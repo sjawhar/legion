@@ -88,6 +88,7 @@ var settingsEmitted = map[string]string{
 	"Config.WorkerBackends":                          "worker_backends",
 	"Runtime.Name":                                   "runtime.name",
 	"Runtime.Kubernetes":                             "runtime.kubernetes",
+	"Runtime.Tmux":                                   "runtime.tmux (its session store's kind alone: session_store, files or postgres)",
 	"Kubernetes.Namespace":                           "runtime.kubernetes.namespace",
 	"Kubernetes.Image":                               "runtime.kubernetes.image",
 	"Kubernetes.StorageClass":                        "runtime.kubernetes.storage_class",
@@ -182,6 +183,7 @@ var settingsExcluded = map[string]string{
 	"Answers.ConversationStore":     "the daemon's own connection to the conversation store: the path of a file holding its URL, or the login the daemon signs in as",
 	"ConversationStore.DSNFile":     "the path of a file holding a credential: the conversation store's URL, password and all",
 	"ConversationStore.Database":    "the instance and IAM login behind the daemon's conversation store, left out as runtime.kubernetes.session_database is",
+	"Tmux.SessionDSNFile":           "the path of a file holding a credential: the tmux session database's URL, password and all",
 }
 
 // Every exported field of every struct the walk reaches (settingsConfigTypes) is named in exactly
@@ -481,8 +483,8 @@ func TestSettingsOfAMinimalConfigurationResolvesTheDefaults(t *testing.T) {
 	if settings.MaxFixAttempts != 3 || settings.WorkerBootTimeoutSeconds != 120 {
 		t.Errorf("max_fix_attempts %d, worker_boot_timeout_seconds %d; want the defaults 3 and 120", settings.MaxFixAttempts, settings.WorkerBootTimeoutSeconds)
 	}
-	if settings.Runtime.Name != "tmux" || settings.Runtime.Kubernetes != nil {
-		t.Errorf("runtime = %+v, want tmux with no kubernetes block", settings.Runtime)
+	if settings.Runtime.Name != "tmux" || settings.Runtime.Kubernetes != nil || settings.Runtime.Tmux != nil {
+		t.Errorf("runtime = %+v, want tmux with no kubernetes block and no tmux block", settings.Runtime)
 	}
 	if settings.GitHubApps != nil {
 		t.Errorf("github_apps = %+v, want none", settings.GitHubApps)
@@ -508,6 +510,26 @@ func TestSettingsOfAMinimalConfigurationResolvesTheDefaults(t *testing.T) {
 	set := SettingsOf(loadSettingsFile(t, minimalSettingsFile+"max_fix_attempts: 5\n"))
 	if set.MaxFixAttempts != 5 {
 		t.Errorf("max_fix_attempts = %d, want the file's 5", set.MaxFixAttempts)
+	}
+}
+
+// A tmux file whose panes keep their sessions in Postgres shows runtime.tmux.session_store and
+// nothing else of the block: never the path of the file holding the session database's URL.
+func TestSettingsOfATmuxSessionDatabaseShowsTheStoreAndNotItsFile(t *testing.T) {
+	const dsnFile = "/var/run/legion/TMUX_SESSION_DSN_FIXTURE"
+	settings := SettingsOf(loadSettingsFile(t, minimalSettingsFile+"runtime: {tmux: {session_store: postgres, session_dsn_file: "+dsnFile+"}}\n"))
+	encoded, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	runtimeKeys := keysOf(t, keysOf(t, encoded)["runtime"])
+	assertKeys(t, "settings.runtime", runtimeKeys, []string{"name", "tmux"})
+	assertKeys(t, "settings.runtime.tmux", keysOf(t, runtimeKeys["tmux"]), []string{"session_store"})
+	if settings.Runtime.Tmux == nil || settings.Runtime.Tmux.SessionStore != "postgres" {
+		t.Errorf("runtime.tmux = %+v, want session_store postgres", settings.Runtime.Tmux)
+	}
+	if bytes.Contains(encoded, []byte("TMUX_SESSION_DSN_FIXTURE")) {
+		t.Errorf("settings carry the session database's URL file: %s", encoded)
 	}
 }
 

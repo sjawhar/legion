@@ -79,10 +79,20 @@ type Settings struct {
 	Answers *AnswersSettings `json:"answers,omitempty"`
 }
 
-// RuntimeSettings is `runtime`: its name, and the kubernetes block under that runtime alone.
+// RuntimeSettings is `runtime`: its name, and the block of that runtime alone. Tmux is absent under
+// the tmux runtime's files store, the default, so the scalar `runtime: tmux` shows what it always
+// has.
 type RuntimeSettings struct {
 	Name       string              `json:"name"`
 	Kubernetes *KubernetesSettings `json:"kubernetes,omitempty"`
+	Tmux       *TmuxSettings       `json:"tmux,omitempty"`
+}
+
+// TmuxSettings is the settled `runtime.tmux` block without `session_dsn_file`, the path of the file
+// holding the session database's URL, password and all.
+type TmuxSettings struct {
+	// SessionStore is the store's kind, "postgres": the files store shows no block.
+	SessionStore string `json:"session_store"`
 }
 
 // KubernetesSettings is the settled `runtime.kubernetes` block without its credential file
@@ -248,7 +258,7 @@ func SettingsOf(cfg config.Config) Settings {
 		Bind:                                    cfg.Bind,
 		AdvertiseHost:                           cfg.AdvertiseHost,
 		StateDir:                                cfg.StateDir,
-		Runtime:                                 RuntimeSettings{Name: cfg.Runtime.Name, Kubernetes: kubernetesSettingsOf(cfg.Runtime.Kubernetes)},
+		Runtime:                                 runtimeSettingsOf(cfg.Runtime),
 		AdmissionCap:                            cfg.AdmissionCap,
 		DaemonURL:                               endpointOf(cfg.DaemonURL),
 		WorkerStreamPort:                        cfg.WorkerStreamPort,
@@ -339,11 +349,21 @@ func answersSettingsOf(answers *config.Answers) *AnswersSettings {
 	return settings
 }
 
-// kubernetesSettingsOf is block as the state shows it, nil under another runtime.
-func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
-	if block == nil {
-		return nil
+// runtimeSettingsOf is rt as the state shows it: its name, and the kubernetes block under that
+// runtime, or under tmux the tmux block's session store when it is a database.
+func runtimeSettingsOf(rt config.Runtime) RuntimeSettings {
+	settings := RuntimeSettings{Name: rt.Name}
+	switch {
+	case rt.Kubernetes != nil:
+		settings.Kubernetes = kubernetesSettingsOf(rt.Kubernetes)
+	case rt.Tmux.InDatabase():
+		settings.Tmux = &TmuxSettings{SessionStore: rt.Tmux.SessionStore()}
 	}
+	return settings
+}
+
+// kubernetesSettingsOf is block as the state shows it.
+func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
 	settings := &KubernetesSettings{
 		Namespace:    block.Namespace,
 		Image:        block.Image,

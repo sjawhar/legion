@@ -670,11 +670,13 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 }
 
 // prepareTmux is what panes on this host need beyond readBoot's: the plugin gate on the OMP
-// invocation readBoot resolved, the Dispatch bearer written where every pane reads it, and the
-// provider keys resolved from secretsd into the files every pane's shim reads. The worker stream is
-// a unix socket under the state directory (decision 2 — no configuration key). The runtime gets a
-// Launcher for each backend readBoot resolved (tmuxReads.launches); the gate and the model-fallback
-// read are Oh My Pi's, since the architect runs on it alone (runtime.Backends).
+// invocation readBoot resolved, with the session database's probes under
+// runtime.tmux.session_store postgres (verifyPanes), the Dispatch bearer written where every pane
+// reads it, and the provider keys resolved from secretsd into the files every pane's shim reads.
+// The worker stream is a unix socket under the state directory (decision 2 — no configuration
+// key). The runtime gets a Launcher for each backend readBoot resolved (tmuxReads.launches); the
+// gate and the model-fallback read are Oh My Pi's, since the architect runs on it alone
+// (runtime.Backends).
 func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken string, reads tmuxReads, p *plan) error {
 	invocation := reads.launches[runtime.BackendOmp].invocation
 	p.newRuntime, p.gate = o.runtime, o.gate
@@ -717,8 +719,9 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			retry:          bootprobe.Daemon,
 			contract:       api.DaemonAPIVersion,
 			roleReferences: p.roleReferences,
+			sessionDSN:     reads.sessionDSN,
 			log:            log,
-		}.verify
+		}.verifyPanes
 		image := capabilities.Image{Launch: omplaunch.WithPrefix(cfg.OmpLaunchPrefix, invocation), Env: environPairs(env), WorkDir: cfg.StateDir}
 		p.modelFallback = func(ctx context.Context) string {
 			state, err := capabilities.ReadModelFallback(ctx, image)
@@ -803,6 +806,7 @@ func tmuxOptions(cfg config.Config, project string, launchers map[runtime.Backen
 		ProbeInterval:     cfg.ProbeInterval,
 		AdoptTimeout:      cfg.SlowCommandTimeout,
 		ProviderEnvDir:    providerEnvDir,
+		SessionDSNFile:    cfg.Runtime.Tmux.SessionDSNFile,
 		Log:               log,
 	}
 }

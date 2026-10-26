@@ -39,11 +39,13 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shim"
 )
 
-// Runtime is the `runtime` block: its name, and under kubernetes the settled `runtime.kubernetes`
-// block (nil under tmux).
+// Runtime is the `runtime` block: its name, under kubernetes the settled `runtime.kubernetes`
+// block (nil under tmux), and under tmux the settled `runtime.tmux` block (the zero value under
+// kubernetes, and under the scalar `runtime: tmux`).
 type Runtime struct {
 	Name       string
 	Kubernetes *Kubernetes
+	Tmux       Tmux
 }
 
 // ControllerLaunch is who launches the project's controller (`controller`).
@@ -251,6 +253,7 @@ type fileConfig struct {
 	StateDir          *string
 	AdmissionCap      *int
 	Kubernetes        *Kubernetes
+	Tmux              Tmux
 	DaemonURL         *string
 	OmpInvocation     *string
 	OmpLaunchPrefix   []string
@@ -365,7 +368,7 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 		case "admission_cap":
 			file.AdmissionCap, err = readInt(value, key)
 		case "runtime":
-			file.Kubernetes, err = readRuntime(value)
+			file.Kubernetes, file.Tmux, err = readRuntime(value)
 		case "daemon_url":
 			file.DaemonURL, err = readString(value, key)
 		case "omp_invocation":
@@ -481,29 +484,39 @@ func classify(key string) error {
 	return fmt.Errorf("unknown key %s", key)
 }
 
-// readRuntime reads `runtime`: the `tmux` scalar (nil), or the shipped one-key `{kubernetes: {...}}`
+// readRuntime reads `runtime`: the `tmux` scalar (the default session store), a one-key
+// `{tmux: {...}}` mapping, whose block it reads, or the shipped one-key `{kubernetes: {...}}`
 // mapping, whose block it reads. A bare `kubernetes` scalar is refused: it carries no block, and
 // the block is the only source of what a pod needs.
-func readRuntime(value *yaml.Node) (*Kubernetes, error) {
+func readRuntime(value *yaml.Node) (*Kubernetes, Tmux, error) {
 	if value.Tag == "!!null" {
-		return nil, nil
+		return nil, Tmux{}, nil
 	}
 	if value.Kind == yaml.ScalarNode {
 		switch value.Value {
 		case "tmux":
-			return nil, nil
+			return nil, Tmux{}, nil
 		case "kubernetes":
-			return nil, errors.New("runtime.kubernetes is required when runtime is kubernetes")
+			return nil, Tmux{}, errors.New("runtime.kubernetes is required when runtime is kubernetes")
 		}
-		return nil, errors.New("runtime must be 'tmux' or 'kubernetes'")
+		return nil, Tmux{}, errors.New("runtime must be 'tmux' or 'kubernetes'")
 	}
-	if value.Kind != yaml.MappingNode ||
-		len(value.Content) != 2 ||
-		value.Content[0].Value != "kubernetes" {
-		return nil, errors.New("runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes")
+	if value.Kind != yaml.MappingNode || len(value.Content) != 2 {
+		return nil, Tmux{}, errors.New(runtimeShapes)
 	}
-	return readKubernetes(value.Content[1])
+	switch value.Content[0].Value {
+	case "tmux":
+		tmux, err := readTmux(value.Content[1])
+		return nil, tmux, err
+	case "kubernetes":
+		k, err := readKubernetes(value.Content[1])
+		return k, Tmux{}, err
+	}
+	return nil, Tmux{}, errors.New(runtimeShapes)
 }
+
+// runtimeShapes is readRuntime's refusal of a `runtime` of no shape it reads.
+const runtimeShapes = "runtime accepts tmux, kubernetes, or a mapping with the single key tmux or kubernetes"
 
 // readString reads a string key; nil for an unset one (absent from its mapping, or null).
 func readString(value *yaml.Node, key string) (*string, error) {
@@ -894,6 +907,9 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		if err := resolveKubernetes(file, configDir, &cfg); err != nil {
 			return Config{}, err
 		}
+	}
+	if file.Tmux.InDatabase() {
+		cfg.Runtime.Tmux = Tmux{SessionDSNFile: underConfig(file.Tmux.SessionDSNFile, configDir)}
 	}
 
 	switch {

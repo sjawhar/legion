@@ -1037,12 +1037,12 @@ func TestLoadRefuses(t *testing.T) {
 		{
 			name: "a runtime mapping with two keys",
 			body: minimalFile + "runtime: {kubernetes: {namespace: legion}, tmux: {}}\n",
-			want: "runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes",
+			want: "runtime accepts tmux, kubernetes, or a mapping with the single key tmux or kubernetes",
 		},
 		{
 			name: "a runtime mapping with another single key",
 			body: minimalFile + "runtime: {podman: {}}\n",
-			want: "runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes",
+			want: "runtime accepts tmux, kubernetes, or a mapping with the single key tmux or kubernetes",
 		},
 		{
 			name: "a root that is not a mapping",

@@ -97,10 +97,11 @@ type AnswerPrice struct {
 
 // ConversationStore is the settled `answers.conversation_store`: the daemon's own way into the
 // database the deployment's conversations live in. Under runtime.kubernetes.session_store postgres,
-// DSNFile is the file holding that database's postgres:// URL, which boot reads. Under
-// cloudsql-iam, Database is the instance and database runtime.kubernetes.session_database names
-// with the IAM login the daemon signs in as. Both are empty under runtime tmux, whose conversations
-// are files on the daemon's own host.
+// DSNFile is the file holding that database's postgres:// URL, which boot reads; under
+// runtime.tmux.session_store postgres it is runtime.tmux.session_dsn_file, the file the daemon
+// shares with its panes. Under cloudsql-iam, Database is the instance and database
+// runtime.kubernetes.session_database names with the IAM login the daemon signs in as. Both are
+// empty under runtime tmux's files store, whose conversations are files on the daemon's own host.
 type ConversationStore struct {
 	DSNFile  string
 	Database ompsessions.Database
@@ -389,7 +390,7 @@ func resolveAnswers(file fileConfig, configDir string, cfg *Config) error {
 	if read == nil {
 		return nil
 	}
-	store, err := conversationStoreOf(read, configDir, cfg.Runtime.Kubernetes)
+	store, err := conversationStoreOf(read, configDir, cfg.Runtime)
 	if err != nil {
 		return err
 	}
@@ -410,20 +411,23 @@ func resolveAnswers(file fileConfig, configDir string, cfg *Config) error {
 }
 
 // conversationStoreOf is the connection the daemon reads conversations through, given where the
-// runtime keeps them: a postgres:// URL's file under session_store postgres; its own IAM login on
-// session_database's instance under cloudsql-iam; none under runtime tmux, whose conversations are
-// files on the daemon's own host. A conversation on an issue's volume (session_store pvc) is out of
-// the daemon's reach, so `answers` is refused there whole. Each store refuses the key it does not
-// use, as runtime.kubernetes' session keys do.
-func conversationStoreOf(read *answersFile, configDir string, k *Kubernetes) (ConversationStore, error) {
+// runtime keeps them: a postgres:// URL's file under session_store postgres, the file the panes
+// read under runtime tmux's (runtime.tmux.session_dsn_file); its own IAM login on
+// session_database's instance under cloudsql-iam; none under runtime tmux's files store, whose
+// conversations are files on the daemon's own host. A conversation on an issue's volume
+// (session_store pvc) is out of the daemon's reach, so `answers` is refused there whole. Each store
+// refuses the key it does not use, as runtime.kubernetes' session keys do; under runtime tmux the
+// block names nothing, since the daemon reads the conversations where its panes keep them.
+func conversationStoreOf(read *answersFile, configDir string, rt Runtime) (ConversationStore, error) {
+	k := rt.Kubernetes
 	if k == nil {
-		// runtime tmux. When the tmux database store lands (runtime.tmux.session_store postgres),
-		// its runtime.tmux.session_dsn_file, which the daemon shares with its panes, settles DSNFile
-		// here; this block still names nothing under tmux.
 		if read.storeSet {
+			if rt.Tmux.InDatabase() {
+				return ConversationStore{}, fmt.Errorf("%s is not used under runtime tmux: the daemon reads every conversation from the database %s names, where its panes keep them; remove it", conversationStoreKey, tmuxSessionDSNFileKey)
+			}
 			return ConversationStore{}, fmt.Errorf("%s is not used under runtime tmux: every conversation is a file on the daemon's own host, which it reads where the pane wrote it; remove it", conversationStoreKey)
 		}
-		return ConversationStore{}, nil
+		return ConversationStore{DSNFile: rt.Tmux.SessionDSNFile}, nil
 	}
 	switch kind := k.SessionStore.Kind; kind {
 	case ompsessions.StorePostgres:

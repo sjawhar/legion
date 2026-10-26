@@ -131,3 +131,57 @@ func TestBootRefusesAConversationStoreFileWithNoURL(t *testing.T) {
 		})
 	}
 }
+
+// Under runtime.tmux.session_store postgres boot reads the session database's URL from
+// runtime.tmux.session_dsn_file, which the boot gate probes; with `answers` set that URL is the
+// answer loop's conversation store, in the one place the loop reads it from whichever key named
+// the file (config settles answers.conversation_store's file to the tmux one).
+func TestATmuxSessionDatabaseIsTheAnswerLoopsConversationStore(t *testing.T) {
+	onPath := t.TempDir()
+	binary(t, onPath, "gh")
+	lookup := environLookup([]string{"PATH=" + onPath})
+	file := dsnFileOf(t, conversationsDSN+"\n")
+	cfg := testConfig(t)
+	cfg.Runtime.Tmux = config.Tmux{SessionDSNFile: file}
+
+	reads, err := readBoot(cfg, lookup, os.Getenv, false, quietLogger())
+	if err != nil {
+		t.Fatalf("readBoot under a tmux session database: %v", err)
+	}
+	if reads.tmux.sessionDSN != conversationsDSN || reads.answers.conversationDSN != "" {
+		t.Errorf("boot read session database %q and conversation store %q; want the file's URL and none without answers",
+			reads.tmux.sessionDSN, reads.answers.conversationDSN)
+	}
+
+	cfg.Answers = answersConfig(filepath.Join(t.TempDir(), "ran"), file)
+	if reads, err = readBoot(cfg, lookup, os.Getenv, false, quietLogger()); err != nil {
+		t.Fatalf("readBoot under a tmux session database with answers: %v", err)
+	}
+	if reads.answers.conversationDSN != conversationsDSN {
+		t.Errorf("boot's conversation store = %q, want the session database's URL", reads.answers.conversationDSN)
+	}
+}
+
+// runtime.tmux.session_dsn_file is read at boot as every other *_file is: a missing or blank file,
+// or one holding no postgres:// URL, refuses the boot naming the key and the file and never what
+// the file holds.
+func TestBootRefusesATmuxSessionDSNFileWithNoURL(t *testing.T) {
+	lookup := environLookup([]string{"PATH=" + t.TempDir()})
+	missing := filepath.Join(t.TempDir(), "absent")
+	notAURL := dsnFileOf(t, "host=sessions.internal.example password=fixture-keyword-password\n")
+	blank := dsnFileOf(t, "\n")
+	for _, tc := range []struct{ name, file, want string }{
+		{"missing", missing, "runtime.tmux.session_dsn_file names " + missing + ", which could not be read"},
+		{"blank", blank, "runtime.tmux.session_dsn_file names " + blank + ", which is empty"},
+		{"no URL", notAURL, "runtime.tmux.session_dsn_file names " + notAURL + ", which holds no postgres:// URL"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig(t)
+			cfg.Runtime.Tmux = config.Tmux{SessionDSNFile: tc.file}
+			_, err := readBoot(cfg, lookup, os.Getenv, false, quietLogger())
+			if err == nil || !strings.HasPrefix(err.Error(), tc.want) || strings.Contains(err.Error(), "fixture-keyword-password") {
+				t.Fatalf("readBoot = %v, want a refusal starting %q that carries nothing the file holds", err, tc.want)
+			}
+		})
+	}
+}

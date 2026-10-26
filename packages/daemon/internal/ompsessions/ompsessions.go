@@ -6,8 +6,9 @@
 // omp_session_files_parts when it starts, keys a session by the path its file would have had (the
 // session file a claim records), and reads a session as the row's content followed by its parts in
 // offset order. Legion reads it to hold a resume to a session the table holds (Written, the role
-// launcher's check), and seeds it once from the files sessions were kept in before (Import,
-// `legion sessions import`).
+// launcher's check and the tmux runtime's under runtime.tmux.session_store postgres), to hold a
+// tmux daemon's boot to a table it can read (HasTable), and seeds it once from the files sessions
+// were kept in before (Import, `legion sessions import`).
 package ompsessions
 
 import (
@@ -99,6 +100,20 @@ func Written(ctx context.Context, conn *pgx.Conn, path string) (at time.Time, ok
 		return time.Time{}, false, fmt.Errorf("look up session %s: %w", path, err)
 	}
 	return time.UnixMilli(mtime), true, nil
+}
+
+// HasTable is whether the database holds the session table, read as the connection's login: false
+// for a database no Oh My Pi has opened yet, whose first Oh My Pi creates it; an error for a table
+// the login may not read, or a database that does not answer.
+func HasTable(ctx context.Context, conn *pgx.Conn) (bool, error) {
+	_, err := conn.Exec(ctx, "SELECT 1 FROM omp_session_files LIMIT 0")
+	switch {
+	case isUndefinedTable(err):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("read the session table: %w", err)
+	}
+	return true, nil
 }
 
 // Read is the session the table holds at path as Oh My Pi reads it (readFull): the row's content,

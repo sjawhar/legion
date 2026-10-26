@@ -90,7 +90,7 @@ func readBoot(cfg config.Config, lookup func(string) (string, bool), getenv func
 		return bootReads{}, err
 	}
 	if cfg.Answers != nil {
-		if r.answers, err = readAnswersBoot(*cfg.Answers, r.tmux.tools, lookup); err != nil {
+		if r.answers, err = readAnswersBoot(*cfg.Answers, r.tmux, lookup); err != nil {
 			return bootReads{}, err
 		}
 	}
@@ -98,34 +98,50 @@ func readBoot(cfg config.Config, lookup func(string) (string, bool), getenv func
 }
 
 // answersReads is what the answer loop needs that readBoot reads: gh, the real gh on the daemon's
-// own host its gh tool runs, under either runtime (answersGH); and conversationDSN, under
-// runtime.kubernetes.session_store postgres, the URL of the database the conversations live in,
-// from answers.conversation_store.dsn_file ("" under any other store).
+// own host its gh tool runs, under either runtime (answersGH); and conversationDSN, the URL of the
+// database the conversations live in: answers.conversation_store.dsn_file's under
+// runtime.kubernetes.session_store postgres, runtime.tmux.session_dsn_file's under
+// runtime.tmux.session_store postgres ("" under any other store). It is the one place the loop
+// gets that URL from, whichever key named its file.
 type answersReads struct {
 	gh              string
 	conversationDSN string
 }
 
-// readAnswersBoot is the answer loop's share of readBoot, tools the tmux daemon's own (nil under
-// kubernetes, and under tmux with no repository). No provider's key is read: the loop reads it for
-// every model call (config.AnswerCredential), so neither boot nor `legion start --check-config` runs
-// an api_key_command.
-func readAnswersBoot(answers config.Answers, tools map[string]string, lookup func(string) (string, bool)) (answersReads, error) {
+// readAnswersBoot is the answer loop's share of readBoot, tmux what readTmux read (the zero value
+// under kubernetes): its tools, the tmux daemon's own (nil under tmux with no repository), and its
+// session database's URL, which under runtime.tmux.session_store postgres is the conversation
+// store's (config.ConversationStore.DSNFile names the same file). No provider's key is read: the
+// loop reads it for every model call (config.AnswerCredential), so neither boot nor `legion start
+// --check-config` runs an api_key_command.
+func readAnswersBoot(answers config.Answers, tmux tmuxReads, lookup func(string) (string, bool)) (answersReads, error) {
 	var r answersReads
 	var err error
-	if r.gh, err = answersGH(lookup, tools); err != nil {
+	if r.gh, err = answersGH(lookup, tmux.tools); err != nil {
 		return answersReads{}, err
 	}
-	if file := answers.ConversationStore.DSNFile; file != "" {
-		const key = "answers.conversation_store.dsn_file"
-		if r.conversationDSN, err = config.ReadSecretPointer(key, file); err != nil {
+	switch file := answers.ConversationStore.DSNFile; {
+	case tmux.sessionDSN != "":
+		r.conversationDSN = tmux.sessionDSN
+	case file != "":
+		if r.conversationDSN, err = readPostgresURL("answers.conversation_store.dsn_file", file); err != nil {
 			return answersReads{}, err
-		}
-		if parsed, err := url.Parse(r.conversationDSN); err != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") {
-			return answersReads{}, fmt.Errorf("%s names %s, which holds no postgres:// URL", key, file)
 		}
 	}
 	return r, nil
+}
+
+// readPostgresURL is the postgres:// URL the file a key names holds, refused, naming the key and
+// the file and never what it holds, unless it is one.
+func readPostgresURL(key, file string) (string, error) {
+	dsn, err := config.ReadSecretPointer(key, file)
+	if err != nil {
+		return "", err
+	}
+	if parsed, err := url.Parse(dsn); err != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") {
+		return "", fmt.Errorf("%s names %s, which holds no postgres:// URL", key, file)
+	}
+	return dsn, nil
 }
 
 // natsConnection is the NATS user the daemon's own connection authenticates as: its own seed
@@ -171,16 +187,19 @@ func (c natsConnection) log(log *slog.Logger) {
 }
 
 // tmuxReads is what a daemon on this host needs that readBoot reads: a launch for each harness its
-// roles run on (resolveLaunchers), and the host's git and jj its own provisioning runs
-// (daemonTools), which no pane is told.
+// roles run on (resolveLaunchers), the host's git and jj its own provisioning runs (daemonTools),
+// which no pane is told, and, under runtime.tmux.session_store postgres, the URL of the session
+// database every pane's Oh My Pi keeps its sessions in, which the boot gate probes (verifyPanes).
 type tmuxReads struct {
-	launches map[runtime.Backend]launchReads // Oh My Pi's absent when boot does not run the host's Oh My Pi
-	tools    map[string]string               // nil without a repository
+	launches   map[runtime.Backend]launchReads // Oh My Pi's absent when boot does not run the host's Oh My Pi
+	tools      map[string]string               // nil without a repository
+	sessionDSN string                          // "" under the files store
 }
 
 // readTmux is tmux's share of readBoot: each backend's launch (resolveLaunchers), Oh My Pi's only
-// when boot runs the host's Oh My Pi (hostOMP), and, for a configuration with a repository, the
-// host's git and jj Legion runs itself.
+// when boot runs the host's Oh My Pi (hostOMP), for a configuration with a repository, the host's
+// git and jj Legion runs itself, and under runtime.tmux.session_store postgres the session
+// database's URL from runtime.tmux.session_dsn_file, which must be a postgres:// URL.
 func readTmux(cfg config.Config, lookup func(string) (string, bool), getenv func(string) string, hostOMP bool) (tmuxReads, error) {
 	var r tmuxReads
 	var err error
@@ -189,6 +208,11 @@ func readTmux(cfg config.Config, lookup func(string) (string, bool), getenv func
 	}
 	if _, ok := cfg.Projects[cfg.Project]; ok {
 		if r.tools, err = resolveTools(lookup); err != nil {
+			return tmuxReads{}, err
+		}
+	}
+	if file := cfg.Runtime.Tmux.SessionDSNFile; file != "" {
+		if r.sessionDSN, err = readPostgresURL("runtime.tmux.session_dsn_file", file); err != nil {
 			return tmuxReads{}, err
 		}
 	}

@@ -22,6 +22,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/ompdirs"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/procgroup"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
@@ -108,8 +109,10 @@ const (
 // agent it would not run on the agent's own model. Only pi-legion declares a contract: pi-envoy is
 // held to the interface version the probe reports, and to an owning manifest of its own name.
 //
-// Inside the worker image the same gate is `legion probe-image` (ProbeImage), which adds the two
-// probes only the image runs: pi.agents and the session-storage setting.
+// Inside the worker image the same gate is `legion probe-image` (ProbeImage), which adds two
+// probes: pi.agents, which only the image runs, and the session-storage setting, which a tmux
+// daemon whose panes keep their sessions in a database also runs, with the session table probe
+// beside it (verifyPanes).
 type pluginGate struct {
 	// env is the environment the probes resolve and run under: a pane's, or the image's own.
 	env map[string]string
@@ -148,7 +151,13 @@ type pluginGate struct {
 	// name begins the gate's own errors: "controller probe" for ProbeController; empty is the boot
 	// gate's, which the image probe also is.
 	name string
-	log  *slog.Logger
+	// sessionDSN is the postgres:// URL of the session database every pane's Oh My Pi keeps its
+	// sessions in, under runtime.tmux.session_store postgres (read from
+	// runtime.tmux.session_dsn_file at boot); "" under the files store and for every other gate.
+	// With it, the tmux gate (verifyPanes) also runs the session-storage probe and the session table
+	// probe.
+	sessionDSN string
+	log        *slog.Logger
 }
 
 // gateEnvironment is the environment a pane's Oh My Pi runs with, which the boot gate probes under:
@@ -218,6 +227,47 @@ func (g pluginGate) verify(ctx context.Context) error {
 	g.log.Info("boot gate: pi-legion speaks this daemon's contract and loads with pi-envoy",
 		"lane", lane.described, "manifest", lane.manifest, "version", plugin.version, "daemonApiVersion", g.contract,
 		"envoyInterface", from.envoyInterface, "envoyFrom", from.envoy)
+	return nil
+}
+
+// verifyPanes is the tmux daemon's boot gate: the two probes (verify), then, under
+// runtime.tmux.session_store postgres, the session-storage probe a pod's image runs
+// (verifySessionStorage), on the Oh My Pi every pane runs, so a build that would silently keep
+// sessions on files never starts, and the session table probe (verifySessionTable).
+func (g pluginGate) verifyPanes(ctx context.Context) error {
+	if err := g.verify(ctx); err != nil {
+		return err
+	}
+	if g.sessionDSN == "" {
+		return nil
+	}
+	if err := g.verifySessionStorage(ctx); err != nil {
+		return err
+	}
+	return g.verifySessionTable(ctx)
+}
+
+// verifySessionTable is the session table probe under runtime.tmux.session_store postgres: the
+// daemon connects to the session database through the URL every pane's Oh My Pi is pointed at and
+// reads the session table, within the probe budget, refusing to start on a database it cannot
+// reach or a table its login may not read, which would otherwise fail every pane's Oh My Pi at
+// its start and every resume's look-up of its session. A database no Oh My Pi has opened yet holds
+// no table, which the first pane's Oh My Pi creates (ompsessions.HasTable): it passes, logged.
+func (g pluginGate) verifySessionTable(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, g.timeout)
+	defer cancel()
+	conn, err := ompsessions.ConnectURL(ctx, g.sessionDSN)
+	if err != nil {
+		return fmt.Errorf("%s: the session database runtime.tmux.session_dsn_file names does not answer: %w", g.label(), err)
+	}
+	defer conn.Close(context.Background())
+	held, err := ompsessions.HasTable(ctx, conn)
+	if err != nil {
+		return fmt.Errorf("%s: the session database runtime.tmux.session_dsn_file names: %w", g.label(), err)
+	}
+	if !held {
+		g.log.Info("the session database holds no session table yet; the first pane's Oh My Pi creates it")
+	}
 	return nil
 }
 
@@ -713,9 +763,10 @@ func (g pluginGate) verifyAgentsCapability(ctx context.Context) error {
 }
 
 // verifySessionStorage is the session-storage probe (verifySessionStorageSetting, boot-probes.ts),
-// which only the image runs: it proves the Oh My Pi build carries the `session.storage`
-// setting, so a deployment that sets OMP_SESSION_STORAGE=sql gets its sessions in its database
-// rather than a build that ignores the variable and silently keeps them on files.
+// which the image runs, and a tmux daemon under runtime.tmux.session_store postgres (verifyPanes):
+// it proves the Oh My Pi build carries the `session.storage` setting, so a deployment that sets
+// OMP_SESSION_STORAGE=sql gets its sessions in its database rather than a build that ignores the
+// variable and silently keeps them on files.
 //
 // It starts Oh My Pi in RPC mode with stdin on /dev/null, where the setting resolves before the
 // first command is read and the closed stdin then ends the run with exit 0, calling no model; an
@@ -875,7 +926,7 @@ const defaultProbeTimeout = 300 * time.Second
 
 // ProbeImage runs the image's launch probes: pi.agents; then the daemon's own gate — pi-legion
 // held to Contract, then loaded with pi-envoy, from the manifest it was held by; then the
-// session-storage setting, which only the image runs (the launch probes' comment atop
+// session-storage setting, which every image runs (the launch probes' comment atop
 // boot-probes.ts). The contract comes before the load, as in the daemon's gate, so a plugin of
 // another contract is refused as a reinstall rather than sent to `omp plugin list`. Each attempt
 // is bounded by defaultProbeTimeout and retried under bootprobe.Image: an image build has no

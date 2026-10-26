@@ -24,6 +24,7 @@ const (
 	daemonDSNFile      = "  conversation_store: {dsn_file: conversations-dsn}\n"
 	daemonIAMLogin     = "  conversation_store: {user: legion-daemon@example-project.iam}\n"
 	answersRequiredDSN = "answers.conversation_store.dsn_file is required with runtime.kubernetes.session_store postgres: the file holding the postgres:// URL of the database the conversations live in, which the daemon reads them through"
+	tmuxPostgresStore  = "runtime: {tmux: {session_store: postgres, session_dsn_file: session-dsn}}\n"
 )
 
 // answersBlock is an `answers` block of providers, prices and whatever else rest adds.
@@ -124,7 +125,8 @@ func TestAnswersBoundsTheFileSetsOverrideTheDefaults(t *testing.T) {
 
 // conversation_store is the key the runtime's own store needs, and only that one: dsn_file under
 // session_store postgres, user under cloudsql-iam (with session_database's instance and database),
-// neither under tmux; and under pvc, the default, `answers` is refused whole.
+// neither under tmux, whose postgres store's runtime.tmux.session_dsn_file is the conversation
+// store's; and under pvc, the default, `answers` is refused whole.
 func TestAnswersConversationStoreFollowsTheRuntimesStore(t *testing.T) {
 	for _, tc := range []struct {
 		name, body string
@@ -181,6 +183,20 @@ func TestAnswersConversationStoreFollowsTheRuntimesStore(t *testing.T) {
 			name:    "tmux, a conversation_store",
 			body:    minimalFile + answersBlock(anthropicByFile, opusPrice, daemonDSNFile),
 			refusal: "answers.conversation_store is not used under runtime tmux: every conversation is a file on the daemon's own host, which it reads where the pane wrote it; remove it",
+		},
+		{
+			name: "tmux postgres, no conversation_store",
+			body: minimalFile + tmuxPostgresStore + answersBlock(anthropicByFile, opusPrice, ""),
+			want: ConversationStore{DSNFile: "session-dsn"},
+		},
+		{
+			name:    "tmux postgres, a conversation_store",
+			body:    minimalFile + tmuxPostgresStore + answersBlock(anthropicByFile, opusPrice, daemonDSNFile),
+			refusal: "answers.conversation_store is not used under runtime tmux: the daemon reads every conversation from the database runtime.tmux.session_dsn_file names, where its panes keep them; remove it",
+		},
+		{
+			name: "tmux files named, no conversation_store",
+			body: minimalFile + "runtime: {tmux: {session_store: files}}\n" + answersBlock(anthropicByFile, opusPrice, ""),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
