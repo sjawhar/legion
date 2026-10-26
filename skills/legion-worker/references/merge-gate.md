@@ -280,5 +280,5 @@ reviewing until you finish.
   on a closed issue (`ISSUE_CLOSED`), so the deployment instructions' "on the pull request and the
   issue" is the pull request for a closed issue, and a defect reaches Dispatch as the ask above.
   The architect accepted the issue before the merge and is asked nothing after it. `pass` or
-  `fail` closes the check: your claim is retired and, for a child, the issue's Sandbox and volume
-  are released.
+  `fail` closes the check: your claim is retired and the issue's Sandbox goes with its pod and
+  disk, for a root as for a child.
