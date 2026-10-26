@@ -2,61 +2,37 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-440",
-  "completed": "2026-10-26T13:59:42Z",
-  "round": 1,
-  "reviewedCodeHead": "e57e4be32d506fcf6fde3a22e9d30286f4462db3",
+  "completed": "2026-10-26T15:58:35Z",
+  "round": 2,
+  "reviewedCodeHead": "1c08eb908fced3f754e88c058f221d6f8cd60829",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
-  "minor": 7,
+  "important": 0,
+  "minor": 3,
   "verdictProvider": "provider not verified (this session's system prompt names model anthropic/claude-opus-5-5; the transcript's per-turn provider was not read)",
-  "ci": "At e57e4be3 when read: lint, typecheck, test, pr-title (the required set from the main ruleset) all queued; compare e57e4be3...d03cfaa3 touches only .legion/. A request for changes does not wait on CI.",
-  "thermonuclear": "deep-review and code-quality both ran once at e57e4be3; both CHANGES. tsc, biome and bun test (2406 pass) clean per deep-review.",
+  "ci": "At 1c08eb90 when read: lint, typecheck, test, pr-title (the main ruleset's required set) queued; compare 1c08eb90...afc2a781 touches only .legion/. GitHub reports the pull request CONFLICTING with main (packages/contracts/CHANGELOG.md, against c41e4ebd9..c79379d94). A request for changes does not wait on CI.",
+  "thermonuclear": "Round 2 at 1c08eb90: deep review APPROVE with one minor (asker tooltip); code quality CHANGES (credential lines double source; ReplyQuote prop combination; resolveAgent overloads). tsc per package, biome, bun test web/src 2375 pass, contracts 218 pass, envoy-client 260 pass per deep review.",
+  "roundOneFindings": "All 11 round-1 threads fixed (339e0c89, 1c08eb90) and verified; finding 4 (full id behind the short form) is fixed for drawn names but defeated at the Inbox asker's tooltip (keyFindings[0]).",
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/dispatch/web/src/features/inbox/AskCard.tsx:573",
-      "description": "At 390 px the Inbox ask card's asker reads 'Le…': the control variant's live link gets the global 44 px touch box (styles.css:74-79) inside the nowrap turn/author/time row. Name must stay readable beside the copy-handles button and the live link, with a 390 px browser assertion."
-    },
-    {
-      "severity": "important",
-      "file": "packages/dispatch/web/src/features/credentials/CredentialSessionLines.tsx:25",
-      "description": "Security[untrusted-input]: the credential approval surface now shows a requester-chosen session id as session:<8 chars>… with only a ring for its state; before, the full id and 'isn't running' / 'Couldn't check whether … is running' were visible. Show the full id and the state words for a line the registry does not list."
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/inbox/AskCard.tsx:278",
+      "description": "askerTitle is agentText.label(author), the short form for an untitled session, and sits on the innermost TruncatedText inside the AgentName span whose title is the full id, so hovering the asker shows session:<8>… again; the round-1 full-id fix does not reach the place an untitled session is most often named. Include the id in askerTitle for a session asker and adjust the e2e locator at agent-name.e2e.ts:351-353."
     },
     {
       "severity": "minor",
-      "file": "packages/dispatch/web/src/features/refs/AgentName.tsx:169",
-      "description": "Link variant sets aria-label to the full label and then renders the attribution suffix as text after the link: a screen reader hears the attribution twice."
+      "file": "packages/dispatch/web/src/features/credentials/CredentialSessionLines.tsx:30",
+      "description": "The state words come from a second registry read (useAgentRegistry(false)) while session.ts already resolved the same list into place/unresolved; the final else branch (running with no place) cannot run, and the docstring says the component takes the list as props instead of reading it. Carry a status {running, place} | not-running | unknown on CredentialSessionLine from resolveLine and switch on it."
     },
     {
       "severity": "minor",
-      "file": "packages/dispatch/web/src/features/refs/AgentName.tsx:146",
-      "description": "Short-form fallback session:<8>… replaced full ids in DrillDown, Pinned event lines, the delivery group editor and the mention picker; UUIDv7 prefixes collide. Expose the full id (title) whenever the short form is shown."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/web/src/features/refs/AgentName.tsx:108",
-      "description": "kind=control with a user/system actor returns the id and never calls control(), silently dropping the host's button."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/web/src/features/refs/AgentName.tsx:140",
-      "description": "The naming rule is branched four times in the module meant to hold it once, and the attribution is found by slicing actorLabel's string; one resolver and a contracts-side attribution function."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/web/src/features/conversation/composer-model.ts:20",
-      "description": "ReplyTarget's actor|author union and ReplyQuote's second layout exist only for ThreadCard.tsx:539's author:'', which renders 'Replying to ' with nothing after it; pass the root comment's actor and drop the string path."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/web/src/features/agents/AgentsPage.tsx:229",
-      "description": "AgentText is threaded through exchangeDelivery/agentReplyTo to fill ReplyTarget.thread.title, which nothing reads; ConversationTab's sessionTitle() is a hand-rolled namer for the same dead field."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/web/src/features/conversation/ConversationTab.tsx:410",
-      "description": "commentReplyTarget builds @mention text from the raw title or full id, while the picker uses useAgentText().sessionText; AGENTS.md says every @Title goes through useAgentText. Docs: AGENTS.md:471 lists a nonexistent `name` (it is `part`), SubscribedAgents.tsx:24-26 says the endpoint has no running state (Subscriber.live exists)."
+      "file": "packages/contracts/CHANGELOG.md",
+      "description": "GitHub reports the pull request CONFLICTING with main in this file (this round's entry against main's newer entries); forward-merge main as the conflict procedure says."
     }
+  ],
+  "judgedNotDefects": [
+    "ReplyQuote's author/excerpt props allow 'no author, non-empty body' that no caller produces, and markdown-surfaces tests exercise it: the formatting under test is MarkdownPreview's, the same component and line count on both paths, so coverage of what a reader sees is not lost.",
+    "resolveAgent's overloads and ResolvedAgent.sessionId: style, no behaviour.",
+    "Confirmation dialogs and RouteReach's explanation use the short form: each acts on the row the person clicked."
   ]
 }
