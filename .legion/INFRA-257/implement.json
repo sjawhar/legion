@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-257",
-  "completed": "2026-10-26T04:38:00Z",
+  "completed": "2026-10-26T05:00:00Z",
   "proof": [
     {
       "criterion": "In a worker pod, `CGO_ENABLED=1 go test -race` runs on a package of `packages/envoy` and reports its result.",
@@ -30,16 +30,16 @@
     }
   ],
   "filesChanged": [
-    "packages/daemon/docker/worker.Dockerfile",
-    "packages/daemon/internal/runtime/sandbox/operatorpod.go",
-    "packages/daemon/internal/capabilities/image.go",
-    "packages/daemon/internal/capabilities/capabilities.go",
-    "packages/daemon/internal/capabilities/capabilitiestest/capabilitiestest.go",
-    "packages/daemon/internal/capabilities/image_test.go",
     "docs/kubernetes.md",
     "docs/site/src/content/docs/legion/running-legion.md",
     "docs/solutions/testing/ (seven learnings: INFRA-182, LEGION-694, LEGION-630, INFRA-271, LEGION-631, LEGION-629, LEGION-668)",
-    "docs/solutions/testing/prove-a-published-worker-image-from-a-pod-by-unpacking-its-rootfs-and-chrooting-under-unshare-LEGION-764.md"
+    "docs/solutions/testing/prove-a-published-worker-image-from-a-pod-by-unpacking-its-rootfs-and-chrooting-under-unshare-LEGION-764.md",
+    "packages/daemon/docker/worker.Dockerfile",
+    "packages/daemon/internal/capabilities/capabilities.go",
+    "packages/daemon/internal/capabilities/capabilitiestest/capabilitiestest.go",
+    "packages/daemon/internal/capabilities/image.go",
+    "packages/daemon/internal/capabilities/image_test.go",
+    "packages/daemon/internal/runtime/sandbox/operatorpod.go"
   ],
   "trickyParts": [
     "Two cgo-off mechanisms: ENV CGO_ENABLED=0 (same instruction as COREPACK_DEFAULT_TO_LATEST, no new history entry) reaches inheriting processes, go/build readers and switched toolchains; the /opt/go/go.env line covers scrubbed environments. The boundary (scrubbed env plus toolchain switch, or a go/build reader under a scrubbed env) gets Go's default and is documented.",
@@ -49,7 +49,8 @@
     "Forward merge of main after #2216 (INFRA-255): this branch's hand edit of the notices intro string is dropped for #2216's generated list; the apt words and their comment paragraph moved into #2216's runtime-base stage; the toolchain comment names runtime-base. Fingerprint b123c2a1… → cd0bb48c…, changed (https://github.com/sjawhar/legion/pull/2222#issuecomment-6407052777).",
     "The before image for the merged round is main's own image after #2216 (sha256:cae86927…, revision 06170c71); the pre-merge round's was the disclosed fallback sha256:816f592c… (revision 0af6288a).",
     "The simplify pass applied one comment-only edit (de0e5936) in the first round; this round runs no second pass.",
-    "Review round 1 (dc3138b8): the ENV comment states what the ENV does (go/build readers match the go command; a switched toolchain), not a false failure. The toolchain step checks `env -u CGO_ENABLED go env CGO_ENABLED` = 0. The runtime-base cost sentence is deleted. The operatorpod.go comment is narrowed. In docs/kubernetes.md, gcc moved into the trixie list and the cgo paragraph follows the list. Six learnings use the `status: superseded in part by INFRA-257` frontmatter, with short notes; LEGION-629's body never claimed cgo was missing, so its status is unchanged. LEGION-764's env -i list now carries COREPACK_DEFAULT_TO_LATEST=0 CGO_ENABLED=0. The PR body carries the Contract change census. All three threads are answered and resolved. No merge of main: GitHub reports the PR MERGEABLE."
+    "Review round 1 (dc3138b8): the ENV comment states what the ENV does (go/build readers match the go command; a switched toolchain), not a false failure. The toolchain step checks `env -u CGO_ENABLED go env CGO_ENABLED` = 0. The runtime-base cost sentence is deleted. The operatorpod.go comment is narrowed. In docs/kubernetes.md, gcc moved into the trixie list and the cgo paragraph follows the list. Six learnings use the `status: superseded in part by INFRA-257` frontmatter, with short notes; LEGION-629's body never claimed cgo was missing, so its status is unchanged. LEGION-764's env -i list now carries COREPACK_DEFAULT_TO_LATEST=0 CGO_ENABLED=0. The PR body carries the Contract change census. All three threads are answered and resolved. No merge of main: GitHub reports the PR MERGEABLE.",
+    "Acceptance send-back (4e6a8374): the four wording items that were on the Fast-follow line are fixed in this PR, as the standing ruling dispatch://INFRA-49/ask/2d080aec-ce9a-4c7c-a235-ae998d2b0830 requires. image.go names the five clients; the toolchain-stage comment no longer restates Go's env precedence; docs/kubernetes.md says 'linked dynamically' only of the switched-toolchain build; LEGION-764 says imageEnv holds the names and the Dockerfile ENV the values. The PR body's Fast-follow line is now `none`. Comments and prose only: the proof entries stand at dc3138b8, and the tester re-reads the bare gates at 4e6a8374. No main merge: GitHub reports MERGEABLE."
   ],
   "openQuestions": []
 }
