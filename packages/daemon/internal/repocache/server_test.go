@@ -432,10 +432,10 @@ func TestHealthzIsUnavailableUntilTheFirstCloneFinishes(t *testing.T) {
 	}
 }
 
-// /tar streams the bare clone's refs and packs alone — HEAD, packed-refs, refs/ and
-// objects/pack/pack-<id>.pack — and nothing the feed builds itself (a pack's index), no loose
-// object, and nothing of the clone's own configuration, hooks or descriptions: indexed, it is a
-// repository whose connectivity git checks and whose default branch is the remote's, holding
+// /tar streams the bare clone's refs and packs alone — HEAD, packed-refs, refs/,
+// objects/pack/pack-<id>.pack and the index git reads each pack through — and no reverse index,
+// loose object, or anything of the clone's own configuration, hooks or descriptions: unpacked, it
+// is a repository whose connectivity git checks and whose default branch is the remote's, holding
 // regular files and directories alone and no temporary pack or lock file git was writing.
 func TestTarStreamsTheBareRepositorysRefsAndPacks(t *testing.T) {
 	remote := newRemote(t)
@@ -457,18 +457,20 @@ func TestTarStreamsTheBareRepositorysRefsAndPacks(t *testing.T) {
 		t.Fatalf("/tar answers %d", status)
 	}
 	unpacked, names := unpack(t, bytes.NewReader(body))
-	packs := 0
+	packs, indexes := 0, 0
 	for _, name := range names {
 		switch {
 		case name == "HEAD" || name == "packed-refs" || strings.HasPrefix(name, "refs/") || name == "objects/" || name == "objects/pack/":
 		case regexp.MustCompile(`^objects/pack/pack-[0-9a-f]{40}\.pack$`).MatchString(name):
 			packs++
+		case regexp.MustCompile(`^objects/pack/pack-[0-9a-f]{40}\.idx$`).MatchString(name):
+			indexes++
 		default:
 			t.Errorf("the tar holds %s, which is neither a ref nor a pack", name)
 		}
 	}
-	if packs == 0 {
-		t.Fatalf("the tar holds no pack: %q", names)
+	if packs == 0 || indexes != packs {
+		t.Fatalf("the tar holds %d packs and %d indexes: %q; want every pack with the index git reads it through", packs, indexes, names)
 	}
 	indexed(t, unpacked)
 	if got, want := git(t, unpacked, "--git-dir="+unpacked, "rev-parse", "refs/heads/main"), git(t, remote, "--git-dir="+remote, "rev-parse", "main"); got != want {
@@ -476,8 +478,9 @@ func TestTarStreamsTheBareRepositorysRefsAndPacks(t *testing.T) {
 	}
 }
 
-// indexed indexes each pack of the unpacked bare repository dir, as an issue pod's fetch does, and
-// checks its connectivity.
+// indexed checks the unpacked bare repository dir as an issue pod's fetch does: each pack the
+// cache streamed came with the index git reads it through, so none is indexed again, and the
+// history is whole.
 func indexed(t *testing.T, dir string) {
 	t.Helper()
 	packs, err := filepath.Glob(filepath.Join(dir, "objects", "pack", "pack-*.pack"))
@@ -485,7 +488,10 @@ func indexed(t *testing.T, dir string) {
 		t.Fatal(err)
 	}
 	for _, pack := range packs {
-		git(t, dir, "--git-dir="+dir, "index-pack", pack)
+		index := strings.TrimSuffix(pack, ".pack") + ".idx"
+		if _, err := os.Stat(index); err != nil {
+			t.Fatalf("the cache streamed %s without its index: %v", filepath.Base(pack), err)
+		}
 	}
 	git(t, dir, "--git-dir="+dir, "fsck", "--connectivity-only")
 }
@@ -885,8 +891,10 @@ func TestAnIssuePodsFetchFillsItsFeedFromTheCache(t *testing.T) {
 		t.Errorf("the feed's main is %s, want the remote's %s", got, moved)
 	}
 	git(t, report.Feed, "--git-dir="+report.Feed, "fsck", "--connectivity-only")
-	if transfers := run.transfers(); transfers[len(transfers)-1] != "--git-dir="+report.Feed+" fetch" && !strings.HasPrefix(transfers[len(transfers)-1], "--git-dir="+report.Feed+".clone-") {
-		t.Errorf("the pod's last transfer was %q, want a fetch of the delta", transfers[len(transfers)-1])
+	if transfers := run.transfers(); !slices.ContainsFunc(transfers, func(transfer string) bool {
+		return strings.HasPrefix(transfer, "--git-dir="+report.Feed+".clone-") && strings.HasSuffix(transfer, " fetch")
+	}) {
+		t.Errorf("the pod's transfers were %q, wanted a fetch of the delta into the feed it filled", transfers)
 	}
 	for _, transfer := range run.transfers()[1:] {
 		if strings.HasPrefix(transfer, "clone ") {

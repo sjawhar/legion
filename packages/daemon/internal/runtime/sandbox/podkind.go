@@ -135,7 +135,8 @@ func (issuePod) secretAnnotations(l launch) map[string]string {
 // process with anything an agent of the issue can write (Stage 4b Task 4b.6b): workspace-fetch
 // mounts the provisioning Secret, its own TMPDIR, and the feed alone of the issue's volume (its
 // feedSubPath, read-write), and fills the feed — from the repository's cache when one is ready
-// (fetchEnvironment), then from GitHub for what it lacks, or from GitHub alone; workspace-init
+// (fetchEnvironment), then from GitHub the branches an issue's clone is made from, or from GitHub
+// alone; workspace-init
 // mounts the issue's volume, the feed over it read-only, and the config home, and does all the
 // volume's work from the feed, with no credential, making the issue's clone shared with the feed
 // and starting an issue with no branch at the repository's default branch the spec names. Each

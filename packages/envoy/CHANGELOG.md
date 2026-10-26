@@ -4,6 +4,57 @@
 
 ### Added
 
+- Dispatch's meaning search embeds through AWS Bedrock (the default, unchanged) or Azure AI
+  Foundry, chosen by `DISPATCH_EMBEDDER`. Azure takes `DISPATCH_AZURE_EMBED_ENDPOINT`,
+  `DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE` (the deployment's quota, two thirds of which paces
+  background embedding), `DISPATCH_AZURE_EMBED_DEPLOYMENT` (default `embed-v-4-0`) and one
+  credential: the deployment's key (`DISPATCH_AZURE_EMBED_KEY` or `_FILE`), or a keyless sign-in
+  that exchanges a projected token with Microsoft Entra (`DISPATCH_AZURE_TENANT_ID`,
+  `DISPATCH_AZURE_CLIENT_ID`, `DISPATCH_AZURE_FEDERATED_TOKEN_FILE`). Boot refuses, naming the
+  setting, an unknown place, an Azure setting under Bedrock, and an Azure configuration missing its
+  endpoint or quota or holding both credentials, neither or part of the keyless one; a model
+  service or Entra that is down refuses no boot. Background embedding sends Azure at most 320,000
+  bytes of text a call, so a call of dense text (CJK, hex) finishes well inside the 60-second
+  request timeout instead of timing out and being split; Bedrock's batches are unchanged. Pacing
+  estimates 4 characters a token, which under-counts such text, so a backlog of it can meet
+  Azure's 429s, which the queue retries as throttles (INFRA-393).
+- The Dispatch server keeps meaning search's coverage itself: a coverage pass at boot and every 10
+  minutes embeds items written before the embedding triggers existed or with them off, repairs a
+  row whose text changed with the triggers off, drops every vector another embedder made and
+  re-admits a row that died under another embedder, with no lease, so every process may run it.
+  It drops and re-admits only once the configured embedder has answered (an embedding by this
+  process has succeeded, or a short canary text it embeds does); until then it leaves those rows in
+  place and logs one WARN naming the identity, the canary's error and how many it left, so a
+  misnamed Azure deployment or a refused credential drops no vector.
+  `GET /api/v1/search/coverage` reports the configured embedder's identity, place and model, and
+  in total and per kind the searchable items with a current vector, lacking one or failed, and the
+  oldest lacking item's wait (INFRA-393).
+- `agent-secrets` names the store it answered from, so no answer of its own is read as another
+  secrets CLI's about the same name: the broker `AGENT_SECRETS_URL` names, by host, and that
+  broker's store, read once from its public `GET /v1/settings` (`AWS Secrets Manager account <id>
+  in <region>`, or `GCP Secret Manager project <number>`), with the broker named alone where the
+  settings cannot be read. The injection form writes one line to standard error before it execs -
+  `agent-secrets: NAME, NAME from the broker at <host> (<store>)`, the names it injected and
+  nothing of their values; `request`, `status` and `self` print a `source:` line; `secret show`
+  prints a `store:` line and every row of `secret list` carries `store` in `--json` and a line
+  on standard error naming the store the table is from; `machine list` and `grant list` name
+  their broker the same way; and every refusal names where this CLI looked, from a denied request
+  to `UNKNOWN_SECRET` and a grant that released no value. `--json` output is unchanged for
+  `request`, `status`, `self`, `whoami`, `machine list` and `grant list`, which still print the
+  broker's own body verbatim and make no settings call; `secret list --json` and
+  `secret show --json` gain a `store` field. No line names a secret's version: the broker
+  releases a grant's values as names and values alone, and a session holds no sign-in of its own
+  to the store to read one with (`agent-secrets secret show`, which reads the store directly
+  under the person's own sign-in, lists each version as before).
+- A broker call that did not complete says what failed, rather than leaving a bare transport error
+  to read as a broker refusal: the host does not resolve, name resolution failed, the connection
+  was refused, no connection could be made (network or host unreachable, or any other dial error),
+  nothing answered in time, or a peer answered and then broke the exchange (TLS, an HTTP answer to
+  https, EOF or a reset after the request); any other error says only that the request failed. It
+  names the method and URL it tried, and that `AGENT_SECRETS_URL` named that address, so a session
+  that inherited a stale address reads a stale address. Such a message carries no `asked the
+  broker …` trailer: the broker refused nothing. A local helper refusal or dead helper socket names
+  that socket instead, since no broker was asked.
 - Dispatch's conversation view (`/agents/<id>/live`) shows the model and thinking level an Oh My
   Pi session runs now, from the `settings` frame pi-envoy publishes, before any turn runs on them
   and within about 20 seconds of a change made anywhere else (INFRA-195). Where the session runs
@@ -659,6 +710,16 @@
 
 ### Changed
 
+- **Breaking:** `envoy-dispatch backfill-embeddings` is removed: the server's coverage pass does
+  its work at boot and every 10 minutes, and an operator script that still runs it exits 2.
+  Migration `0119` drops its checkpoint table, `embeddings_backfill_progress`, in the same release,
+  since no server of any release reads it. Each vector now records its embedder's identity
+  (`us.cohere.embed-v4:0` on Bedrock, the value every stored vector already carries, and
+  `azure:<endpoint host>/<deployment>` on Azure), and search compares a query only with vectors of
+  its own identity: run one embedder configuration on every process of a deployment, since each
+  process's pass drops the others' vectors, and put a new model on Azure under a new deployment
+  name. A text with nothing to embed (empty or only white space) is settled with no vector rather
+  than retried until it dies, and a row that died that way is settled by the pass (INFRA-393).
 - **Breaking (local development):** `agent-secrets-devrelay` presents a listed caller's own
   ServiceAccount token, read from `--account-token-file` (default
   `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`), in place of the shared bearer the broker no longer takes. A
@@ -1276,6 +1337,19 @@
   new event sent none until the first heartbeat, fifteen seconds later: until then the page stayed
   "Reconnecting…" and skipped the refresh a reconnect owes every view. `GET /api/v1/events` now
   sends an SSE comment, `: open`, with its headers, so the stream opens at once in every browser.
+
+- A person who edits a document in the browser while an agent's write to it is published is now
+  credited for the edit. ygo runs each change's observers after it unlocks the document, so the two
+  changes' observers could run in either order, and when the agent's ran first it counted the
+  browser's change as part of its own, which is credited to no one because the agent's write was
+  credited when it committed; the browser's own observer then found nothing new and credited no one
+  either. The edit was stored, sometimes inside the agent's version, but its author was on no
+  version and owed none. The room's observer now takes the room's changes one at a time in the order
+  they committed, from an update log ygo fills under the document's lock, so each change is
+  measured against the room the change before it left, whichever observer gets there first; a
+  deleted paragraph is credited too, and a heading id the editor derives still credits no one. The
+  ygo pin moves from `v1.51.3-sami.3` to `v1.51.3-sami.4`, which adds that log
+  (reearth/ygo#332).
 
 - A browser that opens a document while Dispatch closes that document's room now keeps getting the
   document's edits. Dispatch closes a room when an issue closes, when it evicts a stale or failed
