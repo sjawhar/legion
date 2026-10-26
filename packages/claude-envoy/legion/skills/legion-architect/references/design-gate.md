@@ -82,7 +82,12 @@ Facts about the request:
 - If the output reads `spec.md (document id <UUID>) is already approved at version <N>`, still call
   `register_gate` with that id and version: the daemon reads the approval from Dispatch as it
   registers, opens the gate and delivers `design-approved` at once. The same read covers a human
-  who answers between your two calls. You never approve anything yourself.
+  who answers between your two calls: a changes request on that version arrives as
+  `design-changes-requested`, once. You never approve anything yourself.
+- `register_gate` refused 409 `VERSION_NOT_IN_DISPATCH` means the version you named is above the
+  latest version Dispatch holds for that document (the message names both), and a version Dispatch
+  never wrote is no registration: the gate is as it was. Read the document's latest version, check
+  it is the spec the human is asked to approve, and `register_gate` that version.
 
 Then end your turn. Release no wave until a delivered wake shows `design-approved` on the root. On
 `design-changes-requested`: revise the spec as the human's reason asks, run
