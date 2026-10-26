@@ -459,6 +459,7 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		state.Daemon.StartedAt.Format(time.RFC3339), state.Daemon.FirstBootAt.Format(time.RFC3339))
 	fmt.Fprintf(stdout, "admission: %d active, %d waiting, cap %d; %d issues\n",
 		len(state.Admission.Active), len(state.Admission.Waiting), state.Admission.Cap, len(state.Issues))
+	fmt.Fprintln(stdout, blockedSummary(state.Admission.Blocked))
 	fmt.Fprintln(stdout, checksSummary(openChecks(state.Issues)))
 	fmt.Fprintln(stdout, pendingSummary(state.PendingStatusWrites))
 	fmt.Fprintln(stdout, heldSummary(state.HeldOutboxRows))
@@ -478,6 +479,21 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprintf(stdout, "issue %s:\n%s\n", key, record)
 	}
 	return 0
+}
+
+// blockedSummary is the one line an operator reads for the issues Legion is waiting to start
+// behind a Dispatch issue nobody has finished (api.Admission.Blocked): how many, and each by
+// issue with what it waits on, in the state's own key order. Nothing here is the daemon's to
+// clear — a blocker is finished in Dispatch by a person — so the line names them and stops.
+func blockedSummary(blocked []api.BlockedIssue) string {
+	if len(blocked) == 0 {
+		return "blocked on Dispatch links: none"
+	}
+	waits := make([]string, len(blocked))
+	for i, issue := range blocked {
+		waits[i] = issue.Issue + " waits on " + strings.Join(issue.BlockedBy, ", ")
+	}
+	return fmt.Sprintf("blocked on Dispatch links: %d — %s", len(blocked), strings.Join(waits, "; "))
 }
 
 // pendingSummary is the one line an operator reads for the Dispatch status writes the daemon has
