@@ -302,35 +302,60 @@ func TestGitHubAppMintAcceptsPKCS8Key(t *testing.T) {
 }
 
 // TestGitHubAppMintNamesTheClassOfEachFailure: every failure wraps the class the broker's log
-// names, so an operator can tell a bad stored key from GitHub refusing from GitHub being down.
+// names, so an operator can tell a bad stored key from GitHub refusing from GitHub being down. A
+// rate limit, on a release with no narrowing as on a narrowed one, is no verdict on the App and
+// not its owner's to fix, so a rate-limited 4xx is upstream, never refused: GitHub's primary limit
+// (a 403 with X-RateLimit-Remaining: 0), a 429, and a 403 whose body names its secondary limit.
 func TestGitHubAppMintNamesTheClassOfEachFailure(t *testing.T) {
 	key, err := testAppKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	answer := func(status int) *httptest.Server {
-		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, "no", status)
+	answer := func(status int, headers http.Header, body string) *httptest.Server {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			for name, values := range headers {
+				w.Header()[name] = values
+			}
+			http.Error(w, body, status)
 		}))
+		t.Cleanup(server.Close)
+		return server
 	}
-	refused, down := answer(http.StatusUnauthorized), answer(http.StatusBadGateway)
-	defer refused.Close()
-	defer down.Close()
+	refused, down := answer(http.StatusUnauthorized, nil, "no"), answer(http.StatusBadGateway, nil, "no")
+	forbidden := answer(http.StatusForbidden, nil, `{"message":"Resource not accessible by integration"}`)
+	primary := answer(http.StatusForbidden, http.Header{"X-Ratelimit-Remaining": {"0"}}, `{"message":"API rate limit exceeded for installation."}`)
+	tooMany := answer(http.StatusTooManyRequests, nil, "no")
+	secondary := answer(http.StatusForbidden, nil, `{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}`)
+	github := func(server *httptest.Server) secrets.GitHubApp {
+		return secrets.GitHubApp{Base: server.URL, HTTP: server.Client()}
+	}
+	value := githubAppValue(t, "1", key)
 	for name, tc := range map[string]struct {
-		app   secrets.GitHubApp
-		value string
-		class string
+		app       secrets.GitHubApp
+		value     string
+		class     string
+		rateLimit bool
 	}{
-		"stored value is not JSON": {secrets.GitHubApp{}, "not json", "stored-value"},
-		"stored key is corrupt":    {secrets.GitHubApp{}, `{"app_id":"1","private_key":"x"}`, "stored-value"},
-		"GitHub answers 401":       {secrets.GitHubApp{Base: refused.URL, HTTP: refused.Client()}, githubAppValue(t, "1", key), "refused"},
-		"GitHub answers 502":       {secrets.GitHubApp{Base: down.URL, HTTP: down.Client()}, githubAppValue(t, "1", key), "upstream"},
-		"GitHub cannot be reached": {secrets.GitHubApp{Base: "http://127.0.0.1:1"}, githubAppValue(t, "1", key), "upstream"},
+		"stored value is not JSON":           {secrets.GitHubApp{}, "not json", "stored-value", false},
+		"stored key is corrupt":              {secrets.GitHubApp{}, `{"app_id":"1","private_key":"x"}`, "stored-value", false},
+		"GitHub answers 401":                 {github(refused), value, "refused", false},
+		"GitHub answers 403":                 {github(forbidden), value, "refused", false},
+		"GitHub answers 502":                 {github(down), value, "upstream", false},
+		"GitHub cannot be reached":           {secrets.GitHubApp{Base: "http://127.0.0.1:1"}, value, "upstream", false},
+		"GitHub's primary rate limit, 403":   {github(primary), value, "upstream", true},
+		"GitHub answers 429":                 {github(tooMany), value, "upstream", true},
+		"GitHub's secondary rate limit, 403": {github(secondary), value, "upstream", true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := tc.app.Mint(t.Context(), mintFor(tc.value, "acme"))
 			if got := secrets.MintErrorClass(err); err == nil || got != tc.class {
 				t.Fatalf("Mint = %v (class %s); want class %s", err, got, tc.class)
+			}
+			if said := strings.Contains(err.Error(), "a rate limit"); said != tc.rateLimit {
+				t.Fatalf("Mint = %v; saying a rate limit is %t, want %t", err, said, tc.rateLimit)
+			}
+			if strings.Contains(err.Error(), "few minutes") || strings.Contains(err.Error(), "for installation") {
+				t.Fatalf("Mint = %v quotes GitHub's own text", err)
 			}
 		})
 	}

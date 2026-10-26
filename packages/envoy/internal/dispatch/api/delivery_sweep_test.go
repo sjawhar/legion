@@ -710,7 +710,7 @@ func TestTheDeliverySweepSendsTheAttemptItFoundOwed(t *testing.T) {
 
 // The sweep's read of the keyed sends it owes a first attempt runs once a minute, over a table that
 // holds every keyed write of the last day, so it reads the partial index request_keys_owed_sends
-// (0118), which holds only the keyed sends still in flight, rather than every key. The sweep's own
+// (0120), which holds only the keyed sends still in flight, rather than every key. The sweep's own
 // SQL is explained with sequential scans off, since a table this small is cheapest to scan
 // whatever its indexes: the assertion is that the index serves the query, as the custom plan a
 // statement's first runs get and as the generic plan Postgres may cache for it afterwards.

@@ -46,7 +46,7 @@ func TestAnIssuePodProcessEnrollsWithItsPodUIDAndRoleSlot(t *testing.T) {
 	broker := h.withSecrets()
 	h.rt.ScriptSpawn(fake.SpawnResult{Locator: runtime.Locator{
 		Runtime: runtime.RuntimeSandbox, Claim: testToken, Incarnation: runtime.SandboxIncarnation("pod-uid-9", 1),
-		Sandbox: &runtime.SandboxLocator{Namespace: "legion", Name: "legion-legion-209", PodUID: "pod-uid-9", Container: "implementer", Generation: 1},
+		Sandbox: &runtime.SandboxLocator{Namespace: "legion", Name: "legion-legion-209", PodUID: "pod-uid-9", Container: "roles", Generation: 1},
 	}})
 	h.launch()
 	h.helloWithIdentity()

@@ -66,6 +66,7 @@ func (c *HTTPClient) ListIssues(ctx context.Context, project string, statuses []
 			HandedOver:   CarriesLegionLabel(issue.Labels),
 			LastSeq:      issue.LastSeq,
 			ResolvedRepo: deref(issue.ResolvedRepo),
+			BlockedBy:    issue.BlockedBy,
 		})
 	}
 	return issues, nil
@@ -89,6 +90,7 @@ func (c *HTTPClient) GetIssue(ctx context.Context, key string) (Issue, error) {
 		PrimaryArtifactID: response.PrimaryArtifactID,
 		LastSeq:           response.LastSeq,
 		ResolvedRepo:      deref(response.ResolvedRepo),
+		BlockedBy:         response.BlockedBy,
 	}, nil
 }
 
@@ -336,6 +338,7 @@ type issueSummaryResponse struct {
 	Labels       []string `json:"labels"`
 	LastSeq      int64    `json:"last_seq"`
 	ResolvedRepo *string  `json:"resolved_repo"`
+	BlockedBy    []string `json:"blocked_by"`
 }
 
 type issueResponse struct {
@@ -349,6 +352,7 @@ type issueResponse struct {
 	PrimaryArtifactID string   `json:"primary_artifact_id"`
 	LastSeq           int64    `json:"last_seq"`
 	ResolvedRepo      *string  `json:"resolved_repo"`
+	BlockedBy         []string `json:"blocked_by"`
 }
 
 type repoProjectResponse struct {

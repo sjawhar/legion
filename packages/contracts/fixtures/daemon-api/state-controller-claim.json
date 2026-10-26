@@ -11,7 +11,24 @@
     "active": [
       "LEGION-208"
     ],
-    "waiting": []
+    "waiting": [
+      "LEGION-210",
+      "LEGION-211"
+    ],
+    "blocked": [
+      {
+        "issue": "LEGION-209",
+        "blockedBy": [
+          "LEGION-300"
+        ]
+      },
+      {
+        "issue": "LEGION-210",
+        "blockedBy": [
+          "LEGION-301"
+        ]
+      }
+    ]
   },
   "issues": {
     "LEGION-208": {
@@ -32,7 +49,7 @@
             "namespace": "legion",
             "name": "legion-legion-legion-208",
             "podUid": "4b7e1c2a-0d93-4f6e-8a51-3c2f9e7d1b04",
-            "container": "architect",
+            "container": "roles",
             "generation": 1
           }
         },
@@ -60,6 +77,33 @@
         "index": 0,
         "admittedAt": "2026-10-06T18:02:11Z"
       }
+    },
+    "LEGION-209": {
+      "key": "LEGION-209",
+      "generation": 1,
+      "phase": "admitted",
+      "status": "todo",
+      "repo": "acme/widgets",
+      "defaultBranch": "main",
+      "workers": {}
+    },
+    "LEGION-210": {
+      "key": "LEGION-210",
+      "generation": 1,
+      "phase": "admitted",
+      "status": "todo",
+      "repo": "acme/widgets",
+      "defaultBranch": "main",
+      "workers": {}
+    },
+    "LEGION-211": {
+      "key": "LEGION-211",
+      "generation": 2,
+      "phase": "implementing",
+      "status": "todo",
+      "repo": "acme/widgets",
+      "defaultBranch": "main",
+      "workers": {}
     }
   },
   "pendingStatusWrites": [],

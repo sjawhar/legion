@@ -79,8 +79,8 @@ type testServerOptions struct {
 	// agentWatchInterval replaces how often an agent view re-arms its session (ten seconds), so a
 	// test of the re-arm need not wait one out.
 	agentWatchInterval time.Duration
-	// embedder wires meaning search (LEGION-549); nil (every test but search_meaning_test.go's
-	// own) is the deployment with no Cohere key, where search answers keyword-only.
+	// embedder wires meaning search (LEGION-549); nil (every test but the meaning search tests'
+	// own) is the deployment with no embedder configured, where search answers keyword-only.
 	embedder embed.Embedder
 	// files is the uploaded-file store; nil keeps every upload's bytes in Postgres, as a
 	// deployment with no bucket does.

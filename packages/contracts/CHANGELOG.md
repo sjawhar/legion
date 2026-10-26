@@ -18,6 +18,11 @@
   answered (INFRA-292). It is required: a page of this release subscribes the event feed on
   `GET /ws/live`, which only a server that answers the head serves, and the feed starts its first
   subscription there, so every read the page makes after the sign-in check is covered by a resume.
+- `SearchCoverage`, `SearchCoverageKinds` and `SearchCoverageCounts`, the body of
+  `GET /api/v1/search/coverage`: the configured embedder's identity, place (`bedrock` or `azure`)
+  and model, and per kind and in total how many searchable items have a current vector, lack one or
+  failed, with the oldest lacking item's wait (INFRA-393). `SearchResponse.degraded`'s doc names the
+  model service rather than Bedrock.
 - The agent stream's `settings` frame (`AgentStreamSettings`, in `AgentStreamFrame`): the model
   and thinking level an Oh My Pi session runs now, the whole state each time it changes and the
   frame before `commands` in every replay. `AgentStreamSettingsReported` carries `model`
@@ -181,6 +186,12 @@
   `EventsLiveView` with an `EventsLiveResume`, and an `AgentLiveView` with none, which are the
   only pairings Dispatch accepts. `LiveServerFrame` adds the events and agent views' frames. The
   frame fixtures move with them: `fixtures/delivery-live/` is now `fixtures/live/`.
+- The daemon API fixtures (`fixtures/daemon-api/`) are at contract 39 (INFRA-208): `state.json`'s
+  `settings.runtime.kubernetes.resources` is `{issue, controller}`, each pod's six reservation
+  fields, in place of one entry per role, and the `resource-limits` capability row's detail names
+  pods (`no CPU and memory requests and limits under runtime.kubernetes.resources for the issue
+  pod`) rather than roles. `LegionStateResponse` reads `settings` loosely, so its schema is
+  unchanged.
 - **Breaking:** a project's architecture model comes from any number of sources, one per
   repository (INFRA-391). `ArchitectureTree.sources`, each source's sync bookkeeping in the order
   the project added them, replaces `source`; `ArchitectureTreeComponent.source` names the

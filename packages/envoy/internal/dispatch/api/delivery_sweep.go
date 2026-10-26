@@ -94,7 +94,7 @@ const (
 	// owedKeyedSend is every keyed send whose key's holder is gone - it never answered, and its
 	// lease lapsed or was released - with a targeted message and no attempt at all: the key as k,
 	// its message as m, $1 the key's lease and $2 IdempotencyKeyTTL, in seconds. Its first two
-	// conditions are the predicate of request_keys_owed_sends (migration 0118), the partial index
+	// conditions are the predicate of request_keys_owed_sends (migration 0120), the partial index
 	// that keeps this read to the keyed sends still in flight.
 	owedKeyedSend = `from request_keys k
 		join messages m on m.id = (k.recovery ->> 'message_id')::uuid
