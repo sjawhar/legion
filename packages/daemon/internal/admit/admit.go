@@ -46,7 +46,7 @@ type Admission struct {
 	// distinguishes one held key's own catching-up from another's. release applies every key's
 	// own summary — exactly as Reconcile's own immediate path would — before it clears them, so a
 	// key the stream never gets around to explaining still lands on what the listing already knew.
-	pending map[string]dispatch.IssueSummary
+	pending map[string]intake.DispatchIssue
 	// target is the notification stream's own last sequence Reconcile captured when it found the
 	// first record behind: every key in pending releases once the Dispatch consumer's position
 	// has Reached it. Zero means nothing is held.
@@ -74,7 +74,7 @@ func New(store record.Store, engine *workflow.Engine, cap int, project string, l
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Admission{store: store, engine: engine, cap: cap, project: project, log: log, now: time.Now, pending: make(map[string]dispatch.IssueSummary)}
+	return &Admission{store: store, engine: engine, cap: cap, project: project, log: log, now: time.Now, pending: make(map[string]intake.DispatchIssue)}
 }
 
 // Apply records root and orphan todo observations of issues handed to Legion and every newer
@@ -142,84 +142,79 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 	if observation, err = workflow.SettleRetainedRepository(observation, stored); err != nil {
 		return nil, nil, err
 	}
-	// records says whether the observation records anything, and todoWake whether it is an
-	// unlabelled todo issue's, which wakes the controller once the line is settled.
-	records, todoWake := true, false
-	if stored == nil {
-		handed := observation.HandedOver
-		// A root in triage handed to Legion is the controller's to triage, so each observation of it
-		// while it is unrecorded wakes the controller: its creation with the label, or the edit that
-		// adds it, since the dashboard creates an issue without labels. The controller triages from
-		// Dispatch and the daemon's state, never from the wake. A root without the label is not
-		// Legion's and wakes nobody. This runs before any hold check: a hold defers only whether an
-		// unrecorded todo is admitted, never whether an unrecorded triage root wakes the
-		// controller. The record stays empty, as for any root not yet todo; Reconcile's boot
-		// listing reads every status now, but a triage root is never a todo candidate it admits.
-		if observation.Status == "triage" && observation.Parent == "" && handed {
-			if err := a.enqueue(ctx, tx, observation.Key, record.ControllerNotice{Kind: record.TriageNotice}, a.now()); err != nil {
-				return nil, nil, err
-			}
+	if stored != nil {
+		if err := a.applyObservation(ctx, tx, *stored, observation); err != nil {
+			return nil, nil, err
 		}
-		// An unrecorded todo issue without the label is someone else's work in a project Legion may
-		// share with humans and other agents: Legion records nothing of it until it is handed over.
-		// Neither exit records anything, but each still refreshes a held key's own pending summary:
-		// an event moving the key out of todo, or taking its label off, is real information about
-		// what Dispatch shows now, and leaving the held summary as Reconcile's stale boot listing
-		// found it would have release admit on that stale information instead.
-		switch {
-		case observation.Status != "todo":
-			a.refreshHeldSummary(observation)
-			records = false
-		case !handed:
-			a.log.Debug("admission: not handed to Legion", "issue", observation.Key, "label", dispatch.LegionLabel)
-			a.refreshHeldSummary(observation)
-			records, todoWake = false, true
-		default:
-			a.mu.Lock()
-			summary, held := a.pending[observation.Key]
-			a.mu.Unlock()
-			if held && observation.Seq <= summary.LastSeq {
-				// Reconcile already holds this key on the listing's own summary because it found it
-				// behind the stream: an unrecorded key has no record to fence a live event against, so
-				// a replay at or behind that summary's own sequence — a nak's redelivery, the outbox's
-				// own publish backoff — decides nothing. release applies that summary once the
-				// consumer catches up. A newer event, past the sequence the summary was taken at, is
-				// not a stale replay: it is recorded normally below, even while the key is still
-				// technically held — a release that has already committed but not yet run its
-				// commit hook (which clears pending) still shows this key as held, and dropping this
-				// event here would lose it once that hook clears pending out from under it, the
-				// event already acknowledged as processed. promote's own pending membership check —
-				// not this one — is what still holds the freshly recorded candidate back from a slot
-				// until pending is actually clear; a later pass once the hold clears promotes it.
-				records = false
-			} else if err := a.putNewRoot(ctx, tx, observation, true); err != nil {
-				return nil, nil, err
-			}
-		}
-	} else if err := a.applyObservation(ctx, tx, *stored, observation); err != nil {
-		return nil, nil, err
+		released, err := a.settle(ctx, tx)
+		return released, nil, err
 	}
-
-	// An observation that records nothing still owes the line its release and promotion when its
-	// Reread moved a root's Dispatch chain: the root it frees has no event of its own.
-	var released []string
-	if records || reread {
-		if released, err = a.settle(ctx, tx); err != nil {
+	handed := observation.HandedOver
+	// A root in triage handed to Legion is the controller's to triage, so each observation of it
+	// while it is unrecorded wakes the controller: its creation with the label, or the edit that
+	// adds it, since the dashboard creates an issue without labels. The controller triages from
+	// Dispatch and the daemon's state, never from the wake. A root without the label is not
+	// Legion's and wakes nobody. This runs before any hold check: a hold defers only whether an
+	// unrecorded todo is admitted, never whether an unrecorded triage root wakes the
+	// controller. The record stays empty, as for any root not yet todo; Reconcile's boot
+	// listing reads every status now, but a triage root is never a todo candidate it admits.
+	if observation.Status == "triage" && observation.Parent == "" && handed {
+		if err := a.enqueue(ctx, tx, observation.Key, record.ControllerNotice{Kind: record.TriageNotice}, a.now()); err != nil {
 			return nil, nil, err
 		}
 	}
-	if !todoWake {
-		return released, nil, nil
+	// An unrecorded todo issue without the label is someone else's work in a project Legion may
+	// share with humans and other agents: Legion records nothing of it until it is handed over.
+	// Neither exit records anything, but each still refreshes a held key's own pending summary:
+	// an event moving the key out of todo, or taking its label off, is real information about
+	// what Dispatch shows now, and leaving the held summary as Reconcile's stale boot listing
+	// found it would have release admit on that stale information instead.
+	switch {
+	case observation.Status != "todo":
+		a.refreshHeldSummary(observation)
+		released, err := a.settleReread(ctx, tx, reread)
+		return released, nil, err
+	case !handed:
+		a.log.Debug("admission: not handed to Legion", "issue", observation.Key, "label", dispatch.LegionLabel)
+		a.refreshHeldSummary(observation)
+		released, err := a.settleReread(ctx, tx, reread)
+		if err != nil {
+			return nil, nil, err
+		}
+		// An issue in todo that nobody handed to Legion wakes the controller while a slot stands
+		// free; the controller takes nothing for it, since only a person hands Legion work
+		// (skill://legion-controller, "Free slots"). The notice waits todoWakeDelay, so the
+		// events of one edit burst find it pending and fold into it.
+		free, err := a.slotFree(ctx, tx)
+		if err != nil || !free {
+			return released, nil, err
+		}
+		return released, nil, a.wakeController(ctx, tx, record.TodoNotice, observation.Key, a.now().Add(todoWakeDelay))
 	}
-	// An issue in todo that nobody handed to Legion wakes the controller while a slot stands
-	// free; the controller takes nothing for it, since only a person hands Legion work
-	// (skill://legion-controller, "Free slots"). The notice waits todoWakeDelay, so the
-	// events of one edit burst find it pending and fold into it.
-	free, err := a.slotFree(ctx, tx)
-	if err != nil || !free {
+	a.mu.Lock()
+	summary, held := a.pending[observation.Key]
+	a.mu.Unlock()
+	if held && observation.Seq <= summary.Seq {
+		// Reconcile already holds this key on the listing's own summary because it found it
+		// behind the stream: an unrecorded key has no record to fence a live event against, so
+		// a replay at or behind that summary's own sequence — a nak's redelivery, the outbox's
+		// own publish backoff — decides nothing. release applies that summary once the
+		// consumer catches up. A newer event, past the sequence the summary was taken at, is
+		// not a stale replay: it is recorded normally below, even while the key is still
+		// technically held — a release that has already committed but not yet run its
+		// commit hook (which clears pending) still shows this key as held, and dropping this
+		// event here would lose it once that hook clears pending out from under it, the
+		// event already acknowledged as processed. promote's own pending membership check —
+		// not this one — is what still holds the freshly recorded candidate back from a slot
+		// until pending is actually clear; a later pass once the hold clears promotes it.
+		released, err := a.settleReread(ctx, tx, reread)
 		return released, nil, err
 	}
-	return released, nil, a.wakeController(ctx, tx, record.TodoNotice, observation.Key, a.now().Add(todoWakeDelay))
+	if err := a.putNewRoot(ctx, tx, observation, true); err != nil {
+		return nil, nil, err
+	}
+	released, err := a.settle(ctx, tx)
+	return released, nil, err
 }
 
 // settle releases the slots of trees no longer in the workflow (releaseInactiveSlots) and promotes
@@ -233,6 +228,16 @@ func (a *Admission) settle(ctx context.Context, tx pgx.Tx) ([]string, error) {
 		return nil, err
 	}
 	return released, nil
+}
+
+// settleReread settles the line for an observation that records nothing, when its Reread changed
+// a record (applyReread): a root whose Dispatch chain moved has no event of its own, so the
+// release and promotion its move allows are this observation's to make.
+func (a *Admission) settleReread(ctx context.Context, tx pgx.Tx, changed bool) ([]string, error) {
+	if !changed {
+		return nil, nil
+	}
+	return a.settle(ctx, tx)
 }
 
 // applyReread writes each Dispatch chain the preparation of an unrecorded or re-parented issue's
@@ -340,7 +345,7 @@ func (a *Admission) wakeController(ctx context.Context, tx pgx.Tx, kind record.N
 // is coming for any of it, ever, so every summary applies now instead of holding a key nothing
 // will later release. target and position are the caller's own single measurement of the stream
 // and the Dispatch consumer, taken once for the whole call, not per issue.
-func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispatch.IssueSummary, target int64, position intake.DispatchConsumerPosition) error {
+func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []intake.DispatchIssue, target int64, position intake.DispatchConsumerPosition) error {
 	slots, err := a.store.Slots(ctx, tx)
 	if err != nil {
 		return fmt.Errorf("list admission slots: %w", err)
@@ -351,16 +356,16 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 	}
 
 	caughtUp := position.Reached(target)
-	deferred := make(map[string]dispatch.IssueSummary)
+	deferred := make(map[string]intake.DispatchIssue)
 	for _, summary := range summaries {
 		stored, err := a.store.Issue(ctx, tx, summary.Key)
 		if err != nil {
 			return fmt.Errorf("read reconciled issue %s: %w", summary.Key, err)
 		}
-		behind := stored == nil && summary.LastSeq > 0 || stored != nil && summary.LastSeq > stored.LastDispatchSeq
+		behind := stored == nil && summary.Seq > 0 || stored != nil && summary.Seq > stored.LastDispatchSeq
 		if behind && !caughtUp {
 			a.log.Debug("admission reconcile: the stream may still hold or redeliver an event for this issue; holding it for the consumer to catch up",
-				"issue", summary.Key, "status", summary.Status, "dispatch", summary.LastSeq)
+				"issue", summary.Key, "status", summary.Status, "dispatch", summary.Seq)
 			deferred[summary.Key] = summary
 			continue
 		}
@@ -452,7 +457,7 @@ func (a *Admission) putNewRoot(ctx context.Context, tx pgx.Tx, observation intak
 // immediately when the consumer is already caught up, and release, once the consumer catches up
 // to a summary Reconcile deferred, call this the same way: a key nothing else ever gets around to
 // explaining still lands on what the listing already knew.
-func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatch.IssueSummary, slotted map[string]struct{}) error {
+func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary intake.DispatchIssue, slotted map[string]struct{}) error {
 	stored, err := a.store.Issue(ctx, tx, summary.Key)
 	if err != nil {
 		return fmt.Errorf("read reconciled issue %s: %w", summary.Key, err)
@@ -466,9 +471,9 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 			a.log.Debug("admission: not handed to Legion", "issue", summary.Key, "label", dispatch.LegionLabel)
 			return nil
 		}
-		return a.putNewRoot(ctx, tx, intake.ListedIssue(summary), false)
+		return a.putNewRoot(ctx, tx, summary, false)
 	}
-	if summary.LastSeq > 0 && summary.LastSeq < stored.LastDispatchSeq {
+	if summary.Seq > 0 && summary.Seq < stored.LastDispatchSeq {
 		return nil
 	}
 	// The record keeps the repository it was recorded with, as for a live event (the engine's
@@ -478,11 +483,11 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 		return err
 	}
 	seq := stored.LastDispatchSeq
-	if summary.LastSeq > seq {
-		seq = summary.LastSeq
+	if summary.Seq > seq {
+		seq = summary.Seq
 	}
 	status := stored.Status
-	if summary.Status != stored.Status && summary.LastSeq > stored.LastDispatchSeq {
+	if summary.Status != stored.Status && summary.Seq > stored.LastDispatchSeq {
 		// A snapshot that changes a recorded issue's status, strictly newer than what is stored, is
 		// the fact a live Dispatch event of the same change would carry, so it runs through the
 		// engine's own transition table first — leave/beginLinger out of the workflow, or
@@ -501,7 +506,7 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 		// root's or a live tree's own state, not the record it briefly showed on Dispatch. Re-read
 		// afterward: the engine's own write (phase, hold, linger) must not be clobbered by
 		// recordObservation writing back the stale copy this call fetched before the engine ran.
-		if _, err := a.engine.Apply(ctx, tx, intake.ListedIssue(summary)); err != nil {
+		if _, err := a.engine.Apply(ctx, tx, summary); err != nil {
 			return fmt.Errorf("apply engine transition for %s: %w", summary.Key, err)
 		}
 		refreshed, err := a.store.Issue(ctx, tx, summary.Key)
@@ -513,13 +518,13 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 		// the observation itself. Recording the snapshot's status now would put a set-back's backlog
 		// on a running tree, whose slot releaseInactiveSlots would then free. Otherwise the snapshot's
 		// move is recorded, as the live event's would be.
-		if refreshed.LastDispatchSeq >= summary.LastSeq {
+		if refreshed.LastDispatchSeq >= summary.Seq {
 			return nil
 		}
 		stored, status = refreshed, summary.Status
 	}
 	o := observed{
-		Title: summary.Title, Parent: deref(summary.Parent), Rank: summary.Rank,
+		Title: summary.Title, Parent: summary.Parent, Rank: summary.Rank,
 		Status: status, Shown: summary.Status, Ancestry: summary.Ancestry, HandedOver: handed, Seq: seq,
 	}
 	if summary.Status == "todo" && handed && readmittable(*stored) {
@@ -856,13 +861,9 @@ func (a *Admission) promote(ctx context.Context, tx pgx.Tx) (int, error) {
 // every one of them back in the very call that released them. A queued root a live tree took in
 // (adoptQueuedRoots) leaves the line before anything else reads it.
 func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bool) (int, error) {
-	issues, err := a.adoptQueuedRoots(ctx, tx, respectHolds)
+	issues, slots, err := a.adoptQueuedRoots(ctx, tx, respectHolds)
 	if err != nil {
 		return 0, err
-	}
-	slots, err := a.store.Slots(ctx, tx)
-	if err != nil {
-		return 0, fmt.Errorf("list admission slots: %w", err)
 	}
 	released, err := a.releaseUnslotted(ctx, tx, issues, slots, respectHolds)
 	if err != nil {
@@ -1033,14 +1034,13 @@ func (a *Admission) refreshHeldSummary(observation intake.DispatchIssue) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	summary, held := a.pending[observation.Key]
-	if !held || observation.Seq <= summary.LastSeq {
+	if !held || observation.Seq <= summary.Seq {
 		return
 	}
-	a.pending[observation.Key] = dispatch.IssueSummary{
-		Key: observation.Key, Title: observation.Title, Status: observation.Status,
-		Parent: record.ParentOf(observation.Parent), Rank: observation.Rank,
-		HandedOver: observation.HandedOver, LastSeq: observation.Seq, ResolvedRepo: observation.ResolvedRepo,
-		Ancestry: observation.Ancestry,
+	a.pending[observation.Key] = intake.DispatchIssue{
+		Key: observation.Key, Seq: observation.Seq, Status: observation.Status, Title: observation.Title,
+		Parent: observation.Parent, Rank: observation.Rank, HandedOver: observation.HandedOver,
+		ResolvedRepo: observation.ResolvedRepo, Ancestry: observation.Ancestry,
 	}
 }
 
@@ -1055,7 +1055,7 @@ func (a *Admission) refreshHeldSummary(observation intake.DispatchIssue) {
 func (a *Admission) release(ctx context.Context, tx pgx.Tx, position intake.DispatchConsumerPosition) ([]string, error) {
 	a.mu.Lock()
 	caughtUp := len(a.pending) > 0 && position.Reached(a.target)
-	var releasing map[string]dispatch.IssueSummary
+	var releasing map[string]intake.DispatchIssue
 	if caughtUp {
 		releasing = maps.Clone(a.pending)
 	}

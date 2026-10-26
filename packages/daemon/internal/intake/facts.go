@@ -97,7 +97,7 @@ func ListedIssue(issue dispatch.IssueSummary) DispatchIssue {
 		parent = *issue.Parent
 	}
 	return DispatchIssue{Key: issue.Key, Seq: issue.LastSeq, Status: issue.Status, Title: issue.Title, Parent: parent,
-		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, Ancestry: issue.Ancestry}
+		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo}
 }
 
 // Handover is the outbox's direct completion of a hand-over whose Dispatch state is already todo
@@ -113,7 +113,8 @@ func (Handover) isFact() {}
 // ChildAdoption is an architect's release of children recorded outside its tree Tree, the root
 // key its grant names: each a root that queued in admission before a person made it a child of
 // Tree, under the Dispatch parent the release read. Admission adopts every one into Tree or, when
-// any cannot join it (workflow's AdoptionRefusal), refuses the whole fact and writes nothing.
+// any cannot join it (workflow's AdoptionRefusal, or Tree is not live), refuses the whole fact and
+// writes nothing.
 type ChildAdoption struct {
 	Tree     string
 	Children []AdoptedChild
@@ -699,6 +700,13 @@ type Refusal struct {
 // the workflow's adoption both answer it.
 func ChildInOtherTree(key, tree, want string) *Refusal {
 	return &Refusal{Status: 409, Code: "CHILD_IN_OTHER_TREE", Message: fmt.Sprintf("%s runs in the tree of %s, not %s", key, tree, want)}
+}
+
+// ChildNotAdoptable is the 409 CHILD_NOT_ADOPTABLE refusal of key, a recorded root, when it is
+// asked to join the tree of tree and cannot, for reason. The workflow's adoption and a release of
+// children both answer it.
+func ChildNotAdoptable(key, tree, reason string) *Refusal {
+	return &Refusal{Status: 409, Code: "CHILD_NOT_ADOPTABLE", Message: fmt.Sprintf("%s cannot join the tree of %s: %s", key, tree, reason)}
 }
 
 // ApplyFact is the only transaction path for facts, whether they arrived through JetStream, the

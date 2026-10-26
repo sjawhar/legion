@@ -323,9 +323,13 @@ func reconcile(t *testing.T, pool *pgxpool.Pool, admission *Admission, summaries
 func reconcileWithPosition(t *testing.T, pool *pgxpool.Pool, admission *Admission, summaries []dispatch.IssueSummary, target, ackFloorStream int64, idle bool) {
 	t.Helper()
 	position := intake.DispatchConsumerPosition{AckFloorStream: ackFloorStream, Idle: idle}
+	listed := make([]intake.DispatchIssue, len(summaries))
+	for i, summary := range summaries {
+		listed[i] = intake.ListedIssue(summary)
+	}
 	scoped, committed := intake.WithCommitHooks(context.Background())
 	inTx(t, pool, func(tx pgx.Tx) {
-		if err := admission.Reconcile(scoped, tx, summaries, target, position); err != nil {
+		if err := admission.Reconcile(scoped, tx, listed, target, position); err != nil {
 			t.Fatalf("Reconcile: %v", err)
 		}
 	})

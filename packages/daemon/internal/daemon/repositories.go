@@ -655,11 +655,7 @@ func (w *workflowRuntime) prepareIssue(ctx context.Context, issue intake.Dispatc
 		return issue, err
 	}
 	if recorded != nil {
-		w.forgetIssue(issue.Key)
-		if issue.ResolvedRepoMissing {
-			issue.ResolvedRepo, issue.ResolvedRepoMissing = recorded.Repo, false
-		}
-		return w.withAncestry(ctx, issue, recorded, observe)
+		return w.withAncestry(ctx, w.prepareRecorded(issue, recorded), recorded, observe)
 	}
 	if !admissionBound(issue) {
 		prepared, err := w.prepareUnrecorded(ctx, issue, false, 0)
@@ -699,10 +695,7 @@ func (w *workflowRuntime) prepareIssue(ctx context.Context, issue intake.Dispatc
 func (w *workflowRuntime) prepareListed(ctx context.Context, records map[string]*record.Issue, walk ancestry, issue intake.DispatchIssue) (intake.DispatchIssue, error) {
 	recorded := records[issue.Key]
 	if recorded != nil {
-		w.forgetIssue(issue.Key)
-		if issue.ResolvedRepoMissing {
-			issue.ResolvedRepo, issue.ResolvedRepoMissing = recorded.Repo, false
-		}
+		issue = w.prepareRecorded(issue, recorded)
 	} else {
 		prepared, err := w.prepareUnrecorded(ctx, issue, false, 0)
 		if err != nil {
@@ -716,6 +709,17 @@ func (w *workflowRuntime) prepareListed(ctx context.Context, records map[string]
 	chain, err := w.chainOf(ctx, walk, issue.Key, issue.Parent)
 	issue.Ancestry = chain
 	return issue, err
+}
+
+// prepareRecorded readies an event of an issue recorded as recorded, an event's or the boot
+// listing's: no event of it is held as an admission any longer (forgetIssue), and one that names no
+// repository (ResolvedRepoMissing) takes the record's.
+func (w *workflowRuntime) prepareRecorded(issue intake.DispatchIssue, recorded *record.Issue) intake.DispatchIssue {
+	w.forgetIssue(issue.Key)
+	if issue.ResolvedRepoMissing {
+		issue.ResolvedRepo, issue.ResolvedRepoMissing = recorded.Repo, false
+	}
+	return issue
 }
 
 // listingAncestry is what reconcile's boot prepares its listing from: every record, by key, read

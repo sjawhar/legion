@@ -645,9 +645,13 @@ func TestPollHoldReleaseRetriesAFailedClosingPass(t *testing.T) {
 // its own transaction, running the commit hooks it registered once that commits.
 func reconcileAdmission(t *testing.T, pool *pgxpool.Pool, admission *admit.Admission, summaries []dispatch.IssueSummary, target int64, position intake.DispatchConsumerPosition) {
 	t.Helper()
+	listed := make([]intake.DispatchIssue, len(summaries))
+	for i, summary := range summaries {
+		listed[i] = intake.ListedIssue(summary)
+	}
 	scoped, committed := intake.WithCommitHooks(context.Background())
 	if err := pgx.BeginFunc(scoped, pool, func(tx pgx.Tx) error {
-		return admission.Reconcile(scoped, tx, summaries, target, position)
+		return admission.Reconcile(scoped, tx, listed, target, position)
 	}); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}

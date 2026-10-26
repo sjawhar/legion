@@ -429,10 +429,12 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 	}
 	// The transaction performs no I/O: what admission reads of a todo issue's repository, and the
 	// Dispatch chain above its parent, are read now, up one walk over the whole listing
-	// (listingAncestry); the summary carries that chain to admission.
+	// (listingAncestry); each listed issue's fact carries that chain to admission.
+	listed := make([]intake.DispatchIssue, len(issues))
 	var records map[string]*record.Issue
 	var walk ancestry
 	for i, summary := range issues {
+		listed[i] = intake.ListedIssue(summary)
 		if summary.Status != "todo" {
 			continue
 		}
@@ -441,11 +443,11 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 				return err
 			}
 		}
-		prepared, err := w.prepareListed(ctx, records, walk, intake.ListedIssue(summary))
+		prepared, err := w.prepareListed(ctx, records, walk, listed[i])
 		if err != nil {
 			return fmt.Errorf("prepare the repository of %s for admission: %w", summary.Key, err)
 		}
-		issues[i].Ancestry = prepared.Ancestry
+		listed[i].Ancestry = prepared.Ancestry
 	}
 	target, err := w.consumers.DispatchTarget(ctx)
 	if err != nil {
@@ -464,7 +466,7 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 		if err := intake.SerializeFacts(scoped, tx); err != nil {
 			return fmt.Errorf("serialize the reconcile with every fact: %w", err)
 		}
-		return w.admission.Reconcile(scoped, tx, issues, target, position)
+		return w.admission.Reconcile(scoped, tx, listed, target, position)
 	}); err != nil {
 		return fmt.Errorf("reconcile admission: %w", err)
 	}
