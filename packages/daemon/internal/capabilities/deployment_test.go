@@ -3,8 +3,12 @@ package capabilities
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"flag"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -510,5 +514,39 @@ func TestEveryDeploymentRowIsMeasured(t *testing.T) {
 		if _, source, detail := (Deployment{Runtime: "kubernetes"}).measure(name); detail == "" || strings.HasPrefix(detail, "no measurement") || source == "" {
 			t.Errorf("deployment row %s has no measurement (%q, source %q)", name, detail, source)
 		}
+	}
+}
+
+var updateGolden = flag.Bool("update", false, "rewrite the golden this package writes for scripts/e2e")
+
+// The web-search row as `legion state --json` carries it when tree 3's planner, in its issue pod,
+// reports web_search off: the row Stage 4b's full-agent-negative checkpoint reads
+// (web_search_open_for in scripts/e2e/stage4b-sandbox-tree.sh), written here from the producer so
+// scripts/e2e/lib/stage4b-capabilities.test.ts runs that predicate on what the daemon renders.
+func TestWebSearchOpenRowGolden(t *testing.T) {
+	d := satisfied
+	d.Sessions = []Session{podSession("LEGSMOKE-3", claim.RolePlanner, measured, map[Name]string{WebSearch: "web_search is not a registered tool"})}
+	row := states(d.Report())[WebSearch]
+	encoded, err := json.MarshalIndent(map[string]string{"name": string(row.Name), "status": row.Status, "detail": row.Detail}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded = append(encoded, '\n')
+	path := filepath.Join("testdata", "web-search-open-planner.json")
+	if *updateGolden {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, encoded, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read golden (run `go test ./internal/capabilities/ -update`): %v", err)
+	}
+	if !bytes.Equal(encoded, want) {
+		t.Fatalf("%s is stale\n got: %s\nwant: %s", path, encoded, want)
 	}
 }

@@ -5405,10 +5405,21 @@ open_view=$(claim_view "$tree3" planner)
 open_incarnation=$(jq -r .locator.incarnation <<<"$open_view")
 note "tree 3's planner (process $(jq -r .locator.incarnation <<<"$before")) was killed at its worker-shim's process group and relaunched as process $open_incarnation, which reported"
 web_search_row() { daemon_state | jq -ce '.capabilities[] | select(.name == "web-search")'; }
+# web_search_open_for ROW POD ISSUE: the web-search row ROW reads open for the planner of ISSUE in
+# POD, as the daemon names a live session (capabilities.Session.label: `pod <name>/roles (<role>,
+# <issue>)`, an issue pod's roles all running in its one `roles` container), with the fact its
+# check found. The pod, the role and the issue are three separate conditions.
+web_search_open_for() {
+  jq -e --arg pod "pod $2/roles " --arg issue "$3" \
+    '.status == "open"
+      and (.detail | contains($pod))
+      and (.detail | contains("(planner, "))
+      and (.detail | contains(", \($issue))"))
+      and (.detail | contains("web_search is not a registered tool"))' <<<"$1" >/dev/null
+}
 open_row=$(web_search_row) || fail "legion state carries no web-search row"
-jq -e --arg pod "pod $pod3/planner" --arg issue "$tree3" \
-  '.status == "open" and (.detail | contains($pod) and contains("planner") and contains($issue) and contains("web_search is not a registered tool"))' <<<"$open_row" >/dev/null ||
-  fail "the web-search row does not read open for $pod3/planner ($tree3) with 'web_search is not a registered tool': $open_row"
+web_search_open_for "$open_row" "$pod3" "$tree3" ||
+  fail "the web-search row does not read open for the planner of $tree3 in $pod3/roles with 'web_search is not a registered tool': $open_row"
 note "web-search: $(jq -r '"\(.status): \(.detail)"' <<<"$open_row")"
 jq -e '.capabilities.open | any(.name == "web-search")' <<<"$open_view" >/dev/null ||
   fail "tree 3's planner view does not list web-search under capabilities.open: $(jq -c .capabilities <<<"$open_view")"
