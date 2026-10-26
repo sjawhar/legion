@@ -3,8 +3,10 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"testing"
 	"time"
 
@@ -216,5 +218,68 @@ func TestBootReconcileHoldsATodoUnderAnUnreleasedChildOfALiveTree(t *testing.T) 
 	}
 	if starts != 0 {
 		t.Fatalf("%s has %d architect starts queued, want none while %s runs", child, starts, tree)
+	}
+}
+
+// A labelled todo issue held out of admission's line under an unrecorded parent of a running tree
+// is held only while that parent is under the tree: once a person moves the parent out of it, the
+// parent's own event leaves the issue a root of its own under no live tree, and it queues and takes
+// the free slot as any labelled todo root does. Its own next event must not be what releases it.
+func TestATodoHeldUnderAnUnreleasedChildQueuesOnceItsParentLeavesTheLiveTree(t *testing.T) {
+	const tree, parent, child = "LEGION-168", "LEGION-169", "LEGION-214"
+	ctx := context.Background()
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	putOutboxIssue(t, pool, records, recordedOn(tree, tree, "in_progress"))
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		return records.PutSlot(ctx, tx, record.Slot{Issue: tree, Index: 0, AdmittedAt: time.Now()})
+	}); err != nil {
+		t.Fatalf("seed the running tree's slot: %v", err)
+	}
+	repos := newRepositories("LEGION")
+	repos.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
+	branches := newDefaultBranches(roleTokens{}, "", defaultBranchTTL, time.Now)
+	branches.read["acme/widgets"] = defaultBranchRead{repository: ghbranch.Repository{Name: ghrepo.MustParse("acme/widgets"), DefaultBranch: "main"}, at: time.Now()}
+	client := &chainDispatch{issues: map[string]dispatch.Issue{
+		parent: shownUnder(parent, "backlog", tree, false),
+		child:  shownUnder(child, "todo", parent, true),
+	}}
+	log := quietLogger()
+	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories}, log)
+	admission := admit.New(records, engine, 2, "LEGION", log)
+	w := &workflowRuntime{pool: pool, records: records, dispatch: client, repositories: repos, defaultBranches: branches, log: log}
+	// deliver is the consumer's handling of one Dispatch event: its preparation, then its fact.
+	deliver := func(event intake.DispatchIssue) {
+		t.Helper()
+		prepared, err := w.prepareRepository(ctx, event)
+		if err != nil {
+			t.Fatalf("prepare the event of %s: %v", event.Key, err)
+		}
+		if _, err := intake.ApplyFact(ctx, pool, "dispatch", fmt.Sprintf("%s-%d", event.Key, event.Seq), prepared, engine, admission); err != nil {
+			t.Fatalf("apply the event of %s: %v", event.Key, err)
+		}
+	}
+	slotOf := func(key string) bool {
+		t.Helper()
+		var slotted bool
+		if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+			slots, err := records.Slots(ctx, tx)
+			slotted = slices.ContainsFunc(slots, func(slot record.Slot) bool { return slot.Issue == key })
+			return err
+		}); err != nil {
+			t.Fatalf("read the slots: %v", err)
+		}
+		return slotted
+	}
+
+	deliver(intake.DispatchIssue{Key: child, Seq: 2, Type: "issue.updated", Status: "todo", Title: child, Parent: parent, Rank: "B", HandedOver: true, ResolvedRepo: "acme/widgets"})
+	if slotOf(child) {
+		t.Fatalf("%s took a slot while its parent %s is an unreleased child of %s", child, parent, tree)
+	}
+
+	client.issues[parent] = shownUnder(parent, "backlog", "", false)
+	deliver(intake.DispatchIssue{Key: parent, Seq: 3, Type: "issue.updated", Status: "backlog", Title: parent, Rank: "B", ResolvedRepo: "acme/widgets"})
+	if !slotOf(child) {
+		t.Fatalf("%s holds no slot with one free after its parent %s left the tree of %s: it is held under a tree it is no longer under", child, parent, tree)
 	}
 }
