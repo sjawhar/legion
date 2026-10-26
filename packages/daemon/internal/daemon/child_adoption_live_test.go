@@ -6,9 +6,11 @@
 // (admit's adoptQueuedRoots); an architect's release_children adopts it from the Dispatch chain it
 // reads, from todo, from backlog, and from the state INFRA-214 reached, before it answers
 // (api's adoptReleasedChildren); a todo root under an unreleased child of a live tree waits in no
-// line (record.Waiting's RecordedAncestor), and queues as its own root again once a person moves
-// that child out of the tree (the event of an unrecorded issue reads every held root's chain again);
-// and a child recorded in another tree is refused by name.
+// line (record.Waiting's RecordedAncestor), a todo child of that root waits with it and moves with
+// it into the tree its release adopts it into, and the root queues as its own again once a person
+// moves an ancestor out of the tree, recorded or not (such an event reads every held root's chain
+// again); a root that ran as a tree of its own is never held, and keeps queueing as its own; and a
+// child recorded in another tree is refused by name.
 // scripts/e2e/child-adoption.sh builds this driver with `-tags e2e` and owns the nats-server and
 // the PostgreSQL it runs against.
 //
@@ -34,8 +36,9 @@
 // every claim is launched by the package's fake runtime, which provisions each claim's workspace in
 // its own pod (fake.Runtime.InPod), so no host clone is made; the tree's architect is brought to
 // ready over the daemon's own worker stream and HTTP routes. The live tree, the slot a second tree
-// holds, and step 7's other tree are seeded through the store, as every daemon test seeds its
-// fixture; every issue the change acts on is recorded by the daemon from its own envelopes.
+// holds, step 8's run of a root of its own, step 9's parked member and step 10's other tree are
+// seeded through the store, as every daemon test seeds its fixture; every issue the change acts on
+// is recorded by the daemon from its own envelopes.
 package daemon
 
 import (
@@ -114,7 +117,7 @@ type childAdoptionLive struct {
 	seq int64
 }
 
-// TestAQueuedRootUnderALiveTreeJoinsItLive drives the seven steps of the proof against one booted
+// TestAQueuedRootUnderALiveTreeJoinsItLive drives the ten steps of the proof against one booted
 // daemon.
 func TestAQueuedRootUnderALiveTreeJoinsItLive(t *testing.T) {
 	natsURL := os.Getenv(mergedRootWaitsNATSURL)
@@ -127,7 +130,10 @@ func TestAQueuedRootUnderALiveTreeJoinsItLive(t *testing.T) {
 	r.step("release-adopts-from-backlog", r.releaseAdoptsFromBacklog)
 	r.step("release-adopts-infra-214-state", r.releaseAdoptsInfra214State)
 	r.step("held-under-an-unreleased-child", r.heldUnderAnUnreleasedChild)
+	r.step("child-of-a-held-root-waits-with-it", r.childOfAHeldRootWaitsWithIt)
 	r.step("held-root-queues-once-its-parent-leaves", r.heldRootQueuesOnceItsParentLeaves)
+	r.step("a-root-that-ran-keeps-queueing", r.aRootThatRanKeepsQueueing)
+	r.step("held-root-queues-once-a-recorded-ancestor-leaves", r.heldRootQueuesOnceARecordedAncestorLeaves)
 	r.step("release-refuses", r.releaseRefuses)
 }
 
@@ -825,7 +831,40 @@ func (r *childAdoptionLive) heldUnderAnUnreleasedChild() {
 	r.parks(h)
 }
 
-// Step 6 (D2, the parent moved). P2 is a child of T on Dispatch alone, in backlog, never released
+// Step 6 (a held root's tree is live). P3 is a child of T on Dispatch alone, in backlog, never
+// released and never recorded. H3, a labelled todo issue under P3, is recorded as a root of its own
+// and held out of the line under T. K3, a labelled todo issue under H3, is recorded in H3's tree,
+// which is live while H3 is held, and waits with it: with the slot step 5 freed standing free,
+// neither takes a slot or an architect. T's architect releases H3: H3 joins T, and K3 moves with it.
+func (r *childAdoptionLive) childOfAHeldRootWaitsWithIt() {
+	t := r.t
+	p, h, k := r.key(13), r.key(14), r.key(15)
+	r.board.show(p, "backlog", r.tree, false)
+	r.note("the Dispatch stand-in shows %s backlog under %s; the daemon has no event of it", p, r.tree)
+	r.publishIssue(h, "todo", p, true, false)
+	r.note("drove %s labelled todo under %s: an issue.updated envelope", h, p)
+	r.recordedAsHeld(h)
+	r.publishIssue(k, "todo", h, true, false)
+	r.note("drove %s labelled todo under %s: an issue.updated envelope", k, h)
+	testwait.Eventually(t, "the daemon's record of "+k, func() bool { return r.recorded(k) != nil })
+	recorded := r.inTree(k, h)
+	r.note("read back: the daemon records %s in the tree of %s, parent %s", k, recorded.Tree, *recorded.Parent)
+	r.heldWithASlotFree(h, k)
+
+	status, failure := r.release(h)
+	if status != http.StatusOK {
+		t.Fatalf("release_children of %s = %d %s %s, want 200", h, status, failure.Code, failure.Error)
+	}
+	r.note("drove POST /legion/v1/waves/release {%s} by %s's architect: %d", h, r.tree, status)
+	for _, key := range []string{h, k} {
+		recorded := r.inTree(key, r.tree)
+		r.note("read back as the release answered: the daemon records %s in the tree of %s at generation %d, parent %s", key, recorded.Tree, recorded.Generation, *recorded.Parent)
+	}
+	r.runsInTree(h)
+	r.runsInTree(k)
+}
+
+// Step 7 (D2, the parent moved). P2 is a child of T on Dispatch alone, in backlog, never released
 // and never recorded. H2, a labelled todo issue under P2, is recorded as a root of its own and held
 // out of the line under T while the slot step 5 freed stands free. A person then moves P2 to no
 // parent, and Dispatch's event of P2 says so: P2 stays unrecorded, and H2, a labelled todo root
@@ -838,16 +877,98 @@ func (r *childAdoptionLive) heldRootQueuesOnceItsParentLeaves() {
 	r.note("the Dispatch stand-in shows %s backlog under %s; the daemon has no event of it", p, r.tree)
 	r.publishIssue(h, "todo", p, true, false)
 	r.note("drove %s labelled todo under %s: an issue.updated envelope", h, p)
-	testwait.Eventually(t, "the daemon's record of "+h, func() bool { return r.recorded(h) != nil })
-	if recorded := r.recorded(h); recorded.Tree != h {
-		t.Fatalf("the daemon records %s in the tree of %s, want a root of its own", h, recorded.Tree)
+	r.recordedAsHeld(h)
+	r.heldWithASlotFree(h)
+
+	r.publishIssue(p, "backlog", "", false, false)
+	r.note("drove %s's move to no parent: the Dispatch stand-in shows it backlog with no parent, and its own issue.updated envelope, status backlog, no parent", p)
+	r.takesTheFreeSlot(h)
+	if r.recorded(p) != nil {
+		t.Fatalf("the daemon records %s, want it unrecorded: it was never released", p)
 	}
-	architect := r.token(h, claim.RoleArchitect)
+	r.note("read back: the daemon records no %s", p)
+}
+
+// Step 8 (a root that ran). H2 moves to backlog, freeing its slot. R ran as a tree of its own: the
+// store holds a tree lifecycle under its key, as R's promotion would have opened. P4 is a child of
+// T on Dispatch alone, in backlog, never released and never recorded. R, labelled todo under P4, is
+// not held under T, which could never release it into its tree: it queues as its own root and
+// takes the free slot and an architect of its own.
+func (r *childAdoptionLive) aRootThatRanKeepsQueueing() {
+	p, root := r.key(16), r.key(17)
+	r.frees(r.key(10), r.key(9), "the root step 7 slotted")
+	if _, err := r.st.OpenTreeLifecycle(context.Background(), r.project, root, treelifecycle.AuthorityWorkflow); err != nil {
+		r.t.Fatalf("open the lifecycle of %s: %v", root, err)
+	}
+	r.note("seeded: a tree lifecycle under %s, opened by the workflow as a promotion opens one; the daemon records no %s", root, root)
+	r.board.show(p, "backlog", r.tree, false)
+	r.note("the Dispatch stand-in shows %s backlog under %s; the daemon has no event of it", p, r.tree)
+	r.publishIssue(root, "todo", p, true, false)
+	r.note("drove %s labelled todo under %s: an issue.updated envelope", root, p)
+	r.takesTheFreeSlot(root)
+}
+
+// Step 9 (a recorded ancestor moved). R moves to backlog, freeing its slot. Q is a member of T,
+// parked in backlog. P5, on Dispatch alone, is in backlog under Q, never released and never
+// recorded. H5, a labelled todo issue under P5, is held out of the line under T, the root its
+// chain reaches through Q, while the slot stands free. A person then moves Q to no parent, and
+// Dispatch's event of Q says so: though the daemon records Q, the event reads H5's chain again, and
+// H5 queues as its own root and takes the free slot and an architect of its own.
+func (r *childAdoptionLive) heldRootQueuesOnceARecordedAncestorLeaves() {
+	q, p, h := r.key(18), r.key(19), r.key(20)
+	r.frees(r.key(17), r.key(16), "the root step 8 slotted")
+	ctx := context.Background()
+	tree := r.tree
+	r.board.show(q, "backlog", tree, false)
+	r.write(fmt.Sprintf("%s, a member of the tree of %s parked in backlog", q, tree), func(tx pgx.Tx) error {
+		return r.records.PutIssue(ctx, tx, record.Issue{
+			Key: q, Repo: childAdoptionRepo, DefaultBranch: "main", GitHubRepo: childAdoptionRepo, Tree: tree, Project: r.cfg.Project,
+			Title: q, Parent: &tree, Phase: phase.Done, Generation: 1, Status: "backlog", DispatchStatus: "backlog", Rank: "D",
+			LastDispatchSeq: r.seq,
+		})
+	})
+	r.inTree(q, tree)
+	r.board.show(p, "backlog", q, false)
+	r.note("the Dispatch stand-in shows %s backlog under %s, under %s; the daemon has no event of %s", p, q, tree, p)
+	r.publishIssue(h, "todo", p, true, false)
+	r.note("drove %s labelled todo under %s: an issue.updated envelope", h, p)
+	r.recordedAsHeld(h)
+	r.heldWithASlotFree(h)
+
+	r.publishIssue(q, "backlog", "", false, false)
+	r.note("drove %s's move to no parent: the Dispatch stand-in shows it backlog with no parent, and its own issue.updated envelope, status backlog, no parent", q)
+	r.takesTheFreeSlot(h)
+	if r.recorded(p) != nil {
+		r.t.Fatalf("the daemon records %s, want it unrecorded: it was never released", p)
+	}
+	r.note("read back: the daemon records no %s", p)
+}
+
+// recordedAsHeld waits for the daemon's record of key and requires it a root of its own held under
+// T: its tree its own, its recorded ancestor T.
+func (r *childAdoptionLive) recordedAsHeld(key string) {
+	r.t.Helper()
+	testwait.Eventually(r.t, "the daemon's record of "+key, func() bool { return r.recorded(key) != nil })
+	recorded := r.recorded(key)
+	if recorded.Tree != key || recorded.RecordedAncestor != r.tree {
+		r.t.Fatalf("the daemon records %s in the tree of %s with recorded ancestor %q, want a root of its own held under %s", key, recorded.Tree, recorded.RecordedAncestor, r.tree)
+	}
+	r.note("read back: the daemon records %s as a root of its own, its recorded ancestor %s", key, recorded.RecordedAncestor)
+}
+
+// heldWithASlotFree requires each of keys, over childAdoptionSettle, out of admission.waiting with
+// no slot, no architect and no launch of an architect of its own, while the cap's other slot
+// stands free: admission.active is T's slot alone.
+func (r *childAdoptionLive) heldWithASlotFree(keys ...string) {
+	t := r.t
+	t.Helper()
 	deadline := time.Now().Add(childAdoptionSettle)
 	for time.Now().Before(deadline) {
-		got := r.issue(h)
-		if r.waiting(h) || got.Slot != nil || got.Architect != nil || r.launched(architect) {
-			t.Fatalf("held under %s, %s is waiting %v, slot %v, architect %v: want out of the line with no slot and no architect", r.tree, h, r.waiting(h), got.Slot, got.Architect)
+		for _, key := range keys {
+			got := r.issue(key)
+			if r.waiting(key) || got.Slot != nil || got.Architect != nil || r.launched(r.token(key, claim.RoleArchitect)) {
+				t.Fatalf("held under %s, %s is waiting %v, slot %v, architect %v: want out of the line with no slot and no architect", r.tree, key, r.waiting(key), got.Slot, got.Architect)
+			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -855,44 +976,51 @@ func (r *childAdoptionLive) heldRootQueuesOnceItsParentLeaves() {
 	if !slices.Equal(state.Admission.Active, []string{r.tree}) || state.Admission.Cap != childAdoptionCap {
 		t.Fatalf("admission.active is %v of cap %d, want %s's slot alone of %d, so a slot stands free", state.Admission.Active, state.Admission.Cap, r.tree, childAdoptionCap)
 	}
-	r.note("read back over %s: the daemon records %s as a root of its own; admission.active %v of cap %d, admission.waiting %v, and %s holds no slot and no architect",
-		childAdoptionSettle, h, state.Admission.Active, state.Admission.Cap, state.Admission.Waiting, h)
+	r.note("read back over %s: admission.active %v of cap %d, admission.waiting %v, and %s: no slot, no architect, no launch of one",
+		childAdoptionSettle, state.Admission.Active, state.Admission.Cap, state.Admission.Waiting, strings.Join(keys, ", "))
+}
 
-	r.publishIssue(p, "backlog", "", false, false)
-	r.note("drove %s's move to no parent: the Dispatch stand-in shows it backlog with no parent, and its own issue.updated envelope, status backlog, no parent", p)
-	got := r.waitFor(h+" in the free slot with an architect of its own", h, func(got api.Issue) bool {
+// takesTheFreeSlot requires key, within the bounded wait, to hold the free slot with its
+// architect's claim, the fake runtime asked to launch that architect, key in admission.active and
+// out of admission.waiting, and the daemon's record of it a root of its own, held under no tree.
+func (r *childAdoptionLive) takesTheFreeSlot(key string) {
+	t := r.t
+	t.Helper()
+	architect := r.token(key, claim.RoleArchitect)
+	got := r.waitFor(key+" in the free slot with an architect of its own", key, func(got api.Issue) bool {
 		return got.Slot != nil && got.Architect != nil
 	})
 	testwait.Eventually(t, "the launch of "+string(architect), func() bool { return r.launched(architect) })
-	if r.waiting(h) {
-		t.Fatalf("%s holds slot %d and is still in admission.waiting %v", h, got.Slot.Index, r.state().Admission.Waiting)
-	}
-	state = r.state()
-	if !slices.Contains(state.Admission.Active, h) {
-		t.Fatalf("admission.active is %v, want %s among it", state.Admission.Active, h)
+	state := r.state()
+	if slices.Contains(state.Admission.Waiting, key) || !slices.Contains(state.Admission.Active, key) {
+		t.Fatalf("%s holds slot %d, but admission.active is %v and admission.waiting %v: want it active and not waiting", key, got.Slot.Index, state.Admission.Active, state.Admission.Waiting)
 	}
 	r.note("read back: %s holds admission slot %d with its architect's claim %s, the fake runtime was asked to launch %s, admission.active %v, admission.waiting %v",
-		h, got.Slot.Index, got.Architect.State, architect, state.Admission.Active, state.Admission.Waiting)
-	if recorded := r.recorded(h); recorded.Tree != h {
-		t.Fatalf("the daemon records %s in the tree of %s, want its own", h, recorded.Tree)
+		key, got.Slot.Index, got.Architect.State, architect, state.Admission.Active, state.Admission.Waiting)
+	if recorded := r.recorded(key); recorded.Tree != key || recorded.RecordedAncestor != "" {
+		t.Fatalf("the daemon records %s in the tree of %s with recorded ancestor %q, want its own tree under none", key, recorded.Tree, recorded.RecordedAncestor)
 	}
-	if r.recorded(p) != nil {
-		t.Fatalf("the daemon records %s, want it unrecorded: it was never released", p)
-	}
-	r.note("read back: the daemon records %s in its own tree, and records no %s", h, p)
+	r.note("read back: the daemon records %s in its own tree, with no recorded ancestor", key)
 }
 
-// Step 7 (AC4). H2 moves to backlog, freeing its slot. U is a second live tree, holding that slot,
+// frees moves key, the root which says a previous step slotted, to backlog under parent by
+// envelope, as a person's move from the Dispatch dashboard, and waits for its slot to be freed.
+func (r *childAdoptionLive) frees(key, parent, which string) {
+	r.t.Helper()
+	r.publishIssue(key, "backlog", parent, true, false)
+	r.note("drove %s, %s, to backlog: an issue.updated envelope", key, which)
+	r.waitFor(key+"'s slot freed", key, func(got api.Issue) bool { return got.Slot == nil })
+	r.note("read back: %s holds no slot, admission.active %v", key, r.state().Admission.Active)
+}
+
+// Step 10 (AC4). H5 moves to backlog, freeing its slot. U is a second live tree, holding that slot,
 // with G, a child parked in backlog. Dispatch shows G in backlog under T. T's architect's release
 // of G is refused 409 CHILD_IN_OTHER_TREE, naming G and U, and changes nothing: G's record is as it
 // was and nothing is written to Dispatch.
 func (r *childAdoptionLive) releaseRefuses() {
 	t := r.t
-	held, u, g := r.key(10), r.key(11), r.key(12)
-	r.publishIssue(held, "backlog", "", true, false)
-	r.note("drove %s, the root step 6 slotted, to backlog: an issue.updated envelope", held)
-	r.waitFor(held+"'s slot freed", held, func(got api.Issue) bool { return got.Slot == nil })
-	r.note("read back: %s holds no slot, admission.active %v", held, r.state().Admission.Active)
+	u, g := r.key(11), r.key(12)
+	r.frees(r.key(20), r.key(19), "the root step 9 slotted")
 	ctx := context.Background()
 	r.board.show(u, "in_progress", "", true)
 	r.write(fmt.Sprintf("%s, a second tree holding the free slot, and %s, its child parked in backlog", u, g), func(tx pgx.Tx) error {

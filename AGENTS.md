@@ -196,8 +196,10 @@ answers `released`, and refuses one it cannot, writing nothing: `CHILD_NOT_ADOPT
 that ran as a tree of its own or carries a handed-over run, `CHILD_IN_OTHER_TREE` for a child
 recorded in another tree. A labelled `todo` issue whose parent is not recorded but sits under a
 live tree (a child that tree's architect has not released) waits for no slot until that release,
-or its parent's, brings it into the tree, and queues as a root of its own once that tree lingers or
-leaves the workflow, or once a person moves its parent, or an ancestor, out from under that tree.
+or its parent's, brings it into the tree, and a `todo` child of it waits with it and moves with it;
+it queues as a root of its own once that tree lingers or leaves the workflow, or once a person
+moves any ancestor, recorded or not, out from under that tree. A root that ran as a tree of its own
+or carries a handed-over run is never held so: it keeps queueing as its own root.
 An issue is recorded on the repository Dispatch resolves for it (its own, else its nearest
 ancestor's, else the project's default) and keeps it: an issue whose repository
 resolves to none, or to one the daemon does not serve, is not admitted, and the daemon says why on
