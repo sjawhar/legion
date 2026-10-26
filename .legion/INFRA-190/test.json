@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-190",
-  "completed": "2026-10-26T21:26:00Z",
+  "completed": "2026-10-26T21:26:06Z",
   "round": 8,
   "headSha": "8565e8d8e82b332d4263d38cbf89603c95f5fbdd",
   "codeHeadSha": "7270f77dba4fd97b29753962f77d9dea3cab0f31",
@@ -68,5 +68,6 @@
       "verdict": "fail",
       "failure": "A linked image's link was stored as written, not decoded as the editor reads it (red test TestParseDecodesALinkedImagesLinkAsTheEditorReadsIt, 80ac2d84fc67). Fixed at f91b263c and verified in round 2."
     }
-  ]
+  ],
+  "completionNote": "Round 8's first handoff_complete at 10bab73f was refused 409 HANDOFF_STALE_GENERATION (generation 3 vs 4); this handoff-only commit re-reports the same round, unchanged, at generation 4."
 }
