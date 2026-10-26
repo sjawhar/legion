@@ -123,6 +123,48 @@ func TestWhoseStatusWriteTakesARunningRootOutOfTheWorkflow(t *testing.T) {
 	}
 }
 
+// A root waiting on a person gave its slot back, but its tree is live: a session outside it that
+// writes a status on it is set back and the architect told, as on a root holding its slot, and the
+// root goes on waiting. A person's own move still takes it out of the workflow.
+func TestASessionsStatusWriteOnARootWaitingOnAPersonIsSetBack(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		actor   string
+		outcome statusWriteOutcome
+	}{
+		{name: "a session outside Legion parks it", actor: "ses-outsider", outcome: setBackAndTold},
+		{name: "a person parks it", actor: "", outcome: takesTheTreeOut},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			awaitingRoot(t, pool, record.Awaiting{Ask: "ask-root", Since: record.EventMark{Seq: 1}})
+			apply(t, pool, admission, "parked", intake.DispatchIssue{Key: "LEGION-ROOT", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated",
+				Status: "backlog", Title: "root", Rank: "B", HandedOver: true, ActorSession: tc.actor}, admission.engine)
+			got := issue(t, pool, "LEGION-ROOT")
+			reasserted, told := 0, 0
+			for _, effect := range effects(t, pool) {
+				if write, ok := effect.payload.(record.StatusWrite); ok && effect.issue == "LEGION-ROOT" && write == (record.StatusWrite{Status: "in_progress", ObservedStatus: "backlog"}) {
+					reasserted++
+				}
+				if notice, ok := effect.payload.(record.Notice); ok && effect.issue == "LEGION-ROOT" && notice.Kind == "status-reasserted" {
+					told++
+				}
+			}
+			switch tc.outcome {
+			case setBackAndTold:
+				if !got.AwaitingPerson() || got.Status != "in_progress" || got.LingerUntil != nil || reasserted != 1 || told != 1 {
+					t.Fatalf("root after %s = %#v with %d re-asserted writes and %d notices, want it still waiting, in_progress re-asserted once and the architect told", tc.name, got, reasserted, told)
+				}
+			case takesTheTreeOut:
+				if got.AwaitingPerson() || got.Phase != phase.Done || reasserted != 0 {
+					t.Fatalf("root after %s = %#v with %d re-asserted writes, want it out of the workflow", tc.name, got, reasserted)
+				}
+			}
+		})
+	}
+}
+
 // Where no tree runs — on a child of a running tree, a root still waiting for its slot, or a
 // lingering root — a session with no claim there writes a status as a person does: the child parks
 // and its architect is told, the waiting root leaves the line, the lingering root is re-admitted.

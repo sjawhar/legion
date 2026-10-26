@@ -226,12 +226,14 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 // sessionStatusWrite takes a lifecycle status change written by a session whose write the workflow
 // does not act on. A session holding a claim in the issue's tree is an agent, never a human move,
 // since a phase ends only by its completion (the `legion` tool's `handoff_complete`) and a tree only by the
-// architect's sign-off. Any other session on the root of an admitted tree — another tree's agent, or
-// one outside Legion that took the issue for its own — has no part in the running tree it would end
-// or park, so the tree's architect is told who wrote what. Either way the workflow does not react:
-// the observation is recorded with the status kept (keepStatus), and the daemon re-asserts its own
-// status through the outbox. A person's move and the daemon's own write carry no session
-// (intake.DispatchIssue.ActorSession): they are the workflow's to act on.
+// architect's sign-off. Any other session on the root of a running tree — one holding its admission
+// slot, or one waiting on a person, whose tree stays live while it gave its slot back — another
+// tree's agent, or one outside Legion that took the issue for its own, has no part in the tree it
+// would end or park, so the tree's architect is told who wrote what (held until a waiting root's
+// architect resumes). Either way the workflow does not react: the observation is recorded with the
+// status kept (keepStatus), and the daemon re-asserts its own status through the outbox. A
+// person's move and the daemon's own write carry no session (intake.DispatchIssue.ActorSession):
+// they are the workflow's to act on.
 func (e *Engine) sessionStatusWrite(ctx context.Context, tx pgx.Tx, issue record.Issue, fact intake.DispatchIssue) (bool, error) {
 	if fact.ActorSession == "" {
 		return false, nil
@@ -241,7 +243,8 @@ func (e *Engine) sessionStatusWrite(ctx context.Context, tx pgx.Tx, issue record
 		return false, err
 	}
 	if !agent {
-		if admitted, err := e.admittedRoot(ctx, tx, issue); err != nil || !admitted {
+		waiting := claim.IsTreeRoot(issue.Key, issue.Tree) && issue.AwaitingPerson() && !issue.Lingers()
+		if admitted, err := e.admittedRoot(ctx, tx, issue); err != nil || !admitted && !waiting {
 			return false, err
 		}
 	}
