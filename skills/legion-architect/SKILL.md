@@ -15,8 +15,8 @@ You own one issue tree from its first decision to the merge that closes it. The 
 - Check each claim against the code as fetched now (the default branch your addressing line names, or the head under review), never the workspace as it was at admission, and tell every fresh reader you dispatch to do the same: the branch may have moved since.
 - Before you end a turn that waits on a human, open what they must answer: a decision block, a `dispatch ask` or `dispatch request-approval`. A turn that ends with nothing open asks nobody, and the tree stops.
 - Deliver every criterion of the root spec in this tree. The only way to move work out is a child issue you create and own, or, when a root splits, a `dispatch ask` for the rest: work outside has no owner.
-- A problem outside the tree is a `dispatch ask`, never an issue you file, because a person decides whether it needs one (`skill://legion-worker/references/findings.md`).
-- Before you write a spec or ask a person anything, read the repository's `STRATEGY.md` when it has one, then use a standard best-practice solution; ask only what neither settles, with one recommendation.
+- A problem outside the tree is a `dispatch ask`, never an issue you file, because a person decides whether it needs one (`skill://legion-worker/references/findings.md`). The one exception is a clear defect: it goes to the controller, which files it.
+- Before you write a spec or ask a person anything, read the repository's `STRATEGY.md` when it has one, then use a standard best-practice solution; ask only what neither settles, with one recommendation. Find the standard with a web search and with how two or three well-regarded projects solve the problem. Cite them in a few lines of the spec's `Design`. A design far from the standard is a sign to fix the underlying problem, not to add a workaround.
 - Write lifecycle changes with the `legion` tool, which takes Dispatch issue keys (`LEGION-41`). Never apply a label: Legion has none.
 - Message a phase worker with `envoy_publish` to `notifications.role.<token>`, with a token you hold (yours or your addressing line's) or one `roleToken` from `@legion/contracts` computes: a hand-made token may reach nobody.
 - Deployment instructions override this skill where they conflict: they are the operator's rules (required checks, deploy commands, code owners, standing roles you may consult, the merge credential).
@@ -59,7 +59,7 @@ The reviewer's `phase-finished` with an `APPROVED` review puts the issue in `acc
 - the reviewer's approval of that head by SHA (`gh api --paginate repos/<o>/<r>/pulls/<n>/reviews`);
 - each of the reviewer's prose findings, checked against the code at that head and command output, not against the reviewer's own verdict: no other agent has read that prose.
 
-Accept only when each acceptance line has passing evidence at the approved head, every corrective child and (for a root) the integration child has closed, and no criterion left the tree. Post that evidence as a `dispatch comment`, then `legion({ op: "sign_off", issue: "<KEY>" })`.
+Accept only when each acceptance line has passing evidence at the approved head, every corrective child and (for a root) the integration child has closed, and no criterion left the tree. A finding ask on the issue holds the acceptance until it is resolved or carries the controller's reply (`skill://legion-architect/references/acceptance.md`). Post that evidence as a `dispatch comment`, then `legion({ op: "sign_off", issue: "<KEY>" })`.
 
 - `sign_off` works only in `accepting` (`SIGNOFF_OUTSIDE_ACCEPTING`) and is refused 409 `SIGNOFF_CHILD_IN_WORKFLOW` while any issue beneath this one is in the workflow, naming each: wait for the last, or take one out with `park_child`.
 - When an acceptance check fails: `request_backward_move` with `issue`, `to` (`implementing` or `testing`) and a `reason` naming the failure. It counts a review round.

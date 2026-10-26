@@ -183,7 +183,8 @@ issue-update`. The controller starts no other work on its own: a free admission 
 to label or admit an issue (`skills/legion-controller/SKILL.md`, "Free slots"). No other Legion
 agent files an issue for a finding outside its own issue. A defect with a clear fix goes to the
 controller with its evidence, and the controller files it with the label and a `Filed for Legion
-from <role> on <issue>: <evidence>` line, which its triage admits. A finding that needs a decision
+from <role> on <issue>: <evidence>` line, which its triage admits, by the operator's ruling
+(dispatch://INFRA-49/ask/c7051816-2e86-4cb6-ad56-02ccb01e9355). A finding that needs a decision
 is a Dispatch ask, and a person decides whether it needs an issue
 (`skills/legion-worker/references/findings.md`).
 A root in `todo` without the label is never admitted, and a root in `triage` without it never wakes

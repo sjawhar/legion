@@ -41,7 +41,8 @@ These issues are filed:
   their answer to an ask
 - the report issue itself, which the controller creates once when the project has none
 
-`skill://legion-controller`, "Findings, and the issues you file" and "Daily report", says how.
+`skill://legion-controller`, "Findings, and the issues you file", and
+`skill://legion-controller/references/daily-report.md` say how.
 
 ## Send a clear defect to the controller
 
@@ -78,15 +79,16 @@ of these that holds, so a person sees it and the controller finds it when it ret
    report issue's assignee sees the ask, and the controller's catch-up files it.
 2. **The report issue is missing or closed:** ask on your own issue, the evidence posted there as
    a comment first. Then publish the ask's reference to your tree's architect (`skill://legion-worker`,
-   the escalation paragraph). An architect holds its own. The architect holds your issue's
+   *Stop rules*). An architect holds its own. The architect holds your issue's
    acceptance until a controller has taken the ask (`skill://legion-architect`, "Acceptance and the
    merge"). That hold is what keeps the ask readable: an open ask on a closed issue drops out of
    the controller's own listing (`asks.go`'s `listOpenAsks` takes `i.closed_at is null`), so an
    issue that closed over one hides it for good.
 3. **Your own issue is closed too** (Dispatch refuses the ask `409 ISSUE_CLOSED`, as on a
    production check): put the report issue back in reach yourself, with the `dispatch` commands
-   below, and ask there. Never `legion({op: "set_status"})`, which the controller's "Daily report"
-   uses: that op is the controller's alone, and your session is refused `set_status is not
+   below, and ask there. Never `legion({op: "set_status"})`, which the controller's report steps
+   (`skill://legion-controller/references/daily-report.md`) use: that op is the controller's
+   alone, and your session is refused `set_status is not
    available to a phase-worker session` (`packages/pi-legion/src/tools.ts`'s `OPERATIONS`). No
    other issue can hold an answerable ask, so this is the one case a role writes the report issue.
    - It exists and is closed: `dispatch issue-update --issue <REPORT KEY> --status icebox`. Send
@@ -96,9 +98,9 @@ of these that holds, so a person sees it and the controller finds it when it ret
      the daemon re-asserts nothing on it: `workflow`'s `sessionStatusWrite` acts only for a
      session that claims the issue's tree, or for an admitted root.
    - A search finds none: create it as "Where it goes" names it, `dispatch issue --project
-     <PROJECT> --title 'Legion daily report' --spec-file -`, with the Summary the controller's
-     "Daily report" gives, then park it with `dispatch issue-update --issue <NEW KEY> --status
-     icebox`. It carries no `legion` label.
+     <PROJECT> --title 'Legion daily report' --spec-file -`, with the Summary
+     `skill://legion-controller/references/daily-report.md` gives, then park it with
+     `dispatch issue-update --issue <NEW KEY> --status icebox`. It carries no `legion` label.
    - Then post the evidence there and ask there, as [What the ask says](#what-the-ask-says)
      spells it. Say in your summary that you reopened or created it, so the controller knows.
 

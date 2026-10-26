@@ -164,8 +164,11 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   the issue with `--repo` naming the repository where the fix belongs, since without it Dispatch
   records the project's default repository and the daemon would start the work there. The
   controller's rule never to label work nobody asked for names a clear defect as its one
-  exception, by the deployment owner's ruling: a clear defect's fix is "how" inside work a person
-  already wants, as `STRATEGY.md` puts the split.
+  exception, by the operator's ruling on
+  dispatch://INFRA-49/ask/c7051816-2e86-4cb6-ad56-02ccb01e9355 ("This should not have been asked
+  of me. You found a clear architectural issue. Fix it."): a clear defect's fix is "how" inside
+  work a person already wants, as `STRATEGY.md` puts the split. The root `AGENTS.md` Handover
+  paragraph carries the same link.
   `legion-worker/references/findings.md` holds the two paths. `legion-controller` (its "Free
   slots", triage row, report wake and daily-report text), `legion-architect`, `legion-worker`,
   `legion-retro`, the production check's `fail` in `merge-gate.md`, `dispatch`, `dispatch-first`,
@@ -173,6 +176,15 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   learning `docs/solutions/legion/a-clear-defect-goes-to-the-controller-…-INFRA-140.md` supersedes
   the #2130 learning that made every finding an ask. This reverses part of #2130: the owner had to
   approve every clear defect by hand.
+- Every rule above sits on #2197's rewrite of the Legion skills (INFRA-353), which merged first
+  and rewrote `legion-architect`, `legion-worker`, `legion-controller` and `legion-retro` with
+  their references (INFRA-140). The merge takes #2197's text in each conflicted file, and the
+  rules return in the fewest words beside it: the clear-defect exception beside #2197's "a
+  problem outside the tree is a `dispatch ask`" sentence, the spec's two reviews in
+  `legion-architect/references/design-gate.md`, the acceptance hold in its `acceptance.md`, the
+  forward-merge triggers in `legion-worker/references/conflicts-and-rewrites.md`, and the
+  controller's clear-defect filing and catch-up in
+  `legion-controller/references/finding-asks.md`.
 - The reviewer waits for its own prose head's required checks to be green before it approves
   (INFRA-140). The daemon marks any push by the review App beyond `.legion/` a planned red
   (`classify.ApplyPush`), and `RedSendsBack` ignores a planned red, so nothing sends that head
