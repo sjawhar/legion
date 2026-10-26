@@ -95,6 +95,18 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 	if !classify.DesignGateOpen(gate) && sameDocument && stored.ToldChangesVersion != nil {
 		gate = classify.RecordChangesTold(gate, *stored.ToldChangesVersion, stored.ToldChangesReason, stored.ToldChangesMark)
 	}
+	// The changes request the read shows is the review its live event carries, so it meets a root
+	// waiting on a person by the same rules (applyArtifact): unplaceable, it is neither told nor
+	// recorded as told; placed after the wait began, it answers the wait, and the resume names it.
+	review := intake.DispatchArtifact{Key: fact.Issue, ArtifactID: fact.ArtifactID, Kind: intake.DispatchArtifactChangesRequested,
+		Version: gate.LatestVersion, Reason: fact.ChangesReason, Mark: fact.ChangesRequestedMark}
+	if changesRequested {
+		placeable, err := e.placeable(ctx, tx, fact.Issue, review)
+		if err != nil {
+			return intake.Result{}, err
+		}
+		changesRequested = placeable
+	}
 	tell := false
 	if changesRequested {
 		tell = !classify.DesignGateChangesTold(gate, gate.LatestVersion, fact.ChangesReason, fact.ChangesRequestedMark)
@@ -102,6 +114,11 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 	}
 	if err := e.store.PutGate(ctx, tx, gate); err != nil {
 		return intake.Result{}, err
+	}
+	if changesRequested {
+		if _, err := e.answerAwaitedGate(ctx, tx, fact.Issue, review, false); err != nil {
+			return intake.Result{}, err
+		}
 	}
 	e.logOnCommit(ctx, "workflow: design gate registered", "issue", issue.Key, "artifact", fact.ArtifactID,
 		"version", version, "open", classify.DesignGateOpen(gate), "changes_requested", changesRequested, "policy", e.cfg.DesignGate)
@@ -113,7 +130,7 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 		e.logOnCommit(ctx, "workflow: the registration read a changes request the architect was already told of", "issue", issue.Key, "version", gate.LatestVersion)
 		return intake.Result{}, nil
 	case changesRequested:
-		return intake.Result{}, e.tellChanges(ctx, tx, issue.Key, fact.ArtifactID, gate.LatestVersion, fact.ChangesReason, fact.ChangesRequestedMark)
+		return intake.Result{}, e.tellChangesOnce(ctx, tx, review, true)
 	case !classify.DesignGateOpen(gate):
 		return intake.Result{}, nil
 	}
@@ -154,7 +171,11 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 // (record.Store.TakeInThrough). A hand-back newer than the review, applied first, still stands. A
 // review with no sequence cannot be placed, so it takes in everything the record holds
 // (record.Store.StartHandout), as the notice did before hand-backs were placed.
-func (e *Engine) tellChanges(ctx context.Context, tx pgx.Tx, key, artifact string, version int, reason string, mark record.EventMark) error {
+//
+// With notify false the review is marked processed and nothing is sent: a root waiting on a person
+// has the review named by the task that resumes it, and the mark keeps a redelivery after that
+// resume from telling it again.
+func (e *Engine) tellChanges(ctx context.Context, tx pgx.Tx, key, artifact string, version int, reason string, mark record.EventMark, notify bool) error {
 	issue, err := e.store.Issue(ctx, tx, key)
 	if err != nil || issue == nil {
 		return err
@@ -172,6 +193,9 @@ func (e *Engine) tellChanges(ctx context.Context, tx pgx.Tx, key, artifact strin
 			e.logOnCommit(ctx, "workflow: a changes request the architect was already told of is not told again", "issue", key, "version", version)
 		}
 		return err
+	}
+	if !notify {
+		return nil
 	}
 	if err := e.notice(ctx, tx, key, record.Notice{Kind: "design-changes-requested", Version: version, Reason: reason}); err != nil {
 		return err
@@ -245,18 +269,22 @@ func changesDetail(version int, reason string) string {
 }
 
 // untellUnresumedChanges clears the gate's record that its architect was told a changes request
-// when that request answered root's wait and root leaves the workflow before it resumed. The
-// request was recorded as told because the resume task would name it (applyArtifact), and that
-// task was never written: a root swept for a lost label or a foreign claim, or moved out by a
-// person, never resumed. Cleared, the request reaches the architect when the root is admitted
-// anew, through its registration, the gate seed or the boot catch-up, rather than staying silent.
+// placed after the start of root's wait when root leaves the workflow before it resumed. The
+// request was recorded as told because the resume task would name it (tellChangesOnce), whether it
+// answered the wait or came after another act did, and that task was never written: a root swept
+// for a lost label or a foreign claim, or moved out by a person, never resumed. Cleared, the
+// request reaches the architect when the root is admitted anew, through its registration, the gate
+// seed or the boot catch-up, rather than staying silent.
 func (e *Engine) untellUnresumedChanges(ctx context.Context, tx pgx.Tx, root record.Issue) error {
-	if !root.AwaitingPerson() || root.Awaiting.AnsweredBy != record.AnsweredByChanges {
+	if !root.AwaitingPerson() || root.Awaiting.AnsweredAt == nil {
 		return nil
 	}
 	gate, err := e.store.Gate(ctx, tx, root.Key)
 	if err != nil || gate == nil || gate.ToldChangesVersion == nil {
 		return err
+	}
+	if root.Awaiting.AnsweredBy != record.AnsweredByChanges && !placedAfter(root, gate.ToldChangesMark) {
+		return nil
 	}
 	e.logOnCommit(ctx, "workflow: a changes request whose resume never ran is no longer recorded as told", "issue", root.Key, "version", *gate.ToldChangesVersion)
 	gate.ToldChangesVersion, gate.ToldChangesReason, gate.ToldChangesMark = nil, "", record.EventMark{}
@@ -390,7 +418,7 @@ func copyTakes(gate record.DesignGate, fact intake.DispatchArtifact) bool {
 //
 // Every review of the root's own spec also answers a root waiting on its architect's question
 // (answerAwaitedGate), a stale one included: the resume task names it, so the notice is not sent
-// too (tellUnanswered). A changes request that cannot be placed against that wait (unplaceable) is
+// too (tellChangesOnce). A changes request that cannot be placed against that wait (unplaceable) is
 // neither told nor recorded as told.
 func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.DesignGate, fact intake.DispatchArtifact, carried bool) error {
 	key := gate.Issue
@@ -407,8 +435,7 @@ func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.Desig
 		if fact.Kind == intake.DispatchArtifactVersion || carried {
 			return nil
 		}
-		answered, err := e.answerAwaitedGate(ctx, tx, key, fact, carried)
-		if err != nil {
+		if _, err := e.answerAwaitedGate(ctx, tx, key, fact, carried); err != nil {
 			return err
 		}
 		if fact.Kind != intake.DispatchArtifactChangesRequested {
@@ -420,7 +447,7 @@ func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.Desig
 		if !off {
 			e.logOnCommit(ctx, "workflow: the architect is told a changes request no approval followed", "issue", key, "version", fact.Version)
 		}
-		return e.tellUnanswered(ctx, tx, key, fact, answered)
+		return e.tellChangesOnce(ctx, tx, fact, false)
 	}
 	wasOpen := classify.DesignGateOpen(gate)
 	kind := classify.DesignGateEventKind(fact.Kind)
@@ -436,8 +463,7 @@ func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.Desig
 	case fact.Kind == intake.DispatchArtifactChangesRequested:
 		e.logOnCommit(ctx, "workflow: design gate changes requested", "issue", key, "artifact", fact.ArtifactID, "version", fact.Version)
 	}
-	answered, err := e.answerAwaitedGate(ctx, tx, key, fact, carried)
-	if err != nil {
+	if _, err := e.answerAwaitedGate(ctx, tx, key, fact, carried); err != nil {
 		return err
 	}
 	placeable, err := e.placeable(ctx, tx, key, fact)
@@ -453,7 +479,7 @@ func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.Desig
 		return err
 	}
 	if tell {
-		if err := e.tellUnanswered(ctx, tx, key, fact, answered); err != nil {
+		if err := e.tellChangesOnce(ctx, tx, fact, true); err != nil {
 			return err
 		}
 	}
@@ -485,15 +511,24 @@ func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.Desig
 	return e.advancePendingReady(ctx, tx, key, updated)
 }
 
-// tellUnanswered tells key's architect a changes request, unless that request already answered the
-// root's wait: the task resuming its architect names the review, so a notice would say it twice.
-func (e *Engine) tellUnanswered(ctx context.Context, tx pgx.Tx, key string, fact intake.DispatchArtifact, answered bool) error {
-	if answered {
-		e.logOnCommit(ctx, "workflow: a changes request that answered a root's wait is named by its resume, not by a notice",
-			"issue", key, "version", fact.Version)
-		return nil
+// tellChangesOnce tells fact's changes request to its issue's architect once, by a notice or by the
+// task that resumes it, never both. A request that answered the root's wait is named by that task.
+// So is one placed after the wait began that the gate records as told (recorded), whatever
+// answered the wait: a notice held for the suspended architect could reach it after the resume
+// task, and a later approval the task tells as the design-approved wake would then read as
+// superseded by the older request. Otherwise the notice tells it.
+func (e *Engine) tellChangesOnce(ctx context.Context, tx pgx.Tx, fact intake.DispatchArtifact, recorded bool) error {
+	issue, err := e.store.Issue(ctx, tx, fact.Key)
+	if err != nil || issue == nil {
+		return err
 	}
-	return e.tellChanges(ctx, tx, key, fact.ArtifactID, fact.Version, fact.Reason, fact.Mark)
+	byResume := issue.AwaitingPerson() && placedAfter(*issue, fact.Mark) &&
+		(recorded || issue.Awaiting.AnsweredBy == record.AnsweredByChanges && issue.Awaiting.AnsweredDetail == changesDetail(fact.Version, fact.Reason))
+	if byResume {
+		e.logOnCommit(ctx, "workflow: a changes request on a root waiting on a person is named by its resume, not by a notice",
+			"issue", fact.Key, "version", fact.Version)
+	}
+	return e.tellChanges(ctx, tx, fact.Key, fact.ArtifactID, fact.Version, fact.Reason, fact.Mark, !byResume)
 }
 
 // placeable says whether a changes request can be placed against key's wait, and so may be told

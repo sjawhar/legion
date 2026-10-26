@@ -382,11 +382,13 @@ const DesignApprovedWake = "this resume is your design-approved wake"
 // was answered, so a later act of the same kind does not rename it); how the spec stands at the
 // resume, read from the gate now, so an approval a newer version superseded, or a gate closed
 // again since, is said as it is, and an open gate is said as the design-approved wake
-// (DesignApprovedWake) — a changes request a later approval superseded asks for no revision; what
-// is still with the person (withHuman) and what waits on the architect (a tree question on the
-// agent's turn). Handing back is advice only while the gate is not open, since an open gate moves
-// the root to planning, where a hand-back starts no wait. armed says whether the design gate is
-// armed: with it off, no approval is asked for and register_gate is never the advice.
+// (DesignApprovedWake) — a changes request a later approval superseded asks for no revision; a
+// changes request the gate records as told after the wait began that did not answer it, which no
+// notice told (tellChangesOnce); what is still with the person (withHuman) and what waits on the
+// architect (a tree question on the agent's turn). Handing back is advice only while the gate is
+// not open, since an open gate moves the root to planning, where a hand-back starts no wait. armed
+// says whether the design gate is armed: with it off, no approval is asked for, register_gate is
+// never the advice, and an open gate is no person's approval.
 func resumeTask(key string, waiting record.Awaiting, gate *record.DesignGate, asks []record.RootAsk, armed bool) string {
 	gateOpen := gate != nil && classify.DesignGateOpen(*gate)
 	gateClosed := gate != nil && !gateOpen
@@ -400,7 +402,7 @@ func resumeTask(key string, waiting record.Awaiting, gate *record.DesignGate, as
 		}
 	case record.AnsweredByChanges:
 		fmt.Fprintf(&task, "A person requested changes to your spec on %s at %s.", key, waiting.AnsweredDetail)
-		if gateOpen {
+		if gateOpen && armed {
 			task.WriteString(" A person approved the spec after that review, so it asks for no revision now; read it.")
 		} else {
 			task.WriteString(" Read the review, and revise the spec as they ask.")
@@ -423,6 +425,9 @@ func resumeTask(key string, waiting record.Awaiting, gate *record.DesignGate, as
 	}
 	switch {
 	case gate == nil:
+	case gateOpen && !armed:
+		fmt.Fprintf(&task, " The design gate is open at version %d: %s, so act on it as on design-approved.",
+			gate.LatestVersion, DesignApprovedWake)
 	case gateOpen:
 		fmt.Fprintf(&task, " Your spec is approved at version %d and the design gate is open: %s, so act on it as on design-approved.",
 			gate.LatestVersion, DesignApprovedWake)
@@ -430,6 +435,13 @@ func resumeTask(key string, waiting record.Awaiting, gate *record.DesignGate, as
 		fmt.Fprintf(&task, " That approval no longer stands: the spec is at version %d and is not approved.", gate.LatestVersion)
 	default:
 		fmt.Fprintf(&task, " Your spec is not approved at version %d.", gate.LatestVersion)
+	}
+	if gate != nil && gate.ToldChangesVersion != nil && !(waiting.Since.Seq > 0 && gate.ToldChangesMark.Seq == 0) &&
+		gate.ToldChangesMark.After(waiting.Since) {
+		detail := changesDetail(*gate.ToldChangesVersion, gate.ToldChangesReason)
+		if waiting.AnsweredBy != record.AnsweredByChanges || waiting.AnsweredDetail != detail {
+			fmt.Fprintf(&task, " A person then requested changes to your spec at %s. Read the review, and revise the spec as they ask.", detail)
+		}
 	}
 	var still, yours []string
 	for _, ask := range withHuman(asks) {

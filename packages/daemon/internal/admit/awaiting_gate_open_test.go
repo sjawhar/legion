@@ -2,6 +2,7 @@ package admit
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
 // childStarts counts what LEGION-209's first phase queued: its planner's starts, its branch rows
@@ -140,6 +142,150 @@ func TestAnOpenGateAnswersAQuestionWaitWhateverOpenedIt(t *testing.T) {
 				t.Fatalf("design-approved notices = %+v, want the resume task alone to say it", told)
 			}
 		})
+	}
+}
+
+// waitingRoot seeds LEGION-208 waiting on its question ask-q from hand-back seq 5, its gate v3
+// closed, with LEGION-300 holding the slot it returned.
+func waitingRoot(t *testing.T, policy config.DesignGate) (*pgxpool.Pool, *Admission) {
+	t.Helper()
+	pool := migratedPool(t)
+	seedSlotted(t, pool, "LEGION-208", "U")
+	seedWaiting(t, pool, "LEGION-300", "V")
+	seedArchitectClaim(t, pool, "LEGION-208", true)
+	seedHandBack(t, pool, "LEGION-208", "ask-q", 5)
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 3})
+	admission := newAdmissionWithGate(t, 1, policy, nil)
+	tick(t, pool, admission, "tick-1")
+	if got := issue(t, pool, "LEGION-208").Phase; got != phase.AwaitingPerson {
+		t.Fatalf("phase = %s, want the root waiting on its question", got)
+	}
+	return pool, admission
+}
+
+// architectResumes returns the tasks of every architect start queued for LEGION-208.
+func architectResumes(t *testing.T, pool *pgxpool.Pool) []string {
+	t.Helper()
+	var tasks []string
+	for _, request := range superviseRequests(t, pool, "LEGION-208") {
+		if request.Op == "start" && request.Role == claim.RoleArchitect {
+			tasks = append(tasks, request.Task)
+		}
+	}
+	return tasks
+}
+
+// A registration's read of a changes request on a root already waiting on its question applies the
+// review as its live event does: placed after the wait began, it answers the wait and is named by
+// the resume alone; read with no sequence, it answers nothing and is neither told nor recorded, so
+// its live event decides. Either way the architect hears the request once. (Round 3, standard P3-1.)
+func TestARegistrationsChangesReadOnAWaitingRootIsToldOnce(t *testing.T) {
+	for _, seq := range []int64{7, 0} {
+		t.Run(map[int64]string{7: "sequenced read", 0: "unsequenced read"}[seq], func(t *testing.T) {
+			pool, admission := waitingRoot(t, config.DesignGateRootIssues)
+			at := fixedNow.Add(-30 * time.Second)
+			applyFact(t, pool, admission, "register", intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "artifact-208", Version: 3, DispatchVersion: 3,
+				ChangesRequestedVersion: 3, ChangesRequestedMark: record.EventMark{Seq: seq, At: at}, ChangesReason: "split it", Since: record.EventMark{Seq: 6}})
+			root := issue(t, pool, "LEGION-208")
+			if answered := root.Awaiting != nil && root.Awaiting.AnsweredAt != nil; answered != (seq > 0) {
+				t.Fatalf("after the registration, awaiting = %+v; want it answered only by a sequenced read", root.Awaiting)
+			}
+			if told := gateNotices(t, pool, "LEGION-208", "design-changes-requested"); len(told) != 0 {
+				t.Fatalf("after the registration, changes notices = %+v, want none for a waiting root", told)
+			}
+			applyFact(t, pool, admission, "live", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208",
+				Kind: intake.DispatchArtifactChangesRequested, Version: 3, Reason: "split it", Mark: record.EventMark{Seq: 7, At: at}})
+			freeTheSlot(t, pool)
+			tick(t, pool, admission, "tick-2")
+			named := 0
+			resumes := architectResumes(t, pool)
+			for _, task := range resumes {
+				named += strings.Count(task, "split it")
+			}
+			notices := gateNotices(t, pool, "LEGION-208", "design-changes-requested")
+			if len(resumes) != 1 || named+len(notices) != 1 {
+				t.Fatalf("resumes = %q, changes notices = %+v; want one resume and the request told once", resumes, notices)
+			}
+		})
+	}
+}
+
+// A changes request a person makes on a waiting root after something else answered its wait is
+// named by the resume, never by a notice held beside it: when a later approval superseded it, the
+// resume's design-approved wake is the newest word and nothing asks for a revision; when none did,
+// the resume asks for the revision. (Round 3, adversarial P3-1.)
+func TestAChangesRequestOnAnAnsweredWaitIsNamedByTheResume(t *testing.T) {
+	at := fixedNow.Add(-30 * time.Second)
+	review := func(kind intake.DispatchArtifactKind, seq int64, reason string) intake.DispatchArtifact {
+		return intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: kind, Version: 3, Reason: reason,
+			Mark: record.EventMark{Seq: seq, At: at.Add(time.Duration(seq) * time.Second)}}
+	}
+	for _, tc := range []struct {
+		name     string
+		reviews  []intake.DispatchArtifact
+		contains []string
+		absent   []string
+	}{
+		{"a later approval superseded it",
+			[]intake.DispatchArtifact{review(intake.DispatchArtifactApproved, 7, ""), review(intake.DispatchArtifactChangesRequested, 8, "wait no"),
+				review(intake.DispatchArtifactApproved, 9, "")},
+			[]string{workflow.DesignApprovedWake}, []string{"revise"}},
+		{"no approval followed it",
+			[]intake.DispatchArtifact{review(intake.DispatchArtifactApproved, 7, ""), review(intake.DispatchArtifactChangesRequested, 8, "wait no")},
+			[]string{"wait no", "revise the spec"}, []string{workflow.DesignApprovedWake}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool, admission := waitingRoot(t, config.DesignGateRootIssues)
+			for i, fact := range tc.reviews {
+				applyFact(t, pool, admission, fmt.Sprintf("review-%d", i), fact)
+			}
+			freeTheSlot(t, pool)
+			tick(t, pool, admission, "tick-2")
+			if told := gateNotices(t, pool, "LEGION-208", "design-changes-requested"); len(told) != 0 {
+				t.Fatalf("changes notices = %+v, want the resume alone to name the request", told)
+			}
+			resumes := architectResumes(t, pool)
+			if len(resumes) != 1 {
+				t.Fatalf("architect starts = %q, want one resume", resumes)
+			}
+			for _, want := range tc.contains {
+				if !strings.Contains(resumes[0], want) {
+					t.Errorf("resume %q does not say %q", resumes[0], want)
+				}
+			}
+			for _, unwanted := range tc.absent {
+				if strings.Contains(resumes[0], unwanted) {
+					t.Errorf("resume %q says %q", resumes[0], unwanted)
+				}
+			}
+		})
+	}
+}
+
+// Under gates.design: off, a resume never says a person approved the spec when only the policy
+// opened the gate: a changes request that answered the wait still asks for the revision, and the
+// open gate is said as open, not approved. (Round 3, adversarial P3-2, standard and outside-whole
+// wording P3s.)
+func TestTheResumeUnderGateOffSaysNoPersonApproved(t *testing.T) {
+	pool, admission := waitingRoot(t, config.DesignGateOff)
+	applyFact(t, pool, admission, "changes", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208",
+		Kind: intake.DispatchArtifactChangesRequested, Version: 3, Reason: "split it", Mark: record.EventMark{Seq: 7, At: fixedNow.Add(-time.Minute)}})
+	applyFact(t, pool, admission, "register", intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "artifact-208", Version: 3, DispatchVersion: 3, Since: record.EventMark{Seq: 8}})
+	freeTheSlot(t, pool)
+	tick(t, pool, admission, "tick-2")
+	resumes := architectResumes(t, pool)
+	if len(resumes) != 1 {
+		t.Fatalf("architect starts = %q, want one resume", resumes)
+	}
+	for _, want := range []string{"revise the spec", workflow.DesignApprovedWake} {
+		if !strings.Contains(resumes[0], want) {
+			t.Errorf("resume %q does not say %q", resumes[0], want)
+		}
+	}
+	for _, unwanted := range []string{"approved the spec", "is approved"} {
+		if strings.Contains(resumes[0], unwanted) {
+			t.Errorf("resume %q says %q under gates.design: off", resumes[0], unwanted)
+		}
 	}
 }
 

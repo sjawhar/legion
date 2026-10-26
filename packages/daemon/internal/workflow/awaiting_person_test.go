@@ -428,6 +428,33 @@ func TestAChangesRequestARootNeverResumedForIsNotRecordedAsTold(t *testing.T) {
 	}
 }
 
+// A changes request the resume would name though an ask act answered the wait first, placed after
+// the wait began, is likewise no longer recorded as told when the root leaves unresumed; one placed
+// before it, which a notice told, keeps its record. (Round 3, adversarial P3-1.)
+func TestALaterChangesRequestARootNeverResumedForIsNotRecordedAsTold(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		seq     int64
+		cleared bool
+	}{{"placed after the wait began", 7, true}, {"placed before it", 2, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool, apply := askRig(t)
+			root := awaitingRoot(3)
+			answered := time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
+			root.Awaiting.AnsweredAt, root.Awaiting.AnsweredBy, root.Awaiting.AnsweredDetail = &answered, record.AnsweredByAsk, "ask-q"
+			seedIssue(t, pool, root)
+			version := 2
+			seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2,
+				ToldChangesVersion: &version, ToldChangesReason: "say more", ToldChangesMark: record.EventMark{Seq: tc.seq}})
+			apply("parked", intake.DispatchIssue{Key: "LEGION-208", Seq: 20, Type: "issue.updated", Status: "backlog", Title: "root", Rank: "U"})
+			gate := recordedGate(t, pool)
+			if gate == nil || (gate.ToldChangesVersion == nil) != tc.cleared {
+				t.Fatalf("gate = %+v, want the told record cleared = %v", gate, tc.cleared)
+			}
+		})
+	}
+}
+
 // A child its blockers held does not start while its root waits on a person, though the tree's
 // design gate is open (a person's approval answered the wait): the root holds no slot, and its
 // children start with its resume (advanceAdmittedTree), once it has its slot again.

@@ -14,9 +14,15 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   and the controller's `read_state` carry the phase and the issue's `waitingOn`: the question
   (`kind: "ask"`, `ask`) or, for the gate waits of a later release, the spec version (`kind:
   "gate"`, `gateVersion`, `artifactId`), when the wait began (`since`, Dispatch's time of the
-  hand-back), and, once a person answered, `answeredAt` and `answeredBy`. The controller
-  receives the new `awaiting-person` notice. A 39 plugin's strict state reader refuses this state,
-  so install this release with a `legion` built from the same commit.
+  hand-back), and, once the wait was answered, `answeredAt` and `answeredBy` (how it was
+  answered, not always by a person). The controller receives the new `awaiting-person` notice. A
+  39 plugin's strict state reader refuses this state, so install this release with a `legion`
+  built from the same commit. The `legion-architect` skill opens a question on the root and ends
+  its turn after handing it back; it takes a resume task that says "this resume is your
+  design-approved wake" as its `design-approved` wake, since a waiting root gets no
+  `design-approved` notice, and its `design-changes-requested` row says a waiting root's resume
+  task, not a notice, names the changes request. The `legion-controller` skill reads the
+  `awaiting-person` wake and a waiting root as no reason to label or admit anything.
 
 - A ninth Legion skill, `leading-a-work-stream`, rebuilt from dotfiles
   `feb1271d4f5021f2e0b9b22b7496a300e6f46790`: a `SKILL.md` and seven references (daily plan,

@@ -227,8 +227,9 @@ export const LEGION_WAIT_ANSWERS = [
 ] as const;
 
 /** The fields every `waitingOn` shape shares: `since`, Dispatch's time of the hand-back the wait
- * began at (absent when unknown), and `answeredAt` with `answeredBy` once a person's act answered
- * it, when the root waits at the front of admission's waiting line for its slot. */
+ * began at (absent when unknown), and `answeredAt` with `answeredBy` once the wait was answered
+ * (`answeredBy` names how, not always by a person), when the root waits at the front of
+ * admission's waiting line for its slot. */
 const legionWaitTimes = {
   since: timestamp.optional(),
   answeredAt: timestamp.optional(),
