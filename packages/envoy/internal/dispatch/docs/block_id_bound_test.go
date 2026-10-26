@@ -4,15 +4,18 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"log/slog"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -145,5 +148,57 @@ func TestADocumentAlreadyHoldingABlockIDPastTheBoundIsIndexedAndLeavesOwed(t *te
 	requireIndexedWithoutLongIDs(t, database, service, spec, version.Number, long)
 	if tick := reconcileBlockIndex(t, service, ""); tick.Documents != 0 || tick.OwedDocuments != 0 {
 		t.Fatalf("next tick = %#v, want nothing owed", tick)
+	}
+}
+
+// An ask block a browser's edit gives an id of 3200 random hex characters - past what a Postgres
+// B-tree key holds - settles as any other: its ask opens under that id, an edit of its question
+// reaches the row, and a second document of the issue holding a copy of the block shows that ask
+// and opens none. No settlement fails on an index key past its limit (SQLSTATE 54000).
+func TestAnAskBlockWhoseIDIsPastTheBoundSettles(t *testing.T) {
+	logs := &storetest.LockedLog{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	service, original := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, original, "Context\n\n"+shipBlock)
+	long := randomHexID(t, 3200)
+	editLiveTree(t, service, original, func(tree *pmdoc.Node) *pmdoc.Node {
+		if ask := tree.Children[1]; ask.Type != "ask" {
+			t.Fatalf("the live tree is %#v, want the ship ask second", tree.Children)
+		}
+		tree.Children[1].Attrs[pmdoc.BlockIDAttr] = long
+		return tree
+	})
+	settleCurrentGeneration(t, service, original)
+	if line := logs.Lines("54000"); line != "" {
+		t.Fatalf("the settlement of the long-id ask block failed: %.400s", line)
+	}
+	if ask := blockAskOn(t, service, original, long); ask.State != "open" || ask.Question != "Ship on Monday?" {
+		t.Fatalf("the long-id block's ask is %s %q, want it open asking the block's question", ask.State, ask.Question)
+	}
+
+	editLiveTree(t, service, original, replaceRun("Ship on Monday?", "Ship on Tuesday?"))
+	settleCurrentGeneration(t, service, original)
+	ask := blockAskOn(t, service, original, long)
+	if ask.Question != "Ship on Tuesday?" {
+		t.Fatalf("the long-id block's ask asks %q after the edit, want the block's new question", ask.Question)
+	}
+
+	markdown, err := service.Text(context.Background(), original)
+	if err != nil {
+		t.Fatalf("read the original: %v", err)
+	}
+	copied := createIssueDocument(t, service.store, 1, "# Copy")
+	seedServiceText(t, service, copied, "# Copy\n")
+	browserReplaceText(t, service, copied, markdown, model.Actor{Kind: "user", ID: "alice"})
+	settleCurrentGeneration(t, service, copied)
+	if count := asksOn(t, service, copied); count != 0 {
+		t.Fatalf("the copy opened %d asks, want none", count)
+	}
+	requireCopiedStates(t, service, copied, copiedFrom(t, service, ask.ID, original))
+	if line := logs.Lines("54000"); line != "" {
+		t.Fatalf("a settlement failed on an index key past its limit: %.400s", line)
 	}
 }

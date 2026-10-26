@@ -190,13 +190,16 @@ func ownerDocuments(owner artifactOwner) (string, string) {
 // copiedAskSourcesQuery reads the asks of owner's other documents under the block ids $1, the
 // document settled being $2, oldest first, each followed by its document's issue key, project,
 // slug, kind and whether it is the issue's spec, and returns the value it binds as $3: the owner's
-// documents through their index, then each one's asks through asks_block_id_unique.
+// documents through their index, then each one's asks through asks_block_id_unique, whose second
+// column is block_id_key(block_id) (migration 0123), so the ids' keys are matched beside the ids.
 func copiedAskSourcesQuery(owner artifactOwner) (string, string) {
 	documents, ownerKey := ownerDocuments(owner)
 	return `
 		select ` + AskColumns + `, d.issue_key, coalesce(d.project_key, ''), d.slug, d.kind, d.is_primary
 		from artifacts d
-		join asks a on a.block_artifact_id = d.id and a.block_id = any($1)
+		join asks a on a.block_artifact_id = d.id
+			and block_id_key(a.block_id) = any(array(select block_id_key(id) from unnest($1::text[]) id))
+			and a.block_id = any($1)
 		where ` + documents + ` and d.id <> $2
 		order by a.created_at, a.id
 	`, ownerKey
@@ -204,7 +207,8 @@ func copiedAskSourcesQuery(owner artifactOwner) (string, string) {
 
 // owedCopiesQuery reads owner's other documents, the document settled being $2, whose latest
 // version holds an ask block opener of the pairs ($1 block id, $4 LIKE pattern for its opener)
-// with no ask of its own under that id, and returns the value it binds as $3.
+// with no ask of its own under that id, read through asks_block_id_unique as copiedAskSourcesQuery
+// reads it, and returns the value it binds as $3.
 func owedCopiesQuery(owner artifactOwner) (string, string) {
 	documents, ownerKey := ownerDocuments(owner)
 	return `
@@ -217,7 +221,9 @@ func owedCopiesQuery(owner artifactOwner) (string, string) {
 		where ` + documents + ` and d.id <> $2 and exists (
 			select 1 from unnest($1::text[], $4::text[]) as copied(block_id, pattern)
 			where latest.markdown like copied.pattern and not exists (
-				select 1 from asks a where a.block_artifact_id = d.id and a.block_id = copied.block_id
+				select 1 from asks a
+				where a.block_artifact_id = d.id and block_id_key(a.block_id) = block_id_key(copied.block_id)
+					and a.block_id = copied.block_id
 			)
 		)
 		order by d.id

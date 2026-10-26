@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -293,5 +295,56 @@ func TestAReferencePastTheTargetBoundIsAnInvalidReference(t *testing.T) {
 		if read := blockLinksRequest(t, handler, query); read.Code != http.StatusBadRequest || responseCode(t, read) != "INVALID_REFERENCE" {
 			t.Fatalf("block-links %v naming a document past the bound: status=%d body=%.400s, want 400 INVALID_REFERENCE", query, read.Code, read.Body.String())
 		}
+	}
+}
+
+// A comment and an ask anchored by a quote inside a block whose id is 3200 random hex characters -
+// which a browser's edit writes, and which no Postgres B-tree key holds - are written as any
+// anchor is, each anchored to that block, and the document's blocks count both against it. No
+// write fails on an index key past its limit (SQLSTATE 54000).
+func TestAnAnchorInsideABlockWhoseIDIsPastTheBoundIsWritten(t *testing.T) {
+	logs := &storetest.LockedLog{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	documentService, handler, _ := browserDocumentService(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Anchored in a long-id block", "Context paragraph.\n")
+	long := randomBlockID(t, 3200)
+	// A quote across the callout's two paragraphs lies in no block below the callout, so its
+	// anchor's block is the callout and its long id.
+	writeBrowserDocument(t, documentService, issue.PrimaryArtifactID,
+		":::callout{#"+long+" kind=\"note\" title=\"\"}\nOne line.\n\nTwo line.\n:::\n\nContext paragraph.\n")
+
+	for _, write := range []struct{ name, path, field, text, quote string }{
+		{"comment", "comments", "body", "Why both lines?", "One line. Two line."},
+		{"ask", "asks", "question", "Are both lines needed?", "line. Two"},
+	} {
+		created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/"+write.path, map[string]any{
+			write.field: write.text, "anchor": map[string]string{"artifact": "spec", "quote": write.quote},
+		}, "alice")
+		if created.Code != http.StatusCreated {
+			t.Errorf("anchor a %s inside the block of a 3200-character id: status=%d body=%.400s log=%.600s", write.name, created.Code, created.Body.String(), logs.Lines("SQLSTATE"))
+			continue
+		}
+		if anchored := decodeBody[anchoredRecord](t, created); anchored.Anchor.BlockID != long {
+			t.Errorf("the %s's anchor names block %.40q…, want the callout's long id", write.name, anchored.Anchor.BlockID)
+		}
+	}
+	if t.Failed() {
+		return
+	}
+
+	blocks := decodeBody[[]blockWithReferences](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/blocks", nil, "alice"))
+	counted := false
+	for _, block := range blocks {
+		if block.ID == long {
+			counted = block.References.Comments == 1 && block.References.Asks == 1
+		}
+	}
+	if !counted {
+		t.Fatalf("blocks = %.400v, want the long-id callout counting one comment and one ask", blocks)
+	}
+	if line := logs.Lines("54000"); line != "" {
+		t.Fatalf("a write failed on an index key past its limit: %.400s", line)
 	}
 }
