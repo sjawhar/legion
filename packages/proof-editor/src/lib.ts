@@ -91,7 +91,7 @@ import { remarkSoftBreakAsSpace } from './dispatch-soft-breaks';
 import { configureDispatchLinks } from './dispatch-links';
 import { trailingNewlineInputPlugin } from './trailing-newline-input';
 import { recordMarkHistoryPlugin } from './record-mark-history';
-import { editorHighlightsPlugin, pulseHighlight, setActiveHighlights } from './editor-highlights';
+import { editorHighlightsPlugin, landOnBlock, pulseHighlight, setActiveHighlights } from './editor-highlights';
 import { referenceDecorationsPlugin, setReferenceTargets, type EditorReferences, type ReferenceTarget } from './reference-decorations';
 import { removeRecordMark, retypeMark as retypeRecordMark } from './record-mark-retype';
 import type { RetypeOutcome } from './record-mark-retype';
@@ -292,6 +292,7 @@ export async function createProofEditor(
   root.classList.add('proof-editor');
   setCurrentActor(`human:${opts.user.name}`);
   let alive = true;
+  let endLanding = (): void => {};
   const heatMapMode: HeatMapMode = opts.heatMapMode ?? 'background';
 
   const builder = Editor.make()
@@ -476,9 +477,10 @@ export async function createProofEditor(
     },
     focusBlock(blockId: string): void {
       const escaped = cssEscapeAttrValue(blockId);
-      const element = view.dom.querySelector<HTMLElement>(`[${BLOCK_ID_DOM_ATTR}="${escaped}"]`);
-      if (element === null) return;
-      element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const find = () => view.dom.querySelector<HTMLElement>(`[${BLOCK_ID_DOM_ATTR}="${escaped}"]`);
+      if (find() === null) return;
+      endLanding();
+      endLanding = landOnBlock(view, find);
       pulseHighlight(view, 'block', blockId);
     },
     setActiveMarks(markIds: readonly string[]): void {
@@ -500,6 +502,7 @@ export async function createProofEditor(
     },
     destroy(): void {
       alive = false;
+      endLanding();
       unregisterPopoverHook();
       editor.action((ctx) => {
         const collabService = ctx.get(collabServiceCtx);

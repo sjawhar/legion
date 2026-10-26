@@ -25,25 +25,33 @@ export async function settledBlockAsk(
   return { id: ask.id, question: ask.question };
 }
 
-/** The `data-dispatch-ref` of every element in scope matching `selector`, in document order: the
- *  reference a rendered link (`a[data-dispatch-ref]`) or an inert preview's link-styled span
- *  names, normalised to its `dispatch://` form by the renderer. */
-export function referencesIn(scope: Locator, selector = "a[data-dispatch-ref]"): Promise<string[]> {
-  return scope
+/** The reference each element in scope matching `selector` names, each once, in order of first
+ *  appearance: a Dispatch picture's `data-dispatch-picture`, any other's `data-dispatch-ref`. A
+ *  rendered body's links and pictures, or an inert preview's link-styled spans. */
+export async function referenceTargetsIn(scope: Locator, selector: string): Promise<string[]> {
+  const references = await scope
     .locator(selector)
     .evaluateAll((elements) =>
-      elements.map((element) => element.getAttribute("data-dispatch-ref") ?? "")
+      elements.map(
+        (element) =>
+          element.getAttribute("data-dispatch-picture") ??
+          element.getAttribute("data-dispatch-ref") ??
+          ""
+      )
     );
+  return [...new Set(references)];
 }
 
-/** The `data-dispatch-href` of every reference title the document editor draws in scope, in
- *  document order (`@legion/proof-editor`'s reference decorations, `a.dispatch-reference`). */
-export function editorReferencesIn(scope: Locator): Promise<string[]> {
-  return scope
+/** The `data-dispatch-href` of every reference title the document editor draws in scope, each
+ *  once, in order of first appearance (`@legion/proof-editor`'s reference decorations,
+ *  `a.dispatch-reference`). */
+export async function editorReferencesIn(scope: Locator): Promise<string[]> {
+  const references = await scope
     .locator("a.dispatch-reference")
     .evaluateAll((elements) =>
       elements.map((element) => element.getAttribute("data-dispatch-href") ?? "")
     );
+  return [...new Set(references)];
 }
 
 /** A margin thread's collapsed card: the toggle that holds its one-line preview. On the phone
@@ -65,7 +73,7 @@ export async function collapsedMarginThread(
 /** Opens a margin thread from its collapsed card, as a reader's click does, and answers the
  *  opened card: beside the document, or in the Thread dialog on the phone layout. The click lands
  *  on the card's anchor quote, since its preview keeps its links live and the thread's root must
- *  be anchored. */
+ *  be anchored. The opened card holds no collapsed preview, so what it renders is the comment. */
 export async function openMarginThread(
   page: Page,
   project: string,
@@ -74,5 +82,6 @@ export async function openMarginThread(
   await (await collapsedMarginThread(page, project, rootId)).locator("blockquote").click();
   const card = openedThreadCard(page, project, rootId);
   await expect(card).toBeVisible();
+  await expect(card.locator('button[aria-expanded="false"]')).toHaveCount(0);
   return card;
 }
