@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-141",
+  "completed": "2026-10-26T00:22:00Z",
+  "generation": 3,
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran each command of implement.json's proof at e6968c51 (code tree of 8be80926: jj diff --stat --from 8be80926 --to e6968c51 shows only .legion/INFRA-141/): the 16-test cmd/listener set and the 5-test internal/bus set with -v (16/16 and 5/5 --- PASS, ok 48.805s / 6.319s), bash scripts/e2e-local.sh (exit 0, both PASS lines, bus-down 503 in 3.503014 s, real client EnvoyApiError 503), and the A6' jq filter (exactly three WARN bus_unavailable records, all after nats.log's 'Initiating Shutdown...'). Re-ran its A1/A2 negative control independently with my own go test -overlay cutting liveSessionEntry to a cache-only read: both tests fail with the messages the proof quotes."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "A1 - a session-addressed send to a session only the store holds (cold cache) succeeds",
+      "surface": "the real envoy-listener binary (built from this head) against a real NATS server (internal/testnats/cmd/natsd), driven over HTTP by a throwaway Go driver that writes a fresh session straight into the envoy_sessions bucket and sends to it at once",
+      "command": "300 iterations of: KV Put ses_race_<n> into envoy_sessions, then POST /v1/messages/send to it immediately; run against this head's binary, then against the same binary built with go build -overlay replacing liveSessionEntry's store read (cmd/listener/api.go:624-630) by 'return session.SessionEntry{}, nats.ErrKeyNotFound'",
+      "observed": "this head: statuses 200:300. Cache-only build: 200:219 404:81, first refusal {\"error\":\"no live session ses_race_1792972957283466078_9\"}",
+      "headSha": "e6968c5136e638a78df6d674e8c2e24bf5257583",
+      "negativeControl": "the cache-only build of the same binary on the same rig refused 81 of 300 sends with 404 no live session, so the rig discriminates the read-through"
+    },
+    {
+      "criterion": "A3 - bus unreachable: a named 503 with Retry-After: 1 inside the caller's 5 s, never a 404, and recovery when the bus returns",
+      "surface": "the real envoy-listener binary against a real NATS server that the driver stops and restarts on the same JetStream store; scripts/e2e-local.sh for the real @legion/envoy-client",
+      "command": "bash scripts/e2e-local.sh; then the driver: send to a cached session and to a never-registered one with the bus up, stop NATS, send to each, 25 concurrent sends to each, restart NATS, send again; jq over the listener log for 'listener send' records",
+      "observed": "e2e-local.sh: bus-down send HTTP 503 in 3.503014 s, Retry-After: 1, client EnvoyApiError 503. Driver: bus up 200 / 404; bus down cached 503 in 3.503 s ('bus: waiting for NATS to reconnect: context deadline exceeded'), uncached 503 in 0.003 s ('nats: outbound buffer limit exceeded'), 25+25 concurrent all 503 with the slowest at 3.508 s; after the restart the first send 200 and the unregistered one 404. Records: 2 INFO accepted, 52 WARN bus_unavailable 503, 2 WARN no_live_session 404",
+      "headSha": "e6968c5136e638a78df6d674e8c2e24bf5257583",
+      "negativeControl": "the identical sends answered 200 and 404 with the bus up, so the 503s are the outage and not the rig"
+    },
+    {
+      "criterion": "A5 - an unplaceable delivery is retried within the window and then given up once, with a record and a counter, for every value of ENVOY_UNPLACEABLE_RETRY_WINDOW",
+      "surface": "the real envoy-listener binary against a real NATS server; a session written to the store with port 0 (no_push_target) or a closed port (push_failed) on the listener's own machine id",
+      "command": "for window in <unset>, garbage, 0, -5s, 10m: start the listener with ENVOY_UNPLACEABLE_RETRY_WINDOW=$window, put ses_np port 0, POST /v1/messages/send, wait for 'listener agent delivery given up', count deferred lines, read /metrics; then once more with the session's port 1",
+      "observed": "unset: 12 deferrals, given up at 61.1 s, unplaceable_no_push_target 1, naked_total 12. garbage: 'invalid ENVOY_UNPLACEABLE_RETRY_WINDOW; using default', the same 12 and give-up. 0 and -5s: given up on the first delivery, no NAK. 10m: 17 deferrals (window_deferrals 120), given up at attempt 18 after 85.7 s, before MaxDeliver 20. Port 1: deferred once (reason push_failed), given up 5 s later, unplaceable_push_failed 1. No 'listener attempt-dedupe skip' in any run",
+      "headSha": "e6968c5136e638a78df6d674e8c2e24bf5257583",
+      "negativeControl": "the same 10m run on a binary built without the NumDelivered < unplaceableMaxDeliveries cap (delivery.go:813, go build -overlay) deferred the message on all 20 deliveries (attempt 20, naked_total 20) and wrote no give-up line, counter or exception within 244 s"
+    },
+    {
+      "criterion": "A6' - every bus-down request under a real outage writes one WARN bus_unavailable record",
+      "surface": "packages/envoy/out/e2e/listener.log and nats.log from this round's scripts/e2e-local.sh run",
+      "command": "jq -R -c 'fromjson? // empty | objects | select(.msg==\"listener send\" and .level==\"WARN\" and .outcome==\"bus_unavailable\" and .status==503 and .target_session==\"ses_e2e_local\") | {time,outcome,status}' out/e2e/listener.log; grep 'Initiating Shutdown' out/e2e/nats.log",
+      "observed": "exactly three records, at 00:00:44.999Z, 00:00:48.812Z and 00:00:52.569Z (curl, then the client's two attempts); NATS 'Initiating Shutdown...' at 00:00:41.461Z",
+      "headSha": "e6968c5136e638a78df6d674e8c2e24bf5257583",
+      "negativeControl": "the same run's send with the bus up wrote an INFO accepted record and no bus_unavailable record; all three WARN records are later than the shutdown line"
+    }
+  ],
+  "regressionLocksAdded": [
+    {
+      "test": "TestAWindowPastTheDurablesMaxDeliverStillGivesUpBeforeIt (packages/envoy/cmd/listener/unplaceable_delivery_acceptance_test.go)",
+      "commit": "5a496a63a7a33aa3def57b21f0a1694843f5c00a",
+      "why": "Removing the NumDelivered < unplaceableMaxDeliveries cap at delivery.go:813 left every existing test green (the nine unplaceable tests all --- PASS under the overlay), while the real binary at ENVOY_UNPLACEABLE_RETRY_WINDOW=10m then lost a message silently after 20 deferrals. TestUnplaceableRetryWindowFitsTheBoundsItDependsOn checks only the default window, and envDuration puts no upper bound on the operator's.",
+      "evidence": "cd packages/envoy && go test ./cmd/listener -count=1 -run '^TestAWindowPastTheDurablesMaxDeliverStillGivesUpBeforeIt$' -> ok (both subtests PASS; -count=10 ok 3.150s). With go test -overlay replacing delivery.go:813's clause by 'true': FAIL at unplaceable_delivery_acceptance_test.go:832 'delivery 18 of a 10m0s window was deferred (attempt 18 of 120 window deferrals): the stream stops redelivering at 20, so this message would be lost with no give-up record, no counter and no exception'. The code needs no change; -race was not run here (no cgo in this pod), CI's envoy-go-race runs it."
+    }
+  ],
+  "ci": "At the code head 8be80926: Tests 40231585129 (lint, typecheck, test success), Legion Envoy and Contracts 40231585201 (envoy-go, envoy-go-race, envoy-e2e-local, envoy-smoke and the rest success; package lanes it does not touch skipped), PR Title 40231585094, Docs 40231585116, Worker Image 40231585150 success; head_sha checked. This round's push carries a test file, so it carries no skip-checks trailer and GitHub starts runs at the new head; they were not waited for.",
+  "notesForTheReviewer": [
+    "This round's push puts a test-only commit (5a496a63, +83 lines in one _test.go file, no production code) above the approved head bc2283ee and above retro's two commits; the plan's 'What this generation must not change' expected only .legion/ pushes. The new head needs the review of that one file, and retro's removal of .legion/INFRA-141/ runs again after acceptance.",
+    "A real-binary cold-cache delivery race (A2's surface) did not discriminate: putting the session from a separate process gave the watcher time to catch up, so the cache-only build delivered 100/100 too. A2 rests on TestAgentDeliveryReadsTheSessionStoreWhileTheCacheIsCold and its overlay control, re-run here and failing as the proof says.",
+    "With the bus down, a send to a session not in the cache answers 503 in about 3 ms with 'nats: outbound buffer limit exceeded' rather than the reconnect-wait text: still a 503 naming the bus, Retry-After: 1, and recorded as bus_unavailable, so a sender retries rather than routing around the pane."
+  ]
+}
