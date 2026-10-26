@@ -20,6 +20,13 @@
   exits 2 on a narrowing the broker would refuse `INVALID_NARROWING` before it sends any request,
   and runs its command only once the broker names the narrowing it applied, so deploy the broker
   before any caller passes `--github-owner`.
+- Dispatch can serve the Go profiler: `DISPATCH_PPROF_PORT` set to a port serves
+  `net/http/pprof` on `127.0.0.1:<port>` alone, on a mux of its own, so a CPU profile of a busy
+  server is one `kubectl port-forward` and `go tool pprof` away. Unset or empty, nothing listens;
+  a value that is not a port 1-65535 refuses startup naming the variable, the profiler binds
+  before anything connects, and it closes at once on shutdown, delaying nothing. `DISPATCH_PORT`
+  is read by the same rule, so a value past the integer range (which wrapped to a small port)
+  is refused too.
 - Dispatch's meaning search embeds through AWS Bedrock (the default, unchanged) or Azure AI
   Foundry, chosen by `DISPATCH_EMBEDDER`. Azure takes `DISPATCH_AZURE_EMBED_ENDPOINT`,
   `DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE` (the deployment's quota, two thirds of which paces
