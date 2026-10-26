@@ -1018,7 +1018,9 @@ function SelectionHeader({
  * Send hands the request to the page's queue (`onSend`) at the press: `composed`, which
  * `composedBroadcast` decides - the restored request word for word while one is kept, else the
  * live plan under the composition's key - with the plan the composer shows for it, so a session
- * that has come back since a refused send is shown as not in the request being re-sent.
+ * that has come back since a refused send is shown as not in the request being re-sent. A
+ * selected session the agent list could not vouch for (`unchecked`: missing from a list that is
+ * not current) keeps its place in the send, and its chip says its state is unknown, not gone.
  */
 function BroadcastComposer({
   agents,
@@ -1045,7 +1047,7 @@ function BroadcastComposer({
   selected: ReadonlySet<string>;
 }): ReactNode {
   const { plan } = composed;
-  const { excluded, recipients } = plan;
+  const { excluded, recipients, unchecked } = plan;
   // The selection's own mode, named when it is not the broadcast's usual BTW, so the reader knows
   // what their words become: an Aside, because a selected session takes Aside and not BTW.
   const asideOnly =
@@ -1101,6 +1103,7 @@ function BroadcastComposer({
         {[...selected].map((sessionID) => {
           const agent = agents.find((candidate) => candidate.session_id === sessionID);
           const left = excluded.find((item) => item.sessionID === sessionID);
+          const note = left ?? unchecked.find((item) => item.sessionID === sessionID);
           return (
             <li className="narrow-or-short:shrink-0" key={sessionID}>
               {/* The deselect button keeps the name; the agent's live link sits beside it. */}
@@ -1114,7 +1117,7 @@ function BroadcastComposer({
                     type="button"
                   >
                     {name}
-                    {left === undefined ? "" : ` · ${left.reason}`} ✕
+                    {note === undefined ? "" : ` · ${note.reason}`} ✕
                   </button>
                 )}
                 kind="control"
@@ -1462,7 +1465,10 @@ export function AgentsPage(): ReactNode {
             <BroadcastComposer
               agents={agents}
               body={draft}
-              composed={composedBroadcast({ ...composition, delivery }, agents)}
+              composed={composedBroadcast(
+                { ...composition, delivery },
+                { agents, current, refilling }
+              )}
               defaulted={composition.delivery === null}
               delivery={delivery}
               onBody={composition.setDraft}

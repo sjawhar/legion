@@ -21,7 +21,12 @@ import { AuthGate } from "../../app";
 import type { AgentPart } from "../refs/AgentName";
 import { orderAgents, partitionAgents } from "./AgentsPage";
 import { matchesFilters, searchWords } from "./agent-search";
-import { broadcastPlan, broadcastSendState, composedBroadcast } from "./broadcast-plan";
+import {
+  type BroadcastRoster,
+  broadcastPlan,
+  broadcastSendState,
+  composedBroadcast,
+} from "./broadcast-plan";
 
 // Delivery attempts are dated relative to the run: the dashboard only offers a
 // same-mode Retry while an attempt is inside the stream's duplicate window, so a
@@ -55,6 +60,11 @@ const agents = [
     title: "Reviewer",
   },
 ] satisfies Agent[];
+
+/** The agent list as a plan reads it after a read that succeeded: it says who is absent. */
+function currentList(listed: readonly Agent[]): BroadcastRoster {
+  return { agents: listed, current: true, refilling: false };
+}
 
 // The signed-in reader is `alice`, and a card's first number is their own work: these rows are
 // on an issue assigned to them.
@@ -1996,7 +2006,7 @@ test("a broadcast whose selection holds an Aside-only session goes as an Aside u
 
 test("a broadcast composer labels a mode-mismatched recipient", () => {
   const [, reviewer] = agents;
-  const composer = broadcastPlan(new Set([reviewer.session_id]), [reviewer], "btw");
+  const composer = broadcastPlan(new Set([reviewer.session_id]), currentList([reviewer]), "btw");
 
   // `packages/dispatch/AGENTS.md:36-41` and `features/conversation/delivery.ts:8-12` name this
   // composer-facing label.
@@ -2382,14 +2392,211 @@ test("a restored send names a selected session it leaves out by the reason an ed
     sendKey: "next-key",
   } as const;
   const reasons = (live: readonly Agent[]) =>
-    composedBroadcast(composition, live).plan.excluded.map((item) => item.reason);
+    composedBroadcast(composition, currentList(live)).plan.excluded.map((item) => item.reason);
 
   expect(reasons([planner, reviewer])).toEqual(["does not advertise BTW"]);
   expect(reasons([planner])).toEqual(["no live session"]);
   expect(reasons([planner, { ...reviewer, capabilities: ["aside", "btw"] }])).toEqual([
     "not in the refused send; edit to include it",
   ]);
-  expect(composedBroadcast(composition, [planner, reviewer]).input).toBe(restored);
+  expect(composedBroadcast(composition, currentList([planner, reviewer])).input).toBe(restored);
+});
+
+// Spec acceptance 3: an absence is claimed only from a current list. A selected session a list
+// whose latest read failed does not hold is unknown, not gone: the plan keeps it a recipient - the
+// server reads each selected id's liveness when the send arrives - and says it could not check.
+test("a selected session missing from an agent list that is not current is unknown and still sent to, never excluded as gone", () => {
+  const [planner, reviewer] = agents;
+  const selected = new Set([planner.session_id, reviewer.session_id]);
+  const refilling: BroadcastRoster = { agents: [reviewer], current: false, refilling: true };
+  const failed: BroadcastRoster = { agents: [reviewer], current: false, refilling: false };
+
+  // A current list that no longer holds the Planner says it has gone.
+  expect(broadcastPlan(selected, currentList([reviewer]), "aside")).toEqual({
+    excluded: [{ agent: undefined, reason: "no live session", sessionID: planner.session_id }],
+    recipients: [reviewer.session_id],
+    unchecked: [],
+  });
+  // The same rows from a refilling list say nothing of who is absent.
+  expect(broadcastPlan(selected, refilling, "aside")).toEqual({
+    excluded: [],
+    recipients: [planner.session_id, reviewer.session_id],
+    unchecked: [
+      {
+        reason: `couldn't check whether it is running. ${AGENT_LIST_REFILLING}`,
+        sessionID: planner.session_id,
+      },
+    ],
+  });
+  expect(broadcastPlan(selected, failed, "aside").unchecked).toEqual([
+    { reason: "couldn't check whether it is running", sessionID: planner.session_id },
+  ]);
+  // Send counts it and does not refuse, even when it is the whole selection.
+  expect(
+    broadcastSendState(broadcastPlan(selected, refilling, "aside"), "aside", "Status?")
+  ).toEqual({ label: "Send to 2", notice: null, refusal: null, refusalOnNotice: false });
+  const alone = broadcastPlan(new Set([planner.session_id]), { ...refilling, agents: [] }, "btw");
+  expect(broadcastSendState(alone, "btw", "Status?").label).toBe("Send to 1");
+});
+
+test("a restored send claims no absence from an agent list that is not current", () => {
+  const [planner, reviewer] = agents;
+  const restored = {
+    body: "Still here?",
+    delivery: "btw",
+    idempotency_key: "refused-key",
+    session_ids: ["planner-session"],
+  } satisfies CreateBroadcastInput;
+  const composition = {
+    delivery: "btw",
+    draft: "Still here?",
+    restored,
+    selected: new Set([planner.session_id, reviewer.session_id]),
+    sendKey: "next-key",
+  } as const;
+
+  // The unnamed Reviewer is left out because the request does not name it, not as gone; the named
+  // Planner is still asked for, and unknown.
+  const composed = composedBroadcast(composition, { agents: [], current: false, refilling: true });
+  expect(composed.input).toBe(restored);
+  expect(composed.plan).toEqual({
+    excluded: [
+      {
+        agent: undefined,
+        reason: "not in the refused send; edit to include it",
+        sessionID: reviewer.session_id,
+      },
+    ],
+    recipients: [planner.session_id],
+    unchecked: [
+      {
+        reason: `couldn't check whether it is running. ${AGENT_LIST_REFILLING}`,
+        sessionID: planner.session_id,
+      },
+    ],
+  });
+  // A current list still says the Planner has nothing to check and the Reviewer has gone.
+  expect(composedBroadcast(composition, currentList([planner])).plan).toEqual({
+    excluded: [{ agent: undefined, reason: "no live session", sessionID: reviewer.session_id }],
+    recipients: [planner.session_id],
+    unchecked: [],
+  });
+});
+
+// Plan D12: a capability a row does not carry is an absence too, and a list that is not current
+// claims none. Its rows are its last successful read, so a listed session without the mode is
+// unknown - still a recipient, `unchecked` - and the server judges it at send time.
+test("a selected session listed without the mode on an agent list that is not current is unchecked and still sent to, never excluded", () => {
+  const [planner, reviewer] = agents;
+  const selected = new Set([planner.session_id, reviewer.session_id]);
+  const refilling: BroadcastRoster = { agents, current: false, refilling: true };
+
+  // A current list says the Reviewer does not advertise BTW.
+  expect(broadcastPlan(selected, currentList(agents), "btw").excluded).toEqual([
+    { agent: reviewer, reason: "does not advertise BTW", sessionID: reviewer.session_id },
+  ]);
+  // The same rows from a refilling list say nothing of what it lacks.
+  expect(broadcastPlan(selected, refilling, "btw")).toEqual({
+    excluded: [],
+    recipients: [planner.session_id, reviewer.session_id],
+    unchecked: [
+      {
+        reason: `couldn't check whether it is running. ${AGENT_LIST_REFILLING}`,
+        sessionID: reviewer.session_id,
+      },
+    ],
+  });
+  expect(broadcastPlan(selected, { ...refilling, refilling: false }, "btw").unchecked).toEqual([
+    { reason: "couldn't check whether it is running", sessionID: reviewer.session_id },
+  ]);
+  expect(broadcastSendState(broadcastPlan(selected, refilling, "btw"), "btw", "Status?")).toEqual({
+    label: "Send to 2",
+    notice: null,
+    refusal: null,
+    refusalOnNotice: false,
+  });
+
+  // A restored send leaves the unnamed Reviewer out because the request does not name it, not
+  // for the mode, and calls the named one it cannot vouch for unchecked.
+  const restored = {
+    body: "Still here?",
+    delivery: "btw",
+    idempotency_key: "refused-key",
+    session_ids: [planner.session_id],
+  } satisfies CreateBroadcastInput;
+  const composition = {
+    delivery: "btw",
+    draft: "Still here?",
+    restored,
+    selected,
+    sendKey: "next-key",
+  } as const;
+  expect(composedBroadcast(composition, refilling).plan.excluded).toEqual([
+    {
+      agent: reviewer,
+      reason: "not in the refused send; edit to include it",
+      sessionID: reviewer.session_id,
+    },
+  ]);
+  expect(
+    composedBroadcast(
+      { ...composition, restored: { ...restored, session_ids: [reviewer.session_id] } },
+      refilling
+    ).plan.unchecked
+  ).toEqual([
+    {
+      reason: `couldn't check whether it is running. ${AGENT_LIST_REFILLING}`,
+      sessionID: reviewer.session_id,
+    },
+  ]);
+});
+
+test("the broadcast composer shows a selected agent missing from a refilling list as unchecked and sends to it", async () => {
+  const [, reviewer] = agents;
+  const page = renderAgents();
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    fireEvent.click(within(region).getByRole("checkbox", { name: "Select Planner for broadcast" }));
+    fireEvent.click(
+      within(region).getByRole("checkbox", { name: "Select Reviewer for broadcast" })
+    );
+    const composer = () => within(region).getByRole("region", { name: "Broadcast" });
+    const chips = () =>
+      within(within(composer()).getByRole("list", { name: "Selected agents" }))
+        .getAllByRole("button")
+        .map((chip) => chip.textContent);
+
+    // A current read without the Planner says it has gone.
+    page.listAgents.mockResolvedValue([reviewer]);
+    await page.queryClient.refetchQueries({ queryKey: ["agents"] });
+    await waitFor(() => expect(chips()[0]).toEndWith(" · no live session ✕"));
+    expect(chips()[1]).toBe("Reviewer ✕");
+
+    // A refilling read keeps the Reviewer's row and says nothing of the Planner's absence.
+    page.listAgents.mockRejectedValue(refillingError());
+    await page.queryClient.refetchQueries({ queryKey: ["agents"] });
+    await screen.findByTestId("agent-list-refilling");
+    expect(chips()[0]).toEndWith(
+      ` · couldn't check whether it is running. ${AGENT_LIST_REFILLING} ✕`
+    );
+    expect(chips()[0]).not.toContain("no live session");
+    expect(chips()[1]).toBe("Reviewer ✕");
+    expect(within(composer()).getByRole("heading", { level: 2 }).textContent).toBe(
+      "Broadcast to 2 of 2 selected"
+    );
+    expect(within(composer()).queryByText(/Excluded:/)).toBeNull();
+
+    fireEvent.change(within(composer()).getByRole("textbox", { name: "Broadcast message" }), {
+      target: { value: "Status?" },
+    });
+    fireEvent.click(within(composer()).getByRole("button", { name: "Send to 2" }));
+    await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(1));
+    expect(posted(page, 0).session_ids).toEqual(["planner-session", "reviewer-session"]);
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
 });
 
 // Two deliberate sends of the same words are two broadcasts: each composition carries a key of its
@@ -2480,7 +2687,12 @@ test("Send says which of its reasons stops it, where that reason is shown, and t
     live: readonly Agent[],
     delivery: MessageDeliveryMode,
     body = "Report status."
-  ) => broadcastSendState(broadcastPlan(new Set(selected), live, delivery), delivery, body);
+  ) =>
+    broadcastSendState(
+      broadcastPlan(new Set(selected), currentList(live), delivery),
+      delivery,
+      body
+    );
   const both = [planner.session_id, reviewer.session_id];
   const tail = ". Nothing is sent to them, and no other mode is substituted.";
   // The line keeps each excluded session as an agent part, for `AgentName` to draw: by its
