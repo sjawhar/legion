@@ -2,9 +2,10 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-253",
-  "completed": "2026-10-26T12:52:00Z",
-  "headSha": "b5139e26d69c6ad4528be7da037867b8cfea8348",
-  "round": 4,
+  "completed": "2026-10-26T15:40:00Z",
+  "headSha": "98840a82bcf817645aede4b8b04a56cc50c1788f",
+  "round": 5,
+  "rebaseRecheck": "rebase re-check b5139e26 → 98840a82: fingerprint unchanged, bare gates only. 98840a82 is the implementer's forward merge of main for a GitHub-reported conflict. Fingerprint (reference command: fork_point(main@origin | head) .. head, --context 0, '~(.legion | docs/solutions)', @@ and index lines dropped): 4faa5738b09770516c7d9012585b005d0c4ae5caa719110e9abf082ab531b64c at both heads. Bare gates: Stage 1 smoke at 98840a82 → `stage 1 e2e: PASS` (legion built from that tree, pod Postgres 17, tmux 3.5a). CI at 98840a82 is queued (see ciAtHead). The round-4 proofs below were run at b5139e26 and are not repeated.",
   "scope": "Narrowed by the architect: cee45e9b (the playwright.config.ts reuse-refusal fix; the port-file waits in stage2 and verifiers-staging-token) and the merge of main b5139e26, which resolved #2188's conflict in the daemon's scratch-Dispatch start (fingerprint 34d89a93 → 4faa5738).",
   "implementerProof": {
     "verdict": "verified",
@@ -55,7 +56,7 @@
       "negativeControl": "without LEGION_TEST_NATS_URL, TestBlockedIssues… panics 'rootless Docker not found' (testnats' container path), which shows it ran against the external NATS when it passed"
     }
   ],
-  "ciAtHead": "b5139e26 at 12:50Z: Tests run 40324211671, Legion Envoy and Contracts run 40324211721, Docs run 40324211729 and Worker Image run 40324211722 are all queued or pending; no job has started. c432d8ef's runs (40318328337, 40318328338) cancelled every job when the next push superseded them. The last head with finished jobs is bd64de98: envoy-smoke success on the held-port image; Tests success. Every job at b5139e26 must be read before approval.",
+  "ciAtHead": "98840a82 at 15:38Z: Tests run 40349306345, Legion Envoy and Contracts run 40349306397, Docs run 40349306182 and Worker Image run 40349306390 are all queued; no job has started. The previous head b5139e26, read job by job: Tests success (test, typecheck, lint); Docs and Worker Image success; Legion Envoy and Contracts 40324211721: envoy-smoke, envoy-go, envoy-go-race, envoy-infra-go, envoy-e2e-local, dispatch-multiprocess, dispatch-memory, broker-multiprocess, pi-* success; dispatch cancelled; claude-envoy failure at `Typecheck Claude Envoy plugin` (../envoy-client/src/dispatch-command.ts(363,52): TS4111 `args.issue`). That file is not in the PR's diff, and main's fix (`args[\"issue\"]`) is in 98840a82 through the merge. Every job at 98840a82 must be read before approval.",
   "notes": [
     "Wording only: with a single harness port set, the reuse refusal lists the unset ones as port 0 ('… whatever listens on 1111 (FAKE_ENVOY_PORT), 0 (FAKE_GITHUB_PORT), …'). The run is refused either way.",
     "Out of this round's narrowed scope and unchanged since round 3: the Dispatch, listener and legion start refusals, Stage 1, the held-port darwin path and the search scripts (round-3 proofs at c432d8ef)."
