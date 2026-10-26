@@ -2618,6 +2618,44 @@ console.log(JSON.stringify(args, null, 2));
         fs.closeSync(fd);
       }
     }, 30_000);
+    // Finding 6: the CLI's readFileSync lets the kernel resolve `..` after a symlink, while
+    // path.resolve collapses it first, so the gate reviewed one file and the command posted
+    // another. The gate now joins the physical base and the operand as written.
+    test("F6: a --*-file path resolves as the CLI resolves it, through a symlink and its ..", async () => {
+      const other = path.join(work, "f6-other", "sub");
+      fs.mkdirSync(other, { recursive: true });
+      fs.writeFileSync(
+        path.join(work, "f6-other", "f6-note.txt"),
+        "The file the CLI would post.\n"
+      );
+      // The file a lexical `path.resolve` names instead, which the command never posts.
+      fs.writeFileSync(path.join(work, "f6-note.txt"), "The file beside the link.\n");
+      const link = path.join(work, "f6-link");
+      fs.rmSync(link, { force: true });
+      fs.symlinkSync(other, link);
+      const posted = path.join(work, "f6-posted.json");
+      fs.rmSync(posted, { force: true });
+      const command = "dispatch comment --issue X-1 --body-file f6-link/../f6-note.txt";
+      const g = bind({ env: STUB, cwd: work });
+      const result = await g.bash("f6", command);
+      // Either the gate reviews the file the CLI reads, or it refuses the call. It never reviews
+      // one file and posts another.
+      if (result?.block === true) {
+        expect(result.reason).toMatch(/a symbolic link|does not exist/);
+        expect(g.calls).toHaveLength(0);
+        return;
+      }
+      expect(g.calls[0]?.user).toContain("The file the CLI would post.");
+      expect(g.calls[0]?.user).not.toContain("The file beside the link.");
+      const child = Bun.spawn(["bash", "-c", (result?.input?.command as string) ?? command], {
+        cwd: work,
+        env: { ...process.env, ...STUB, ASKGATE_POSTED: posted },
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      expect(await child.exited).toBe(0);
+      expect(JSON.parse(fs.readFileSync(posted, "utf8")).body).toBe("The file the CLI would post.\n");
+    }, 30_000);
 
     test("an unreadable --path is told to send the text with --content-file -, never --path -, which the CLI opens as a file named -", async () => {
       const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
