@@ -3,7 +3,8 @@ import { harnessPorts } from "./harness-ports";
 // Minimal GitHub App API for the architecture-source access check, the
 // architecture importer and the delivery reconcile: the installation lookup, the
 // installation-token mint, the repository read that proves the minted token works,
-// the commit/tree/blob reads a sync walks, and empty delivery listings. Tests seed
+// the exact branch read a source's save makes, the commit/tree/blob reads a sync
+// walks, and empty delivery listings. Tests seed
 // per-repository state through /__fixture/repos; the server reaches this via
 // DISPATCH_GITHUB_API_BASE.
 
@@ -122,6 +123,21 @@ Bun.serve({
     const pull = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/pulls\/\d+$/);
     if (request.method === "GET" && pull !== null) {
       return Response.json({ message: "fixture has no pull request" }, { status: 500 });
+    }
+
+    // The exact branch read a source's save makes (`git/ref/heads/{branch}`, a `/` in the name
+    // percent-encoded by the Go client): every seeded repository has the branch, its head the
+    // commit the commits read answers.
+    const branchRef = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/git\/ref\/heads\/([^/]+)$/);
+    if (request.method === "GET" && branchRef !== null) {
+      const repo = repos.get(`${branchRef[1]}/${branchRef[2]}`);
+      if (repo === undefined) {
+        return Response.json({ message: "Not Found" }, { status: 404 });
+      }
+      return Response.json({
+        object: { sha: commitFor(repo), type: "commit" },
+        ref: `refs/heads/${decodeURIComponent(branchRef[3] ?? "")}`,
+      });
     }
 
     // As GitHub does: the bare sha for `Accept: application/vnd.github.sha` (what the Go

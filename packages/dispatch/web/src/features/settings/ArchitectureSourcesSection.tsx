@@ -91,7 +91,8 @@ export function ArchitectureSourcesSection(): ReactNode {
         A project can import its architecture documents from several repositories, each on one
         branch. Its component model is every source's components together, so a component id must
         not repeat across a project's sources. Saving verifies the Dispatch GitHub App can read the
-        repository; saving a repository the project already has changes its branch.
+        repository and that the branch exists in it (a branch name, not a commit or tag); saving a
+        repository the project already has changes its branch.
       </p>
 
       {sources.isPending || projects.isPending ? (

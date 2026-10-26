@@ -125,8 +125,10 @@ func (s *server) putArchitectureSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The access check, of the repository and of the branch, runs before any write: a failed
-	// re-PUT leaves the stored source untouched.
+	// The access check, of the repository and of the branch, runs before any write: a value that
+	// is not exactly the name of a branch the repository has (a commit SHA, a relative ref such as
+	// main~1, HEAD, a refs/ path) is refused like a missing branch, and a failed re-PUT leaves the
+	// stored source untouched.
 	installationID, err := s.checkArchitectureSource(r.Context(), owner, name, branch)
 	if err != nil {
 		if errors.Is(err, githubapp.ErrNoAppKey) || errors.Is(err, githubapp.ErrNoInstallation) || errors.Is(err, githubapp.ErrNoContentsRead) || errors.Is(err, githubapp.ErrNoBranch) {
@@ -181,9 +183,12 @@ func (s *server) putArchitectureSource(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, source)
 }
 
-// checkArchitectureSource proves the GitHub App can read owner/name and that branch exists in it,
-// and answers the installation that reads it. The sync refuses a missing branch the same way, so
-// a save that skipped the branch would store a source no sync can import.
+// checkArchitectureSource proves the GitHub App can read owner/name and that branch is the name of
+// a branch it has, and answers the installation that reads it. The sync refuses a missing branch
+// the same way, so a save that skipped the branch would store a source no sync can import. It
+// reads the branch's exact ref (githubapp.Client.Branch), not the commit the sync's Ref resolves:
+// GitHub's commits read takes any commit-ish, so a SHA or main~1 would pass it and be stored as
+// the source's branch.
 func (s *server) checkArchitectureSource(ctx context.Context, owner, name, branch string) (int64, error) {
 	check, err := s.deps.GitHub.CheckSource(ctx, owner, name)
 	if err != nil {
@@ -193,7 +198,7 @@ func (s *server) checkArchitectureSource(ctx context.Context, owner, name, branc
 	if err != nil {
 		return 0, err
 	}
-	if _, err := s.deps.GitHub.Ref(ctx, token, owner, name, branch); err != nil {
+	if _, err := s.deps.GitHub.Branch(ctx, token, owner, name, branch); err != nil {
 		return 0, err
 	}
 	return check.InstallationID, nil

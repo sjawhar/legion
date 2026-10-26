@@ -50,15 +50,21 @@ type fakeGitHubApp struct {
 	installations map[string]string
 	tokenMints    int
 	repos         map[string]*fakeArchitectureRepo
-	// headReads lists every branch head lookup, as "owner/repo@branch", in order: which
-	// sources a sync attempted.
+	// headReads lists every branch head lookup, as "owner/repo@branch", in order: the saves'
+	// exact branch reads and the syncs' commit reads, which sources each attempted.
 	headReads []string
 }
 
+// fixtureBranches are the branches every fixture repository has, unless branchMissing: the exact
+// branch read finds these names and no other, as GitHub's finds no SHA, `main~1`, `HEAD` or
+// `refs/heads/main`, which the commits route resolves.
+var fixtureBranches = map[string]bool{"main": true, "release": true}
+
 // fakeArchitectureRepo is one repository's architecture branch. commit is the
-// sha every branch resolves to; branchMissing answers 422 instead, as GitHub
-// does for a branch that does not exist, and a repository absent from
-// fakeGitHubApp.repos answers 404, as GitHub does for one it cannot find.
+// sha every commit-ish resolves to, and the head of each of fixtureBranches;
+// branchMissing answers 422 instead on the commits route, and 404 on the exact
+// branch read, as GitHub does for a branch that does not exist, and a repository
+// absent from fakeGitHubApp.repos answers 404, as GitHub does for one it cannot find.
 // files is keyed by file name inside architecture.SourceDir.
 type fakeArchitectureRepo struct {
 	commit        string
@@ -126,6 +132,24 @@ func (f *fakeGitHubApp) handler(t *testing.T) http.Handler {
 			return
 		}
 		fmt.Fprintf(w, `{"sha":%q}`, repo.commit)
+	})
+	// The exact branch read: GitHub answers 404 for any name that is not exactly a branch's.
+	mux.HandleFunc("GET /repos/{owner}/{repo}/git/ref/heads/{branch...}", func(w http.ResponseWriter, r *http.Request) {
+		branch := r.PathValue("branch")
+		f.headReads = append(f.headReads, r.PathValue("owner")+"/"+r.PathValue("repo")+"@"+branch)
+		repo := f.repo(r)
+		if repo == nil || repo.branchMissing || !fixtureBranches[branch] {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"message":"Not Found","documentation_url":"https://docs.github.com/rest/git/refs#get-a-reference","status":"404"}`)
+			return
+		}
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"ref":    "refs/heads/" + branch,
+			"object": map[string]string{"sha": repo.commit, "type": "commit"},
+		}); err != nil {
+			t.Errorf("encode ref: %v", err)
+		}
 	})
 	mux.HandleFunc("GET /repos/{owner}/{repo}/git/trees/{ref}", func(w http.ResponseWriter, r *http.Request) {
 		if _, dir, ok := strings.Cut(r.PathValue("ref"), ":"); !ok || dir != architecture.SourceDir {
@@ -870,6 +894,58 @@ func TestArchitectureSourceRePutRefusesAMissingBranch(t *testing.T) {
 	}
 	if got, want := sourceEvents(t, database), []string{"CORE legion/arch@main deleted=false by alice"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("source events = %q, want %q", got, want)
+	}
+}
+
+// A save takes only the name of a branch the repository has. A full commit SHA, a relative ref,
+// HEAD or a `refs/` path each resolve to a commit on the sync's commits read, but none is a
+// branch: each is refused before any write, 409 SOURCE_ACCESS naming the value and the
+// repository, with no source row and no event; and re-pointing a saved source at one leaves the
+// source on its branch.
+func TestArchitectureSourcePutRefusesACommitThatIsNoBranch(t *testing.T) {
+	fake := &fakeGitHubApp{
+		installations: map[string]string{"legion/arch": "read"},
+		repos:         map[string]*fakeArchitectureRepo{"legion/arch": {commit: shaOne, files: archFiles()}},
+	}
+	handler, database := newArchitectureSourceServer(t, fake)
+	createTestProject(t, handler, "CORE")
+	commitish := []string{shaOne, "main~1", "main^", "HEAD", "refs/heads/main"}
+
+	refuse := func(t *testing.T, branch string) {
+		t.Helper()
+		refused := dispatchRequest(t, handler, http.MethodPut, sourcePath("CORE", "legion/arch"), map[string]string{"branch": branch}, "alice")
+		if refused.Code != http.StatusConflict {
+			t.Fatalf("put on %q: status=%d body=%s, want 409 SOURCE_ACCESS", branch, refused.Code, refused.Body.String())
+		}
+		if body := decodeBody[map[string]string](t, refused); body["code"] != "SOURCE_ACCESS" || !strings.Contains(body["error"], "the branch does not exist: "+branch+" on legion/arch") {
+			t.Fatalf("put on %q: body=%s, want SOURCE_ACCESS naming %s on legion/arch", branch, refused.Body.String(), branch)
+		}
+	}
+	for _, branch := range commitish {
+		t.Run("save "+branch, func(t *testing.T) {
+			refuse(t, branch)
+			if sources := listSources(t, handler, "CORE"); len(sources) != 0 {
+				t.Fatalf("refused save of %q wrote sources: %q", branch, sourceStrings(sources))
+			}
+			if events := sourceEvents(t, database); len(events) != 0 {
+				t.Fatalf("refused save of %q wrote events: %q", branch, events)
+			}
+		})
+	}
+
+	putSource(t, handler, "CORE", "legion/arch", "main")
+	for _, branch := range commitish {
+		t.Run("re-save "+branch, func(t *testing.T) {
+			refuse(t, branch)
+			if got, want := sourceStrings(listSources(t, handler, "CORE")), []string{
+				"CORE legion/arch@main enabled=true commit=- error=- components=0",
+			}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("sources after the refused re-save of %q = %q, want %q", branch, got, want)
+			}
+			if got, want := sourceEvents(t, database), []string{"CORE legion/arch@main deleted=false by alice"}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("source events after the refused re-save of %q = %q, want %q", branch, got, want)
+			}
+		})
 	}
 }
 
