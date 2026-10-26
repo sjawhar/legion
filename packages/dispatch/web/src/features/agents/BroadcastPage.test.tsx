@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerAgentStates } from "../../__tests__/send-answers";
 import { ApiError, api } from "../../api/client";
 import type {
   Agent,
@@ -85,10 +86,10 @@ function renderBroadcast(
   );
   const getMyAgentState = spyOn(api, "getMyAgentState").mockResolvedValue(agentState);
   const putAgentState = markRefused
-    ? spyOn(api, "putAgentState").mockRejectedValue(
+    ? answerAgentStates().mockRejectedValue(
         new ApiError(400, { code: "STATE_INPUT", error: "an old server's refusal" })
       )
-    : spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 });
+    : answerAgentStates().mockResolvedValue({ unread_replies: 0 });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <MemoryRouter initialEntries={[{ pathname: "/agents/broadcasts/broadcast-1", state }]}>

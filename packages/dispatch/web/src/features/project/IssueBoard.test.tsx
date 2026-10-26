@@ -13,6 +13,7 @@ import type { ReactNode } from "react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerIssuePatches } from "../../__tests__/send-answers";
 import { ApiError, api } from "../../api/client";
 import type { Issue, IssueSummary, UserState } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
@@ -231,7 +232,7 @@ test("a failed move rolls the board back, refetches it and tells the truth about
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const queryKey = ["issues", "project", "CORE"] as const;
   queryClient.setQueryData(queryKey, issues);
-  const patchIssue = spyOn(api, "patchIssue").mockRejectedValue(
+  const patchIssue = answerIssuePatches().mockRejectedValue(
     new ApiError(400, { code: "RANK_INPUT", error: "rank neighbors are not ordered" })
   );
   const hook = renderMoves(queryClient);
@@ -258,7 +259,7 @@ test("any other failure shows the server's message and still refetches", async (
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const queryKey = ["issues", "project", "CORE"] as const;
   queryClient.setQueryData(queryKey, issues);
-  const patchIssue = spyOn(api, "patchIssue").mockRejectedValue(
+  const patchIssue = answerIssuePatches().mockRejectedValue(
     new ApiError(403, { code: "FORBIDDEN", error: "not your project" })
   );
   const hook = renderMoves(queryClient);
@@ -277,7 +278,7 @@ test("two rapid moves on one board run one after the other, the second from the 
   const queryKey = ["issues", "project", "CORE"] as const;
   queryClient.setQueryData(queryKey, issues);
   const settle: Array<(issue: Issue) => void> = [];
-  const patchIssue = spyOn(api, "patchIssue").mockImplementation(
+  const patchIssue = answerIssuePatches().mockImplementation(
     () =>
       new Promise<Issue>((resolve) => {
         settle.push(resolve);
@@ -337,7 +338,7 @@ const keyboardIssues: IssueSummary[] = [
 /** A PATCH that never answers: the board stays as the move placed it, so a test reads the
  *  optimistic placement rather than the seed the mocked refetch would hand back. */
 function patchInFlight() {
-  return spyOn(api, "patchIssue").mockImplementation(() => new Promise<Issue>(() => {}));
+  return answerIssuePatches().mockImplementation(() => new Promise<Issue>(() => {}));
 }
 
 test("Shift+J moves the focused card down through moveCard, announces the new position and keeps focus on it; Shift+K at the top does nothing", async () => {
@@ -581,7 +582,7 @@ test("a board refetch already on the wire when a card moves is dropped: the card
 
 test("a board refetch asked for while a move is unanswered waits for the answer, then reads the moved board", async () => {
   const answer = Promise.withResolvers<Issue>();
-  const patchIssue = spyOn(api, "patchIssue").mockImplementation(() => answer.promise);
+  const patchIssue = answerIssuePatches().mockImplementation(() => answer.promise);
   const { cleanup, listIssues, queryClient } = renderBoard({}, undefined, keyboardIssues);
   try {
     const board = await screen.findByRole("region", { name: "Project board" });
@@ -691,7 +692,7 @@ test("Enter and o open the focused card once, p focuses its priority select, Esc
 });
 
 test("Space on a focused card lifts nothing, and the card's instructions name the registry keys, not dnd-kit's grammar", async () => {
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue(patched);
+  const patchIssue = answerIssuePatches().mockResolvedValue(patched);
   const { cleanup } = renderBoard({}, undefined, keyboardIssues);
   try {
     const board = await screen.findByRole("region", { name: "Project board" });
@@ -804,7 +805,7 @@ test("a labelled move writes the rendered list, names its neighbours, and refetc
   // The server answers the labelled query without the unlabelled card.
   queryClient.setQueryData(labelledKey, [alpha, charlie, delta]);
   queryClient.setQueryData(baseKey, [alpha, bravo, charlie, delta]);
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue(patched);
+  const patchIssue = answerIssuePatches().mockResolvedValue(patched);
   const hook = renderMoves(queryClient, labels);
   try {
     await act(() => hook.result.current.moveCard("CORE-4", "todo", 1));

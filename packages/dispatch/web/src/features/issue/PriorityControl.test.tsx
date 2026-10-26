@@ -1,9 +1,9 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
-import { api } from "../../api/client";
+import { answerIssuePatches } from "../../__tests__/send-answers";
 import type { InboxRow, Issue, IssueDetails, IssueSummary } from "../../api/types";
 import { PriorityControl } from "./PriorityControl";
 
@@ -135,7 +135,7 @@ test("PriorityControl shows the issue's priority and offers Unset and P0-P3", ()
 
 test("PriorityControl saves the picked priority, shows it before the server answers, and keeps focus", async () => {
   const save = Promise.withResolvers<Issue>();
-  const patchIssue = spyOn(api, "patchIssue").mockImplementation(() => save.promise);
+  const patchIssue = answerIssuePatches().mockImplementation(() => save.promise);
   const { queryClient, unmount } = renderControl();
   try {
     select().focus();
@@ -170,7 +170,7 @@ test("PriorityControl saves the picked priority, shows it before the server answ
 });
 
 test("PriorityControl sends null for Unset and shows the muted tag", async () => {
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue({ ...issue, priority: null });
+  const patchIssue = answerIssuePatches().mockResolvedValue({ ...issue, priority: null });
   const { unmount } = renderControl();
   try {
     fireEvent.change(select(), { target: { value: "" } });
@@ -188,7 +188,7 @@ test("PriorityControl sends null for Unset and shows the muted tag", async () =>
 
 test("PriorityControl rolls every surface back and offers Retry when the save fails", async () => {
   const save = Promise.withResolvers<Issue>();
-  const patchIssue = spyOn(api, "patchIssue").mockImplementation(() => save.promise);
+  const patchIssue = answerIssuePatches().mockImplementation(() => save.promise);
   const { queryClient, unmount } = renderControl();
   try {
     fireEvent.change(select(), { target: { value: "0" } });
@@ -218,7 +218,7 @@ test("PriorityControl rolls every surface back and offers Retry when the save fa
 test("PriorityControl saves a pick made during the first save once that save settles, newest first shown", async () => {
   const first = Promise.withResolvers<Issue>();
   const second = Promise.withResolvers<Issue>();
-  const patchIssue = spyOn(api, "patchIssue")
+  const patchIssue = answerIssuePatches()
     .mockImplementationOnce(() => first.promise)
     .mockImplementationOnce(() => second.promise);
   const { queryClient, unmount } = renderControl();
@@ -260,7 +260,7 @@ test("PriorityControl saves a pick made during the first save once that save set
 test("a queued pick that fails rolls back to the priority the server last confirmed, not the pick", async () => {
   const first = Promise.withResolvers<Issue>();
   const second = Promise.withResolvers<Issue>();
-  const patchIssue = spyOn(api, "patchIssue")
+  const patchIssue = answerIssuePatches()
     .mockImplementationOnce(() => first.promise)
     .mockImplementationOnce(() => second.promise);
   const { queryClient, unmount } = renderControl();

@@ -25,6 +25,7 @@ import {
   type FakeLiveSockets,
   installFakeLiveSockets,
 } from "../../__tests__/live-socket-harness";
+import { answerAgentMessages, answerAgentStates } from "../../__tests__/send-answers";
 import { ApiError, api, NetworkError } from "../../api/client";
 import { liveSocketFor } from "../../api/live-socket";
 import type { Agent, Message, MessageRead, UserAgentStates } from "../../api/types";
@@ -299,7 +300,7 @@ function relayStatus(view: HTMLElement = screen.getByTestId("agent-conversation"
 // call. The live view is where the human talks to the session, so it has to show those replies,
 // and seeing them there is reading them.
 test("the live view shows the session's Dispatch replies to direct messages and marks them read", async () => {
-  const putAgentState = spyOn(api, "putAgentState").mockImplementation(async (_session, input) => ({
+  const putAgentState = answerAgentStates().mockImplementation(async (_session, input) => ({
     ...input,
     unread_replies: 0,
   }));
@@ -329,7 +330,7 @@ test("the live view shows the session's Dispatch replies to direct messages and 
 // A read mark that fails short of Dispatch's verdict is tried again under its key, so one dropped
 // request does not leave the badge up until the session replies once more.
 test("the live view retries a read mark that failed to save", async () => {
-  const putAgentState = spyOn(api, "putAgentState")
+  const putAgentState = answerAgentStates()
     .mockRejectedValueOnce(new ApiError(503, { code: "UNAVAILABLE", error: "restarting" }))
     .mockImplementation(async (_session, input) => ({ ...input, unread_replies: 0 }));
   renderLiveView({
@@ -1251,12 +1252,10 @@ function held(select: HTMLSelectElement): boolean {
 /** Answers each switch's send as Dispatch stores it: the person's message, its attempt sent. */
 function spyOnSwitchSends() {
   let count = 0;
-  const createAgentMessage = spyOn(api, "createAgentMessage").mockImplementation(
-    async (_session, input) => {
-      count += 1;
-      return message(`switch-${count}`, input.body);
-    }
-  );
+  const createAgentMessage = answerAgentMessages().mockImplementation(async (_session, input) => {
+    count += 1;
+    return message(`switch-${count}`, input.body);
+  });
   spies.push(createAgentMessage);
   return createAgentMessage;
 }
@@ -1502,7 +1501,7 @@ interface HeldSend {
 /** Dispatch holding every send until the row answers it: `held[n]` answers the nth. */
 function holdSends() {
   const held: HeldSend[] = [];
-  const createAgentMessage = spyOn(api, "createAgentMessage").mockImplementation(() => {
+  const createAgentMessage = answerAgentMessages().mockImplementation(() => {
     const answer = Promise.withResolvers<Message>();
     held.push(answer);
     return answer.promise;

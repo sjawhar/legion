@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerIssuePatches } from "../../__tests__/send-answers";
 import { ApiError, api, NetworkError } from "../../api/client";
 import type { Issue, IssueDetails, IssueSummary } from "../../api/types";
 import type { IssueStatus } from "../project/board-model";
@@ -99,7 +100,7 @@ function stubIssueApi() {
   // The server answers a PATCH with the narrow `Issue`, not `IssueDetails`: no artifacts,
   // children, or open asks. The stub mirrors that so the page is exercised against the
   // real response shape.
-  const patchIssue = spyOn(api, "patchIssue").mockImplementation(
+  const patchIssue = answerIssuePatches().mockImplementation(
     async (_key, { rank: _rank, components: _components, ...update }) =>
       narrowIssue({ ...issue, ...update })
   );

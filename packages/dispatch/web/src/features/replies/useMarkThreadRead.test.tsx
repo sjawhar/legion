@@ -1,4 +1,4 @@
-import { afterEach, expect, jest, spyOn, test } from "bun:test";
+import { afterEach, expect, jest, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render } from "@testing-library/react";
 import type { ReactNode } from "react";
@@ -8,7 +8,7 @@ import {
   installIntersectionObserver,
 } from "../../__tests__/intersection-observer";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
-import { api } from "../../api/client";
+import { answerThreadReads } from "../../__tests__/send-answers";
 import { myRepliesOwnerQuery, whoAmIQuery } from "../../api/queries";
 import type { MyRepliesResponse, MyReplyRow } from "../../api/types";
 import { replyRow as row } from "./replies-fixture";
@@ -72,7 +72,7 @@ async function dwell(screen: IntersectionControl, element: Element) {
 test("a thread outside the viewer's unread set is never watched or marked", async () => {
   jest.useFakeTimers();
   const screen = installIntersectionObserver();
-  const mark = spyOn(api, "markThreadRead").mockResolvedValue(undefined);
+  const mark = answerThreadReads().mockResolvedValue(undefined);
   const { view } = renderThread(unreadSet([row("other-thread")]), {
     at: "2026-10-12T00:00:00Z",
     threadId: "thread-1",
@@ -92,7 +92,7 @@ test("a thread outside the viewer's unread set is never watched or marked", asyn
 test("an unread thread is marked through its newest reply once that reply dwells, once per reply", async () => {
   jest.useFakeTimers();
   const screen = installIntersectionObserver();
-  const mark = spyOn(api, "markThreadRead").mockResolvedValue(undefined);
+  const mark = answerThreadReads().mockResolvedValue(undefined);
   const first = "2026-10-12T00:00:00.123456Z";
   const second = "2026-10-12T00:05:00Z";
   const { rerender, view } = renderThread(unreadSet([row("thread-1")]), {
@@ -111,7 +111,7 @@ test("an unread thread is marked through its newest reply once that reply dwells
       jest.advanceTimersByTime(1);
     });
     for (let flush = 0; flush < 5; flush += 1) await act(async () => {});
-    expect(mark.mock.calls).toEqual([["thread-1", first, keyedAttempt]]);
+    expect(mark.mock.calls).toEqual([["thread-1", { read_through: first }, keyedAttempt]]);
 
     // The same reply seen again sends nothing more.
     act(() => screen.hide(newest));
@@ -122,8 +122,8 @@ test("an unread thread is marked through its newest reply once that reply dwells
     rerender({ at: second, threadId: "thread-1" });
     await dwell(screen, view.getByTestId("newest"));
     expect(mark.mock.calls).toEqual([
-      ["thread-1", first, keyedAttempt],
-      ["thread-1", second, keyedAttempt],
+      ["thread-1", { read_through: first }, keyedAttempt],
+      ["thread-1", { read_through: second }, keyedAttempt],
     ]);
   } finally {
     view.unmount();
@@ -137,14 +137,16 @@ test("an unread thread is marked through its newest reply once that reply dwells
 test("an owner with more unread threads than its set holds watches every thread", async () => {
   jest.useFakeTimers();
   const screen = installIntersectionObserver();
-  const mark = spyOn(api, "markThreadRead").mockResolvedValue(undefined);
+  const mark = answerThreadReads().mockResolvedValue(undefined);
   const { view } = renderThread(unreadSet([row("other-thread")], 201), {
     at: "2026-10-12T00:00:00Z",
     threadId: "thread-1",
   });
   try {
     await dwell(screen, view.getByTestId("newest"));
-    expect(mark.mock.calls).toEqual([["thread-1", "2026-10-12T00:00:00Z", keyedAttempt]]);
+    expect(mark.mock.calls).toEqual([
+      ["thread-1", { read_through: "2026-10-12T00:00:00Z" }, keyedAttempt],
+    ]);
   } finally {
     view.unmount();
     mark.mockRestore();

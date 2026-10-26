@@ -6,6 +6,7 @@ import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerIssuePatches } from "../../__tests__/send-answers";
 import { ApiError, api } from "../../api/client";
 import type {
   Agent,
@@ -469,7 +470,7 @@ test("IssuePage creates a label from the multi-select and saves the final draft 
     { ...labeledIssue, open_asks: 0 },
     { ...issue, key: "CORE-2", labels: ["frontend"], open_asks: 0 },
   ]);
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue({
+  const patchIssue = answerIssuePatches().mockResolvedValue({
     ...labeledIssue,
     labels: ["bug", "urgent"],
   });
@@ -504,7 +505,7 @@ test("IssuePage does not save after a label is toggled off and back on", async (
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([
     { ...labeledIssue, open_asks: 0 },
   ]);
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue(labeledIssue);
+  const patchIssue = answerIssuePatches().mockResolvedValue(labeledIssue);
   const view = renderIssuePage();
 
   try {
@@ -536,7 +537,7 @@ test("IssuePage returns focus to the label trigger when Escape closes an unchang
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([
     { ...labeledIssue, open_asks: 0 },
   ]);
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue(labeledIssue);
+  const patchIssue = answerIssuePatches().mockResolvedValue(labeledIssue);
   const view = renderIssuePage();
 
   try {
@@ -1640,7 +1641,7 @@ test("IssuePage closes an issue and reopens it into Backlog", async () => {
   });
   const closeSave = Promise.withResolvers<IssueDetails>();
   const reopenSave = Promise.withResolvers<IssueDetails>();
-  const patchIssue = spyOn(api, "patchIssue").mockImplementation(async (_key, input) => {
+  const patchIssue = answerIssuePatches().mockImplementation(async (_key, input) => {
     if (input.status === "done") return closeSave.promise;
     if (input.status === "backlog") return reopenSave.promise;
     throw new Error(`Unexpected issue update: ${JSON.stringify(input)}`);
@@ -1694,7 +1695,7 @@ test("IssuePage closes an issue and reopens it into Backlog", async () => {
 
 test("IssuePage lets a human move a Todo issue to In progress", async () => {
   const restore = stubIssuePage(issue);
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue({
+  const patchIssue = answerIssuePatches().mockResolvedValue({
     ...issue,
     status: "in_progress",
   });

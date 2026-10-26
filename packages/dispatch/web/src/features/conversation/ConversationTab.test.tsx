@@ -9,6 +9,8 @@ import {
   type Placement,
 } from "../../__tests__/intersection-observer";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerIssueStates, answerThreadReads } from "../../__tests__/send-answers";
+import type { WriteBounds } from "../../api/client";
 import { ApiError, api } from "../../api/client";
 import type {
   Actor,
@@ -1716,7 +1718,9 @@ test("Conversation restores edit controls and the draft when its owner save reje
 
 interface ThreadsPage {
   readonly cleanup: () => void;
-  readonly mark: Mock<typeof api.markThreadRead>;
+  readonly mark: Mock<
+    (id: string, body: { read_through: string }, bounds: WriteBounds) => Promise<unknown>
+  >;
   readonly turn: (id: string) => HTMLElement;
   readonly viewport: IntersectionControl;
 }
@@ -1729,8 +1733,8 @@ interface ThreadsPage {
 function renderThreads(lists: Lists, unread: readonly string[], focusItemId?: string): ThreadsPage {
   const viewport = installIntersectionObserver();
   const stub = stubLists(lists);
-  const putIssueState = spyOn(api, "putIssueState").mockImplementation(async () => issueState());
-  const mark = spyOn(api, "markThreadRead").mockResolvedValue(undefined);
+  const putIssueState = answerIssueStates().mockImplementation(async () => issueState());
+  const mark = answerThreadReads().mockResolvedValue(undefined);
   const scrollIntoView = HTMLElement.prototype.scrollIntoView;
   HTMLElement.prototype.scrollIntoView = () => {};
   const queryClient = newQueryClient();
@@ -1791,7 +1795,9 @@ test("landing on a message thread shows its replies and marks the thread read th
     const newest = page.turn("message:message-2");
     expect(page.viewport.observed()).toContain(newest);
     await dwellOn(page.viewport, newest);
-    expect(page.mark.mock.calls).toEqual([["message-1", "2026-09-09T00:05:00.25Z", keyedAttempt]]);
+    expect(page.mark.mock.calls).toEqual([
+      ["message-1", { read_through: "2026-09-09T00:05:00.25Z" }, keyedAttempt],
+    ]);
   } finally {
     page.cleanup();
   }
@@ -1810,7 +1816,9 @@ test("a message thread taller than the screen is marked read from its newest rep
     await screen.findByText("Session reply message-3");
     act(() => page.viewport.show(page.turn("message:message-1"), { height: 3_000, visible: 300 }));
     await dwellOn(page.viewport, page.turn("message:message-3"));
-    expect(page.mark.mock.calls).toEqual([["message-1", "2026-09-09T00:06:00Z", keyedAttempt]]);
+    expect(page.mark.mock.calls).toEqual([
+      ["message-1", { read_through: "2026-09-09T00:06:00Z" }, keyedAttempt],
+    ]);
     // The older reply is not what the mark watches.
     expect(page.viewport.observed()).not.toContain(page.turn("message:message-2"));
   } finally {
@@ -1831,7 +1839,9 @@ test("a targeted message's thread is marked read once its newest reply is on scr
   try {
     await screen.findByText("Session reply message-2");
     await dwellOn(page.viewport, page.turn("message:message-2"));
-    expect(page.mark.mock.calls).toEqual([["message-1", "2026-09-09T00:07:00Z", keyedAttempt]]);
+    expect(page.mark.mock.calls).toEqual([
+      ["message-1", { read_through: "2026-09-09T00:07:00Z" }, keyedAttempt],
+    ]);
   } finally {
     page.cleanup();
   }
@@ -1868,7 +1878,9 @@ test("at a desktop width, landing on a comment opens its thread inline and readi
       page.turn("comment:root-comment").querySelector("article")?.getAttribute("aria-expanded")
     ).toBe("true");
     await dwellOn(page.viewport, replyItem);
-    expect(page.mark.mock.calls).toEqual([["root-comment", reply.created_at, keyedAttempt]]);
+    expect(page.mark.mock.calls).toEqual([
+      ["root-comment", { read_through: reply.created_at }, keyedAttempt],
+    ]);
   } finally {
     page.cleanup();
   }
@@ -1905,7 +1917,9 @@ test("on a phone, landing on a comment opens its thread dialog and reading it ma
     const replyItem = within(dialog).getByText("Reply comment").closest("li");
     if (replyItem === null) throw new Error("expected the reply's item");
     await dwellOn(page.viewport, replyItem);
-    expect(page.mark.mock.calls).toEqual([["root-comment", reply.created_at, keyedAttempt]]);
+    expect(page.mark.mock.calls).toEqual([
+      ["root-comment", { read_through: reply.created_at }, keyedAttempt],
+    ]);
   } finally {
     page.cleanup();
     restoreViewport();
@@ -1938,7 +1952,7 @@ test("the read mark writes the issue's head seq as the reader, and retries an un
     "CORE-1": issueState([], 1),
   }));
   let writes = 0;
-  const putIssueState = spyOn(api, "putIssueState").mockImplementation(async (_key, input) => {
+  const putIssueState = answerIssueStates().mockImplementation(async (_key, input) => {
     writes += 1;
     if (writes === 1) throw new ApiError(503, { code: "UNAVAILABLE", error: "down" });
     return issueState([], input.last_read_seq ?? 0);

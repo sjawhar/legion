@@ -18,6 +18,7 @@ import {
   installIntersectionObserver,
 } from "../../__tests__/intersection-observer";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerThreadReads } from "../../__tests__/send-answers";
 import { api } from "../../api/client";
 import type { Comment } from "../../api/types";
 import { seedUnread } from "../replies/replies-fixture";
@@ -539,7 +540,7 @@ afterEach(() => {
 function renderUnreadCard(expanded: boolean) {
   jest.useFakeTimers();
   const screen = installIntersectionObserver();
-  const mark = spyOn(api, "markThreadRead").mockResolvedValue(undefined);
+  const mark = answerThreadReads().mockResolvedValue(undefined);
   const queryClient = new QueryClient({
     defaultOptions: {
       mutations: { retry: false },
@@ -576,7 +577,9 @@ test("an expanded thread is marked read once its newest reply has been on screen
     // The watched element is the newest reply's own, not the card around the whole thread.
     expect(card.screen.observed()).toEqual([newest]);
     await dwellOn(newest, card.screen);
-    expect(card.mark.mock.calls).toEqual([[root.id, reply.created_at, keyedAttempt]]);
+    expect(card.mark.mock.calls).toEqual([
+      [root.id, { read_through: reply.created_at }, keyedAttempt],
+    ]);
   } finally {
     card.cleanup();
   }

@@ -9,6 +9,7 @@ import { MemoryRouter } from "react-router-dom";
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { installIntersectionObserver } from "../../__tests__/intersection-observer";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerThreadReads } from "../../__tests__/send-answers";
 import { ApiError, api } from "../../api/client";
 import type { AnswerAskInput, Ask, AskAnswer, AskRead, Comment } from "../../api/types";
 import { seedUnread } from "../replies/replies-fixture";
@@ -299,7 +300,7 @@ function renderUnreadAsk(props: {
 }) {
   jest.useFakeTimers();
   const screen = installIntersectionObserver();
-  const mark = spyOn(api, "markThreadRead").mockResolvedValue(undefined);
+  const mark = answerThreadReads().mockResolvedValue(undefined);
   const ask = answeredAsk(props.answer === undefined ? {} : { answer: props.answer });
   const replies = [
     askReply("reply-1", "2026-10-08T03:00:00Z"),
@@ -349,7 +350,9 @@ for (const shape of ["inline", "collapsed"] as const) {
         jest.advanceTimersByTime(1_000);
       });
       for (let flush = 0; flush < 5; flush += 1) await act(async () => {});
-      expect(card.mark.mock.calls).toEqual([["ask-1", "2026-10-08T04:00:00.5Z", keyedAttempt]]);
+      expect(card.mark.mock.calls).toEqual([
+        ["ask-1", { read_through: "2026-10-08T04:00:00.5Z" }, keyedAttempt],
+      ]);
     } finally {
       card.cleanup();
     }
@@ -386,7 +389,7 @@ test("an answer given after every reply is what the mark watches and reads throu
       jest.advanceTimersByTime(1_000);
     });
     for (let flush = 0; flush < 5; flush += 1) await act(async () => {});
-    expect(card.mark.mock.calls).toEqual([["ask-1", answer.at, keyedAttempt]]);
+    expect(card.mark.mock.calls).toEqual([["ask-1", { read_through: answer.at }, keyedAttempt]]);
   } finally {
     card.cleanup();
   }

@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-quer
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerIssuePatches } from "../../__tests__/send-answers";
 import { ApiError, api } from "../../api/client";
 import type { InboxRow, Issue, IssueDetails, IssueSummary } from "../../api/types";
 import { AssigneeControl } from "./AssigneeControl";
@@ -161,7 +162,7 @@ test("AssigneeControl reads who has signed in only once the reader reaches for i
 
 test("AssigneeControl reassigns optimistically on every surface and merges the server's answer", async () => {
   const save = Promise.withResolvers<Issue>();
-  const patchIssue = spyOn(api, "patchIssue").mockImplementation(() => save.promise);
+  const patchIssue = answerIssuePatches().mockImplementation(() => save.promise);
   const { queryClient, unmount } = renderControl();
   try {
     fireEvent.pointerEnter(select());
@@ -185,7 +186,7 @@ test("AssigneeControl reassigns optimistically on every surface and merges the s
 });
 
 test("AssigneeControl sends null for Unassigned", async () => {
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue({ ...issue, assignee: null });
+  const patchIssue = answerIssuePatches().mockResolvedValue({ ...issue, assignee: null });
   const { unmount } = renderControl();
   try {
     fireEvent.focus(select());
@@ -203,7 +204,7 @@ test("AssigneeControl sends null for Unassigned", async () => {
 });
 
 test("AssigneeControl rolls back and shows the server's refusal when the person has not signed in", async () => {
-  const patchIssue = spyOn(api, "patchIssue").mockRejectedValue(
+  const patchIssue = answerIssuePatches().mockRejectedValue(
     new ApiError(400, {
       code: "ASSIGNEE_NOT_ALLOWED",
       error: '"bob" has not signed in to Dispatch',
@@ -228,7 +229,7 @@ test("AssigneeControl rolls back and shows the server's refusal when the person 
 test("AssigneeControl keeps focus while a save is in flight and saves a pick made meanwhile after it", async () => {
   const first = Promise.withResolvers<Issue>();
   const second = Promise.withResolvers<Issue>();
-  const patchIssue = spyOn(api, "patchIssue")
+  const patchIssue = answerIssuePatches()
     .mockImplementationOnce(() => first.promise)
     .mockImplementationOnce(() => second.promise);
   const { queryClient, unmount } = renderControl();

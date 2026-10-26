@@ -5,6 +5,7 @@ import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerAskSnoozes, answerIssuePatches } from "../../__tests__/send-answers";
 import { ApiError, api } from "../../api/client";
 import type { AskRead, Comment, CredentialPendingRow, InboxRow, Issue } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
@@ -1674,7 +1675,7 @@ test("Assign to me PATCHes the viewer's lowercase login and keeps its row until 
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
   const getAsk = mockAskReads(rows);
   const save = Promise.withResolvers<Issue>();
-  const patchIssue = spyOn(api, "patchIssue").mockImplementation(() => save.promise);
+  const patchIssue = answerIssuePatches().mockImplementation(() => save.promise);
   const { unmount } = renderInbox("/?assignee=unassigned");
   try {
     await screen.findByText("Orphan question?");
@@ -1721,7 +1722,7 @@ test("a refused Assign to me keeps its row under the Unassigned filter, with the
   const getAsk = mockAskReads(rows);
   const firstSave = Promise.withResolvers<Issue>();
   let attempts = 0;
-  const patchIssue = spyOn(api, "patchIssue").mockImplementation(async () => {
+  const patchIssue = answerIssuePatches().mockImplementation(async () => {
     attempts += 1;
     return attempts === 1 ? firstSave.promise : narrowIssueOf(orphan, "alice");
   });
@@ -1779,7 +1780,7 @@ test("a sibling ask of the same issue leaving the list does not drop an in-fligh
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
   const getAsk = mockAskReads(rows);
   const save = Promise.withResolvers<Issue>();
-  const patchIssue = spyOn(api, "patchIssue").mockImplementation(() => save.promise);
+  const patchIssue = answerIssuePatches().mockImplementation(() => save.promise);
   const { queryClient, unmount } = renderInbox("/?assignee=everyone");
   try {
     await screen.findByText("Question A?");
@@ -1889,7 +1890,7 @@ test("Snooze folds a row into Later until the reader un-snoozes it", async () =>
   // the server would now hold rather than resurrecting the pre-snooze list.
   let served: InboxRow[] = [askA, askB];
   const getInbox = spyOn(api, "getInbox").mockImplementation(async () => served);
-  const snoozeAsk = spyOn(api, "snoozeAsk").mockImplementation(async (id, until) => {
+  const snoozeAsk = answerAskSnoozes().mockImplementation(async (id, { snoozed_until: until }) => {
     served = served.map((row) => (row.id === id ? { ...row, snoozed_until: until } : row));
     return { snoozed_until: until };
   });
@@ -1914,8 +1915,8 @@ test("Snooze folds a row into Later until the reader un-snoozes it", async () =>
     expect(rowIds()).toEqual(["ask-a"]);
     expect(screen.getByText(/Blocked on you: 1 item/)).toBeTruthy();
     expect(snoozeAsk).toHaveBeenCalledTimes(1);
-    const [, until] = snoozeAsk.mock.calls[0] ?? [];
-    expect(Date.parse(until ?? "")).toBeGreaterThan(Date.now());
+    const [, body] = snoozeAsk.mock.calls[0] ?? [];
+    expect(Date.parse(body?.snoozed_until ?? "")).toBeGreaterThan(Date.now());
 
     fireEvent.click(screen.getByRole("button", { name: /^Later \(1\)/ }));
     const later = screen.getByTestId("ask-ask-b").closest<HTMLElement>("[data-inbox-row]");
@@ -2012,8 +2013,8 @@ test("a snooze still saving says Snoozing…, not Un-snoozing…, in the band it
   const getInbox = spyOn(api, "getInbox").mockImplementation(async () => served);
   // Held open, so the render under test is the one while the write is in flight.
   let settle: (() => void) | undefined;
-  const snoozeAsk = spyOn(api, "snoozeAsk").mockImplementation(
-    (id, until) =>
+  const snoozeAsk = answerAskSnoozes().mockImplementation(
+    (id, { snoozed_until: until }) =>
       new Promise((resolve) => {
         settle = () => {
           served = served.map((each) =>
@@ -2062,7 +2063,7 @@ test("a snooze still saving says Snoozing…, not Un-snoozing…, in the band it
 test("a refused snooze rolls the row back and says why, where the reader can still see it", async () => {
   const row = issueAsk({ id: "ask-b", question: "Which format?" });
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([row]);
-  const snoozeAsk = spyOn(api, "snoozeAsk").mockRejectedValue(
+  const snoozeAsk = answerAskSnoozes().mockRejectedValue(
     new ApiError(400, { code: "SNOOZE_INPUT", error: "snoozed_until must be in the future" })
   );
   const getAsk = mockAskReads([row]);

@@ -11,7 +11,7 @@ import { blockSchemaCache } from "../features/doc/schema";
 import { resetReplyDrafts } from "../features/inbox/reply-drafts";
 import { resetPinState } from "../features/issue/pin-write";
 import { resetWriteStorage } from "../features/writes/write-storage";
-import { answerLineWritesByMethod } from "./line-write-methods";
+import { resetRouteAnswers } from "./send-answers";
 
 GlobalRegistrator.register();
 
@@ -22,10 +22,8 @@ GlobalRegistrator.register();
 // first render in its file.
 void blockSchemaCache.load(async () => serverBlockSchema as unknown as BlockSchema);
 
-// A plain write on a line goes out as `api.send` of its request; a test answers it, as every other
-// write, by spying on the client method that makes the same request (`line-write-methods.ts`).
-answerLineWritesByMethod();
-
+// A route a test answers (`answerRoute`) is that test's: the next test answers its own.
+afterEach(resetRouteAnswers);
 class WebSocketStub {
   binaryType = "arraybuffer";
   identifier = 0;

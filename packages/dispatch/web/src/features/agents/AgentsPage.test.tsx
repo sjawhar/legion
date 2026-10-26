@@ -8,7 +8,7 @@ import {
 } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
-
+import { answerAgentStates } from "../../__tests__/send-answers";
 import { ApiError, api, NetworkError, RequestTimeoutError } from "../../api/client";
 import type {
   Agent,
@@ -189,7 +189,7 @@ function renderAgents({
     state: "sent",
   });
   const getMyAgentState = spyOn(api, "getMyAgentState").mockResolvedValue(agentState);
-  const putAgentState = spyOn(api, "putAgentState").mockImplementation(async (_session, input) => ({
+  const putAgentState = answerAgentStates().mockImplementation(async (_session, input) => ({
     ...input,
     unread_replies: 0,
   }));

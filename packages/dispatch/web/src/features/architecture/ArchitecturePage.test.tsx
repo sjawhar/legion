@@ -11,6 +11,7 @@ import {
 import { MemoryRouter, useLocation } from "react-router-dom";
 
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerIssuePatches } from "../../__tests__/send-answers";
 import { ApiError, api } from "../../api/client";
 import type {
   ArchitectureTree,
@@ -147,7 +148,7 @@ function LocationProbe() {
 function renderPane(tree: ArchitectureTree, search = "") {
   const getArchitecture = spyOn(api, "getArchitecture").mockResolvedValue(tree);
   const syncArchitectureSource = spyOn(api, "syncArchitectureSource");
-  const patchIssue = spyOn(api, "patchIssue");
+  const patchIssue = answerIssuePatches();
   const getIssue = spyOn(api, "getIssue");
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
