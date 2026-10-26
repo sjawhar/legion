@@ -2,34 +2,32 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T06:05:00Z",
+  "completed": "2026-10-26T08:50:00Z",
   "generation": 3,
-  "round": "after review 5647844063: implementer head faf41f3e (code 954e9d18), a prose round",
+  "round": "the round retro sent back (dc06110d: bounded interest reads of GET /v1/sessions, /v1/registry/<id>, /v1/interests/<id>) and the forward merge of main 748e8d95 (5aee84d6); head 8d8816be",
+  "verdictProvenance": "provider not verified: this verdict was written in my own session and no subagent ran; the model name in my configuration is the one requested, not one read from the run's transcript",
   "implementerProof": {
     "verdict": "verified",
-    "how": "The round changes no compiled code: jj diff --name-only fd4ce3c4..954e9d18 lists packages/envoy/AGENTS.md, CHANGELOG.md, docs/architecture.md and internal/bus/publish_ended_context_test.go, and that test file's comment-stripped form (go/parser without ParseComments, printed through go/printer) hashes d69974ab4dc1a3f6039a35d25da2bfb6fd5ec71d7b41efece82fa2607cfa095c at both commits. No non-test .go file changed and the listener embeds no Markdown (the package's only go:embed directives are the broker and Dispatch migrations and the Dispatch block schema), so the listener binary is built from the source I drove on the real surface last round at dfe43f43, and that evidence (commit fd4ce3c4's test.json) carries. I checked each corrected sentence against the code it describes, as the review's findings are about prose accuracy."
+    "how": "Drove its frozen-relay case on the merged binary with my own rig (python relay frozen with the connection open, curl): GET /v1/sessions 503 in 1.004 s, GET /v1/registry/<miss> 503 in 1.002 s, GET /v1/interests/<miss> 503 in 3.505 s, each Retry-After: 1 with the busUnansweredPrefix body, cached interests still 200. Re-ran scripts/e2e-local.sh (exit 0, both PASS lines) with the A6' jq, TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget and both AgentToAgent integration tests. Its proof is accurate for a read that does not answer; the failure below is a read that answers with a record it cannot decode, which its proof did not drive."
   },
-  "failures": [],
-  "failed": 0,
-  "proof": [
+  "failures": [
     {
-      "criterion": "The delta is prose: no statement of the shipped code or the tests moved",
-      "surface": "the diff from my last verified head fd4ce3c4 to 954e9d18, and the one changed .go file parsed with its comments discarded",
-      "command": "jj diff --name-only --from fd4ce3c4702e --to 954e9d184941; go/parser (mode 0) + go/printer + sha256 of publish_ended_context_test.go at fd4ce3c4 and at this head; go build ./... && go vet ./internal/bus ./cmd/listener ./internal/store && gofmt -l cmd internal",
-      "observed": "changed: .legion/INFRA-141/review.json, packages/envoy/AGENTS.md, packages/envoy/CHANGELOG.md, packages/envoy/docs/architecture.md, packages/envoy/internal/bus/publish_ended_context_test.go; the test file's comment-stripped hash is d69974ab...095c on both sides; build, vet and gofmt clean",
-      "headSha": "faf41f3eb85bb1a45cef772a6b5c2e1990680c5f",
-      "negativeControl": "the AST hash is the control for the prose claim: had any statement in the test changed, the two hashes would differ and the suite would have had to run"
-    },
-    {
-      "criterion": "Each corrected sentence (review 5647844063's three findings) is true of the code at this head",
-      "surface": "packages/envoy/internal/bus/confirm.go, internal/bus/nats.go, internal/store/kv.go, cmd/listener/role_holder.go at this head",
-      "command": "read publishConfirmed (confirm.go:40-61), publishCoreTo (nats.go:928-942), ensureConnWithContext (nats.go:634-643), store.bounded and its callers (kv.go:436, 464, 553, 765), liveSessionEntry (role_holder.go:168-170); grep -rn withinContext over packages/envoy",
-      "observed": "publishConfirmed reads ctx.Deadline() and ctx.Err() before publish and refuses either a spent deadline or a cancel (lines 41-48): one check sees both, as AGENTS.md:1954, architecture.md and the CHANGELOG now say. publishCoreTo only passes ctx on (WithTimeout, ensureConnWithContext, publishConfirmed) and reads it nowhere, as the test comment says; ensureConnWithContext returns nil on a connected connection without reading ctx (641-642). RoleClaim/ReleaseExpiredRoleClaim/Get bound their bucket calls through bounded in internal/store/kv.go, and liveSessionEntry bounds the session read with Refresh(readCtx), as AGENTS.md:1893 now says. withinContext: no hit in packages/envoy",
-      "headSha": "faf41f3eb85bb1a45cef772a6b5c2e1990680c5f",
-      "negativeControl": "the old sentences were checked the same way and are false of this code (publishCoreTo has no ctx read at entry or after the reconnect wait; withinContext no longer exists), so the check tells a stale sentence from a true one"
+      "criterion": "Bus-unavailable means the bus did not answer (spec, bus-down case; the distinction review 5647344074 required for an unreadable role claim): an interest record the bucket holds and this build cannot decode is answered by GET /v1/sessions, GET /v1/registry/<id> and GET /v1/interests/<id> as 503 'envoy: the message bus did not answer: <decode error>' with Retry-After: 1, and GET /v1/sessions refuses its whole listing for that one record",
+      "evidence": "Real envoy-listener binary at this head, real NATS: sessions ses_sub (subscribed), ses_bare and ses_badinterest registered; the raw value 'not json at all' written into envoy_interests under ses_badinterest. GET /v1/sessions -> 503 Retry-After: 1 {\"error\":\"envoy: the message bus did not answer: invalid character 'o' in literal null (expecting 'u')\"}; GET /v1/registry/ses_badinterest and GET /v1/interests/ses_badinterest -> the same 503. The same rig on the previous head's binary (0cfb5c6c, built from git archive of packages/envoy): GET /v1/sessions 200 listing ses_badinterest with topics null, GET /v1/registry/ses_badinterest 200 with topics null, GET /v1/interests/ses_badinterest 503 {\"error\":\"invalid character ...\"} with no Retry-After (that route's pre-existing false 503, on the line dc06110d edited). Cause: sessionInfoFor's switch and adminInterestsHandler's GET (packages/envoy/cmd/listener/api.go, dc06110d) send every error other than nats.ErrKeyNotFound to writeBusUnavailable, and store.Registry.Get returns json.Unmarshal's error for a record it cannot decode. Red test TestAnUnreadableInterestRecordIsNotAnsweredAsTheBusNotAnswering in packages/envoy/cmd/listener/interest_record_unreadable_test.go, commit 5c5ee4f3ed2db2024d36a9132866fc8e0e5665d7: `cd packages/envoy && go test ./cmd/listener -count=1 -run '^TestAnUnreadableInterestRecordIsNotAnsweredAsTheBusNotAnswering$' -v` fails at this head on all three subtests, each 'status 503, body {\"error\":\"envoy: the message bus did not answer: invalid character 'o' in literal null (expecting 'u')\"}; want anything but the bus-unavailable 503'. It asserts only that the answer is not the bus's (not 503, no busUnansweredPrefix, no Retry-After); whether a route names the unreadable record (as writeRoleClaimUnreadable does) or lists the session without its topics is the implementer's to choose. Its control, a readable session on the same rig, is served 200 with its topics."
     }
   ],
-  "carriedEvidence": "Real-binary proof of every behaviour at the identical compiled source dfe43f43: unreadable role claims 500 without Retry-After on both role routes (control at 57d8d3bb: 503 bus-unavailable); frozen bus: sends, publishes and lookups 503 with Retry-After: 1 inside 3.52 s, 20+20 concurrent; unplaceable retry 12 deferrals / push_failed once / cap of 64; cold-cache sends 300/300; e2e-local exit 0 and A6' three records. See commit fd4ce3c4's .legion/INFRA-141/test.json.",
-  "ci": "At faf41f3e: Tests 40275967174, Legion Envoy and Contracts 40275967201, Docs 40275967328 and Worker Image 40275967173 queued when read, cited unsettled and not waited for. The runs at 2d63edbb were cancelled when this head superseded them (Worker Image success), so the code of dfe43f43 has its first settled CI in these runs.",
-  "regressionLocksAdded": []
+  "failed": 1,
+  "breakAttemptsThatHeld": [
+    "Merge with #2199 (INFRA-122) on the real binary: two listeners (machines ma, mb) on one NATS and a fake session server counting prompt_async posts. A session subscribed through A with a serve port, sent through B: pushed once, by A. A session with no interest record whose entry names mb, sent through A: pushed once, by B. Neither listener logged a deferral, give-up or failed delivery; each counted delivered 1.",
+    "Frozen bus on the merged binary: the interest routes as in implementerProof; 20 concurrent GET /v1/sessions all 503, slowest 1.095 s. Sends, publishes and role lookups 503 with Retry-After: 1 within 3.53 s, 20 concurrent sends and 20 concurrent lookups.",
+    "Unreadable role claims on the merged binary: empty, blank, number and string records 500 with no Retry-After on both role routes, 4 role_claim_unreadable records; the legacy bare record and a live claim 200; a lapsed holder 404 with the claim released.",
+    "Unplaceable delivery on the merged binary: no_push_target deferred 12 times and given up at 61 s; push_failed deferred once; naked_total 13; no attempt-dedupe skip. Cold-cache sends 300/300 200.",
+    "scripts/e2e-local.sh exit 0, both PASS lines, absent 404, client EnvoyApiError 503; A6' exactly three WARN bus_unavailable records (08:33:18.426Z, 08:33:22.167Z, 08:33:25.927Z), all after nats.log's 'Initiating Shutdown...' at 08:33:14.869Z.",
+    "go test at this head: the implementer's interest-route test, my three earlier tests (unchanged since 5dcda609), the unreadable-claim tests and the plan's A1-A6 set, 14 tests --- PASS, ok 54.891 s; internal/integration TestE2E_AgentToAgent_LocalMachine and _RemoteMachine --- PASS."
+  ],
+  "ci": "At 8d8816be: Tests 40292608158, Legion Envoy and Contracts 40292608289, Docs 40292608328 and Worker Image 40292608679 queued when read, cited unsettled and not waited for. GitHub reports the pull request MERGEABLE (BLOCKED on review).",
+  "notesForTheImplementer": [
+    "The red test is mine and stays as written; make it pass. It drives the three routes with the handlers' own constructors and writes the bad record straight into bus.InterestBucket.",
+    "GET /v1/interests/<id> answered this record 503 before dc06110d too (writeNATSError with StatusServiceUnavailable); dc06110d's edit of that line added the bus prefix and Retry-After. The test covers it because the line is this pull request's."
+  ]
 }
