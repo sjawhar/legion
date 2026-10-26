@@ -107,6 +107,8 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.gateRegistered(ctx, tx, fact)
 	case intake.DispatchArtifact:
 		return e.dispatchArtifact(ctx, tx, fact)
+	case intake.GateAboveDispatch:
+		return e.gateAboveDispatch(ctx, tx, fact)
 	case intake.HandoffComplete:
 		return e.handoff(ctx, tx, fact)
 	case intake.PullRequestOpened:

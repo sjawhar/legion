@@ -102,7 +102,8 @@ func outputString(value any) (string, error) {
 // pod is ready. Autopilot honours it as extended-duration protection: for up to seven days, from
 // scale-down and node auto-upgrade only (node repair, maintenance and drains still evict), on a
 // node of the pod's own whenever possible, and with each pod raised to at least 500m CPU and 512Mi
-// memory, so no pod here requests less.
+// memory, so no pod here requests less: the resolver refuses an appCpu or appMemory that would
+// take the app pod below that (newDispatchAppResources).
 const safeToEvictAnnotation = "cluster-autoscaler.kubernetes.io/safe-to-evict"
 
 func resources(cpu, memory string) *corev1.ResourceRequirementsArgs {
@@ -492,10 +493,10 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	if _, err := deployment(s.hostname, s.replicas, deploymentStrategy(s.strategy), corev1.PodSpecArgs{
 		ServiceAccountName: pulumi.String(s.hostname), TerminationGracePeriodSeconds: pulumi.Int(35), EnableServiceLinks: pulumi.Bool(false),
 		InitContainers: corev1.ContainerArray{
-			corev1.ContainerArgs{Name: pulumi.String("cloud-sql-proxy"), Image: pulumi.String(s.images.proxy), RestartPolicy: pulumi.String("Always"), Args: pulumi.StringArray{pulumi.String("--private-ip"), pulumi.String("--structured-logs"), pulumi.String("--address=127.0.0.1"), pulumi.String("--port=5432"), cloud.instance.ConnectionName}, Resources: resources("200m", "256Mi"), SecurityContext: &corev1.SecurityContextArgs{RunAsNonRoot: pulumi.Bool(true)}},
+			corev1.ContainerArgs{Name: pulumi.String("cloud-sql-proxy"), Image: pulumi.String(s.images.proxy), RestartPolicy: pulumi.String("Always"), Args: pulumi.StringArray{pulumi.String("--private-ip"), pulumi.String("--structured-logs"), pulumi.String("--address=127.0.0.1"), pulumi.String("--port=5432"), cloud.instance.ConnectionName}, Resources: resources(dispatchProxyCPU, dispatchProxyMemory), SecurityContext: &corev1.SecurityContextArgs{RunAsNonRoot: pulumi.Bool(true)}},
 		},
 		Containers: corev1.ContainerArray{
-			corev1.ContainerArgs{Name: pulumi.String("envoy-dispatch"), Image: pulumi.String(s.images.envoy), Command: pulumi.StringArray{pulumi.String("/usr/local/bin/envoy-dispatch")}, Resources: resources("1", "4Gi"), Env: appEnv, VolumeMounts: appMounts, Lifecycle: appPreStop, ReadinessProbe: &corev1.ProbeArgs{Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("curl"), pulumi.String("-fsS"), pulumi.String("http://127.0.0.1:8766/healthz")}}, PeriodSeconds: pulumi.Int(10), TimeoutSeconds: pulumi.Int(3), FailureThreshold: pulumi.Int(3), InitialDelaySeconds: pulumi.Int(5)}},
+			corev1.ContainerArgs{Name: pulumi.String("envoy-dispatch"), Image: pulumi.String(s.images.envoy), Command: pulumi.StringArray{pulumi.String("/usr/local/bin/envoy-dispatch")}, Resources: resources(s.appCPU, s.appMemory), Env: appEnv, VolumeMounts: appMounts, Lifecycle: appPreStop, ReadinessProbe: &corev1.ProbeArgs{Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("curl"), pulumi.String("-fsS"), pulumi.String("http://127.0.0.1:8766/healthz")}}, PeriodSeconds: pulumi.Int(10), TimeoutSeconds: pulumi.Int(3), FailureThreshold: pulumi.Int(3), InitialDelaySeconds: pulumi.Int(5)}},
 		},
 		Volumes: appVolumes,
 	}, frontDoor, pulumi.DependsOn(appGrants)); err != nil {

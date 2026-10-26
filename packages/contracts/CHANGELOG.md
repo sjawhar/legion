@@ -6,11 +6,26 @@
 
 - `dispatch doc-edit --help` says the spec, not every document, holds no progress or status, and that a record of open items or progress is a document of its own.
 
+- `actorAttribution(actor)`, the part of an actor's label after its name: ` (for <owner>)` for a
+  session a personal token attributed to a human, ` (as <namespace>/<name>)` for one a service
+  token authenticated, else `""` (always for a user or system). `actorLabel` is now `actorName`
+  followed by it, with the same output as before, so a reader that draws the name and the
+  attribution apart (the Dashboard's `AgentName`) takes the attribution from the one rule
+  instead of cutting it out of the label (INFRA-440).
 - `SearchCoverage`, `SearchCoverageKinds` and `SearchCoverageCounts`, the body of
   `GET /api/v1/search/coverage`: the configured embedder's identity, place (`bedrock` or `azure`)
   and model, and per kind and in total how many searchable items have a current vector, lack one or
   failed, with the oldest lacking item's wait (INFRA-393). `SearchResponse.degraded`'s doc names the
   model service rather than Bedrock.
+- `AskEventPayload.restored`: `true` on the `ask.opened` or `ask.answered` Dispatch's settlement
+  appends when an edit restores a decision block it retracted, which records no new answer. A
+  restore the release before it writes (every one already in the event log, and one written during
+  a rollout or an image rollback) carries no mark, so a missing field proves nothing.
+- `ArtifactApproval.seq`, the latest review's event sequence on the document's owner, beside its
+  `at`: the owner's row lock orders its events as they commit, so `seq` places the review among them
+  where `at`, its transaction's start, cannot. Absent for a review recorded before Dispatch kept
+  it, and on every read the release before it serves during a rollout or a rollback, so a missing
+  `seq` does not prove an older review.
 - The agent stream's `settings` frame (`AgentStreamSettings`, in `AgentStreamFrame`): the model
   and thinking level an Oh My Pi session runs now, the whole state each time it changes and the
   frame before `commands` in every replay. `AgentStreamSettingsReported` carries `model`

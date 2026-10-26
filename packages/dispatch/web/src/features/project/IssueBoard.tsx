@@ -79,6 +79,9 @@ const boardCollisionDetection: CollisionDetection = (args) => {
 };
 
 const CARD_SELECTOR = "[data-board-card]";
+/** A card's title link, which the open keys follow: the card holds other links (a claim's
+ *  agent), so "the first link" is not the issue's. */
+const ISSUE_LINK = "[data-issue-link]";
 const COLUMN_SELECTOR = "[data-board-column]";
 
 /** The focus ring every board focus target draws: cards, columns and rails alike. */
@@ -145,6 +148,7 @@ function IssueCard({ issue, unread }: { issue: IssueSummary; unread: boolean }):
           styles.css), so the key and title are stacked and start-aligned explicitly. */}
       <Link
         className={`flex flex-col text-sm ${linkText} ${linkHoverText}`}
+        data-issue-link
         to={buildIssuePath({ key: issue.key, kind: "issue" })}
         {...referenceTriggerProps({ key: issue.key, kind: "issue" })}
       >
@@ -586,7 +590,8 @@ export function IssueBoard({
       id: "open",
       keys: "o",
       label: "Open issue",
-      run: () => cardAround(document.activeElement)?.querySelector("a")?.click(),
+      run: () =>
+        cardAround(document.activeElement)?.querySelector<HTMLElement>(ISSUE_LINK)?.click(),
       when: focusedCard,
     },
     {
@@ -596,7 +601,8 @@ export function IssueBoard({
       keys: "Enter",
       label: "Open the focused card's issue",
       palette: false,
-      run: () => cardAround(document.activeElement)?.querySelector("a")?.click(),
+      run: () =>
+        cardAround(document.activeElement)?.querySelector<HTMLElement>(ISSUE_LINK)?.click(),
       when: () => document.activeElement?.matches(CARD_SELECTOR) === true,
     },
     {
