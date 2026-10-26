@@ -2,25 +2,27 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-439",
-  "completed": "2026-10-26T22:32:00Z",
-  "round": 13,
-  "headSha": "232a541eb40c27720c9bab0f17bb42fa4e5c0dad",
-  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6428866683",
+  "completed": "2026-10-26T23:12:00Z",
+  "round": 14,
+  "headSha": "489fd64ded897ef011a110aad09ba2bb8280efab",
+  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6429491574",
   "answeringProvider": "anthropic/claude-haiku-4-5 answered every omp 18.12.2 turn",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `bash packages/pi-envoy/scripts/smoke-replay.sh` at this head in local mode and in remote mode as committed (against a loopback listener and natsd built from this head): both SMOKE REPLAY PASS. Drove the held replay notice live (leg N1): it passes."
+    "how": "Re-drove leg N2 for the 'stream recreated' notice at this head (notice3.sh): with omp SIGKILLed while the notice was held, the resumed session showed it once, still once three heartbeats later. Red test bddc5c2a9815 is unchanged and passes. Smoke passes in local mode and in remote mode run as committed."
   },
   "failed": 1,
   "failures": [
     {
-      "criterion": "The architect's check (b): a replay notice held for a busy session is not lost; it survives a SIGKILL before the first settled heartbeat (shown once after the resume, or recorded where the session sees it)",
-      "evidence": "Lost. Live (leg N2, notice2.sh): a long turn streamed; I deleted ENVOY_NOTIFICATIONS and added it back. Within 2 s the session wrote the reset cursor (envoy-replay-state stream_created 22:20:41) to its transcript but held the 'stream recreated' notice for the turn (isStreaming true, queuedMessageCount 0, 0 notices in the file). omp was SIGKILLed. After the resume, 4 heartbeats and idle: 0 notices, still 0 three heartbeats later. The persisted state already names the new stream, so the recreation is never detected again. The same applies to the retention-gap notice. Red test: bddc5c2a9815, `cd packages/pi-envoy && bun test extensions/envoy.test.ts -t \"a retention gap\"` -> fails 'a retention gap held while the host's turn streams is told after a restart that cut the hold short' (expected 1, received 0). Fix direction: the state change that makes the notice unrecoverable must not be persisted before the notice is written, or the held notice itself must be recorded in the transcript."
+      "criterion": "The architect's check: a held replay notice survives a SIGKILL while held and is shown once after the resume, for both stream_recreated and retention_gap",
+      "evidence": "retention_gap is shown twice. Live (notice4.sh leg gap-b): a fresh session's long turn streamed; I published on an unfollowed subject and purged ENVOY_NOTIFICATIONS. The held notice was recorded (envoy-replay-notice at 22:58:34.427), but the cursor's move past the gap was not written: a change of the cursors alone waits up to REPLAY_STATE_REFRESH_MS, an hour (envoy-client replay.ts flush). omp was SIGKILLed while the turn streamed. After the resume, the recorded notice was handed (22:58:37.964), and the restored cursor (after 3, below first_seq 7) found the same gap again (22:58:37.966): 2 notices for one gap, still 2 three heartbeats later. No notice is lost. A gap notice handed while idle is also told again after a restart (notice3 run, 3 -> 4), for the same reason. Red test: cf65bda2468a, `cd packages/pi-envoy && bun test extensions/envoy.test.ts -t \"a retention gap\"` -> fails 'a retention gap held while the host's turn streams is told once after the process is killed' (expected 1, received 2)."
     }
   ],
   "verifiedFixed": [
-    "The architect's check (a), live (leg N1): a 'stream recreated' notice raised while a turn streams is held, with 0 notices and queuedMessageCount 0 on each of 4 heartbeats while streaming. It is written once at 22:16:39 after the turn ended on its own. 1 agent_start and 1 turn_start since the long prompt (the turn's own), and no assistant message after the notice."
+    "stream_recreated, live (notice3.sh): idle control, 1 notice. (a) Raised mid-turn: held through 3 heartbeats (0 notices, queue 0), written once after the turn ended on its own, 1 agent_start and 1 turn_start, no assistant message after it. (b) SIGKILLed while held: 1 notice after the resume, still 1 three heartbeats later.",
+    "retention_gap (a), live (notice4.sh leg gap-a): held through 3 heartbeats, written once after the turn, 1 agent_start and 1 turn_start, no assistant message after it.",
+    "Red tests bddc5c2a9815 (unchanged), 8c4e8911, 9f8ac8ff and 240a4c4ae641 PASS; smoke PASS in local mode and in remote mode run as committed."
   ],
   "proof": [],
-  "ci": "At 232a541e when read: Tests queued; Legion Envoy and Contracts, Docs and Worker Image pending."
+  "ci": "At 489fd64d when read: Tests, Legion Envoy and Contracts, Docs and Worker Image queued."
 }
