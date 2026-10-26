@@ -228,6 +228,35 @@ func TestParseTakesAnImageWhoseSourceEscapesAReferencesAmpersand(t *testing.T) {
 	}
 }
 
+// A linked image whose link title holds a line break the context cannot hold as written - a blank
+// line, or any line break in a heading or a table cell - is a write the server took before
+// INFRA-190 (it dropped the link), and the change adds no refusal (R2): the link title is held
+// decoded, so it must be written back so that it reads as that again, and the link kept (R1).
+func TestParseTakesALinkedImageWhoseLinkTitleHoldsALineBreak(t *testing.T) {
+	for _, test := range []struct{ markdown, linkTitle string }{
+		{"[![x](i.png)](https://u.com \"a&#10;&#10;b\")\n", "a\n\nb"},
+		{"# [![x](i.png)](https://u.com \"a&#10;b\")\n", "a\nb"},
+		{"| a |\n| - |\n| [![x](i.png)](https://u.com \"a&#10;b\") |\n", "a\nb"},
+		{"Head [![x](i.png)](https://u.com \"a\nb\")\n===\n", "a\nb"},
+	} {
+		got, err := ParseForWrite(test.markdown, nil)
+		if err != nil {
+			t.Errorf("ParseForWrite(%q) = %v, want the write taken, as before INFRA-190", test.markdown, err)
+			continue
+		}
+		var image *Node
+		Walk(got, func(node *Node) bool {
+			if node.Type == "image" {
+				image = node
+			}
+			return image == nil
+		})
+		if image == nil || image.Attrs["link"] != "https://u.com" || image.Attrs["linkTitle"] != test.linkTitle {
+			t.Errorf("ParseForWrite(%q) image = %v, want link %q and link title %q", test.markdown, image, "https://u.com", test.linkTitle)
+		}
+	}
+}
+
 // The browser editor's parser matches a reference to its definition by the labels as written,
 // before their character references are decoded, and a label is stored and written decoded, so a
 // reference whose label matches its definition's only as written would lose it: `[^&AUML;]` finds
