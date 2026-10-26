@@ -17,11 +17,11 @@ import {
 // session's model and records one `advisor-gate` entry. LEGION_TEST_OMP names the binary, as in
 // dispatch-first-omp.test.ts. A run without one skips, except on GitHub Actions.
 //
-// What these two tests prove, and what they do not: the gate binds inside the binary, reads the
-// call, asks the session's model, records its entry, and hands its note back where the agent reads
-// it. The model is a stand-in that answers a scripted line, so nothing here is evidence about a
-// real model's judgement; one `bash` form and one eval cell are driven, not the grammar's range,
-// which `askgate.test.ts` covers.
+// What these tests prove, and what they do not: the gate binds inside the binary, reads the call,
+// asks the session's model, records its entry, and hands its note back where the agent reads it.
+// The model is a stand-in that answers a scripted line, so nothing here is evidence about a real
+// model's judgement; one `bash` form and one eval cell in each language are driven, not the
+// grammar's range, which `askgate.test.ts` covers.
 const omp = process.env.LEGION_TEST_OMP;
 const onActions = process.env.GITHUB_ACTIONS === "true";
 
@@ -182,35 +182,40 @@ test.skipIf(omp === undefined && !onActions)(
 
 // A write an eval cell makes reaches the gate through the tool bridge, which calls the tool with no
 // loop context, so the note of a write that went out unreviewed was dropped: the agent was told
-// nothing. The note rides on the call's own result now, so the next model request holds it.
-test.skipIf(omp === undefined && !onActions)(
-  "a write an eval cell makes, whose review gives no verdict, tells the next model request it went out unreviewed",
-  async () => {
-    const { requests, sessions } = await runSession({
-      // No JSON verdict on the last line: the gate reaches no verdict and the write posts unreviewed.
-      gateAnswer: "The call looks fine to me.",
-      firstTurn: (dispatch) => ({
-        type: "tool_use",
-        name: "eval",
-        input: {
-          language: "js",
-          code: `return await tool.bash({ command: ${JSON.stringify(ask(dispatch))} })`,
-        },
-      }),
-    });
+// nothing. The note rides on the call's own result now, so the next model request holds it. A JS
+// cell runs in a worker of the Oh My Pi process; a Python cell runs in a Python process of its own
+// and reaches the same bridge over HTTP, so each language gets a case. The Python runner needs only
+// the standard library and a `python3` on PATH.
+for (const [language, code] of [
+  ["js", (command: string) => `return await tool.bash({ command: ${JSON.stringify(command)} })`],
+  ["py", (command: string) => `print(await tool.bash({"command": ${JSON.stringify(command)}}))`],
+] as const)
+  test.skipIf(omp === undefined && !onActions)(
+    `a write a ${language} eval cell makes, whose review gives no verdict, tells the next model request it went out unreviewed`,
+    async () => {
+      const { requests, sessions } = await runSession({
+        // No JSON verdict on the last line: the gate reaches no verdict and the write posts
+        // unreviewed.
+        gateAnswer: "The call looks fine to me.",
+        firstTurn: (dispatch) => ({
+          type: "tool_use",
+          name: "eval",
+          input: { language, code: code(ask(dispatch)) },
+        }),
+      });
 
-    const main = requests.filter(
-      (request) => request.path === "/anthropic/v1/messages" && !isGateRequest(request)
-    );
-    expect(main.length).toBeGreaterThanOrEqual(2);
-    const next = JSON.stringify(main.at(-1)?.body.messages);
-    expect(next).toContain("AskGate did not review this Dispatch write");
-    expect(next).toContain("The call ran unreviewed.");
-    expect(next).toContain("stand-in dispatch: sent");
+      const main = requests.filter(
+        (request) => request.path === "/anthropic/v1/messages" && !isGateRequest(request)
+      );
+      expect(main.length).toBeGreaterThanOrEqual(2);
+      const next = JSON.stringify(main.at(-1)?.body.messages);
+      expect(next).toContain("AskGate did not review this Dispatch write");
+      expect(next).toContain("The call ran unreviewed.");
+      expect(next).toContain("stand-in dispatch: sent");
 
-    expect(await gateEntries(sessions)).toMatchObject([
-      { tool: "dispatch_ask", outcome: "no-verdict", decision: "allow" },
-    ]);
-  },
-  180_000
-);
+      expect(await gateEntries(sessions)).toMatchObject([
+        { tool: "dispatch_ask", outcome: "no-verdict", decision: "allow" },
+      ]);
+    },
+    180_000
+  );
