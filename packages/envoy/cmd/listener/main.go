@@ -731,10 +731,11 @@ func main() {
 	sessionCacheReadyCancel()
 
 	// The Legion agent registry (internal/legionagents) keeps no cache: every read is a read of its
-	// bucket, so it joins no warm-up, self-health or drain. A listener whose NATS grant lacks the
-	// bucket logs one ERROR naming it and serves on, its registry routes answering 503 until an open
-	// after a reconnect succeeds (legionAgentRegistry). Its reconnect hook runs after the caches'
-	// rewatch, and moves its bucket handle onto a connection the bus dialled to replace a closed one.
+	// bucket, so it joins no warm-up or self-health. A listener that cannot open the bucket (a
+	// missing grant is the usual cause) logs one ERROR and serves on, its registry routes answering
+	// 503 while it retries the open in the background, with a backoff and at once after a reconnect
+	// (legionAgentRegistry). Its reconnect hook runs after the caches' rewatch, and moves its bucket
+	// handle onto a connection the bus dialled to replace a closed one; its drain hook ends the retry.
 	legionAgents := openLegionAgentRegistry(client.Conn, logger, legionagents.WithReplicas(cfg.NATSReplicas), legionagents.WithLogger(logger.Slog()))
 
 	// KV watchers are not bus subscriptions, so recreate them after every
@@ -747,6 +748,7 @@ func main() {
 	client.AddDrainHook(func(ctx context.Context) {
 		endListenerKVWatchers(ctx, caches)
 	})
+	client.AddDrainHook(legionAgents.close)
 
 	deliver := session.Deliverer{
 		MachineID:    cfg.MachineID,

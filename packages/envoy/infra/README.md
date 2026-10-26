@@ -1719,8 +1719,9 @@ as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space
   `$KV.<bucket>.>`, and its watchers' consumer create and delete and their flow-control replies. A
   listener whose grant lacks `legion_agents`, one whose image is newer than the release that
   applied its grant, serves everything else and answers 503 on the registry routes
-  (`/v1/legion/agents`) until the grant is applied, and opens the bucket again after each NATS
-  reconnect;
+  (`/v1/legion/agents`) while it retries the open in the background (1 s doubling to 1 min, and at
+  once after each NATS reconnect), so the routes serve once the grant reaches it, by a reload or a
+  reconnect, without a restart;
 - `$JS.API.STREAM.PURGE.KV_envoy_interests`, which the interest bucket's delete-marker collection
   sends.
 

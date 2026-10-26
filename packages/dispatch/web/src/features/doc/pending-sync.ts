@@ -24,7 +24,10 @@ export interface PendingSync {
   frameWritten(frame: Uint8Array): void;
   /** Pairs an incoming SyncStatus frame with the next counted sent frame. */
   frameReceived(frame: Uint8Array): Promise<void>;
-  /** Restores prior-page rows after this admission's initial sync. */
+  /**
+   * Restores prior-page rows after an admission's initial sync. A connection runs it again when a
+   * later admission turns read-write after a read-only one.
+   */
   firstSync(readOnly: boolean): Promise<void>;
   destroy(): void;
 }
@@ -125,6 +128,9 @@ export function startPendingSync({
   store,
 }: PendingSyncOptions): PendingSync {
   let destroyed = false;
+  // The client the store writes this page's rows under (`openPendingEdits` takes the document's
+  // client id at start; yjs may change `doc.clientID` later).
+  const ownClient = doc.clientID;
   let readOnly = false;
   let rebuiltAt: number | undefined;
   let lastState: PendingState | undefined;
@@ -354,7 +360,9 @@ export function startPendingSync({
         return;
       }
       try {
-        const restored = await edits.restoreRows();
+        // This page's own rows are already in the live document and tracked in `recorded`, so a
+        // later restore leaves them for their own acknowledgement.
+        const restored = (await edits.restoreRows()).filter((row) => row.key[1] !== ownClient);
         if (destroyed || restored.length === 0) {
           await report();
           return;

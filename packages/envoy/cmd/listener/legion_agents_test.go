@@ -10,8 +10,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	natsgo "github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cmdtest"
@@ -364,9 +367,10 @@ authorization {
 }
 
 // A listener whose NATS user lacks the grant on the legion_agents bucket, as one deployed before
-// that grant is applied, starts and serves every other route, logs one ERROR naming the bucket, and
-// answers each registry route 503 naming the missing grant. Once the server applies the grant and
-// the listener reconnects, its reconnect hook opens the bucket and the routes serve.
+// that grant is applied, starts and serves every other route, logs one ERROR naming the bucket
+// however often it retries the open, and answers each registry route 503 naming the failed open.
+// Once the server applies the grant and the listener reconnects, its reconnect hook wakes the
+// retry, which opens the bucket, and the routes serve.
 func TestAListenerWithoutTheRegistryGrantServesAndAnswersItsRoutes503(t *testing.T) {
 	bucket := "KV_" + bus.LegionAgentBucket
 	server, uri := testnats.StartConfig(t, listenerGrant(
@@ -391,14 +395,14 @@ func TestAListenerWithoutTheRegistryGrantServesAndAnswersItsRoutes503(t *testing
 	}
 	for _, route := range routes {
 		status, answer := callListener(t, listener.port, route.method, route.path, route.body)
-		if status != http.StatusServiceUnavailable || !strings.Contains(answer, "could not open the legion_agents bucket, which its NATS user needs a grant on") {
-			t.Fatalf("%s %s without the registry grant = %d %s, want a 503 naming the grant", route.method, route.path, status, answer)
+		if status != http.StatusServiceUnavailable || !strings.Contains(answer, "could not open the legion_agents bucket (a missing grant is the usual cause): ") {
+			t.Fatalf("%s %s without the registry grant = %d %s, want a 503 naming the failed open", route.method, route.path, status, answer)
 		}
 	}
-	if count := countRecords(listener, "legion agent registry unavailable: this listener's NATS user lacks the grant on the legion_agents bucket, so the /v1/legion/agents routes answer 503 until the grant is applied; every other route serves, and the listener opens the bucket again after its next NATS reconnect", func(record map[string]any) bool {
+	if count := countRecords(listener, "legion agent registry unavailable: could not open the legion_agents bucket (a missing grant is the usual cause), so the /v1/legion/agents routes answer 503 while every other route serves; the listener retries the open in the background", func(record map[string]any) bool {
 		return record["level"] == "ERROR" && record["bucket"] == bus.LegionAgentBucket
 	}); count != 1 {
-		t.Fatalf("%d ERROR records name the missing grant, want 1:\n%s", count, listener.Output.String())
+		t.Fatalf("%d ERROR records name the failed open, want 1:\n%s", count, listener.Output.String())
 	}
 
 	server.Restart(t, listenerGrant())
@@ -416,5 +420,65 @@ func TestAListenerWithoutTheRegistryGrantServesAndAnswersItsRoutes503(t *testing
 	status, answer := callListener(t, listener.port, http.MethodGet, "/v1/legion/agents?issue=INFRA-448", "")
 	if ids := legionIDs(t, answer); status != http.StatusOK || !slices.Equal(ids, []string{"ses-tester"}) {
 		t.Fatalf("GET INFRA-448's agents after the grant = %d %s, want the tester", status, answer)
+	}
+}
+
+// A registry whose first open fails on a listener that holds the grant, a JetStream timeout or a
+// slow first create, answers its routes 503 naming the failed open and logs one ERROR however often
+// its retry fails; once an open succeeds, with no NATS connection event in between, the routes
+// serve and one INFO says the registry opened.
+func TestALegionAgentRegistryWhoseFirstOpenFailsServesOnceItsRetryOpensIt(t *testing.T) {
+	l := newLegionListener(t, setupPublishTestClient(t))
+	var failing atomic.Bool
+	failing.Store(true)
+	var opens atomic.Int32
+	logs := &lockedBuffer{}
+	registry := startLegionAgentRegistry(l.deps.client.Conn, logging.NewWithWriter("test", logs), func(conn *natsgo.Conn) (*legionagents.Store, error) {
+		opens.Add(1)
+		if failing.Load() {
+			return nil, errors.New("nats: timeout")
+		}
+		return legionagents.Open(conn, legionagents.WithReplicas(1))
+	}, 10*time.Millisecond, 40*time.Millisecond)
+	t.Cleanup(func() { registry.close(context.Background()) })
+	l.deps.legionAgents = registry
+
+	retried := time.Now().Add(10 * time.Second)
+	for opens.Load() < 4 {
+		if time.Now().After(retried) {
+			t.Fatalf("the registry opened %d times in 10 s, want its retry to open again", opens.Load())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	body := l.want(t, http.StatusServiceUnavailable, http.MethodGet, "/v1/legion/agents?issue=INFRA-448", "")
+	if !strings.Contains(body, "envoy: the legion agent registry is unavailable: could not open the legion_agents bucket (a missing grant is the usual cause): nats: timeout") {
+		t.Fatalf("the 503 = %s, want it to name the failed open", body)
+	}
+
+	failing.Store(false)
+	deadline := time.Now().Add(10 * time.Second)
+	for l.do(t, http.MethodGet, "/v1/legion/agents?issue=INFRA-448", "").Code != http.StatusOK {
+		if time.Now().After(deadline) {
+			t.Fatalf("the registry still answers 503 after its open recovered\n%s", logs.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	l.want(t, http.StatusOK, http.MethodPut, "/v1/legion/agents/sessions/ses-tester", legionEntry("ses-tester", "INFRA-448", "tester", "2026-10-26T03:15:00Z"))
+
+	count := func(level, msg string) int {
+		n := 0
+		for line := range strings.SplitSeq(logs.String(), "\n") {
+			var record map[string]any
+			if json.Unmarshal([]byte(line), &record) == nil && record["level"] == level && record["msg"] == msg {
+				n++
+			}
+		}
+		return n
+	}
+	if n := count("ERROR", "legion agent registry unavailable: could not open the legion_agents bucket (a missing grant is the usual cause), so the /v1/legion/agents routes answer 503 while every other route serves; the listener retries the open in the background"); n != 1 {
+		t.Fatalf("%d ERROR records name the failed open over %d opens, want 1:\n%s", n, opens.Load(), logs.String())
+	}
+	if n := count("INFO", "legion agent registry opened"); n != 1 {
+		t.Fatalf("%d INFO records say the registry opened, want 1:\n%s", n, logs.String())
 	}
 }

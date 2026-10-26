@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -130,6 +131,11 @@ func rolePrefix(token string) string { return "role." + token + "." }
 
 // Get answers the session's entry with its replacement within its role token: the session key,
 // then the role token's listing. A session the bucket holds no key for is ErrNotFound.
+//
+// The session key is claimed before the index keys are written, so a write that ended between them
+// leaves the role token listing the session's older entry, or not listing it yet. The listing's
+// entry for the session is therefore replaced with the session key's, or the session key's added,
+// before the replacements are derived, and the write's retry brings the role key up to date.
 func (s *Store) Get(ctx context.Context, sessionID string) (Agent, error) {
 	if err := ValidateSessionID(sessionID); err != nil {
 		return Agent{}, err
@@ -142,15 +148,9 @@ func (s *Store) Get(ctx context.Context, sessionID string) (Agent, error) {
 	if err != nil {
 		return Agent{}, err
 	}
-	for _, agent := range succession(siblings) {
-		if agent.SessionID == sessionID {
-			return agent, nil
-		}
-	}
-	// The session key is claimed before the index keys are written, so a write that ended between
-	// them leaves a session its role token does not list yet; it is answered alone rather than
-	// refused, and the write's retry lists it.
-	return Agent{Entry: entry}, nil
+	siblings = slices.DeleteFunc(siblings, func(sibling Entry) bool { return sibling.SessionID == sessionID })
+	agents := succession(append(siblings, entry))
+	return agents[slices.IndexFunc(agents, func(agent Agent) bool { return agent.SessionID == sessionID })], nil
 }
 
 // ByRoleToken answers every session of the role token, newest first, each with its replacement:

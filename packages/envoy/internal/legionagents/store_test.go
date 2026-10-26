@@ -791,3 +791,43 @@ func TestAWriteEndingAfterItsClaimIsCompletedByItsRetry(t *testing.T) {
 		})
 	}
 }
+
+// A write that ends after its claim leaves the role key holding the session's older entry, or none
+// yet: Get answers the session key's entry all the same, replaced by the role token's later session.
+func TestGetAnswersTheSessionKeyWithItsReplacementAfterAnEndedWrite(t *testing.T) {
+	for name, recorded := range map[string]bool{"over an older entry": true, "with no role key yet": false} {
+		t.Run(name, func(t *testing.T) {
+			uri := testnats.URL(t)
+			r := openRegistryAt(t, uri)
+			later := agent("infra", "INFRA-448", "tester", "ses-later", "2026-10-26T04:00:00Z")
+			entry := agent("infra", "INFRA-448", "tester", "ses-ended", "2026-10-26T03:15:00Z")
+			first := []legionagents.Entry{later}
+			if recorded {
+				first = append(first, entry)
+			}
+			if _, err := r.store.PutAll(ctx(t), first); err != nil {
+				t.Fatalf("put: %v", err)
+			}
+			ended := openRegistryAt(t, uri)
+			ended.store.WrapBucket(func(kv natsgo.KeyValue) natsgo.KeyValue { return &failingPuts{KeyValue: kv} })
+			entry.Title = "Legion tester · INFRA-448, renamed"
+			if _, err := ended.store.Put(ctx(t), entry); err == nil || !strings.Contains(err.Error(), "the write ended here") {
+				t.Fatalf("the write that ends = %v, want its failure", err)
+			}
+
+			got, err := r.store.Get(ctx(t), "ses-ended")
+			if err != nil {
+				t.Fatalf("get: %v", err)
+			}
+			if got.Title != entry.Title {
+				t.Fatalf("get answered title %q, want the session key's %q", got.Title, entry.Title)
+			}
+			if got.ReplacedBy == nil || got.ReplacedAt == nil {
+				t.Fatalf("get answered no replacement, want ses-later at %s", later.StartedAt)
+			}
+			if *got.ReplacedBy != "ses-later" || *got.ReplacedAt != later.StartedAt {
+				t.Fatalf("get answered replaced by %s at %s, want ses-later at %s", *got.ReplacedBy, *got.ReplacedAt, later.StartedAt)
+			}
+		})
+	}
+}

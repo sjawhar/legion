@@ -300,6 +300,19 @@ test("a restore that merges is recorded under the new client and the old rows ar
   expect(states.at(-1)).toEqual({ count: 1, readOnly: false, rebuiltAt: undefined, stored: true });
 });
 
+test("a first sync run again leaves this page's own unacknowledged rows stored", async () => {
+  const artifact = artifactId();
+  const { doc, sync, type } = await scripted(artifact);
+  await sync.firstSync(true);
+  type("typed");
+  const own: PendingKey[] = [[artifact, doc.clientID, 1]];
+  await waitFor(async () => expect(await rowsOf(artifact)).toEqual(own));
+
+  await sync.firstSync(false);
+
+  expect(await rowsOf(artifact)).toEqual(own);
+});
+
 test("a stale saved row does not discard another row that still applies", async () => {
   const artifact = artifactId();
   await savedEdit(artifact, serverWith("shared", 100), " stale");
@@ -574,6 +587,76 @@ test("a readmitted connection reports the admission of the socket it reconnects"
     OpenSocket.opened[1]?.receive(authenticatedFrame("read-write", artifact));
     await waitFor(() => expect(admissions).toEqual([true, false]));
     expect(OpenSocket.opened).toHaveLength(2);
+  } finally {
+    connection?.destroy();
+    globalThis.WebSocket = realSocket;
+  }
+});
+
+test("a readmission that turns read-write restores the saved edits a read-only first sync kept", async () => {
+  const artifact = artifactId();
+  const server = serverWith("shared", 100);
+  await savedEdit(artifact, server, " saved");
+  const realSocket = globalThis.WebSocket;
+  globalThis.WebSocket = ClosingSocket as unknown as typeof WebSocket;
+  OpenSocket.opened = [];
+  const pending: PendingState[] = [];
+  let syncedCount = 0;
+  let connection: DocumentConnection | undefined;
+  try {
+    const connect = await loadDocumentTransport();
+    connection = connect(artifact, {
+      onAdmission() {},
+      onOutsideSchema() {},
+      onPending: (state) => pending.push(state),
+      onStatus() {},
+      onSynced: () => {
+        syncedCount += 1;
+      },
+      schemaVersion: 1,
+    });
+    await waitFor(() => expect(OpenSocket.opened[0]?.sent.length).toBeGreaterThan(0));
+    OpenSocket.opened[0]?.receive(authenticatedFrame("readonly", artifact));
+    OpenSocket.opened[0]?.receive(syncStep2Frame(Y.encodeStateAsUpdate(server), artifact));
+    await waitFor(() => expect(syncedCount).toBe(1));
+    await waitFor(() =>
+      expect(pending.at(-1)).toEqual({
+        count: 1,
+        readOnly: true,
+        rebuiltAt: undefined,
+        stored: true,
+      })
+    );
+    expect(connection.doc.getText("t").toString()).toBe("shared");
+
+    const restoredUpdates: Uint8Array[] = [];
+    connection.doc.on("update", (update: Uint8Array, origin: unknown) => {
+      if (typeof origin === "object" && origin !== null && "restored" in origin) {
+        restoredUpdates.push(update);
+      }
+    });
+    connection.readmit();
+    await waitFor(() => expect(OpenSocket.opened[1]?.sent.length).toBeGreaterThan(0));
+    const reopened = OpenSocket.opened[1] as OpenSocket;
+    reopened.receive(authenticatedFrame("read-write", artifact));
+    reopened.receive(syncStep2Frame(Y.encodeStateAsUpdate(server), artifact));
+
+    await waitFor(() =>
+      expect(pending.at(-1)).toEqual({
+        count: 1,
+        readOnly: false,
+        rebuiltAt: undefined,
+        stored: true,
+      })
+    );
+    expect(connection.doc.getText("t").toString()).toBe("shared saved");
+    expect(restoredUpdates).toHaveLength(1);
+    expect(reopened.sent).toContainEqual(
+      frame(artifact, [0, 2], varBytes(restoredUpdates[0] as Uint8Array))
+    );
+    const clientId = connection.doc.clientID;
+    await waitFor(async () => expect(await rowsOf(artifact)).toEqual([[artifact, clientId, 1]]));
+    expect(syncedCount).toBe(1);
   } finally {
     connection?.destroy();
     globalThis.WebSocket = realSocket;

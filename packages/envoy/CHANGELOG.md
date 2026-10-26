@@ -29,9 +29,10 @@
   `RoleAgents` and `IssueAgents`. The listener's NATS grant (`ListenerPermissions`, and so
   `HostPermissions` and `DispatchPermissions`) gains the bucket's key-value calls, so a hub's
   rendered authorization changes, which replaces a GCP hub's VM on its next update. Deploy order:
-  a listener without the grant serves everything else and answers 503 on the registry routes until
-  the grant is applied, logging one ERROR naming the `legion_agents` bucket; it opens the bucket
-  again after each NATS reconnect.
+  a listener that cannot open the bucket (a missing grant is the usual cause) serves everything
+  else and answers 503 on the registry routes, logging one ERROR naming the `legion_agents` bucket,
+  and retries the open in the background (1 s doubling to 1 min, and at once after each NATS
+  reconnect) until it opens, so a grant applied later serves the routes without a restart.
 - `GET /api/v1/issues/{key}/collaborators` lists everyone who worked an issue, running or not
   (INFRA-448): `people` (one per login: the assignee, everyone who claimed it, posted on it or its
   documents, or answered one of its asks) and `agents` (one per session: the same writers that are

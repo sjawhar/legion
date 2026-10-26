@@ -2081,19 +2081,25 @@ routes above with the listener's `/v1` credential; Dispatch reads it through
   absence is the bucket's, the lesson of `/v1/sessions`'s cache answers (INFRA-249). A route's
   whole read, a session key and its role token's listing, waits at most 2 s
   (`legionagents.ReadTimeout`), and so does every call on the bucket. `live` and `replaced_by` /
-  `replaced_at` are derived at each read and never stored.
+  `replaced_at` are derived at each read and never stored. A session read derives them with the
+  session key's entry in its role token's listing, in place of the role key's or added where there
+  is none, so a write that ended between its claim and its index keys still answers the entry it
+  claimed and the session that replaced it.
 - **Grant.** The bucket is in the listener's NATS grant (`listenerBuckets`,
   `packages/envoy/infra/core/permissions.go`). A listener opens it at start, after the session
-  registry. A listener whose grant lacks it (an image deployed before the `envoy-infra` release
-  carrying the grant is applied) does not stop: it logs one ERROR naming the `legion_agents`
-  bucket, serves every other route, and answers the three `/v1/legion/agents` routes
-  `503 {"error":"envoy: the legion agent registry is unavailable: …"}` naming the missing grant
-  until the grant is applied, since the registry is one Dispatch only displays and Dispatch answers
-  `legion_registry: "unavailable"` without it. The listener opens the bucket again, in the
-  background, after every NATS reconnect, so a grant that reaches it on a new connection serves the
-  routes without a restart. Once open, the reconnect hook moves the store's handle onto a connection
-  the bus replaced (`Store.Reopen`). Both live in `legionAgentRegistry`
-  (`cmd/listener/legion_agents.go`).
+  registry. A listener that cannot open it, its grant lacking it being the usual cause (an image
+  deployed before the `envoy-infra` release carrying the grant is applied), a JetStream timeout or a
+  slow first create the others, does not stop: it logs one ERROR naming the `legion_agents` bucket,
+  serves every other route, and answers the three `/v1/legion/agents` routes
+  `503 {"error":"envoy: the legion agent registry is unavailable: could not open the legion_agents
+  bucket (a missing grant is the usual cause): <err>"}`, since the registry is one Dispatch only
+  displays and Dispatch answers `legion_registry: "unavailable"` without it. While it has no store
+  the listener retries the open in the background, after a backoff doubling from 1 s to 1 min and
+  at once after every NATS reconnect, logging no further failure and one INFO once it opens, so a
+  grant applied by a configuration reload or on a new connection serves the routes without a
+  restart; the retry is the only open after the first, so no two run at once, and the shutdown's
+  drain ends it. Once open, the reconnect hook moves the store's handle onto a connection the bus
+  replaced (`Store.Reopen`). Both live in `legionAgentRegistry` (`cmd/listener/legion_agents.go`).
 
 ## Targeted Dispatch messages
 
