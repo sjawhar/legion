@@ -2,38 +2,27 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-80",
-  "completed": "2026-10-26T05:40:30Z",
-  "decision": "changes_requested",
+  "completed": "2026-10-26T06:23:00Z",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
-  "minor": 1,
-  "kind": "round 15, narrow by the architect's decision: the round-14 skill fixes (ae3f92ecd6c7), their claude-envoy copies, the skills guard, the podKind.disk refactor (71705421a303), required checks",
+  "important": 0,
+  "minor": 0,
+  "kind": "round 16, narrow by the architect's decision: the fix for review 5647835985 (19aca29ca15c), the repo-wide grep, the claude-envoy copies, the required checks",
   "lastReview": {
-    "id": 5647511344,
+    "id": 5647835985,
     "state": "CHANGES_REQUESTED",
-    "commitId": "152c849ca282c1628df7893ed05a2fe200112128"
+    "commitId": "27e70bf79f21842f1ab6e60b26b84efc798f8dbe"
   },
   "verified": [
-    "merge-gate.md:282-284 now true of closeCheck (check.go:283-302): IssueSuspend for root and child alike",
-    "acceptance.md child-closed bullet links merge-gate.md instead of restating it",
-    "refactor keeps behaviour: two podKind implementors, two callers each taking the half its old method returned; go build, go vet, go vet -tags e2e clean; go test ./internal/runtime/sandbox ok (thermonuclear pair)",
-    "claude-envoy bun run check-dist in sync; skills-guard 12 pass (thermonuclear pair)"
+    "docs/kubernetes.md:2418, 2424, 3867, 3889 now cite issuePod.disk",
+    "grep -rn 'claimTemplates|diskSource' over the workspace, excluding .legion/ and docs/solutions|plans: no tracked file matches; only the untracked .codegraph/codegraph.db index",
+    "merge-gate.md:254-256 names the Sandbox in the pending look, true of endLookPending (check.go:265-269); the added sentence at :284-285 is true of closeCheck's InWorkflow branch (check.go:291-295)",
+    "claude-envoy copy of merge-gate.md carries the same blob change (ba98f9762a..7620887d17) as skills/"
   ],
   "ci": {
     "requiredSet": ["lint", "typecheck", "test", "pr-title"],
-    "ciHead": "71705421a303 (compare to ea4e175c lists only .legion/)",
-    "state": "queued at 05:30Z; a request for changes does not wait on it. Worker Image run 40270907952 at 58d8060c failed in docker/setup-buildx-action with 'unknown blob' (registry pull), not a required check and superseded by run 40273842423 at 71705421"
+    "ciHead": "c05785ff96e9 (code of 19aca29ca15c; compare to 69b303f0 lists only .legion/INFRA-80/test.json)",
+    "checks": "typecheck success 06:10:42Z, lint success 06:17:46Z, test success 06:22:09Z, pr-title success (latest 06:21:10Z)"
   },
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "docs/kubernetes.md:2418, 2424, 3867, 3889",
-      "description": "The refactor 71705421a303 removed issuePod.diskSource and issuePod.claimTemplates and renamed every Go comment that cited them, but this PR's operator doc still cites both names four times; a reader searching podkind.go for them finds nothing. Fix: issuePod.disk."
-    },
-    {
-      "severity": "minor",
-      "file": "skills/legion-worker/references/merge-gate.md:254-256",
-      "description": "acceptance.md now sends the architect to merge-gate.md for when the issue's pod and Sandbox go, but merge-gate.md's pending bullet says only that the pod and disk go; endLookPending (check.go:262-270) enqueues IssueSuspend, which deletes the Sandbox too. Fix: name the Sandbox in that sentence (claude-envoy copy too)."
-    }
-  ]
+  "keyFindings": []
 }
