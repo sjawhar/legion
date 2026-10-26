@@ -95,11 +95,10 @@ func TestTheShippedExamplesAnswersBlockPassesCheckConfig(t *testing.T) {
 	for _, line := range strings.SplitAfter(example[start+1:start+1+end+1], "\n") {
 		block.WriteString(strings.TrimPrefix(line, "# "))
 	}
-	const contextLine = "    context: legion-daemon\n"
-	if !strings.Contains(example, contextLine) {
-		t.Fatalf("the shipped example has no line %q to set the session store after", contextLine)
+	if !strings.Contains(example, "\n    session_store: postgres") {
+		t.Fatal("the shipped example keeps no sessions in postgres, the store its answers block reads")
 	}
-	example = strings.Replace(example, contextLine, contextLine+"    session_store: postgres\n    session_dsn_secret: SESSION_DSN\n", 1) + "\n" + block.String()
+	example += "\n" + block.String()
 
 	// The block is live, not a comment the uncommenting left behind: both providers and the store.
 	path := filepath.Join(t.TempDir(), "legion.yaml")
