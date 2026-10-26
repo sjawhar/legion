@@ -126,9 +126,9 @@ type FetchReport struct {
 // never leaves the delta minutes to run in: nine of one deployment's issue pods died in the delta
 // on 2026-10-26, the stream and its verification having used most of the one bound they then
 // shared (sjawhar/legion#2235). The repository cache's first clone, which waits on nothing, may
-// take its whole CacheFetchTimeout, past FetchBudget, and is no issue pod's. The few local git
-// commands around them (reading refs, writing the feed's configuration) keep CommandTimeout each
-// and take moments. Every attempt of a transfer from GitHub reads
+// take its whole CacheFetchTimeout, within FetchBudget too, and is no issue pod's. The few local
+// git commands around them (reading refs, writing the feed's configuration) keep CommandTimeout
+// each and take moments. Every attempt of a transfer from GitHub reads
 // the provisioning token anew as it starts (FetchRequest.Token, fetchCredential.renew), so it
 // presents the token as its file stands then, not as it stood when the fetch began. A transfer
 // from GitHub that fails transiently (transientCloneFailure) is run again after the next of
@@ -515,7 +515,8 @@ const CacheWaitTimeout = CacheFetchTimeout + 10*time.Minute
 // waiting for the repository cache, then FetchTimeout for the cache's stream and its verification,
 // then FetchTimeout for the delta from GitHub, which has a bound of its own so that a slow stream
 // cannot leave the delta minutes to run in (sjawhar/legion#2235). A fetch with no cache holds one
-// FetchTimeout for its clone or its fetch, well inside this. The few local git commands around
+// bound for its clone or its fetch, FetchTimeout or the repository cache's first clone's
+// CacheFetchTimeout (FetchRequest.Bound), both well inside this. The few local git commands around
 // them keep CommandTimeout each
 // and take moments, which the launch's boot timeout past ProvisionBound covers. The Sandbox runtime
 // allows a launching pod's provisioning this much and the shared clone's (sandbox.Runtime.
