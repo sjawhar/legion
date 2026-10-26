@@ -164,15 +164,16 @@ func TestATransportErrorRequeuesWithoutACharge(t *testing.T) {
 }
 
 // A prompt the agent refuses is charged like an acknowledged prompt that started no turn
-// (LEGION-60), and retried at the next sweep rather than on the spot: a merely busy agent is not
-// re-prompted into another refusal.
+// (LEGION-60), and retried at the next sweep rather than on the spot, so an agent that refuses is
+// not re-prompted into another refusal at once. Oh My Pi's busy answer is no refusal of the work
+// and is charged nothing (TestABusyAgentsRefusalOfTheSendIsChargedNothingAndItsTurnsEndSendsTheTask).
 func TestARefusedPromptIsChargedAndRetriedAtTheNextSweep(t *testing.T) {
 	for _, state := range prompted {
 		t.Run(string(state), func(t *testing.T) {
 			h := newHarness(t)
 			h.reach(state)
 			base := len(h.prompts())
-			h.conn.RefusePrompt("agent busy")
+			h.conn.RefusePrompt("the model provider refused the request")
 
 			h.must(RequestDeliver{Claim: testToken, Task: "the task"})
 
@@ -202,7 +203,7 @@ func TestAnAgentThatRefusesEveryPromptRunsOutOfItsBudget(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateReady)
 	refusing := h.locator()
-	h.conn.RefusePrompt("agent busy")
+	h.conn.RefusePrompt("the model provider refused the request")
 	h.must(RequestDeliver{Claim: testToken, Task: "the task"})
 	h.observe(runtime.Alive)
 	h.wantBudgets(Budgets{PromptFailures: 2})
@@ -265,6 +266,57 @@ func TestABusyAgentsRefusalOfTheSendIsChargedNothingAndItsTurnsEndSendsTheTask(t
 	h.wantBudgets(Budgets{})
 	h.wantCalls("Suspend", 0)
 	h.wantState(StateIdle)
+}
+
+// The notice's turn usually starts while the task's send is still in flight, so its agent_start
+// confirms the task (turnStarted's in-flight rule) before the busy answer arrives. The refusal takes
+// that confirmation back and is still charged nothing; the claim stays working, and the turn's end
+// sends the task again rather than retiring it as served.
+func TestABusyRefusalAfterTheNoticesTurnConfirmedTheSendIsChargedNothing(t *testing.T) {
+	const busy = "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion."
+	h := newHarness(t)
+	h.reach(StateReady)
+	gated := newGatedConn()
+	h.conns.Register(testToken, gated)
+	if err := h.m.Handle(h.ctx, RequestDeliver{Claim: testToken, Task: "the task", Generation: 7}); err != nil {
+		t.Fatal(err)
+	}
+	task := waitFor(t, "the send", gated.entered)
+	if err := h.m.Handle(h.ctx, StreamTurnStart{Claim: testToken}); err != nil { // the notice's turn
+		t.Fatal(err)
+	}
+	if p := h.pending(); p.ConfirmedAt.IsZero() {
+		t.Fatalf("pending after a turn started with the send in flight = %+v, want it confirmed", p)
+	}
+	gated.RefusePrompt(busy)
+	gated.release <- struct{}{}
+	h.m.Wait()
+
+	if p := h.pending(); p.ID != task || !p.ConfirmedAt.IsZero() || !p.DeliveredAt.IsZero() {
+		t.Fatalf("pending after the busy refusal = %+v, want the task waiting unread and unconfirmed", p)
+	}
+	h.wantBudgets(Budgets{})
+	h.wantState(StateWorking)
+	if run := h.claim().ServingRun(); run != 0 {
+		t.Fatalf("during the notice's turn the claim serves run %d, want none", run)
+	}
+
+	gated.FailPrompt(nil)
+	gated.release <- struct{}{}             // let the re-send through
+	h.must(StreamTurnEnd{Claim: testToken}) // the notice's turn ends: the task goes again
+	if sent := gated.Prompts(); len(sent) != 2 || sent[1].DeliveryID != task {
+		t.Fatalf("prompts = %+v, want the refused send and its re-send under %s", sent, task)
+	}
+	h.must(StreamTurnStart{Claim: testToken}) // the task's own turn
+	if run := h.claim().ServingRun(); run != 7 {
+		t.Fatalf("during the task's turn the claim serves run %d, want the task's 7", run)
+	}
+	h.must(StreamTurnEnd{Claim: testToken})
+	if c := h.claim(); c.Pending != nil || c.ServingGeneration != 7 {
+		t.Fatalf("after the task's turn: pending %+v serving %d, want the task retired and run 7 served", c.Pending, c.ServingGeneration)
+	}
+	h.wantBudgets(Budgets{})
+	h.wantCalls("Suspend", 0)
 }
 
 // The sweep that finds a ready or idle claim's process alive is what retries a delivery waiting
@@ -623,7 +675,7 @@ func TestAFailedSendAfterAConfirmingTurnTakesTheConfirmationBack(t *testing.T) {
 		script  func(*gatedConn)
 		charged Budgets
 	}{
-		{"refused", func(g *gatedConn) { g.RefusePrompt("agent busy") }, Budgets{PromptFailures: 1}},
+		{"refused", func(g *gatedConn) { g.RefusePrompt("the model provider refused the request") }, Budgets{PromptFailures: 1}},
 		{"transport", func(g *gatedConn) { g.FailPrompt(errBoom) }, Budgets{}},
 	} {
 		t.Run(failure.name, func(t *testing.T) {
