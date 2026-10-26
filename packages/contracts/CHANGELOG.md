@@ -4,6 +4,14 @@
 
 ### Added
 
+- The agent stream's `settings` frame (`AgentStreamSettings`, in `AgentStreamFrame`): the model
+  and thinking level an Oh My Pi session runs now, the whole state each time it changes and the
+  frame before `commands` in every replay. `AgentStreamSettingsReported` carries `model`
+  (`provider/id`, absent with no model selected), `models` (every model the session lists as
+  available, never cut or truncated) and `thinking` (`level`, what `/effort` reports, `null` for the
+  model's default, and `levels`, what `/effort` offers; `thinking` is `null` when the model has no
+  adjustable thinking). `AgentStreamSettingsUnreported` (`reported: false`) is a session whose
+  plugin cannot read them from its host. A viewer older than the frame ignores it (INFRA-195).
 - `dispatch_issues` takes `all` (`--all`), which asks Dispatch for the whole filtered listing in
   one read instead of a page: the request goes out with neither `limit` nor `offset`, the two
   parameters whose absence makes the server answer every match
