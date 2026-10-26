@@ -2,36 +2,28 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-80",
-  "completed": "2026-10-26T06:57:06Z",
-  "round": "tester round 19, generation 4: eleventh forward merge of main (#2222, gcc and CGO_ENABLED=0 in the worker image) at retro's READY head 25686c368f69, merge 261787696ec8, handoff 1333686c34bd; my last verified head is c05785ff96e9 (round 18)",
+  "completed": "2026-10-26T07:14:14Z",
+  "round": "tester round 20, generation 4: the implementer's answer (7ad1c609da45, handoff ff87f8e6b5d1) to review round 17 (ffb68a71af37); docs/kubernetes.md text only",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the reference fingerprint myself after jj git fetch: c037869c19fb… at c05785ff96e9 and at retro's 25686c368f69 (retro's commits change only docs/solutions and .legion, so the product is the one round 18 passed), 1feb7d7e75f1… at 261787696ec8 and 1333686c34bd (changed, as the implementer says); with packages/daemon/internal/runtime/sandbox/operatorpod.go also excluded, 78ccb817c013… at all four heads. Read the branch's operatorpod.go hunks against its base at c05785ff96e9 and at 261787696ec8: the @@ -175 (sessionDSNKey) and @@ -188 (legionClaim) hunks are identical, and the changed @@ -22/-24 hunk is the imageEnv doc comment only — the branch's sentence about the profile's sessions now sits after main's new CGO_ENABLED sentence; no code line differs. Main's other daemon changes (#2222: capabilities toolchain gains gcc, Dockerfile ENV CGO_ENABLED=0, imageEnv gains CGO_ENABLED) touch nothing this change edits. Re-drove the implementer's check-config refusal with CGO_ENABLED and the session-store refusals on my own build."
+    "how": "jj diff 261787696ec8..ff87f8e6b5d1 outside .legion is docs/kubernetes.md alone (+3/-2). The new :172-174 ('OMP writes logs and `models.db` under `~/.omp/profiles/legion`; every session is a row in the session database') matches the code: runtime/sandbox/manifest.go:876-886 (mainEnvironment) gives every workflow role's generation OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE, and podsafety/podsafety.go:8-19 and :78-81 keep them, leaving the baseline's `file` only for the image probe's container, which runs Oh My Pi only to probe settings and plugins (runtime/sandbox/probe.go:185-186). It agrees with operatorpod.go:24-25 ('whose sessions a pod never writes'). My own sweep over docs/*.md, docs/site/src, skills/, the daemon prompts, deploy/ and README.md for text placing sessions under the profile or HOME finds only docs/kubernetes.md:1013, the one-off import from legion-v10.0.0's tree volumes, which is history."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Conflict-forced forward merge: the branch's diff changes only where the conflict was resolved, and that resolution changes no code",
-      "surface": "the reference fingerprint command over the real branch history in the issue workspace, base read from GitHub with gh pr view 2173",
-      "command": "base=$(gh pr view 2173 -R sjawhar/legion --json baseRefName -q '.baseRefName | @json') && jj git fetch && jj diff --from \"fork_point(${base}@origin | <h>)\" --to <h> --git --context 0 '<fileset>' | sed -e '/^@@/d' -e '/^index /d' | sha256sum for <h> in c05785ff96e9, 25686c368f69, 261787696ec8, 1333686c34bd and <fileset> '~(.legion | docs/solutions)' and the same plus packages/daemon/internal/runtime/sandbox/operatorpod.go; then jj diff --from fork_point(...) --to <h> --context 2 operatorpod.go at c05785ff96e9 and 261787696ec8",
-      "observed": "full: c037869c… (c05785ff96e9, 25686c368f69) -> 1feb7d7e… (261787696ec8, 1333686c34bd); without operatorpod.go: 78ccb817… at all four. In operatorpod.go only the imageEnv doc comment hunk differs (main's re-wrapped text plus its CGO_ENABLED sentence, with the branch's sessions clause kept); var imageEnv now lists CGO_ENABLED from main; the sessionDSNKey and legionClaim hunks are byte-identical",
-      "headSha": "261787696ec8d0c717432095ebf0cc1d4fdeeb52",
-      "negativeControl": "the implementer's unresolved merge 389ded217f52 fingerprints ccb5172868c5…, neither value; my comparison of the operatorpod.go hunks separates the one comment hunk from the two unchanged code hunks"
-    },
-    {
-      "criterion": "At the merged head the session-store rule this change adds and main's new image variable both hold through the real CLI",
-      "surface": "the real legion CLI built with CGO_ENABLED=0 go build ./cmd/legion at 1333686c34bd (code tree of 261787696ec8), against deploy/kubernetes/daemon/legion.yaml.example with stub 0600 token files, a stub kubeconfig (context legion-daemon) and LEGION_POSTGRES_DSN set",
-      "command": "legion start --config <file> --check-config for: the example (postgres); cloudsql-iam with session_database; session_store: pvc; session_store omitted; pod.env CGO_ENABLED: \"1\"; pod.env HOME: /tmp",
-      "observed": "postgres and cloudsql-iam: 'Config OK: project=WIDGETS' exit 0; pvc and omitted: exit 1 'runtime.kubernetes.session_store must name a store that keeps sessions in a database, and is required (INFRA-80)…'; CGO_ENABLED: exit 1 'runtime.kubernetes.pod.env sets CGO_ENABLED, which the worker image sets (packages/daemon/docker/worker.Dockerfile ENV)'; HOME: exit 1, the same refusal naming HOME",
-      "headSha": "1333686c34bd7ff8c6e79a47625646460df112eb",
-      "negativeControl": "session_store: pvc, the omitted key, and a pod.env naming CGO_ENABLED or HOME, each refused with exit 1 while the unmodified example passes"
+      "criterion": "Review round 17's finding: docs/kubernetes.md no longer says Oh My Pi writes sessions under the worker image's profile, since every pod keeps its sessions in the session database",
+      "surface": "docs/kubernetes.md as published to the docs site, against the pod environment the Sandbox runtime renders and the pod baseline",
+      "command": "jj diff -r 7ad1c609da45 docs/kubernetes.md; read packages/daemon/internal/runtime/sandbox/manifest.go:876-886, packages/daemon/internal/podsafety/podsafety.go:5-19,74-82, runtime/sandbox/operatorpod.go:24-25; grep -rniE 'writes? (its |the )?sessions|sessions, logs|session files? (under|in) (the )?(profile|~/.omp|/home/legion)|sessions directory' docs/*.md docs/site/src skills packages/daemon/internal/prompts deploy README.md",
+      "observed": "the paragraph now reads 'which must be writable (OMP writes logs and `models.db` under `~/.omp/profiles/legion`; every session is a row in the session database)', the rest of it unchanged; mainEnvironment sets OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE on every workflow role's generation; the sweep's one hit, kubernetes.md:1013, is the legion-v10.0.0 tree-volume import procedure",
+      "headSha": "ff87f8e6b5d1a0c9a17cbd38151ab05bce5ecd32",
+      "negativeControl": "at ffb68a71af37 the same line reads 'OMP writes sessions, logs, and `models.db` under `~/.omp/profiles/legion`', contradicting operatorpod.go:24-25 and mainEnvironment"
     }
   ],
-  "ci": "At 261787696ec8 (the merge; 1333686c34bd carries skip-checks), read without waiting: Tests 40282443565 (lint, typecheck, test) and Legion Envoy and Contracts 40282443678 queued; Docs 40282443586, PR Title 40282443587 and Worker Image 40282443628 pending. At retro's 25686c368f69 the Tests run was cancelled by the merge push (typecheck had passed) and Worker Image 40281148576 is still queued. Nothing concluded from unsettled lanes.",
+  "smoke": "No code changed since round 19 (the only file outside .legion is docs/kubernetes.md), so round 19's legion --check-config smoke at 1333686c34bd stands for this head's code.",
+  "ci": "At ff87f8e6b5d1 (this push's head, no skip-checks), read without waiting: Tests 40284301204 (lint, typecheck, test), Worker Image 40284301585, Docs 40284301363, Legion Envoy and Contracts 40284301230 and PR Title 40284372028 queued. The runs at 261787696ec8 were cancelled by this push. Nothing concluded from unsettled lanes.",
   "notRun": [
     "The live Stage 4a run (scripts/e2e/stage4a-sandbox-runtime.sh) on the cluster: it cannot run from a pod; the architect arranges it from the devbox. Not run by me and not recorded as passing.",
-    "Stage 4b has run at no head.",
-    "Retro's docs/solutions commits (9d781c183c42) are not re-tested: the merge gate exempts them, and the fingerprint excludes them."
+    "Stage 4b has run at no head."
   ]
 }
