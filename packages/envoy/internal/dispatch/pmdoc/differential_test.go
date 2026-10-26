@@ -385,17 +385,20 @@ func TestDifferentialCompare(t *testing.T) {
 		// A link around one whole image is stored as the image's link attributes, as the editor
 		// stores it; head keeps it when it stores the document as the engine reads it. A document
 		// both revisions refuse - its markdown is outside the Proof schema, so no write of it is
-		// taken at either - loses no link it ever had, and one Go's reader reads otherwise than the
-		// engine at both revisions - a misread the base already makes elsewhere in the document,
-		// which head does not store correctly however it writes the image - is not head's loss;
-		// both are counted apart, ungated.
+		// taken at either - loses no link it ever had, and is counted apart, ungated. So is one
+		// Go's reader reads otherwise than the engine at both revisions - its author's source,
+		// read two ways at base already, which the server takes as Go reads it (R2) - but only
+		// where head's stored bytes hold what Go read: Go's Parse and ParseForWrite and the engine
+		// all read them back as Go's tree, its images and their links included. Bytes either
+		// reader reads otherwise lose the link the server took, whatever the source said.
 		if links.whole {
 			switch {
 			case head.correct:
 				counts["linked image kept"]++
 			case !base.stores && !head.stores:
 				flag("linked image in a write both refuse", sides)
-			case !base.ReadsAsEngine && !head.ReadsAsEngine:
+			case !base.ReadsAsEngine && !head.ReadsAsEngine && head.stores &&
+				head.dump.ReadsBack && head.dump.WriteReadsBack && head.EngineReadsBack:
 				flag("linked image in a document Go reads otherwise than the engine at both revisions", sides)
 			default:
 				flag("lost whole-image link", sides)
