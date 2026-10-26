@@ -335,6 +335,9 @@ test("on a phone the ask card's asker still opens its copy handles, and the live
 test("the page reads the agent list once, asks nothing per agent, and shows a rename and a stop without a reload", async ({
   browser,
 }, testInfo) => {
+  // The open page learns of a rename and then of a stop only from the shell's 15 s registry
+  // poll, so this row waits for up to two polls of 30 s each on top of its seeding.
+  test.setTimeout(120_000);
   const seeded = await seed();
   const alice = await asUser(browser, "alice");
   try {
