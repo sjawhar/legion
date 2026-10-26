@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-252",
-  "completed": "2026-10-26T21:29:46Z",
+  "completed": "2026-10-26T22:43:58Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2226",
   "proof": [
     {
@@ -156,6 +156,14 @@
       "observed": "All(): 55 design_gate_review_marks, 56 issue_ancestry, 56 migrations, no error; every suite ok; main's blocked-issue test ok; child adoption e2e PASS in 65s",
       "headSha": "2286fec9ca1408b7e7d2d3936dfffb5e7e160a38",
       "negativeControl": "without the renumber the merged tree holds two version-55 files, which migrations.All refuses ('share version'), as rounds 3 and 8 reproduced for 51 and 54"
+    },
+    {
+      "criterion": "Forward merge of main ba9a24e2 (#2258): both features hold, the ancestry migration sits after main's 0056, and the daemon boots and migrates on the merged head",
+      "surface": "the merged head c78e5a51: migrations.All(); store, record, admit, api, intake suites; main's TestBlockedIssuesAreNotStartedAgainstScratchDispatch; the whole daemon through scripts/e2e/child-adoption.sh, on fresh PostgreSQL databases",
+      "command": "go run -overlay=<throwaway> ./cmd/zz-migcheck; LEGION_TEST_PG_DSN=<fresh database> go test -count=1 ./internal/store/... ./internal/record/... ./internal/admit/... ./internal/api/... ./internal/intake/...; ... -run TestBlockedIssuesAreNotStartedAgainstScratchDispatch ./internal/daemon/; bash scripts/e2e/child-adoption.sh (comment: https://github.com/sjawhar/legion/pull/2226#issuecomment-6429079019)",
+      "observed": "All(): 56 root_ask_mirror, 57 issue_ancestry, 57 migrations, no error; every suite ok; main's blocked-issue test ok; child adoption e2e PASS in 63s",
+      "headSha": "c78e5a511aec08eda51fbfd1c5c04e006cd82a11",
+      "negativeControl": "without the renumber the merged tree holds two version-56 files, which migrations.All refuses ('share version'), as reproduced for 51 and 54 in earlier rounds"
     }
   ],
   "filesChanged": [
@@ -200,7 +208,8 @@
     "tester round 8: packages/daemon/internal/store/migrations/0054_issue_ancestry.up.sql renamed 0055_issue_ancestry.up.sql (header line updated), after main's 0054_issue_pod_roles_container (#2150); nothing else changed",
     "generation 3 (re-admission after the contract-37 drain): no code change. Code head stays afedb19d; main 6cdb9995 still ends at migration 0054, so 0055_issue_ancestry collides with nothing; GitHub reports MERGEABLE; required checks at afedb19d: Tests 40369963835 success (lint, typecheck, test), PR Title 40370064190 success.",
     "review round 7: 0055 backfills handed_over_from from processed_events outbox hand-over ids and claims naming another tree (store/migration_0055_test.go); PR body deploy note with a read-only pre-upgrade query for the unmarked population (an orphan a person admitted that never ran a worker)",
-    "merge of main 5c4548f0 (#2253) at 2286fec9: migration_0055_test.go keeps main's gate-marks test, this branch's backfill test moves to migration_0056_test.go (seeded through 55); store_test.go keeps both new tests; migration renamed 0056_issue_ancestry; adopt_test.go's applyFact helper removed in favour of #2253's identical-signature one; PR body deploy note and size line say 0056"
+    "merge of main 5c4548f0 (#2253) at 2286fec9: migration_0055_test.go keeps main's gate-marks test, this branch's backfill test moves to migration_0056_test.go (seeded through 55); store_test.go keeps both new tests; migration renamed 0056_issue_ancestry; adopt_test.go's applyFact helper removed in favour of #2253's identical-signature one; PR body deploy note and size line say 0056",
+    "merge of main ba9a24e2 (#2258) at c78e5a51: intake/facts.go keeps Ancestry/Reread and main's ClaimedBy/ClaimKnown; migration_0056_test.go keeps main's mirror test, this branch's backfill test moves to migration_0057_test.go (seeded through 56); migration renamed 0057_issue_ancestry; the retro learning's evidence and the PR body's present-tense mentions say 0057"
   ],
   "trickyParts": [
     "Adoption bumps every adopted record's generation: that is the fence the old self-tree's LingerClose, supervise and issue-suspend rows already check; WorkspaceRemove had none, so it now names its tree.",
@@ -232,7 +241,7 @@
     "Every todo event of an unrecorded issue or a recorded root under an unrecorded Dispatch parent now costs one Dispatch read per ancestor at preparation, labelled or not.",
     "Every event of an unrecorded issue now reads the issues table once at preparation; Dispatch is read only when a parented queued root exists (normally none)."
   ],
-  "round": 12,
+  "round": 13,
   "reviewRound": 3,
-  "codeHead": "2286fec9ca1408b7e7d2d3936dfffb5e7e160a38"
+  "codeHead": "c78e5a511aec08eda51fbfd1c5c04e006cd82a11"
 }
