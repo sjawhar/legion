@@ -49,10 +49,13 @@ export function useBoardMoves(
 } {
   const queryClient = useQueryClient();
   const [error, setError] = useState<string>();
-  // The board says why a move was refused, over the card it rolled back.
+  // The board says why a move was refused, over the card it rolled back. A move is one write to
+  // its issue, so it goes in press order with every other write to that issue (`issue:<KEY>`) -
+  // the header's status, its fields, a components save.
   const patch = useKeyedWrite({
     inline: true,
     label: ({ key }: { input: UpdateIssueInput; key: string }) => `${key} moved on the board`,
+    target: ({ key }) => `issue:${key}`,
     write: ({ input, key }, bounds) => api.patchIssue(key, input, bounds),
     mutationKey: boardMoveMutationKey(project),
     scope: { id: `board:${project}` },

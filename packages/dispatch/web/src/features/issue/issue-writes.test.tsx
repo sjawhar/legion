@@ -4,8 +4,11 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
-import { ApiError, api } from "../../api/client";
-import type { Issue, IssueDetails } from "../../api/types";
+import { ApiError, api, NetworkError } from "../../api/client";
+import type { Issue, IssueDetails, IssueSummary } from "../../api/types";
+import type { IssueStatus } from "../project/board-model";
+import { useBoardMoves } from "../project/board-moves";
+import { projectIssuesQueryKey } from "../project/issue-filters";
 import { IssuePage } from "./IssuePage";
 
 const issue: IssueDetails = {
@@ -939,3 +942,59 @@ test("IssuePage renders the server's reason inline when a parent save is refused
     restore();
   }
 });
+
+// W34. Every write to one issue goes in the order it was pressed (`issue:<KEY>`), a board move's and
+// a components save's as much as the header's: a board move pressed during an outage, then a
+// status change from the issue's header, land in that order once Dispatch is back, even though the
+// move's answer is the slower of the two.
+test("a board move then a header status change land in press order after an outage", async () => {
+  const { patchIssue, restore } = stubIssueApi();
+  const { queryClient, unmount } = renderIssuePage();
+  let up = false;
+  const landed: string[] = [];
+  patchIssue.mockImplementation(async (_key, input) => {
+    if (!up) throw new NetworkError("/api/v1/issues/CORE-1", new TypeError("Failed to fetch"));
+    if (input.rank !== undefined) {
+      const slow = Promise.withResolvers<void>();
+      setTimeout(slow.resolve, 500);
+      await slow.promise;
+    }
+    landed.push(input.rank !== undefined ? `board move to ${input.status}` : `${input.status}`);
+    return narrowIssue({ ...issue, status: input.status ?? issue.status });
+  });
+  const { artifacts: _artifacts, children: _children, open_asks: _asks, ...fields } = issue;
+  const summary: IssueSummary = { ...fields, open_asks: 0 };
+  queryClient.setQueryData(projectIssuesQueryKey("CORE", []), [summary]);
+  let moveCard: ((key: string, status: IssueStatus, index: number) => Promise<void>) | undefined;
+  function Board(): null {
+    moveCard = useBoardMoves("CORE").moveCard;
+    return null;
+  }
+  const board = render(
+    <QueryClientProvider client={queryClient}>
+      <Board />
+    </QueryClientProvider>
+  );
+  try {
+    const status = (await screen.findByLabelText("Status")) as HTMLSelectElement;
+    let moved: Promise<void> | undefined;
+    act(() => {
+      moved = moveCard?.("CORE-1", "in_progress", 0);
+    });
+    await waitFor(() => expect(patchIssue).toHaveBeenCalledTimes(1));
+    fireEvent.change(status, { target: { value: "backlog" } });
+    up = true;
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+    await act(async () => {
+      await moved;
+    });
+    await waitFor(() => expect(landed).toHaveLength(2), { timeout: 4_000 });
+    expect(landed).toEqual(["board move to in_progress", "backlog"]);
+  } finally {
+    board.unmount();
+    unmount();
+    restore();
+  }
+}, 10_000);

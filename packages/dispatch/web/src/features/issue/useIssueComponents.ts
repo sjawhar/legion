@@ -60,6 +60,8 @@ export function useIssueComponents(
     // The components line says why a save was refused, beside the picker it came from.
     inline: true,
     label: () => `Components of ${issue.key}`,
+    // One write to the issue, in press order with every other (`issue:<KEY>`).
+    target: () => `issue:${issue.key}`,
     write: (input: IssueComponentsInput, bounds) =>
       api.patchIssue(issue.key, { components: input }, bounds),
     onMutate: async (input): Promise<Snapshot> => {
