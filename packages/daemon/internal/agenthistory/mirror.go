@@ -25,9 +25,8 @@ const (
 	// body per request.
 	batchEntries = 256
 	batchBytes   = 1 << 20
-	// heartbeatEvery is how often the project's answering key is written while the loop is
-	// configured; the listener hands a project's messages off only while it is younger than three
-	// minutes.
+	// heartbeatEvery is how often the project's answering key is written; the listener hands a
+	// project's messages off only while it says answering and is younger than three minutes.
 	heartbeatEvery = time.Minute
 	// notFoundRetry is how soon a route an older listener answers 404 is tried again.
 	notFoundRetry = time.Minute
@@ -98,21 +97,25 @@ type MirrorConfig struct {
 	BaseURL, Token string
 	// Project is the Legion project token: the heartbeat's key and every entry's legion_project.
 	Project string
-	Store   Store
-	Clock   Clock
-	Log     *slog.Logger
+	// Answering is what the heartbeat says: whether the daemon's answer loop runs, so that the
+	// listener hands the project's messages off to it.
+	Answering bool
+	// Store is the history the entries are read from; nil writes no entry, only the heartbeat.
+	Store Store
+	Clock Clock
+	Log   *slog.Logger
 	// Client is the HTTP client; nil is one with a ten-second timeout.
 	Client *http.Client
 }
 
-// Mirror writes the history to the listener's Legion agent registry while the answer loop is
-// configured: once Run starts, every recorded conversation of the project in batches (each at most
-// 256 entries and 1 MiB), then one PUT for each registration Put hands it, in the order handed; and
-// the project's `answering` key every minute. Nothing it does blocks the boot or a registration. A
-// route an older listener answers 404 is logged once and tried again each minute; any other failure
-// is tried again on a backoff. A write the listener refuses (400 or 409: an entry it will never
-// take) is logged and dropped; a refused batch is sent again an entry at a time, so one bad entry
-// costs only itself.
+// Mirror writes the project's `answering` key to the listener's Legion agent registry every
+// minute, and, with a Store, the history: once Run starts, every recorded conversation of the
+// project in batches (each at most 256 entries and 1 MiB), then one PUT for each registration Put
+// hands it, in the order handed. Nothing it does blocks the boot or a registration. A route an
+// older listener answers 404 is logged once and tried again each minute; any other failure is
+// tried again on a backoff. A write the listener refuses (400 or 409: an entry it will never take)
+// is logged and dropped; a refused batch is sent again an entry at a time, so one bad entry costs
+// only itself.
 type Mirror struct {
 	cfg  MirrorConfig
 	wake chan struct{}
@@ -172,7 +175,7 @@ func (m *Mirror) Put(row store.AgentConversation) {
 
 // Run writes until ctx ends: the heartbeat at once and then each minute, the recorded history in
 // batches, and every Put as it comes, each kind on its own schedule (lane), so a route an older
-// listener lacks never holds up one it has.
+// listener lacks never holds up one it has. Without a Store it writes the heartbeat alone.
 func (m *Mirror) Run(ctx context.Context) {
 	for {
 		now := m.cfg.Clock.Now()
@@ -201,6 +204,9 @@ func (m *Mirror) Run(ctx context.Context) {
 }
 
 func (m *Mirror) pendingWrites() bool {
+	if m.cfg.Store == nil {
+		return false
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return !m.booted || len(m.batches) > 0 || len(m.puts) > 0
@@ -211,7 +217,7 @@ func (m *Mirror) beat(ctx context.Context, now time.Time) {
 	body := struct {
 		Answering bool   `json:"answering"`
 		UpdatedAt string `json:"updated_at"`
-	}{true, now.UTC().Format(registryTime)}
+	}{m.cfg.Answering, now.UTC().Format(registryTime)}
 	result := m.send(ctx, "PUT /v1/legion/projects/{project}", "/v1/legion/projects/"+url.PathEscape(m.cfg.Project), body)
 	if result == refused {
 		// The key is the listener's to refuse; the next minute's is a new write all the same.

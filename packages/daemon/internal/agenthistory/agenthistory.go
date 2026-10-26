@@ -2,8 +2,9 @@
 // (agent_conversations) and that record's mirror in the Envoy listener's Legion agent registry:
 // every claim registration recorded as it happens (Recorder), the conversations of earlier releases
 // found by their titles at boot (Backfill), and, while the answer loop is configured, every record
-// written to the registry with the project's `answering` heartbeat (Mirror). The registry is how
-// Envoy and Dispatch learn that a stopped session was a Legion agent whose daemon answers for it.
+// written to the registry (Mirror), beside the project's `answering` heartbeat, which says whether
+// the loop runs. The registry is how Envoy and Dispatch learn that a stopped session was a Legion
+// agent whose daemon answers for it.
 package agenthistory
 
 import (

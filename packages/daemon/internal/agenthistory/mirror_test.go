@@ -281,11 +281,20 @@ func testerRow(t *testing.T, session string, minute int) store.AgentConversation
 	}
 }
 
-// runMirror runs a mirror over st against the stand-in until the test ends.
+// runMirror runs the mirror of a daemon whose answer loop runs over st against the stand-in until
+// the test ends.
 func runMirror(t *testing.T, server *httptest.Server, st Store, log *logs) (*Mirror, *fakeClock) {
 	t.Helper()
+	return runMirrorOf(t, server, MirrorConfig{Answering: true, Store: st, Log: log.logger()})
+}
+
+// runMirrorOf runs a mirror of cfg, with the stand-in's address and bearer, the Legion project and
+// a fake clock, against the stand-in until the test ends.
+func runMirrorOf(t *testing.T, server *httptest.Server, cfg MirrorConfig) (*Mirror, *fakeClock) {
+	t.Helper()
 	clock := newFakeClock()
-	m := NewMirror(MirrorConfig{BaseURL: server.URL + "/", Token: listenerToken, Project: legionProject, Store: st, Clock: clock, Log: log.logger()})
+	cfg.BaseURL, cfg.Token, cfg.Project, cfg.Clock = server.URL+"/", listenerToken, legionProject, clock
+	m := NewMirror(cfg)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -418,7 +427,8 @@ func TestEachRegistrationIsOnePutOfItsSession(t *testing.T) {
 	}
 }
 
-// The project's answering key is written at boot and then every minute, each with the clock's time.
+// A daemon whose answer loop runs writes its project's answering key saying so at boot and then
+// every minute, each with the clock's time.
 func TestTheHeartbeatIsWrittenEveryMinute(t *testing.T) {
 	listener, server := newStandIn(t)
 	_, clock := runMirror(t, server, &fakeStore{}, &logs{})
@@ -440,6 +450,47 @@ func TestTheHeartbeatIsWrittenEveryMinute(t *testing.T) {
 		if beats[i] != (beat{Answering: true, UpdatedAt: at}) {
 			t.Errorf("heartbeat %d = %+v, want answering at %s", i, beats[i], at)
 		}
+	}
+}
+
+// A daemon whose answer loop does not run says so at boot and every minute, so the listener stops
+// handing its project's messages off at once rather than when the last answering key ages out. With
+// `answers` set it still writes the history; without, it writes no entry at all.
+func TestTheHeartbeatSaysNotAnsweringWhileTheLoopDoesNotRun(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		store Store
+		want  int
+	}{
+		{name: "answers without the workflow", store: &fakeStore{rows: []store.AgentConversation{testerRow(t, "ses-0", 0)}}, want: 1},
+		{name: "no answers", want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			listener, server := newStandIn(t)
+			_, clock := runMirrorOf(t, server, MirrorConfig{Store: tc.store, Log: (&logs{}).logger()})
+			var times []string
+			for range 2 {
+				times = append(times, clock.Now().UTC().Format("2006-01-02T15:04:05.000Z"))
+				w := clock.wait(t)
+				if w.d != time.Minute {
+					t.Fatalf("the mirror waits %s after a heartbeat, want a minute", w.d)
+				}
+				clock.fire(w)
+			}
+			clock.wait(t)
+			batches, puts, beats := listener.snapshot()
+			if len(beats) != 3 {
+				t.Fatalf("heartbeats = %+v, want three: at boot and after each of two minutes", beats)
+			}
+			for i, at := range times {
+				if beats[i] != (beat{Answering: false, UpdatedAt: at}) {
+					t.Errorf("heartbeat %d = %+v, want not answering at %s", i, beats[i], at)
+				}
+			}
+			if len(batches) != tc.want || len(puts) != 0 {
+				t.Errorf("batches %+v and puts %+v, want %d batches of the history", batches, puts, tc.want)
+			}
+		})
 	}
 }
 

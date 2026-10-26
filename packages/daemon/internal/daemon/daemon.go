@@ -247,8 +247,6 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 	if cfg.DispatchURL != "" {
 		log.Info("legion workflow boot stage", "stage", "store")
 	}
-	history := newConversationHistory(cfg, plan, st, o.environment(), log)
-	plan.registered = history.recorder.Registered
 	// The mapping read and the App mint wait out GitHub's and Dispatch's transient failures, which the
 	// boot budget does not bound, as it does not bound the plugin gate or the image probe: the work
 	// after them has a budget of its own.
@@ -276,6 +274,10 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 			workflow.answers = &answering{project: plan.project}
 		}
 	}
+	// The heartbeat says answering only while the answer loop runs: `answers` set and the workflow
+	// open, whose connection the loop reads its hand-offs from.
+	history := newConversationHistory(cfg, plan, st, o.environment(), workflow != nil && workflow.answers != nil, log)
+	plan.registered = history.recorder.Registered
 	if cfg.Runtime.Name == "tmux" {
 		executable, err := os.Executable()
 		if err != nil {
