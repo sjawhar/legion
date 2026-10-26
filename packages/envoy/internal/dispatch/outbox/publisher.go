@@ -41,10 +41,9 @@ const (
 
 // Publisher is the NATS publication boundary used by the Dispatch outbox.
 type Publisher interface {
-	// PublishAsync sends item without waiting for NATS's answer, and returns a channel that
-	// receives the outcome once: nil once NATS accepted item, or why it did not. Items sent one
-	// after another reach NATS in the order they were sent (bus.Client.PublishAsync).
-	PublishAsync(contracts.Envelope) <-chan error
+	// Window starts one batch's sends: each is sent without waiting for NATS's answer, all on one
+	// connection and in the order they were made, or not at all (bus.Client.Window).
+	Window() bus.Sender
 }
 
 // Deps are the durable state and delivery dependencies for the outbox.
@@ -62,6 +61,9 @@ type Deps struct {
 // periodically so a dropped in-process notification cannot strand an event. It
 // returns when ctx is cancelled.
 func Run(ctx context.Context, deps Deps) {
+	// Started before the publisher marks its context, so the compaction carries a marker of its
+	// own: a connection it holds must never count as one the publisher holds.
+	go compactDaily(ctx, deps)
 	// The publisher is one of the process's transaction openers, so its context carries the
 	// pool's marker: a read it ever makes while one of its transactions is open is refused
 	// rather than left to deadlock the pool (store.ErrNestedAcquire).
@@ -72,8 +74,6 @@ func Run(ctx context.Context, deps Deps) {
 	scan(ctx, deps)
 	retry := time.NewTicker(retryInterval)
 	defer retry.Stop()
-	compact := time.NewTicker(compactInterval)
-	defer compact.Stop()
 
 	for {
 		select {
@@ -88,6 +88,21 @@ func Run(ctx context.Context, deps Deps) {
 			scan(ctx, deps)
 		case <-retry.C:
 			scan(ctx, deps)
+		}
+	}
+}
+
+// compactDaily compacts every document once per compactInterval until ctx ends, on a goroutine of
+// its own: a compaction walks every document for minutes, and on the outbox's loop nothing would
+// publish meanwhile. It goes through the document service's own store, not the outbox's pool.
+func compactDaily(ctx context.Context, deps Deps) {
+	ctx = store.WithTransactionTracking(ctx)
+	compact := time.NewTicker(compactInterval)
+	defer compact.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
 		case <-compact.C:
 			if err := deps.Docs.CompactAll(ctx); err != nil {
 				slog.Error("dispatch outbox: compact documents", "error", err)
@@ -125,20 +140,22 @@ type pendingEvent struct {
 	failureLog string
 }
 
-// scanBatch claims a batch and publishes it as one window. Every event's envelope is sent to each
-// of its destinations, in id order and each event's destinations in turn, before any answer is
-// waited for, so a batch costs one NATS round trip rather than one per destination, and
-// NATS takes the envelopes in the order they were sent: on the stream, on the role lanes and on
-// each issue's subject, a batch's events arrive in id order. Then every answer is read, and what
-// the batch came to is written in one statement (recordBatch). An event is marked published only
-// once NATS accepted each of its destinations; one that failed is backed off, so the events
-// queued behind it are not stuck behind it.
+// scanBatch reads a batch and publishes it as one window (bus.Client.Window). Every event's
+// envelope is sent to each of its destinations, in id order and each event's destinations in
+// turn, before any answer is waited for, so a batch costs one NATS round trip rather than one per
+// destination, and NATS takes the envelopes in the order they were sent: on the stream, on the role
+// lanes and on each issue's subject, a batch's events arrive in id order. Then every answer is
+// read, and what the batch came to is written in one statement (recordBatch). An event is marked
+// published only once NATS accepted each of its destinations; one that failed is backed off, so
+// the events queued behind it are not stuck behind it.
 //
-// A send NATS could not take at all because the client has no connection (bus.ErrUnavailable)
-// is no fault of its event: nothing after it in the batch is sent, since it would meet the same
-// connection, and that event and every one after it are released rather than backed off, so the
-// next scan takes them again in id order. An event backed off for an outage would reach its
-// issue's subject after the later events of that issue, which the Legion daemon then drops as
+// A failure of the connection rather than the envelope (bus.ErrUnavailable: no connection, one
+// lost or reconnected mid-batch, no answer at all) is no fault of its event. The window sends
+// nothing on a connection that came back, so what of the batch reached NATS is a prefix of it; no
+// event after the first such send is sent, and every event that met the failure, or was not sent,
+// is released rather than backed off, so the next scan sends them again in id order, and the
+// stream's MsgId drops the copies of those that had landed. An event backed off instead would reach
+// its issue's subject after the later events of that issue, which the Legion daemon then drops as
 // stale by their sequence.
 func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 	pending, blocked, err := scanPendingEvents(ctx, deps)
@@ -146,23 +163,29 @@ func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 		return 0, false, err
 	}
 
+	sender := deps.Publisher.Window()
 	attempts := make([]*attempt, len(pending))
-	unavailable := false
 	for index, item := range pending {
+		if ctx.Err() != nil {
+			break
+		}
 		if item.failure != nil {
 			continue
 		}
-		attempts[index] = send(ctx, deps, item.event, item.slug, item.route, publishedDestinationSet(item.destinations))
+		attempts[index] = send(ctx, deps, sender, item.event, item.slug, item.route, publishedDestinationSet(item.destinations))
 		if errors.Is(attempts[index].ended, bus.ErrUnavailable) {
-			slog.Error("dispatch outbox: NATS is unreachable, so the rest of the batch waits for the next scan",
-				"event_id", item.event.ID, "error", attempts[index].ended)
-			unavailable = true
 			break
 		}
 	}
 	outcomes := make([]outcome, len(pending))
+	unavailable := false
 	for index, item := range pending {
 		outcomes[index] = settle(ctx, item, attempts[index])
+		if outcomes[index].state == released && !unavailable && ctx.Err() == nil {
+			slog.Error("dispatch outbox: NATS is unreachable, so the batch from this event on waits for the next scan",
+				"event_id", item.event.ID)
+			unavailable = true
+		}
 	}
 	// Written even when ctx has ended: a process stopping mid-batch records what NATS already
 	// accepted, so the next process does not send it again.
@@ -212,9 +235,10 @@ func settle(ctx context.Context, item pendingEvent, a *attempt) outcome {
 	a.wait(ctx)
 	result.reached = a.reached
 	if err := a.err(); err != nil {
-		// NATS unreachable, or the process stopping before every answer came, is no failure of
-		// the event's own.
-		if errors.Is(a.ended, bus.ErrUnavailable) || ctx.Err() != nil {
+		// The connection failing, or the process stopping before every answer came, is no
+		// failure of the event's own.
+		if errors.Is(err, bus.ErrUnavailable) || ctx.Err() != nil {
+			slog.Info("dispatch outbox: event released", "event_id", item.event.ID, "error", err)
 			result.state = released
 			return result
 		}
@@ -242,8 +266,9 @@ func backOff(result outcome, item pendingEvent, what string, cause error) outcom
 // marked published, backed off, or released (left due at once). Each row is guarded on
 // published_at is null, like every terminal write here. A write that fails leaves the whole batch
 // unmarked, which is what a process that dies between NATS's acknowledgements and this write
-// leaves too: the next scan publishes the batch again, and JetStream drops each repeat inside its
-// duplicate window by its MsgId.
+// leaves too: the next scan publishes the batch again. JetStream drops each repeat inside its
+// duplicate window by its MsgId; a role lane, over core NATS, carries the repeat, and its
+// receivers drop it by its dedupe key (internal/contracts/dedupe.go).
 func recordBatch(ctx context.Context, deps Deps, outcomes []outcome) error {
 	if len(outcomes) == 0 {
 		return nil
@@ -371,8 +396,8 @@ func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, bool, er
 // the connection or of the store, ends the attempt at once, since every destination after it would
 // fail the same way. The destinations the attempt reached are recorded with the batch
 // (recordBatch), so a retry publishes only the rest.
-func send(ctx context.Context, deps Deps, event model.Event, slug string, route *string, delivered map[string]struct{}) *attempt {
-	a := &attempt{delivered: delivered}
+func send(ctx context.Context, deps Deps, sender bus.Sender, event model.Event, slug string, route *string, delivered map[string]struct{}) *attempt {
+	a := &attempt{delivered: delivered, sender: sender}
 	if event.IssueKey == nil && event.ArtifactID == nil && event.Project == "" {
 		return a
 	}
@@ -413,13 +438,15 @@ func publishDestinations(ctx context.Context, deps Deps, event model.Event, item
 	return publishPreviousClaimant(deps, event.ID, item, event, a)
 }
 
-// attempt is one pass over an event's destinations. delivered holds the destinations the event
+// attempt is one pass over an event's destinations, sent through sender, its batch's window
+// (Publisher.Window). delivered holds the destinations the event
 // reached before this pass and those this pass sent, so that none is sent twice; sent is what this
 // pass sent, in order, with each one's answer to come. wait reads those answers into reached, the
 // destinations NATS accepted or refused (bus.ErrRefused), denied, the denials
 // (bus.ErrPublishDenied) the pass went on past, and failed, every other failure. ended is the
 // error that ended the pass before it sent everything.
 type attempt struct {
+	sender    bus.Sender
 	delivered map[string]struct{}
 	sent      []sentDestination
 	reached   []string
@@ -445,10 +472,16 @@ type sentDestination struct {
 func (a *attempt) wait(ctx context.Context) {
 	for _, sent := range a.sent {
 		var err error
+		// An answer already in is read before ctx is: a stopping process records what NATS
+		// accepted.
 		select {
 		case err = <-sent.answer:
-		case <-ctx.Done():
-			err = ctx.Err()
+		default:
+			select {
+			case err = <-sent.answer:
+			case <-ctx.Done():
+				err = ctx.Err()
+			}
 		}
 		if err := a.answer(sent, err); err != nil {
 			a.failed = append(a.failed, err)
@@ -782,7 +815,7 @@ func publishDestination(deps Deps, eventID int64, item contracts.Envelope, a *at
 		return nil
 	}
 	a.delivered[item.Topic] = struct{}{}
-	sent := sentDestination{eventID: eventID, topic: item.Topic, label: label, id: id, answer: deps.Publisher.PublishAsync(item)}
+	sent := sentDestination{eventID: eventID, topic: item.Topic, label: label, id: id, answer: a.sender.PublishAsync(item)}
 	select {
 	case err := <-sent.answer:
 		if err != nil && !errors.Is(err, bus.ErrPublishDenied) && !errors.Is(err, bus.ErrRefused) {

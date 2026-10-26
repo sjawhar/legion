@@ -67,11 +67,12 @@ func TestPublishAsyncKeepsSendOrder(t *testing.T) {
 		t.Fatalf("flush the subscription: %v", err)
 	}
 
+	window := client.Window()
 	answers := make([]<-chan error, 0, 2*count)
 	for index := range count {
 		answers = append(answers,
-			client.PublishAsync(numberedEnvelope(orderedStreamTopic, index)),
-			client.PublishAsync(numberedEnvelope(orderedRoleTopic, index)))
+			window.PublishAsync(numberedEnvelope(orderedStreamTopic, index)),
+			window.PublishAsync(numberedEnvelope(orderedRoleTopic, index)))
 	}
 	for index, answer := range answers {
 		select {
@@ -115,15 +116,20 @@ func TestPublishAsyncKeepsSendOrder(t *testing.T) {
 	}
 }
 
-// PublishAsync with no connection to NATS sends nothing, and its answer is in the channel when it
-// returns: ErrUnavailable, which a caller tells apart from a failure of the envelope itself.
-func TestPublishAsyncWithNATSDownAnswersUnavailableBeforeSending(t *testing.T) {
+// A window whose connection is lost sends nothing more, and says so before it returns: its answer
+// is in the channel at once, ErrUnavailable, which a caller tells apart from a failure of the
+// envelope itself.
+func TestAWindowWhoseConnectionIsLostAnswersUnavailableBeforeSending(t *testing.T) {
 	server, url := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{url})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(client.Close)
+	window := client.Window()
+	if err := <-window.PublishAsync(numberedEnvelope(orderedStreamTopic, 0)); err != nil {
+		t.Fatalf("first publish answered %v", err)
+	}
 	if err := server.Stop(context.Background(), nil); err != nil {
 		t.Fatalf("stop NATS: %v", err)
 	}
@@ -132,15 +138,15 @@ func TestPublishAsyncWithNATSDownAnswersUnavailableBeforeSending(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	for _, topic := range []string{orderedStreamTopic, orderedRoleTopic} {
-		answer := client.PublishAsync(numberedEnvelope(topic, 0))
+	for index, topic := range []string{orderedStreamTopic, orderedRoleTopic} {
+		answer := window.PublishAsync(numberedEnvelope(topic, index+1))
 		select {
 		case err := <-answer:
 			if !errors.Is(err, bus.ErrUnavailable) {
-				t.Fatalf("publish to %s with NATS down answered %v, want bus.ErrUnavailable", topic, err)
+				t.Fatalf("publish to %s on a lost connection answered %v, want bus.ErrUnavailable", topic, err)
 			}
 		default:
-			t.Fatalf("publish to %s with NATS down returned with no answer, as if it had sent something", topic)
+			t.Fatalf("publish to %s on a lost connection returned with no answer, as if it had sent something", topic)
 		}
 	}
 }

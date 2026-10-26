@@ -49,16 +49,16 @@ func startLatencyProxy(t *testing.T, target string, rtt time.Duration) string {
 	return "nats://" + listener.Addr().String()
 }
 
-// startOutageProxy relays to target (host:port) with nothing added, until down cuts every
-// connection through it and refuses new ones; up listens on the same address again. It returns
-// the proxy and the NATS URL of its address, and closes when t ends.
-func startOutageProxy(t *testing.T, target string) (*latencyProxy, string) {
+// startOutageProxy relays to target (host:port) with rtt added to every round trip, until down
+// cuts every connection through it and refuses new ones; up listens on the same address again. It
+// returns the proxy and the NATS URL of its address, and closes when t ends.
+func startOutageProxy(t *testing.T, target string, rtt time.Duration) (*latencyProxy, string) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen for the outage proxy: %v", err)
 	}
-	proxy := &latencyProxy{listener: listener, target: target}
+	proxy := &latencyProxy{listener: listener, target: target, delay: rtt / 2}
 	go proxy.serve(listener)
 	t.Cleanup(proxy.close)
 	return proxy, "nats://" + listener.Addr().String()

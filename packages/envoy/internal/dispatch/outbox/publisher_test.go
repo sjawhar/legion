@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
@@ -34,7 +35,7 @@ func answered(err error) <-chan error {
 // publish runs one attempt of event to its end, as scanBatch does for each event of a batch, and
 // returns why it failed.
 func publish(ctx context.Context, deps Deps, event model.Event, slug string, route *string, delivered map[string]struct{}) error {
-	a := send(ctx, deps, event, slug, route, delivered)
+	a := send(ctx, deps, deps.Publisher.Window(), event, slug, route, delivered)
 	a.wait(ctx)
 	return a.err()
 }
@@ -65,6 +66,8 @@ func (p *recordingPublisher) Publish(item contracts.Envelope) error {
 	return nil
 }
 
+func (p *recordingPublisher) Window() bus.Sender { return p }
+
 func (p *recordingPublisher) PublishAsync(item contracts.Envelope) <-chan error {
 	return answered(p.Publish(item))
 }
@@ -94,6 +97,8 @@ func (p *blockingFailPublisher) Publish(contracts.Envelope) error {
 	}
 	return errors.New("publisher unavailable")
 }
+
+func (p *blockingFailPublisher) Window() bus.Sender { return p }
 
 func (p *blockingFailPublisher) PublishAsync(item contracts.Envelope) <-chan error {
 	return answered(p.Publish(item))
@@ -337,7 +342,7 @@ func TestPublishAuthorRoutesNotifiesTheAddedOrRemovedFollowerDirectly(t *testing
 				Actor:   model.Actor{Kind: "user", ID: "alice"},
 				Payload: map[string]any{"ask_id": "5a660655-04ad-4ce0-8a9b-93dd03c412b7", "session_id": "session-asker"},
 			}
-			if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, &attempt{delivered: map[string]struct{}{}}); err != nil {
+			if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
 				t.Fatalf("publish author routes: %v", err)
 			}
 			got := publisher.all()
@@ -399,7 +404,7 @@ func TestPublishPreviousClaimantTellsTheSessionThatLostTheClaim(t *testing.T) {
 			deps := Deps{Store: database, Publisher: publisher}
 			item := contracts.Envelope{EventID: "dispatch-1", Topic: "notifications.dispatch.issue.T-1." + tc.eventType}
 			event := model.Event{Type: tc.eventType, Actor: tc.actor, Payload: tc.payload}
-			if err := publishPreviousClaimant(deps, 0, item, event, &attempt{delivered: map[string]struct{}{}}); err != nil {
+			if err := publishPreviousClaimant(deps, 0, item, event, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
 				t.Fatalf("publish previous claimant: %v", err)
 			}
 			if got := topicsOf(publisher.all()); !reflect.DeepEqual(got, tc.want) {
@@ -807,7 +812,7 @@ func TestPublishAuthorRoutesSkipsAgentReplyingToItself(t *testing.T) {
 		Actor:   model.Actor{Kind: "session", ID: "session-writer"},
 		Payload: map[string]any{"reply_to": rootID},
 	}
-	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, &attempt{delivered: map[string]struct{}{}}); err != nil {
+	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
 		t.Fatalf("publish author routes: %v", err)
 	}
 
@@ -831,7 +836,7 @@ func TestPublishAuthorRoutesNotifiesTheUnsubscribedSessionDirectly(t *testing.T)
 			"topics":     []any{"notifications.dispatch.issue.T-1.>"},
 		},
 	}
-	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, &attempt{delivered: map[string]struct{}{}}); err != nil {
+	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
 		t.Fatalf("publish author routes: %v", err)
 	}
 
@@ -852,7 +857,7 @@ func TestPublishAuthorRoutesSkipsSubscriptionRemovedWithoutASessionID(t *testing
 		Actor:   model.Actor{Kind: "user", ID: "alice"},
 		Payload: map[string]any{"by": map[string]any{"kind": "user", "id": "alice"}, "topics": []any{}},
 	}
-	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, &attempt{delivered: map[string]struct{}{}}); err != nil {
+	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
 		t.Fatalf("publish author routes: %v", err)
 	}
 

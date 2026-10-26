@@ -37,6 +37,8 @@ func (p *countingPublisher) Publish(item contracts.Envelope) error {
 	return p.fail
 }
 
+func (p *countingPublisher) Window() bus.Sender { return p }
+
 func (p *countingPublisher) PublishAsync(item contracts.Envelope) <-chan error {
 	return answered(p.Publish(item))
 }
