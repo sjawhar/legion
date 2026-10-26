@@ -1336,8 +1336,7 @@ send_agent "$issue" implementer "Claude backend sandbox proof implementation ope
 until_true 1200 "the daemon to record the implementer's handoff_complete" handoff_recorded
 commit=$(role_handoff "$issue" implementer implementing)
 assert_handoff_committer "$issue" implementer implementing 0
-files=$(timeout 60 gh api "repos/$repo/commits/$commit" --jq '.files[].filename') ||
-  fail "the handoff commit $commit the implementer reported is not on $repo"
+files=$(smoke_commit_files "$commit") || exit 1
 grep -q "^\.legion/$issue/" <<<"$files" || fail "the handoff commit $commit changes nothing under .legion/$issue/: $(tr '\n' ' ' <<<"$files")"
 legion_handoff_in || fail "the transcript $transcript holds no successful legion handoff_complete call"
 until_true 300 "the implementer's turn to end" issue_worker_state "$issue" implementer idle

@@ -715,6 +715,46 @@ smoke_branch_state() {
   refs=$(timeout 60 gh api "repos/$repo/git/matching-refs/heads/$1" --jq ".[] | select(.ref == \"refs/heads/$1\") | .ref") || return 1
   if [ -n "$refs" ]; then echo present; else echo absent; fi
 }
+# smoke_commit_files COMMIT prints the paths COMMIT changes on the smoke repository, one a line, as
+# the proof human's gh reads them. It tells the three answers apart, since only one of them says the
+# commit is not there: GitHub's 404 or 422 for a commit the repository does not hold fails naming
+# it; a rate limit the proof human's installation has spent is waited out, up to the 15 minutes
+# smoke_rate_limit_wait allows, reading the reset from `gh api rate_limit` (which no limit counts),
+# and the read made again once; any other failure fails naming gh's own answer. A bare `gh api`
+# whose failure was read as the commit's absence reported a spent rate limit as a missing commit
+# (INFRA-220, 2026-10-26).
+smoke_rate_limit_wait=900
+smoke_commit_files() {
+  local commit=$1 out err status reset wait attempt
+  err=$(mktemp)
+  for attempt in 1 2; do
+    status=0
+    out=$(timeout 60 gh api "repos/$repo/commits/$commit" --jq '.files[].filename' 2>"$err") || status=$?
+    if [ "$status" = 0 ]; then
+      rm -f "$err"
+      printf '%s\n' "$out"
+      return 0
+    fi
+    if grep -qi 'rate limit' "$err" && [ "$attempt" = 1 ]; then
+      reset=$(timeout 60 gh api rate_limit --jq '.resources.core.reset' 2>/dev/null) || reset=
+      case "$reset" in '' | *[!0-9]*) break ;; esac
+      wait=$((reset - $(date +%s) + 5))
+      if [ "$wait" -gt "$smoke_rate_limit_wait" ]; then break; fi
+      note "the proof human's GitHub installation has spent its rate limit; waiting ${wait}s for its reset at $(TZ=UTC date -d "@$reset" +%FT%TZ) to read $commit again" >&2
+      [ "$wait" -le 0 ] || sleep "$wait"
+      continue
+    fi
+    break
+  done
+  if grep -qE 'HTTP (404|422)' "$err"; then
+    rm -f "$err"
+    fail "the handoff commit $commit the implementer reported is not on $repo"
+  fi
+  local said
+  said=$(tr '\n' ' ' <"$err" | cut -c1-400)
+  rm -f "$err"
+  fail "GitHub did not answer the proof human's read of $repo commit $commit (gh exited $status): $said"
+}
 # The cleanup pull request's branch is proof/clean-main-<project, lowercased>. Stage 3's project is
 # a fresh key per run, but Stage 4b's is LEGSMOKE in every run, so the name alone cannot tell this
 # run's branch from one an earlier run left. smoke_cleanup_branch is the run's record that the
