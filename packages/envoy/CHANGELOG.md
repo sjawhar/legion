@@ -648,7 +648,7 @@
   planning the view's fifteen arms on every issue and ask read; the counts are unchanged
   (INFRA-325). Migration `0118_ask_followers_session` adds the one index an arm lacked,
   `ask_followers (session_id)`; `create index` holds `SHARE` on `ask_followers` while it builds,
-  and an earlier release serves beside it.
+  and a release that already carries 0117 serves beside it (0117 itself is stop-the-world).
 
 - **Breaking (local development):** `agent-secrets-devrelay` presents a listed caller's own
   ServiceAccount token, read from `--account-token-file` (default

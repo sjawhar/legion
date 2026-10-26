@@ -215,6 +215,8 @@ func TestBacklinkCountsEqualTheViewAndScanNoTable(t *testing.T) {
 	}{
 		{"issue", nil},
 		{"issue", []string{"child_of", "attached_to"}},
+		{"issue", []string{"blocked_by"}},
+		{"artifact", []string{"anchored_to"}},
 		{"artifact", nil},
 		{"artifact", []string{"owned_by"}},
 		{"ask", nil},

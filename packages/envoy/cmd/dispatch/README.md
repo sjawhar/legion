@@ -712,7 +712,9 @@ key leads with `ask_id`. `refs.BacklinkCounts` counts a node's inbound edges by 
 arms that can point at its kind, each through its own index, rather than the view. `create index`
 holds `SHARE` on `ask_followers` while it builds, which waits out an open write of a follower and
 holds off a new one for that moment; reads are not held. The table holds about 1,200 rows. Its
-census answers `0`. It is an ordinary migration: an earlier release serves beside it.
+census answers `0`. On its own it is an ordinary migration, which a release already carrying `0117`
+serves beside; a release that also carries `0117` deploys as `0117` says, with no earlier server
+running.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
