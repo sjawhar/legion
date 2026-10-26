@@ -527,6 +527,23 @@ const LITERAL_UNQUOTED = /^[A-Za-z0-9._/+@%:,=-]$/;
  * one names a program AskGate cannot know. */
 const EXPANSIONS = "$`";
 
+/** Whether a program word's value names the Dispatch CLI: its last path segment is `dispatch`,
+ * or `dispatch.js`, the bundle the plugin's `bin/dispatch` runs with bun. */
+const namesCli = (value: string): boolean =>
+  ["dispatch", "dispatch.js"].includes(value.split("/").at(-1) ?? "");
+
+/** How many leading words of a command run the Dispatch CLI: 1 for a word that names it, 2 for
+ * `bun` and the bundle's path, 0 when they do not run it. */
+function cliProgramLength(words: readonly Pick<Word, "value">[]): number {
+  const [first, second] = words;
+  if (first === undefined) return 0;
+  if (namesCli(first.value)) return 1;
+  return first.value.split("/").at(-1) === "bun" &&
+    second?.value.split("/").at(-1) === "dispatch.js"
+    ? 2
+    : 0;
+}
+
 /**
  * The word at `from` in `text`, up to an unquoted blank or the text's end: where it ends, its value
  * with quotes removed, and each character in it AskGate does not take as literal, in order (an
@@ -603,14 +620,14 @@ function dispatchCommandHead(command: string): DispatchHead | undefined {
   }
   const suffix = STDERR_TO_STDOUT.exec(text);
   const head = suffix === null ? text : text.slice(0, suffix.index);
-  // One `dispatch` command, called by name or by a literal path ending in it that is no
-  // assignment, whose every word the shell takes as written.
+  // One `dispatch` command, called by name, by a literal path ending in it or by `bun` and the
+  // bundle's literal path, that is no assignment, whose every word the shell takes as written.
   const program = scanWord(head, 0);
   if (
     program.unread.length > 0 ||
-    program.value.split("/").at(-1) !== "dispatch" ||
     ASSIGNMENT.test(head) ||
-    !literalWords(head)
+    !literalWords(head) ||
+    cliProgramLength(headWords(head)) === 0
   )
     return undefined;
   const at = line.at + offset;
@@ -649,7 +666,8 @@ function literalWords(text: string): boolean {
   return true;
 }
 
-type Word = { raw: string; value: string; start?: number; end?: number };
+/** A word as written and with its quotes removed; `hereString` marks the word after `<<<`. */
+type Word = { raw: string; value: string; start?: number; end?: number; hereString?: true };
 
 /**
  * Whether `name` with `flags` is a write the gate reviews: a scoped command, with no flag under
@@ -888,11 +906,14 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
   const found = dispatchCommandHead(command);
   if (found === undefined) return undefined;
   const { head, at, cdEnd, end, heredoc, stderr } = found;
-  const [program, name, ...flags] = headWords(head);
+  const all = headWords(head);
+  const lead = cliProgramLength(all);
+  const program = all.slice(0, lead);
+  const [name, ...flags] = all.slice(lead);
   if (name === undefined || !reviewedWrite(name.value, flags)) return undefined;
   const { rebuttal, removed } = splitRebuttal(flags);
   const kept = flags.filter((_, index) => !removed.has(index));
-  const words = [program, name, ...kept];
+  const words = [...program, name, ...kept];
   const positioned: Word[] = [];
   let cursor = at;
   for (const word of words) {
@@ -901,7 +922,7 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
   }
   const commandHead = words.map((word) => word.raw).join(" ");
   const upload = name.value === UPLOAD_COMMAND;
-  const files = fileInputs(positioned.slice(2), upload);
+  const files = fileInputs(positioned.slice(lead + 1), upload);
   const unsafeFile =
     files.unsafeFile ??
     (files.stdinFileFlag !== undefined && !heredoc
@@ -927,7 +948,7 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
     tool: `dispatch_${name.value.replaceAll("-", "_")}`,
     label: `dispatch ${name.value}`,
     command: `${command.slice(0, at)}${commandHead}${command.slice(at + head.length)}`,
-    dryRunScript: `${before}${[program.raw, name.raw, "--dry-run", ...kept.map((word) => word.raw)].join(" ")}${after}`,
+    dryRunScript: `${before}${[...program.map((word) => word.raw), name.raw, "--dry-run", ...kept.map((word) => word.raw)].join(" ")}${after}`,
     ...(rebuttal === undefined ? {} : { rebuttal }),
     readsFile: files.inputs.length > 0,
     fileInputs: files.inputs,
@@ -960,13 +981,25 @@ const COMMAND_PREFIXES: ReadonlySet<string> = new Set([
   "env",
   "timeout",
 ]);
-/** The prefixes that are programs of their own, also called by a path (`/usr/bin/env`). */
-const PROGRAM_PREFIXES: Record<string, true> = { env: true, nohup: true, timeout: true };
+/** The prefixes that are programs of their own, also called by a path (`/usr/bin/env`). Each runs
+ * the command its arguments name. */
+const PROGRAM_PREFIXES: Record<string, true> = {
+  env: true,
+  nohup: true,
+  timeout: true,
+  time: true,
+  sudo: true,
+  nice: true,
+  stdbuf: true,
+  setsid: true,
+  xargs: true,
+};
 /**
  * How a prefix that runs the command after it reads its own options, as its parser (getopt, or
  * bash's for a builtin) reads them: up to `--`, which it consumes, or the first word that is no
  * option. `values` are the short options that take a value (the rest of the word, else the next
- * word) and `longValues` the long ones (after `=`, else the next word). An option in `runsNothing`
+ * word), `optional` the short options whose value is only the rest of the word (`xargs -i`), and
+ * `longValues` the long ones (after `=`, else the next word). An option in `runsNothing`
  * makes the prefix run nothing (`command -v` only prints), `split` names the options whose value
  * holds the command's own words (`env -S`), `dash` lets a lone `-` be an option (`env -`, as
  * `env -i`), and `operands` counts the words after the options that are not the command
@@ -974,6 +1007,7 @@ const PROGRAM_PREFIXES: Record<string, true> = { env: true, nohup: true, timeout
  */
 interface PrefixOptions {
   values?: string;
+  optional?: string;
   longValues?: readonly string[];
   runsNothing?: string;
   split?: readonly string[];
@@ -984,7 +1018,7 @@ const PREFIX_OPTIONS: Record<string, PrefixOptions> = {
   command: { runsNothing: "vV" },
   exec: { values: "a" },
   nohup: {},
-  time: {},
+  time: { values: "fo", longValues: ["--format", "--output"] },
   env: {
     values: "uCSa",
     longValues: ["--unset", "--chdir", "--split-string", "--argv0"],
@@ -992,17 +1026,54 @@ const PREFIX_OPTIONS: Record<string, PrefixOptions> = {
     dash: true,
   },
   timeout: { values: "sk", longValues: ["--signal", "--kill-after"], operands: 1 },
+  sudo: {
+    values: "CDghprRtTuU",
+    longValues: [
+      "--close-from",
+      "--chdir",
+      "--group",
+      "--host",
+      "--prompt",
+      "--chroot",
+      "--role",
+      "--type",
+      "--command-timeout",
+      "--user",
+      "--other-user",
+    ],
+    runsNothing: "eKlvV",
+  },
+  nice: { values: "n", longValues: ["--adjustment"] },
+  stdbuf: { values: "ioe", longValues: ["--input", "--output", "--error"] },
+  setsid: {},
+  xargs: {
+    values: "adEILnPs",
+    optional: "eil",
+    longValues: [
+      "--arg-file",
+      "--delimiter",
+      "--max-args",
+      "--max-procs",
+      "--max-chars",
+      "--process-slot-var",
+    ],
+  },
 };
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
 /**
  * Where the command a simple command runs starts, past its assignments and prefixes and each
  * prefix's options; undefined when a prefix runs nothing. `words` comes back with the words an
- * `env -S` value splits into put where the command starts.
+ * `env -S` value splits into put where the command starts. `bun` before the CLI bundle's path is
+ * a prefix too. `xargs` is set when xargs runs the command, with its replacement strings (`-I`,
+ * `-i`, `--replace`): xargs puts the words it reads in their place, or after the command's words.
  */
-function commandStart(segment: readonly Word[]): { words: Word[]; at: number } | undefined {
+function commandStart(
+  segment: readonly Word[]
+): { words: Word[]; at: number; xargs?: string[] } | undefined {
   let words = [...segment];
   let at = 0;
+  let xargs: string[] | undefined;
   while (at < words.length) {
     const prefix = words[at];
     if (ASSIGNMENT.test(prefix.raw)) {
@@ -1010,6 +1081,10 @@ function commandStart(segment: readonly Word[]): { words: Word[]; at: number } |
       continue;
     }
     const base = prefix.value.split("/").at(-1) ?? "";
+    if (base === "bun" && words[at + 1]?.value.split("/").at(-1) === "dispatch.js") {
+      at++;
+      break;
+    }
     const name = COMMAND_PREFIXES.has(prefix.value)
       ? prefix.value
       : Object.hasOwn(PROGRAM_PREFIXES, base)
@@ -1017,6 +1092,7 @@ function commandStart(segment: readonly Word[]): { words: Word[]; at: number } |
         : undefined;
     if (name === undefined) break;
     at++;
+    if (name === "xargs") xargs ??= [];
     if (!Object.hasOwn(PREFIX_OPTIONS, name)) continue;
     const options = PREFIX_OPTIONS[name];
     const split: Word[] = [];
@@ -1040,26 +1116,97 @@ function commandStart(segment: readonly Word[]): { words: Word[]; at: number } |
         for (let index = 1; index < word.length; index++) {
           const char = word[index];
           if (options.runsNothing?.includes(char)) return undefined;
-          if (!options.values?.includes(char)) continue;
+          const optional = options.optional?.includes(char) === true;
+          if (!optional && !options.values?.includes(char)) continue;
           flag = `-${char}`;
-          value = index + 1 < word.length ? word.slice(index + 1) : words[at++]?.value;
+          value =
+            index + 1 < word.length
+              ? word.slice(index + 1)
+              : optional
+                ? undefined
+                : words[at++]?.value;
           break;
         }
       }
       if (value !== undefined && options.split?.includes(flag))
         split.push(...commandWords(value).flat());
+      if (name === "xargs" && ["-I", "-i", "--replace"].includes(flag)) xargs?.push(value ?? "{}");
     }
     at += options.operands ?? 0;
     words = [...words.slice(0, at), ...split, ...words.slice(at)];
   }
-  return { words, at };
+  return { words, at, ...(xargs === undefined ? {} : { xargs }) };
 }
 
 /** An open subshell, or an open command substitution with the command and word it sits in, which
  * go on at its end. */
 type Open =
   | { kind: "(" }
-  | { kind: "$(" | "`"; words: Word[]; start: number; value: string; quote: '"' | undefined };
+  | {
+      kind: "$(" | "`";
+      words: Word[];
+      start: number;
+      value: string;
+      quote: '"' | undefined;
+      pipeFrom: Word[] | undefined;
+    };
+
+/** A here-document's body and the command whose input it is. The body of an unquoted delimiter
+ * has the backslashes bash removes there removed: before `$`, a backtick, a backslash and a
+ * newline. */
+interface Body {
+  text: string;
+  words: Word[];
+}
+/** What `commandWords` finds beside the commands: each here-document body, and for each command
+ * whose standard input is a pipe, the command that writes into it. */
+interface CommandScan {
+  bodies: Body[];
+  pipes: Map<Word[], Word[]>;
+}
+
+/** The escapes `$'…'`, `printf` and `echo -e` decode, by the letter after the backslash. */
+const NAMED_ESCAPES: Record<string, string> = {
+  a: "\x07",
+  b: "\b",
+  e: "\x1b",
+  E: "\x1b",
+  f: "\f",
+  n: "\n",
+  r: "\r",
+  t: "\t",
+  v: "\v",
+  "\\": "\\",
+  "'": "'",
+  '"': '"',
+  "?": "?",
+};
+
+/** `text` with the backslash escapes of `$'…'`, `printf` and `echo -e` decoded: the named ones,
+ * `\xHH`, `\uHHHH`, `\UHHHHHHHH` and octal `\NNN` or `\0NNN`. Any other backslash stays. */
+function decodeEscapes(text: string): string {
+  return text.replace(
+    /\\(?:x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})|0?([0-7]{1,3})|(.))/gs,
+    (match, hex?: string, short?: string, long?: string, octal?: string, char?: string) => {
+      const code = hex ?? short ?? long;
+      if (code !== undefined) {
+        const point = Number.parseInt(code, 16);
+        return point > 0x10ffff ? match : String.fromCodePoint(point);
+      }
+      if (octal !== undefined) return String.fromCharCode(Number.parseInt(octal, 8) & 0xff);
+      return (char !== undefined && NAMED_ESCAPES[char]) || match;
+    }
+  );
+}
+
+/** The ANSI-C quoted text `$'…'` whose body starts at `from`: its value as bash decodes it, and
+ * the index of its closing quote (the text's length when it has none). */
+function ansiC(text: string, from: number): { value: string; end: number } {
+  let end = from;
+  while (end < text.length && text[end] !== "'") end += text[end] === "\\" ? 2 : 1;
+  end = Math.min(end, text.length);
+  return { value: decodeEscapes(text.slice(from, end)), end };
+}
 
 /**
  * The words of each simple command in a `bash` command, each as written and with its quotes
@@ -1071,15 +1218,20 @@ type Open =
  * command only writes (`cat > f <<EOF … EOF`, `echo "dispatch ask"`) is never a command. Not a
  * shell parser: a `)` in a `case` pattern ends a substitution early.
  */
-function commandWords(command: string, bodies?: string[]): Word[][] {
+function commandWords(command: string, scan?: CommandScan): Word[][] {
   const segments: Word[][] = [];
-  const pending: Array<{ delimiter: string; stripTabs: boolean }> = [];
+  const pending: Array<{ delimiter: string; stripTabs: boolean; quoted: boolean; words: Word[] }> =
+    [];
   const open: Open[] = [];
   let words: Word[] = [];
   /** The word being read: where it starts in `command`, and its value so far; undefined between words. */
   let start = 0;
   let value: string | undefined;
   let quote: '"' | "'" | undefined;
+  /** The command before an unquoted `|`, whose output the next command reads. */
+  let pipeFrom: Word[] | undefined;
+  /** The next word is a here-string, after `<<<`. */
+  let hereString = false;
   const add = (at: number, text: string) => {
     if (value === undefined) {
       start = at;
@@ -1088,33 +1240,52 @@ function commandWords(command: string, bodies?: string[]): Word[][] {
     value += text;
   };
   const endWord = (at: number) => {
-    if (value !== undefined) words.push({ raw: command.slice(start, at), value });
+    if (value !== undefined) {
+      words.push({
+        raw: command.slice(start, at),
+        value,
+        ...(hereString ? { hereString: true as const } : {}),
+      });
+      hereString = false;
+    }
     value = undefined;
   };
-  const endSegment = (at: number) => {
+  const endSegment = (at: number, piped = false) => {
     endWord(at);
-    if (words.length > 0) segments.push(words);
+    if (words.length > 0) {
+      segments.push(words);
+      if (pipeFrom !== undefined) scan?.pipes.set(words, pipeFrom);
+      pipeFrom = piped ? words : undefined;
+    }
     words = [];
   };
   /** A command substitution opens at `at`: the command and word it sits in wait for its end. */
   const openSubstitution = (kind: "$(" | "`", at: number) => {
     add(at, "");
-    open.push({ kind, words, start, value: value ?? "", quote: quote === '"' ? quote : undefined });
+    open.push({
+      kind,
+      words,
+      start,
+      value: value ?? "",
+      quote: quote === '"' ? quote : undefined,
+      pipeFrom,
+    });
     words = [];
     value = undefined;
     quote = undefined;
+    pipeFrom = undefined;
   };
   /** The innermost command substitution, `outer`, ends at `at`: its last command ends and the word around it goes on. */
   const closeSubstitution = (at: number, outer: Exclude<Open, { kind: "(" }>) => {
     endSegment(at);
     open.pop();
-    ({ words, start, value, quote } = outer);
+    ({ words, start, value, quote, pipeFrom } = outer);
   };
   /** Past the bodies of the here-documents opened on the line that ended just before `from`; each
-   * body goes to `bodies` when the caller asks for them. */
+   * body goes to the scan when the caller asks for it. */
   const skipBodies = (from: number): number => {
     let at = from;
-    for (const { delimiter, stripTabs } of pending.splice(0)) {
+    for (const { delimiter, stripTabs, quoted, words: owner } of pending.splice(0)) {
       const body = at;
       let bodyEnd = command.length;
       while (at < command.length) {
@@ -1127,7 +1298,13 @@ function commandWords(command: string, bodies?: string[]): Word[][] {
           break;
         }
       }
-      bodies?.push(command.slice(body, bodyEnd));
+      const text = command.slice(body, bodyEnd);
+      scan?.bodies.push({
+        text: quoted
+          ? text
+          : text.replace(/\\([$`\\\n])/g, (_, char: string) => (char === "\n" ? "" : char)),
+        words: owner,
+      });
     }
     return at;
   };
@@ -1154,6 +1331,11 @@ function commandWords(command: string, bodies?: string[]): Word[][] {
     if (c === "\\") {
       if (command[i + 1] !== "\n") add(i, command[i + 1] ?? "");
       i++;
+    } else if (c === "$" && command[i + 1] === "'") {
+      // ANSI-C quoting: bash decodes the escapes, so the word's value holds what they stand for.
+      const quoted = ansiC(command, i + 2);
+      add(i, quoted.value);
+      i = quoted.end;
     } else if (c === "'" || c === '"') {
       add(i, "");
       quote = c;
@@ -1165,7 +1347,12 @@ function commandWords(command: string, bodies?: string[]): Word[][] {
       i = skipBodies(i + 1) - 1;
     } else if (c === " " || c === "\t") {
       endWord(i);
-    } else if (c === "<" && command[i + 1] === "<" && command[i + 2] !== "<") {
+    } else if (c === "<" && command[i + 1] === "<" && command[i + 2] === "<") {
+      // A here-string: the next word is the command's standard input.
+      endWord(i);
+      i += 2;
+      hereString = true;
+    } else if (c === "<" && command[i + 1] === "<") {
       // A here-document opener: its delimiter, quotes removed, ends the body that starts on the next line.
       endWord(i);
       i += 2;
@@ -1173,10 +1360,11 @@ function commandWords(command: string, bodies?: string[]): Word[][] {
       if (stripTabs) i++;
       while (command[i] === " " || command[i] === "\t") i++;
       let delimiter = "";
+      let quoted = false;
       for (; i < command.length && !" \t\n;&|<>()".includes(command[i]); i++)
-        if (command[i] !== "'" && command[i] !== '"' && command[i] !== "\\")
-          delimiter += command[i];
-      pending.push({ delimiter, stripTabs });
+        if (command[i] === "'" || command[i] === '"' || command[i] === "\\") quoted = true;
+        else delimiter += command[i];
+      pending.push({ delimiter, stripTabs, quoted, words });
       i--;
     } else if (c === "$" && command[i + 1] === "(") {
       openSubstitution("$(", i);
@@ -1198,7 +1386,7 @@ function commandWords(command: string, bodies?: string[]): Word[][] {
       if (top?.kind === "(") open.pop();
       endSegment(i);
     } else if (";&|".includes(c)) {
-      endSegment(i);
+      endSegment(i, c === "|" && command[i + 1] !== "|" && command[i - 1] !== "|");
     } else if (c === "<" || c === ">") {
       endWord(i);
     } else {
@@ -1216,22 +1404,26 @@ export interface UnreadableCommand {
   label: string;
   /** The word that runs the write is not literal: whether it calls `dispatch` by name or by path. */
   program?: { namesDispatch: boolean; unread: string[] };
-  /** The word after `dispatch` is not literal, so the subcommand it names is unknown. */
-  subcommand?: { unread: string[] };
+  /** The word after `dispatch` is not literal, so the subcommand it names is unknown; `from` names
+   * the runner that puts the subcommand there when the call runs (`xargs`). */
+  subcommand?: { unread: string[]; from?: string };
   /** The write is in the call's text, where another command (`bash -c`, `eval`, a function) runs it. */
   wrapped?: true;
   /** A file the call would make Dispatch read cannot be captured safely. */
   file?: { flag: string; path: string; reason: string };
+  /** The write is a process an eval cell starts, which AskGate does not read. */
+  cell?: true;
 }
 
 /**
- * `dispatch`, by name or by a path ending in it, with a gated write subcommand after it. The
- * pattern is applied to the whole command's text, quotes and here-document bodies included: the
- * text a `bash -c '…'`, `sh -c`, `eval`, `xargs`, a function or a variable would run is one word
- * to the shell, so no scan of the call's own commands finds the write inside it.
+ * `dispatch`, or the CLI bundle `dispatch.js`, by name or by a path ending in it, with a gated
+ * write subcommand after it. The pattern is applied to the whole command's text, quotes and
+ * here-document bodies included: the text a `bash -c '…'`, `sh -c`, `eval`, `xargs`, a function
+ * or a variable would run is one word to the shell, so no scan of the call's own commands finds
+ * the write inside it.
  */
 const DISPATCH_IN_TEXT = new RegExp(
-  `(?:^|[^A-Za-z0-9_.-])(?:[^\\s'";|&<>()]*/)?dispatch[ \\t]+(${SCOPED_COMMANDS.join("|")})(?![A-Za-z0-9_-])`,
+  `(?:^|[^A-Za-z0-9_.-])(?:[^\\s'";|&<>()]*/)?dispatch(?:\\.js)?[ \\t]+(${SCOPED_COMMANDS.join("|")})(?![A-Za-z0-9_-])`,
   "g"
 );
 
@@ -1269,107 +1461,403 @@ type FoundWrite = Omit<UnreadableCommand, "wrapped">;
 
 /**
  * A scoped `dispatch` write in a `bash` command AskGate does not read. In order: a write at a
- * command's position (after any assignments and prefixes such as `env -u HOME --` or `timeout -s
- * KILL 30`, each prefix's options and its `--` read as its own parser reads them:
- * `commandStart`), or a scoped subcommand run by a program an expansion names (`$D comment …`,
- * `$(command -v dispatch) ask …`), which may be `dispatch`; then a write in text another command
- * would run (`nestedWrite`, then `textDispatchWrite`); then a `dispatch` whose own subcommand an
- * expansion names (`dispatch $SUB …`), which may be a write. One carrying `--dry-run` or `--help`,
- * or a `dispatch issue` without `--spec`/`--spec-file`, sends nothing for review and is not one.
- * Only for a command `scopedCommand` could not read.
+ * command's position (after any assignments and prefixes such as `env -u HOME --`, `timeout -s
+ * KILL 30`, `sudo -u me` or `xargs -I %`, each prefix's options and its `--` read as its own
+ * parser reads them: `commandStart`), or a scoped subcommand run by a program an expansion names
+ * (`$D comment …`, `$(command -v dispatch) ask …`), which may be `dispatch`; then a write in text
+ * another command would run (`nestedWrite`, then `textDispatchWrite`); then a `dispatch` whose own
+ * subcommand an expansion or `xargs` supplies (`dispatch $SUB …`, `xargs dispatch`), which may be
+ * a write. One carrying `--dry-run` or `--help`, or a `dispatch issue` without
+ * `--spec`/`--spec-file`, sends nothing for review and is not one. Only for a command
+ * `scopedCommand` could not read.
  */
 export function unreadableDispatchWrite(command: unknown): UnreadableCommand | undefined {
   // No prefilter on the raw text: bash removes a backslash or empty quotes inside a word
   // (`d\ispatch`, `di""spatch`), so a write need not hold `dispatch` as written. `commandWords`
   // removes them as bash does and names the program.
   if (typeof command !== "string") return undefined;
-  return findWrite(command, 0);
+  return findWrite(command, 0, true);
 }
 
-function findWrite(command: string, depth: number): UnreadableCommand | undefined {
-  const bodies: string[] = [];
-  const segments = commandWords(command, bodies);
-  let unknownSubcommand: UnreadableCommand | undefined;
-  for (const segment of segments) {
-    const start = commandStart(segment);
-    if (start === undefined) continue;
-    const [program, name, ...flags] = start.words.slice(start.at);
-    if (program === undefined || name === undefined) continue;
-    const named = program.value.split("/").at(-1) === "dispatch";
-    const unread = [...new Set(scanWord(program.raw, 0).unread)];
-    const expansions = unread.filter((char) => EXPANSIONS.includes(char));
-    if (!named && expansions.length === 0) continue;
-    if (!mayBeReviewedWrite(name.value, flags)) {
-      // `dispatch $SUB …`, or `$D $SUB …`, may be any subcommand, a write among them.
-      const subcommand = unresolvedCharacters(name);
-      if (subcommand.length > 0)
-        unknownSubcommand ??= {
-          tool: "dispatch_unknown",
-          label: "dispatch",
+/** A write of a subcommand AskGate cannot know. */
+const UNKNOWN_WRITE = { tool: "dispatch_unknown", label: "dispatch" } as const;
+
+/**
+ * The write the simple command `segment` runs, or the write of unknown subcommand it may run.
+ * `runs` says whether a shell runs the text the command is in: only then may a program an
+ * expansion names be `dispatch`, and only then is a subcommand `xargs` supplies one. In text no
+ * shell runs (a quoted word, a here-document `cat` writes) only `dispatch` as the program counts.
+ */
+function segmentWrite(
+  segment: readonly Word[],
+  runs: boolean
+): { write?: UnreadableCommand; unknown?: UnreadableCommand } | undefined {
+  const start = commandStart(segment);
+  if (start === undefined) return undefined;
+  const [program, name, ...flags] = start.words.slice(start.at);
+  if (program === undefined) return undefined;
+  const named = namesCli(program.value);
+  const unread = [...new Set(scanWord(program.raw, 0).unread)];
+  const expansions = unread.filter((char) => EXPANSIONS.includes(char));
+  if (!named && !(runs && expansions.length > 0)) return undefined;
+  // A write xargs runs is in the call's text, where another command runs it.
+  const wrapped = start.xargs === undefined ? {} : { wrapped: true as const };
+  if (name === undefined || !mayBeReviewedWrite(name.value, flags)) {
+    // `dispatch $SUB …`, or `$D $SUB …`, may be any subcommand, a write among them.
+    const subcommand = name === undefined ? [] : unresolvedCharacters(name);
+    if (subcommand.length > 0)
+      return {
+        unknown: {
+          ...UNKNOWN_WRITE,
           subcommand: { unread: subcommand },
           ...(named ? {} : { program: { namesDispatch: false, unread: expansions } }),
-        };
-      continue;
-    }
-    const found = writeNamed(name.value);
-    return unread.length === 0
-      ? found
-      : { ...found, program: { namesDispatch: named, unread: named ? unread : expansions } };
+          ...wrapped,
+        },
+      };
+    // `xargs dispatch`, `xargs -I % dispatch % …`: xargs puts the words it reads after the
+    // command's words, or in place of its replacement string.
+    if (
+      named &&
+      runs &&
+      start.xargs !== undefined &&
+      (name === undefined || start.xargs.includes(name.value))
+    )
+      return {
+        unknown: { ...UNKNOWN_WRITE, subcommand: { unread: [], from: "xargs" }, ...wrapped },
+      };
+    return undefined;
   }
-  const wrapped = nestedWrite(segments, bodies, depth) ?? textDispatchWrite(command);
+  const found = writeNamed(name.value);
+  return {
+    write: {
+      ...found,
+      ...(unread.length === 0
+        ? {}
+        : { program: { namesDispatch: named, unread: named ? unread : expansions } }),
+      ...wrapped,
+    },
+  };
+}
+
+function findWrite(command: string, depth: number, runs: boolean): UnreadableCommand | undefined {
+  const scan: CommandScan = { bodies: [], pipes: new Map() };
+  const segments = commandWords(command, scan);
+  let unknownSubcommand: UnreadableCommand | undefined;
+  for (const segment of segments) {
+    const found = segmentWrite(segment, runs);
+    if (found?.write !== undefined) return found.write;
+    unknownSubcommand ??= found?.unknown;
+  }
+  const wrapped = nestedWrite(segments, scan, depth, runs) ?? textDispatchWrite(command);
   return wrapped === undefined ? unknownSubcommand : { ...wrapped, wrapped: true as const };
 }
+
+/** The words of `find` after which it runs a command of its own, up to `;` or `+`. */
+const FIND_EXEC = ["-exec", "-execdir", "-ok", "-okdir"];
 
 /**
  * A write in text another command would run, read with the same quote-aware scan, never only by
  * the text pattern: quotes and backslashes the inner shell removes (`bash -c 'dispatch "comment"
- * …'`) hide a write from that pattern. `dispatch` as any word of a command is the command a runner
- * such as `xargs`, `find -exec` or `sudo` runs. Each word's value with its quotes removed, the
- * arguments of `eval` joined as `eval` joins them, and each here-document's body are each read as
- * a script of their own, down to NESTED_DEPTH levels.
+ * …'`) hide a write from that pattern. `dispatch` before a literal write as any word of a command
+ * is a write some runner may run; the words after `find`'s `-exec` are a command of their own.
+ * Each text `nestedScripts` names is read as a script of its own, down to NESTED_DEPTH levels.
  */
 function nestedWrite(
   segments: readonly Word[][],
-  bodies: readonly string[],
-  depth: number
+  scan: CommandScan,
+  depth: number,
+  runs: boolean
 ): FoundWrite | undefined {
   let unknownSubcommand: FoundWrite | undefined;
   for (const words of segments)
     for (const [index, word] of words.entries()) {
       const name = words[index + 1];
-      if (word.value.split("/").at(-1) !== "dispatch" || name === undefined) continue;
-      if (mayBeReviewedWrite(name.value, words.slice(index + 2))) return writeNamed(name.value);
-      // `xargs -I{} dispatch $SUB …`: the runner takes the words as they are, and the word after
-      // `dispatch` may name any subcommand, a write among them.
-      const subcommand = unresolvedCharacters(name);
-      if (subcommand.length > 0)
-        unknownSubcommand ??= {
-          tool: "dispatch_unknown",
-          label: "dispatch",
-          subcommand: { unread: subcommand },
-        };
+      if (
+        namesCli(word.value) &&
+        name !== undefined &&
+        mayBeReviewedWrite(name.value, words.slice(index + 2))
+      )
+        return writeNamed(name.value);
+      if (FIND_EXEC.includes(word.value)) {
+        const end = words.findIndex(
+          (next, at) => at > index && (next.value === ";" || next.value === "+")
+        );
+        const found = segmentWrite(words.slice(index + 1, end === -1 ? undefined : end), runs);
+        if (found?.write !== undefined) {
+          const { wrapped: _, ...write } = found.write;
+          return write;
+        }
+        unknownSubcommand ??= found?.unknown;
+      }
     }
   if (depth >= NESTED_DEPTH) return unknownSubcommand;
-  const scripts = [...bodies];
-  for (const words of segments)
-    for (const [index, word] of words.entries()) {
-      // A word bash takes as written splits into the same words again: nothing new to read.
-      if (word.value !== word.raw) scripts.push(word.value);
-      if (word.value === "eval")
-        scripts.push(
-          words
-            .slice(index + 1)
-            .map((arg) => arg.value)
-            .join(" ")
-        );
-    }
-  for (const script of scripts) {
-    const found = findWrite(script, depth + 1);
+  for (const script of nestedScripts(segments, scan)) {
+    const found = findWrite(script.text, depth + 1, runs && script.runs);
     if (found === undefined) continue;
     const { wrapped: _, ...write } = found;
     return write;
   }
   return unknownSubcommand;
+}
+
+/** The shells whose `-c` operand, here-document, here-string or piped input is a script they run. */
+const SHELLS = ["bash", "sh", "zsh", "dash", "ksh"];
+
+/** What a shell whose options start at `from` runs: its `-c` operand, else its standard input
+ * when no script file is named or `-s` is set. */
+function shellScript(words: readonly Word[], from: number): { operand?: Word; stdin: boolean } {
+  let command = false;
+  let stdin = false;
+  for (let at = from; at < words.length; at++) {
+    const value = words[at].value;
+    if (value === "--")
+      return command
+        ? { operand: words[at + 1], stdin: false }
+        : { stdin: stdin || at + 1 >= words.length };
+    if (/^[-+][A-Za-z]+$/.test(value)) {
+      if (value[0] === "-" && value.includes("c")) command = true;
+      if (value.includes("s")) stdin = true;
+      // `-o pipefail`, `-O extglob`: the option's value is the next word.
+      if (/[oO]$/.test(value)) at++;
+      continue;
+    }
+    if (value === "--rcfile" || value === "--init-file") {
+      at++;
+      continue;
+    }
+    if (value.startsWith("--")) continue;
+    return command ? { operand: words[at], stdin: false } : { stdin };
+  }
+  return { stdin: !command };
+}
+
+/**
+ * The texts inside a command that a shell may read, each with whether a shell runs it. A shell
+ * runs `eval`'s arguments joined as `eval` joins them, a shell's `-c` operand, and the
+ * here-document, here-string or pipe a shell reads as its script (the text piped in with the
+ * escapes of `printf` and `echo -e` decoded). Every other quoted word and here-document body is
+ * only text, which the scan reads for `dispatch` as a program alone.
+ */
+function nestedScripts(
+  segments: readonly Word[][],
+  scan: CommandScan
+): Array<{ text: string; runs: boolean }> {
+  const scripts: Array<{ text: string; runs: boolean }> = [];
+  /** The commands whose standard input a shell runs: a shell reading its script there, and the
+   * command piped into it. */
+  const fed = new Set<readonly Word[]>();
+  for (const words of segments) {
+    const start = commandStart(words);
+    const program = start?.words[start.at];
+    let operand: Word | undefined;
+    let shell = false;
+    if (start !== undefined && program !== undefined) {
+      if (program.value === "eval")
+        scripts.push({
+          text: start.words
+            .slice(start.at + 1)
+            .map((arg) => arg.value)
+            .join(" "),
+          runs: true,
+        });
+      if (SHELLS.includes(program.value.split("/").at(-1) ?? "")) {
+        shell = true;
+        const script = shellScript(start.words, start.at + 1);
+        operand = script.operand;
+        const from = script.stdin ? scan.pipes.get(words) : undefined;
+        if (script.stdin) fed.add(words);
+        if (from !== undefined) {
+          fed.add(from);
+          const fromStart = commandStart(from);
+          const args =
+            fromStart === undefined ? [...from] : fromStart.words.slice(fromStart.at + 1);
+          // `echo -e …`, `printf -- …`: the options are not text the shell reads.
+          while (args[0]?.value.startsWith("-")) args.shift();
+          scripts.push({ text: decodeEscapes(args.map((arg) => arg.value).join(" ")), runs: true });
+        }
+      }
+    }
+    // A word bash takes as written splits into the same words again: nothing new to read.
+    for (const word of words)
+      if (word.value !== word.raw)
+        scripts.push({
+          text: word.value,
+          runs: word === operand || (shell && word.hereString === true),
+        });
+  }
+  for (const body of scan.bodies) scripts.push({ text: body.text, runs: fed.has(body.words) });
+  return scripts;
+}
+
+/** A string literal of an eval cell's code: its value with its escapes decoded (an interpolation
+ * becomes `$X`), whether it interpolates, and where it ends. */
+interface CodeString {
+  value: string;
+  expansion: boolean;
+  end: number;
+}
+
+/** The string literal at `at` in `code`, JavaScript's or Python's (with a prefix such as `f` or
+ * `r`, triple-quoted or not), or undefined when none starts there. */
+function codeString(code: string, at: number): CodeString | undefined {
+  const opening = /^([rRbBuUfF]{0,2})("""|'''|"|'|`)/.exec(code.slice(at));
+  if (opening === null) return undefined;
+  const prefix = opening[1].toLowerCase();
+  const quote = opening[2];
+  let index = at + opening[0].length;
+  let text = "";
+  while (index < code.length && !code.startsWith(quote, index)) {
+    // A backslash takes the next character with it, so an escaped quote ends nothing.
+    const length = code[index] === "\\" ? 2 : 1;
+    text += code.slice(index, index + length);
+    index += length;
+  }
+  let value = prefix.includes("r") ? text : decodeEscapes(text);
+  let expansion = false;
+  if (quote === "`" && value.includes("${")) expansion = true;
+  if (prefix.includes("f")) {
+    const replaced = value.replace(/\{[^{}]*\}/g, "$X");
+    expansion = replaced !== value;
+    value = replaced;
+  }
+  return { value, expansion, end: Math.min(index + quote.length, code.length) };
+}
+
+const skipBlank = (code: string, at: number): number => {
+  let index = at;
+  while (index < code.length && /\s/.test(code[index])) index++;
+  return index;
+};
+
+/** The elements of the array literal whose `[` is at `at`: each string literal, or undefined for
+ * any other expression. */
+function codeArray(code: string, at: number): Array<CodeString | undefined> {
+  const items: Array<CodeString | undefined> = [];
+  let index = at + 1;
+  while (items.length < 256) {
+    index = skipBlank(code, index);
+    if (index >= code.length || code[index] === "]") break;
+    const literal = codeString(code, index);
+    const next = literal === undefined ? index : skipBlank(code, literal.end);
+    if (literal !== undefined && (code[next] === "," || code[next] === "]")) {
+      items.push(literal);
+      index = next;
+    } else {
+      items.push(undefined);
+      // Past the expression, to the `,` or `]` at its own depth.
+      let depth = 0;
+      while (index < code.length) {
+        const char = code[index];
+        const inner = codeString(code, index);
+        if (inner !== undefined && /["'`]/.test(char)) {
+          index = inner.end;
+          continue;
+        }
+        if (depth === 0 && (char === "," || char === "]")) break;
+        if ("([{".includes(char)) depth++;
+        else if (")]}".includes(char)) depth--;
+        index++;
+      }
+    }
+    if (code[index] === ",") index++;
+  }
+  return items;
+}
+
+/** The write an argument vector runs, when its program is the Dispatch CLI. */
+function argvWrite(items: ReadonlyArray<CodeString | undefined>): FoundWrite | undefined {
+  const words: Word[] = items.map((item) =>
+    item === undefined || item.expansion
+      ? { raw: "$X", value: item?.value ?? "$X" }
+      : { raw: `'${item.value.replaceAll("'", "")}'`, value: item.value }
+  );
+  const lead = cliProgramLength(words);
+  if (lead === 0) return undefined;
+  const [name, ...flags] = words.slice(lead);
+  if (name === undefined) return undefined;
+  if (mayBeReviewedWrite(name.value, flags)) return writeNamed(name.value);
+  const subcommand = unresolvedCharacters(name);
+  return subcommand.length > 0
+    ? { ...UNKNOWN_WRITE, subcommand: { unread: subcommand } }
+    : undefined;
+}
+
+/** The calls of an eval cell that start a process: Node's and Bun's spawn and exec functions, and
+ * Python's `subprocess` and `os` ones. The bridge's `tool.bash` is none: the gate reviews that
+ * `bash` call on its own. */
+const PROCESS_CALL =
+  /\b(?:spawnSync|spawn|execSync|exec|execFileSync|execFile|execaSync|execa|system|popen|run|call|check_call|check_output|Popen|getoutput|getstatusoutput)\s*\(/g;
+/** Bun's shell, `` $`…` ``. */
+const BUN_SHELL = /\$`/g;
+
+/** A write a shell string runs: only `dispatch` as its program counts (`segmentWrite`). */
+function shellStringWrite(text: string): FoundWrite | undefined {
+  const found = findWrite(text, 0, false);
+  if (found === undefined) return undefined;
+  const { wrapped: _, ...write } = found;
+  return write;
+}
+
+/** The Dispatch write one cell's code starts as a process, or the write of unknown subcommand it
+ * may start. */
+function cellWrite(code: string): FoundWrite | undefined {
+  let unknown: FoundWrite | undefined;
+  const writes: Array<FoundWrite | undefined> = [];
+  for (const match of code.matchAll(PROCESS_CALL)) {
+    let at = skipBlank(code, (match.index ?? 0) + match[0].length);
+    // `Bun.spawn({ cmd: [...] })`.
+    const field = /^\{\s*cmd\s*:\s*/.exec(code.slice(at));
+    if (field !== null) at += field[0].length;
+    if (code[at] === "[") {
+      writes.push(argvWrite(codeArray(code, at)));
+      continue;
+    }
+    const literal = codeString(code, at);
+    if (literal === undefined) continue;
+    const next = skipBlank(code, literal.end);
+    const array = code[next] === "," ? skipBlank(code, next + 1) : -1;
+    if (array !== -1 && code[array] === "[")
+      // `spawnSync("dispatch", ["comment", …])`.
+      writes.push(argvWrite([literal, ...codeArray(code, array)]));
+    // `"dispatch " + sub`: what follows the `+` is an expansion.
+    else writes.push(shellStringWrite(`${literal.value}${code[next] === "+" ? "$X" : ""}`));
+  }
+  for (const match of code.matchAll(BUN_SHELL)) {
+    const literal = codeString(code, (match.index ?? 0) + 1);
+    if (literal !== undefined) writes.push(shellStringWrite(literal.value));
+  }
+  for (const write of writes) {
+    if (write === undefined) continue;
+    if (write.tool !== UNKNOWN_WRITE.tool) return write;
+    unknown ??= write;
+  }
+  return unknown;
+}
+
+/**
+ * A Dispatch write an `eval` call's code starts as a process of its own (`Bun.spawnSync`,
+ * `child_process`, `subprocess`, `os.system`): `dispatch` or its bundle as the program of an
+ * argument vector or a shell string, before a gated write subcommand or an expansion. Such a
+ * process sends with no `bash` call for AskGate to read, so the call is unreadable. A cell that
+ * only names `dispatch` in text, or calls the bash tool, is none. Each cell is read when the input
+ * holds several.
+ */
+export function evalDispatchWrite(input: Input): UnreadableCommand | undefined {
+  const cells = Array.isArray(input.cells) ? (input.cells as unknown[]) : [];
+  const codes = [
+    input.code,
+    ...cells.map((cell) =>
+      typeof cell === "object" && cell !== null ? (cell as Input).code : undefined
+    ),
+  ].filter((code): code is string => typeof code === "string");
+  let unknown: FoundWrite | undefined;
+  for (const code of codes) {
+    const found = cellWrite(code);
+    if (found === undefined) continue;
+    if (found.tool !== UNKNOWN_WRITE.tool) return { ...found, cell: true };
+    unknown ??= found;
+  }
+  return unknown === undefined ? undefined : { ...unknown, cell: true };
 }
 
 /** Runs `script` under bash in a process group of its own, which is killed at the limit or on the signal. */
@@ -1914,7 +2402,7 @@ const LITERAL_GRAMMAR =
  * the form it reads, so the next write goes in that form.
  */
 function renderUnreadable(
-  { label, program, subcommand, wrapped, file }: UnreadableCommand,
+  { label, program, subcommand, wrapped, file, cell }: UnreadableCommand,
   mode: Mode
 ): string {
   const ran = mode === "warn";
@@ -1940,23 +2428,29 @@ function renderUnreadable(
   const opening =
     subcommand === undefined
       ? `AskGate ${ran ? "did not review" : "did not run"} this call: it holds a \`${label}\`, which AskGate reviews before it is sent, and in this call AskGate cannot know the text it would send.`
-      : unknownProgram
-        ? `AskGate ${ran ? "did not review" : "did not run"} this call: its program's name and the word after it hold ${characters([...new Set([...program.unread, ...subcommand.unread])])}, so AskGate cannot tell which program or subcommand would run, and either may be \`dispatch\` and a write AskGate reviews before it is sent.`
-        : `AskGate ${ran ? "did not review" : "did not run"} this call: the word after \`dispatch\` holds ${characters(subcommand.unread)}, so AskGate cannot tell which subcommand would run, and AskGate reviews each Dispatch write before it is sent.`;
+      : subcommand.from !== undefined
+        ? `AskGate ${ran ? "did not review" : "did not run"} this call: the word after \`dispatch\` comes from \`${subcommand.from}\` when the call runs, so AskGate cannot tell which subcommand would run, and AskGate reviews each Dispatch write before it is sent.`
+        : unknownProgram
+          ? `AskGate ${ran ? "did not review" : "did not run"} this call: its program's name and the word after it hold ${characters([...new Set([...program.unread, ...subcommand.unread])])}, so AskGate cannot tell which program or subcommand would run, and either may be \`dispatch\` and a write AskGate reviews before it is sent.`
+          : `AskGate ${ran ? "did not review" : "did not run"} this call: the word after \`dispatch\` holds ${characters(subcommand.unread)}, so AskGate cannot tell which subcommand would run, and AskGate reviews each Dispatch write before it is sent.`;
   // A write in the call's text is named as such first: a resend of it in the same wrapper is
   // refused again, whatever its program word holds.
   const why =
-    wrapped === true
-      ? ` Here \`${label}\` is in this call's text, where another command (\`bash -c\`, \`sh -c\`, \`eval\`, \`xargs\`, a function or a variable) can run it.`
-      : program !== undefined && !unknownProgram
-        ? program.namesDispatch
-          ? ` Here the word that calls \`dispatch\` holds ${characters(program.unread)}, which AskGate does not take as literal.`
-          : ` Here its program's name holds ${characters(program.unread)}, so AskGate cannot tell which program would run.`
-        : "";
+    cell === true
+      ? " Here an eval cell starts `dispatch` as a process of its own, and AskGate does not read what that process sends."
+      : wrapped === true
+        ? ` Here \`${label}\` is in this call's text, where another command (\`bash -c\`, \`sh -c\`, \`eval\`, \`xargs\`, a function or a variable) can run it.`
+        : program !== undefined && !unknownProgram
+          ? program.namesDispatch
+            ? ` Here the word that calls \`dispatch\` holds ${characters(program.unread)}, which AskGate does not take as literal.`
+            : ` Here its program's name holds ${characters(program.unread)}, so AskGate cannot tell which program would run.`
+          : "";
   const resend =
-    subcommand === undefined
-      ? ` ${ran ? "Send the next one" : `Run any other commands it held in a call of their own first, then send that \`${label}\` again`} on its own${program === undefined ? "" : ", calling `dispatch` by name"}.`
-      : ` Send the \`dispatch\` command again${unknownProgram ? ", calling `dispatch` by name," : ""} with its subcommand written out.`;
+    cell === true
+      ? ` Send the \`dispatch\` command as one \`bash\` call on its own, not from an eval cell.`
+      : subcommand === undefined
+        ? ` ${ran ? "Send the next one" : `Run any other commands it held in a call of their own first, then send that \`${label}\` again`} on its own${program === undefined ? "" : ", calling `dispatch` by name"}.`
+        : ` Send the \`dispatch\` command again${unknownProgram ? ", calling `dispatch` by name," : ""} with its subcommand written out.`;
   return note(
     `${opening} ${LITERAL_GRAMMAR}${why} ${ending}${resend} Text it posts from a file goes in a \`--<field>-file <path>\` flag or in one here-document opened with a quoted delimiter (\`<<'EOF'\`) as the call's only other content.${wrapped === true ? ` If \`${label}\` here is text and no Dispatch write (a search pattern, a message, a file's content), keep it out of the command line: put that text in a file and name the file.` : ""}`
   );
@@ -1988,6 +2482,9 @@ export function loadFailureGate(
     if (event.toolName === "bash") {
       const write =
         scopedCommand(event.input.command) ?? unreadableDispatchWrite(event.input.command);
+      if (write !== undefined) found = { tool: write.tool, path: write.label };
+    } else if (event.toolName === "eval") {
+      const write = evalDispatchWrite(event.input);
       if (write !== undefined) found = { tool: write.tool, path: write.label };
     } else if (scopedDevice(event.toolName, event.input))
       found = { tool: event.toolName, path: `xd://${event.toolName}` };
@@ -2773,10 +3270,15 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         if (ctx.agent.kind !== "main") return undefined;
         if (event.toolName === "write") return stripRebuttal(event);
         if (envMode === undefined) mode = sessionMode(ctx.sessionManager.getEntries());
-        if (event.toolName === "bash") {
-          const scoped = scopedCommand(event.input.command);
+        // An eval cell holds no `dispatch` command AskGate reads; one that starts the CLI as a
+        // process is unreadable as a `bash` call is.
+        if (event.toolName === "bash" || event.toolName === "eval") {
+          const scoped = event.toolName === "bash" ? scopedCommand(event.input.command) : undefined;
           if (scoped === undefined) {
-            const unreadable = unreadableDispatchWrite(event.input.command);
+            const unreadable =
+              event.toolName === "bash"
+                ? unreadableDispatchWrite(event.input.command)
+                : evalDispatchWrite(event.input);
             if (unreadable === undefined) return undefined;
             // A judgment on one call's form: block mode refuses it before anything in it runs, and
             // warn mode runs it and hands the reason back (`unreadableCall`). A session with no

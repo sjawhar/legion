@@ -2288,6 +2288,170 @@ console.log(JSON.stringify(args, null, 2));
     }
     expect(g.entries).toHaveLength(0);
   });
+  // Final review of #2159 at 0cf9f1902, B1: every quoted word and here-document body was read as
+  // a script with the unknown-program rule, so text with two expansions and no `dispatch` was
+  // refused. That rule now applies only to text a shell runs.
+  const NO_SHELL_RUNS = [
+    'echo "$a $b"',
+    'while read -r a b; do echo "$a $b"; done <f',
+    'msg="$x $y $z"',
+    "perl -pe 's/(\\w+) (\\w+)/$2 $1/'",
+    "cat >Makefile <<'EOF'\napp: main.c\n\t$(CC) $(CFLAGS) -o app main.c\nEOF",
+  ];
+  test("B1: text no shell runs is read for dispatch only, so two expansions in it are not refused", async () => {
+    for (const command of NO_SHELL_RUNS) expect(unreadableDispatchWrite(command)).toBeUndefined();
+    const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+    for (const command of NO_SHELL_RUNS) expect(await g.bash("b1", command)).toBeUndefined();
+    expect(g.entries).toHaveLength(0);
+  });
+  test("B1: text a shell runs keeps the unknown-program rule", () => {
+    for (const command of [
+      `bash -c '"$0" "$1" --issue X-1 --body hi' "$P" "$S"`,
+      `eval '"$D" "$S" --issue X-1 --body hi'`,
+      `bash <<'EOF'\n"$D" "$S" --issue X-1 --body hi\nEOF`,
+      `bash <<< '"$D" "$S" --issue X-1 --body hi'`,
+      `printf '%s\\n' '"$D" "$S" --issue X-1 --body hi' | bash`,
+    ])
+      expect(unreadableDispatchWrite(command)).toMatchObject({
+        tool: "dispatch_unknown",
+        wrapped: true,
+      });
+  });
+  // The same review, B2: `dispatch` before a glob, brace or variable word was a write of unknown
+  // subcommand wherever it stood, so a search for the word was refused. Only a runner that runs
+  // `dispatch` makes it one now.
+  const SEARCHES = [
+    "grep -rn dispatch packages/*/src",
+    'grep -l dispatch "$f"',
+    "find . -name '*.ts' -exec grep -l dispatch {} +",
+    "rg dispatch src | head",
+    "rg dispatch $(git ls-files)",
+    'cp -r packages/dispatch "$tmp"',
+    "command -v dispatch",
+  ];
+  test("B2: a search for the word dispatch with a glob, brace or variable after it is not refused", async () => {
+    for (const command of SEARCHES) expect(unreadableDispatchWrite(command)).toBeUndefined();
+    const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+    for (const command of SEARCHES) expect(await g.bash("b2", command)).toBeUndefined();
+    expect(g.entries).toHaveLength(0);
+  });
+  test("B2: dispatch that find -exec runs, its subcommand unknown, is still refused", () => {
+    for (const command of [
+      "find . -name x -exec dispatch {} --issue X-1 \\;",
+      "find . -name x -execdir dispatch $SUB --issue X-1 --body hi \\;",
+    ])
+      expect(unreadableDispatchWrite(command)).toMatchObject({ tool: "dispatch_unknown" });
+  });
+  // The attack review at 0cf9f1902, A4 and A5: a program that runs its arguments (`xargs`,
+  // `nice`, `sudo` and the like) hid a `dispatch` whose subcommand it supplies, and an expansion
+  // as the program it runs.
+  const RUNNERS: Array<[string, string]> = [
+    ["printf '%s\\n' comment --issue X-1 --body hi | xargs dispatch", "dispatch_unknown"],
+    ["xargs -a args.txt dispatch", "dispatch_unknown"],
+    ["printf 'comment\\n' | xargs -I % dispatch % --issue X-1 --body hi", "dispatch_unknown"],
+    ["printf 'comment\\n' | xargs -I SUB dispatch SUB --issue X-1 --body hi", "dispatch_unknown"],
+    ['D=dispatch; nice "$D" comment --issue X-1 --body hi', "dispatch_comment"],
+    ['D=dispatch; sudo -E "$D" comment --issue X-1 --body hi', "dispatch_comment"],
+    ['D=dispatch; stdbuf -oL "$D" comment --issue X-1 --body hi', "dispatch_comment"],
+    ['D=dispatch; setsid "$D" comment --issue X-1 --body hi', "dispatch_comment"],
+    ['D=dispatch; xargs "$D" comment --issue X-1 --body hi </dev/null', "dispatch_comment"],
+    ["sudo -u me nice -n 5 dispatch $SUB --issue X-1 --body hi", "dispatch_unknown"],
+  ];
+  for (const [command, tool] of RUNNERS)
+    test(`A4, A5: dispatch or an expansion that a runner runs is a write: ${command}`, async () => {
+      expect(unreadableDispatchWrite(command)).toMatchObject({ tool });
+      const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+      const result = await g.bash("r", command);
+      expect(result?.block).toBe(true);
+      expect(result?.reason).toContain("Nothing in the call ran");
+      expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([[tool, "unreadable"]]);
+    });
+  test("A4: the reason for a subcommand xargs supplies names xargs", async () => {
+    const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+    const reason = (await g.bash("x", "xargs -a args.txt dispatch"))?.reason ?? "";
+    expect(reason).toContain("the word after `dispatch` comes from `xargs` when the call runs");
+  });
+  test("A4, A5: a runner that runs no dispatch, or runs nothing, is not refused", async () => {
+    const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+    for (const command of [
+      "command -v dispatch",
+      'exec "$@"',
+      'sudo "$EDITOR" notes.md',
+      "ls | xargs -I % cp % backup/",
+      "nice -n 10 make -j4",
+      "xargs -a list.txt rm",
+    ])
+      expect(await g.bash("n", command)).toBeUndefined();
+    expect(g.entries).toHaveLength(0);
+  });
+  // The attack review, A2: escapes that the shell decodes before a shell runs the text hid the
+  // write from the scan.
+  const ESCAPED: Array<[string, string, string]> = [
+    [
+      "ANSI-C quoting given to bash -c",
+      "bash -c $'true\\ndispatch comment --issue X-1 --body hi'",
+      "dispatch_comment",
+    ],
+    [
+      "ANSI-C quoting given to eval",
+      "eval $'true\\ndispatch comment --issue X-1 --body hi'",
+      "dispatch_comment",
+    ],
+    [
+      "printf escapes piped into bash",
+      "printf 'true\\ndispatch comment --issue X-1 --body hi\\n' | bash",
+      "dispatch_comment",
+    ],
+    [
+      "echo -e escapes piped into sh",
+      "echo -e 'dispatch\\tcomment --issue X-1 --body hi' | sh",
+      "dispatch_comment",
+    ],
+    [
+      "an escaped expansion in an unquoted here-document bash reads",
+      "bash <<EOF\nSUB=comment\ndispatch \\$SUB --issue X-1 --body hi\nEOF",
+      "dispatch_unknown",
+    ],
+  ];
+  for (const [form, command, tool] of ESCAPED)
+    test(`A2: a write that escapes hide from the text is refused: ${form}`, async () => {
+      expect(unreadableDispatchWrite(command)).toMatchObject({ tool, wrapped: true });
+      const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+      const result = await g.bash("e", command);
+      expect(result?.block).toBe(true);
+      expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([[tool, "unreadable"]]);
+    });
+  // The attack review, A3: the CLI by path. `bin/dispatch` runs `bun …/dist/dispatch.js`, so that
+  // bundle, run by bun or by its own path, is the CLI too.
+  test("A3: the CLI bundle run by bun or by its path is reviewed in the literal form", async () => {
+    fs.copyFileSync(path.join(bin, "dispatch"), path.join(bin, "dispatch.js"));
+    fs.chmodSync(path.join(bin, "dispatch.js"), 0o755);
+    const g = bind({ env: { PATH: process.env.PATH ?? "" }, cwd: work });
+    expect(
+      await g.bash("bun", `bun ${bin}/dispatch.js comment --issue X-1 --body hi`)
+    ).toBeUndefined();
+    expect(await g.bash("js", "./bin/dispatch.js ask --issue X-1 --question q")).toBeUndefined();
+    expect(g.dryRuns.map((r) => r.script)).toEqual([
+      `bun ${bin}/dispatch.js comment --dry-run --issue X-1 --body hi`,
+      "./bin/dispatch.js ask --dry-run --issue X-1 --question q",
+    ]);
+    expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([
+      ["dispatch_comment", "verdict"],
+      ["dispatch_ask", "verdict"],
+    ]);
+  }, 30_000);
+  test("A3: the CLI bundle in a call AskGate cannot read is unreadable", () => {
+    for (const [command, tool] of [
+      ["cd $X && bun /opt/x/dist/dispatch.js comment --issue X-1 --body hi", "dispatch_comment"],
+      ["true; /opt/x/dist/dispatch.js ask --issue X-1 --question q", "dispatch_ask"],
+      [
+        "bash -c 'bun /opt/x/dist/dispatch.js \"comment\" --issue X-1 --body hi'",
+        "dispatch_comment",
+      ],
+      ["echo 'run dispatch.js comment later'", "dispatch_comment"],
+    ])
+      expect(unreadableDispatchWrite(command)).toMatchObject({ tool });
+  });
   test("dispatch issue is reviewed with --spec or --spec-file and not without", async () => {
     const g = bind({ env: STUB, cwd: work });
     await g.bash("plain", "dispatch issue --project P --title 'A new issue'");
@@ -3151,6 +3315,136 @@ console.log(JSON.stringify(args, null, 2));
       await g.bash("u8", ASK);
       expect(g.calls[0].user).not.toContain(uploadRule);
     });
+  });
+});
+
+// The attack review at 0cf9f1902, A1: an eval cell that starts the CLI as a process of its own
+// posts with no `bash` call for the gate to see. The gate now reads the cell's code.
+describe("eval cells that run the dispatch CLI (A1)", () => {
+  /** Main's spec scorer fixture of an agent that ran the CLI from a Python cell (score.test.ts). */
+  const SCORER_PYTHON =
+    "import subprocess\nr = subprocess.run(['dispatch', 'doc-edit', '--issue', 'LWEVAL-7', '--artifact', 'spec', '--ops-json-file', 'ops.json'], capture_output=True, text=True)\nprint(r.stdout)";
+  const CELLS: Array<[string, string, string, string]> = [
+    [
+      "Bun.spawnSync with an argv",
+      "js",
+      'Bun.spawnSync(["dispatch", "comment", "--issue", "X-1", "--body", "hi"])',
+      "dispatch_comment",
+    ],
+    [
+      "Bun.spawn with a cmd field",
+      "js",
+      'const p = Bun.spawn({ cmd: ["dispatch", "ask", "--issue", "X-1", "--question", "q"] });',
+      "dispatch_ask",
+    ],
+    [
+      "child_process execSync with a shell string",
+      "js",
+      'require("node:child_process").execSync("dispatch comment --issue X-1 --body hi")',
+      "dispatch_comment",
+    ],
+    [
+      "spawnSync with a program and its arguments",
+      "js",
+      'spawnSync("dispatch", ["message", "--issue", "X-1", "--body", "hi"])',
+      "dispatch_message",
+    ],
+    [
+      "the bundle run by bun",
+      "js",
+      'Bun.spawnSync(["bun", "/opt/pi-envoy/dist/dispatch.js", "comment", "--issue", "X-1", "--body", "hi"])',
+      "dispatch_comment",
+    ],
+    [
+      "a subcommand from a variable",
+      "js",
+      'const sub = "comment";\nBun.spawnSync(["dispatch", sub, "--issue", "X-1", "--body", "hi"])',
+      "dispatch_unknown",
+    ],
+    [
+      "a template string",
+      "js",
+      `execSync(\`dispatch $${"{"}sub} --issue X-1 --body hi\`)`,
+      "dispatch_unknown",
+    ],
+    [
+      "Python subprocess.run with DISPATCH_HOST set",
+      "py",
+      'subprocess.run(["dispatch", "comment", "--issue", "X-1", "--body", "hi"], env={**os.environ, "DISPATCH_HOST": "omp"})',
+      "dispatch_comment",
+    ],
+    ["Python, the scorer's fixture", "py", SCORER_PYTHON, "dispatch_doc_edit"],
+    [
+      "Python os.system",
+      "py",
+      'os.system("dispatch ask --issue X-1 --question q")',
+      "dispatch_ask",
+    ],
+    [
+      "a Python f-string",
+      "py",
+      'subprocess.run(f"dispatch {sub} --issue X-1 --body hi", shell=True)',
+      "dispatch_unknown",
+    ],
+  ];
+  for (const [form, language, code, tool] of CELLS)
+    test(`refused in block mode, noted in warn mode: ${form}`, async () => {
+      expect(core.evalDispatchWrite({ language, code })).toMatchObject({ tool, cell: true });
+      const block = bind({ env: { OMP_ASKGATE: "block" } });
+      const refused = await block.device("e", "eval", { language, code });
+      expect(refused?.block).toBe(true);
+      expect(refused?.reason).toContain("Nothing in the call ran");
+      expect(refused?.reason).toContain("one `bash` call");
+      const warn = bind({ env: { OMP_ASKGATE: "warn" } });
+      const noted = await warn.device("e", "eval", { language, code });
+      expect(noted?.block).toBeUndefined();
+      expect(noted?.additionalContext).toContain("The call ran unreviewed");
+      for (const g of [block, warn]) {
+        expect(g.calls).toHaveLength(0);
+        expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([[tool, "unreadable"]]);
+      }
+      const refuse = core.loadFailureGate(
+        new Error("a host module did not load"),
+        { env: { OMP_ASKGATE: "warn" }, configFile: CONFIG_FILE },
+        { appendEntry: () => {} }
+      );
+      expect(
+        refuse({ toolName: "eval", toolCallId: "l", input: { language, code } }, {
+          agent: { kind: "main" },
+          sessionManager: { getEntries: () => [] },
+        } as never)?.block
+      ).toBe(true);
+    });
+  test("each cell of an input that holds several is read", () => {
+    expect(
+      core.evalDispatchWrite({
+        cells: [
+          { language: "js", code: "1 + 1" },
+          { language: "py", code: 'os.system("dispatch comment --issue X-1 --body hi")' },
+        ],
+      })
+    ).toMatchObject({ tool: "dispatch_comment", cell: true });
+  });
+  test("a cell that only mentions dispatch, or calls the bash tool, is not refused", async () => {
+    const g = bind({ env: { OMP_ASKGATE: "block" } });
+    for (const [language, code] of [
+      ["js", "// dispatch comment --issue X-1 runs from bash, not from here\n1"],
+      ["js", 'console.log("see dispatch docs")'],
+      ["py", 'print("dispatch comment --issue X-1 --body hi")'],
+      ["js", 'Bun.spawnSync(["dispatch", "search", "--query", "x"])'],
+      ["js", 'Bun.spawnSync(["rg", "dispatch", "src"])'],
+      ["js", `execSync(\`$${"{"}cmd} $${"{"}args}\`)`],
+      [
+        "js",
+        `return await tool.bash({ command: "/opt/pi-envoy/bin/dispatch ask --issue DSP-1 --question 'Ship the release today?'" })`,
+      ],
+      [
+        "py",
+        `print(await tool.bash({"command": "/opt/pi-envoy/bin/dispatch ask --issue DSP-1 --question 'Ship the release today?'"}))`,
+      ],
+    ])
+      expect(await g.device("c", "eval", { language, code })).toBeUndefined();
+    expect(g.entries).toHaveLength(0);
   });
 });
 
