@@ -60,8 +60,8 @@ export interface SessionContext {
   };
   readonly setInterval: (callback: () => void, intervalMs: number) => void;
   /**
-   * The host's `ctx.isIdle()`: false while a turn runs (`!session.isStreaming`), read live from a
-   * context kept since `session_start`.
+   * The host's `ctx.isIdle()`: `!session.isStreaming`, false while a turn runs and while a prompt
+   * is set up or recovered, read live from a context kept since `session_start`.
    */
   readonly isIdle?: () => boolean;
   /** The host's managed one-shot timer: a throw or rejection is contained, cleared on shutdown. */
