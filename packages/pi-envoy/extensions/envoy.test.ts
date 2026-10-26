@@ -3805,13 +3805,16 @@ describe("envoy OMP extension", () => {
       '{"decision":"revise","reason":"failure 7 (content gate): \\"see the message above\\" points at nothing"}';
     const MODEL = { provider: "anthropic", id: "claude-fable-5-1", api: "anthropic-messages" };
     const completions: unknown[] = [];
+    /** What the stand-in model answers: a revise, unless a test sets text that is no verdict. */
+    let standInAnswer = REVISE;
     const standInHost = () => {
       completions.length = 0;
+      standInAnswer = REVISE;
       mock.module("@oh-my-pi/pi-ai", () => ({
         completeSimple: async (model: unknown) => {
           completions.push(model);
           return {
-            content: [{ type: "text", text: REVISE }],
+            content: [{ type: "text", text: standInAnswer }],
             usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
             stopReason: "stop",
           };
@@ -4161,6 +4164,71 @@ console.log(JSON.stringify(args));
             verdictMode: "warn",
           },
         },
+      ]);
+    }, 30_000);
+    /** Appends to the session's ledger a gated write the CLI logged as unmarked. */
+    const appendUnmarked = () =>
+      appendResult(sessionDirectory(process.env, "ses_askgate"), {
+        tool: "dispatch_ask",
+        error: "dispatch ask was not called: AskGate is on for this session, and …",
+        askgate: { mode: "block", why: "this call carries no AskGate marker" },
+      });
+    const PY_RESULT = { toolName: "bash", toolCallId: "call-py", input: {}, content: [], isError: false };
+    /** The outcome of each `advisor-gate` entry, in order. */
+    const gateOutcomes = (entries: readonly { readonly customType: string; readonly data: unknown }[]) =>
+      entries.flatMap(({ customType, data }) =>
+        customType === "advisor-gate" && typeof data === "object" && data !== null && "outcome" in data
+          ? [data.outcome]
+          : []
+      );
+    // An unmarked entry records the CLI's refusal or warning; no review stands behind it, so it is
+    // neither an allow that resets a target's revises nor a verdict that resets the halt's count.
+    test("an unmarked entry leaves the breaker as it was: the third attempt after two revises still trips it", async () => {
+      gateOn();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-unmarked-breaker");
+      const fixture = allHandlers();
+      envoyExtension(fixture.pi);
+      const context = gateContext([]);
+      await fixture.handlers.get("session_start")?.({}, context);
+      standInDispatch();
+      const ask = (toolCallId: string) =>
+        fixture.handlers.get("tool_call")?.(
+          { toolName: "bash", toolCallId, input: { command: ASK } },
+          context
+        );
+      await ask("call-1");
+      await ask("call-2");
+      appendUnmarked();
+      await fixture.handlers.get("tool_result")?.(PY_RESULT, context);
+      await ask("call-3");
+      expect(gateOutcomes(fixture.entries)).toEqual(["verdict", "verdict", "unmarked", "breaker"]);
+    }, 30_000);
+    test("an unmarked entry leaves the halt's count as it was: the third call without a verdict still halts", async () => {
+      gateOn();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-unmarked-halt");
+      const fixture = allHandlers();
+      envoyExtension(fixture.pi);
+      const context = gateContext([]);
+      await fixture.handlers.get("session_start")?.({}, context);
+      standInDispatch();
+      standInAnswer = "no verdict here";
+      const ask = (toolCallId: string) =>
+        fixture.handlers.get("tool_call")?.(
+          { toolName: "bash", toolCallId, input: { command: ASK } },
+          context
+        );
+      await ask("call-1");
+      await ask("call-2");
+      appendUnmarked();
+      await fixture.handlers.get("tool_result")?.(PY_RESULT, context);
+      await ask("call-3");
+      await ask("call-4");
+      expect(gateOutcomes(fixture.entries)).toEqual([
+        "no-verdict",
+        "no-verdict",
+        "unmarked",
+        "no-verdict",
+        "halted",
       ]);
     }, 30_000);
     // The second re-gate of #2159, non-blocking: at the host's default handler limit of 30 s the
