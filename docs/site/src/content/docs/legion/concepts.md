@@ -325,7 +325,7 @@ pull request's `Production:` line, naming the merge commit and what woke the loo
 when production does not carry the merge yet; or `fail`, a defect, which the implementer asks you
 about in a Dispatch ask on Legion's daily report issue, naming the issue, the pull request, the
 merge commit, what it drove and what failed, so you decide whether it needs an issue.
-The record lives on the pull request alone: Dispatch refuses a write on a closed issue.
+The record lives on the pull request alone, whether or not the issue is closed.
 
 Nothing waits for the deploy: a `pending` look ends, the implementer's pod goes with its
 conversation and the issue's volume kept, and the daemon wakes the check — the pod comes back and

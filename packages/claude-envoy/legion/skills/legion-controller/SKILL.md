@@ -315,7 +315,7 @@ one sentence asking a person to take the issue from its header, since its asks r
 Inbox's `Unassigned` filter.
 
 Each time you read it, keep it answerable. `Status: done` means someone closed it: Dispatch
-refuses an ask or a message there (`409 ISSUE_CLOSED`) and hides its open asks, so reopen it with
+refuses an ask there (`409 ISSUE_CLOSED`) and hides its open asks, so reopen it with
 `set_status` to `icebox` and say so in the day's report. `Assignee: unassigned`, with a person
 known, means assign it, naming your session (`dispatch whoami` names it):
 `curl -sS -X PATCH -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" -H 'Content-Type: application/json' -d '{"assignee": "<email>", "actor": {"kind": "session", "id": "<session id>"}}' "$DISPATCH_URL/api/v1/issues/<REPORT KEY>"`.

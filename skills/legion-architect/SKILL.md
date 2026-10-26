@@ -422,8 +422,8 @@ after the close*). A root's close writes `done`, frees the tree's admission slot
 tree for `linger_hours` with every member suspended; a child still in the workflow at the linger's
 end is handed over (section 3), and the tree's close waits for a member's open check.
 
-Nothing of the check is yours. Its record lives on the pull request alone, since Dispatch refuses
-a write on a closed issue; a defect it finds is a `dispatch ask`, never an issue; and
+Nothing of the check is yours. Its record is the pull request's `Production:` line, whether or
+not the issue is closed; a defect it finds is a `dispatch ask`, never an issue; and
 `read_record` shows a closed issue's open check (`check`: the pull request, the merge commit, the
 looks, what woke the last one and when the next is due).
 

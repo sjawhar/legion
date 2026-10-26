@@ -590,6 +590,14 @@
 
 ### Changed
 
+- A closed Dispatch issue takes comments and messages (INFRA-448), where each was
+  `409 ISSUE_CLOSED` before: a new comment (issue-level, a thread reply, a reply on an ask, one
+  anchored to a quote of one of its documents, and that thread's replies) and a new message post
+  from people and agents, and so do their deliveries, retries and the mentioned or targeted agent's
+  reply. Every other closed-issue rule stays: a new ask, an ask's edit, answer or resolve, a
+  suggestion, a document edit, a named version, an upload, a review, an approval request, a claim,
+  a PATCH outside the closed allow-list, and a resolve, reopen, edit, accept or reject of an
+  existing comment are still `409 ISSUE_CLOSED` until the issue reopens.
 - **Breaking (local development):** `agent-secrets-devrelay` presents a listed caller's own
   ServiceAccount token, read from `--account-token-file` (default
   `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`), in place of the shared bearer the broker no longer takes. A

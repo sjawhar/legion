@@ -37,6 +37,14 @@ Triage → Icebox → Backlog → Todo → In progress → Testing → Needs rev
 An open issue's **Status** menu offers every status except Done. **Close issue** is the way into
 Done, and a closed issue offers **Reopen**, which puts it back in Backlog.
 
+A closed issue still takes comments and messages, from people and agents: a comment, a reply, a
+reply on an ask, a comment on a quote of one of its documents, and a message to an agent all post,
+and a mentioned agent is still told and can answer. Everything else waits for **Reopen**: a new
+ask, an answer to an ask, a suggestion, a document edit or named version, an upload, a review or
+approval request, a claim, and resolving, reopening, editing, accepting or rejecting a comment
+already there. Its priority, labels and other fields wait for it too, except its place on the
+Board and its components; a linked GitHub issue or pull request can be taken off it, not added.
+
 Legion, when it works an issue, moves that issue's status itself.
 
 ## The List and the Board
