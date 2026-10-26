@@ -666,11 +666,13 @@ func (r *renderer) rawTitleLinesHold(raw, prefix string) bool {
 const maxTableHeaderRead = 4 << 10
 
 // makesTable reports whether lines[index], a delimiter row width cells wide that raw's lines
-// (lines) write at the paragraph's own level, makes a table of the paragraph, as the table reader
-// (lazyTableRows) does, under the line before it: lines[index-1], or for raw's first line feed the
-// written line up to it. The reader takes only the paragraph's first delimiter row, under a header
-// no wider than it and holding more than a lone `|`; a delimiter row on an earlier line of the
-// paragraph than the one before is not seen here, and the line is taken to make a table.
+// (lines) write at the paragraph's own level, can make a table of the paragraph under the line
+// before it, its header: lines[index-1], or for raw's first line feed the written line up to it,
+// holding more than a lone `|` and no wider than the delimiter row. Go's table reader
+// (lazyTableRows) takes only the paragraph's first delimiter row, but the browser editor's engine
+// takes a later line of the paragraph as a header too, a delimiter row before it included
+// (`| - |` over `| - |` is a table there), so every delimiter row is judged under its own header,
+// and one either reader could take as a table's is written `&#10;`.
 func (r *renderer) makesTable(lines []string, index, width int) bool {
 	header := lines[index-1]
 	if index == 1 {
@@ -681,8 +683,6 @@ func (r *renderer) makesTable(lines []string, index, width int) bool {
 			return true
 		}
 		header = string(written[from+lineFrom:]) + header
-	} else if _, delimiter := delimiterRowWidth(header); delimiter {
-		return false
 	}
 	source := []byte(header)
 	return !lonePipe(source) && tableRowWidth(gmtext.NewSegment(0, len(source)), source) <= width

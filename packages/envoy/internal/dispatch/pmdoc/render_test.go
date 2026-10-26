@@ -1361,6 +1361,49 @@ func TestRenderWritesALazyHTMLTagTitleLineSoTheEngineReadsItBack(t *testing.T) {
 	}
 }
 
+// A title whose lines write two table delimiter rows, one under the other, in a paragraph whose
+// first line is wider than them, is written `&#10;`: Go's reader takes only the paragraph's first
+// delimiter row, which under a wider header makes no table, but the browser editor's engine reads
+// the second row's line before it, the first, as a header, so the raw title makes a table there
+// and the images are lost (the tester's fuzz document f513). Go and the engine both read the
+// writing back with every image held, and an image whose title writes one such row under a wider
+// header keeps its line feeds as written.
+func TestRenderWritesADelimiterRowUnderADelimiterRowSoTheEngineReadsItBack(t *testing.T) {
+	tests := []struct{ source, want string }{
+		{"a | b ![x](i.png \"a&#10;| - |&#10;| - |&#10;z\")\n", "a | b ![x](i.png \"a&#10;| - |&#10;| - |&#10;z\")\n"},
+		{"a | b ![x](i.png \"a&#10;| - |&#10;z\")\n", "a | b ![x](i.png \"a\n| - |\nz\")\n"},
+	}
+	markdowns := make([]string, len(tests))
+	held := make([][]*Node, len(tests))
+	for index, test := range tests {
+		doc, err := ParseForWrite(test.source, nil)
+		if err != nil {
+			t.Fatalf("ParseForWrite(%q): %v", test.source, err)
+		}
+		markdown, err := Render(doc)
+		if err != nil {
+			t.Fatalf("Render(ParseForWrite(%q)): %v", test.source, err)
+		}
+		if markdown != test.want {
+			t.Errorf("Render(ParseForWrite(%q)) = %q, want %q", test.source, markdown, test.want)
+		}
+		if back, err := ParseForWrite(markdown, nil); err != nil || !back.Equal(doc) {
+			t.Errorf("Go reads %q back otherwise (%v)", markdown, err)
+		}
+		markdowns[index], held[index] = markdown, documentImages(doc)
+	}
+	for index, reading := range engineReadings(t, markdowns) {
+		var read []*Node
+		if reading != nil {
+			read = documentImages(reading)
+		}
+		if len(read) != len(held[index]) || !sameImageFields(read[0], held[index][0]) {
+			got, _ := reading.JSON()
+			t.Errorf("the engine reads %q as %s, want its image %v", markdowns[index], got, held[index][0].Attrs)
+		}
+	}
+}
+
 // documentImages is doc's images in document order.
 func documentImages(doc *Node) []*Node {
 	var images []*Node
