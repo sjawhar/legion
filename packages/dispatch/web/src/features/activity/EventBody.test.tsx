@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
-import { render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 
 import type { Event } from "../../api/types";
 import { EventBody } from "./EventBody";
@@ -133,7 +135,16 @@ test("EventBody names how an ask was resolved: a withdrawal by the close, a retr
     seq: 4,
     type: "ask.resolved",
   };
-  const view = render(<EventBody event={withdrawn} />);
+  // A session actor renders through `AgentName`, which links to its live page and reads the
+  // agent registry.
+  const client = new QueryClient();
+  const view = render(<EventBody event={withdrawn} />, {
+    wrapper: ({ children }) => (
+      <MemoryRouter>
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      </MemoryRouter>
+    ),
+  });
 
   try {
     expect(await screen.findByText(/^Withdrawn when alice closed the issue/)).toBeDefined();
@@ -155,7 +166,11 @@ test("EventBody names how an ask was resolved: a withdrawal by the close, a retr
         }}
       />
     );
-    expect(await screen.findByText(/^Retracted by session:session-… -/)).toBeDefined();
+    await waitFor(() =>
+      expect(view.container.textContent).toContain(
+        "Retracted by session:session-… - Superseded by the spec."
+      )
+    );
     expect((await screen.findByText("the spec")).tagName).toBe("STRONG");
   } finally {
     view.unmount();

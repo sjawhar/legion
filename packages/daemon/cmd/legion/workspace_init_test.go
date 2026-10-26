@@ -429,7 +429,7 @@ func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 // still GitHub's, and the issue's jj workspace on its bookmark, the clone's credential helper the
 // one named, no gh shim and no tmux pane's `legion` launcher on the volume (a pod's PATH names the
 // image's gh and legion, and its credential is the gh files its role Secret projects), one log
-// line naming the workspace, and no sessions directory: no role container mounts one, every
+// line naming the workspace, and no sessions directory: no container of the pod mounts one, every
 // session being a row in the database the deployment names (INFRA-80). The permanent
 // guard on the pod path: a recording `codegraph` stub is first on PATH throughout, and this
 // container must never call it (#1647) — only a synchronous warm-up regressing back onto the init

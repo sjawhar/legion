@@ -227,7 +227,15 @@ test.each([
     expect(card.section.querySelector("[data-dispatch-ask-asked]")).toBeNull();
     const hosted = card.footer.getByRole("article", { name: `Urgency: ${label}` });
     expect(hosted.dataset.testid).toBe("ask-ask-1");
-    expect(within(hosted).getByText("Architect for CORE-1 (for sjawhar)")).toBeDefined();
+    // The asker's button holds its name, its attribution follows, and its live link sits beside
+    // the button rather than inside it.
+    const asker = within(hosted).getByRole("button", { name: "Architect for CORE-1" });
+    const agent = asker.closest<HTMLElement>("[data-agent-name]");
+    expect(agent?.textContent).toContain("Architect for CORE-1 (for sjawhar)");
+    const live = within(agent as HTMLElement).getByRole("link", {
+      name: "Open live conversation with Architect for CORE-1 (for sjawhar)",
+    });
+    expect(asker.contains(live)).toBe(false);
     await waitFor(() =>
       expect(within(hosted).getByText("3 minutes ago", { exact: false })).toBeDefined()
     );
@@ -801,10 +809,11 @@ test("a closed issue's resolved block shows its withdrawn row's record and no co
     expect(card.section.querySelector("form")).toBeNull();
     expect(card.footer.queryByRole("radio")).toBeNull();
     expect(card.footer.getByTestId("ask-resolution-badge").textContent).toBe("Withdrawn");
-    expect(
-      card.footer.getByText(/Withdrawn when legion-daemon:CORE closed the issue$/)
-    ).toBeDefined();
-    expect(card.footer.queryByText(/Withdrawn by the close/)).toBeNull();
+    // The daemon is an `AgentName`, its whole id in a link inside the sentence.
+    expect(card.section.textContent).toContain(
+      "Withdrawn when legion-daemon:CORE closed the issue"
+    );
+    expect(card.section.textContent).not.toContain("Withdrawn by the close");
     // The record names who asked and how it ended, so the header does not repeat either.
     expect(card.header.queryByText("Resolved")).toBeNull();
     expect(card.section.querySelector("[data-dispatch-ask-asked]")).toBeNull();

@@ -10,6 +10,12 @@
   payload schema (`AskEventPayloadSchema`) now parses: Dispatch writes it alone, on each open ask
   an issue's close withdraws, and reopening the issue opens those asks again. `dispatch_resolve_ask`
   still takes only `retracted` and `resolved`, so no caller can write one (INFRA-158).
+- `actorAttribution(actor)`, the part of an actor's label after its name: ` (for <owner>)` for a
+  session a personal token attributed to a human, ` (as <namespace>/<name>)` for one a service
+  token authenticated, else `""` (always for a user or system). `actorLabel` is now `actorName`
+  followed by it, with the same output as before, so a reader that draws the name and the
+  attribution apart (the Dashboard's `AgentName`) takes the attribution from the one rule
+  instead of cutting it out of the label (INFRA-440).
 - `SearchCoverage`, `SearchCoverageKinds` and `SearchCoverageCounts`, the body of
   `GET /api/v1/search/coverage`: the configured embedder's identity, place (`bedrock` or `azure`)
   and model, and per kind and in total how many searchable items have a current vector, lack one or

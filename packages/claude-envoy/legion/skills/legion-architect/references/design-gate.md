@@ -81,13 +81,23 @@ Facts about the request:
   again to hand the same request back at the latest version.
 - If the output reads `spec.md (document id <UUID>) is already approved at version <N>`, still call
   `register_gate` with that id and version: the daemon reads the approval from Dispatch as it
-  registers, opens the gate and delivers `design-approved` at once. The same read covers a human
-  who answers between your two calls. You never approve anything yourself.
+  registers, opens the gate and delivers `design-approved` at once, and only once even when the
+  approval's own event opened the gate first. The same read covers a human who answers between
+  your two calls: a changes request on that version arrives as `design-changes-requested`, once.
+  You never approve anything yourself.
+- `register_gate` refused 409 `VERSION_NOT_IN_DISPATCH` means the version you named is above the
+  latest version Dispatch holds for that document (the message names both), and a version Dispatch
+  never wrote is no registration: the gate is as it was. Read the document's latest version, check
+  it is the spec the human is asked to approve, and `register_gate` that version.
 
 Then end your turn. Release no wave until a delivered wake shows `design-approved` on the root. On
 `design-changes-requested`: revise the spec as the human's reason asks, run
 `task(agent="plan-gap-analyst")` on the new version with the code, command output and the human's
-words, resolve every finding, request approval again and end your turn.
+words, resolve every finding, request approval again and end your turn. A
+`design-changes-requested` may name a version below the latest, or arrive after another for the
+same version: it is a request the human made that reached the daemon late, and no approval came
+after it. Each request arrives once. The gate is as the newest review left it; still read the
+reason, and answer it in the spec if the latest version does not already.
 
 ## After approval
 

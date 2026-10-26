@@ -4,7 +4,8 @@ import type { Event } from "../../api/types";
 import { textMutedOnSurface, textPrimaryOnSurface } from "../../theme/classes";
 import { AskOptionList } from "../inbox/AskOptionList";
 import { eventDescription } from "../issue/event-description";
-import { askResolutionReason, describeAskResolutionActor } from "../refs/actor";
+import { AgentParts, AskResolutionLine } from "../refs/AgentName";
+import { askResolutionReason } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
 
@@ -61,7 +62,7 @@ function AskEventBody({
       )}
       {resolution === undefined ? null : (
         <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
-          {describeAskResolutionActor(resolution)}
+          <AskResolutionLine resolution={resolution} />
           {resolutionReason === undefined ? null : (
             <>
               {" "}
@@ -94,5 +95,9 @@ export function EventBody({
   ) {
     return <MarkdownBody markdown={event.payload.body} onRendered={onRendered} />;
   }
-  return <p className={`font-medium ${textPrimaryOnSurface}`}>{eventDescription(event)}</p>;
+  return (
+    <p className={`font-medium ${textPrimaryOnSurface}`}>
+      <AgentParts parts={eventDescription(event)} />
+    </p>
+  );
 }
