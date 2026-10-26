@@ -883,9 +883,10 @@ type AskAnsweredEventPayload struct {
 // creating transaction, so `issue.created` names the nodes that body cited.
 //
 // issue.created, issue.updated and issue.closed also say what the write changed, read in its own
-// transaction: Changed names each field whose value the write moved (title, status, rank,
-// priority, assignee, parent, labels, route, repo, components, blocked_by, external_links; for
-// issue.created every field the new issue holds a value in), Ancestors the issue's parent chain,
+// transaction: Changed names each field whose value the write moved (title, status, closed_at
+// for a close or a reopen, rank, priority, assignee, parent, labels, route, repo, components,
+// blocked_by, external_links; for issue.created every field the new issue holds a value in),
+// Ancestors the issue's parent chain,
 // parent first up to the root ([] for a root), and ThreadLogins, only when the status moved,
 // whose Replies count the move can change: for a close or a reopen every login with a Replies row
 // on one of the issue's open asks (events.IssueThreadLogins), for any other status move [].

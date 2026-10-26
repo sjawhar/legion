@@ -18,7 +18,9 @@ var unsetIssue = model.Issue{Components: model.IssueComponents{Mode: "inherit"}}
 // issueChangedFields is an issue event's changed list: the name of every field whose value differs
 // between before and after, in one fixed order. repo moves with the issue's own repository or the
 // one it resolves to (a reparent can move the second alone), and components with the effective
-// attachment, so an inherited change counts too.
+// attachment, so an inherited change counts too. closed_at moves only with a close or a reopen
+// (whether the issue is closed, not the time), which a status alone cannot say: a reader learns
+// from it that the issue's open asks entered or left the Inbox and the projects' open-ask counts.
 func issueChangedFields(before, after model.Issue) []string {
 	changed := []string{}
 	add := func(field string, moved bool) {
@@ -28,6 +30,7 @@ func issueChangedFields(before, after model.Issue) []string {
 	}
 	add("title", before.Title != after.Title)
 	add("status", before.Status != after.Status)
+	add("closed_at", (before.ClosedAt == nil) != (after.ClosedAt == nil))
 	add("rank", before.Rank != after.Rank)
 	add("priority", !intPointersEqual(before.Priority, after.Priority))
 	add("assignee", !stringPointersEqual(before.Assignee, after.Assignee))

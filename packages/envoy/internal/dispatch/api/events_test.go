@@ -322,13 +322,13 @@ func TestIssueEventsSayWhatTheWriteChanged(t *testing.T) {
 	createThreadComment(t, handler, grandchild.Key, map[string]any{"body": "Unrelated."}, "bob")
 	patch(map[string]any{"status": "done"})
 	closed := newestEventPayload[issueEventFields](t, database, "issue.closed", grandchild.Key)
-	if !slices.Equal(closed.Changed, []string{"status"}) || !slices.Equal(closed.ThreadLogins, []string{"alice"}) {
-		t.Fatalf("issue.closed = %#v, want changed [status] and thread_logins [alice]", closed)
+	if !slices.Equal(closed.Changed, []string{"status", "closed_at"}) || !slices.Equal(closed.ThreadLogins, []string{"alice"}) {
+		t.Fatalf("issue.closed = %#v, want changed [status closed_at] and thread_logins [alice]", closed)
 	}
 	patch(map[string]any{"status": "backlog"})
 	reopened := newestEventPayload[issueEventFields](t, database, "issue.updated", grandchild.Key)
-	if !slices.Equal(reopened.Changed, []string{"status"}) || reopened.Status != "backlog" {
-		t.Fatalf("a reopen's issue.updated = %#v, want changed [status] and the new status", reopened)
+	if !slices.Equal(reopened.Changed, []string{"status", "closed_at"}) || reopened.Status != "backlog" {
+		t.Fatalf("a reopen's issue.updated = %#v, want changed [status closed_at] and the new status", reopened)
 	}
 	if !slices.Equal(reopened.ThreadLogins, []string{"alice"}) || slices.Contains(reopened.ThreadLogins, "bob") {
 		t.Fatalf("a reopen's thread_logins = %#v, want alice, who wrote in a thread, and not bob", reopened.ThreadLogins)
