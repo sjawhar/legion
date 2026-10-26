@@ -2,6 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 
 import { api, apiErrorMessage } from "../../api/client";
+import type { CredentialDecisionResponse } from "../../api/types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   dangerText,
@@ -75,28 +76,35 @@ export function MachineLoginPage(): ReactNode {
     onSettled: () => submitGuard.release(),
     write: (lookupCode: string, bounds) => api.lookupMachineCredential(lookupCode, bounds),
   });
-  const record = lookup.data;
+  // A lookup Dispatch answered with nothing it kept shows nothing until it is looked up again.
+  const record = lookup.data ?? undefined;
   // The code the shown record was looked up by, not whatever the field holds now.
   const lookedUpCode = lookup.variables ?? "";
 
-  const approve = useKeyedWrite({
+  // Each is typed by its answer, which its callbacks read.
+  const approve = useKeyedWrite<CredentialDecisionResponse>({
+    write: (_variables, bounds) =>
+      api.approveCredentialRecord(record?.record_id ?? "", { code: lookedUpCode }, bounds),
     inline: true,
     label: () => "Approval of a machine login",
     onSettled: () => submitGuard.release(),
-    onSuccess: () => {
+    onSuccess: (decided) => {
       void queryClient.invalidateQueries({ queryKey: ["credential-pending"] });
       void queryClient.invalidateQueries({ queryKey: machineLoginsQuery().queryKey });
+      // Decided, with no answer to say how: the record is looked up again for its decision.
+      if (decided === null) lookup.mutate(lookedUpCode);
     },
-    write: (_variables, bounds) =>
-      api.approveCredentialRecord(record?.record_id ?? "", { code: lookedUpCode }, bounds),
   });
-  const deny = useKeyedWrite({
+  const deny = useKeyedWrite<CredentialDecisionResponse>({
+    write: (_variables, bounds) =>
+      api.denyCredentialRecord(record?.record_id ?? "", { code: lookedUpCode }, bounds),
     inline: true,
     label: () => "Denial of a machine login",
     onSettled: () => submitGuard.release(),
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["credential-pending"] }),
-    write: (_variables, bounds) =>
-      api.denyCredentialRecord(record?.record_id ?? "", { code: lookedUpCode }, bounds),
+    onSuccess: (decided) => {
+      void queryClient.invalidateQueries({ queryKey: ["credential-pending"] });
+      if (decided === null) lookup.mutate(lookedUpCode);
+    },
   });
 
   useDocumentTitle("Machine login · Dispatch");
@@ -109,7 +117,7 @@ export function MachineLoginPage(): ReactNode {
       lookup.mutate(code);
     });
   };
-  const madeHere = approve.data ?? deny.data;
+  const madeHere = approve.data ?? deny.data ?? undefined;
   // The looked-up record and its decision as the page now knows them: a decision made here leaves
   // the record decided, with the credential an approval minted.
   const view =

@@ -140,18 +140,23 @@ export function useDraftUpload(insert: (text: string) => void): DraftUpload {
   const [pending, setPending] = useState(0);
   const [madeUnanswered, setMadeUnanswered] = useState<string | null>(null);
   const retryGuard = useSubmitGuard();
-  // Each file is one write under a key of its own, its refusal shown here beside the draft.
-  const upload = useKeyedWrite({
-    // `write` comes first: the answer and the variables of every callback below are read from it.
-    write: async ({ file, owner }: { file: File; owner: ArtifactOwner }, bounds) => ({
+  // Each file is one write under a key of its own, its refusal shown here beside the draft, and
+  // its file kept across a reload with it.
+  const upload = useKeyedWrite<
+    { file: File; owner: ArtifactOwner; result: UploadResult },
+    { file: File; owner: ArtifactOwner }
+  >({
+    write: async ({ file, owner }, bounds) => ({
       file,
       owner,
       result: await uploadFile(owner, file, {}, bounds),
     }),
+    file: ({ file }) => file,
     inline: true,
     label: ({ file }) => `Upload of ${file.name || "a file"}`,
     onMutate: () => setPending((count) => count + 1),
-    onLanded: (landed, { file, owner }) => {
+    // Stored either way; with no answer to give, its reference cannot be added to the draft.
+    onSuccess: (landed, { file, owner }) => {
       refreshOwnerArtifacts(queryClient, owner);
       if (landed === null) {
         setMadeUnanswered(file.name || "the file");
@@ -254,17 +259,18 @@ export function useArtifactUpload(
   const [summary, setSummary] = useState("");
   const [isDragging, setIsDragging] = useState(false);
   const [madeUnanswered, setMadeUnanswered] = useState<string | null>(null);
-  const upload = useKeyedWrite({
-    write: (file: File, bounds) =>
+  const upload = useKeyedWrite<UploadResult, File>({
+    write: (file, bounds) =>
       uploadFile(
         owner,
         file,
         { name, summary: summary.trim() === "" ? undefined : summary.trim() },
         bounds
       ),
+    file: (file) => file,
     inline: true,
     label: (file) => `Upload of ${file.name || "a file"}`,
-    onLanded: (result, file) => {
+    onSuccess: (result, file) => {
       // Stored either way: the staged file and its summary go, so a second press sends nothing.
       setPendingFile(null);
       setSummary("");

@@ -1,12 +1,17 @@
+import { retriesUnderKey } from "@legion/contracts";
+
 import {
   AnswerNotKeptError,
   ApiError,
   isKeyCommitted,
   isKeyInFlight,
+  NetworkError,
   RequestTimeoutError,
+  UnreadableAnswerError,
   type WriteBounds,
   type WriteRequest,
 } from "../../api/client";
+import { onReachable } from "../../api/reachability";
 
 /**
  * How long a write may go unanswered before the page says so: past it the write is late, still
@@ -16,14 +21,17 @@ import {
  */
 export const SEND_DEADLINE_MS = 30_000;
 
-/** How long one attempt of a write may go unanswered before it is given up and made again under
- *  the same key. */
+/** How long one attempt of a write may go silent - no piece of its body sent, no piece of its
+ *  answer received - before it is given up and made again under the same key. A write that keeps
+ *  moving, a large upload on a slow line, is never cut off; Dispatch finishes a write whose
+ *  attempt was given up, so the attempt after it is answered `409 KEY_IN_FLIGHT`, then with the
+ *  first's answer. */
 export const KEYED_SEND_ATTEMPT_MS = 15_000;
 
 /** The wait before a write's first retry, doubling after each attempt that ends without Dispatch's
- *  verdict, up to `MAX_BACKOFF_MS`. */
-const FIRST_BACKOFF_MS = 1_000;
-const MAX_BACKOFF_MS = 30_000;
+ *  verdict, up to `MAX_BACKOFF_MS`; any answer from Dispatch starts it over. */
+export const FIRST_BACKOFF_MS = 1_000;
+export const MAX_BACKOFF_MS = 30_000;
 
 /** A write that stopped trying before Dispatch confirmed it: the reader pressed Stop trying. Not
  *  Dispatch's refusal: the write may have reached it, and a Retry under the same key is answered
@@ -61,71 +69,144 @@ export function retriesUnderItsKey(refusal: Error | undefined): boolean {
   return refusal instanceof SendStoppedError;
 }
 
-/** Waits `ms`, and says whether it waited the whole of it: `false` once `signal` aborts, at once. */
-function pause(ms: number, signal: AbortSignal | undefined): Promise<boolean> {
+/** What ended one attempt without Dispatch's verdict, and so makes the write again under its key:
+ *  how long to wait first, and whether the page learning Dispatch can be reached again cuts that
+ *  wait short. `undefined` for an answer that is Dispatch's verdict, or an error of the page's
+ *  own, which ends the write at once. */
+function retryAfter(
+  error: unknown,
+  backoff: number
+): { readonly ms: number; readonly wakes: boolean } | undefined {
+  if (
+    error instanceof NetworkError ||
+    error instanceof RequestTimeoutError ||
+    error instanceof UnreadableAnswerError
+  ) {
+    return { ms: backoff, wakes: true };
+  }
+  if (!(error instanceof ApiError) || !retriesUnderKey(error.status, error.code)) return undefined;
+  // Dispatch said when to come back: the first request under the key is still running, or it is
+  // turning requests away for now. Nothing the page learns elsewhere changes that.
+  if ((error.status === 429 && error.retryAfterMs !== undefined) || isKeyInFlight(error)) {
+    return { ms: error.retryAfterMs ?? FIRST_BACKOFF_MS, wakes: false };
+  }
+  return { ms: backoff, wakes: true };
+}
+
+/**
+ * Waits `ms`, and says whether it waited for a reason to try again: `false` once `signal`
+ * aborts, at once. A wait that `wakes` ends early - but never before `FIRST_BACKOFF_MS` of it,
+ * so an error answered alongside a busy page's reads is not asked again in a tight loop - when
+ * the page learns Dispatch can be reached: it answered any request, the browser came back
+ * online, the live socket opened (`reachability.ts`).
+ */
+function pause(ms: number, wakes: boolean, signal: AbortSignal | undefined): Promise<boolean> {
   if (signal?.aborted === true) return Promise.resolve(false);
   const { promise, resolve } = Promise.withResolvers<boolean>();
-  const stop = () => {
+  const startedAt = Date.now();
+  let timer = setTimeout(() => end(true), ms);
+  function end(tryAgain: boolean): void {
     clearTimeout(timer);
-    resolve(false);
-  };
-  const timer = setTimeout(() => {
+    stopWaking();
     signal?.removeEventListener("abort", stop);
-    resolve(true);
-  }, ms);
+    resolve(tryAgain);
+  }
+  function stop(): void {
+    end(false);
+  }
+  const stopWaking = wakes
+    ? onReachable(() => {
+        clearTimeout(timer);
+        const floor = Math.min(ms, FIRST_BACKOFF_MS) - (Date.now() - startedAt);
+        timer = setTimeout(() => end(true), Math.max(0, floor));
+      })
+    : () => {};
   signal?.addEventListener("abort", stop, { once: true });
   return promise;
 }
 
-/** How one keyed write is tried: `signal` stops the trying, `sent` is told each attempt's request
- *  as it goes out, and `decided` says whether a 2xx is the write's outcome yet. */
-export interface KeyedWriteOptions<T> {
-  readonly decided?: (answer: T) => boolean;
+/** How one keyed write is tried: `login` is the person who pressed it, sent on every attempt so
+ *  Dispatch refuses it under anyone else's session; `signal` stops the trying; `sent` is told each
+ *  attempt's request as it goes out. */
+export interface KeyedWriteOptions {
+  readonly login?: string;
   readonly sent?: (request: WriteRequest) => void;
   readonly signal?: AbortSignal;
 }
 
-/** Whether `error` ended an attempt without Dispatch's verdict, so the write is made again under
- *  its key: the fetch failed (a browser's `TypeError`), the attempt outran its deadline, Dispatch
- *  answered a 5xx or a 429, or it is still running the first request under the key
- *  (`409 KEY_IN_FLIGHT`). Anything else - a refusal, an answer it did not keep, an error of the
- *  page's own - ends the write at once. */
-function undecided(error: unknown): boolean {
-  if (error instanceof TypeError || error instanceof RequestTimeoutError) return true;
-  return (
-    error instanceof ApiError &&
-    (error.status >= 500 || error.status === 429 || isKeyInFlight(error))
-  );
+/** A write whose attempts made more than one kind of request under one key: a page bug, since
+ *  Dispatch would refuse the second as `422 KEY_REUSED`, and a queue keeping one request per write
+ *  could make only one of them again after a reload. */
+export class OneRequestPerWriteError extends Error {
+  constructor(first: WriteRequest, next: WriteRequest) {
+    super(
+      `one write makes one request: ${first.method} ${first.path}, then ${next.method} ${next.path}`
+    );
+    this.name = "OneRequestPerWriteError";
+  }
 }
 
 /**
  * Makes `attempt` under `key`, the person's action's name, until Dispatch decides it. Each attempt
- * is held to `KEYED_SEND_ATTEMPT_MS`, and one that ends without Dispatch's verdict (`undecided`),
- * or with a 2xx `decided` says is not yet the outcome, is made again after 1 s, 2 s, 4 s … never
- * more than 30 s apart, so however many of them reach Dispatch, the key makes it act once.
- * Resolves with any other 2xx; rejects with anything else at once - a 4xx, its refusal;
- * `AnswerNotKeptError` for a write that landed with no answer to give, which a replay that did
- * not keep the first answer says, and so does `409 KEY_COMMITTED` (the answer was lost before
- * Dispatch stored it, whether the attempt before was dropped or answered 5xx); an error of the
- * page's own. `signal` stops the trying between attempts - a wait ends at once, an attempt in
- * flight is let finish, since it may already have reached Dispatch and its answer is still the
- * write's - and the write then rejects with `SendStoppedError`.
+ * is held to `KEYED_SEND_ATTEMPT_MS` of silence, and one that ends without Dispatch's verdict - the
+ * connection failed (`NetworkError`), the attempt went silent (`RequestTimeoutError`), a 2xx was
+ * not JSON (`UnreadableAnswerError`), or Dispatch answered a 5xx, a 408, a 429 or `409
+ * KEY_IN_FLIGHT` (`retriesUnderKey`) - is made again after 1 s, 2 s, 4 s … never more than 30 s
+ * apart, or after Dispatch's `Retry-After`; any answer from Dispatch to any request starts that
+ * backoff over, and ends a wait early, as does the browser coming back online or the live socket
+ * opening. However many attempts reach Dispatch, the key makes it act once. Resolves with the 2xx,
+ * or `null` for a write that landed with no answer to give - `409 KEY_COMMITTED`, or a replay
+ * that did not keep the first answer - and for a `DELETE` an earlier attempt of which may have
+ * landed and which Dispatch now answers `404` (the thing is gone either way). Rejects with
+ * anything else at once: a 4xx, its refusal; an error of the page's own. Every attempt must make
+ * the same request (`OneRequestPerWriteError`). `signal` stops the trying between attempts - a
+ * wait ends at once, an attempt in flight is let finish, since it may already have reached
+ * Dispatch and its answer is still the write's - and the write then rejects with
+ * `SendStoppedError`.
  */
 export async function writeUnderKey<T>(
   attempt: (bounds: WriteBounds) => Promise<T>,
   key: string,
-  { decided = () => true, sent, signal }: KeyedWriteOptions<T> = {}
-): Promise<T> {
+  { login, sent, signal }: KeyedWriteOptions = {}
+): Promise<T | null> {
   let backoff = FIRST_BACKOFF_MS;
-  for (;;) {
-    try {
-      const answer = await attempt({ deadlineMs: KEYED_SEND_ATTEMPT_MS, key, sent });
-      if (decided(answer)) return answer;
-    } catch (error) {
-      if (isKeyCommitted(error)) throw new AnswerNotKeptError(error.status, error.message);
-      if (!undecided(error)) throw error;
+  let first: WriteRequest | undefined;
+  // Whether an attempt went out that the page has no answer to: a resent `DELETE` then finds the
+  // thing already gone.
+  let unanswered = false;
+  const told = (request: WriteRequest) => {
+    if (first === undefined) first = request;
+    else if (request.method !== first.method || request.path !== first.path) {
+      throw new OneRequestPerWriteError(first, request);
     }
-    if (!(await pause(backoff, signal))) throw new SendStoppedError();
-    backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
+    sent?.(request);
+  };
+  // Whether Dispatch answered any request since the backoff last grew: it is reachable, and the
+  // backoff starts over.
+  let answered = false;
+  const stopListening = onReachable((how) => {
+    if (how === "answer") answered = true;
+  });
+  try {
+    for (;;) {
+      try {
+        return await attempt({ deadlineMs: KEYED_SEND_ATTEMPT_MS, key, login, sent: told });
+      } catch (error) {
+        if (isKeyCommitted(error) || error instanceof AnswerNotKeptError) return null;
+        const gone = error instanceof ApiError && error.status === 404;
+        if (gone && unanswered && first?.method === "DELETE") return null;
+        if (answered || (error instanceof ApiError && error.status < 500)) {
+          answered = false;
+          backoff = FIRST_BACKOFF_MS;
+        }
+        const wait = retryAfter(error, backoff);
+        if (wait === undefined) throw error;
+        unanswered ||= !(error instanceof ApiError) || error.status >= 500;
+        if (!(await pause(wait.ms, wait.wakes, signal))) throw new SendStoppedError();
+        backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
+      }
+    }
+  } finally {
+    stopListening();
   }
 }

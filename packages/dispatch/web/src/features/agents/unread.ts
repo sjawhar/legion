@@ -11,7 +11,7 @@ import type {
   UserAgentStates,
 } from "../../api/types";
 import { compareTimestamps } from "../../lib/timestamps";
-import { useSendMarkOnce } from "../../lib/useSendMarkOnce";
+import { useSendMarkOnce } from "../writes/useSendMarkOnce";
 
 /** The badge an unread count wears wherever it shows: the navigation, the compact header, and
  *  the agent's row. */
@@ -109,9 +109,10 @@ function useSendReadMark<V>(
   const unread = useQuery(userAgentStateQuery()).data?.[sessionId]?.unread_replies ?? 0;
   useSendMarkOnce({
     mark: value === undefined ? undefined : { key: dedupeKey(value), value: input(value) },
-    onSuccess: (next) => storeAgentState(queryClient, sessionId, next),
-    send: (body: UserAgentStateInput) => api.putAgentState(sessionId, body),
+    onSuccess: (next: UserAgentState) => storeAgentState(queryClient, sessionId, next),
+    send: (body: UserAgentStateInput, bounds) => api.putAgentState(sessionId, body, bounds),
     shouldSend: unread !== 0,
+    target: `read:agent:${sessionId}`,
     wake: unread,
   });
 }

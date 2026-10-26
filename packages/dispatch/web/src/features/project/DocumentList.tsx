@@ -125,7 +125,7 @@ export function DocumentList({ project }: { project: string }): ReactNode {
     write: (name: string, bounds) =>
       api.uploadArtifact({ project }, { content: `# ${name}\n`, name }, bounds),
     onSettled: () => submitGuard.release(),
-    onLanded: (made, name) => {
+    onSuccess: (made, name) => {
       setCreating(false);
       setTitle("");
       void queryClient.invalidateQueries({ queryKey: ["project", project, "artifacts"] });

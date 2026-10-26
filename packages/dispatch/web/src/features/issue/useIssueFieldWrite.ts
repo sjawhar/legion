@@ -61,10 +61,13 @@ export function useIssueFieldWrite<Value>(
     lists: queryClient.getQueriesData<IssueSummary[]>({ queryKey: projectListsKey }),
   });
   // The control says why its save was refused and offers Retry where the reader just picked, so
-  // the shell's indicator shows the save only while it is out.
+  // the shell's indicator shows the save only while it is out. Every write to the issue's fields
+  // goes in the issue's line (`issue:<key>`), so one still being tried after its surface is gone
+  // never lands after a newer one.
   const mutation = useKeyedWrite({
     inline: true,
     label: (value: Value) => field.label(value),
+    target: () => `issue:${issueKey}`,
     write: (value: Value, bounds) => api.patchIssue(issueKey, field.patch(value), bounds),
     onMutate: async (value): Promise<Snapshot> => {
       await Promise.all(
@@ -96,7 +99,8 @@ export function useIssueFieldWrite<Value>(
       }
     },
     onSuccess: (next) => {
-      if (queued.current === null) {
+      // Saved with no answer to give: `onSettled` reads the issue again.
+      if (queued.current === null && next !== null) {
         mergeIssue(queryClient, next);
       }
     },

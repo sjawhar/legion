@@ -9,7 +9,7 @@ import {
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 
-import { ApiError, api, RequestTimeoutError } from "../../api/client";
+import { ApiError, api, NetworkError, RequestTimeoutError } from "../../api/client";
 import type {
   Agent,
   BroadcastCreated,
@@ -36,6 +36,9 @@ const keyedAttempt = expect.objectContaining({
   deadlineMs: KEYED_SEND_ATTEMPT_MS,
   key: expect.any(String),
 });
+
+/** The bounds a read mark's write carries: the one write path's key and deadline. */
+const markAttempt = keyedAttempt;
 
 /** The key each message to one agent went under, in order. */
 function messageKeys(createAgentMessage: Mock<typeof api.createAgentMessage>): string[] {
@@ -1323,9 +1326,11 @@ test("an agent's unread reply shows on its row and in the navigation until its c
     );
     await expect(within(planner).findByText("At /dash.")).resolves.toBeTruthy();
     await waitFor(() =>
-      expect(page.putAgentState).toHaveBeenCalledWith("planner-session", {
-        read_through: "2026-09-14T01:05:00Z",
-      })
+      expect(page.putAgentState).toHaveBeenCalledWith(
+        "planner-session",
+        { read_through: "2026-09-14T01:05:00Z" },
+        markAttempt
+      )
     );
     await waitFor(() =>
       expect(within(planner).queryByRole("button", { name: /unread/ })).toBeNull()
@@ -1389,9 +1394,11 @@ test("opening a row shows an older exchange's unread follow-up instead of foldin
     expect(within(planner).queryByText("Second question")).toBeNull();
     expect(within(planner).getByRole("button", { name: "Show 1 older" })).toBeTruthy();
     await waitFor(() =>
-      expect(page.putAgentState).toHaveBeenCalledWith("planner-session", {
-        read_through: "2026-09-14T00:30:00Z",
-      })
+      expect(page.putAgentState).toHaveBeenCalledWith(
+        "planner-session",
+        { read_through: "2026-09-14T00:30:00Z" },
+        markAttempt
+      )
     );
     await waitFor(() =>
       expect(within(planner).queryByRole("button", { name: /unread/ })).toBeNull()
@@ -1735,9 +1742,11 @@ test("Agents marks read and clears through the newest reply even within one mill
     );
     await expect(within(planner).findByText("First answer")).resolves.toBeTruthy();
     await waitFor(() =>
-      expect(page.putAgentState).toHaveBeenCalledWith("planner-session", {
-        read_through: "2026-09-14T03:00:00.1235Z",
-      })
+      expect(page.putAgentState).toHaveBeenCalledWith(
+        "planner-session",
+        { read_through: "2026-09-14T03:00:00.1235Z" },
+        markAttempt
+      )
     );
 
     fireEvent.click(within(planner).getByRole("button", { name: "Clear conversation" }));
@@ -2516,19 +2525,21 @@ async function broadcastToPlanner(region: HTMLElement, body: string): Promise<vo
 }
 
 // W2. A broadcast goes under its key as a message to one session does, and is tried as one is: a
-// failed fetch, a timeout, a 5xx or a 429 is no verdict, so the same request is made again after
-// 1 s, 2 s, 4 s … never more than 30 s apart, each attempt held to 15 s. Past the send's 30 s
+// failed fetch, a timeout or a 5xx is no verdict, so the same request is made again after 1 s, 2 s,
+// 4 s … never more than 30 s apart, each attempt held to 15 s of silence. Past the send's 30 s
 // deadline the strip says Dispatch has not confirmed it yet, and it goes on until Dispatch does.
 test("a broadcast Dispatch has not confirmed is tried again under its key until it is", async () => {
   const page = renderAgents();
   const region = await screen.findByRole("region", { name: "Agents" });
   page.createBroadcast
-    .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+    .mockRejectedValueOnce(new NetworkError("/api/v1/broadcasts", new TypeError("Failed to fetch")))
     .mockRejectedValueOnce(new RequestTimeoutError("/api/v1/broadcasts", KEYED_SEND_ATTEMPT_MS))
     .mockRejectedValueOnce(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }))
-    .mockRejectedValueOnce(new ApiError(429, { code: "RATE_LIMITED", error: "slow down" }))
+    .mockRejectedValueOnce(new ApiError(504, { error: "gateway timeout" }))
     .mockRejectedValueOnce(new ApiError(502, { error: "bad gateway" }))
-    .mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    .mockRejectedValueOnce(
+      new NetworkError("/api/v1/broadcasts", new TypeError("Failed to fetch"))
+    );
   jest.useFakeTimers();
 
   try {
@@ -2676,7 +2687,7 @@ test("a broadcast out or refused when the page reloads is there again after it",
 });
 
 // W1. A message to one session out when the page reloads is made again after it under the key it
-// was pressed with, and its live view holds it as before: the message, Sending… and no free Send.
+// was pressed with, and its live view shows it again as its own turn, Sending….
 test("a live-view send out when the page reloads is sent again under its key and shown again", async () => {
   const before = await renderPlannerLiveView();
   before.createAgentMessage.mockReturnValueOnce(Promise.withResolvers<Message>().promise);
@@ -2696,7 +2707,7 @@ test("a live-view send out when the page reloads is sent again under its key and
   after.createAgentMessage.mockReturnValueOnce(answer.promise);
   try {
     const held = await screen.findByTestId("agent-send-held");
-    expect(within(held).getByText("Your message: “Status please”")).toBeTruthy();
+    expect(within(held).getByText("Status please")).toBeTruthy();
     expect(within(held).getByRole("status").textContent).toBe("Sending…");
     expect(after.createAgentMessage.mock.calls).toEqual([
       [
@@ -2987,9 +2998,11 @@ test("an open row a closed fold hides marks nothing read, and opening the fold r
 
     fireEvent.click(fold);
     await waitFor(() =>
-      expect(page.putAgentState).toHaveBeenCalledWith("stale-session", {
-        read_through: "2026-09-14T01:05:00Z",
-      })
+      expect(page.putAgentState).toHaveBeenCalledWith(
+        "stale-session",
+        { read_through: "2026-09-14T01:05:00Z" },
+        markAttempt
+      )
     );
   } finally {
     page.view.unmount();
@@ -3315,7 +3328,7 @@ test("a live-view send that keeps failing outlives the view, under one key, unti
     await act(async () => backToAgents());
     await act(async () => openLiveView("Planner"));
     const held = screen.getByTestId("agent-send-held");
-    expect(within(held).getByText("Your message: “Status please”")).toBeTruthy();
+    expect(within(held).getByText("Status please")).toBeTruthy();
     expect(within(held).getByRole("status").textContent).toBe("Sending…");
     await tick(4_000);
     await tick(8_000);
@@ -3349,10 +3362,12 @@ test("a live-view send that keeps failing outlives the view, under one key, unti
   }
 });
 
-// The live view and the Agents row send to one session under one name: the row shows the send the
-// live view made - its draft held, Send refused while it is out, the keyed late text - and the
-// row's Stop trying ends it, handing the draft back with a Retry under the same key.
-test("the session's Agents row shows a live-view send, refuses its own Send, and can stop it", async () => {
+// A send to a session belongs to the session, the write's target: the session's Agents row shows
+// the send its live view made as a turn of its own, in the session's one press-order line, while
+// the row's own composer stays the reader's - empty and free. The row's Stop trying ends that
+// write, and the row's Retry sends it again under the same key, where it lands, and it leaves both
+// surfaces.
+test("the session's Agents row shows a live-view send as its own turn and can stop and retry it", async () => {
   const page = await renderPlannerLiveView();
   jest.useFakeTimers();
 
@@ -3365,37 +3380,37 @@ test("the session's Agents row shows a live-view send, refuses its own Send, and
     const region = screen.getByRole("region", { name: "Agents" });
     const planner = card(region, "Planner");
     await act(async () => expand(planner, "Planner"));
+    const held = within(planner).getByTestId("agent-send-held");
+    expect(within(held).getByText("Status please")).toBeTruthy();
+    expect(within(held).getByRole("status").textContent).toBe("Sending…");
     const field = within(planner).getByRole("textbox", { name: "Comment" }) as HTMLTextAreaElement;
-    expect(field.value).toBe("Status please");
-    expect(field.closest("fieldset")?.disabled).toBe(true);
-    const sending = within(planner).getByRole("button", { name: "Sending…" }) as HTMLButtonElement;
-    expect(sending.disabled).toBe(true);
-    fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
-    await tick(0);
-    expect(page.createAgentMessage).toHaveBeenCalledTimes(2);
+    expect(field.value).toBe("");
+    expect(field.closest("fieldset")?.disabled).toBe(false);
 
     for (const wait of [2_000, 4_000, 8_000, 15_000]) await tick(wait);
     expect(page.createAgentMessage).toHaveBeenCalledTimes(5);
-    expect(within(planner).getByText(KEYED_SEND_LATE_TEXT)).toBeTruthy();
+    expect(within(held).getByRole("status").textContent).toBe(KEYED_SEND_LATE_TEXT);
     await act(async () => {
-      fireEvent.click(within(planner).getByRole("button", { name: "Stop trying" }));
+      fireEvent.click(within(held).getByRole("button", { name: "Stop trying" }));
     });
     await tick(0);
-    expect(within(planner).getByText(keyedStopped)).toBeTruthy();
-    expect(field.value).toBe("Status please");
-    expect(field.closest("fieldset")?.disabled).toBe(false);
+    expect(within(planner).getByTestId("agent-send-error").textContent).toBe(keyedStopped);
     await tick(30 * 60_000);
     expect(page.createAgentMessage).toHaveBeenCalledTimes(5);
 
     // Retry from the row is the same message, so it goes under the same key, and lands.
     page.createAgentMessage.mockResolvedValueOnce(message("Status please"));
     await act(async () => {
-      fireEvent.click(within(planner).getByRole("button", { name: "Retry" }));
+      fireEvent.click(
+        within(within(planner).getByTestId("agent-send-held")).getByRole("button", {
+          name: "Retry",
+        })
+      );
     });
     await tick(0);
     expect(page.createAgentMessage).toHaveBeenCalledTimes(6);
     expect(new Set(messageKeys(page.createAgentMessage)).size).toBe(1);
-    expect(field.value).toBe("");
+    expect(within(planner).queryByTestId("agent-send-held")).toBeNull();
   } finally {
     jest.advanceTimersByTime(1);
     jest.useRealTimers();
@@ -3405,10 +3420,10 @@ test("the session's Agents row shows a live-view send, refuses its own Send, and
 });
 
 // A message the live view sent in a mode the reader picked is that message, whoever retries it:
-// the Agents row's Retry of the untouched draft sends the held request as it was - its body, the
-// picked mode and its key - and not the row's own plain mode under a key of its own, which would
-// reach the session a second time as a different message. An edit makes it a message of its own.
-test("the Agents row's Retry of a live-view send re-sends it as it was; an edit sends a new one", async () => {
+// the Agents row's Retry of a stopped live-view send re-sends the held request as it was - its
+// body, the picked mode and its key - and not the row's own plain mode under a key of its own,
+// which would reach the session a second time as a different message.
+test("the Agents row's Retry of a live-view send re-sends it as it was", async () => {
   const both: Agent = { ...agents[0], capabilities: ["aside", "steer"] };
   const page = await renderPlannerLiveView([both, agents[1]]);
   const mode = screen.getByRole("combobox", { name: "Delivery mode" }) as HTMLSelectElement;
@@ -3432,37 +3447,20 @@ test("the Agents row's Retry of a live-view send re-sends it as it was; an edit 
     await act(async () => backToAgents());
     const planner = card(screen.getByRole("region", { name: "Agents" }), "Planner");
     await act(async () => expand(planner, "Planner"));
-    const field = within(planner).getByRole("textbox", { name: "Comment" }) as HTMLTextAreaElement;
-    expect(field.value).toBe("Status please");
-
-    // Untouched: the held request, as it was. Dispatch refuses it this time, which ends it.
-    page.createAgentMessage.mockRejectedValueOnce(
-      new ApiError(400, { code: "MESSAGE_INPUT", error: "Dispatch refused the message" })
-    );
+    page.createAgentMessage.mockResolvedValueOnce(message("Status please"));
     await act(async () => {
-      fireEvent.click(within(planner).getByRole("button", { name: "Retry" }));
+      fireEvent.click(
+        within(within(planner).getByTestId("agent-send-held")).getByRole("button", {
+          name: "Retry",
+        })
+      );
     });
     await tick(0);
     expect(page.createAgentMessage).toHaveBeenCalledTimes(6);
     expect(page.createAgentMessage.mock.calls[5]?.[1]).toEqual(pressed);
     // Stopped, so Dispatch gave no verdict: the Retry goes under the key the press had.
     expect(page.createAgentMessage.mock.calls[5]?.[2].key).toBe(pressedKey);
-    expect(within(planner).getByText("Couldn't send — Dispatch refused the message")).toBeTruthy();
-
-    // Edited: another message, in the row's own mode, under a key of its own.
-    page.createAgentMessage.mockResolvedValueOnce(message("Status please, now"));
-    fireEvent.change(field, { target: { value: "Status please, now" } });
-    await act(async () => {
-      fireEvent.click(within(planner).getByRole("button", { name: "Retry" }));
-    });
-    await tick(0);
-    expect(page.createAgentMessage).toHaveBeenCalledTimes(7);
-    expect(page.createAgentMessage.mock.calls[6]?.[1]).toEqual({
-      body: "Status please, now",
-      delivery: "steer",
-    });
-    expect(page.createAgentMessage.mock.calls[6]?.[2].key).not.toBe(pressedKey);
-    expect(field.value).toBe("");
+    expect(within(planner).queryByTestId("agent-send-held")).toBeNull();
   } finally {
     jest.advanceTimersByTime(1);
     jest.useRealTimers();
@@ -3471,10 +3469,9 @@ test("the Agents row's Retry of a live-view send re-sends it as it was; an edit 
   }
 });
 
-// W18. The row and the live view share one send, so a Retry pressed in the view sends the draft
-// the row wrote over the refusal: edited, that is another message, in the mode the refused one
-// went in, under a key of its own - never the stale text the refusal was made with.
-test("a live-view Retry sends the draft the Agents row wrote over the refusal", async () => {
+// The session is the write's target: a refused live-view message shows on the Agents row too, and
+// the row's Discard drops the one write, so the live view shows it no longer.
+test("a refused live-view send shows on the Agents row, and Discard there drops it from both", async () => {
   const page = await renderPlannerLiveView();
   try {
     page.createAgentMessage.mockRejectedValueOnce(
@@ -3482,41 +3479,33 @@ test("a live-view Retry sends the draft the Agents row wrote over the refusal", 
     );
     await sendFromLiveView("Status please");
     await screen.findByTestId("agent-send-error");
-    const pressed = page.createAgentMessage.mock.calls[0]?.[1];
-    const pressedKey = page.createAgentMessage.mock.calls[0]?.[2].key;
 
-    // The row holds the same send: the reader rewrites it there and goes back to the view, which
-    // is where the composer hands what they wrote back to the held send.
     await act(async () => backToAgents());
     const planner = card(screen.getByRole("region", { name: "Agents" }), "Planner");
     await act(async () => expand(planner, "Planner"));
+    const held = within(planner).getByTestId("agent-send-held");
+    expect(within(held).getByText("Status please")).toBeTruthy();
+    expect(within(held).getByTestId("agent-send-error").textContent).toBe(
+      "Could not send: Dispatch refused the message"
+    );
     const field = within(planner).getByRole("textbox", { name: "Comment" }) as HTMLTextAreaElement;
-    expect(field.value).toBe("Status please");
-    fireEvent.change(field, { target: { value: "Status please, now" } });
-    await act(async () => openLiveView("Planner"));
+    expect(field.value).toBe("");
 
-    page.createAgentMessage.mockResolvedValueOnce(message("Status please, now"));
-    const held = await screen.findByTestId("agent-send-held");
-    expect(within(held).getByText("Your message: “Status please, now”")).toBeTruthy();
-    await act(async () => {
-      fireEvent.click(within(held).getByRole("button", { name: "Retry" }));
-    });
-    await waitFor(() => expect(page.createAgentMessage).toHaveBeenCalledTimes(2));
-    const sent = page.createAgentMessage.mock.calls[1]?.[1];
-    expect(sent?.body).toBe("Status please, now");
-    expect(sent?.delivery).toBe(pressed?.delivery);
-    expect(page.createAgentMessage.mock.calls[1]?.[2].key).not.toBe(pressedKey);
+    fireEvent.click(within(held).getByRole("button", { name: "Discard" }));
+    expect(within(planner).queryByTestId("agent-send-held")).toBeNull();
+    await act(async () => openLiveView("Planner"));
+    expect(screen.queryByTestId("agent-send-held")).toBeNull();
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(1);
   } finally {
     page.view.unmount();
     page.restore();
   }
 });
 
-// W18. A held send's own mode is what the row warns about: the live view picked BTW outright, so
-// the row must not say the message goes as an Aside because that is what its own targets
-// advertise. The first edit makes the message the row's, in the row's mode, and the warning with
-// it.
-test("the Agents row warns in the mode a held live-view send went in, not its own", async () => {
+// A live-view send's mode is that send's own: the Agents row shows a BTW the live view sent as a
+// turn of its own, and its composer warns only about the row's own message, in the row's own
+// plain mode, before and after the reader writes there.
+test("the Agents row's composer warns about its own message, not a live-view send", async () => {
   const page = await renderPlannerLiveView();
   const plainNotice = /does not advertise Send/;
   try {
@@ -3540,9 +3529,9 @@ test("the Agents row warns in the mode a held live-view send went in, not its ow
     await act(async () => backToAgents());
     const planner = card(screen.getByRole("region", { name: "Agents" }), "Planner");
     await act(async () => expand(planner, "Planner"));
-    expect(within(planner).queryByText(plainNotice)).toBeNull();
+    expect(within(planner).getByTestId("agent-send-held")).toBeTruthy();
+    expect(within(planner).getByText(plainNotice)).toBeTruthy();
 
-    // Edited, the message is the row's own: it goes in the row's plain mode, and says so.
     fireEvent.change(within(planner).getByRole("textbox", { name: "Comment" }), {
       target: { value: "Status please, now" },
     });
@@ -3613,6 +3602,12 @@ test("a send alice left behind is not resumed for bob, and is dropped", async ()
       fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
     });
     await waitFor(() => expect(alice.createAgentMessage).toHaveBeenCalledTimes(1));
+    // Her send is kept in the tab, so the check after the reload is of something that was there.
+    expect(
+      Array.from({ length: window.sessionStorage.length }, (_, index) =>
+        window.sessionStorage.key(index)
+      ).filter((name) => name?.startsWith("dispatch.write:"))
+    ).toHaveLength(1);
   } finally {
     alice.view.unmount();
     alice.restore();
@@ -3627,15 +3622,17 @@ test("a send alice left behind is not resumed for bob, and is dropped", async ()
     const planner = card(region, "Planner");
     await act(async () => expand(planner, "Planner"));
     expect(bob.createAgentMessage).not.toHaveBeenCalled();
-    expect(screen.queryByText("Your message: “Status please”")).toBeNull();
+    expect(screen.queryByTestId("agent-send-held")).toBeNull();
+    expect(screen.queryByText("Status please")).toBeNull();
     expect(
       within(planner).getByRole<HTMLTextAreaElement>("textbox", { name: "Comment" }).value
     ).toBe("");
+    // Alice's kept write is gone from the tab, not merely left unshown.
     await waitFor(() =>
       expect(
         Array.from({ length: window.sessionStorage.length }, (_, index) =>
           window.sessionStorage.key(index)
-        ).filter((name) => name?.startsWith("dispatch.keyed-send:"))
+        ).filter((name) => name?.startsWith("dispatch.write:"))
       ).toEqual([])
     );
   } finally {
@@ -3651,7 +3648,9 @@ test("a send alice left behind is not resumed for bob, and is dropped", async ()
 test("a send pressed offline goes late with Stop trying, and lands when the network returns", async () => {
   const online = onlineManager.isOnline();
   const page = await renderPlannerLiveView();
-  page.createAgentMessage.mockRejectedValue(new TypeError("Failed to fetch"));
+  page.createAgentMessage.mockRejectedValue(
+    new NetworkError("/api/v1/agents/planner-session/messages", new TypeError("Failed to fetch"))
+  );
   jest.useFakeTimers();
 
   try {

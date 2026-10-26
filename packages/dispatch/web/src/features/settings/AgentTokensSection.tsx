@@ -35,26 +35,25 @@ import {
 
 const agentTokensQueryKey = ["agent-tokens"] as const;
 
-/** A mint Dispatch made and lost the answer to: the label it was pressed with, when it was pressed
- *  (`Date.now()`), and whether the token list has been read again since. */
+/** A mint Dispatch made and lost the answer to: the label it was pressed with, the tokens already
+ *  listed under any label when it was pressed (`before`), and whether the token list has been read
+ *  again since. */
 interface LostMint {
   readonly label: string;
-  readonly pressedAt: number;
+  readonly before: readonly string[];
   readonly listed: boolean;
 }
 
-/** The live tokens labelled `label` made at or after `pressedAt`, newest first: the tokens the lost
- *  mint can be. A token of that label made before the press is another one, never a candidate. */
+/** The live tokens labelled `label` that were not listed at the press, newest first: the tokens
+ *  the lost mint can be. Read by id rather than by time, since the browser's clock and the
+ *  database's need not agree. */
 function lostTokens(
   tokens: readonly AgentToken[] | undefined,
-  { label, pressedAt }: LostMint
+  { before, label }: LostMint
 ): AgentToken[] {
   return (tokens ?? [])
     .filter(
-      (token) =>
-        token.name === label &&
-        token.revoked_at === null &&
-        Date.parse(token.created_at) >= pressedAt
+      (token) => token.name === label && token.revoked_at === null && !before.includes(token.id)
     )
     .sort((a, b) => compareTimestamps(b.created_at, a.created_at));
 }
@@ -71,15 +70,15 @@ export function AgentTokensSection(): ReactNode {
   // The form shows a refused mint beside the name it was refused over.
   const createToken = useKeyedWrite({
     inline: true,
-    label: (input: { name: string; pressedAt: number }) => `New agent token ${input.name}`,
+    label: (input: { name: string; before: readonly string[] }) => `New agent token ${input.name}`,
     write: ({ name: label }, bounds) => api.createAgentToken({ name: label }, bounds),
-    onLanded: (created, input) => {
+    onSuccess: (created, input) => {
       setName("");
       if (created === null) {
         // Minted, and its value - shown once only - is gone with the answer: the token is
         // listed once the list is read again, and the reader can replace it.
         setShownToken(undefined);
-        const mint = { label: input.name, listed: false, pressedAt: input.pressedAt };
+        const mint = { before: input.before, label: input.name, listed: false };
         setLost(mint);
         void queryClient
           .invalidateQueries({ queryKey: agentTokensQueryKey })
@@ -109,11 +108,13 @@ export function AgentTokensSection(): ReactNode {
       );
     },
   });
+  /** Every token the page lists now, read at a press. */
+  const listedIds = () => (tokens.data ?? []).map((token) => token.id);
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     // An emptied form - a mint that landed - sends nothing, whatever submits it.
     if (name.trim() === "") return;
-    createToken.mutate({ name, pressedAt: Date.now() });
+    createToken.mutate({ before: listedIds(), name });
   };
   const candidates = lost === null ? [] : lostTokens(tokens.data, lost);
   /** Revokes `token` - once the reader confirms it, by its label and when it was made - and then
@@ -128,7 +129,7 @@ export function AgentTokensSection(): ReactNode {
       return;
     }
     revokeToken.mutate(token.id, {
-      onSuccess: () => createToken.mutate({ name: token.name, pressedAt: Date.now() }),
+      onSuccess: () => createToken.mutate({ before: listedIds(), name: token.name }),
     });
   };
   const replacing = revokeToken.isPending || createToken.isPending;

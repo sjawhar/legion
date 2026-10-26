@@ -27,8 +27,8 @@ export function CredentialDecisionButtons({
   deny,
   submitGuard,
 }: {
-  approve?: UseMutationResult<CredentialDecisionResponse, Error, void>;
-  deny: UseMutationResult<CredentialDecisionResponse, Error, void>;
+  approve?: UseMutationResult<CredentialDecisionResponse | null, Error, void>;
+  deny: UseMutationResult<CredentialDecisionResponse | null, Error, void>;
   submitGuard: SubmitGuard;
 }): ReactNode {
   const deciding = approve?.isPending === true || deny.isPending;

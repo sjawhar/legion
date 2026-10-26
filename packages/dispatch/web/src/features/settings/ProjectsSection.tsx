@@ -48,7 +48,7 @@ export function ProjectsSection(): ReactNode {
     label: (input: CreateProjectInput) => `New project ${input.key}`,
     write: (input, bounds) => api.createProject(input, bounds),
     onSettled: () => projectSubmitGuard.release(),
-    onLanded: (project, input) => {
+    onSuccess: (project, input) => {
       void queryClient.invalidateQueries({ queryKey: projectsQuery().queryKey });
       setProjectKey("");
       setProjectName("");
@@ -269,7 +269,7 @@ type DefaultAssigneePick = { assignee: string | null };
 type DefaultAssigneeSuperseded = { superseded: true };
 
 type DefaultAssigneeSave = Mutation<
-  ProjectDefaultAssignee | DefaultAssigneeSuperseded,
+  ProjectDefaultAssignee | DefaultAssigneeSuperseded | null,
   Error,
   DefaultAssigneePick
 >;
@@ -327,7 +327,8 @@ function useDefaultAssigneeWrite(project: string): {
     // A defaults read already out was asked before this save and could land over its answer.
     onMutate: () => queryClient.cancelQueries({ queryKey: defaultsKey }),
     onSuccess: (saved) => {
-      if ("superseded" in saved) {
+      // Saved with no answer to give: the store reads every query again.
+      if (saved === null || "superseded" in saved) {
         return;
       }
       queryClient.setQueryData<ProjectDefaultAssignee[]>(defaultsKey, (rows) => {
@@ -351,7 +352,7 @@ function useDefaultAssigneeWrite(project: string): {
       }
       // A superseded save changed nothing on the server. Not awaited: the next pick in the scope
       // need not wait for this refetch.
-      if (saved === undefined || !("superseded" in saved)) {
+      if (saved == null || !("superseded" in saved)) {
         void queryClient.invalidateQueries({ queryKey: defaultsKey });
       }
     },

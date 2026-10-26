@@ -67,7 +67,7 @@ export function CreateIssueDialog({
     label: (input: CreateIssueInput) => `New issue “${input.title}”`,
     onSettled: () => submitGuard.release(),
     write: create,
-    onLanded: (issue, input) => {
+    onSuccess: (issue, input) => {
       void queryClient.invalidateQueries({ queryKey: ["issues"] });
       void queryClient.invalidateQueries({ queryKey: projectsQuery().queryKey });
       if (issue !== null) {

@@ -110,10 +110,13 @@ export function SettingsPage(): ReactNode {
       );
       return { previous };
     },
+    // A landing with no answer keeps the optimistic row; `onSettled` reads them all again.
     onSuccess: (mapping, variables) => {
-      queryClient.setQueryData<RepoProject[]>(["repo-projects"], (current = []) =>
-        withMapping(current, mapping)
-      );
+      if (mapping !== null) {
+        queryClient.setQueryData<RepoProject[]>(["repo-projects"], (current = []) =>
+          withMapping(current, mapping)
+        );
+      }
       setFailedAction(undefined);
       if (variables.default === undefined) {
         setRepository("");

@@ -3,9 +3,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
-import { api, type ListEventsOptions } from "../../api/client";
+import { ApiError, api, type ListEventsOptions } from "../../api/client";
 import { prependEventToLog } from "../../api/event-feed";
 import type { Actor, Agent, Event, UserIssueState, UserState } from "../../api/types";
+import { writesOf } from "../writes/write-store";
 import { ActivityTab } from "./ActivityTab";
 
 function message(seq: number, by?: Actor): Event {
@@ -143,18 +144,18 @@ test("ActivityTab names a session author by its registered title", async () => {
   }
 });
 
-// Event pinning moved here from the Conversation, where a write the server refuses raises a
-// banner the reader must answer. Reverting the optimistic pin with nothing said reads as a
-// broken Pin button, so both tabs draw their pin through the one pin-write surface
-// (`features/issue/usePinWrites.tsx`): the refusal is on screen here too, it holds every further
-// pin write until it is answered, and Retry re-sends exactly the write that was refused.
-test("a pin the server refuses raises the retry banner, and Retry re-sends it", async () => {
+// A pin is a write of the one store (W22): a refusal reverts the optimistic pin and says so in the
+// shell's pending-writes indicator, with Retry, which re-sends the pin; nothing else is held while
+// it waits, so the Pin buttons stay live.
+test("a pin the server refuses shows refused in the store, and Retry re-sends it", async () => {
   const originalGetMyState = api.getMyState;
   const originalPutIssueState = api.putIssueState;
   const getIssueEvents = spyOn(api, "getIssueEvents").mockResolvedValue([message(1)]);
   const writes: string[][] = [];
   let refuse = true;
   let unmount: (() => void) | undefined;
+  const queryClient = newQueryClient();
+  queryClient.setQueryData(["whoami"], { event_head: "0", kind: "user", login: "alice" });
 
   try {
     api.getMyState = async () => ({ "CORE-1": issueState(9) });
@@ -162,23 +163,26 @@ test("a pin the server refuses raises the retry banner, and Retry re-sends it", 
       const dismissed = input.dismissed ?? [];
       writes.push(dismissed);
       if (refuse) {
-        throw new Error("offline");
+        throw new ApiError(409, { code: "PIN_REFUSED", error: "refused" });
       }
       return { ...issueState(9), dismissed, seq: input.seq ?? 1 };
     };
-    unmount = renderTab({ "CORE-1": issueState(9) }).unmount;
+    unmount = renderTab({ "CORE-1": issueState(9) }, queryClient).unmount;
     fireEvent.click(await screen.findByRole("button", { name: "Pin" }));
 
     await waitFor(() =>
-      expect(screen.getByRole("alert").textContent).toContain("Couldn't save pin — retry")
+      expect(
+        writesOf(queryClient)
+          .rows()
+          .map((write) => [write.label, write.status])
+      ).toEqual([["Pin on CORE-1", "refused"]])
     );
-    expect(screen.getByRole("button", { name: "Pin" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Pin" }).hasAttribute("disabled")).toBe(false);
 
     refuse = false;
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    act(() => writesOf(queryClient).retry(writesOf(queryClient).rows()[0]?.id ?? 0));
+    await waitFor(() => expect(writesOf(queryClient).rows()).toEqual([]));
     expect(writes).toEqual([["pinned_items:event:1"], ["pinned_items:event:1"]]);
-    expect(screen.getByRole("button", { name: "Pin" }).hasAttribute("disabled")).toBe(false);
   } finally {
     unmount?.();
     api.getMyState = originalGetMyState;

@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type {
   Agent,
   BroadcastExclusion,
@@ -85,7 +85,9 @@ function renderBroadcast(
   );
   const getMyAgentState = spyOn(api, "getMyAgentState").mockResolvedValue(agentState);
   const putAgentState = markRefused
-    ? spyOn(api, "putAgentState").mockRejectedValue(new Error("Dispatch is restarting"))
+    ? spyOn(api, "putAgentState").mockRejectedValue(
+        new ApiError(400, { code: "STATE_INPUT", error: "an old server's refusal" })
+      )
     : spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
@@ -156,9 +158,11 @@ test("opening a broadcast marks the recipient's answers read by id, and only the
   });
   try {
     await waitFor(() =>
-      expect(page.putAgentState).toHaveBeenCalledWith("planner-session", {
-        read_replies: ["answer-1", "answer-2"],
-      })
+      expect(page.putAgentState).toHaveBeenCalledWith(
+        "planner-session",
+        { read_replies: ["answer-1", "answer-2"] },
+        expect.objectContaining({ key: expect.any(String) })
+      )
     );
     expect(page.putAgentState).toHaveBeenCalledTimes(1);
   } finally {
@@ -167,11 +171,10 @@ test("opening a broadcast marks the recipient's answers read by id, and only the
   }
 });
 
-// A mark the server keeps refusing - a 5xx, an expired session, an old server's 400 during a
-// rolling deploy - is sent once and retried twice, and then the row waits for the unread count or
-// the replies it shows to change. A refetch of the broadcast renders the same replies in a new
-// array, as every render does, and sends nothing more.
-test("a refused mark is sent three times and then left alone, however often the row re-renders", async () => {
+// A mark Dispatch refuses - an old server's 400 during a rolling deploy - is sent once and then
+// the row waits for the unread count or the replies it shows to change. A refetch of the broadcast
+// renders the same replies in a new array, as every render does, and sends nothing more.
+test("a refused mark is sent once and then left alone, however often the row re-renders", async () => {
   const page = renderBroadcast(
     answeredBroadcast(),
     undefined,
@@ -179,17 +182,17 @@ test("a refused mark is sent three times and then left alone, however often the 
     true
   );
   try {
-    await waitFor(() => expect(page.putAgentState).toHaveBeenCalledTimes(3), { timeout: 8000 });
+    await waitFor(() => expect(page.putAgentState).toHaveBeenCalledTimes(1));
     await page.queryClient.invalidateQueries({ queryKey: ["broadcast"] });
     const quiet = Promise.withResolvers<void>();
-    setTimeout(quiet.resolve, 2500);
+    setTimeout(quiet.resolve, 500);
     await quiet.promise;
-    expect(page.putAgentState).toHaveBeenCalledTimes(3);
+    expect(page.putAgentState).toHaveBeenCalledTimes(1);
   } finally {
     page.view.unmount();
     page.restore();
   }
-}, 20_000);
+});
 
 test("a broadcast page keeps the server exclusion reason as written", async () => {
   const serverExcluded = [

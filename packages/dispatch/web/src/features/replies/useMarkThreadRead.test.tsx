@@ -7,6 +7,7 @@ import {
   type IntersectionControl,
   installIntersectionObserver,
 } from "../../__tests__/intersection-observer";
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { api } from "../../api/client";
 import { myRepliesOwnerQuery, whoAmIQuery } from "../../api/queries";
 import type { MyRepliesResponse, MyReplyRow } from "../../api/types";
@@ -110,7 +111,7 @@ test("an unread thread is marked through its newest reply once that reply dwells
       jest.advanceTimersByTime(1);
     });
     for (let flush = 0; flush < 5; flush += 1) await act(async () => {});
-    expect(mark.mock.calls).toEqual([["thread-1", first]]);
+    expect(mark.mock.calls).toEqual([["thread-1", first, keyedAttempt]]);
 
     // The same reply seen again sends nothing more.
     act(() => screen.hide(newest));
@@ -121,8 +122,8 @@ test("an unread thread is marked through its newest reply once that reply dwells
     rerender({ at: second, threadId: "thread-1" });
     await dwell(screen, view.getByTestId("newest"));
     expect(mark.mock.calls).toEqual([
-      ["thread-1", first],
-      ["thread-1", second],
+      ["thread-1", first, keyedAttempt],
+      ["thread-1", second, keyedAttempt],
     ]);
   } finally {
     view.unmount();
@@ -143,7 +144,7 @@ test("an owner with more unread threads than its set holds watches every thread"
   });
   try {
     await dwell(screen, view.getByTestId("newest"));
-    expect(mark.mock.calls).toEqual([["thread-1", "2026-10-12T00:00:00Z"]]);
+    expect(mark.mock.calls).toEqual([["thread-1", "2026-10-12T00:00:00Z", keyedAttempt]]);
   } finally {
     view.unmount();
     mark.mockRestore();

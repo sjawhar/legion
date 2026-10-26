@@ -1,36 +1,30 @@
-import type { QueryClient } from "@tanstack/react-query";
-
-import { ApiError, type WriteRequest } from "../../api/client";
-import type { AuthenticatedUser } from "../../api/types";
+import { ApiError, WRITE_METHODS, type WriteMethod, type WriteRequest } from "../../api/client";
 import { SendInterruptedError, SendStoppedError } from "./keyed-write";
 
 /**
- * The page's one durable write queue: where every write to Dispatch waits out a reload. Every
- * `POST` and `PATCH` names itself to Dispatch by a key (`Idempotency-Key`), so making it again is
- * safe - Dispatch answers a repeat of the key with what the first request did - and the page keeps
- * each write in `sessionStorage`, which a reload keeps and closing the tab drops, from before its
- * first attempt until Dispatch answers it, and resumes it on load under its key. Each write is one
- * entry, `dispatch.write:<key>`, in one versioned format for every kind - its key, the request as
- * it went out, the login of the person who pressed it and when, where it stood and its refusal -
- * beside the record of the store that owns it: a composer's send (`held-sends.ts`), a broadcast
- * (`broadcast-queue.ts`), or any other write (`pending-writes.ts`). An entry that does not parse -
- * another version's, or damaged - is dropped when the page loads, as is every entry of another
- * person's. While any of them is unconfirmed the page asks the browser to confirm leaving
+ * Where every write to Dispatch waits out a reload (`write-store.ts`). Every `POST` and `PATCH`
+ * names itself to Dispatch by a key (`Idempotency-Key`), so making it again is safe - Dispatch
+ * answers a repeat of the key with what the first request did - and a `PUT` or a `DELETE` is the
+ * same write however often it is made, so the page keeps each write in `sessionStorage`, which a
+ * reload keeps and closing the tab drops, from its press until Dispatch answers it, and the store
+ * resumes it on load under its key. Each write is one entry, `dispatch.write:<key>`, in one
+ * versioned format for every kind (`KeptWrite`): its key, its kind and how it is shown, the login
+ * of the person who pressed it and when, the target its line is ordered on, where it stood and its
+ * refusal, the request as it last went out, and its kind's own record. An entry that does not
+ * parse - another version's, or damaged - is dropped when the page loads, as is every entry of
+ * another person's. While any of them is unconfirmed the page asks the browser to confirm leaving
  * (`beforeunload`), since a closed tab would lose it.
  */
 
 const ENTRY_PREFIX = "dispatch.write:";
 
-/** Where a release before the one keyed write path kept its sends, in a format nothing reads now:
- *  dropped as the page loads. */
-const RETIRED_PREFIX = "dispatch.keyed-send:";
-
 /** The format's version: an entry of any other is dropped on load, never read. */
-const FORMAT_VERSION = 3;
+const FORMAT_VERSION = 1;
 
 /** How long after its press a write a reload interrupted is made again on its own. One kept longer
  *  comes back refused (`SendInterruptedError`), for the reader to Retry under its key or discard:
- *  something they did that long ago may no longer be what they mean. */
+ *  something they did that long ago may no longer be what they mean. A write the reader never
+ *  sees (`quiet`) is let go instead. */
 export const KEPT_SEND_RESUME_MS = 5 * 60_000;
 
 /** Whether a write pressed at `pressedAt` that a reload interrupted is made again on its own now. */
@@ -38,18 +32,12 @@ export function resumesOnItsOwn(pressedAt: number, now = Date.now()): boolean {
   return now - pressedAt <= KEPT_SEND_RESUME_MS;
 }
 
-/** The login of the person `client`'s app is signed in as (`["whoami"]`), which every kept write
- *  is stamped with; undefined while no one is signed in, when nothing is kept. */
-export function signedInLogin(client: QueryClient): string | undefined {
-  return client.getQueryData<AuthenticatedUser>(["whoami"])?.login;
-}
+/** Where a write shows: a composer's own held state (`composer`), the shell's pending-writes
+ *  indicator (`indicator`), or nowhere at all (`quiet`: a read mark, tried and kept like any write,
+ *  and let go unconfirmed five minutes after its press). */
+export const PRESENTATIONS = ["composer", "indicator", "quiet"] as const;
 
-/** Which store a kept write belongs to: a composer's send, a broadcast, or any other write. */
-export type KeptKind = "broadcast" | "composer" | "write";
-
-/** Where a kept write stood when it was last written: waiting its turn (a broadcast behind
- *  another), out within its deadline, out past it, out while the reader stopped it, or refused. */
-export type KeptState = "late" | "queued" | "refused" | "sending" | "stopping";
+export type Presentation = (typeof PRESENTATIONS)[number];
 
 /** A refusal as it is kept: the reader stopped the write, a reload interrupted it too long ago to
  *  be made again on its own, Dispatch refused it, or another error. */
@@ -64,60 +52,91 @@ export type KeptRefusal =
     }
   | { readonly kind: "error"; readonly message: string };
 
-/** One write as it is kept: its key, its store, its state, its refusal once refused, when it was
- *  pressed, the request as it last went out (`null` before its first attempt, or for one whose
- *  body is no JSON), and the owning store's own record of it (`detail`), which that store writes
- *  and parses. */
-export interface KeptWrite<T> {
+/** Where a kept write stood when it was last written: waiting its turn behind an earlier write to
+ *  its target, out within its deadline, out past it (`stopping` once the reader pressed Stop
+ *  trying), or refused. */
+export type KeptState =
+  | { readonly status: "queued" }
+  | { readonly status: "sending" }
+  | { readonly status: "late"; readonly stopping: boolean }
+  | { readonly status: "refused"; readonly refusal: KeptRefusal };
+
+/** One field of an upload's multipart form as it is kept: a value, or the place of its file, which
+ *  is kept apart (`kept-files.ts`) since no entry can hold one. */
+export type KeptField =
+  | { readonly name: string; readonly value: string }
+  | { readonly name: string; readonly file: true };
+
+/** A request as it is kept: its method, its path and its JSON body, or an upload's form. */
+export type KeptRequest =
+  | { readonly method: WriteMethod; readonly path: string; readonly body?: unknown }
+  | { readonly method: WriteMethod; readonly path: string; readonly form: readonly KeptField[] };
+
+/** One write as it is kept: everything a reload needs to make it again, show it and order it. */
+export interface KeptWrite {
   readonly key: string;
-  readonly kind: KeptKind;
-  readonly state: KeptState;
-  readonly refusal: KeptRefusal | null;
+  /** The kind of write (`WriteKind.name`), whose record `detail` is. */
+  readonly kind: string;
+  readonly login: string;
+  readonly label: string;
+  readonly presentation: Presentation;
+  readonly target: string | null;
   readonly pressedAt: number;
-  readonly request: WriteRequest | null;
-  readonly detail: T;
+  readonly state: KeptState;
+  /** The request as it last went out; `null` before its first attempt. */
+  readonly request: KeptRequest | null;
+  readonly detail: unknown;
 }
 
-/** A value's shape, checked: what a kept record is parsed by before it is trusted. */
-export type Shape = (value: unknown) => boolean;
+/** A value's shape, checked: what a kept record is parsed by before it is trusted, and a type
+ *  guard, so each is held to the type it stands for (`satisfies Shape<T>`) and nothing is cast. */
+export type Shape<T> = (value: unknown) => value is T;
 
-/** The shapes a store builds its kept record's check from: a record has each named field in its
- *  shape (a missing one reads as undefined, and others are not read), and `either` fits a value
- *  that one of its shapes fits. */
+/** The type a shape checks for. */
+export type ShapeOf<S> = S extends Shape<infer T> ? T : never;
+
+/** The shapes a kept record is checked by: a record has each named field in its shape (a missing
+ *  one reads as undefined, and others are not read), and `either` fits a value that one of its
+ *  shapes fits. */
 export const shape = {
   array:
-    (item: Shape): Shape =>
-    (value) =>
+    <T>(item: Shape<T>): Shape<readonly T[]> =>
+    (value): value is readonly T[] =>
       Array.isArray(value) && value.every(item),
-  boolean: (value: unknown) => typeof value === "boolean",
+  boolean: ((value) => typeof value === "boolean") as Shape<boolean>,
   either:
-    (...shapes: readonly Shape[]): Shape =>
-    (value) =>
+    <S extends readonly Shape<unknown>[]>(...shapes: S): Shape<ShapeOf<S[number]>> =>
+    (value): value is ShapeOf<S[number]> =>
       shapes.some((fits) => fits(value)),
   nullable:
-    (inner: Shape): Shape =>
-    (value) =>
+    <T>(inner: Shape<T>): Shape<T | null> =>
+    (value): value is T | null =>
       value === null || inner(value),
-  number: (value: unknown) => typeof value === "number" && Number.isFinite(value),
+  number: ((value) => typeof value === "number" && Number.isFinite(value)) as Shape<number>,
   oneOf:
-    (...values: readonly unknown[]): Shape =>
-    (value) =>
-      values.includes(value),
+    <const V extends readonly (boolean | number | string | null)[]>(
+      ...values: V
+    ): Shape<V[number]> =>
+    (value): value is V[number] =>
+      values.includes(value as V[number]),
   optional:
-    (inner: Shape): Shape =>
-    (value) =>
+    <T>(inner: Shape<T>): Shape<T | undefined> =>
+    (value): value is T | undefined =>
       value === undefined || inner(value),
   record:
-    (fields: Readonly<Record<string, Shape>>): Shape =>
-    (value) =>
+    <F extends Readonly<Record<string, Shape<unknown>>>>(
+      fields: F
+    ): Shape<{ readonly [K in keyof F]: ShapeOf<F[K]> }> =>
+    (value): value is { readonly [K in keyof F]: ShapeOf<F[K]> } =>
       typeof value === "object" &&
       value !== null &&
       !Array.isArray(value) &&
       Object.entries(fields).every(([name, field]) => field(Reflect.get(value, name))),
-  string: (value: unknown) => typeof value === "string",
+  string: ((value) => typeof value === "string") as Shape<string>,
+  unknown: ((_value) => true) as Shape<unknown>,
 } as const;
 
-const refusalShape = shape.either(
+const keptRefusalShape = shape.either(
   shape.record({ kind: shape.oneOf("interrupted", "stopped") }),
   shape.record({
     code: shape.nullable(shape.string),
@@ -126,31 +145,42 @@ const refusalShape = shape.either(
     status: shape.number,
   }),
   shape.record({ kind: shape.oneOf("error"), message: shape.string })
-);
+) satisfies Shape<KeptRefusal>;
 
-const common = {
-  key: shape.string,
-  kind: shape.oneOf("broadcast", "composer", "write"),
-  login: shape.string,
-  pressedAt: shape.number,
-  request: shape.nullable(
-    shape.record({ method: shape.oneOf("PATCH", "POST"), path: shape.string })
-  ),
-  version: shape.oneOf(FORMAT_VERSION),
-};
+const keptStateShape = shape.either(
+  shape.record({ status: shape.oneOf("queued", "sending") }),
+  shape.record({ status: shape.oneOf("late"), stopping: shape.boolean }),
+  shape.record({ refusal: keptRefusalShape, status: shape.oneOf("refused") })
+) satisfies Shape<KeptState>;
 
-/** An entry of this format: a refused write carries its refusal, and no other does. */
-const entryShape = shape.either(
-  shape.record({ ...common, refusal: refusalShape, state: shape.oneOf("refused") }),
+const keptFieldShape = shape.either(
+  shape.record({ name: shape.string, value: shape.string }),
+  shape.record({ file: shape.oneOf(true), name: shape.string })
+) satisfies Shape<KeptField>;
+
+const keptRequestShape = shape.either(
   shape.record({
-    ...common,
-    refusal: shape.oneOf(null),
-    state: shape.oneOf("late", "queued", "sending", "stopping"),
-  })
-);
+    form: shape.array(keptFieldShape),
+    method: shape.oneOf(...WRITE_METHODS),
+    path: shape.string,
+  }),
+  shape.record({ body: shape.unknown, method: shape.oneOf(...WRITE_METHODS), path: shape.string })
+) satisfies Shape<KeptRequest>;
 
-/** An entry as it is written: the write, the login of the person who pressed it, and the format. */
-type KeptEntry = KeptWrite<unknown> & { readonly login: string; readonly version: number };
+/** An entry as it is written: the write and the format's version. */
+const keptEntryShape = shape.record({
+  detail: shape.unknown,
+  key: shape.string,
+  kind: shape.string,
+  label: shape.string,
+  login: shape.string,
+  presentation: shape.oneOf(...PRESENTATIONS),
+  pressedAt: shape.number,
+  request: shape.nullable(keptRequestShape),
+  state: keptStateShape,
+  target: shape.nullable(shape.string),
+  version: shape.oneOf(FORMAT_VERSION),
+}) satisfies Shape<KeptWrite & { readonly version: typeof FORMAT_VERSION }>;
 
 /** How `error`, a write's refusal, is kept. */
 export function keptRefusal(error: Error): KeptRefusal {
@@ -176,6 +206,30 @@ export function refusalFrom(kept: KeptRefusal): Error {
   }
 }
 
+/** `request` as it is kept: an upload's form by its fields, its file's place among them. */
+export function keptRequest({ body, method, path }: WriteRequest): KeptRequest {
+  if (!(body instanceof FormData))
+    return body === undefined ? { method, path } : { body, method, path };
+  const form: KeptField[] = [];
+  for (const [name, value] of body) {
+    form.push(typeof value === "string" ? { name, value } : { file: true, name });
+  }
+  return { form, method, path };
+}
+
+/** The request `kept` names, whole again: an upload's form with `file` in its file's place, or
+ *  `undefined` when it names a file and none is given. */
+export function requestFrom(kept: KeptRequest, file?: File): WriteRequest | undefined {
+  if (!("form" in kept)) return kept;
+  const body = new FormData();
+  for (const field of kept.form) {
+    if ("value" in field) body.append(field.name, field.value);
+    else if (file === undefined) return undefined;
+    else body.append(field.name, file);
+  }
+  return { body, method: kept.method, path: kept.path };
+}
+
 /** The kept writes of one page: `storage` holds them across a reload, and `unload` is where the
  *  page asks to confirm leaving while any of them is unconfirmed. */
 export class WriteStorage {
@@ -192,36 +246,20 @@ export class WriteStorage {
     this.#unload = unload;
   }
 
-  /** Keeps `sent` under its key for `login`, the person who pressed it, replacing what was kept
-   *  there. A write with no one signed in to stamp it with is not kept, nor is one the storage
-   *  refuses to write (full, or refused the page): what was kept under its key before is then
-   *  removed rather than left to stand for it, so a reload never resumes a state the write has
-   *  left - a write the reader stopped never comes back as one still being tried. */
-  keep<T>(sent: KeptWrite<T>, login: string | undefined): void {
+  /** Keeps `write` under its key, replacing what was kept there. One the storage refuses to write
+   *  (full, or refused the page) removes what was kept under its key before rather than leaving
+   *  it to stand for it, so a reload never resumes a state the write has left - a write the reader
+   *  stopped never comes back as one still being tried. */
+  keep(write: KeptWrite): void {
     if (this.#retired) return;
-    const name = `${ENTRY_PREFIX}${sent.key}`;
-    if (login === undefined) {
+    const name = `${ENTRY_PREFIX}${write.key}`;
+    try {
+      this.#storage?.setItem(name, JSON.stringify({ ...write, version: FORMAT_VERSION }));
+    } catch {
+      // The write is still made; only its reload is lost.
       this.#remove(name);
-    } else {
-      try {
-        this.#storage?.setItem(
-          name,
-          JSON.stringify({ ...sent, login, version: FORMAT_VERSION } satisfies KeptEntry)
-        );
-      } catch {
-        // The write is still made; only its reload is lost.
-        this.#remove(name);
-      }
     }
-    this.#confirm(sent.key, sent.state === "refused");
-  }
-
-  /** Counts the write under `key` as out (`out`) or answered, for the leave prompt, without
-   *  keeping it: a write nothing could make again after a reload - an upload's file - is lost
-   *  with the page, so leaving still asks while it is out. */
-  hold(key: string, out: boolean): void {
-    if (this.#retired) return;
-    this.#confirm(key, !out);
+    this.#confirm(write.key, write.state.status === "refused");
   }
 
   /** Drops the write kept under `key`: it landed, or the reader dropped its refusal. */
@@ -231,50 +269,33 @@ export class WriteStorage {
     this.#confirm(key, true);
   }
 
-  /** Every write `login` kept for `kind` whose record `parse` accepts, handed its key. An entry
-   *  that is not one of this format's, one another person kept, or one whose record `parse`
-   *  refuses, is dropped; the other kinds' entries of `login` stay for their stores. */
-  load<T>(
-    kind: KeptKind,
-    login: string,
-    parse: (detail: unknown, key: string) => T | undefined
-  ): KeptWrite<T>[] {
+  /** Every write `login` kept, in press order. An entry that is not one of this format's, or one
+   *  another person kept, is dropped. */
+  load(login: string): KeptWrite[] {
     const storage = this.#storage;
     if (storage === undefined || this.#retired) return [];
-    for (const name of this.#names(storage, RETIRED_PREFIX)) this.#remove(name);
-    const loaded: KeptWrite<T>[] = [];
-    for (const name of this.#names(storage, ENTRY_PREFIX)) {
+    const loaded: KeptWrite[] = [];
+    for (const name of this.#names(storage)) {
       const entry = this.#read(storage, name);
-      const ours =
-        entry !== undefined && `${ENTRY_PREFIX}${entry.key}` === name && entry.login === login;
-      if (ours && entry.kind !== kind) continue;
-      const detail = ours ? parse(entry.detail, entry.key) : undefined;
-      if (!ours || detail === undefined) {
+      if (entry === undefined || `${ENTRY_PREFIX}${entry.key}` !== name || entry.login !== login) {
         this.#remove(name);
         continue;
       }
-      loaded.push({
-        detail,
-        key: entry.key,
-        kind,
-        pressedAt: entry.pressedAt,
-        refusal: entry.refusal,
-        request: entry.request,
-        state: entry.state,
-      });
+      const { version: _version, ...write } = entry;
+      loaded.push(write);
     }
-    return loaded;
+    return loaded.sort((a, b) => a.pressedAt - b.pressedAt);
   }
 
   /** Drops every kept write, and stops asking to confirm leaving: the person who pressed them
-   *  signed out. A write still out goes on, and is kept again only once someone is signed in. */
+   *  signed out, or someone else signed in. */
   clear(): void {
     if (this.#retired) return;
     this.#dropAll();
   }
 
   /** Ends this storage, for the unit-test preload between tests: what it kept goes, and it keeps
-   *  nothing more and asks nothing on leaving, whatever the stores it served still send. */
+   *  nothing more and asks nothing on leaving, whatever the store it served still sends. */
   retire(): void {
     this.#retired = true;
     this.#dropAll();
@@ -287,9 +308,7 @@ export class WriteStorage {
     this.#unconfirmed.clear();
     const storage = this.#storage;
     if (storage === undefined) return;
-    for (const prefix of [ENTRY_PREFIX, RETIRED_PREFIX]) {
-      for (const name of this.#names(storage, prefix)) this.#remove(name);
-    }
+    for (const name of this.#names(storage)) this.#remove(name);
   }
 
   #remove(name: string): void {
@@ -300,17 +319,17 @@ export class WriteStorage {
     }
   }
 
-  /** The names of every entry under `prefix`, read before any is removed. */
-  #names(storage: Storage, prefix: string): string[] {
+  /** The names of every entry, read before any is removed. */
+  #names(storage: Storage): string[] {
     return Array.from({ length: storage.length }, (_, index) => storage.key(index)).filter(
-      (name): name is string => name?.startsWith(prefix) === true
+      (name): name is string => name?.startsWith(ENTRY_PREFIX) === true
     );
   }
 
-  #read(storage: Storage, name: string): KeptEntry | undefined {
+  #read(storage: Storage, name: string) {
     try {
       const value: unknown = JSON.parse(storage.getItem(name) ?? "null");
-      return entryShape(value) ? (value as KeptEntry) : undefined;
+      return keptEntryShape(value) ? value : undefined;
     } catch {
       return undefined;
     }

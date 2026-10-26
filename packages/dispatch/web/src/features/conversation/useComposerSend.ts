@@ -14,8 +14,6 @@ export interface ComposerSend {
   readonly send: (build: (refused: HeldSend | undefined) => SentRequest) => void;
   /** Whether a send is out, past its deadline included, as of the last render. */
   readonly sending: boolean;
-  /** Whether the send is past its deadline and still waiting for its answer. */
-  readonly late: boolean;
   /** What the server refused, for the reader: a deadline is not a refusal, and the answer that
    *  follows one is. */
   readonly refusal: Error | undefined;
@@ -66,7 +64,6 @@ export function useComposerSend(
     discard: () => store.discard(key),
     held,
     keep: (draft) => store.keep(key, draft),
-    late: held?.status === "late",
     refusal: held?.status === "refused" ? held.refusal : undefined,
     send: (build) => {
       if (store.sendingNow(key)) return;

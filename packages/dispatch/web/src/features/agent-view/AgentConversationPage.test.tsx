@@ -25,7 +25,7 @@ import {
   type FakeLiveSockets,
   installFakeLiveSockets,
 } from "../../__tests__/live-socket-harness";
-import { ApiError, api } from "../../api/client";
+import { ApiError, api, NetworkError } from "../../api/client";
 import { liveSocketFor } from "../../api/live-socket";
 import type { Agent, Message, MessageRead, UserAgentStates } from "../../api/types";
 import { KEYED_SEND_LATE_TEXT } from "../conversation/send-request";
@@ -317,16 +317,20 @@ test("the live view shows the session's Dispatch replies to direct messages and 
     expect.stringContaining("Done: it is at /dash."),
   ]);
   await waitFor(() =>
-    expect(putAgentState).toHaveBeenCalledWith(SESSION, { read_through: "2026-09-27T21:20:28Z" })
+    expect(putAgentState).toHaveBeenCalledWith(
+      SESSION,
+      { read_through: "2026-09-27T21:20:28Z" },
+      keyedAttempt
+    )
   );
   await waitFor(() => expect(agentsLink().textContent).toBe("Agents"));
 });
 
-// A read mark that fails to save is sent again, so one failed request does not leave the badge
-// up until the session replies once more.
+// A read mark that fails short of Dispatch's verdict is tried again under its key, so one dropped
+// request does not leave the badge up until the session replies once more.
 test("the live view retries a read mark that failed to save", async () => {
   const putAgentState = spyOn(api, "putAgentState")
-    .mockRejectedValueOnce(new Error("Dispatch is restarting"))
+    .mockRejectedValueOnce(new ApiError(503, { code: "UNAVAILABLE", error: "restarting" }))
     .mockImplementation(async (_session, input) => ({ ...input, unread_replies: 0 }));
   renderLiveView({
     agentState: { [SESSION]: { unread_replies: 2 } },
@@ -539,6 +543,10 @@ test("the live view sends as Send by default where the session takes it, and as 
   ).toEqual(["Aside"]);
 });
 
+/** A fetch that failed, as the client hands it on: no answer from Dispatch at all. */
+const dropped = () =>
+  new NetworkError(`/api/v1/agents/${SESSION}/messages`, new TypeError("Failed to fetch"));
+
 /** Types `body` into the live view's composer and presses its Send. */
 async function sendFromLiveView(body: string): Promise<void> {
   fireEvent.change(screen.getByPlaceholderText(/delivered as Send/), { target: { value: body } });
@@ -568,7 +576,7 @@ async function onFakeClock(body: () => Promise<void>): Promise<void> {
 // message once. The next press is another message, with a key of its own.
 test("the live view's send retries under one key", async () => {
   const createAgentMessage = spyOn(api, "createAgentMessage")
-    .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+    .mockRejectedValueOnce(dropped())
     .mockRejectedValueOnce(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }))
     .mockImplementation(async (_session, input) => message("sent", input.body));
   spies.push(createAgentMessage);
@@ -608,9 +616,7 @@ test("the live view's send retries under one key", async () => {
 // its page - leaves its send being tried under the key it was pressed with, and every attempt is
 // held to its own deadline, nothing cutting it short.
 test("leaving the live view leaves its send being tried, under its key", async () => {
-  const createAgentMessage = spyOn(api, "createAgentMessage").mockRejectedValue(
-    new TypeError("Failed to fetch")
-  );
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockRejectedValue(dropped());
   spies.push(createAgentMessage);
   renderLiveView({
     agentState: {},
@@ -664,69 +670,91 @@ async function renderSendingView(): Promise<void> {
   await waitFor(() => expect(mode.value).toBe("steer"));
 }
 
-// A pressed message is held on screen until Dispatch confirms it. Send waits for it - busy while
-// the attempt is inside its deadline, then saying why - so the reader drafts the next message
-// rather than sending a second one beside it, which would carry a key of its own and reach the
-// session twice; past the send's deadline it says the message is still being tried.
-test("the live view holds a pressed message until Dispatch confirms it, and Send waits for it", async () => {
-  const answer = Promise.withResolvers<Message>();
-  const createAgentMessage = spyOn(api, "createAgentMessage").mockReturnValueOnce(answer.promise);
+// W25 / INFRA-442. Send is pressable whenever the box holds text: each press is its own write under
+// its own key, shown as its own pending turn until Dispatch confirms it, and a later press waits
+// only behind an earlier one still being tried - so they reach the session in press order, each
+// once. Past a send's deadline its turn says it is still being tried, with Stop trying, and Send
+// stays open.
+test("Send stays open with text while an earlier send is out or late, and each press is its own turn", async () => {
+  const answers: ReturnType<typeof Promise.withResolvers<Message>>[] = [];
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockImplementation(() => {
+    const answer = Promise.withResolvers<Message>();
+    answers.push(answer);
+    return answer.promise;
+  });
   spies.push(createAgentMessage);
   await renderSendingView();
 
   await onFakeClock(async () => {
     await sendFromLiveView("try the other branch");
-    const held = screen.getByTestId("agent-send-held");
-    expect(within(held).getByText("Your message: “try the other branch”")).toBeTruthy();
-    expect(within(held).getByRole("status").textContent).toBe("Sending…");
-    expect(sendButton("Sending…").disabled).toBe(true);
+    const [held] = screen.getAllByTestId("agent-send-held");
+    expect(within(held as HTMLElement).getByText("try the other branch")).toBeTruthy();
+    expect(within(held as HTMLElement).getByRole("status").textContent).toBe("Sending…");
 
-    // The next message can be written, and a press sends nothing beside the first.
+    // The field cleared on the press, and the next message goes out as its own press.
     const input = screen.getByPlaceholderText(/delivered as Send/) as HTMLTextAreaElement;
+    expect(input.value).toBe("");
     fireEvent.change(input, { target: { value: "and this" } });
-    fireEvent.click(sendButton("Sending…"));
-    fireEvent.keyDown(input, { key: "Enter" });
+    expect(sendButton().disabled).toBe(false);
+    expect(sendButton().getAttribute("aria-disabled")).toBeNull();
+    await act(async () => {
+      fireEvent.click(sendButton());
+    });
     await tick(0);
+    expect(screen.getAllByTestId("agent-send-held")).toHaveLength(2);
+    // In press order: the second waits while the first is being tried.
     expect(createAgentMessage).toHaveBeenCalledTimes(1);
-    expect(input.value).toContain("and this");
 
     await tick(SEND_DEADLINE_MS);
-    expect(within(held).getByRole("status").textContent).toBe(KEYED_SEND_LATE_TEXT);
-    expect(within(held).getByRole("button", { name: "Stop trying" })).toBeTruthy();
-    expect(sendButton().getAttribute("aria-disabled")).toBe("true");
-    expect(sendButton().getAttribute("title")).toBe(
-      "Dispatch has not confirmed your last message yet."
-    );
+    const [late] = screen.getAllByTestId("agent-send-held");
+    expect(within(late as HTMLElement).getByRole("status").textContent).toBe(KEYED_SEND_LATE_TEXT);
+    expect(within(late as HTMLElement).getByRole("button", { name: "Stop trying" })).toBeTruthy();
+    fireEvent.change(input, { target: { value: "a third" } });
+    expect(sendButton().getAttribute("aria-disabled")).toBeNull();
+    fireEvent.change(input, { target: { value: "" } });
 
     await act(async () => {
-      answer.resolve(message("sent", "try the other branch"));
+      answers[0]?.resolve(message("sent", "try the other branch"));
+    });
+    await tick(0);
+    expect(createAgentMessage.mock.calls.map(([, sent]) => sent.body)).toEqual([
+      "try the other branch",
+      "and this",
+    ]);
+    await act(async () => {
+      answers[1]?.resolve(message("sent", "and this"));
     });
     await tick(0);
   });
   expect(screen.queryByTestId("agent-send-held")).toBeNull();
-  expect(sendButton().getAttribute("aria-disabled")).toBeNull();
+  const [first, second] = sentKeys(createAgentMessage);
+  expect(second).not.toBe(first);
 });
 
-// Dispatch's own refusal ends the send: the message stays on screen with the reason, Retry sends
-// it again under a key of its own - Dispatch would answer the refused key with its refusal - and
-// Discard drops it.
-test("a message Dispatch refuses offers Retry under a new key, and Discard", async () => {
+// Dispatch's own refusal ends the send: the message stays on screen in its turn with the reason,
+// Retry sends it again under a key of its own - Dispatch would answer the refused key with its
+// refusal - and Discard drops it. A refused message holds nothing: Send stays open with text, and
+// the next message is not held behind it.
+test("a message Dispatch refuses offers Retry under a new key, Discard, and holds nothing", async () => {
   const refused = new ApiError(400, { code: "MESSAGE_INPUT", error: "Dispatch refused it" });
-  const createAgentMessage = spyOn(api, "createAgentMessage").mockRejectedValue(refused);
+  const createAgentMessage = spyOn(api, "createAgentMessage")
+    .mockRejectedValueOnce(refused)
+    .mockImplementationOnce(async (_session, input) => message("sent", input.body))
+    .mockRejectedValue(refused);
   spies.push(createAgentMessage);
   await renderSendingView();
 
   await sendFromLiveView("try the other branch");
   const error = await screen.findByTestId("agent-send-error");
   expect(error.textContent).toBe("Could not send: Dispatch refused it");
-  expect(sendButton().getAttribute("title")).toBe(
-    "Retry or discard the message Dispatch did not take first."
-  );
+  await sendFromLiveView("the next one");
+  await waitFor(() => expect(createAgentMessage).toHaveBeenCalledTimes(2));
+  expect(createAgentMessage.mock.calls[1]?.[1].body).toBe("the next one");
 
   const held = screen.getByTestId("agent-send-held");
   fireEvent.click(within(held).getByRole("button", { name: "Retry" }));
-  await waitFor(() => expect(createAgentMessage).toHaveBeenCalledTimes(2));
-  const [first, retried] = sentKeys(createAgentMessage);
+  await waitFor(() => expect(createAgentMessage).toHaveBeenCalledTimes(3));
+  const [first, , retried] = sentKeys(createAgentMessage);
   expect(retried).not.toBe(first);
 
   await screen.findByTestId("agent-send-error");
@@ -734,9 +762,8 @@ test("a message Dispatch refuses offers Retry under a new key, and Discard", asy
     within(screen.getByTestId("agent-send-held")).getByRole("button", { name: "Discard" })
   );
   expect(screen.queryByTestId("agent-send-held")).toBeNull();
-  // Send is free again: only the empty box, which Send cleared, refuses it now.
   expect(sendButton().getAttribute("title")).toBe("Type a message first.");
-  expect(createAgentMessage).toHaveBeenCalledTimes(2);
+  expect(createAgentMessage).toHaveBeenCalledTimes(3);
 });
 
 // A lasting outage would hold the message for good. Once it is late, Stop trying ends it after the
@@ -1597,7 +1624,7 @@ test("a refused send keeps the message on screen and says why", async () => {
     "Could not send: Dispatch refused it"
   );
   expect(
-    within(screen.getByTestId("agent-send-held")).getByText("Your message: “try the other branch”")
+    within(screen.getByTestId("agent-send-held")).getByText("try the other branch")
   ).toBeTruthy();
   expect(composerInput().value).toBe("");
 });
@@ -1640,15 +1667,14 @@ test("a refusal that lands after switching sessions stays with the session that 
   expect((await screen.findByTestId("agent-send-error")).textContent).toBe(
     "Could not send: Dispatch refused it"
   );
-  expect(
-    within(screen.getByTestId("agent-send-held")).getByText("Your message: “hold this”")
-  ).toBeTruthy();
+  expect(within(screen.getByTestId("agent-send-held")).getByText("hold this")).toBeTruthy();
 });
 
-// One send is out per session at a time: while it is, Send reads "Sending…" and is disabled,
-// Enter sends nothing, and the box takes the next message. A refused send is held once, however
-// often a Retry of it is refused, and only its landing frees Send for what was typed since.
-test("while a send is out Send is busy, and a refused send is held once until a Retry lands it", async () => {
+// Messages to one session go out one after another, in press order: Send stays open while one is
+// out, and a press - a click or Enter - while one is out is its own message, which waits its turn.
+// A refused send is one turn, however often a Retry of it is refused, and it no longer holds the
+// line: its Retry joins behind what was pressed since.
+test("a send pressed while another is out waits its turn, and a refused one is retried at the back", async () => {
   const { createAgentMessage, held } = holdSends();
   renderLiveView({
     agentState: {},
@@ -1667,50 +1693,51 @@ test("while a send is out Send is busy, and a refused send is held once until a 
       keyedAttempt
     )
   );
-  await waitFor(() => expect(sendButton("Sending…").hasAttribute("disabled")).toBe(true));
-  expect(
-    within(composer()).getByText("Sending… Enter sends again once Dispatch answers.")
-  ).toBeTruthy();
-  expect(within(composer()).queryByText("Enter to send · Shift+Enter for a new line")).toBeNull();
   type(composerInput(), "second");
+  expect(sendButton().hasAttribute("aria-disabled")).toBe(false);
+  expect(within(composer()).getByText("Enter to send · Shift+Enter for a new line")).toBeTruthy();
   fireEvent.keyDown(composerInput(), { key: "Enter" });
-  await Bun.sleep(50);
+  await waitFor(() => expect(screen.getAllByTestId("agent-send-held")).toHaveLength(2));
   expect(createAgentMessage).toHaveBeenCalledTimes(1);
 
   await act(async () => {
     held[0]?.reject(refusal);
   });
   await screen.findByTestId("agent-send-error");
-  expect(composerInput().value).toBe("second");
-  expect(sendButton().getAttribute("title")).toBe(
-    "Retry or discard the message Dispatch did not take first."
+  await waitFor(() => expect(createAgentMessage).toHaveBeenCalledTimes(2));
+  expect(createAgentMessage).toHaveBeenLastCalledWith(
+    SESSION,
+    { body: "second", delivery: "steer" },
+    keyedAttempt
   );
 
-  const retry = () =>
-    fireEvent.click(
-      within(screen.getByTestId("agent-send-held")).getByRole("button", { name: "Retry" })
-    );
-  retry();
-  await waitFor(() => expect(createAgentMessage).toHaveBeenCalledTimes(2));
+  fireEvent.click(
+    within(screen.getAllByTestId("agent-send-held")[0] as HTMLElement).getByRole("button", {
+      name: "Retry",
+    })
+  );
+  await act(async () => {
+    held[1]?.resolve(message("sent", "second"));
+  });
+  await waitFor(() => expect(createAgentMessage).toHaveBeenCalledTimes(3));
   expect(createAgentMessage).toHaveBeenLastCalledWith(
     SESSION,
     { body: "first", delivery: "steer" },
     keyedAttempt
   );
   await act(async () => {
-    held[1]?.reject(refusal);
+    held[2]?.reject(refusal);
   });
   await screen.findByTestId("agent-send-error");
   expect(screen.getAllByTestId("agent-send-held")).toHaveLength(1);
-
-  retry();
-  await waitFor(() => expect(createAgentMessage).toHaveBeenCalledTimes(3));
+  fireEvent.click(
+    within(screen.getByTestId("agent-send-held")).getByRole("button", { name: "Retry" })
+  );
+  await waitFor(() => expect(createAgentMessage).toHaveBeenCalledTimes(4));
   await act(async () => {
-    held[2]?.resolve(message("sent", "first"));
+    held[3]?.resolve(message("sent", "first"));
   });
   await waitFor(() => expect(screen.queryByTestId("agent-send-held")).toBeNull());
-  expect(composerInput().value).toBe("second");
-  expect(sendButton().hasAttribute("aria-disabled")).toBe(false);
 });
 
 // What a person is writing to one session stays with it: switching to another shows that
@@ -1731,11 +1758,11 @@ test("a draft stays with its session across a switch to another", async () => {
   expect(back.value).toBe("draft for the planner");
 });
 
-// Send has two holds, each on its own session: a model or thinking switch pending on it (Send
-// keeps reading "Send", and the line under the box says what its placeholder says) and its own
-// send out (Send reads "Sending…"). Neither holds another session's Send, and Enter sends nothing
-// while either holds.
-test("a pending switch holds its own session's Send, and a send out on another still reads Sending… there", async () => {
+// A model or thinking switch pending on a session holds that session's Send (it keeps reading
+// "Send", and the line under the box says what its placeholder says) and holds no other's; a
+// message out on another session holds nothing there either, and Enter sends nothing while a
+// switch holds.
+test("a pending switch holds its own session's Send, and a send out on another holds nothing there", async () => {
   const { createAgentMessage, held: answers } = holdSends();
   const view = renderLiveView({
     agentState: {},
@@ -1782,15 +1809,13 @@ test("a pending switch holds its own session's Send, and a send out on another s
       keyedAttempt
     )
   );
-  await waitFor(() => expect(sendButton("Sending…").disabled).toBe(true));
-  expect(
-    within(composer()).getByText("Sending… Enter sends again once Dispatch answers.")
-  ).toBeTruthy();
+  await waitFor(() => expect(screen.getAllByTestId("agent-send-held")).toHaveLength(1));
+  expect(sendButton().getAttribute("title")).toBe("Type a message first.");
 
   const back = await switchTo("Planner");
   expect(back.value).toBe("and then run the tests");
   expect(sendButton().disabled).toBe(true);
-  expect(within(composer()).queryByRole("button", { name: "Sending…" })).toBeNull();
+  expect(screen.queryByTestId("agent-send-held")).toBeNull();
   await act(async () => {
     answers[0]?.resolve(message("switch-1", "/model anthropic/model-b"));
   });

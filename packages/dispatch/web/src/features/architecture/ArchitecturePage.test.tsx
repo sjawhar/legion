@@ -19,7 +19,7 @@ import type {
   ArchitectureTreeSource,
 } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
-import { pendingWrites } from "../writes/pending-writes";
+import { writesOf } from "../writes/write-store";
 import { ArchitecturePage } from "./ArchitecturePage";
 
 function component(
@@ -437,12 +437,13 @@ test("a refused Refresh goes to the shell's pending writes, and the button is re
       new ApiError(409, { code: "SOURCE_ACCESS", error: "GitHub is unreachable" })
     );
     fireEvent.click(screen.getByRole("button", { name: "Refresh legion/legion" }));
-    await waitFor(() =>
-      expect(pendingWrites(pane.queryClient).rows()[0]?.refusal?.message).toBe(
+    await waitFor(() => {
+      const [refused] = writesOf(pane.queryClient).rows();
+      expect(refused?.status === "refused" ? refused.refusal.message : undefined).toBe(
         "GitHub is unreachable"
-      )
-    );
-    expect(pendingWrites(pane.queryClient).rows()[0]?.label).toBe(
+      );
+    });
+    expect(writesOf(pane.queryClient).rows()[0]?.label).toBe(
       "Refresh of CORE's architecture source legion/legion"
     );
     await screen.findByRole("button", { name: "Refresh legion/legion" });

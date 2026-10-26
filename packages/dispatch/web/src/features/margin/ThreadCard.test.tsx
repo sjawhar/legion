@@ -576,7 +576,7 @@ test("an expanded thread is marked read once its newest reply has been on screen
     // The watched element is the newest reply's own, not the card around the whole thread.
     expect(card.screen.observed()).toEqual([newest]);
     await dwellOn(newest, card.screen);
-    expect(card.mark.mock.calls).toEqual([[root.id, reply.created_at]]);
+    expect(card.mark.mock.calls).toEqual([[root.id, reply.created_at, keyedAttempt]]);
   } finally {
     card.cleanup();
   }

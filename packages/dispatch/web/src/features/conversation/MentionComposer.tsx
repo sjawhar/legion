@@ -67,6 +67,7 @@ import { ASK_URGENCIES_ASCENDING, URGENCY_LABELS } from "../inbox/ask-urgency";
 import { ReferencePicker } from "../refs/ReferencePicker";
 import { composerReferences } from "../refs/routes";
 import { SendStoppedError } from "../writes/keyed-write";
+import { StopTrying } from "../writes/StopTrying";
 import type {
   AcceptedMention,
   ComposerAnchor,
@@ -77,7 +78,6 @@ import type {
 import { MODE_LABELS, plainDelivery } from "./delivery";
 import type { HeldSend } from "./held-sends";
 import { ReplyQuote } from "./ReplyQuote";
-import { StopTryingButton } from "./StopTryingButton";
 import {
   DELIVERY_COMMANDS,
   type DeliveryPlan,
@@ -119,9 +119,8 @@ interface AskOptionDraft {
 }
 
 /** How long after the last keystroke what the reader wrote over a refusal is written back to the
- *  held send, which is what a reload restores (`keyed-send-storage.ts`). Short enough that a
- *  reader who stops typing and reloads keeps their words, long enough that a burst of typing
- *  writes once. */
+ *  held send, which is what a reload restores (`write-storage.ts`). Short enough that a reader who
+ *  stops typing and reloads keeps their words, long enough that a burst of typing writes once. */
 const KEEP_DRAFT_MS = 300;
 
 let nextAskOptionId = 0;
@@ -631,7 +630,7 @@ export function MentionComposer({
     onSent();
     if (!inline && sentEdit === undefined) onClose();
   };
-  const { late, refusal, sending } = outgoing;
+  const { refusal, sending } = outgoing;
   // Closed or finishing, with no send out and no refusal to show: nothing of this composer is on
   // screen.
   const dormant = (closed || finishing) && !sending && refusal === undefined;
@@ -649,8 +648,8 @@ export function MentionComposer({
   // What the reader wrote over a refusal goes back to the held send (`keep`, which a send still
   // out ignores), so the composer that mounts next shows it - and so a reload does: a refusal's
   // draft is the only copy of that message, and the entry it is kept in is what survives the
-  // page (`keyed-send-storage.ts`). It is written as this composer unmounts, a short wait after
-  // each keystroke, and as the page goes, which no unmount follows.
+  // page (`write-storage.ts`). It is written as this composer unmounts, a short wait after each
+  // keystroke, and as the page goes, which no unmount follows.
   const keepDraft = useRef(() => {});
   keepDraft.current = () =>
     outgoing.keep({
@@ -828,7 +827,7 @@ export function MentionComposer({
    *  task may not have rendered yet, and every prop and setting that addresses or shapes it - or,
    *  for a Retry, what `requestFor` makes of the refused send it replaces. */
   const sentRequest = (refused: HeldSend | undefined): SentRequest =>
-    requestFor(refused?.request, refused?.refusal, {
+    requestFor(refused?.request, refused?.status === "refused" ? refused.refusal : undefined, {
       ...composedRequest(),
       draft: {
         body: textarea.current?.value ?? body,
@@ -1370,14 +1369,16 @@ export function MentionComposer({
   // Past its deadline a send is still the server's: no Retry, which would post it twice. It is
   // still being tried under its key, so it says so and offers Stop trying, which sits outside the
   // held fieldset, the one control a send that is out leaves the reader.
-  const lateStatus = late ? (
-    <div className="flex flex-wrap items-center gap-3">
-      <p className={`text-sm ${textMutedOnSurfaceMuted}`} role="status">
-        {KEYED_SEND_LATE_TEXT}
-      </p>
-      <StopTryingButton held={outgoing.held} onStop={outgoing.stop} />
-    </div>
-  ) : null;
+  const heldLate = outgoing.held?.status === "late" ? outgoing.held : undefined;
+  const lateStatus =
+    heldLate === undefined ? null : (
+      <div className="flex flex-wrap items-center gap-3">
+        <p className={`text-sm ${textMutedOnSurfaceMuted}`} role="status">
+          {KEYED_SEND_LATE_TEXT}
+        </p>
+        <StopTrying onStop={outgoing.stop} stopping={heldLate.stopping} />
+      </div>
+    );
   const form = (
     <form
       aria-label="Comment composer"

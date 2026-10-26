@@ -7,9 +7,7 @@ import { useEventFeed } from "./api/event-feed";
 import { useLiveSocketPill } from "./api/live-socket";
 import { userAgentStateQuery, whoAmIQuery } from "./api/queries";
 import type { AuthenticatedUser } from "./api/types";
-import { broadcastQueue } from "./features/agents/broadcast-queue";
 import { totalUnreadReplies, unreadRepliesLabel } from "./features/agents/unread";
-import { heldSends } from "./features/conversation/held-sends";
 import { useNeedsYouCount } from "./features/inbox/BlockedOnYou";
 import { Inbox } from "./features/inbox/Inbox";
 import { InboxDrawer } from "./features/inbox/InboxDrawer";
@@ -44,10 +42,10 @@ import { useDocumentTitle } from "./features/shell/useDocumentTitle";
 import { useKeyboardFit } from "./features/shell/useKeyboardFit";
 import { useUserPreference } from "./features/shell/userPreference";
 import { Sidebar } from "./features/sidebar/Sidebar";
+import "./features/writes/kinds";
 import { PendingWritesIndicator } from "./features/writes/PendingWritesIndicator";
-import { pendingWrites } from "./features/writes/pending-writes";
 import { useKeyedWrite } from "./features/writes/useKeyedWrite";
-import { writeStorage } from "./features/writes/write-storage";
+import { writesOf } from "./features/writes/write-store";
 import {
   backdrop50,
   badgeBlocking,
@@ -509,13 +507,12 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       // refetch immediately — a signed-out user must land on sign-in without a manual reload.
       void queryClient.resetQueries({ queryKey: ["whoami"] });
       queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== "whoami" });
-      // A kept write belongs to the person who made it, so none outlives their session: the
-      // next person to sign in here resumes nothing of theirs, sees none of their refusals, and
-      // the page stops asking to confirm leaving (`write-storage.ts`).
-      writeStorage().clear();
-      pendingWrites(queryClient).clear();
+      // A write belongs to the person who made it, so none outlives their session: every one
+      // still out stops, the next person to sign in here resumes nothing of theirs, sees none of
+      // their refusals, and the page stops asking to confirm leaving (`write-store.ts`).
+      writesOf(queryClient).clear();
     },
-    write: (_variables, bounds) => api.logout(bounds),
+    write: () => api.logout(),
   });
   // Tabs within the same issue manage their own focus (roving tabindex); only a
   // genuine page change — a different issue, or a different top-level route —
@@ -763,16 +760,14 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
 
 function AuthenticatedApp({ user }: { user: AuthenticatedUser }): ReactNode {
   // Signed in, and before any page's own write, the writes this person's reload interrupted go
-  // on under their keys, and their refusals show again (`write-storage.ts`): a composer's send,
-  // a broadcast, and every other write. In an effect, not in the render: a resume sends requests
-  // and writes to the stores, which a render must not do, and React runs the render twice under
-  // StrictMode. Each store takes them up once, so a later effect does nothing.
+  // on under their keys, and their refusals show again (`write-store.ts`): a composer's send, a
+  // broadcast, a pin, a read mark and every other write. In an effect, not in the render: a
+  // resume sends requests and writes to the store, which a render must not do, and React runs the
+  // render twice under StrictMode. The store takes them up once, so a later effect does nothing.
   const queryClient = useQueryClient();
   const login = user.login;
   useEffect(() => {
-    heldSends(queryClient).resume(login);
-    broadcastQueue(queryClient).resume(login);
-    pendingWrites(queryClient).resume(login);
+    writesOf(queryClient).resume(login);
   }, [login, queryClient]);
   useEventFeed();
   return (
@@ -781,6 +776,11 @@ function AuthenticatedApp({ user }: { user: AuthenticatedUser }): ReactNode {
     </KeymapProvider>
   );
 }
+
+/** Where the tabs of one browser tell each other who is signed in, which a sign-in in place in
+ *  one changes for all of them: each reads `["whoami"]` again on a message. */
+const signIns =
+  typeof BroadcastChannel === "undefined" ? undefined : new BroadcastChannel("dispatch-sign-in");
 
 export function AuthGate(): ReactNode {
   const queryClient = useQueryClient();
@@ -795,6 +795,23 @@ export function AuthGate(): ReactNode {
     if (!signedOut) return;
     queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== "whoami" });
   }, [queryClient, signedOut]);
+  // A write belongs to the person who pressed it: once someone else is signed in here - in place,
+  // from another tab - or no one is, every write of another login is dropped and stops trying
+  // (`Writes.signedIn`), and every other tab of this browser is told to read who is signed in
+  // again, so it drops them too.
+  const login = signedOut ? undefined : whoAmI.data?.login;
+  const known = signedOut || whoAmI.data !== undefined;
+  useEffect(() => {
+    if (!known) return;
+    writesOf(queryClient).signedIn(login);
+    signIns?.postMessage(login ?? null);
+  }, [known, login, queryClient]);
+  useEffect(() => {
+    if (signIns === undefined) return;
+    const reread = () => void queryClient.invalidateQueries({ queryKey: ["whoami"] });
+    signIns.addEventListener("message", reread);
+    return () => signIns.removeEventListener("message", reread);
+  }, [queryClient]);
 
   if (whoAmI.isPending) {
     return <ShellSkeleton />;

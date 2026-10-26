@@ -8,6 +8,7 @@ import { MemoryRouter } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { installIntersectionObserver } from "../../__tests__/intersection-observer";
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { ApiError, api } from "../../api/client";
 import type { AnswerAskInput, Ask, AskAnswer, AskRead, Comment } from "../../api/types";
 import { seedUnread } from "../replies/replies-fixture";
@@ -348,7 +349,7 @@ for (const shape of ["inline", "collapsed"] as const) {
         jest.advanceTimersByTime(1_000);
       });
       for (let flush = 0; flush < 5; flush += 1) await act(async () => {});
-      expect(card.mark.mock.calls).toEqual([["ask-1", "2026-10-08T04:00:00.5Z"]]);
+      expect(card.mark.mock.calls).toEqual([["ask-1", "2026-10-08T04:00:00.5Z", keyedAttempt]]);
     } finally {
       card.cleanup();
     }
@@ -385,7 +386,7 @@ test("an answer given after every reply is what the mark watches and reads throu
       jest.advanceTimersByTime(1_000);
     });
     for (let flush = 0; flush < 5; flush += 1) await act(async () => {});
-    expect(card.mark.mock.calls).toEqual([["ask-1", answer.at]]);
+    expect(card.mark.mock.calls).toEqual([["ask-1", answer.at, keyedAttempt]]);
   } finally {
     card.cleanup();
   }

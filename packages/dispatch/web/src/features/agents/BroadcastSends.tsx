@@ -1,7 +1,9 @@
-import { useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useEffect, useId, useRef, useState, useSyncExternalStore } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
+import { api } from "../../api/client";
+import type { BroadcastCreated } from "../../api/types";
 import { RefusableButton } from "../../components/RefusableButton";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
@@ -17,16 +19,22 @@ import {
 import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { SendInterruptedError, SendStoppedError } from "../writes/keyed-write";
 import { StopTrying } from "../writes/StopTrying";
-import { type BroadcastSend, type BroadcastSendRow, broadcastQueue } from "./broadcast-queue";
+import { useWriteSelection, useWrites } from "../writes/write-store";
+import {
+  type BroadcastSend,
+  type BroadcastSendRow,
+  broadcastRows,
+  enqueueBroadcast,
+} from "./broadcast-queue";
 
 /**
- * The Agents page's hold on the broadcast queue (`broadcast-queue.ts`). Send hands its request off
- * at the press (`enqueue`) - the page clears the draft and the selection with it, so the next
- * broadcast can be written at once - and the queue sends one request at a time, in press order,
+ * The Agents page's hold on its broadcasts (`broadcast-queue.ts`). Send hands its request off at
+ * the press (`enqueue`) - the page clears the draft and the selection with it, so the next
+ * broadcast can be written at once - and the writes go one request at a time, in press order,
  * each under its key until Dispatch decides it. A send carries its own request, so a waiting send
- * keeps the draft it was pressed with. The request is all a send orders: the server answers
- * before it delivers, and each broadcast delivers on its own, so two broadcasts can reach one
- * agent in either order.
+ * keeps the draft it was pressed with. The request is all a send orders: Dispatch answers as soon
+ * as the broadcast is made and delivers behind that answer, so two broadcasts can reach one agent
+ * in either order.
  *
  * `rows` is every send the queue holds, newest press first, each with its own state, so a later
  * send never hides an earlier one's failure. Nothing navigates while a send is queued or on the
@@ -49,8 +57,8 @@ export function useBroadcastQueue(composing: boolean): {
   rows: readonly BroadcastSendRow[];
 } {
   const navigate = useNavigate();
-  const queue = broadcastQueue(useQueryClient());
-  const rows = useSyncExternalStore(queue.subscribe, queue.rows);
+  const writes = useWrites();
+  const rows = useWriteSelection("broadcasts", broadcastRows);
   const [openedAt] = useState(Date.now);
   // A same-tick double press reaches the handler twice before React re-renders without the
   // composer, so the second would queue the same request; this ref drops it until the next task.
@@ -76,20 +84,25 @@ export function useBroadcastQueue(composing: boolean): {
     });
   }, [navigate, openedAt, rows]);
 
-  useEffect(() => () => queue.clearSent(), [queue]);
+  useEffect(
+    () => () => {
+      for (const row of broadcastRows(writes.rows())) {
+        if (row.status === "sent") writes.letGo(row.id);
+      }
+    },
+    [writes]
+  );
 
   const guarded = (fn: () => void) => {
     press.guard(fn);
     setTimeout(press.release, 0);
   };
   return {
-    dismiss: (row) => queue.dismiss(row),
-    enqueue: (send) => guarded(() => queue.enqueue(send)),
-    retry: (row) => guarded(() => queue.retry(row)),
+    dismiss: (row) => void writes.discard(row.id),
+    enqueue: (send) => guarded(() => enqueueBroadcast(writes, send)),
+    retry: (row) => guarded(() => writes.retry(row.id)),
     rows,
-    stop: (row) => {
-      queue.stop(row);
-    },
+    stop: (row) => void writes.stop(row.id),
   };
 }
 
@@ -100,13 +113,14 @@ function agentCount(count: number): string {
 /**
  * The page's sends, one row each, newest press first so the send just pressed is in view: queued,
  * on the wire, still being tried under its key once past its deadline (with Stop trying), sent
- * (linking its broadcast, with the send's exclusions), or refused with the server's reason - or
- * stopped - with Retry and Restore draft. One a reload interrupted too long ago to be sent on its
- * own (`SendInterruptedError`) says so in the error's own words and offers Discard beside them. A
- * retried send keeps its row's place. The strip sits above the composer, outside it, because the
- * composer goes whenever the selection empties - at every press - and a send outlives it. Restore
- * draft refuses, and says why under its row, while the host says putting a draft back would
- * replace one (`restoreRefusal`).
+ * (linking its broadcast, with the send's exclusions, and how its deliveries stand: delivering
+ * while any recipient's is still on its way, from the live feed, then delivered), or refused with
+ * the server's reason - or stopped - with Retry and Restore draft. One a reload interrupted too
+ * long ago to be sent on its own (`SendInterruptedError`) says so in the error's own words and
+ * offers Discard beside them. A retried send keeps its row's place. The strip sits above the
+ * composer, outside it, because the composer goes whenever the selection empties - at every press
+ * - and a send outlives it. Restore draft refuses, and says why under its row, while the host says
+ * putting a draft back would replace one (`restoreRefusal`).
  */
 export function BroadcastSends({
   className = "",
@@ -157,18 +171,7 @@ export function BroadcastSends({
                     `Could not send to ${count}: ${row.error.message}`
                   )
                 ) : (
-                  <>
-                    <Link
-                      className={`${linkText} ${linkHoverText}`}
-                      state={{ excluded: row.created.excluded }}
-                      to={`/agents/broadcasts/${row.created.id}`}
-                    >
-                      Sent to {agentCount(row.created.recipients.length)}
-                    </Link>
-                    {row.created.excluded.length === 0
-                      ? null
-                      : `, ${row.created.excluded.length} excluded`}
-                  </>
+                  <SentBroadcast created={row.created} />
                 )}
               </span>
               <MarkdownPreview
@@ -221,5 +224,42 @@ export function BroadcastSends({
         })}
       </ul>
     </section>
+  );
+}
+
+/**
+ * A made broadcast's row: its link, its exclusions, and how its deliveries stand. Dispatch answered
+ * once it had made the broadcast and goes on delivering behind that answer, finishing each
+ * delivery itself, so the row reads the broadcast again as the live feed reports each delivery
+ * (`["broadcast"]`, which every recipient's delivery event refreshes): delivering while any
+ * recipient's attempt is still pending, then delivered - or not, to a recipient whose attempt
+ * failed, which the broadcast's own page retries. The broadcast is made either way; nothing here
+ * is a write still unconfirmed.
+ */
+function SentBroadcast({ created }: { created: BroadcastCreated }): ReactNode {
+  const read = useQuery({
+    initialData: created,
+    queryFn: () => api.getBroadcast(created.id),
+    queryKey: ["broadcast", created.id],
+  }).data;
+  const states = read.recipients.map((recipient) => recipient.message.deliveries.at(-1)?.state);
+  const delivering = states.filter((state) => state === "pending").length;
+  const failed = states.filter((state) => state === "failed").length;
+  return (
+    <>
+      <Link
+        className={`${linkText} ${linkHoverText}`}
+        state={{ excluded: created.excluded }}
+        to={`/agents/broadcasts/${created.id}`}
+      >
+        Sent to {agentCount(created.recipients.length)}
+      </Link>
+      {created.excluded.length === 0 ? null : `, ${created.excluded.length} excluded`}
+      {delivering > 0
+        ? ` — delivering to ${agentCount(delivering)}…`
+        : failed > 0
+          ? ` — not delivered to ${agentCount(failed)}`
+          : " — delivered"}
+    </>
   );
 }

@@ -36,8 +36,8 @@ import {
 } from "../../theme/classes";
 import { deliveryAttempts } from "../agents/attempts";
 import { AskCard } from "../inbox/AskCard";
+import { writePin } from "../issue/pin-write";
 import { conversationItemId, isPinnedConversation, stateForIssue } from "../issue/pins";
-import { usePinWrites } from "../issue/usePinWrites";
 import { ThreadCard } from "../margin/ThreadCard";
 import { type CommentActionFailure, useCommentActionQueue } from "../margin/useCommentActionQueue";
 import type { Thread as CommentThread } from "../margin/useMarginItems";
@@ -309,24 +309,8 @@ function Thread({
   );
 }
 
-function TurnPin({
-  disabled,
-  onPin,
-  pinned,
-}: {
-  disabled: boolean;
-  onPin: () => void;
-  pinned: boolean;
-}): ReactNode {
-  return (
-    <PinButton
-      disabled={disabled}
-      label={pinned ? "Unpin" : "Pin"}
-      onClick={onPin}
-      pinned={pinned}
-      quiet
-    />
-  );
+function TurnPin({ onPin, pinned }: { onPin: () => void; pinned: boolean }): ReactNode {
+  return <PinButton label={pinned ? "Unpin" : "Pin"} onClick={onPin} pinned={pinned} quiet />;
 }
 
 function MessageTurn({
@@ -334,7 +318,6 @@ function MessageTurn({
   author,
   current,
   currentReplyId,
-  disabled,
   isClosed,
   issueKey,
   item,
@@ -349,7 +332,6 @@ function MessageTurn({
   author: Author;
   current: boolean;
   currentReplyId: string | undefined;
-  disabled: boolean;
   isClosed: boolean;
   issueKey: string;
   item: Extract<Conversation, { kind: "message" }>;
@@ -385,7 +367,7 @@ function MessageTurn({
               onClick={() => onReply(replyTargetFor(item.root, author, item, issueKey, agents))}
             />
           )}
-          <TurnPin disabled={disabled} onPin={onPin} pinned={pinned} />
+          <TurnPin onPin={onPin} pinned={pinned} />
         </TurnActions>
       </div>
       <Thread
@@ -506,7 +488,6 @@ function CommentTurn({
   composerClassName,
   current,
   currentReplyId,
-  disabled,
   expanded,
   forceExpanded = false,
   hideReplyComposer = false,
@@ -534,7 +515,6 @@ function CommentTurn({
   current: boolean;
   /** The reply a deep link named, marked inside the thread. */
   currentReplyId: string | undefined;
-  disabled: boolean;
   /** Whether the reader has the thread open inline. The tab owns it, so a comment whose thread is
    *  open stays in the list whoever resolves it (`shown`), with its reply and the reply's send. */
   expanded: boolean;
@@ -701,7 +681,7 @@ function CommentTurn({
             }}
           />
         )}
-        <TurnPin disabled={disabled} onPin={onPin} pinned={pinned} />
+        <TurnPin onPin={onPin} pinned={pinned} />
       </div>
     </li>
   );
@@ -810,7 +790,6 @@ export function ConversationTab({
   const store = useHeldSends();
   // Comments whose card's own reply the store holds, out or refused.
   const heldCardReplies = useHeldSendsUnder(threadRepliesSendKey(sendKey));
-  const pins = usePinWrites(issueKey);
   const viewer = useQuery(whoAmIQuery());
   // The three reads the list is built from, each the issue's whole set: a conversation is listed
   // however old it is, which no window of the event log could promise.
@@ -1050,7 +1029,7 @@ export function ConversationTab({
   });
 
   const pinConversation = (id: string) =>
-    pins.updatePins((dismissed) => ({
+    writePin(queryClient, issueKey, (dismissed) => ({
       id,
       op: isPinnedConversation(dismissed, id) ? "unpin" : "pin",
     }));
@@ -1073,7 +1052,6 @@ export function ConversationTab({
       item="data-turn"
       label="Conversation"
     >
-      {pins.banner}
       {/* Mounted, and hidden, while a phone thread covers it: its draft, a send it has out, that
           send's refusal and its reply are all still there on Back. Mounted on a closed issue too,
           where it shows only a send of its own still out or its refusal (`closed`), so an issue
@@ -1176,7 +1154,6 @@ export function ConversationTab({
                 issueKey={issueKey}
                 current={current}
                 currentReplyId={currentReplyId}
-                disabled={pins.blocked}
                 isClosed={isClosed}
                 item={item}
                 key={item.id}
@@ -1205,7 +1182,6 @@ export function ConversationTab({
                 onAction={(id, kind) => commentActions.mutateItem({ id, kind })}
                 current={current}
                 currentReplyId={currentReplyId}
-                disabled={pins.blocked}
                 expanded={openThreads.has(item.root.id)}
                 onRetryAction={commentActions.retryItem}
                 pendingAction={commentActions.pendingActionIds.has(item.root.id)}
@@ -1254,11 +1230,7 @@ export function ConversationTab({
                   variant="compact"
                 />
               </div>
-              <TurnPin
-                disabled={pins.blocked}
-                onPin={() => pinConversation(item.id)}
-                pinned={pinned}
-              />
+              <TurnPin onPin={() => pinConversation(item.id)} pinned={pinned} />
             </li>
           );
         })}
@@ -1299,7 +1271,6 @@ export function ConversationTab({
                 current={phoneThread.id === focus?.id}
                 currentReplyId={phoneThread.id === focus?.id ? focus?.replyId : undefined}
                 viewerLogin={viewer.data?.login ?? ""}
-                disabled={pins.blocked}
                 expanded={openThreads.has(phoneThread.root.id)}
                 forceExpanded
                 hideReplyComposer={phoneReplyTargetsThread}

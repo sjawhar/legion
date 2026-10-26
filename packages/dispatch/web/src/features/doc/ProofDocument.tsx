@@ -262,6 +262,10 @@ export function ProofDocument({
     inline: true,
     label: () => `New version of ${artifact.name}`,
     onSuccess: (created) => {
+      // Made either way, so the dialog closes and a second press names nothing twice; with no
+      // answer to give, the store has read the document again.
+      setIsNameDialogOpen(false);
+      if (created === null) return;
       queryClient.setQueryData<Artifact>(["artifact", artifact.id], (current) => {
         const source = current ?? artifact;
         return {
@@ -270,7 +274,6 @@ export function ProofDocument({
         };
       });
       onVersionChange(created.number);
-      setIsNameDialogOpen(false);
     },
   });
   const rebuild = useKeyedWrite({

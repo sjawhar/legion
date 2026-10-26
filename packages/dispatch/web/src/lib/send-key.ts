@@ -1,8 +1,8 @@
 /**
- * A v4 UUID that names one send to Dispatch (an `idempotency_key`), built from
+ * A v4 UUID that names one write to Dispatch (its `Idempotency-Key`), built from
  * `crypto.getRandomValues`. `crypto.randomUUID` exists only in a secure context, and Dispatch
  * opened over plain HTTP by a non-loopback name is not one, so a key built from it would throw
- * there on the first send.
+ * there on the first write.
  */
 export function newSendKey(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));

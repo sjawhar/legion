@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import { userAgentStateQuery } from "../../api/queries";
 import type {
   Message,
@@ -11,6 +11,7 @@ import type {
   UserAgentStateInput,
   UserAgentStates,
 } from "../../api/types";
+import { writesOf } from "../writes/write-store";
 import { totalUnreadReplies, useMarkShownRepliesRead } from "./unread";
 
 // An API older than the unread count answers a session's state with its Clear alone. The badge
@@ -49,10 +50,8 @@ function renderShownReplies(put: (body: UserAgentStateInput) => Promise<UserAgen
     sent.push(body);
     return put(body);
   });
-  // No backoff between a write's retries, so its final failure lands within the test.
-  const queryClient = new QueryClient({
-    defaultOptions: { mutations: { retryDelay: 0 }, queries: { retry: false } },
-  });
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  queryClient.setQueryData(["whoami"], { event_head: "0", kind: "user", login: "alice" });
   const hook = renderHook(
     ({ replies }: { replies: readonly Message[] }) => useMarkShownRepliesRead(SESSION, replies),
     {
@@ -61,21 +60,22 @@ function renderShownReplies(put: (body: UserAgentStateInput) => Promise<UserAgen
         createElement(QueryClientProvider, { client: queryClient }, children),
     }
   );
+  /** Waits until the store holds no mark still out. */
+  const settled = () => waitFor(() => expect(writesOf(queryClient).rows()).toEqual([]));
   return {
     hook,
     queryClient,
     sent,
+    settled,
     /** The session's unread count moves, as the refetch a `user_agent_state.updated` event
-     *  causes brings it in, and every PUT the new count calls for is answered. A PUT the view
-     *  sends for it is pending by the time `act` has run the view's effects, so waiting for no
-     *  pending write waits for it. */
+     *  causes brings it in, and every PUT the new count calls for is answered. */
     async countBecomes(unread: number) {
       states = { [SESSION]: { unread_replies: unread } };
       await act(() => queryClient.invalidateQueries({ queryKey: userAgentStateQuery().queryKey }));
-      await waitFor(() => expect(queryClient.isMutating()).toBe(0));
+      await settled();
     },
     async restore() {
-      await waitFor(() => expect(queryClient.isMutating()).toBe(0));
+      await settled();
       hook.unmount();
       putAgentState.mockRestore();
       getMyAgentState.mockRestore();
@@ -83,16 +83,19 @@ function renderShownReplies(put: (body: UserAgentStateInput) => Promise<UserAgen
   };
 }
 
-// A reply that arrives while the page's mark is still retrying changes what the page shows, so
-// the page sends a new mark that covers both, and the old one is superseded. When the old one then
-// fails for good, the new mark still stands: forgetting it would send it once more at the next
-// change in the count, a PUT the server answers by changing nothing.
-test("a superseded mark that fails for good sends nothing more", async () => {
+const refusal = new ApiError(400, { code: "STATE_INPUT", error: "refused" });
+
+// A reply that arrives while the page's mark is still out changes what the page shows, so the page
+// makes a new mark that covers both; the marks of one session go out in order, so the new one
+// waits behind the old. When the old one is then refused, the new mark still stands: forgetting it
+// would send it once more at the next change in the count, a PUT the server answers by changing
+// nothing.
+test("a superseded mark that is refused sends nothing more", async () => {
   const held = Promise.withResolvers<void>();
   const page = renderShownReplies(async (body) => {
     if (body.read_replies?.length === 1) {
       await held.promise;
-      throw new Error("Dispatch is restarting");
+      throw refusal;
     }
     // The session has another unread reply this page does not show, so the count stays up.
     return { unread_replies: 1 };
@@ -100,40 +103,34 @@ test("a superseded mark that fails for good sends nothing more", async () => {
   try {
     await waitFor(() => expect(page.sent).toEqual([{ read_replies: ["a1"] }]));
     page.hook.rerender({ replies: [reply("a1"), reply("a2")] });
-    await waitFor(() => expect(page.sent).toHaveLength(2));
-    // The covering mark is answered while the first is still on its first try.
-    await waitFor(() => expect(page.queryClient.isMutating()).toBe(1));
+    await waitFor(() => expect(writesOf(page.queryClient).rows()).toHaveLength(2));
+    expect(page.sent).toHaveLength(1);
     held.resolve();
-    await waitFor(() => expect(page.queryClient.isMutating()).toBe(0));
-    expect(page.sent).toEqual([
-      { read_replies: ["a1"] },
-      { read_replies: ["a1", "a2"] },
-      { read_replies: ["a1"] },
-      { read_replies: ["a1"] },
-    ]);
+    await page.settled();
+    expect(page.sent).toEqual([{ read_replies: ["a1"] }, { read_replies: ["a1", "a2"] }]);
     await page.countBecomes(3);
-    expect(page.sent).toHaveLength(4);
+    expect(page.sent).toHaveLength(2);
   } finally {
     held.resolve();
     await page.restore();
   }
 });
 
-// The mark the page still stands by is another matter: when it fails for good its key is
-// forgotten, so the next change in the count sends it again rather than leaving the badge up
-// until the session replies once more.
-test("the current mark that fails for good is sent again when the count changes", async () => {
-  let refusals = 3;
+// The mark the page still stands by is another matter: when it is refused its key is forgotten, so
+// the next change in the count sends it again rather than leaving the badge up until the session
+// replies once more.
+test("the current mark that is refused is sent again when the count changes", async () => {
+  let refusals = 1;
   const page = renderShownReplies(async () => {
     refusals -= 1;
-    if (refusals >= 0) throw new Error("Dispatch is restarting");
+    if (refusals >= 0) throw refusal;
     return { unread_replies: 0 };
   });
   try {
-    await waitFor(() => expect(page.sent).toHaveLength(3));
-    await waitFor(() => expect(page.queryClient.isMutating()).toBe(0));
+    await waitFor(() => expect(page.sent).toHaveLength(1));
+    await page.settled();
     await page.countBecomes(3);
-    expect(page.sent).toEqual(Array(4).fill({ read_replies: ["a1"] }));
+    expect(page.sent).toEqual(Array(2).fill({ read_replies: ["a1"] }));
   } finally {
     await page.restore();
   }

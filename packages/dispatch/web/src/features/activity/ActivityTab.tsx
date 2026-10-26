@@ -1,4 +1,4 @@
-import { replaceEqualDeep, useInfiniteQuery } from "@tanstack/react-query";
+import { replaceEqualDeep, useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useMemo } from "react";
 
 import { api } from "../../api/client";
@@ -16,8 +16,8 @@ import {
 } from "../../theme/classes";
 import { resolveAuthor } from "../conversation/authors";
 import { useAgents } from "../conversation/useAgents";
+import { writePin } from "../issue/pin-write";
 import { eventItemId, isPinnedEvent, stateForIssue } from "../issue/pins";
-import { usePinWrites } from "../issue/usePinWrites";
 import { Timestamp } from "../refs/Timestamp";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
 import { ActivityLine } from "./ActivityLine";
@@ -37,7 +37,7 @@ interface ActivityTabProps {
  * filters: this is the record, not a place to write.
  */
 export function ActivityTab({ issueKey, state, visible }: ActivityTabProps): ReactNode {
-  const pins = usePinWrites(issueKey);
+  const queryClient = useQueryClient();
   const log = useInfiniteQuery({
     initialPageParam: null as number | null,
     queryKey: ["events", issueKey],
@@ -88,7 +88,7 @@ export function ActivityTab({ issueKey, state, visible }: ActivityTabProps): Rea
   );
 
   const togglePin = (eventId: number) =>
-    pins.updatePins((dismissed) => ({
+    writePin(queryClient, issueKey, (dismissed) => ({
       id: eventItemId({ id: eventId }),
       op: isPinnedEvent(dismissed, eventId) ? "unpin" : "pin",
     }));
@@ -110,7 +110,6 @@ export function ActivityTab({ issueKey, state, visible }: ActivityTabProps): Rea
       item="data-event-seq"
       label="Activity"
     >
-      {pins.banner}
       <ol aria-label="Issue activity" className="flex flex-col gap-1">
         {items.map((item) => {
           if (item.kind === "day-divider" || item.kind === "unread-divider") {
@@ -162,7 +161,6 @@ export function ActivityTab({ issueKey, state, visible }: ActivityTabProps): Rea
                 />
               </span>
               <PinButton
-                disabled={pins.blocked}
                 label={pinned ? "Unpin" : "Pin"}
                 onClick={() => togglePin(item.event.id)}
                 pinned={pinned}

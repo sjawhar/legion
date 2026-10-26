@@ -187,31 +187,39 @@ export function IssueHeader({
     inline: true,
     label: () => `Claim on ${issue.key} released`,
     onSuccess: (next) => {
-      mergeIssue(queryClient, next);
+      if (next !== null) mergeIssue(queryClient, next);
       void queryClient.invalidateQueries({ queryKey: ["issues"] });
     },
   });
   // A title, route, parent or close the header shows refused itself, beside its draft; a status
   // pick is a control, so its refusal is the shell's (`PendingWritesIndicator`), and the pick
-  // rolls back.
+  // rolls back. Every field write goes in the issue's line (`issue:<key>`), so an older one still
+  // being tried never lands after a newer one, whatever left the page meanwhile. A landing with no
+  // answer to give is merged by reading the issue again.
   const updateIssue = useKeyedWrite({
     write: (input: IssueUpdateInput, bounds) => api.patchIssue(issue.key, input, bounds),
     inline: (input) => !statusPickOnly(input),
     label: (input) => issueUpdateLabel(issue.key, input),
+    target: () => `issue:${issue.key}`,
     onSettled: (_data, error) => {
       drafts.onIssueSettled(error);
     },
     onSuccess: (next, input) => {
-      mergeIssue(queryClient, next);
-      drafts.onIssueSuccess(next, input);
+      if (next === null) {
+        void queryClient.invalidateQueries({ queryKey: ["issue", issue.key] });
+      } else {
+        mergeIssue(queryClient, next);
+      }
+      drafts.onIssueSuccess(next ?? issue, input);
       void queryClient.invalidateQueries({ queryKey: ["issues"] });
     },
   });
   const labelsMutation = useKeyedWrite({
     write: (labels: string[], bounds) => api.patchIssue(issue.key, { labels }, bounds),
     label: () => `Labels of ${issue.key}`,
+    target: () => `issue:${issue.key}`,
     onSuccess: (next) => {
-      mergeIssue(queryClient, next);
+      if (next !== null) mergeIssue(queryClient, next);
       void queryClient.invalidateQueries({ queryKey: ["issues"] });
     },
   });
@@ -288,6 +296,7 @@ export function IssueHeader({
       }));
     },
     onSuccess: (next) => {
+      if (next === null) return;
       queryClient.setQueryData<UserState>(userStateQuery().queryKey, (current) => ({
         ...current,
         [issue.key]: next,
@@ -448,7 +457,7 @@ export function IssueHeader({
               className={`min-w-0 appearance-none font-inherit outline-none disabled:cursor-not-allowed disabled:opacity-50 ${bgTransparent} ${statusPill.text}`}
               disabled={isClosed || updateIssue.isPending}
               onChange={(event) => drafts.requestStatusSubmit(event.target.value)}
-              value={issue.status}
+              value={pendingStatus ?? issue.status}
             >
               {selectableStatuses.map((status) => (
                 <option key={status} value={status}>

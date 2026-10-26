@@ -5,105 +5,97 @@ import { ApiError } from "../../api/client";
 import { SendInterruptedError, SendStoppedError } from "./keyed-write";
 import {
   KEPT_SEND_RESUME_MS,
+  type KeptWrite,
   keptRefusal,
+  keptRequest,
   refusalFrom,
+  requestFrom,
   resumesOnItsOwn,
   WriteStorage,
 } from "./write-storage";
 
-/** A record `parse` takes: the store's own, here a flag. */
-const accept = (detail: unknown) =>
-  typeof detail === "object" && detail !== null && Reflect.get(detail, "ok") === true
-    ? { ok: true as const }
-    : undefined;
-
-/** One write as its store keeps it, with the fields every entry carries. */
-const kept = (key: string, fields: Record<string, unknown> = {}) => ({
-  detail: { ok: true },
+/** One write as the store keeps it, with every field an entry carries. */
+const kept = (key: string, fields: Partial<KeptWrite> = {}): KeptWrite => ({
+  detail: null,
   key,
-  kind: "composer" as const,
+  kind: "write",
+  label: "CORE-1 set to done",
+  login: "alice",
+  presentation: "indicator",
   pressedAt: 1_700_000_000_000,
-  refusal: null,
-  request: {
-    body: { body: "hello" },
-    method: "POST" as const,
-    path: "/api/v1/issues/CORE-1/comments",
-  },
-  state: "sending" as const,
+  request: { body: { status: "done" }, method: "PATCH", path: "/api/v1/issues/CORE-1" },
+  state: { status: "sending" },
+  target: null,
   ...fields,
 });
 
-// W1, W6. Every store keeps its writes in one format, one entry per key, versioned and stamped
-// with the login of the person who pressed it, and each takes up only its own kind and only that
-// person's. An entry the page cannot read - another version's, damaged JSON, one filed under
-// another key, one another person kept, or a record its store refuses - is dropped as the page
-// loads, never read; another store's entries of the same person stay for it. So is an entry of
-// the retired `dispatch.keyed-send:` format, which nothing reads now.
-test("one versioned format for every store, and an entry that does not parse is dropped on load", () => {
+// Every write is kept in one format, one entry per key, versioned and stamped with the login of
+// the person who pressed it, and a page takes up only that person's. An entry the page cannot
+// read - another version's, damaged JSON, one filed under another key, one another person kept,
+// a method no write goes as - is dropped as the page loads, never read. Every write method a page
+// write goes as is one the format accepts, a PUT and a DELETE included (W29).
+test("one versioned format, every write method kept, and an entry that does not parse dropped", () => {
   const tab = keptTab();
   const page = tab.page();
-  const entry = (key: string, fields: Record<string, unknown> = {}) =>
-    JSON.stringify({ ...kept(key), login: "alice", version: 3, ...fields });
-
+  const entry = (write: KeptWrite, fields: Record<string, unknown> = {}) =>
+    JSON.stringify({ ...write, version: 1, ...fields });
   try {
-    page.keep(kept("kept", { state: "late" }), "alice");
-    expect(tab.kept("kept")).toEqual({
-      ...kept("kept", { state: "late" }),
-      login: "alice",
-      version: 3,
+    page.keep(kept("patch", { state: { status: "late", stopping: false } }));
+    page.keep(kept("put", { request: { body: { until: null }, method: "PUT", path: "/x" } }));
+    page.keep(kept("delete", { request: { method: "DELETE", path: "/y" } }));
+    expect(tab.kept("patch")).toEqual({
+      ...kept("patch", { state: { status: "late", stopping: false } }),
+      version: 1,
     });
-    tab.storage.setItem("dispatch.write:broadcast", entry("broadcast", { kind: "broadcast" }));
-    tab.storage.setItem("dispatch.write:newer", entry("newer", { version: 4 }));
-    tab.storage.setItem("dispatch.write:older", entry("older", { login: undefined, version: 2 }));
+    tab.storage.setItem("dispatch.write:newer", entry(kept("newer"), { version: 2 }));
     tab.storage.setItem("dispatch.write:damaged", "{");
-    tab.storage.setItem("dispatch.write:moved", entry("elsewhere"));
-    tab.storage.setItem("dispatch.write:bobs", entry("bobs", { login: "bob" }));
-    tab.storage.setItem("dispatch.write:refused-record", entry("refused-record", { detail: 7 }));
+    tab.storage.setItem("dispatch.write:moved", entry(kept("elsewhere")));
+    tab.storage.setItem("dispatch.write:bobs", entry(kept("bobs", { login: "bob" })));
     tab.storage.setItem(
-      "dispatch.write:refused-unsaid",
-      entry("refused-unsaid", { state: "refused" })
+      "dispatch.write:get",
+      entry(kept("get"), { request: { method: "GET", path: "/z" } })
     );
-    // The format this release retired: dropped whatever it holds.
-    tab.storage.setItem("dispatch.keyed-send:retired", entry("retired"));
+    tab.storage.setItem(
+      "dispatch.write:unsaid",
+      entry(kept("unsaid"), { state: { status: "refused" } })
+    );
     tab.storage.setItem("someone-else", "{");
 
     const later = tab.page();
-    expect(later.load("composer", "alice", accept)).toEqual([
-      { ...kept("kept", { state: "late" }), detail: { ok: true } },
-    ]);
+    expect(later.load("alice").map((write) => write.key)).toEqual(["patch", "put", "delete"]);
     expect(
       Array.from({ length: tab.storage.length }, (_, index) => tab.storage.key(index)).sort()
-    ).toEqual(["dispatch.write:broadcast", "dispatch.write:kept", "someone-else"]);
-    expect(later.load("broadcast", "alice", accept)).toEqual([
-      { ...kept("broadcast"), kind: "broadcast", detail: { ok: true } },
+    ).toEqual([
+      "dispatch.write:delete",
+      "dispatch.write:patch",
+      "dispatch.write:put",
+      "someone-else",
     ]);
   } finally {
     tab.close();
   }
 });
 
-// A write with no request to make again - an upload, whose file no entry can hold - is counted
-// for the leave prompt and kept nowhere, so a reload never resumes it as an empty request.
-test("a write with nothing to repeat is only held for the leave prompt", () => {
-  const tab = keptTab();
-  const unload = new EventTarget();
-  const page = new WriteStorage(tab.storage, unload);
-  const asks = () => {
-    const leaving = new Event("beforeunload", { cancelable: true });
-    unload.dispatchEvent(leaving);
-    return leaving.defaultPrevented;
-  };
-
-  try {
-    page.hold("upload-1", true);
-    expect(asks()).toBe(true);
-    expect(tab.storage.length).toBe(0);
-
-    page.hold("upload-1", false);
-    expect(asks()).toBe(false);
-  } finally {
-    tab.close();
-  }
+// An upload's form is kept by its fields, its file's place among them, and made whole again with
+// the file a reload found - or not at all without one.
+test("an upload's request is kept by its fields and made whole with its file", () => {
+  const file = new File(["spec"], "spec.md");
+  const body = new FormData();
+  body.set("name", "spec.md");
+  body.set("file", file);
+  const request = keptRequest({ body, method: "POST", path: "/api/v1/issues/CORE-1/artifacts" });
+  expect(request).toEqual({
+    form: [
+      { name: "name", value: "spec.md" },
+      { file: true, name: "file" },
+    ],
+    method: "POST",
+    path: "/api/v1/issues/CORE-1/artifacts",
+  });
+  expect(requestFrom(request)).toBeUndefined();
+  const whole = requestFrom(request, file)?.body as FormData;
+  expect(whole.get("name")).toBe("spec.md");
+  expect((whole.get("file") as File).name).toBe("spec.md");
 });
 
 // A refusal comes back as the error it was: the reader's stop, a reload that interrupted the write
@@ -133,22 +125,20 @@ test("a write resumes on its own only within five minutes of its press", () => {
   expect(KEPT_SEND_RESUME_MS).toBe(5 * 60_000);
 });
 
-// W6. Signing out ends the kept writes with the session that made them: nothing of the person
-// who has gone is left for the next one to resume, and the page stops asking to confirm leaving.
+// Signing out ends the kept writes with the session that made them: nothing of the person who has
+// gone is left for the next one to resume, and the page stops asking to confirm leaving.
 test("clearing drops every kept write and the leave prompt with it", () => {
   const tab = keptTab();
   const unload = new EventTarget();
   const page = new WriteStorage(tab.storage, unload);
-
+  const asks = () => {
+    const leaving = new Event("beforeunload", { cancelable: true });
+    unload.dispatchEvent(leaving);
+    return leaving.defaultPrevented;
+  };
   try {
-    page.keep(kept("out"), "alice");
-    const asks = () => {
-      const leaving = new Event("beforeunload", { cancelable: true });
-      unload.dispatchEvent(leaving);
-      return leaving.defaultPrevented;
-    };
+    page.keep(kept("out"));
     expect(asks()).toBe(true);
-
     page.clear();
     expect(tab.storage.length).toBe(0);
     expect(asks()).toBe(false);
@@ -157,9 +147,9 @@ test("clearing drops every kept write and the leave prompt with it", () => {
   }
 });
 
-// W10. A write the storage refuses - it is full, or the browser refuses the page a quota - must
-// never leave an older state standing for the write: the entry goes instead, so a reload resumes
-// nothing rather than resuming a write the reader has since stopped.
+// A write the storage refuses - it is full, or the browser refuses the page a quota - must never
+// leave an older state standing for the write: the entry goes instead, so a reload resumes nothing
+// rather than resuming a write the reader has since stopped.
 test("a write the storage refuses removes what was kept under that key", () => {
   const tab = keptTab();
   const refusing: Storage = {
@@ -171,17 +161,15 @@ test("a write the storage refuses removes what was kept under that key", () => {
     },
     removeItem: (name) => tab.storage.removeItem(name),
     setItem: (name, value) => {
-      if (value.includes('"state":"stopping"')) throw new Error("QuotaExceededError");
+      if (value.includes('"stopping":true')) throw new Error("QuotaExceededError");
       tab.storage.setItem(name, value);
     },
   };
   const page = new WriteStorage(refusing, new EventTarget());
-
   try {
-    page.keep(kept("out", { state: "late" }), "alice");
-    expect(tab.kept("out")).toMatchObject({ state: "late" });
-
-    page.keep(kept("out", { state: "stopping" }), "alice");
+    page.keep(kept("out", { state: { status: "late", stopping: false } }));
+    expect(tab.kept("out")).toMatchObject({ state: { status: "late" } });
+    page.keep(kept("out", { state: { status: "late", stopping: true } }));
     expect(tab.kept("out")).toBeUndefined();
   } finally {
     tab.close();
@@ -198,11 +186,9 @@ test("a page with no storage keeps nothing and still asks before the tab is clos
     unload.dispatchEvent(leaving);
     return leaving.defaultPrevented;
   };
-
-  page.keep(kept("out"), "alice");
+  page.keep(kept("out"));
   expect(asks()).toBe(true);
-  expect(page.load("composer", "alice", accept)).toEqual([]);
-
+  expect(page.load("alice")).toEqual([]);
   page.forget("out");
   expect(asks()).toBe(false);
 });

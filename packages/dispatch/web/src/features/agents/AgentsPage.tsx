@@ -483,9 +483,10 @@ function AgentMessageList({
     write: (cutoff: string, bounds) =>
       api.putAgentState(agent.session_id, { cleared_before: cutoff }, bounds),
     label: () => `Conversation with ${sessionLabel(agent.session_id, agent.title)} cleared`,
+    // A landing with no answer to give has the store read every query again.
     onSuccess: (next) => {
       setShowCleared(false);
-      storeAgentState(queryClient, agent.session_id, next);
+      if (next !== null) storeAgentState(queryClient, agent.session_id, next);
     },
   });
   const label = sessionLabel(agent.session_id, agent.title);

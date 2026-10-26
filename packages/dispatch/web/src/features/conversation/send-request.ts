@@ -1,14 +1,13 @@
-import { api, type WriteBounds, type WriteRequest } from "../../api/client";
+import { api, type WriteBounds } from "../../api/client";
 import type {
   AskOption,
   AskUrgency,
   CreateAgentMessageInput,
   CreateCommentInput,
   DeliveryCapability,
-  Message,
 } from "../../api/types";
 import { newSendKey } from "../../lib/send-key";
-import { retriesUnderItsKey, SEND_DEADLINE_MS, writeUnderKey } from "../writes/keyed-write";
+import { retriesUnderItsKey } from "../writes/keyed-write";
 import type {
   AcceptedMention,
   ComposerAnchor,
@@ -38,7 +37,7 @@ export interface SentRequest {
   readonly anchor: ComposerAnchor | undefined;
   readonly ask: {
     readonly multiple: boolean;
-    readonly options: AskOption[];
+    readonly options: readonly AskOption[];
     readonly urgency: AskUrgency;
   };
   readonly draft: SentDraft;
@@ -124,18 +123,6 @@ export function survivingMentions(
     surviving.push(mention);
   }
   return surviving;
-}
-
-/** A send the server did not answer within `SEND_DEADLINE_MS`. It is not a refusal: the request
- *  goes on, and `answer` is still its outcome. */
-export class SendDeadlineError extends Error {
-  readonly answer: Promise<unknown>;
-
-  constructor(answer: Promise<unknown>) {
-    super(`the server has not answered within ${SEND_DEADLINE_MS / 1000} seconds`);
-    this.answer = answer;
-    this.name = "SendDeadlineError";
-  }
 }
 
 /** What a send says once it is past `SEND_DEADLINE_MS`: still the server's, as any late send is,
@@ -230,41 +217,21 @@ export function requestFor(
   };
 }
 
-/** How a send is made: `signal` stops its trying, `sent` is told each attempt's request as it goes
- *  out, and `wire` is a request kept from an earlier page to make again verbatim. */
-export interface SendOptions {
-  readonly sent?: (request: WriteRequest) => void;
-  readonly signal?: AbortSignal;
-  readonly wire?: WriteRequest;
-}
-
-/** `sendRequest`, answered by the server, or rejected with a `SendDeadlineError` carrying the
- *  request's own answer once `SEND_DEADLINE_MS` passes without one. */
-export function sendWithinDeadline(sent: SentRequest, options: SendOptions = {}): Promise<unknown> {
-  const answer = sendRequest(sent, options);
-  const { promise, reject, resolve } = Promise.withResolvers<unknown>();
-  const deadline = setTimeout(() => reject(new SendDeadlineError(answer)), SEND_DEADLINE_MS);
-  answer.then(resolve, reject).finally(() => clearTimeout(deadline));
-  return promise;
-}
-
-/** One attempt of `sent`, any send but a message to one session (`sendRequest`), under `bounds`:
- *  built from that value alone, so no later render's props or state can reach the request it
- *  makes. */
-function attempt(sent: SentRequest, bounds: WriteBounds): Promise<unknown> {
-  const { anchor, ask, draft, edit, kind, owner, plainDelivery, replyTo } = sent;
+/** One attempt of `sent`, an edit or a send to an issue or a document, under `bounds`: built from
+ *  that value alone, so no later render's props or state can reach the request it makes. */
+function attempt(
+  sent: SentRequest & { readonly owner: Exclude<ComposerOwner, { kind: "session" }> },
+  bounds: WriteBounds
+): Promise<unknown> {
+  const { anchor, ask, draft, kind, owner, plainDelivery, replyTo } = sent;
   const { body, mentions, replacement } = draft;
-  if (edit !== undefined) return edit.save(edit.id, body.trim(), bounds);
-  if (owner.kind === "session") {
-    return Promise.reject(new Error("The direct session channel does not support asks."));
-  }
   const selection =
     anchor === undefined ? undefined : { artifact: anchor.artifact, mark_id: anchor.mark_id };
   if (kind === "ask") {
     const input = {
       anchor: selection,
       multiple: ask.multiple,
-      options: ask.options,
+      options: [...ask.options],
       question: body.trim(),
       urgency: ask.urgency,
     };
@@ -307,48 +274,25 @@ function attempt(sent: SentRequest, bounds: WriteBounds): Promise<unknown> {
 }
 
 /**
- * Sends a `SentRequest` under its key until Dispatch decides it (`writeUnderKey`), so however many
- * attempts reach Dispatch it is one write there; `options.wire`, a request an earlier page kept, is
- * made verbatim instead of built again. It sits outside the composer, so no later render's props
- * or state can reach the request it builds. A message to one session is not decided by a 2xx
- * whose one attempt is still pending - another request is sending it, or a sender that died holds
- * its claim, which Dispatch resumes for the first repeat after that claim lapses - since the
- * message is stored but not yet on its way.
+ * One attempt of a `SentRequest`, built from that value alone, so no later render's props or state
+ * can reach the request it makes, whichever surface made it and whenever the store makes it again
+ * (`held-sends.ts`): an edit saves its comment, a message to one session goes as `agentMessage`
+ * puts it, and anything else is an ask, a message reply or a comment on its issue or document. A
+ * request no route takes - an ask to a session, a message reply on a document - is refused at once,
+ * an error of the page's own.
  */
-export function sendRequest(
-  sent: SentRequest,
-  { sent: told, signal, wire }: SendOptions = {}
-): Promise<unknown> {
+export function sendAttempt(sent: SentRequest): (bounds: WriteBounds) => Promise<unknown> {
   const { edit, kind, owner, replyTo } = sent;
-  if (edit === undefined && kind === "ask" && owner.kind === "session") {
-    return Promise.reject(new Error("The direct session channel does not support asks."));
-  }
-  if (edit === undefined && replyTo?.parentKind === "message" && owner.kind === "artifact") {
-    return Promise.reject(new Error("Legacy message replies belong to an issue."));
-  }
-  if (edit !== undefined || owner.kind !== "session") {
-    return writeUnderKey(
-      (bounds) => (wire === undefined ? attempt(sent, bounds) : api.send<unknown>(wire, bounds)),
-      sent.sendKey,
-      { sent: told, signal }
-    );
-  }
-  const sessionId = owner.sessionId;
-  return writeUnderKey(
-    (bounds) =>
-      wire === undefined
-        ? api.createAgentMessage(sessionId, agentMessage(sent), bounds)
-        : api.send<Message>(wire, bounds),
-    sent.sendKey,
-    {
-      // Dispatch answers a repeat with the attempt pending while another request is sending it,
-      // or while a sender that died - a crashed process - still holds its claim, and resumes the
-      // attempt for the first repeat after that claim lapses (a minute). It never resumes an
-      // attempt of a message retried from its card, which has more than one, so that answer
-      // lands as it is.
-      decided: ({ deliveries: [only, ...more] }) => only?.state !== "pending" || more.length > 0,
-      sent: told,
-      signal,
+  if (edit !== undefined) return (bounds) => edit.save(edit.id, sent.draft.body.trim(), bounds);
+  if (owner.kind === "session") {
+    if (kind === "ask") {
+      return () => Promise.reject(new Error("The direct session channel does not support asks."));
     }
-  );
+    const message = agentMessage(sent);
+    return (bounds) => api.createAgentMessage(owner.sessionId, message, bounds);
+  }
+  if (replyTo?.parentKind === "message" && owner.kind === "artifact") {
+    return () => Promise.reject(new Error("Legacy message replies belong to an issue."));
+  }
+  return (bounds) => attempt({ ...sent, owner }, bounds);
 }

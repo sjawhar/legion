@@ -8,6 +8,7 @@ import serverBlockSchema from "../../../../envoy/internal/dispatch/pmdoc/schema/
 import type { BlockSchema } from "../api/types";
 import { blockSchemaCache } from "../features/doc/schema";
 import { resetReplyDrafts } from "../features/inbox/reply-drafts";
+import { resetPinState } from "../features/issue/pin-write";
 import { resetWriteStorage } from "../features/writes/write-storage";
 
 GlobalRegistrator.register();
@@ -65,6 +66,7 @@ notifyManager.setScheduler((callback) => callback());
 afterEach(resetReplyDrafts);
 
 // A write a test leaves out keeps writing what it keeps, and the next test's signed-in app would
-// take it up again (`HeldSends.resume`, `BroadcastQueue.resume`, `PendingWrites.resume`): each
-// test's are let go.
+// take it up again (`Writes.resume`): each test's are let go, and so is the issue state the last
+// pin answered, which the next pin would otherwise write over.
 afterEach(resetWriteStorage);
+afterEach(resetPinState);

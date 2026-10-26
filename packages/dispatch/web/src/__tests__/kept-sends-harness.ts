@@ -1,4 +1,31 @@
+import type { KeptFiles } from "../features/writes/kept-files";
 import { WriteStorage } from "../features/writes/write-storage";
+
+/** A browser's kept upload files, in memory: what IndexedDB holds for the page across a reload. */
+export function memoryFiles(): KeptFiles & { readonly rows: Map<string, File> } {
+  const rows = new Map<string, { login: string; file: File }>();
+  const files = new Map<string, File>();
+  return {
+    delete: async (key) => {
+      rows.delete(key);
+      files.delete(key);
+    },
+    get: async (key) => rows.get(key)?.file,
+    keepOnly: async (login) => {
+      for (const [key, row] of rows) {
+        if (row.login !== login) {
+          rows.delete(key);
+          files.delete(key);
+        }
+      }
+    },
+    put: async (key, login, file) => {
+      rows.set(key, { file, login });
+      files.set(key, file);
+    },
+    rows: files,
+  };
+}
 
 /** A `beforeunload` target that counts its listeners: the page asks to confirm leaving exactly
  *  while it holds one. */

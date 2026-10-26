@@ -5,8 +5,8 @@ import { api } from "../../api/client";
 import { myRepliesKey, myRepliesOwnerQuery } from "../../api/queries";
 import type { Ask } from "../../api/types";
 import { useIsHuman } from "../../hooks/useIsHuman";
-import { useSendMarkOnce } from "../../lib/useSendMarkOnce";
 import { type DwellRef, useDwell } from "../shell/useDwell";
+import { useSendMarkOnce } from "../writes/useSendMarkOnce";
 
 /** The owner a thread lives on, as `GET /api/v1/me/replies` narrows to it: an issue, or a project
  *  document (an issue's documents are the issue's). */
@@ -80,8 +80,9 @@ export function useMarkThreadRead({
         ? undefined
         : { key: `${threadId} ${seen.at}`, value: seen.at },
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: myRepliesKey }),
-    send: (readThrough: string) => api.markThreadRead(threadId, readThrough),
+    send: (readThrough: string, bounds) => api.markThreadRead(threadId, readThrough, bounds),
     shouldSend: unread,
+    target: `read:thread:${threadId}`,
     wake: unreadSet.dataUpdatedAt,
   });
   return ref;

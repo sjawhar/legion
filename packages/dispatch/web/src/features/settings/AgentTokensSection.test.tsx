@@ -129,10 +129,13 @@ function madeAt(id: string, name: string, offsetMs: number): AgentToken {
 }
 
 /** The Settings token section, its mint answered `409 KEY_COMMITTED` and its list then read as
- *  `listed`; `confirmAnswers` answers each `window.confirm` in turn. */
+ *  `listed`; the list read before the press holds those of `listed` made before it, which the page
+ *  tells apart from the lost mint's by id. `confirmAnswers` answers each `window.confirm` in
+ *  turn. */
 async function mintLostWith(listed: AgentToken[], confirmAnswers: boolean[] = []) {
+  const now = Date.now();
   const listAgentTokens = spyOn(api, "listAgentTokens")
-    .mockResolvedValueOnce([token])
+    .mockResolvedValueOnce(listed.filter((made) => Date.parse(made.created_at) <= now))
     .mockResolvedValue(listed);
   const createAgentToken = spyOn(api, "createAgentToken")
     .mockRejectedValueOnce(new ApiError(409, { code: "KEY_COMMITTED", error: "already made" }))
@@ -151,7 +154,8 @@ async function mintLostWith(listed: AgentToken[], confirmAnswers: boolean[] = []
       <AgentTokensSection />
     </QueryClientProvider>
   );
-  await screen.findByRole("cell", { name: "dsp_AbCdEf12…" });
+  // The tokens made before the press share the fixture's prefix.
+  await screen.findAllByRole("cell", { name: "dsp_AbCdEf12…" });
   const label = screen.getByLabelText<HTMLInputElement>("Token label");
   fireEvent.change(label, { target: { value: "reviewer" } });
   fireEvent.click(screen.getByRole("button", { name: "New token" }));

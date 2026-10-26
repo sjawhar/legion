@@ -4,44 +4,56 @@ import {
   type UseMutationResult,
   useMutation,
 } from "@tanstack/react-query";
-import { useLayoutEffect, useRef } from "react";
+import { useRef } from "react";
 
-import { AnswerNotKeptError, type WriteBounds } from "../../api/client";
+import type { WriteBounds } from "../../api/client";
 import { newSendKey } from "../../lib/send-key";
 import { retriesUnderItsKey } from "./keyed-write";
-import { usePendingWrites } from "./pending-writes";
+import { plainWrite, useWrites } from "./write-store";
 
 /** A write a surface makes for the reader: `useMutation`'s options, but for `mutationFn`, which
- *  the write path makes from `write` and `label`. */
+ *  the write path makes from `write` and `label`. Its data is Dispatch's answer, or `null` for a
+ *  write Dispatch made and has no answer to give for (`409 KEY_COMMITTED`, or a replay of an answer
+ *  it did not keep): a landing all the same, which `onSuccess` handles - a create form lets go of
+ *  its draft and says what was made (`LandedWithoutAnswer`) rather than opening it. */
 export interface KeyedWriteOptions<TData, TVariables, TContext>
   extends Omit<
-    UseMutationOptions<TData, DefaultError, TVariables, TContext>,
+    UseMutationOptions<TData | null, DefaultError, TVariables, TContext>,
     "mutationFn" | "networkMode"
   > {
   /** What the shell's pending-writes indicator names this write, in the reader's words. */
   readonly label: (variables: TVariables) => string;
-  /** One attempt of the write, under the bounds the queue gives it: its key and its deadline. */
+  /** One attempt of the write, under the bounds the store gives it: its key, its login and its
+   *  deadline. */
   readonly write: (variables: TVariables, bounds: WriteBounds) => Promise<TData>;
   /** Whether this surface shows a refusal itself (a form the reader is in front of): the
    *  indicator then shows the write only while it is out. A function decides it per write. */
   readonly inline?: boolean | ((variables: TVariables) => boolean);
-  /**
-   * Called once the write has landed: with Dispatch's answer, or with `null` when Dispatch made
-   * the write and has no answer to give for it (`AnswerNotKeptError`: `409 KEY_COMMITTED`, or a
-   * replay of an answer it did not keep). A surface that creates something - a form the reader
-   * would otherwise press again - handles both here, in one place: it lets go of its draft either
-   * way, and for `null` says what was made (`LandedWithoutAnswer`) rather than opening it.
-   */
-  readonly onLanded?: (data: TData | null, variables: TVariables) => void;
+  /** What the write is ordered on: writes to one target - one issue's fields - go out in press
+   *  order, so an older one never lands after a newer one. */
+  readonly target?: (variables: TVariables) => string | undefined;
+  /** An upload's file, kept across a reload with the write. */
+  readonly file?: (variables: TVariables) => File | undefined;
+}
+
+/** Whether `a` and `b` are the same variables: one value, or two that serialise alike (a form
+ *  built afresh at each submit); variables that do not serialise are only themselves. */
+function sameVariables(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
 }
 
 /**
  * The one way a surface that is not a composer writes to Dispatch: each `mutate` is one press,
  * made under a key of its own and tried under it until Dispatch decides it, shown by the shell's
- * pending-writes indicator while it is out and, refused, with Retry and Discard
- * (`PendingWrites.run`). The mutation settles with Dispatch's answer, its refusal, or
+ * pending-writes indicator while it is out and, refused, with Retry and Discard (`Writes.run`).
+ * The mutation settles with Dispatch's answer - `null` for a landing without one - its refusal, or
  * `SendStoppedError` once the reader stops it, so the surface keeps its optimistic state until
- * then and rolls it back on anything but a landing. A `mutate` of the very variables a press the
+ * then and rolls it back on anything but a landing. A `mutate` of the same variables a press the
  * reader stopped was made with is that press made again, under its key - Dispatch may have taken
  * it, and answers the key with what it did - while one after Dispatch's own refusal is a new
  * press, since Dispatch would answer the old key with that refusal. It runs whether or not the
@@ -50,67 +62,49 @@ export interface KeyedWriteOptions<TData, TVariables, TContext>
  * offer Stop trying.
  */
 export function useKeyedWrite<TData, TVariables = void, TContext = unknown>({
+  file,
   inline,
   label,
-  onLanded,
+  target,
   write,
   ...options
 }: KeyedWriteOptions<TData, TVariables, TContext>): UseMutationResult<
-  TData,
+  TData | null,
   DefaultError,
   TVariables,
   TContext
 > {
-  const writes = usePendingWrites();
+  const writes = useWrites();
   /** The last press the reader stopped, which a Retry of the same variables makes again. */
   const stopped = useRef<{ readonly key: string; readonly variables: TVariables } | undefined>(
     undefined
   );
-  const { onError, onSettled, onSuccess } = options;
-  const mutation = useMutation({
+  return useMutation({
     ...options,
     mutationFn: (variables: TVariables) => {
       const again = stopped.current;
       stopped.current = undefined;
       const key =
-        again !== undefined && Object.is(again.variables, variables) ? again.key : newSendKey();
+        again !== undefined && sameVariables(again.variables, variables) ? again.key : newSendKey();
       return writes
         .run({
+          detail: null,
+          file: file?.(variables),
           inline: typeof inline === "function" ? inline(variables) : inline,
           key,
+          kind: plainWrite,
           label: label(variables),
+          presentation: "indicator",
+          target: target?.(variables),
           write: (bounds) => write(variables, bounds),
         })
         .catch((error: unknown) => {
-          if (error instanceof Error && retriesUnderItsKey(error)) {
+          if (retriesUnderItsKey(error instanceof Error ? error : undefined)) {
             stopped.current = { key, variables };
           }
           throw error;
         });
     },
     networkMode: "always",
-    // A write that landed with no answer to give (`AnswerNotKeptError`) is no refusal: the queue
-    // has read again everything it could have changed, so the surface rolls nothing back and
-    // settles as on a landing, with no error.
-    onError: (error, variables, ...rest) => {
-      if (error instanceof AnswerNotKeptError) {
-        onLanded?.(null, variables);
-        return;
-      }
-      return onError?.(error, variables, ...rest);
-    },
-    onSettled: (data, error, ...rest) =>
-      onSettled?.(data, error instanceof AnswerNotKeptError ? null : error, ...rest),
-    onSuccess: (data, variables, ...rest) => {
-      onLanded?.(data, variables);
-      return onSuccess?.(data, variables, ...rest);
-    },
   });
-  // Nor does the surface show it as one: the mutation is reset before the browser paints it.
-  const landedWithoutAnswer = mutation.error instanceof AnswerNotKeptError;
-  const { reset } = mutation;
-  useLayoutEffect(() => {
-    if (landedWithoutAnswer) reset();
-  }, [landedWithoutAnswer, reset]);
-  return mutation;
 }

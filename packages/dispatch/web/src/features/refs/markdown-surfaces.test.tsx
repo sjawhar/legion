@@ -23,6 +23,7 @@ import { AgentThread } from "../agent-view/AgentThread";
 import { dispatchMetadata, type KeyedMessage, turnKey } from "../agent-view/dispatch-marks";
 import { BroadcastsPage } from "../agents/BroadcastsPage";
 import { ReplyQuote } from "../conversation/ReplyQuote";
+import { NO_SESSION_SENDS } from "../conversation/useSessionSends";
 import { ThreadCard } from "../margin/ThreadCard";
 import type { Thread } from "../margin/useMarginItems";
 import { SearchPalette } from "../search/SearchPalette";
@@ -134,8 +135,7 @@ function Transcript({ messages }: { messages: KeyedMessage[] }): ReactNode {
         placeholder="Message the session…"
         replayCount={0}
         resetKey="session-1"
-        sendRefusal={null}
-        sending={false}
+        sends={NO_SESSION_SENDS}
         sessionId="session-1"
       />
     </AssistantRuntimeProvider>

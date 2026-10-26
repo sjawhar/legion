@@ -187,9 +187,11 @@ export function useAskAnswerForm({
       const changed = replacing.current !== undefined;
       replacing.current = undefined;
       setChanging(false);
+      // Answered either way; with no answer to give, the card reads the ask afresh instead of
+      // showing the one Dispatch would have handed back.
       setJustAnswered(updatedAsk);
-      if (changed) {
-        if (updatedAsk.answer !== null) {
+      if (changed || updatedAsk === null) {
+        if (updatedAsk?.answer != null) {
           const changedAnswer = updatedAsk.answer;
           queryClient.setQueryData<AskRead>(["ask-thread", ask.id], (current) =>
             current === undefined
@@ -199,9 +201,8 @@ export function useAskAnswerForm({
         }
         void queryClient.invalidateQueries({ queryKey: ["ask-thread", ask.id] });
         void queryClient.invalidateQueries({ queryKey: ["me", "answers"] });
-      } else {
-        onAnswered?.(ask.id);
       }
+      if (!changed) onAnswered?.(ask.id);
       invalidateOwnerReads();
     },
   });

@@ -1,5 +1,7 @@
-import { useMutation } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
+
+import type { WriteBounds } from "../../api/client";
+import { plainWrite, useWrites } from "./write-store";
 
 /** One read mark: what it is for (`key`) and what a send carries (`value`). */
 export interface ReadMark<T> {
@@ -16,46 +18,61 @@ export interface SendMarkOnceOptions<T, R> {
   /** A value whose change makes the hook look again without making a new mark - the server's
    *  unread count, say - so a mark whose send failed for good is sent once more. */
   readonly wake?: unknown;
-  readonly send: (value: T) => Promise<R>;
+  /** What the marks of this view are ordered on: one mark of it goes out after the one before. */
+  readonly target: string;
+  /** One attempt of the mark's write, under the bounds the write store gives it. */
+  readonly send: (value: T, bounds: WriteBounds) => Promise<R>;
   readonly onSuccess?: (result: R) => void;
 }
 
 /**
  * The write every read mark makes: `send(mark.value)` once per `mark.key`, whenever the server
- * still needs it (`shouldSend`). The key, not the value, decides when to write, so a caller that
- * rebuilds its value on every render sends nothing more, and a retry carries the value the mark
- * was made with. A failed write is retried twice with backoff; if it still fails while it is the
- * view's latest write, its key is forgotten, so it is sent again when `shouldSend` or `wake` next
- * changes, rather than the mark staying unsent until the key changes. A write that a newer key
- * replaced while it was retrying forgets nothing when it fails: the newer write stands for the
- * view, and forgetting its key would send it once more.
+ * still needs it (`shouldSend`), as a quiet write of the one write store (`Writes`): tried under
+ * its key like any write and kept across a reload, never shown, and let go if Dispatch has not
+ * confirmed it five minutes after it was made. The key, not the value, decides when to write, so
+ * a caller that rebuilds its value on every render sends nothing more, and a retry carries the
+ * value the mark was made with. A mark that ends without landing - refused, or let go - while it
+ * is the view's latest has its key forgotten, so it is sent again when `shouldSend` or `wake`
+ * next changes, rather than the mark staying unsent until the key changes. A mark a newer key
+ * replaced forgets nothing when it ends: the newer one stands for the view.
  */
 export function useSendMarkOnce<T, R>({
   mark,
   shouldSend,
+  target,
   wake,
   send,
   onSuccess,
 }: SendMarkOnceOptions<T, R>): void {
+  const writes = useWrites();
   // The mark this view last sent, so a re-render does not send its key again; compared by
-  // identity, so a failure can tell its own write from a newer one with the same key.
+  // identity, so an ending can tell its own write from a newer one with the same key.
   const sent = useRef<ReadMark<T> | undefined>(undefined);
-  const latest = useRef({ mark, onSuccess, send });
-  latest.current = { mark, onSuccess, send };
-  const { mutate } = useMutation({
-    mutationFn: (sending: ReadMark<T>) => latest.current.send(sending.value),
-    onError: (_error, failed) => {
-      if (sent.current === failed) sent.current = undefined;
-    },
-    onSuccess: (result) => latest.current.onSuccess?.(result),
-    retry: 2,
-  });
+  const latest = useRef({ mark, onSuccess, send, target });
+  latest.current = { mark, onSuccess, send, target };
   const key = mark?.key;
   // biome-ignore lint/correctness/useExhaustiveDependencies: wake is a trigger the effect does not read.
   useEffect(() => {
     const current = latest.current.mark;
     if (!shouldSend || current === undefined || sent.current?.key === current.key) return;
     sent.current = current;
-    mutate(current);
-  }, [key, mutate, shouldSend, wake]);
+    const { send: write } = latest.current;
+    writes
+      .run({
+        detail: null,
+        kind: plainWrite,
+        label: "Read mark",
+        presentation: "quiet",
+        target: latest.current.target,
+        write: (bounds) => write(current.value, bounds),
+      })
+      .then(
+        (result) => {
+          if (result !== null) latest.current.onSuccess?.(result);
+        },
+        () => {
+          if (sent.current === current) sent.current = undefined;
+        }
+      );
+  }, [key, shouldSend, wake, writes]);
 }

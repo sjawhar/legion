@@ -8,6 +8,7 @@ import { type ReactNode, useLayoutEffect, useMemo, useRef } from "react";
 
 import type { Message, MessageRead } from "../../api/types";
 import { compareTimestamps } from "../../lib/timestamps";
+import type { SessionSends } from "../conversation/useSessionSends";
 import { actorName, isViewer } from "../refs/actor";
 import { AgentThread } from "./AgentThread";
 import { type AgentConversation, dispatchTurns, toThreadMessages } from "./conversation";
@@ -41,12 +42,11 @@ export function AgentRuntimeThread({
   empty,
   onSend,
   ownSendCount,
+  sends,
   placeholder,
   replayCount,
   resetKey,
   sendDisabled,
-  sendRefusal,
-  sending,
   sessionId,
   stored,
   viewer,
@@ -55,11 +55,14 @@ export function AgentRuntimeThread({
   commands: readonly AgentStreamCommand[] | undefined;
   conversation: AgentConversation;
   empty: string;
-  /** Hands `body` to the session's keyed held send, as the page's delivery mode stands. */
+  /** Hands `body` to the session as a write of its own, as the page's delivery mode stands. */
   onSend: (body: string) => void;
   /** Bumped once per message this viewer sent that the session accepted, so their own send takes
    *  them back to the live end (`AgentThread`'s `useLiveFollow`). */
   ownSendCount: number;
+  /** Every message to the session Dispatch has not yet made, each shown as its own turn, and what
+   *  acts on them. */
+  sends: SessionSends;
   placeholder: string;
   /** Bumped once per rebuild of the whole transcript from the session's replay
    *  (`useAgentStream`'s `replays`). */
@@ -67,10 +70,6 @@ export function AgentRuntimeThread({
   resetKey: string;
   /** Holds the composer's Send while a model or thinking switch awaits the session. */
   sendDisabled: boolean;
-  /** Why the composer's Send cannot be pressed while a keyed send is held. */
-  sendRefusal: string | null;
-  /** Whether this session's own keyed send is in flight. */
-  sending: boolean;
   sessionId: string;
   stored: readonly MessageRead[];
   /** The signed-in human's login: their own messages read as theirs, every other one names its
@@ -164,13 +163,13 @@ export function AgentRuntimeThread({
     // keeps assistant-ui from planting an empty upcoming assistant turn after the viewer's
     // newest message.
     isRunning: false,
-    // The composer cannot send while this session's keyed send is held (out, or refused and
-    // waiting on Retry or Discard), or while a model or thinking switch is pending on it, and the
-    // box still takes the next message.
-    isSendDisabled: sending || sendDisabled || sendRefusal !== null,
+    // The composer cannot send while a model or thinking switch is pending on this session, and
+    // the box still takes the next message. A message still out, late or refused holds nothing:
+    // the next one goes out behind it (INFRA-442).
+    isSendDisabled: sendDisabled,
     messages,
-    // assistant-ui's composer has already emptied the box when this runs. The held-send store owns
-    // the message from here, under its key, and keeps its draft for Retry after a refusal.
+    // assistant-ui's composer has already emptied the box when this runs. The write store owns the
+    // message from here, under its key, and keeps its draft for Retry after a refusal.
     onNew: async (message: { content: readonly { type: string; text?: string }[] }) => {
       const body = message.content
         .filter((part) => part.type === "text")
@@ -211,8 +210,7 @@ export function AgentRuntimeThread({
         placeholder={placeholder}
         replayCount={replayCount}
         resetKey={resetKey}
-        sendRefusal={sendRefusal}
-        sending={sending}
+        sends={sends}
         sessionId={sessionId}
       />
     </AssistantRuntimeProvider>

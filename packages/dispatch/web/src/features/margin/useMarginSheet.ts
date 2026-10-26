@@ -6,16 +6,12 @@ import { useLocation } from "react-router-dom";
 import { api, type WriteBounds } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
 import { whoAmIQuery } from "../../api/queries";
-import type { Ask, UserState } from "../../api/types";
+import type { Ask } from "../../api/types";
 import { useSending } from "../../hooks/useSending";
 import { useHeldSend, useHeldSends, useHeldSendsUnder } from "../conversation/held-sends";
 import { useProjectArtifact } from "../document/useProjectArtifact";
-import { eventItemId, stateForIssue } from "../issue/pins";
-import {
-  applyPinStateOperation,
-  issueStateTransport,
-  sharedIssueStateWrites,
-} from "../issue/state-write-queue";
+import { writePin } from "../issue/pin-write";
+import { eventItemId } from "../issue/pins";
 import { parseIssuePath, parseProjectPath } from "../refs/routes";
 import { COMPACT_VIEWPORT_QUERY, PHONE_VIEWPORT_QUERY } from "../shell/useDialog";
 import type { MarginComposer } from "./CommentsTab";
@@ -165,34 +161,7 @@ export function useMarginSheet(): MarginSheetModel {
   const visibleArtifactId = visibleArtifact?.id;
   const removePin = useCallback(
     (id: string) => {
-      if (owner?.kind !== "issue") {
-        return;
-      }
-      const operation = { id, op: "unpin" as const };
-      queryClient.setQueryData<UserState>(["user-state"], (current) => {
-        const issueState = stateForIssue(current, owner.key);
-        return {
-          ...current,
-          [owner.key]: {
-            ...issueState,
-            dismissed: applyPinStateOperation(issueState.dismissed, operation),
-          },
-        };
-      });
-      void sharedIssueStateWrites
-        .enqueue(owner.key, operation, {
-          ...issueStateTransport,
-          onDrained: (key, next) => {
-            queryClient.setQueryData<UserState>(["user-state"], (current) => ({
-              ...current,
-              [key]: next,
-            }));
-          },
-          onError: () => {
-            void queryClient.invalidateQueries({ queryKey: ["user-state"] });
-          },
-        })
-        .catch(() => {});
+      if (owner?.kind === "issue") writePin(queryClient, owner.key, { id, op: "unpin" });
     },
     [owner, queryClient]
   );

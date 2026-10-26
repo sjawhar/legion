@@ -4,7 +4,7 @@ import { textSecondaryOnSurface } from "../../theme/classes";
 
 /**
  * The one line a create form shows when Dispatch made what it asked for and has no answer to give
- * for it (`onLanded(null)`, from `409 KEY_COMMITTED`): the form has let go of its draft, so a
+ * for it (its `onSuccess` given `null`, from `409 KEY_COMMITTED`): the form has let go of its draft, so a
  * second press makes nothing, and the reader learns where the item will turn up. `what` names it
  * (`The issue`); `children` adds what this surface needs said beyond that.
  */

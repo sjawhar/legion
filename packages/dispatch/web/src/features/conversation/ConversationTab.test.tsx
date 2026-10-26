@@ -28,6 +28,7 @@ import type {
 import { stubMatchMedia } from "../margin/margin-fixture";
 import { seedUnread } from "../replies/replies-fixture";
 import { KeymapProvider } from "../shell/KeymapProvider";
+import { writesOf } from "../writes/write-store";
 import { ConversationTab } from "./ConversationTab";
 import { answeredWithErrorGuidance, safeRetryGuidance } from "./delivery";
 
@@ -377,7 +378,10 @@ test("Conversation holds Reply while its composer sends", async () => {
   }
 });
 
-test("retry replays every pin operation rejected by the state-write queue", async () => {
+// W22. Each pin is a write of the one store, in press order on its issue: the ones Dispatch refuses
+// stay refused in the shell's indicator, the Pin buttons stay live, and each Retry re-sends its own
+// pin over the state Dispatch holds then, so after both land the issue holds both.
+test("each refused pin is retried on its own, over the state Dispatch holds", async () => {
   const originalGetMyState = api.getMyState;
   const originalPutIssueState = api.putIssueState;
   const stub = stubLists({
@@ -387,20 +391,20 @@ test("retry replays every pin operation rejected by the state-write queue", asyn
     ],
   });
   const queryClient = newQueryClient();
-  const writes: string[][] = [];
+  queryClient.setQueryData(["whoami"], { event_head: "0", kind: "user", login: "alice" });
+  let saved: string[] = [];
   let failures = 2;
   let unmount: (() => void) | undefined;
 
   try {
-    api.getMyState = async () => ({ "CORE-1": issueState() });
+    api.getMyState = async () => ({ "CORE-1": issueState(saved) });
     api.putIssueState = async (_issueKey, input) => {
-      const dismissed = input.dismissed ?? [];
-      writes.push(dismissed);
       if (failures > 0) {
         failures -= 1;
-        throw new Error("offline");
+        throw new ApiError(409, { code: "PIN_REFUSED", error: "refused" });
       }
-      return issueState(dismissed);
+      saved = input.dismissed ?? [];
+      return issueState(saved);
     };
 
     unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
@@ -411,18 +415,22 @@ test("retry replays every pin operation rejected by the state-write queue", asyn
       fireEvent.click(button);
     }
 
+    const writes = writesOf(queryClient);
     await waitFor(() =>
-      expect(screen.getByRole("alert").textContent).toContain("Couldn't save pin — retry")
+      expect(writes.rows().map((write) => write.status)).toEqual(["refused", "refused"])
     );
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-
+    expect(
+      screen
+        .getAllByRole("button", { name: /Pin|Unpin/ })
+        .every((button) => !button.hasAttribute("disabled"))
+    ).toBe(true);
+    for (const write of writes.rows()) act(() => writes.retry(write.id));
+    await waitFor(() => expect(writes.rows()).toEqual([]));
     // A card built from `/messages` has no event id at all: it pins under its own id.
-    await waitFor(() =>
-      expect(writes.at(-1)).toEqual([
-        "pinned_items:message:message-2",
-        "pinned_items:message:message-1",
-      ])
-    );
+    expect([...saved].sort()).toEqual([
+      "pinned_items:message:message-1",
+      "pinned_items:message:message-2",
+    ]);
   } finally {
     unmount?.();
     api.getMyState = originalGetMyState;
@@ -1783,7 +1791,7 @@ test("landing on a message thread shows its replies and marks the thread read th
     const newest = page.turn("message:message-2");
     expect(page.viewport.observed()).toContain(newest);
     await dwellOn(page.viewport, newest);
-    expect(page.mark.mock.calls).toEqual([["message-1", "2026-09-09T00:05:00.25Z"]]);
+    expect(page.mark.mock.calls).toEqual([["message-1", "2026-09-09T00:05:00.25Z", keyedAttempt]]);
   } finally {
     page.cleanup();
   }
@@ -1802,7 +1810,7 @@ test("a message thread taller than the screen is marked read from its newest rep
     await screen.findByText("Session reply message-3");
     act(() => page.viewport.show(page.turn("message:message-1"), { height: 3_000, visible: 300 }));
     await dwellOn(page.viewport, page.turn("message:message-3"));
-    expect(page.mark.mock.calls).toEqual([["message-1", "2026-09-09T00:06:00Z"]]);
+    expect(page.mark.mock.calls).toEqual([["message-1", "2026-09-09T00:06:00Z", keyedAttempt]]);
     // The older reply is not what the mark watches.
     expect(page.viewport.observed()).not.toContain(page.turn("message:message-2"));
   } finally {
@@ -1823,7 +1831,7 @@ test("a targeted message's thread is marked read once its newest reply is on scr
   try {
     await screen.findByText("Session reply message-2");
     await dwellOn(page.viewport, page.turn("message:message-2"));
-    expect(page.mark.mock.calls).toEqual([["message-1", "2026-09-09T00:07:00Z"]]);
+    expect(page.mark.mock.calls).toEqual([["message-1", "2026-09-09T00:07:00Z", keyedAttempt]]);
   } finally {
     page.cleanup();
   }
@@ -1860,7 +1868,7 @@ test("at a desktop width, landing on a comment opens its thread inline and readi
       page.turn("comment:root-comment").querySelector("article")?.getAttribute("aria-expanded")
     ).toBe("true");
     await dwellOn(page.viewport, replyItem);
-    expect(page.mark.mock.calls).toEqual([["root-comment", reply.created_at]]);
+    expect(page.mark.mock.calls).toEqual([["root-comment", reply.created_at, keyedAttempt]]);
   } finally {
     page.cleanup();
   }
@@ -1897,7 +1905,7 @@ test("on a phone, landing on a comment opens its thread dialog and reading it ma
     const replyItem = within(dialog).getByText("Reply comment").closest("li");
     if (replyItem === null) throw new Error("expected the reply's item");
     await dwellOn(page.viewport, replyItem);
-    expect(page.mark.mock.calls).toEqual([["root-comment", reply.created_at]]);
+    expect(page.mark.mock.calls).toEqual([["root-comment", reply.created_at, keyedAttempt]]);
   } finally {
     page.cleanup();
     restoreViewport();

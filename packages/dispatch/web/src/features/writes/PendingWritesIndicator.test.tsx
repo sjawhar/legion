@@ -4,10 +4,21 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import type { ReactNode } from "react";
 
 import { keptTab } from "../../__tests__/kept-sends-harness";
-import { ApiError, api } from "../../api/client";
+import { ApiError, api, type WriteBounds } from "../../api/client";
 import { SEND_DEADLINE_MS } from "./keyed-write";
 import { PendingWritesIndicator } from "./PendingWritesIndicator";
-import { pendingWrites } from "./pending-writes";
+import { plainWrite, type Writes, writesOf } from "./write-store";
+
+/** One write the indicator shows, labelled `label`, its attempt `write`. */
+function indicatorWrite(
+  writes: Writes,
+  label: string,
+  write: (bounds: WriteBounds) => Promise<unknown>
+): void {
+  void writes
+    .run({ detail: null, kind: plainWrite, label, presentation: "indicator", write })
+    .catch(() => undefined);
+}
 
 const refusal = new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" });
 const verdict = new ApiError(422, { code: "KEY_REUSED", error: "the key names another write" });
@@ -59,21 +70,15 @@ test("the indicator counts the writes out, names a late one, and clears when it 
   const held = Promise.withResolvers<never>();
   const putIssueState = spyOn(api, "putIssueState").mockReturnValue(held.promise);
   const { client, unmount } = mountIndicator();
-  const writes = pendingWrites(client);
+  const writes = writesOf(client);
 
   try {
-    void writes
-      .run({
-        label: "CORE-1 set to done",
-        write: (bounds) => api.patchIssue("CORE-1", { status: "done" }, bounds),
-      })
-      .catch(() => undefined);
-    void writes
-      .run({
-        label: "CORE-2 pinned",
-        write: (bounds) => api.putIssueState("CORE-2", { pinned: true }, bounds),
-      })
-      .catch(() => undefined);
+    indicatorWrite(writes, "CORE-1 set to done", (bounds) =>
+      api.patchIssue("CORE-1", { status: "done" }, bounds)
+    );
+    indicatorWrite(writes, "CORE-2 pinned", (bounds) =>
+      api.putIssueState("CORE-2", { pinned: true }, bounds)
+    );
     await settle();
 
     const indicator = await screen.findByTestId("pending-writes");
@@ -135,15 +140,12 @@ test("a refused write names Dispatch's reason, and Retry sends it again", async 
   const tab = keptTab();
   const patchIssue = spyOn(api, "patchIssue").mockRejectedValueOnce(verdict);
   const { client, unmount } = mountIndicator();
-  const writes = pendingWrites(client);
+  const writes = writesOf(client);
 
   try {
-    void writes
-      .run({
-        label: "CORE-1 set to done",
-        write: (bounds) => api.patchIssue("CORE-1", { status: "done" }, bounds),
-      })
-      .catch(() => undefined);
+    indicatorWrite(writes, "CORE-1 set to done", (bounds) =>
+      api.patchIssue("CORE-1", { status: "done" }, bounds)
+    );
     await settle();
 
     const indicator = await screen.findByTestId("pending-writes");
