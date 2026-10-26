@@ -18,20 +18,21 @@ export function answeredPost(page: Page, path: string, status: number) {
   );
 }
 
-/** Holds every `POST` to `pattern` until `release`, as a slow server would, and counts them. */
+/** Holds every `POST` to `pattern` until `release`, as a slow server would, and counts them, with
+ *  the `Idempotency-Key` each carried. */
 export async function holdPosts(
   page: Page,
   pattern: string
-): Promise<{ posts: () => number; release: () => void }> {
+): Promise<{ keys: () => (string | null)[]; posts: () => number; release: () => void }> {
   const { promise: held, resolve: release } = Promise.withResolvers<void>();
-  let posts = 0;
+  const keys: (string | null)[] = [];
   await page.route(pattern, async (route) => {
     if (route.request().method() !== "POST") return route.fallback();
-    posts += 1;
+    keys.push(await route.request().headerValue("idempotency-key"));
     await held;
     return route.fallback();
   });
-  return { posts: () => posts, release };
+  return { keys: () => [...keys], posts: () => keys.length, release };
 }
 
 /** What a route answers a `POST` it refuses: the status, and the code and reason the composer

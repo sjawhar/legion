@@ -113,7 +113,7 @@ test("on a phone, Expand thread while a send is out keeps the draft and its refu
       (response) =>
         response.request().method() === "POST" &&
         response.url().endsWith(`/api/v1/issues/${issue.key}/comments`) &&
-        response.status() === 503
+        response.status() === WRITE_REFUSED.status
     );
     refuse();
     await refused;
@@ -569,7 +569,8 @@ test("on a phone, a thread resolved while its own reply is out stays open with t
 // Back, Escape and the thread's own controls wait for a send from the thread, so a request the
 // server never answers must not keep the reader there: past the client's deadline they let go,
 // and Back takes the reader out. The send is not refused - the server may still take it - so the
-// thread offers no Retry, and the draft stays held.
+// thread offers no Retry, and the draft stays held. Each attempt is held to KEYED_SEND_ATTEMPT_MS
+// (15 s), so by the deadline the page has asked again, under the write's one key.
 test("on a phone, a thread reply the server never answers lets Back go at the deadline", async ({
   browser,
 }) => {
@@ -602,7 +603,9 @@ test("on a phone, a thread reply the server never answers lets Back go at the de
     await expect(field).toHaveValue("Reply into the void");
     await expect(field).toBeDisabled();
     await expect(back).toBeEnabled();
-    expect(send.posts()).toBe(1);
+    const keys = send.keys();
+    expect(keys.length).toBeGreaterThan(1);
+    expect(new Set(keys).size).toBe(1);
     await back.click();
     await expect(threadView(page)).toHaveCount(0);
   } finally {

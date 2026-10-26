@@ -331,8 +331,9 @@ test("a docked send out when its issue closes keeps the draft and shows the refu
 // The client's deadline lets go of the controls that would take the reader away from a send; it
 // is not a refusal. A comment that mentions agents can take the server longer than that, and it
 // is still one comment: the deadline offers no Retry, and the answer that follows lands as any
-// answer does.
-test("a docked send the server answers at 35 s posts once and shows once, with no Retry at the deadline", async ({
+// answer does. Each attempt is held to KEYED_SEND_ATTEMPT_MS (15 s), so a 35 s wait asks again,
+// under the same key: every POST carries that one key, and Dispatch makes the comment once.
+test("a docked send the server answers at 35 s is one keyed write and shows once, with no Retry at the deadline", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -362,7 +363,10 @@ test("a docked send the server answers at 35 s posts once and shows once, with n
     await expect(turns.getByText("Slow but sure", { exact: true })).toHaveCount(1);
     await expect(field).toHaveValue("");
     await expect(form.getByText(/^Still sending/)).toHaveCount(0);
-    expect(send.posts()).toBe(1);
+    const keys = send.keys();
+    expect(keys.length).toBeGreaterThan(1);
+    expect(new Set(keys).size).toBe(1);
+    expect(keys[0]).toMatch(/^[0-9a-f-]{36}$/);
   } finally {
     await alice.close();
   }
