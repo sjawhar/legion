@@ -2,34 +2,27 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-391",
-  "completed": "2026-10-25T20:49:30Z",
+  "completed": "2026-10-26T01:32:03Z",
+  "round": 2,
   "decision": "changes_requested",
-  "reviewedCodeHead": "97ddf0a48fc4bed61f347de3327e18baaceaca07",
+  "reviewedCodeHead": "fa2dacfbb399b233620c8e01a751a311cbae4a1b",
   "critical": 0,
-  "important": 3,
+  "important": 1,
   "minor": 0,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy-client/src/dispatch-http.ts",
-      "description": "listArchitectureSources reads only the new route, so this release's dispatch CLI against a Dispatch older than 0117 answers every issue create in a project with no architecture source with false advice ('Could not check whether project NOARCH has an architecture model: no route for GET /api/v1/projects/NOARCH/architecture-sources. Review the dispatch skill ...'), reproduced against the base server 83f63201 in the reviewer's lane; the base CLI on the same server prints nothing. This reintroduces the exact defect #1522 fixed (a project with no source reads as none from either server). Fix: on the older server's 404 NOT_FOUND for the list, read the singular GET (200 null or 404 SOURCE_NOT_FOUND -> [], a row -> [row]) and rethrow anything else; lock it with a test; correct the envoy-client CHANGELOG line that documents the false advice."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/routes_table.go",
-      "description": "Removing GET /api/v1/projects/{key}/architecture-source gives every session still on an earlier pi-envoy or claude-envoy the same false advice on every issue create once Dispatch deploys: base CLI 83f63201 against the head server printed 'Could not check whether project NOARCH has an architecture model: no route for GET /api/v1/projects/NOARCH/architecture-source ...' (reproduced); the head CLI on the same server prints nothing. Keep that read route in this release answering its old contract (null without a source, a source row otherwise), described as kept for clients older than this release."
-    },
-    {
-      "severity": "important",
-      "file": "PR body",
-      "description": "No '## Contract change census' although the PR removes four routes, renames GET /architecture's 'source' to 'sources', removes DispatchClient.getArchitectureSource, changes syncArchitectureSource's signature, drops 'repo' from the PUT body and changes dispatch_architecture_sync's details shape. The census needs its search commands, every hit with a disposition, and a rollout line that is warn-first or an immediate refusal naming the vulnerability it closes."
+      "file": "packages/envoy/internal/dispatch/api/architecture_source.go",
+      "description": "checkArchitectureSource (line 196) proves the branch with GitHub.Ref, which reads GET /repos/{o}/{r}/commits/{ref} (githubapp/client.go:645-651) and resolves any commit-ish. On real GitHub (review App, sjawhar/legion) commits/main~1, commits/main^, commits/HEAD, commits/refs%2Fheads%2Fmain and commits/<40-hex sha> all answer a commit, while git/ref/heads/<value> answers 404 for each and refs/heads/main for main (and refs/heads/infra-391/architecture on sjawhar/legion-smoke, 404 for the prefix infra-391). The tester saved main~1, a SHA and refs/heads/<branch> through the server. A source saved on a SHA syncs once and never moves; one saved on main~1 tracks the wrong commit; Settings shows either as a branch. The check this PR adds, and its docs ('the branch exists in it'), promise an existing branch. Fix: the save accepts only an existing branch name and refuses a SHA, a relative ref or a refs/ path with 409 SOURCE_ACCESS (or 400 SOURCE_INPUT), writing nothing; an exact branch read (git/ref/heads/{branch} or branches/{branch}) is one mechanism; do not refuse a value only because it looks like a SHA, since a branch may have such a name. A test that fails at fa2dacfbb399 for at least a SHA and main~1, and the census section 6 updated. Sync's own use of Ref unchanged. Architect's ruling under dispatch://INFRA-49/ask/2d080aec-ce9a-4c7c-a235-ae998d2b0830."
     }
   ],
   "thermonuclear": {
-    "head": "0a3b99cf71046a5a527df5c91f4aae4939ed877c",
-    "deepReview": "approve, no findings; Security rows answered (authz, secret, untrusted-input, prompt, agent-def, transport; supply-chain and sandbox not touched)",
-    "codeQuality": "one maintainability item: architecture-source tests grow __tests__/settings.test.tsx from 928 to 1,084 lines with whole-App mocks; move them to features/settings/ArchitectureSourcesSection.test.tsx (AgentTokensSection.test.tsx pattern) — named as the fast-follow, to fold into the next push"
+    "head": "fa2dacfbb399b233620c8e01a751a311cbae4a1b",
+    "deepReview": "changes: the commit-ish branch check above; no other finding. Consumers (component identity, graph refs, attachments, delivery, event consumers, SPA invalidation), the two kept singular routes and the client fallbacks checked. Security: authz (routes require an authenticated user or bearer, bearer writes need an actor: architecture_source.go:109-111, server.go:616-643), secret (reuses the installation-token cache, no new holder: architecture_source.go:187-199), untrusted-input (path repo validated, SQL parameterized, ref path-escaped: architecture_source.go:151-164, client.go:649-651), agent-def (skills/dispatch/SKILL.md:139 and skills/legion-architect/SKILL.md:457 describe the contract only), transport (existing response-size and time bounds: client.go:608-630); prompt, supply-chain, sandbox not touched.",
+    "codeQuality": "one item: architecture_source_test.go grows from 642 to 1,093 lines; split the older-client singular-route tests and captureSourceWarnings (lines 448-584) into their own file, keeping the shared GitHub fake shared. Named as the fast-follow, for the next push."
   },
-  "ci": "At 97ddf0a48fc4 read 2026-10-25T20:48Z: Docs 40230403152 success, Worker Image 40230403197 success, PR Title 40230637803 success, Tests 40230403139 in progress, Legion Envoy and Contracts 40230403058 queued; required set lint, typecheck, test, pr-title. A request for changes does not wait on it.",
-  "verified": "PR files 80 = changed_files 80 (paginated); compare main...head not truncated (80 files). Migration 0117 is still the next free number on main. Tester's A2/A6/upgrade/race proofs read and consistent with the diff."
+  "ci": "At code head fa2dacfbb399 read 2026-10-26T01:31Z: required lint, typecheck, test, pr-title all completed success (the required set from the main ruleset; branch protection has none). Non-required envoy-go, envoy-go-race, dispatch, dispatch-memory, dispatch-multiprocess, pi-legion, claude-envoy, envoy-infra-go, envoy-smoke, broker-multiprocess still queued or in progress. compare fa2dacfbb399...f4569fb4c99b changes only .legion/.",
+  "threads": "PRRT_kwDORFy7ds6wE5Qu and PRRT_kwDORFy7ds6wE5Qz (both mine, round 1): fixed, replied 4373302526 and 4373302595, accepted; the implementer had already resolved both. No bot thread.",
+  "census": "Re-ran the census patterns at fa2dacfbb399 with git grep (':!.legion'): architecture-source(?![s-]) 52 hits/21 files, the tree .source pattern 4, getArchitectureSource 5, syncArchitectureSource( 19, putArchitectureSource 24, dispatch_architecture_sync 25; every hit is listed with a disposition in the body. The body's command names revision 80d924329642 while its text says fa2dacfbb399; the counts are equal at both. Rollout lines: warn-first for the two kept routes, immediate refusal for the missing-branch save naming what it closes.",
+  "verified": "E2E (implementer) at 02b464b10f9c (fa2dacfbb399 adds one docs line) and E2E (tester) at fa2dacfbb399 present. Round-1 fixes read: dispatch-http.ts isNoRoute fallbacks for list and every-source sync; kept GET and POST singular routes with warn. Merge 98ad9cd539c3 resolution read: test fixtures moved to 40-hex SHAs and per-repo 422/404 fakes for #2202's Ref."
 }
