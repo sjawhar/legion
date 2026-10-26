@@ -533,11 +533,25 @@ func TestHealthzReportsAnUnstampedCommitAsNull(t *testing.T) {
 
 // /healthz says this build judges a write's Idempotency-Key (INFRA-258), which the agents' client
 // reads before it retries a write under its key: an earlier Dispatch ignores the header and would
-// run the retry again. It is the binary's fact, so a probe whose database is down reports it too.
+// run the retry again. It is the binary's fact, so a probe that answers 503 - its database down,
+// closed or never configured - carries it in its body as a 200 does: a client that reads the body
+// whatever the status resends a write its outage refused.
 func TestHealthzReportsThatWritesTakeIdempotencyKeys(t *testing.T) {
-	for name, database := range map[string]*store.Store{"a database": storetest.Open(t), "no database": nil} {
+	closed := storetest.Open(t)
+	closed.Pool.Close()
+	for name, probe := range map[string]struct {
+		database *store.Store
+		status   int
+	}{
+		"a database":        {storetest.Open(t), http.StatusOK},
+		"a closed database": {closed, http.StatusServiceUnavailable},
+		"no database":       {nil, http.StatusServiceUnavailable},
+	} {
 		response := httptest.NewRecorder()
-		dispatchHandler(http.NewServeMux(), database, nil, nil, "").ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		dispatchHandler(http.NewServeMux(), probe.database, nil, nil, "").ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		if response.Code != probe.status {
+			t.Errorf("healthz with %s: status %d, want %d", name, response.Code, probe.status)
+		}
 		var health map[string]any
 		if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
 			t.Fatalf("decode health response: %v", err)
