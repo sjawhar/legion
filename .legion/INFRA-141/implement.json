@@ -2,40 +2,53 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-141",
-  "completed": "2026-10-25T23:58:00Z",
+  "completed": "2026-10-26T03:04:21Z",
+  "round": "generation 3, review round requesting changes at e5185432 (dispatch://INFRA-49/ask/2d080aec-ce9a-4c7c-a235-ae998d2b0830: a defect with a clear fix in code this tree touches is fixed here)",
   "proof": [
     {
-      "criterion": "A1/A2 — a session-addressed send and an agent delivery to a session only the session store holds (cold cache) succeed: 200 with the envelope delivered, and exactly one push with delivery_status=delivered",
-      "surface": "go test of ./cmd/listener against the in-process NATS test server (internal/testnats), the listener's real HTTP handlers and JetStream durable; no container runtime",
-      "command": "cd packages/envoy && go test ./cmd/listener -count=1 -v -run '^(TestSendReadsTheSessionStoreWhileTheCacheIsCold|TestAgentDeliveryReadsTheSessionStoreWhileTheCacheIsCold|TestSendAnswersServiceUnavailableWhileTheBusIsUnreachable|TestSendRefusesTheBusRatherThanTheSessionWhenTheStoreReadDoesNotAnswer|TestSendAnswersServiceUnavailableWhenTheBusRefusesThePublish|TestADeniedPublishIsRefusedPermanentlyAndNotRecordedAsBusUnavailable|TestAPublishThatLosesTheRoleClaimRaceSaysSoRatherThanBlamingTheBus|TestUnplaceableAgentDeliveryRetriesThenGivesUp|TestUnplaceableRetryWindowFitsTheBoundsItDependsOn|TestUnplaceableDeferralsStopAtTheirCap|TestARedeliveryGivesItsDeferralSlotBack|TestARedeliveryThisListenerNeverDeferredGivesNoSlotBack|TestAPushFailureIsDeferredOnceWhereOtherCausesAreDeferredFurther|TestAGiveUpWhoseNoticeCanNeverBePublishedIsStillTerminal|TestListenerRecordsEverySendAndPublishRequest|TestGiveUpCounterSeparatesItsThreeCauses)$'",
-      "observed": "exit 0, ok 48.819s; all 16 named tests listed as --- PASS (A1 TestSendReadsTheSessionStoreWhileTheCacheIsCold 0.07s, A2 TestAgentDeliveryReadsTheSessionStoreWhileTheCacheIsCold 0.04s, A3 bus-unreachable 3.57s and store-read 1.05s, A4 three, A5 seven, A6 two)",
-      "headSha": "445fcfcdc08490808876200b9ab561474339c903 (code tree identical to 8be80926726bcf3ae2d372731f3902b0c019f712 outside .legion/: jj diff --stat --from 8be80926 --to 445fcfcd shows only .legion/INFRA-141/plan.json)",
-      "negativeControl": "go test -overlay replacing liveSessionEntry's store read (cmd/listener/api.go:624-630) with a cache-only answer (return nats.ErrKeyNotFound), workspace untouched (jj diff --stat empty after): exit 1, TestSendReadsTheSessionStoreWhileTheCacheIsCold fails 'status 404, body {\"error\":\"no live session ses_cold_cache_target\"}' and TestAgentDeliveryReadsTheSessionStoreWhileTheCacheIsCold fails 'the cold-cache delivery pushed 0 times ([])'"
+      "criterion": "Review item 2: a role route's holder resolution is bounded by the request's sendRequestBudget (3.5 s), so a role store that is connected but does not answer is reported inside the caller's attempt; and the lookup and publish answer by name",
+      "surface": "the real envoy-listener binary built at this head, connected to a real NATS (internal/testnats/cmd/natsd) through a TCP relay that is then frozen (connection kept open, no bytes forwarded); throwaway rig under $TMPDIR, driven with curl",
+      "command": "go build -o listener-new ./cmd/listener; bash stall-smoke.sh listener-new new …: start natsd, relay, listener; GET /v1/roles/stall-role (bus up); freeze the relay; GET /v1/roles/stall-role; POST /v1/messages/publish {topic: notifications.role.stall-role}",
+      "observed": "bus up: 404 in 0.0036 s {\"error\":\"no holder for role stall-role\",\"reason\":\"unclaimed\"}; frozen GET: 500 in 3.503348 s {\"error\":\"read role stall-role's claim: context deadline exceeded\"}; frozen publish: 503 in 3.503347 s {\"error\":\"envoy: the message bus did not answer: read role stall-role's claim: context deadline exceeded\"}, Retry-After: 1; listener.log has one WARN listener publish record {outcome: bus_unavailable, status: 503, topic: notifications.role.stall-role}",
+      "headSha": "e6372254547a3f84c5269a53222a5a682e9030ab",
+      "negativeControl": "The same rig with the listener built from the reviewed head e5185432 (git archive): frozen GET and frozen publish both got no answer at all: 'curl: (52) Empty reply from server' after 10.002 s and 10.005 s (the listener's HTTP write timeout), status 000"
     },
     {
-      "criterion": "A4 — a publish NATS denies or a publish with an ended context sends nothing and reports the denial",
-      "surface": "go test of ./internal/bus against the in-process NATS test server",
-      "command": "cd packages/envoy && go test ./internal/bus -count=1 -v -run '^(TestPublishCoreReportsAPublishNATSDenies|TestAnAdHocPublishNATSDeniesReturnsTheDenial|TestAPublishWithAnEndedContextSendsNothing|TestAPublishConfirmedWithASpentDeadlinePublishesNothing|TestAPublishCancelledWhileWaitingForAReconnectSendsNothing)$'",
-      "observed": "exit 0, ok 6.295s; all 5 named tests --- PASS",
-      "headSha": "445fcfcdc08490808876200b9ab561474339c903 (code tree identical to 8be80926 outside .legion/)",
-      "negativeControl": "TestAPublishWithAnEndedContextSendsNothing carries its control: the same call under a live context publishes and is received, so a bus that delivered nothing for every call would fail it (PR body, round five)"
+      "criterion": "Review items 1, 2, 3, 4, 7a, 7b, 7c and the tester's test: each pinned by a test that fails before its fix",
+      "surface": "go test of ./cmd/listener and ./internal/bus against the in-process NATS test server, the listener's real HTTP handlers and JetStream durable",
+      "command": "cd packages/envoy && go test ./cmd/listener -count=1 -v -skip '^(TestDispatchMentionResolvesASessionTheCacheHasNotRefilled|TestDispatchBroadcastResolvesSessionsTheCacheHasNotRefilled|TestDispatchRefusesABroadcastWhenASessionReadDoesNotAnswer|TestDispatchRefusesAClaimTakeoverWhileTheCacheRefills)$' -timeout 20m; go test ./internal/bus ./internal/session ./internal/integration ./internal/store -count=1",
+      "observed": "ok cmd/listener 247.605s with 0 '--- FAIL' lines, including --- PASS for TestARoleLookupThatLosesTheRoleClaimRaceSaysSoRatherThanFailing, TestARoleResolutionWhoseStoreCallDoesNotAnswerAnswersInsideTheBudget (4 subtests, 4.04-4.06 s each), TestAnOrphanedDeferralSlotIsReclaimedAtItsExpiry, TestListenerDeliveryHandlersShareOneDeferralSet, TestListenerRecordsEverySendAndPublishRequest, the tester's TestAWindowPastTheDurablesMaxDeliverStillGivesUpBeforeIt (both subtests, its body unchanged: the only hunk in its file is another test's doc comment), TestSendReadsTheSessionStoreWhileTheCacheIsCold and TestAgentDeliveryReadsTheSessionStoreWhileTheCacheIsCold; ok internal/bus 216.113s (incl. the new TestAPublishCancelledAsTheReconnectCompletesSendsNothing), ok internal/session 8.125s, ok internal/integration 97.376s, ok internal/store 18.792s; go build ./..., go vet and gofmt -l . clean",
+      "headSha": "e6372254547a3f84c5269a53222a5a682e9030ab",
+      "negativeControl": "Each new test run with its fix removed through go test -overlay (workspace untouched): GET race → 'lookup into a lost claim race: status 500, body {\"error\":\"role holder changed while resolving\"}'; publish resolution under context.Background() → 'answered after 6.001182792s, want at sendRequestBudget (3.5s) and inside 4s'; no post-reconnect ctx read → 'the subscriber received {…evt-cancel-as-reconnected…} from a publish cancelled as the reconnect completed (publish answered <nil>)'; no sweep in take → the orphan test fails; capability_refused recorded as invalid_request → 'the record's outcome = \"invalid_request\", want \"capability_refused\"'; role_lapsed recorded as role_unclaimed → 'the record's outcome = \"role_unclaimed\", want \"role_lapsed\"'; rebind given a fresh set → 'the self-health rebind's config carries deferral set 0x…450, want the role lane's 0x…438'"
     },
     {
-      "criterion": "A3/A5/A6/A6' — on the real envoy-listener binary: an absent destination gets 404 by name, every send is recorded, and with the bus down a send gets 503 inside the 3.5 s budget and the real client raises EnvoyApiError 503 rather than timing out; each bus-down request writes one WARN bus_unavailable record",
-      "surface": "the real envoy-listener binary against a real NATS server, through HTTP (curl) and @legion/envoy-client, driven by scripts/e2e-local.sh; evidence in packages/envoy/out/e2e/",
-      "command": "cd packages/envoy && bash scripts/e2e-local.sh; then jq -R -c 'fromjson? // empty | objects | select(.msg==\"listener send\" and .level==\"WARN\" and .outcome==\"bus_unavailable\" and .status==503 and .target_session==\"ses_e2e_local\") | {time,outcome,status}' out/e2e/listener.log",
-      "observed": "exit 0 with both PASS lines; 'bus-down send: HTTP 503 in 3.506826 seconds'; 'client refusal: EnvoyApiError 503 envoy: the message bus did not answer: bus: waiting for NATS to reconnect: context deadline exceeded'; the jq filter prints exactly three records at 23:55:20.008Z, 23:55:23.932Z and 23:55:27.689Z (curl plus the client's two attempts)",
-      "headSha": "445fcfcdc08490808876200b9ab561474339c903 (code tree identical to 8be80926 outside .legion/)",
-      "negativeControl": "The same script's identical send answered 200 (one INFO accepted record) before NATS was stopped; the three bus_unavailable records are all later than nats.log's 'Initiating Shutdown...' at 23:55:16.459Z, so none was written while the bus was up"
+      "criterion": "Item 6: the request records, role-holder resolution and unplaceable-delivery policy moved without behaviour change; the original acceptance (cold-cache send, bus-down 503 inside 3.5 s, records) still holds on the real binary",
+      "surface": "the real envoy-listener binary against a real NATS, through HTTP and @legion/envoy-client (scripts/e2e-local.sh); and a go/parser comparison of every moved declaration",
+      "command": "cd packages/envoy && bash scripts/e2e-local.sh; jq A6′ filter over out/e2e/listener.log; throwaway go/parser script comparing each top-level declaration (with doc comment) in api.go/delivery.go at a8e96a1c (the commit before the move) against the new files at 564a9ed8",
+      "observed": "e2e-local exit 0, both PASS lines, 'bus-down send: HTTP 503 in 3.502782 seconds', 'client refusal: EnvoyApiError 503 envoy: the message bus did not answer: …'; the jq filter prints exactly three WARN bus_unavailable 503 records (03:00:44.740Z, 03:00:48.569Z, 03:00:52.326Z), all after nats.log's 'Initiating Shutdown...' at 03:00:41.205Z; declaration comparison: 33 moved declarations byte-identical, 0 differing, none lost or duplicated; the extracted unplaceableAgentDelivery body differs from the old branch only in return true/false and three location words in comments",
+      "headSha": "e6372254547a3f84c5269a53222a5a682e9030ab",
+      "negativeControl": "The identical e2e send answered 200 before NATS was stopped; and the comparison script reports DIFF/LOST for any declaration whose text changed (it flagged none)"
     }
   ],
   "filesChanged": [
-    ".legion/INFRA-141/implement.json"
+    "packages/envoy/internal/bus/nats.go — ctx read again after ensureConnWithContext; test seam reconnectWaitTick (nil in production)",
+    "packages/envoy/internal/bus/export_test.go (new), publish_cancel_reconnect_test.go, publish_ended_context_test.go",
+    "packages/envoy/cmd/listener/api.go — moved units out; roleGetHandler budget and 503 race answer; publishHandler passes its ctx",
+    "packages/envoy/cmd/listener/delivery.go — unreachable exception fields deleted; unplaceable branch calls unplaceableAgentDelivery",
+    "packages/envoy/cmd/listener/request_record.go (new), role_holder.go (new), unplaceable_delivery.go (new)",
+    "packages/envoy/cmd/listener/main.go — newListenerDeliveryHandlerConfigs",
+    "packages/envoy/cmd/listener/publish_refusal_answers_test.go, send_route_acceptance_test.go, delivery_unplaceable_test.go, delivery_handler_configs_test.go (new), api_test.go, startup_test.go, unplaceable_delivery_acceptance_test.go (comment), dispatch_resolution_test.go (comment)",
+    "packages/envoy/internal/session/handler.go, session.go (comments)",
+    "packages/envoy/AGENTS.md, packages/envoy/docs/architecture.md, packages/envoy/CHANGELOG.md"
+  ],
+  "trickyParts": [
+    "nats.go's legacy KeyValue Get/Delete take no context, so role_holder.go bounds them with withinContext (goroutine + select on ctx.Done(), the streamInfoWithin pattern). An abandoned conditional release can still land after the 503/500; that is safe because it deletes only the exact revision whose holder was just found gone.",
+    "unplaceableDeferralExpiry = unplaceableRetryDelay + 2 × consumerAckWait = 125 s: NAK delay, an AckWait for a lost NAK, and an AckWait of margin for the redelivery to reach the handler. A message pending longer loses its slot early and the set undercounts by one until its delivery.",
+    "GET /v1/roles/<role> answers only the race 503; a role store that does not answer within the budget stays 500 there, as before, now naming the call."
   ],
   "deviations": [
-    "No code change in generation 3, per plan.md's 'What this generation must not change': the code is the tree of 8be80926 outside .legion/, and this push carries only this handoff with the skip-checks trailer.",
-    "The working copy found at the turn's start held only the daemon's .legion/INFRA-141/workspace-recovered.json (recovery from f39471a2 after volume-missing). It was not committed: the turn started with jj new @- on 445fcfcd, leaving that commit as an unpushed sibling, so the recovery note never reaches the branch.",
-    "PR body: the Fast-follow line now cites dispatch://INFRA-410 in place of the INFRA-49 ask, as the architect asked; a generation-3 paragraph was added to the E2E (implementer) line naming this re-run; the CI line names the runs at the code head 8be80926."
+    "Beyond item 5, the same fanout 'listener delivery failed' outcome's exceptionReason and exceptionFailureClearsAttempt were also unreachable for the same reason (no fanoutRefusal, fanout never carries a control topic) and were deleted with it; behaviour unchanged, full suite green.",
+    "Thermo: ce-simplify-code ran once in this PR's first implementing round and is not re-run; the thermonuclear pair is the reviewer's, at the head it reviews."
   ],
   "openQuestions": []
 }
