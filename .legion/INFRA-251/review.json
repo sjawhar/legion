@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-251",
+  "completed": "2026-10-26T08:30:04Z",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 3,
+  "reviewedHead": "the handoff push above cfbd3587d28388d36e6acaa8df073ca977cc1c18; code head edd6044b011338469568540f7b12be9a580b7976",
+  "round": "new round: unchanged-diff fingerprint at my last approval 4d9fba63c3bd (cb5c1756176e802a) differs from cfbd3587d283 (2ccf97d53d4071fa); only the 14 skill files' branch diff moved (the port into #2197's rewritten skills)",
+  "ci": "main's required set lint, typecheck, test, pr-title completed/success at edd6044b011338469568540f7b12be9a580b7976 (runs 40287856845, 40288249773), read 2026-10-26T08:28Z; compare edd6044b...cfbd3587 only .legion/; the non-required Legion Envoy and Contracts run 40287856895 was still queued",
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/workflow/parked_decision.go:108",
+      "description": "The re-admitted architect's start task says to request approval 'as skill://legion-architect section 1 says'; after #2197 the request-approval steps live in references/design-gate.md, which section 1 (SKILL.md:30-31) points to. One extra hop, nothing broken. Fast-follow wording."
+    },
+    {
+      "severity": "minor",
+      "file": "skills/legion-controller/references/wakes.md:64-75",
+      "description": "The parked-decision wake section restates the own-hold and foreign-park rules parked-decisions.md#deciding owns, faithfully ported from the old table row; a second copy to keep in step. Fast-follow duplication."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/daemon/workflow.go:468-613",
+      "description": "Code-quality pass: the file passes 1,000 lines (951 -> 1,101) through the awaiting-root boot catch-up. Every branch commit touching the file is #2131's (sami/gate-frees-slot), none of INFRA-251's, so the decomposition belongs to #2131's review, which gate G1 lands first."
+    }
+  ]
+}
