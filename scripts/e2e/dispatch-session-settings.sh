@@ -58,7 +58,7 @@ unset ANTHROPIC_API_KEY OPENAI_API_KEY
 # The nats-server the run installs when the caller names none: the 2.10 line the daemon's own NATS
 # tests pin (packages/daemon/internal/testnats/nats.go), as merged-root-waits.sh installs it.
 nats_version=v2.10.22
-# The pi-envoy the older-plugin session runs: the last release before the settings frame.
+# The pi-envoy the older-plugin session runs: a release before the settings frame.
 older_pi_envoy=10.24.0
 
 root=$(cd "$(dirname "$0")/../.." && pwd)

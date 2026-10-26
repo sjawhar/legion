@@ -1631,7 +1631,14 @@ LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable'
 
 The script does only the setup and the cleanup. The driver,
 [`lib/dispatch-session-settings.ts`](lib/dispatch-session-settings.ts), owns every Oh My Pi
-process and one held-open page, signed in as `alice`, and runs the checks in order.
+process and one held-open page, signed in as `alice`, and runs the checks in order, each its own
+function. The parts it drives are its siblings in `lib/`:
+[`session-settings-omp.ts`](lib/session-settings-omp.ts) (Oh My Pi in `--mode rpc`),
+[`session-settings-services.ts`](lib/session-settings-services.ts) (Dispatch, the listener and the
+bus), [`session-settings-browser.ts`](lib/session-settings-browser.ts) (the held-open page),
+[`session-settings-session-file.ts`](lib/session-settings-session-file.ts) (the session file's
+entries) and [`session-settings-common.ts`](lib/session-settings-common.ts) (the rig's setup, the
+transcript and the waits).
 
 It differs from [`dispatch-user-turns.sh`](#dispatch-user-turnssh) in these ways:
 
@@ -1728,7 +1735,7 @@ also drops the database and removes the work directory.
 | `resume-keeps-switch` | one page, held open from before the first relaunch to the last step, and three steps. **The switch stays (A2):** the process ends and is started again with `--resume <session file>`, which opens the same session; `get_state` and `/effort` show the model and level picked last. **Numbering:** once the resumed process has registered, a bare NATS client subscribes to `agentstream.<session>.control` and waits up to 30 s for the first control message the relay sends there (its `watch`, about every 10 s while a page is open), then 1 s more; RPC `set_thinking_level` to another level then shows on the held page within 20 s with no reload, and the level set back shows too. **Arming:** the process ends again and is started with `--resume <session file> --model <the other model>`; `get_state` shows that model, and with no RPC change and no reload the held page shows it within 20 s of the registration. The screenshot is the held page then. RPC `set_model` (and `set_thinking_level`, when the level moved) puts the session back on the model and level picked last, and the reloaded header shows them. A held-page step that times out reloads the page, to tell a report the page missed from one never made, and fails naming its step |
 | `new-session-defaults` | a new session of the same profile reports the profile's default model and `low`, through RPC and on its own live view |
 | `fallback` | a pick of `rig-broken/broken-model`, then a composer prompt. That request fails, and the session file gains a `model_change` with role `fallback` to the first model. The header shows the first model within 20 s of that entry, with no further user message. The check prints how each request of the run ended, including the retry on the fallback model |
-| `older-plugin-notice` | a session on `@sjawhar/pi-envoy` 10.24.0, the last release before the settings frame (pinned in the script, since the newest release reports its settings once this one ships), installed with `bun add` into the run's directory, runs one prompt. Its live view shows that turn's model, no picker, and the restart notice |
+| `older-plugin-notice` | a session on `@sjawhar/pi-envoy` 10.24.0, a release before the settings frame (pinned in the script, since the newest release reports its settings once this one ships), installed with `bun add` into the run's directory, runs one prompt. Its live view shows that turn's model, no picker, and the restart notice |
 | `attribution` | `bob` sends a switch with `X-Dispatch-User: bob`, the header's own body (`/model <id>` as a steer). Dispatch stores it as `bob`'s, the session answers it, and `alice`'s held-open page shows `bob` beside it in the thread |
 
 ## verifiers-staging-token.sh
