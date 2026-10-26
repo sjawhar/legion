@@ -2,20 +2,21 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-448",
-  "completed": "2026-10-26T21:30:21Z",
-  "round": 4,
+  "completed": "2026-10-26T23:32:30Z",
+  "round": 5,
   "decision": "approved",
   "critical": 0,
   "important": 0,
   "minor": 0,
-  "reviewedCodeHead": "05b29be5dd913cc247b7632092bf74775a91c456",
-  "scope": "Narrow (INFRA-204 architect): C1-C4 of spec v4, the earlier rounds' fixes, the tester's two closed-document fixes; cleanup on the Fast-follow line only.",
+  "reviewedCodeHead": "19aaa96fe03bdf0a48bb877a441cf14c962aef69",
+  "lastApprovedHead": "551fc07416ff8e2adf94cbe82ddcd8429080c3e7",
+  "fingerprint": "b55d3516 (551fc074) -> 8a20f939 (1e860588): changed, so a new round over the two merges since the approval",
   "keyFindings": [],
-  "roundThreeFixesVerified": [
-    "legion_agents.go open: a failed move to the latest connection stores the unavailable state and returns false, so the retry opens again; the INFO line follows the move; TestALegionAgentRegistryWhoseMoveToANewConnectionFailsOpensAgainOnTheLatest fails on the old code",
-    "legion_agents.go close: only stops the retry; an open under way ends in its own timeouts and only stores state; TestClosingALegionAgentRegistryDoesNotWaitForAnOpenUnderWay fails on the old code"
+  "mergesVerified": [
+    "51c56482 (INFRA-440, #2237): INFRA-440's agent-drawing code kept in ConversationTab.tsx, its test and AgentsPage.tsx; isClosed removed only from Reply, Retry and the delivery guidance and AgentsPage's isClosed={false}; remaining isClosed reaches ThreadCard (accept/reject, edit, resolve) and MentionComposer closed (Suggest, Ask); reply-target signatures consistent",
+    "19aaa96f (#2160): merge-gate.md, acceptance.md, the three implementer prompts, AGENTS.md and concepts.md keep both rules (record on the PR's Production: line whether or not the issue is closed; clear defect to the controller, any other a dispatch ask); claude-envoy copies match a fresh build; C3 search prints only true closed-issue refusals (repo field, document rebuild, closed document room, a reopening status alone)"
   ],
-  "fastFollow": "A rare self-healing interleaving: a hook can move the store while the open's own move fails, leaving 503 until the backoff timer (at most 1 min); wake the retry in the move-failure branch and correct the comment at legion_agents.go:104-106. retried is read only by a test; the two failure branches could share one helper with named kinds. The 'one ERROR' docs (each retry makes the bus log one nats async error) and the round-2 cleanups stay on the PR's Fast-follow line.",
-  "thermonuclear": "deep-review: APPROVE; code-quality: APPROVE; both at 44eab33b, both ran go test -race -count=3 ./cmd/listener/ -run 'Legion|Registry' green; provider not verified",
-  "ci": "At code head 05b29be5 (newest pull_request run; compare to 44eab33b is .legion/ only, 2 files): required lint, typecheck, test and pr-title success. GitHub reports the pull request CONFLICTING with main after INFRA-440 (#2237) merged; the conflict merge goes through the implementer and the fingerprint rule."
+  "fastFollow": "ConversationTab.tsx:1081: merge 51c56482 restored the comment 'a refusal's Retry or Discard draft' that the PR had corrected to 'a refusal's Retry'; the docked composer never shows Discard draft. Plus the earlier rounds' items on the PR's Fast-follow line.",
+  "thermonuclear": "deep-review: APPROVE; code-quality: APPROVE (one stale comment, cleanup); both at 1e860588; bun tests, tsc, daemon prompt tests and claude-envoy build --check green; provider not verified",
+  "ci": "At code head 19aaa96f (newest pull_request run; compare to 1e860588 is .legion/ only, 2 files): required lint, typecheck, test and pr-title success."
 }
