@@ -1,5 +1,5 @@
 import type { Actor, Event } from "../../api/types";
-import { actorLabel, describeAskResolution, shortSessionId } from "../refs/actor";
+import { type AgentPart, askResolutionParts } from "../refs/AgentName";
 
 export function dateKey(iso: string): string {
   const date = new Date(iso);
@@ -32,11 +32,14 @@ function sameActor(left: Actor, right: Actor): boolean {
   return left.kind === right.kind && left.id === right.id;
 }
 
-export function activityDescription(
-  event: Event,
-  previousStatus?: string,
-  titles?: ReadonlyMap<string, string>
-): string {
+/** One line of the Activity tab, as `AgentPart`s: an agent it names keeps its identity until
+ *  `ActivityLine` draws it through `AgentName`. */
+export function activityDescription(event: Event, previousStatus?: string): AgentPart[] {
+  const description = describe(event, previousStatus);
+  return typeof description === "string" ? [description] : description;
+}
+
+function describe(event: Event, previousStatus: string | undefined): string | AgentPart[] {
   switch (event.type) {
     case "project.created":
       return `created project ${event.payload.key}`;
@@ -77,7 +80,7 @@ export function activityDescription(
     case "issue.claimed":
       return event.payload.previous_claim === undefined
         ? "claimed the issue"
-        : `took the claim from ${actorLabel(event.payload.previous_claim.actor, titles)}`;
+        : ["took the claim from ", { actor: event.payload.previous_claim.actor }];
     case "issue.released": {
       // A release always carries the claim it cleared (the server appends the event only with a
       // claim in hand), so the only question is whose it was: naming the releaser's own claim
@@ -88,7 +91,7 @@ export function activityDescription(
       const released = event.payload.previous_claim.actor;
       return sameActor(released, event.actor)
         ? "released the claim"
-        : `released ${actorLabel(released, titles)}'s claim`;
+        : ["released ", { actor: released }, "'s claim"];
     }
     case "issue.deployed":
       return `deployed ${event.payload.repo}#${event.payload.number} to production (run ${event.payload.run_id})`;
@@ -127,7 +130,7 @@ export function activityDescription(
     case "suggestion.rejected":
       return `rejected a suggestion on ${event.payload.artifact_name}`;
     case "ask.resolved":
-      return describeAskResolution(event.payload.resolution);
+      return askResolutionParts(event.payload.resolution);
     case "ask.opened":
       return `asked “${event.payload.question}”`;
     case "ask.anchor_refreshed":
@@ -157,17 +160,32 @@ export function activityDescription(
     case "child.removed":
       return `removed child ${event.payload.child_key}`;
     case "subscription.remove_requested":
-      return `requested unsubscribe for ${shortSessionId(event.payload.session_id)}`;
+      return [
+        "requested unsubscribe for ",
+        { sessionId: event.payload.session_id, storedTitle: undefined },
+      ];
     case "subscription.removed":
-      return `unsubscribed ${shortSessionId(event.payload.session_id)} from notifications`;
+      return [
+        "unsubscribed ",
+        { sessionId: event.payload.session_id, storedTitle: undefined },
+        " from notifications",
+      ];
     case "ask.follower_added":
       return event.actor.kind === "session" && event.actor.id === event.payload.session_id
         ? "followed an ask"
-        : `added ${shortSessionId(event.payload.session_id)} to an ask's followers`;
+        : [
+            "added ",
+            { sessionId: event.payload.session_id, storedTitle: undefined },
+            " to an ask's followers",
+          ];
     case "ask.follower_removed":
       return event.actor.kind === "session" && event.actor.id === event.payload.session_id
         ? "unfollowed an ask"
-        : `removed ${shortSessionId(event.payload.session_id)} from an ask's followers`;
+        : [
+            "removed ",
+            { sessionId: event.payload.session_id, storedTitle: undefined },
+            " from an ask's followers",
+          ];
     case "block.repaired":
       return `repaired server-owned state on block ${event.payload.block_id}`;
     case "block.invalid":
@@ -183,7 +201,7 @@ export type ActivityItem =
       id: string;
       at: string;
       author: Actor;
-      description: string;
+      description: AgentPart[];
       event: Event;
       seq: number;
     }
@@ -196,9 +214,6 @@ export interface ActivityInput {
   lastReadSeq: number;
   /** Local YYYY-MM-DD. */
   today: string;
-  /** Live session titles from the agent registry, so an activity line names a session the
-   *  same way every other surface does. */
-  readonly titles?: ReadonlyMap<string, string>;
 }
 
 /**
@@ -206,12 +221,7 @@ export interface ActivityInput {
  * which is what separates this list from the Conversation's. A line's description is read in
  * sequence order, so `issue.updated` can say what status it reopened from.
  */
-export function buildActivityItems({
-  events,
-  lastReadSeq,
-  titles,
-  today,
-}: ActivityInput): ActivityItem[] {
+export function buildActivityItems({ events, lastReadSeq, today }: ActivityInput): ActivityItem[] {
   const lines: Extract<ActivityItem, { kind: "event" }>[] = [];
   let previousIssueStatus: string | undefined;
 
@@ -221,7 +231,7 @@ export function buildActivityItems({
       id: `activity:${event.id}`,
       at: event.created_at,
       author: event.actor,
-      description: activityDescription(event, previousIssueStatus, titles),
+      description: activityDescription(event, previousIssueStatus),
       event,
       seq: event.seq,
     });
