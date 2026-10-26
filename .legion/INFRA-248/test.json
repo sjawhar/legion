@@ -2,55 +2,55 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-248",
-  "completed": "2026-10-26T19:01:14Z",
-  "round": 6,
-  "testedHead": "efde11adb5a8dae6b837df51cc8f22e3139c496b",
-  "prHead": "29cfa051bf28e476db72778b033afe81a75d8685",
-  "scope": "Narrowed by the architect (Envoy 2026-10-26T17:11Z): review round 2's fixes and the spec's acceptance lines; rounds 1-5's passes not reopened. The workspace was recreated before this round; round 5's handoff (3fa9abe9) is an ancestor of the head, and the scratch scripts were rebuilt.",
-  "mergeable": "gh pr view 2219: MERGEABLE at 29cfa051",
+  "completed": "2026-10-26T19:52:13Z",
+  "round": 7,
+  "testedHead": "3264771a17196319d1b6d66ebb9928aa075e25aa",
+  "prHead": "9456058ea78722e7212c464b99ae98274d4ea407",
+  "scope": "Set by the architect (Envoy 2026-10-26T19:49Z): the delta since efde11ad only — the Fast-follow 9d01535e, decision A (the try-the-options step moved into dispatch-writing-specs after #2136), the 91 cut words, stale dispatch-brainstorming references and the claude-envoy mirror, required CI. No image Job unless the image's skill files differ.",
+  "mergeable": "gh pr view 2219: MERGEABLE at 9456058e",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same claims independently: the skill listing Oh My Pi actually sends a model, captured in the head's image (not the implementer's loadSkills probe test), and real Claude Code 2.1.310 loads of all three skills with hide: true. A1 and A2 re-driven on the head's image sha256:eee8fadfce84a7dc4a23bb0a0314a69cc90a6915c656cf1ea031a67821bb8358 (Worker Image run 40368294581). The implementer's new skills-guard test runs in CI's pi-legion job (Legion Envoy and Contracts 40368294303, queued); the recreated workspace has no node_modules, so I ran no bun suite."
+    "how": "Re-ran the moved test with LEGION_TEST_OMP=/opt/omp/bin/omp and added a negative control; checked each of the PR body's 13 'Still stated in' rows against the head's text; counted the Dispatch skills' words at the head and at main d1f4b8a6; checked the moved step against spec v4 change 1 element by element; ran claude-envoy's build --check."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Review round 2: ce-dogfood, thermonuclear-deep-review and thermonuclear-code-quality stay hidden from Oh My Pi's skill listing",
-      "surface": "the head's worker image in a Job in namespace <namespace> (runtimeClassName gvisor, uid 1000): Oh My Pi loading /opt/legion/pi-envoy and /opt/legion/pi-legion by --extension as a pod does, its request to a loopback stand-in provider recorded",
-      "command": "bash /legion/scratch/tmp/infra-248-test/job-r6.sh <image> r6 (log r6-job.log there): omp -p --model operator/probe-test --extension /opt/legion/pi-envoy --extension /opt/legion/pi-legion \"say hi\", provider baseUrl http://127.0.0.1:18991 answering 400; the '- <name>: ' lines of the captured request parsed",
-      "observed": "listed: asd-ste100, ce-simplify-code, dispatch, dispatch-brainstorming, dispatch-first, envoy, legion-architect, legion-controller, legion-oracle, legion-retro, legion-worker; ce-dogfood, thermonuclear-deep-review, thermonuclear-code-quality absent. In the image each of the three SKILL.md files has 'hide: true' (count 1) and no disable-model-invocation (count 0).",
-      "headSha": "efde11adb5a8dae6b837df51cc8f22e3139c496b",
-      "negativeControl": "the same run with a pi-legion copy whose ce-dogfood SKILL.md has its 'hide: true' line removed -> ce-dogfood appears in the listing (the two thermonuclear skills still absent)"
+      "criterion": "Fast-follow: the real-Oh-My-Pi hide check lives in packages/pi-shared/test/skills-guard.ts (unhiddenSkills) and packages/pi-legion/AGENTS.md names it",
+      "surface": "the pinned Oh My Pi binary (/opt/omp/bin/omp) loading pi-legion's staged partition through its own loadSkills, from the shared guard",
+      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp bun test src/skills-guard.test.ts",
+      "observed": "14 pass, 0 fail; the 'each hidden' test is one call to unhiddenSkills(omp, staged, HIDDEN_SKILLS); AGENTS.md's guard row names unhiddenSkills and its Checks line adds src/skills-guard.test.ts to the LEGION_TEST_OMP run",
+      "headSha": "3264771a17196319d1b6d66ebb9928aa075e25aa",
+      "negativeControl": "with 'hide: true' removed from skills/thermonuclear-code-quality/SKILL.md (restored with jj restore afterwards) -> the test fails: Received [\"thermonuclear-code-quality is listed by Oh My Pi (hide: false)\"], expected []"
     },
     {
-      "criterion": "Review round 2 and round 4's failure: all three skills load through Claude Code's Skill tool with hide: true",
-      "surface": "real Claude Code 2.1.310 (npm @anthropic-ai/claude-code) with --plugin-dir at a copy of packages/claude-envoy/legion from 29cfa051; every assistant turn in each transcript reports model claude-opus-5-5 (2 turns per load run, 3 in the refusal run)",
-      "command": "CLAUDE_CONFIG_DIR=$TMPDIR/claude-cc/cfg claude -p --plugin-dir <copy> --output-format stream-json --verbose --allowedTools Skill --max-turns 4 \"Use the Skill tool to load the skill legion:<name>. Then reply with only its first '# ' heading line, or the exact error the Skill tool returned.\"",
-      "observed": "thermonuclear-deep-review: 'Launching skill: legion:thermonuclear-deep-review', '# Thermonuclear Deep Review'; thermonuclear-code-quality: 'Launching skill …', '# Thermonuclear Code Quality'; ce-dogfood: 'Launching skill …', '# Dogfood'",
-      "headSha": "efde11adb5a8dae6b837df51cc8f22e3139c496b",
-      "negativeControl": "thermonuclear-deep-review with 'hide: true' changed back to 'disable-model-invocation: true' -> tool_result is_error true: 'Skill legion:thermonuclear-deep-review cannot be used with Skill tool due to disable-model-invocation'"
+      "criterion": "Decision A: the approved try-the-options step, now in skills/dispatch-writing-specs, keeps every element of spec v4 change 1 and names no person",
+      "surface": "skills/dispatch-writing-specs/SKILL.md:47 (Questions) at the head, against dispatch://INFRA-248/artifact/spec v4",
+      "command": "element-by-element read of the bullet; grep -rnE 'Sami|Jawhar|sami@' skills/ packages/claude-envoy/legion/ packages/daemon/internal/prompts/",
+      "observed": "present: once clarifying questions are answered and options known, ask whether trying is quicker than choosing (each builds in hours; how it works decides, not how it reads); fresh agents build each from the brief alone (ce-bakeoff without its judge, ce-prototype for a page or flow, else a task agent); each through the same check; builds and results side by side in the ask block (dispatch's name for the decision block, dispatch/SKILL.md:17); recommend one only if the check settles it, else the person picks. Name grep rc 1.",
+      "headSha": "3264771a17196319d1b6d66ebb9928aa075e25aa",
+      "negativeControl": "the spec's own text names a person ('Show Sami', 'he picks'); the shipped bullet contains neither"
     },
     {
-      "criterion": "A1 The Legion skills guard passes with ce-dogfood in pi-legion (hidden skills still resolve by name)",
-      "surface": "the head's image under gVisor, uid 1000",
-      "command": "legion probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models (job-r6.sh)",
-      "observed": "probe-image: OK … daemon-api-version=38, rc 0",
-      "headSha": "efde11adb5a8dae6b837df51cc8f22e3139c496b",
-      "negativeControl": "a copy without dist/skills/ce-dogfood -> 'finds no skill ce-dogfood (loaded by dist/skills/legion-worker/references/dogfood.md, …)', rc 1"
+      "criterion": "The 91 cut words remove repetition only, and pi-envoy's 'fewer than 2,000 words' guard passes unmodified",
+      "surface": "the three Dispatch skills at the head and at main d1f4b8a6; packages/pi-envoy/src/skills-guard.test.ts (no diff against main)",
+      "command": "grep -nF of each 'Still stated in' sentence in skills/dispatch, dispatch-first and dispatch-writing-specs; find skills/dispatch skills/dispatch-first skills/dispatch-writing-specs -type f -exec cat {} + | wc -w; cd packages/pi-envoy && bun test src/skills-guard.test.ts -t '2,000'",
+      "observed": "all 13 rows found word for word (dispatch-first description and heading; writing-specs description 'It replaces superpowers' brainstorming there.' and 'The plan'; dispatch-first:37 'A Legion phase worker sends decisions to its architect instead.'; dispatch:28, :58, :80, :17 'at the end of its section', :52 resolve-ask; dispatch-first:35 chat rule; writing-specs:33 and :34). Words: 1,996 at the head, 1,999 at main. Guard: 1 pass.",
+      "headSha": "3264771a17196319d1b6d66ebb9928aa075e25aa",
+      "negativeControl": "four words appended to skills/dispatch-first/SKILL.md (restored afterwards) -> 'Expected: < 2000, Received: 2000', 1 fail"
     },
     {
-      "criterion": "A2 The worker image builds; in a worker pod (gVisor, uid 1000) agent-browser --version prints the pin and agent-browser open https://example.com loads the page with its title read back",
-      "surface": "the same Job: image ghcr.io/sjawhar/legion-worker@sha256:eee8fadfce84a7dc4a23bb0a0314a69cc90a6915c656cf1ea031a67821bb8358, runtimeClassName gvisor, uid 1000",
-      "command": "agent-browser --version; agent-browser open https://example.com; agent-browser get title; agent-browser close (job-r6.sh)",
-      "observed": "pod Succeeded, gvisor, imageID the digest; uid=1000, 4.19.0-gvisor; 'agent-browser 0.39.2'; '✓ Example Domain'; 'Example Domain'; '✓ Browser closed'",
-      "headSha": "efde11adb5a8dae6b837df51cc8f22e3139c496b",
-      "negativeControl": "agent-browser open http://127.0.0.1:1/ after the close -> '✗ Invalid response: EOF …', rc 1 (rounds 1-5 got ERR_UNSAFE_PORT with a live session); main's image (round 1) -> agent-browser not found rc 127"
+      "criterion": "No reference to dispatch-brainstorming this PR added is left; the claude-envoy mirror equals the source",
+      "surface": "the PR's diff against its fork point; packages/claude-envoy",
+      "command": "jj diff --from fork_point(main@origin | 3264771a) --to 3264771a | grep '^+.*dispatch-brainstorming'; jj file annotate of the remaining CHANGELOG mentions; cd packages/claude-envoy && bun scripts/build.ts --check && bun test tests/legion-plugin-fresh.test.ts; readlink -f of skills/<five Dispatch skills>",
+      "observed": "added lines naming dispatch-brainstorming exist only in .legion/INFRA-248 handoffs (removed at retro); the tree's other mentions are main's own CHANGELOG entries; 'dist/ and legion/ match a fresh build'; 5 pass; all five symlinks resolve to skills/",
+      "headSha": "3264771a17196319d1b6d66ebb9928aa075e25aa",
+      "negativeControl": "the legion-plugin-fresh test that compares legion/ with a fresh build failed at 0459804d on a real difference (round 4)"
     }
   ],
-  "ci": "efde11adb5a8: Tests 40368294287, PR Title 40368294291, Docs 40368294263, Worker Image 40368294581 success; Legion Envoy and Contracts 40368294303 queued (read as queued, not waited for)",
+  "ci": "3264771a1719: Tests 40389772616, Legion Envoy and Contracts 40389772658, Docs 40389772715, Worker Image 40389772633, PR Title 40389992325 all queued (read as queued, not waited for; a required red that settles sends the issue back)",
+  "image": "No image Job, as the architect set: the branch's own worker.Dockerfile lines equal round 6's (equal context-0 diff against each fork point); the Dockerfile's other changes since efde11ad are main's; the merge head's Worker Image build is queued, so its skill files could not be compared with the branch.",
   "notes": [
-    "The dogfood.md and changelog edits of efde11ad are text only; read in the diff, no contradiction with what rounds 1-5 verified.",
-    "Nothing in CI launches the browser: the image build runs only `agent-browser --version`."
+    "/opt/omp/bin/omp in this pod is 18.12.2 built before main's new pin (#2260, 18.12.2-sami.20261026-135627); CI installs the new pin for the same test."
   ]
 }
