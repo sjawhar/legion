@@ -86,9 +86,14 @@ func (r *liveRig) checkPreviousLayout() error {
 		return err
 	}
 	fixture := exec.CommandContext(r.ctx, r.env.previousHarness, "-test.run", "^TestStage4aPreviousLayoutFixture$", "-test.v", "-test.timeout", "30m")
+	// A previous release's harness built before LEGION_E2E_IMPLEMENT_APP_KEY_NAME reads the key's
+	// name from LEGION_E2E_IMPLEMENT_APP_KEY and stops at identity without it, so the fixture is
+	// told both names.
 	fixture.Env = append(slices.DeleteFunc(os.Environ(), func(kv string) bool {
-		return strings.HasPrefix(kv, "LEGION_E2E_IMAGE=") || strings.HasPrefix(kv, "LEGION_E2E_WORK=") || strings.HasPrefix(kv, "LEGION_E2E_FROM=")
-	}), "LEGION_E2E_IMAGE="+r.env.previousImage, "LEGION_E2E_WORK="+work, "LEGION_E2E_PREVIOUS_LAYOUT_OUT="+out)
+		return strings.HasPrefix(kv, "LEGION_E2E_IMAGE=") || strings.HasPrefix(kv, "LEGION_E2E_WORK=") || strings.HasPrefix(kv, "LEGION_E2E_FROM=") ||
+			strings.HasPrefix(kv, "LEGION_E2E_IMPLEMENT_APP_KEY=")
+	}), "LEGION_E2E_IMAGE="+r.env.previousImage, "LEGION_E2E_WORK="+work, "LEGION_E2E_PREVIOUS_LAYOUT_OUT="+out,
+		"LEGION_E2E_IMPLEMENT_APP_KEY="+r.env.appKeyName)
 	transcript, err := fixture.CombinedOutput()
 	if werr := os.WriteFile(filepath.Join(work, "fixture.log"), transcript, 0o600); werr != nil {
 		return werr

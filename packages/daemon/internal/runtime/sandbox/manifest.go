@@ -942,7 +942,7 @@ func (r *Runtime) LaunchBound() time.Duration {
 // variable naming one of the runtime's or a spec's. The temporary directory, XDG homes and tool
 // caches are the issue volume's
 // (roleEnvironment) — the issue's scratch and its Go caches, which every role of it is told the
-// same of, but the state home, which is the role's own — carried to the role's shim by the start
+// same of, but the state home, one per role — carried to the role's shim by the start
 // command (launcherCommand's Env). POD_UID is the pod's own incarnation, from the downward
 // API. The secrets broker is told when the runtime enrolls pods. PI_SHELL_PREFIX puts
 // the `legion` directory first on PATH alone: a pod's gh is the image's, so no directory of the

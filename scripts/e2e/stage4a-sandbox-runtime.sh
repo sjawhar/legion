@@ -81,15 +81,19 @@
 # bridge, forwarded through the same tunnel); LEGION_E2E_REPO_SECOND_OWNER (required) `<owner>/<name>`,
 # a repository under an owner other than sjawhar on which both Legion Apps are installed, where
 # second-owner provisions an issue and proves its pod's gh and git read sjawhar/legion-smoke with
-# read-only tokens (nothing is pushed to it); LEGION_E2E_PREVIOUS_IMAGE (required) a worker image
-# by digest built from a commit of main before one container (its issue pods run six role
-# containers), which this checkout contains: previous-layout builds that commit's own Stage 4a
-# harness (the image's org.opencontainers.image.revision) with testdata/previouslayout's fixture and
-# runs it on that image, to leave a pod of the previous layout running for this runtime to take
-# over; the script refuses an image whose revision main or this checkout does not contain, or one
-# whose commit already runs one container; STAGE4A_FROM a development entry point,
-# which is never the proof; STAGE4A_EVIDENCE_DIR where the transcript and the runtime's log go
-# (default a fresh /tmp directory, kept and printed).
+# read-only tokens (nothing is pushed to it); LEGION_E2E_IMPLEMENT_APP_ID and
+# LEGION_E2E_IMPLEMENT_APP_KEY_NAME (this deployment's implement App by default) the App's numeric
+# id and the secret-store key the `secrets` CLI resolves to its private key (agent tier: no YubiKey
+# touch), which prerequisites proves is that id's App against GitHub's GET /app before the run
+# writes anything (lib/github-apps.sh; the run acts as no other App); LEGION_E2E_PREVIOUS_IMAGE
+# (required) a worker image by digest built from a commit of main before one container (its issue
+# pods run six role containers), which this checkout contains: previous-layout builds that commit's
+# own Stage 4a harness (the image's org.opencontainers.image.revision) with testdata/previouslayout's
+# fixture and runs it on that image, to leave a pod of the previous layout running for this runtime
+# to take over; the script refuses an image whose revision main or this checkout does not contain,
+# or one whose commit already runs one container; STAGE4A_FROM a development entry point, which is
+# never the proof; STAGE4A_EVIDENCE_DIR where the transcript and the runtime's log go (default a
+# fresh /tmp directory, kept and printed).
 #
 # The secrets-* checks are optional and print CHECK <name>: SKIPPED-BLOCKED when
 # unconfigured: LEGION_E2E_AGENT_SECRETS_URL, LEGION_E2E_AGENT_SECRETS_OPERATOR (the email of the
@@ -116,8 +120,6 @@ port=${LEGION_E2E_WORKER_STREAM_PORT:-13373}
 repo=sjawhar/legion-smoke
 second_owner_repo=${LEGION_E2E_REPO_SECOND_OWNER:-}
 previous_image=${LEGION_E2E_PREVIOUS_IMAGE:-}
-app_id=3202636
-app_key=LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64
 # The scratch session database's image: the pinned Postgres the repository's CI tests against.
 session_db_image=pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
 session_db_port=${LEGION_E2E_SESSION_DB_PORT:-}
@@ -182,6 +184,8 @@ fail() {
 . "$root/scripts/e2e/lib/bridge-tunnel.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/teardown.sh
 . "$root/scripts/e2e/lib/teardown.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/github-apps.sh
+. "$root/scripts/e2e/lib/github-apps.sh"
 
 trap cleanup EXIT
 trap 'exit 129' HUP
@@ -257,6 +261,9 @@ git -C "$root" merge-base --is-ancestor "$previous_base" HEAD ||
 if git -C "$root" cat-file -e "$previous_base:packages/daemon/internal/runtime/sandbox/one_container_test.go" 2>/dev/null; then
   fail "LEGION_E2E_PREVIOUS_IMAGE $previous_image was built from $previous_base, which already runs issue pods of one container"
 fi
+require_app_inputs implement
+write_github_apps implement
+check_github_apps implement
 for taken in "$port" "$session_db_port"; do
   if [ -n "$(ss -Hltn "sport = :$taken")" ]; then
     fail "port $taken is taken on the devbox: $(ss -Hltnp "sport = :$taken")"
@@ -464,8 +471,8 @@ env \
   LEGION_E2E_RUNTIME_IDENTITY_KIND="$runtime_identity_kind" \
   LEGION_E2E_PLATFORM="$platform" \
   LEGION_E2E_POD_REACHABILITY="$pod_reachability" \
-  LEGION_E2E_IMPLEMENT_APP_ID="$app_id" \
-  LEGION_E2E_IMPLEMENT_APP_KEY="$app_key" \
+  LEGION_E2E_IMPLEMENT_APP_ID="$implement_app_id" \
+  LEGION_E2E_IMPLEMENT_APP_KEY_NAME="$implement_app_key_name" \
   LEGION_E2E_RECORD="$record" \
   LEGION_E2E_WORK="$evidence" \
   LEGION_E2E_FROM="$from" \

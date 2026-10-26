@@ -18,6 +18,9 @@ type Service struct {
 	// AllowedHosts are the ENVOY_ALLOWED_HOSTS names, each as HostName writes it, that an
 	// unauthenticated listener serves /v1 to beside loopback.
 	AllowedHosts []string
+	// SubscribeAllTopics is ENVOY_SUBSCRIBE_ALL_TOPICS: whether the listener also subscribes every
+	// notifications topic over core NATS, which only a grant that allows `notifications.>` permits.
+	SubscribeAllTopics bool
 }
 
 func (s Service) ListenAddress() string {
@@ -61,14 +64,32 @@ func Load(defaultPort int) (Service, error) {
 	if err != nil {
 		return Service{}, err
 	}
+	subscribeAllTopics, err := parseSubscribeAllTopics(os.Getenv("ENVOY_SUBSCRIBE_ALL_TOPICS"))
+	if err != nil {
+		return Service{}, err
+	}
 	return Service{
-		AllowedHosts: allowedHosts,
-		MachineID:    machine,
-		NATSURLs:     urls,
-		NATSReplicas: replicas,
-		ListenHost:   listenHost,
-		Port:         port,
+		AllowedHosts:       allowedHosts,
+		MachineID:          machine,
+		NATSURLs:           urls,
+		NATSReplicas:       replicas,
+		ListenHost:         listenHost,
+		Port:               port,
+		SubscribeAllTopics: subscribeAllTopics,
 	}, nil
+}
+
+// parseSubscribeAllTopics reads ENVOY_SUBSCRIBE_ALL_TOPICS: unset, empty or "0" off, "1" on. Any
+// other value, a padded "1" among them, is refused rather than read as off, so a typo such as
+// "true" never leaves the opt-in silently off.
+func parseSubscribeAllTopics(raw string) (bool, error) {
+	switch raw {
+	case "", "0":
+		return false, nil
+	case "1":
+		return true, nil
+	}
+	return false, fmt.Errorf("invalid ENVOY_SUBSCRIBE_ALL_TOPICS %q: want 1 to subscribe every notifications topic, or 0 or unset not to", raw)
 }
 
 // hostEntry is an ENVOY_ALLOWED_HOSTS entry's shape: a name or an IPv4 address, or an IPv6

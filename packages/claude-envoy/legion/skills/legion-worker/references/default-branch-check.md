@@ -35,3 +35,19 @@ never runs.
 
 The output must show your role's App in both columns **on every commit you made** — not on the
 whole list: earlier phases' commits are legitimately authored by their own role's App.
+
+## Which App, and what a wrong one means
+
+- Your role's App is the **implement** App for the implementer and the merger, and the **review**
+  App for the planner, tester, reviewer and architect; your pane's `JJ_USER` and `JJ_EMAIL` name
+  its bot account. A planner's commits authored by the review App are right.
+- Never set `user.name` or `user.email` in any jj or Git scope (`jj config set`, `--config`,
+  `git config`): `--config` outranks the pane's identity and puts the wrong App on your commits,
+  and the repository-scoped jj config is one file shared by every issue workspace of the clone.
+- A wrong identity on your own commit (the other App, or none) is a pane-environment problem:
+  report it to the architect, never pin it (sjawhar/legion
+  `docs/solutions/legion/shared-main-repo-hazards-for-concurrent-issue-workspaces.md`, Hazard 1).
+- Another role's commit with you as committer, which you did not rewrite under the guard in
+  *Rewriting pushed commits* (`skill://legion-worker/references/conflicts-and-rewrites.md`), means
+  something rewrote commits it should not have: stop and send the architect this log. A forward
+  merge rewrites nothing, so it changes no committer.

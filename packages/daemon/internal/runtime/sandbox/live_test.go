@@ -315,7 +315,7 @@ func readLiveEnv(t *testing.T) liveEnv {
 		platform:              get("LEGION_E2E_PLATFORM"),
 		runtimeIdentityKind:   get("LEGION_E2E_RUNTIME_IDENTITY_KIND"),
 		appID:                 get("LEGION_E2E_IMPLEMENT_APP_ID"),
-		appKeyName:            get("LEGION_E2E_IMPLEMENT_APP_KEY"),
+		appKeyName:            get("LEGION_E2E_IMPLEMENT_APP_KEY_NAME"),
 		record:                get("LEGION_E2E_RECORD"),
 		work:                  get("LEGION_E2E_WORK"),
 		from:                  os.Getenv("LEGION_E2E_FROM"),

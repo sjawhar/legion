@@ -13,8 +13,8 @@ whether it needs an issue, where, and whether Legion works it.
 - A problem inside your issue is not such a finding: fix it in your change, since nothing needed
   for correctness is deferred.
 - A problem inside your tree is work its root spec's acceptance needs. A phase worker's such
-  problem outside its own issue goes to the tree's architect (`skill://legion-worker`, the
-  escalation paragraph), which may file it as a child of the tree. Anything else, in the same
+  problem outside its own issue goes to the tree's architect (`skill://legion-worker`, *Stop
+  rules*), which may file it as a child of the tree. Anything else, in the same
   repository or not, is a finding.
 - Search first (`skill://dispatch-first`): when an open issue already tracks the problem, comment
   the evidence on that issue and ask nothing. When an open ask on the report issue already asks

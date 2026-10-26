@@ -327,8 +327,8 @@ describe("role_inits_sh", () => {
   });
 });
 
-// role_enter_sh's first hop, read from a fake tree: the nsenter it then runs needs a real pod, so
-// only the refusals before it run here.
+// role_enter_sh's refusals before its first nsenter, read from a fake tree; both hops run end to
+// end, with a stand-in nsenter, in the tests further down.
 describe("role_enter_sh finds the role-init in the proc root it is given", () => {
   const def = `. ${JSON.stringify(lib)}`;
   test("none of the role is refused, a --role after the shim's -- not counted", () => {
