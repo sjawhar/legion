@@ -37,14 +37,16 @@ function renderPage() {
   );
 }
 
-test("code -> lookup -> Approve posts the looked-up code", async () => {
+// The typed code goes to the broker with the approval it opens: the broker checks it against the
+// record there and then, and the browser goes to the broker's page for the sign-in that approves.
+test("code -> lookup -> Approve opens an approval with the looked-up code and goes to the broker", async () => {
   const record = machineRecord();
   const lookupMachineCredential = spyOn(api, "lookupMachineCredential").mockResolvedValue(record);
-  const approveCredentialRecord = spyOn(api, "approveCredentialRecord").mockResolvedValue({
-    credential_id: "cred-9",
-    grant_id: null,
-    state: "approved",
+  const startCredentialApproval = spyOn(api, "startCredentialApproval").mockResolvedValue({
+    expires_at: "2026-09-27T00:10:00Z",
+    url: "https://broker.example/approve/challenge-2",
   });
+  const assign = spyOn(window.location, "assign").mockImplementation(() => {});
 
   try {
     renderPage();
@@ -59,12 +61,16 @@ test("code -> lookup -> Approve posts the looked-up code", async () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
 
-    await waitFor(() => expect(approveCredentialRecord).toHaveBeenCalledTimes(1));
-    expect(approveCredentialRecord).toHaveBeenCalledWith("req-2", { code: "ABCD-1234" });
+    await waitFor(() => expect(startCredentialApproval).toHaveBeenCalledTimes(1));
+    expect(startCredentialApproval).toHaveBeenCalledWith("req-2", { code: "ABCD-1234" });
+    await waitFor(() =>
+      expect(assign).toHaveBeenCalledWith("https://broker.example/approve/challenge-2")
+    );
   } finally {
     cleanup();
     lookupMachineCredential.mockRestore();
-    approveCredentialRecord.mockRestore();
+    startCredentialApproval.mockRestore();
+    assign.mockRestore();
   }
 });
 

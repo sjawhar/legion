@@ -76,6 +76,20 @@ var DefaultTokenLimit = ratelimit.Limit{Every: 500 * time.Millisecond, Burst: 60
 // a flood through the same proxy drains for Dispatch too.
 var DefaultAccountLimit = ratelimit.Limit{Every: 20 * time.Millisecond, Burst: 200}
 
+// DefaultApprovalLimit bounds the three approval pages a person's browser reaches — the page
+// itself, the sign-in it starts and the issuer's callback — per source address, in one bucket
+// they share: a burst of 30 and one back every two seconds, per process, so a fleet of N broker
+// pods allows N times it. One approval is three requests and a reload or two, and a person
+// approves a handful of things at a sitting, so nobody reaches it; what it bounds is the work an
+// unauthenticated caller can make the broker do, since each of these routes reads the database
+// and the callback also calls the issuer's token endpoint. These pages take no credential at all
+// — a person's browser has none to give until it has signed in — so this bucket is the only
+// thing in front of them, and a refused request is 429 RATE_LIMITED with Retry-After.
+//
+// Guessing a challenge id is not what it guards: an id is 32 random bytes, which no rate of
+// requests searches. What it guards is the cost of the attempt.
+var DefaultApprovalLimit = ratelimit.Limit{Every: 2 * time.Second, Burst: 30}
+
 // DefaultRereadBurst is the depth of every per-address bucket on POST
 // /v1/secrets/{name}/reread: a person's write burst passes; a flood cannot make the broker
 // hammer DescribeSecret. The bucket is per process, so a fleet of N broker pods allows one

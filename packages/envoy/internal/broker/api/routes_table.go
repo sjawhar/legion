@@ -127,15 +127,38 @@ func routes() []apiRoute {
 		{http.MethodGet, "/v1/pending", accountAuth((*server).listPending)},
 		// Read a credential-request record: what was asked, by whom, why, and its decision.
 		{http.MethodGet, "/v1/credential-requests/{record}", accountAuth((*server).readRecord)},
-		// Approve a pending record as the named person; a machine login also needs its code. The
-		// caller is a named service identity, its own ServiceAccount token, and the approver is
-		// still the login the request names: the broker takes that name on the caller's word, and
-		// dispatch://INFRA-314 is what replaces it with a signed assertion the broker verifies.
+		// Open an approval of a pending record that the named person signs in for themselves:
+		// answers the broker's own page to send them to, and decides nothing. A machine login
+		// also needs its code. The caller is a named service identity, its own ServiceAccount
+		// token, which says only which service is asking: the record is decided when the person
+		// the body names has signed in to the broker's approval issuer and the broker has
+		// compared that sign-in's email with the record's own approver rule. On a broker whose
+		// BROKER_APPROVAL_* group is unset, 503 APPROVAL_SIGN_IN_OFF.
+		{http.MethodPost, "/v1/credential-requests/{record}/approval", accountAuth((*server).openApproval)},
+		// Approve a pending record as the named person, on the calling service's word; a machine
+		// login also needs its code. Refused 403 APPROVAL_NEEDS_PERSON on a broker with an
+		// approval issuer, where an approval carries the approver's own sign-in instead (the
+		// approval route above). It serves the rollout's first half alone: a deployment whose
+		// BROKER_APPROVAL_* group is not set yet.
 		{http.MethodPost, "/v1/credential-requests/{record}/approve", accountAuth((*server).approveRecord)},
-		// Deny a pending record as the named person; a machine login also needs its code. As with
-		// approve, the caller is a named service identity and the approver is still the login the
-		// request names, until dispatch://INFRA-314.
+		// Deny a pending record as the named person; a machine login also needs its code. A
+		// denial takes access away and gives none, so it stays on the calling service's word
+		// whatever the approval group says.
 		{http.MethodPost, "/v1/credential-requests/{record}/deny", accountAuth((*server).denyRecord)},
+		// Show what an approval covers, from the broker's own record, with the button that starts
+		// the person's sign-in: an HTML page a person's browser reaches by the link the approval
+		// route answered, with no credential of any kind. Mounted only on a broker with an
+		// approval issuer.
+		{http.MethodGet, "/approve/{id}", public((*server).approvalPage)},
+		// Start that sign-in: sets the browser's own binding cookie and redirects to the issuer's
+		// authorization endpoint, asking for a recent authentication of the approver's account
+		// and nothing to keep.
+		{http.MethodPost, "/approve/{id}/start", public((*server).startApprovalSignIn)},
+		// Take the issuer's answer: verifies the ID token against the issuer's keys, this
+		// client, the cookie's nonce, a verified email in the deployment's domain and an
+		// authentication no older than five minutes, requires that email to be the approval's own
+		// approver, spends the approval once and applies the decision as that person.
+		{http.MethodGet, "/approve/callback", public((*server).approvalCallback)},
 		// Find a pending machine login by the confirmation code its machine shows.
 		{http.MethodPost, "/v1/machine-logins/lookup", accountAuth((*server).lookupMachineLogin)},
 		// List the machine logins the named person may revoke, every service's, such as the Legion

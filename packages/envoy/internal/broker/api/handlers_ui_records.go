@@ -1,13 +1,19 @@
 // handlers_ui_records.go: GET /v1/credential-requests/{record}, POST .../approve, .../deny — a
 // record's own read, approve and deny routes. Part of the routes a listed service calls with its
 // own Kubernetes ServiceAccount token (accountAuth): that token proves which service is calling,
-// and the service names the deciding human in the body's approver field from its own session. The
-// broker takes that name on the caller's word — a decision is authorized by the record's rule
-// admitting that login (record.MayDecide): its approver, or anyone signed in for a shared
-// secret's request or a service's machine login — and dispatch://INFRA-314 is what replaces the
-// name with a signed assertion the broker verifies. Each decision is logged with the caller that
-// made it and the approver it named. A service's machine login, which only a broker before token
-// logins opened, may only be denied: approving it is 400 SERVICE_LOGS_IN_WITH_TOKEN.
+// and the service names the deciding human in the body's approver field from its own session.
+//
+// An approval does not travel that way on a broker with an approval issuer (Deps.Approval): there
+// approve is refused 403 APPROVAL_NEEDS_PERSON and the person signs in on the broker's own page
+// (handlers_approval.go), which is the one place an approval is applied. With no issuer set —
+// the rollout's first half — approve decides as it always did, on the caller's word, authorized
+// by the record's rule admitting the login it names (record.MayDecide): its approver, or anyone
+// signed in for a shared secret's request or a service's machine login.
+//
+// A denial travels on the caller's word either way, since it can only take access away. Each
+// decision is logged with the caller that made it and the approver it named. A service's machine
+// login, which only a broker before token logins opened, may only be denied: approving it is 400
+// SERVICE_LOGS_IN_WITH_TOKEN.
 package api
 
 import (
@@ -172,6 +178,14 @@ type decisionResponse struct {
 }
 
 func (s *server) approveRecord(w http.ResponseWriter, r *http.Request, callerName string) {
+	// An approval needs the approving person's own sign-in wherever the broker can take one, and
+	// this route can only ever carry the calling service's word for who is approving. The caller
+	// opens an approval instead (openApproval) and sends the person to the page it answers.
+	if s.deps.Approval != nil {
+		writeError(w, http.StatusForbidden, "APPROVAL_NEEDS_PERSON",
+			"an approval needs the approving person's own sign-in: open one with POST /v1/credential-requests/{record}/approval and send them to the page it answers")
+		return
+	}
 	s.decideRecord(w, r, callerName, true)
 }
 

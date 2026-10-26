@@ -60,26 +60,32 @@ test("renders the broker's facts before the agent's reason, rendered as plain te
   }
 });
 
-test("Approve is one plain POST for the record, with no body", async () => {
+// Approving no longer decides anything here: Dispatch opens an approval on the broker, which
+// answers its own page, and the browser goes there for the approver's own Google sign-in.
+test("Approve opens an approval for the record and sends the browser to the broker's page", async () => {
   const record = secretRecord();
   const getCredentialRecord = spyOn(api, "getCredentialRecord").mockResolvedValue(record);
-  const approveCredentialRecord = spyOn(api, "approveCredentialRecord").mockResolvedValue({
-    credential_id: null,
-    grant_id: "grant-1",
-    state: "approved",
+  const startCredentialApproval = spyOn(api, "startCredentialApproval").mockResolvedValue({
+    expires_at: "2026-09-27T00:10:00Z",
+    url: "https://broker.example/approve/challenge-1",
   });
+  const assign = spyOn(window.location, "assign").mockImplementation(() => {});
 
   try {
     renderPage();
 
     fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
 
-    await waitFor(() => expect(approveCredentialRecord).toHaveBeenCalledTimes(1));
-    expect(approveCredentialRecord).toHaveBeenCalledWith("req-1");
+    await waitFor(() => expect(startCredentialApproval).toHaveBeenCalledTimes(1));
+    expect(startCredentialApproval).toHaveBeenCalledWith("req-1");
+    await waitFor(() =>
+      expect(assign).toHaveBeenCalledWith("https://broker.example/approve/challenge-1")
+    );
   } finally {
     cleanup();
     getCredentialRecord.mockRestore();
-    approveCredentialRecord.mockRestore();
+    startCredentialApproval.mockRestore();
+    assign.mockRestore();
   }
 });
 

@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -73,6 +74,32 @@ type Config struct {
 	// given twice, since each account names one caller. Keyed by account, each answering its
 	// caller. Unset, no caller reaches those routes.
 	APIAccounts map[string]string
+	// BROKER_APPROVAL_ISSUER: the OpenID Connect issuer an approving person signs in to on the
+	// broker's own approval page, https://accounts.google.com for a Google Workspace. Set it with
+	// BROKER_APPROVAL_CLIENT_ID, BROKER_APPROVAL_CLIENT_SECRET (or its _FILE) and
+	// BROKER_APPROVAL_DOMAIN, or none of the four, which is a broker that takes no person's
+	// sign-in: it serves no approval page, refuses POST
+	// /v1/credential-requests/{record}/approval, and goes on taking every approval on the word of
+	// whichever BROKER_API_ACCOUNTS caller relays it, which it warns about at every boot. With the
+	// group set, POST /v1/credential-requests/{record}/approve is refused outright (403
+	// APPROVAL_NEEDS_PERSON) and an approval is applied only by the broker's own
+	// /approve/callback, for the person whose sign-in it verified.
+	ApprovalIssuer string
+	// BROKER_APPROVAL_CLIENT_ID: the client id of the broker's own confidential OAuth client at
+	// that issuer, which nothing else holds — not the service that relays Dispatch's pages, and not
+	// that service's own OAuth client. A Google client's "Authorized redirect URIs" must hold
+	// exactly BROKER_PUBLIC_URL + /approve/callback.
+	ApprovalClientID string
+	// BROKER_APPROVAL_CLIENT_SECRET, BROKER_APPROVAL_CLIENT_SECRET_FILE: that client's secret,
+	// given directly or as a file whose trimmed contents win over the variable. It is what makes
+	// the ID token the broker reads unmintable by anyone else, so a deployment keeps it where no
+	// agent and no other service can read it.
+	ApprovalClientSecret string
+	// BROKER_APPROVAL_DOMAIN: the Workspace domain an approving person's account must be in, a
+	// lowercase domain name such as example.com, compared against the ID token's own hd claim
+	// rather than the spelling of its email. Name the organization's primary domain, the one
+	// Google puts in hd for every account of the organization.
+	ApprovalDomain string
 	// BROKER_SECRETS_STORE: which secret store the agent secrets live in: aws-secrets-manager (the
 	// default when unset, AWS Secrets Manager with the agent-secrets key in AWS KMS) or
 	// gcp-secret-manager (Google Cloud Secret Manager with the agent-secrets key in Cloud KMS, read
@@ -471,6 +498,56 @@ func databaseIAM(databaseURL string) (bool, error) {
 	return true, nil
 }
 
+// approvalDomainPattern is a lowercase domain name of at least two labels, the form
+// BROKER_APPROVAL_DOMAIN takes: the shape Dispatch holds its own sign-in domain to, since both
+// are compared against a Google ID token's hd claim.
+var approvalDomainPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
+
+// maxDomainLength bounds a domain name: RFC 1035's 255 octets less the root label's two.
+const maxDomainLength = 253
+
+// loadApproval reads the approval sign-in's four variables into cfg. They are set together or not
+// at all: a broker that holds three of them would serve an approval page it cannot complete, so a
+// partial group refuses the boot naming what is set and what is missing. Unset, every field stays
+// empty, which is the broker that takes no person's sign-in (Config.ApprovalIssuer).
+func loadApproval(getenv func(string) string, cfg *Config) error {
+	secret, err := secretValue(getenv, "BROKER_APPROVAL_CLIENT_SECRET")
+	if err != nil {
+		return err
+	}
+	cfg.ApprovalIssuer = strings.TrimSpace(getenv("BROKER_APPROVAL_ISSUER"))
+	cfg.ApprovalClientID = strings.TrimSpace(getenv("BROKER_APPROVAL_CLIENT_ID"))
+	cfg.ApprovalClientSecret = secret
+	cfg.ApprovalDomain = strings.TrimSpace(getenv("BROKER_APPROVAL_DOMAIN"))
+	var set, missing []string
+	for _, variable := range []struct{ name, value string }{
+		{"BROKER_APPROVAL_ISSUER", cfg.ApprovalIssuer},
+		{"BROKER_APPROVAL_CLIENT_ID", cfg.ApprovalClientID},
+		{"BROKER_APPROVAL_CLIENT_SECRET", cfg.ApprovalClientSecret},
+		{"BROKER_APPROVAL_DOMAIN", cfg.ApprovalDomain},
+	} {
+		if variable.value == "" {
+			missing = append(missing, variable.name)
+			continue
+		}
+		set = append(set, variable.name)
+	}
+	switch {
+	case len(set) == 0:
+		return nil
+	case len(missing) > 0:
+		return fmt.Errorf("the approval sign-in needs BROKER_APPROVAL_ISSUER, BROKER_APPROVAL_CLIENT_ID, BROKER_APPROVAL_CLIENT_SECRET (or BROKER_APPROVAL_CLIENT_SECRET_FILE) and BROKER_APPROVAL_DOMAIN, or none of them: %s set, %s missing",
+			strings.Join(set, ", "), strings.Join(missing, ", "))
+	}
+	if parsed, err := url.Parse(cfg.ApprovalIssuer); err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
+		return fmt.Errorf("BROKER_APPROVAL_ISSUER must be an absolute http(s) URL, such as https://accounts.google.com: %q", cfg.ApprovalIssuer)
+	}
+	if len(cfg.ApprovalDomain) > maxDomainLength || !approvalDomainPattern.MatchString(cfg.ApprovalDomain) {
+		return fmt.Errorf("BROKER_APPROVAL_DOMAIN must be a lowercase domain name such as example.com; got a value of %d characters", utf8.RuneCountInString(cfg.ApprovalDomain))
+	}
+	return nil
+}
+
 func Load(getenv func(string) string) (Config, error) {
 	for _, removed := range removedVars {
 		if getenv(removed.name) != "" {
@@ -583,6 +660,9 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if len(cfg.APIAccounts) > 0 && cfg.K8sOIDCIssuer == "" {
 		return Config{}, fmt.Errorf("BROKER_API_ACCOUNTS needs BROKER_K8S_OIDC_ISSUER and BROKER_K8S_OIDC_AUDIENCE, whose tokens its callers present")
+	}
+	if err := loadApproval(getenv, &cfg); err != nil {
+		return Config{}, err
 	}
 	githubIssuer, githubAudience, err := oidc.ConfigFromEnv(getenv, "BROKER_EXCHANGE_GITHUB_ISSUER", "BROKER_EXCHANGE_GITHUB_AUDIENCE")
 	if err != nil {

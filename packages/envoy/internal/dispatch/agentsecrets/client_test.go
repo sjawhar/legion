@@ -89,17 +89,21 @@ func TestRecordSendsBearerAndPath(t *testing.T) {
 	}
 }
 
-// Approve and Deny send exactly the Decision Dispatch built — the approver and, for a machine
-// login, the code — as the broker's strict decideBody reads it; a decision with no code carries
-// no code field at all.
+// Approval and Deny send exactly the Decision Dispatch built — the approver and, for a machine
+// login, the code — as the broker's strict body reads it; a decision with no code carries no code
+// field at all. Approval names the person the broker then requires a sign-in from, and decides
+// nothing itself, which is why there is no approve call here at all.
 func TestDecisionsSendBearerPathAndTheApproverDispatchNames(t *testing.T) {
 	code := "ABCD-1234"
 	for _, tc := range []struct {
 		name, wantPath, wantBody string
 		decide                   func(*Client) (json.RawMessage, error)
 	}{
-		{"approve", "/v1/credential-requests/req-1/approve", `{"approver":"sjawhar"}`, func(c *Client) (json.RawMessage, error) {
-			return c.Approve(context.Background(), "req-1", Decision{Approver: "sjawhar"})
+		{"approval", "/v1/credential-requests/req-1/approval", `{"approver":"sjawhar"}`, func(c *Client) (json.RawMessage, error) {
+			return c.Approval(context.Background(), "req-1", Decision{Approver: "sjawhar"})
+		}},
+		{"approval with a machine login's code", "/v1/credential-requests/req-1/approval", `{"approver":"sjawhar","code":"ABCD-1234"}`, func(c *Client) (json.RawMessage, error) {
+			return c.Approval(context.Background(), "req-1", Decision{Approver: "sjawhar", Code: &code})
 		}},
 		{"deny with code", "/v1/credential-requests/req-1/deny", `{"approver":"sjawhar","code":"ABCD-1234"}`, func(c *Client) (json.RawMessage, error) {
 			return c.Deny(context.Background(), "req-1", Decision{Approver: "sjawhar", Code: &code})

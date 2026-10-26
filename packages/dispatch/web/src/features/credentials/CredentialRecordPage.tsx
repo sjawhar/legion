@@ -35,9 +35,11 @@ function CredentialDecision({ decided }: { decided: CredentialDecisionEvent }): 
 /**
  * The credential-record approval page: an approver reaches `/credentials/:recordId` from the
  * inbox's credential-requests section (or a shared link), sees the broker's facts and the
- * agent's stated reason, and, for a pending `agent_secret` record, approves or denies it with one
- * click — Dispatch names the viewer's own login, and the broker decides whether it is the
- * record's approver. A `launcher_credential` (machine) record never gets buttons here (ruling
+ * agent's stated reason, and, for a pending `agent_secret` record, denies it with one click or
+ * starts an approval. Approving leaves Dispatch: the broker answers its own page's URL and the
+ * browser goes there, where the approver signs in with their own Google account and the broker
+ * decides. Dispatch names the viewer's own login either way, and the broker decides whether it is
+ * the record's approver. A `launcher_credential` (machine) record never gets buttons here (ruling
  * 13 - only its typed code selects it); it links to `MachineLoginPage` instead.
  */
 export function CredentialRecordPage(): ReactNode {
@@ -52,9 +54,11 @@ export function CredentialRecordPage(): ReactNode {
   };
 
   const approve = useMutation({
-    mutationFn: () => api.approveCredentialRecord(recordId ?? ""),
+    mutationFn: () => api.startCredentialApproval(recordId ?? ""),
     onSettled: () => submitGuard.release(),
-    onSuccess: invalidateAfterDecision,
+    // A top-level navigation, not a fetch: the approval page is the broker's own, on its own
+    // origin, and the sign-in that follows has to happen in this browser's address bar.
+    onSuccess: (approval) => window.location.assign(approval.url),
   });
   const deny = useMutation({
     mutationFn: () => api.denyCredentialRecord(recordId ?? ""),

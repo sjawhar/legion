@@ -31,6 +31,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sjawhar/envoy/internal/broker/api"
+	"github.com/sjawhar/envoy/internal/broker/approval"
 	"github.com/sjawhar/envoy/internal/broker/config"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/exchange"
@@ -230,6 +231,22 @@ func main() {
 		// cluster's projected tokens, for the same audience.
 		pod = enroll.K8sPodVerifier{Verifier: verifier}
 	}
+	// The broker's own OAuth client at the approval issuer, discovered under the same bound as the
+	// cluster's, before anything binds a socket. With it, an approval is applied only for a person
+	// the issuer signed in to this client (internal/broker/approval); without it, every approval is
+	// still taken on the word of whichever BROKER_API_ACCOUNTS caller relays it. Which of the two
+	// this broker is doing is logged once it has bound, where its public URL is final.
+	var approvalSignIn *api.ApprovalSignIn
+	if cfg.ApprovalIssuer != "" {
+		flow, err := oidc.DiscoverConfirmFlow(ctx, cfg.ApprovalIssuer, cfg.ApprovalClientID,
+			cfg.ApprovalClientSecret, cfg.ApprovalDomain, oidc.DiscoveryTimeout)
+		fatal(err)
+		approvalSignIn = &api.ApprovalSignIn{
+			Challenges: &approval.Service{Store: st, Lifetime: approval.DefaultLifetime},
+			Flow:       flow,
+			Domain:     cfg.ApprovalDomain,
+		}
+	}
 
 	// The context the work that has to outlive the drain runs on: the five-minute policy reload
 	// below and the reread listener under it. ctx is signal.NotifyContext's, which the first
@@ -398,6 +415,17 @@ func main() {
 		cfg.PublicURL = "http://" + listener.Addr().String()
 	}
 	slog.Info("broker listening", "addr", listener.Addr().String())
+	// Which way this broker takes an approval, logged with the redirect URI an operator registers
+	// on the OAuth client, now that the public URL is the one callers reach. The warning is the
+	// only sign a running broker gives that an approval is still the relaying service's word: the
+	// routes answer the same either way, and the deployment that has set the group reads the other
+	// line instead.
+	if approvalSignIn != nil {
+		slog.Info("approval sign-in", "state", "on", "issuer", cfg.ApprovalIssuer, "domain", cfg.ApprovalDomain,
+			"redirect_uri", cfg.PublicURL+api.ApprovalCallbackPath)
+	} else {
+		slog.Warn("broker: every approval is taken on the calling service's word: BROKER_APPROVAL_ISSUER and its group are unset, so whoever holds a BROKER_API_ACCOUNTS caller's token can approve a credential request or a machine login as any person it names")
+	}
 
 	enr := &enroll.Service{Store: st, Lease: time.Duration(cfg.LeaseSeconds) * time.Second, Pod: pod, ServiceLogins: cfg.ServiceLogins}
 	enr.Chain = enroll.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
@@ -492,7 +520,7 @@ func main() {
 	// process is worth failing over a notification Postgres would not take.
 	notify := reread.Notifier(st.Pool, senderID)
 	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, RereadOverallLimit: rereadOverall,
-		APIAccounts: cfg.APIAccounts, AccountTokens: pod,
+		APIAccounts: cfg.APIAccounts, AccountTokens: pod, Approval: approvalSignIn,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
 		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},

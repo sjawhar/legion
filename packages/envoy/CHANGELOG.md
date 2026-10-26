@@ -659,6 +659,37 @@
 
 ### Changed
 
+- **Breaking (operators):** an approval carries the approving person's own sign-in. The broker
+  takes a new set-together-or-none configuration group — `BROKER_APPROVAL_ISSUER`
+  (`https://accounts.google.com` in production), `BROKER_APPROVAL_CLIENT_ID`,
+  `BROKER_APPROVAL_CLIENT_SECRET` (or `BROKER_APPROVAL_CLIENT_SECRET_FILE`) and
+  `BROKER_APPROVAL_DOMAIN`; a partial group refuses the boot naming what is set and what is
+  missing. The client is the broker's own, which nothing else holds, and its OAuth client needs
+  the one redirect URI `<BROKER_PUBLIC_URL>/approve/callback`, which the broker logs at boot on
+  its `approval sign-in` line. With the group set, `POST /v1/credential-requests/{record}/approve`
+  is refused `403 APPROVAL_NEEDS_PERSON` whoever calls it, for a secret request and a machine
+  login alike: a listed caller opens an approval instead
+  (`POST /v1/credential-requests/{record}/approval`, answering `{url, expires_at}`), and the
+  person approves on the broker's own pages — `GET /approve/{id}`, `POST /approve/{id}/start`
+  and `GET /approve/callback`, which take no credential, are rate-limited per address, and carry
+  `Content-Security-Policy: default-src 'none'`, `X-Frame-Options: DENY` and `Cache-Control:
+  no-store`. The callback applies the decision only for an ID token the issuer signed for that
+  client, carrying the nonce the browser's own cookie binds, a verified email in the Workspace
+  domain and an authentication within five minutes (`max_age`), whose email is the approval's own
+  approver; the single-use approval is then spent, and the issuer and the token's `sub` are kept
+  on it. So neither Dispatch's ServiceAccount token, nor its Google client secret, nor the
+  refresh tokens it holds can approve anything; what Dispatch's credential still does is list,
+  read, deny and open an approval. A deny and a revoke are unchanged, since either can only take
+  access away. Dispatch's own `POST /api/v1/credential-requests/{id}/approve` now answers the
+  broker's page URL, which its Approve buttons navigate the browser to. With the group unset the
+  broker behaves as it always did and warns at every boot that approvals are taken on the calling
+  service's word, so a deployment can ship this release and turn the group on afterwards; the
+  local stack (`dev-broker.sh`, `agent-secrets-devrelay`) leaves it unset. New migration
+  `0019_approval_challenges`, new codes `APPROVAL_NEEDS_PERSON` (403) and `APPROVAL_SIGN_IN_OFF`
+  (503). What the change does not cover: a person's own live browser session at the identity
+  provider, a sign-in code or ID token stolen inside its own minutes of validity, and an approval
+  page that can show no more than the broker's own record holds.
+
 - **Breaking (local development):** `agent-secrets-devrelay` presents a listed caller's own
   ServiceAccount token, read from `--account-token-file` (default
   `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`), in place of the shared bearer the broker no longer takes. A

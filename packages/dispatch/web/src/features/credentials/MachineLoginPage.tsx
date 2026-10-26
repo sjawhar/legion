@@ -16,7 +16,7 @@ import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { CredentialDecisionButtons } from "./CredentialDecisionButtons";
 import { CredentialRecordFacts } from "./CredentialRecordFacts";
 import { MachineLoginsSection } from "./MachineLoginsSection";
-import { machineLoginsQuery, machineName } from "./machineLogins";
+import { machineName } from "./machineLogins";
 
 /** What the login's decision was, in place of the buttons that decide it: one just made on this
  *  page, or the one a looked-up record already carries. A service's approved login (the Legion
@@ -57,9 +57,12 @@ function MachineLoginDecision({
  * looked up here, and only denied. Ruling 13 of the shared broker contract:
  * only this code-lookup route selects a
  * `launcher_credential` record, and deciding it sends the same code again, so this is the one
- * place a machine record gets Approve/Deny buttons. A looked-up login already decided shows its
- * decision, and so does one decided here, in their place, as the record page does, so a second
- * click never reaches the broker's already-decided refusal. Below it, the machine logins the
+ * place a machine record gets Approve/Deny buttons. Approving leaves Dispatch: the broker checks
+ * the typed code against the record, answers its own approval page, and this page navigates there,
+ * where the operator signs in with their own Google account and the broker mints the credential.
+ * A looked-up login already decided shows its decision, and so does one denied here, in their
+ * place, as the record page does, so a second click never reaches the broker's already-decided
+ * refusal. Below it, the machine logins the
  * viewer may revoke that can still reach a secret: their own machines' and every service's.
  */
 export function MachineLoginPage(): ReactNode {
@@ -76,12 +79,11 @@ export function MachineLoginPage(): ReactNode {
   const lookedUpCode = lookup.variables ?? "";
 
   const approve = useMutation({
-    mutationFn: () => api.approveCredentialRecord(record?.record_id ?? "", { code: lookedUpCode }),
+    mutationFn: () => api.startCredentialApproval(record?.record_id ?? "", { code: lookedUpCode }),
     onSettled: () => submitGuard.release(),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["credential-pending"] });
-      void queryClient.invalidateQueries({ queryKey: machineLoginsQuery().queryKey });
-    },
+    // A top-level navigation, not a fetch: the sign-in that approves this login happens on the
+    // broker's own page, in this browser's address bar.
+    onSuccess: (approval) => window.location.assign(approval.url),
   });
   const deny = useMutation({
     mutationFn: () => api.denyCredentialRecord(record?.record_id ?? "", { code: lookedUpCode }),
@@ -99,20 +101,18 @@ export function MachineLoginPage(): ReactNode {
       lookup.mutate(code);
     });
   };
-  const madeHere = approve.data ?? deny.data;
-  // The looked-up record and its decision as the page now knows them: a decision made here leaves
-  // the record decided, with the credential an approval minted.
+  const decidedHere = deny.data;
+  // The looked-up record and its decision as the page now knows them: a denial made here leaves
+  // the record denied. An approval is not decided here at all — the browser goes to the broker's
+  // page for it — so nothing of it is folded in.
   const view =
     record === undefined
       ? undefined
-      : madeHere === undefined
+      : decidedHere === undefined
         ? { decided: record.decided, record }
         : {
-            decided: {
-              credential_id: madeHere.state === "approved" ? madeHere.credential_id : null,
-              event: madeHere.state,
-            },
-            record: { ...record, state: madeHere.state },
+            decided: { credential_id: null, event: decidedHere.state },
+            record: { ...record, state: decidedHere.state },
           };
 
   return (

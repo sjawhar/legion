@@ -8,7 +8,11 @@ import { harnessPorts } from "./harness-ports";
 // The secrets broker's reads Dispatch relays on every Inbox and Settings load:
 // `GET /v1/pending` (the credential requests waiting on an approver), `GET /v1/credential-requests/{id}`
 // (one record's full detail, for the record page) and `GET /v1/grants` (the live grants of a
-// person's sessions and those the person approved). The server reaches this through
+// person's sessions and those the person approved). It also answers
+// `POST /v1/credential-requests/{id}/approval`, which opens an approval: the real broker answers
+// its own approval page's URL and decides nothing until the approver has signed in there, so this
+// answers a URL of its own that leads nowhere — a test that clicks Approve sees Dispatch hand the
+// browser over, which is the whole of what the SPA does. The server reaches this through
 // DISPATCH_AGENT_SECRETS_URL (run-server.sh) whenever the harness switch is left unset
 // (e2e/harness-broker.ts), and it lists nothing until a test seeds a request through
 // /__fixture/pending or a record through /__fixture/records. It verifies no caller: the token the
@@ -58,6 +62,25 @@ Bun.serve({
         );
       }
       return Response.json(record);
+    }
+    if (
+      request.method === "POST" &&
+      url.pathname.startsWith("/v1/credential-requests/") &&
+      url.pathname.endsWith("/approval")
+    ) {
+      const recordID = decodeURIComponent(
+        url.pathname.slice("/v1/credential-requests/".length, -"/approval".length)
+      );
+      if (state.records[recordID] === undefined) {
+        return Response.json(
+          { code: "NOT_FOUND", error: "no such credential request" },
+          { status: 404 }
+        );
+      }
+      return Response.json({
+        expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+        url: `http://127.0.0.1:${harnessPorts.fakeBroker.port}/approve/${recordID}`,
+      });
     }
     if (request.method === "GET" && url.pathname === "/v1/grants") {
       return Response.json({ grants: [] });

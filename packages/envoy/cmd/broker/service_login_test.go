@@ -58,6 +58,11 @@ func TestTheBinaryLogsTheDaemonInWithItsTokenAndOnlyAPersonDecidesTheirOwnLogin(
 		"BROKER_API_ACCOUNTS=dispatch=" + dispatchAccount,
 	}})
 	base := "http://" + broker.Addr
+	// This broker's BROKER_APPROVAL_* group is unset, so ada's approval below travels on the
+	// listed caller's word — and the broker says so once, just after it binds, which is the only
+	// sign a running one gives that it does. With the group set it refuses that approve outright
+	// (approval_test.go).
+	broker.Await(t, "every approval is taken on the calling service's word")
 
 	call := func(method, path string, auth map[string]string, body any) (int, []byte) {
 		t.Helper()

@@ -13,14 +13,18 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/api"
+	"github.com/sjawhar/envoy/internal/broker/approval"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/exchange"
 	"github.com/sjawhar/envoy/internal/broker/machine"
@@ -109,7 +113,19 @@ type Rig struct {
 	podKey    *oidctest.Key
 	// serviceLogins is the broker's live BROKER_SERVICE_LOGINS: DaemonAccount, as legion-daemon.
 	serviceLogins map[string]string
+	// approval is whether this Rig's broker takes an approving person's own sign-in
+	// (WithApprovalSignIn): with it, the approval pages are served, POST .../approve is refused
+	// APPROVAL_NEEDS_PERSON, and ApproveBySignIn is how a record is approved.
+	approval bool
 }
+
+// The broker's own OAuth client at the approval issuer a Rig built WithApprovalSignIn holds, and
+// the Workspace domain every approving sign-in must be in — Operator's own.
+const (
+	ApprovalClientID     = "broker-approval-client"
+	approvalClientSecret = "broker-approval-secret"
+	ApprovalDomain       = "example.com"
+)
 
 // Option changes how NewRig wires its broker.
 type Option func(*rigConfig)
@@ -117,6 +133,7 @@ type Option func(*rigConfig)
 type rigConfig struct {
 	lease    time.Duration
 	maxConns int
+	approval bool
 }
 
 // WithLease sets the enrollment lease the broker grants, an hour by default, for a test whose
@@ -129,6 +146,14 @@ func WithLease(lease time.Duration) Option {
 // test that starves it; pgx's default otherwise.
 func WithPoolMaxConns(n int) Option {
 	return func(c *rigConfig) { c.maxConns = n }
+}
+
+// WithApprovalSignIn gives the broker the BROKER_APPROVAL_* group: its own confidential client at
+// the Rig's local issuer, which stands in for the deployment's (Google's). A Rig without it is a
+// broker whose group is unset, where a listed caller's approve still decides — the rollout's
+// first half, and what every other test in this repository drives.
+func WithApprovalSignIn() Option {
+	return func(c *rigConfig) { c.approval = true }
 }
 
 // NewRig holds two secrets the person ada@example.com owns: TEST_SECRET, human-tier, which a
@@ -183,6 +208,20 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 		OAuth: provider, Replay: enr.Replay,
 	}
 
+	// The broker's own approval client, on the same local issuer, when the Rig was asked for one.
+	var approvalSignIn *api.ApprovalSignIn
+	if config.approval {
+		issuer.EnableCodeFlow(podKey, ApprovalClientID, approvalClientSecret)
+		flow, err := oidc.NewConfirmFlow(context.Background(), issuer.URL(), ApprovalClientID, approvalClientSecret, ApprovalDomain)
+		if err != nil {
+			t.Fatalf("oidc.NewConfirmFlow: %v", err)
+		}
+		approvalSignIn = &api.ApprovalSignIn{
+			Challenges: &approval.Service{Store: st},
+			Flow:       flow,
+			Domain:     ApprovalDomain,
+		}
+	}
 	api.Register(mux, api.Deps{
 		PublicURL:   srv.URL,
 		APIAccounts: map[string]string{APIAccount: APICaller},
@@ -193,6 +232,7 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: cur, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKey: policytest.KeyARN,
+		Approval: approvalSignIn,
 	})
 
 	operatorFile := filepath.Join(t.TempDir(), "operator")
@@ -206,6 +246,7 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 		Secrets:   local,
 		podIssuer: issuer, podKey: podKey,
 		serviceLogins: serviceLogins,
+		approval:      config.approval,
 	}
 	rig.UIToken = rig.MintAccountToken(t, APIAccount, time.Hour)
 	return rig
@@ -369,6 +410,86 @@ func decideMachineLogin(t *testing.T, ui uiCall, approver, code string, approve 
 func (r *Rig) DecideMachineLogin(t *testing.T, code string, approve bool) (credentialID string) {
 	t.Helper()
 	return decideMachineLogin(t, r.UI, r.Operator, code, approve, "")
+}
+
+// OpenApproval opens an approval of recordID for approver, as the listed caller Dispatch's server
+// is, and answers the broker's status and body. It decides nothing: ApproveBySignIn does. code is
+// a machine login's typed confirmation code and nil for a request for secrets.
+func (r *Rig) OpenApproval(t *testing.T, recordID, approver string, code *string) (int, []byte) {
+	t.Helper()
+	body := map[string]any{"approver": approver}
+	if code != nil {
+		body["code"] = *code
+	}
+	return r.UI(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approval", body)
+}
+
+// ApproveBySignIn is the whole of one approval as a person makes it on a Rig built
+// WithApprovalSignIn: the listed caller opens it, and the person then reads the broker's own page,
+// signs in at the approval issuer as approver, and the broker decides. It answers the callback's
+// status and page, asserting nothing itself, so a test reads the answer it means to.
+func (r *Rig) ApproveBySignIn(t *testing.T, recordID, approver string, code *string) (int, string) {
+	t.Helper()
+	if !r.approval {
+		t.Fatal("this Rig takes no sign-in: build it with brokertest.WithApprovalSignIn()")
+	}
+	status, body := r.OpenApproval(t, recordID, approver, code)
+	if status != http.StatusOK {
+		t.Fatalf("open an approval of %s = %d: %s", recordID, status, body)
+	}
+	var opened struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(body, &opened); err != nil || !strings.HasPrefix(opened.URL, r.URL+"/approve/") {
+		t.Fatalf("open an approval answered %s (%v), want the broker's own page", body, err)
+	}
+	return r.SignInAt(t, opened.URL, approver)
+}
+
+// SignInAt drives the browser's half of an open approval: the page, the start that sets the
+// binding cookie and redirects, the sign-in at the issuer as email, and the callback. The issuer
+// is the Rig's own, standing in for the deployment's, and the claims are a verified account of
+// ApprovalDomain that authenticated a minute ago.
+func (r *Rig) SignInAt(t *testing.T, approvalURL, email string) (int, string) {
+	t.Helper()
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar.New: %v", err)
+	}
+	browser := &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	page, err := browser.Get(approvalURL)
+	if err != nil {
+		t.Fatalf("GET %s: %v", approvalURL, err)
+	}
+	page.Body.Close()
+	if page.StatusCode != http.StatusOK {
+		t.Fatalf("the approval page = %d, want 200", page.StatusCode)
+	}
+	started, err := browser.Post(approvalURL+"/start", "application/x-www-form-urlencoded", nil)
+	if err != nil {
+		t.Fatalf("POST %s/start: %v", approvalURL, err)
+	}
+	started.Body.Close()
+	if started.StatusCode != http.StatusSeeOther {
+		t.Fatalf("the sign-in's start = %d, want 303", started.StatusCode)
+	}
+	r.podIssuer.SignInAs(map[string]any{
+		"sub": "google-subject-" + email, "email": email, "email_verified": true,
+		"hd": ApprovalDomain, "auth_time": time.Now().Add(-time.Minute).Unix(),
+	})
+	code, state := r.podIssuer.Authorize(t, started.Header.Get("Location"))
+	done, err := browser.Get(r.URL + "/approve/callback?code=" + url.QueryEscape(code) + "&state=" + url.QueryEscape(state))
+	if err != nil {
+		t.Fatalf("GET the approval callback: %v", err)
+	}
+	defer done.Body.Close()
+	answer, err := io.ReadAll(done.Body)
+	if err != nil {
+		t.Fatalf("read the callback's page: %v", err)
+	}
+	return done.StatusCode, string(answer)
 }
 
 // MintPodToken mints a projected service-account token bound to podUID — the shape

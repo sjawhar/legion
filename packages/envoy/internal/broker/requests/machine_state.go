@@ -684,6 +684,43 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	return Decision{RequestID: requestID, State: next, GrantID: grantID}, tx.Commit(ctx)
 }
 
+// ApprovalAdmitted refuses login an approval of agent_secret record recordID that ApplyDecision
+// would refuse: the record's own approver rule (record.ErrNotApprover) and the current policy's
+// (currentPolicyAdmits, whose comment is the whole of that rule). It writes nothing and locks
+// nothing, and is what a broker asks before it sends a person off to sign in for an approval, so
+// a refusal reaches them on Dispatch's page rather than at the end of a sign-in. Answering nil
+// promises nothing: the policy can move again before the decision, and ApplyDecision asks again
+// inside the transaction that grants. pgx.ErrNoRows is no such record, and no request for it.
+func (m *Machine) ApprovalAdmitted(ctx context.Context, recordID, login string) error {
+	var enrollmentID, body string
+	if err := m.Store.Pool.QueryRow(ctx, `select enrollment_id, body from credential_requests where id=$1`, recordID).
+		Scan(&enrollmentID, &body); err != nil {
+		return err
+	}
+	parsed, err := verifyRecordBody(recordID, body)
+	if err != nil {
+		return err
+	}
+	if _, err := parsed.ApproverLogin(record.KindAgentSecret, "", login); err != nil {
+		return err
+	}
+	enr := enrollmentRow{ID: enrollmentID}
+	if err := m.Store.Pool.QueryRow(ctx, `select e.kind, e.operator, e.subject, c.service from enrollments e
+		left join launcher_credentials c on c.id = e.launcher_credential_id where e.id=$1`, enrollmentID).
+		Scan(&enr.Kind, &enr.Operator, &enr.Subject, &enr.Service); err != nil {
+		return err
+	}
+	var requestID string
+	if err := m.Store.Pool.QueryRow(ctx, `select id from requests where record_id=$1`, recordID).Scan(&requestID); err != nil {
+		return err
+	}
+	requester, err := enr.requester(ctx, m.Store.Pool, m.ServicesByAccount)
+	if err != nil {
+		return err
+	}
+	return m.currentPolicyAdmits(ctx, m.Store.Pool, requestID, requester, record.CanonicalLogin(login), parsed.LifetimeSeconds)
+}
+
 // currentPolicyAdmits refuses login an approval of request requestID when the current policy wants
 // one of its names approved by someone else (record.MayDecide), since a change of owner since the
 // request was made moves who may approve it: a request waiting on anyone for a secret that is now
@@ -702,9 +739,11 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 // that brings back the policy version the request was made under and Values re-checks the grant
 // (stillAllowed) only when the version has moved. A secret whose max-grant the current policy sets
 // below the request's lifetime, or that now has one the request names none for, is no one's to
-// approve now, as with a withheld name: the session asks again within it.
-func (m *Machine) currentPolicyAdmits(ctx context.Context, tx pgx.Tx, requestID string, requester policy.Requester, login string, lifetime *int) error {
-	names, err := requestedSecrets(ctx, tx, requestID)
+// approve now, as with a withheld name: the session asks again within it. It reads through q and
+// writes nothing, so it runs both inside the transaction that decides (ApplyDecision) and on the
+// pool alone, as the check ApprovalAdmitted makes before a person is sent to sign in.
+func (m *Machine) currentPolicyAdmits(ctx context.Context, q querier, requestID string, requester policy.Requester, login string, lifetime *int) error {
+	names, err := requestedSecrets(ctx, q, requestID)
 	if err != nil {
 		return err
 	}

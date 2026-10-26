@@ -256,7 +256,6 @@ export interface CredentialRecord {
   decided: CredentialDecisionEvent | null;
   session?: CredentialSession;
 }
-
 export interface CredentialApproval {
   state: "approved";
   grant_id: string | null;
@@ -265,9 +264,19 @@ export interface CredentialApproval {
 export interface CredentialDenial {
   state: "denied";
 }
-/** What approve and deny answer, relayed verbatim from the broker: an approval names the grant or
- *  the launcher credential it made, and a denial is `{state: "denied"}` alone. */
+/** What deny answers, relayed verbatim from the broker: `{state: "denied"}` alone. An approval is
+ *  not answered here at all — it is applied on the broker's own page, where the approver signs in
+ *  (`CredentialApprovalResponse`) — so `CredentialApproval` is only ever read back off a decided
+ *  record. */
 export type CredentialDecisionResponse = CredentialApproval | CredentialDenial;
+
+/** What opening an approval answers, relayed verbatim from the broker: the broker's own page for
+ *  the approver to sign in on, which the browser then goes to, and when the link stops working.
+ *  Nothing is approved until that sign-in reaches the broker. */
+export interface CredentialApprovalResponse {
+  url: string;
+  expires_at: string;
+}
 
 interface CredentialGrantFields {
   grant_id: string;
