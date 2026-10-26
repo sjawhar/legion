@@ -2,24 +2,17 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-253",
-  "completed": "2026-10-26T12:28:00Z",
-  "round": 2,
-  "reviewedCodeHead": "c432d8ef102884a3e7751707556ec8f03fe38a4e",
-  "decision": "changes_requested",
+  "completed": "2026-10-26T22:17:00Z",
+  "round": 3,
+  "reviewedCodeHead": "46502a8428905acd9ecaad7c402ee1050d71af16",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/dispatch/e2e/playwright.config.ts",
-      "description": "isListMode (:39-44) exempts any argv carrying `--list` from both refusals, the DISPATCH_E2E_REUSE_SERVERS one (:69) included. Playwright reads `--grep --list` or `--grep-invert --list` as a grep value and runs specs. With harness ports in the shell and no reuse flag, such a run targets those servers, and seed.ts truncates their database, which is what :69 refuses. On main the same argv met Playwright's own refusal, because webServer would not reuse a taken port. The comment at :37-38 and packages/dispatch/AGENTS.md:1102-1104 claim no spec runs. Fix: a listing exempts only the unset-ports refusal; the reuse refusal stands whenever a targeted port is set."
-    }
-  ],
-  "roundOneThreads": "PRRT_kwDORFy7ds6wOS84, PRRT_kwDORFy7ds6wOS88 and PRRT_kwDORFy7ds6wOS9B: each fixed in 9729362306a9, verified in the diff afa62a4a..9a26a4a6 and answered on its thread.",
-  "census": "Present. Its searches were re-run at c432d8ef: no deploy setter of the three *_LISTEN_FD variables; one daemon.Run caller (cmd/legion/main.go:385); no FreeTCPPort, pick_port, log_size or free-port.sh caller; every await_start call uses the 4+ argument form; the log readers all read a loopback line. The rollouts are opt-in, plus an immediate refusal for the Playwright config naming the port race it closes.",
-  "checks": "`bun test scripts/e2e/lib` at the head in the pod: 567 pass, 2 fail (nats-stream.test.ts needs Docker, which the pod lacks).",
-  "ci": "At 12:26Z every pull_request run at c432d8ef was still queued or pending (Tests 40318328337, Legion Envoy and Contracts 40318328338, Docs 40318328416, Worker Image 40318328341, PR Title 40318626250). At bd64de98, envoy-smoke passed in run 40302789136, job 121530727669, on the architect's reading; the next round reads every required check and envoy-smoke at its own head before any approval.",
-  "thermonuclear": "Pair run once at c432d8ef. thermonuclear-deep-review: APPROVE with 1 Minor (the `--list` guard bypass, which I rank Important because it lets a run past a safety refusal). thermonuclear-code-quality: APPROVE with 3 Minor cleanup items. Both answered mixed, read from each subagent's stored transcript: 58 assistant turns from anthropic/claude-opus-5-5 and 1 from openai/gpt-6.1-sol for the deep review; 47 and 1 for code quality. Each subagent's own claim to be openai/gpt-6.1-sol came from its system context and is wrong.",
-  "fastFollow": "stage2-tmux-supervision.sh:321-322,359 and verifiers-staging-token.sh:233-241 wait for the port file without lib/port-file.sh: stage2's wait does not stop on a dead keeper and ends in a generic 30 s timeout. cmd/legion/main_test.go:279-280's heldSocket comment lacks the cleanup sentence its daemon_test.go twin got."
+  "keyFindings": [],
+  "scope": "Narrowed by the architect after the review-round cap: the diff since c432d8ef (cee45e9b's --list/DISPATCH_E2E_REUSE_SERVERS fix and Minor items; merge b5139e26 resolving #2188 in outbox_scratch_dispatch_test.go) and the forward merges since. 98840a82 and 76d1daad left every non-.legion/ PR line set byte-identical. 993bd7c1 changed only stage3-devbox-workflow.sh's start_daemon (#2242's env -u LEGION_OMP_PATH and daemon_runs_the_pinned_omp, with the log offset taken before start_kept). 46502a84 changed only claude-backend-tmux.sh's required-tool list (#2206 dropped hawk-token; the PR's ss->python3 stays). Every other file was checked by per-file fingerprint.",
+  "roundTwoThread": "PRRT_kwDORFy7ds6wQfCf: fixed in cee45e9b89b6; answered and accepted.",
+  "ci": "At code head 46502a84, every required check is green: lint, typecheck, test and pr-title succeeded. Tests 40395310118, Docs, Worker Image and PR Title succeeded. Legion Envoy and Contracts 40395310296 succeeded on every job: envoy-smoke, claude-envoy, envoy-go, envoy-go-race, envoy-infra-go, dispatch, dispatch-memory, dispatch-multiprocess, envoy-e2e-local, broker-multiprocess, envoy-client, envoy-plugin, pi-envoy, pi-legion and pi-shared. The compare from 46502a84 to the PR head changes only .legion/.",
+  "thermonuclear": "At b5139e26, on the cee45e9b and #2188 merge delta: deep review APPROVE, code quality CHANGES. Code quality's case was some ports set with reuse=1 and a misparsed --list. The deep review traced it as stopped by the workers' re-import before any spec, with nothing truncated, so I took it as no defect. Mixed providers there: 16 and 14 anthropic/claude-opus-5-5 turns, 1 openai/gpt-6.1-sol each. At 46502a84, on the two merge resolutions: deep review APPROVE and code quality APPROVE. Read from the stored transcripts, every assistant turn was anthropic/claude-opus-5-5: 18 turns for the deep review and 11 for code quality.",
+  "fastFollow": "The scripts/e2e/lib/port-file.sh header and the scripts/e2e/README.md consumer list do not name stage2-tmux-supervision.sh or verifiers-staging-token.sh, which now source it. The start_daemon comment in stage3-devbox-workflow.sh:313-319 could be split."
 }
