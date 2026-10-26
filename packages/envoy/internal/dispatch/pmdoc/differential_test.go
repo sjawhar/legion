@@ -25,19 +25,23 @@ type diffDump struct {
 	Parse string          `json:"parse,omitempty"`
 	// Write is ParseForWrite's refusal: what an upload of the document is answered.
 	Write string `json:"write,omitempty"`
-	// Render is Tree's rendering, the markdown the document is stored as, and ReadsBack whether
-	// Parse reads it back as Tree.
-	Render    *string `json:"render"`
-	RenderErr string  `json:"render_err,omitempty"`
-	ReadsBack bool    `json:"reads_back"`
+	// Render is Tree's rendering, the markdown the document is stored as, ReadsBack whether Parse
+	// reads it back as Tree, and WriteReadsBack whether ParseForWrite, the reading every later
+	// write of the stored document makes, does too.
+	Render         *string `json:"render"`
+	RenderErr      string  `json:"render_err,omitempty"`
+	ReadsBack      bool    `json:"reads_back"`
+	WriteReadsBack bool    `json:"write_reads_back"`
 	// FixedPoint is whether Render is the document's markdown byte for byte: reading the
 	// document and writing it back gives back what was read.
 	FixedPoint bool `json:"fixed_point"`
 	// EngineRender is the rendering of the engine's reading of the document, the tree a browser
-	// holds, and EngineReadsBack whether Parse reads it back as that tree.
-	EngineRender    *string `json:"engine_render"`
-	EngineRenderErr string  `json:"engine_render_err,omitempty"`
-	EngineReadsBack bool    `json:"engine_reads_back"`
+	// holds, and EngineReadsBack and EngineWriteReadsBack whether Parse and ParseForWrite read it
+	// back as that tree.
+	EngineRender         *string `json:"engine_render"`
+	EngineRenderErr      string  `json:"engine_render_err,omitempty"`
+	EngineReadsBack      bool    `json:"engine_reads_back"`
+	EngineWriteReadsBack bool    `json:"engine_write_reads_back"`
 	// Panics names each step that panicked, recovered or not.
 	Panics []string `json:"panics,omitempty"`
 }
@@ -243,11 +247,11 @@ func TestDifferentialDump(t *testing.T) {
 		}
 		if tree != nil {
 			dump.Tree, _ = withoutBlockIDs(tree).JSON()
-			dump.Render, dump.RenderErr, dump.ReadsBack = diffRender(&dump, "render", tree)
+			dump.Render, dump.RenderErr, dump.ReadsBack, dump.WriteReadsBack = diffRender(&dump, "render", tree)
 			dump.FixedPoint = dump.Render != nil && *dump.Render == source.MD
 		}
 		if engineTree := diffTree(read.MD); engineTree != nil {
-			dump.EngineRender, dump.EngineRenderErr, dump.EngineReadsBack = diffRender(&dump, "engine render", engineTree)
+			dump.EngineRender, dump.EngineRenderErr, dump.EngineReadsBack, dump.EngineWriteReadsBack = diffRender(&dump, "engine render", engineTree)
 		}
 		line, err := json.Marshal(dump)
 		if err != nil {
@@ -257,17 +261,18 @@ func TestDifferentialDump(t *testing.T) {
 	}
 }
 
-// diffRender renders tree and reports whether Parse reads the rendering back as tree.
-func diffRender(dump *diffDump, name string, tree *Node) (*string, string, bool) {
+// diffRender renders tree and reports whether Parse, and whether ParseForWrite, reads the
+// rendering back as tree.
+func diffRender(dump *diffDump, name string, tree *Node) (*string, string, bool, bool) {
 	var markdown string
 	if err := diffStep(dump, name, func() (err error) { markdown, err = Render(tree); return err }); err != nil {
-		return nil, err.Error(), false
+		return nil, err.Error(), false, false
 	}
-	var back *Node
-	if err := diffStep(dump, name+" read back", func() (err error) { back, err = Parse(markdown); return err }); err != nil {
-		return &markdown, "", false
-	}
-	return &markdown, "", StripAnchorMarks(tree).Equal(back)
+	want := StripAnchorMarks(tree)
+	var back, written *Node
+	readsBack := diffStep(dump, name+" read back", func() (err error) { back, err = Parse(markdown); return err }) == nil && want.Equal(back)
+	writeReadsBack := diffStep(dump, name+" write read back", func() (err error) { written, err = ParseForWrite(markdown, nil); return err }) == nil && want.Equal(written)
+	return &markdown, "", readsBack, writeReadsBack
 }
 
 // diffSide is what one revision does with one document.
@@ -430,14 +435,27 @@ func TestDifferentialCompare(t *testing.T) {
 		case lost:
 			flag("lost fixed point of a misread", sides)
 		}
+		// Churn is head writing other bytes for a document base stores correctly in bytes a write
+		// reads back as held too: such bytes are kept, and others are written only where the base's
+		// do not read back as held (a title's carriage return written raw, which every later write
+		// reads as a line feed, is written `&#13;`). Bytes of base's that only Parse reads back as
+		// held are counted apart, ungated.
 		if base.correct && differs(base.dump.Render, head.dump.Render) {
-			flag("churn", sides)
+			if base.dump.WriteReadsBack {
+				flag("churn", sides)
+			} else {
+				flag("churn of base bytes a write reads otherwise", sides)
+			}
 		}
 		if base.renders && !head.renders {
 			flag("engine-tree regression", sides)
 		}
 		if base.renders && differs(base.dump.EngineRender, head.dump.EngineRender) {
-			flag("engine-tree churn", sides)
+			if base.dump.EngineWriteReadsBack {
+				flag("engine-tree churn", sides)
+			} else {
+				flag("engine-tree churn of base bytes a write reads otherwise", sides)
+			}
 		}
 		if !base.renders && head.renders {
 			flag("engine-tree fixed", sides)
