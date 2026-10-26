@@ -100,7 +100,7 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   ([Running a workload in the cluster from a role](#running-a-workload-in-the-cluster-from-a-role))
   — a declaration the capability report
   renders, not a network control this repository ships; the package's setuid
-  `/usr/lib/openssh/ssh-keysign` and setgid `/usr/bin/ssh-agent` lose those bits in the runtime stage,
+  `/usr/lib/openssh/ssh-keysign` and setgid `/usr/bin/ssh-agent` lose those bits in the `runtime-base` stage,
   and the build's final step refuses an image where any file under `/usr/lib/openssh` or
   `/usr/bin/ssh-agent` carries one),
   `psql` (from `postgresql-client`: the Dispatch browser suite `bun run e2e`, which a

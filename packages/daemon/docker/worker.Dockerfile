@@ -19,7 +19,7 @@
 # `legion`, where discovery loads it — backed by the CodeGraph CLI (@colbymchenry/codegraph, pinned) at
 # /opt/codegraph/bin; jj; git at /usr/bin/git (>= 2.42, from the debian:trixie-slim runtime base — jj's
 # git backend requires it); gh; trixie's socat, which carries a connection over `kubectl exec` to a
-# loopback port inside the pod (the runtime stage says why); what the capability check
+# loopback port inside the pod (the runtime-base stage says why); what the capability check
 # (packages/daemon/internal/capabilities, which `legion probe-image` runs) requires of the image: the Go
 # toolchain at go.work's version (go and gofmt, /opt/go), gopls, typescript-language-server with
 # TypeScript's tsc and tsserver, pyright with its pyright-langserver, and trixie's python3, curl, wget,
@@ -259,7 +259,7 @@ RUN test -n "$LEGION_REVISION" \
 # ------------------------------------------------------------------------------------------------
 # toolchain: what a worker needs to work a repository that is not Legion's, specific to none: uv (which
 # installs each project's own Python from its `.python-version` or `requires-python`; the image's own
-# python3 is trixie's, installed by the runtime stage for Oh My Pi's Python eval), Node with npm and
+# python3 is trixie's, installed by the runtime-base stage for Oh My Pi's Python eval), Node with npm and
 # corepack, the AWS CLI v2, kubectl, the Go toolchain at go.work's version (the release the go stage
 # builds `legion` with, so a worker builds the daemon as CI does), and the TypeScript and Python language
 # servers Oh My Pi's LSP tools start. All five downloads are checked against their pinned SHA-256
