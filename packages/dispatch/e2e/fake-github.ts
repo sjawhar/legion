@@ -21,6 +21,9 @@ interface FakeRepo {
    *  branch commit is derived from their content, so a re-seed with different
    *  files moves the commit exactly like a push would. */
   readonly files?: Record<string, string>;
+  /** The repository's branches, every one at the commit `files` derives; `["main"]` when
+   *  unset, GitHub's default branch. The exact branch read answers 404 for any other name. */
+  readonly branches?: readonly string[];
 }
 
 /** Deterministic commit sha for a repository's current files. */
@@ -126,17 +129,18 @@ Bun.serve({
     }
 
     // The exact branch read a source's save makes (`git/ref/heads/{branch}`, a `/` in the name
-    // percent-encoded by the Go client): every seeded repository has the branch, its head the
-    // commit the commits read answers.
+    // percent-encoded by the Go client): a branch the repository was seeded with answers its ref
+    // at the commit the commits read answers, and any other name 404, as GitHub does.
     const branchRef = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/git\/ref\/heads\/([^/]+)$/);
     if (request.method === "GET" && branchRef !== null) {
       const repo = repos.get(`${branchRef[1]}/${branchRef[2]}`);
-      if (repo === undefined) {
+      const branch = decodeURIComponent(branchRef[3] ?? "");
+      if (repo === undefined || !(repo.branches ?? ["main"]).includes(branch)) {
         return Response.json({ message: "Not Found" }, { status: 404 });
       }
       return Response.json({
         object: { sha: commitFor(repo), type: "commit" },
-        ref: `refs/heads/${decodeURIComponent(branchRef[3] ?? "")}`,
+        ref: `refs/heads/${branch}`,
       });
     }
 

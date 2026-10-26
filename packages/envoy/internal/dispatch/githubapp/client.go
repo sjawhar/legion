@@ -634,11 +634,13 @@ func (c *Client) request(ctx context.Context, method, target, authorization, acc
 }
 
 // Ref resolves branch to its commit SHA under an installation token
-// (`GET /repos/{owner}/{repo}/commits/{branch}`) — one call that also proves
-// the branch exists. GitHub answers a branch that does not exist with 422 and
-// a repository it cannot find or the installation cannot see with 404; both
-// are ErrNoBranch. An empty repository answers 409 per GitHub's docs, which
-// passes through as a read error.
+// (`GET /repos/{owner}/{repo}/commits/{branch}`). That read resolves any
+// commit-ish, so a SHA, `main~1` or `refs/heads/main` resolves too: Ref answers
+// a head, and it does not prove that branch names a branch. A source's save
+// proves that with Branch. GitHub answers a value that resolves to nothing with
+// 422 and a repository it cannot find or the installation cannot see with 404;
+// both are ErrNoBranch. An empty repository answers 409 per GitHub's docs,
+// which passes through as a read error.
 // It asks for the SHA alone (`Accept: application/vnd.github.sha`), so the
 // commit's file list, which GitHub's JSON answer carries, never counts
 // against responseLimit. An answer that is not one 40-hex SHA is an error,
