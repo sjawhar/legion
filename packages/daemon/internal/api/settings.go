@@ -94,8 +94,9 @@ type KubernetesSettings struct {
 	IssueVolume  string               `json:"issue_volume"`
 	Scheduling   SchedulingSettings   `json:"scheduling"`
 	Resources    PodResourcesSettings `json:"resources"`
-	// SessionStore is the settled store's kind — "pvc", "postgres" or "cloudsql-iam" — and nothing
-	// else of it.
+	// SessionStore is the settled store's kind and nothing else of it: always one that keeps
+	// sessions in a database (ompsessions.Store.InDatabase), since `runtime: kubernetes` refuses
+	// "pvc" (readSessionStore).
 	SessionStore string                `json:"session_store"`
 	AgentSecrets *AgentSecretsSettings `json:"agent_secrets,omitempty"`
 	// Plugins is the settled pair, whatever its source, absent while the daemon knows none.

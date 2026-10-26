@@ -187,7 +187,7 @@ root=${JSON.stringify(join(import.meta.dir, "..", "..", ".."))}
 work=${JSON.stringify(join(run, "work"))} evidence=${JSON.stringify(evidence)}
 check=controller check_started=2026-09-30T12:00:00Z daemon_log=${JSON.stringify(join(evidence, "daemon.log"))}
 ok= was_blocked= until=controller locked=1 compared= snapshotted= audited= prod_baseline=2026-09-30T11:00:00.000000000Z
-tree1= tree2= tree3= tree4= pair_session= shape_pid= daemon_pid= watch_pid= events_pid= leaks_pid= sampler_pid= interests_pid= pg_container=none project=LEGSMOKE run_label=x smoke_main_cleaning=
+tree1= tree2= tree3= tree4= pair_session= shape_pid= daemon_pid= watch_pid= events_pid= leaks_pid= sampler_pid= interests_pid= pg_container=none session_db_container=none project=LEGSMOKE run_label=x smoke_main_cleaning=
 negative_config_pod= negative_config_workspace= block_tree=
 operator=production namespace=legion capacity_subject=
 mkdir -p "$work" "$evidence/model-gateway"

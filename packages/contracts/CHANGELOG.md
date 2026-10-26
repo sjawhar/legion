@@ -136,7 +136,7 @@
 
 ### Changed
 
-- The daemon API fixtures (`fixtures/daemon-api/`) are at contract 37 (INFRA-208): `state.json`'s
+- The daemon API fixtures (`fixtures/daemon-api/`) are at contract 38 (INFRA-208): `state.json`'s
   `settings.runtime.kubernetes.resources` is `{issue, controller}`, each pod's six reservation
   fields, in place of one entry per role, and the `resource-limits` capability row's detail names
   pods (`no CPU and memory requests and limits under runtime.kubernetes.resources for the issue

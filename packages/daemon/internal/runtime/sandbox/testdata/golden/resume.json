@@ -93,11 +93,6 @@
                 "name": "issue"
               },
               {
-                "mountPath": "/var/run/legion/home/.omp/profiles/legion/agent/sessions",
-                "name": "issue",
-                "subPath": "sessions"
-              },
-              {
                 "mountPath": "/var/run/legion/home/.config",
                 "name": "config"
               },
@@ -218,6 +213,11 @@
               {
                 "mountPath": "/var/run/legion/roles/.homes",
                 "name": "role-homes"
+              },
+              {
+                "mountPath": "/var/run/legion/providers",
+                "name": "providers",
+                "readOnly": true
               }
             ],
             "workingDir": "/legion/workspaces/sjawhar/legion-smoke/legion-208"
@@ -324,10 +324,6 @@
                 "value": "/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin"
               },
               {
-                "name": "LEGION_EXPECT_ISSUE_VOLUME",
-                "value": "true"
-              },
-              {
                 "name": "XDG_CONFIG_HOME",
                 "value": "/home/legion/.config"
               },
@@ -411,10 +407,23 @@
         ],
         "volumes": [
           {
-            "name": "issue",
-            "persistentVolumeClaim": {
-              "claimName": "issue-legion-legion-legion-208"
-            }
+            "ephemeral": {
+              "volumeClaimTemplate": {
+                "metadata": {},
+                "spec": {
+                  "accessModes": [
+                    "ReadWriteOnce"
+                  ],
+                  "resources": {
+                    "requests": {
+                      "storage": "20Gi"
+                    }
+                  },
+                  "storageClassName": "gp2"
+                }
+              }
+            },
+            "name": "issue"
           },
           {
             "name": "provision",
@@ -748,31 +757,22 @@
           {
             "emptyDir": {},
             "name": "role-homes"
+          },
+          {
+            "name": "providers",
+            "secret": {
+              "defaultMode": 288,
+              "items": [
+                {
+                  "key": "SESSION_DSN",
+                  "path": "OMP_SESSION_SQL_DSN"
+                }
+              ],
+              "secretName": "legion-legion-providers"
+            }
           }
         ]
       }
-    },
-    "volumeClaimTemplates": [
-      {
-        "metadata": {
-          "labels": {
-            "legion.dev/issue": "LEGION-208",
-            "legion.dev/project": "legion"
-          },
-          "name": "issue"
-        },
-        "spec": {
-          "accessModes": [
-            "ReadWriteOnce"
-          ],
-          "resources": {
-            "requests": {
-              "storage": "20Gi"
-            }
-          },
-          "storageClassName": "gp2"
-        }
-      }
-    ]
+    }
   }
 }

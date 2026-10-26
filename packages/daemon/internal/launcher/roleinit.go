@@ -184,17 +184,6 @@ func overlaps(a, b string) bool {
 	return a == b || under(a, b) || under(b, a)
 }
 
-// containerPath is where the launcher, outside every role's namespaces, finds a file a role names
-// under its home: a path under the home is under the home mounts in the container, where the
-// volume holding it is mounted, and any other path is the same in both views.
-func containerPath(path string) string {
-	rest, ok := strings.CutPrefix(path, roleHome+"/")
-	if !ok {
-		return path
-	}
-	return filepath.Join(roleHomeMounts, rest)
-}
-
 // RoleInitSubcommand is `legion launcher`'s hidden subcommand, the one the launcher runs itself.
 const RoleInitSubcommand = "role-init"
 

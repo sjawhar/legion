@@ -111,13 +111,14 @@ type Runtime interface {
 
 // IssueSuspender stops an issue's pod once authorize, called under the runtime's issue launch
 // lock, says the issue's durable close and its complete stored role population allow it (false
-// finishes the close without acting). With release, the close is a child's as done: once the pod
-// is stopped, the issue's Sandbox is deleted with everything it owns, its volume included, and the
-// call returns once the cluster no longer has it; a Sandbox already gone is success, so a retried
-// close finishes. Without it the Sandbox is kept, Suspended, for a later re-admission to resume.
+// finishes the close without acting). Once the pod is stopped, the issue's Sandbox is deleted
+// with everything it owns — the role Secrets holding each launcher's token and credentials — and
+// the call returns once the cluster no longer has it; a Sandbox already gone is success, so a
+// retried close finishes. Nothing durable is kept by keeping it: an issue pod's disk is the pod's
+// own and went with the pod, so the issue's next launch makes the Sandbox again.
 // Process-only runtimes have no shared issue resources to suspend.
 type IssueSuspender interface {
-	SuspendIssue(ctx context.Context, issue, tree string, release bool, authorize func(context.Context) (bool, error)) error
+	SuspendIssue(ctx context.Context, issue, tree string, authorize func(context.Context) (bool, error)) error
 }
 
 // RegistrationDeadline is the registration deadline's base Boot×RegistrationIntervals bound plus
@@ -168,8 +169,7 @@ func (k Known) Validate() error {
 // values — each is written to a 0600 file and reaches the process as a `<NAME>_FILE` pointer — and
 // carries only what is the claim's to carry: a credential every agent of the deployment shares,
 // like the Dispatch bearer, is a runtime option. ResumeSessionFile is set only by `Resume`, and it
-// names the transcript the same agent continues from. WorkspaceRecoveredFrom names the ref a
-// workspace recreated after its volume was lost is recovered from; "" for every other launch.
+// names the transcript the same agent continues from.
 // Plugins, set only under Kubernetes (specs.SpawnSpec, LEGION-164), carries the plugin pair a
 // stale-plugin relaunch installs into the kept pod before Oh My Pi starts, in place of the
 // image's own copies; nil for every launch that installs nothing — every tmux launch, and every
@@ -178,22 +178,21 @@ func (k Known) Validate() error {
 // gate already holds to the daemon's contract. Backend is the harness the process runs
 // (`worker_backends`, Backends); "" is Oh My Pi (Of).
 type SpawnSpec struct {
-	Claim                  claim.Token
-	Project                string
-	Tree                   string
-	Issue                  string
-	Role                   claim.Role
-	Generation             uint64
-	BootToken              string
-	Env                    map[string]string
-	Secrets                map[string]string
-	Prompt                 PromptParts
-	Repository             ghrepo.Repository
-	DefaultBranch          string
-	ResumeSessionFile      string
-	WorkspaceRecoveredFrom string
-	Plugins                *PluginInstall
-	Backend                Backend
+	Claim             claim.Token
+	Project           string
+	Tree              string
+	Issue             string
+	Role              claim.Role
+	Generation        uint64
+	BootToken         string
+	Env               map[string]string
+	Secrets           map[string]string
+	Prompt            PromptParts
+	Repository        ghrepo.Repository
+	DefaultBranch     string
+	ResumeSessionFile string
+	Plugins           *PluginInstall
+	Backend           Backend
 }
 
 // PluginInstall is the plugin pair a Kubernetes launch installs before Oh My Pi starts, and the
@@ -253,19 +252,14 @@ type Observation struct {
 	Kind    ObservationKind
 	At      time.Time
 	Detail  string
-	// WorkspaceLost is a Gone whose process never started because its workspace-init found the
-	// tree volume lost: neither the shared clone nor the session file it was to resume (exit code
-	// 3, cmd/legion/workspace_init.go). The session went with the volume, so the supervisor
-	// relaunches the claim as a fresh session rather than resume one that no longer exists. It is
-	// a field rather than a shape of Detail, which is prose for an operator and nothing else.
-	WorkspaceLost bool
 	// Displaced is a Gone or NotRecordedProcess of a process the daemon itself ended: it replaced
 	// the process's pod while the process ran, to launch another role there. Only the Sandbox
 	// runtime reports it, for a replacement of a live issue or controller pod — one on another
 	// image, one holding a worker stream, secrets broker enrollment or session database URL key a
 	// pod created now is not handed, or one whose role launcher Secret no longer binds it. The
 	// process did nothing wrong, so the supervisor resumes its session at once, charging nothing,
-	// rather than count a death. A field, as WorkspaceLost is, and never set beside it.
+	// rather than count a death. It is a field rather than a shape of Detail, which is prose for an
+	// operator and nothing else.
 	Displaced bool
 }
 

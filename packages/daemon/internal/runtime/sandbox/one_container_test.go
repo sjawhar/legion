@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -91,9 +92,8 @@ func TestAnIssuePodRunsEveryRoleInOneContainer(t *testing.T) {
 	// over a lower layer with mounts under it, and binds each back at its own path (role-init).
 	for path, volume := range map[string]string{
 		"/var/run/legion/roles/.homes": "role-homes", TreeRoot: issueVolume,
-		"/var/run/legion/home/.omp/profiles/legion/agent/sessions": issueVolume,
-		"/var/run/legion/home/.config":                             configVolume,
-		FeedDir:                                                    issueVolume, AgentSecretsTokenDir: agentSecretsTokenVolume,
+		"/var/run/legion/home/.config": configVolume,
+		FeedDir:                        issueVolume, AgentSecretsTokenDir: agentSecretsTokenVolume,
 	} {
 		if got, ok := byPath[path]; !ok || got.Name != volume {
 			t.Errorf("the roles container mounts %+v at %s, want volume %s", got, path, volume)
@@ -110,7 +110,7 @@ func TestAnIssuePodRunsEveryRoleInOneContainer(t *testing.T) {
 		}
 	}
 	for name, count := range byName {
-		if want := map[bool]int{true: 3, false: 1}[name == issueVolume]; count != want {
+		if want := map[bool]int{true: 2, false: 1}[name == issueVolume]; count != want {
 			t.Errorf("the roles container mounts volume %s %d times, want %d", name, count, want)
 		}
 	}
@@ -750,13 +750,13 @@ func TestTheBootCensusPassesBothIssuePodLayouts(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			sandboxes := newDynamic(t, sandboxRunning(t, "legion-legion-legion-208", issue, containers...)).Resource(sandboxGVR).Namespace(testNamespace)
-			if err := rejectLegacyIssueSandboxes(t.Context(), sandboxes, testProject); err != nil {
+			if err := rejectLegacyIssueSandboxes(t.Context(), sandboxes, testProject, slogTo(io.Discard)); err != nil {
 				t.Fatalf("census = %v, want none", err)
 			}
 		})
 	}
 	sandboxes := newDynamic(t, sandboxRunning(t, "legion-legion-legion-208", issue, "roles", "tester")).Resource(sandboxGVR).Namespace(testNamespace)
-	if err := rejectLegacyIssueSandboxes(t.Context(), sandboxes, testProject); err == nil || !strings.Contains(err.Error(), "legion-legion-legion-208") {
+	if err := rejectLegacyIssueSandboxes(t.Context(), sandboxes, testProject, slogTo(io.Discard)); err == nil || !strings.Contains(err.Error(), "legion-legion-legion-208") {
 		t.Fatalf("census of an issue pod running roles and a role container = %v, want it refused by name", err)
 	}
 }

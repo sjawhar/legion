@@ -32,6 +32,7 @@ type previousLaunch struct {
 	Gen     uint64          `json:"generation"`
 	Boot    string          `json:"bootToken"`
 	Marker  string          `json:"marker"`
+	Session string          `json:"session"`
 	Locator runtime.Locator `json:"locator"`
 	Pod     string          `json:"pod"`
 	Names   []string        `json:"containers"`
@@ -57,15 +58,18 @@ func (g *registry) adopt(c claim.Token, gen uint64, token string) {
 }
 
 // previous-layout: with this runtime stopped, the previous release's own runtime and rig
-// (LEGION_E2E_PREVIOUS_HARNESS, built from LEGION_E2E_PREVIOUS_IMAGE's revision with the fixture) launch issue S4A-9's
-// architect and tester in one issue pod of six role containers, on the previous release's worker
-// image, and exit, leaving both running, as a deployment upgrading onto this release has them. Their
-// locators are taken over as store migration 0051 rewrites them (container `roles`) and this
-// runtime starts on them: its first observation of each is StaleAddress naming the six containers,
-// and nothing else of theirs. The architect's Resume replaces the pod with one `roles` container;
-// the tester's old process then reads Displaced, uncharged, and its Resume starts in that same new
-// pod. Each claim is charged exactly one generation, its previous one plus one, registers exactly
-// once after the upgrade, and its marker holds its previous and its resumed incarnation.
+// (LEGION_E2E_PREVIOUS_HARNESS, built from LEGION_E2E_PREVIOUS_IMAGE's revision with the fixture)
+// launch issue S4A-10's architect and tester in one issue pod of six role containers, on the
+// previous release's worker image, and exit, leaving both running, as a deployment upgrading onto
+// this release has them. Their locators are taken over as store migration 0052 rewrites them
+// (container `roles`) and this runtime starts on them: its first observation of each is
+// StaleAddress naming the six containers, and nothing else of theirs. The architect's Resume
+// replaces the pod with one `roles` container; the tester's old process then reads Displaced,
+// uncharged, and its Resume starts in that same new pod. Each claim is charged exactly one
+// generation, its previous one plus one, and registers exactly once after the upgrade. Each
+// resumes the session the fixture recorded in the session table, and the replacement pod starts
+// on a disk of its own, since the old pod's went with it: the marker there holds the resumed
+// incarnation alone, and the previous one is the fixture's record of it (previousLaunch.Locator).
 func (r *liveRig) checkPreviousLayout() error {
 	r.stopRuntime()
 	note("runtime", "listener and runtime closed for the previous release's fixture")
@@ -76,7 +80,7 @@ func (r *liveRig) checkPreviousLayout() error {
 	}
 	name := ""
 	{
-		token, err := claim.NewToken(r.env.claimProject, "S4A-9", claim.RoleArchitect)
+		token, err := claim.NewToken(r.env.claimProject, "S4A-10", claim.RoleArchitect)
 		if err != nil {
 			return err
 		}
@@ -134,14 +138,16 @@ func (r *liveRig) checkPreviousLayout() error {
 		sandboxLoc := *loc.Sandbox
 		sandboxLoc.Container = runtime.IssuePodContainer
 		loc.Sandbox = &sandboxLoc
+		// The fixture's rig recorded each session in the table once its pod ran (recordSession),
+		// so this rig holds it recorded and resumes it from there.
 		c := &liveClaim{token: l.Token, tree: l.Tree, issue: l.Issue, role: l.Role, name: l.Name, marker: l.Marker,
-			state: stateRunning, gen: l.Gen, loc: &loc, last: &loc}
+			session: l.Session, recorded: true, state: stateRunning, gen: l.Gen, loc: &loc, last: &loc}
 		r.reg.adopt(c.token, c.gen, l.Boot)
 		r.claims = append(r.claims, c)
 		claims = append(claims, c)
 	}
 	architect, tester := claims[0], claims[1]
-	note("operator", "pod %s (uid %s) runs containers %v; locators taken over with container %s, as store migration 0051 rewrites them", name, short(oldUID), launched[0].Names, runtime.IssuePodContainer)
+	note("operator", "pod %s (uid %s) runs containers %v; locators taken over with container %s, as store migration 0052 rewrites them", name, short(oldUID), launched[0].Names, runtime.IssuePodContainer)
 
 	restarted := time.Now()
 	mark := r.obs.mark()
@@ -167,7 +173,7 @@ func (r *liveRig) checkPreviousLayout() error {
 	}
 
 	since := time.Now()
-	moved, err := r.resume(architect, architect.marker)
+	moved, err := r.resume(architect, architect.session)
 	if err != nil {
 		return fmt.Errorf("the architect's Resume out of the previous layout: %w", err)
 	}
@@ -192,7 +198,7 @@ func (r *liveRig) checkPreviousLayout() error {
 	note("runtime", "tester: %s Displaced at its recorded %s, charged nothing", ended.Kind, short(tester.loc.Incarnation))
 	tester.loc, tester.state = nil, stateDead
 	since = time.Now()
-	resumed, err := r.resume(tester, tester.marker)
+	resumed, err := r.resume(tester, tester.session)
 	if err != nil {
 		return fmt.Errorf("the tester's Resume into the new pod: %w", err)
 	}
@@ -217,16 +223,19 @@ func (r *liveRig) checkPreviousLayout() error {
 		if err != nil {
 			return err
 		}
+		// The replacement pod's disk is its own: the previous incarnation's line went with the old
+		// pod's, so the fixture's record of that incarnation stands for it, and the marker holds the
+		// resumed one alone.
 		own := roleIncarnations(lines, c.role)
-		if !slices.Equal(own, []string{previous.Locator.Incarnation, c.loc.Incarnation}) {
-			return fmt.Errorf("%s's marker lines are %v, want its previous %s and its resumed %s", c.name, own, previous.Locator.Incarnation, c.loc.Incarnation)
+		if c.loc.Incarnation == previous.Locator.Incarnation || !slices.Equal(own, []string{c.loc.Incarnation}) {
+			return fmt.Errorf("%s's marker lines in the new pod are %v, want only its resumed %s, a later incarnation than its previous %s", c.name, own, c.loc.Incarnation, previous.Locator.Incarnation)
 		}
 		for _, o := range r.obs.since(mark) {
 			if o.Locator.Claim == c.token && o.Kind == runtime.Gone && !o.Displaced {
 				return fmt.Errorf("%s was observed Gone, not Displaced, at %s: %s", c.name, o.Locator.Incarnation, o.Detail)
 			}
 		}
-		note("harness", "%s: generation %d → %d, one registration of a new generation since the upgrade; marker %v", c.name, previous.Gen, c.gen, own)
+		note("harness", "%s: generation %d → %d, one registration of a new generation since the upgrade; previous %s, marker in the new pod %v", c.name, previous.Gen, c.gen, short(previous.Locator.Incarnation), own)
 	}
 	for _, c := range claims {
 		if err := r.suspend(c); err != nil {

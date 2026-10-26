@@ -767,6 +767,48 @@ func TestReadyMergeDedupMigrationCollapsesExistingRows(t *testing.T) {
 	}
 }
 
+// A database can hold issue_suspend rows the previous release queued with a `release` key when
+// 0051 arrives. An issue's close now deletes its Sandbox in every case, the field is gone, and the
+// payload decodes strictly (record.DecodeOutboxPayload), so a row still carrying the key would
+// fail to decode and stall its issue's lifecycle lane. The migration strips the key and leaves
+// everything else of the row as it is; a row that never had it is untouched.
+func TestTheIssueSuspendMigrationStripsTheReleaseKeyFromQueuedRows(t *testing.T) {
+	ctx := context.Background()
+	store := emptyStore(t)
+	migrateThrough(t, store, 50)
+	insert := `insert into outbox (kind, issue, payload, attempts, next_at, last_error)
+		values ('issue_suspend', $1, $2, 0, now(), '') returning id`
+	var releasing, keeping int64
+	if err := store.pool.QueryRow(ctx, insert, "LEGION-209", `{"tree":"LEGION-208","generation":3,"treeGeneration":7,"release":true}`).Scan(&releasing); err != nil {
+		t.Fatalf("queue the releasing suspension the previous release wrote: %v", err)
+	}
+	if err := store.pool.QueryRow(ctx, insert, "LEGION-210", `{"tree":"LEGION-208","generation":4,"treeGeneration":7}`).Scan(&keeping); err != nil {
+		t.Fatalf("queue the suspension written without the field: %v", err)
+	}
+	if _, err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate through the release-key strip: %v", err)
+	}
+	for _, want := range []struct {
+		id      int64
+		payload record.IssueSuspend
+	}{
+		{releasing, record.IssueSuspend{Tree: "LEGION-208", Generation: 3, TreeGeneration: 7}},
+		{keeping, record.IssueSuspend{Tree: "LEGION-208", Generation: 4, TreeGeneration: 7}},
+	} {
+		var payload []byte
+		if err := store.pool.QueryRow(ctx, "select payload from outbox where id = $1", want.id).Scan(&payload); err != nil {
+			t.Fatalf("read row %d: %v", want.id, err)
+		}
+		got, err := record.DecodeOutboxPayload(record.OutboxRow{ID: want.id, Kind: record.OutboxKindIssueSuspend, Payload: payload})
+		if err != nil {
+			t.Fatalf("decode row %d (%s) after the migration: %v", want.id, payload, err)
+		}
+		if got != want.payload {
+			t.Fatalf("row %d decodes as %#v, want %#v", want.id, got, want.payload)
+		}
+	}
+}
+
 // 0044 can run while a daemon still on 0043 works the outbox. A ready_merge row that daemon commits
 // while the dedup waits would be one the dedup's snapshot never saw, and would fail the unique index
 // and with it the upgrade. A worker claiming the duplicate the dedup deletes locks it and then

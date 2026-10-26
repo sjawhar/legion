@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net"
 	"os"
 	"os/exec"
@@ -442,13 +441,7 @@ func (m *manager) start(ctx context.Context, command shimwire.LauncherStart) shi
 	}
 	recreated := false
 	if command.ResumeFile != "" {
-		// An issue pod's role names its session under its own home, which the container holds
-		// under the home mounts; the controller's pod mounts its home's volumes in place.
-		onDisk := command.ResumeFile
-		if m.namespaced {
-			onDisk = containerPath(onDisk)
-		}
-		if recreated, err = resumable(ctx, env, command.ResumeFile, onDisk, clientURL, m.stderr); err != nil {
+		if recreated, err = resumable(ctx, env, command.ResumeFile, clientURL, m.stderr); err != nil {
 			endSession(proxy, dir)
 			return refuse(err.Error())
 		}
@@ -861,11 +854,9 @@ var resumeLookupBackoff = []time.Duration{500 * time.Millisecond, time.Second, 2
 
 // resumable refuses a resume of a session nothing holds, so it is a launch failure and never a fresh
 // agent: Oh My Pi starts a new session at a --resume path it finds empty. It looks where the child's
-// Oh My Pi will, by the storage the child's environment names: the session table when
-// OMP_SESSION_STORAGE is sql (the runtime's runtime.kubernetes.session_store postgres and
-// cloudsql-iam), through clientURL when the generation has a session database of its own and
-// otherwise the URL file OMP_SESSION_SQL_DSN_FILE names, and otherwise the session file on the
-// issue's volume.
+// Oh My Pi will, in the session table (the runtime's runtime.kubernetes.session_store, which must
+// keep sessions in a database: no issue disk holds one), through clientURL when the generation has
+// a session database of its own and otherwise the URL file OMP_SESSION_SQL_DSN_FILE names.
 //
 // It also reports whether the workspace the child works in, LEGION_WORKSPACE, was recreated since the
 // session was last written: provisioning recorded its creation later than that write
@@ -873,8 +864,8 @@ var resumeLookupBackoff = []time.Duration{500 * time.Millisecond, time.Second, 2
 // only what was pushed. A workspace with no record, or a child with no workspace (the controller),
 // was not. A record that cannot be read, which an init container killed mid-write can leave, only
 // decides that notice: it is written to log and taken as no record, and the resume goes ahead.
-func resumable(ctx context.Context, env []string, file, onDisk, clientURL string, log io.Writer) (recreated bool, err error) {
-	written, err := sessionWritten(ctx, env, file, onDisk, clientURL)
+func resumable(ctx context.Context, env []string, file, clientURL string, log io.Writer) (recreated bool, err error) {
+	written, err := sessionWritten(ctx, env, file, clientURL)
 	if err != nil {
 		return false, err
 	}
@@ -892,35 +883,20 @@ func resumable(ctx context.Context, env []string, file, onDisk, clientURL string
 	return ok && written.Before(created), nil
 }
 
-// sessionWritten is when the session a resume names was last written, from where the child's Oh My
-// Pi keeps it (resumable), refusing a session nothing holds. A session file is read at onDisk, where
-// this process finds the path the child names (file): in an issue pod the role's home is its own
-// overlay, and the volume holding its sessions is mounted under the home mounts outside it
-// (containerPath). clientURL is the generation's own session database through the socket its proxy
-// has already bound; with none it is "" and the table is reached through the URL file the child's
-// environment points at, read afresh at each attempt, since that file is a projection something
-// else may replace. A session table it cannot reach is asked again after each of
-// resumeLookupBackoff's waits until resumeLookupTimeout, as a database that is briefly unreachable
-// must not fail the launch; a session the table answers it does not hold, or a URL file that is
-// missing or empty, is refused at once. parent's end (the container's stop) ends the wait as the
-// timeout does.
-func sessionWritten(parent context.Context, env []string, file, onDisk, clientURL string) (time.Time, error) {
-	if strings.TrimSpace(envValue(env, ompsessions.StorageVariable)) != ompsessions.SQLStorage {
-		info, err := os.Stat(onDisk)
-		if err != nil {
-			// The refusal names the file as the role knows it, whichever path held it here.
-			var path *fs.PathError
-			if errors.As(err, &path) {
-				path.Path = file
-			}
-			return time.Time{}, fmt.Errorf("resume session file %s: %v", file, err)
-		}
-		return info.ModTime(), nil
-	}
+// sessionWritten is when the session a resume names was last written, read from the session table
+// the child's Oh My Pi keeps it in (resumable), refusing a session nothing holds. clientURL is the
+// generation's own session database through the socket its proxy has already bound; with none it is
+// "" and the table is reached through the URL file the child's environment points at, read afresh
+// at each attempt, since that file is a projection something else may replace. A session table it
+// cannot reach is asked again after each of resumeLookupBackoff's waits until resumeLookupTimeout,
+// as a database that is briefly unreachable must not fail the launch; a session the table answers
+// it does not hold, or a URL file that is missing or empty, is refused at once. parent's end (the
+// container's stop) ends the wait as the timeout does.
+func sessionWritten(parent context.Context, env []string, file, clientURL string) (time.Time, error) {
 	dsnFile := ""
 	if clientURL == "" {
 		if dsnFile = strings.TrimSpace(envValue(env, ompsessions.DSNFileVariable)); dsnFile == "" {
-			return time.Time{}, fmt.Errorf("resume session %s: %s is %s and %s names no file", file, ompsessions.StorageVariable, ompsessions.SQLStorage, ompsessions.DSNFileVariable)
+			return time.Time{}, fmt.Errorf("resume session %s: %s names no file", file, ompsessions.DSNFileVariable)
 		}
 	}
 	ctx, cancel := context.WithTimeout(parent, resumeLookupTimeout)

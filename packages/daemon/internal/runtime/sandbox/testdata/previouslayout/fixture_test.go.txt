@@ -1,15 +1,19 @@
 //go:build e2e
 
 // Stage 4a's previous-layout fixture. scripts/e2e/stage4a-sandbox-runtime.sh copies this file into
-// a checkout of the commit LEGION_E2E_PREVIOUS_IMAGE was built from (a commit of main whose issue pods run
-// six role containers), as zz_previous_layout_fixture_test.go of its internal/runtime/sandbox, and
-// builds that package's Stage 4a harness with it. The previous-layout check of this branch's harness
-// runs the result once, while its own runtime is stopped: the previous release's own runtime and rig
-// launch the issue S4A-9's architect and tester in one pod of that layout, on the previous release's
-// worker image, exactly as a deployment running it would, and leave both running. It writes each
-// claim's launch, its boot token among it, to LEGION_E2E_PREVIOUS_LAYOUT_OUT (owner-only) as one JSON
-// array, as the daemon's store would hold it across the upgrade; this branch's harness reads and
-// removes the file, and its runtime takes the claims over. Nothing else of the previous harness runs.
+// a checkout of the commit LEGION_E2E_PREVIOUS_IMAGE was built from (a commit of main at or after
+// the pod-owned disk, daemon API contract 37, whose issue pods still run six role containers), as
+// zz_previous_layout_fixture_test.go of its internal/runtime/sandbox, and builds that package's
+// Stage 4a harness with it. The previous-layout check of this branch's harness runs the result once,
+// while its own runtime is stopped: the previous release's own runtime and rig launch the issue
+// S4A-9's architect and tester in one pod of that layout, on the previous release's worker image,
+// exactly as a deployment running it would, and leave both running. Each claim's marker is at the
+// root of that pod's own disk, which every role container of the layout mounts and which dies with
+// the pod, and its session is recorded in the run's session table (awaitRunning's recordSession),
+// where every pod of either release reads it. It writes each claim's launch, its boot token and
+// session among it, to LEGION_E2E_PREVIOUS_LAYOUT_OUT (owner-only) as one JSON array, as the
+// daemon's store would hold it across the upgrade; this branch's harness reads and removes the
+// file, and its runtime takes the claims over. Nothing else of the previous harness runs.
 
 package sandbox
 
@@ -35,6 +39,7 @@ type previousLaunch struct {
 	Gen     uint64          `json:"generation"`
 	Boot    string          `json:"bootToken"`
 	Marker  string          `json:"marker"`
+	Session string          `json:"session"`
 	Locator runtime.Locator `json:"locator"`
 	Pod     string          `json:"pod"`
 	Names   []string        `json:"containers"`
@@ -54,12 +59,13 @@ func TestStage4aPreviousLayoutFixture(t *testing.T) {
 		name string
 		role claim.Role
 	}{{"prev-architect", claim.RoleArchitect}, {"prev-tester", claim.RoleTester}} {
-		token, err := claim.NewToken(env.claimProject, "S4A-9", c.role)
+		token, err := claim.NewToken(env.claimProject, "S4A-10", c.role)
 		if err != nil {
 			t.Fatal(err)
 		}
-		lc := &liveClaim{token: token, tree: "S4A-9", issue: "S4A-9", role: c.role, name: c.name,
-			marker: ompSessionsDir + "/" + SandboxName(token) + ".marker"}
+		lc := &liveClaim{token: token, tree: "S4A-10", issue: "S4A-10", role: c.role, name: c.name,
+			marker:  TreeRoot + "/" + SandboxName(token) + ".marker",
+			session: ompSessionsDir + "/" + SandboxName(token) + "-" + string(c.role) + ".jsonl"}
 		r.claims = append(r.claims, lc)
 		since := time.Now()
 		if _, err := r.spawn(lc, true); err != nil {
@@ -78,7 +84,7 @@ func TestStage4aPreviousLayoutFixture(t *testing.T) {
 		}
 		launched = append(launched, previousLaunch{
 			Name: c.name, Tree: lc.tree, Issue: lc.issue, Role: c.role, Token: token, Gen: lc.gen, Boot: lc.bootToken,
-			Marker: lc.marker, Locator: *lc.loc, Pod: string(pod.UID), Names: names,
+			Marker: lc.marker, Session: lc.session, Locator: *lc.loc, Pod: string(pod.UID), Names: names,
 		})
 		fmt.Printf("   [previous] %s running at generation %d in pod %s (uid %s), containers %v\n", c.name, lc.gen, pod.Name, pod.UID, names)
 	}

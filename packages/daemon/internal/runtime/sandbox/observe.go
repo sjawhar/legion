@@ -23,10 +23,6 @@ import (
 // logTailLines is how much of a failed container's log a Gone quotes (runtime-kubernetes.ts:678-689).
 const logTailLines = 20
 
-// workspaceLostExitCode is workspace-init's exit code for an issue's volume that lost its clone and
-// the session being resumed (decision 11): a Gone that says so carries Observation.WorkspaceLost.
-const workspaceLostExitCode = 3
-
 // view is what the stores hold for one claim's name: its Sandbox, the pod the Sandbox owns, and a
 // same-named pod it does not own, which is no process of the claim's.
 type view struct {
@@ -85,6 +81,21 @@ func (r *Runtime) Probe(ctx context.Context, loc runtime.Locator) (runtime.Obser
 // once the pod store shows the end sees the name. When that read names the pod, the verdict is
 // read again from it, its detail included; when the read fails the observation is Uncertain, so the
 // claim stays watched and is evaluated again.
+//
+// When that read finds no Sandbox at all, the name may be in the gap a migrating launch opens
+// between deleting the issue's Sandbox of the superseded disk shape and creating its replacement
+// (replaceSupersededSandbox), and then the runtime's own keeping of the pod the deleted one named
+// (stranded) stands in for the annotation. It is taken before the confirming read: it is kept from
+// before the delete is sent until after the Create is answered, so taken first it misses the gap
+// only if a whole foreground delete, garbage collection included, ran between the two, where taken
+// after it would miss a Create landing between them. That one window is closed by the record's
+// generation (strandedGen), taken with it and again once the read answers: a GET the API server is
+// slow to answer can span the whole delete, and then the record taken before it is not the one the
+// absence it reports belongs to, so the observation is Uncertain and the claim is evaluated again a
+// tick later, when a Sandbox exists to answer for itself or the record has settled. Only an absence
+// the API server confirmed under a record that did not move lets it answer; a Sandbox that exists
+// answers for itself, as it does for a restarted daemon. It names a pod by uid, so it can only call
+// displaced a process of the pod the suspension ended.
 func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Observation {
 	uncertain := func(format string, args ...any) runtime.Observation {
 		return runtime.Observation{Locator: loc, Kind: runtime.Uncertain, At: r.now(), Detail: fmt.Sprintf(format, args...)}
@@ -95,22 +106,31 @@ func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Obs
 		return uncertain("%v", err)
 	}
 	obs := r.verdict(ctx, loc, v)
+	stranded := false
 	if ends(obs) && !names(v.sandbox, loc) {
+		held, heldAt := r.strandedPod(name)
 		current, err := r.readSandbox(ctx, name)
 		if err != nil {
 			return uncertain("the stores report %s (%s); reading sandbox %s to learn whether the daemon replaced pod %s failed: %v",
 				obs.Kind, obs.Detail, name, loc.Sandbox.PodUID, err)
 		}
-		if names(current, loc) {
+		switch {
+		case names(current, loc):
 			v = r.viewOf(name, current)
 			obs = r.verdict(ctx, loc, v)
+		case current == nil:
+			if now, nowAt := r.strandedPod(name); nowAt != heldAt {
+				return uncertain("the stores report %s (%s); the API server holds no sandbox %s, but the daemon's record of the pods its sandbox replacements displaced moved while that read was out (pod %q held for it before, %q now), so whether the daemon replaced pod %s is read again",
+					obs.Kind, obs.Detail, name, held, now, loc.Sandbox.PodUID)
+			}
+			stranded = held != "" && held == loc.Sandbox.PodUID
 		}
 	}
-	if displaced(v, loc, obs) {
+	if stranded || displaced(v, loc, obs) {
 		obs.Displaced = true
 		obs.Detail += fmt.Sprintf("; the daemon replaced pod %s to launch another role there", loc.Sandbox.PodUID)
 	}
-	return obs
+	return obs.Observation
 }
 
 // readSandbox is the Sandbox named name as the API server holds it now, or nil when it holds none.
@@ -125,10 +145,27 @@ func (r *Runtime) readSandbox(ctx context.Context, name string) (*sandbox, error
 	return decodeSandbox(u)
 }
 
+// observation is one verdict of the mapping: the runtime.Observation the caller receives, beside
+// the one classification only this package acts on. No runtime consumer reads it — the supervisor
+// reads Kind and Displaced alone — so it stays here rather than on the cross-runtime contract.
+type observation struct {
+	runtime.Observation
+	// initFailed is a Gone whose process never started because an init container of its pod ended
+	// non-zero: the pod provisioned nothing a launcher could run in. No replacement the daemon made
+	// can account for such an end, which is what has a relaunch replace a pod whose init keeps
+	// failing rather than read its roles as displaced into it (ends). A pod the daemon is itself
+	// deleting is never one of these, however its init container ended: a pod still inside its init
+	// containers is live to a relaunch (relaunch's live), so the daemon displaces it for image
+	// drift, a moved address or the disk migration, and the kubelet then kills the init container it
+	// was running — a non-zero termination of the daemon's own making, which read as a failed init
+	// would charge every role of that pod a death.
+	initFailed bool
+}
+
 // ends reports whether obs is a final verdict the daemon's own replacement of a pod can account
-// for: a Gone or NotRecordedProcess, never a lost workspace, which no replacement causes.
-func ends(obs runtime.Observation) bool {
-	return (obs.Kind == runtime.Gone || obs.Kind == runtime.NotRecordedProcess) && !obs.WorkspaceLost
+// for: a Gone or NotRecordedProcess, never one a failed init container made.
+func ends(obs observation) bool {
+	return (obs.Kind == runtime.Gone || obs.Kind == runtime.NotRecordedProcess) && !obs.initFailed
 }
 
 // names reports whether s names loc's recorded pod as the live pod a relaunch replaced
@@ -147,7 +184,7 @@ func names(s *sandbox, loc runtime.Locator) bool {
 // still runs undeleted ended on its own, and so did one whose pod the Sandbox does not name: the
 // name is written in the patch that suspends the pod, so a suspension that never applied names
 // nothing.
-func displaced(v view, loc runtime.Locator, obs runtime.Observation) bool {
+func displaced(v view, loc runtime.Locator, obs observation) bool {
 	if !ends(obs) || !names(v.sandbox, loc) {
 		return false
 	}
@@ -173,9 +210,9 @@ func displaced(v view, loc runtime.Locator, obs runtime.Observation) bool {
 // the pod under the rest. A role running its recorded generation whose Sandbox records it was
 // started with other addresses than a generation started now is handed (movedEnvironment) is
 // StaleAddress too. Either names each moved address, never its credentials.
-func (r *Runtime) verdict(ctx context.Context, loc runtime.Locator, v view) runtime.Observation {
-	observe := func(kind runtime.ObservationKind, format string, args ...any) runtime.Observation {
-		return runtime.Observation{Locator: loc, Kind: kind, At: r.now(), Detail: fmt.Sprintf(format, args...)}
+func (r *Runtime) verdict(ctx context.Context, loc runtime.Locator, v view) observation {
+	observe := func(kind runtime.ObservationKind, format string, args ...any) observation {
+		return observation{Observation: runtime.Observation{Locator: loc, Kind: kind, At: r.now(), Detail: fmt.Sprintf(format, args...)}}
 	}
 	name, container := loc.Sandbox.Name, loc.Sandbox.Container
 	role, _ := loc.Claim.Role()
@@ -190,9 +227,8 @@ func (r *Runtime) verdict(ctx context.Context, loc runtime.Locator, v view) runt
 	pod := v.pod
 	initName, initExit := failedInit(pod)
 	if terminal(pod) || initExit != nil {
-		detail, workspaceLost := r.ended(ctx, v, container, role, initName, initExit)
-		ended := observe(runtime.Gone, "%s", detail)
-		ended.WorkspaceLost = workspaceLost
+		ended := observe(runtime.Gone, "%s", r.ended(ctx, v, container, role, initName, initExit))
+		ended.initFailed = initExit != nil && pod.DeletionTimestamp == nil
 		return ended
 	}
 	if scheduled := podCondition(pod, corev1.PodScheduled); pod.Status.Phase == corev1.PodPending && scheduled != nil &&
@@ -311,7 +347,7 @@ func podAbsent(v view) string {
 // init container's log, or role's own lines of the container's (roleLog). A pod of the layout
 // before one container (movedLayout) that ended before this daemon replaced it has no `roles`
 // container: role's own container there is what ended, and its log is role's alone.
-func (r *Runtime) ended(ctx context.Context, v view, container string, role claim.Role, initName string, initExit *corev1.ContainerStateTerminated) (string, bool) {
+func (r *Runtime) ended(ctx context.Context, v view, container string, role claim.Role, initName string, initExit *corev1.ContainerStateTerminated) string {
 	pod := v.pod
 	kind, state := "container", initExit
 	if initExit != nil {
@@ -325,10 +361,7 @@ func (r *Runtime) ended(ctx context.Context, v view, container string, role clai
 		}
 	}
 	var detail strings.Builder
-	workspaceLost := initExit != nil && container == initContainer && state != nil && state.ExitCode == workspaceLostExitCode
-	if workspaceLost {
-		detail.WriteString("the issue's volume was lost: ")
-	}
+
 	fmt.Fprintf(&detail, "pod %s (uid %s) %s", pod.Name, pod.UID, pod.Status.Phase)
 	if state != nil {
 		fmt.Fprintf(&detail, ": %s %s terminated (%s, exit code %d)", kind, container, state.Reason, state.ExitCode)
@@ -346,7 +379,7 @@ func (r *Runtime) ended(ctx context.Context, v view, container string, role clai
 	} else {
 		fmt.Fprintf(&detail, "; last lines of %s:\n%s", role, r.roleLog(ctx, pod.Name, container, role))
 	}
-	return detail.String(), workspaceLost
+	return detail.String()
 }
 
 // fetchCacheState is what a failed workspace-fetch's detail says of the repository cache it fills
