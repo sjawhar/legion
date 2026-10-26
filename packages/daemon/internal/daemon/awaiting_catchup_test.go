@@ -940,3 +940,34 @@ func TestADelayedRegistrationDoesNotStrandARootAcrossASeedAndABoot(t *testing.T)
 		t.Errorf("the review at sequence 11 reached the live handler and the seed; the registration whose read began at 10 left the root %#v, want it admitted or answered", got)
 	}
 }
+
+// The gate seed's read of a newer version carries no place in the event log, so it says whether
+// Dispatch showed the approval request on the agent's turn, as a newer version leaves it: such a
+// read answers a root waiting on its gate, and one showing the request still with the person moves
+// the wait to that version and answers nothing.
+func TestAGateSeedAnswersAGateWaitOnlyWhenTheRequestIsWithTheAgent(t *testing.T) {
+	client := &awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 5, AskID: "ask-approval", WaitingOn: "human"}}
+	pool, w := catchUpRig(t, client, 0)
+	seedCatchUp(t, pool, func(ctx context.Context, tx pgx.Tx, records *record.Postgres) error {
+		if err := records.PutIssue(ctx, tx, captureRoot(phase.AwaitingPerson, &record.Awaiting{GateVersion: 4, Artifact: "artifact-root", Since: record.EventMark{Seq: 10}})); err != nil {
+			return err
+		}
+		return records.PutGate(ctx, tx, record.DesignGate{Issue: "CAPTURE-100", ArtifactID: "artifact-root", LatestVersion: 4, RequestAsk: "ask-approval"})
+	})
+	runner := &outbox{pool: pool, dispatch: client, handlers: w.handlers}
+	seed := func() {
+		t.Helper()
+		if err := runner.seedGate(context.Background(), record.OutboxRow{Issue: "CAPTURE-100"}, record.GateSeed{ArtifactID: "artifact-root", Version: 4, Generation: 1}); err != nil {
+			t.Fatalf("seed the gate: %v", err)
+		}
+	}
+	seed()
+	if got := readIssue(t, pool, "CAPTURE-100"); got.Answered() || got.Awaiting.GateVersion != 5 {
+		t.Fatalf("root after a seed showing the request with the person = %#v, want it waiting on version 5, unanswered", got)
+	}
+	client.approval.LatestVersion, client.approval.WaitingOn = 6, "agent"
+	seed()
+	if got := readIssue(t, pool, "CAPTURE-100"); !got.Answered() || got.Awaiting.AnsweredBy != record.AnsweredByVersion {
+		t.Fatalf("root after a seed showing the request with the agent = %#v, want it answered by the version", got)
+	}
+}
