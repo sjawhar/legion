@@ -2,54 +2,52 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-158",
-  "completed": "2026-10-26T23:08:00Z",
-  "round": 5,
+  "completed": "2026-10-26T23:38:00Z",
+  "round": 6,
   "generation": 4,
-  "head": "de6daaffe1cd",
+  "head": "58b805d967a00e12722289bfd93de702d4000d58",
   "verdictProvider": "No subagent judged anything in this round; the tester's own session ran every check, so no provider or model needs naming.",
+  "fingerprint": {
+    "from": "de6daaffe1cd0699d566a468679b80ba4d35680f 39943e163ceed1ec63dbf8b878cf6e116b870b92ac6f915ec9ffe48e94bf6e36",
+    "to": "58b805d967a00e12722289bfd93de702d4000d58 172e0d29cfbcd7a0a663eeb7c8e8df1f1850ad4a92a922b87a11e3ebe2307ea0",
+    "result": "changed",
+    "why": "Both diffs touch the same files; the only difference is three 22-line hunks (actorAttribution) in the regenerated packages/claude-envoy/dist bundles, which main now carries. With that directory left out, both fingerprints are 86f1cec2360a2ac1c49b11506966d132bc68312872aab73fcbf7cf2d56c4805b. Because the fingerprint changed, this was a full round."
+  },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove each of the three review findings' fixes on the real surface at de6daaff, with negative controls against builds that lack each fix: the rebuild on the round-4 server 337c577d and the reconnect on an SPA built without 988beb33. Then re-drove the spec's acceptance (closes, reopen, upgrade from main 5c4548f0) and the browser suites."
+    "how": "Drove the same surface independently at the merged head 58b805d9: closes, reopen, rebuild after close, margin, reconnect probe, races, upgrade from main 1357b95c, browser suites."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Review finding A: a rebuild of a closed issue's document whose history could not load at the close shows its withdrawn decision resolved, and a reopen opens it again",
-      "surface": "dispatch:local: the head's Go server on Postgres 17, the document rebuild route as a person",
-      "command": "TT-4: notes.md holds an indexed decision block n1; corrupt its doc_updates in SQL; restart; daemonclose TT-4 done; POST /api/v1/artifacts/<notes>/rebuild as alice; read the live text and the ask; repairpass twice; reopen as alice; read again",
-      "observed": "Close 200; ask withdrawn by legion-daemon:TT. Rebuild 200 (source_version 1). Live text ':::ask{#n1 urgency=\"high\" multiple=\"false\" state=\"resolved\"}', ask still withdrawn, document owing a settlement. Repair passes: withdrawn=0 restored=0 swept=0. After the reopen: block state=\"open\", ask open, open_asks [n1].",
-      "headSha": "de6daaffe1cd",
-      "negativeControl": "The same steps on the round-4 server 337c577d (built from an archive): after the rebuild the block reads state=\"open\" while its ask reads withdrawn. On the head, the same rebuild with the agent token is refused 403 HUMAN_ONLY."
+      "criterion": "Close by a person, an agent session and the Legion daemon withdraws every open ask, naming the closer, and changes nothing else; reopen restores exactly those asks; a client of the regenerated bundle reads the record",
+      "surface": "dispatch:local at 58b805d9 with the branch's CLI, the daemon's SetStatus and packages/claude-envoy/dist/dispatch.js",
+      "command": "seed.ts TT 3; alice cookie PATCH TT-1; dcli issue-update --issue TT-2 --status done; daemonclose TT-3 done; state.ts; reopen TT-1; bun packages/claude-envoy/dist/dispatch.js read --ref dispatch://TT-3/ask/<p1> and read --issue TT-3",
+      "observed": "Closes took 0.10 and 0.14 s. On each issue open_asks is 0 and the approval draft; d1, p1, p3, h1 and ap read withdrawn by alice | tester-agent-9 | legion-daemon:TT; d2 answered, p2 retracted, p4 resolved; blocks and the copy read resolved; the named versions read d1=open. The reopen restored the same 5 ids with the same waiting_on, in the Inbox. The claude-envoy bundle prints 'Kind: withdrawn', 'By: legion-daemon:TT' and 'Open asks: - none'.",
+      "headSha": "58b805d967a00e12722289bfd93de702d4000d58",
+      "negativeControl": "The same closes on main's build 1357b95c left open_asks 5, the approval awaiting and every block open"
     },
     {
-      "criterion": "Review finding B: a tab first admitted read-only that reconnects writable restores another tab's unsent row only after the reconnect's sync has applied, so the row reaches the server and no rebuild is reported",
-      "surface": "Dispatch's Playwright harness (chromium and iphone) on the head's server, with a throwaway probe spec whose WebSocket route holds every server frame except the authentication answer for 2.5 s on a reconnect",
-      "command": "Tab 1 opens a closed issue (read-only) and goes offline; the issue is reopened; tab 2 types 'server took this first' online, then 'then typed offline' with its socket held, and closes; tab 1 reconnects. bunx playwright test zz-tester-probe.e2e.ts --project chromium --project iphone --repeat-each 3 (DISPATCH_E2E_REUSE_SERVERS=1, head SPA); probe deleted after",
-      "observed": "6 of 6 passed: 'then typed offline' reached the server through tab 1, tab 1's editor shows it, and no 'could not be applied: the document was rebuilt since' notice appeared.",
-      "headSha": "de6daaffe1cd",
-      "negativeControl": "The same probe against the head SPA built with 988beb33's five source files restored to its parent failed 4 of 4: tab 1 showed 'Edits saved in this browser at … could not be applied: the document was rebuilt since.' and the row never reached the server."
+      "criterion": "Review-round-4 fixes still hold on the merged head: a rebuild after a close shows the withdrawn block resolved; a withdrawn ask folds in the margin; a read-only tab's writable reconnect restores another tab's row with no false rebuild notice",
+      "surface": "dispatch:local (server API, SQL corruption), Chromium, and Dispatch's Playwright harness with the throwaway reconnect probe (chromium and iphone)",
+      "command": "TT-4: corrupt notes.md, restart, daemonclose, rebuild as alice, read, margin.ts, reopen, read; zz-tester-probe.e2e.ts --repeat-each 2 with the reconnect's server frames, except authentication, held 2.5 s (deleted after)",
+      "observed": "Rebuild 200; the block reads state=\"resolved\" and the ask is withdrawn. The margin hides both asks under 'Resolved (2)'. After the reopen the block is open, the ask is open and the withdrawn ask is shown. Probe: 4 of 4 passed; the row reached the server and no rebuild notice appeared.",
+      "headSha": "58b805d967a00e12722289bfd93de702d4000d58",
+      "negativeControl": "Round 5 against builds without each fix: the round-4 server left the rebuilt block open; the SPA without 988beb33 failed the same probe 4 of 4. Here, after the reopen, the margin unfolds the withdrawn ask (Resolved (1))."
     },
     {
-      "criterion": "Review finding C: a withdrawn ask folds away in a document's margin like a retracted one, and a reopen unfolds it",
-      "surface": "Chromium (fresh profile) on the head's server and web app",
-      "command": "TT-5: two asks anchored to spec quotes; retract one; daemonclose TT-5 done; open /issues/TT-5/spec, read the margin, open the 'Resolved' toggle; reopen; read again (margin.ts)",
-      "observed": "Closed: neither 'Which region?' (withdrawn) nor 'Raise budget?' (retracted) is shown; the toggle reads 'Resolved (2)', and opening it shows both.",
-      "headSha": "de6daaffe1cd",
-      "negativeControl": "After the reopen, the withdrawn ask is open again and shown unfolded, and the toggle reads 'Resolved (1)' (only the retracted ask)."
-    },
-    {
-      "criterion": "Spec acceptance re-run: closes by a person, an agent session and the Legion daemon withdraw every open ask naming the closer and change nothing else; reopen restores them; asks already open on closed issues are withdrawn by the repair",
-      "surface": "dispatch:local with the branch's CLI and the daemon's SetStatus; main's build 5c4548f0 then the head on one database",
-      "command": "seed.ts TT 3; alice cookie PATCH TT-1; dcli issue-update --issue TT-2 --status done; daemonclose TT-3 done; state.ts; reopen TT-1; race.ts resolve 10, double 6, unsettled 8, flip 6; main seeds UP-1..3, adds an unindexed block to each and closes them, then the head boots, then 2 repair passes with an md5 before and after",
-      "observed": "On each issue open_asks is 0 and the approval draft; d1, p1, p3, h1 and ap read withdrawn by alice | tester-agent-9 | legion-daemon:TT; d2 answered, p2 retracted, p4 resolved; the blocks and the copy read resolved, and the named versions read d1=open. The reopen restored the same 5 ids. Races: 0 problems, no 5xx. Upgrade: withdrawn=15 swept=3 naming alice, old-agent-5 and legion-daemon:UP; the passes left the md5 unchanged.",
-      "headSha": "de6daaffe1cd",
-      "negativeControl": "On main's build 5c4548f0 the same closes left open_asks 5, the approval awaiting and every block open"
+      "criterion": "Asks already open on closed issues are withdrawn by the repair naming each closer, later passes write nothing, and concurrent closes stay consistent",
+      "surface": "Main's build 1357b95c, then the merged head on the same Postgres database; dispatch:local for races",
+      "command": "Main seeds UP-1..3, adds an unindexed block to each and closes them (alice, old-agent-5, SetStatus); the head boots; 2 repair passes with an md5 before and after; race.ts resolve 10, double 6, unsettled 6, flip 6",
+      "observed": "Boot: withdrawn=15 restored=0 swept=3, naming alice, old-agent-5 and legion-daemon:UP; blocks d1, late and the copy read resolved. The passes reported withdrawn=0 restored=0 swept=0 and left the md5 unchanged. Races: 0 problems, no 5xx.",
+      "headSha": "58b805d967a00e12722289bfd93de702d4000d58",
+      "negativeControl": "On main's build 1357b95c the three closed issues kept 5 open asks each, the approval awaiting and the blocks open"
     }
   ],
-  "browserSuites": "close-withdraws-asks, offline-edits, ask-blocks, doc, margin, margin-order, margin-thread-reply and issue on chromium and iphone: 193 passed. 6 runs in ask-blocks failed with Playwright trace ENOENT because my concurrent probe run shared the artifacts directory; rerun alone, all 16 runs of those 3 tests passed.",
-  "ci": "At de6daaff: PR Title 40411943691 success; Tests 40411943625, Docs 40411943794 and Worker Image 40411943748 in progress; Legion Envoy and Contracts 40411943985 queued. GitHub reports the pull request CONFLICTING at 84808fc7.",
+  "browserSuites": "close-withdraws-asks, offline-edits, ask-blocks, doc, margin and issue on chromium and iphone at 58b805d9: 183 passed, 0 failed, 15 skipped.",
+  "ci": "At 58b805d9: Tests 40417939926, Docs 40417939908, Worker Image 40417939907, Legion Envoy and Contracts 40417939909 and PR Title 40417939938, all queued. GitHub reports the pull request MERGEABLE.",
   "evidenceComments": [
-    "https://github.com/sjawhar/legion/pull/2233#issuecomment-6429414018"
+    "https://github.com/sjawhar/legion/pull/2233#issuecomment-6429930939"
   ]
 }
