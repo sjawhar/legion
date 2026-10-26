@@ -6,15 +6,15 @@ import (
 	"testing"
 )
 
-// 0054 records where Dispatch put the approval a gate holds and the changes request its architect
+// 0055 records where Dispatch put the approval a gate holds and the changes request its architect
 // was told of. A gate the older daemon left migrates with neither recorded; afterwards each column
 // refuses a version or a sequence of zero, and no check ties a mark to its version, so the older
 // daemon, which writes approved_version alone, can still clear an approval on a gate that has a
 // mark: the daemon keeps that shape itself (record.Postgres.PutGate).
-func TestTheGatesReviewMarksArriveWith0054(t *testing.T) {
+func TestTheGatesReviewMarksArriveWith0055(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
-	migrateThrough(t, store, 53)
+	migrateThrough(t, store, 54)
 	if _, err := store.Pool().Exec(ctx, `insert into issues
 		(key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
 		values ('LEGION-208', 'LEGION-208', 'LEGION', 'admitted root', 'admitted', 1, 'in_progress', 'A', 1)`); err != nil {
@@ -36,7 +36,7 @@ func TestTheGatesReviewMarksArriveWith0054(t *testing.T) {
 		t.Fatalf("read the migrated gate: %v", err)
 	}
 	if approvedSeq != nil || approvedAt != nil || toldVersion != nil || reason != "" || toldSeq != nil || toldAt != nil {
-		t.Fatalf("gate after 0054 = approved %v/%v told %v %q %v/%v, want the approval it held placed nowhere and nothing told",
+		t.Fatalf("gate after 0055 = approved %v/%v told %v %q %v/%v, want the approval it held placed nowhere and nothing told",
 			approvedSeq, approvedAt, toldVersion, reason, toldSeq, toldAt)
 	}
 	for _, accepted := range []string{

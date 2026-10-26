@@ -1,4 +1,4 @@
--- 0054_design_gate_review_marks.up.sql -- the design gate identifies a review by where Dispatch
+-- 0055_design_gate_review_marks.up.sql -- the design gate identifies a review by where Dispatch
 -- recorded it, and records the changes request its architect was told of.
 --
 -- design_gates.approved_seq and approved_at are where Dispatch recorded the approval the gate
