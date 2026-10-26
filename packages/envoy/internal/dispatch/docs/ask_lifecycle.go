@@ -62,8 +62,11 @@ func isLifecycleWrite(ctx context.Context) bool {
 // whose stored history does not load (ErrDocumentUnloadable): nothing can read or open it, so no
 // reader sees its blocks open, and the history a retry would meet is the same. Each is logged,
 // naming the issue and the document, and the other documents are written as if it were not
-// there, so the close, reopen or repair writing them is not refused for good. Every other error,
-// a failed or rebuilding room's ErrServiceUnavailable and the database's included, is returned.
+// there, so the close, reopen or repair writing them is not refused for good. While the issue is
+// closed, a rebuild from the latest version is the one way such a document loads again, and that
+// rebuild writes the close's states into the document it seeds (RebuildDocument), so the blocks
+// this left as they were do not come back open on the closed issue. Every other error, a failed or
+// rebuilding room's ErrServiceUnavailable and the database's included, is returned.
 //
 // An answered ask, which the close's final sweep passes, is written into its copies alone, never
 // into its own block: the answer route writes that block itself (SetBlockAttributes), and a write
@@ -137,87 +140,147 @@ func (s *Service) writeDocumentAskStates(
 	actor model.Actor,
 	markUnindexed bool,
 ) ([]BlockRef, error) {
-	var marked []BlockRef
+	given := func(row model.Ask) (model.Ask, bool) {
+		ask, wanted := asks[row.ID]
+		return ask, wanted
+	}
+	var writes *issueAskStateWrites
 	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current *pmdoc.Node, _ func(func(*crdt.Transaction))) error {
 		if current == nil {
 			// Settlement reads none of its ask blocks either (settleRoomWithin).
 			slog.Warn("dispatch: leave the ask blocks of a document outside Proof schema as they are", "artifact", artifactID)
 			return nil
 		}
-		blocks, repeats := readableAskBlocks(current)
-		if !markUnindexed {
-			repeats = nil
-		}
-		if len(blocks) == 0 && len(repeats) == 0 {
-			return nil
-		}
-		rows, err := loadAskBlocks(ctx, tx, artifactID)
-		if err != nil {
-			return err
-		}
-		// An issue's documents take no copy lock (lockProjectCopies): the caller holds the issue's
-		// row, as every transaction reading or marking the copies among its documents does.
-		sources, err := readCopiedAskSources(ctx, tx, artifactID, owner, blocks, unindexedAskBlockIDs(blocks, rows))
-		if err != nil {
+		var err error
+		writes, err = readIssueAskStateWrites(ctx, tx, artifactID, owner, current, given, markUnindexed)
+		if err != nil || writes.empty() {
 			return err
 		}
 		// The writes are made on the fork as it stands (rewriteLive), each on the block carrying its
 		// id, as settlement makes its repairs (repairLive), and each repeat on the block at its place
 		// (markRepeatedAskBlocks), all in one rewrite of the fork, whose tree is the one current read.
 		// A document none of them changes is left as it was, and applyLive writes nothing for it.
-		var writes settlementReconciliation
-		for _, block := range blocks {
-			if row, indexed := rows[block.id]; indexed {
-				if ask, wanted := asks[row.ID]; wanted && ask.State != "answered" {
-					writes.repairs = append(writes.repairs, askRepair{blockID: block.id, set: askServerAttributes(ask, "", false)})
-				}
-				continue
-			}
-			if source, copied := sources[block.id]; copied {
-				if ask, wanted := asks[source.ask.ID]; wanted {
-					set := askServerAttributes(ask, source.document, false)
-					if ask.State == "answered" {
-						set = answeredCopyAttributes(ask, source.document)
-					}
-					writes.repairs = append(writes.repairs, askRepair{blockID: block.id, set: set})
-				}
-				continue
-			}
-			if markUnindexed {
-				ref := BlockRef{ArtifactID: artifactID, BlockID: block.id}
-				writes.repairs = append(writes.repairs, askRepair{blockID: block.id, set: func(node *pmdoc.Node) bool {
-					if node.Attrs["state"] == "resolved" {
-						return false
-					}
-					node.Attrs["state"] = "resolved"
-					marked = append(marked, ref)
-					return true
-				}})
-			}
-		}
-		if len(writes.repairs) == 0 && len(repeats) == 0 {
-			return nil
-		}
-		_, _, err = rewriteLive(doc, nil, func(live *pmdoc.Node) bool {
-			repaired := writes.repairLive(live)
-			repeated := markRepeatedAskBlocks(live, artifactID, repeats)
-			marked = append(marked, repeated...)
-			return repaired || len(repeated) > 0
-		})
+		_, _, err = rewriteLive(doc, nil, writes.apply)
 		return err
 	})
 	switch {
 	case err == nil, errors.Is(err, websocket.ErrNoChanges):
 	case errors.Is(err, ErrDocumentUnloadable) && !errors.Is(err, ErrServiceUnavailable):
 		// Nothing can load the document, so no reader sees its blocks open, and a retry meets the
-		// same history: the close, reopen or repair writing it goes on without it.
+		// same history: the close, reopen or repair writing it goes on without it. The rebuild
+		// that makes it load again writes its closed issue's states itself (RebuildDocument).
 		slog.Warn("dispatch: leave the ask blocks of a document whose history cannot load as they are",
 			"issue", *owner.IssueKey, "artifact", artifactID, "error", err)
 		return nil, nil
 	default:
 		return nil, err
 	}
-	return marked, nil
+	if writes == nil {
+		return nil, nil
+	}
+	return writes.marked, nil
+}
+
+// issueAskStateWrites is what WriteIssueAskStates writes into one document of an issue, read off
+// one tree of it (readIssueAskStateWrites) and made on a tree by apply.
+type issueAskStateWrites struct {
+	artifactID string
+	// writes are the attribute writes to the blocks carrying their ids (repairLive).
+	writes settlementReconciliation
+	// repeats are the blocks repeating an earlier ask block's id, each marked resolved at its
+	// place (markRepeatedAskBlocks).
+	repeats []repeatedAskBlock
+	// marked are the unindexed blocks apply changed to read state="resolved".
+	marked []BlockRef
+}
+
+// readIssueAskStateWrites reads, in tx, the writes WriteIssueAskStates makes to tree, the document
+// artifactID of owner, an issue whose row the caller holds. For each readable ask block that an
+// ask of the document indexes, or that readCopiedAskSources classifies as a copy of an ask on
+// another document, wanted is handed that ask's row and answers the ask whose state the block is
+// to show and whether it is to be written at all. An answered ask's own block is never written,
+// and its copies are written with the answer left out (answeredCopyAttributes). With
+// markUnindexed, every other readable ask block, and every one repeating an earlier ask block's id
+// that does not read resolved, is marked resolved. It changes nothing in tree.
+func readIssueAskStateWrites(
+	ctx context.Context,
+	tx pgx.Tx,
+	artifactID string,
+	owner artifactOwner,
+	tree *pmdoc.Node,
+	wanted func(row model.Ask) (model.Ask, bool),
+	markUnindexed bool,
+) (*issueAskStateWrites, error) {
+	found := &issueAskStateWrites{artifactID: artifactID}
+	blocks, repeats := readableAskBlocks(tree)
+	if markUnindexed {
+		found.repeats = repeats
+	}
+	if len(blocks) == 0 {
+		return found, nil
+	}
+	rows, err := loadAskBlocks(ctx, tx, artifactID)
+	if err != nil {
+		return nil, err
+	}
+	// An issue's documents take no copy lock (lockProjectCopies): the caller holds the issue's
+	// row, as every transaction reading or marking the copies among its documents does.
+	sources, err := readCopiedAskSources(ctx, tx, artifactID, owner, blocks, unindexedAskBlockIDs(blocks, rows))
+	if err != nil {
+		return nil, err
+	}
+	for _, block := range blocks {
+		if row, indexed := rows[block.id]; indexed {
+			if ask, write := wanted(row); write && ask.State != "answered" {
+				found.writes.repairs = append(found.writes.repairs, askRepair{blockID: block.id, set: askServerAttributes(ask, "", false)})
+			}
+			continue
+		}
+		if source, copied := sources[block.id]; copied {
+			if ask, write := wanted(source.ask); write {
+				set := askServerAttributes(ask, source.document, false)
+				if ask.State == "answered" {
+					set = answeredCopyAttributes(ask, source.document)
+				}
+				found.writes.repairs = append(found.writes.repairs, askRepair{blockID: block.id, set: set})
+			}
+			continue
+		}
+		if markUnindexed {
+			ref := BlockRef{ArtifactID: artifactID, BlockID: block.id}
+			found.writes.repairs = append(found.writes.repairs, askRepair{blockID: block.id, set: func(node *pmdoc.Node) bool {
+				if node.Attrs["state"] == "resolved" {
+					return false
+				}
+				node.Attrs["state"] = "resolved"
+				found.marked = append(found.marked, ref)
+				return true
+			}})
+		}
+	}
+	return found, nil
+}
+
+// empty reports whether w has nothing to write.
+func (w *issueAskStateWrites) empty() bool {
+	return len(w.writes.repairs) == 0 && len(w.repeats) == 0
+}
+
+// apply makes w's writes on live, a tree of w's document, recording each unindexed block it marks
+// resolved, and reports whether any changed it.
+func (w *issueAskStateWrites) apply(live *pmdoc.Node) bool {
+	repaired := w.writes.repairLive(live)
+	repeated := markRepeatedAskBlocks(live, w.artifactID, w.repeats)
+	w.marked = append(w.marked, repeated...)
+	return repaired || len(repeated) > 0
+}
+
+// closedIssueAskState is the ask a block showing row shows once row's issue has closed, as the
+// close's final sweep writes it: the row as it stands, for a resolved ask - among them every ask
+// the close withdrew - and for an answered one. An open row is none: no close leaves one, and the
+// repair that withdraws the asks a close by an older release left open writes their blocks.
+func closedIssueAskState(row model.Ask) (model.Ask, bool) {
+	return row, row.State == "resolved" || row.State == "answered"
 }
 
 // answeredCopyAttributes is the write WriteIssueAskStates makes to a copy of ask, an answered ask,
