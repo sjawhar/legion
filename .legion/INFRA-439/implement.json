@@ -2,38 +2,35 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-439",
-  "completed": "2026-10-26T22:50:11Z",
+  "completed": "2026-10-26T23:36:22Z",
   "pr": 2228,
-  "round": "tester round 13 fail (b): a replay notice held for a streaming turn was lost when omp was killed before the first settled heartbeat",
+  "round": "tester round 14 fail: a retention_gap notice held while a turn streams, with omp killed, was shown twice after the resume (the cursor move past the gap was not written)",
   "proof": [
     {
-      "criterion": "A replay notice held for a busy session survives a SIGKILL before the first settled heartbeat and is shown once after the resume",
-      "surface": "the tester's leg N2 (/legion/scratch/tmp/adv/notice2.sh, unchanged) on real omp 18.12.2 with natsd -js and the listener built from this head: long turn streaming, ENVOY_NOTIFICATIONS deleted and added back, omp SIGKILLed with the notice held, session resumed",
-      "command": "bash /legion/scratch/tmp/adv/notice2.sh (exit 0; https://github.com/sjawhar/legion/pull/2228#issuecomment-6429185726)",
-      "observed": "NOTICE RESULT: N2-shown-after-resume:PASS N2-once:PASS; notices in file 0 at the kill, 1 after the resume, still 1 three heartbeats later; the session file holds the held envoy-replay-notice entry before the kill and its handed mark after the resume",
-      "headSha": "489fd64ded897ef011a110aad09ba2bb8280efab",
-      "negativeControl": "the same leg at 232a541e (tester's round 13 run) gave N2-shown-after-resume:FAIL(0->0)"
+      "criterion": "A retention gap held for a streaming turn and cut short by a SIGKILL is told once after the resume, not lost and not repeated",
+      "surface": "the tester's notice4.sh legs (unchanged) on real omp 18.12.2 with natsd -js and the listener built from this head",
+      "command": "bash /legion/scratch/tmp/adv/notice4.sh (exit 0; https://github.com/sjawhar/legion/pull/2228#issuecomment-6429893314)",
+      "observed": "NOTICE4 RESULT: gap-a:PASS gap-b:PASS; gap-b: held record 1 at the kill, 1 notice after the resume, still 1 three heartbeats later; notice2 N2-shown-after-resume:PASS N2-once:PASS; notice3 gap-idle/gap-a PASS and a gap notice handed idle then restarted stays at one",
+      "headSha": "6eba519ff6672fe881656aa83aab31f4aaa0b9aa",
+      "negativeControl": "the same notice4 run at 489fd64d (tester round 14) gave gap-b:FAIL(0->2->2)"
     },
     {
-      "criterion": "Red test bddc5c2a9815 passes unmodified; held notices are recorded, marked handed, and re-queued once by id",
-      "surface": "pi-envoy bun test (extensions/envoy.test.ts, src/unwritten-frames.test.ts)",
-      "command": "cd packages/pi-envoy && bun test (1012 pass, 0 fail); jj diff --git --from bddc5c2a9815 packages/pi-envoy/extensions/envoy.test.ts shows only added lines",
-      "observed": "'a retention gap held while the host's turn streams is told after a restart that cut the hold short' passes, as do the new unit tests and the switch-away-and-back test",
-      "headSha": "489fd64ded897ef011a110aad09ba2bb8280efab",
-      "negativeControl": "with the recordNotice and noticeHanded calls removed, five unit tests and both retention-gap envoy tests fail"
+      "criterion": "Red test cf65bda2468a passes unmodified; a sweep that tells a retention gap writes its moved cursors at once",
+      "surface": "pi-envoy and envoy-client bun test",
+      "command": "cd packages/pi-envoy && bun test (1013 pass, 0 fail); cd packages/envoy-client && bun test (910 pass, 0 fail)",
+      "observed": "'a retention gap held while the host's turn streams is told once after the process is killed' passes; the new replay.test.ts test sees the write carry the cursor past the gap and a restored engine raise no second gap",
+      "headSha": "6eba519ff6672fe881656aa83aab31f4aaa0b9aa",
+      "negativeControl": "with flush(alive, handledAny) restored, the red test receives 2 notices and the new test sees after 0 instead of 2"
     }
   ],
   "filesChanged": [
-    "packages/pi-envoy/src/missed-messages.ts",
-    "packages/pi-envoy/src/unwritten-frames.ts",
-    "packages/pi-envoy/src/unwritten-frames.test.ts",
-    "packages/pi-envoy/extensions/envoy.ts",
-    "packages/pi-envoy/extensions/envoy.test.ts (tests added only)",
-    "packages/pi-envoy/AGENTS.md",
-    "packages/pi-envoy/CHANGELOG.md"
+    "packages/envoy-client/src/replay.ts",
+    "packages/envoy-client/src/__tests__/replay.test.ts",
+    "packages/envoy-client/CHANGELOG.md",
+    "packages/claude-envoy/dist/envoy-channel.js",
+    "packages/envoy/CHANGELOG.md (forward-merge resolution only)"
   ],
-  "trickyParts": [
-    "A notice is recorded (envoy-replay-notice {id, content}) only when it stays held; a notice handed at once records nothing. Handing a recorded notice appends {id, handed: true}.",
-    "restoreLocalSessionState re-queues held-and-not-handed notices by id; UnwrittenFrames skips an id already held or handed in this process, so a second restore of the same session queues nothing twice."
+  "deviations": [
+    "Forward merge of main because GitHub reported CONFLICTING: 9f60905a -> 84bcb2cd, fingerprint 82b2e440... unchanged (https://github.com/sjawhar/legion/pull/2228#issuecomment-6429788724)."
   ]
 }
