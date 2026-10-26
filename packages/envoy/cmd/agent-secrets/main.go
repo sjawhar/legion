@@ -24,7 +24,7 @@
 //	agent-secrets whoami [--json]
 //	agent-secrets sign --method M --url U [--enrollment E]
 //	agent-secrets secret list|show|create|set|retag|delete|restore ...
-//	agent-secrets NAME... [--reason TEXT] [--wait DURATION] [--ttl DURATION] -- <command> [args...]
+//	agent-secrets NAME... [--reason TEXT] [--wait DURATION] [--ttl DURATION] [--github-owner LOGIN [--github-repo NAME]... [--github-read-only]] -- <command> [args...]
 //
 // Environment: AGENT_SECRETS_URL (the broker's base URL) and, for every session-authenticated
 // subcommand, either AGENT_SECRETS_KEY_DIR (an agent box or pod's key.pem and enrollment, the
@@ -137,8 +137,8 @@ var commands = []command{
 		"Print this session's enrollment as the broker's JSON, as self --json does."},
 	{"sign", "agent-secrets sign --method M --url U [--enrollment E]",
 		"Print the proof this session would sign for one broker call, without making the call."},
-	{"", "agent-secrets NAME... [--reason TEXT] [--wait DURATION] [--ttl DURATION] -- <command> [args...]",
-		"Request secrets, wait up to --wait (default 30m) for a person to decide, and run <command>\nwith each granted secret in its environment under its NAME; nothing runs unless all are\ngranted. The grant lasts --ttl, or until this session ends."},
+	{"", "agent-secrets NAME... [--reason TEXT] [--wait DURATION] [--ttl DURATION] [--github-owner LOGIN [--github-repo NAME]... [--github-read-only]] -- <command> [args...]",
+		"Request secrets, wait up to --wait (default 30m) for a person to decide, and run <command>\nwith each granted secret in its environment under its NAME; nothing runs unless all are\ngranted. The grant lasts --ttl, or until this session ends. --github-owner narrows each\nGitHub App token the grant releases to that account's installation, and --github-repo and\n--github-read-only narrow it further, to those repositories and to read access; <command>\nruns only once the broker answers that it applied the narrowing."},
 }
 
 // usageEnvironment closes usage: the variables every form reads, and the exit codes.
@@ -839,15 +839,24 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 
-	flagArgs, names := splitArgs(before, map[string]bool{"reason": true, "wait": true, "ttl": true})
+	flagArgs, names := splitArgs(before, map[string]bool{"reason": true, "wait": true, "ttl": true, "github-owner": true, "github-repo": true})
 	flags := newFlagSet("", stderr)
 	reason := flags.String("reason", "", "why these secrets are needed")
 	wait := flags.Duration("wait", 30*time.Minute, "how long to wait for a pending request")
 	ttlFlagValue := flags.Duration("ttl", 0, ttlFlag)
+	githubOwner := flags.String("github-owner", "", "narrow each GitHub App token the grant releases to this account's installation")
+	var githubRepos repositoryFlag
+	flags.Var(&githubRepos, "github-repo", "narrow the GitHub App token further, to this repository of --github-owner's (repeatable)")
+	githubReadOnly := flags.Bool("github-read-only", false, "narrow the GitHub App token further, to contents: read and metadata: read")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
 	ttl, err := ttlSeconds(flags, *ttlFlagValue)
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
+		return exitUsageError
+	}
+	narrowing, err := githubNarrowing(*githubOwner, githubRepos, *githubReadOnly)
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
 		return exitUsageError
@@ -914,9 +923,13 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	values, err := c.GrantValues(ctx, signer, *grantID)
+	values, err := c.GrantValues(ctx, signer, *grantID, narrowing)
 	if err != nil {
 		reportError(stderr, "agent-secrets", err)
+		return 1
+	}
+	if err := narrowedAsAsked(narrowing, values.GitHubApp); err != nil {
+		fmt.Fprintf(stderr, "agent-secrets: %v; nothing was run\n", err)
 		return 1
 	}
 	var missing []string

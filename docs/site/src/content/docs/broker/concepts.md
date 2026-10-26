@@ -293,7 +293,11 @@ reason of at most 400 characters. The broker evaluates every name
 - A **kind secret** has `kind=github-app` or `kind=google-login` and a current stored value. A
   GitHub App value holds an App identifier and private key. Its release returns a JSON object with
   one installation token for each installation of the App that is not suspended and is on an
-  account its `github-owners` tag lists. A Google login
+  account its `github-owners` tag lists. A release can narrow that token, with the `github_app`
+  body of `POST /v1/grants/{id}/values` or the exec form's `--github-owner`, `--github-repo` and
+  `--github-read-only`: the token of one listed account alone, limited to named repositories of
+  that account, to `contents: read` and `metadata: read`, or to both. It narrows that release
+  alone; the grant's next release is owner-wide unless it narrows too. A Google login
   value holds an `authorized_user` refresh-token credential. Its release returns a bare access
   token. The broker reads the stored value for each release, as it reads any secret, and mints from
   it. It never returns the stored App key or refresh token. A token lasts about an hour, so a client

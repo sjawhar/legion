@@ -40,8 +40,11 @@ const MintFailedMessage = "broker: mint failed"
 // against the policy as it stands then (recheckStoredSources), so a retag that lands during the
 // reads never releases what the secret stores once it is a kind. It holds no pooled connection
 // across a Secrets Manager read: the grant's names are read into memory before the first value is
-// fetched.
-func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map[string]string, *time.Time, error) {
+// fetched. A non-nil narrowing is this release's alone: it reaches the github-app minter of every
+// github-app name the grant holds, and the grant records nothing of it, so its next release
+// without one is owner-wide again. A grant that holds no github-app name refuses a narrowing
+// (ErrNarrowingNotApplicable) and releases nothing.
+func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narrowing *secrets.GitHubNarrowing) (map[string]string, *time.Time, error) {
 	var owner, requestID, policyVersion, decidedBy string
 	var expires *time.Time
 	var lifetime *int
@@ -97,10 +100,13 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 			}
 		}
 	}
+	if narrowing != nil && !holdsGitHubApp(granted) {
+		return nil, nil, ErrNarrowingNotApplicable
+	}
 	values := map[string]string{}
 	released := []string{}
 	for _, g := range granted {
-		value, err := m.release(ctx, g, set.Secrets[g.name].GitHubOwnerLogins())
+		value, err := m.release(ctx, g, set.Secrets[g.name].GitHubOwnerLogins(), narrowing)
 		if errors.Is(err, secrets.ErrNotFound) {
 			return nil, nil, fmt.Errorf("%w: %s", ErrSecretNotInStore, g.name)
 		}
@@ -113,11 +119,26 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 	if err := m.recheckStoredSources(ctx, grantID, granted); err != nil {
 		return nil, nil, err
 	}
+	detail := auditDetail{"names": released}
+	if narrowing != nil {
+		detail["github_app"] = auditDetail{"owner": narrowing.Owner, "repositories": narrowing.Repositories, "read_only": narrowing.ReadOnly}
+	}
 	if _, err := m.Store.Pool.Exec(ctx, `insert into audit (kind, enrollment_id, request_id, grant_id, actor, detail) values ('grant.used',$1,$2,$3,$4,$5)`,
-		enrollmentID, requestID, grantID, "session:"+enrollmentID, auditDetail{"names": released}); err != nil {
+		enrollmentID, requestID, grantID, "session:"+enrollmentID, detail); err != nil {
 		return nil, nil, err
 	}
 	return values, expires, nil
+}
+
+// holdsGitHubApp reports whether any of granted is a github-app secret: a name whose frozen source
+// is that kind's, the only kind a release's narrowing reaches.
+func holdsGitHubApp(granted []requestedSecret) bool {
+	for _, g := range granted {
+		if kind, _, minted, err := policy.ParseKindSource(g.source); err == nil && minted && kind == policy.KindGitHubApp {
+			return true
+		}
+	}
+	return false
 }
 
 // recheckStoredSources checks every name of grantID that releases its stored value (a source no
@@ -198,9 +219,10 @@ func (m *Machine) endGrant(ctx context.Context, grantID string, reason error) er
 // owners, to the kind's minter and returns only what the minter makes. owners is the name's
 // github-owners in the policy snapshot Values checked the grant against, so a list narrowed after
 // a grant holds at the grant's next release, and a name that snapshot does not serve gets none,
-// which the github-app minter refuses. A deleted secret stops releasing once the policy drops it:
-// `agent-secrets secret delete` rereads the name at once.
-func (m *Machine) release(ctx context.Context, g requestedSecret, owners []string) (string, error) {
+// which the github-app minter refuses. narrowing reaches the github-app minter alone. A deleted
+// secret stops releasing once the policy drops it: `agent-secrets secret delete` rereads the name
+// at once.
+func (m *Machine) release(ctx context.Context, g requestedSecret, owners []string, narrowing *secrets.GitHubNarrowing) (string, error) {
 	kind, source, minted, err := policy.ParseKindSource(g.source)
 	if err != nil {
 		return "", fmt.Errorf("secret %s: %w", g.name, err)
@@ -216,7 +238,10 @@ func (m *Machine) release(ctx context.Context, g requestedSecret, owners []strin
 	if err != nil {
 		return "", err
 	}
-	token, err := mint(ctx, secrets.MintRequest{Value: value, GitHubOwners: owners})
+	if kind != policy.KindGitHubApp {
+		narrowing = nil
+	}
+	token, err := mint(ctx, secrets.MintRequest{Value: value, GitHubOwners: owners, GitHubNarrowing: narrowing})
 	if err != nil {
 		// The minter's error names its class and why, never the stored value or a token, so the
 		// line is safe to log; the session sees the same words as MINT_FAILED.

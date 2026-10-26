@@ -4,10 +4,29 @@ import "errors"
 
 // MintRequest is one release's input to a minter (GitHubApp.Mint, GoogleLogin.Mint): the secret's
 // stored value, and the policy's facts about it a minter needs. GitHubOwners is a github-app
-// secret's github-owners tag as lowercase logins; every other kind leaves it nil.
+// secret's github-owners tag as lowercase logins; every other kind leaves it nil. GitHubNarrowing
+// is the narrowing a github-app release asked for, nil for the owner-wide tokens; every other kind
+// leaves it nil.
 type MintRequest struct {
-	Value        string
-	GitHubOwners []string
+	Value           string
+	GitHubOwners    []string
+	GitHubNarrowing *GitHubNarrowing
+}
+
+// GitHubNarrowing narrows one github-app release to the installation of one account and, within
+// it, to named repositories of that account, to read access, or to both: GitHub's
+// POST /app/installations/{id}/access_tokens body. It can only narrow what the release would give
+// without it: Owner must be an account the secret's github-owners lists, and the only permissions
+// it names are contents: read and metadata: read, which GitHub refuses past what the installation
+// holds.
+type GitHubNarrowing struct {
+	// Owner is the lowercase login of the one account whose installation the release mints for.
+	Owner string
+	// Repositories are names of Owner's repositories, without the owner, sorted and distinct: the
+	// token reaches those alone. Empty leaves the token every repository the installation reaches.
+	Repositories []string
+	// ReadOnly limits the token to contents: read and metadata: read.
+	ReadOnly bool
 }
 
 // The classes of a minter's failure (GitHubApp.Mint, GoogleLogin.Mint). Every error a minter

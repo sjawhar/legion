@@ -2,7 +2,11 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
+	"regexp"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -10,6 +14,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
+	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
 // createRequestBody is POST /v1/requests's exact shape: a signed
@@ -141,6 +146,58 @@ type requestStatusResponse struct {
 	Decision *requestDecision `json:"decision"`
 }
 
+// grantValuesBody is POST /v1/grants/{id}/values's optional body: no body at all, or one with no
+// github_app, releases every value as the grant holds it.
+type grantValuesBody struct {
+	// Optional: narrows the token of every github-app secret the grant holds to one account's
+	// installation and, within it, to named repositories, to read access, or to both. A grant
+	// that holds no github-app secret refuses it (NARROWING_NOT_APPLICABLE). It narrows this
+	// release alone: the grant's next release without it is owner-wide.
+	GitHubApp *githubNarrowing `json:"github_app"`
+}
+
+// githubNarrowing is one release's narrowing of its GitHub App tokens: as the request names it,
+// and as the answer names what the broker applied.
+type githubNarrowing struct {
+	// The one GitHub account whose installation the token is minted for: a login the secret's
+	// github-owners lists, compared without regard to case. The answer names it lowercased.
+	Owner string `json:"owner"`
+	// Optional: names of the account's repositories, without the account, at most 500: the token
+	// reaches those alone. The answer names them sorted, each once.
+	Repositories []string `json:"repositories,omitempty"`
+	// Optional: true limits the token to contents: read and metadata: read.
+	ReadOnly bool `json:"read_only,omitempty"`
+}
+
+// maxNarrowedRepositories is the most repositories GitHub's access_tokens body takes.
+const maxNarrowedRepositories = 500
+
+// gitHubRepositoryName is what a repository name GitHub creates can be: ASCII letters, digits,
+// '.', '-' and '_', at most 100 of them. The names . and .. are refused beside it.
+var gitHubRepositoryName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
+
+// narrowingOf checks body and answers it as the minter's narrowing: its owner one GitHub login,
+// lowercased (policy.ParseGitHubOwners, the github-owners tag's own rule), and its repositories
+// names GitHub can hold, at most maxNarrowedRepositories, sorted, each once. Nothing else reaches
+// GitHub: the permissions a narrowing can name are fixed, so a caller can only narrow.
+func narrowingOf(body githubNarrowing) (secrets.GitHubNarrowing, error) {
+	owner, err := policy.ParseGitHubOwners(body.Owner)
+	if err != nil || strings.Contains(owner, " ") {
+		return secrets.GitHubNarrowing{}, fmt.Errorf("github_app.owner must name one GitHub login, not %q", body.Owner)
+	}
+	if len(body.Repositories) > maxNarrowedRepositories {
+		return secrets.GitHubNarrowing{}, fmt.Errorf("github_app.repositories names %d repositories; GitHub takes at most %d", len(body.Repositories), maxNarrowedRepositories)
+	}
+	repositories := slices.Clone(body.Repositories)
+	for _, name := range repositories {
+		if !gitHubRepositoryName.MatchString(name) || name == "." || name == ".." {
+			return secrets.GitHubNarrowing{}, fmt.Errorf("github_app.repositories names %s's repositories by name alone, in ASCII letters, digits, '.', '-' and '_', not %q", owner, name)
+		}
+	}
+	slices.Sort(repositories)
+	return secrets.GitHubNarrowing{Owner: owner, Repositories: slices.Compact(repositories), ReadOnly: body.ReadOnly}, nil
+}
+
 // grantValuesResponse is POST /v1/grants/{id}/values's answer.
 type grantValuesResponse struct {
 	// When the grant expires; the session can read the values again until then. Null for a grant
@@ -148,6 +205,10 @@ type grantValuesResponse struct {
 	ExpiresAt *time.Time `json:"expires_at"`
 	// Each granted name's value, read fresh from the secret store.
 	Values map[string]string `json:"values"`
+	// The narrowing this release applied to its GitHub App tokens, absent when it applied none. A
+	// client that asked for one and finds none here is answered by a broker from before
+	// narrowing, which released the owner-wide tokens.
+	GitHubApp *githubNarrowing `json:"github_app,omitempty"`
 }
 
 func (s *server) readRequest(w http.ResponseWriter, r *http.Request, enrollmentID string) {
@@ -210,7 +271,22 @@ func (s *server) grantValues(w http.ResponseWriter, r *http.Request, enrollmentI
 	if !ok {
 		return
 	}
-	values, expires, err := s.deps.Machine.Values(r.Context(), id, enrollmentID)
+	var body grantValuesBody
+	if r.ContentLength != 0 && !readJSON(w, r, &body, "INVALID_NARROWING") {
+		return
+	}
+	var narrowing *secrets.GitHubNarrowing
+	var applied *githubNarrowing
+	if body.GitHubApp != nil {
+		n, err := narrowingOf(*body.GitHubApp)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_NARROWING", err.Error())
+			return
+		}
+		narrowing = &n
+		applied = &githubNarrowing{Owner: n.Owner, Repositories: n.Repositories, ReadOnly: n.ReadOnly}
+	}
+	values, expires, err := s.deps.Machine.Values(r.Context(), id, enrollmentID, narrowing)
 	switch {
 	case errors.Is(err, requests.ErrNotYours):
 		writeError(w, http.StatusForbidden, "NOT_YOURS", err.Error())
@@ -224,6 +300,9 @@ func (s *server) grantValues(w http.ResponseWriter, r *http.Request, enrollmentI
 	case errors.Is(err, requests.ErrSecretNotInStore):
 		writeError(w, http.StatusNotFound, "SECRET_NOT_IN_STORE", err.Error())
 		return
+	case errors.Is(err, requests.ErrNarrowingNotApplicable):
+		writeError(w, http.StatusBadRequest, "NARROWING_NOT_APPLICABLE", err.Error())
+		return
 	case errors.Is(err, requests.ErrMintFailed):
 		// The kind's upstream (GitHub or Google) refused or failed the mint; its message says why,
 		// such as a Google login that needs a new sign-in, and never holds the stored value.
@@ -236,7 +315,7 @@ func (s *server) grantValues(w http.ResponseWriter, r *http.Request, enrollmentI
 	if values == nil {
 		values = map[string]string{}
 	}
-	writeJSON(w, http.StatusOK, grantValuesResponse{ExpiresAt: expires, Values: values})
+	writeJSON(w, http.StatusOK, grantValuesResponse{ExpiresAt: expires, Values: values, GitHubApp: applied})
 }
 
 // revokeGrant ends a grant for the session that holds it — session proof only, per the shared

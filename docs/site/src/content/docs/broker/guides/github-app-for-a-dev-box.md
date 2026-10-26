@@ -186,3 +186,33 @@ GH_TOKEN=$token gh repo view <owner>/<repository>
 ```
 
 The token expires at the time in `expires_at`. Read the secret again after the token expires.
+
+## Give a narrowed token to another machine
+
+A token you give to another machine, such as a virtual machine that must only read one
+repository, must be narrowed. Use these flags on the `agent-secrets` command that reads the
+secret:
+
+- `--github-owner <owner>` gives a token for the installation on that account only. The account
+  must be in the `github-owners` tag of the secret.
+- `--github-repo <repository>` limits the token to that repository of the account. Use the flag
+  one time for each repository. Give the repository name without the account.
+- `--github-read-only` limits the token to `contents: read` and `metadata: read`.
+
+`--github-repo` and `--github-read-only` need `--github-owner`.
+
+```sh
+agent-secrets --reason "read <repository> on <machine>" GITHUB_APP_<PERSON> \
+  --github-owner <owner> --github-repo <repository> --github-read-only -- sh -ceu '
+printf %s "$GITHUB_APP_<PERSON>" | jq -r ".installations[\"<owner>\"].token"
+'
+```
+
+The release JSON has one entry, for `<owner>`. The broker sends the narrowing to GitHub, which
+refuses a repository or permission the installation does not have. The command runs only when
+the broker tells `agent-secrets` that it applied the narrowing. A broker that cannot narrow
+releases the token for all repositories, so `agent-secrets` runs nothing and exits 1.
+
+The narrowing applies to this read only. The next read without these flags gives the token for
+all repositories of each installation. Keep a narrowed token apart from the other tokens, so
+that you do not use one in place of the other.

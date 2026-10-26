@@ -1,10 +1,12 @@
 package secrets
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"slices"
 	"strconv"
@@ -57,13 +59,37 @@ type githubMintedInstallation struct {
 	ExpiresAt      time.Time `json:"expires_at"`
 }
 
+// githubAccessTokensBody is GitHub's POST /app/installations/{id}/access_tokens body for a narrowed
+// token: the repositories it reaches and the permissions it holds, each left out when the
+// narrowing does not name it.
+type githubAccessTokensBody struct {
+	Repositories []string          `json:"repositories,omitempty"`
+	Permissions  map[string]string `json:"permissions,omitempty"`
+}
+
+// accessTokensBody is narrowing as GitHub's access_tokens body, nil for a narrowing that names
+// neither repositories nor read-only (it narrows to its owner alone) and for none, whose tokens
+// are asked for with no body, as before narrowing existed.
+func (n *GitHubNarrowing) accessTokensBody() ([]byte, error) {
+	if n == nil || len(n.Repositories) == 0 && !n.ReadOnly {
+		return nil, nil
+	}
+	body := githubAccessTokensBody{Repositories: n.Repositories}
+	if n.ReadOnly {
+		body.Permissions = map[string]string{"contents": "read", "metadata": "read"}
+	}
+	return json.Marshal(body)
+}
+
 // Mint returns a token and expiry for every installation of the App in req.Value that is not
 // suspended and whose account req.GitHubOwners lists, compared without regard to case. It leaves
 // out an installation on any other account without asking GitHub for its token: a public App can
 // be installed by anyone, and a release must not carry a token for an outsider's account. It also
 // leaves out a record with no positive installation id, which names no installation a token can be
-// asked for. The value is the JSON object stored in the secret, never part of an error. Every error
-// wraps one of ErrMintStoredValue, ErrMintRefused or ErrMintUpstream.
+// asked for. With req.GitHubNarrowing it mints for the narrowing's owner alone, which
+// req.GitHubOwners must list (it refuses, asking GitHub nothing, otherwise), sending the narrowing
+// as GitHub's access_tokens body. The value is the JSON object stored in the secret, never part of
+// an error. Every error wraps one of ErrMintStoredValue, ErrMintRefused or ErrMintUpstream.
 func (m GitHubApp) Mint(ctx context.Context, req MintRequest) (string, error) {
 	var secret githubAppSecret
 	// encoding/json's syntax errors quote the offending byte, so this decode and the token's do
@@ -73,6 +99,14 @@ func (m GitHubApp) Mint(ctx context.Context, req MintRequest) (string, error) {
 	}
 	if !validGitHubAppID(secret.AppID) || secret.PrivateKey == "" {
 		return "", fmt.Errorf("%w: GitHub App secret needs an app_id and private_key", ErrMintStoredValue)
+	}
+	narrowing := req.GitHubNarrowing
+	if narrowing != nil && !slices.Contains(req.GitHubOwners, strings.ToLower(narrowing.Owner)) {
+		return "", fmt.Errorf("%w: github app %s: %s is not an account its github-owners tag lists", ErrMintRefused, secret.AppID, narrowing.Owner)
+	}
+	scope, err := narrowing.accessTokensBody()
+	if err != nil {
+		return "", fmt.Errorf("%w: encode the narrowing as GitHub's access_tokens body: %w", ErrMintUpstream, err)
 	}
 	key, err := githubappjwt.ParseKey(secret.PrivateKey)
 	if err != nil {
@@ -103,7 +137,10 @@ func (m GitHubApp) Mint(ctx context.Context, req MintRequest) (string, error) {
 		if !slices.Contains(req.GitHubOwners, strings.ToLower(owner)) {
 			continue
 		}
-		token, err := m.installationToken(ctx, jwt, installation.ID)
+		if narrowing != nil && !strings.EqualFold(owner, narrowing.Owner) {
+			continue
+		}
+		token, err := m.installationToken(ctx, jwt, installation.ID, scope)
 		if err != nil {
 			return "", err
 		}
@@ -114,6 +151,9 @@ func (m GitHubApp) Mint(ctx context.Context, req MintRequest) (string, error) {
 		}
 	}
 	if len(minted.Installations) == 0 {
+		if narrowing != nil {
+			return "", fmt.Errorf("%w: github app %s has no installation on %s", ErrMintRefused, secret.AppID, narrowing.Owner)
+		}
 		return "", fmt.Errorf("%w: github app %s has no installation on an account its github-owners tag lists", ErrMintRefused, secret.AppID)
 	}
 	encoded, err := json.Marshal(minted)
@@ -132,14 +172,22 @@ func (m GitHubApp) base() string {
 	return cmp.Or(strings.TrimSuffix(m.Base, "/"), githubAPIBase)
 }
 
-// githubRequest is a call to GitHub's App API, authenticated as the App.
-func githubRequest(ctx context.Context, method, target, jwt string) (*http.Request, error) {
-	request, err := http.NewRequestWithContext(ctx, method, target, nil)
+// githubRequest is a call to GitHub's App API, authenticated as the App, carrying body as JSON
+// when it is not nil.
+func githubRequest(ctx context.Context, method, target, jwt string, body []byte) (*http.Request, error) {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	request, err := http.NewRequestWithContext(ctx, method, target, reader)
 	if err != nil {
 		return nil, err
 	}
 	request.Header.Set("Authorization", "Bearer "+jwt)
 	request.Header.Set("Accept", "application/vnd.github+json")
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
 	return request, nil
 }
 
@@ -147,7 +195,7 @@ func (m GitHubApp) installations(ctx context.Context, jwt string) ([]githubInsta
 	const what = "list GitHub App installations"
 	var installations []githubInstallation
 	for page := 1; ; page++ {
-		request, err := githubRequest(ctx, http.MethodGet, fmt.Sprintf("%s/app/installations?per_page=100&page=%d", m.base(), page), jwt)
+		request, err := githubRequest(ctx, http.MethodGet, fmt.Sprintf("%s/app/installations?per_page=100&page=%d", m.base(), page), jwt, nil)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %s: %w", ErrMintUpstream, what, err)
 		}
@@ -166,9 +214,11 @@ func (m GitHubApp) installations(ctx context.Context, jwt string) ([]githubInsta
 	}
 }
 
-func (m GitHubApp) installationToken(ctx context.Context, jwt string, installationID int64) (githubInstallationToken, error) {
+// installationToken asks GitHub for installationID's token, narrowed by scope, GitHub's
+// access_tokens body, when it is not nil.
+func (m GitHubApp) installationToken(ctx context.Context, jwt string, installationID int64, scope []byte) (githubInstallationToken, error) {
 	const what = "mint GitHub App installation token"
-	request, err := githubRequest(ctx, http.MethodPost, m.base()+"/app/installations/"+strconv.FormatInt(installationID, 10)+"/access_tokens", jwt)
+	request, err := githubRequest(ctx, http.MethodPost, m.base()+"/app/installations/"+strconv.FormatInt(installationID, 10)+"/access_tokens", jwt, scope)
 	if err != nil {
 		return githubInstallationToken{}, fmt.Errorf("%w: %s: %w", ErrMintUpstream, what, err)
 	}
