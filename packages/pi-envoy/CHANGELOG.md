@@ -4,6 +4,28 @@
 
 ### Added
 
+- A session shows once each Envoy message it missed while its NATS connection or a subscription
+  was down, NATS was restarting or the session was not running. It asks its listener's new
+  `POST /v1/replay` for what the notification stream (72 hours) stored on its own agent subject
+  and on every topic it follows after where it last read, when a pass opens its agent subject (a
+  start, a switch, a resume), after a subscription is reopened, on each NATS reconnect, on every
+  heartbeat and after `envoy_subscribe`, and shows each message neither the live path nor an
+  earlier sweep showed as a card saying it was published while the connection was down. A
+  replayed BTW, Aside, Steer or person's Send is that card only: it runs no side turn, takes no
+  user turn and posts no Dispatch reply. Role messages and team or other ad-hoc topics stay live
+  only, and nothing from before the session followed a topic, or older than 72 hours, comes back.
+  The session file keeps what the session was shown (`envoy-replay-delivered`) and where it read
+  to (`envoy-replay-state`), so a restart shows nothing again (up to 20,000 frames in 72 hours) —
+  a live repeat of a frame shown before the restart is dropped too — and a session stopped past
+  the listener's grace follows its topics again; a crash between showing a frame and recording it
+  can show it twice, never lose it. A frame that fails to show is retried, and its third failure,
+  or a live failure no sweep will retry, shows one card naming it and how to read it, where a
+  failed injection was only logged before. A recreated stream or a cursor older than the stream's
+  oldest message is said once as a card; a listener without the route (404) or unable to read the
+  stream (503 `REPLAY_UNAVAILABLE`, 401, 403) is said once as a warning, and live delivery goes
+  on as before. `scripts/smoke-replay.sh` proves it against a real session, listener and
+  JetStream (INFRA-439).
+
 - The `dispatch` skill this plugin ships teaches the board move as a command: a card moves with
   `dispatch issue-update --issue <KEY> --before <OTHER>`, which puts it above that issue,
   `--after <OTHER>`, which puts it below, or both together, which land it between them, where the

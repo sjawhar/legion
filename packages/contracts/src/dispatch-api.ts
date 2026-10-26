@@ -1210,16 +1210,22 @@ export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
  *   error instead (a BTW whose side turn failed) was never handed over, so the host releases its
  *   key and a same-mode re-send of it reaches the agent.
  *
- * It fails in three places. A host holds its keys in memory, so one that restarts after the first
- * frame landed has forgotten it and a Retry reaches that agent a second time; that is ordinary,
- * not rare: `claude --resume` starts a new channel process on the same conversation, and a
- * Sandbox pod resumes its session in a new process. The stream stores a re-send of an attempt the
- * session answered with an error no more than any other repeat, so a session the listener pushes
- * to never receives it, and its attempt reads as a duplicate. The dashboard therefore offers no
- * same-mode Retry for such an attempt and points at a mode change, which is a new key; sending
- * that Retry under a new key is LEGION-431. And a host keeps at most `DELIVERY_DEDUPE_KEY_LIMIT`
- * keys, forgetting the oldest past it, so a re-send of a key it was handed before that many later
- * ones reaches the agent again. The limit is two and a half times what the whole stream stored in
+ * It fails in three places. A host's `createDeliveryDedupe` holds its keys in memory, so a host
+ * that keeps nothing else and restarts after the first frame landed has forgotten it, and a Retry
+ * reaches that agent a second time; that is ordinary, not rare: `claude --resume` starts a new
+ * channel process on the same conversation, and a Sandbox pod resumes its session in a new
+ * process. pi-envoy and claude-envoy, from the releases that carry `@legion/envoy-client/replay`,
+ * also keep a ledger of the frames their session was handed (pi-envoy in the session's
+ * transcript, claude-envoy in a file per session id) and drop a repeat it holds after a restart,
+ * for 72 hours and up to 20,000 frames; only a crash between the hand-over and the ledger write
+ * still lets that Retry through. Older plugins still forget, and the dashboard cannot tell which
+ * one a session runs. The stream stores a re-send of an attempt the session answered with an
+ * error no more than any other repeat, so a session the listener pushes to never receives it, and
+ * its attempt reads as a duplicate. The dashboard therefore offers no same-mode Retry for such an
+ * attempt and points at a mode change, which is a new key; sending that Retry under a new key is
+ * LEGION-431. And a host keeps at most `DELIVERY_DEDUPE_KEY_LIMIT` keys, forgetting the oldest
+ * past it, so a re-send of a key it was handed before that many later ones reaches the agent
+ * again. The limit is two and a half times what the whole stream stored in
  * one window when it was set, so a host reaches it only once traffic grows past that or a
  * producer floods a topic it follows.
  *

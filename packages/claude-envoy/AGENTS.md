@@ -13,6 +13,27 @@ There is no Monitor and no native Claude messaging socket path. The server's too
 `envoyToolSpecs` alone, the ten `envoy_*` tools and `slack_post`: agents reach Dispatch through the
 `dispatch` command, which `bin/dispatch` puts on the Bash tool's `PATH`.
 
+What those subscriptions missed while they were down, the server reads back from Envoy's
+notification stream through its listener (`POST /v1/replay`) with the shared engine
+`@legion/envoy-client/replay`, which pi-envoy uses too (its rules are "Missed messages" in
+`packages/pi-envoy/AGENTS.md`). A sweep runs at channel start (a resume included), on each nats.js
+`reconnect` status, on every heartbeat and after a new follow, and shows each stored frame the
+session was not shown, once, through the same path a live frame takes (the channel notification,
+or the Legion bridge's inbox), with a last line saying when it was published while the
+connection was down (`src/missed-messages.ts`); a frame there runs nothing. Role messages and team
+or other ad-hoc topics stay live only. The live path records each frame Claude Code was handed in
+the engine's ledger before its claim settles, and drops a frame the ledger holds (a repeat after
+a restart). The state is one file per session id, `replay-<url-encoded session id>.json` in the
+plugin's state directory (`src/replay-state.ts`, mode 0600, written by rename): the cursors, the
+followed subjects, which the server follows again at start even after the listener reaped its
+interests, and at most 72 hours of ledger, at most 20,000 entries; no sweep prunes these files,
+since Claude Code can resume a session at any later time. A `/clear` handoff to a new id starts a
+fresh file, as a new session does, so nothing from before it comes back. A frame that fails three
+times, or a live frame that fails and no sweep will show, is replaced by a notice naming it on
+the same path; a notice that cannot be shown, and a listener that does not replay (404,
+`REPLAY_UNAVAILABLE`, 401 or 403), go to stderr. A crash between the hand-off and the ledger
+write can show a frame twice, never lose it.
+
 A session advertises the delivery modes its deliveries' path can honour, never `btw`, and none at
 all when its deliveries are channel notifications Claude Code did not load (`src/claude-channel.ts`;
 a Legion pane's go to the bridge's inbox instead, so the gate does not apply to it). One whose

@@ -139,10 +139,14 @@ every Oh My Pi session, and a Claude Code one — receives every message publish
 subscribes to, whoever the source: its own publish, and a subagent's publish to a topic the
 session that spawned you subscribes to, included. The listener skips its push to such a session
 entirely, so the push path's skip of the source session never decides anything for it, and a
-topic the stream retains and a team topic that travels live (below) behave alike here. The
-session whose own publish does not come back is one the listener delivers to by push, one
-registered with a serve port such as the OpenCode plugin; such a session receives no team topic
-at all, since it holds no NATS subscription of its own.
+topic the stream retains and a team topic that travels live (below) reach it alike while it is
+connected. They differ after an outage: once such a session's connection or subscription is back,
+it recovers from the stream what was published meanwhile on its own topic and on each retained
+topic it follows, up to 72 hours back, and is shown each message once, marked as published while
+its connection was down; what a team topic carried in that time is gone. The session whose own
+publish does not come back is one the listener delivers to by push, one registered with a serve
+port such as the OpenCode plugin; such a session receives no team topic at all, since it holds no
+NATS subscription of its own.
 
 A role lane is the case that needs the `agent://` hop, because a role is not a subject its holder
 subscribes to: the listener resolves the live holder and forwards the message to it, and drops
@@ -202,8 +206,9 @@ subscribes to `notifications.team.deploy-squad.>`, and any of them publishes the
 `envoy_publish(topic="notifications.team.deploy-squad.all", message=...)`. Such a topic travels
 live, as a role does: it reaches the sessions subscribed when it is published, the publisher
 itself included when it subscribes, it is not retained, and a session that subscribes later does
-not receive earlier messages. A topic outside `notifications.` is refused. Use a role for one
-owner, and `envoy_send` for one session.
+not receive earlier messages, nor does a subscribed session whose connection was down when they
+were published. A topic outside `notifications.` is refused. Use a role for one owner, and
+`envoy_send` for one session.
 
 ## Roles
 

@@ -12,6 +12,20 @@
 
 ### Added
 
+- `@legion/envoy-client/replay`: `createReplayEngine` shows a session, once, each message the
+  notification stream stored on a subject it follows while its own NATS subscription was down,
+  through the listener's `POST /v1/replay`. A sweep reads each followed subject after its cursor,
+  merges subjects by stream sequence, passes over role forwards, leaves a frame the live path is
+  still delivering for later, and hands the host each frame neither path showed; one sweep runs at
+  a time and none rejects. A ledger of the frames the session finished with (event id, and dedupe
+  key when it names its event), kept 72 hours from when each was recorded and capped at 20,000,
+  lets the live path drop a repeat after a restart. A frame the host fails to show three times
+  becomes a failure notice the host shows instead; a recreated stream, a cursor older than the
+  stream's oldest message, and a listener that does not replay (404) or cannot (503
+  `REPLAY_UNAVAILABLE`, 401, 403) are each told once. The transport gains `replay()` (one try,
+  10 s) and `EnvoyApiError.code`; a `createDeliveryDedupe` claim gains `settle()` and the dedupe
+  `status()`, `pending` until the claim is settled or released (INFRA-439).
+
 - `dispatch issue-update --before <KEY>` and `--after <KEY>` move an issue on its project's board:
   the executor carries the two arguments into the server's `rank` on the PATCH it already makes, so
   the move rides along with any other change in the same call, and the printed result gains

@@ -1,7 +1,8 @@
 # Envoy client
 
-Shared HTTP transport, tool contract, and inbound delivery renderer for Envoy hosts. pi-envoy and
-claude-envoy consume these modules rather than maintaining host-specific envelope parsers.
+Shared HTTP transport, tool contract, inbound delivery renderer, and missed-message replay for Envoy
+hosts. pi-envoy and claude-envoy consume these modules rather than maintaining host-specific
+envelope parsers.
 
 ## Inbound delivery
 
@@ -20,6 +21,37 @@ all falls back to the same `summary` field every other source gets and marks `un
 payload`. The renderer skips Dispatch events marked `notify: false` on an issue topic before a host
 can steer or record them in its inbox, as well as events authored by the reader's own session.
 
+## Missed messages
+
+`createReplayEngine` (`@legion/envoy-client/replay`) shows a session, once, each message the
+notification stream stored on a subject it follows while its own NATS subscription was down. A
+host makes one per session process and hands it its live path's `createDeliveryDedupe`, the
+listener client and callbacks (`ReplayHost`): the session id, the followed subjects, how to show
+a stored frame (as a card that runs nothing), a failure notice and a one-time notice, and how to
+persist a change. `sweep()` asks the listener's `POST /v1/replay` for each followed subject's
+messages after its cursor, merges them by stream sequence and hands the host each frame neither
+path showed; it never rejects, and one runs at a time with at most one queued behind it. A
+subject with no cursor starts at the stream's end, so a new follow brings up no history. Role
+forwards are passed over: role messages stay live only.
+
+The ledger holds the identity of each frame the session finished with (its `event_id`, and its
+`dedupe_key` when that names its event), each expiring 72 hours after it was recorded, at most
+20,000, the oldest dropped first. A host's live path calls `recordDelivered` once the host took a
+frame, before it settles the claim, and drops a frame `delivered` finds. A `createDeliveryDedupe`
+claim is settled (`settle()`) once the host is done with the frame, shown or not, or released as
+before; until then `status()` reads it `pending`, and a sweep leaves that frame's stored copy for
+a later sweep rather than show it beside the live one.
+
+The state holds each followed subject's `since` and `after` and the stream's `created` time;
+`restore(snapshot)` loads what a host persisted, dropping expired ledger entries and keeping the
+state at any age. A frame the host fails to show is retried, and on its third failure the host
+shows a notice naming it instead (`showFailureNotice`); `reportLiveFailure` shows that notice at
+once for a live frame no sweep will retry, which `retries(followed)` tells. The session is told
+once when the stream was recreated, when its cursor fell behind the stream's oldest message
+(older than 72 hours), and when the listener does not replay (404) or cannot (503
+`REPLAY_UNAVAILABLE`, 401, 403). Work started for one session stops, writing nothing, once
+`sessionID()` names another.
+
 ## HTTP transport
 
 `createEnvoyClient` sends and receives the listener's `/v1` JSON contracts. Send and publish
@@ -33,6 +65,10 @@ listener's bearer is the `token` the client is given (`envoySettings`); without 
 `subscribe` exposes listener warnings, including a topic that has no event in the configured
 stream. `getRole` returns a role holder with its last-seen timestamp, and `listSessions` accepts
 optional directory and title filters.
+
+`replay` posts `POST /v1/replay` once, with no retry and a 10 s timeout, and returns the
+listener's answer in its wire shape; an error body's `code` (such as `REPLAY_UNAVAILABLE`) is on
+`EnvoyApiError.code`.
 
 ## envoy.json
 

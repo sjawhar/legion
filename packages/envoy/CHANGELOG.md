@@ -4,6 +4,24 @@
 
 ### Added
 
+- The listener answers `POST /v1/replay` with the messages `ENVOY_NOTIFICATIONS` stored for a
+  session after a cursor per subject, so a session that receives on its own NATS subscriptions
+  (pi-envoy, claude-envoy) reads back what it missed while they were down. It serves only the
+  session's own `notifications.agent.<session_id>` and the topics registered as its interests
+  (any other is `refused: "not_followed"`), and only subjects the deployed stream retains
+  (`refused: "not_retained"`); a subject without a cursor gets the stream's last sequence to start
+  one. One answer holds at most 32 subjects, 500 messages (100 by default), 2 MiB and 5 s of
+  reading, and says `more` for a subject it cut short. NATS refusing the read is
+  `503 {"code":"REPLAY_UNAVAILABLE"}` naming NATS's error; a listener without the route answers
+  404, which a session reads as "does not replay" (INFRA-439).
+- `envoy-infra`'s `ListenerPermissions`, and through it `HostPermissions` and
+  `DispatchPermissions`, grant `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS`, the stored-message
+  read `/v1/replay` makes; it reads one message at a time and can create, change or delete
+  nothing, and `SessionPermissions` does not get it. The rendered users change, so moving a hub
+  with a `listener`, a `machineId` user or a `dispatchMachineId` user to this release replaces its
+  VM once, with NATS down until the new VM starts; a hub with none of them keeps its VM. A
+  listener whose NATS user lacks the read answers `/v1/replay` with `REPLAY_UNAVAILABLE`
+  (INFRA-439).
 - A project's default assignee, the last step of an issue create's assignee chain: an issue created
   with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
   it, goes to the person the project names; nothing already filed, and no create that names an
