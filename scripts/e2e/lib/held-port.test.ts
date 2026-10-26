@@ -28,6 +28,8 @@ type Running = {
   process: Bun.Subprocess<"ignore" | "pipe", "pipe", "pipe">;
   output: () => string;
   exited: () => boolean;
+  // logged resolves once the output matches pattern, and rejects when the process ended first.
+  logged: (pattern: RegExp) => Promise<void>;
 };
 
 const started: Running[] = [];
@@ -92,16 +94,37 @@ function start(name: string, argv: string[], stdin: "ignore" | "pipe" = "ignore"
   });
   let output = "";
   let done = false;
+  let drained = false;
+  const waiting: { pattern: RegExp; resolve: () => void; reject: (error: Error) => void }[] = [];
+  const settle = () => {
+    for (const waiter of waiting.splice(0)) {
+      if (waiter.pattern.test(output)) waiter.resolve();
+      else if (drained)
+        waiter.reject(new Error(`ended before it logged ${waiter.pattern}:\n${output}`));
+      else waiting.push(waiter);
+    }
+  };
   const decoder = new TextDecoder();
-  for (const stream of [process.stdout, process.stderr]) {
-    void (async () => {
-      for await (const chunk of stream) output += decoder.decode(chunk, { stream: true });
-    })();
-  }
+  const streams = [process.stdout, process.stderr].map(async (stream) => {
+    for await (const chunk of stream) {
+      output += decoder.decode(chunk, { stream: true });
+      settle();
+    }
+  });
   void process.exited.then(() => {
     done = true;
   });
-  const running = { name, process, output: () => output, exited: () => done };
+  void Promise.all([process.exited, ...streams]).then(() => {
+    drained = true;
+    settle();
+  });
+  const logged = (pattern: RegExp) => {
+    const outcome = Promise.withResolvers<void>();
+    waiting.push({ pattern, resolve: outcome.resolve, reject: outcome.reject });
+    settle();
+    return outcome.promise;
+  };
+  const running = { name, process, output: () => output, exited: () => done, logged };
   started.push(running);
   return running;
 }
@@ -247,7 +270,9 @@ describe("held-port.py exec", () => {
     const running = exec("exec of the listener", portFile, [listener]);
     const port = await readPort(portFile, running);
     await requireAnswers(port, running);
-    expect(running.output()).toMatch(
+    // The listener logs its line after it starts serving, so /healthz can answer before the line
+    // is read: await the line itself.
+    await running.logged(
       new RegExp(`"msg":"envoy-listener listening".*"addr":"127\\.0\\.0\\.1:${port}"`)
     );
     // The PID Bun.spawn returned, a shell's $!, is the listener's: the helper executed it in place.
