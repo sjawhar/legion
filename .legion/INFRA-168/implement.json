@@ -2,26 +2,40 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-168",
-  "completed": "2026-10-26T09:45:00Z",
-  "round": "the implementing round after tester round 7 (verdict fail at 2b7369f4)",
+  "completed": "2026-10-26T10:30:00Z",
+  "round": "the implementing round answering the review of 83ff55cf (REQUEST_CHANGES, five findings; the architect's Narrow decision, dispatch://INFRA-168/comment/169d9f23)",
   "proof": [
     {
-      "criterion": "Every --advisor-rebuttal a call carries stays where the agent reads its call back, so it reports no flag the gate dropped (tester round 7 failure; red test ee316eba).",
+      "criterion": "Finding 3: AskGate reads its own output — the command a rebuttal hands back, resent as recorded, is recorded as the rebuttal it carries, not refused as unreadable.",
       "surface": "Nested headless Oh My Pi sessions on this branch's build in this Legion pod, every assistant turn anthropic/claude-opus-5-5, production Dispatch, scratch issue INFRA-465.",
-      "command": "env -u LEGION_WORKSPACE -u LEGION_ROLE -u LEGION_BOOT_TOKEN_FILE -u LEGION_TREE -u LEGION_GENERATION -u LEGION_DAEMON_URL -u LEGION_STATE_DIR LEGION_ISSUE=INFRA-465 OMP_SESSION_STORAGE=file OMP_ASKGATE=<warn|block> OMP_ASKGATE_RECORD_PROJECT=INFRA /opt/omp/bin/omp --extension \"$LEGION_WORKSPACE/packages/pi-envoy\" --session-dir <run dir> -p \"$(cat p8.txt)\", p8.txt being the tester's run 7-r4-block prompt (run `dispatch ask --issue INFRA-465 --advisor-rebuttal 'first reason' --question '…' --advisor-rebuttal 'second reason'` exactly as given), runs d8-warn and d8-block under /legion/scratch/tmp/g4; then jq of each session's toolCall commands and advisor-gate entries, and grep for report_issue.",
-      "observed": "Both recorded commands: `dispatch ask --issue INFRA-465 --question '…' # --advisor-rebuttal 'first reason' --advisor-rebuttal 'second reason'`. Both acknowledgements: `You sent this call with --advisor-rebuttal 'first reason' --advisor-rebuttal 'second reason'. AskGate recorded your rebuttal \"first reason; second reason\", and the call was sent without review.` Both entries: outcome rebuttal, rebuttal \"first reason; second reason\". 0 report_issue writes. Asks 8132f2a9-d8c9-4596-ab51-979056a159d3 and 59016086-d980-4ea1-b48c-684feecdfa4f opened and were retracted in their runs.",
-      "headSha": "a3fc16aad2523c535e232f23e097f30333677007",
-      "negativeControl": "At 2b7369f4 the same call was recorded with only `# --advisor-rebuttal 'second reason'`, its note and entry named only the second line, and that agent wrote xd://report_issue (tester round 7, run 7-r4-block)."
+      "command": "The run.sh invocation of earlier rounds (env -u LEGION_* … OMP_ASKGATE=<warn|block> OMP_ASKGATE_RECORD_PROJECT=INFRA /opt/omp/bin/omp --extension \"$LEGION_WORKSPACE/packages/pi-envoy\" --session-dir <dir> -p …) with prompt /legion/scratch/tmp/g4/p9.txt: step 1 `dispatch comment --issue INFRA-465 --body '…' --advisor-rebuttal 'the probe needs this comment as written'`, step 2 the command the session recorded for step 1, resent character for character; runs e9-warn and e9-block, at 139059f1.",
+      "observed": "In both modes both sends posted (comments 83cb3e8e, cde6565c warn; 51ce9f5b, a0f55db1 block); both entries are outcome rebuttal, decision allow, rebuttal 'the probe needs this comment as written'; both recorded commands are `dispatch comment --issue INFRA-465 --body '…' # --advisor-rebuttal 'the probe needs this comment as written'`; 0 xd://report_issue. One agent said the note's 'moved it into a shell comment' did not fit the resend; 403f240f words it 'it stays a shell comment', true for both (unit-pinned).",
+      "headSha": "403f240f20d59c2538399b61e927920288e24697",
+      "negativeControl": "At a3fc16aa the same resend was unreadable to the gate: scopedCommand undefined, refused in block mode with a refusal that never mentions the comment (the reviewer's reproduction at 83ff55cf); the new test 'the command a rebuttal hands back, sent again, is recorded as the same rebuttal and comes back unchanged' fails on that code."
+    },
+    {
+      "criterion": "Findings 1, 2, 4 and 5, each with a test that fails before its fix.",
+      "surface": "The real AskGate handler and the real Envoy extension under pi-envoy's and pi-shared's suites (no live session can force a held upload block, Envoy's run-end check or a shutdown mid-record on purpose).",
+      "command": "cd packages/pi-envoy && bun test (1432 pass, 0 fail) && bunx tsc --noEmit && bun run lint; cd packages/pi-shared && bun test (73 pass) && bunx tsc --noEmit; bun test extensions/askgate/askgate.test.ts -t 'byte for byte' (A1 pin, unedited, green).",
+      "observed": "(1) 'an upload's rules refusals count only the asks the check judged, never a block its stored version holds, so a third upload with a new ask is reviewed'; (2) pi-shared 'drops the comment that ends the head line, as bash does, and the override AskGate keeps there', the differential bash test's 21-case comment corpus, envoy.test.ts 'a rebutted dispatch command, recorded with its override as a trailing comment, does not re-arm the check'; (4) 'each refusal says what becomes of the override on its surface: a command's flag stays a shell comment, a device's field is removed'; (5) 'at shutdown a slow decision record is cut short, so the gated call's entry is written before the handler returns'. All green.",
+      "headSha": "403f240f20d59c2538399b61e927920288e24697",
+      "negativeControl": "Each new test was run against its file reverted to the code before the fix and failed: (1) the second upload carried the second-refusal line and the third went out as outcome breaker; (2) dispatchCommandHead returned undefined for the rebutted command and Envoy delivered 3 times for 1; (4) the refusal said 'is removed before sending'; (5) the shutdown handler returned at 1,500 ms with 0 entries."
     }
   ],
   "filesChanged": [
-    "packages/pi-envoy/extensions/askgate/askgate-core.ts — splitRebuttal keeps every override: `sent` all their words as written in order, `line` all their lines joined with \"; \".",
-    "packages/pi-envoy/CHANGELOG.md — the rebuttal sentence says each flag and every line."
+    "packages/pi-envoy/extensions/askgate/askgate-core.ts — breaker count from the judged asks; overrideComment read by headLine/scopedCommand; Override.fate; renderRevise; Rebuttal doc; acknowledgement wording; shutdown record deadline (recordDeadline, recordStops, SHUTDOWN_RECORD_MARGIN_MS, RECORD_SHUT_DOWN).",
+    "packages/pi-envoy/extensions/askgate/rules-check.ts — RulesCheck.judged; RuleOverride.fate in the refusal sentence.",
+    "packages/pi-shared/src/shell-command.ts and its test — withoutComment on the head line.",
+    "packages/pi-envoy/extensions/askgate/askgate.test.ts, packages/pi-envoy/extensions/envoy.test.ts — the tests above.",
+    "packages/pi-envoy/{README.md,AGENTS.md,CHANGELOG.md}, packages/pi-shared/AGENTS.md — the comment grammar, per-surface override text, shutdown record bound."
   ],
   "trickyParts": [
-    "The red test requires the call to pass (block undefined), so the architect's preferred refusal of a repeated flag would fail it; keeping both, which the architect named as acceptable, is what it allows."
+    "Finding 3 accepts only a trailing comment whose words are exactly override words, so no other comment widens the literal grammar; the gate hands back its normalised `# <sent>`, so its own output round-trips byte for byte.",
+    "Finding 5 keeps record-before-entry (plan invariant 5) and bounds the record once shutdown begins rather than reordering, so the entry still carries recordError."
   ],
-  "deviations": [],
+  "deviations": [
+    "The reviewer's structure items are recorded on the PR body's Fast-follow line and not done, as the architect directed."
+  ],
   "openQuestions": [
     "sjawhar/legion#2159 is still open at 0aa47421c; sign-off waits on its merge per plan rev 10."
   ]
