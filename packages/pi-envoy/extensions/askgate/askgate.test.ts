@@ -2684,7 +2684,10 @@ console.log(JSON.stringify(args, null, 2));
       expect((await g.bash(command, command))?.reason).not.toContain(NOTE);
     }
   }, 30_000);
-  test("a cd that CDPATH resolves prints nothing into the dry-run's JSON", async () => {
+  // Oh My Pi reads no CDPATH ("(c2)" below): from `bin`, its bash tool takes `cd sub &&` as the
+  // directory `bin/sub`, which does not exist, and runs nothing. So the gate reads no file from
+  // the directory CDPATH names, and says it cannot read the call.
+  test("a cd that only CDPATH resolves reads no file from the CDPATH directory", async () => {
     fs.mkdirSync(path.join(work, "sub"), { recursive: true });
     fs.writeFileSync(path.join(work, "sub", "note.txt"), "Body from the working directory.");
     const g = bind({ env: { ...STUB, CDPATH: work }, cwd: bin });
@@ -2692,9 +2695,9 @@ console.log(JSON.stringify(args, null, 2));
       "b1",
       "cd sub && dispatch message --issue X-1 --body-file note.txt"
     );
-    expect(result).toMatchObject({ input: { command: expect.stringContaining("/askgate-") } });
-    expect(g.entries).toMatchObject([{ tool: "dispatch_message", outcome: "verdict" }]);
-    expect(g.calls[0].user).toContain('"body": "Body from the working directory."');
+    expect(result?.input).toBeUndefined();
+    expect(g.calls).toHaveLength(0);
+    expect(g.entries).toMatchObject([{ tool: "dispatch_message", outcome: "unreadable" }]);
   });
   test("the wrappers run as written, a rebuttal removed, and a quoted cd path is never taken for the command", async () => {
     const g = bind({
@@ -2808,6 +2811,45 @@ console.log(JSON.stringify(args, null, 2));
       // The directory comes from the command's own cd and then pwd -P, run as the dry run runs.
       expect(g.dryRuns.map((run) => run.script)).toContain("cd docs >/dev/null && pwd -P");
       expect(g.dryRuns.every((run) => run.cwd === work && run.timeoutMs === 10_000)).toBe(true);
+    });
+    // The second final review of #2159: Oh My Pi at its pin takes a leading `cd X &&` into the
+    // call's directory with no CDPATH (`extractLeadingCdTarget`, then `resolveToCwd`), and its
+    // shell's `cd` builtin reads no CDPATH either. So the probe must not use a CDPATH in the
+    // session's environment, which would make it read another file than the one that posts.
+    test("(c2) a CDPATH in the session's environment does not move a leading cd's directory", async () => {
+      const elsewhere = path.join(work, "cdpath-root");
+      fs.mkdirSync(path.join(elsewhere, "docs"), { recursive: true });
+      fs.writeFileSync(path.join(elsewhere, "docs", "brief.md"), `${BRIEF}(the CDPATH copy)\n`);
+      const g = bind({ env: { ...STUB, CDPATH: elsewhere }, cwd: work });
+      const result = await g.bash(
+        "u3-cdpath",
+        "cd docs && dispatch artifact --issue DSP-1 --name brief.md --path brief.md"
+      );
+      expect(result?.block).toBeUndefined();
+      expect(g.calls).toHaveLength(1);
+      expect(g.calls[0].user).toContain(JSON.stringify(`${BRIEF}(the copy in docs)\n`));
+      expect(g.calls[0].user).not.toContain("(the CDPATH copy)");
+    });
+    // At the pin, `resolveToCwd` takes a cwd of only slashes for the session's own directory, so a
+    // leading `cd / &&` runs the rest of the call there, not in `/`. A call that names its own
+    // directory leaves the `cd` to the shell, which goes to `/`.
+    test("(c3) a leading cd / with no cwd of its own reads from the session's directory, as Oh My Pi runs it", async () => {
+      const g = bind({ env: STUB, cwd: work });
+      const result = await g.bash(
+        "u3-root",
+        "cd / && dispatch artifact --issue DSP-1 --name brief.md --path brief.md"
+      );
+      expect(result?.block).toBeUndefined();
+      expect(g.calls).toHaveLength(1);
+      expect(g.calls[0].user).toContain(`"content": ${JSON.stringify(BRIEF)}`);
+      const named = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+      const refused = await named.bash(
+        "u3-root-cwd",
+        "cd / && dispatch artifact --issue DSP-1 --name brief.md --path brief.md",
+        { cwd: "docs" }
+      );
+      expect(refused?.block).toBe(true);
+      expect(refused?.reason).toContain("does not exist");
     });
     // The CLI resolves --path against its process.cwd(), the physical directory, so `..` from a
     // symlinked directory leaves the link's target, not the link.

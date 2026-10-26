@@ -44,7 +44,9 @@
 //     The arguments are cut at 64 KiB as one JSON block, so the document gets less than 64 KiB of
 //     it. A relative path resolves where the CLI resolves it, against its
 //     `process.cwd()`, the physical directory the command runs in after its own `cd`: bash names
-//     it (the `cd`, then `pwd -P`, run as the dry run runs). A `--<field>-file` operand is joined
+//     it (the `cd`, then `pwd -P`, run as the dry run runs, with no CDPATH, since Oh My Pi reads
+//     none), except a leading `cd /` in a call that names no directory, which Oh My Pi runs in
+//     the session's own directory. A `--<field>-file` operand is joined
 //     to that directory and given to the kernel as written, as the CLI's own `readFileSync`
 //     gives it (so a `..` after a symbolic link leaves the link's target, which a lexical
 //     `path.resolve` would collapse first and name another file); an upload's `--path`, relative
@@ -594,11 +596,14 @@ const STDERR_TO_STDOUT = /[ \t]+2>&1$/;
 /** A `dispatch` command in a `bash` command, bare or in the two wrappers above: its head, where the
  * head starts, where a leading `cd` path ends (to silence `cd` in the dry-run), where the head's
  * line ends, past a trailing `2>&1`, and where a `2>&1` after a here-document opener lies (both
- * `2>&1` forms are left out of the dry-run, whose stdout must be the CLI's JSON). */
+ * `2>&1` forms are left out of the dry-run, whose stdout must be the CLI's JSON). `leadingCd` is
+ * that `cd`'s path when the `cd` opens the whole call, which is where Oh My Pi's bash tool looks
+ * for one to take as the call's directory (`extractLeadingCdTarget` at the pin). */
 interface DispatchHead {
   head: string;
   at: number;
   cdEnd?: number;
+  leadingCd?: string;
   end: number;
   stderr?: [number, number];
   heredoc?: true;
@@ -610,12 +615,14 @@ function dispatchCommandHead(command: string): DispatchHead | undefined {
   let text = line.text;
   let offset = 0;
   let cdEnd: number | undefined;
+  let leadingCd: string | undefined;
   const cd = /^cd[ \t]+/.exec(text);
   if (cd !== null) {
     const pathEnd = cdPathEnd(text, cd[0].length);
     const and = pathEnd === undefined ? null : /^[ \t]*&&[ \t]*/.exec(text.slice(pathEnd));
     if (pathEnd === undefined || and === null) return undefined;
     cdEnd = line.at + pathEnd;
+    if (line.at === 0) leadingCd = scanWord(text, cd[0].length).value;
     offset = pathEnd + and[0].length;
     text = text.slice(offset);
   }
@@ -636,6 +643,7 @@ function dispatchCommandHead(command: string): DispatchHead | undefined {
     head,
     at,
     ...(cdEnd === undefined ? {} : { cdEnd }),
+    ...(leadingCd === undefined ? {} : { leadingCd }),
     end: at + text.length,
     ...(line.heredoc ? { heredoc: true as const } : {}),
     ...(line.stderr ? { stderr: line.stderr } : {}),
@@ -807,6 +815,12 @@ export interface ScopedCommand {
   /** A leading `cd` changes where relative file operands resolve. */
   changesDirectory?: true;
   /**
+   * The call opens with `cd /` (any number of slashes). Oh My Pi's bash tool takes that `cd` as
+   * the call's directory when the call names none, and `resolveToCwd` reads a directory of only
+   * slashes as the session's own, so the command runs there and not in `/`.
+   */
+  cdToSessionDirectory?: true;
+  /**
    * The command's own leading `cd`, if any, then `pwd -P`: run where the dry run runs, it prints
    * the physical directory the command reaches, the CLI's `process.cwd()`, against which an
    * upload's relative `path` resolves.
@@ -906,7 +920,7 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
   if (typeof command !== "string") return undefined;
   const found = dispatchCommandHead(command);
   if (found === undefined) return undefined;
-  const { head, at, cdEnd, end, heredoc, stderr } = found;
+  const { head, at, cdEnd, leadingCd, end, heredoc, stderr } = found;
   const all = headWords(head);
   const lead = cliProgramLength(all);
   const program = all.slice(0, lead);
@@ -957,6 +971,9 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
     ...(unsafeFile === undefined ? {} : { unsafeFile }),
     ...(upload ? { upload: true as const } : {}),
     ...(cdEnd === undefined ? {} : { changesDirectory: true as const }),
+    ...(leadingCd !== undefined && /^\/+$/.test(leadingCd)
+      ? { cdToSessionDirectory: true as const }
+      : {}),
     dirScript: cdEnd === undefined ? "pwd -P" : `${command.slice(0, cdEnd)} >/dev/null && pwd -P`,
   };
 }
@@ -2992,6 +3009,11 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           ? input.cwd.replace(/^~(?=$|\/)/, deps.home)
           : undefined;
       const cwd = raw === undefined || /^\/+$/.test(raw) ? ctx.cwd : path.resolve(ctx.cwd, raw);
+      // Oh My Pi reads no CDPATH where a call's `cd` goes: its bash tool takes a leading
+      // `cd X &&` into the call's directory (`resolveToCwd`), and its shell's `cd` builtin has no
+      // CDPATH search. So the dry run runs without it, and its `cd` reaches the directory the
+      // command reaches.
+      const { CDPATH: _cdpath, ...env } = deps.env;
       /** Runs one script as the dry run runs: in `cwd`, under the limit, abandoned with the call. */
       const runScript = async (
         script: string
@@ -3006,7 +3028,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         try {
           const run = await deps.dryRun(script, {
             cwd,
-            env: deps.env,
+            env,
             timeoutMs: DRY_RUN_TIMEOUT_MS,
             signal: controller.signal,
           });
@@ -3066,7 +3088,11 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
             };
           }
         }
-        const firstRelative = scoped.changesDirectory === true ? relativeFile : undefined;
+        // A leading `cd /` in a call that names no directory runs in the session's own directory
+        // (`cdToSessionDirectory`), which `base` already is; any other `cd` is the probe's.
+        const hostDirectory = scoped.cdToSessionDirectory === true && raw === undefined;
+        const firstRelative =
+          scoped.changesDirectory === true && !hostDirectory ? relativeFile : undefined;
         if (firstRelative !== undefined) {
           const reached = await stdoutOf(scoped.dirScript, `${scoped.label}'s directory`);
           if ("cause" in reached) return reached;
