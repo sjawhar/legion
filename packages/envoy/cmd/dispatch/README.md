@@ -788,8 +788,11 @@ not work over the new schema, and nothing at boot stops it from serving:
 - Its delete removes every source of the project and every component of the project.
 
 Migration `0118_request_keys` creates `request_keys`, the one record of every keyed write (Keyed
-writes, below): a new table that touches no row, which the release before it neither reads nor
-writes; its census answers `0`. It follows `0116_project_default_assignee` and
+writes, below), and its two indexes: `request_keys_created_at`, for the sweep that deletes a key
+past its 24 hours, and the partial `request_keys_owed_sends` (`created_at`, over rows with no
+answer yet whose recovery point names a message), for the delivery sweep's read of a keyed send
+whose process died before its first attempt. It is a new table that touches no row, which the
+release before it neither reads nor writes; its census answers `0`. It follows `0116_project_default_assignee` and
 `0117_architecture_sources_per_repo`, which already use the preceding migration numbers. From its
 release on, nothing reads or writes `broadcast_idempotency_keys` (`0055`), the broadcast's own key
 table before it, and the table is kept: dropping it is a contracting migration, so it ships no
@@ -1098,10 +1101,16 @@ suggestion-outcome sweep deletes older rows).
 A keyed write finishes on the server whatever its client does. Its handler runs with the client's
 cancellation taken off, bounded at ten minutes (past which its work rolls back and the key is
 released, as for a 5xx) and counted in the server's background wait, so a shutdown lets it finish
-as it lets a delivery finish. While it runs it renews its key's 60 s lease every 20 s, so a
-client that gave up and asks again is answered `409 KEY_IN_FLIGHT` for as long as the first run
-lives, then that run's stored answer; only a run whose process died is taken over, once its lease
-lapses. A write Dispatch takes longer to finish than its client waits still lands once.
+within its 30 s stop grace; one still running past that dies with the process, and the lease
+handover below takes its key over once its lease lapses. While it runs it renews its key's 60 s
+lease every 20 s, until its ten minutes are up, so a client that gave up and asks again is answered
+`409 KEY_IN_FLIGHT` for as long as the first run lives, then that run's stored answer; only a run
+whose process died is taken over, once its lease lapses. A write Dispatch takes longer to finish
+than its client waits still lands once. A repeat while the first still runs is answered before
+its body is read, by the key alone, so a retried upload costs nothing while its first attempt
+runs, and a different request under a key still running is `KEY_IN_FLIGHT` too until the first
+has answered, then `KEY_REUSED`. The key is claimed, and its answer recorded, on a context the
+client's leaving does not end, bounded at 10 s.
 
 | Status / code | Meaning |
 | --- | --- |
@@ -1128,14 +1137,21 @@ or an issue message's replay reads every member fresh and keeps from the first a
 
 A delivery a dead process left owed is made whether anyone asks again or not. Every write that
 delivers to sessions claims each attempt before its send and settles it after, on a context its
-client's cancellation does not reach. The maintenance loop's pass, once a minute, sends each
-attempt that is still pending under a claim that has lapsed, is its message's or mention's latest,
-and was opened over a minute ago and inside the 72-hour duplicate window
-(`DELIVERY_DUPLICATE_WINDOW_MS`), under its own attempt number, so the listener drops a frame that
-did land; and the first attempt of a keyed send whose process died between committing its message
-and opening that attempt. A send to one session answers once its own attempt has settled, which
-keeps a person's sends to one session in the order they pressed them; a broadcast answers once its
-messages are committed, with its deliveries behind the answer.
+client's cancellation does not reach. The maintenance loop's pass, once a minute, first settles
+`failed`, with its receipt, every owed attempt nothing can send: a message attempt, or a keyed
+send with no attempt yet, on an issue that has closed (`not sent: the issue closed before this
+attempt was delivered`), a mention attempt whose issue closed, whose document is no longer a
+project's (`not sent: the document is gone`) or whose comment no longer holds the mention (`not
+sent: the comment no longer mentions this target`), each checked again under its owner's lock so
+an issue reopened meanwhile keeps its attempt owed. It then sends each attempt that is still
+pending under a claim that has lapsed, is its message's or mention's latest, and was opened over a
+minute ago and inside the 72-hour duplicate window (`DELIVERY_DUPLICATE_WINDOW_MS`), the exact
+attempt it found under its own attempt number, so the listener drops a frame that did land; and
+the first attempt of a keyed send whose process died between committing its message and opening
+that attempt. An attempt that cannot be sent never takes a place in a send batch. A send to one
+session answers once its own attempt has settled, which keeps a person's sends to one session in
+the order they pressed them; a broadcast answers once its messages are committed, with its
+deliveries behind the answer.
 
 The layer reads a keyed body before its handler runs, spooling at most the route's own limit: 26
 MiB for the three upload routes (`POST /api/v1/issues/{key}/artifacts`,
@@ -1231,7 +1247,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/comments/{id}/reject` | POST | cookie or trusted header | Reject a suggestion. |
 | `/api/v1/issues/{key}/messages` | POST | cookie, trusted header, or bearer | Post an issue message. |
 | `/api/v1/issues/{key}/messages` | GET | cookie, trusted header, or bearer | List an issue's message threads: every root message, oldest first, unpaged, each with its delivery attempts and its replies. |
-| `/api/v1/issues/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List issue artifacts or create a version from a multipart `file` or JSON `{name, content, summary?, actor?}`. The JSON form requires `Content-Type: application/json`. A `text/markdown` file is a document. Any other file's kind is read from its bytes, never from the part's declared `Content-Type`: it is `image` only when its bytes are a PNG, JPEG, GIF or WebP, stored with `mime` the type its bytes are (a JPEG declared `image/png` is `image/jpeg`), and otherwise a `file` under its declared type, an SVG among them, so no client stores other bytes as an image. A version whose kind is not its artifact's is `400 ARTIFACT_KIND_MISMATCH`. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. A markdown document over 1 MiB, or any file over 25 MiB, is `413 CAP_EXCEEDED`, and so is a document whose markdown makes more than 65,536 elements (weighed as Element weights below lists), naming the line that passes the limit; a document or version whose markdown as stored (what `.../text` answers) would be longer than 1 MiB and longer than the document's was, or make more than 65,536 elements and more than the document's did, or that would leave a live state ygo could not decode as one update; or whose formatting is more items than one document update can store (1,048,576), naming the count. A file the configured bucket refuses is `502 FILE_STORE_UNAVAILABLE`, with no version written. |
+| `/api/v1/issues/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List issue artifacts or create a version from a multipart `file` or JSON `{name, content, summary?, actor?}`. The JSON form requires `Content-Type: application/json`. A `text/markdown` file is a document. Any other file's kind is read from its bytes, never from the part's declared `Content-Type`: it is `image` only when its bytes are a PNG, JPEG, GIF or WebP, stored with `mime` the type its bytes are (a JPEG declared `image/png` is `image/jpeg`), and otherwise a `file` under its declared type, an SVG among them, so no client stores other bytes as an image. A version whose kind is not its artifact's is `400 ARTIFACT_KIND_MISMATCH`. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. A markdown document over 1 MiB, or any file over 25 MiB, is `413 CAP_EXCEEDED`, and so is a document whose markdown makes more than 65,536 elements (weighed as Element weights below lists), naming the line that passes the limit; a document or version whose markdown as stored (what `.../text` answers) would be longer than 1 MiB and longer than the document's was, or make more than 65,536 elements and more than the document's did, or that would leave a live state ygo could not decode as one update; or whose formatting is more items than one document update can store (1,048,576), naming the count. A file the configured bucket refuses is `502 FILE_STORE_UNAVAILABLE`, with no version written. A POST to a closed issue is `409 ISSUE_CLOSED` before its body is read, keyed or not, and claims no key. |
 | `/api/v1/projects/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List non-primary project artifacts (or only unlinked documents with `?unlinked=true`), or create an unlinked project artifact, its kind read as an issue upload's is. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. A markdown document over 1 MiB, or any file over 25 MiB, is `413 CAP_EXCEEDED`, and so is a document whose markdown makes more than 65,536 elements (weighed as Element weights below lists), naming the line that passes the limit; a document or version whose markdown as stored (what `.../text` answers) would be longer than 1 MiB and longer than the document's was, or make more than 65,536 elements and more than the document's did, or that would leave a live state ygo could not decode as one update; or whose formatting is more items than one document update can store (1,048,576), naming the count. A file the configured bucket refuses is `502 FILE_STORE_UNAVAILABLE`, with no version written. |
 | `/api/v1/artifacts/{id}` | GET | cookie, trusted header, or bearer | Read an artifact, its versions, and incoming references. `{id}` must be a UUID. Every version on every artifact read and list (this route, the issue and project artifact lists, the issue read, the reference reads, and each version write's answer and event) carries `size`: the bytes it stores, a file's or an image's bytes or a document's markdown, read from the row's own length without rendering the document or loading its history. |
 | `/api/v1/artifacts/{id}/rebuild` | POST | cookie or trusted header (human only) | Rebuild a document only when its durable history cannot load (`409 DOCUMENT_UNLOADABLE` on its reads): deletes its document updates, checkpoints, and snapshots, then writes one fresh update from the latest saved version or optional `{markdown}`. A supplied markdown source that changes the document writes the next immutable version, emits `artifact.version`, and moves an open approval request to that version, where it waits on its agent, as every version does; an omitted source keeps the existing latest-version behavior. The rebuild, that version, its event and the move commit in one transaction, and every refusal comes before anything is written: a live room is `409 DOCUMENT_LIVE`; a healthy, non-resident document is `409 DOCUMENT_LOADS`; supplied markdown on a closed issue's document is `409 ISSUE_CLOSED`; supplied markdown held to a new document's limits - more than 65,536 elements, or stored as markdown longer than 1 MiB or making more than 65,536 elements - is `413 CAP_EXCEEDED`. The latest saved version rebuilds whatever it weighs, except a document whose tree is more items than ygo decodes in one update (1,048,576), which no document can hold and which is `413 CAP_EXCEEDED` naming the count, from either source. A refused or failed rebuild leaves the document unchanged. It answers the report, whose `source_version` is the version the rebuilt document holds: its latest saved version, or the version supplied markdown wrote. |

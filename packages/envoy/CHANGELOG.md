@@ -24,16 +24,23 @@
   first has finished, is answered the first's stored status, headers and body with
   `Idempotency-Replayed: ?1`, and nothing runs again; the same key with a different request is
   `422 KEY_REUSED`, naming the request that used it; a repeat while the first still runs is
-  `409 KEY_IN_FLIGHT` with `Retry-After: 1`. A keyed write finishes on the server whatever its
-  client does: its handler runs with the client's cancellation taken off, bounded at ten minutes
-  and counted in the server's background wait, so a shutdown lets it finish, and it renews its
-  key's 60 s lease every 20 s, so a repeat waits on it for as long as it runs and takes the key
-  over only once its process has died. A write the server takes longer to finish than its client
-  waits therefore lands once, where a client giving up used to cancel it and every retry started
-  over. A 5xx, 401, 408 or 429 is not stored, so the next attempt runs the request again, and an
-  answer larger than 1 MiB is replayed as its status with `ANSWER_NOT_KEPT`. Keys belong to the
-  caller's login and are kept 24 hours, in migration `0118_request_keys`'s table, which the
-  suggestion-outcome sweep empties of older rows. A write without the header runs as before. A
+  `409 KEY_IN_FLIGHT` with `Retry-After: 1`, answered by the key alone before the repeat's body is
+  read, so a retried upload costs nothing while its first attempt runs (a different request under
+  a key still running is `KEY_IN_FLIGHT` too, then `KEY_REUSED` once the first has answered). A
+  keyed write finishes on the server whatever its client does: its handler runs with the client's
+  cancellation taken off, bounded at ten minutes and counted in the server's background wait, so a
+  shutdown lets it finish within the 30 s stop grace, past which the lease handover takes its key
+  over; it renews its key's 60 s lease every 20 s until its ten minutes are up, so a repeat waits
+  on it for as long as it runs and takes the key over only once its process has died. The key is
+  claimed, and its answer recorded, on a context the client's leaving does not end, bounded at
+  10 s. A write the server takes longer to finish than its client waits therefore lands once,
+  where a client giving up used to cancel it and every retry started over. A 5xx, 401, 408 or 429
+  is not stored, so the next attempt runs the request again, and an answer larger than 1 MiB is
+  replayed as its status with `ANSWER_NOT_KEPT`. Keys belong to the caller's login and are kept
+  24 hours, in migration `0118_request_keys`'s table (with an index on its age and a partial one
+  on the keyed sends still owed), which the suggestion-outcome sweep empties of older rows. A
+  write without the header runs as before. An upload to a closed issue is `409 ISSUE_CLOSED`
+  before its body is read, keyed or not, and claims no key. A
   repeat whose first request committed a write but whose answer was lost (its lease lapsed, or it
   ended in a 5xx or a panic after committing) is `409 KEY_COMMITTED`, with no `Retry-After`: the
   write landed and is not run again, and the client reads what it wrote; every transaction a keyed
@@ -82,16 +89,20 @@
   counted in the server's background wait. A process that dies between the two leaves the attempt
   pending under a claim nobody holds; the maintenance loop's pass, once a minute, sends each such
   attempt that is its message's or mention's latest, opened over a minute ago and inside the
-  72-hour duplicate window, once its claim has lapsed, under its own attempt number, so the
-  listener drops a frame that did land; it also sends the first attempt of a keyed send whose
-  process died between its message's commit and that attempt. A repeat under the write's key
-  resumes the same attempts sooner. A broadcast answers as soon as its messages are committed, and
-  its repeat as soon as it has read the broadcast, with the recipients it still owes put on their
-  way behind the answer; a send to one session answers once its own attempt has settled, which
-  keeps a person's sends to one session in the order they pressed them. A broadcast is not ordered
-  against a later send to one of its recipients. Migration `0119_pending_delivery_indexes` adds the
-  two partial indexes on pending message and comment-mention attempts that pass reads; its census is
-  `0`.
+  72-hour duplicate window, once its claim has lapsed, the exact attempt it found under its own
+  attempt number, so the listener drops a frame that did land and never sends an older attempt a
+  card retry overtook; it also sends the first attempt of a keyed send whose process died between
+  its message's commit and that attempt. Before it sends, each pass settles `failed`, with its
+  receipt, every owed attempt nothing can send - on an issue that has closed, a document that is
+  no longer a project's, or a comment that no longer mentions its target, each cause checked again
+  under its owner's lock - so such attempts never crowd out the ones that can go. A repeat under
+  the write's key resumes the same attempts sooner. A broadcast answers as soon as its messages are
+  committed, and its repeat as soon as it has read the broadcast, with the recipients it still owes
+  put on their way behind the answer; a send to one session answers once its own attempt has
+  settled, which keeps a person's sends to one session in the order they pressed them. A broadcast
+  is not ordered against a later send to one of its recipients. Migration
+  `0119_pending_delivery_indexes` adds the two partial indexes on pending message and
+  comment-mention attempts that pass reads; its census is `0`.
 
 - Dispatch's conversation view (`/agents/<id>/live`) shows the model and thinking level an Oh My
   Pi session runs now, from the `settings` frame pi-envoy publishes, before any turn runs on them

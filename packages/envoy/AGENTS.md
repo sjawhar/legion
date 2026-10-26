@@ -2065,32 +2065,43 @@ method, the route pattern, its path values, the query, the media type and the bo
 body with its boundary masked, since a client mints a boundary per attempt), so a repeat is told
 from a reuse:
 
-- The layer first reads the body, spooling at most the route's own limit (`keyedBodyLimit`: an
+- Before it reads a byte of the body, the layer looks the key up by login and key alone, naming no
+  digest: a row still in flight answers `409 KEY_IN_FLIGHT` with `Retry-After: 1` at once, so a
+  repeat of a large upload whose first attempt still runs costs nothing, and a different request
+  under a key still running gets `KEY_IN_FLIGHT` too, then `KEY_REUSED` once the first has
+  answered. An upload to a closed issue (`POST /api/v1/issues/{key}/artifacts`) is refused
+  `409 ISSUE_CLOSED` before its body is read, keyed or not, and claims no key.
+- The layer then reads the body, spooling at most the route's own limit (`keyedBodyLimit`: an
   upload's file and a megabyte of fields for the three upload routes, `keyedUploads`, 26 MiB;
   `maxJSONRequestBytes`, 1 MiB, for every other); a body past it runs unkeyed and its route
   refuses it. A body the client did not finish sending is `400 REQUEST_BODY_UNREADABLE`, and a
   spill Dispatch could not write (`keyedSpillError`: a full disk, a temporary directory it cannot
   write) is a 5xx with the key echoed, Dispatch's own failure, which the client asks again.
-- The row is inserted in flight, in a statement of its own, before the handler runs. A repeat that
-  finds it answers from it instead. A different request under the key is `422 KEY_REUSED`, whose
-  message names the method and path that used it; nothing runs. A first request still running is
-  `409 KEY_IN_FLIGHT` with `Retry-After: 1`, which a client asks again after. A finished one is
-  replayed: its stored status, every header its handler set (`request_keys.headers`, a
-  `Content-Type` among them) and its body, with `Idempotency-Replayed: ?1`, and the handler does
-  not run again. The table's checks hold a row to those states: an answered row holds no lease, and
-  nothing of an answer is stored without its status.
+- The row is inserted in flight, in a statement of its own, before the handler runs; the claim and
+  every later bookkeeping statement run under `context.WithoutCancel`, bounded by
+  `keyedBookkeeping` (10 s), so a client that goes away mid-claim leaves no half-claimed key. A
+  repeat that finds the row answers from it instead. A different request under the key is
+  `422 KEY_REUSED`, whose message names the method and path that used it; nothing runs. A first
+  request still running is `409 KEY_IN_FLIGHT` with `Retry-After: 1`, which a client asks again
+  after. A finished one is replayed: its stored status, every header its handler set
+  (`request_keys.headers`, a `Content-Type` among them) and its body, with
+  `Idempotency-Replayed: ?1`, and the handler does not run again. The table's checks hold a row to
+  those states: an answered row holds no lease, and nothing of an answer is stored without its
+  status.
 - The handler finishes whatever its client does: it runs on the request's context with the
   client's cancellation taken off (`context.WithoutCancel`), bounded by `keyedHandlerLimit` (ten
   minutes, past which its work rolls back and the key is released as for a 5xx) and counted in the
-  server's background wait (`detached`, a `backgroundWork`), so a shutdown lets it finish as it
-  lets a delivery finish. While it runs it renews its key's lease (`IDEMPOTENCY_LEASE_MS`, 60 s)
-  every `keyedLeaseRenewal` (20 s, `renewRequestKeyLease`), each renewal a statement of its own, so
-  a client that gave up and asks again is answered `409 KEY_IN_FLIGHT` for as long as the first run
-  lives and then its stored answer, and only a run whose process died is taken over. A handler cut
-  off with its client would roll its transactions back and leave every retry to start over, so a
-  write that takes the server longer than the client waits could never land. Every handler that
-  reads `r.Context()` for its work gets this detached context, the architecture importer's `Sync`
-  among them.
+  server's background wait (`detached`, a `backgroundWork`). A shutdown lets it finish within the
+  stop grace (`stopGrace`, 30 s, `cmd/dispatch/shutdown.go`); one still running past it dies with
+  the process, and its key is taken over by the lease handover (below) once its lease lapses. While
+  it runs it renews its key's lease (`IDEMPOTENCY_LEASE_MS`, 60 s) every `keyedLeaseRenewal` (20 s,
+  `renewRequestKeyLease`), each renewal a statement of its own, and only until `keyedHandlerLimit`,
+  so a handler that runs past its limit holds its key one lease longer at most. A client that gave
+  up and asks again is answered `409 KEY_IN_FLIGHT` for as long as the first run lives and then its
+  stored answer, and only a run whose process died is taken over. A handler cut off with its client
+  would roll its transactions back and leave every retry to start over, so a write that takes the
+  server longer than the client waits could never land. Every handler that reads `r.Context()` for
+  its work gets this detached context, the architecture importer's `Sync` among them.
 - The handler answers on a writer that holds its answer (`keyedAnswer`) until the row has it. A
   2xx or a 4xx is stored and the row finished in one statement; a 5xx, a 401 (a session that
   lapsed mid-write), a 408, a 429 and a panic release the key, so the next attempt runs the
@@ -2113,7 +2124,11 @@ from a reuse:
   refused after the mark leaves none. `TestEveryKeyedWriteCommitsInsideATransactionTheMarkHooks`
   (`keyed_write_guard_test.go`) walks the copy-lock graph from every `POST` and `PATCH` route and
   fails the build on a write outside the shared pool's transactions, the one way a write could miss
-  the mark. A repeat that finds a marked row in flight past its lease, or released after a 5xx or a
+  the mark. It follows `go` statements, Go callbacks (an `errgroup` or `WaitGroup` function,
+  `time.AfterFunc`) and `select` arms into what they call, treats only `goDetached` as detached,
+  and reads a `select` of a SQL function a migration defines to write (`embeddings_enqueue`,
+  `user_threads_record`, `delivery_change_log` and the triggers that call them) as a write. A
+  repeat that finds a marked row in flight past its lease, or released after a 5xx or a
   panic, is `409 KEY_COMMITTED` (`IDEMPOTENCY_KEY_COMMITTED`) at once, with the echo and no
   `Retry-After`: `the write under Idempotency-Key "k" (POST /path) landed, but Dispatch lost its
   answer, so it is not run again and has no answer to replay: read what it wrote`. A client treats
@@ -2148,17 +2163,31 @@ and settles it after, on a context its client's cancellation does not reach. A p
 between the two leaves the attempt pending under a claim nobody holds. Every pass of the
 maintenance loop (`RunSuggestionOutcomeSweep`, once a minute, the `ResumeDeliveries` that
 `api.Register` and `routes.New` return in `api.Background` beside `Wait`) calls
-`resumeOwedDeliveries`, which sends, `broadcastDeliveryWorkers` at a time and at most
+`resumeOwedDeliveries`. It first settles `failed`, with the receipt the row owes, every owed
+attempt nothing can send, 100 of each kind a read until a read comes back short or a round settles
+nothing: a message attempt on a closed issue and a keyed send with no attempt on a closed issue
+(given a failed attempt 1), `not sent: the issue closed before this attempt was delivered`; a
+mention attempt whose document is no longer a project's, `not sent: the document is gone`, or
+whose issue closed, as above; and one whose comment no longer holds the mention, `not sent: the
+comment no longer mentions this target`. Each settle is a transaction of its own that takes the
+owner's lock first and checks the cause again under it, so an issue reopened meanwhile keeps its
+attempt owed. It then sends, `broadcastDeliveryWorkers` at a time and at most
 `deliverySweepBatch` (100) of each kind a pass, every attempt that is its message's or its
 mention's latest, still pending, its claim lapsed (`claimLapsed`, a minute), opened over a minute
-ago and inside `DeliveryDuplicateWindow`, under its own attempt number; and the first attempt of a
-keyed send whose process died between committing its message and opening that attempt, found by its
-key's recovery point once the key's holder is gone. Of two senders that find one attempt owed - the
-sweep and a repeat, or two processes' sweeps - the one that claims it sends and the other sends
-nothing. The sweep's read stays as small as the attempts still pending: migration `0119` indexes
-them (`message_deliveries_pending`, `comment_deliveries_pending`, partial on
-`state = 'pending'`). `cmd/dispatch/keyed_kill_multiprocess_test.go` proves the takeover on two
-real processes: one killed mid-handler (held there by the slow-write hook), the other answers
+ago and inside `DeliveryDuplicateWindow` - the exact attempt it selected, bound to its attempt
+number for a message and a mention alike, never an older pending one a card retry overtook - and
+the first attempt of a keyed send whose process died between committing its message and opening
+that attempt, found by its key's recovery point once the key's holder is gone. One rule says what
+is owed (`owedMessageAttempt`, `owedCommentAttempt`, `owedKeyedSend` and the closed or gone
+predicates, package constants): the settle reads use them as they are and the send reads
+(`owedDeliveries`) their negations, so no attempt that cannot be sent ever fills a send batch. Of
+two senders that find one attempt owed - the sweep and a repeat, or two processes' sweeps - the
+one that claims it sends and the other sends nothing. The sweep's reads stay as small as the work
+still owed: migration `0119` indexes the pending attempts (`message_deliveries_pending`,
+`comment_deliveries_pending`, partial on `state = 'pending'`), and `0118` the keyed sends still
+owed (`request_keys_owed_sends`, on `created_at`, partial on rows with no status whose recovery
+names a message). `cmd/dispatch/keyed_kill_multiprocess_test.go` proves the takeover on two real
+processes: one killed mid-handler (held there by the slow-write hook), the other answers
 `409 KEY_IN_FLIGHT` while the lease lasts, then makes the write once and replays it.
 
 Every answer the layer judged echoes the key back (`Idempotency-Key: <key>`) - not the
