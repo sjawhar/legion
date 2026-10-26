@@ -18,6 +18,11 @@
   session file (the message's `message_end`): a card or turn handed over while a turn streams,
   which Oh My Pi holds in memory until the turn takes it, is recorded only then, so a process that
   ends first (a SIGKILL, a pod stopped mid-turn) shows it after the restart instead of losing it.
+  A card Oh My Pi drops unwritten while the process lives on is shown again: one an interrupt
+  (Escape, RPC `abort_and_restore_queue`) withdrew is handed again at the next heartbeat, once
+  the host is idle and holds no message (`ctx.isIdle()`, `ctx.hasPendingMessages()`), and one a
+  switch away dropped is released, so that session's sweep shows it once the host is back on it
+  or resumes it, never recorded before its card is written.
   The session file keeps what the session was shown (`envoy-replay-delivered`, and the written
   cards themselves, read back by the event they name) and where it read to
   (`envoy-replay-state`), so a restart shows nothing again (up to 20,000 frames in 72 hours) — a

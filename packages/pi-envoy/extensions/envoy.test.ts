@@ -13901,7 +13901,8 @@ describe("messages missed while the subscription was down", () => {
    * may throw, the host refusing it. The host's turn: `streaming` (the default) holds every card
    * it is handed in memory and writes none, as Oh My Pi holds a card sent mid-turn until the turn
    * takes it; `idle` writes each card as it starts a turn for it, its `custom_message` entry and
-   * then its `message_end`, as Oh My Pi does.
+   * then its `message_end`, as Oh My Pi does. The context reads the host as Oh My Pi's does: idle
+   * (`isIdle`) when its turn is, holding messages (`hasPendingMessages`) while it holds a card.
    */
   async function bootReplay(
     query: string,
@@ -13967,6 +13968,8 @@ describe("messages missed while the subscription was down", () => {
       setInterval: (callback) => {
         intervals.push(callback);
       },
+      isIdle: () => options.turn === "idle",
+      hasPendingMessages: () => held.length > 0,
       ui: { ...base.ui, notify: (message) => notifications.push(message) },
     };
     const before = model.replays;
@@ -14069,6 +14072,19 @@ describe("messages missed while the subscription was down", () => {
         };
         written.push({ type: "message", message });
         await fixture.handlers.get("message_end")?.({ message }, context);
+        await settle();
+      },
+      /**
+       * The person aborts the streaming turn (RPC `abort`): the run ends aborted (`agent_end`), and
+       * the host, idle at its end, still holds the cards the turn held, for the run it starts next
+       * to take (`take`), as Oh My Pi 18.8.9 does.
+       */
+      abort: async () => {
+        options = { ...options, turn: "idle" };
+        await fixture.handlers.get("agent_end")?.(
+          { messages: [{ role: "assistant", stopReason: "aborted", content: [] }] },
+          context
+        );
         await settle();
       },
       live: (subject: string) => {
@@ -14315,6 +14331,80 @@ describe("messages missed while the subscription was down", () => {
       await second.tick();
 
       expect(second.cards("evt-taken-later")).toHaveLength(0);
+    });
+
+    test("one a plain abort left in the host's queue is shown once, by the run the host starts next", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-abort-queued-a", model);
+      const replayed = peerMessage("ses_replay", "abort-replayed");
+      const live = peerMessage("ses_replay", "abort-live");
+      model.store(first.agentSubject, replayed);
+      await first.reconnect();
+      model.store(first.agentSubject, live);
+      first.live(first.agentSubject).push(live);
+      await until(() => first.cards("evt-abort-live").length > 0, "the live card");
+
+      // The host is idle at the aborted run's end and still holds both cards: not handed again.
+      await first.abort();
+      await first.tick();
+      await first.tick();
+      expect(first.cards("evt-abort-replayed")).toHaveLength(1);
+      expect(first.cards("evt-abort-live")).toHaveLength(1);
+
+      await first.take();
+      await first.tick();
+      await first.tick();
+      expect(first.cards("evt-abort-replayed")).toHaveLength(1);
+      expect(first.cards("evt-abort-live")).toHaveLength(1);
+      await first.stop();
+
+      const second = await bootReplay("replay-abort-queued-b", model, {
+        entries: first.entries(),
+      });
+      await second.tick();
+
+      expect(second.cards("evt-abort-replayed")).toHaveLength(0);
+      expect(second.cards("evt-abort-live")).toHaveLength(0);
+    });
+
+    test("a frame shown before the host moved to this session is recorded here only once its card is written", async () => {
+      const model = new StreamModel();
+      // A session that followed the issue, left before the event was published.
+      const left = await bootReplay("replay-moved-left", model, { sessionID: "ses_moved" });
+      await left.follow(ISSUE_TOPIC);
+      await left.stop();
+      const leftEntries = left.entries();
+      // Another session follows the issue too and is shown the event live: its turn takes the card.
+      const session = await bootReplay("replay-moved-a", model);
+      await session.follow(ISSUE_TOPIC);
+      const frame = issueEvent(ISSUE_SUBJECT, 30);
+      model.store(ISSUE_SUBJECT, frame);
+      session.live(ISSUE_TOPIC).push(frame);
+      await until(() => session.cards("dispatch-30").length > 0, "the live card");
+      await session.take();
+
+      // The host resumes the session it left, its turn streaming: that session's sweep hands it
+      // the event's card, which the turn holds until the process ends.
+      const mark = session.fixture.entries.length;
+      const file = () => [...leftEntries, ...session.fixture.entries.slice(mark)];
+      const resumed = sessionContext("ses_moved");
+      await session.fixture.handlers.get("session_switch")?.(
+        { reason: "resume" },
+        {
+          ...resumed,
+          sessionManager: { ...resumed.sessionManager, getBranch: file, getEntries: file },
+        }
+      );
+      await until(() => session.cards("dispatch-30").length > 1, "the resumed session's card");
+      await settle();
+      await session.stop();
+
+      const restarted = await bootReplay("replay-moved-b", model, {
+        sessionID: "ses_moved",
+        entries: file(),
+      });
+
+      expect(restarted.cards("dispatch-30")).toHaveLength(1);
     });
 
     test("a frame whose failure notice was still held when the process ended is shown after the restart", async () => {

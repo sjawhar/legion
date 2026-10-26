@@ -197,8 +197,23 @@ user message `matchInjectedUserTurn` finds for it: by its `tag` for typed input
 for `pi.sendUserMessage` on a host without `sendUserInput`, whose search the run's end stops,
 recording the turn then. Typed input the host answers submitted no message (a command, a refusal,
 a failure) is recorded at that answer, which the person gets on Dispatch. A BTW reply and a
-correlated refusal are Dispatch posts, recorded once posted. A session change settles, recording
-nothing, what the session left was handed and has not written.
+correlated refusal are Dispatch posts, recorded once posted. A replayed card of a frame the
+dedupe let go of that the open session's ledger lacks (shown before the host moved to this
+session) waits on its write too, with no claim.
+
+The host can also drop a card it holds without writing it while the process lives on. A session
+change drops what the session left was handed and has not written: its claims are released,
+recording nothing, so that session's sweep, once the host is back on it or resumes it, shows the
+stream's copy again. An interrupt (Escape at the terminal, RPC `abort_and_restore_queue`:
+`clearQueue({ forInterrupt: true })`) withdraws every card the turn held, writes none and restores
+none, and leaves the host idle with an empty queue; a plain abort keeps them queued and writes
+them in the run it starts at once (measured on omp 18.8.9: `ctx.hasPendingMessages()` false, then
+true, at the aborted run's `agent_end`). So each heartbeat tick, while the host is idle
+(`ctx.isIdle()`) and holds no message (`ctx.hasPendingMessages()`), hands each card still
+unwritten again, as it was and under its claim, which also covers a live frame on a topic the
+stream does not keep (`handBackWithdrawnCards`). A card handed since the last tick or aborted
+run's end is left alone: `pi.sendMessage` returns before the host queues the card or starts its
+run, so the host reads idle and empty for that moment.
 
 A sweep asks, for each followed subject, for the stored messages after that subject's cursor,
 merges them by stream sequence and shows each that neither path has shown. The followed subjects
@@ -264,9 +279,11 @@ again.
 Each frame is shown once across reconnects and restarts, within two limits: the ledger's 72
 hours, and its 20,000 entries, the oldest dropped first, so a session shown more frames than that
 inside 72 hours can be shown the oldest of them again by a sweep that reads it. A frame the host
-still held unwritten when the process ended is shown after the restart, as a card; a card written
-whose record was not is read back from the transcript; a user turn written whose record was not
-(the process ending between the two) is shown again as a card. Inside one sweep replayed frames
+still held unwritten when the process ended is shown after the restart, as a card; one an
+interrupt withdrew is shown again by the next heartbeat in the same process, and one a switch away
+dropped by that session's sweep once the host is back on it or resumes it; a card written whose
+record was not is read back from the transcript; a user turn written whose record was not (the
+process ending between the two) is shown again as a card. Inside one sweep replayed frames
 go out in stream order; nothing orders them against live ones. `scripts/smoke-replay.sh` is the
 live proof (`scripts/README.md`).
 
