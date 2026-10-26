@@ -97,7 +97,7 @@ const natsSeedVariables = ["NATS_NKEY_SEED", "NATS_DAEMON_NKEY_SEED"];
 /** Runs one App's private_key_command and returns the key it printed, trimmed, as the daemon does.
  * A failure is named as the daemon names it (internal/config, commandError): its field and exit
  * code, then the command's stderr when it wrote any; its stdout is never quoted. */
-function runKeyCommand(role: AppRole, command: string): string {
+export function runKeyCommand(role: AppRole, command: string): string {
   const field = `github_apps.${role}.private_key_command`;
   const env = { ...process.env };
   for (const name of natsSeedVariables) delete env[name];
