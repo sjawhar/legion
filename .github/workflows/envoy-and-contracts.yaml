@@ -338,8 +338,9 @@ jobs:
               # install-jj reads the mise version and checksum it installs from here.
               - 'packages/daemon/docker/worker.Dockerfile'
             # The Legion plugin: its own sources, the workspace packages its bundle inlines, the Oh
-            # My Pi pin its real-binary tests run (extensions/legion-phase-stall-omp.test.ts), and
-            # every file its tests and typecheck read outside the package:
+            # My Pi pin its real-binary tests run (extensions/legion-phase-stall-omp.test.ts and
+            # controller-start-omp.test.ts), and every file its tests and typecheck read outside the
+            # package:
             # - every skill: src/skills-guard.test.ts resolves each skill:// link across all of
             #   skills/ (the Legion skills link into skills/dispatch by heading), and the Envoy entry
             #   its tests load beside this one reads skills/dispatch-first at load;
@@ -585,16 +586,23 @@ jobs:
     needs: changes
     if: needs.changes.outputs.pi_legion == 'true'
     runs-on: ubuntu-24.04
+    # The NATS server the Envoy role claim of extensions/controller-start-omp.test.ts's controller
+    # needs (LEGION_TEST_NATS_URL on the test step), on the image the envoy-client job pulls.
+    services:
+      nats:
+        image: mirror.gcr.io/library/nats:2.10
+        ports: ["4222:4222"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
       - uses: ./.github/actions/install-jj
-      # extensions/legion-phase-stall-omp.test.ts runs the pinned Oh My Pi against stand-ins
-      # (packages/pi-shared/test/omp-harness.ts) and refuses on GitHub Actions without one. The pin
-      # is read from .omp-pin, the repository's one copy of it, installed through the mise
-      # install-jj leaves at ~/.local/bin/mise (.github/actions/install-omp).
+      # extensions/legion-phase-stall-omp.test.ts and controller-start-omp.test.ts run the pinned
+      # Oh My Pi against stand-ins (packages/pi-shared/test/omp-harness.ts) and refuse on GitHub
+      # Actions without one. The pin is read from .omp-pin, the repository's one copy of it,
+      # installed through the mise install-jj leaves at ~/.local/bin/mise
+      # (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
       # scripts/skill-scenarios/rig.test.ts runs rig.sh judge-omp's container with the runner's own
       # Docker, pulling its pinned ubuntu image from mirror.gcr.io.
@@ -616,6 +624,8 @@ jobs:
       - name: Test pi-legion
         run: bun run test
         working-directory: packages/pi-legion
+        env:
+          LEGION_TEST_NATS_URL: nats://127.0.0.1:4222
       # The release's pack (release.yaml's pi_legion_build job), which is also this job's build: the
       # manifest pointed at the one bundle, then scripts/pi-plugin-prepack.sh, which bundles
       # legion.ts, writes dist/THIRD_PARTY_NOTICES (failing the pack on a bundled package whose

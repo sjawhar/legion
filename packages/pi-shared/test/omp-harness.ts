@@ -1,12 +1,15 @@
 // The harness shared by the tests that run the real Oh My Pi binary (each plugin's `*-omp.test.ts`):
 // a stand-in server that is the model gateway and whatever else a test answers, a profile whose
 // every model role is that stand-in, one `omp --mode rpc` child with only the caller's extensions
-// loaded, and the Legion pane runner (`runLegionPane`) that puts those together as one Legion pane
-// against a stand-in daemon and listener. The profile format, the flags and the RPC stream are the
-// Oh My Pi pin's (the repository's .omp-pin), so a pin bump that changes one is fixed here once.
+// loaded, one interactive `omp` under a pseudo-terminal whose screen a test reads as an operator
+// sees it (`spawnInteractive`), and the Legion pane runner (`runLegionPane`) that puts those
+// together as one Legion pane against a stand-in daemon and listener. The profile format, the
+// flags and the RPC stream are the Oh My Pi pin's (the repository's .omp-pin), so a pin bump that
+// changes one is fixed here once.
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Terminal } from "@xterm/headless";
 import { linkOmpNatives } from "./omp-natives";
 
 export interface Request {
@@ -182,34 +185,17 @@ export function spawnRpc(
   },
   cleanup: Cleanup
 ): Rpc {
-  const child = Bun.spawn(
-    [
-      binary,
-      "--mode",
-      "rpc",
-      "--no-extensions",
-      ...options.extensions.flatMap((file) => ["-e", file]),
-      "--no-skills",
-      "--no-rules",
-      "--no-lsp",
-      "--no-title",
-      "--session-dir",
-      options.sessions,
-      "--cwd",
-      options.workspace,
-    ],
-    {
-      cwd: options.workspace,
-      env: {
-        HOME: options.home,
-        PATH: [options.bin, "/usr/local/bin:/usr/bin:/bin"].filter(Boolean).join(":"),
-        ...options.env,
-      },
-      stdin: "pipe",
-      stdout: "pipe",
-      stderr: "pipe",
-    }
-  );
+  const child = Bun.spawn([binary, "--mode", "rpc", ...ompFlags(options)], {
+    cwd: options.workspace,
+    env: {
+      HOME: options.home,
+      PATH: [options.bin, "/usr/local/bin:/usr/bin:/bin"].filter(Boolean).join(":"),
+      ...options.env,
+    },
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
   cleanup.push(async () => {
     child.kill("SIGKILL");
     await child.exited;
@@ -242,6 +228,112 @@ export function spawnRpc(
       await child.exited;
     },
     closed,
+  };
+}
+
+/** The flags `spawnRpc` and `spawnInteractive` start omp with: only `extensions` loaded. */
+function ompFlags(options: {
+  readonly extensions: readonly string[];
+  readonly workspace: string;
+  readonly sessions: string;
+}): string[] {
+  return [
+    "--no-extensions",
+    ...options.extensions.flatMap((file) => ["-e", file]),
+    "--no-skills",
+    "--no-rules",
+    "--no-lsp",
+    "--no-title",
+    "--session-dir",
+    options.sessions,
+    "--cwd",
+    options.workspace,
+  ];
+}
+
+export interface Interactive {
+  /**
+   * The screen as the terminal renders it now, scrollback included: one string, each row's
+   * trailing blanks trimmed and the trailing empty rows dropped. It holds only what the emulator
+   * has parsed so far, so a case polls it.
+   */
+  screen(): string;
+  /** Types `data` at the terminal, as keystrokes: `\r` is Enter, a lone `\x1b` is Esc. */
+  write(data: string): void;
+  /**
+   * Resolves with omp's exit code once it exits and the screen holds every byte read from the
+   * terminal by then, so a case that fails on the exit can show what omp printed last.
+   */
+  readonly exited: Promise<number>;
+}
+
+/**
+ * Starts interactive `omp` (the TUI, no `--mode`) under a pseudo-terminal of `cols` × `rows`
+ * (120 × 40 by default), with `spawnRpc`'s flags and environment, then `args` on its command line
+ * (an `--append-system-prompt <prompt>`, a positional word Oh My Pi runs once its startup is over).
+ * TERM is `xterm-256color` and OMP_SKIP_SETUP skips the first-run setup wizard, so the TUI starts
+ * straight into the session; `env` is spread last. Every byte omp writes to the terminal is fed to
+ * a headless xterm of the same size, which `screen` reads. The child is killed at cleanup.
+ */
+export function spawnInteractive(
+  binary: string,
+  options: {
+    readonly extensions: readonly string[];
+    readonly home: string;
+    readonly workspace: string;
+    readonly sessions: string;
+    readonly bin?: string;
+    readonly env: Record<string, string>;
+    readonly args: readonly string[];
+    readonly cols?: number;
+    readonly rows?: number;
+  },
+  cleanup: Cleanup
+): Interactive {
+  const { cols = 120, rows = 40 } = options;
+  const emulator = new Terminal({ cols, rows, allowProposedApi: true });
+  const terminal = new Bun.Terminal({
+    cols,
+    rows,
+    data(_terminal, data) {
+      emulator.write(data);
+    },
+  });
+  const child = Bun.spawn([binary, ...ompFlags(options), ...options.args], {
+    cwd: options.workspace,
+    env: {
+      HOME: options.home,
+      PATH: [options.bin, "/usr/local/bin:/usr/bin:/bin"].filter(Boolean).join(":"),
+      TERM: "xterm-256color",
+      OMP_SKIP_SETUP: "1",
+      ...options.env,
+    },
+    terminal,
+  });
+  cleanup.push(async () => {
+    child.kill("SIGKILL");
+    await child.exited;
+    terminal.close();
+    emulator.dispose();
+  });
+
+  return {
+    screen() {
+      const buffer = emulator.buffer.active;
+      const lines: string[] = [];
+      for (let row = 0; row < buffer.length; row++) {
+        lines.push(buffer.getLine(row)?.translateToString(true) ?? "");
+      }
+      return lines.join("\n").replace(/\n+$/, "");
+    },
+    write(data) {
+      terminal.write(data);
+    },
+    exited: child.exited.then(
+      // The emulator parses what it is fed asynchronously; an empty write's callback runs once
+      // everything before it is parsed.
+      (code) => new Promise<number>((resolve) => emulator.write("", () => resolve(code)))
+    ),
   };
 }
 
