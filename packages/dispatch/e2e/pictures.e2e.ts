@@ -399,8 +399,10 @@ test("a long-named picture in a comment draws, its link to a long-named document
     const designTarget = `dispatch://${issue.key}/artifact/${designSlug}`;
     const path = `/issues/${issue.key}/artifacts/${designSlug}`;
     const bareUrl = `${dashboardOrigin}${path}`;
+    // A block of a short-named document whose id is past the 256 bytes a block reference names.
+    const blockTarget = `dispatch://${issue.key}/spec#b-${"b".repeat(257)}`;
     const comment = await createComment(issue.key, {
-      body: `![shot](dispatch://${issue.key}/artifact/${pictureSlug}@v1)\n\nSee [design](${designTarget}).\n\nBare: ${bareUrl}\n\nAngle: <${designTarget}>\n\nSelf: [${designTarget}](${designTarget})`,
+      body: `![shot](dispatch://${issue.key}/artifact/${pictureSlug}@v1)\n\nSee [design](${designTarget}).\n\nBare: ${bareUrl}\n\nAngle: <${designTarget}>\n\nSelf: [${designTarget}](${designTarget})\n\nBlock: <${blockTarget}>`,
     });
 
     await page.goto(`/issues/${issue.key}/conversation`);
@@ -428,11 +430,24 @@ test("a long-named picture in a comment draws, its link to a long-named document
     await expect(bare).toHaveText(bareUrl);
     await expect(bare).not.toHaveAttribute("data-dispatch-ref");
     // The `dispatch://` forms of the same text keep their words and name no reference either.
-    for (const label of ["Angle:", "Self:"]) {
-      const plain = thread.locator("p", { hasText: label }).getByRole("link");
-      await expect(plain).toHaveText(designTarget);
-      await expect(plain).not.toHaveAttribute("data-dispatch-ref");
+    // The `dispatch://` forms of text past the bounds are their words alone: no link to click,
+    // and nothing the hover card opens on (`[data-dispatch-ref]`, `[data-dispatch-href]`).
+    for (const [label, words] of [
+      ["Angle:", designTarget],
+      ["Self:", designTarget],
+      ["Block:", blockTarget],
+    ] as const) {
+      const paragraph = thread.locator("p", { hasText: label });
+      await expect(paragraph).toHaveText(`${label} ${words}`);
+      await expect(paragraph.getByRole("link")).toHaveCount(0);
+      await expect(paragraph.locator("[data-dispatch-href],[data-dispatch-ref]")).toHaveCount(0);
+      if (testInfo.project.name !== "iphone") {
+        await paragraph.hover();
+        await page.waitForTimeout(600);
+        await expect(page.getByRole("tooltip")).toHaveCount(0);
+      }
     }
+    await page.mouse.move(0, 0);
     // The link reads as the document's name, so it wraps past the window's height; the click lands
     // on its last line, clear of the composer pinned above the conversation.
     const lastLine = await link.evaluate((anchor) => {

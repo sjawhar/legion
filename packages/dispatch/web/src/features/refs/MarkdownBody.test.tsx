@@ -343,10 +343,11 @@ describe("Dispatch pictures", () => {
     });
     const long = `dispatch://CORE-1/artifact/${slug}`;
     const plan = "dispatch://CORE-1/artifact/plan-md";
+    const block = `${plan}#b-${"b".repeat(257)}`;
     const view = render(
       withQueries(
         <MarkdownBody
-          markdown={`Angle: <${long}>\n\nSelf: [${long}](${long})\n\nSee [design](${long}).\n\nPlan: <${plan}> and [${plan}](${plan})`}
+          markdown={`Angle: <${long}>\n\nSelf: [${long}](${long})\n\nBlock: <${block}>\n\nSee [design](${long}).\n\nPlan: <${plan}> and [${plan}](${plan})`}
         />
       )
     );
@@ -361,11 +362,17 @@ describe("Dispatch pictures", () => {
       for (const link of plans) {
         expect(link.getAttribute("data-dispatch-ref")).toBe(plan);
       }
-      for (const label of ["Angle:", "Self:"]) {
+      // Past the bounds each is its words as plain text: no link to click, and no
+      // `data-dispatch-href` for the hover card (`RefPreview`'s trigger) to find.
+      for (const [label, words] of [
+        ["Angle:", long],
+        ["Self:", long],
+        ["Block:", block],
+      ] as const) {
         const paragraph = within(view.container).getByText(label, { exact: false });
-        const plain = paragraph.querySelector("a");
-        expect(plain?.textContent).toBe(long);
-        expect(plain?.getAttribute("data-dispatch-ref")).toBeNull();
+        expect(paragraph.textContent).toBe(`${label} ${words}`);
+        expect(paragraph.querySelector("a")).toBeNull();
+        expect(paragraph.querySelector("[data-dispatch-href],[data-dispatch-ref]")).toBeNull();
       }
     } finally {
       getArtifactText.mockRestore();

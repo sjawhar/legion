@@ -177,10 +177,18 @@ export function collectReferenceAnchors(
       continue;
     }
     const text = anchor.textContent ?? "";
-    const route = isTextUrl(href, text)
+    const textUrl = isTextUrl(href, text);
+    const route = textUrl
       ? referenceRouteFromHref(href, appOrigin)
       : nodeRouteFromHref(href, appOrigin);
     if (route === undefined) {
+      // A `dispatch://` URL left as text that cites nothing - past the bounds the index keys -
+      // is the text it is, as a bare one past them already renders (`linkifyDispatchRefs`):
+      // Proof's serializer left it `href=""` and `data-dispatch-href`, which would click to the
+      // current page and open a hover card for a reference the server never recorded.
+      if (textUrl && href.startsWith("dispatch://")) {
+        anchor.replaceWith(document.createTextNode(text));
+      }
       continue;
     }
     anchor.setAttribute("href", buildReferencePath(route));
