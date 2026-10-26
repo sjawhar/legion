@@ -459,6 +459,7 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		state.Daemon.StartedAt.Format(time.RFC3339), state.Daemon.FirstBootAt.Format(time.RFC3339))
 	fmt.Fprintf(stdout, "admission: %d active, %d waiting, cap %d; %d issues\n",
 		len(state.Admission.Active), len(state.Admission.Waiting), state.Admission.Cap, len(state.Issues))
+	fmt.Fprintln(stdout, awaitingSummary(state.Issues))
 	fmt.Fprintln(stdout, checksSummary(openChecks(state.Issues)))
 	fmt.Fprintln(stdout, pendingSummary(state.PendingStatusWrites))
 	fmt.Fprintln(stdout, heldSummary(state.HeldOutboxRows))
@@ -494,6 +495,39 @@ func pendingSummary(pending []api.PendingStatusWrite) string {
 	}
 	return fmt.Sprintf("pending Dispatch status writes: %d; the oldest, for %s, has failed %d attempts, next at %s: %s",
 		len(pending), oldest.Issue, oldest.Attempts, next, oldest.LastError)
+}
+
+// awaitingSummary is the one line an operator reads for the roots that gave their admission slot
+// back to wait on a person — an unanswered one is in neither admission list, so the capacity it
+// freed would otherwise look idle: how many, how many a person has answered (each first in the
+// waiting line for the next free slot), and the first by key with what it waits on.
+func awaitingSummary(issues map[string]api.Issue) string {
+	var keys []string
+	answered := 0
+	for key, issue := range issues {
+		if issue.WaitingOn == nil {
+			continue
+		}
+		keys = append(keys, key)
+		if issue.WaitingOn.AnsweredAt != nil {
+			answered++
+		}
+	}
+	if len(keys) == 0 {
+		return "roots waiting on a person: none"
+	}
+	slices.Sort(keys)
+	first := issues[keys[0]].WaitingOn
+	on := "ask " + first.Ask
+	if first.Kind == "gate" {
+		on = fmt.Sprintf("spec version %d", first.GateVersion)
+	}
+	state := "unanswered"
+	if first.AnsweredAt != nil {
+		state = "answered at " + first.AnsweredAt.UTC().Format(time.RFC3339)
+	}
+	return fmt.Sprintf("roots waiting on a person: %d, %d answered and waiting for a slot; the first, %s, waits on %s, %s",
+		len(keys), answered, keys[0], on, state)
 }
 
 // issueCheck is one open production check (api.CheckView) with the issue it belongs to.

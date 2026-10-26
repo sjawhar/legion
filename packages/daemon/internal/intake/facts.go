@@ -545,9 +545,8 @@ func (SignOff) isFact() {}
 // asked to act, and the architect's hand-back of the request starts it. DispatchVersion is the
 // document's latest version as that read found it: Version is the caller's, so only
 // DispatchVersion proves the document moved past the version a root waits on. Since is where a wait
-// this registration starts begins: the issue's event sequence read before the approval, so every
-// review the read did not show comes after it, and the time of the latest review it showed (zero
-// for none), for a review Dispatch gives no sequence for.
+// this registration starts begins: the issue's event sequence read before the approval, with no
+// time, so every review and act the read did not show comes after it (record.EventMark.After).
 type GateRegistered struct {
 	Issue                   string
 	ArtifactID              string

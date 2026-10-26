@@ -117,6 +117,11 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 	if err := e.closeAwaitingRoot(ctx, tx, *root); err != nil {
 		return err
 	}
+	// The member may have been the one whose phase kept the root's slot while the root waited only
+	// on a person: the wait held pending starts now (awaitPending).
+	if err := e.awaitPending(ctx, tx, root.Key); err != nil {
+		return err
+	}
 	if !merged {
 		return nil
 	}

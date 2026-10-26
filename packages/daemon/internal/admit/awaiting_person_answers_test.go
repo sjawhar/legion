@@ -1453,6 +1453,8 @@ func TestASessionClosingTheAwaitedQuestionEndsTheWait(t *testing.T) {
 			fact: intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-root", Kind: "question", State: "resolved", Actor: architect, Mark: record.EventMark{Seq: 11}}},
 		{name: "settlement retracts it", ends: true, inTask: "retracted",
 			fact: intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-root", Kind: "question", State: "resolved", Actor: settler, Mark: record.EventMark{Seq: 11}}},
+		{name: "a session outside the tree resolves it", ends: true, inTask: "closed by someone outside your tree",
+			fact: intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-root", Kind: "question", State: "resolved", Actor: outsider, Mark: record.EventMark{Seq: 11}}},
 		{name: "the architect resolves another question",
 			fact: intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-other", Kind: "question", State: "resolved", Actor: architect, Mark: record.EventMark{Seq: 11}}},
 	} {
@@ -1460,6 +1462,7 @@ func TestASessionClosingTheAwaitedQuestionEndsTheWait(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, nil)
 			awaitingRoot(t, pool, record.Awaiting{Ask: "ask-root", Since: handBack})
+			seedArchitectClaim(t, pool, "LEGION-ROOT", architect.ID)
 			applyFact(t, pool, admission, "closed", tc.fact)
 			got := issue(t, pool, "LEGION-ROOT")
 			if got.Answered() != tc.ends {

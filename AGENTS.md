@@ -236,21 +236,29 @@ moves the wait to that document at the version Dispatch shows. A review the gate
 applied, or one of a version below its latest, changes no gate state and tells the architect
 nothing, and still answers a wait it follows. A person's act delivered before the event that would
 start the wait (Dispatch retries a delivery) is kept on the root, and that event then starts no
-wait: the architect, still running, has the act. Admission gives an answered root the next free
-slot and resumes the same architect session with a task naming what answered it (a changes request
-with its version and reason, a newer version, an act on another ask, a question retracted or
-closed). Its
+wait: the architect, still running, has the act. A wait the root would start while it already
+waits (a second question, a hand-back, a closed gate registered), or once answered before it
+resumes, or while a guard keeps its slot (a member of its tree mid-phase, a claim a person holds),
+is held pending (`awaiting_pending_waits`) until it is answered or closed: when the guard clears —
+the member leaves the workflow, the person releases the claim — the wait starts and the slot goes
+back, and the resumed architect's task names every ask, and the approval request, still with the
+person, to hand back or close. Admission gives an answered root the next free slot and resumes the
+same architect session with a task naming what answered it (a changes request with its version
+and reason, a newer version, an act on another ask, a question retracted or closed and by whom)
+and how the spec stands now. Plain `legion state` prints the roots waiting on a person, how many are
+answered, and what the first waits on. Its
 tree remains live while it waits, so children do not become orphans or start planning before the
 root returns. Taking the `legion` label off such a root, or a human or foreign session claiming it,
 takes it out of the workflow with an `unslotted` notice; it is never resumed under another owner,
 and a changes request recorded as told because its resume task would name it is told again when
 the root is admitted anew. A session outside the tree writing a lifecycle status on a waiting root
 is set back, as on a root holding its slot, and its architect is told when it resumes.
-A root a person or foreign session already holds the Dispatch claim of never gives up its slot at
-all: its architect asks that holder whether to release the claim and keeps the slot at `admitted`,
-since no answer could resume it once it had none. Neither does an admitted root whose label was
-taken off, since only a labelled root is resumed; its tree runs on, as any running tree does. The
-claim a person took before the hand-over arrives with the hand-over event that records the root.
+A root a person or foreign session already holds the Dispatch claim of keeps its slot at
+`admitted` while its architect asks that holder whether to release the claim, since no answer could
+resume it once it had none; the wait it would have started is held pending and starts once the
+claim is released. Neither does an admitted root whose label was taken off give up its slot, since
+only a labelled root is resumed; its tree runs on, as any running tree does. The claim a person
+took before the hand-over arrives with the hand-over event that records the root.
 
 The mark is a label rather than the issue's `route` because Dispatch publishes every event of a
 routed issue to the route's topic, where a label only marks the issue; it carries no workflow state.

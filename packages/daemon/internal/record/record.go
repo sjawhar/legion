@@ -587,18 +587,42 @@ type DesignGate struct {
 	ToldChangesMark    EventMark
 }
 
-// PersonAct is an act a person took on an ask of a root and where Dispatch recorded it (Mark, its
-// event's sequence on the issue and its time): an answer or resolution that closed the ask, or a
-// reply that left the turn with the agent. AnswersGate says whether it answers a wait on the
-// root's design gate as well as one on that ask (the workflow's answeredByPerson). Dispatch's
-// intake retries a delivery, so the event that starts a wait — a question opened, a hand-back —
-// can reach the daemon after a person's act that followed it; the root keeps every such act, and a
-// wait whose start one of them follows starts none, since what it would wait on has happened.
+// PersonAct is an act on an ask of a root and where Dispatch recorded it (Mark, its event's
+// sequence on the issue and its time): a person's answer or resolution that closed the ask, a
+// person's reply that left the turn with the agent (ByPerson), or a close of the ask by anyone
+// else — a session of the tree, Dispatch's settlement — which ends that ask and nothing more.
+// AnswersGate says whether it answers a wait on the root's design gate as well as one on that ask
+// (the workflow's personActed). Dispatch's intake retries a delivery, so the event that starts a
+// wait — a question opened, a hand-back — can reach the daemon after an act that followed it; the
+// root keeps every such act, and a wait whose start one of them follows starts none, since what it
+// would wait on has happened.
 type PersonAct struct {
 	Issue       string
 	Ask         string
 	Mark        EventMark
 	AnswersGate bool
+	ByPerson    bool
+}
+
+// PendingWait is a wait a root would have started but did not: the event that would start it (an
+// architect's question on the root, a hand-back, a closed gate registered) arrived while the root
+// already waited, or was answered and not yet resumed, or while a guard kept its slot (a member of
+// its tree mid-phase, a claim a person holds). It names the ask (Ask) or the closed gate's version
+// on its document (GateVersion, Artifact), and the event's place in the issue's event log (Since).
+// The root keeps every one until it is answered, a wait starts on it, or the root leaves the
+// workflow, so the slot goes back when the guard clears and the resumed architect is told of the
+// asks still with the human.
+type PendingWait struct {
+	Issue       string
+	Ask         string
+	GateVersion int
+	Artifact    string
+	Since       EventMark
+}
+
+// Awaiting is the wait p would start.
+func (p PendingWait) Awaiting() Awaiting {
+	return Awaiting{Ask: p.Ask, GateVersion: p.GateVersion, Artifact: p.Artifact, Since: p.Since}
 }
 
 // Slot is an active admission slot.
@@ -710,14 +734,21 @@ type Store interface {
 	// gate and each copy a hand-over carried to a child of its tree.
 	GatesForArtifact(ctx context.Context, tx pgx.Tx, artifactID string) ([]DesignGate, error)
 	PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) error
-	// RecordPersonAct records a person's act on an ask of issue, at the place in the issue's event
-	// log Dispatch recorded it. A second record of the same event changes nothing.
+	// RecordPersonAct records an act on an ask of issue, at the place in the issue's event log
+	// Dispatch recorded it. A second record of the same event changes nothing.
 	RecordPersonAct(ctx context.Context, tx pgx.Tx, act PersonAct) error
-	// PersonActs is every person's act recorded on issue, in event order.
+	// PersonActs is every act recorded on issue's asks, in event order.
 	PersonActs(ctx context.Context, tx pgx.Tx, issue string) ([]PersonAct, error)
-	// ForgetPersonActs drops every person's act recorded on the issue, which leaves the workflow
-	// with it.
+	// ForgetPersonActs drops every act recorded on the issue, and every wait it holds pending,
+	// which leave the workflow with it.
 	ForgetPersonActs(ctx context.Context, tx pgx.Tx, issue string) error
+	// HoldPendingWait keeps a wait the root would have started, keyed by its event's place in the
+	// issue's event log. A second hold of the same event changes nothing.
+	HoldPendingWait(ctx context.Context, tx pgx.Tx, pending PendingWait) error
+	// PendingWaits is every wait issue holds pending, in event order.
+	PendingWaits(ctx context.Context, tx pgx.Tx, issue string) ([]PendingWait, error)
+	// DropPendingWait drops the pending wait of issue whose event is at seq.
+	DropPendingWait(ctx context.Context, tx pgx.Tx, issue string, seq int64) error
 	Slots(ctx context.Context, tx pgx.Tx) ([]Slot, error)
 	PutSlot(ctx context.Context, tx pgx.Tx, slot Slot) error
 	ReleaseSlot(ctx context.Context, tx pgx.Tx, issue string) error

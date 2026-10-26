@@ -124,7 +124,8 @@ func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
 		awaiting_answered_at = excluded.awaiting_answered_at, awaiting_answered_by = excluded.awaiting_answered_by,
 		awaiting_answered_detail = excluded.awaiting_answered_detail,
 		awaiting_since_seq = excluded.awaiting_since_seq, awaiting_since = excluded.awaiting_since,
-		claimed_by = excluded.claimed_by, claim_seq = greatest(issues.claim_seq, excluded.claim_seq),
+		claimed_by = case when excluded.claim_seq >= issues.claim_seq then excluded.claimed_by else issues.claimed_by end,
+		claim_seq = greatest(issues.claim_seq, excluded.claim_seq),
 		wait_fence_seq = greatest(issues.wait_fence_seq, excluded.wait_fence_seq),
 		gate_fence_seq = greatest(issues.gate_fence_seq, excluded.gate_fence_seq)
 		where issues.repo = excluded.repo and issues.default_branch = excluded.default_branch and issues.github_repo = excluded.github_repo`,
@@ -268,6 +269,10 @@ func scanIssue(row scanner) (*Issue, error) {
 		issue.Hold = &Hold{From: phase.Phase(*heldFrom), Reason: HoldReason(holdReason)}
 	}
 	if awaitingAsk != nil || awaitingGate != nil {
+		if answeredAt != nil {
+			utc := answeredAt.UTC()
+			answeredAt = &utc
+		}
 		issue.Awaiting = &Awaiting{Artifact: awaitingArtifact, AnsweredAt: answeredAt, AnsweredBy: Answer(answeredBy),
 			AnsweredDetail: answeredDetail, Since: scannedMark(sinceSeq, since)}
 		if awaitingAsk != nil {
@@ -711,6 +716,9 @@ func (s *Postgres) PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) erro
 		approvedSeq, approvedAt = nil, nil
 	}
 	toldSeq, toldAt := markValues(gate.ToldChangesMark)
+	if gate.ToldChangesVersion == nil {
+		toldSeq, toldAt = nil, nil
+	}
 	_, err := tx.Exec(ctx, `insert into design_gates (`+gateColumns+`)
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		on conflict (issue) do update set artifact_id = excluded.artifact_id,
@@ -726,32 +734,32 @@ func (s *Postgres) PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) erro
 	return nil
 }
 
-// RecordPersonAct records a person's act on an ask, keyed by its event's place in the issue's
-// event log: the act is one event, however often a delivery or a read of it reaches the daemon.
+// RecordPersonAct records an act on an ask, keyed by its event's place in the issue's event log:
+// the act is one event, however often a delivery or a read of it reaches the daemon.
 func (s *Postgres) RecordPersonAct(ctx context.Context, tx pgx.Tx, act PersonAct) error {
 	if act.Mark.Seq <= 0 {
-		return fmt.Errorf("record the person's act on ask %s of %s: the act has no event sequence", act.Ask, act.Issue)
+		return fmt.Errorf("record the act on ask %s of %s: the act has no event sequence", act.Ask, act.Issue)
 	}
 	_, at := markValues(act.Mark)
-	if _, err := tx.Exec(ctx, `insert into awaiting_person_acts (issue, seq, ask, at, answers_gate) values ($1, $2, $3, $4, $5)
-		on conflict (issue, seq) do nothing`, act.Issue, act.Mark.Seq, act.Ask, at, act.AnswersGate); err != nil {
-		return fmt.Errorf("record the person's act on ask %s of %s: %w", act.Ask, act.Issue, err)
+	if _, err := tx.Exec(ctx, `insert into awaiting_person_acts (issue, seq, ask, at, answers_gate, by_person) values ($1, $2, $3, $4, $5, $6)
+		on conflict (issue, seq) do nothing`, act.Issue, act.Mark.Seq, act.Ask, at, act.AnswersGate, act.ByPerson); err != nil {
+		return fmt.Errorf("record the act on ask %s of %s: %w", act.Ask, act.Issue, err)
 	}
 	return nil
 }
 
 func (s *Postgres) PersonActs(ctx context.Context, tx pgx.Tx, issue string) ([]PersonAct, error) {
-	rows, err := tx.Query(ctx, `select seq, ask, at, answers_gate from awaiting_person_acts where issue = $1 order by seq`, issue)
+	rows, err := tx.Query(ctx, `select seq, ask, at, answers_gate, by_person from awaiting_person_acts where issue = $1 order by seq`, issue)
 	if err != nil {
-		return nil, fmt.Errorf("read the person's acts on %s: %w", issue, err)
+		return nil, fmt.Errorf("read the acts on %s: %w", issue, err)
 	}
 	defer rows.Close()
 	acts := []PersonAct{}
 	for rows.Next() {
 		act := PersonAct{Issue: issue}
 		var at *time.Time
-		if err := rows.Scan(&act.Mark.Seq, &act.Ask, &at, &act.AnswersGate); err != nil {
-			return nil, fmt.Errorf("read the person's acts on %s: %w", issue, err)
+		if err := rows.Scan(&act.Mark.Seq, &act.Ask, &at, &act.AnswersGate, &act.ByPerson); err != nil {
+			return nil, fmt.Errorf("read the acts on %s: %w", issue, err)
 		}
 		if at != nil {
 			act.Mark.At = at.UTC()
@@ -759,16 +767,80 @@ func (s *Postgres) PersonActs(ctx context.Context, tx pgx.Tx, issue string) ([]P
 		acts = append(acts, act)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read the person's acts on %s: %w", issue, err)
+		return nil, fmt.Errorf("read the acts on %s: %w", issue, err)
 	}
 	return acts, nil
 }
 
 func (s *Postgres) ForgetPersonActs(ctx context.Context, tx pgx.Tx, issue string) error {
 	if _, err := tx.Exec(ctx, `delete from awaiting_person_acts where issue = $1`, issue); err != nil {
-		return fmt.Errorf("forget the person's acts on %s: %w", issue, err)
+		return fmt.Errorf("forget the acts on %s: %w", issue, err)
+	}
+	if _, err := tx.Exec(ctx, `delete from awaiting_pending_waits where issue = $1`, issue); err != nil {
+		return fmt.Errorf("forget the pending waits of %s: %w", issue, err)
 	}
 	return nil
+}
+
+// HoldPendingWait keeps a wait the root would have started, keyed by its event's place in the
+// issue's event log, so the same event held twice is one pending wait.
+func (s *Postgres) HoldPendingWait(ctx context.Context, tx pgx.Tx, pending PendingWait) error {
+	if pending.Since.Seq <= 0 {
+		return fmt.Errorf("hold a pending wait of %s: its event has no sequence", pending.Issue)
+	}
+	var ask, gateVersion, artifact any
+	if pending.Ask != "" {
+		ask = pending.Ask
+	}
+	if pending.GateVersion != 0 {
+		gateVersion, artifact = pending.GateVersion, nullableText(pending.Artifact)
+	}
+	_, at := markValues(pending.Since)
+	if _, err := tx.Exec(ctx, `insert into awaiting_pending_waits (issue, seq, at, ask, gate_version, artifact) values ($1, $2, $3, $4, $5, $6)
+		on conflict (issue, seq) do nothing`, pending.Issue, pending.Since.Seq, at, ask, gateVersion, artifact); err != nil {
+		return fmt.Errorf("hold a pending wait of %s: %w", pending.Issue, err)
+	}
+	return nil
+}
+
+func (s *Postgres) PendingWaits(ctx context.Context, tx pgx.Tx, issue string) ([]PendingWait, error) {
+	rows, err := tx.Query(ctx, `select seq, at, coalesce(ask, ''), coalesce(gate_version, 0), coalesce(artifact, '')
+		from awaiting_pending_waits where issue = $1 order by seq`, issue)
+	if err != nil {
+		return nil, fmt.Errorf("read the pending waits of %s: %w", issue, err)
+	}
+	defer rows.Close()
+	pending := []PendingWait{}
+	for rows.Next() {
+		wait := PendingWait{Issue: issue}
+		var at *time.Time
+		if err := rows.Scan(&wait.Since.Seq, &at, &wait.Ask, &wait.GateVersion, &wait.Artifact); err != nil {
+			return nil, fmt.Errorf("read the pending waits of %s: %w", issue, err)
+		}
+		if at != nil {
+			wait.Since.At = at.UTC()
+		}
+		pending = append(pending, wait)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the pending waits of %s: %w", issue, err)
+	}
+	return pending, nil
+}
+
+func (s *Postgres) DropPendingWait(ctx context.Context, tx pgx.Tx, issue string, seq int64) error {
+	if _, err := tx.Exec(ctx, `delete from awaiting_pending_waits where issue = $1 and seq = $2`, issue, seq); err != nil {
+		return fmt.Errorf("drop the pending wait of %s at %d: %w", issue, seq, err)
+	}
+	return nil
+}
+
+// nullableText is text, or SQL null when it is empty.
+func nullableText(text string) any {
+	if text == "" {
+		return nil
+	}
+	return text
 }
 
 func (s *Postgres) Slots(ctx context.Context, tx pgx.Tx) ([]Slot, error) {

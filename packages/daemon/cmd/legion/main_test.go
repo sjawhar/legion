@@ -1371,6 +1371,46 @@ func TestPlainStateSummarizesTheOpenProductionChecks(t *testing.T) {
 	}
 }
 
+// An operator reading plain `legion state` is told how many roots gave their slot back to wait on a
+// person, how many a person answered, and the first by key with what it waits on: an unanswered one
+// is in neither admission list, so without this line the capacity it freed looks idle.
+func TestPlainStateNamesTheRootsWaitingOnAPerson(t *testing.T) {
+	daemon := `"daemon":{"project":"LEGION","schemaVersion":6,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},` +
+		`"admission":{"cap":2,"active":[],"waiting":["LEGION-211"]},"pendingStatusWrites":[]`
+	gate := `"LEGION-210":{"key":"LEGION-210","generation":1,"phase":"awaiting_person","status":"in_progress","waitingOn":{"kind":"gate","gateVersion":3}}`
+	asked := `"LEGION-211":{"key":"LEGION-211","generation":1,"phase":"awaiting_person","status":"in_progress",` +
+		`"waitingOn":{"kind":"ask","ask":"ask-7","answeredAt":"2026-10-25T12:00:00Z"}}`
+	for _, tc := range []struct {
+		name, issues, want string
+	}{
+		{name: "two waiting, one answered", issues: `{` + asked + `,` + gate + `}`,
+			want: "roots waiting on a person: 2, 1 answered and waiting for a slot; the first, LEGION-210, waits on spec version 3, unanswered\n"},
+		{name: "one answered", issues: `{` + asked + `}`,
+			want: "roots waiting on a person: 1, 1 answered and waiting for a slot; the first, LEGION-211, waits on ask ask-7, answered at 2026-10-25T12:00:00Z\n"},
+		{name: "none", issues: `{}`, want: "roots waiting on a person: none\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			served := "{" + daemon + `,"issues":` + tc.issues + "}"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(served))
+			}))
+			defer server.Close()
+			t.Chdir(t.TempDir())
+			t.Setenv("LEGION_DAEMON_URL", server.URL)
+			t.Setenv("LEGION_ISSUE", "")
+
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), []string{"legion", "state"}, &out, &errb); code != 0 {
+				t.Fatalf("legion state = %d, stderr %q", code, errb.String())
+			}
+			if !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("legion state printed %q, want the line %q", out.String(), tc.want)
+			}
+		})
+	}
+}
+
 // An operator reading plain `legion state` is told which claims nothing will wake, each by issue
 // and role under the move that brings it back (api.StrandedClaim.Move), on one line however many
 // there are; with none the line says so.

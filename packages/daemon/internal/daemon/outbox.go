@@ -1197,7 +1197,14 @@ func (r *outbox) seedGate(ctx context.Context, row record.OutboxRow, payload rec
 	case approval.LatestVersion <= payload.Version:
 		return nil
 	}
-	_, err = intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("gate-seed:%s:%d:%s:%s:%d:%d", row.Issue, payload.Generation, payload.ArtifactID, fact.Kind, fact.Version, fact.Mark.ID()), fact, r.handlers...)
+	// A version fact carries no mark, so its id also says whether the read showed the request with
+	// the agent: a later seed of the same version that finds it moved there is another fact, not a
+	// duplicate of one that answered nothing.
+	id := fmt.Sprintf("gate-seed:%s:%d:%s:%s:%d:%d", row.Issue, payload.Generation, payload.ArtifactID, fact.Kind, fact.Version, fact.Mark.ID())
+	if fact.Kind == intake.DispatchArtifactVersion && fact.RequestWaitsOnAgent {
+		id += ":with-agent"
+	}
+	_, err = intake.ApplyFact(ctx, r.pool, "outbox", id, fact, r.handlers...)
 	if err != nil {
 		return fmt.Errorf("apply approved gate seed for %s: %w", row.Issue, err)
 	}

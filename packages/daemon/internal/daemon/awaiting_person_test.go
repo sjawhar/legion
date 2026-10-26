@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -297,7 +299,10 @@ func TestCatchUpAwaitingSkipsARootItCannotReadAndStillFailsWhenDispatchIsDown(t 
 		t.Fatalf("root after the broken one = %#v, want its answer caught up", got)
 	}
 
-	w.dispatch = &unreachableEvents{awaitingDispatch{issue: dispatch.Issue{Key: asking.Key, LastSeq: 7}}}
+	// Another boot: the first one's catch-up finished CAPTURE-2, which a retry of that boot would
+	// not read again.
+	w = &workflowRuntime{pool: pool, records: records, dispatch: &unreachableEvents{awaitingDispatch{issue: dispatch.Issue{Key: asking.Key, LastSeq: 7}}},
+		dispatchProject: "CAPTURE", handlers: []intake.Handler{engine, admission}, log: quietLogger()}
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		asking.Awaiting = &record.Awaiting{Ask: "ask-2"}
 		return records.PutIssue(context.Background(), tx, asking)
@@ -306,6 +311,95 @@ func TestCatchUpAwaitingSkipsARootItCannotReadAndStillFailsWhenDispatchIsDown(t 
 	}
 	if err := w.catchUpAwaiting(context.Background()); !dispatch.Unreachable(err) {
 		t.Fatalf("catch up with Dispatch down = %v, want an unreachable error the boot retries", err)
+	}
+}
+
+// slowFirstRoot is a Dispatch whose read of CAPTURE-1's issue never answers within the catch-up's
+// deadline for that root, the first time it is asked, and whose approval read fails for good.
+type slowFirstRoot struct {
+	awaitingDispatch
+	stalled bool
+	asked   []string
+}
+
+func (d *slowFirstRoot) GetIssue(ctx context.Context, key string) (dispatch.Issue, error) {
+	d.asked = append(d.asked, key)
+	if key == "CAPTURE-1" && !d.stalled {
+		d.stalled = true
+		<-ctx.Done()
+		return dispatch.Issue{}, ctx.Err()
+	}
+	return dispatch.Issue{Key: key, LastSeq: 7}, nil
+}
+
+func (d *slowFirstRoot) Approval(context.Context, string) (dispatch.Approval, error) {
+	return dispatch.Approval{}, errors.New("the document is gone")
+}
+
+// EventsAfter serves the answer only in CAPTURE-2's own log.
+func (d *slowFirstRoot) EventsAfter(ctx context.Context, key string, after int64) ([]json.RawMessage, error) {
+	if key != "CAPTURE-2" {
+		return nil, nil
+	}
+	return d.awaitingDispatch.EventsAfter(ctx, key, after)
+}
+
+// The boot's catch-up gives each root a deadline of its own. A root whose deadline passes makes the
+// attempt transient, so the boot's readiness retry runs it again, and the retry resumes at that root
+// without reading again the roots it finished. A root whose approval read fails for good still has
+// its event log replayed, so a person's answer there is caught up.
+func TestCatchUpAwaitingBoundsEachRootAndResumesAfterTheRootsItFinished(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	answered, err := json.Marshal(map[string]any{"id": 1009, "issue_key": "CAPTURE-2", "seq": 9, "type": "ask.answered", "notify": true,
+		"actor": map[string]any{"kind": alice.Kind, "id": alice.ID}, "created_at": time.Date(2026, 10, 23, 17, 0, 9, 0, time.UTC),
+		"payload": map[string]any{"id": "ask-2", "kind": "question"}})
+	if err != nil {
+		t.Fatalf("encode the answer: %v", err)
+	}
+	roots := []record.Issue{
+		{Key: "CAPTURE-0", Tree: "CAPTURE-0", Project: "CAPTURE", Title: "first", Phase: phase.AwaitingPerson, Generation: 1, Status: "in_progress", Rank: "A",
+			HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Awaiting: &record.Awaiting{Ask: "ask-0"}},
+		{Key: "CAPTURE-1", Tree: "CAPTURE-1", Project: "CAPTURE", Title: "slow", Phase: phase.AwaitingPerson, Generation: 1, Status: "in_progress", Rank: "B",
+			HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Awaiting: &record.Awaiting{Ask: "ask-1"}},
+		{Key: "CAPTURE-2", Tree: "CAPTURE-2", Project: "CAPTURE", Title: "gate gone", Phase: phase.AwaitingPerson, Generation: 1, Status: "in_progress", Rank: "C",
+			HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Awaiting: &record.Awaiting{Ask: "ask-2"}},
+	}
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		for _, root := range roots {
+			if err := records.PutIssue(context.Background(), tx, root); err != nil {
+				return err
+			}
+		}
+		return records.PutGate(context.Background(), tx, record.DesignGate{Issue: "CAPTURE-2", ArtifactID: "artifact-gone", LatestVersion: 2})
+	}); err != nil {
+		t.Fatalf("seed awaiting roots: %v", err)
+	}
+	engine := workflow.New(records, workflow.Config{Project: "CAPTURE", Repositories: testRepositories, Clock: func() time.Time { return time.Date(2026, 10, 23, 18, 0, 0, 0, time.UTC) }}, quietLogger())
+	admission := admit.New(records, engine, 0, "CAPTURE", quietLogger())
+	client := &slowFirstRoot{awaitingDispatch: awaitingDispatch{events: []json.RawMessage{answered}}}
+	w := &workflowRuntime{pool: pool, records: records, dispatch: client, dispatchProject: "CAPTURE", handlers: []intake.Handler{engine, admission},
+		log: quietLogger(), catchUpRootTimeout: 200 * time.Millisecond}
+
+	if err := w.catchUpAwaiting(context.Background()); !dispatch.Unreachable(err) {
+		t.Fatalf("catch up with a root past its deadline = %v, want a transient error the boot retries", err)
+	}
+	if err := w.catchUpAwaiting(context.Background()); err != nil {
+		t.Fatalf("the retry = %v, want it to finish", err)
+	}
+	if want := []string{"CAPTURE-0", "CAPTURE-1", "CAPTURE-1", "CAPTURE-2"}; !slices.Equal(client.asked, want) {
+		t.Fatalf("roots read = %v, want %v: the retry resumes at the root whose deadline passed", client.asked, want)
+	}
+	var got *record.Issue
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		var err error
+		got, err = records.Issue(context.Background(), tx, "CAPTURE-2")
+		return err
+	}); err != nil {
+		t.Fatalf("read the root whose approval read failed: %v", err)
+	}
+	if got == nil || !got.Answered() {
+		t.Fatalf("root whose approval read failed = %#v, want the answer in its event log caught up", got)
 	}
 }
 
@@ -377,8 +471,11 @@ func TestCatchUpAwaitingRecoversSuccessiveReviewsAtOneVersion(t *testing.T) {
 				mark := next()
 				client.approval = dispatch.Approval{State: "changes_requested", LatestVersion: 4, Version: new(4), Reason: &reason, Seq: mark.Seq, At: mark.At}
 			}
+			// Each catch-up is another boot's: a boot's own retries keep the roots it finished
+			// (caughtUp), a new boot starts with none.
 			catchUp := func() {
 				t.Helper()
+				w.caughtUp = nil
 				if err := w.catchUpAwaiting(ctx); err != nil {
 					t.Fatalf("catch up: %v", err)
 				}

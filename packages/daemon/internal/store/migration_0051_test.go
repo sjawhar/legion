@@ -160,8 +160,10 @@ func TestTheGatesApprovalMarkAndThePersonsActsArriveWith0051(t *testing.T) {
 	}
 	for _, accepted := range []string{
 		`update design_gates set approved_seq = 12, approved_at = now() where issue = 'LEGION-208'`,
-		`insert into awaiting_person_acts (issue, seq, ask, at, answers_gate) values ('LEGION-208', 11, 'ask-question', now(), true)`,
-		`insert into awaiting_person_acts (issue, seq, ask, answers_gate) values ('LEGION-208', 12, 'ask-approval', false)`,
+		`insert into awaiting_person_acts (issue, seq, ask, at, answers_gate, by_person) values ('LEGION-208', 11, 'ask-question', now(), true, true)`,
+		`insert into awaiting_person_acts (issue, seq, ask, answers_gate, by_person) values ('LEGION-208', 12, 'ask-approval', false, false)`,
+		`insert into awaiting_pending_waits (issue, seq, at, ask) values ('LEGION-208', 13, now(), 'ask-second')`,
+		`insert into awaiting_pending_waits (issue, seq, gate_version, artifact) values ('LEGION-208', 14, 4, '7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26')`,
 	} {
 		if _, err := store.Pool().Exec(ctx, accepted); err != nil {
 			t.Fatalf("%s: %v, want it accepted", accepted, err)
@@ -172,6 +174,9 @@ func TestTheGatesApprovalMarkAndThePersonsActsArriveWith0051(t *testing.T) {
 		{"a mark with no approval", `update design_gates set approved_version = null where issue = 'LEGION-208'`},
 		{"an act's sequence of zero", `update awaiting_person_acts set seq = 0 where ask = 'ask-question'`},
 		{"an act on no ask", `update awaiting_person_acts set ask = '' where ask = 'ask-question'`},
+		{"a pending wait on an ask and a gate", `update awaiting_pending_waits set gate_version = 4, artifact = 'a' where seq = 13`},
+		{"a pending wait on neither", `update awaiting_pending_waits set ask = null where seq = 13`},
+		{"a pending gate wait with no document", `update awaiting_pending_waits set artifact = null where seq = 14`},
 	} {
 		_, err := store.Pool().Exec(ctx, refused.statement)
 		if err == nil || !strings.Contains(err.Error(), "check constraint") {
@@ -182,10 +187,10 @@ func TestTheGatesApprovalMarkAndThePersonsActsArriveWith0051(t *testing.T) {
 		t.Fatalf("delete the issue: %v", err)
 	}
 	var left int
-	if err := store.Pool().QueryRow(ctx, `select count(*) from awaiting_person_acts`).Scan(&left); err != nil {
-		t.Fatalf("count the person's acts: %v", err)
+	if err := store.Pool().QueryRow(ctx, `select (select count(*) from awaiting_person_acts) + (select count(*) from awaiting_pending_waits)`).Scan(&left); err != nil {
+		t.Fatalf("count the acts and pending waits: %v", err)
 	}
 	if left != 0 {
-		t.Fatalf("person's acts after the issue was deleted = %d, want none", left)
+		t.Fatalf("acts and pending waits after the issue was deleted = %d, want none", left)
 	}
 }

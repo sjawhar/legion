@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -70,6 +71,13 @@ type workflowRuntime struct {
 	// would otherwise repeat the same (ack floor, idle) pairs and have its own releases swallowed
 	// as duplicates of the previous boot's.
 	bootID string
+	// caughtUp names each awaiting root (key and generation) the boot's catch-up finished, so a
+	// retry of the catch-up resumes after it rather than reading it again (catchUpAwaiting). The
+	// boot alone writes it, from its one readiness goroutine.
+	caughtUp map[string]struct{}
+	// catchUpRootTimeout bounds the boot's catch-up of one awaiting root; zero means bootTimeout. A
+	// test shortens it.
+	catchUpRootTimeout time.Duration
 	// holdPollInterval is pollHoldRelease's ticker period; zero means the production default. A
 	// test shortens it to bound how long a release takes to observe.
 	holdPollInterval time.Duration
@@ -475,17 +483,23 @@ type awaitingRoot struct {
 // as processed; what keeps one act from answering twice, beside a later JetStream redelivery of the
 // original event whose id differs, is the record: a root already answered is skipped, a changes
 // request the gate records as told answers nothing, and one Dispatch recorded before the wait began
-// answers nothing either (workflow's answerAwaitedGate). A root it cannot read is logged and
-// skipped: it waits for its live event, as before this daemon booted, and blocks no other root's
-// catch-up nor the boot. Dispatch being unreachable is returned, since the boot's readiness retry
-// waits that out (dispatch.Unreachable).
+// answers nothing either (workflow's answerAwaitedGate).
+//
+// Each root gets a deadline of its own (bootTimeout), so the catch-up of many roots never has to
+// fit one boot attempt, and a root it finished — caught up, or skipped for an error a retry would
+// repeat — is remembered across the boot's retries (caughtUp), so a retry resumes after it. A root
+// whose own deadline passes, or one Dispatch does not answer for, makes the attempt transient
+// (dispatch.TransientError): the boot's readiness retry waits it out and starts at that root again.
+// A root it cannot read for another reason is logged and skipped: it waits for its live event, as
+// before this daemon booted, and blocks no other root's catch-up nor the boot.
 func (w *workflowRuntime) catchUpAwaiting(ctx context.Context) error {
 	if w.dispatch == nil {
 		return nil
 	}
 	var roots []awaitingRoot
-	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
-		issues, err := w.records.Issues(ctx, tx)
+	listing, cancel := context.WithTimeout(ctx, bootTimeout)
+	err := pgx.BeginFunc(listing, w.pool, func(tx pgx.Tx) error {
+		issues, err := w.records.Issues(listing, tx)
 		if err != nil {
 			return err
 		}
@@ -493,28 +507,54 @@ func (w *workflowRuntime) catchUpAwaiting(ctx context.Context) error {
 			if issue.Project != w.dispatchProject || issue.Key != issue.Tree || !issue.AwaitingPerson() {
 				continue
 			}
-			gate, err := w.records.Gate(ctx, tx, issue.Key)
+			gate, err := w.records.Gate(listing, tx, issue.Key)
 			if err != nil {
 				return err
 			}
 			roots = append(roots, awaitingRoot{issue: issue, gate: gate})
 		}
 		return nil
-	}); err != nil {
+	})
+	cancel()
+	if err != nil {
+		if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+			return &dispatch.TransientError{Err: fmt.Errorf("list awaiting roots: %w", err)}
+		}
 		return fmt.Errorf("list awaiting roots: %w", err)
 	}
+	if w.caughtUp == nil {
+		w.caughtUp = map[string]struct{}{}
+	}
 	for _, root := range roots {
-		err := w.catchUpAwaitingRoot(ctx, root)
-		if dispatch.Unreachable(err) || ctx.Err() != nil {
-			return err
+		done := root.issue.Key + "/generation-" + strconv.FormatUint(uint64(root.issue.Generation), 10)
+		if _, ok := w.caughtUp[done]; ok {
+			continue
 		}
-		if err != nil {
+		bound := w.catchUpRootTimeout
+		if bound == 0 {
+			bound = bootTimeout
+		}
+		attempt, cancel := context.WithTimeout(ctx, bound)
+		err := w.catchUpAwaitingRoot(attempt, root)
+		cancel()
+		switch {
+		case ctx.Err() != nil:
+			return ctx.Err()
+		case dispatch.Unreachable(err):
+			return err
+		case err != nil && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)):
+			return &dispatch.TransientError{Err: fmt.Errorf("catch up %s: %w", root.issue.Key, err)}
+		case err != nil:
 			w.log.Warn("boot catch-up skipped a root waiting on a person; its live event still answers it", "issue", root.issue.Key, "error", err)
 		}
+		w.caughtUp[done] = struct{}{}
 	}
 	return nil
 }
 
+// catchUpAwaitingRoot catches up one root: its Dispatch claim, then, unless it is answered, its
+// document's approval and its event log. The two reads are independent: one failing still runs the
+// other, and both errors are returned together.
 func (w *workflowRuntime) catchUpAwaitingRoot(ctx context.Context, root awaitingRoot) error {
 	current, err := w.dispatch.GetIssue(ctx, root.issue.Key)
 	if err != nil {
@@ -532,12 +572,11 @@ func (w *workflowRuntime) catchUpAwaitingRoot(ctx context.Context, root awaiting
 	if root.issue.Answered() {
 		return nil
 	}
+	var gateErr error
 	if root.issue.Awaiting.GateVersion != 0 || root.gate != nil {
-		if err := w.catchUpAwaitingGate(ctx, root); err != nil {
-			return err
-		}
+		gateErr = w.catchUpAwaitingGate(ctx, root)
 	}
-	return w.catchUpAwaitingAsks(ctx, root)
+	return errors.Join(gateErr, w.catchUpAwaitingAsks(ctx, root))
 }
 
 // catchUpAwaitingGate reads the approval of a root waiting on its design gate, or on a question

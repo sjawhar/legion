@@ -118,8 +118,18 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 		e.logOnCommit(ctx, "workflow: root keeps its admission slot, since its approval request waits on the agent", "issue", issue.Key, "version", gate.LatestVersion)
 		return intake.Result{}, nil
 	case !classify.DesignGateOpen(gate):
-		return intake.Result{}, e.awaitPerson(ctx, tx, *issue, record.Awaiting{GateVersion: gate.LatestVersion, Artifact: gate.ArtifactID, Since: fact.Since},
-			fmt.Sprintf("spec version %d is awaiting a person's review", gate.LatestVersion))
+		// A root already waiting (on its question) when its architect registers a closed gate holds
+		// that wait pending: the resumed architect is told the spec is still with the person, and
+		// handing the request back starts the next wait.
+		current, err := e.store.Issue(ctx, tx, fact.Issue)
+		if err != nil || current == nil {
+			return intake.Result{}, err
+		}
+		waiting := record.Awaiting{GateVersion: gate.LatestVersion, Artifact: gate.ArtifactID, Since: fact.Since}
+		if current.AwaitingPerson() {
+			return intake.Result{}, e.coveredByTheWaitItRuns(ctx, tx, *current, waiting, "closed gate registered")
+		}
+		return intake.Result{}, e.awaitPerson(ctx, tx, *current, waiting, fmt.Sprintf("spec version %d is awaiting a person's review", gate.LatestVersion))
 	}
 	if err := e.notice(ctx, tx, fact.Issue, record.Notice{Kind: "design-approved", Version: gate.LatestVersion}); err != nil {
 		return intake.Result{}, err
@@ -178,7 +188,10 @@ func (e *Engine) answerRegisteredGate(ctx context.Context, tx pgx.Tx, fact intak
 	switch {
 	case issue.Awaiting.GateVersion != 0 && fact.DispatchVersion > waited && fact.RequestWaitsOnAgent:
 		by, version = record.AnsweredByVersion, fact.DispatchVersion
-	case classify.DesignGateOpen(gate) && fact.ApprovedVersion >= waited:
+	// An approval answers a gate wait whenever it was given (a wait can begin after an approval whose
+	// event was lost, and the gate holds it closed until now); a question wait has no such claim on
+	// it, and an approval the person gave before the question is not their answer to it.
+	case classify.DesignGateOpen(gate) && fact.ApprovedVersion >= waited && (issue.Awaiting.GateVersion != 0 || fact.ApprovedMark.After(issue.Awaiting.Since)):
 		by, version = record.AnsweredByApproval, fact.ApprovedVersion
 	case changesRequested && fact.ChangesRequestedVersion >= waited && !fact.ChangesRequestedMark.After(issue.Awaiting.Since):
 		e.logOnCommit(ctx, "workflow: a registration read a changes request given before the wait began, which answers no wait", "issue", issue.Key,

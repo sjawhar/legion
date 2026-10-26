@@ -87,18 +87,38 @@ alter table design_gates add column approved_at timestamptz;
 alter table design_gates add constraint design_gates_approved_mark_shape check (
   approved_version is not null or (approved_seq is null and approved_at is null));
 
--- awaiting_person_acts records each act a person took on an ask of a root — an answer or
--- resolution that closed it, or a reply that left the turn with the agent — by its event's
--- sequence on the issue, with Dispatch's time of it (null when the event carried none), the ask,
--- and whether it answers a wait on the root's design gate as well as one on that ask. Dispatch's
--- intake retries a delivery, so the event that starts a wait (a question opened, a hand-back) can
--- reach the daemon after a person's act that followed it: a wait whose start an act recorded here
--- follows starts none, since what it would wait on has already happened. The rows are the issue's
--- and go when it leaves the workflow.
+-- awaiting_person_acts records each act on an ask of a root — a person's answer or resolution
+-- that closed it, a person's reply that left the turn with the agent (by_person), or a close of it
+-- by anyone else, a session of the tree or Dispatch's settlement — by its event's sequence on the
+-- issue, with Dispatch's time of it (null when the event carried none), the ask, and whether it
+-- answers a wait on the root's design gate as well as one on that ask. Dispatch's intake retries a
+-- delivery, so the event that starts a wait (a question opened, a hand-back) can reach the daemon
+-- after an act that followed it: a wait whose start an act recorded here follows starts none,
+-- since what it would wait on has already happened. The rows are the issue's and go when it leaves
+-- the workflow.
 create table awaiting_person_acts (
   issue text not null references issues (key) on delete cascade,
   seq bigint not null check (seq > 0),
   ask text not null check (ask <> ''),
   at timestamptz,
   answers_gate boolean not null,
+  by_person boolean not null,
   primary key (issue, seq));
+
+-- awaiting_pending_waits keeps each wait a root would have started but did not: the event that
+-- would start it (an architect's question on the root, a hand-back, a closed gate registered)
+-- arrived while the root already waited, or while a guard kept its slot (a member of its tree
+-- mid-phase, a claim a person holds). It names the ask, or the closed gate's version on its
+-- document, by the event's sequence on the issue. The root keeps each until it is answered, a wait
+-- starts on it, or the root leaves the workflow: when the guard clears the wait starts, and the
+-- resumed architect is told which asks are still with the human.
+create table awaiting_pending_waits (
+  issue text not null references issues (key) on delete cascade,
+  seq bigint not null check (seq > 0),
+  at timestamptz,
+  ask text check (ask <> ''),
+  gate_version integer check (gate_version > 0),
+  artifact text check (artifact <> ''),
+  primary key (issue, seq),
+  check ((ask is null) <> (gate_version is null)),
+  check ((gate_version is null) = (artifact is null)));
