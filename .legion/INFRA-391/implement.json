@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-391",
-  "completed": "2026-10-26T02:05:03Z",
+  "completed": "2026-10-26T02:36:36Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2209",
   "proof": [
     {
@@ -100,6 +100,14 @@
       "observed": "57 passed (3.7m), 1 skipped (live.e2e.ts:519, phone-only by its own test.skip)",
       "headSha": "b64d85e642ad62a792970adf53cea2443e2579f1",
       "negativeControl": "TestArchitectureSourcePutRefusesACommitThatIsNoBranch run against the fa2dacfbb399 handler: the SHA and main~1 PUTs answered 200 where the test wants 409 (failing output recorded by the round's worker before the handler change)"
+    },
+    {
+      "criterion": "Acceptance send-back: branchServer and the four TestBranch* tests move from githubapp/client_test.go into githubapp/branch_test.go with no behaviour change",
+      "surface": "The githubapp package's own Go test binary at the head, in the issue pod; evidence https://github.com/sjawhar/legion/pull/2209#issuecomment-6406965668",
+      "command": "cd packages/envoy && go test -list '.*' ./internal/dispatch/githubapp/ (at 3aa3355a and at 95a9fd1a, sorted, `ok` line dropped, diffed); go test ./internal/dispatch/githubapp/ -count=1 -v; jj diff --git line comparison of removed vs added lines",
+      "observed": "Both lists hold the same 31 test names and the diff is empty; go test ok with TestBranchReadsTheExactRefOfTheBranch, TestBranchMissingIsErrNoBranch, TestBranchRefusesAnAnswerForAnotherRef, TestBranchOtherFailures PASS; every line removed from client_test.go is added in branch_test.go, the only new lines are branch_test.go's package and import lines; gofmt -l empty, go vet and go build ./... pass",
+      "headSha": "95a9fd1abf7328c895e061eccae9a619c8c00fbd",
+      "negativeControl": "The same list taken with branch_test.go overlaid by an empty file (go test -overlay … -list '.*') loses TestBranchMissingIsErrNoBranch, TestBranchOtherFailures, TestBranchReadsTheExactRefOfTheBranch and TestBranchRefusesAnAnswerForAnotherRef: the diff against the before list prints those four and exits 1"
     }
   ],
   "filesChanged": [
@@ -185,7 +193,8 @@
     "packages/envoy/internal/dispatch/githubapp/client.go",
     "packages/envoy/internal/dispatch/githubapp/client_test.go",
     "packages/envoy/internal/dispatch/api/architecture_source_older_clients_test.go",
-    "packages/dispatch/e2e/fake-github.ts"
+    "packages/dispatch/e2e/fake-github.ts",
+    "packages/envoy/internal/dispatch/githubapp/branch_test.go"
   ],
   "trickyParts": [
     "Harness for every later role: /legion/harness/setup.sh (idempotent) and /legion/harness/env.sh (source for harness commands only). Rootless Postgres 17 + pgvector on 127.0.0.1:55433 (template1 recreated with ICU en-US so rank_test's collation check runs), PLAYWRIGHT_BROWSERS_PATH=/legion/harness/ms-playwright, per-role lanes by LEGION_ROLE (implementer 18710/19011-19014, tester 18720/19021-19024, reviewer 18730/19031-19034), DISPATCH_TEST_DATABASE_URL=dispatch_test_<role>. createdb your own e2e database and `create extension vector` in it.",
@@ -210,7 +219,8 @@
     "Round 1: docs/solutions INFRA-390 learning (from main) named the removed singular PUT; updated to the per-repository routes in fa2dacfbb399.",
     "Review round 2: the save's branch check reads the exact ref (new githubapp.Client.Branch, GET git/ref/heads/{branch}, answer must name refs/heads/<branch> with a 40-hex sha) instead of Ref; 404/409/422 and any other ref are ErrNoBranch -> 409 SOURCE_ACCESS. No shape check of the value: the exact read decides, so a branch whose name looks like a SHA still saves. The sync keeps Ref.",
     "Review round 2 fast-follow (done this round on the architect's instruction): the older-client singular-route tests and captureSourceWarnings moved to architecture_source_older_clients_test.go; the GitHub fake stays in architecture_source_test.go.",
-    "Conflict round after review round 2: forward-merged main fc379b99147a (#2151) into cbdbdc4a78e1 as 64cdb1b013e2 (jj new legion/INFRA-391 \"main\"@origin); the one conflict, packages/pi-legion/CHANGELOG.md, kept both sides' Added entries. Fingerprint 6d9f92ce91bf… before and after: unchanged, so the real-surface proofs stand at their heads and only the bare gates re-ran (claude-envoy check-dist, envoy-client 842 pass, tsc x3, biome, go build, githubapp/architecture/targeted api Go tests); comment https://github.com/sjawhar/legion/pull/2209#issuecomment-6406602508."
+    "Conflict round after review round 2: forward-merged main fc379b99147a (#2151) into cbdbdc4a78e1 as 64cdb1b013e2 (jj new legion/INFRA-391 \"main\"@origin); the one conflict, packages/pi-legion/CHANGELOG.md, kept both sides' Added entries. Fingerprint 6d9f92ce91bf… before and after: unchanged, so the real-surface proofs stand at their heads and only the bare gates re-ran (claude-envoy check-dist, envoy-client 842 pass, tsc x3, biome, go build, githubapp/architecture/targeted api Go tests); comment https://github.com/sjawhar/legion/pull/2209#issuecomment-6406602508.",
+    "Acceptance send-back: the round-2 Fast-follow (branchServer and the TestBranch* tests into githubapp/branch_test.go) done in 95a9fd1abf73 under the standing ruling dispatch://INFRA-49/ask/2d080aec-ce9a-4c7c-a235-ae998d2b0830; Fast-follow line set to none; nothing else changed."
   ],
   "openQuestions": [
     "Local go test of the whole internal/dispatch tree is not a green signal in this pod: api (about 1055 s) and docs (about 748 s) pass the 10-minute default only with a longer -timeout; TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves needs a database whose default collation is not byte order, the micromamba Postgres here is; pmdoc's linearity timings and files' S3 test (Docker) fail here. None of those files differs between base, branch and main; CI is the record for them."
