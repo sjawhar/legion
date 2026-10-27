@@ -270,9 +270,16 @@ func TestWriteErrorMapsNoIdentityToUnauthorized(t *testing.T) {
 		t.Errorf("no identity: status %d body %s, want 401 NO_IDENTITY", w.Code, w.Body.String())
 	}
 	w = httptest.NewRecorder()
-	WriteError(w, fmt.Errorf("oidc: refresh: %w: oauth2: 503", oidc.ErrIssuerUnavailable))
+	WriteError(w, fmt.Errorf("%w: %w", ErrSignInUnavailable, fmt.Errorf("oidc: refresh: %w: oauth2: 503", oidc.ErrIssuerUnavailable)))
 	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), `"code":"SIGNIN_UNAVAILABLE"`) || !strings.Contains(w.Body.String(), "try again in a minute") {
 		t.Errorf("sign-in issuer unreachable: status %d body %s, want 503 SIGNIN_UNAVAILABLE", w.Code, w.Body.String())
+	}
+	// An issuer outage that is not the sign-in's (a service-account token's issuer) is not
+	// SIGNIN_UNAVAILABLE: only ErrSignInUnavailable answers that, whatever else the error carries.
+	w = httptest.NewRecorder()
+	WriteError(w, fmt.Errorf("verify: %w", oidc.ErrIssuerUnavailable))
+	if w.Code != http.StatusInternalServerError || strings.Contains(w.Body.String(), "SIGNIN_UNAVAILABLE") {
+		t.Errorf("another issuer unreachable: status %d body %s, want 500 and not SIGNIN_UNAVAILABLE", w.Code, w.Body.String())
 	}
 	w = httptest.NewRecorder()
 	WriteError(w, errors.New("database down"))

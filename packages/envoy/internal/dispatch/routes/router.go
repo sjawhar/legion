@@ -255,8 +255,9 @@ func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
 	}
 	authURL, err := r.ctx.SignIn.AuthURL(req.Context(), callbackURL(r.ctx.ServerURL, req), state, nonce)
 	if err != nil {
+		// AuthURL fails only while the issuer is not discovered (oidc.ErrIssuerUnavailable).
 		slog.Warn("dispatch: sign-in not started: the sign-in issuer is not discovered", "error", err)
-		identity.WriteError(w, err)
+		identity.WriteError(w, fmt.Errorf("%w: %w", identity.ErrSignInUnavailable, err))
 		return
 	}
 	value, err := signOAuthState(r.ctx.SigningKey, oauthState{
@@ -311,7 +312,7 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 	session, err := r.ctx.SignIn.Exchange(req.Context(), callbackURL(r.ctx.ServerURL, req), code, pending.Nonce)
 	if errors.Is(err, oidc.ErrIssuerUnavailable) {
 		slog.Warn("dispatch: sign-in code exchange failed: the sign-in issuer is not discovered", "error", err)
-		identity.WriteError(w, err)
+		identity.WriteError(w, fmt.Errorf("%w: %w", identity.ErrSignInUnavailable, err))
 		return
 	}
 	if err != nil {
@@ -629,11 +630,32 @@ func servePage(w http.ResponseWriter, req *http.Request, path string) {
 		writeError(w, http.StatusInternalServerError, "read failed")
 		return
 	}
-	sum := sha256.Sum256(page)
 	w.Header().Set("Content-Type", contentType(path))
 	w.Header().Set("Cache-Control", pageCacheControl)
-	w.Header().Set("ETag", `"`+hex.EncodeToString(sum[:16])+`"`)
+	w.Header().Set("ETag", `"`+pageTag(page)+`"`)
 	http.ServeContent(w, req, path, time.Time{}, bytes.NewReader(page))
+}
+
+// pageTag names a page by its bytes: lowercase hex of the first 16 bytes of their SHA-256. It is
+// servePage's ETag value and DashboardBuild's name for the build.
+func pageTag(page []byte) string {
+	sum := sha256.Sum256(page)
+	return hex.EncodeToString(sum[:16])
+}
+
+// DashboardBuild names the dashboard build served from webDistDir (processes.Instance): the
+// pageTag of its index.html, the page every dashboard route answers, so two processes report one
+// build exactly when they answer one page with one ETag. It is "" when there is no dashboard to
+// serve: no directory, no index.html, or one this process cannot read.
+func DashboardBuild(webDistDir string) string {
+	if webDistDir == "" {
+		return ""
+	}
+	page, err := os.ReadFile(filepath.Join(webDistDir, "index.html"))
+	if err != nil {
+		return ""
+	}
+	return pageTag(page)
 }
 
 func serveFile(w http.ResponseWriter, req *http.Request, path string) {

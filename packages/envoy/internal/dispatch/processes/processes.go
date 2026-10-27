@@ -17,13 +17,9 @@ package processes
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"slices"
 	"time"
 
@@ -83,7 +79,7 @@ var ErrKeySetMismatch = errors.New("this process's signing key set does not matc
 type Instance struct {
 	// Commit is the legion commit the binary was stamped with, "" for an unstamped build.
 	Commit string
-	// DashboardBuild names the dashboard the process serves (DashboardBuild), "" for none.
+	// DashboardBuild names the dashboard the process serves (routes.DashboardBuild), "" for none.
 	DashboardBuild string
 	// SigningKeys is the fingerprint of each key of the process's DISPATCH_SIGNING_KEY set
 	// (auth.SigningKeys.Fingerprints), the current key first. It holds at least that one.
@@ -466,21 +462,4 @@ func prune(ctx context.Context, pool *store.Pool) (int64, error) {
 		return 0, err
 	}
 	return tag.RowsAffected(), nil
-}
-
-// DashboardBuild names the dashboard build served from webDistDir: lowercase hex of the first 16
-// bytes of the SHA-256 of its index.html, the page every dashboard route answers. They are the
-// bytes routes.servePage hashes for that page's ETag, and the same hash, so two processes report
-// one build exactly when they answer one page. It is "" when there is no dashboard to serve: no
-// directory, no index.html, or one this process cannot read.
-func DashboardBuild(webDistDir string) string {
-	if webDistDir == "" {
-		return ""
-	}
-	page, err := os.ReadFile(filepath.Join(webDistDir, "index.html"))
-	if err != nil {
-		return ""
-	}
-	sum := sha256.Sum256(page)
-	return hex.EncodeToString(sum[:16])
 }

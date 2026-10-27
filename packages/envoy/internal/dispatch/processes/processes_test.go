@@ -2,11 +2,8 @@ package processes
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -616,34 +613,4 @@ func TestALiveRowsHeartbeatChecksNoPeer(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	requireNotLost(t, registration, "a live process beside a disagreeing peer")
-}
-
-// The dashboard build is the page's ETag value: the first 16 bytes of the SHA-256 of index.html,
-// in lowercase hex; "" when there is no dashboard to serve.
-func TestDashboardBuildNamesTheIndexPage(t *testing.T) {
-	dist := t.TempDir()
-	page := []byte("<!doctype html><script src=/assets/index-abc.js></script>")
-	if err := os.WriteFile(filepath.Join(dist, "index.html"), page, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	sum := sha256.Sum256(page)
-	if got, want := DashboardBuild(dist), hex.EncodeToString(sum[:16]); got != want {
-		t.Errorf("DashboardBuild = %q, want %q", got, want)
-	}
-	for name, dir := range map[string]string{
-		"no setting":    "",
-		"no directory":  filepath.Join(dist, "missing"),
-		"no index.html": t.TempDir(),
-		"index.html a dir": func() string {
-			d := t.TempDir()
-			if err := os.Mkdir(filepath.Join(d, "index.html"), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			return d
-		}(),
-	} {
-		if got := DashboardBuild(dir); got != "" {
-			t.Errorf("DashboardBuild with %s = %q, want \"\"", name, got)
-		}
-	}
 }

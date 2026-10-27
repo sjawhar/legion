@@ -501,7 +501,7 @@ func main() {
 	}
 	registration, err := joinRegistry(ctx, database, processes.Instance{
 		Commit:         buildCommit,
-		DashboardBuild: processes.DashboardBuild(webDistDir),
+		DashboardBuild: routes.DashboardBuild(webDistDir),
 		SigningKeys:    signingKey.Fingerprints(),
 	}, leases, announcer)
 	if err != nil {

@@ -66,9 +66,25 @@ func (k SigningKeys) Empty() bool {
 	return len(k.keys) == 0
 }
 
-// Keys returns every key of the set, the current one first, in a slice of the caller's own.
-func (k SigningKeys) Keys() []string {
-	return append([]string(nil), k.keys...)
+// Derive returns, for each key of the set, the current one first, the 32-byte key HKDF-SHA256
+// derives from it with info and no salt: a key for info's one purpose that reveals no signing key.
+// The refresh-token seal derives its keys here, as SignFor derives its own.
+func (k SigningKeys) Derive(info string) [][]byte {
+	derived := make([][]byte, 0, len(k.keys))
+	for _, key := range k.keys {
+		derived = append(derived, deriveKey(key, info))
+	}
+	return derived
+}
+
+// deriveKey is the 32-byte key HKDF-SHA256 derives from the signing key key with info and no salt.
+func deriveKey(key, info string) []byte {
+	derived, err := hkdf.Key(sha256.New, []byte(key), nil, info, sha256.Size)
+	if err != nil {
+		// HKDF-SHA256 refuses only a length beyond 255 hashes; sha256.Size never is.
+		panic(fmt.Sprintf("dispatch: derive the %q key from the signing key: %v", info, err))
+	}
+	return derived
 }
 
 // Fingerprints names each key of the set, the current one first, without revealing it: the
@@ -152,15 +168,10 @@ func (k SigningKeys) anyKeySigned(signature string, macOf func(key string) []byt
 	return matched
 }
 
-// purposeMAC is payload's HMAC-SHA256 under the key HKDF-SHA256 derives from the signing key key
-// with purpose as its info, as the refresh-token seal derives its own key.
+// purposeMAC is payload's HMAC-SHA256 under the key deriveKey derives from the signing key key
+// with purpose as its info.
 func purposeMAC(purpose, payload, key string) []byte {
-	derived, err := hkdf.Key(sha256.New, []byte(key), nil, purpose, sha256.Size)
-	if err != nil {
-		// HKDF-SHA256 refuses only a length beyond 255 hashes; sha256.Size never is.
-		panic(fmt.Sprintf("dispatch: derive the %q key from the signing key: %v", purpose, err))
-	}
-	hash := hmac.New(sha256.New, derived)
+	hash := hmac.New(sha256.New, deriveKey(key, purpose))
 	hash.Write([]byte(payload))
 	return hash.Sum(nil)
 }

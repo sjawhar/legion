@@ -66,6 +66,9 @@ type testServerOptions struct {
 	// oidc is the service-account token verifier; nil is the unconfigured
 	// deployment, whose bearer handling is untouched by that feature.
 	oidc ServiceTokenVerifier
+	// identity resolves a cookie caller; nil is headerIdentity, which names the person the
+	// X-Dispatch-User header names.
+	identity identity.Identity
 	// envoyURL points the Envoy listener client at a fake listener; empty leaves the client
 	// unconfigured, which is every test that never asks whether a session is live.
 	envoyURL string
@@ -171,9 +174,13 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		}
 	})
 	seedPeople(t, database, "alice", "bob")
+	var people identity.Identity = headerIdentity(database)
+	if options.identity != nil {
+		people = options.identity
+	}
 	deps, err := NewDeps(DepsInput{
 		Store:            database,
-		Identity:         headerIdentity(database),
+		Identity:         people,
 		AgentTokens:      sharedAgentTokens(t, "agent-token"),
 		DefaultProject:   options.defaultProject,
 		ServerURL:        "https://dispatch.example",

@@ -300,7 +300,8 @@ write identity errors with `identity.WriteError`.
   thirty), and so does the first call that needs it, so an unreachable issuer
   refuses no boot. Until it is read, `AuthURL`, `Exchange`, `Refresh` and
   `Revoke` fail with `oidc.ErrIssuerUnavailable`, which `/auth/start` and the
-  callback answer `503 SIGNIN_UNAVAILABLE`. The sign-in in flight rides the
+  callback wrap in `identity.ErrSignInUnavailable` and answer
+  `503 SIGNIN_UNAVAILABLE`. The sign-in in flight rides the
   browser's `dispatch_oauth_state` cookie (`routes/oauthstate.go`: state,
   nonce, next and expiry, signed under a key `auth.SigningKeys.SignFor` derives
   from the current signing key), so any process completes a sign-in another
@@ -334,8 +335,10 @@ write identity errors with `identity.WriteError`.
   the rule, names another email, or (under a domain) another `sub`, advances
   their session generation and forgets the token, ending every session they
   hold. Any other failed refresh (`oidc.ErrIssuerUnavailable`) ends nothing:
-  `Login` returns it, every caller answers it `503 SIGNIN_UNAVAILABLE`
-  (`identity.WriteError`), and the next request after the issuer answers
+  `Login` returns it wrapped in `identity.ErrSignInUnavailable`, every caller
+  answers that `503 SIGNIN_UNAVAILABLE` (`identity.WriteError`; a service
+  token's own issuer outage stays `OIDC_ISSUER_UNAVAILABLE`), and the next
+  request after the issuer answers
   refreshes. `store.PgPeopleStore` seals that token at rest
   (`store/refresh_token_seal.go`; the format is in the README's Identity
   section) under a key derived from the current signing key, and opens one

@@ -35,7 +35,7 @@ func TestRefreshTokenSealOpensAStoredV1Value(t *testing.T) {
 	for _, keys := range []auth.SigningKeys{testSigningKey, signingKeys(t, "rotated-signing-key signing-key")} {
 		token, err := newRefreshTokenSeal(keys).open("alice@d.example", "v1:r0BoP-FEdLZtGu05-m8CAo8qzvy77FVWOv8itleQYmrMtd_r_rQ")
 		if err != nil || token != "refresh-v1" {
-			t.Fatalf("open under %d keys = %q, %v; want refresh-v1", len(keys.Keys()), token, err)
+			t.Fatalf("open under %d keys = %q, %v; want refresh-v1", len(keys.Fingerprints()), token, err)
 		}
 	}
 }
