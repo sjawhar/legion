@@ -365,14 +365,14 @@ a {
    prose paragraph margins into the card (a 20px gap under a 12px header). */
 :is(.dispatch-doc, .dispatch-markdown)
   .proof-typed-block-ask
-  [data-proof-block-content]
+  > [data-proof-block-content]
   > :first-child {
   margin-top: 0;
 }
 
 :is(.dispatch-doc, .dispatch-markdown)
   .proof-typed-block-ask
-  [data-proof-block-content]
+  > [data-proof-block-content]
   > :last-child {
   margin-bottom: 0;
 }
@@ -414,10 +414,12 @@ a {
    marks it `data-dispatch-ask-editing`) — click into the question to reveal it — and never where
    nothing can be edited (a read-only render) or once the decision is no longer open. In a body
    the list folds only where the app mounts the card's rows (`useRenderedMarkdown` sets
-   `data-dispatch-ask-options`), and it never shows, since nothing there is edited. */
+   `data-dispatch-ask-options`), and it never shows, since nothing there is edited. The child
+   combinators keep a decision's rules to its own content, never a typed block inside a reply or
+   answer note its card renders. */
 :is(.dispatch-doc, .dispatch-markdown)
   .proof-typed-block-ask[data-dispatch-ask-options="rows"]
-  [data-proof-block-content]
+  > [data-proof-block-content]
   > ul {
   display: none;
   margin-top: 0.5rem;
@@ -427,7 +429,7 @@ a {
 
 .dispatch-doc:not([data-read-only="true"])
   .proof-typed-block-ask[data-dispatch-ask-options="rows"][data-dispatch-ask-state="open"][data-dispatch-ask-editing="true"]
-  [data-proof-block-content]
+  > [data-proof-block-content]
   > ul {
   display: block;
 }
