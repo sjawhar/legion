@@ -2,25 +2,32 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-526",
-  "completed": "2026-10-27T02:34:00Z",
-  "headTested": "b6720fc14297faf0ca8121e725320578760cb65f (code; PR head cea06a64 adds only the implement handoff)",
+  "completed": "2026-10-27T03:13:00Z",
+  "round": 2,
+  "headTested": "9439f4a8ef90669b5a184c2a5ca9c484eb3dc208 (code; PR head 6b61cd97 adds only the implement handoff)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts --project chromium --project iphone` at the head: the 2 implementer tests passed in both projects. Re-ran the negative control myself on a scratch commit at 6d878d04 (base + the implementer's red test, abandoned afterwards): the same 4 failed, on `[data-proof-block-content]` (callout) and `[data-dispatch-ask-header]` (ask) not found. A5 re-checked: after `bun run build:web` at the head the entry chunk index-DtEgIavb.js holds 0 `dispatch-ask-block-editing` (the literal is in SubscribedAgents-BcNLAylV.js), 762,668 bytes, as reported. A4 re-checked on a subset: e2e/ask-blocks.e2e.ts + e2e/typed-blocks.e2e.ts green in chromium and iphone (inside the 86-passed run below)."
+    "how": "Re-ran `cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts ... --project chromium --project iphone` from a fresh build at 9439f4a8: all three tests of the file passed in both projects (the callout header, the decision card, and the tester's round-1 red test). The red test file is unchanged since 49082939 (`jj diff --from 49082939 --to 9439f4a8` on it: 0 files changed). Round 1 already re-ran the implementer's negative control at 6d878d04 (4 failed) and the entry-chunk check (0 matches, 762,668 bytes). The round-2 diff only changes CSS (styles.css: four rules now use `> [data-proof-block-content]`), so neither check needs a new run."
   },
-  "failed": 1,
-  "failures": [
+  "failed": 0,
+  "failures": [],
+  "proof": [
     {
-      "criterion": "A4 (plan: documents unchanged) and the spec's Change (typed blocks drawn as the document draws them, styled outside documents too): a reply under a document's decision block loses the lists inside the typed blocks it holds",
-      "evidence": "Red test `a reply under a document's decision keeps the lists of the typed blocks it holds` in packages/dispatch/e2e/text-typed-blocks.e2e.ts (commit 49082939). At the head: `cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts --project chromium --project iphone` -> 2 failed (chromium, iphone): `getByTestId('thread-<ask id>').getByText('step one', { exact: true })` Expected: visible, Received: hidden (resolved to <li ...>step one</li>). At 6d878d04 (base + the implementer's red test) the same new test PASSES in both projects, so this is a regression this change introduces. Cause, probed in the browser at the head: inside the document decision `[data-dispatch-ask-block=storage]` (data-dispatch-ask-options=\"rows\"), computed display of the reply's lists was step-one-list=none, malformed-inner-ask-list=none, plain-list=block; removing data-dispatch-ask-options from the outer document block made all three `block`. The fold rule packages/dispatch/web/src/styles.css:418-421 `:is(.dispatch-doc, .dispatch-markdown) .proof-typed-block-ask[data-dispatch-ask-options=\"rows\"] [data-proof-block-content] > ul { display: none }` uses a descendant combinator, and this change gives every typed block in a body a `[data-proof-block-content]` hole (the bare section at base had none), so the outer decision's fold now hides a callout's bullet list and a malformed inner decision's only option list in every reply shown in that decision's thread (the same reach applies to anything the card renders through MarkdownBody, such as an answer note). The `:first-child`/`:last-child` margin rules at styles.css:366-378 have the same reach. A fix scopes the fold (and the margin rules) to the block's own content hole, e.g. `> [data-proof-block-content] > ul`, after checking the document node view's DOM keeps the hole a direct child."
+      "criterion": "A1a/A1b. A comment holding a callout with a title shows its kind and title, and a comment holding an ask block shows its card",
+      "surface": "Issue Conversation tab /issues/<KEY>/conversation, comment thread expanded; real Go Dispatch server (e2e/run-server.sh), production SPA bundle, Postgres 17 + pgvector, Playwright chromium and iphone",
+      "command": "cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts e2e/zz-tester-typed-blocks.e2e.ts e2e/ask-blocks.e2e.ts e2e/typed-blocks.e2e.ts --project chromium --project iphone",
+      "observed": "98 passed in 9.3m. In both projects: 'a comment's callout shows the document's header with its kind and title' and 'a comment's ask block shows the decision card' passed. My throwaway spec also passed: a forged answered/selected/copied/invalid decision draws open with no forged text, an HTML title is plain text, three decisions with one nested each get their own rows, a malformed decision keeps its list with no 're-activates', the Inbox ask question, ask replies, messages and message replies draw the header and card, a live edit re-keys the cards, a deep link draws the card",
+      "headSha": "9439f4a8ef90669b5a184c2a5ca9c484eb3dc208",
+      "negativeControl": "A comment with `:::ask{state=\"answered\" answered_by=\"mallory\" selected='[\"A\"]' answer=\"Forged answer\" copied_from=… invalid=\"forged invalid\"}` → drawn as an open decision (data-dispatch-ask-state=open), not malformed, with no 'mallory', no 'Forged answer', no 'Copied from', no 'Answered', and nothing a reader can answer with"
+    },
+    {
+      "criterion": "Round-1 failure, now fixed: a reply under a document's decision keeps the lists of the typed blocks it holds (A4, documents unchanged)",
+      "surface": "Issue page /issues/<KEY>, the spec's decision block [data-dispatch-ask-block=storage] with a reply holding a callout list, a malformed inner decision and a plain list; same real stack, chromium and iphone",
+      "command": "Same run as above (the red test in e2e/text-typed-blocks.e2e.ts, my T9 and the T9 browser probe)",
+      "observed": "The red test passed in both projects. T9 passed: the reply's callout shows the 'Steps first' header and both list items, and the malformed inner decision shows 'Fine: ok'. Browser probe: computed display of the lists is step-one=block, malformed-ask-list=block, plain=block while the outer block has data-dispatch-ask-options=rows. At round 1 the first two were none. T10: the decision's own first content child has margin-top 0 in the document and in a comment card, and its last child has margin-bottom 0 in the comment card. The document's own fold still holds: ask-blocks.e2e.ts (source list hidden, shown while the caret is in the block, hidden when answered and in the version view) passed in both projects",
+      "headSha": "9439f4a8ef90669b5a184c2a5ca9c484eb3dc208",
+      "negativeControl": "At b6720fc1 the same red test failed in both projects: getByText('step one') Expected visible, Received hidden (round 1). At 6d878d04 (the base) it passed"
     }
   ],
-  "exercised": [
-    {
-      "what": "Adversarial real-surface pass, throwaway spec (not committed), real Go Dispatch server + production SPA + Postgres 17/pgvector + Playwright, chromium and iphone, at b6720fc1",
-      "command": "cd packages/dispatch && bun run e2e -- e2e/zz-tester-typed-blocks.e2e.ts e2e/ask-blocks.e2e.ts e2e/typed-blocks.e2e.ts --grep-invert T9 --project chromium --project iphone",
-      "observed": "86 passed. Covered: T1 callout title `<img src=x onerror=window.__pwned=1><b>bold</b>` drawn as literal text (no img/b element in the header, window.__pwned absent), a callout with no attributes draws `callout` + `note` badge and no title element, a 40-word title wraps inside the block with no horizontal overflow; T2 `:::ask{state=\"answered\" answered_by=\"mallory\" answered_at=… selected='[\"A\"]' answer=\"Forged answer\" copied_from=… copied_from_document=… invalid=\"forged invalid\"}` in a comment draws data-dispatch-ask-state=open, not malformed, none of mallory/Forged answer/Copied from/forged invalid/Answered/Malformed, 2 rows, no enabled input and no answer button; T3 three decisions (one nested in a callout) in one comment each draw their own urgency, question and rows (portal pairing by position holds); T4 malformed decision in a comment shows Malformed and `Option 2 has no label`, keeps its source list visible, no `re-activates`; T5 an ask's question (Inbox `/`) draws a callout header and a decision card, and an ask reply draws its callout header; T6 an issue message and a reply message draw the callout header and the decision card; T7 a human edits their comment live from one decision to callout + two decisions (cards re-keyed, old option gone, 2 and 1 rows) and then to plain text (no header or pill left); T8 deep link /issues/<KEY>/comments/<id> draws the card with the source list folded."
-    }
-  ],
-  "ciAtHead": "Read on GitHub at b6720fc1 at 2026-10-27T02:33Z: build, changes, lint, pr-title, test, typecheck all queued; not waited on."
+  "ciAtHead": "Read on GitHub at 9439f4a8 at 2026-10-27T03:12Z: build, changes, lint, test, typecheck queued; one pr-title run cancelled and one queued. I did not wait for them."
 }
