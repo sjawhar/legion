@@ -2,26 +2,32 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-158",
-  "completed": "2026-10-27T01:13:30Z",
-  "round": 6,
+  "completed": "2026-10-27T02:38:00Z",
+  "round": 7,
   "generation": 4,
-  "head": "52159aaf335f522ca3a925d37e2fa1d46d5eae8d",
+  "head": "83649d6aa94f89254e8c6143308cce339fe1de7d",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
-  "minor": 0,
-  "ci": "Required set: lint, typecheck, test, pr-title. At CI head 52159aaf: pr-title success; lint, typecheck and test still queued. Compare 52159aaf...0a588923 changes only .legion/. A request for changes does not wait on CI.",
-  "thermonuclear": "At 52159aaf: thermonuclear-deep-review CHANGES (41 assistant turns, all anthropic / claude-opus-5-5); thermonuclear-code-quality CHANGES on cleanup only (20 assistant turns, all anthropic / claude-opus-5-5). Read turn by turn from each pass's session transcript. Scope narrowed by the architect: the round-5 fix, whether it brings back round 1's false unsent-edit notice, and whether earlier findings came back; cleanup is not a reason to request changes.",
+  "minor": 1,
+  "ci": "Required set: lint, typecheck, test, pr-title. All four queued at CI head 83649d6a when this round ended; compare 83649d6a...f6bafb88 changes only .legion/. A request for changes does not wait on CI.",
+  "thermonuclear": "At 83649d6a: thermonuclear-deep-review CHANGES (60 assistant turns, all anthropic / claude-opus-5-5); thermonuclear-code-quality CHANGES on cleanup only (27 assistant turns, all anthropic / claude-opus-5-5). Read turn by turn from each pass's session transcript. Under the architect's narrowing.",
   "previousFindings": {
-    "round 5 connection.ts:188 gap": "Closed by 52159aaf in the order the tests replay. Against ygo the gap never opened: ygo queues SyncStep1/SyncStep2 before its read loop and writes Authenticated only from the read loop (ygo@v1.51.3-sami.4 server.go:2088-2097, peer.go:330-341), so the client syncs before it is authenticated.",
-    "earlier rounds": "No other earlier finding came back."
+    "review 5661131761 held stamp stored after the SyncStep2": "fixed in 61b165e7: no hold; a read-only admission stores nothing; tests replay ygo's order through a reopen and a second close and fail against 52159aaf",
+    "named cleanups": "all landed (firstSync/admitted, test file sizes and harness, admitWithoutSync deleted, held buffer gone, provider flags, rebuild log/return, unloadable setup in its own file)",
+    "earlier findings": "round 1's false notice comes back on one path: keyFindings[0]; round 4's restore order and writable-reconnect storage hold"
   },
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/dispatch/web/src/features/doc/pending-sync.ts:420",
-      "description": "takeAdmission records the read-only load's held heading-id stamp at writable authentication, after the client's SyncStep2 to ygo's SyncStep1 is already in `sent` with a lower `through`, and no Update frame carries it, so the row stays stored and counted: offline or connecting, the page says '1 edit saved in this browser, not sent yet.' with nothing unsent (deep-review probe in ygo's frame order). If the issue then closes again, the read-only reconnect's SyncStep2 is answered applied=0 (peer.go:245-249, roomHolds false for a refused stamp) and otherClientsRows keeps own rows out of the prune, so the page shows round 1's false notice '1 edit saved in this browser can't be sent: this document is read-only.' [traced from code]. The new tests replay Authenticated before the sync, an order ygo never sends."
+      "file": "packages/dispatch/web/src/features/doc/pending-sync.ts:515",
+      "description": "From a socket's open until its Authenticated frame the pending sync keeps the previous socket's admission. In ygo's order SyncStep2 and awareness arrive before Authenticated, so a writable tab that reconnects to an issue closed meanwhile stores the editor's own heading-id stamp of a heading written server-side without an id (pmdoc/parse.go:628), pushed into Yjs by the dispatch a peer's awareness triggers. The read-only room refuses it, the prune skips own rows, and the page says '1 edit saved in this browser can't be sent: this document is read-only.' to a person who typed nothing, until a reload. Reproduced (deep-review PROBE D, real editor and transport in ygo's order with a peer; PROBE E without a peer stores nothing), and rerun by the reviewer."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/e2e/offline-edits.e2e.ts:224",
+      "description": "The browser test's checks after the reopen run as soon as the editor is writable and the dot reads connected, read the pending count once, and check a notice that never shows while connected, so it could not have failed at 52159aaf; the unit tests carry that regression."
     }
   ],
-  "fastFollow": "Cleanup (no behaviour change; not a reason to request changes this round per the architect): PendingSync firstSync/admitted duplicate one behaviour and the read-only flag is passed twice per socket; pending-sync.test.ts at 1148 lines with six copies of the transport harness; e2e admitWithoutSync replaces hold()'s message handler; heldWhileReadOnly unbounded in a schema-stale read-only tab; round 5's three cleanups (connection.ts synced/authenticated locals, rebuild.go duplicate log line and return, issue_close_asks_test.go setup copy) not landed."
+  "fastFollow": "Cleanup, not a reason to request changes this round: connection.ts's per-socket `admitted` flag is redundant with the provider's once-per-socket reports and synced()'s own guard; LogUnindexedAskBlocks is exported only for api to log what WriteIssueAskStates returned (call it inside WriteIssueAskStates and unexport it)."
 }
