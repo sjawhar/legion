@@ -92,10 +92,6 @@ type rosterCache struct {
 	// while other reads arrive sets it, so how long it holds the fetch is its own choice rather
 	// than a race against two seconds of wall clock.
 	timeout time.Duration
-	// uncached makes every read ask the listener itself: no TTL, no shared fetch, nothing kept.
-	// Only an end-to-end test process sets it (Deps.ListenerRosterUncached), so a test that
-	// changes the listener's sessions sees the change at its next read.
-	uncached bool
 
 	mu      sync.Mutex
 	roster  routeRoster
@@ -122,7 +118,9 @@ func (s *server) readRouteRoster(ctx context.Context) routeRoster {
 	if s.deps.Envoy == nil {
 		return routeRoster{}
 	}
-	if s.rosters.uncached {
+	if s.deps.ListenerRosterUncached {
+		// An end-to-end test process: every read asks the listener itself, with no TTL, no shared
+		// fetch and nothing kept.
 		return s.listRouteRoster(ctx)
 	}
 	cache := &s.rosters

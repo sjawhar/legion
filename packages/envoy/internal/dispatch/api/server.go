@@ -346,11 +346,7 @@ func (s *server) waitBackground() {
 // must not dial or read the nil Store: whatever reaches the database or the network starts
 // later, from a handler or the relay's first subscriber.
 func register(mux *http.ServeMux, deps Deps) *server {
-	s := &server{deps: deps, rosters: rosterCache{
-		ttl:        routeRosterTTL,
-		silenceTTL: routeRosterSilenceTTL,
-		uncached:   deps.ListenerRosterUncached,
-	}}
+	s := &server{deps: deps, rosters: rosterCache{ttl: routeRosterTTL, silenceTTL: routeRosterSilenceTTL}}
 	s.eventRelay = newEventStreamRelay(s, s.lifetime())
 	if deps.Lifetime != nil {
 		s.deliveryHub = newDeliveryHub(s, deps.Lifetime, deliveryHubClock{})

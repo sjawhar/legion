@@ -3,7 +3,6 @@ package api
 import (
 	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -94,11 +93,7 @@ func (s *server) listAgents(w http.ResponseWriter, r *http.Request) {
 
 	roster := s.readRouteRoster(r.Context())
 	if !roster.answered {
-		if errors.Is(roster.err, envoy.ErrUnavailable) {
-			writeError(w, "ENVOY_UNAVAILABLE", http.StatusServiceUnavailable, roster.err.Error())
-			return
-		}
-		s.writeHandlerError(w, roster.err)
+		s.writeEnvoyError(w, roster.err)
 		return
 	}
 	if len(roster.sessions) == 0 {
