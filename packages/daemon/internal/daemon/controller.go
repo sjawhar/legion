@@ -17,19 +17,21 @@ import (
 // ControllerStartMessage is the controller's first prompt at every start, so every start and
 // restart runs the skill's start procedure with nothing typed, where the plugin alone would leave
 // the session idle until a wake. `legion controller start` carries it to the operator's Oh My Pi
-// as LEGION_CONTROLLER_START_MESSAGE, and pi-legion's ControllerStartCommand sends it as the
-// session's first turn, ahead of any Envoy card or Legion notice (LEGION-392: the pi-legion claim
-// at session start marks the start turn due before it opens the live Envoy subscription a wake
-// could arrive on, and holds the Envoy entry's startup wake behind it). The daemon delivers it to
-// its own controller (`controller: daemon`) as an RPC prompt each time that controller reports
-// ready, after its claims.
+// as LEGION_CONTROLLER_START_MESSAGE, and pi-legion's ControllerStartCommand claims the controller
+// and sends it as the session's first turn, ahead of any Envoy card or Legion notice (LEGION-392:
+// that command, which runs after Oh My Pi's startup, sends it once the controller is registered,
+// right before the controller role's Envoy claim and the live Envoy subscription a wake could
+// arrive on). The daemon delivers it to its own controller (`controller: daemon`) as an RPC prompt
+// each time that controller reports ready, after its claims.
 const ControllerStartMessage = "Legion controller start: follow skill://legion-controller's start procedure now (\"What happened before you started\"), then end the turn."
 
 // ControllerStartCommand is the positional word `legion controller start` passes to the operator's
 // Oh My Pi, which runs command-line words as prompts once its startup is over and its TUI listens.
-// pi-legion's extension command of that name sends ControllerStartMessage as the session's first
-// turn. A send from pi-legion's session_start handler instead would be drained at the end of Oh My
-// Pi's startup, so the start turn would run inside the startup wait, with no TUI and no input.
+// pi-legion's extension command of that name claims the controller and sends
+// ControllerStartMessage as the session's first turn. A claim from pi-legion's session_start
+// handler instead would run inside Oh My Pi's startup, which drains every send made there at its
+// end: the start turn would run inside the startup wait, with no TUI and no input, and a card on
+// the controller role's lane could start its own turn first.
 const ControllerStartCommand = "/legion-controller-start"
 
 // The waits before a failed or retired controller is retried: the first (plan.controllerRetry,

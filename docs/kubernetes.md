@@ -6186,13 +6186,14 @@ keeping nothing until the daemon has answered, the command:
    environment (`LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_DAEMON_URL`,
    `LEGION_PROJECT`, `LEGION_STATE_DIR`, `LEGION_CONTROLLER_START_MESSAGE` (Oh My Pi runs the
    positional word once its startup is over and its TUI listens, and pi-legion's command of that
-   name sends the message as the session's first turn, which the operator sees, can type during
-   and can interrupt with Esc; the extension's role claim made the start due before it opened the
-   live wake subscription, so the controller's first turn runs its start procedure
-   deterministically, with nothing typed, rather than racing a wake for the session's one
-   first-turn slot — LEGION-392), its grant and secret files, `LEGION_GH_OWNERS_DIR` naming
-   `<state_dir>/gh` (the bundle step 5 wrote), `GH_CONFIG_DIR` its default owner's directory (the
-   bundle's root, empty, when the daemon has no GitHub App), `LEGION_GH_PATH` the real gh, with
+   name claims the controller and sends the message as the session's first turn, which the
+   operator sees, can type during and can interrupt with Esc; it sends it once the controller is
+   registered, right before the role claim and the live wake subscription, so the controller's
+   first turn runs its start procedure deterministically, with nothing typed, rather than racing a
+   card or a wake for the session's one first-turn slot — LEGION-392), its grant and secret files,
+   `LEGION_GH_OWNERS_DIR` naming `<state_dir>/gh` (the bundle step 5 wrote), `GH_CONFIG_DIR` its
+   default owner's directory (the bundle's root, empty, when the daemon has no GitHub App),
+   `LEGION_GH_PATH` the real gh, with
    `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` emptied, so nothing inherited outranks the files, the
    Envoy and Dispatch
    endpoints, and `NATS_NKEY_SEED_FILE` naming `nats_nkey_seed_file` when the file sets it) on top

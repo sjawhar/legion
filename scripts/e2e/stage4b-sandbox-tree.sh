@@ -5430,9 +5430,10 @@ note "the operator-launched controller's gh: pull request state $state, viewer $
 # its session's first user message is the start message `legion controller start` carries as
 # LEGION_CONTROLLER_START_MESSAGE (daemon.ControllerStartMessage, internal/daemon/controller.go),
 # which pi-legion's `/legion-controller-start` (daemon.ControllerStartCommand, the word the command
-# puts on Oh My Pi's command line) sends once Oh My Pi's startup is over; the extension's role
-# claim made it due before it opened the live wake subscription a tick could race it on
-# (controller-session.ts `claim`, `sendStartMessage`); the model answers it.
+# puts on Oh My Pi's command line) sends once Oh My Pi's startup is over: that command claims the
+# controller and sends it once registered, right before the role claim and the live wake
+# subscription a tick could race it on (controller-session.ts `claim`, `startCommand`); the model
+# answers it.
 controller_started_itself() {
   local file
   for file in "$profile_agent/sessions"/*/*.jsonl; do

@@ -39,11 +39,12 @@ export interface EnvoyPluginInterface {
   /** The transcript of the session this process bootstrapped as its Legion identity. */
   readonly bootstrappedSession: { file: string | undefined };
   /**
-   * The session whose first turn a Legion command (`/legion-controller-start`) or the daemon's
-   * start prompt starts after Oh My Pi's startup, and when that start was sent (ms since epoch;
-   * undefined until sent). Both are undefined once that session's first run starts or the session
-   * shuts down. The Envoy entry holds its startup-card wake while it names the Envoy entry's own
-   * session, so the start turn stays the session's first.
+   * The session whose first turn is the Legion controller's start turn, and when its start was
+   * sent (ms since epoch): `/legion-controller-start` sets both right before it sends the start
+   * message, and the daemon-launched controller sets both right before `claims/ready`, after
+   * which the daemon sends its start prompt. Both are undefined once that session's first run
+   * starts or the session shuts down. Nothing in the Envoy entry reads it yet; it is the Envoy
+   * entry's signal to keep a card that arrived during startup from taking that first turn.
    */
   readonly startupTurn: { session: string | undefined; sentAt: number | undefined };
 }

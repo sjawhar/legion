@@ -227,6 +227,9 @@ export default function legionExtension(pi: PiApi): void {
     }
     // The controller registers through the controller session and gets the `legion` tool's
     // controller operations (`read_state`, `set_status`), each minting its own controller grant.
+    // Only the controller the daemon launched claims here; the operator-launched controller
+    // claims from `/legion-controller-start`, after Oh My Pi's startup, and until then its
+    // `legion` tool answers that the session holds no registered claim.
     if (session.kind === "controller") {
       await controllerSession.handleSessionStart(context);
     } else {
@@ -424,12 +427,15 @@ export default function legionExtension(pi: PiApi): void {
 
   pi.registerCommand("legion-controller-start", {
     description:
-      "Send the Legion controller's start message as its first turn; `legion controller start` passes this command on Oh My Pi's command line",
-    // A command, not a send from session_start: Oh My Pi holds every session_start send and drains
-    // them at the end of its startup, so a turn started there runs before the TUI listens or any
-    // input is read. Oh My Pi runs command-line words after its startup wait, once the TUI listens.
+      "Claim the Legion controller and send its start message as the session's first turn; `legion controller start` passes this command on Oh My Pi's command line",
+    // A command, not a claim from session_start: Oh My Pi holds every session_start send and
+    // drains them at the end of its startup, while an Envoy card starts its own turn, so a role
+    // claim made during startup lets a card or a controller-topic notice take the first turn ahead
+    // of the start message. Oh My Pi runs command-line words after its startup wait, once the TUI
+    // listens; the claim there queues the start message before the role's lane and the
+    // controller topic open (`controllerSession.startCommand`).
     handler: async (_args, context) => {
-      await controllerSession.sendStartMessage(context);
+      await controllerSession.startCommand(context);
     },
   });
 }

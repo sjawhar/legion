@@ -1,7 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
+import {
+  controllerToken,
+  legionControllerNoticeSubject,
+  ROLE_TOPIC_PREFIX,
+} from "@legion/contracts";
 import {
   type Cleanup,
   type Interactive,
@@ -12,23 +17,28 @@ import {
   spawnInteractive,
   writeStandinProfile,
 } from "@legion/pi-shared/test/omp-harness";
+import { connect, StringCodec } from "nats";
 import { z } from "zod";
 
 // The operator's controller on the real, interactive Oh My Pi, as `legion controller start` runs
 // it: both plugins, the controller's environment, and `/legion-controller-start` on the command
 // line, which pi-legion's extension command of that name (extensions/legion.ts,
-// src/controller-session.ts `sendStartMessage`) answers by sending the start message. Oh My Pi
-// runs a command-line word once its startup is over and the TUI listens, so the start turn is the
-// operator's to see, type into and interrupt; a send from `session_start`, which Oh My Pi drains
-// at the end of its startup, ran the whole turn before the TUI subscribed, with no start message
-// and no busy row on screen, Enter not taking typed text and Esc doing nothing. Only a terminal
-// shows that, so the session runs under a pseudo-terminal whose screen the cases read
-// (`spawnInteractive`), against one stand-in that is the model gateway — each Messages request held
-// until the case answers it — the daemon, Dispatch and the Envoy listener, and the real NATS server
-// the Envoy role claim needs. LEGION_TEST_OMP names the binary and LEGION_TEST_NATS_URL the NATS
-// server, as in pi-envoy's real-binary tests. A run without both skips, except on GitHub Actions,
-// where the pi-legion job supplies both (GITHUB_ACTIONS, not CI: agent harnesses on the devbox
-// export CI=true).
+// src/controller-session.ts `startCommand`) answers by claiming the controller and sending the
+// start message right before the role claim. Oh My Pi runs a command-line word once its startup is
+// over and the TUI listens, so the start turn is the operator's to see, type into and interrupt; a
+// send from `session_start`, which Oh My Pi drains at the end of its startup, ran the whole turn
+// before the TUI subscribed, with no start message and no busy row on screen, Enter not taking
+// typed text and Esc doing nothing; and a role claim made there let a card on the role's lane
+// start its turn ahead of the start message. Only a terminal shows that, so the session runs under
+// a pseudo-terminal whose screen the cases read (`spawnInteractive`), against one stand-in that is
+// the model gateway — each Messages request held until the case answers it — the daemon, Dispatch
+// and the Envoy listener, and the real NATS server the Envoy role claim needs, over which the
+// cases also send the controller cards and notices. LEGION_TEST_OMP names the binary and
+// LEGION_TEST_NATS_URL the NATS server, as in pi-envoy's real-binary tests. A run without both
+// skips, except on GitHub Actions, where the pi-legion job supplies both (GITHUB_ACTIONS, not CI:
+// agent harnesses on the devbox export CI=true). The file imports the real `nats` module, which
+// extensions/legion.test.ts replaces for its whole process, so it runs in a process of its own
+// (the package's `test` script).
 const omp = process.env.LEGION_TEST_OMP;
 const natsUrl = process.env.LEGION_TEST_NATS_URL;
 const onActions = process.env.GITHUB_ACTIONS === "true";
@@ -65,6 +75,9 @@ const CONTROLLER_ARGS = [
   "You are the stand-in Legion controller.",
   START_COMMAND,
 ] as const;
+
+/** The project the cases' controller serves: the daemon state fixture's `legion`. */
+const PROJECT = "legion";
 
 /** The TUI's busy row while a turn runs (`⎋ Working…`). */
 const BUSY = "Working…";
@@ -118,16 +131,35 @@ interface ControllerSession {
   shows(what: string, ...texts: readonly string[]): Promise<void>;
 }
 
+/** What a case's stand-in does beyond answering the controller's claim. */
+interface StandinHooks {
+  /** The daemon's answer to the controller's registration, in place of the fixture's. */
+  readonly register?: () => Response;
+  /**
+   * Called with the claiming session's id once the stand-in has answered the controller role's
+   * claim (`/v1/roles/set` for `legion-legion-controller`): the next turn of its event loop, after
+   * the answer went out.
+   */
+  readonly onRoleClaim?: (sid: string) => void;
+  /**
+   * Called with the session's id as the first listener registration after that role claim
+   * arrives (`/v1/interests/subscribe`): the one envoy.ts sends right after it opens the
+   * controller topic's NATS subscription (`subscribeNotice`).
+   */
+  readonly onNoticeInterest?: (sid: string) => void;
+}
+
 /**
  * Starts the controller as `legion controller start` does: interactive Oh My Pi with the Envoy and
  * Legion extensions from this checkout, the controller's environment (LEGION_CONTROLLER, its
  * capability file, its start message, the daemon, Envoy and its NATS server) and
  * `CONTROLLER_ARGS`, against one stand-in: the gateway holds each Messages request until the case
  * answers it; the daemon answers its state and the controller's registration from the contract
- * fixtures and mints grants; Dispatch is unavailable; and the Envoy listener records the session
- * that sets a role and names it as that role's holder.
+ * fixtures (or `hooks.register`'s answer) and mints grants; Dispatch is unavailable; and the Envoy
+ * listener records the session that sets a role and names it as that role's holder, calling
+ * `hooks`' role-claim and notice-interest callbacks as those requests arrive.
  */
-async function startController(): Promise<ControllerSession> {
+async function startController(hooks: StandinHooks = {}): Promise<ControllerSession> {
   const { binary, nats } = setup();
   const { root, home, workspace, sessions } = await ompRoot(
     binary,
@@ -151,6 +183,8 @@ async function startController(): Promise<ControllerSession> {
   const turns: Turn[] = [];
   let roleHolder = "";
   let grants = 0;
+  // Set at the controller role's first claim, until the registration after it arrives.
+  let noticeInterestDue = false;
   const { base } = serveStandin(cleanup, async (url, body) => {
     if (url.pathname === "/anthropic/v1/messages") {
       const index = turns.length;
@@ -165,7 +199,9 @@ async function startController(): Promise<ControllerSession> {
     }
     if (url.pathname.startsWith("/anthropic/")) return Response.json({ data: [] });
     if (url.pathname === "/legion/v1/state") return Response.json(daemonState);
-    if (url.pathname === "/legion/v1/claims/register") return Response.json(registered);
+    if (url.pathname === "/legion/v1/claims/register") {
+      return hooks.register?.() ?? Response.json(registered);
+    }
     if (url.pathname === "/legion/v1/grants") {
       grants += 1;
       return Response.json({
@@ -181,7 +217,17 @@ async function startController(): Promise<ControllerSession> {
     // The Envoy listener: the role claim records its holder, the role read names it, and
     // registration and any other read answer with an interest.
     const sid = typeof body.session_id === "string" ? body.session_id : "";
-    if (url.pathname === "/v1/roles/set") roleHolder = sid;
+    if (url.pathname === "/v1/roles/set") {
+      if (body.role === registered.claimToken && roleHolder === "") {
+        setImmediate(() => hooks.onRoleClaim?.(sid));
+        noticeInterestDue = true;
+      }
+      roleHolder = sid;
+    }
+    if (url.pathname === "/v1/interests/subscribe" && noticeInterestDue) {
+      noticeInterestDue = false;
+      hooks.onNoticeInterest?.(sid);
+    }
     if (url.pathname === `/v1/roles/${registered.claimToken}`) {
       return Response.json({ role: registered.claimToken, holder: roleHolder, last_seen: 1 });
     }
@@ -215,7 +261,7 @@ async function startController(): Promise<ControllerSession> {
         LEGION_CONTROLLER: "1",
         LEGION_ROLE: "controller",
         LEGION_DAEMON_URL: base,
-        LEGION_PROJECT: "legion",
+        LEGION_PROJECT: PROJECT,
         LEGION_STATE_DIR: state,
         LEGION_CONTROLLER_SECRET_FILE: secretFile,
         LEGION_CONTROLLER_START_MESSAGE: START_MESSAGE,
@@ -292,6 +338,11 @@ async function startController(): Promise<ControllerSession> {
   };
 }
 
+/** A Messages request's conversation, as one string to find texts in. */
+function conversation(request: Request): string {
+  return JSON.stringify(request.body.messages ?? null);
+}
+
 /** The text of a Messages request's last message: what the turn it answers was started on. */
 function lastMessage(request: Request): string {
   const messages = Array.isArray(request.body.messages) ? request.body.messages : [];
@@ -299,16 +350,112 @@ function lastMessage(request: Request): string {
 }
 
 /**
- * Resolves once the session has settled on `reply`: the screen shows the reply and no busy row,
- * and the transcript's last message is the assistant's, ended normally.
+ * Whether the session has settled on `reply`: the screen shows the reply and no busy row, and the
+ * transcript's last message is the assistant's, ended normally.
  */
+async function isSettledOn(session: ControllerSession, reply: string): Promise<boolean> {
+  const screen = session.terminal.screen();
+  if (!screen.includes(reply) || screen.includes(BUSY)) return false;
+  const last = (await session.messages()).at(-1)?.message;
+  return last?.role === "assistant" && last.stopReason === "stop";
+}
+
+/** Resolves once the session has settled on `reply` (`isSettledOn`). */
 async function settledOn(session: ControllerSession, reply: string): Promise<void> {
-  await session.until("the session to settle on the reply", async () => {
-    const screen = session.terminal.screen();
-    if (!screen.includes(reply) || screen.includes(BUSY)) return undefined;
-    const last = (await session.messages()).at(-1)?.message;
-    return last?.role === "assistant" && last.stopReason === "stop" ? true : undefined;
-  });
+  await session.until("the session to settle on the reply", async () =>
+    (await isSettledOn(session, reply)) ? true : undefined
+  );
+}
+
+/** A card the case published on the controller role's lane: its text, and the frame it went in. */
+interface Card {
+  readonly summary: string;
+  readonly frame: Uint8Array;
+}
+
+/** A card in flight: the card, and its lane receipt once the session acknowledges it. */
+interface SentCard {
+  readonly card: Card;
+  readonly receipt: Promise<unknown>;
+}
+
+/**
+ * What reaches a controller session over the real NATS server: a card on the controller role's
+ * lane, as the Envoy listener forwards it to the session's agent subject, and a daemon notice on
+ * the controller topic, as the listener publishes what the daemon's controller-notice executor
+ * posts (packages/daemon/internal/daemon/outbox.go `controllerNotice`, the listener's
+ * `messageEnvelope` in packages/envoy/cmd/listener/api.go).
+ */
+interface ControllerInbound {
+  /**
+   * Publishes one card to session `sid` and returns it with its lane receipt: the forwarded
+   * envelope keeps the role topic, so the session acknowledges it on the request's reply inbox
+   * (`expectsLaneReceipt`, packages/envoy-client/src/delivery.ts) before it delivers the card.
+   */
+  card(sid: string, label: string): SentCard;
+  /**
+   * Sends `card`'s frame to `sid` again, as the listener re-sends a card whose receipt it missed,
+   * and resolves on its receipt. The session acknowledges a frame before it checks for a repeat
+   * (pi-envoy's envoy.ts `deliver`) and delivers a repeat nowhere, so this adds no message: it only
+   * shows that the session's NATS connection has taken everything published before it.
+   */
+  repeat(sid: string, card: Card): Promise<unknown>;
+  /**
+   * Publishes one triage notice on the controller topic and returns its summary (`triage on
+   * <issue>`, the daemon's `noticeSummary`), whose issue key no other notice shares.
+   */
+  notice(): string;
+}
+
+async function controllerInbound(nats: string): Promise<ControllerInbound> {
+  const connection = await connect({ servers: nats });
+  cleanup.push(() => connection.close());
+  const codec = StringCodec();
+  const noticeSubject = legionControllerNoticeSubject(PROJECT);
+  const receipt = (sid: string, frame: Uint8Array): Promise<unknown> =>
+    connection.request(`notifications.agent.${sid}`, frame, { timeout: 5_000 });
+  return {
+    card(sid, label) {
+      const summary = `CARD-${label}-${randomUUID().slice(0, 8)}`;
+      const key = `${label}-${randomUUID()}`;
+      const minted = createHash("sha256").update(key).digest("hex").slice(0, 32);
+      const frame = codec.encode(
+        JSON.stringify({
+          event_id: `evt-${key}`,
+          source: "envoy",
+          source_event_id: `source-${key}`,
+          topic: `${ROLE_TOPIC_PREFIX}${controllerToken(PROJECT)}`,
+          dedupe_key: `envoy.role.forward.publish.${minted}`,
+          issued_at: Date.now(),
+          payload_summary: summary,
+          trace_id: `trace-${key}`,
+        })
+      );
+      return { card: { summary, frame }, receipt: receipt(sid, frame) };
+    },
+    repeat: (sid, card) => receipt(sid, card.frame),
+    notice() {
+      const text = `triage on LEGION-${100_000 + Math.floor(Math.random() * 900_000)}`;
+      connection.publish(
+        noticeSubject,
+        codec.encode(
+          JSON.stringify({
+            event_id: randomUUID(),
+            // The daemon names no source, so the listener's default.
+            source: "agent",
+            source_event_id: randomUUID(),
+            topic: noticeSubject,
+            dedupe_key: `legion-outbox:${randomUUID()}`,
+            issued_at: Date.now(),
+            payload_summary: text,
+            payload: JSON.stringify({ kind: "triage" }),
+            trace_id: randomUUID(),
+          })
+        )
+      );
+      return text;
+    },
+  };
 }
 
 test.skipIf(skip)(
@@ -403,6 +550,108 @@ test.skipIf(skip)(
       .map((entry) => JSON.stringify(entry));
     expect(userMessages[0]).toContain(START_MESSAGE_JSON);
     expect(userMessages.filter((entry) => entry.includes(START_MESSAGE_JSON))).toHaveLength(1);
+  },
+  120_000
+);
+
+// Main's pi-envoy delivers every card as a steer, which starts a turn of its own when the session
+// is idle, so whatever reaches the session on the controller role's lane or the controller topic
+// first takes the first turn. The start command's claim sends the start message once the
+// registration is in, right before the role claim, so a card the listener forwards the moment it
+// takes the role (which can reach the session before the role claim's answer does), and a notice
+// published the moment the controller topic is registered, both find the start turn already
+// queued: the first request carries the start message, and each of them reaches the model after
+// it, as a steer into the start turn or in a later turn. The card's lane receipt shows the session
+// took it, and the repeat's receipt that its connection took the notice published before it.
+test.skipIf(skip)(
+  "a card published as soon as the role is claimed comes after the start turn",
+  async () => {
+    const inbound = await controllerInbound(setup().nats);
+    let sid: string | undefined;
+    let sent: SentCard | undefined;
+    let notice: string | undefined;
+    const session = await startController({
+      onRoleClaim: (claimed) => {
+        sid = claimed;
+        sent = inbound.card(claimed, "role-claim");
+      },
+      onNoticeInterest: () => {
+        notice = inbound.notice();
+      },
+    });
+    const { card, receipt } = await session.until("the controller role's claim", () => sent);
+    await receipt;
+    const published = await session.until("the controller topic's registration", () => notice);
+    await inbound.repeat(sid ?? "", card);
+
+    // Every request is answered, in order, until the session settles with both having reached
+    // the model.
+    const reached = (): boolean =>
+      session.turns.some(({ request }) => conversation(request).includes(card.summary)) &&
+      session.turns.some(({ request }) => conversation(request).includes(published));
+    for (let answered = 0; ; ) {
+      const turn = await session.nextTurn(`model request ${answered + 1}`);
+      answered += 1;
+      const reply = `Reply ${answered}.`;
+      turn.reply(reply);
+      const next = await session.until(
+        "the next model request, or the session settled with the card and the notice read",
+        async () => {
+          if (session.turns.length > answered) return "request";
+          return reached() && (await isSettledOn(session, reply)) ? "settled" : undefined;
+        }
+      );
+      if (next === "settled") break;
+    }
+
+    const requests = session.turns.map(({ request }) => request);
+    const firstStart = requests.findIndex((request) =>
+      conversation(request).includes(START_MESSAGE_JSON)
+    );
+    expect(firstStart).toBeGreaterThanOrEqual(0);
+    for (const request of requests.slice(0, firstStart)) {
+      expect(lastMessage(request)).not.toContain(card.summary);
+      expect(lastMessage(request)).not.toContain(published);
+    }
+    // From the first request carrying it on, the start message comes before the card and the
+    // notice wherever they are.
+    for (const request of requests.slice(firstStart)) {
+      const held = conversation(request);
+      for (const text of [card.summary, published]) {
+        if (held.includes(text)) {
+          expect(held.indexOf(text)).toBeGreaterThan(held.indexOf(START_MESSAGE_JSON));
+        }
+      }
+    }
+    const userMessages = (await session.messages())
+      .filter(({ message }) => message.role === "user")
+      .map((entry) => JSON.stringify(entry));
+    expect(userMessages[0]).toContain(START_MESSAGE_JSON);
+    expect(userMessages.filter((entry) => entry.includes(START_MESSAGE_JSON))).toHaveLength(1);
+  },
+  120_000
+);
+
+// The claim runs from the start command, after startup, in the terminal the operator reads: a
+// refusal there is shown as one warning naming the daemon's answer and the command that claims
+// again, and no start message is sent.
+test.skipIf(skip)(
+  "the operator sees a claim refusal",
+  async () => {
+    const session = await startController({
+      register: () => Response.json({ error: "invalid controller capability" }, { status: 403 }),
+    });
+    await session.shows(
+      "the claim refusal's warning on screen",
+      "the controller claim failed",
+      "invalid controller capability",
+      "/legion-claim-controller"
+    );
+    // A real clock, deliberately: the proposition is that the refused claim sends no start
+    // message, and a send that never happens emits no signal to await, so only a quiet window
+    // with no Messages request shows the absence.
+    await Bun.sleep(3_000);
+    expect(session.turns).toHaveLength(0);
   },
   120_000
 );

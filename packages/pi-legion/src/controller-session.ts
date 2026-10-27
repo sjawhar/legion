@@ -28,7 +28,7 @@ export interface ControllerSession {
   readonly claim: (context: CommandContext | SessionContext) => Promise<void>;
   readonly handleSessionStart: (context: SessionContext) => Promise<void>;
   readonly reclaimAfterSessionChange: (context: SessionContext) => Promise<void>;
-  readonly sendStartMessage: (context: CommandContext) => Promise<void>;
+  readonly startCommand: (context: CommandContext) => Promise<void>;
   readonly isClaimedSession: (sessionID: string) => boolean;
   readonly mintGrant: (sessionID: string) => Promise<LegionGrant>;
 }
@@ -49,16 +49,9 @@ export function createControllerSession(deps: {
   let controllerCapability: string | undefined;
   let mintControllerGrant: (() => Promise<LegionGrant>) | undefined;
   // Whether this process has ever sent LEGION_CONTROLLER_START_MESSAGE: the gate is its own flag
-  // rather than `controllerSessionID`, which a claim that throws after the start is due or sent
-  // (the subscription below, say) never reaches setting, so a retry would otherwise send it again.
+  // rather than `controllerSessionID`, which a claim that throws after the start is sent (the
+  // subscription below, say) never reaches setting, so a retry would otherwise send it again.
   let startMessageSent = false;
-  // The start message the claim at Oh My Pi's startup made due, kept for `sendStartMessage`
-  // (`/legion-controller-start`) to send once the startup wait is over; undefined once sent.
-  let dueStartMessage: string | undefined;
-  // The claim `handleSessionStart` runs during Oh My Pi's startup, while it runs: a handler past
-  // Oh My Pi's handler timeout keeps running, so `/legion-controller-start` can arrive before it
-  // ends and waits for it.
-  let startupClaim: Promise<void> | undefined;
   // The controller's own transcript as of the last successful claim, which a session navigation
   // compares to decide whether to claim again; a hand-started takeover records none.
   let controllerTranscript: string | undefined;
@@ -83,20 +76,28 @@ export function createControllerSession(deps: {
    * leaving a half-claimed controller behind a refusal found only after. That message runs the
    * skill's start procedure as the session's first turn, with nothing typed, ahead of any Envoy
    * card or Legion notice that would otherwise race it for the session's one first-turn slot
-   * (LEGION-392). The claim run at Oh My Pi's startup (`handleSessionStart`) does not send it:
-   * Oh My Pi holds every send a `session_start` handler makes and drains them all at the end of
-   * its startup, so a turn started there runs inside the startup wait, before the TUI shows it and
-   * before any input is read. Instead, right after the role claim and before the subscription
-   * below opens, it makes the message due and marks this session in the Envoy plugin interface's
-   * `startupTurn`, which keeps the Envoy entry's startup wake behind the start turn.
-   * `legion controller start` puts `/legion-controller-start` on Oh My Pi's command line, which
-   * Oh My Pi runs after its startup and once the TUI listens; that command (`sendStartMessage`)
-   * sends the due message. A claim run after startup (`/legion-claim-controller`, a re-claim after
-   * a session change) is outside the startup wait and sends a message still unsent itself.
-   * `startMessageSent` — not `controllerSessionID`, which a claim that throws after the start is
-   * due (the subscription below, say) never reaches setting — keeps this process from sending it
-   * twice: a retried claim after such a failure, and a later `/legion-claim-controller` in the
-   * same session, send nothing more.
+   * (LEGION-392). It is sent once the registration is in, right before the role claim, so before
+   * anything can reach the session on the role's lane or the controller topic. Not after the role
+   * claim: the listener forwards a card on the role's lane as soon as it records the role, and
+   * that card can reach the session before the role claim's own answer does, which on a pi-envoy
+   * that steers every card would start the card's turn first. A role claim refused after the send
+   * leaves the start message sent, and the claim's refusal is the operator's to see.
+   *
+   * That order holds only outside Oh My Pi's startup, so this launched controller claims from
+   * `/legion-controller-start` (`startCommand`), never from `session_start`. Oh My Pi holds every
+   * send a `session_start` handler makes and drains them all at the end of its startup, while an
+   * Envoy card is a steer that starts its own turn: a role claim made during startup lets a card
+   * on the role's lane, or a notice on the controller topic, start its turn ahead of the held
+   * start message, and a turn started there runs inside the startup wait, before the TUI shows it
+   * and before any input is read. `legion controller start` puts the command on Oh My Pi's
+   * command line, which Oh My Pi runs after its startup and once the TUI listens, so the role's
+   * lane and the controller topic open only once the start message is queued. A claim from
+   * `/legion-claim-controller`, or a re-claim after a session change, sends a message still
+   * unsent the same way. Each send marks this session in the Envoy plugin interface's
+   * `startupTurn` as sent right before it. `startMessageSent` — not `controllerSessionID`, which
+   * a claim that throws after the send (the role claim or the subscription below, say) never
+   * reaches setting — keeps this process from sending it twice: a retried claim after such a
+   * failure, and a later `/legion-claim-controller` in the same session, send nothing more.
    *
    * The subscription is a live wake only: an Oh My Pi session subscribes over core NATS, so a
    * notice published while no controller runs never reaches one, and the controller skill reads
@@ -110,26 +111,21 @@ export function createControllerSession(deps: {
    *
    * A controller the daemon launched itself (`controller: daemon`) is the controller's own session
    * (`LEGION_CONTROLLER=1`) carrying its launch's boot token (`LEGION_BOOT_TOKEN_FILE`) in place of
-   * a capability: it registers with that token, as every pane does, subscribes to each Slack
-   * channel its launch names (`daemonControllerSlackChannels`) for as long as it holds the role,
-   * and once it holds the role and the topics it reports ready on `claims/ready`, which is when the
-   * daemon hands it the start message; it marks `startupTurn` as sent right before that report.
-   * Any step of its claim that fails exits Oh My Pi, so the daemon relaunches it, as a pane's
-   * failed boot does. A root architect's or phase worker's pane carries a boot token too, its own
-   * claim's: `/legion-claim-controller` run there is a takeover by hand like any other, which needs
-   * the capability and stops before any daemon call without it.
+   * a capability: it claims at `session_start` (`handleSessionStart`), registers with that token,
+   * as every pane does, subscribes to each Slack channel its launch names
+   * (`daemonControllerSlackChannels`) for as long as it holds the role, and once it holds the role
+   * and the topics it reports ready on `claims/ready`, which is when the daemon hands it the start
+   * message; it marks `startupTurn` as sent right before that report. Any step of its claim that
+   * fails exits Oh My Pi, so the daemon relaunches it, as a pane's failed boot does. A root
+   * architect's or phase worker's pane carries a boot token too, its own claim's:
+   * `/legion-claim-controller` run there is a takeover by hand like any other, which needs the
+   * capability and stops before any daemon call without it.
    */
-  const claim = (context: CommandContext | SessionContext): Promise<void> =>
-    claimFrom(context, false);
-
-  const claimFrom = async (
-    context: CommandContext | SessionContext,
-    atStartup: boolean
-  ): Promise<void> => {
+  const claim = async (context: CommandContext | SessionContext): Promise<void> => {
     const supervised = daemonLaunchedController(process.env);
-    if (!supervised) return claimWith(context, false, atStartup);
+    if (!supervised) return claimWith(context, false);
     try {
-      await claimWith(context, true, atStartup);
+      await claimWith(context, true);
     } catch (error) {
       console.error(
         `[legion] the daemon-launched controller's claim failed; exiting so the daemon launches it again: ${messageFor(error)}`
@@ -138,17 +134,9 @@ export function createControllerSession(deps: {
     }
   };
 
-  const recordStartMessageSent = (): void => {
-    startMessageSent = true;
-    dueStartMessage = undefined;
-    const mark = envoyPluginInterface().startupTurn;
-    if (mark.session !== undefined) mark.sentAt = Date.now();
-  };
-
   const claimWith = async (
     context: CommandContext | SessionContext,
-    supervised: boolean,
-    atStartup: boolean
+    supervised: boolean
   ): Promise<void> => {
     const sessionID = context.sessionManager.getSessionId();
     const capability =
@@ -206,25 +194,26 @@ export function createControllerSession(deps: {
       );
     }
     const envoyContext = "setInterval" in context ? context : undefined;
-    await claimEnvoyRole(sessionID, registration.claimToken, envoyContext);
-    // Once per process, ever, and before the subscription below can deliver an external wake that
-    // would otherwise race the start turn for the one first-turn slot (LEGION-392). At Oh My Pi's
-    // startup the message is only made due, and the mark holds the Envoy entry's startup wake
-    // until `/legion-controller-start` sends it after the startup wait; a claim after startup
-    // sends it here. A hand-started takeover (`startMessage` undefined) sends nothing: the
-    // operator's own session speaks for itself. Nor does the daemon's own controller, whose start
-    // message the daemon delivers once it reports ready below.
+    // Once per process, ever, and before the role claim and the subscription below, so no card on
+    // the role's lane and no wake on the controller topic can race the start turn for the one
+    // first-turn slot (LEGION-392): a card the listener forwards as soon as it records the role can
+    // arrive before the role claim resolves here. The session's first turn when it is idle; when
+    // the operator already started a turn, queued behind it as a follow-up, which starts no turn of
+    // its own. A hand-started takeover (`startMessage` undefined) sends nothing: the operator's own
+    // session speaks for itself. Nor does the daemon's own controller, whose start message the
+    // daemon delivers once it reports ready below.
     if (startMessage !== undefined && !startMessageSent) {
-      if (atStartup) {
-        dueStartMessage = startMessage;
-        const mark = envoyPluginInterface().startupTurn;
-        mark.session = sessionID;
-        mark.sentAt = undefined;
+      const mark = envoyPluginInterface().startupTurn;
+      mark.session = sessionID;
+      mark.sentAt = Date.now();
+      if ("isIdle" in context && context.isIdle?.() === false) {
+        pi.sendUserMessage(startMessage, { deliverAs: "followUp" });
       } else {
         pi.sendUserMessage(startMessage);
-        recordStartMessageSent();
       }
+      startMessageSent = true;
     }
+    await claimEnvoyRole(sessionID, registration.claimToken, envoyContext);
     await subscribeLegionNotice(
       sessionID,
       legionControllerNoticeSubject(project),
@@ -260,50 +249,54 @@ export function createControllerSession(deps: {
     controllerTranscript = launched ? sessionFile : undefined;
   };
 
+  /**
+   * Only the controller the daemon launched claims at `session_start`: it has no start message of
+   * its own to queue ahead of its role's lane, and its claim ends in the ready at which the daemon
+   * sends it one. The operator-launched controller claims from `/legion-controller-start`
+   * (`startCommand`), after Oh My Pi's startup.
+   */
   const handleSessionStart = async (context: SessionContext): Promise<void> => {
     if (classifySession(process.env).kind !== "controller") return;
+    if (!daemonLaunchedController(process.env)) return;
     const sessionID = context.sessionManager.getSessionId();
     if (controllerSessionID === undefined || controllerSessionID === sessionID) {
-      const running = claimFrom(context, true);
-      startupClaim = running;
-      try {
-        await running;
-      } finally {
-        if (startupClaim === running) startupClaim = undefined;
-      }
+      await claim(context);
     }
   };
 
   /**
-   * `/legion-controller-start`: sends the start message the claim at Oh My Pi's startup made due,
-   * as the session's first turn — or, when the operator started a turn first, queued behind it as
-   * a follow-up, which starts no turn of its own. A startup claim still running is waited for.
+   * `/legion-controller-start`, which `legion controller start` puts on Oh My Pi's command line
+   * and Oh My Pi runs once its startup is over and the TUI listens: the operator-launched
+   * controller's whole claim (`claim`), which sends the start message right before the role
+   * claim. A refusal anywhere in it is logged and shown to the operator as one warning naming
+   * `/legion-claim-controller`, which claims again and sends the start message once that claim
+   * succeeds, if it is still unsent; the command itself never fails past that notice. Once a claim
+   * has succeeded in this process — the command run again — and in a hand-started takeover or the
+   * controller the daemon launched (which claimed at `session_start`), there is nothing to do, and
+   * the command says so.
    */
-  const sendStartMessage = async (context: CommandContext): Promise<void> => {
-    const pending = startupClaim;
-    if (pending !== undefined) await pending.catch(() => undefined);
-    if (dueStartMessage !== undefined) {
-      const message = dueStartMessage;
-      if (context.isIdle?.() === false) pi.sendUserMessage(message, { deliverAs: "followUp" });
-      else pi.sendUserMessage(message);
-      recordStartMessageSent();
-      return;
-    }
+  const startCommand = async (context: CommandContext): Promise<void> => {
     if (
-      !startMessageSent &&
-      classifySession(process.env).kind === "controller" &&
-      !daemonLaunchedController(process.env)
+      classifySession(process.env).kind !== "controller" ||
+      daemonLaunchedController(process.env) ||
+      controllerSessionID !== undefined
     ) {
       context.ui.notify(
-        "legion: the controller claim failed, so no start message was sent. Run /legion-claim-controller to claim the controller again; it sends the start message once the claim succeeds.",
-        "warning"
+        "legion: nothing to do: the controller claim already succeeded in this process, or this session claims no controller from this command (a hand-started takeover, or the controller the daemon launched).",
+        "info"
       );
       return;
     }
-    context.ui.notify(
-      "legion: no controller start message to send: it was already sent, or this session has none.",
-      "info"
-    );
+    try {
+      await claim(context);
+    } catch (error) {
+      const message = messageFor(error);
+      console.error(`[legion] the controller claim failed: ${message}`);
+      context.ui.notify(
+        `legion: the controller claim failed: ${message}. Run /legion-claim-controller to claim again; it sends the start message once the claim succeeds.`,
+        "warning"
+      );
+    }
   };
 
   /**
@@ -342,7 +335,7 @@ export function createControllerSession(deps: {
     claim,
     handleSessionStart,
     reclaimAfterSessionChange,
-    sendStartMessage,
+    startCommand,
     isClaimedSession,
     mintGrant,
   };

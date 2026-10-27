@@ -347,34 +347,40 @@ status only through its tool's `set_status`.
 line with one positional word, `/legion-controller-start` (`daemon.ControllerStartCommand`). The
 message runs the controller skill's start procedure as the session's first turn, with nothing
 typed, ahead of any Envoy card or Legion notice that would otherwise race it for the session's one
-first-turn slot (LEGION-392). The claim `session_start` runs (`handleSessionStart` in
-`src/controller-session.ts`) does not send it: Oh My Pi holds every send a `session_start` handler
-makes and drains them at the end of its startup, so a turn started there runs inside the startup
-wait, before the TUI shows it or reads any input — no start message and no busy row on screen,
-Enter not taking typed text, Esc doing nothing. Instead, right after the role claim and before the
-controller-topic subscription opens, that claim makes the message due and sets the Envoy plugin
-interface's `startupTurn` to `{session, sentAt: undefined}`, keeping LEGION-392's order: the start
-is due before the subscription a wake could arrive on opens. Oh My Pi runs command-line words
-after its startup, once the TUI listens, and the extension command `legion-controller-start`
-(`extensions/legion.ts`, `sendStartMessage`) answers the word. It first waits for a startup claim
-still running (Oh My Pi moves on from a handler past its timeout, and the handler keeps running),
-then:
+first-turn slot (LEGION-392). It is sent once the registration is in, right before the Envoy role
+claim and so before the controller-topic subscription: nothing reaches the session on the role's
+lane before the role claim, nor on the controller topic before the subscription, so the start
+message is queued ahead of both. Not after the role claim: the listener forwards a card on the
+role's lane as soon as it records the role, and that card can reach the session before the role
+claim's own answer does, starting its turn first (`extensions/controller-start-omp.test.ts` saw it
+on the real binary). A role claim refused after the send leaves the start message sent.
+
+That order holds only outside Oh My Pi's startup, so the operator's controller claims nothing at
+`session_start` (`handleSessionStart` in `src/controller-session.ts` returns for it; the session is
+titled and its `legion` tool registered, answering that no claim is registered until one is). Oh
+My Pi holds every send a `session_start` handler makes and drains them at the end of its startup,
+while an Envoy card is a steer that starts its own turn: a role claim made during startup lets a
+card on the role's lane, or a notice on the controller topic, start its turn ahead of the held start
+message, and a turn started there runs inside the startup wait, before the TUI shows it or reads any
+input — no start message and no busy row on screen, Enter not taking typed text, Esc doing nothing.
+Oh My Pi runs command-line words after its startup, once the TUI listens, and the extension command
+`legion-controller-start` (`extensions/legion.ts`, `startCommand`) answers the word:
 
 | When the command runs | What it does |
 | --- | --- |
-| The start message is due | Sends it as the session's first turn, or, when the operator already started a turn (`isIdle()` false), as a follow-up behind that turn (`deliverAs: "followUp"`), which starts no turn of its own; then stamps `startupTurn.sentAt` |
-| Nothing was sent, in a controller session (`LEGION_CONTROLLER=1`) that is not the daemon's: its claim failed before the start was due | A warning notice: no start message was sent, and `/legion-claim-controller` claims again and sends it once the claim succeeds |
-| Nothing is due: the message was sent, the session is the daemon-launched controller, or it is no controller session | An info notice that there is nothing to send |
+| The operator's controller (`LEGION_CONTROLLER=1`, not the daemon's) whose claim has not succeeded in this process | Runs the whole claim: reads and validates `LEGION_CONTROLLER_START_MESSAGE` before any daemon call, reads the daemon's state, registers on `claims/register`, sets `startupTurn` to `{session, sentAt: now}` and sends the start message as the session's first turn — or, when the operator already started a turn (`isIdle()` false), as a follow-up behind that turn (`deliverAs: "followUp"`), which starts no turn of its own — then claims the Envoy role and subscribes to the controller topic |
+| That claim is refused at any step | Logs it (`[legion] the controller claim failed: …`) and shows one warning notice naming the refusal and `/legion-claim-controller`, which claims again and sends the start message once the claim succeeds; the command itself does not fail |
+| The claim already succeeded in this process (the command run again), the session is the daemon-launched controller, or it is a hand-started session | An info notice that there is nothing to do |
 
-A claim run after startup — `/legion-claim-controller`, a re-claim after a session change — is
-outside the startup wait and sends a message still unsent itself, stamping `sentAt` when the mark
-names a session. The message goes out once per process (`startMessageSent`): a retried claim after
-a failure past the role claim, and a later `/legion-claim-controller`, send nothing more.
-`startupTurn` names the session until its first run starts: that session's first `agent_start`
-(the start turn, or the operator's turn the start message follows) clears it, and so does its
-`session_shutdown`; a `task` subagent's run, under its own session id, clears nothing. The
-daemon-launched controller sends no start message and sets the mark with `sentAt` now right before
-`claims/ready`, after which the daemon delivers its start prompt.
+A claim run any other way — `/legion-claim-controller`, a re-claim after a session change — sends a
+message still unsent the same way, setting the mark right before the send. The message goes out
+once per process (`startMessageSent`): a retried claim after a failure past the send, and a
+later `/legion-claim-controller`, send nothing more. `startupTurn` names the session until its
+first run starts: that session's first `agent_start` (the start turn, or the operator's turn the
+start message follows) clears it, and so does its `session_shutdown`; a `task` subagent's run,
+under its own session id, clears nothing. The daemon-launched controller keeps its whole claim at
+`session_start`: it sends no start message, sets the mark with `sentAt` now right before
+`claims/ready`, after which the daemon delivers its start prompt, and exits on any failure.
 
 ## Session titles
 
@@ -489,10 +495,10 @@ which hands both plugin entries to the Oh My Pi child by path.
 | --- | --- | --- |
 | OMP extension entry | `extensions/legion.ts` | The one entry; ships as `dist/legion.js` in `@sjawhar/pi-legion`. Inert without `LEGION_TREE`/`LEGION_ROLE`/`LEGION_CONTROLLER` in the environment; in a Legion session it refuses to run without the Envoy plugin's interface (the section above). The Envoy entry is `../pi-envoy/extensions/envoy.ts` (`packages/pi-envoy/AGENTS.md`) |
 | Legion lifecycle modules | `src/` | Classification (`classify.ts`) and the claim session (`claim-session.ts`, an adapter over `@legion/pi-shared/legion-claim-core`; see Daemon contract), jj attribution (`jj-attribution.ts`: the `JJ_CONFIG` overlay that adds the `Omp-Session` trailer; the commit identity itself is not the extension's — the daemon puts `JJ_USER`/`JJ_EMAIL` and the Git author/committer variables on the pane, and worker boot writes no jj config), the session title (`session-title.ts`; see Session titles), the `legion` tool (`tools.ts`: the phase ops' schema fields, description template and executor are `@legion/pi-shared/legion-phase-ops`, beside which it serves the architect's and the controller's operations; its description, which `tools.test.ts` pins word for word, states no sentence on `read_record` or `request_backward_move`; every operation that writes mints its grant on `/grants` in-process and posts it with the request; nothing is written to the pane, and no tool call is wrapped or refused), the phase stall (`phase-stall.ts`) |
-| Controller session | `src/controller-session.ts` | Owns the controller's identity, the transcript a session navigation compares to decide whether to claim again, the claim and reclaim hooks, the start message's send (`sendStartMessage`, behind `/legion-controller-start`; see The controller's start turn), and grant minting: it reads the daemon's project, registers on `claims/register` with the controller capability, claims the controller role, and mints with the registration's secret (see Daemon contract). The `legion` tool's `set_status` mints through it (`mintGrant`) and posts the grant with its request. |
+| Controller session | `src/controller-session.ts` | Owns the controller's identity, the transcript a session navigation compares to decide whether to claim again, the claim and reclaim hooks, the operator's controller's claim behind `/legion-controller-start` (`startCommand`, which sends the start message right before the role claim; see The controller's start turn), and grant minting: it reads the daemon's project, registers on `claims/register` with the controller capability, claims the controller role, and mints with the registration's secret (see Daemon contract). The `legion` tool's `set_status` mints through it (`mintGrant`) and posts the grant with its request. |
 | Shared modules and the interface | `../pi-shared/` | `@legion/pi-shared`: the interface this entry reads (`interface`), the role-claim bridge, the injected-user-turn record, the subagent check, the host types and `toolSuccess`/`toolFailure`, and the Legion modules claude-envoy's MCP server shares with this entry: the daemon client (`daemon-client`), the claim boot (`legion-claim-core`), the `legion` tool's phase ops (`legion-phase-ops`), the handoff-commit lookup (`handoff-commit`) and the stale git lock note (`git-lock`); inlined into `dist/legion.js` by `bun build`. See `packages/pi-shared/AGENTS.md` |
 | Extension unit tests | `extensions/legion.test.ts` | Mocked Pi and NATS surface; every test starts from no `LEGION_*`/`ENVOY_*`/`DISPATCH_*` environment and sets only what it declares, except `ENVOY_CONFIG_FILE`, which the file points at an envoy.json that holds no section before it imports the Envoy entry (the entry picks its file at module load) and `beforeEach` sets again, with `OMP_PROFILE` and `PI_CODING_AGENT_DIR` unset, so no caller's envoy.json reaches a pane; each stubs `fetch` itself, and `afterEach` resets the process-wide interface (`resetEnvoyPluginInterfaceForTests`) so one test's bound Envoy instance or bootstrapped session never reaches the next. Pins the three Envoy-plugin refusals, that `/legion-claim-controller` answers the sentence without exiting, and that `register_gate`'s lookup reads the envoy.json the Envoy entry chose |
-| Both entries in one process | `extensions/legion-role-claim.test.ts`, `extensions/legion-phase-stall-omp.test.ts`, `extensions/legion-role-tools-omp.test.ts`, `extensions/controller-start-omp.test.ts` | Test-only; the shipped sources never import the sibling. `legion-role-claim.test.ts` loads `../pi-envoy/extensions/envoy.ts` by relative path: the role claim through the interface with Legion initialised first. The phase-stall and role-tools omp tests run through the harness's `runLegionPane` (`@legion/pi-shared/test/omp-harness`), which names both entries by path for the Oh My Pi child: the phase stall, and no role refused a tool, on the pinned Oh My Pi (`LEGION_TEST_OMP`). `controller-start-omp.test.ts` runs the operator's controller as `legion controller start` does, interactive Oh My Pi under a pseudo-terminal (the harness's `spawnInteractive`) with both entries by path and `/legion-controller-start` on its command line, against a stand-in gateway, daemon and Envoy listener and the real NATS server the role claim needs (`LEGION_TEST_NATS_URL`): the start turn runs after startup and shows on screen, the operator can type during it, Esc interrupts it, and the start message starts the first turn once |
+| Both entries in one process | `extensions/legion-role-claim.test.ts`, `extensions/legion-phase-stall-omp.test.ts`, `extensions/legion-role-tools-omp.test.ts`, `extensions/controller-start-omp.test.ts` | Test-only; the shipped sources never import the sibling. `legion-role-claim.test.ts` loads `../pi-envoy/extensions/envoy.ts` by relative path: the role claim through the interface with Legion initialised first. The phase-stall and role-tools omp tests run through the harness's `runLegionPane` (`@legion/pi-shared/test/omp-harness`), which names both entries by path for the Oh My Pi child: the phase stall, and no role refused a tool, on the pinned Oh My Pi (`LEGION_TEST_OMP`). `controller-start-omp.test.ts` runs the operator's controller as `legion controller start` does, interactive Oh My Pi under a pseudo-terminal (the harness's `spawnInteractive`) with both entries by path and `/legion-controller-start` on its command line, against a stand-in gateway, daemon and Envoy listener and the real NATS server the role claim needs (`LEGION_TEST_NATS_URL`), over which it also sends the controller a role-lane card and a controller-topic notice: the start turn runs after startup and shows on screen, the operator can type during it, Esc interrupts it, the start message starts the first turn once, a card published the moment the role is claimed and a notice published the moment the controller topic is registered both reach the model after the start message, and a refused claim shows its warning and sends nothing |
 | Shipped agents | `agents/`, `src/shipped-agents.test.ts` | The task agents Legion's prompts dispatch: `oracle`, the reviewer's pair `thermonuclear-deep-review` and `thermonuclear-code-quality`, `deep-worker`, and the planner's `plan-gap-analyst` and `plan-reviewer`. The root architect also runs the planner's two on its spec before every approval request. Each agent declares the name of its file, and its model only as role aliases. The planner's two carry `bash` and no edit or write tool. Oh My Pi has no per-agent command limit, so their prompts hold them to read-only commands |
 | Daemon contract pin | `src/daemon-api-version.test.ts` | Pins `legion.daemonApiVersion` to `packages/contracts/fixtures/daemon-api/version.json`, which the daemon's golden test writes |
 | Capability report | `src/capability-report.ts`, `src/capability-report.test.ts` | The six live capability checks a claim session runs at boot and sends with `claims/ready` (see Daemon contract): `measureCapabilities` over a `CapabilityHost` that wraps every Oh My Pi import and the two child commands (`dispatch read --issue <issue>`, `gh api graphql {viewer{login}}`), with the budgets (8 s a check, 10 s the report) and each row's detail strings; `ompCapabilityHost` is the production host, string-literal `import()` only. The test fakes the host; `extensions/legion.test.ts` substitutes one through `setLegionCapabilityHostForTests` |
@@ -512,6 +518,9 @@ which hands both plugin entries to the Oh My Pi child by path.
 
 ## Checks
 
-`bunx tsc --noEmit`, `bun test`, `bunx biome check extensions/ src/`, each from this directory;
+`bunx tsc --noEmit`, `bun run test`, `bunx biome check extensions/ src/`, each from this directory;
 `LEGION_TEST_OMP=<omp> bun test extensions/legion-phase-stall-omp.test.ts extensions/legion-role-tools-omp.test.ts` and
-`LEGION_TEST_OMP=<omp> LEGION_TEST_NATS_URL=<nats> bun test extensions/controller-start-omp.test.ts` for the real binary.
+`LEGION_TEST_OMP=<omp> LEGION_TEST_NATS_URL=<nats> bun test ./extensions/controller-start-omp.test.ts` for the real binary.
+`bun run test` runs `controller-start-omp.test.ts` in a process of its own: `extensions/legion.test.ts`
+replaces the `nats` module for the whole process (`mock.module`), and that file's card case
+publishes over the real NATS server, so a plain `bun test` with both variables set fails it.

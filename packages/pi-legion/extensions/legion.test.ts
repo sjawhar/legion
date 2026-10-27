@@ -2338,6 +2338,8 @@ async function launchedController(options: {
   /** The Go-written state document the daemon's `GET /legion/v1/state` answers with, its project
    * replaced by `daemonProject`: `state.json` unless a test names another. */
   readonly stateFixture?: string;
+  /** Called with each request's path as the stub takes it, before it answers. */
+  readonly onRequest?: (path: string) => void;
 }): Promise<LaunchedController> {
   const project = options.project ?? "omp";
   const token = `legion-${project}-controller`;
@@ -2387,6 +2389,7 @@ async function launchedController(options: {
     const url = new URL(input.toString());
     const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
     requests.push({ path: url.pathname, body });
+    options.onRequest?.(url.pathname);
     if (url.pathname === "/legion/v1/claims/register") {
       return (await options.register?.(body)) ?? Response.json(registration);
     }
@@ -2486,30 +2489,86 @@ interface CommandNotice {
   readonly level: "info" | "warning";
 }
 
-/** Runs `/legion-controller-start` in `sessionId` as Oh My Pi runs a command-line word: with the
+/** Runs `/legion-controller-start` as Oh My Pi runs a command-line word: with `context` as the
  * session's command context, whose `isIdle()` answers `idle` when given, and resolves to what it
  * notified. */
 async function runStartCommand(
-  controller: LaunchedController,
-  sessionId: string,
+  fixture: { readonly commands: readonly RegisteredCommand[] },
+  context: SessionContext,
   options: { readonly idle?: boolean } = {}
 ): Promise<CommandNotice[]> {
-  const command = controller.commands.find((entry) => entry.name === "legion-controller-start");
+  const command = fixture.commands.find((entry) => entry.name === "legion-controller-start");
   if (command === undefined) throw new Error("controller start command was not registered");
   const notices: CommandNotice[] = [];
   const { idle } = options;
   await command.handler("", {
-    ...controller.context(sessionId),
+    ...context,
     ...(idle === undefined ? {} : { isIdle: () => idle }),
     ui: { notify: (message, level) => notices.push({ message, level }) },
   });
   return notices;
 }
 
+/** Starts the operator's controller as `legion controller start` runs it: Oh My Pi's startup
+ * (`session_start`, with `context`), then `/legion-controller-start` from its command line, which
+ * claims the controller. Resolves to what the command notified. */
+async function startOperatorController(
+  fixture: {
+    readonly handlers: Map<string, Handler>;
+    readonly commands: readonly RegisteredCommand[];
+  },
+  context: SessionContext,
+  options: { readonly idle?: boolean } = {}
+): Promise<CommandNotice[]> {
+  await fixture.handlers.get("session_start")?.({}, context);
+  return runStartCommand(fixture, context, options);
+}
+
+/** The info `/legion-controller-start` gives when it has nothing to do. */
+const NOTHING_TO_DO = {
+  message: expect.stringContaining("legion: nothing to do"),
+  level: "info",
+} as const;
+
+/** The one warning `/legion-controller-start` gives when its claim fails with `error`. */
+const claimRefused = (error: string): CommandNotice => ({
+  message: `legion: the controller claim failed: ${error}. Run /legion-claim-controller to claim again; it sends the start message once the claim succeeds.`,
+  level: "warning",
+});
+
+/** `startOperatorController` for a claim that is refused: resolves to what the command notified
+ * and what was logged, which is kept off the test's output. */
+async function startRefusedController(
+  fixture: Parameters<typeof startOperatorController>[0],
+  context: SessionContext
+): Promise<{ readonly notices: CommandNotice[]; readonly errors: string[] }> {
+  const errors: string[] = [];
+  const errorLog = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+    errors.push(args.map(String).join(" "));
+  });
+  try {
+    return { notices: await startOperatorController(fixture, context), errors };
+  } finally {
+    errorLog.mockRestore();
+  }
+}
+
 describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
-  test("reads the daemon's project, registers on the claim route with its capability, then claims the controller role, and asks nothing else", async () => {
+  // Oh My Pi holds every send a session_start handler makes and drains them at the end of its
+  // startup, and an Envoy card starts its own turn, so a role claim made there would let a card
+  // take the first turn: the operator's controller claims nothing until its start command runs.
+  test("its startup makes no daemon call and claims no role; /legion-controller-start reads the daemon's project, registers on the claim route with its capability, then claims the controller role, and asks nothing else", async () => {
     const controller = await launchedController({ sessionId: "ses_controller" });
     await controller.handlers.get("session_start")?.({}, controller.context("ses_controller"));
+
+    expect(daemonRequests(controller.requests)).toEqual([]);
+    expect(controller.requests.map((request) => request.path)).not.toContain("/v1/roles/set");
+    expect(controller.sentUserMessages).toEqual([]);
+    // The controller's `legion` tool: `read_state` and `set_status`, registered at startup and
+    // answering only once the claim has registered the session.
+    expect(controller.tools.map((tool) => tool.name)).toContain("legion");
+
+    expect(await runStartCommand(controller, controller.context("ses_controller"))).toEqual([]);
 
     expect(daemonRequests(controller.requests)).toEqual([
       { path: "/legion/v1/state", body: undefined },
@@ -2533,87 +2592,142 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     );
     expect(roleClaim).toBeGreaterThan(paths.indexOf("/legion/v1/claims/register"));
     expect(controller.exits).toEqual([]);
-    // The controller's `legion` tool: `read_state` and `set_status`, registered with its claim.
-    expect(controller.tools.map((tool) => tool.name)).toContain("legion");
   });
 
   // LEGION-392's race: Oh My Pi's own positional-argument first message can lose the session's one
-  // first-turn slot to an Envoy notice. A send from session_start would run inside Oh My Pi's
-  // startup wait, with no TUI and no input, so the claim there only marks the start turn due —
-  // right after the role claim and before the live wake subscription opens, so the Envoy entry
-  // holds its startup wake behind it — and `/legion-controller-start`, which `legion controller
-  // start` puts on Oh My Pi's command line, sends it after startup.
-  test("the startup claim sends nothing and marks the start turn due before the controller-topic subscribe opens; /legion-controller-start then sends LEGION_CONTROLLER_START_MESSAGE once", async () => {
+  // first-turn slot to an Envoy notice. The start command's claim sends the start message once the
+  // registration is in, right before the role claim, so neither the role's lane nor the controller
+  // topic can deliver anything ahead of it: a card the listener forwards as soon as it records the
+  // role can reach the session before the role claim's answer does. The startup-turn mark is set
+  // sent right before the send.
+  test("/legion-controller-start sends LEGION_CONTROLLER_START_MESSAGE once, after the registration and before the role claim and the controller-topic subscribe, marking the start turn sent before it", async () => {
     const topic = "notifications.legion.omp.controller";
+    const message = "Legion controller start: follow skill://legion-controller's start procedure";
+    const sentAtRegister: string[][] = [];
+    const sentAtRoleClaim: string[][] = [];
     const controller = await launchedController({
       sessionId: "ses_controller_start",
-      startMessage: "Legion controller start: follow skill://legion-controller's start procedure",
+      startMessage: message,
+      onRequest: (path) => {
+        if (path === "/legion/v1/claims/register") {
+          sentAtRegister.push([...controller.sentUserMessages]);
+        }
+        if (path === "/v1/roles/set") sentAtRoleClaim.push([...controller.sentUserMessages]);
+      },
     });
-    const markAtSubscribe: unknown[] = [];
+    const atSubscribe: { sent: string[]; mark: unknown }[] = [];
     natsSubscribeObserver = (subject) => {
-      if (subject === topic) markAtSubscribe.push({ ...envoyPluginInterface().startupTurn });
+      if (subject === topic) {
+        atSubscribe.push({
+          sent: [...controller.sentUserMessages],
+          mark: { ...envoyPluginInterface().startupTurn },
+        });
+      }
     };
-    await controller.handlers.get("session_start")?.(
-      {},
-      controller.context("ses_controller_start")
-    );
-
+    const context = controller.context("ses_controller_start");
+    await controller.handlers.get("session_start")?.({}, context);
     expect(controller.sentUserMessages).toEqual([]);
-    expect(markAtSubscribe.length).toBeGreaterThan(0);
-    expect(markAtSubscribe[0]).toEqual({ session: "ses_controller_start", sentAt: undefined });
+    expect(atSubscribe).toEqual([]);
 
     const before = Date.now();
-    expect(await runStartCommand(controller, "ses_controller_start")).toEqual([]);
+    expect(await runStartCommand(controller, context)).toEqual([]);
     const after = Date.now();
 
-    expect(controller.sentUserMessages).toEqual([
-      "Legion controller start: follow skill://legion-controller's start procedure",
+    expect(sentAtRegister).toEqual([[]]);
+    expect(sentAtRoleClaim).toEqual([[message]]);
+    expect(atSubscribe).toEqual([
+      { sent: [message], mark: { session: "ses_controller_start", sentAt: expect.any(Number) } },
     ]);
+    expect(controller.sentUserMessages).toEqual([message]);
     expect(controller.sentUserMessageOptions).toEqual([undefined]);
     const mark = envoyPluginInterface().startupTurn;
     expect(mark.session).toBe("ses_controller_start");
     expect(mark.sentAt).toBeGreaterThanOrEqual(before);
     expect(mark.sentAt).toBeLessThanOrEqual(after);
 
-    // A second run finds the start already sent: it says so and sends nothing.
-    expect(await runStartCommand(controller, "ses_controller_start")).toEqual([
-      { message: expect.stringContaining("no controller start message to send"), level: "info" },
-    ]);
-    expect(controller.sentUserMessages).toEqual([
-      "Legion controller start: follow skill://legion-controller's start procedure",
-    ]);
+    // A second run finds the claim done: it says so, and neither claims nor sends again.
+    const registrations = controller.requests.filter(
+      (request) => request.path === "/legion/v1/claims/register"
+    ).length;
+    expect(await runStartCommand(controller, context)).toEqual([NOTHING_TO_DO]);
+    expect(controller.sentUserMessages).toEqual([message]);
+    expect(
+      controller.requests.filter((request) => request.path === "/legion/v1/claims/register")
+    ).toHaveLength(registrations);
   });
 
   // The start message is read and validated before anything that mutates daemon-side state
   // (registerController, which replaces the running controller's session; claimEnvoyRole, which
   // takes its role): a missing value refuses here, leaving the previous controller, if any, still
   // running and still registered.
-  test("a launched claim with LEGION_CONTROLLER_START_MESSAGE unset refuses and makes no /legion/v1/claims/register request", async () => {
+  test("a launched claim with LEGION_CONTROLLER_START_MESSAGE unset warns and makes no /legion/v1/claims/register request", async () => {
     const controller = await launchedController({ sessionId: "ses_controller_no_start_message" });
     delete process.env.LEGION_CONTROLLER_START_MESSAGE;
 
-    await expect(
-      controller.handlers.get("session_start")?.(
-        {},
-        controller.context("ses_controller_no_start_message")
-      )
-    ).rejects.toThrow("LEGION_CONTROLLER_START_MESSAGE is required for Legion");
+    const { notices } = await startRefusedController(
+      controller,
+      controller.context("ses_controller_no_start_message")
+    );
 
+    expect(notices).toEqual([
+      claimRefused("LEGION_CONTROLLER_START_MESSAGE is required for Legion"),
+    ]);
     expect(
       controller.requests.filter((request) => request.path === "/legion/v1/claims/register")
     ).toEqual([]);
     expect(controller.sentUserMessages).toEqual([]);
   });
 
+  // The daemon's refusal reaches the operator as one warning naming it and the command that claims
+  // again; that command sends the start message once its claim succeeds.
+  test("a refused registration warns naming the daemon's refusal and /legion-claim-controller, sends nothing, and /legion-claim-controller then claims and sends the start message once", async () => {
+    let refuse = true;
+    const controller = await launchedController({
+      sessionId: "ses_controller_refused",
+      register: () =>
+        refuse ? Response.json({ error: "capability revoked" }, { status: 403 }) : undefined,
+    });
+    const { notices, errors } = await startRefusedController(
+      controller,
+      controller.context("ses_controller_refused")
+    );
+
+    expect(notices).toEqual([
+      claimRefused("POST /legion/v1/claims/register failed with 403: capability revoked"),
+    ]);
+    expect(errors).toContain(
+      "[legion] the controller claim failed: POST /legion/v1/claims/register failed with 403: capability revoked"
+    );
+    expect(controller.sentUserMessages).toEqual([]);
+    expect(controller.requests.map((request) => request.path)).not.toContain("/v1/roles/set");
+    expect(envoyPluginInterface().startupTurn).toEqual({ session: undefined, sentAt: undefined });
+
+    refuse = false;
+    const claimCommand = controller.commands.find(
+      (command) => command.name === "legion-claim-controller"
+    );
+    if (claimCommand === undefined) throw new Error("controller claim command was not registered");
+    await claimCommand.handler("", controller.context("ses_controller_refused"));
+    await claimCommand.handler("", controller.context("ses_controller_refused"));
+
+    expect(controller.sentUserMessages).toEqual([
+      "Legion controller start: follow skill://legion-controller",
+    ]);
+    expect(envoyPluginInterface().startupTurn).toEqual({
+      session: "ses_controller_refused",
+      sentAt: expect.any(Number),
+    });
+  });
+
   // startMessageSent, not controllerSessionID, gates the send: a claim that throws after the
-  // start is due (here, the controller-topic subscribe) never reaches the controllerSessionID
+  // start is sent (here, the controller-topic subscribe) never reaches the controllerSessionID
   // assignment at the end of claim(), so a guard keyed on controllerSessionID would send a second
   // time on retry. Forcing the subscribe itself to throw (rather than a connect envoy.ts's own
   // session_start handler retries quietly in the background) needs the same technique the
   // subscription-opening tests below use: close the connection envoy.ts already opened eagerly,
   // from the registration's own callback, so ensureConnection() inside subscribe() dials again —
   // only then does a rejected dial reach subscribeNotice uncaught.
-  test("a startup claim whose controller-topic subscribe throws, then the start command, then a retried claim, sends one start message in total", async () => {
+  test("a start command whose controller-topic subscribe throws after the send, then a retried claim, sends one start message in total", async () => {
     let subscribeAttempts = 0;
     const controller = await launchedController({
       sessionId: "ses_controller_subscribe_retry",
@@ -2630,23 +2744,19 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       },
     });
 
-    await expect(
-      controller.handlers.get("session_start")?.(
-        {},
-        controller.context("ses_controller_subscribe_retry")
-      )
-    ).rejects.toThrow("nats: connection refused");
-    expect(controller.sentUserMessages).toEqual([]);
-    expect(envoyPluginInterface().startupTurn).toEqual({
-      session: "ses_controller_subscribe_retry",
-      sentAt: undefined,
-    });
-
-    // The role claim went through before the subscribe threw, so the start is due and sent.
-    expect(await runStartCommand(controller, "ses_controller_subscribe_retry")).toEqual([]);
+    const { notices } = await startRefusedController(
+      controller,
+      controller.context("ses_controller_subscribe_retry")
+    );
+    expect(notices).toEqual([claimRefused("nats: connection refused")]);
+    // The start was sent before the role claim, which went through; then the subscribe threw.
     expect(controller.sentUserMessages).toEqual([
       "Legion controller start: follow skill://legion-controller",
     ]);
+    expect(envoyPluginInterface().startupTurn).toEqual({
+      session: "ses_controller_subscribe_retry",
+      sentAt: expect.any(Number),
+    });
 
     // Retried in the same session and process: /legion-claim-controller re-enters claim()
     // directly, as a lost-claim recovery would.
@@ -2679,20 +2789,16 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     await claimCommand.handler("", controller.context("ses_controller_takeover_only"));
 
     expect(controller.sentUserMessages).toEqual([]);
-    // Nor does the start command run there: this process has no start message to send.
-    expect(await runStartCommand(controller, "ses_controller_takeover_only")).toEqual([
-      { message: expect.stringContaining("no controller start message to send"), level: "info" },
-    ]);
+    // Nor does the start command run there: this process claims no controller from it.
+    expect(
+      await runStartCommand(controller, controller.context("ses_controller_takeover_only"))
+    ).toEqual([NOTHING_TO_DO]);
     expect(controller.sentUserMessages).toEqual([]);
   });
 
   test("a hand-started takeover sends no start message of its own: the operator's own session speaks for itself", async () => {
     const controller = await launchedController({ sessionId: "ses_controller_takeover_pane" });
-    await controller.handlers.get("session_start")?.(
-      {},
-      controller.context("ses_controller_takeover_pane")
-    );
-    await runStartCommand(controller, "ses_controller_takeover_pane");
+    await startOperatorController(controller, controller.context("ses_controller_takeover_pane"));
     delete process.env.LEGION_CONTROLLER;
     delete process.env.LEGION_ROLE;
     const claimCommand = controller.commands.find(
@@ -2700,9 +2806,9 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     );
     if (claimCommand === undefined) throw new Error("controller claim command was not registered");
     await claimCommand.handler("", controller.context("ses_controller_takeover_hand"));
-    expect(await runStartCommand(controller, "ses_controller_takeover_hand")).toEqual([
-      { message: expect.stringContaining("no controller start message to send"), level: "info" },
-    ]);
+    expect(
+      await runStartCommand(controller, controller.context("ses_controller_takeover_hand"))
+    ).toEqual([NOTHING_TO_DO]);
 
     // One send, from the fresh launch's start command; the hand-started takeover added none.
     expect(controller.sentUserMessages).toEqual([
@@ -2712,50 +2818,15 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
 
   test("a session switch (/new, /resume) does not resend the start message: only a fresh process launch does", async () => {
     const controller = await launchedController({ sessionId: "ses_controller_switch_before" });
-    await controller.handlers.get("session_start")?.(
-      {},
-      controller.context("ses_controller_switch_before")
-    );
-    await runStartCommand(controller, "ses_controller_switch_before");
+    await startOperatorController(controller, controller.context("ses_controller_switch_before"));
     await controller.handlers.get("session_switch")?.(
       {},
       controller.context("ses_controller_switch_after", "/tmp/ses_controller_switch_after.jsonl")
     );
-    expect(await runStartCommand(controller, "ses_controller_switch_after")).toEqual([
-      { message: expect.stringContaining("no controller start message to send"), level: "info" },
-    ]);
+    expect(
+      await runStartCommand(controller, controller.context("ses_controller_switch_after"))
+    ).toEqual([NOTHING_TO_DO]);
 
-    expect(controller.sentUserMessages).toEqual([
-      "Legion controller start: follow skill://legion-controller",
-    ]);
-  });
-
-  // Oh My Pi gives a session_start handler 30 s and then moves on, leaving it running, so the
-  // command-line `/legion-controller-start` can arrive while the startup claim still runs.
-  test("the start command run while the startup claim is still running waits for it, then sends the start message once", async () => {
-    const registering = Promise.withResolvers<void>();
-    const answer = Promise.withResolvers<void>();
-    const controller = await launchedController({
-      sessionId: "ses_controller_slow_claim",
-      register: async () => {
-        registering.resolve();
-        await answer.promise;
-        return undefined;
-      },
-    });
-    const starting = controller.handlers.get("session_start")?.(
-      {},
-      controller.context("ses_controller_slow_claim")
-    );
-    await registering.promise;
-    // Without waiting, the command would find nothing due and warn, and the claim would then
-    // leave its start due with nothing left to send it.
-    const command = runStartCommand(controller, "ses_controller_slow_claim");
-    expect(controller.sentUserMessages).toEqual([]);
-
-    answer.resolve();
-    await starting;
-    expect(await command).toEqual([]);
     expect(controller.sentUserMessages).toEqual([
       "Legion controller start: follow skill://legion-controller",
     ]);
@@ -2763,48 +2834,26 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
 
   test("the start command run while the operator's own first turn runs queues the start message behind it as a follow-up", async () => {
     const controller = await launchedController({ sessionId: "ses_controller_typed_first" });
-    await controller.handlers.get("session_start")?.(
-      {},
-      controller.context("ses_controller_typed_first")
-    );
 
     expect(
-      await runStartCommand(controller, "ses_controller_typed_first", { idle: false })
+      await startOperatorController(controller, controller.context("ses_controller_typed_first"), {
+        idle: false,
+      })
     ).toEqual([]);
 
     expect(controller.sentUserMessages).toEqual([
       "Legion controller start: follow skill://legion-controller",
     ]);
     expect(controller.sentUserMessageOptions).toEqual([{ deliverAs: "followUp" }]);
-    expect(envoyPluginInterface().startupTurn.sentAt).toEqual(expect.any(Number));
-  });
-
-  test("the start command after a startup claim that failed before the role claim warns that nothing was sent and names /legion-claim-controller", async () => {
-    const controller = await launchedController({
-      sessionId: "ses_controller_refused",
-      register: () => Response.json({ error: "capability revoked" }, { status: 403 }),
+    expect(envoyPluginInterface().startupTurn).toEqual({
+      session: "ses_controller_typed_first",
+      sentAt: expect.any(Number),
     });
-    await expect(
-      controller.handlers.get("session_start")?.({}, controller.context("ses_controller_refused"))
-    ).rejects.toThrow();
-
-    const notices = await runStartCommand(controller, "ses_controller_refused");
-
-    expect(notices).toEqual([
-      { message: expect.stringContaining("/legion-claim-controller"), level: "warning" },
-    ]);
-    expect(notices[0]?.message).toContain("no start message was sent");
-    expect(controller.sentUserMessages).toEqual([]);
-    expect(envoyPluginInterface().startupTurn).toEqual({ session: undefined, sentAt: undefined });
   });
 
   test("the session's first run clears the startup-turn mark; a run in another session (a task subagent) leaves it", async () => {
     const controller = await launchedController({ sessionId: "ses_controller_first_run" });
-    await controller.handlers.get("session_start")?.(
-      {},
-      controller.context("ses_controller_first_run")
-    );
-    await runStartCommand(controller, "ses_controller_first_run");
+    await startOperatorController(controller, controller.context("ses_controller_first_run"));
     const sent = { ...envoyPluginInterface().startupTurn };
     expect(sent.session).toBe("ses_controller_first_run");
 
@@ -2820,10 +2869,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
 
   test("the session's shutdown clears the startup-turn mark", async () => {
     const controller = await launchedController({ sessionId: "ses_controller_shutdown" });
-    await controller.handlers.get("session_start")?.(
-      {},
-      controller.context("ses_controller_shutdown")
-    );
+    await startOperatorController(controller, controller.context("ses_controller_shutdown"));
     expect(envoyPluginInterface().startupTurn.session).toBe("ses_controller_shutdown");
 
     await controller.handlers.get("session_shutdown")?.(
@@ -2869,7 +2915,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
         controller.context("ses_controller_pod")
       );
       // Its start command, run while the process is still the daemon's controller.
-      commandNotices = await runStartCommand(controller, "ses_controller_pod");
+      commandNotices = await runStartCommand(controller, controller.context("ses_controller_pod"));
     } finally {
       delete process.env.LEGION_BOOT_TOKEN_FILE;
     }
@@ -2902,10 +2948,9 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     const { sentAt } = markAtReady[0] as { readonly sentAt: number };
     expect(sentAt).toBeGreaterThanOrEqual(before);
     expect(sentAt).toBeLessThanOrEqual(Date.now());
-    // Its start command had nothing to send: the daemon delivers the start message.
-    expect(commandNotices).toEqual([
-      { message: expect.stringContaining("no controller start message to send"), level: "info" },
-    ]);
+    // Its start command had nothing to do: it claimed at session_start, and the daemon delivers
+    // the start message.
+    expect(commandNotices).toEqual([NOTHING_TO_DO]);
     expect(controller.sentUserMessages).toEqual([]);
     expect(controller.exits).toEqual([]);
   });
@@ -2942,7 +2987,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
   test("claims with the capability LEGION_CONTROLLER_SECRET_FILE names over LEGION_CONTROLLER_SECRET, and /legion-claim-controller moves the role to a hand-started session", async () => {
     const controller = await launchedController({ sessionId: "ses_controller_pane" });
     process.env.LEGION_CONTROLLER_SECRET = "decoy";
-    await controller.handlers.get("session_start")?.({}, controller.context("ses_controller_pane"));
+    await startOperatorController(controller, controller.context("ses_controller_pane"));
     // A hand-started takeover session carries no controller marker.
     delete process.env.LEGION_CONTROLLER;
     delete process.env.LEGION_ROLE;
@@ -2975,7 +3020,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       grant: () => Response.json({ error: "Invalid controller capability" }, { status: 403 }),
     });
     const context = controller.context("ses_controller_refused");
-    await controller.handlers.get("session_start")?.({}, context);
+    await startOperatorController(controller, context);
     const legion = controller.tools.find((tool) => tool.name === "legion");
 
     await expect(
@@ -3002,8 +3047,8 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
 
   test("a tree navigation that changes nothing and a task subagent's switch claim nothing; a tree navigation after the transcript moved under the same id claims again with the moved file", async () => {
     const controller = await launchedController({ sessionId: "ses_pane_first" });
-    await controller.handlers.get("session_start")?.(
-      {},
+    await startOperatorController(
+      controller,
       controller.context("ses_pane_first", "/tmp/first.jsonl")
     );
     const registrations = () =>
@@ -3059,7 +3104,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       const controller = await launchedController({ sessionId: "ses_pane_first", order });
       const paneTicks: (() => void)[] = [];
       const pane = controllerPane(paneTicks);
-      await controller.handlers.get("session_start")?.({}, pane.context);
+      await startOperatorController(controller, pane.context);
       expect(controller.holder()).toBe("ses_pane_first");
 
       // The pane runs a `task`: a fresh pair of extension instances binds in this process and
@@ -3115,12 +3160,22 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
   test("the controller's legion tool reads the whole state without a grant and sets a status with a grant minted from its registration secret", async () => {
     const controller = await launchedController({ sessionId: "ses_controller_tool" });
     const context = controller.context("ses_controller_tool");
-    // Nothing is registered before the claim: the tool arrives with it.
+    // Nothing is registered before startup; from startup on the tool answers only for a claimed
+    // session, which the start command's claim makes this one.
     expect(controller.tools.map((tool) => tool.name)).not.toContain("legion");
 
     await controller.handlers.get("session_start")?.({}, context);
     const legion = controller.tools.find((tool) => tool.name === "legion");
     if (legion === undefined) throw new Error("the controller's legion tool was not registered");
+    await expect(
+      legion.execute("controller-early", { op: "read_state" }, undefined, undefined, context)
+    ).resolves.toMatchObject({
+      isError: true,
+      content: [
+        { type: "text", text: "legion is available only to this session's registered claim" },
+      ],
+    });
+    expect(await runStartCommand(controller, context)).toEqual([]);
     const requestsAfterClaim = controller.requests.length;
 
     await expect(
@@ -3167,10 +3222,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
 
   test("subscribes to its project's controller topic", async () => {
     const controller = await launchedController({ sessionId: "ses_controller_notices" });
-    await controller.handlers.get("session_start")?.(
-      {},
-      controller.context("ses_controller_notices")
-    );
+    await startOperatorController(controller, controller.context("ses_controller_notices"));
 
     expect(natsConnections.flatMap((connection) => connection.subjects)).toContain(
       "notifications.legion.omp.controller"
@@ -3182,24 +3234,21 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     const first = await launchedController({ sessionId: "ses_controller_first" });
     const ticks: (() => void)[] = [];
     const refused = Promise.withResolvers<void>();
-    await first.handlers.get("session_start")?.(
-      {},
-      {
-        ...first.context("ses_controller_first"),
-        setInterval: (callback) => ticks.push(callback),
-        ui: {
-          notify: (message) => {
-            if (message.includes("this session no longer holds it")) refused.resolve();
-          },
+    await startOperatorController(first, {
+      ...first.context("ses_controller_first"),
+      setInterval: (callback) => ticks.push(callback),
+      ui: {
+        notify: (message) => {
+          if (message.includes("this session no longer holds it")) refused.resolve();
         },
-      }
-    );
+      },
+    });
     // A later `legion controller start`: a second session registers and takes the role. It is
     // another process, so this one's record of the session it bootstrapped does not apply to it.
     envoyPluginInterface().bootstrappedSession.file = undefined;
     const second = createPi();
     legionExtension(second.pi);
-    await second.handlers.get("session_start")?.({}, first.context("ses_controller_second"));
+    await startOperatorController(second, first.context("ses_controller_second"));
 
     // The first session's next heartbeat finds the role held by the second and is refused.
     for (const tick of ticks) tick();
@@ -3227,12 +3276,12 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
           ? Response.json({ error: "Invalid boot token" }, { status: 403 })
           : undefined,
     });
-    await first.handlers.get("session_start")?.({}, first.context("ses_controller_first"));
+    await startOperatorController(first, first.context("ses_controller_first"));
     // A later `legion controller start` takes the role, in another process.
     envoyPluginInterface().bootstrappedSession.file = undefined;
     const second = createPi();
     legionExtension(second.pi);
-    await second.handlers.get("session_start")?.({}, first.context("ses_controller_second"));
+    await startOperatorController(second, first.context("ses_controller_second"));
     replaced = true;
 
     // The first session's process died, and the session is resumed within the listener's reap
@@ -3244,25 +3293,18 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     const resumed = createPi();
     legionExtension(resumed.pi);
     const context = first.context("ses_controller_first");
-    const errorLog = spyOn(console, "error").mockImplementation(() => undefined);
-    try {
-      await expect(
-        resumed.handlers.get("session_start")?.(
-          {},
-          {
-            ...context,
-            sessionManager: {
-              ...context.sessionManager,
-              getBranch: () => [
-                { type: "custom", customType: "envoy-role-claim", data: { role: first.token } },
-              ],
-            },
-          }
-        )
-      ).rejects.toThrow("Invalid boot token");
-    } finally {
-      errorLog.mockRestore();
-    }
+    const { notices } = await startRefusedController(resumed, {
+      ...context,
+      sessionManager: {
+        ...context.sessionManager,
+        getBranch: () => [
+          { type: "custom", customType: "envoy-role-claim", data: { role: first.token } },
+        ],
+      },
+    });
+    expect(notices).toEqual([
+      claimRefused("POST /legion/v1/claims/register failed with 403: Invalid boot token"),
+    ]);
 
     expect(
       first.requests.filter(
@@ -3489,8 +3531,8 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       process.env.LEGION_SLACK_CHANNELS = "C00000001";
       const before = natsConnections.length;
       const controller = await launchedController({ sessionId: "ses_controller_operator_slack" });
-      await controller.handlers.get("session_start")?.(
-        {},
+      await startOperatorController(
+        controller,
         controller.context("ses_controller_operator_slack")
       );
 
@@ -3553,25 +3595,22 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
         return undefined;
       },
     });
-    const starting = first.handlers.get("session_start")?.(
-      {},
-      {
-        ...first.context("ses_controller_first"),
-        setInterval: (callback) => ticks.push(callback),
-        ui: {
-          notify: (message) => {
-            if (message.includes("this session no longer holds it")) refused.resolve();
-          },
+    const starting = startOperatorController(first, {
+      ...first.context("ses_controller_first"),
+      setInterval: (callback) => ticks.push(callback),
+      ui: {
+        notify: (message) => {
+          if (message.includes("this session no longer holds it")) refused.resolve();
         },
-      }
-    );
+      },
+    });
     await reconnecting.promise;
     // While the subscription waits, a later `legion controller start` takes the role, and the
     // first session's heartbeat is refused.
     envoyPluginInterface().bootstrappedSession.file = undefined;
     const second = createPi();
     legionExtension(second.pi);
-    await second.handlers.get("session_start")?.({}, first.context("ses_controller_second"));
+    await startOperatorController(second, first.context("ses_controller_second"));
     for (const tick of ticks) tick();
     await refused.promise;
     connectGate.resolve();
@@ -3598,18 +3637,15 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       const first = await launchedController({ sessionId: "ses_controller_first" });
       const ticks: (() => void)[] = [];
       const refused = Promise.withResolvers<void>();
-      await first.handlers.get("session_start")?.(
-        {},
-        {
-          ...first.context("ses_controller_first"),
-          setInterval: (callback) => ticks.push(callback),
-          ui: {
-            notify: (message) => {
-              if (message.includes("this session no longer holds it")) refused.resolve();
-            },
+      await startOperatorController(first, {
+        ...first.context("ses_controller_first"),
+        setInterval: (callback) => ticks.push(callback),
+        ui: {
+          notify: (message) => {
+            if (message.includes("this session no longer holds it")) refused.resolve();
           },
-        }
-      );
+        },
+      });
       // The connection dies; each subject's pump retries (the agent subject's and the topic's),
       // and both reconnects wait on the gate.
       const connectGate = Promise.withResolvers<void>();
@@ -3627,7 +3663,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       envoyPluginInterface().bootstrappedSession.file = undefined;
       const second = createPi();
       legionExtension(second.pi);
-      await second.handlers.get("session_start")?.({}, first.context("ses_controller_second"));
+      await startOperatorController(second, first.context("ses_controller_second"));
       for (const tick of ticks) tick();
       await refused.promise;
       connectGate.resolve();
@@ -3675,18 +3711,15 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       });
       const ticks: (() => void)[] = [];
       const refused = Promise.withResolvers<void>();
-      await first.handlers.get("session_start")?.(
-        {},
-        {
-          ...first.context("ses_controller_first"),
-          setInterval: (callback) => ticks.push(callback),
-          ui: {
-            notify: (message) => {
-              if (message.includes("this session no longer holds it")) refused.resolve();
-            },
+      await startOperatorController(first, {
+        ...first.context("ses_controller_first"),
+        setInterval: (callback) => ticks.push(callback),
+        ui: {
+          notify: (message) => {
+            if (message.includes("this session no longer holds it")) refused.resolve();
           },
-        }
-      );
+        },
+      });
       // The connection dies, and both pumps' retries wait on a reconnect that will fail.
       const failingConnect = Promise.withResolvers<void>();
       const reconnecting = Promise.withResolvers<void>();
@@ -3703,7 +3736,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       envoyPluginInterface().bootstrappedSession.file = undefined;
       const second = createPi();
       legionExtension(second.pi);
-      await second.handlers.get("session_start")?.({}, first.context("ses_controller_second"));
+      await startOperatorController(second, first.context("ses_controller_second"));
       replaced = true;
       for (const tick of ticks) tick();
       await refused.promise;
@@ -3748,25 +3781,18 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       const resumed = createPi();
       legionExtension(resumed.pi);
       const context = first.context("ses_controller_first");
-      const errorLog = spyOn(console, "error").mockImplementation(() => undefined);
-      try {
-        await expect(
-          resumed.handlers.get("session_start")?.(
-            {},
-            {
-              ...context,
-              sessionManager: {
-                ...context.sessionManager,
-                getBranch: () => [
-                  { type: "custom", customType: "envoy-role-claim", data: { role: first.token } },
-                ],
-              },
-            }
-          )
-        ).rejects.toThrow("Invalid boot token");
-      } finally {
-        errorLog.mockRestore();
-      }
+      const { notices } = await startRefusedController(resumed, {
+        ...context,
+        sessionManager: {
+          ...context.sessionManager,
+          getBranch: () => [
+            { type: "custom", customType: "envoy-role-claim", data: { role: first.token } },
+          ],
+        },
+      });
+      expect(notices).toEqual([
+        claimRefused("POST /legion/v1/claims/register failed with 403: Invalid boot token"),
+      ]);
       const resumedSubjects = natsConnections
         .slice(connectionsBeforeResume)
         .flatMap((connection) => connection.subjects);
@@ -3780,10 +3806,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
 
   test("a session switch in the controller registers the new session", async () => {
     const controller = await launchedController({ sessionId: "ses_controller_before" });
-    await controller.handlers.get("session_start")?.(
-      {},
-      controller.context("ses_controller_before")
-    );
+    await startOperatorController(controller, controller.context("ses_controller_before"));
     await controller.handlers.get("session_switch")?.(
       {},
       controller.context("ses_controller_after", "/tmp/ses_controller_after.jsonl")
@@ -3813,10 +3836,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     test(`keeps its controller topic open across /new and /resume when ${order} handles the switch first`, async () => {
       const topic = "notifications.legion.omp.controller";
       const controller = await launchedController({ sessionId: "ses_controller_before", order });
-      await controller.handlers.get("session_start")?.(
-        {},
-        controller.context("ses_controller_before")
-      );
+      await startOperatorController(controller, controller.context("ses_controller_before"));
       // A subject is open while it was subscribed more often than unsubscribed on a live connection.
       const openSubjects = () =>
         natsConnections
@@ -3850,14 +3870,15 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     const controller = await launchedController({ sessionId: "ses_controller_other_project" });
     process.env.LEGION_PROJECT = "demo";
 
-    await expect(
-      controller.handlers.get("session_start")?.(
-        {},
-        controller.context("ses_controller_other_project")
-      )
-    ).rejects.toThrow(
-      "LEGION_PROJECT demo names controller role legion-demo-controller, but the daemon at http://daemon.test serves project OMP, whose controller role is legion-omp-controller"
+    const { notices } = await startRefusedController(
+      controller,
+      controller.context("ses_controller_other_project")
     );
+    expect(notices).toEqual([
+      claimRefused(
+        "LEGION_PROJECT demo names controller role legion-demo-controller, but the daemon at http://daemon.test serves project OMP, whose controller role is legion-omp-controller"
+      ),
+    ]);
     expect(controller.requests.map((request) => request.path)).not.toContain(
       "/legion/v1/claims/register"
     );
@@ -3874,14 +3895,15 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     });
     process.env.LEGION_PROJECT = "demo";
 
-    await expect(
-      controller.handlers.get("session_start")?.(
-        {},
-        controller.context("ses_controller_other_role")
-      )
-    ).rejects.toThrow(
-      "LEGION_PROJECT demo names controller role legion-demo-controller, but the daemon registered this controller as legion-omp-controller"
+    const { notices } = await startRefusedController(
+      controller,
+      controller.context("ses_controller_other_role")
     );
+    expect(notices).toEqual([
+      claimRefused(
+        "LEGION_PROJECT demo names controller role legion-demo-controller, but the daemon registered this controller as legion-omp-controller"
+      ),
+    ]);
     expect(controller.requests.map((request) => request.path)).not.toContain("/v1/roles/set");
     expect(natsConnections.flatMap((connection) => connection.subjects)).not.toContain(
       "notifications.legion.demo.controller"
@@ -3894,41 +3916,34 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     const controller = await launchedController({ sessionId: "ses_controller_no_project" });
     delete process.env.LEGION_PROJECT;
 
-    await expect(
-      controller.handlers.get("session_start")?.(
-        {},
-        controller.context("ses_controller_no_project")
-      )
-    ).rejects.toThrow("LEGION_PROJECT is required for Legion");
+    const { notices } = await startRefusedController(
+      controller,
+      controller.context("ses_controller_no_project")
+    );
+    expect(notices).toEqual([claimRefused("LEGION_PROJECT is required for Legion")]);
     expect(controller.requests.map((request) => request.path)).not.toContain(
       "/legion/v1/claims/register"
     );
   });
 
-  test("a refused capability is logged and propagates, and the operator's session is not ended", async () => {
+  test("a refused capability is logged and shown as one warning, and the operator's session is not ended", async () => {
     const controller = await launchedController({
       sessionId: "ses_controller_replaced",
       register: () => Response.json({ error: "Invalid boot token" }, { status: 403 }),
     });
 
-    const errors: string[] = [];
-    const errorLog = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
-      errors.push(args.map(String).join(" "));
-    });
-    try {
-      await expect(
-        controller.handlers.get("session_start")?.(
-          {},
-          controller.context("ses_controller_replaced")
-        )
-      ).rejects.toThrow("Invalid boot token");
-    } finally {
-      errorLog.mockRestore();
-    }
-    expect(controller.exits).toEqual([]);
-    expect(errors).toContain(
-      "[legion] claims/register for the controller failed (403): Invalid boot token"
+    const { notices, errors } = await startRefusedController(
+      controller,
+      controller.context("ses_controller_replaced")
     );
+    expect(notices).toEqual([
+      claimRefused("POST /legion/v1/claims/register failed with 403: Invalid boot token"),
+    ]);
+    expect(controller.exits).toEqual([]);
+    expect(errors).toEqual([
+      "[legion] claims/register for the controller failed (403): Invalid boot token",
+      "[legion] the controller claim failed: POST /legion/v1/claims/register failed with 403: Invalid boot token",
+    ]);
     expect(controller.requests.map((request) => request.path)).not.toContain("/v1/roles/set");
   });
 });
@@ -3995,10 +4010,7 @@ describe("a Legion session's title", () => {
       sessionId: "ses_acme_controller_title",
       project: "acme",
     });
-    await controller.handlers.get("session_start")?.(
-      {},
-      controller.context("ses_acme_controller_title")
-    );
+    await startOperatorController(controller, controller.context("ses_acme_controller_title"));
 
     expect(controller.title.set).toEqual(["Legion controller · ACME"]);
     expect(registrationBeforeClaim(controller.requests, controller.token)).toMatchObject({
@@ -4008,10 +4020,7 @@ describe("a Legion session's title", () => {
 
   test("the controller titles the session a /new leaves it on", async () => {
     const controller = await launchedController({ sessionId: "ses_controller_title" });
-    await controller.handlers.get("session_start")?.(
-      {},
-      controller.context("ses_controller_title")
-    );
+    await startOperatorController(controller, controller.context("ses_controller_title"));
 
     expect(controller.title.set).toEqual(["Legion controller · OMP"]);
     expect(registrationBeforeClaim(controller.requests, controller.token)).toMatchObject({
@@ -4050,10 +4059,7 @@ describe("a Legion session's title", () => {
     const controller = await launchedController({ sessionId: "ses_controller_auto_title" });
     controller.title.name = "Legion Controller Start Procedure";
     controller.title.source = "auto";
-    await controller.handlers.get("session_start")?.(
-      {},
-      controller.context("ses_controller_auto_title")
-    );
+    await startOperatorController(controller, controller.context("ses_controller_auto_title"));
 
     expect(controller.title.set).toEqual(["Legion controller · OMP"]);
     expect(registrationBeforeClaim(controller.requests, controller.token)).toMatchObject({
