@@ -1,7 +1,6 @@
 package pmdoc
 
 import (
-	"bytes"
 	"encoding/json"
 	"math/rand/v2"
 	"os"
@@ -424,6 +423,29 @@ func readingDiff(doc, engine *Node) string {
 	return "Go reads " + string(got) + "\nthe engine reads " + string(reading)
 }
 
+// parseAsTheEngine reads each markdown with Parse and with the engine (engineReadings) and reports
+// each that Parse fails on, with the engine's tree, or reads otherwise, with both trees. It returns
+// Go's trees, nil where Go's reading failed or parted from the engine's.
+func parseAsTheEngine(t *testing.T, markdowns []string) []*Node {
+	t.Helper()
+	readings := engineReadings(t, markdowns)
+	trees := make([]*Node, len(markdowns))
+	for index, markdown := range markdowns {
+		doc, err := Parse(markdown)
+		if err != nil {
+			engine, _ := readings[index].JSON()
+			t.Errorf("Parse(%q) = %v; the engine reads %s", markdown, err, engine)
+			continue
+		}
+		if readings[index] == nil || !doc.Equal(readings[index]) {
+			t.Errorf("%q:\n%s", markdown, readingDiff(doc, readings[index]))
+			continue
+		}
+		trees[index] = doc
+	}
+	return trees
+}
+
 // An agent reads a document as Go reads its markdown, and the user sees it as the browser editor's
 // engine reads it, so where Go decodes an escape or a character reference otherwise the agent
 // quotes and writes back text the user never wrote: Go read `Plain \&amp; end.` as `Plain & end.`
@@ -509,18 +531,7 @@ func TestALineFeedAReferenceNamesReadsAsTheEngineReadsIt(t *testing.T) {
 		"![a&#10;\nb](u)\n",
 		"a&#xA;b &NewLine;c\n",
 	}
-	readings := engineReadings(t, markdowns)
-	for index, markdown := range markdowns {
-		doc, err := Parse(markdown)
-		if err != nil {
-			engine, _ := readings[index].JSON()
-			t.Errorf("Parse(%q) = %v; the engine reads %s", markdown, err, engine)
-			continue
-		}
-		if readings[index] == nil || !doc.Equal(readings[index]) {
-			t.Errorf("%q:\n%s", markdown, readingDiff(doc, readings[index]))
-		}
-	}
+	parseAsTheEngine(t, markdowns)
 }
 
 // The rows above are the cases someone thought of; a reading that parts from the engine's on a
@@ -552,18 +563,7 @@ func TestGeneratedEscapesAndReferencesReadAsTheEngineReadsThem(t *testing.T) {
 		paragraph.WriteString("\n")
 		markdowns[index] = paragraph.String()
 	}
-	readings := engineReadings(t, markdowns)
-	for index, markdown := range markdowns {
-		doc, err := Parse(markdown)
-		if err != nil {
-			engine, _ := readings[index].JSON()
-			t.Errorf("Parse(%q) = %v; the engine reads %s", markdown, err, engine)
-			continue
-		}
-		if readings[index] == nil || !doc.Equal(readings[index]) {
-			t.Errorf("%q:\n%s", markdown, readingDiff(doc, readings[index]))
-		}
-	}
+	parseAsTheEngine(t, markdowns)
 	t.Logf("%d generated paragraphs", len(markdowns))
 }
 
@@ -572,27 +572,7 @@ func TestGeneratedEscapesAndReferencesReadAsTheEngineReadsThem(t *testing.T) {
 // and in the editor as its character. Every name the engine itself loads (gen/entity-names.ts) is
 // read as a paragraph of its own, and Go must read it as the engine does, which decodes each.
 func TestEveryNameTheEngineKnowsReadsAsTheEngineReadsIt(t *testing.T) {
-	if _, err := exec.LookPath("bun"); err != nil {
-		if os.Getenv("CI") == "" {
-			t.Skip("bun is not on PATH; entity-names.ts is required in CI")
-		}
-		t.Fatalf("bun is required in CI: %v", err)
-	}
-	out := filepath.Join(t.TempDir(), "names")
-	cmd := genScript("entity-names.ts", out)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	stdout, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("entity-names.ts: %v\nstderr:\n%s", err, stderr.Bytes())
-	}
-	if len(stdout) > 0 {
-		t.Fatalf("entity-names.ts printed %d bytes to stdout, which nothing reads: a gen script writes its result to the file it is given\nstderr:\n%s", len(stdout), stderr.Bytes())
-	}
-	raw, err := os.ReadFile(out)
-	if err != nil {
-		t.Fatalf("entity-names.ts exited 0 without writing its result to the file it is given: %v\nstderr:\n%s", err, stderr.Bytes())
-	}
+	raw := genResult(t, "entity-names.ts")
 	names := strings.Fields(string(raw))
 	if len(names) <= 2000 {
 		t.Fatalf("entity-names.ts wrote %d names, want the more than 2,000 of character-entities", len(names))
@@ -601,18 +581,11 @@ func TestEveryNameTheEngineKnowsReadsAsTheEngineReadsIt(t *testing.T) {
 	for index, name := range names {
 		markdowns[index] = "&" + name + ";\n"
 	}
-	readings := engineReadings(t, markdowns)
-	for index, markdown := range markdowns {
-		doc, err := Parse(markdown)
-		if err != nil {
-			engine, _ := readings[index].JSON()
-			t.Errorf("Parse(%q) = %v; the engine reads %s", markdown, err, engine)
+	for index, doc := range parseAsTheEngine(t, markdowns) {
+		if doc == nil {
 			continue
 		}
-		if readings[index] == nil || !doc.Equal(readings[index]) {
-			t.Errorf("%q:\n%s", markdown, readingDiff(doc, readings[index]))
-			continue
-		}
+		markdown := markdowns[index]
 		if text := doc.Children[0].Children; len(text) == 1 && text[0].Text == strings.TrimSuffix(markdown, "\n") {
 			t.Errorf("%q reads as written in both, where the engine knows the name", markdown)
 		}

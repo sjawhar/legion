@@ -792,7 +792,7 @@ func escapeLinkDestination(href string, escapePipes bool) string {
 // a destination's escapes and character references, reads it back: a backslash before ASCII
 // punctuation is doubled, an ampersand is escaped where it would open a character reference
 // (characterReferenceAt), and in a table a pipe is escaped as well. An address holding a space or
-// a parenthesis is then written in angle brackets.
+// a parenthesis is then written in angle brackets, as escapeLinkDestination writes a link's.
 func escapeImageSource(src string, escapePipes bool) string {
 	if strings.ContainsAny(src, "\\&|") {
 		var written strings.Builder
@@ -813,10 +813,7 @@ func escapeImageSource(src string, escapePipes bool) string {
 		}
 		src = written.String()
 	}
-	if strings.ContainsAny(src, " ()") {
-		return "<" + src + ">"
-	}
-	return src
+	return escapeLinkDestination(src, false)
 }
 
 // titleSuffix writes a link or image title, quoted, so that the browser editor's parser, which

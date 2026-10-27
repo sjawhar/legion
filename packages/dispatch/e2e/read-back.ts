@@ -9,14 +9,18 @@ export async function goReadBack(markdown: string): Promise<string> {
   return (await getArtifactText(issue.primary_artifact_id)).markdown;
 }
 
+/** The headless engine's reading of stored markdown, from engine-reading.ts. */
+function engineReading(markdown: string): { tables: string[][][]; paragraphs: string[] } {
+  const script = fileURLToPath(new URL("./engine-reading.ts", import.meta.url));
+  return JSON.parse(execFileSync("bun", [script], { encoding: "utf8", input: markdown }));
+}
+
 /** The headless engine's reading of stored markdown: each table's rows, as their cells' text. */
 export function engineTables(markdown: string): string[][][] {
-  const script = fileURLToPath(new URL("./engine-tables.ts", import.meta.url));
-  return JSON.parse(execFileSync("bun", [script], { encoding: "utf8", input: markdown }));
+  return engineReading(markdown).tables;
 }
 
 /** The headless engine's reading of stored markdown: each paragraph's text. */
 export function engineParagraphs(markdown: string): string[] {
-  const script = fileURLToPath(new URL("./engine-text.ts", import.meta.url));
-  return JSON.parse(execFileSync("bun", [script], { encoding: "utf8", input: markdown }));
+  return engineReading(markdown).paragraphs;
 }

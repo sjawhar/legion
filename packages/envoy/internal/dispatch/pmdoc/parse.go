@@ -1026,7 +1026,7 @@ func parseTextValue(node ast.Node, value []byte, marks []Mark) string {
 		}
 	}
 	decoded := decodeMarkdownText(value)
-	if insideImage(node) {
+	if strings.IndexByte(decoded, '\n') < 0 || insideImage(node) {
 		return decoded
 	}
 	return strings.ReplaceAll(decoded, "\n", " ")
