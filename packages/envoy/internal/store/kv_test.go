@@ -1156,6 +1156,148 @@ func TestReaperGraceWindow(t *testing.T) {
 	}
 }
 
+// upsertWithin upserts item on another goroutine and reports whether it finished within five
+// seconds, failing the test when it did not or when it failed. A reaper pass calls it from isAlive,
+// so a pass that held the interest lock there would make it time out rather than deadlock.
+func upsertWithin(t *testing.T, reg *Registry, item Interest, topics []string) bool {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		_, err := reg.Upsert(item, topics)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Upsert(%s) during the reaper pass: %v", item.SessionID, err)
+			return false
+		}
+		return true
+	case <-time.After(5 * time.Second):
+		t.Errorf("Upsert(%s) did not finish while Reap was calling isAlive: the pass holds the interest lock", item.SessionID)
+		return false
+	}
+}
+
+func TestReapCallsIsAliveWithoutHoldingTheInterestLock(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	putInterest(t, kv, Interest{SessionID: "ses_dead", MachineID: "m1", Topics: []string{"notifications.>"}, UpdatedAt: time.Now().Add(-10 * time.Minute).UnixMilli()})
+	if _, err := reg.Get("ses_dead"); err != nil {
+		t.Fatalf("Get ses_dead failed: %v", err)
+	}
+
+	upserted := false
+	count, err := reg.Reap(func(sessionID string) bool {
+		if sessionID == "ses_dead" {
+			upserted = upsertWithin(t, reg, Interest{SessionID: "ses_other", MachineID: "m1"}, []string{"notifications.agent.ses_other"})
+		}
+		return false
+	}, 0)
+	if err != nil {
+		t.Fatalf("Reap failed: %v", err)
+	}
+	if !upserted {
+		t.Fatal("isAlive never upserted ses_other")
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 reaped, got %d", count)
+	}
+	if _, err := kv.Get("ses_dead"); !errors.Is(err, natsgo.ErrKeyNotFound) {
+		t.Fatalf("ses_dead should be deleted, got err: %v", err)
+	}
+	if _, err := kv.Get("ses_other"); err != nil {
+		t.Fatalf("ses_other, upserted during the pass, should exist: %v", err)
+	}
+}
+
+func TestReapKeepsAnInterestReupsertedDuringThePass(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	putInterest(t, kv, Interest{SessionID: "ses_back", MachineID: "m1", Topics: []string{"notifications.>"}, UpdatedAt: time.Now().Add(-10 * time.Minute).UnixMilli()})
+	if _, err := reg.Get("ses_back"); err != nil {
+		t.Fatalf("Get ses_back failed: %v", err)
+	}
+
+	// The session heartbeats again while the pass is deciding it is dead.
+	count, err := reg.Reap(func(sessionID string) bool {
+		if sessionID == "ses_back" {
+			upsertWithin(t, reg, Interest{SessionID: "ses_back", MachineID: "m1"}, []string{"notifications.agent.ses_back"})
+		}
+		return false
+	}, 0)
+	if err != nil {
+		t.Fatalf("Reap failed: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 reaped, got %d", count)
+	}
+	if _, err := kv.Get("ses_back"); err != nil {
+		t.Fatalf("ses_back, re-upserted during the pass, should exist: %v", err)
+	}
+	if _, err := reg.Get("ses_back"); err != nil {
+		t.Fatalf("ses_back should stay cached: %v", err)
+	}
+}
+
+func TestReapKeepsAnInterestWrittenAfterItsRecheck(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	putInterest(t, kv, Interest{SessionID: "ses_raced", MachineID: "m1", Topics: []string{"notifications.>"}, UpdatedAt: time.Now().Add(-10 * time.Minute).UnixMilli()})
+	if _, err := reg.Get("ses_raced"); err != nil {
+		t.Fatalf("Get ses_raced failed: %v", err)
+	}
+	// Another listener's write lands after the pass re-checked the candidate and before its delete
+	// reaches the bucket.
+	fresh := Interest{SessionID: "ses_raced", MachineID: "m2", Topics: []string{"notifications.>"}, UpdatedAt: time.Now().UnixMilli()}
+	reg.watcher = kvwatch.New("interest registry", bus.KeyValue{KeyValue: &putBeforeDeleteKeyValue{
+		KeyValue:     kv,
+		beforeDelete: func() { putInterest(t, kv, fresh) },
+	}}, reg.applyWatched, reg.resetCache)
+
+	count, err := reg.Reap(func(string) bool { return false }, 0)
+	if err != nil {
+		t.Fatalf("Reap failed: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 reaped, got %d", count)
+	}
+	entry, err := kv.Get("ses_raced")
+	if err != nil {
+		t.Fatalf("ses_raced, written before the delete landed, should exist: %v", err)
+	}
+	var got Interest
+	if err := json.Unmarshal(entry.Value(), &got); err != nil {
+		t.Fatalf("decode ses_raced: %v", err)
+	}
+	if got.MachineID != "m2" {
+		t.Fatalf("ses_raced = %+v, want the write that landed during the pass", got)
+	}
+}
+
+// putBeforeDeleteKeyValue runs beforeDelete before its first Delete reaches the bucket, and then
+// sends that Delete as it was asked to.
+type putBeforeDeleteKeyValue struct {
+	natsgo.KeyValue
+
+	deletes      int
+	beforeDelete func()
+}
+
+func (kv *putBeforeDeleteKeyValue) Delete(key string, opts ...natsgo.DeleteOpt) error {
+	kv.deletes++
+	if kv.deletes == 1 {
+		kv.beforeDelete()
+	}
+	return kv.KeyValue.Delete(key, opts...)
+}
+
 func TestPing_HealthyConnReturnsNil(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()

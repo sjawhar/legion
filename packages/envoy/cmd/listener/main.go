@@ -585,11 +585,7 @@ func main() {
 		if d == nil {
 			return 0
 		}
-		entries, err := d.sessions.List()
-		if err != nil {
-			return 0
-		}
-		return int64(len(entries))
+		return int64(d.sessions.LiveCount())
 	})
 	met.NewGaugeFunc("envoy_active_interests", "Number of active interest subscriptions", func() int64 {
 		d := deps.Load()

@@ -243,8 +243,15 @@ func (r *Registry) deleteInterest(sessionID string) error {
 	if err != nil {
 		return err
 	}
-	revision = max(revision, read)
+	r.reconcileDeleted(sessionID, max(revision, read))
+	return nil
+}
 
+// reconcileDeleted brings sessionID's cache entry in line with the bucket after a delete that
+// succeeded past revision: it applies the key's latest history entry, which is the delete marker
+// unless a write has landed since, or, when the history cannot be read, evicts the entry behind a
+// fence just past revision.
+func (r *Registry) reconcileDeleted(sessionID string, revision uint64) {
 	entries, err := r.interests().History(sessionID)
 	if err == nil && len(entries) > 0 {
 		latest := entries[len(entries)-1]
@@ -252,7 +259,7 @@ func (r *Registry) deleteInterest(sessionID string) error {
 			r.mu.Lock()
 			r.evictCachedInterestLocked(sessionID, latest.Revision())
 			r.mu.Unlock()
-			return nil
+			return
 		}
 
 		var item Interest
@@ -265,12 +272,12 @@ func (r *Registry) deleteInterest(sessionID string) error {
 				slog.Uint64("revision", latest.Revision()),
 				slog.String("error", err.Error()),
 			)
-			return nil
+			return
 		}
 		r.mu.Lock()
 		r.cacheInterestLocked(sessionID, item, latest.Revision())
 		r.mu.Unlock()
-		return nil
+		return
 	}
 
 	// KeyValue.Delete does not return its revision. A successful delete must
@@ -279,7 +286,6 @@ func (r *Registry) deleteInterest(sessionID string) error {
 	r.mu.Lock()
 	r.evictCachedInterestLocked(sessionID, revision+1)
 	r.mu.Unlock()
-	return nil
 }
 
 // Rewatch reopens both buckets on conn and replaces the cache's watcher with one there
@@ -764,31 +770,54 @@ func curValue(value string) string {
 	return value
 }
 
+// reapCandidate is one cached interest as Reap's snapshot saw it.
+type reapCandidate struct {
+	sessionID string
+	updatedAt int64
+	revision  uint64
+}
+
 // Reap cross-references the interest cache with a session liveness check and
 // deletes interests whose sessions are dead AND whose UpdatedAt exceeds the
 // grace window. A role claim is intentionally not an interest: it remains
 // available for its holder to re-register after a listener restart, and the
 // role delivery path drops it if that holder never becomes live again.
+//
+// It copies every cached interest's session id, UpdatedAt and cache revision under
+// the read lock and then releases it, so isAlive and the grace check run with no
+// interest lock held and a heartbeat's Upsert never waits on a pass. Before it deletes
+// a candidate it reads it again and skips it when its revision changed or it is now
+// within grace, and it deletes at exactly the revision it checked, so a write that
+// lands after that check is kept: the delete fails with JetStream's wrong last
+// sequence (10071, nats.ErrKeyExists), and the candidate counts as skipped.
 func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (int, error) {
 	now := r.now().UnixMilli()
 	graceMs := graceWindow.Milliseconds()
 
 	r.mu.RLock()
-	var stale []string
+	candidates := make([]reapCandidate, 0, len(r.cache))
 	for sid, item := range r.cache {
-		if isAlive(sid) {
-			continue // session still alive
-		}
-		if now-item.UpdatedAt <= graceMs {
-			continue // within grace window
-		}
-		stale = append(stale, sid)
+		candidates = append(candidates, reapCandidate{sessionID: sid, updatedAt: item.UpdatedAt, revision: r.cacheRevisions[sid]})
 	}
 	r.mu.RUnlock()
 
 	reaped := 0
-	for _, sid := range stale {
-		err := r.deleteInterest(sid)
+	for _, candidate := range candidates {
+		sid := candidate.sessionID
+		if isAlive(sid) {
+			continue // session still alive
+		}
+		if now-candidate.updatedAt <= graceMs {
+			continue // within grace window
+		}
+		r.mu.RLock()
+		item, cached := r.cache[sid]
+		revision := r.cacheRevisions[sid]
+		r.mu.RUnlock()
+		if !cached || revision != candidate.revision || now-item.UpdatedAt <= graceMs {
+			continue // written or removed during the pass
+		}
+		deleted, err := r.deleteInterestAt(sid, revision)
 		if errors.Is(err, bus.ErrRefused) {
 			r.logger().Warn("reaper skipped an interest it cannot delete", slog.Int("key_bytes", len(sid)), slog.String("error", err.Error()))
 			continue
@@ -796,9 +825,32 @@ func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (i
 		if err != nil {
 			return 0, err
 		}
-		reaped++
+		if deleted {
+			reaped++
+		}
 	}
 	return reaped, nil
+}
+
+// deleteInterestAt deletes sessionID's interest only while its latest revision is revision, and
+// reports whether it did. A write since then makes JetStream refuse the delete with wrong last
+// sequence (10071, which nats.go names nats.ErrKeyExists), and the interest is kept: false and no
+// error. Revision 0 names no revision, which a conditional delete cannot express, so that interest
+// is deleted at the revision it reads (deleteInterest). The cache follows the bucket afterwards as it
+// does after deleteInterest.
+func (r *Registry) deleteInterestAt(sessionID string, revision uint64) (bool, error) {
+	if revision == 0 {
+		return true, r.deleteInterest(sessionID)
+	}
+	err := r.interests().Delete(sessionID, nats.LastRevision(revision))
+	if errors.Is(err, nats.ErrKeyExists) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	r.reconcileDeleted(sessionID, revision)
+	return true, nil
 }
 
 // ReapRoleClaims removes claims whose holders did not re-register before the
@@ -852,15 +904,16 @@ func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Dur
 // a channel closed once it has returned: a pass in flight when ctx ends finishes first. A pass
 // lists the bucket through watchers whose consumers nats.go creates and deletes, so the listener's
 // shutdown waits for it before it drains NATS (kvwatch.Watcher.End says what a drain does to such
-// a delete).
+// a delete). Each pass logs how many interests it reaped and how long it took (elapsed_ms).
 func (r *Registry) StartReaper(ctx context.Context, isAlive func(string) bool, interval, graceWindow time.Duration) <-chan struct{} {
 	return everyInterval(ctx, interval, func() {
+		started := time.Now()
 		count, err := r.Reap(isAlive, graceWindow)
 		if err != nil {
 			r.logger().Error("reaper cycle failed", slog.String("error", err.Error()))
 			return
 		}
-		r.logger().Info("reaper cycle", slog.Int("reaped", count))
+		r.logger().Info("reaper cycle", slog.Int("reaped", count), slog.Int64("elapsed_ms", time.Since(started).Milliseconds()))
 	})
 }
 
