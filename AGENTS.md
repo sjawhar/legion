@@ -378,3 +378,5 @@ the phase-verdict artifacts. No lifecycle labels carry worker state.
 - Learnings: `docs/solutions/<category>/<slug>.md`
 
 > Many docs in `docs/plans/` and `docs/solutions/` predate the TypeScript rewrite and contain Python-era references. These are marked with `[HISTORICAL]` headers.
+
+<!-- scratch INFRA-520 pi-legion -->
