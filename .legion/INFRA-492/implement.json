@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-492",
-  "completed": "2026-10-27T15:12:08Z",
+  "completed": "2026-10-27T16:37:01Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2324",
   "round": "review round: the reviewer's review at 614e0003 (3 threads plus the PR body census and claims), scope set by the architect; one conflict merge of main ae36683e",
   "proof": [
@@ -19,16 +19,24 @@
       "surface": "web unit suite with TanStack's focusManager on the real query builders",
       "command": "cd packages/dispatch && bun test web/src/features/refs/reference-target.test.ts && bun run test",
       "observed": "7 pass 0 fail in reference-target.test.ts; the full suite at 9e4bb204 is 2542 pass, 0 fail.",
-      "headSha": "9e4bb204d26a8f6e8e006711e9ea0ed2943f829e",
+      "headSha": "27152a78691f774dc3053eb90c44126773cad943",
       "negativeControl": "Before the fix: 'Expected: \"success\" Received: \"error\"', 6 pass 1 fail."
     },
     {
       "criterion": "Spec acceptance 1 and 2 and every earlier freshness defect still hold on the merged head",
       "surface": "Dispatch in Chromium and iPhone (Playwright) against the branch's Go server, fake Envoy and a loopback Postgres 17 + pgvector, production SPA bundle built from the head",
       "command": "cd packages/dispatch && bun run build:web && DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_e2e?sslmode=disable bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/refresh-freshness.e2e.ts e2e/refetch-budget.e2e.ts e2e/references.e2e.ts e2e/block-references.e2e.ts e2e/hover-preview.e2e.ts e2e/live.e2e.ts e2e/inbox.e2e.ts e2e/task-items.e2e.ts",
-      "observed": "155 passed, 7 skipped, 0 failed (10.8m); REFETCH-BUDGET 0 GETs and 0 untouched-issue reads on both projects; REFETCH-SIDEBAR inbox 1, pinned 1, projects 1; REFETCH-INDEX no GETs.",
-      "headSha": "9e4bb204d26a8f6e8e006711e9ea0ed2943f829e",
+      "observed": "155 passed, 7 skipped, 0 failed (10.9m); REFETCH-BUDGET 0 GETs and 0 untouched-issue reads on both projects; REFETCH-SIDEBAR inbox 1, pinned 1, projects 1; REFETCH-INDEX no GETs.",
+      "headSha": "27152a78691f774dc3053eb90c44126773cad943",
       "negativeControl": "The same refetch-budget file at base 16e4bb0f758e fails on the counts: budget Received 1120 against <= 5; sidebar inbox 2, pinned 2, projects 2 against 1 each."
+    },
+    {
+      "criterion": "The merged head keeps Dispatch's Go suites green after #2389 (graph node provenance) merged into the branch's refs and event code",
+      "surface": "Dispatch's Go packages on a real Postgres 17 (ICU template1, pgvector), migrations through 0132",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_gotest?sslmode=disable go test ./internal/dispatch/api/ -count=1 -timeout 55m && go test ./internal/dispatch/docs/ ./internal/dispatch/refs/ ./internal/dispatch/events/ ./internal/dispatch/model/ ./internal/dispatch/store/ ./internal/dispatch/architecture/ -count=1 -timeout 55m; go test ./internal/dispatch/docs/ -count=5 -run TestAHealthyRoomUnderWritesIsNeverRefused -v",
+      "observed": "ok api 1330.930s; ok refs, events, model, store 350s, architecture. docs failed once in the full run on TestAHealthyRoomUnderWritesIsNeverRefused's floor (18 writes, minimum 20); alone it passes 5/5 (32, 33, 37, 37, 44 writes); the same test at main b08a56bc gives 35, 43, 44, 44, 48.",
+      "headSha": "27152a78691f774dc3053eb90c44126773cad943",
+      "negativeControl": "Before renaming the branch's test helper, go vet refused the package: 'createChildIssue redeclared in this block' (node_facts_test.go:210 from main, events_test.go:258 from the branch)."
     }
   ],
   "filesChanged": [
@@ -67,7 +75,8 @@
     "Main merged a fourth time (fe1e97d2, main c892b97df887) for a conflict in sse.ts/sse.test.ts and the changelogs; main's artifact.human_edited got an explicit rule (the issue's log only) instead of the catch-all broad refresh. Record: https://github.com/sjawhar/legion/pull/2324#issuecomment-6442151664.",
     "Conflict return: merged main 1b859ea3 as 5873436a; the only conflict was MarkdownBody.test.tsx's import list (both sides kept). Record: the PR comment after https://github.com/sjawhar/legion/pull/2324#issuecomment-6442151664.",
     "Review round: PR body gained the Contract change census and corrected two claims (optimistic mutations still cancel on purpose; focus still refetches stale reads, only the reconnect's whole-cache refresh is gone); structural cleanup stays on Fast-follow as the architect ruled.",
-    "Merged main ae36683e as 9e4bb204 (conflicts: one packages/dispatch/AGENTS.md paragraph and packages/envoy/CHANGELOG.md, both sides kept). Main's e2e harness now starts through e2e/run.ts."
+    "Merged main ae36683e as 9e4bb204 (conflicts: one packages/dispatch/AGENTS.md paragraph and packages/envoy/CHANGELOG.md, both sides kept). Main's e2e harness now starts through e2e/run.ts.",
+    "Merged main 452e46479082 as 27152a78 (#2389): AGENTS.md bullet conflict and a test-helper name collision (branch's createChildIssue renamed createTitledChild). Observed, not a defect: the room-under-writes test's write count runs about 15% lower than main (median 37 vs 44 in 5 runs), still well above its floor of 20."
   ],
   "openQuestions": [
     "Memory with kubectl top (dispatch://INFRA-492/comment/8d3d6ac7-d9a7-4187-a9bb-348c88cac96e) is not in the approved acceptance and not done; the architect decides (comment 32 says not added).",
