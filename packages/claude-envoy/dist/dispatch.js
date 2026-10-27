@@ -14304,7 +14304,7 @@ function dispatchToolSchema(spec, z2, opts) {
 var ISSUE_REFERENCE = "An issue is a native KEY or external owner/repo#n reference. An external reference addresses an existing Dispatch issue, including one linked to that GitHub pull request; only dispatch issue with --external creates a native issue.";
 var BOARD_NEIGHBOUR_REFUSAL = "The server refuses a key that does not exist, one in another project, this issue itself, an empty value, and a pair the board does not hold in that order.";
 var OWNER_REFERENCE = "Exactly one of issue and project is required. An issue is a native KEY or external owner/repo#n reference; a project is a project key such as CORE and addresses an unlinked project document named by artifact.";
-var ASK_QUESTION_CONTRACT = "The question carries the problem the reader recognises and why it matters now, what constrains " + "the answer, and the recommendation with its reason. It asks how to solve the problem or which " + "outcome is wanted; never enumerate choices in the question.";
+var ASK_QUESTION_CONTRACT = "The question names the concrete case first: which machines, files, sessions or people, and the " + "numbers. It asks the choice in those terms, saying what happens to whom under each option " + '("Ship Friday and risk signing out 1,240 users, or hold to Monday?"), never "How should we ' + 'proceed?" or "Which option?", because a reader cannot work back from a general question to ' + "the case. It carries every fact the reader needs to decide and nothing " + "that does not change the decision. Generalize only after the specifics, if at all. Then give " + "your recommendation and its reason.";
 var ASK_OPTIONS_CONTRACT = "Options carry the genuinely different approaches. Each option has a label, and its description " + "says what that approach costs.";
 var HUMAN_AGREED_TO_DOCUMENT = "the human has agreed to every point in the document";
 function documentOwnerValidation(requireArtifact, alwaysRequireArtifact = false) {
@@ -14390,7 +14390,7 @@ function imagesArgument(z2, owner, cap) {
   return z2.array(z2.string({ min: 1 }), { min: 1 }).describe(`Optional local picture files to show inline: PNG, JPEG, GIF or WebP (by their bytes, not their name), each at most 25 MiB. Each is uploaded to ${owner} and appended after a blank line as one ![<file name>](dispatch://\u2026@vN) line, in this order; those lines count toward ${cap}.`).optional();
 }
 var ASK_URGENCIES = ["low", "med", "high", "blocking"];
-var ASK_QUESTION_MAX = 800;
+var ASK_QUESTION_MAX = 2000;
 var DISPATCH_BODY_MAX = 32000;
 var SEARCH_QUERY_MAX = 1000;
 var SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
@@ -14484,15 +14484,15 @@ var dispatchToolSpecs = [
     name: "dispatch_ask",
     example: {
       issue: "DSP-1",
-      question: "The release cannot pass its review gate because the revised plan is unreviewed. " + "How should we proceed? Recommendation: review the plan before release to keep the review gate.",
+      question: "Release 4.2 ships Friday. Tuesday's plan change makes its migration drop the " + "sessions.legacy_token column, and nobody has reviewed that change. Shipped unreviewed, a " + "wrong drop signs out the 1,240 users still on legacy tokens. Held for review, 4.2 ships " + "Monday. Ship Friday unreviewed, or hold to Monday? Recommendation: hold to Monday; no user " + "waits on 4.2, and 1,240 forced sign-ins cost more than three days.",
       options: [
         {
-          label: "Review the revised plan",
-          description: "Delays release for review but keeps the release gate."
+          label: "Hold to Monday",
+          description: "4.2 ships three days late, with the column drop reviewed."
         },
         {
-          label: "Release without review",
-          description: "Ships sooner but bypasses the review gate."
+          label: "Ship Friday",
+          description: "On time; a wrong drop signs out 1,240 users."
         }
       ]
     },
@@ -14522,15 +14522,15 @@ var dispatchToolSpecs = [
     name: "dispatch_edit_ask",
     example: {
       ask: "01234567-0000-4000-8000-000000000001",
-      question: "The release cannot pass its review gate because the revised plan is unreviewed. " + "How should we proceed? Recommendation: review the plan before release to keep the review gate.",
+      question: "Release 4.2 ships Friday. Tuesday's plan change makes its migration drop the " + "sessions.legacy_token column, and nobody has reviewed that change. Shipped unreviewed, a " + "wrong drop signs out the 1,240 users still on legacy tokens. Held for review, 4.2 ships " + "Monday. Ship Friday unreviewed, or hold to Monday? Recommendation: hold to Monday; no user " + "waits on 4.2, and 1,240 forced sign-ins cost more than three days.",
       options: [
         {
-          label: "Review the revised plan",
-          description: "Delays release for review but keeps the release gate."
+          label: "Hold to Monday",
+          description: "4.2 ships three days late, with the column drop reviewed."
         },
         {
-          label: "Release without review",
-          description: "Ships sooner but bypasses the review gate."
+          label: "Ship Friday",
+          description: "On time; a wrong drop signs out 1,240 users."
         }
       ]
     },
@@ -14884,6 +14884,7 @@ function dedupeKeyNamesItsEvent(envelope) {
 // ../contracts/src/subject.ts
 var AGENT_TOPIC_PREFIX = "notifications.agent.";
 var ROLE_TOPIC_PREFIX = "notifications.role.";
+var LEGION_NOTICE_TOPIC_PREFIX = "notifications.legion.";
 var DISPATCH_TOPIC_PREFIX = "notifications.dispatch.";
 var DISPATCH_ISSUE_TOPIC_PREFIX = `${DISPATCH_TOPIC_PREFIX}issue.`;
 var DISPATCH_DOCUMENT_TOPIC_PREFIX = `${DISPATCH_TOPIC_PREFIX}document.`;
@@ -20297,6 +20298,8 @@ function sessionEnvoySettings(file2, env, options) {
 // ../envoy-client/src/transport.ts
 var DEFAULT_TIMEOUT_MS = 5000;
 var RETRY_DELAY_MS = 250;
+var REPLAY_TIMEOUT_MS = 1e4;
+var REPLAY_UNAVAILABLE_CODE = "REPLAY_UNAVAILABLE";
 var InterestWireSchema = exports_external.object({
   session_id: exports_external.string(),
   machine_id: exports_external.string(),
@@ -20331,11 +20334,32 @@ var RoleHeldWireSchema = exports_external.object({
 });
 var ErrorWireSchema = exports_external.object({
   error: exports_external.string(),
+  code: exports_external.string().optional(),
   expected: exports_external.array(exports_external.string()).optional()
 });
 var EnvelopeResponseSchema = EnvelopeSchema.extend({
   recipient: exports_external.string().optional(),
   holder: exports_external.string().optional()
+});
+var ReplayWireSchema = exports_external.object({
+  stream: exports_external.object({
+    id: exports_external.string().min(1).optional(),
+    created: exports_external.string(),
+    first_seq: exports_external.number().int().nonnegative(),
+    last_seq: exports_external.number().int().nonnegative()
+  }),
+  subjects: exports_external.array(exports_external.object({
+    subject: exports_external.string(),
+    messages: exports_external.array(exports_external.object({
+      seq: exports_external.number().int().positive(),
+      subject: exports_external.string(),
+      time: exports_external.string(),
+      data: exports_external.string()
+    })),
+    next_after: exports_external.number().int().nonnegative(),
+    more: exports_external.boolean(),
+    refused: exports_external.string().optional()
+  }))
 });
 function mergeInterestSources(registryTopics, liveTopics) {
   const interests = new Map;
@@ -20370,6 +20394,7 @@ class EnvoyApiError extends Error {
   details;
   name = "EnvoyApiError";
   expected;
+  code;
   constructor(details) {
     let parsed;
     try {
@@ -20380,16 +20405,18 @@ class EnvoyApiError extends Error {
     super(parsed === undefined ? `${details.method} ${details.url} failed with ${details.status}: ${details.responseBody}` : `${parsed.error}${parsed.expected === undefined ? "" : ` (expected: ${parsed.expected.join(", ")})`}`);
     this.details = details;
     this.expected = parsed?.expected;
+    this.code = parsed?.code;
   }
 }
 function createEnvoyClient(config2) {
   const baseUrl = normalizeEnvoyUrl(config2.baseUrl);
   const timeoutMs = config2.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const apiToken = config2.token;
-  const request = async (path2, init) => {
+  const request = async (path2, init, options = {}) => {
     const url2 = `${baseUrl}${path2}`;
     const attempts = config2.retry === false ? 1 : 2;
-    for (let attempt = 0;attempt < attempts; attempt += 1) {
+    const tries = options.retry === false ? 1 : attempts;
+    for (let attempt = 0;attempt < tries; attempt += 1) {
       let response;
       try {
         const headers = new Headers(init.headers);
@@ -20398,10 +20425,10 @@ function createEnvoyClient(config2) {
         response = await config2.fetch(url2, {
           ...init,
           headers,
-          signal: AbortSignal.timeout(timeoutMs)
+          signal: AbortSignal.timeout(options.timeoutMs ?? timeoutMs)
         });
       } catch (error49) {
-        if (attempt + 1 < attempts) {
+        if (attempt + 1 < tries) {
           await waitForRetry();
           continue;
         }
@@ -20416,7 +20443,7 @@ function createEnvoyClient(config2) {
         status: response.status,
         responseBody
       });
-      if (response.status >= 500 && attempt + 1 < attempts) {
+      if (response.status >= 500 && attempt + 1 < tries) {
         await waitForRetry();
         continue;
       }
@@ -20424,11 +20451,11 @@ function createEnvoyClient(config2) {
     }
     throw new Error("Envoy request exhausted retries");
   };
-  const post = (path2, body) => request(path2, {
+  const post = (path2, body, options) => request(path2, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body)
-  });
+  }, options);
   return {
     subscribe: async (input) => InterestWireSchema.parse(JSON.parse(await post("/v1/interests/subscribe", {
       session_id: input.sessionID,
@@ -20514,7 +20541,12 @@ function createEnvoyClient(config2) {
         search.set("title", input.title);
       const query = search.size === 0 ? "" : `?${search.toString()}`;
       return SessionWireSchema.array().parse(JSON.parse(await request(`/v1/sessions${query}`, {})));
-    }
+    },
+    replay: async (input) => ReplayWireSchema.parse(JSON.parse(await post("/v1/replay", {
+      session_id: input.sessionID,
+      subjects: input.subjects.map((cursor) => cursor.after === undefined ? { subject: cursor.subject } : { subject: cursor.subject, after: cursor.after }),
+      ...input.maxMessages === undefined ? {} : { max_messages: input.maxMessages }
+    }, { timeoutMs: REPLAY_TIMEOUT_MS, retry: false })))
   };
 }
 function waitForRetry() {
