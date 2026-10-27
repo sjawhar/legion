@@ -5240,12 +5240,17 @@ For each issue, as the implement App, it:
     make the push a code push to the old daemon too, so it stays on the branch, and the line says
     `kept .legion/<dirs> for the run after the rollout`.
   - **new daemon:** all of `.legion/`, other issues' directories included. The new daemon carries
-    no push, so the removal is a code push like any other; for an issue in `testing` or `reviewing`
-    it would clear the tester's planned red, or leave an approval of a round the reviewer has not
-    completed standing for nothing, and for an issue in `merging` or `awaiting_merge` it would move
-    the head past the one the merger's READY names, which withdraws that READY and sends the issue
-    back to `implementing`; so there the import writes the records as usual, removes nothing, and
-    the line says `removal deferred: <KEY> is in <phase>; run the import again once the phase ends`.
+    no push, so the removal is a code push like any other. For an issue in `testing` it would clear
+    the tester's planned red; in `reviewing` an approval of a round the reviewer has not completed
+    would no longer stand; in `merging` the merger builds its READY at the head it reads, and a push
+    past that head makes the daemon refuse or void that READY (`READY_HEAD_MOVED`), so the merger
+    builds it again; in `awaiting_merge` a push past READY's head withdraws that READY and sends the
+    issue back to `implementing`; and a `held` issue may have been held from any of these (the
+    daemon's state does not say which), so the retry that restores its phase would find the push.
+    There the import writes the records as usual, removes nothing, and the line says `removal
+    deferred: <KEY> is in <phase>; run the import again once the phase ends`. It reads the issue's
+    phase again just before each removal, so an issue that moved into one of these during the run
+    is not pushed over.
 
   A branch that moved in between is read again and the issue started over, three times at most. A
   ref update GitHub refuses with the branch still where it was (a ruleset's refusal, a
@@ -5281,11 +5286,15 @@ The cutover, in this order:
    since. Under the new daemon the removal push is a code push, with the effects of any:
    - in `testing` or `reviewing` it is deferred, the line saying so; run the import again once the
      phase ends;
-   - in `merging` or `awaiting_merge` it is deferred too, since a push past READY's head withdraws
-     that READY and sends the issue back to `implementing`. Such a branch can still carry another
-     issue's directory (retro removed only its own `.legion/<KEY>/`, and a child branch can carry
-     its parent's); if it merges before the phase ends, that directory reaches the default branch
-     with the merge, and a commit to the default branch removes it;
+   - in `merging` it is deferred, since the merger builds READY at the head it reads and a push past
+     it makes the daemon refuse or void that READY (`READY_HEAD_MOVED`);
+   - in `awaiting_merge` it is deferred, since a push past READY's head withdraws that READY and
+     sends the issue back to `implementing`. A `merging` or `awaiting_merge` branch can still carry
+     another issue's directory (retro removed only its own `.legion/<KEY>/`, and a child branch can
+     carry its parent's); when it merges, that directory reaches the default branch with the merge,
+     and dispatch://INFRA-609 removes any `.legion/` there;
+   - in `held` it is deferred, since the hold may have come from any of the phases above and the
+     retry that restores the phase would find the push;
    - in `implementing` on a red head it counts one fix attempt, as any push onto a red head does;
    - in `accepting` or `retro` the new head runs its required checks, and a red sends the issue
      back to `implementing` as any red does; READY lets the removal of `.legion/` above the approved
@@ -5313,8 +5322,8 @@ branch's (`<KEY>: …`):
   `would remove .legion/ (<n> paths) above <head>`, or `.legion/<KEY>/`). Under the old daemon a
   branch carrying more under `.legion/` adds `; kept .legion/<dirs> for the run after the rollout`.
 - `removal deferred: <KEY> is in <phase>; run the import again once the phase ends` — under the new
-  daemon, for an issue in `testing`, `reviewing`, `merging` or `awaiting_merge`: the records are
-  written, nothing is pushed.
+  daemon, for an issue in `testing`, `reviewing`, `merging`, `awaiting_merge` or `held` (read again
+  just before the removal): the records are written, nothing is pushed.
 - `no branch` — GitHub has no `legion/<KEY>`: the issue has nothing to import.
 - `failed: <why>` — that file or branch did not go through; on a file's failure `.legion/` stays on
   the branch, and the branch's line says so; `failed: GitHub refused the ref update: <answer>`

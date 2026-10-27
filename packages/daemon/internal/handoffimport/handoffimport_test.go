@@ -828,6 +828,64 @@ func TestUnderTheRecordsDaemonAnAwaitingMergeBranchIsNotMoved(t *testing.T) {
 	}
 }
 
+// Under the records' daemon a held issue waits as an issue in testing, reviewing, merging or
+// awaiting_merge does: the state says only `held`, not the phase the hold came from, and the retry
+// that restores that phase would otherwise find the removal push (a tester's planned red cleared, a
+// round's approval no longer standing, a READY naming a head the branch no longer has). A merging
+// issue waits for its own reason: the merger builds READY at the head it reads, and a push past it
+// makes the daemon refuse or void that READY.
+func TestUnderTheRecordsDaemonHeldAndMergingBranchesAreNotMoved(t *testing.T) {
+	w := newWorld(t)
+	w.schema = recordsSchema
+	w.states["LEG-2"] = seededIssue{"held", seed["LEG-2"].files}
+	w.states["LEG-3"] = seededIssue{"merging", seed["LEG-3"].files}
+	o := w.serve()
+	before2, before3 := w.branches["legion/LEG-2"], w.branches["legion/LEG-3"]
+
+	code, stdout, stderr := run(t, o)
+
+	if code != 0 || stderr != "" {
+		t.Fatalf("exit %d, stderr %q; want 0 and nothing:\n%s", code, stderr, stdout)
+	}
+	wantLines(t, stdout,
+		"LEG-2: removal deferred: LEG-2 is in held; run the import again once the phase ends",
+		"LEG-3: removal deferred: LEG-3 is in merging; run the import again once the phase ends")
+	if w.branches["legion/LEG-2"] != before2 || w.branches["legion/LEG-3"] != before3 {
+		t.Errorf("a held or merging branch moved: LEG-2 %s -> %s, LEG-3 %s -> %s", before2, w.branches["legion/LEG-2"], before3, w.branches["legion/LEG-3"])
+	}
+}
+
+// The phase is read again just before the removal: an issue the run's first read saw in
+// implementing, and that has since moved into testing (where its tester may already have pushed its
+// red tests), is not pushed over.
+func TestThePhaseIsReadAgainBeforeTheRemoval(t *testing.T) {
+	w := newWorld(t)
+	w.schema = recordsSchema
+	w.states["LEG-2"] = seededIssue{"implementing", seed["LEG-2"].files}
+	o := w.serve()
+	reads := 0
+	o.State = func(ctx context.Context) ([]byte, error) {
+		reads++
+		if reads > 1 {
+			w.mu.Lock()
+			w.states["LEG-2"] = seededIssue{"testing", seed["LEG-2"].files}
+			w.mu.Unlock()
+		}
+		return w.state(ctx)
+	}
+	before := w.branches["legion/LEG-2"]
+
+	code, stdout, stderr := run(t, o)
+
+	if code != 0 || stderr != "" {
+		t.Fatalf("exit %d, stderr %q; want 0 and nothing:\n%s", code, stderr, stdout)
+	}
+	wantLines(t, stdout, "LEG-2: removal deferred: LEG-2 is in testing; run the import again once the phase ends")
+	if w.branches["legion/LEG-2"] != before {
+		t.Errorf("legion/LEG-2 moved from %s to %s after it entered testing", before, w.branches["legion/LEG-2"])
+	}
+}
+
 // The records' daemon is told by its store's schema version: recordsSchema is migration
 // 0060_handoff_records, the one the records' release added.
 func TestTheRecordsSchemaIsTheHandoffRecordsMigration(t *testing.T) {
