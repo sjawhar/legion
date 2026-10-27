@@ -376,11 +376,29 @@ with the host's `handoff-document.md`; Anthropic remote compaction (`buildLivePr
 converts the conversation up to its cut, counts the result and keeps that many messages of the
 whole conversation's conversion, so the request that ends at a message the session's branch
 (`getBranch`) holds with a later one after it gets no list (a failed or aborted reply, which a
-retry drops from the context but not from the branch, does not count as later). The whole
-conversation's conversion carries the list at its end, past the cut. The dispatch-first skill
-goes on all of them as before. Not covered: OpenAI live steering (`providers.openaiLiveSteering`,
-a Codex WebSocket stream) converts the queued steers alone through the same handler, which no
-message tells apart from a first turn, so the skill and the list go out with a live steer there.
+retry drops from the context but not from the branch, does not count as later). The branch's
+messages are those the compaction builds its conversation from (`MI`): a `message` entry's
+message, a `custom_message` entry as role `custom` (every Envoy delivery with `triggerTurn` is
+one, and the cut can fall right after it) and a `branch_summary` entry as role `branchSummary`,
+each timestamped `new Date(entry.timestamp).getTime()`, matched by role and timestamp; a
+`compaction` entry becomes none there, since the earlier summary heads the conversion. The whole
+conversation's conversion carries the list at its end, past the cut. A compaction that keeps no
+tail converts the same messages twice, both ending at the branch's last message, so nothing on
+the branch tells either from a main-loop request: the second is a repeat of the conversion
+before it in the same session (`sessionManager`), ending at the same branch tip with the same
+messages' roles and timestamps, while the live `AgentSession` reads `isCompacting` (an automatic
+or manual compaction, the main loop paused) or `compactionSpeculation === "running"`, and it gets
+no list, so the compaction keeps none whatever the first carried. A repeat right after a cut
+keeps its list: that is the main loop's next request beside a speculative compaction with a tail,
+matching its whole conversion. Each session's last conversion lives in a process-wide `WeakMap`
+(on `globalThis` under `Symbol.for("legion.pi-envoy.session-answers-conversions.v1")`). Left
+open: a speculative compaction that keeps no tail (its kept turn right after a failed reply the
+branch still holds) beside the main loop's request matching it, which can lose that request's
+list; and a `task` subagent, which the host's registry does not list, so its compaction that
+keeps no tail carries the list. The dispatch-first skill goes on all of them as before. Not
+covered: OpenAI live steering (`providers.openaiLiveSteering`, a Codex WebSocket stream) converts
+the queued steers alone through the same handler, which no message tells apart from a first
+turn, so the skill and the list go out with a live steer there.
 
 Two copies of the extension run their handlers in turn on one request. The list's first line is
 `SESSION_ANSWERS_MARKER` (the failure line has its own), and only the last message is checked for
@@ -406,8 +424,11 @@ compaction and in a subagent's first request; every kind of item word for word; 
 that never answers costing a request under one second; a route that answers 404; the cache
 prefix byte for byte with no `cache_control` on the list; a `/btw` side turn and the handoff
 ending with their own prompts, with no list and no read; a remote compaction request ending at
-its cut (the stand-in model claims `supportsServerCompaction` and `bedrockMessagesApi`, which
-the binary takes for a first-party endpoint); and two copies with an empty list making one read.
+its cut, after a question and after a delivered message, and one that keeps no tail carrying no
+list (the stand-in model claims `supportsServerCompaction` and `bedrockMessagesApi`, which the
+binary takes for a first-party endpoint; a test-only extension sends the delivered messages as
+`extensions/envoy.ts` does, since pi-envoy reads deliveries off NATS); and two copies with an
+empty list making one read.
 The timed cases run against a profile whose model catalog is already built: a fresh profile
 builds it beside its first turn, holding the host's event loop for one to two seconds whatever
 the extension does.

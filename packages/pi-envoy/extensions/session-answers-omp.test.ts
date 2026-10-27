@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { appendFile, symlink } from "node:fs/promises";
+import { appendFile, symlink, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import type { SessionAnswer } from "@legion/contracts";
 import { DISPATCH_FIRST_MARKER } from "@legion/envoy-client/dispatch-first";
@@ -44,13 +44,46 @@ type Route =
   | { readonly kind: "missing" };
 
 /** One thing the session is told over RPC, in order, or a change in the answers route before the
- *  next one: a prompt, a manual compaction, a `/btw` side question, or a handoff. */
+ *  next one: a prompt, a manual compaction, a `/btw` side question, a handoff, or an Envoy
+ *  delivery (`DELIVERER`) that starts a turn or, quiet, only joins the conversation. */
 type Step =
   | { readonly prompt: string }
   | { readonly compact: true }
   | { readonly btw: string }
   | { readonly handoff: true }
+  | { readonly deliver: string; readonly quiet?: true }
   | { readonly route: Route };
+
+/**
+ * An extension standing in for an Envoy delivery, which the stand-in's Envoy listener cannot
+ * send (pi-envoy reads deliveries off NATS): `/deliver <text>` sends an `envoy-message` as
+ * `extensions/envoy.ts` sends a delivery, `deliverAs: "steer"` and `triggerTurn: true`, and
+ * `/deliver-quiet <text>` the same with no turn. The host queues a send and `sendMessage`
+ * returns nothing to await, so the quiet command polls for the condition itself: it returns once
+ * the branch holds the message.
+ */
+const DELIVERER = `export default function deliverer(pi) {
+  for (const [name, triggerTurn] of [["deliver", true], ["deliver-quiet", false]]) {
+    pi.registerCommand(name, {
+      description: "Send an envoy-message",
+      handler: async (args, context) => {
+        pi.sendMessage(
+          { customType: "envoy-message", content: args, display: true },
+          { deliverAs: "steer", triggerTurn }
+        );
+        while (
+          !triggerTurn &&
+          !context.sessionManager
+            .getBranch()
+            .some((entry) => entry.type === "custom_message" && JSON.stringify(entry).includes(args))
+        ) {
+          await Bun.sleep(10);
+        }
+      },
+    });
+  }
+}
+`;
 
 /** A request the stand-in served, with when it arrived (`performance.now()`). */
 interface Seen extends Request {
@@ -329,9 +362,15 @@ async function runSession(
     await symlink(extension, copy);
     extensions.push(copy);
   }
+  if (steps.some((step) => "deliver" in step)) {
+    const deliverer = path.join(root, "deliverer.ts");
+    await writeFile(deliverer, DELIVERER);
+    extensions.push(deliverer);
+  }
 
-  // A prompt has settled at its terminal agent_end, a compaction and a handoff at their RPC
-  // response, a /btw once its side turn was served.
+  // A prompt and a delivery have settled at their terminal agent_end; a compaction, a handoff and
+  // a quiet delivery (an RPC prompt that runs a command) at their RPC response; a /btw once its
+  // side turn was served.
   let settle: ((frame: object) => boolean) | undefined;
   let settled = Promise.withResolvers<void>();
   const rpc = spawnRpc(
@@ -365,7 +404,14 @@ async function runSession(
       continue;
     }
     settled = Promise.withResolvers<void>();
-    const command = "compact" in step ? "compact" : "handoff" in step ? "handoff" : undefined;
+    const command =
+      "compact" in step
+        ? "compact"
+        : "handoff" in step
+          ? "handoff"
+          : "deliver" in step && step.quiet === true
+            ? "prompt"
+            : undefined;
     let commandError: unknown;
     settle =
       command !== undefined
@@ -382,7 +428,16 @@ async function runSession(
             frame.type === "agent_end" &&
             !("isTerminal" in frame && frame.isTerminal === false);
     sentAt.push(performance.now());
-    rpc.send("prompt" in step ? { type: "prompt", message: step.prompt } : { type: command });
+    rpc.send(
+      "prompt" in step
+        ? { type: "prompt", message: step.prompt }
+        : "deliver" in step
+          ? {
+              type: "prompt",
+              message: `/${step.quiet === true ? "deliver-quiet" : "deliver"} ${step.deliver}`,
+            }
+          : { type: command }
+    );
     await Promise.race([settled.promise, rpc.closed]);
     if (commandError !== undefined) throw new Error(`omp refused the ${command}: ${commandError}`);
   }
@@ -862,6 +917,93 @@ test.skipIf(skipped)(
     expect(carriesList(compaction)).toBe(false);
     expect(listOf(third)).toBe(renderSessionAnswers([item], { now: Date.now() }));
     expect(listOf(fourth)).toBe(renderSessionAnswers([item], { now: Date.now() }));
+  },
+  180_000
+);
+
+// The same compaction with its cut right after a delivered message, which is what every Envoy
+// delivery with `triggerTurn` is: the branch holds it as a `custom_message` entry, and the
+// compaction's conversion makes of it `{role: "custom", ..., timestamp: new Date(s).getTime()}`
+// (`yu`). The cut search (`qge`) cuts where the role changes between assistant and not, so with
+// the newest turn kept the cut comes between the delivery and its reply.
+test.skipIf(skipped)(
+  "(m) a remote compaction cut right after a delivered message ends at it with no list, and keeps no message past it",
+  async () => {
+    const item = answer("ask_m", "Compact after the delivery.", 1);
+    const session = await runSession(
+      binary(),
+      [
+        { route: { kind: "list", items: [item] } },
+        { prompt: "First question." },
+        { prompt: "Second question." },
+        { deliver: "ENVOY-DELIVERY: CI finished." },
+        { compact: true },
+        { prompt: "Fourth question." },
+      ],
+      {
+        methodOrder: "[remote, soft]",
+        model: ["compat: {supportsServerCompaction: true, bedrockMessagesApi: true}"],
+      }
+    );
+
+    const compactions = session.seen.filter(isRemoteCompaction);
+    expect(compactions).toHaveLength(1);
+    const compaction = compactions[0] as Seen;
+    const [, , delivered, fourth, ...rest] = session.turns;
+    if (delivered === undefined || fourth === undefined) throw new Error("want four turns");
+    expect(rest).toEqual([]);
+    // The delivery's turn ends at the delivery, then its list; the compaction request is that
+    // turn's request without its list, message for message: nothing of the reply after the cut.
+    const compacted = messagesOf(compaction);
+    expect(textOf(compacted.at(-1))).toContain("ENVOY-DELIVERY: CI finished.");
+    expect(shapeOf(compacted)).toEqual(shapeOf(messagesOf(delivered).slice(0, -1)));
+    expect(carriesList(compaction)).toBe(false);
+    expect(listOf(delivered)).toBe(renderSessionAnswers([item], { now: Date.now() }));
+    expect(listOf(fourth)).toBe(renderSessionAnswers([item], { now: Date.now() }));
+  },
+  180_000
+);
+
+// A remote compaction that keeps no tail: two delivered messages with no turn after a turn, the
+// newest kept, and no role change from assistant to not past the cut, so `qge` returns the whole
+// conversation's length and `buildLiveProviderContext` gets an empty tail. Its two conversions,
+// `convert(Se)` and `convert([...Se, ...[]])`, then hold the same messages, both ending at the
+// branch's last message, while the session compacts (`isCompacting`, the manual compaction's
+// controller set).
+test.skipIf(skipped)(
+  "(n) a remote compaction that keeps no tail carries no list, and the turn after it carries the list",
+  async () => {
+    const item = answer("ask_n", "Compact it all.", 1);
+    const session = await runSession(
+      binary(),
+      [
+        { route: { kind: "list", items: [item] } },
+        { prompt: "First question." },
+        { deliver: "QUIET-ONE: a notice.", quiet: true },
+        { deliver: "QUIET-TWO: another notice.", quiet: true },
+        { compact: true },
+        { prompt: "Second question." },
+      ],
+      {
+        methodOrder: "[remote, soft]",
+        model: ["compat: {supportsServerCompaction: true, bedrockMessagesApi: true}"],
+      }
+    );
+
+    const compactions = session.seen.filter(isRemoteCompaction);
+    expect(compactions).toHaveLength(1);
+    const compaction = compactions[0] as Seen;
+    const [first, second, ...rest] = session.turns;
+    if (first === undefined || second === undefined) throw new Error("want two turns");
+    expect(rest).toEqual([]);
+    // The whole conversation, ending at the newest delivered message, with no list.
+    const compacted = messagesOf(compaction);
+    expect(textOf(compacted.at(-1))).toContain("QUIET-TWO: another notice.");
+    expect(JSON.stringify(compacted)).toContain("QUIET-ONE: a notice.");
+    expect(JSON.stringify(compacted)).toContain("First question.");
+    expect(carriesList(compaction)).toBe(false);
+    expect(listOf(first)).toBe(renderSessionAnswers([item], { now: Date.now() }));
+    expect(listOf(second)).toBe(renderSessionAnswers([item], { now: Date.now() }));
   },
   180_000
 );

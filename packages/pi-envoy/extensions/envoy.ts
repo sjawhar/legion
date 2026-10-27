@@ -2856,6 +2856,22 @@ export default function envoyExtension(pi: PiApi): void {
       const withSkill = withDispatchFirst(event.messages, DISPATCH_FIRST_CONTEXT);
       const messages = await withSessionAnswers(withSkill ?? event.messages, {
         branch: () => context.sessionManager.getBranch?.() ?? [],
+        session: context.sessionManager,
+        // Read off the live `AgentSession` (18.12.2), whose getters the declared host surface
+        // leaves out: `get isCompacting() { return this.#C.isCompacting; }` and
+        // `get compactionSpeculation() { return this.#C.speculationState; }`, the compaction
+        // controller's `this.#i !== undefined || this.#u !== undefined || this.#l !== undefined`
+        // (an automatic or manual compaction, or a handoff) and `e.armed ? "armed" : "running"`
+        // for a speculative one. A session the registry does not list (a `task` subagent's)
+        // reads as not compacting.
+        compacting: () => {
+          const live = liveAgentSession(context.sessionManager.getSessionId());
+          return (
+            live !== undefined &&
+            (("isCompacting" in live && live.isCompacting === true) ||
+              ("compactionSpeculation" in live && live.compactionSpeculation === "running"))
+          );
+        },
         read: () => sessionAnswersText(context),
       });
       const result = messages ?? withSkill;
