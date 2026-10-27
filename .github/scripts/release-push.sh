@@ -3,9 +3,11 @@
 #
 # The workflows split each release into a build job, which runs the
 # dependencies' code and holds no credential, and a publish job, which holds
-# the credentials and runs no dependency code. `version` and `no-credential`
-# are the build job's; `tag`, `release`, `restart`, `push-main` and `push-tag`
-# the publish job's; `tagged` and `handed` serve both.
+# the credentials and runs no dependency code. `version`, `no-credential` and
+# `fold-notes` are the build job's; `tag`, `release`, `restart`, `push-main`,
+# `push-tag` and `push-fold` the publish job's; `tagged`, `handed` and
+# `fold-plan` serve both. changelog-fold.yaml splits each fold of the packages'
+# changelog fragments the same way.
 #
 # version:   the one version step every build job calls: print the release
 #            this checkout gets, as the three lines `version=`, `tag=` and
@@ -173,9 +175,89 @@
 #            ran in the job could have planted a `git` for this very step, so
 #            the build/publish split is the boundary and this only catches a
 #            credential wired into a build job by mistake.
+# fold-plan: print which changelog fragments a fold of main writes into which
+#            CHANGELOG.md, one tab-separated line per fragment:
+#            <package-dir>, <label>, <date> (YYYY-MM-DD, UTC), <path>, sorted by
+#            package in the order of the specs, then by label as versions
+#            (`sort -V`), then by path; nothing printed means nothing to fold.
+#            Each <spec> is <package-dir>[=<tag-prefix>], and the package must
+#            hold a CHANGELOG.md at HEAD. The fragments are the files
+#            <package-dir>/.changes/unreleased/*.yaml HEAD holds (git's tree,
+#            never the working tree; other names are not fragments). With a tag
+#            prefix (a package with releases of its own), a fragment's label is
+#            X.Y.Z of the lowest <tag-prefix>X.Y.Z tag that contains the commit
+#            which added it: the release that first shipped the entry, whether
+#            the tag sits on the bump commit `tag` makes over the built commit
+#            (the npm plugins) or on the built commit itself (the listener);
+#            other names under the prefix are not releases and are skipped. A
+#            fragment no such tag contains waits for a later run, unprinted.
+#            The date is the tag's commit's committer date. Without a prefix (a
+#            package with no release of its own), every fragment is folded under
+#            main@<HEAD's first 12 hex digits>, dated by HEAD's committer date.
+#            It reads only git, so the build job and the publish job compute
+#            the same plan from the same checkout and tags.
+# fold-notes: the build job's half of a fold: render the plan's fragments with
+#            changie, which is dependency code, into <notes-dir>, which must be
+#            absent or empty and is created. Each (package, label) of the plan
+#            gets a directory of its own holding a copy of the package's
+#            .changie.yaml and only that group's fragments as HEAD holds them,
+#            where `changie batch 0.0.0` renders them, and the rendered notes
+#            become <notes-dir>/<package basename>_<label>.md. An empty plan
+#            writes nothing. A fragment changie refuses fails the command with
+#            an ::error:: naming the package, the label, each fragment changie
+#            refuses on its own and changie's output.
+# push-fold: the publish job's half: write the build job's notes into the
+#            CHANGELOG.md files and land the result on main, with git, jq and
+#            gh only. HEAD must be <base-sha>, the commit the build job built,
+#            with a clean working tree and index; $DEPLOY_KEY and
+#            $GITHUB_REPOSITORY must be set before anything is written. The
+#            plan is computed again from git, never taken from the build job;
+#            an empty one prints "Nothing to fold" and exits 0. <notes-dir>
+#            must hold exactly the files <package basename>_<label>.md of the
+#            plan, by `handed`'s rule (regular files, nothing else at any
+#            depth), so the build job chooses the notes' bytes but not which
+#            packages and labels they go to. Each must hold something besides
+#            blank lines, no NUL byte and no line starting "## " (the heading
+#            is push-fold's to write), and no package's CHANGELOG.md may
+#            already hold the heading "## [<label>]" of its group. Every
+#            refusal is an ::error:: naming the file, package or label, before
+#            anything is written. Each group then becomes a block, applied in
+#            ascending label order: "## [<label>] - <date>", a blank line, the
+#            notes with leading and trailing blank lines trimmed, a blank line.
+#            A version's block goes above the first "## " line that is not the
+#            release heading "## [X.Y.Z]" of a higher version, so the newest
+#            release is on top and an older one goes below a newer one present;
+#            a main@ block goes above the first "## " line; with no such line
+#            the block is appended after a blank line. Every existing line is
+#            kept, byte for byte and in order. The planned fragments are
+#            removed, and the one commit, by github-actions[bot] as `tag`'s
+#            are, has the fixed subject "chore: fold changelog fragments [skip
+#            ci]" and no body: "[skip ci]" starts no workflow run from it, and
+#            release-bump.sh reads commit subjects and bodies, where a fixed
+#            chore subject bumps no release. The commit lands by land_on_main
+#            (below), which never rebases: a fold is of main's tip, so when main
+#            moved since the build, a new run folds the new tip, fragments and
+#            all, and is the retry.
+#
+#            land_on_main <base-sha> <workflow-file>, shared with the other
+#            commands that land one commit built from a base, pushes HEAD to
+#            main through the deploy key (deploy_key_env) when HEAD is exactly
+#            one commit whose one parent is <base-sha> and main's fetched tip is
+#            still <base-sha>, writing pushed=true to $GITHUB_OUTPUT when that
+#            is set. When main moved, before the push or by a push it rejected,
+#            it pushes nothing and starts a run of <workflow-file> on main with
+#            gh ($GH_TOKEN), which builds main's tip: a ::notice:: names both
+#            commits and the command exits 0. A rejected push while main stays
+#            at the base, a failed fetch or a failed `gh workflow run` fails
+#            with an ::error::.
 set -euo pipefail
 
-command=${1:?usage: release-push.sh version <tag-prefix> [--package-dir <dir>] [--first-npm <npm package>] [--expect <X.Y.Z>] [--patch-path <path>]... -- <paths>... | release-push.sh restart <workflow-file> <lost-races> | release-push.sh tag <package-dir> <commit-message> <tag> | release-push.sh tagged <tag-prefix> [<package-dir>] | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh push-main <package-dir> <version> | release-push.sh push-tag <tag> | release-push.sh handed <tag-prefix> <version> <dir> <file>... | release-push.sh no-credential}
+command=${1:?usage: release-push.sh version <tag-prefix> [--package-dir <dir>] [--first-npm <npm package>] [--expect <X.Y.Z>] [--patch-path <path>]... -- <paths>... | release-push.sh restart <workflow-file> <lost-races> | release-push.sh tag <package-dir> <commit-message> <tag> | release-push.sh tagged <tag-prefix> [<package-dir>] | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh push-main <package-dir> <version> | release-push.sh push-tag <tag> | release-push.sh handed <tag-prefix> <version> <dir> <file>... | release-push.sh fold-plan <spec>... | release-push.sh fold-notes <notes-dir> <spec>... | release-push.sh push-fold <base-sha> <notes-dir> <spec>... | release-push.sh no-credential}
+
+# The identity of the commits this script makes, `tag`'s version bump and
+# push-fold's fold: GitHub Actions' own bot.
+bot_name='github-actions[bot]'
+bot_email='41898282+github-actions[bot]@users.noreply.github.com'
 
 # is_plain_version <value>: true when <value> is X.Y.Z, each field a number
 # without leading zeros (release-bump.sh does arithmetic on the fields, where a
@@ -268,13 +350,227 @@ fail_outstanding() {
   exit 1
 }
 
+# version_gt <a> <b>: true when version <a> is higher than <b> (`sort -V`).
+version_gt() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1)" = "$1" ]; }
+
+# check_hand_over <dir> <what> <file>...: refuse a <dir> that does not hold
+# exactly the <file>s, each a regular file, and nothing else at any depth (the
+# header's handed paragraph), with an ::error:: on stderr for each fault; an
+# entry no <file> names is reported as what <what>. Exits 1 on a refusal.
+check_hand_over() {
+  local dir=$1 what=$2 file entry listed refused=false missing=() irregular=() unlisted=()
+  shift 2
+  for file in "$@"; do
+    if [ -z "$file" ] || [ "$file" = . ] || [ "$file" = .. ] || [[ $file == */* ]]; then
+      echo "::error::release-push.sh $command: $(quote_all "$file") is not a file name: each <file> is a name in <dir>, with no /" >&2
+      exit 1
+    fi
+  done
+  if [ ! -d "$dir" ] || [ -L "$dir" ]; then
+    echo "::error::release-push.sh $command: $(quote_all "$dir") is not a directory" >&2
+    exit 1
+  fi
+
+  for file in "$@"; do
+    if [ -L "$dir/$file" ] || { [ -e "$dir/$file" ] && [ ! -f "$dir/$file" ]; }; then
+      irregular+=("$file")
+    elif [ ! -e "$dir/$file" ]; then
+      missing+=("$file")
+    fi
+  done
+  # Everything under <dir>, at any depth, sorted so a refusal names it the same
+  # way every time. The list is removed here, and by the trap on a failure, as
+  # a later command may set a trap of its own.
+  listing=$(mktemp)
+  trap 'rm -f "$listing"' EXIT
+  find "$dir" -mindepth 1 -print0 > "$listing"
+  sort -z -o "$listing" "$listing"
+  while IFS= read -r -d '' entry; do
+    entry=${entry#"$dir"/}
+    listed=false
+    for file in "$@"; do
+      [ "$file" != "$entry" ] || listed=true
+    done
+    "$listed" || unlisted+=("$entry")
+  done < "$listing"
+  rm -f "$listing"
+
+  if [ ${#missing[@]} -gt 0 ]; then
+    echo "::error::release-push.sh $command: $(quote_all "$dir") lacks $(quote_all "${missing[@]}")" >&2
+    refused=true
+  fi
+  for file in "${irregular[@]}"; do
+    echo "::error::release-push.sh $command: $(quote_all "$file") in $(quote_all "$dir") is not a regular file" >&2
+    refused=true
+  done
+  if [ ${#unlisted[@]} -gt 0 ]; then
+    echo "::error::release-push.sh $command: $(quote_all "$dir") holds what $what: $(quote_all "${unlisted[@]}")" >&2
+    refused=true
+  fi
+  if "$refused"; then
+    exit 1
+  fi
+}
+
+# fold_plan <spec>...: set plan to the fold's plan, the lines fold-plan prints
+# (the header's fold-plan paragraph), each ending in a newline; empty when there
+# is nothing to fold. Sets groups to its distinct <package-dir><TAB><label>
+# pairs, in the plan's order.
+fold_plan() {
+  [ $# -gt 0 ] || fail_error "no package spec given; each is <package-dir>[=<tag-prefix>]"
+  local spec dir prefix index=0 names=' ' head head_label head_date entry meta path commit candidate tag version label date lines=''
+  local package_dir_re='^[A-Za-z0-9_-][A-Za-z0-9._-]*(/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$'
+  head=$(git rev-parse HEAD)
+  head_label="main@${head:0:12}"
+  head_date=$(TZ=UTC git log -1 --date=format-local:%Y-%m-%d --format=%cd HEAD)
+  for spec in "$@"; do
+    dir=${spec%%=*} prefix=''
+    [[ $spec != *=* ]] || prefix=${spec#*=}
+    # The package dir goes into paths and pathspecs, the prefix into a tag
+    # pattern, and the dir's basename names the notes file of each group.
+    if ! [[ $dir =~ $package_dir_re ]] || { [[ $spec == *=* ]] && ! [[ $prefix =~ ^[A-Za-z0-9._-]+$ ]]; }; then
+      fail_error "package spec $(quote_all "$spec") is not <package-dir>[=<tag-prefix>], a relative path of letters, digits, '.', '_' and '-' and a prefix of the same without '/'"
+    fi
+    [[ $names != *" ${dir##*/} "* ]] || fail_error "two package specs name a directory ${dir##*/}; the notes files are named by it, so each must differ"
+    names+="${dir##*/} "
+    git cat-file -e "HEAD:$dir/CHANGELOG.md" 2>/dev/null || fail_error "$dir holds no CHANGELOG.md at HEAD to fold its fragments into"
+    index=$((index + 1))
+    # Regular files directly in the unreleased directory, as HEAD's tree holds them.
+    while IFS= read -r -d '' entry; do
+      meta=${entry%%$'\t'*} path=${entry#*$'\t'}
+      if ! [[ $meta == 100644\ blob\ * || $meta == 100755\ blob\ * ]] || [[ $path != *.yaml ]]; then
+        continue
+      fi
+      [[ $path != *[$'\t\n']* ]] || fail_error "fragment $(quote_all "$path") has a tab or a newline in its name; rename it"
+      if [ -z "$prefix" ]; then
+        label=$head_label date=$head_date
+      else
+        commit=$(git log -1 --diff-filter=A --format=%H HEAD -- "$path")
+        label='' tag=''
+        for candidate in $(git tag --list "$prefix*" --contains "$commit"); do
+          version=${candidate#"$prefix"}
+          is_plain_version "$version" || continue
+          if [ -z "$label" ] || version_gt "$label" "$version"; then
+            label=$version tag=$candidate
+          fi
+        done
+        [ -n "$label" ] || continue
+        date=$(TZ=UTC git log -1 --date=format-local:%Y-%m-%d --format=%cd "$tag^{commit}")
+      fi
+      lines+="$index"$'\t'"$dir"$'\t'"$label"$'\t'"$date"$'\t'"$path"$'\n'
+    done < <(git ls-tree -z HEAD -- "$dir/.changes/unreleased/")
+  done
+  plan=$(printf '%s' "$lines" | LC_ALL=C sort -t $'\t' -k1,1n -k3,3V -k5,5 | cut -f2-)
+  [ -z "$plan" ] || plan+=$'\n'
+  groups=$(printf '%s' "$plan" | cut -f1,2 | uniq)
+}
+
+# group_column <dir> <label> <column>: the plan's <column> (3 the date, 4 the
+# path) on each line of that group.
+group_column() {
+  awk -F '\t' -v dir="$1" -v label="$2" -v column="$3" '$1 == dir && $2 == label { print $column }' <<<"$plan"
+}
+
+# render_notes <package-dir> <out> <fragment>...: run `changie batch 0.0.0` over
+# those fragments, as HEAD holds them, in a directory of their own beside a copy
+# of <package-dir>/.changie.yaml, and copy the notes it renders to <out> (none
+# when <out> is empty). On a failure, changie's output is left in
+# changie_output and the status is 1.
+render_notes() {
+  local package_dir=$1 out=$2 fragment render status=0
+  shift 2
+  render=$(mktemp -d)
+  mkdir -p "$render/.changes/unreleased"
+  git show "HEAD:$package_dir/.changie.yaml" > "$render/.changie.yaml" || status=1
+  for fragment in "$@"; do
+    git show "HEAD:$fragment" > "$render/.changes/unreleased/${fragment##*/}" || status=1
+  done
+  if [ "$status" = 0 ] && changie_output=$(cd "$render" && changie batch 0.0.0 2>&1 </dev/null); then
+    if [ -n "$out" ]; then cp "$render/.changes/0.0.0.md" "$out" || status=1; fi
+  else
+    status=1
+  fi
+  rm -rf "$render"
+  return "$status"
+}
+
+# has_heading <changelog> <label>: true when a line of <changelog> starts with
+# "## [<label>]".
+has_heading() {
+  awk -v heading="## [$2]" 'index($0, heading) == 1 { found = 1 } END { exit !found }' "$1"
+}
+
+# insert_block <changelog> <label> <date> <notes>: write the block of <label>
+# into <changelog> where the header's push-fold paragraph places it, keeping
+# every existing line as it is.
+insert_block() {
+  local changelog=$1 label=$2 date=$3 notes_file=$4 at='' number line version heading_re='^## \[([^]]+)\]'
+  while IFS=: read -r number line; do
+    if [[ $label != main@* && $line =~ $heading_re ]]; then
+      version=${BASH_REMATCH[1]}
+      if is_plain_version "$version" && version_gt "$version" "$label"; then
+        continue
+      fi
+    fi
+    at=$number
+    break
+  done < <(grep -n '^## ' "$changelog")
+  {
+    if [ -n "$at" ]; then
+      head -n "$((at - 1))" "$changelog"
+    elif [ -s "$changelog" ]; then
+      cat "$changelog"
+      # A last line without its newline gets one before the blank line.
+      [ -z "$(tail -c 1 "$changelog")" ] || echo
+      echo
+    fi
+    printf '## [%s] - %s\n\n' "$label" "$date"
+    awk 'NF { if (!first) first = NR; last = NR } { line[NR] = $0 } END { for (i = first; i <= last; i++) print line[i] }' "$notes_file"
+    echo
+    if [ -n "$at" ]; then tail -n "+$at" "$changelog"; fi
+  } > "$changelog.fold"
+  # Written over the file, not moved onto it, so the file keeps its mode.
+  cat "$changelog.fold" > "$changelog"
+  rm "$changelog.fold"
+}
+
+# land_on_main <base-sha> <workflow-file>: push HEAD, one commit over
+# <base-sha>, to main, or start a run of <workflow-file> on main when main moved
+# since <base-sha> (the header's land_on_main paragraph, under push-fold).
+# Exits the command.
+land_on_main() {
+  local base=$1 workflow=$2 head tip
+  [[ $base =~ ^[0-9a-f]{40}$ ]] || fail_error "the base $(quote_all "$base") is not a commit's 40 lower-case hex digits"
+  head=$(git rev-parse HEAD)
+  [ "$(git log -1 --format=%P HEAD)" = "$base" ] || fail_error "HEAD $head is not exactly one commit whose one parent is the base $base; only that commit lands on main"
+  deploy_key_env
+  git fetch "$remote" main || fail_error "fetching main failed; nothing was pushed"
+  tip=$(git rev-parse FETCH_HEAD)
+  if [ "$tip" = "$base" ]; then
+    if git push "$remote" HEAD:refs/heads/main; then
+      [ -z "${GITHUB_OUTPUT:-}" ] || echo "pushed=true" >> "$GITHUB_OUTPUT"
+      echo "Pushed $head to main over $base"
+      exit 0
+    fi
+    git fetch "$remote" main || fail_error "the push of $head to main was rejected, and fetching main again failed"
+    tip=$(git rev-parse FETCH_HEAD)
+    [ "$tip" != "$base" ] || fail_error "the push of $head to main was rejected while main stayed at the base $base"
+  fi
+  # main moved since the build: what this run built is not of main's tip, and
+  # a new run builds that tip.
+  gh workflow run "$workflow" --ref main --repo "$GITHUB_REPOSITORY" ||
+    fail_error "main moved from $base to $tip since this run built, and starting a new run of $workflow on main failed; nothing was pushed"
+  echo "::notice title=Nothing pushed::main moved from $base to $tip since this run built $head on $base, so nothing was pushed; a new run of $workflow on main builds main's tip" >&2
+  exit 0
+}
+
 case "$command" in
   tag)
     package_dir=${2:?package dir}
     commit_message=${3:?commit message}
     tag=${4:?tag}
-    git config user.name "github-actions[bot]"
-    git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+    git config user.name "$bot_name"
+    git config user.email "$bot_email"
     git add "$package_dir/package.json"
     git diff --staged --quiet || git commit -m "$commit_message"
     git fetch --tags origin
@@ -648,58 +944,96 @@ case "$command" in
       echo "::error::release-push.sh handed: version $(quote_all "$version") is not X.Y.Z, each field a number without leading zeros; refusing it" >&2
       exit 1
     fi
-    for file in "$@"; do
-      if [ -z "$file" ] || [ "$file" = . ] || [ "$file" = .. ] || [[ $file == */* ]]; then
-        echo "::error::release-push.sh handed: $(quote_all "$file") is not a file name: each <file> is a name in <dir>, with no /" >&2
-        exit 1
-      fi
-    done
-    if [ ! -d "$dir" ] || [ -L "$dir" ]; then
-      echo "::error::release-push.sh handed: $(quote_all "$dir") is not a directory" >&2
-      exit 1
-    fi
-
-    missing=()
-    irregular=()
-    for file in "$@"; do
-      if [ -L "$dir/$file" ] || { [ -e "$dir/$file" ] && [ ! -f "$dir/$file" ]; }; then
-        irregular+=("$file")
-      elif [ ! -e "$dir/$file" ]; then
-        missing+=("$file")
-      fi
-    done
-    # Everything under <dir>, at any depth, sorted so a refusal names it the same way every time.
-    listing=$(mktemp)
-    trap 'rm -f "$listing"' EXIT
-    find "$dir" -mindepth 1 -print0 > "$listing"
-    sort -z -o "$listing" "$listing"
-    extra=()
-    while IFS= read -r -d '' entry; do
-      entry=${entry#"$dir"/}
-      listed=false
-      for file in "$@"; do
-        [ "$file" != "$entry" ] || listed=true
-      done
-      "$listed" || extra+=("$entry")
-    done < "$listing"
-
-    refused=false
-    if [ ${#missing[@]} -gt 0 ]; then
-      echo "::error::release-push.sh handed: $(quote_all "$dir") lacks $(quote_all "${missing[@]}")" >&2
-      refused=true
-    fi
-    for file in "${irregular[@]}"; do
-      echo "::error::release-push.sh handed: $(quote_all "$file") in $(quote_all "$dir") is not a regular file" >&2
-      refused=true
-    done
-    if [ ${#extra[@]} -gt 0 ]; then
-      echo "::error::release-push.sh handed: $(quote_all "$dir") holds what the release does not ship: $(quote_all "${extra[@]}")" >&2
-      refused=true
-    fi
-    if "$refused"; then
-      exit 1
-    fi
+    check_hand_over "$dir" "the release does not ship" "$@"
     printf '%s\n' "$prefix$version"
+    ;;
+  fold-plan)
+    shift
+    fold_plan "$@"
+    printf '%s' "$plan"
+    ;;
+  fold-notes)
+    [ $# -ge 3 ] || fail_error "usage: release-push.sh fold-notes <notes-dir> <spec>..."
+    notes_dir=${2%/}
+    shift 2
+    if [ -e "$notes_dir" ] || [ -L "$notes_dir" ]; then
+      if [ ! -d "$notes_dir" ] || [ -L "$notes_dir" ] || [ -n "$(ls -A "$notes_dir")" ]; then
+        fail_error "$(quote_all "$notes_dir") exists and is not an empty directory; the notes go into a directory of their own"
+      fi
+    fi
+    fold_plan "$@"
+    mkdir -p "$notes_dir"
+    if [ -z "$plan" ]; then
+      echo "Nothing to fold"
+      exit 0
+    fi
+    while IFS=$'\t' read -r dir label; do
+      git cat-file -e "HEAD:$dir/.changie.yaml" 2>/dev/null || fail_error "$dir holds no .changie.yaml at HEAD to render its fragments with"
+      mapfile -t fragments < <(group_column "$dir" "$label" 4)
+      notes_file="$notes_dir/${dir##*/}_$label.md"
+      if ! render_notes "$dir" "$notes_file" "${fragments[@]}"; then
+        # changie does not name the fragment of every refusal (an unknown kind):
+        # each fragment is rendered alone to find the ones it refuses.
+        output=$changie_output
+        refused=()
+        for fragment in "${fragments[@]}"; do
+          render_notes "$dir" '' "$fragment" || refused+=("$fragment")
+        done
+        if [ ${#refused[@]} -gt 0 ]; then
+          output="refused alone: $(quote_all "${refused[@]}"); changie said: $output"
+        fi
+        fail_error "changie could not render $dir's notes for $label; ${output//$'\n'/ }"
+      fi
+      echo "Wrote $notes_file from ${#fragments[@]} fragments"
+    done <<<"$groups"
+    ;;
+  push-fold)
+    [ $# -ge 4 ] || fail_error "usage: release-push.sh push-fold <base-sha> <notes-dir> <spec>..."
+    base=$2 notes_dir=${3%/}
+    shift 3
+    [[ $base =~ ^[0-9a-f]{40}$ ]] || fail_error "the base $(quote_all "$base") is not a commit's 40 lower-case hex digits"
+    head=$(git rev-parse HEAD)
+    [ "$head" = "$base" ] || fail_error "HEAD is $head, not the base $base the build job built"
+    [ -z "$(git status --porcelain --untracked-files=no)" ] || fail_error "the working tree or the index differs from HEAD; the fold is written onto a clean checkout of the base"
+    for var in DEPLOY_KEY GITHUB_REPOSITORY; do
+      [ -n "${!var:-}" ] || fail_error "$var is unset or empty, and landing the fold on main needs it; nothing was written"
+    done
+    fold_plan "$@"
+    if [ -z "$plan" ]; then
+      echo "Nothing to fold"
+      exit 0
+    fi
+    names=()
+    while IFS=$'\t' read -r dir label; do
+      names+=("${dir##*/}_$label.md")
+    done <<<"$groups"
+    check_hand_over "$notes_dir" "the fold's plan names no notes for" "${names[@]}"
+    while IFS=$'\t' read -r dir label; do
+      notes_file="$notes_dir/${dir##*/}_$label.md"
+      shown=$(quote_all "$notes_file")
+      [ "$(tr -d '\000' < "$notes_file" | wc -c)" = "$(wc -c < "$notes_file")" ] || fail_error "$shown, the notes of $dir for $label, holds a NUL byte"
+      LC_ALL=C grep -q '[^[:space:]]' "$notes_file" || fail_error "$shown, the notes of $dir for $label, holds nothing but blank lines"
+      if LC_ALL=C grep -q '^## ' "$notes_file"; then
+        fail_error "$shown, the notes of $dir for $label, holds a line starting '## '; the heading is push-fold's to write"
+      fi
+      if has_heading "$dir/CHANGELOG.md" "$label"; then
+        fail_error "$dir/CHANGELOG.md already holds the heading ## [$label]"
+      fi
+    done <<<"$groups"
+    while IFS=$'\t' read -r dir label; do
+      date=$(group_column "$dir" "$label" 3 | sed -n 1p)
+      insert_block "$dir/CHANGELOG.md" "$label" "$date" "$notes_dir/${dir##*/}_$label.md"
+    done <<<"$groups"
+    mapfile -t fragments < <(printf '%s' "$plan" | cut -f4)
+    mapfile -t changelogs < <(printf '%s\n' "$groups" | cut -f1 | uniq | sed 's|$|/CHANGELOG.md|')
+    git --literal-pathspecs rm -q -- "${fragments[@]}"
+    git --literal-pathspecs add -- "${changelogs[@]}"
+    # The identity through the environment, which outranks any configuration
+    # and any identity the job's environment already sets.
+    GIT_AUTHOR_NAME=$bot_name GIT_AUTHOR_EMAIL=$bot_email GIT_COMMITTER_NAME=$bot_name GIT_COMMITTER_EMAIL=$bot_email \
+      git -c commit.gpgsign=false commit -q --no-verify -m "chore: fold changelog fragments [skip ci]"
+    echo "Folded ${#fragments[@]} fragments into ${changelogs[*]}"
+    land_on_main "$base" changelog-fold.yaml
     ;;
   no-credential)
     status=0
