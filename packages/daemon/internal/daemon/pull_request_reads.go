@@ -109,8 +109,8 @@ func (w *workflowRuntime) openRecord(ctx context.Context, pr record.PullRequest)
 // issue's handoffs, which READY refuses as code too), a rewritten history or a head behind from, no
 // file list or a list GitHub may have cut (githubrest.CompareFilesLimit), and a from GitHub does not
 // know. Any other failure of the read is an error. The push names no pusher: the pusher decides
-// only a code push's planned mark and whether a push takes back its head's counted attempt, which a
-// handoff-only push takes back whoever pushed it (classify.ApplyPush).
+// only a code push's planned mark and whether a push spares a fix attempt, which a handoff-only
+// push spares whoever pushed it, on a chain from the head the count moved from (classify.ApplyPush).
 func handoffPush(ctx context.Context, github githubrest.Client, pr record.PullRequest, from, to string) (intake.Push, string, error) {
 	compare, err := github.Compare(ctx, from, to)
 	if err != nil {
@@ -136,6 +136,8 @@ func handoffPush(ctx context.Context, github githubrest.Client, pr record.PullRe
 			return intake.Push{}, fmt.Sprintf("%s changed between %s and %s, outside .legion/%s/", path, from, to, pr.Issue), nil
 		}
 	}
+	// Not forced: GitHub's compare says ahead, so to is from with commits on top, and the paths
+	// above are what those commits did to from (classify.sparesAttempt, carriesApproval).
 	changed, whole, unforced := strings.Join(paths, "\n"), "false", "false"
 	return intake.Push{Repo: pr.Repo, Branch: pr.Branch, Before: from, After: to, ChangedPaths: &changed, Truncated: &whole, Forced: &unforced}, "", nil
 }
