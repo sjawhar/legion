@@ -182,17 +182,51 @@ func TestAPushForALaterMoveWaitsForItsChain(t *testing.T) {
 	}
 }
 
-// A head that arrives before its push each time keeps no more than the push still to be linked: a
-// late push lies behind the next head's arrival, and is spent there.
-func TestPushesThatArriveAfterTheirHeadsAreSpent(t *testing.T) {
+// A push is spent once its move is judged: a head that arrives before its push keeps no more than
+// the push still to be linked, which the next head's arrival spends, and a head that arrives after
+// its push, its chain then known, spends that push at once.
+func TestPushesAreSpentOnceTheirMoveIsJudged(t *testing.T) {
+	for _, pushFirst := range []bool{false, true} {
+		pr, most := record.PullRequest{HeadSHA: "c0"}, 1
+		if pushFirst {
+			most = 0
+		}
+		for i := 1; i <= 10; i++ {
+			head, push := fmt.Sprintf("c%d", i), record.ClassifiedPush{SHA: fmt.Sprintf("c%d", i), Before: fmt.Sprintf("c%d", i-1)}
+			if pushFirst {
+				pr = AdvancePullRequestHead(ApplyPush(pr, push), head)
+			} else {
+				pr = ApplyPush(AdvancePullRequestHead(pr, head), push)
+			}
+			if len(pr.Pushes) > most {
+				t.Fatalf("push first %v: after %d moves %d pushes are kept, want at most %d: %+v", pushFirst, i, len(pr.Pushes), most, pr.Pushes)
+			}
+		}
+	}
+}
+
+// A push behind a webhook that never arrives is spent by no head's arrival: the walk back from
+// each head stops at the gap. The pull request keeps at most maxWaitingPushes of them, letting the
+// oldest go first and saying which it let go (DroppedPushes).
+func TestPushesWaitingBehindLostWebhooksAreBounded(t *testing.T) {
 	pr := record.PullRequest{HeadSHA: "c0"}
-	for i := 1; i <= 10; i++ {
+	dropped := 0
+	for i := 1; i <= 80; i++ {
 		head := fmt.Sprintf("c%d", i)
 		pr = AdvancePullRequestHead(pr, head)
-		pr = ApplyPush(pr, record.ClassifiedPush{SHA: head, Before: fmt.Sprintf("c%d", i-1)})
-		if len(pr.Pushes) > 1 {
-			t.Fatalf("after %d moves, each head first, %d pushes are kept, want at most 1: %+v", i, len(pr.Pushes), pr.Pushes)
+		if i%2 == 0 {
+			continue // this move's push webhook is lost
 		}
+		// The push of the move before last arrives late, behind the lost one.
+		prior := pr
+		pr = ApplyPush(pr, record.ClassifiedPush{SHA: fmt.Sprintf("c%d", i-1), Before: fmt.Sprintf("c%d", i-2)})
+		dropped += len(DroppedPushes(prior.Pushes, pr.Pushes))
+		if len(pr.Pushes) > maxWaitingPushes {
+			t.Fatalf("after %d moves %d pushes are kept, want at most %d", i, len(pr.Pushes), maxWaitingPushes)
+		}
+	}
+	if dropped == 0 {
+		t.Fatal("no push was let go, want the oldest let go once the bound is reached")
 	}
 }
 

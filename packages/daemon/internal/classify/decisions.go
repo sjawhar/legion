@@ -244,7 +244,8 @@ func arrivalPlan(pushes []record.ClassifiedPush, from, to string) (planned, deci
 // head other than the current one. A push that reached the counted head from another head - the
 // required-checks pass's compare from an approved head - completes no chain from HeadCountedFrom,
 // and takes nothing back: the counted move can carry code that push does not. A push replaces an
-// earlier record of the same two heads, so a redelivered push is recorded once.
+// earlier record of the same two heads, so a redelivered push is recorded once. The pushes it
+// keeps are boundedPushes'.
 func ApplyPush(pr record.PullRequest, push record.ClassifiedPush) record.PullRequest {
 	pushes := make([]record.ClassifiedPush, 0, len(pr.Pushes)+1)
 	for _, p := range pr.Pushes {
@@ -252,7 +253,7 @@ func ApplyPush(pr record.PullRequest, push record.ClassifiedPush) record.PullReq
 			pushes = append(pushes, p)
 		}
 	}
-	pr.Pushes = append(pushes, push)
+	pr.Pushes = boundedPushes(append(pushes, push), pr.HeadSHA)
 	if planned, decided, chained := arrivalPlan(pr.Pushes, pr.HeadArrivedFrom, pr.HeadSHA); chained {
 		if decided {
 			pr.PlannedRed = planned
@@ -268,6 +269,54 @@ func ApplyPush(pr record.PullRequest, push record.ClassifiedPush) record.PullReq
 		pr.HeadCounted, pr.HeadCountedBefore, pr.HeadCountedFrom = pr.HeadCountedBefore, "", ""
 	}
 	return pr
+}
+
+// maxWaitingPushes bounds the pushes a pull request keeps that wait for a link (keptPushes): a push
+// that neither carries an approval across nor lies on the path forward from the head. A push behind
+// a webhook that never arrives is spent by no head's arrival, since the walk back from each head
+// stops at the gap; past the bound the oldest such push goes, and the move it would have linked
+// into is judged without it.
+const maxWaitingPushes = 16
+
+// boundedPushes is pushes with at most maxWaitingPushes waiting pushes, the oldest dropped first.
+func boundedPushes(pushes []record.ClassifiedPush, head string) []record.ClassifiedPush {
+	onPath := map[string]bool{}
+	for _, p := range pathFrom(pushes, head, false) {
+		onPath[p.SHA] = true
+	}
+	waiting := 0
+	for _, p := range pushes {
+		if !carriesApproval(p) && !onPath[p.SHA] {
+			waiting++
+		}
+	}
+	if waiting <= maxWaitingPushes {
+		return pushes
+	}
+	kept := make([]record.ClassifiedPush, 0, len(pushes))
+	for _, p := range pushes {
+		if waiting > maxWaitingPushes && !carriesApproval(p) && !onPath[p.SHA] {
+			waiting--
+			continue
+		}
+		kept = append(kept, p)
+	}
+	return kept
+}
+
+// DroppedPushes is the pushes before holds that after does not: what a fact let go of.
+func DroppedPushes(before, after []record.ClassifiedPush) []record.ClassifiedPush {
+	held := map[[2]string]bool{}
+	for _, p := range after {
+		held[[2]string{p.Before, p.SHA}] = true
+	}
+	var dropped []record.ClassifiedPush
+	for _, p := range before {
+		if !held[[2]string{p.Before, p.SHA}] {
+			dropped = append(dropped, p)
+		}
+	}
+	return dropped
 }
 
 // ApplySettlement applies a listener CI settlement only when ClassifySettlement says it is newer,

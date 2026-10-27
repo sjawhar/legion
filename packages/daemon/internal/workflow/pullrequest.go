@@ -188,6 +188,12 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
 		return intake.Result{}, err
 	}
+	// Past its bound the record lets the oldest push waiting for a link go (classify.ApplyPush): a
+	// webhook behind it never arrived, and the move it would have linked into is judged without it.
+	for _, dropped := range classify.DroppedPushes(prior.Pushes, pr.Pushes) {
+		e.warnOnCommit(ctx, "workflow: a pull request holds the most pushes waiting for a link; the oldest is let go",
+			"issue", pr.Issue, "pullRequest", pr.Number, "before", dropped.Before, "after", dropped.SHA)
+	}
 	// A push classified after its head arrived can complete the carry of a code head's red to the
 	// handoff head that replaced it (classify.SettlementFor), which sends the work back as the
 	// settlement would have (standingRed), in whatever phase the issue is: GitHub delivers a push
