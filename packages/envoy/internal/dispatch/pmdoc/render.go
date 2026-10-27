@@ -790,7 +790,8 @@ func escapeLinkDestination(href string, escapePipes bool) string {
 
 // escapeImageSource writes an image's address so that the browser editor's parser, which decodes
 // a destination's escapes and character references, reads it back: a backslash before ASCII
-// punctuation is doubled, an ampersand is escaped where it would open a character reference
+// punctuation or at the address's end, where it would escape the closing parenthesis or angle
+// bracket, is doubled, an ampersand is escaped where it would open a character reference
 // (characterReferenceAt), and in a table a pipe is escaped as well. An address holding a space or
 // a parenthesis is then written in angle brackets, as escapeLinkDestination writes a link's.
 func escapeImageSource(src string, escapePipes bool) string {
@@ -800,7 +801,7 @@ func escapeImageSource(src string, escapePipes bool) string {
 		for index := range len(src) {
 			char := src[index]
 			switch {
-			case char == '\\' && index+1 < len(src) && isASCIIPunctuation(src[index+1]):
+			case char == '\\' && (index+1 == len(src) || isASCIIPunctuation(src[index+1])):
 				written.WriteByte('\\')
 			case char == '|' && escapePipes:
 				written.WriteByte('\\')
