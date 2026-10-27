@@ -2,47 +2,33 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-439",
-  "completed": "2026-10-27T01:12:00Z",
-  "round": 16,
-  "headSha": "c95305504d295746517ef9dbc9b21b36147d685d",
-  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6431096471",
+  "completed": "2026-10-27T03:12:00Z",
+  "round": 17,
+  "headSha": "067a15afdc167fd3a3ec8b021a944a645b1c83f4",
+  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6432795793",
   "answeringProvider": "anthropic/claude-haiku-4-5 answered every omp 18.12.2 turn",
   "implementerProof": {
     "verdict": "verified",
-    "how": "The implementer proved the cut-short gap with unit tests only (its deviation). I drove it live with a kill inside that window; it passes. I re-ran notice4.sh and notice5.sh at this head: all legs pass. Smoke passes in both modes."
+    "how": "Drove the stream-identity rules myself on a listener and natsd built from this head. A same-id backup and restore: no reset, messages shown once. A new id: one notice and a reset. Upgrade from previous-build state: adopted, no reset. Smoke passes in both modes."
   },
-  "failed": 0,
-  "failures": [],
-  "proof": [
+  "failed": 1,
+  "failures": [
     {
-      "criterion": "Review 5660734397's important item: a retention gap is told once when its sweep is cut short after the notice",
-      "surface": "real omp --mode rpc 18.12.2 with this checkout's pi-envoy, natsd -js and the listener built from this head",
-      "command": "/legion/scratch/tmp/adv/cut.sh",
-      "observed": "omp was killed; 260 own messages were stored behind 3 unfollowed fillers, and the stream was purged below the first of them; omp was resumed and SIGKILLed as soon as the gap was recorded, with 85 of the 260 cards written; after the second resume: 1 gap notice in total, 0 of the 260 messages missing, 0 shown twice",
-      "headSha": "c95305504d295746517ef9dbc9b21b36147d685d",
-      "negativeControl": "the implementer's engine test against 6eba519f's replay.ts gives ['retention_gap','retention_gap']"
-    },
-    {
-      "criterion": "The earlier kill legs: retention gap and stream recreated, each held mid-turn and killed while held",
-      "surface": "same rig",
-      "command": "/legion/scratch/tmp/adv/notice4.sh; /legion/scratch/tmp/adv/notice5.sh",
-      "observed": "gap-a, gap-b, recreate-idle, recreate-a, recreate-b: all PASS (each notice once, no extra turn)",
-      "headSha": "c95305504d295746517ef9dbc9b21b36147d685d",
-      "negativeControl": "gap-b at 489fd64d showed 2 notices; recreate-b at 232a541e showed 0"
-    },
-    {
-      "criterion": "Bare gates",
-      "surface": "real omp, natsd -js and the listener built from this head; the plugin and listener suites",
-      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh (local and remote as committed); bun test extensions/envoy.test.ts -t \"a retention gap|a BTW refused live\"; go test ./cmd/listener -run 'TestReplayNeverReturnsAnotherSessions…'",
-      "observed": "SMOKE REPLAY PASS in both modes; 13 pass 0 fail (red tests cf65bda2 and bddc5c2a unchanged); listener red tests pass",
-      "headSha": "c95305504d295746517ef9dbc9b21b36147d685d",
-      "negativeControl": "the released plugin loses its messages in the smoke's controls"
+      "criterion": "Review 5661117423's stream-id item: a changed created time with the same id resets nothing, with no message lost (the INFRA-14 hub move)",
+      "evidence": "A stream that keeps its envoy_stream_id but stands behind a session's cursor drops the messages published after it, in silence. Live (sidm.sh, natscli v0.5.1): backup at last_seq 1; the session then saw 421..423, so its cursor was at 4. The session's NATS was cut, and the stream was deleted and restored from the backup (same id, last_seq 1). 424 was published, at seq 2. After the reconnect and 4 heartbeats: 0 cards for 424, 0 notices, cursor still at 4. The same happened when the stream was re-added from its exported config (sid3.sh: 415 and 416 at seq 1 and 2 with the cursor at 5, never shown). The engine resets on a cursor past last_seq only on the upgrade path; for a known id it trusts the cursor. Red test: 46751dc66075, `cd packages/envoy-client && bun test src/__tests__/replay.test.ts -t \"keeps its id but stands behind a cursor\"` -> FAIL (the message published after the restore is neither shown nor told)."
     }
   ],
-  "minors": "Fork re-queue keyed by session and id (unit test); nats-hub.md names the replay read; the PR body's no-auth NATS user sentence is conditional on sessionUser.",
-  "ci": {
-    "head": "c95305504d295746517ef9dbc9b21b36147d685d",
-    "observed": "Tests, Legion Envoy and Contracts, Docs and Worker Image queued when read (the repository's runner queue is backed up).",
-    "envoyConfigTest": "envoy-client 'a ! command in envoy.json > still running after 10 s …' passes in CI: job 121528826179 (run 40301975592, e0ed6d23, the last completed envoy-client job on this branch), 10026 ms, 897 pass 0 fail. Its file is untouched by this PR; its failure is specific to the pod."
-  }
+  "verifiedFixed": [
+    "Same id, created moved (backup, delete, restore in one step): 0 notices, the messages from before and after the move each shown once (sid.sh A).",
+    "Changed id: 1 'stream recreated' notice and a cursor reset; the next message is shown once (sid.sh B).",
+    "Upgrade from a state with only stream_created: id adopted, no reset, no notice; the message published while stopped is shown once (sid.sh C).",
+    "Gap notice with its cursor lift, killed during the write. Claude Code: the channel server was killed on its first state write after a purge left 150 messages behind a gap; after the restart, 1 gap notification in total, 0 missing, 0 duplicates (cgap.sh). Oh My Pi: the round-16 cut leg covers it; the notice legs pass at this head.",
+    "Id-only reconcile on a 3-node nats-server 2.15.1 R3 stream with custom limits: only envoy_stream_id is added; replicas, max_msgs, max_bytes, description and peers are kept; a restart keeps the id (r3/run.sh case 1).",
+    "PR body: the census 'Replay cursor format and reset rule' line, the upgrade-edge risk line, both E2E lines and Fast-follow none are present and describe the code."
+  ],
+  "observations": [
+    "A stream whose subjects differ from the listener's takes the full reconcile and becomes R1 with default limits (r3/run.sh case 2). This is main's existing behaviour (desired := *cfg, Replicas 1), tracked by dispatch://INFRA-546."
+  ],
+  "proof": [],
+  "ci": "At 067a15af when read: Tests, Legion Envoy and Contracts and Docs queued; Worker Image pending."
 }
