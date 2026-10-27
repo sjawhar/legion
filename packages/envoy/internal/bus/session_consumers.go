@@ -148,6 +148,34 @@ func (s *SessionConsumers) Drain(timeout time.Duration) error { return s.client.
 // Connected reports whether the connection is live.
 func (s *SessionConsumers) Connected() bool { return s.client.Connected() }
 
+// Publish publishes msg over core NATS on the connection, waiting for a connection nats.go is
+// replacing until ctx ends: a relay frame on a session's DeliverSubject, which the stream does not
+// store, so it travels on the connection the frame's message was pulled and is answered on.
+func (s *SessionConsumers) Publish(ctx context.Context, msg *nats.Msg) error {
+	if err := s.client.ensureConnWithContext(ctx); err != nil {
+		return err
+	}
+	s.client.mu.Lock()
+	conn := s.client.Conn
+	s.client.mu.Unlock()
+	return conn.PublishMsg(msg)
+}
+
+// SubscribeReplies subscribes handler over core NATS to subject, typically a reply-inbox wildcard,
+// on the connection, and keeps the subscription across a reconnect and on a connection dialled to
+// replace a closed one (Client.SubscribeCore). It is the connection's one core subscription: a
+// second call on another subject is refused with ErrSubscriptionHeld. It returns once the server
+// holds the subscription.
+func (s *SessionConsumers) SubscribeReplies(subject string, handler nats.MsgHandler) error {
+	if _, err := s.client.SubscribeCore(subject, handler); err != nil {
+		return err
+	}
+	s.client.mu.Lock()
+	conn := s.client.Conn
+	s.client.mu.Unlock()
+	return conn.Flush()
+}
+
 // SessionConsumerStart is what Ensure or RestartAtFloor did to a session's consumer.
 type SessionConsumerStart struct {
 	// Created is set when the call created the consumer.

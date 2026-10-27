@@ -2,6 +2,7 @@ package session
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -94,7 +95,7 @@ func (d Deliverer) DeliverWithResultForEntry(item contracts.Envelope, interest s
 		if owner != "" && owner != d.MachineID {
 			return DeliveryResult{}, ErrWrongMachine
 		}
-		return DeliveryResult{}, d.prompt(*entry, interest.SessionID, text)
+		return DeliveryResult{}, d.prompt(context.Background(), *entry, interest.SessionID, text)
 	}
 	return DeliveryResult{}, fmt.Errorf("no live serve port for session %s", interest.SessionID)
 }
@@ -179,7 +180,16 @@ func foreignSession(item contracts.Envelope) string {
 	return ""
 }
 
-func (d Deliverer) prompt(entry SessionEntry, sessionID string, text string) error {
+// Push posts item to sessionID's serving port, the prompt_async push DeliverWithResultForEntry makes
+// for a serving-port session this listener owns, at the address hostFor reads from entry, and
+// returns nil only on the port's 204. ctx ends the request early. The caller has checked that the
+// session is this listener's to deliver: the relay of a session's consumer pushes each of its stored
+// messages this way (cmd/listener).
+func (d Deliverer) Push(ctx context.Context, item contracts.Envelope, sessionID string, entry SessionEntry) error {
+	return d.prompt(ctx, entry, sessionID, d.Text(item))
+}
+
+func (d Deliverer) prompt(ctx context.Context, entry SessionEntry, sessionID string, text string) error {
 	type promptBody struct {
 		Parts []map[string]string `json:"parts"`
 	}
@@ -191,7 +201,7 @@ func (d Deliverer) prompt(entry SessionEntry, sessionID string, text string) err
 		return err
 	}
 	url := "http://" + net.JoinHostPort(d.hostFor(entry), strconv.Itoa(entry.Port)) + "/session/" + sessionID + "/prompt_async"
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

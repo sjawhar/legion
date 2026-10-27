@@ -2161,7 +2161,7 @@ func TestRebuildingALostDurableConsumerReplacesItsSubscription(t *testing.T) {
 		if err := client.JS().DeleteConsumer(bus.Stream, consumer); err != nil {
 			t.Fatalf("rebuild %d: lose the durable consumer: %v", rebuild, err)
 		}
-		if err := rebuildListenerDependencies(context.Background(), client, nil, durableProbe, consumer, handler); err != nil {
+		if err := rebuildListenerDependencies(context.Background(), client, nil, durableProbe, consumer, handler, nil); err != nil {
 			t.Fatalf("rebuild %d: %v", rebuild, err)
 		}
 		if got := client.Conn.NumSubscriptions(); got != subscriptions {
@@ -4630,7 +4630,7 @@ func TestSelfHealthRebuildsAnInterestWatcherThatEndedWhileConnected(t *testing.T
 		},
 		client.Connected,
 		func() error {
-			return rebuildListenerDependencies(context.Background(), client, []listenerCache{{name: "interest", cache: registry}}, nil, "", nil)
+			return rebuildListenerDependencies(context.Background(), client, []listenerCache{{name: "interest", cache: registry}}, nil, "", nil, nil)
 		},
 	)
 

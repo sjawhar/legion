@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -12,6 +12,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/session"
+	"github.com/sjawhar/envoy/internal/store"
 )
 
 // The modes of a registration's delivery answer (deliveryAnswer.Mode).
@@ -40,6 +41,17 @@ const (
 
 // sessionConsumerCallTimeout bounds the consumer calls a registration makes before it answers.
 const sessionConsumerCallTimeout = 5 * time.Second
+
+// noGrantBackoff is how long, after a consumer call the server refused for want of a grant, every
+// registration that asks for a consumer is answered core with reason no_grant without a call to the
+// server; the next registration after it probes again. A hub whose grant predates session consumers
+// would otherwise log a permissions violation, on the server and here, for every heartbeat of
+// every session.
+const noGrantBackoff = 10 * time.Minute
+
+// sessionConsumerDrain bounds the drain of the session-consumer connection at shutdown, inside
+// what is left of the HTTP stop's budget.
+const sessionConsumerDrain = 2 * time.Second
 
 // deliveryAnswer is the delivery field of a registration's answer (subscribeResponse.Delivery),
 // present whenever the registration carried delivery or registered a serving port. A listener of an
@@ -93,9 +105,21 @@ type sessionDelivery struct {
 	// port session's consumer is created and kept, and its answer says consumer, but its entry
 	// records no consumer delivery, so the durable path keeps pushing to its port.
 	servingPortRelayed bool
-	// noGrantLogged is set once the first refusal for want of a grant is logged, so a hub without
-	// the grant costs one line per listener process rather than one per registration.
-	noGrantLogged atomic.Bool
+	// now is the clock of the no-grant backoff; time.Now unless a test sets it.
+	now func() time.Time
+	// locks keeps the consumer calls made for one session one at a time: a registration's create or
+	// filter update, an unsubscribe's filter update and the relay's restart at the ack floor, which
+	// deletes the consumer and creates it again. A create landing between that delete and create
+	// would start the consumer at the stream's end and skip what the session has not acked.
+	locks sessionLocks
+	// grantMu guards the refusal episode below.
+	grantMu sync.Mutex
+	// noGrantUntil is when the registrations' calls may probe the grant again after a refusal for
+	// want of it; zero while no refusal episode runs. noGrantLogged is set once the episode's one
+	// warning is logged, so a hub without the grant costs one line per episode rather than one per
+	// registration. A consumer call that succeeds ends the episode.
+	noGrantUntil  time.Time
+	noGrantLogged bool
 }
 
 // connectSessionDelivery opens the session-consumer connection (bus.ConnectSessionConsumers) on
@@ -105,15 +129,35 @@ func connectSessionDelivery(urls []string, logger *logging.Logger) *sessionDeliv
 	consumers, err := bus.ConnectSessionConsumers(urls)
 	if err != nil {
 		logger.Error("session consumer connection failed; every session stays on core delivery", slog.String("error", err.Error()))
-		return &sessionDelivery{logger: logger}
+		return &sessionDelivery{logger: logger, now: time.Now}
 	}
-	return &sessionDelivery{consumers: consumers, logger: logger}
+	return &sessionDelivery{consumers: consumers, logger: logger, now: time.Now}
 }
 
 // close closes the session-consumer connection, if one is open.
 func (m *sessionDelivery) close() {
 	if m != nil && m.consumers != nil {
 		m.consumers.Close()
+	}
+}
+
+// drain drains the session-consumer connection, so the acks the relays sent reach the server,
+// within sessionConsumerDrain or what is left of ctx if that is less; with nothing left of ctx it
+// closes the connection. The relays are stopped first (sessionRelays.stop).
+func (m *sessionDelivery) drain(ctx context.Context) {
+	if m == nil || m.consumers == nil {
+		return
+	}
+	timeout := sessionConsumerDrain
+	if deadline, ok := ctx.Deadline(); ok {
+		timeout = min(timeout, time.Until(deadline))
+	}
+	if timeout <= 0 {
+		m.consumers.Close()
+		return
+	}
+	if err := m.consumers.Drain(timeout); err != nil {
+		m.logger.Warn("session consumer connection drain error", slog.String("error", err.Error()))
 	}
 }
 
@@ -135,6 +179,9 @@ func (m *sessionDelivery) register(ctx context.Context, body subscribeBody, topi
 	if m == nil || m.consumers == nil {
 		return coreDeliveryOutcome(deliveryReasonConsumerError)
 	}
+	if m.grantRefused() {
+		return coreDeliveryOutcome(deliveryReasonNoGrant)
+	}
 	ctx, cancel := context.WithTimeout(ctx, sessionConsumerCallTimeout)
 	defer cancel()
 	streamID, err := m.consumers.StreamID(ctx)
@@ -149,10 +196,13 @@ func (m *sessionDelivery) register(ctx context.Context, body subscribeBody, topi
 			startSeq = resume.Seq + 1
 		}
 	}
+	unlock := m.locks.lock(body.SessionID)
 	start, err := m.consumers.Ensure(ctx, body.SessionID, sessionConsumerFilter(body.SessionID, topics), startSeq)
+	unlock()
 	if err != nil {
 		return m.refused(body.SessionID, err)
 	}
+	m.granted()
 	gap := start.Gap
 	return sessionDeliveryOutcome{
 		answer: &deliveryAnswer{
@@ -171,18 +221,41 @@ func coreDeliveryOutcome(reason string) sessionDeliveryOutcome {
 	return sessionDeliveryOutcome{answer: &deliveryAnswer{Mode: deliveryModeCore, Reason: reason}}
 }
 
-// refused is the core outcome of a consumer call for sessionID that failed with err.
+// refused is the core outcome of a consumer call for sessionID that failed with err. A refusal for
+// want of a grant starts the no-grant backoff (noGrantBackoff), or extends the episode running.
 func (m *sessionDelivery) refused(sessionID string, err error) sessionDeliveryOutcome {
 	if errors.Is(err, bus.ErrConsumerNotGranted) || errors.Is(err, bus.ErrPublishDenied) {
-		if m.noGrantLogged.CompareAndSwap(false, true) {
+		m.grantMu.Lock()
+		m.noGrantUntil = m.now().Add(noGrantBackoff)
+		first := !m.noGrantLogged
+		m.noGrantLogged = true
+		m.grantMu.Unlock()
+		if first {
 			m.logger.Warn("the NATS user may not manage session consumers; sessions stay on core delivery until the grant carries them",
-				slog.String("session_id", sessionID), slog.String("error", err.Error()))
+				slog.String("session_id", sessionID), slog.String("error", err.Error()), slog.String("probe_again_in", noGrantBackoff.String()))
 		}
 		return coreDeliveryOutcome(deliveryReasonNoGrant)
 	}
 	m.logger.Warn("session consumer call failed; the session stays on core delivery",
 		slog.String("session_id", sessionID), slog.String("error", err.Error()))
 	return coreDeliveryOutcome(deliveryReasonConsumerError)
+}
+
+// grantRefused reports whether a refusal for want of a grant was met less than noGrantBackoff
+// ago, so a registration is answered no_grant without asking the server.
+func (m *sessionDelivery) grantRefused() bool {
+	m.grantMu.Lock()
+	defer m.grantMu.Unlock()
+	return !m.noGrantUntil.IsZero() && m.now().Before(m.noGrantUntil)
+}
+
+// granted ends a refusal episode once a consumer call succeeds: the grant now carries session
+// consumers, and a later refusal is logged again.
+func (m *sessionDelivery) granted() {
+	m.grantMu.Lock()
+	defer m.grantMu.Unlock()
+	m.noGrantUntil = time.Time{}
+	m.noGrantLogged = false
 }
 
 // registered tells the relay of a registration that recorded consumer delivery for sessionID
@@ -206,21 +279,68 @@ func (m *sessionDelivery) refollow(ctx context.Context, d *listenerDeps, session
 	if err != nil || entry.Delivery != session.DeliveryConsumer {
 		return
 	}
-	var topics []string
-	interest, err := d.registry.Get(sessionID)
-	switch {
-	case err == nil:
-		topics = interest.Topics
-	case !errors.Is(err, nats.ErrKeyNotFound):
+	topics, err := storedInterestTopics(d.registry, sessionID)
+	if err != nil {
 		m.logger.Warn("session consumer filter left unchanged: the session's interests could not be read",
 			slog.String("session_id", sessionID), slog.String("error", err.Error()))
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, sessionConsumerCallTimeout)
 	defer cancel()
+	unlock := m.locks.lock(sessionID)
 	err = m.consumers.UpdateFilter(ctx, sessionID, sessionConsumerFilter(sessionID, topics))
+	unlock()
 	if err != nil && !errors.Is(err, bus.ErrSessionConsumerNotFound) {
 		m.logger.Warn("session consumer filter update failed", slog.String("session_id", sessionID), slog.String("error", err.Error()))
+	}
+}
+
+// storedInterestTopics is the topics of sessionID's stored interest row, none when it has no row.
+func storedInterestTopics(registry *store.Registry, sessionID string) ([]string, error) {
+	interest, err := registry.Get(sessionID)
+	if errors.Is(err, nats.ErrKeyNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return interest.Topics, nil
+}
+
+// sessionLocks holds one lock per session id, kept only while somebody holds or waits for it.
+type sessionLocks struct {
+	mu    sync.Mutex
+	locks map[string]*sessionLock
+}
+
+type sessionLock struct {
+	sync.Mutex
+	// users counts the callers holding or waiting for the lock, under sessionLocks.mu.
+	users int
+}
+
+// lock takes sessionID's lock and returns the func that releases it.
+func (l *sessionLocks) lock(sessionID string) (unlock func()) {
+	l.mu.Lock()
+	if l.locks == nil {
+		l.locks = map[string]*sessionLock{}
+	}
+	held := l.locks[sessionID]
+	if held == nil {
+		held = &sessionLock{}
+		l.locks[sessionID] = held
+	}
+	held.users++
+	l.mu.Unlock()
+	held.Lock()
+	return func() {
+		held.Unlock()
+		l.mu.Lock()
+		held.users--
+		if held.users == 0 {
+			delete(l.locks, sessionID)
+		}
+		l.mu.Unlock()
 	}
 }
 

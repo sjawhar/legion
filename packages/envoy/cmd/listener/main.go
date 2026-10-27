@@ -147,7 +147,9 @@ func isUnrecoverableSelfHealthFailure(err error, client *bus.Client, caches []li
 // rebuildListenerDependencies rewatches the KV caches and, when the durable probe reports the
 // consumer gone or bound elsewhere, subscribes the durable again. It reports success only once
 // the server reports this listener bound, so the probe that follows a rebuild reads a settled
-// consumer rather than the gap in which the subscription is being replaced.
+// consumer rather than the gap in which the subscription is being replaced. rebound, when not nil,
+// is called once the server reports the durable bound to this listener again: the task holds its
+// machine's durable binding once more (sessionRelays.setOwned).
 func rebuildListenerDependencies(
 	ctx context.Context,
 	client *bus.Client,
@@ -155,6 +157,7 @@ func rebuildListenerDependencies(
 	durableProbe func() error,
 	consumer string,
 	handler nats.MsgHandler,
+	rebound func(),
 ) error {
 	if !client.Connected() {
 		return nats.ErrConnectionClosed
@@ -172,6 +175,9 @@ func rebuildListenerDependencies(
 	}
 	if boundErr := awaitDurableBound(ctx, client, consumer, durableRebindInterval, durableRebindDeadline); boundErr != nil {
 		return errors.Join(err, fmt.Errorf("rebind durable consumer: %w", boundErr))
+	}
+	if rebound != nil {
+		rebound()
 	}
 	return err
 }
@@ -817,6 +823,18 @@ func main() {
 	// (bus.ConnectSessionConsumers). One that fails to connect leaves every session on core
 	// delivery, which a listener of an earlier release serves too, rather than ending the start.
 	delivery := connectSessionDelivery(cfg.NATSURLs, logger)
+	// The relay of those consumers hears registrations from the moment /v1 opens, and relays once
+	// this task holds its machine's durable binding (below). Without its reply inbox no frame could
+	// be answered, so a relay that cannot subscribe one leaves every session on core delivery too.
+	var relays *sessionRelays
+	if delivery.consumers != nil {
+		relays, err = startSessionRelays(delivery, sessions, registry, &deliver, client, cfg.MachineID, logger)
+		if err != nil {
+			logger.Error("session relay reply subscription failed; every session stays on core delivery", slog.String("error", err.Error()))
+			delivery.close()
+			delivery = &sessionDelivery{logger: logger, now: time.Now}
+		}
+	}
 
 	// From here a SIGTERM or SIGINT is an ordered shutdown: /v1 serves from the next step, and the
 	// bind can wait out a rolling deploy's old task for most of a minute. Before here, during the
@@ -866,10 +884,14 @@ func main() {
 				slog.Int64("waited_ms", bind.waited.Milliseconds()),
 			)
 		}
-		shutdownListener(logger, server, client, live, delivery, caches, listenerLoops{})
+		shutdownListener(logger, server, client, live, delivery, relays, caches, listenerLoops{})
 	}
 	deps.Store(ready)
 	logger.Info("envoy-listener ready (NATS connected)")
+	// This task holds its machine's durable binding: among the tasks of one machine id, it alone
+	// relays the session consumers. A task that loses the binding stops relaying, and one that
+	// binds it again in a rebuild starts again (the self-health monitor below).
+	relays.setOwned(true)
 
 	// Phase 6b: Start interest reaper for stale KV cleanup.
 	// Cross-references envoy_sessions (5-min TTL) with envoy_interests (permanent)
@@ -914,7 +936,13 @@ func main() {
 	// rebind wait run under monitorCtx, each JetStream read included, so the shutdown's monitorCancel
 	// cuts a read the server has not answered and the 10 s shutdown budget is held by neither.
 	monitorCtx, monitorCancel := context.WithCancel(context.Background())
-	probeDurable := func() error { return durableProbe(monitorCtx, client, consumer) }
+	probeDurable := func() error {
+		err := durableProbe(monitorCtx, client, consumer)
+		if errors.Is(err, nats.ErrConsumerNotFound) || errors.Is(err, errDurableUnbound) {
+			relays.setOwned(false)
+		}
+		return err
+	}
 	monitorDone := make(chan struct{})
 	go func() {
 		defer close(monitorDone)
@@ -936,6 +964,7 @@ func main() {
 					probeDurable,
 					consumer,
 					jetStreamDeliveryHandler(deliveryConfig),
+					func() { relays.setOwned(true) },
 				)
 			},
 			func() { _ = syscall.Kill(os.Getpid(), syscall.SIGTERM) },
@@ -951,7 +980,7 @@ func main() {
 	case <-stopping.Done():
 		logger.Info("received signal, shutting down", slog.String("signal", context.Cause(stopping).Error()))
 	}
-	shutdownListener(logger, server, client, live, delivery, caches, listenerLoops{
+	shutdownListener(logger, server, client, live, delivery, relays, caches, listenerLoops{
 		stop: func() {
 			monitorCancel()
 			summaryCancel()
@@ -975,23 +1004,27 @@ type listenerLoops struct {
 // shutdownListener is the ordered shutdown every end of a start that serves /v1 comes to, a
 // signal, a fatal error or a bind that did not complete, and exits non-zero so the runtime's
 // restart policy restores the listener. live is the live topics lane's client, nil when the lane
-// is off; delivery holds the session-consumer connection.
-func shutdownListener(logger *logging.Logger, server *http.Server, client *bus.Client, live *bus.Client, delivery *sessionDelivery, caches []listenerCache, loops listenerLoops) {
+// is off; delivery holds the session-consumer connection, and relays relays its consumers (nil when
+// it does not run).
+func shutdownListener(logger *logging.Logger, server *http.Server, client *bus.Client, live *bus.Client, delivery *sessionDelivery, relays *sessionRelays, caches []listenerCache, loops listenerLoops) {
 	// Stop background loops before draining NATS.
 	if loops.stop != nil {
 		loops.stop()
 	}
 
 	// Ordered shutdown:
+	// 1. Session relays — publish no frame, push to no port and ack nothing more.
 	// 2. HTTP server — stop accepting new requests, drain in-flight.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	relays.stop(shutdownCtx)
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("http shutdown error", slog.String("error", err.Error()))
 	}
-	// The session-consumer connection carries only the consumer calls registrations make, and the
-	// HTTP server has stopped serving them.
-	delivery.close()
+	// The session-consumer connection carries the consumer calls registrations make, which the HTTP
+	// server has stopped serving, and the relays' acks, which its drain lets reach the server,
+	// within what is left of the HTTP stop's budget.
+	delivery.drain(shutdownCtx)
 
 	// 3. NATS — wait (within the HTTP deadline) for a self-health rebuild the monitor may still be
 	// running, so nothing re-subscribes or re-watches during the drain, and for a pass of a loop
