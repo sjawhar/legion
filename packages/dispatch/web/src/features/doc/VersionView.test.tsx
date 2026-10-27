@@ -117,23 +117,29 @@ test("VersionView reports an ambiguous or missing quote as changed text", async 
   }
 });
 
+/** What the live editor's `setMarkdown` throws for `UNKNOWN_MARK_MARKDOWN`: a mark span of a
+ *  kind its schema does not carry, one of the parser's refusals the editor still has. */
+const UNKNOWN_MARK_MARKDOWN = 'see <span data-dispatch="bogus">this</span> now';
+const UNKNOWN_MARK_REFUSAL =
+  'Cannot match target parser for node: {"type":"dispatchMark","dispatch":"bogus","attrs":{},"children":[{"type":"text","value":"this","position":{"start":{"line":1,"column":33,"offset":32},"end":{"line":1,"column":37,"offset":36}}}]}.';
+
 test("VersionView shows the parser's error instead of an empty document when a version cannot be rendered", async () => {
   const { editors, view } = renderVersionView({
     createEditor: (inner) => async (root, options) => {
       const handle = await inner(root, options);
       handle.setMarkdown = () => {
-        throw new Error("text directives (:name{...}) are not supported");
+        throw new Error(UNKNOWN_MARK_REFUSAL);
       };
       return handle;
     },
     highlight: undefined,
-    markdown: "held since 16:25Z",
+    markdown: UNKNOWN_MARK_MARKDOWN,
   });
 
   try {
     await waitFor(() =>
       expect(within(view.container).getByRole("alert").textContent).toBe(
-        "This version could not be rendered: text directives (:name{...}) are not supported"
+        `This version could not be rendered: ${UNKNOWN_MARK_REFUSAL}`
       )
     );
     expect(editors[0]?.destroyed).toBe(true);

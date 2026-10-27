@@ -64,6 +64,7 @@
         "!packages/proof-editor/src/record-mark-target.ts",
         "!packages/proof-editor/src/read-only-directives.ts",
         "!packages/proof-editor/src/typed-block-drawing.ts",
+        "!packages/proof-editor/src/ask-content.ts",
         "packages/proof-editor/upstream/**"
       ],
       "assist": { "enabled": false },

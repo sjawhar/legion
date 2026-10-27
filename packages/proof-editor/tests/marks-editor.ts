@@ -25,8 +25,9 @@ export interface MarksEditor {
 /**
  * Runs `run` against the editor `createProofEditor` builds - Milkdown's presets, the collab
  * binding with both undo managers, and every plugin of the stack - in happy-dom, configured as
- * Dispatch's margin configures it, over a Y.Doc seeded with `markdown`; `options` adds to or
- * overrides that configuration (an `onMarkAction`, `readOnly`). The real stack matters:
+ * Dispatch's margin configures it, over a Y.Doc seeded with `markdown` (parsed with
+ * `options.blockSchema` when given); `options` adds to or overrides that configuration (an
+ * `onMarkAction`, `readOnly`, a `blockSchema`). The real stack matters:
  * plugins such as commonmark's hard-break mark cleaner append transactions after a mark write, and
  * only the whole stack shows what reaches each undo manager.
  */
@@ -35,7 +36,7 @@ export async function withMarksEditor(
   run: (editor: MarksEditor) => void | Promise<void>,
   options: Partial<CreateProofEditorOptions> = {}
 ): Promise<void> {
-  const { parseMarkdown } = await createHeadlessProof();
+  const { parseMarkdown } = await createHeadlessProof({ blockSchema: options.blockSchema });
   const ydoc = new Y.Doc();
   prosemirrorToYXmlFragment(parseMarkdown(markdown), ydoc.getXmlFragment("prosemirror"));
   await withDomWindow(async (window) => {

@@ -2,10 +2,7 @@ import { $remark } from '@milkdown/kit/utils';
 import { directiveFromMarkdown, directiveToMarkdown } from 'mdast-util-directive';
 import { directive } from 'micromark-extension-directive';
 import type { Construct, Extension } from 'micromark-util-types';
-import type { Root } from '@milkdown/kit/transformer';
-import type { Processor, Transformer } from 'unified';
-
-import { remarkTypedBlocks, type BlockSchema } from './block-schema.js';
+import type { Processor } from 'unified';
 
 /**
  * The document grammar shared with the Dispatch server has exactly one directive form: the
@@ -39,7 +36,3 @@ export function remarkContainerDirectives(this: Processor): void {
 }
 
 export const libraryRemarkDirectivePlugin = $remark('remarkDirective', () => remarkContainerDirectives);
-
-export function typedBlockRemarkPlugin(schema: BlockSchema) {
-  return $remark('remarkTypedBlocks', () => () => remarkTypedBlocks(schema) as unknown as Transformer<Root, Root>);
-}

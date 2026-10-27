@@ -1,0 +1,313 @@
+/**
+ * An ask two collaborators' concurrent edits leave off its `paragraph+ bullet_list?` rule (here
+ * a second option list) stays in every editor and in the shared Yjs document, where y-prosemirror
+ * used to delete it, with all its text, the moment its `createChecked` threw (INFRA-624). Local
+ * edits on it still hold to the rule, and every other check y-prosemirror relies on is as before.
+ */
+
+import { expect, test } from "bun:test";
+import type { Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
+import { TextSelection } from "@milkdown/kit/prose/state";
+import type { EditorView } from "@milkdown/kit/prose/view";
+import * as Y from "yjs";
+import { SERVER_BLOCK_TYPES } from "../src/ask-content";
+import { BLOCK_ID_ATTR } from "../src/lib-headless.js";
+import { serverBlockSchema as blockSchema, blocks } from "./block-schema-fixture";
+import { withMarksEditor } from "./marks-editor";
+
+/** `Intro`, then an ask whose question is `Which one?` and whose options are `Option A` and `After`. */
+const ASK_DOC = "Intro\n\n:::ask{#a1}\nWhich one?\n\n- Option A\n- After\n:::\n";
+/** Every word of `ASK_DOC` and of the list a collaborator adds to its ask. */
+const WORDS = ["Intro", "Which one?", "Option A", "After", "Option B"];
+
+/** The `ask` block of `doc`, if it holds one. */
+function askOf(doc: ProseMirrorNode): ProseMirrorNode | undefined {
+  let ask: ProseMirrorNode | undefined;
+  doc.descendants((node) => {
+    if (node.type.name === "ask") ask = node;
+    return ask === undefined;
+  });
+  return ask;
+}
+
+/** The `ask` block of `doc`, which must hold one. */
+function requireAsk(doc: ProseMirrorNode): ProseMirrorNode {
+  const ask = askOf(doc);
+  if (ask === undefined) throw new Error("the ask is gone");
+  return ask;
+}
+
+/** The position just inside the start of the first text block of `doc` that reads `text`. */
+function textblockStart(doc: ProseMirrorNode, text: string): number {
+  let at = -1;
+  doc.descendants((node, pos) => {
+    if (at === -1 && node.isTextblock && node.textContent === text) at = pos + 1;
+    return at === -1;
+  });
+  if (at === -1) throw new Error(`no text block reads ${JSON.stringify(text)}`);
+  return at;
+}
+
+/** The ask's element in a Yjs document's `prosemirror` fragment, as y-prosemirror stores it. */
+function yAskOf(ydoc: Y.Doc): Y.XmlElement | undefined {
+  return ydoc
+    .getXmlFragment("prosemirror")
+    .toArray()
+    .find(
+      (child): child is Y.XmlElement => child instanceof Y.XmlElement && child.nodeName === "ask"
+    );
+}
+
+/** The ask's element in `ydoc`, which must hold one. */
+function requireYAsk(ydoc: Y.Doc): Y.XmlElement {
+  const ask = yAskOf(ydoc);
+  if (ask === undefined) throw new Error("the Yjs document holds no ask");
+  return ask;
+}
+
+/** The node names of the ask's children in `ydoc`'s fragment, an element's `nodeName` each. */
+function yAskChildren(ydoc: Y.Doc): string[] {
+  return requireYAsk(ydoc)
+    .toArray()
+    .map((child) => (child instanceof Y.XmlElement ? child.nodeName : "#text"));
+}
+
+/** A collaborator's replica of the editor's shared document. */
+function peerOf(ydoc: Y.Doc): Y.Doc {
+  const peer = new Y.Doc();
+  Y.applyUpdate(peer, Y.encodeStateAsUpdate(ydoc));
+  return peer;
+}
+
+/** Delivers the edits `peer` made since it last synced to the editor's document. */
+function deliver(peer: Y.Doc, ydoc: Y.Doc): void {
+  Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(peer, Y.encodeStateVector(ydoc)));
+}
+
+/** The child of `element` at `index`, which must be an element. */
+function childElement(element: Y.XmlElement, index: number): Y.XmlElement {
+  const child = element.get(index);
+  if (!(child instanceof Y.XmlElement))
+    throw new Error(`child ${index} of ${element.nodeName} is not an element`);
+  return child;
+}
+
+/**
+ * A one-item bullet list reading `text`, as y-prosemirror stores one: an element per node, each
+ * carrying its node's attributes, copied from the ask's own list `template`, with a fresh block
+ * id when `ids` and none otherwise.
+ */
+function yBulletList(template: Y.XmlElement, text: string, ids: boolean): Y.XmlElement {
+  const copy = (source: Y.XmlElement, child: Y.XmlElement | Y.XmlText): Y.XmlElement => {
+    const element = new Y.XmlElement(source.nodeName);
+    for (const [key, value] of Object.entries(source.getAttributes())) {
+      if (key !== BLOCK_ID_ATTR && value !== undefined) element.setAttribute(key, value);
+    }
+    if (ids) element.setAttribute(BLOCK_ID_ATTR, crypto.randomUUID());
+    element.insert(0, [child]);
+    return element;
+  };
+  const item = childElement(template, 0);
+  const paragraph = childElement(item, 0);
+  return copy(template, copy(item, copy(paragraph, new Y.XmlText(text))));
+}
+
+/** A collaborator appends a second option list, `Option B`, to the ask, and the editor receives it. */
+function peerAppendsList(ydoc: Y.Doc, ids: boolean): void {
+  const peer = peerOf(ydoc);
+  const ask = requireYAsk(peer);
+  ask.insert(ask.length, [yBulletList(childElement(ask, 1), "Option B", ids)]);
+  deliver(peer, ydoc);
+}
+
+/** Presses `key` in the editor, offering the keydown to every plugin's `handleKeyDown` in order,
+ *  as ProseMirror's own listener does (happy-dom does not deliver a synthetic keydown to it). */
+function pressKey(view: EditorView, key: "Backspace" | "Enter"): void {
+  const { KeyboardEvent } = window;
+  const event = new KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
+    key,
+    keyCode: key === "Backspace" ? 8 : 13,
+  });
+  view.someProp("handleKeyDown", (handleKeyDown) => handleKeyDown(view, event));
+}
+
+/** Asserts every word of the document and the collaborator's list is in the view and in Yjs. */
+function expectEveryWord(view: EditorView, ydoc: Y.Doc): void {
+  const yText = ydoc.getXmlFragment("prosemirror").toString();
+  for (const word of WORDS) {
+    expect(view.state.doc.textContent).toContain(word);
+    expect(yText).toContain(word);
+  }
+}
+
+/** Asserts the editor's ask holds the question and two option lists, in the view and in Yjs. */
+function expectTwoListAsk(view: EditorView, ydoc: Y.Doc): ProseMirrorNode {
+  const ask = requireAsk(view.state.doc);
+  expect(blocks(ask)).toEqual([
+    ["paragraph", "Which one?"],
+    ["bullet_list", "Option AAfter"],
+    ["bullet_list", "Option B"],
+  ]);
+  expect(yAskChildren(ydoc)).toEqual(["paragraph", "bullet_list", "bullet_list"]);
+  expectEveryWord(view, ydoc);
+  return ask;
+}
+
+test("an ask a collaborator gives a second option list survives in the view and in Yjs", async () => {
+  await withMarksEditor(
+    ASK_DOC,
+    ({ view, ydoc }) => {
+      expect(askOf(view.state.doc)).toBeDefined();
+      peerAppendsList(ydoc, true);
+      expectTwoListAsk(view, ydoc);
+    },
+    { blockSchema }
+  );
+});
+
+test("a collaborator's second option list without block ids gets one from the next local edit", async () => {
+  await withMarksEditor(
+    ASK_DOC,
+    ({ view, ydoc }) => {
+      peerAppendsList(ydoc, false);
+      const before = expectTwoListAsk(view, ydoc);
+      expect(before.child(2).attrs[BLOCK_ID_ATTR]).toBeFalsy();
+      const introEnd = textblockStart(view.state.doc, "Intro") + "Intro".length;
+      expect(() => view.dispatch(view.state.tr.insertText("!", introEnd))).not.toThrow();
+      const ask = expectTwoListAsk(view, ydoc);
+      const listId = ask.child(2).attrs[BLOCK_ID_ATTR];
+      expect(typeof listId).toBe("string");
+      expect(listId).not.toBe("");
+      expect(childElement(requireYAsk(ydoc), 2).getAttribute(BLOCK_ID_ATTR)).toBe(listId);
+    },
+    { blockSchema }
+  );
+});
+
+test("edits on an ask holding two option lists keep every word and join the lists back into one", async () => {
+  await withMarksEditor(
+    ASK_DOC,
+    ({ view, ydoc }) => {
+      peerAppendsList(ydoc, true);
+      expectTwoListAsk(view, ydoc);
+
+      // Typing in the question.
+      const questionEnd = textblockStart(view.state.doc, "Which one?") + "Which one?".length;
+      view.dispatch(view.state.tr.insertText(" Pick", questionEnd));
+      expect(blocks(requireAsk(view.state.doc))[0]).toEqual(["paragraph", "Which one? Pick"]);
+      expectEveryWord(view, ydoc);
+
+      // Bold from the first list into the second.
+      const strong = view.state.schema.marks.strong;
+      const from = textblockStart(view.state.doc, "Option A");
+      const to = textblockStart(view.state.doc, "Option B") + "Option B".length;
+      view.dispatch(view.state.tr.addMark(from, to, strong.create()));
+      expect(view.state.doc.rangeHasMark(from, from + "Option A".length, strong)).toBe(true);
+      expect(view.state.doc.rangeHasMark(to - "Option B".length, to, strong)).toBe(true);
+      expectEveryWord(view, ydoc);
+
+      // Backspace at the start of the second list joins it to the first.
+      const secondList = textblockStart(view.state.doc, "Option B");
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, secondList)));
+      pressKey(view, "Backspace");
+      const ask = requireAsk(view.state.doc);
+      expect(blocks(ask)).toEqual([
+        ["paragraph", "Which one? Pick"],
+        ["bullet_list", "Option AAfterOption B"],
+      ]);
+      expect(ask.type.contentMatch.matchFragment(ask.content)?.validEnd).toBe(true);
+      expect(yAskChildren(ydoc)).toEqual(["paragraph", "bullet_list"]);
+      expectEveryWord(view, ydoc);
+    },
+    { blockSchema }
+  );
+});
+
+test("Enter at the end of an option in an ask holding two option lists keeps every word", async () => {
+  await withMarksEditor(
+    ASK_DOC,
+    ({ view, ydoc }) => {
+      peerAppendsList(ydoc, true);
+      const optionEnd = textblockStart(view.state.doc, "Option A") + "Option A".length;
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, optionEnd)));
+      pressKey(view, "Enter");
+      const ask = requireAsk(view.state.doc);
+      expect(ask.childCount).toBe(3);
+      expect(ask.child(1).childCount).toBe(3);
+      expectEveryWord(view, ydoc);
+    },
+    { blockSchema }
+  );
+});
+
+test("an ask a collaborator empties of every block is still deleted", async () => {
+  await withMarksEditor(
+    ASK_DOC,
+    ({ view, ydoc }) => {
+      const peer = peerOf(ydoc);
+      const ask = requireYAsk(peer);
+      ask.delete(0, ask.length);
+      deliver(peer, ydoc);
+      expect(askOf(view.state.doc)).toBeUndefined();
+      expect(yAskOf(ydoc)).toBeUndefined();
+      expect(blocks(view.state.doc)).toEqual([["paragraph", "Intro"]]);
+    },
+    { blockSchema }
+  );
+});
+
+test("a list a collaborator leaves holding a bare paragraph is still deleted", async () => {
+  await withMarksEditor(
+    ASK_DOC,
+    ({ view, ydoc }) => {
+      const peer = peerOf(ydoc);
+      const paragraph = new Y.XmlElement("paragraph");
+      paragraph.insert(0, [new Y.XmlText("Stray words")]);
+      const list = new Y.XmlElement("bullet_list");
+      list.insert(0, [paragraph]);
+      peer.getXmlFragment("prosemirror").insert(1, [list]);
+      deliver(peer, ydoc);
+      expect(view.state.doc.textContent).not.toContain("Stray words");
+      expect(ydoc.getXmlFragment("prosemirror").toString()).not.toContain("Stray words");
+      expect(blocks(view.state.doc).map(([type]) => type)).toEqual(["paragraph", "ask"]);
+    },
+    { blockSchema }
+  );
+});
+
+test("the server's block types and the schema's typed blocks are the live schema's block group", async () => {
+  await withMarksEditor(
+    "",
+    ({ view }) => {
+      const blockGroup = Object.values(view.state.schema.nodes)
+        .filter((type) => type.isInGroup("block"))
+        .map((type) => type.name);
+      const accepted = [
+        ...Object.keys(SERVER_BLOCK_TYPES),
+        ...blockSchema.types.map((type) => type.name),
+      ];
+      expect(accepted.sort()).toEqual(blockGroup.sort());
+    },
+    { blockSchema }
+  );
+});
+
+test("Enter at the end of a valid ask's question splits it as before", async () => {
+  await withMarksEditor(
+    ASK_DOC,
+    ({ view }) => {
+      const questionEnd = textblockStart(view.state.doc, "Which one?") + "Which one?".length;
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, questionEnd)));
+      pressKey(view, "Enter");
+      const ask = requireAsk(view.state.doc);
+      expect(blocks(ask)).toEqual([
+        ["paragraph", "Which one?"],
+        ["paragraph", ""],
+        ["bullet_list", "Option AAfter"],
+      ]);
+    },
+    { blockSchema }
+  );
+});
