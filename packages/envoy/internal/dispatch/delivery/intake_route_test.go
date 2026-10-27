@@ -168,6 +168,52 @@ func TestIntakeIsSilentForAMergedPullRequestWhoseRepositoryTheAppIsNotOn(t *test
 	}
 }
 
+// TestIntakeWarnsWhenTheDeployRepositoryLosesItsApp: silence is for the repositories this intake
+// has no credential for and never records. The deploy repository is the one the settings name,
+// the one every run, job and merged pull request this slice stores comes from: its App going
+// missing is an incident, and one WARN line an hour of merges is what makes it visible. So that
+// repository keeps the ordinary fetch-failure WARN, and the reconcile retries it as before.
+func TestIntakeWarnsWhenTheDeployRepositoryLosesItsApp(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	settings := seedDeliverySettings(t, ctx, pool)
+	logs := captureLogs(t)
+
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/acme/widgets/installation", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		mustEncode(t, w, map[string]any{"message": "Not Found"})
+	})
+
+	natsClient := intakeTestClient(t)
+	startIntake(t, newIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient(), events.NewBroker()))
+	awaitBoundDurable(t, natsClient)
+
+	publishPullRequestEnvelope(t, natsClient, "acme", "widgets", 91, map[string]string{
+		"kind": "pr", "action": "closed", "repo": settings.DeployRepo, "number": "91",
+		"title": "feat: a widget", "author": "octocat", "url": "https://github.com/acme/widgets/pull/91",
+		"merged": "true", "merge_commit_sha": "abc123", "updated_at": "2024-01-01T02:00:00Z",
+	})
+	awaitAcknowledged(t, natsClient)
+
+	warned := false
+	for _, record := range logs() {
+		if record["level"] == "WARN" && record["msg"] == "dispatch delivery: process event" &&
+			strings.Contains(fmt.Sprint(record["error"]), settings.DeployRepo) {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Errorf("no WARN \"dispatch delivery: process event\" naming %s; logged %v", settings.DeployRepo, logs())
+	}
+	var prs int
+	if err := pool.QueryRow(ctx, "select count(*) from delivery_pull_requests").Scan(&prs); err != nil {
+		t.Fatalf("count pull requests: %v", err)
+	}
+	if prs != 0 {
+		t.Errorf("stored %d pull requests, want none: the completing fetch failed", prs)
+	}
+}
+
 // TestIntakeAcksAKindItDoesNotRecordWithoutLoggingOrWriting: the durable is handed every GitHub
 // notification on the bus (githubIntakeSubject), CI settlements and comments among them. A CI
 // settlement's payload carries arrays (cistore.Summary), which no handler here reads. It and a

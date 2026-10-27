@@ -45,27 +45,36 @@ const (
 // what is in flight and fails a publish issued after it.
 func startNotificationsPoller(publisher ghnotify.Publisher, reg *metrics.Registry, logger *logging.Logger, getenv func(string) string) (*ghnotify.Poller, func()) {
 	noPoller := func() {}
-	cfg, enabled, err := ghnotify.LoadConfig(getenv)
-	if err != nil {
+	poller, cfg, err := buildNotificationsPoller(publisher, reg, logger, getenv)
+	switch {
+	case err != nil:
+		// One refusal for both halves of the build: ErrLookbackTooLong comes back from either
+		// LoadConfig or New, and an operator reads the same line whichever refused.
 		logger.Error(notificationsPollerRefusedLine,
 			slog.String(notificationsLookbackVar, getenv(notificationsLookbackVar)),
 			slog.String("error", err.Error()))
 		return nil, noPoller
-	}
-	if !enabled {
-		return nil, noPoller
-	}
-	poller, err := ghnotify.New(cfg, publisher, logger, reg)
-	if err != nil {
-		logger.Error(notificationsPollerRefusedLine,
-			slog.String(notificationsLookbackVar, getenv(notificationsLookbackVar)),
-			slog.String("error", err.Error()))
+	case poller == nil:
 		return nil, noPoller
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	go poller.Run(ctx)
 	logger.Info(notificationsPollerStartedLine, slog.Int("skip_owners", len(cfg.SkipOwners)))
 	return poller, cancel
+}
+
+// buildNotificationsPoller reads the configuration and builds the poller. It answers a nil poller
+// for a listener that holds no token, which runs none.
+func buildNotificationsPoller(publisher ghnotify.Publisher, reg *metrics.Registry, logger *logging.Logger, getenv func(string) string) (*ghnotify.Poller, ghnotify.Config, error) {
+	cfg, enabled, err := ghnotify.LoadConfig(getenv)
+	if err != nil || !enabled {
+		return nil, cfg, err
+	}
+	poller, err := ghnotify.New(cfg, publisher, logger, reg)
+	if err != nil {
+		return nil, cfg, err
+	}
+	return poller, cfg, nil
 }
 
 // githubNotificationsHealth is one poller's health as /healthz reports it: the time of its last

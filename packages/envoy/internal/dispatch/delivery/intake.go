@@ -254,7 +254,8 @@ var errMalformedPayload = errors.New("malformed envelope payload")
 // and logging nothing. It is a sentinel rather than a plain "handled nothing" so the freshness
 // row is not written either: the envelope was carried by the GitHub notifications poller
 // (internal/ghnotify) on behalf of a repository this deployment holds no credential for, and
-// nothing about it belongs in this intake's record (dispatch://INFRA-611, R11).
+// nothing about it belongs in this intake's record (dispatch://INFRA-611, R11). The deploy
+// repository is never answered with it: an App missing there is an incident the WARN reports.
 var errRepositoryHasNoApp = errors.New("the GitHub App is not installed on the repository")
 
 // flatPayload is a pull request's or workflow run's fields as the flat string map its handler
@@ -700,7 +701,8 @@ func (in *Intake) deliver(msg *natsgo.Msg, handle func(context.Context, string) 
 // fields first, with no GitHub call, so a merge by anyone outside the population costs nothing.
 // It reports whether it stored the pull request's row: a row it deleted, and a pull request
 // outside the population, ship with nothing; one in a repository the App is not installed on is
-// answered errRepositoryHasNoApp, which deliver drops.
+// answered errRepositoryHasNoApp, which deliver drops, unless that repository is the deploy
+// repository, whose missing App stays the ordinary WARN.
 func (in *Intake) handlePullRequestEnvelope(ctx context.Context, settings DeliverySettings, payload map[string]string) (wrote bool, err error) {
 	if payload["kind"] != "pr" || payload["action"] != "closed" || payload["merged"] != "true" {
 		return false, nil
@@ -725,13 +727,19 @@ func (in *Intake) handlePullRequestEnvelope(ctx context.Context, settings Delive
 	}
 
 	fetched, fetchErr := FetchPullRequest(ctx, in.github, owner, repo, number)
-	if errors.Is(fetchErr, githubapp.ErrNoInstallation) {
+	if errors.Is(fetchErr, githubapp.ErrNoInstallation) && repoFull != settings.DeployRepo {
 		// A repository Envoy's GitHub App is not installed on, whose pr.<n> events reach this
 		// intake from the GitHub notifications poller (internal/ghnotify). The fetch answers the
 		// same 404 however often it is retried, so the pull request can be neither read nor
 		// recorded, and it is outside this intake's population as surely as an excluded
 		// repository is. deliver drops the envelope on this sentinel: a WARN would be one line
 		// per upstream merge naming a decision no operator can act on.
+		//
+		// The deploy repository is the exception, and keeps the WARN below: it is the one
+		// repository the settings name and the one every row this slice stores comes from, so
+		// its App going missing is an incident rather than a repository outside the population.
+		// A DEBUG line would say it to nobody -- cmd/dispatch logs at INFO and has no level
+		// setting, so nothing an operator can turn on would print it.
 		return false, errRepositoryHasNoApp
 	}
 	if fetchErr != nil {

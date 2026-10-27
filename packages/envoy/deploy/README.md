@@ -180,6 +180,11 @@ to its clients as `PGPASSWORD` alone. `compose/dispatch.env.example`'s URL is in
 | `ENVOY_WEBHOOKS` | no | Comma-separated enabled webhook providers. Without `github` the listener opens no CI store and publishes no CI settlements. |
 | `ENVOY_GITHUB_WEBHOOK_SECRET` | conditional | Required when GitHub webhooks are enabled. |
 | `ENVOY_GITHUB_MENTION_TRIGGER` | no | Defaults to `@legion`. |
+| `ENVOY_GITHUB_NOTIFICATIONS_TOKEN` | no | A classic personal access token (scopes `notifications` and `repo`), from the Secret Manager secret `<notifications-token-secret>`. Set, the listener runs the GitHub notifications poller: an optional second source of GitHub events, for the owners whose repositories send no webhook because Envoy's GitHub App is not installed on them. Unset on every other listener, which starts no poller goroutine and sends GitHub nothing. |
+| `ENVOY_GITHUB_NOTIFICATIONS_SKIP_OWNERS` | no | The comma list of owners a `legion-envoy`-style App installation already covers (case-insensitive), which the poller publishes nothing for, so no comment reaches a subscriber twice. |
+| `ENVOY_GITHUB_NOTIFICATIONS_LOOKBACK` | no | How far back the poller's first poll reads; `1h` by default, at most `48h`. A larger value is refused with one ERROR line naming it, and the listener serves webhooks as before, since a lookback past the stream's 72-hour duplicate window could republish old events. |
+| `ENVOY_GITHUB_NOTIFICATIONS_API_BASE` | no | GitHub's own API (`https://api.github.com`) when unset, which is what the cluster leaves it at; a test points it at a fake GitHub. |
+| `ENVOY_GITHUB_NOTIFICATIONS_DEGRADED_AFTER` | no | How long the poller may go without a successful poll before `/healthz`'s `github_notifications` field says `degraded`; `10m` by default. A degraded poller never stops the listener. |
 | `ENVOY_SLACK_SIGNING_SECRET` | conditional | Required when Slack webhooks are enabled. |
 | `ENVOY_GHOSTWISPR_SIGNING_SECRET` | optional | Empty skips Ghost Wispr signature verification. |
 
