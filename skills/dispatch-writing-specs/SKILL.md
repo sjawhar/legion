@@ -1,17 +1,17 @@
 ---
 name: dispatch-writing-specs
-description: "Use in a session with Dispatch before you write or change a spec, and before an ask, comment or message a person reads. It replaces superpowers' brainstorming there. A Legion architect also follows skill://legion-architect."
+description: "Use with Dispatch before writing a spec or a person-facing ask, comment or message. It replaces superpowers' brainstorming; a Legion architect also follows skill://legion-architect."
 ---
 
 # Writing specs
 
 ## The aim
 
-Reach shared understanding with the person at the least cost of their time. A Legion phase worker writes no spec: it sends decisions to its architect (`skill://legion-worker`).
+Write for shared understanding at low reader cost. A Legion phase worker sends decisions to its architect (`skill://legion-worker`).
 
 ## The outline
 
-The spec is the issue's primary document. Find its project with `dispatch projects` or `dispatch search`, never the environment. Its `##` parts, in order:
+The issue spec is its primary document. Find its project through Dispatch. Its `##` parts:
 
 Part | Content
 --- | ---
@@ -23,7 +23,7 @@ Part | Content
 `Decisions` | Your own choices
 `Acceptance` | `**A1.**` on, each naming the requirements it tests
 
-Another agent can build and check the work from the spec alone. Length scales with the change: a small change gets a few sentences per part, no matrix. Split a large design into child issues.
+A builder can implement and check from the spec. Keep a small change to a few sentences per part; split a large design into child issues.
 
 ## Rules for the text
 
@@ -31,11 +31,11 @@ For each spec, ask, comment and message:
 
 - Write in `skill://asd-ste100`'s strict mode.
 - State the current design, never how people reached it.
-- Link each source where the person wrote it: `dispatch://KEY/comment/<id>`, `/ask/<id>`, `/message/<id>`, or a Slack URL. With no link, state the design.
-- Write about the design, never the person. Never quote people, repeat an answered ask, or upload their words.
+- Link each source: `dispatch://KEY/comment/<id>`, `/ask/<id>`, `/message/<id>`, or Slack URL. Without a link, state the design.
+- Write about the design, not people. Do not quote people or repeat answered asks.
 - Name your session only if a reader must reach it.
 - Keep only text that helps a reader understand, decide, build, check.
-- Explain each name or term a new reader may not know. Name an issue by its `dispatch://` link, and say in a clause what it does for this reader. Never write a bare key.
+- Explain unfamiliar terms. Name an issue by its `dispatch://` link and its reader-relevant purpose. Never write a bare key.
 - In an ask, ask block, comment or message, name a requirement or check by what it is, never its number.
 
 ## Questions
