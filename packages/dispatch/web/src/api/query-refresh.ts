@@ -30,8 +30,9 @@ export const MIN_REFETCH_INTERVAL_MS = 1_000;
  * Which queries a refresh reaches: every query `queryKey` matches (by prefix unless `exact`), and,
  * with `when`, only those whose data it accepts. `when` runs against the query's data at the
  * flush, and against `undefined` for a query that holds none and is not fetching (an error, a
- * query never fetched). For a query still on its first load it runs on the response that lands,
- * which is then fetched again if `when` accepts it; a body composed after the event is not.
+ * query never fetched). For a query with a fetch out - a first load or a refetch - it runs on the
+ * response that lands, not on the data that response replaces, which is then fetched again if
+ * `when` accepts it; a body composed after the event is not.
  */
 export interface RefreshTarget {
   readonly queryKey: QueryKey;
@@ -92,8 +93,14 @@ function schedulerFor(queryClient: QueryClient): SchedulerState {
     }
     if (action.type === "error") {
       // A first load that failed has no body to judge: the query shows its error and retries on
-      // its own terms.
+      // its own terms. A refetch that failed leaves the data it would have replaced on screen,
+      // which is judged instead.
+      const check = state.deferred.get(hash);
       state.deferred.delete(hash);
+      const data = query.state.data;
+      if (data !== undefined && check?.when.some((when) => when(data)) === true) {
+        owe(state, query, check.requestedAt);
+      }
     }
     if (action.type === "success" && action.manual !== true) {
       const check = state.deferred.get(hash);
@@ -124,11 +131,12 @@ export function trackQueryFetches(queryClient: QueryClient): void {
   schedulerFor(queryClient);
 }
 
-/** Marks a query stale and, while something renders it, records that it owes a fetch begun after
- *  `requestedAt`. */
+/** Marks a query stale and, while something renders it or a fetch of it is out, records that it
+ *  owes a fetch begun after `requestedAt`. A fetch out settles by clearing the stale mark, so the
+ *  debt is what keeps the query stale when nothing renders it once that fetch lands (`drive`). */
 function owe(state: SchedulerState, query: Query, requestedAt: number): void {
   query.invalidate();
-  if (!query.isActive() || query.isStatic()) {
+  if (query.isStatic() || (!query.isActive() && query.state.fetchStatus === "idle")) {
     return;
   }
   const hash = query.queryHash;
@@ -152,6 +160,13 @@ function drive(state: SchedulerState, queryClient: QueryClient, hash: string): v
     // In flight: the cache subscription drives it again when it settles. Or already scheduled.
     return;
   }
+  if (!query.isActive() || query.isStatic()) {
+    // Nothing renders it, or it was left while it waited: the fetch that settled since the
+    // request cleared its stale mark, so it is marked stale again and fetches when it mounts.
+    state.owed.delete(hash);
+    query.invalidate();
+    return;
+  }
   // Clamped to the interval, so a wall clock stepped backwards never holds a refresh longer.
   const wait =
     started === undefined
@@ -165,10 +180,6 @@ function drive(state: SchedulerState, queryClient: QueryClient, hash: string): v
     return;
   }
   state.owed.delete(hash);
-  // Unmounted while it waited: it is already marked stale, and fetches when it mounts again.
-  if (!query.isActive() || query.isStatic()) {
-    return;
-  }
   void query.fetch(undefined, { cancelRefetch: false }).catch(() => undefined);
 }
 
@@ -220,7 +231,8 @@ export function refreshQueries(queryClient: QueryClient, targets?: readonly Refr
       continue;
     }
     if (condition !== true) {
-      if (query.state.data === undefined && query.state.fetchStatus !== "idle") {
+      // A fetch is out: its response replaces the data here, so the test waits for it.
+      if (query.state.fetchStatus !== "idle") {
         const pending = state.deferred.get(query.queryHash);
         state.deferred.set(query.queryHash, {
           requestedAt: Math.max(pending?.requestedAt ?? requestedAt, requestedAt),

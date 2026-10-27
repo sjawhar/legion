@@ -12,6 +12,9 @@ import {
 } from "./queries";
 import type { RefreshTarget } from "./query-refresh";
 import type {
+  ArchitectureTree,
+  ArchitectureTreeComponent,
+  ArchitectureTreeIssueRef,
   Artifact,
   ChangedReference,
   DocumentReferenceSummary,
@@ -20,6 +23,8 @@ import type {
   GraphReferences,
   InboxRow,
   IssueSummary,
+  MyRepliesResponse,
+  MyReplyRow,
 } from "./types";
 
 /**
@@ -87,6 +92,50 @@ function inboxRowsOf(key: string): RefreshTarget {
   return {
     queryKey: inboxKey,
     when: (data) => rowsOf<InboxRow>(data).some((row) => row.issue_key === key),
+  };
+}
+
+/** Every Inbox read that holds the row of ask `id`. */
+function inboxRowOfAsk(id: string): RefreshTarget {
+  return {
+    queryKey: inboxKey,
+    when: (data) => rowsOf<InboxRow>(data).some((row) => row.id === id),
+  };
+}
+
+/** The Replies page (`RepliesPage`'s `[...myRepliesKey, "page"]`, every page it loaded), when a
+ *  row of it is a thread on issue `key`: each row shows its issue's title. */
+function repliesPageRowsOf(key: string): RefreshTarget {
+  return {
+    exact: true,
+    queryKey: [...myRepliesKey, "page"],
+    when: (data) =>
+      rowsOf<MyRepliesResponse>((data as { pages?: unknown } | undefined)?.pages).some((page) =>
+        rowsOf<MyReplyRow>(page.rows).some((row) => row.issue?.key === key)
+      ),
+  };
+}
+
+/** The Architecture page's tree of `project`, when it lists issue `key`: in a component's work
+ *  list, which shows the issue's title, status, priority, parent, links and `updated_at`, or among
+ *  the unassigned, the not-architectural and the retired links, which show its title and status. */
+function architectureListing(project: string, key: string): RefreshTarget {
+  const lists = (rows: unknown) =>
+    rowsOf<ArchitectureTreeIssueRef>(rows).some((issue) => issue.key === key);
+  return {
+    exact: true,
+    queryKey: ["architecture", project],
+    when: (data) => {
+      const tree = data as Partial<ArchitectureTree> | undefined;
+      return (
+        rowsOf<ArchitectureTreeComponent>(tree?.components).some((component) =>
+          lists(component.issues)
+        ) ||
+        lists(tree?.unassigned) ||
+        lists(tree?.not_architectural) ||
+        lists(tree?.retired_links)
+      );
+    },
   };
 }
 
@@ -382,21 +431,16 @@ function issueWriteTargets(
 
   // Issue details. Components, the repository and the parent chain are resolved on read and
   // inherited downward, so moving one changes every descendant's detail, which gets no event of
-  // its own: every loaded detail refreshes. A status rolls up into every ancestor's progress and
-  // child counts, and a parent's Children tab shows each child's title and links. A new issue has
-  // no descendants: only its ancestors' rollups move.
+  // its own: every loaded detail refreshes. Otherwise every write moves the issue's `updated_at`,
+  // the newest of which each ancestor's Children tab shows as its child's activity (`active_at`
+  // of the whole subtree), and a status rolls up into every ancestor's progress and child counts:
+  // every ancestor's detail refreshes. A new issue has no descendants.
   if (changes === undefined || ancestors === undefined) {
     targets.push({ queryKey: ["issue"] });
   } else if (!created && (moved("parent") || moved("components") || moved("repo"))) {
     targets.push({ queryKey: ["issue"] });
   } else {
-    const rolledUp =
-      created || moved("status")
-        ? ancestors
-        : moved("title") || moved("external_links")
-          ? ancestors.slice(0, 1)
-          : [];
-    for (const ancestor of rolledUp) {
+    for (const ancestor of ancestors) {
       targets.push({ exact: true, queryKey: ["issue", ancestor] });
     }
   }
@@ -416,6 +460,10 @@ function issueWriteTargets(
   }
   if (!created && titleOrStatus) {
     targets.push(pinnedRow(key));
+  }
+  // A row of the Replies page shows its thread's issue title.
+  if (!created && moved("title")) {
+    targets.push(repliesPageRowsOf(key));
   }
 
   // An Inbox row shows its issue's title, status, priority and assignee, and lists an open ask
@@ -441,9 +489,15 @@ function issueWriteTargets(
   if (closed || (created ? changes === undefined : moved("closed_at"))) {
     targets.push({ queryKey: projectsKey });
   }
-  // A status move, a new attachment or a new parent moves a count in the component tree.
-  if (project !== undefined && (moved("status") || moved("parent") || moved("components"))) {
-    targets.push({ queryKey: ["components", project] }, { queryKey: ["architecture", project] });
+  // A status move, a new attachment or a new parent moves a count in the component tree. Any
+  // other write moves at least the issue's `updated_at`, which the tree shows where it lists the
+  // issue.
+  if (project !== undefined) {
+    if (moved("status") || moved("parent") || moved("components")) {
+      targets.push({ queryKey: ["components", project] }, { queryKey: ["architecture", project] });
+    } else if (!created) {
+      targets.push(architectureListing(project, key));
+    }
   }
 
   // A `child_of` edge into the parent and a `blocked_by` edge into each blocker are rows of their
@@ -567,15 +621,24 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
     ];
   }
   if (event.type === "user_state.updated") {
-    // A pin, a read mark or a dismissal in another tab or device of this viewer: the state's own
-    // read always (its `seq` moved), the pinned list only for a pin. The Inbox reads none of it.
+    // A pin, a read mark, a dismissal or a snooze in another tab or device of this viewer: the
+    // state's own read always (its `seq` moved), the pinned list only for a pin. Of these the Inbox
+    // reads only a snooze, its row's `snoozed_until`, from which its Later band, its banner and the
+    // Needs-you badge are all counted: the Inbox reads holding the ask's row, or every Inbox read
+    // when the event names no ask. An event without `changed` predates snooze events.
     if (!isViewer(payloadString(event, "login"), viewer)) {
       return [];
     }
     const changed = payloadStrings(event, "changed");
-    return changed === undefined || changed.includes("pinned")
-      ? [{ queryKey: userStateQuery().queryKey }, { exact: true, queryKey: pinnedKey }]
-      : [{ queryKey: userStateQuery().queryKey }];
+    const targets: RefreshTarget[] = [{ queryKey: userStateQuery().queryKey }];
+    if (changed === undefined || changed.includes("pinned")) {
+      targets.push({ exact: true, queryKey: pinnedKey });
+    }
+    if (changed?.includes("snoozed") === true) {
+      const askID = payloadString(event, "ask_id");
+      targets.push(askID === undefined ? { queryKey: inboxKey } : inboxRowOfAsk(askID));
+    }
+    return targets;
   }
   if (event.type === "user_agent_state.updated") {
     // Another tab or device of this viewer read or cleared a conversation: refresh the badge.
@@ -765,8 +828,8 @@ function changedReferences(event: Event): readonly ChangedReference[] {
  * The reads that carry a changed target's backlinks, which `refs.ReplaceCounted` names in the
  * transaction that appends the event: an issue's detail (its count), its references tab and its
  * panel; an ask's read, its thread, the list its row lives in (its issue's asks, or its
- * document's), the Inbox row showing its count, and its panel. Past the server's cap an event names
- * no targets, so every read that holds a count or a panel refreshes.
+ * document's), the Inbox row showing its count, and its panel; a document's panel. Past the
+ * server's cap an event names no targets, so every read that holds a count or a panel refreshes.
  */
 function changedReferenceTargets(event: Event): RefreshTarget[] {
   if (payloadValue(event, "references_changed_truncated") === true) {
@@ -789,17 +852,21 @@ function changedReferenceTargets(event: Event): RefreshTarget[] {
       );
       continue;
     }
+    if (target.kind === "artifact") {
+      // A cited document's panel: the one opened on the address the server names (`ref`, as
+      // `ReferencedBy` keys it), and one opened on another spelling of the same document, or any
+      // when the entry names no address, found by the node its read reports.
+      if (target.ref !== undefined) {
+        targets.push(referencePanel(target.ref));
+      }
+      const id = target.id;
+      targets.push(referencePanels(({ node }) => node.kind === "artifact" && node.id === id));
+      continue;
+    }
     const id = target.id;
     // An answered card reads its ask from the thread, which is fetched once (staleTime
     // Infinity): without it a citation added after the answer never moves its control.
-    targets.push(
-      { queryKey: ["ask", id] },
-      { queryKey: ["ask-thread", id] },
-      {
-        queryKey: inboxKey,
-        when: (data) => rowsOf<InboxRow>(data).some((row) => row.id === id),
-      }
-    );
+    targets.push({ queryKey: ["ask", id] }, { queryKey: ["ask-thread", id] }, inboxRowOfAsk(id));
     if (target.issue_key !== undefined && target.issue_key !== null) {
       targets.push(
         { queryKey: ["asks", target.issue_key] },

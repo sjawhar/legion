@@ -89,8 +89,18 @@ const READS = {
   referencePicker: { key: ["issues", "CORE"] },
   referencesTab: { key: ["issue", "CORE-1", "references"] },
   replies: { key: myRepliesCountQuery().queryKey },
+  repliesPage: { key: ["me", "replies", "page"] },
   rootComment: { key: commentQuery("root-1").queryKey },
   rootMessage: { key: messageQuery("CORE-1", "message-0").queryKey },
+  // CORE-1's spec, one document, opened on two spellings of its address.
+  specPanel: {
+    data: { edges: [], node: { id: "artifact-3", kind: "artifact" } },
+    key: ["references", "to", "dispatch://CORE-1/spec"],
+  },
+  specPanelBySlug: {
+    data: { edges: [], node: { id: "artifact-3", kind: "artifact" } },
+    key: ["references", "to", "dispatch://CORE-1/artifact/spec"],
+  },
   summary: { key: issueSummaryQuery("CORE-1").queryKey },
   unrelatedDetail: { key: issueQuery("CORE-9").queryKey },
   unrelatedPanel: {
@@ -107,6 +117,11 @@ interface PageOptions {
   readonly pinned: boolean;
   /** Whether the Inbox lists CORE-1's ask-1 and CORE-9's ask-9. */
   readonly inboxHolds: boolean;
+  /** Where the Architecture page's tree lists CORE-1: in a component's work list, among the
+   *  unassigned issues, or nowhere. */
+  readonly treeLists: "component" | "unassigned" | "nowhere";
+  /** Whether the Replies page lists a thread on CORE-1. */
+  readonly repliesHold: boolean;
 }
 
 function dataFor(name: ReadName, page: PageOptions): unknown {
@@ -121,13 +136,35 @@ function dataFor(name: ReadName, page: PageOptions): unknown {
         ]
       : [{ id: "ask-5", issue_key: "CORE-5" }];
   }
+  if (name === "architecture") {
+    const listed = [{ key: page.treeLists === "nowhere" ? "CORE-5" : "CORE-1" }];
+    return {
+      components: [{ id: "web", issues: page.treeLists === "unassigned" ? [] : listed }],
+      not_architectural: [],
+      retired_links: [],
+      unassigned: page.treeLists === "unassigned" ? listed : [],
+    };
+  }
+  if (name === "repliesPage") {
+    const key = page.repliesHold ? "CORE-1" : "CORE-5";
+    return {
+      pageParams: [0],
+      pages: [{ rows: [{ issue: { key, title: "Ship the release" }, thread_id: "root-1" }] }],
+    };
+  }
   const read: { data?: unknown; key: QueryKey } = READS[name];
   return read.data ?? { loaded: name };
 }
 
 /** The reads of the page `event` marks stale, signed in as alice. */
 function refreshedReads(event: Event, page: Partial<PageOptions> = {}): ReadName[] {
-  const options: PageOptions = { inboxHolds: true, pinned: true, ...page };
+  const options: PageOptions = {
+    inboxHolds: true,
+    pinned: true,
+    repliesHold: true,
+    treeLists: "component",
+    ...page,
+  };
   const queryClient = new QueryClient();
   const names = Object.keys(READS) as ReadName[];
   for (const name of names) {
@@ -183,7 +220,7 @@ interface Rule {
 }
 
 const rules: Record<string, Rule> = {
-  "a retitle refreshes the issue, its summary, the lists showing its title, and its parent's children":
+  "a retitle refreshes the issue, its summary, the lists and pages showing its title, and every ancestor's children":
     {
       event: event(
         "issue.updated",
@@ -201,10 +238,12 @@ const rules: Record<string, Rule> = {
         "inbox",
         "projectInbox",
         "parent",
+        "grandparent",
         "referencesTab",
+        "architecture",
+        "repliesPage",
       ],
       spares: [
-        "grandparent",
         "unrelatedDetail",
         "parentSummary",
         "otherProjectList",
@@ -212,7 +251,6 @@ const rules: Record<string, Rule> = {
         "replies",
         "userState",
         "components",
-        "architecture",
         "message",
         "ask",
         "comment",
@@ -221,11 +259,18 @@ const rules: Record<string, Rule> = {
         "docSummary",
       ],
     },
-  "a retitle leaves the pinned list and the Inbox alone when neither lists the issue": {
-    event: event("issue.updated", issue({ ancestors: ["CORE-0"], changed: ["title"] })),
-    page: { inboxHolds: false, pinned: false },
-    refreshes: ["summary"],
-    spares: ["pinned", "inbox", "projectInbox"],
+  "a retitle leaves the pinned list, the Inbox, the Replies page and the Architecture page alone when none lists the issue":
+    {
+      event: event("issue.updated", issue({ ancestors: ["CORE-0"], changed: ["title"] })),
+      page: { inboxHolds: false, pinned: false, repliesHold: false, treeLists: "nowhere" },
+      refreshes: ["summary"],
+      spares: ["pinned", "inbox", "projectInbox", "repliesPage", "architecture", "components"],
+    },
+  "a retitle refreshes the Architecture page that lists the issue as unassigned": {
+    event: event("issue.updated", issue({ ancestors: [], changed: ["title"] })),
+    page: { treeLists: "unassigned" },
+    refreshes: ["architecture"],
+    spares: ["components"],
   },
   "a status move that leaves the issue open refreshes every ancestor's rollup, and neither the project counts nor an Inbox that does not list it":
     {
@@ -348,6 +393,7 @@ const rules: Record<string, Rule> = {
       "inbox",
       "projects",
       "replies",
+      "repliesPage",
       "components",
       "architecture",
       "referencesTab",
@@ -355,10 +401,36 @@ const rules: Record<string, Rule> = {
     ],
     spares: ["otherProjectList", "userState"],
   },
-  "a priority change refreshes the Inbox row and nothing that shows no priority": {
-    event: event("issue.updated", issue({ ancestors: ["CORE-0"], changed: ["priority"] })),
-    refreshes: ["detail", "projectList", "inbox"],
-    spares: ["summary", "pinned", "projects", "parent", "referencePicker", "agentsPicker"],
+  "a priority change refreshes the Inbox row, the work list showing it, every ancestor's children, and nothing that shows no priority":
+    {
+      event: event("issue.updated", issue({ ancestors: ["CORE-0"], changed: ["priority"] })),
+      refreshes: ["detail", "projectList", "inbox", "parent", "architecture"],
+      spares: [
+        "summary",
+        "pinned",
+        "projects",
+        "grandparent",
+        "unrelatedDetail",
+        "referencePicker",
+        "agentsPicker",
+        "components",
+        "repliesPage",
+      ],
+    },
+  "a write of any field refreshes every ancestor's children, which show the subtree's newest activity":
+    {
+      event: event(
+        "issue.updated",
+        issue({ ancestors: ["CORE-0", "CORE-00"], changed: ["labels"] })
+      ),
+      page: { treeLists: "nowhere" },
+      refreshes: ["detail", "parent", "grandparent"],
+      spares: ["unrelatedDetail", "parentSummary", "summary", "architecture", "components"],
+    },
+  "an issue write that does not name its ancestors refreshes every issue detail": {
+    event: event("issue.updated", issue({ changed: ["priority"] })),
+    refreshes: ["detail", "parent", "grandparent", "unrelatedDetail"],
+    spares: ["summary", "pinned"],
   },
   "an assignee change leaves an Inbox that does not list the issue alone": {
     event: event("issue.updated", issue({ ancestors: [], changed: ["assignee"] })),
@@ -506,6 +578,35 @@ const rules: Record<string, Rule> = {
     refreshes: ["docAskPanel"],
     spares: ["askPanel", "documentPanel"],
   },
+  "a citation of a project document refreshes the panel opened on its address": {
+    event: event("comment.created", {
+      anchor: null,
+      id: "comment-2",
+      references_changed: [
+        { id: "artifact-1", kind: "artifact", ref: "dispatch://CORE/artifact/plan-md" },
+      ],
+    }),
+    refreshes: ["documentPanel"],
+    spares: ["specPanel", "specPanelBySlug", "docAskPanel", "issuePanel", "unrelatedPanel"],
+  },
+  "a citation of an issue's spec refreshes its panel under every spelling of the document": {
+    event: event("message.created", {
+      id: "message-2",
+      references_changed: [{ id: "artifact-3", kind: "artifact", ref: "dispatch://CORE-1/spec" }],
+    }),
+    refreshes: ["specPanel", "specPanelBySlug"],
+    spares: ["documentPanel", "issuePanel"],
+  },
+  "a citation of a document that names no address refreshes the panel whose read is that document":
+    {
+      event: event("comment.edited", {
+        anchor: null,
+        id: "comment-1",
+        references_changed: [{ id: "artifact-1", kind: "artifact" }],
+      }),
+      refreshes: ["documentPanel"],
+      spares: ["specPanel", "docAskPanel"],
+    },
   "past the server's cap, every count and every panel refreshes": {
     event: event("message.created", { id: "message-2", references_changed_truncated: true }),
     refreshes: [
@@ -540,6 +641,44 @@ const rules: Record<string, Rule> = {
     event: event("user_state.updated", { login: "alice", state: {} }, { issue_key: null }),
     refreshes: ["userState", "pinned"],
     spares: ["inbox"],
+  },
+  "the viewer's snooze in another tab refreshes the Inbox reads that list the ask": {
+    event: event(
+      "user_state.updated",
+      { ask_id: "ask-1", changed: ["snoozed"], login: "alice", state: {} },
+      { issue_key: null }
+    ),
+    refreshes: ["userState", "inbox", "projectInbox"],
+    spares: ["pinned", "detail", "replies"],
+  },
+  "the viewer's snooze of an ask no Inbox read lists leaves them alone": {
+    event: event(
+      "user_state.updated",
+      { ask_id: "ask-1", changed: ["snoozed"], login: "alice", state: {} },
+      { issue_key: null }
+    ),
+    page: { inboxHolds: false },
+    refreshes: ["userState"],
+    spares: ["inbox", "projectInbox", "pinned"],
+  },
+  "the viewer's snooze that names no ask refreshes every Inbox read": {
+    event: event(
+      "user_state.updated",
+      { changed: ["snoozed"], login: "alice", state: {} },
+      { issue_key: null }
+    ),
+    page: { inboxHolds: false },
+    refreshes: ["userState", "inbox", "projectInbox"],
+    spares: ["pinned"],
+  },
+  "another person's snooze refreshes nothing": {
+    event: event(
+      "user_state.updated",
+      { ask_id: "ask-1", changed: ["snoozed"], login: "bob", state: {} },
+      { issue_key: null }
+    ),
+    refreshes: [],
+    spares: ["userState", "inbox", "projectInbox"],
   },
   "another person's state write refreshes nothing": {
     event: event(

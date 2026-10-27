@@ -9,6 +9,7 @@ import {
   isRetryableQueryError,
   isUnauthorized,
 } from "../api/client";
+import { queryRetryDelay } from "../api/query-client";
 
 interface RecordedRequest {
   body?: BodyInit | null;
@@ -403,6 +404,30 @@ test(
   }
 );
 
+test("a refusal keeps the server's Retry-After in delta-seconds, and no delay for a date or junk", async () => {
+  const refusal = (headers: Record<string, string>) =>
+    createApiClient(
+      stubFetch(() =>
+        Response.json({ code: "OVERLOADED", error: "busy" }, { headers, status: 503 })
+      ).fetch
+    )
+      .whoAmI()
+      .catch((error: unknown) => error);
+
+  const [seconds, date, junk, none] = await Promise.all([
+    refusal({ "Retry-After": "2" }),
+    refusal({ "Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT" }),
+    refusal({ "Retry-After": "-1" }),
+    refusal({}),
+  ]);
+
+  expect(seconds).toMatchObject({ code: "OVERLOADED", retryAfterMs: 2_000, status: 503 });
+  expect(date).toMatchObject({ retryAfterMs: undefined, status: 503 });
+  expect(junk).toMatchObject({ retryAfterMs: undefined, status: 503 });
+  expect(none).toMatchObject({ retryAfterMs: undefined, status: 503 });
+  expect(isRetryableQueryError(seconds)).toBe(true);
+});
+
 test(
   "the production retry policy issues one credential request when the broker is unconfigured, " +
     "not three (every query shares this policy from main.tsx)",
@@ -411,13 +436,12 @@ test(
       Response.json({ error: "not configured", code: "FEATURE_OFF" }, { status: 404 })
     );
     const client = createApiClient(stub.fetch);
-    // Mirrors main.tsx's shared QueryClient retry option exactly, with retryDelay shortened
-    // so the test does not wait on the production 500ms backoff.
+    // Mirrors main.tsx's shared QueryClient retry options exactly.
     const queryClient = new QueryClient({
       defaultOptions: {
         queries: {
           retry: (failureCount, error) => failureCount < 2 && isRetryableQueryError(error),
-          retryDelay: 0,
+          retryDelay: queryRetryDelay,
         },
       },
     });

@@ -1,7 +1,8 @@
-import { expect, test } from "bun:test";
+import { expect, jest, spyOn, test } from "bun:test";
 import { QueryObserver } from "@tanstack/react-query";
 
-import { DispatchQueryClient } from "./query-client";
+import { createApiClient, isRetryableQueryError } from "./client";
+import { DispatchQueryClient, queryRetryDelay } from "./query-client";
 
 /**
  * A server for one read whose every request is answered by the test: `answer()` lands the oldest
@@ -107,4 +108,59 @@ test("an invalidation of an idle read fetches it at once", async () => {
   } finally {
     unsubscribe();
   }
+});
+
+/**
+ * When each request of one read went out, in ms after the first, through main.tsx's retry options
+ * and the real API client, with every response a 503 refusal carrying `headers`. The clock is
+ * fake and moves in 10 ms steps until `ms` have passed.
+ */
+async function refusedReadStarts(headers: Record<string, string>, ms: number): Promise<number[]> {
+  const starts: number[] = [];
+  const client = createApiClient(async () => {
+    starts.push(Date.now());
+    return Response.json({ code: "OVERLOADED", error: "busy" }, { headers, status: 503 });
+  });
+  const queryClient = new DispatchQueryClient({
+    defaultOptions: {
+      queries: {
+        retry: (failureCount, error) => failureCount < 2 && isRetryableQueryError(error),
+        retryDelay: queryRetryDelay,
+      },
+    },
+  });
+  jest.useFakeTimers();
+  try {
+    void queryClient
+      .fetchQuery({ queryFn: () => client.whoAmI(), queryKey: ["whoami"] })
+      .catch(() => undefined);
+    for (let elapsed = 0; elapsed < ms; elapsed += 10) {
+      await settle();
+      jest.advanceTimersByTime(10);
+    }
+    await settle();
+  } finally {
+    jest.useRealTimers();
+    queryClient.clear();
+  }
+  return starts.map((start) => start - (starts[0] ?? start));
+}
+
+test("a read refused with Retry-After: 2 is retried no sooner than 2 s later and before 4 s", async () => {
+  for (const draw of [0, 0.9999]) {
+    const random = spyOn(Math, "random").mockReturnValue(draw);
+    try {
+      const starts = await refusedReadStarts({ "Retry-After": "2" }, 4_100);
+      expect(starts[1]).toBeGreaterThanOrEqual(2_000);
+      expect(starts[1]).toBeLessThan(4_000);
+    } finally {
+      random.mockRestore();
+    }
+  }
+});
+
+test("a read refused without Retry-After is retried at 500 ms", async () => {
+  const starts = await refusedReadStarts({}, 700);
+  expect(starts[1]).toBeGreaterThanOrEqual(500);
+  expect(starts[1]).toBeLessThan(510);
 });
