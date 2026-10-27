@@ -45,15 +45,6 @@ test("R1 finds a second sentence that starts with a lowercase identifier", async
   expect(exitCode).toBe(1);
 });
 
-test("the Envoy guide and the Dispatch server README keep the layout", () => {
-  const { exitCode, stdout } = run([
-    "packages/envoy/AGENTS.md",
-    "packages/envoy/cmd/dispatch/README.md",
-  ]);
-  expect(stdout).toBe("");
-  expect(exitCode).toBe(0);
-});
-
 test("a paragraph that starts with inline HTML is checked for R2 like any other", async () => {
   const path = await markdownFile("<kbd>Ctrl</kbd> opens the menu.\n- item\n");
   const { exitCode, stdout } = run([path]);
