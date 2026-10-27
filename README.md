@@ -182,3 +182,4 @@ list, `scripts/go-third-party-notices.sh` the Go programs' with go-licenses, and
 its file with `scripts/assemble-third-party-notices.sh`. A package that ships no license file gets
 its declared license's standard text from the SPDX License List; one whose terms the build cannot
 find fails it.
+
