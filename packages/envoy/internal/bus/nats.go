@@ -24,6 +24,7 @@ type ConnectOption func(*connectOpts)
 type connectOpts struct {
 	name                        string
 	replicas                    int
+	streamMaxBytes              int64
 	publishAcknowledgementClock AcknowledgementClock
 	reconnectErrClock           func() time.Time
 	environment                 func(string) (string, bool)
@@ -36,6 +37,15 @@ func parseConnectOptions(options []ConnectOption) connectOpts {
 		o(&opts)
 	}
 	return opts
+}
+
+// streamConfig is the stream ConnectOwningStream ensures: streamCfg at the deployment's replica
+// count and byte limit.
+func (o connectOpts) streamConfig() nats.StreamConfig {
+	cfg := *streamCfg
+	cfg.Replicas = o.replicas
+	cfg.MaxBytes = o.streamMaxBytes
+	return cfg
 }
 
 // AcknowledgementClock supplies deadline contexts for JetStream publish acknowledgements.
@@ -61,9 +71,27 @@ func WithReconnectErrClock(now func() time.Time) ConnectOption {
 	return func(o *connectOpts) { o.reconnectErrClock = now }
 }
 
-// WithReplicas overrides the replica count of the stream ConnectOwningStream ensures (default 1).
+// ReplicasEnvVar and StreamMaxBytesEnvVar are the deployment settings WithReplicas and
+// WithStreamMaxBytes carry. Each program reads them itself and hands the bus their values; the bus
+// names them in a server's refusal of a stream or a bucket that carries one (refusedSettings).
+const (
+	ReplicasEnvVar       = "ENVOY_NATS_REPLICAS"
+	StreamMaxBytesEnvVar = "ENVOY_STREAM_MAX_BYTES"
+)
+
+// WithReplicas sets the deployment's replica count, ReplicasEnvVar, for the stream
+// ConnectOwningStream ensures (default 1): the count the stream is created at, and a floor for a
+// deployed stream, which is raised to it and never lowered (ensureStreamWithConfig).
 func WithReplicas(n int) ConnectOption {
 	return func(o *connectOpts) { o.replicas = n }
+}
+
+// WithStreamMaxBytes sets the deployment's byte limit, StreamMaxBytesEnvVar, for the stream
+// ConnectOwningStream ensures: the stream's MaxBytes at create and at every reconcile, its oldest
+// messages discarded first once it is full. 0, the default, sets none: the stream is created with
+// no byte limit, and a deployed stream keeps the limit it has (ensureStreamWithConfig).
+func WithStreamMaxBytes(n int64) ConnectOption {
+	return func(o *connectOpts) { o.streamMaxBytes = n }
 }
 
 // WithEnvironment names where a connect reads ENVOY_ALLOW_REMOTE_NATS (AllowRemoteEnvVar),
@@ -220,9 +248,9 @@ func Connect(urls []string, options ...ConnectOption) (*Client, error) {
 }
 
 // ConnectOwningStream opens a client that also reconciles ENVOY_NOTIFICATIONS against this
-// binary's subjects, retention and duplicate window (ensureStreamWithConfig), creating the stream
-// when the server has none. Only the deployed services call it: envoy-listener and
-// envoy-dispatch's server.
+// binary's subjects, retention and duplicate window and the deployment's replica count and byte
+// limit (WithReplicas, WithStreamMaxBytes; ensureStreamWithConfig), creating the stream when the
+// server has none. Only the deployed services call it: envoy-listener and envoy-dispatch's server.
 func ConnectOwningStream(urls []string, options ...ConnectOption) (*Client, error) {
 	return newClient(urls, true, parseConnectOptions(options))
 }
@@ -258,8 +286,7 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 		return nil, err
 	}
 	if ownsStream {
-		cfg := *streamCfg
-		cfg.Replicas = opts.replicas
+		cfg := opts.streamConfig()
 		if err := ensureStreamWithConfig(js, &cfg); err != nil {
 			nc.Close()
 			return nil, err

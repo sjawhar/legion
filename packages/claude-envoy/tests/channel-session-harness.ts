@@ -10,9 +10,15 @@ import { mkdtemp } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { sessionConfigFile } from "@legion/envoy-client/session-settings"
-import type { EnvoyClient, Interest } from "@legion/envoy-client/transport"
+import type {
+  EnvoyClient,
+  Interest,
+  ReplayInput,
+  ReplayResult,
+} from "@legion/envoy-client/transport"
 import type {
   ChannelBrokerMessage,
+  ChannelConnectionStatus,
   ChannelForwarderConnection,
   ChannelTopicSubscription,
 } from "../src/channel-forwarder"
@@ -38,6 +44,8 @@ export class FakeNats implements ChannelForwarderConnection {
   readonly unsubscribed: string[] = []
   readonly subscriptions = new Map<string, Queue>()
   closed = false
+  private readonly statuses: ChannelConnectionStatus[] = []
+  private statusWaiter: PromiseWithResolvers<void> | undefined
 
   constructor(readonly calls: string[] = []) {}
 
@@ -89,18 +97,41 @@ export class FakeNats implements ChannelForwarderConnection {
   }
 
   drain(): Promise<void> {
-    this.closed = true
-    return Promise.resolve()
+    return this.close()
   }
 
   close(): Promise<void> {
     this.closed = true
+    this.statusWaiter?.resolve()
     return Promise.resolve()
   }
 
+  /** nats.js reports a status event: `reconnect`, say. */
+  emitStatus(type: string): void {
+    this.statuses.push({ type })
+    this.statusWaiter?.resolve()
+  }
+
+  async *status(): AsyncIterable<ChannelConnectionStatus> {
+    while (!this.closed) {
+      const next = this.statuses.shift()
+      if (next !== undefined) {
+        yield next
+        continue
+      }
+      this.statusWaiter = Promise.withResolvers<void>()
+      await this.statusWaiter.promise
+    }
+  }
+
   emit(subject: string, raw: string, reply?: string): void {
-    const queue = this.subscriptions.get(subject)
-    if (queue === undefined) throw new Error(`no subscription for ${subject}`)
+    this.emitOn(subject, subject, raw, reply)
+  }
+
+  /** A message published on `subject` reaches the subscription `pattern`, which matches it. */
+  emitOn(pattern: string, subject: string, raw: string, reply?: string): void {
+    const queue = this.subscriptions.get(pattern)
+    if (queue === undefined) throw new Error(`no subscription for ${pattern}`)
     const message = {
       subject,
       data: new TextEncoder().encode(raw),
@@ -130,8 +161,27 @@ export class FakeNotifier implements ChannelNotifier {
 
 export type FakeClient = Pick<
   EnvoyClient,
-  "subscribe" | "unsubscribe" | "unregisterSession" | "setRole" | "getRole" | "getInterest"
+  | "subscribe"
+  | "unsubscribe"
+  | "unregisterSession"
+  | "setRole"
+  | "getRole"
+  | "getInterest"
+  | "replay"
 >
+
+/** A listener whose stream holds nothing: every subject answers no message, its cursor at 0. */
+export async function emptyReplay(input: ReplayInput): Promise<ReplayResult> {
+  return {
+    stream: { created: "2026-10-20T00:00:00Z", first_seq: 1, last_seq: 0 },
+    subjects: input.subjects.map(({ subject }) => ({
+      subject,
+      messages: [],
+      next_after: 0,
+      more: false,
+    })),
+  }
+}
 
 export function settled(): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>()
@@ -142,12 +192,13 @@ export function settled(): Promise<void> {
 /**
  * Polls `condition` every 5 ms until it holds; fails naming `what` after 5 s.
  * Real time on purpose: the awaited conditions are filesystem writes the
- * server's own heartbeat performs, which no fake clock can advance.
+ * server's own heartbeat performs, which no fake clock can advance. The
+ * deadline is read from the monotonic clock, which `setSystemTime` leaves alone.
  */
 export async function waitFor(condition: () => Promise<boolean>, what: string): Promise<void> {
-  const deadline = Date.now() + 5_000
+  const deadline = performance.now() + 5_000
   while (!(await condition())) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
+    if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`)
     await Bun.sleep(5)
   }
 }
@@ -165,7 +216,7 @@ export function noInterest(): Interest {
   }
 }
 
-/** A client that records every call it sees, in order, into `calls`. */
+/** A client that records every call it sees, in order, into `calls`; its stream holds nothing. */
 export function recordingClient(calls: string[], overrides: Partial<FakeClient> = {}): FakeClient {
   return {
     subscribe: async (input) => {
@@ -193,6 +244,7 @@ export function recordingClient(calls: string[], overrides: Partial<FakeClient> 
         topics: [`notifications.agent.${sessionID}`],
       }
     },
+    replay: emptyReplay,
     ...overrides,
   }
 }

@@ -46,10 +46,10 @@ This exits as soon as expiry is observed — faster on fast machines, more relia
 
 ## Pattern 2: Functional Options for Test-Configurable TTL
 
-Production defaults (5-min TTL, 3 replicas) are too slow for tests. Use functional options to shrink them:
+The production TTL (5 minutes) is too slow for tests. Use functional options to shrink it:
 
 ```go
-// Production: 5-min TTL, 3 replicas (defaults in function body)
+// Production: 5-min TTL; the listener passes the deployment's ENVOY_NATS_REPLICAS (default 1)
 sessions, _ := session.OpenSessionRegistry(conn)
 
 // Tests: 2-second TTL, 1 replica

@@ -7,14 +7,21 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/sjawhar/envoy/internal/bus"
 )
 
 type Service struct {
-	MachineID    string
-	NATSURLs     []string
+	MachineID string
+	NATSURLs  []string
+	// NATSReplicas is ENVOY_NATS_REPLICAS (ParseNATSReplicas): the deployment's replica count for
+	// the stream and every bucket the listener opens.
 	NATSReplicas int
-	ListenHost   string
-	Port         int
+	// StreamMaxBytes is ENVOY_STREAM_MAX_BYTES (ParseStreamMaxBytes): the stream's byte limit, or 0
+	// when unset, which sets none and keeps a deployed one.
+	StreamMaxBytes int64
+	ListenHost     string
+	Port           int
 	// AllowedHosts are the ENVOY_ALLOWED_HOSTS names, each as HostName writes it, that an
 	// unauthenticated listener serves /v1 to beside loopback.
 	AllowedHosts []string
@@ -52,13 +59,13 @@ func Load(defaultPort int) (Service, error) {
 	if listenHost == "" {
 		listenHost = "127.0.0.1"
 	}
-	replicas := 1
-	if value := strings.TrimSpace(os.Getenv("ENVOY_NATS_REPLICAS")); value != "" {
-		next, err := strconv.Atoi(value)
-		if err != nil {
-			return Service{}, fmt.Errorf("invalid ENVOY_NATS_REPLICAS: %w", err)
-		}
-		replicas = next
+	replicas, err := ParseNATSReplicas(os.Getenv(bus.ReplicasEnvVar))
+	if err != nil {
+		return Service{}, err
+	}
+	streamMaxBytes, err := ParseStreamMaxBytes(os.Getenv(bus.StreamMaxBytesEnvVar))
+	if err != nil {
+		return Service{}, err
 	}
 	allowedHosts, err := parseAllowedHosts(os.Getenv("ENVOY_ALLOWED_HOSTS"))
 	if err != nil {
@@ -73,10 +80,49 @@ func Load(defaultPort int) (Service, error) {
 		MachineID:          machine,
 		NATSURLs:           urls,
 		NATSReplicas:       replicas,
+		StreamMaxBytes:     streamMaxBytes,
 		ListenHost:         listenHost,
 		Port:               port,
 		SubscribeAllTopics: subscribeAllTopics,
 	}, nil
+}
+
+// MaxNATSReplicas is the most copies NATS keeps of a stream or a bucket. aws:WebhookListener's
+// rendering (MaxNatsReplicas in github.com/sjawhar/envoy/infra/aws/rendering) refuses a larger
+// natsReplicas by hand, so a component never deploys a listener this package would refuse.
+const MaxNATSReplicas = 5
+
+// ParseNATSReplicas reads ENVOY_NATS_REPLICAS (bus.ReplicasEnvVar), the deployment's replica
+// count: unset or blank is 1, and otherwise a whole number from 1 to MaxNATSReplicas. Anything else
+// (0, a negative number, more than NATS keeps, a word) is refused naming the variable and the
+// value, at load rather than as a server's refusal at the stream. envoy-listener (Load) and
+// envoy-dispatch read the setting through it.
+func ParseNATSReplicas(raw string) (int, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 1, nil
+	}
+	replicas, err := strconv.Atoi(value)
+	if err != nil || replicas < 1 || replicas > MaxNATSReplicas {
+		return 0, fmt.Errorf("invalid %s %q: want a whole number of copies from 1 to %d", bus.ReplicasEnvVar, value, MaxNATSReplicas)
+	}
+	return replicas, nil
+}
+
+// ParseStreamMaxBytes reads ENVOY_STREAM_MAX_BYTES (bus.StreamMaxBytesEnvVar), the stream's byte
+// limit: unset or blank is 0, which sets no limit (a deployed stream keeps the one it has), and
+// otherwise a positive whole number of bytes. 0, a negative number or a word is refused naming the
+// variable and the value. envoy-listener (Load) and envoy-dispatch read the setting through it.
+func ParseStreamMaxBytes(raw string) (int64, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0, nil
+	}
+	limit, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || limit < 1 {
+		return 0, fmt.Errorf("invalid %s %q: want a positive whole number of bytes, or unset for no limit", bus.StreamMaxBytesEnvVar, value)
+	}
+	return limit, nil
 }
 
 // parseSubscribeAllTopics reads ENVOY_SUBSCRIBE_ALL_TOPICS: unset, empty or "0" off, "1" on. Any

@@ -82,7 +82,9 @@ func WithLogger(log *slog.Logger) OpenOption {
 	return func(o *openOpts) { o.log = log }
 }
 
-// WithReplicas overrides the KV bucket replica count. Use 1 for single-node test NATS.
+// WithReplicas sets the deployment's replica count (bus.ReplicasEnvVar, default 1) for the interest
+// and role buckets: the count a new bucket is created at, and a floor an existing bucket is raised
+// to and never lowered from (bus.EnsureKeyValue).
 func WithReplicas(n int) OpenOption {
 	return func(o *openOpts) { o.replicas = n }
 }
@@ -386,10 +388,15 @@ func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {
 //
 // ErrKeyNotFound is the genuinely-new-session case — proceed with the passed-in
 // item and topics.
+//
+// The merged row keeps no topic reaching a private stream subject other than the
+// session's own agent subject (dropPrivateStreamTopics): a row stored before the
+// listener refused such a topic is cleaned at the session's next registration.
 func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, now int64) (Interest, error) {
 	if getErr != nil && !errors.Is(getErr, nats.ErrKeyNotFound) {
 		return Interest{}, getErr
 	}
+	sessionID := item.SessionID
 	if getErr == nil {
 		item = cur
 	}
@@ -397,6 +404,7 @@ func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, 
 	item.Dir = first(item.Dir, curValue(cur.Dir))
 	item.UpdatedAt = now
 	item = Merge(item, topics)
+	item.Topics = dropPrivateStreamTopics(sessionID, item.Topics)
 	sort.Strings(item.Topics)
 	return item, nil
 }
@@ -558,6 +566,7 @@ func (r *Registry) removeInterestTopics(sessionID string, topics []string) error
 		return err
 	}
 	item = Remove(item, topics)
+	item.Topics = dropPrivateStreamTopics(sessionID, item.Topics)
 	if len(item.Topics) == 0 {
 		return r.deleteInterest(sessionID)
 	}

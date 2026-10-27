@@ -157,6 +157,74 @@ export function expectsLaneReceipt<
   );
 }
 
+/** A message a subscription yielded, and when it arrived. */
+export interface Arrival<Message> {
+  readonly message: Message;
+  /** When the subscription yielded it (`now`), however long the messages before it took. */
+  readonly receivedAt: number;
+}
+
+/**
+ * Reads `subscription` as its messages arrive and yields them in arrival order, each stamped with
+ * when it arrived. nats.js pushes a message into a subscription's iterator as it arrives, and this
+ * always waits on that iterator, so the stamp is the arrival time whatever the caller is doing
+ * with the messages before it (a Dispatch accept, pictures, a side turn): a message waits here
+ * until the caller asks for the next one. Once the subscription ends or throws, every message
+ * already read is still yielded, in order, and only then does the caller's next read end or throw
+ * that error, as nats.js's own iterator yields the messages it took before it stops. A caller that
+ * stops reading early returns the subscription's iterator, which stops the subscription once the
+ * iterator's pending read settles (nats.js takes a return only after the read in flight).
+ */
+export async function* readArrivals<Message>(
+  subscription: AsyncIterable<Message>,
+  now: () => number = Date.now
+): AsyncGenerator<Arrival<Message>, void, undefined> {
+  const source = subscription[Symbol.asyncIterator]();
+  const arrived: Arrival<Message>[] = [];
+  let stopped: { readonly error?: unknown; readonly failed: boolean } | undefined;
+  let left = false;
+  let wake: (() => void) | undefined;
+  const signal = () => {
+    wake?.();
+    wake = undefined;
+  };
+  void (async () => {
+    try {
+      for (;;) {
+        const read = await source.next();
+        if (read.done === true || left) break;
+        arrived.push({ message: read.value, receivedAt: now() });
+        signal();
+      }
+      stopped = { failed: false };
+    } catch (error) {
+      stopped = { error, failed: true };
+    }
+    signal();
+  })();
+  try {
+    for (;;) {
+      const next = arrived.shift();
+      if (next !== undefined) {
+        yield next;
+        continue;
+      }
+      if (stopped?.failed === true) throw stopped.error;
+      if (stopped !== undefined) return;
+      const { promise, resolve } = Promise.withResolvers<void>();
+      wake = resolve;
+      await promise;
+    }
+  } finally {
+    if (stopped === undefined) {
+      left = true;
+      // The subscription's own end, or the reader's error, says how it stopped; a rejected return
+      // adds nothing a caller that left could act on.
+      void Promise.resolve(source.return?.()).catch(() => undefined);
+    }
+  }
+}
+
 /**
  * The part of an inbound frame a host recognises a repeat by: its `dedupe_key`, which a re-send
  * shares with the frame that came first, and its `event_id`, which only copies of one publish
@@ -172,9 +240,15 @@ export const DedupeIdentitySchema = z.object({
 
 export type DedupeIdentity = z.infer<typeof DedupeIdentitySchema>;
 
-/** What one claim recorded. `release` undoes exactly that, and only once. */
+/**
+ * What one claim recorded. `release` undoes exactly that, and only once. `settle` says the host is
+ * done with the frame without undoing the record: it was handed over, or the host chose not to
+ * show it. Until one of the two, the frame is pending (`DeliveryDedupe.pending`), and a replay
+ * sweep leaves the stream's copy for later rather than show it beside the live one.
+ */
 export interface DeliveryClaim {
   release(): void;
+  settle(): void;
 }
 
 /**
@@ -187,7 +261,9 @@ export interface DeliveryClaim {
  * already a repeat. It releases the claim when its agent was not handed the frame after all: the
  * hand-off threw, or the host answered the frame with an error instead (a BTW whose side turn
  * failed, a frame it could not read). Dispatch records that attempt failed, and a same-mode
- * re-send of it must then reach the agent.
+ * re-send of it must then reach the agent. Otherwise it settles the claim once it is done with the
+ * frame, shown or not: a claim left open reads as `pending` forever, and a replay sweep then never
+ * moves its stream cursor past that frame.
  */
 export interface DeliveryDedupe {
   /**
@@ -196,6 +272,13 @@ export interface DeliveryDedupe {
    * claimed already), otherwise the claim, whose `release` undoes what this call recorded.
    */
   claim(frame: DedupeIdentity | undefined): DeliveryClaim | undefined;
+  /**
+   * Whether a claim of the frame is still being delivered: neither settled nor released. A claim
+   * of its event id, or of a key that names its event, is that frame's claim, by the same identity
+   * rule `claim` drops a repeat by. A settled claim says nothing of whether the frame was shown: a
+   * host that shows it records that in the replay ledger, which a replay sweep reads first.
+   */
+  pending(frame: DedupeIdentity): boolean;
 }
 
 /**
@@ -235,10 +318,13 @@ const DELIVERY_EVENT_ID_LIMIT = 10_000;
 export function createDeliveryDedupe(now: () => number = Date.now): DeliveryDedupe {
   // Insertion order is claim order, so the keys past the window, and the oldest key the limit
   // evicts, are always at the front. A key maps to when it was claimed, an event id to the number
-  // of the claim that recorded it, so a release removes neither once another claim took it.
+  // of the claim that recorded it, so a release removes neither once another claim took it. The
+  // pending maps hold only the claims neither settled nor released yet, each by its number.
   const keys = new Map<string, number>();
   let events = new Map<string, number>();
   let olderEvents = new Map<string, number>();
+  const pendingKeys = new Map<string, number>();
+  const pendingEvents = new Map<string, number>();
   let claims = 0;
   return {
     claim(frame) {
@@ -272,10 +358,22 @@ export function createDeliveryDedupe(now: () => number = Date.now): DeliveryDedu
           events = new Map();
         }
         events.set(eventId, claim);
+        pendingEvents.set(eventId, claim);
       }
+      if (named) pendingKeys.set(key, claim);
+      let open = true;
+      const close = () => {
+        if (!open) return;
+        open = false;
+        if (eventId !== undefined && pendingEvents.get(eventId) === claim) {
+          pendingEvents.delete(eventId);
+        }
+        if (named && pendingKeys.get(key) === claim) pendingKeys.delete(key);
+      };
       let released = false;
       return {
         release() {
+          close();
           if (released) return;
           released = true;
           if (named && keys.get(key) === at) keys.delete(key);
@@ -283,7 +381,16 @@ export function createDeliveryDedupe(now: () => number = Date.now): DeliveryDedu
           if (events.get(eventId) === claim) events.delete(eventId);
           if (olderEvents.get(eventId) === claim) olderEvents.delete(eventId);
         },
+        settle: close,
       };
+    },
+    pending(frame) {
+      const eventId = frame.event_id;
+      const key = frame.dedupe_key;
+      return (
+        (eventId !== undefined && pendingEvents.has(eventId)) ||
+        (key !== undefined && dedupeKeyNamesItsEvent(frame) && pendingKeys.has(key))
+      );
     },
   };
 }

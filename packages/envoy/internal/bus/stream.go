@@ -1,16 +1,33 @@
 package bus
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
+	"maps"
+	"reflect"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/id"
 )
 
 const Stream = "ENVOY_NOTIFICATIONS"
+
+// StreamIDMetadataKey is the stream configuration's metadata key holding the stream's identity:
+// set once, when the stream is created or when a start first finds it without one, and never
+// changed after. It lives in the configuration, so a backup and restore, a reconcile and a leader
+// election all keep it. The stream's Created time is no identity: a restore changes it, and after
+// a clustered restore the servers can report different Created times (per nats-server's clustered
+// restore code), so it can change again at a later leader election. POST /v1/replay answers the
+// key's value as stream.id (cmd/listener/replay.go).
+const StreamIDMetadataKey = "envoy_stream_id"
 
 // The JetStream KV buckets Envoy's stores keep, each named for what it holds.
 const (
@@ -97,6 +114,65 @@ var streamSubjects = []string{
 	ExceptionTopicPrefix + contracts.AgentTopicPrefix + ">",
 }
 
+// Every subject of streamSubjects is classified for POST /v1/replay (cmd/listener/replay.go) by
+// whether a topic under it ever carries one agent session's private payload, read from the code
+// that publishes it. A shared subject's topics are replayed to any session that registered them as
+// interests; a private subject's never are, since a registered interest is any topic a caller
+// names, and a session replays only its own agent subject by name. Each subject is in exactly one
+// list (TestEveryStreamSubjectIsClassifiedForReplay), so a new stream subject must be classified.
+var (
+	sharedStreamSubjects = []string{
+		// Dispatch's outbox: an issue's, a document's or a project's events (internal/dispatch/outbox
+		// envelope), each readable on its owner in Dispatch, and Dispatch's start (startup.Subject); a
+		// copy for one session goes to that session's agent subject, and an issue-less message has
+		// no owner and is not published (outbox publish).
+		"notifications.dispatch.>",
+		// A repository's GitHub webhook events (internal/webhook github, contracts.GithubEnvelopes)
+		// and the CI settlements derived from them (internal/cistore).
+		"notifications.github.>",
+		// A Slack channel's or thread's messages and app mentions (internal/webhook slack,
+		// contracts.SlackEnvelopes).
+		"notifications.slack.>",
+		// A Ghost Wispr recording's events, under its recording id, not an agent session's
+		// (internal/webhook ghostwispr, contracts.GhostWisprEnvelope).
+		"notifications.ghostwispr.>",
+		// A WhatsApp chat's messages the MCP bridge relays (internal/mcpbridge BuildEnvelope).
+		"notifications.whatsapp.>",
+	}
+	privateStreamSubjects = []string{
+		// Each session's own inbox: Dispatch's routes, follower and author copies, and every
+		// message sent to one session (contracts.AgentSubject).
+		contracts.AgentTopicPrefix + ">",
+		// The Legion daemon's notices for one project's controller (daemon notify.ControllerTopic),
+		// which its role holder hears through the role and never registers.
+		"notifications.legion.>",
+		// A failed delivery's report, carrying the undelivered message's payload and the session it
+		// was for (cmd/listener publishDeliveryException); a session's own lane included.
+		ExceptionTopicPrefix + contracts.AgentTopicPrefix + ">",
+	}
+)
+
+// SharedStreamTopic reports whether every topic subject matches lies under one shared stream
+// subject (sharedStreamSubjects), under NATS wildcard rules (SubjectContains): a topic no session's
+// private payload is ever published on.
+func SharedStreamTopic(subject string) bool {
+	return slices.ContainsFunc(sharedStreamSubjects, func(shared string) bool { return SubjectContains(shared, subject) })
+}
+
+// ReachesPrivateStreamSubject reports whether a topic sessionID registers as an interest reaches a
+// private stream subject (privateStreamSubjects) other than sessionID's own agent subject: it
+// overlaps one under NATS wildcard rules (subjectsOverlap), so another session's inbox, a
+// failed-delivery lane (a session's own included), the Legion controller lane, and wildcards
+// reaching any of them (notifications.>, notifications.*.<x>, notifications.envoy.>) count, and it
+// is not sessionID's own agent subject as one literal subject. A session id holding `*` or `>`
+// makes a wildcard of its "own" agent subject, which is no session's alone and counts too.
+func ReachesPrivateStreamSubject(sessionID, topic string) bool {
+	if !slices.ContainsFunc(privateStreamSubjects, func(private string) bool { return subjectsOverlap(topic, private) }) {
+		return false
+	}
+	return topic != contracts.AgentSubject(sessionID) || strings.ContainsAny(sessionID, "*>")
+}
+
 // StreamSubjects reports the durable notification subjects, excluding role lanes.
 func StreamSubjects() []string {
 	return slices.Clone(streamSubjects)
@@ -118,17 +194,21 @@ func StreamCaptures(topic string) bool {
 	return false
 }
 
+// streamCfg is the stream this binary creates, before ConnectOwningStream sets its replicas
+// (WithReplicas) and byte limit (WithStreamMaxBytes). Its age equals the duplicate window by
+// construction: the dashboard promises a same-mode retry cannot deliver twice for exactly as long
+// as the stream can still recognise the repeat, and a deployment where the two differed would break
+// that promise. Once a byte limit binds, the stream discards its oldest messages first and may hold
+// less than the window: a repeat of a message it has already dropped may then be stored again,
+// since nats-server keeps a dropped message's id only in memory, which a server restart clears.
 var streamCfg = &nats.StreamConfig{
-	Name:      Stream,
-	Subjects:  streamSubjects,
-	Retention: nats.LimitsPolicy,
-	// Retention equals the duplicate window by construction: the dashboard promises a
-	// same-mode retry cannot deliver twice for exactly as long as the stream can still
-	// recognise the repeat, and a deployment where the two differ would break that promise.
+	Name:       Stream,
+	Subjects:   streamSubjects,
+	Retention:  nats.LimitsPolicy,
 	MaxAge:     streamDuplicateWindow,
 	Duplicates: streamDuplicateWindow,
+	Discard:    nats.DiscardOld,
 	Storage:    nats.FileStorage,
-	Replicas:   1,
 }
 
 // roleLaneSubjects are the role lanes and their exceptions twin. They travel over core NATS and
@@ -268,34 +348,149 @@ func (r streamReconciliation) log() {
 	}
 }
 
+// ensureStreamWithConfig creates the stream with cfg, under a fresh StreamIDMetadataKey, or
+// reconciles the deployed one towards cfg. cfg's Replicas is the deployment's replica count and its
+// MaxBytes the deployment's byte limit, 0 when it sets none.
+//
+// The update starts from the deployed configuration and sets only what this binary owns:
+//   - the subjects (reconcileSubjects), the age and the duplicate window, cfg's;
+//   - the replicas, the deployed count or cfg's when that is more: a start never lowers them, so a
+//     program whose setting is lower (an older setting, or one restarted before the others) leaves
+//     a raised stream as it is, and lowering is an operator step;
+//   - the byte limit, cfg's when it sets one and the deployed limit otherwise, so a program that
+//     sets none never removes another's, and removing one is an operator step;
+//   - discard, DiscardOld, so a full stream drops its oldest messages and still takes a publish;
+//   - the metadata, the deployed metadata kept as it is, its StreamIDMetadataKey included; a stream
+//     without that key gets one (identifiedMetadata).
+//
+// Every other deployed setting (storage, placement, compression, the message count and size
+// limits, direct get and the rest) stays as it is. A stream that already holds all of that gets no
+// update, and one that lacks only the key gets its own configuration back with the key added.
+// A refused create or update names the settings it carried (refusedSettings).
+//
+// Every bus.ConnectOwningStream caller runs this on the one stream, and JetStream's stream update
+// has no compare-and-swap, so two starts can each read the stream before either writes, and the
+// later write wins. A deployment sets one replica count and one byte limit for all its programs,
+// so both writes carry the same values and the race is harmless. One race does show: nats-server
+// can leave one of two replica changes proposed at once unanswered (seen with v2.10.29,
+// TestTwoStartsRaisingOneStreamAtOnceBothSucceed), so an update whose answer never came is checked
+// against the stream read again, and a stream that by then needs nothing more is the start's
+// success (unanswered). A stream one start creates first is reconciled by the other, keeping the
+// id it was created with (AddStream answers ErrStreamNameAlreadyInUse, as its config's id
+// differs). Two that both find no id write the same one, derived from what both read.
 func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) error {
 	info, err := js.StreamInfo(Stream)
-	if err == nil {
-		reconciliation := reconcileSubjects(info.Config.Subjects, cfg.Subjects)
-		desired := *cfg
-		desired.Subjects = reconciliation.subjects
-		if info.Config.MaxAge == desired.MaxAge &&
-			info.Config.Duplicates == desired.Duplicates &&
-			slices.Equal(info.Config.Subjects, desired.Subjects) {
-			reconciliation.log()
-			return nil
+	if errors.Is(err, nats.ErrStreamNotFound) {
+		created := *cfg
+		created.Metadata = maps.Clone(cfg.Metadata)
+		if created.Metadata == nil {
+			created.Metadata = map[string]string{}
 		}
-		migratingRoleLanes := streamCapturesRoleLanes(info.Config.Subjects) && !streamCapturesRoleLanes(desired.Subjects)
-		if err := migrateRoleLanesOffStream(js, &info.Config, &desired); err != nil {
-			return err
+		created.Metadata[StreamIDMetadataKey] = id.New()
+		if _, err = js.AddStream(&created); !errors.Is(err, nats.ErrStreamNameAlreadyInUse) {
+			return refusedSettings(err, nil, &created)
 		}
-		if _, err = js.UpdateStream(&desired); err != nil {
-			return err
-		}
-		reconciliation.log()
-		if migratingRoleLanes {
-			return purgeLegacyRoleMessages(js)
-		}
-		return nil
+		info, err = js.StreamInfo(Stream)
 	}
-	if !errors.Is(err, nats.ErrStreamNotFound) {
+	if err != nil {
 		return err
 	}
-	_, err = js.AddStream(cfg)
-	return err
+	desired, reconciliation := reconciledStream(info, cfg)
+	if reflect.DeepEqual(desired, info.Config) {
+		reconciliation.log()
+		return nil
+	}
+	migratingRoleLanes := streamCapturesRoleLanes(info.Config.Subjects) && !streamCapturesRoleLanes(desired.Subjects)
+	if err := migrateRoleLanesOffStream(js, &info.Config, &desired); err != nil {
+		return err
+	}
+	if _, err = js.UpdateStream(&desired); err != nil && !(unanswered(err) && streamReconciled(js, cfg)) {
+		return refusedSettings(err, &info.Config, &desired)
+	}
+	reconciliation.log()
+	if migratingRoleLanes {
+		return purgeLegacyRoleMessages(js)
+	}
+	return nil
+}
+
+// reconciledStream is the configuration ensureStreamWithConfig writes over the deployed stream info
+// describes, and the subject reconciliation in it: the deployed configuration with only what this
+// binary owns set from cfg.
+func reconciledStream(info *nats.StreamInfo, cfg *nats.StreamConfig) (nats.StreamConfig, streamReconciliation) {
+	reconciliation := reconcileSubjects(info.Config.Subjects, cfg.Subjects)
+	desired := info.Config
+	desired.Subjects = reconciliation.subjects
+	desired.MaxAge = cfg.MaxAge
+	desired.Duplicates = cfg.Duplicates
+	desired.Replicas = max(info.Config.Replicas, cfg.Replicas)
+	if cfg.MaxBytes > 0 {
+		desired.MaxBytes = cfg.MaxBytes
+	}
+	desired.Discard = nats.DiscardOld
+	desired.Metadata = identifiedMetadata(info)
+	return desired, reconciliation
+}
+
+// streamReconciled reports whether the stream, read again, already holds everything cfg asks of it.
+func streamReconciled(js nats.JetStreamContext, cfg *nats.StreamConfig) bool {
+	info, err := js.StreamInfo(Stream)
+	if err != nil {
+		return false
+	}
+	desired, _ := reconciledStream(info, cfg)
+	return reflect.DeepEqual(desired, info.Config)
+}
+
+// unanswered reports whether err is a JetStream request's wait running out with no answer, rather
+// than the server's refusal.
+func unanswered(err error) bool {
+	return errors.Is(err, nats.ErrTimeout) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// refusedSettings is err, the server's answer to request, a create (deployed nil) or an update of
+// the stream deployed, named with each deployment setting whose value request changes:
+// ReplicasEnvVar when it sets more than one copy the stream does not have (a create, or a raise),
+// StreamMaxBytesEnvVar when it sets a byte limit the stream does not have. The bus is handed the
+// numbers and not where they came from, so the names are those of the settings every deployed
+// program reads them from (WithReplicas, WithStreamMaxBytes). One copy is never named: a server
+// refuses no stream for having one. nil, and a refusal of a request that changes neither, are
+// returned as they are.
+func refusedSettings(err error, deployed, request *nats.StreamConfig) error {
+	if err == nil {
+		return nil
+	}
+	var settings []string
+	if request.Replicas > 1 && (deployed == nil || request.Replicas != deployed.Replicas) {
+		settings = append(settings, fmt.Sprintf("%s=%d", ReplicasEnvVar, request.Replicas))
+	}
+	if request.MaxBytes > 0 && (deployed == nil || request.MaxBytes != deployed.MaxBytes) {
+		settings = append(settings, fmt.Sprintf("%s=%d", StreamMaxBytesEnvVar, request.MaxBytes))
+	}
+	if len(settings) == 0 {
+		return err
+	}
+	return fmt.Errorf("%s: %w", strings.Join(settings, ", "), err)
+}
+
+// identifiedMetadata is a copy of the deployed stream's metadata that holds a StreamIDMetadataKey:
+// the stream's own when it has one, deployedStreamID otherwise.
+func identifiedMetadata(info *nats.StreamInfo) map[string]string {
+	metadata := maps.Clone(info.Config.Metadata)
+	if metadata == nil {
+		metadata = map[string]string{}
+	}
+	if metadata[StreamIDMetadataKey] == "" {
+		metadata[StreamIDMetadataKey] = deployedStreamID(info.Created)
+	}
+	return metadata
+}
+
+// deployedStreamID is the StreamIDMetadataKey a start gives a deployed stream that has none: 16
+// bytes of the SHA-256 of the stream's name and the Created time STREAM.INFO answered, in hex. Every
+// start that reads the stream from one leader before any of them writes derives the same id, so
+// writers racing to add it write one value, where a random id would leave the last writer's.
+func deployedStreamID(created time.Time) string {
+	sum := sha256.Sum256([]byte(Stream + "\x00" + created.UTC().Format(time.RFC3339Nano)))
+	return hex.EncodeToString(sum[:16])
 }

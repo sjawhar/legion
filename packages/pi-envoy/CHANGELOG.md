@@ -4,6 +4,63 @@
 
 ### Added
 
+- A session shows once each Envoy message it missed while its NATS connection or a subscription
+  was down, NATS was restarting or the session was not running. It asks its listener's new
+  `POST /v1/replay` for what the notification stream (72 hours) stored on its own agent subject
+  and on every topic it follows after where it last read, when a pass opens its agent subject (a
+  start, a switch, a resume), after a subscription is reopened, on each NATS reconnect, on every
+  heartbeat and after `envoy_subscribe`, and shows each message neither the live path nor an
+  earlier sweep showed as a card saying it was published while the connection was down. A
+  replayed BTW, Aside, Steer or person's Send is that card only: it runs no side turn, takes no
+  user turn and posts no Dispatch reply. Role messages and team or other ad-hoc topics stay live
+  only, and nothing from before the session followed a topic, or past the stream's 72-hour age or
+  its size limit, comes back.
+  A message counts as shown once Oh My Pi wrote its card, or the person's turn it became, to the
+  session file (the message's `message_end`): a card or turn handed over while a turn streams,
+  which Oh My Pi holds in memory until the turn takes it, is recorded only then, so a process that
+  ends first (a SIGKILL, a pod stopped mid-turn) shows it after the restart instead of losing it.
+  A card Oh My Pi drops unwritten while the process lives on is shown again: one an interrupt
+  (Escape, RPC `abort_and_restore_queue`) withdrew is handed again at the next heartbeat, once
+  the host is idle and holds no message (`ctx.isIdle()`, `ctx.hasPendingMessages()`), and one a
+  switch away dropped is released, so that session's sweep shows it once the host is back on it
+  or resumes it, never recorded before its card is written. A person's Send run as typed input
+  that an interrupt withdrew unwritten (Oh My Pi hands it back to whoever interrupted) is
+  released at that heartbeat, so the next sweep shows it as a card that runs nothing. A BTW is
+  recorded by its event id the moment it arrives, before its side turn and before any reply is
+  posted, in the session's file even while it shuts down, so no sweep shows it as a card again,
+  whether its answer or refusal fails, is still in flight, or the process ends mid-turn or
+  mid-reply and the session is resumed; a Retry of it still runs. Whatever the record, a BTW that
+  reaches replay is shown as one notice that starts no turn, saying it runs nothing, and so is a
+  failure notice naming a BTW: it is handed only once the host is idle with nothing queued, since a
+  streaming turn would run another model turn for it, and waits for the first such heartbeat while
+  a turn runs. The replay's one-time notices (the stream was recreated, older messages may be
+  missing) wait for an idle host the same way. A held notice is recorded in the session file
+  and shown after a restart, or a switch away and back, that cut the hold short. A replayed
+  subscription removal takes the topic out of the listener's registry too, so a later restart
+  does not follow it again.
+  The session file keeps what the session was shown (`envoy-replay-delivered`, and the written
+  cards themselves, read back by the event they name) and where it read to
+  (`envoy-replay-state`), so a restart shows nothing again (up to 20,000 frames in 72 hours) — a
+  live repeat of a frame shown before the restart is dropped too — and a session stopped past the
+  listener's grace follows its topics again; a person's turn written just before the process
+  ended, its record not, can come back once as a card, never lost. A frame that fails to show is
+  retried, and its third failure, or a live failure no sweep will retry (a frame received before
+  its subject's cursor started included, stamped when it arrived even behind a slow delivery),
+  shows one card naming it and how to read it, where a
+  failed injection was only logged before. A recreated stream (its `stream.id` changed, or, from a
+  listener that answers no id, its creation time; a restore moves the creation time under the same
+  id, as can a leader election after a clustered restore, and that is no recreation) or a cursor
+  older than the stream's
+  oldest message is said once as a card, also after a restart that came before it was said; a
+  listener without the route (404) or unable to read the
+  stream (503 `REPLAY_UNAVAILABLE`, 401, 403) is said once as a warning, and live delivery goes
+  on as before. The session registers and replays no followed topic reaching a private stream
+  subject, by the listener's own rule: another session's agent subject (a fork parent's until a
+  pass closes it), a failed-delivery lane, a `notifications.legion.` controller lane, or a
+  wildcard reaching one such as `notifications.agent.*`, which the listener refuses to store; it
+  still follows it live.
+  `scripts/smoke-replay.sh` proves it against a real session, listener and JetStream (INFRA-439).
+
 - The `dispatch` skill never claims an issue with the `legion` label unless the session is a
   Legion role of its tree, even when its claim reads `not running`: the Legion daemon suspends a
   root's architect while the root waits on a person, and taking that claim takes the tree out of

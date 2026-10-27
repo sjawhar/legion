@@ -14,7 +14,11 @@ Pulumi language needs only the Pulumi CLI:
 | `envoy-infra:gcp:Dispatch` | Dispatch on GKE Autopilot, with Cloud SQL, served over a tailnet and, only to the namespaces `allowedNamespaces` names, inside its own cluster: see [gcp:Dispatch](#gcpdispatch). |
 
 The listener creates the `ENVOY_NOTIFICATIONS` stream and its key-value buckets itself when it
-starts, so it needs only a NATS server with JetStream to reach.
+starts, so it needs only a NATS server with JetStream to reach. It creates them at the deployment's
+replica count, `ENVOY_NATS_REPLICAS` (1 to 5, default 1), raises one it finds with fewer copies,
+and never lowers one. More than 1 needs a clustered NATS: a single server, which is what
+`aws:NatsService` and `gcp:NatsHub` deploy, refuses it, and the listener's start then stops with an
+error naming `ENVOY_NATS_REPLICAS`.
 
 The command, `envoy-infra`, writes a NATS user's nkey seed into a secret store and checks the seed
 stored there ([NATS seeds](#nats-seeds)), and prints what the AWS components register for a program
@@ -1339,7 +1343,7 @@ Its outputs are `serviceArn`, `serviceName`, `logGroupName`, `taskDefinitionArn`
 | `logGroupName`, `logRetentionDays` | required | The log group, which the filters read and the alarms' descriptions name. |
 | `listenHost` | required | `ENVOY_LISTEN_HOST`. The listener binds `127.0.0.1` when it is blank, where the target group cannot reach it. |
 | `hostBridge` | required | `ENVOY_HOST_BRIDGE`; `""` leaves it unset. |
-| `natsReplicas` | required | `ENVOY_NATS_REPLICAS`, at least 1. |
+| `natsReplicas` | required | `ENVOY_NATS_REPLICAS`, from 1 to 5: the deployment's replica count, which the listener creates its stream and buckets at and raises them to. More than 1 needs a clustered NATS; `aws:NatsService` runs one server. |
 | `subscribeAllTopics` | `false` | `true` sets `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, as for `host:Listener`: only for a NATS user holding `HostPermissions`, since under any other grant the listener's start ends. |
 | `alarmTopicArn` | required | The SNS topic the alarms page and clear on. |
 | `baseTags`, `metricNamespace` | required | As for `aws:NatsService`. |
@@ -1371,7 +1375,7 @@ the input:
   leading or trailing whitespace, or one holding `.`, `*`, `>`, `/`, `\`, a control character, or
   whitespace other than an interior ordinary space, or one over 246 bytes; a `hostBridge` or `listenHost` holding a
   control character; a `hostBridge` with leading or trailing whitespace; a blank `listenHost`; a
-  `natsReplicas` below 1; an empty `subnetIds`; a `baseTags` holding `service`.
+  `natsReplicas` below 1 or above 5; an empty `subnetIds`; a `baseTags` holding `service`.
 - Either, without an `aws` provider (see [Providers and transformations](#providers-and-transformations)).
 
 `natsUrls` may come from another resource, so the listener checks it when the container's
@@ -2153,13 +2157,21 @@ as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space
 - every notification topic, `notifications.>`: the subjects of the `ENVOY_NOTIFICATIONS` stream,
   the role lanes, every exception lane, and the ad-hoc topics `/v1/messages/publish` sends over
   core NATS (any `notifications.` topic the stream does not capture);
-- the stream's `$JS.API.STREAM.INFO`, `CREATE` and `UPDATE`, its durable consumer
-  `listener-<m>`'s `$JS.API.CONSUMER.INFO` and `CREATE`, the durable's acknowledgements
-  `$JS.ACK.ENVOY_NOTIFICATIONS.listener-<m>.>`, and `$JS.API.INFO`;
+- the stream's `$JS.API.STREAM.INFO`, `CREATE` and `UPDATE`, its stored-message get
+  `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS`, its durable consumer `listener-<m>`'s
+  `$JS.API.CONSUMER.INFO` and `CREATE`, the durable's acknowledgements
+  `$JS.ACK.ENVOY_NOTIFICATIONS.listener-<m>.>`, and `$JS.API.INFO`. The stored-message get is the
+  read `POST /v1/replay` makes to return the retained notifications a session missed while its
+  NATS subscription was down; it reads one stored message at a time and can create, change or
+  delete nothing. `HostPermissions` and `DispatchPermissions` hold it through
+  `ListenerPermissions`; `SessionPermissions` does not, so a session holding that set alone reads
+  what it missed only through the listener;
 - for each key-value bucket, `envoy_interests`, `envoy_roles`, `envoy_sessions` and
-  `envoy_ci_state`, the calls nats.go's key-value store makes: the info and create of the bucket's
-  stream `KV_<bucket>`, its direct and stream message gets, `$KV.<bucket>.>`, and its watchers'
-  consumer create and delete and their flow-control replies;
+  `envoy_ci_state`, the calls nats.go's key-value store makes: the info, create and update of the
+  bucket's stream `KV_<bucket>`, its direct and stream message gets, `$KV.<bucket>.>`, and its
+  watchers' consumer create and delete and their flow-control replies. The update is the raise a
+  start sends when it finds a bucket with fewer copies than `ENVOY_NATS_REPLICAS`; a start never
+  lowers a bucket's copies;
 - `$JS.API.STREAM.PURGE.KV_envoy_interests`, which the interest bucket's delete-marker collection
   sends.
 
@@ -2183,7 +2195,9 @@ host, holds the whole grant above, host sessions included, since sessions run as
 that already reads the host's seed. This repository's listener and a session, connected as one
 user holding `HostPermissions`, and connected as a user holding `ListenerPermissions` beside a
 credential-free session user holding `SessionPermissions`, are checked against real nats-server
-2.10 and 2.15.1 servers; `AGENTS.md` in this directory says how.
+2.10 and 2.15.1 servers, the listener's `/v1/replay` read of a send stored while its session had
+no subscription open and the session user's refusal of that JetStream read included; `AGENTS.md`
+in this directory says how.
 
 `HostPermissions` is also the one set under which a listener may set `ENVOY_SUBSCRIBE_ALL_TOPICS=1`
 (`host:Listener`'s and `aws:WebhookListener`'s `subscribeAllTopics`). The listener then holds a

@@ -98,7 +98,7 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatalf("JetStream: %v", err)
 	}
-	state, err := redeliver.OpenState(js)
+	state, err := redeliver.OpenState(js, 1)
 	if err != nil {
 		t.Fatalf("open redelivery state: %v", err)
 	}

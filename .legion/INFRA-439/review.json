@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-439",
+  "completed": "2026-10-27T01:10:57Z",
+  "round": 6,
+  "reviewedHead": "c95305504d295746517ef9dbc9b21b36147d685d",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 1,
+  "verifiedFixed": [
+    "A retention gap's cursor is lifted to first_seq - 1 and written before the notice; the lift skips no stored message (the listener reads first_seq before any message); a sweep cut after the notice does not repeat it (engine tests on a followed subject, page 1 and later page; pi-envoy kill test; tester's live cut.sh: 1 notice, 0 of 260 missing, 0 repeated).",
+    "requeueNotices and the handed set key on (session, id): a fork holds the notice it copied; a switch back to the parent holds it for the parent.",
+    "packages/envoy/infra/docs/nats-hub.md names the replay read, matching replay.go.",
+    "The PR body's no-auth NATS user sentence is conditional on sessionUser (gcp/natshub.go)."
+  ],
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy-client/src/replay.ts",
+      "description": "Architect-required (INFRA-14's finding): the stream_recreated check (703) compares JetStream's `created` time, which differs between a clustered stream's leader and followers and changes at a leader election, so an election or a read from another replica resets every session's cursors and tells each that messages may be missing. Stream identity must come from an id kept in the stream config's metadata, preserved by the listener's reconcile, restores and elections, and an upgrade from stream_created state must not reset anyone."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy-client/src/replay.ts",
+      "description": "The gap notice is now lost when the session ends while the gap write is in flight: flush checks alive() only before host.write (463), so the lifted cursor is persisted, then `if (!alive()) return` (743) skips the notice, and every restore finds no gap. Real in claude-envoy (async atomic file write; shutdown on plugin reload, /clear); both agents reproduced it (notices [] before and after the restart; round 5's order told it once). Persist the untold notice with the lift (e.g. a gap_untold flag in ReplayState written by the same flush, raised and cleared by the next sweep or restore), and apply the same rule to the stream-identity notice."
+    },
+    {
+      "severity": "minor",
+      "file": "PR body",
+      "description": "The no-auth NATS user sentence assumes the peers that reach port 9020 also reach the NATS client port; tailnet rules are per port. Say 'peers the access rules also let reach NATS'."
+    }
+  ],
+  "notRequired": [
+    "Code-quality: fold the gap pre-pass into the per-subject loop; keep the ordering claim in one comment; one helper for the (session, id) key.",
+    "Deep-review m1: a fork re-hands a notice whose handed mark failed to write (needs an appendEntry throw; the same duplicate already follows any restart)."
+  ],
+  "ci": {
+    "codeHead": "c95305504d295746517ef9dbc9b21b36147d685d",
+    "required": ["lint", "typecheck", "test", "pr-title"],
+    "observed": "All queued when read; compare c9530550...49556e92 changes only .legion/. A request for changes does not wait on CI."
+  },
+  "threads": "19 threads, all answered and resolved; none opened since round 4.",
+  "thermonuclear": {
+    "head": "49556e92f59bc6f18d62b227090149c1dfa8e5d2",
+    "deepReview": "CHANGES: gap notice loss (Medium, adopted), fork re-hand (minor, not required), PR body NATS reach (minor, adopted). Provider: anthropic/claude-opus-5-5, 34 turns, no other provider.",
+    "codeQuality": "CHANGES: gap notice loss (adopted); structural items not required. Provider: anthropic/claude-opus-5-5, 28 turns, no other provider."
+  }
+}

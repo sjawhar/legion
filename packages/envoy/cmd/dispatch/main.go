@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	envoyconfig "github.com/sjawhar/envoy/internal/config"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
@@ -76,7 +77,12 @@ type bootConfig struct {
 	SignInGroup        string
 	SignInDomain       string
 	NATSDisabled       bool
-	TestHooksEnabled   bool
+	// NATSReplicas is ENVOY_NATS_REPLICAS, the deployment's replica count for the stream and the
+	// webhook redelivery bucket, and StreamMaxBytes is ENVOY_STREAM_MAX_BYTES, the stream's byte
+	// limit or 0 for none set (envoyconfig.ParseNATSReplicas, envoyconfig.ParseStreamMaxBytes).
+	NATSReplicas     int
+	StreamMaxBytes   int64
+	TestHooksEnabled bool
 	// SettleDelay is how long a document waits after a live change before it settles, zero for the
 	// document service's own default; only DISPATCH_TEST_SETTLE_DELAY, under the test hooks, sets it.
 	SettleDelay time.Duration
@@ -179,7 +185,7 @@ func main() {
 	if boot.NATSDisabled {
 		slog.Info("dispatch: NATS publisher disabled")
 	} else {
-		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, bus.WithEnvironment(env.lookup), bus.WithName("dispatch"))
+		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, dispatchStreamOptions(boot, env)...)
 		if err != nil {
 			slog.Error("dispatch: connect NATS", "error", err)
 			os.Exit(1)
@@ -405,7 +411,7 @@ func main() {
 	// inserts (LEGION-531).
 	go documentService.RunReferenceExcerptReconciliation(ctx, leases)
 
-	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
+	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase, boot.NATSReplicas)
 	if err != nil {
 		slog.Error("dispatch: open webhook redelivery", "error", err)
 		os.Exit(1)
@@ -555,6 +561,19 @@ func loadAppCredentials(env settingValues, dataDir string) (*auth.AppConfig, app
 	return cfg, appCredentialSource{Path: path}, nil
 }
 
+// dispatchStreamOptions are the options the Dispatch server's publisher connects with, the
+// stream's other owner (bus.ConnectOwningStream): its name, the settings table's lookup for NATS's
+// reach and nkey, and the deployment's replica count and byte limit from boot. main and the tests
+// that start Dispatch's stream both take them from here.
+func dispatchStreamOptions(boot bootConfig, env settingValues) []bus.ConnectOption {
+	return []bus.ConnectOption{
+		bus.WithEnvironment(env.lookup),
+		bus.WithName("dispatch"),
+		bus.WithReplicas(boot.NATSReplicas),
+		bus.WithStreamMaxBytes(boot.StreamMaxBytes),
+	}
+}
+
 // resolveBootConfig is the server's configuration from what the settings table read (env),
 // checked before anything connects. It holds the settings main hands on as values; three groups
 // reach their readers from env instead, through the table's lookup: the GitHub App credentials
@@ -606,6 +625,12 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		return bootConfig{}, err
 	}
 	boot.PprofAddr = pprofAddr
+	if boot.NATSReplicas, err = envoyconfig.ParseNATSReplicas(env.get(bus.ReplicasEnvVar)); err != nil {
+		return bootConfig{}, err
+	}
+	if boot.StreamMaxBytes, err = envoyconfig.ParseStreamMaxBytes(env.get(bus.StreamMaxBytesEnvVar)); err != nil {
+		return bootConfig{}, err
+	}
 	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_SETTLE_DELAY")); raw != "" {
 		if !boot.TestHooksEnabled {
 			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_SETTLE_DELAY")

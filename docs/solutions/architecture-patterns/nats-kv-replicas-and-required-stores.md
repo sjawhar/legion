@@ -35,13 +35,32 @@ NATS JetStream KV requires `Replicas <= available_peers`. A bucket created with 
 single-peer deployment fails with "no suitable peers for placement", and because the store is
 required, the listener crashes on startup.
 
-**Rule of thumb**: default the replica count to 1, which works everywhere, and raise it by
-configuration for HA deployments. The listener passes `ENVOY_NATS_REPLICAS` (`cfg.NATSReplicas`)
-to each store through its functional option (`store.WithReplicas`, `session.WithSessionReplicas`,
-`cistore.WithReplicas`).
+**Rule of thumb**: default the replica count to 1, which works on a single server, and raise it
+per deployment by configuration. `ENVOY_NATS_REPLICAS` (1 to 5) is one setting that every Envoy
+program of a deployment reads with the same value: the listener passes it (`cfg.NATSReplicas`) to
+the stream and to each store through its functional option (`store.WithReplicas`,
+`session.WithSessionReplicas`, `cistore.WithReplicas`), and Dispatch's server reads it from its
+settings table for the stream and `envoy_webhook_redelivery` (`redeliver.OpenState`).
+
+A count is a floor, never lowered by a start. A start opens every bucket through
+`bus.EnsureKeyValue`, which creates a missing bucket at the count and raises an existing one with
+fewer copies through an update of its stream, `KV_<bucket>`, that writes back the deployed
+configuration with only `Replicas` changed. A bucket with as many copies or more is left alone, so
+a program whose setting is lower (an older setting, or one restarted before the others) never
+scales a raised bucket back; lowering is an operator step
+(`nats stream edit KV_<bucket> --replicas=<n>`). `ENVOY_NOTIFICATIONS` holds the same floor
+(`ensureStreamWithConfig`).
+
+The raise is a stream update, so it needs its own permission: each Envoy NATS user's grant holds
+`$JS.API.STREAM.UPDATE.KV_<bucket>` beside the info and create of each bucket it opens
+(`bucketPermissions`, `packages/envoy/infra/core/permissions.go`). A hub whose grant lacks it
+refuses the raise, and the start stops with an error naming `ENVOY_NATS_REPLICAS=<n>`. A single
+server refuses a replica count above 1 at create and at raise alike (nats-server v2.15.1), and the
+start stops naming the setting the same way: more than 1 needs a clustered NATS.
 
 ## When to Apply
 
 Any time you add a JetStream stream or KV bucket that the code creates itself. The deployment
-topology varies (production runs one standalone server; an HA cluster wants more replicas), so the
-replica count is configuration, never a constant.
+topology varies (a deployment may run one standalone server, or a cluster that wants more
+replicas), so the replica count is configuration, never a constant, and the code that creates the
+store also raises it to that count and never lowers it.

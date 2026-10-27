@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-546",
+  "completed": "2026-10-27T05:16:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2362",
+  "proof": [
+    {
+      "criterion": "A stream update from the listener keeps three copies, the byte limit and envoy_stream_id; an R1 stream and an R1 bucket are raised to three; copies are never lowered",
+      "surface": "Real envoy-listener binary against three nats-server v2.15.1 processes clustered on loopback (the hub's version), read with natscli v0.5.1",
+      "command": "bash /legion/scratch/tmp/p546/proof.sh /legion/workspaces/sjawhar/legion/infra-546 (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6434277593)",
+      "observed": "P1: ENVOY_NATS_REPLICAS=3 ENVOY_STREAM_MAX_BYTES=44023414784 raised a deployed R1 stream (old subjects, no id, 3 messages) to 3 current peers, max_bytes 44023414784, discard old, one envoy_stream_id across two reads, messages 1-3 kept; KV_envoy_interests R1 -> 3; durable listener-proof-a at 3 copies. P2: restart with ENVOY_NATS_REPLICAS=1 and no byte limit left 3 replicas, the limit and the id, and sent no STREAM.UPDATE with a body.",
+      "headSha": "b2e6471b14e570a2258d1ab80cc09d2a52e85b38",
+      "negativeControl": "ENVOY_NATS_REPLICAS=3 against a standalone nats-server v2.15.1 -> exit 1 'ENVOY_NATS_REPLICAS=3: nats: replicas > 1 not supported in non-clustered mode' (fresh create and raise of an existing R1 stream, stream left at 1); ENVOY_STREAM_MAX_BYTES=44023414784 against its 29 GB store -> exit 1 'ENVOY_STREAM_MAX_BYTES=44023414784: nats: insufficient storage resources available'; ENVOY_NATS_REPLICAS=0 -> 'invalid ENVOY_NATS_REPLICAS \"0\": want a whole number of copies from 1 to 5'"
+    },
+    {
+      "criterion": "A stream update from the Dispatch server that changes subjects keeps three copies, the byte limit and envoy_stream_id",
+      "surface": "Real envoy-dispatch binary (Postgres 17 from Debian packages on the issue volume, dev sign-in) against the same three-server v2.15.1 cluster",
+      "command": "bash /legion/scratch/tmp/p546/proof.sh /legion/workspaces/sjawhar/legion/infra-546 (P3 section of the same log)",
+      "observed": "P3: with the stream's subjects edited back to 5, envoy-dispatch with ENVOY_NATS_REPLICAS=3 and no byte limit reached 'dispatch: listening'; the stream had 8 subjects, 3 current peers, max_bytes 44023414784, discard old and the same envoy_stream_id",
+      "headSha": "b2e6471b14e570a2258d1ab80cc09d2a52e85b38",
+      "negativeControl": "Same standalone-server refusals as the listener row; Dispatch's settings refuse ENVOY_NATS_REPLICAS 0, -1, 6, x and ENVOY_STREAM_MAX_BYTES 0, -5, x (TestEverySettingReachesItsReader cases)"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/bus/stream.go, nats.go, kv.go (+ stream_replicas_test.go, stream_config_test.go)",
+    "packages/envoy/internal/testnats/cluster.go (new StartCluster, StartClusterConfig), nats.go (+ cluster_test.go)",
+    "packages/envoy/internal/config/config.go (+ test)",
+    "packages/envoy/cmd/listener/main.go (+ stream_replicas_test.go)",
+    "packages/envoy/cmd/dispatch/main.go, settings.go, redeliver.go (+ settings_test.go, stream_replicas_test.go)",
+    "packages/envoy/internal/dispatch/redeliver/sweep.go (+ tests), internal/dispatch/delivery/consumer_replicas_test.go, internal/integration/bucket_replicas_test.go",
+    "packages/envoy/infra/core/permissions.go (+ permissions_test.go, bucket_raise_test.go, dispatch_permissions_live_test.go), infra/gcp/testdata/*.golden, infra/aws/rendering/listener.go, infra/render/render.go (+ tests)",
+    "packages/envoy-client/src/replay.ts (+ test), packages/pi-envoy/extensions/envoy.test.ts, packages/claude-envoy/dist/envoy-channel.js",
+    "Docs: .dispatch/architecture/envoy-listener.md, packages/envoy/AGENTS.md, CHANGELOG.md, docs/architecture.md, deploy/README.md, cmd/dispatch/AGENTS.md and README.md, infra/README.md, infra/docs/nats-hub.md, packages/contracts/src/dispatch-api.ts (comment), docs/site dispatch/envoy.md and running-dispatch.md, three docs/solutions pages, READMEs/AGENTS/CHANGELOGs of envoy-client, pi-envoy, claude-envoy"
+  ],
+  "trickyParts": [
+    "Proof harness: /legion/scratch/tmp/p546/proof.sh re-runs everything; nats-server and natscli are installed under /legion/scratch/tmp/p546/bin; Postgres is /legion/scratch/tmp/pg546 (pg.sh wraps PATH and LD_LIBRARY_PATH around one command; database dispatch546 on 127.0.0.1:14433). Ports used: 14221-14223 client, 15221-15223 routes, 14230 standalone, 14290/14291 listener, 14777 Dispatch.",
+    "The proof cluster sets max_file_store 64GB: the pod's default store (29 GB) cannot reserve the sized 41 GiB limit, which is itself the second negative control.",
+    "nats-server v2.10.29 (linked in Go tests) accepts a single-server raise of an existing stream to R3; v2.15.1 refuses it. Unit tests prove refused raises on the cluster with 5 copies on 3 servers.",
+    "nats-server v2.10.29 can leave one of two concurrent replica changes unanswered; unanswered() re-reads the stream and succeeds when it already holds what was asked.",
+    "A grant-refused bucket raise surfaces as 'ENVOY_NATS_REPLICAS=3: context deadline exceeded' (permission violations are async).",
+    "go tooling rewrites go.work.sum and packages/envoy/infra/go.work.sum when tests run; restore them before committing."
+  ],
+  "deviations": [
+    "Sizing source: the spec's INFRA-514 EV-1 finding does not exist; the rate was measured as the plan says, plus INFRA-547's forward copies (role x1, ad-hoc x4) that the architect asked to count. Result 44,023,414,784 B (41 GiB).",
+    "Added testnats.StartClusterConfig (cluster with an extra config block) for the grant test 3l, and Server.Name() for INFRA-547.",
+    "Added internal/dispatch/delivery/consumer_replicas_test.go so Dispatch's two durables are proven through their real consumer configs (acceptance 3d).",
+    "Docs worker corrected the 'stored again' claim: a dropped message's id stays in the server's memory until a restart, so a repeat 'may' be stored again."
+  ],
+  "openQuestions": [
+    "Memory per hub server for the 72 h duplicate map at the sized load is about 3.6 GB; whether to shorten the window is the architect's (plan coordination item 4).",
+    "Who sets ENVOY_STREAM_MAX_BYTES and ENVOY_NATS_REPLICAS=3 for the production deployment at the move (plan coordination item 1)."
+  ]
+}

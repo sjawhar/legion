@@ -69,7 +69,15 @@ Each start also logs `envoy nats stream keeps subjects this binary does not comp
 naming (`subjects`) the deployed subjects it kept without knowing them. That is the list the retire
 step below works from. Both lines are written only after the stream carries the reconciled list.
 
-`MaxAge` and the duplicate window still take the starting binary's values.
+`MaxAge` and the duplicate window still take the starting binary's values. The rest of an update
+starts from the deployed configuration too: the replicas become the deployed count or
+`ENVOY_NATS_REPLICAS`, whichever is more, so a start never lowers them; the byte limit becomes
+`ENVOY_STREAM_MAX_BYTES` when it is set and otherwise stays as deployed, so a start never removes
+one; discard is `DiscardOld`; and the metadata, `envoy_stream_id` included, and every field Envoy
+does not own (`MaxMsgsPerSubject`, `MaxMsgSize`, placement, compression and the rest) stay as they
+are. Lowering the replicas and removing the limit are operator steps, like retiring a subject:
+`nats stream edit ENVOY_NOTIFICATIONS --replicas=<n>` and
+`nats stream edit ENVOY_NOTIFICATIONS --max-bytes=-1`.
 
 An earlier version of this page described the opposite behaviour, which was true until
 sjawhar/legion's fix for LEGION-208 Stage 3: `ensureStreamWithConfig` called `UpdateStream` with

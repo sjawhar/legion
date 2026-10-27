@@ -131,7 +131,11 @@ server's.
 A present `NATS_URLS` overrides merged `envoy.natsUrls` before `bus.ConnectOwningStream` and the
 outbox start; the server
 owns `ENVOY_NOTIFICATIONS` on whichever server that resolves to, and refuses one that is not this
-machine's unless `ENVOY_ALLOW_REMOTE_NATS=1` says the run means it (every deployment sets it). A
+machine's unless `ENVOY_ALLOW_REMOTE_NATS=1` says the run means it (every deployment sets it). It
+creates and reconciles the stream at the deployment's `ENVOY_NATS_REPLICAS` and
+`ENVOY_STREAM_MAX_BYTES`, two settings table rows (`dispatchStreamOptions`), and the webhook
+redelivery bucket at the first; what a start does with them is `packages/envoy/AGENTS.md`'s
+"Operational notes". A
 present `DISPATCH_SERVER_URL` overrides merged `dispatch.serverUrl`; it must be an absolute `http`
 or `https` URL with no path, and is the exact browser origin
 used for sign-in. It must equal the URL humans type into the browser, with

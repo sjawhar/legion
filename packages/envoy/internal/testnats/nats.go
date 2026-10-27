@@ -243,6 +243,8 @@ type Server struct {
 	log        *logCapture
 	relay      *relay
 	url        string
+	// name is the server_name StartCluster gives a member, "" for a lone server.
+	name string
 
 	mu        sync.Mutex
 	srv       *natsserver.Server
@@ -253,6 +255,10 @@ type Server struct {
 // URL is the server's client URL, which stays the same across every Stop and Start: it names the
 // relay's port, not the server's own.
 func (s *Server) URL() string { return s.url }
+
+// Name is the server_name of a cluster member (StartCluster), the name JetStream reports it by in
+// a stream's or a consumer's cluster information. A lone server has none and answers "".
+func (s *Server) Name() string { return s.name }
 
 // MonitorURL is the server's monitoring endpoint, where /varz and /connz are. The monitoring
 // listener is the server's own rather than the relay's, so a Stop and a Start give it a new port
@@ -388,6 +394,31 @@ func (s *Server) address() (string, error) {
 	}
 	return addr.String(), nil
 }
+
+// clusterAddress is where the server listens for routes at this moment, which its route relay
+// dials (StartCluster). A stopped server has none, as address says.
+func (s *Server) clusterAddress() (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.srv == nil {
+		return "", errors.New("the NATS server is stopped")
+	}
+	addr := s.srv.ClusterAddr()
+	if addr == nil {
+		return "", errors.New("the NATS server has no route address")
+	}
+	return addr.String(), nil
+}
+
+// natsServer is the running nats-server, or nil while the server is stopped.
+func (s *Server) natsServer() *natsserver.Server {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.srv
+}
+
+// running reports whether the server is running: started and not stopped since.
+func (s *Server) running() bool { return s.natsServer() != nil }
 
 // hostOnlyConfig is the configuration of a server a test starts with none of its own:
 // nats-server warns on an empty configuration file ("config has no values or is empty"), and the

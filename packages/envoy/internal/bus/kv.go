@@ -25,10 +25,17 @@ type KeyValue struct {
 }
 
 // EnsureKeyValue opens the KV bucket config names, creating it with config when it does not exist.
+// config.Replicas is the deployment's replica count (ReplicasEnvVar): a new bucket is created at
+// it, and an existing bucket with fewer copies is raised to it (raiseReplicas) and never lowered.
+// A refused create or raise of more than one copy names the setting (refusedSettings).
 func EnsureKeyValue(js nats.JetStreamContext, config *nats.KeyValueConfig) (KeyValue, error) {
 	kv, err := js.KeyValue(config.Bucket)
-	if errors.Is(err, nats.ErrBucketNotFound) {
+	switch {
+	case errors.Is(err, nats.ErrBucketNotFound):
 		kv, err = js.CreateKeyValue(config)
+		err = refusedSettings(err, nil, &nats.StreamConfig{Replicas: config.Replicas})
+	case err == nil:
+		err = raiseReplicas(js, config.Bucket, config.Replicas)
 	}
 	if err != nil {
 		return KeyValue{}, err
@@ -36,7 +43,37 @@ func EnsureKeyValue(js nats.JetStreamContext, config *nats.KeyValueConfig) (KeyV
 	return KeyValue{kv}, nil
 }
 
-// OpenKeyValue opens the existing KV bucket named bucket and creates nothing, as a rebuild does.
+// raiseReplicas raises the stream of the existing bucket to replicas copies when it has fewer. The
+// update writes back the stream's deployed configuration with only its replicas changed, so the
+// bucket's TTL, history, discard policy, direct get, rollup, delete settings, metadata and the rest
+// stay as they are. A bucket with as many copies or more is left alone, and one copy needs no read:
+// every stream has at least one. As for the stream (ensureStreamWithConfig), two starts raising at
+// once each write the deployment's one count, and a raise whose answer never came (unanswered)
+// succeeds when the stream, read again, has the copies.
+func raiseReplicas(js nats.JetStreamContext, bucket string, replicas int) error {
+	if replicas <= 1 {
+		return nil
+	}
+	stream := "KV_" + bucket
+	info, err := js.StreamInfo(stream)
+	if err != nil {
+		return err
+	}
+	if info.Config.Replicas >= replicas {
+		return nil
+	}
+	raised := info.Config
+	raised.Replicas = replicas
+	if _, err = js.UpdateStream(&raised); unanswered(err) {
+		if again, infoErr := js.StreamInfo(stream); infoErr == nil && again.Config.Replicas >= replicas {
+			return nil
+		}
+	}
+	return refusedSettings(err, &info.Config, &raised)
+}
+
+// OpenKeyValue opens the existing KV bucket named bucket and creates nothing, as a rebuild does. It
+// raises nothing either: the start that opened the bucket with EnsureKeyValue did that.
 func OpenKeyValue(js nats.JetStreamContext, bucket string) (KeyValue, error) {
 	kv, err := js.KeyValue(bucket)
 	if err != nil {

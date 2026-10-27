@@ -1229,16 +1229,22 @@ export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
  *   error instead (a BTW whose side turn failed) was never handed over, so the host releases its
  *   key and a same-mode re-send of it reaches the agent.
  *
- * It fails in three places. A host holds its keys in memory, so one that restarts after the first
- * frame landed has forgotten it and a Retry reaches that agent a second time; that is ordinary,
- * not rare: `claude --resume` starts a new channel process on the same conversation, and a
- * Sandbox pod resumes its session in a new process. The stream stores a re-send of an attempt the
- * session answered with an error no more than any other repeat, so a session the listener pushes
- * to never receives it, and its attempt reads as a duplicate. The dashboard therefore offers no
- * same-mode Retry for such an attempt and points at a mode change, which is a new key; sending
- * that Retry under a new key is LEGION-431. And a host keeps at most `DELIVERY_DEDUPE_KEY_LIMIT`
- * keys, forgetting the oldest past it, so a re-send of a key it was handed before that many later
- * ones reaches the agent again. The limit is two and a half times what the whole stream stored in
+ * It fails in three places. A host's `createDeliveryDedupe` holds its keys in memory, so a host
+ * that keeps nothing else and restarts after the first frame landed has forgotten it, and a Retry
+ * reaches that agent a second time; that is ordinary, not rare: `claude --resume` starts a new
+ * channel process on the same conversation, and a Sandbox pod resumes its session in a new
+ * process. pi-envoy and claude-envoy, from the releases that carry `@legion/envoy-client/replay`,
+ * also keep a ledger of the frames their session was handed (pi-envoy in the session's
+ * transcript, claude-envoy in a file per session id) and drop a repeat it holds after a restart,
+ * for 72 hours and up to 20,000 frames; only a crash between the hand-over and the ledger write
+ * still lets that Retry through. Older plugins still forget, and the dashboard cannot tell which
+ * one a session runs. The stream stores a re-send of an attempt the session answered with an
+ * error no more than any other repeat, so a session the listener pushes to never receives it, and
+ * its attempt reads as a duplicate. The dashboard therefore offers no same-mode Retry for such an
+ * attempt and points at a mode change, which is a new key; sending that Retry under a new key is
+ * LEGION-431. And a host keeps at most `DELIVERY_DEDUPE_KEY_LIMIT` keys, forgetting the oldest
+ * past it, so a re-send of a key it was handed before that many later ones reaches the agent
+ * again. The limit is two and a half times what the whole stream stored in
  * one window when it was set, so a host reaches it only once traffic grows past that or a
  * producer floods a topic it follows.
  *
@@ -1246,7 +1252,10 @@ export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
  * dashboard makes the promise only inside it, and names the restart
  * (`packages/dispatch/web/src/features/conversation/delivery.ts`). `scripts/gen-go.ts` emits this
  * as `contracts.DeliveryDuplicateWindow`, which `bus/stream.go` uses for both the stream's
- * duplicate window and its retention.
+ * duplicate window and its age. The stream may hold less than the window: once its byte limit
+ * (`ENVOY_STREAM_MAX_BYTES`) binds it drops its oldest messages first, and a repeat of a message
+ * it already dropped may then be stored again, since nats-server keeps a dropped message's id only
+ * in memory, which a server restart clears.
  *
  * It also bounds webhook redelivery dedupe: a GitHub, Slack or Ghost Wispr envelope is stored
  * under a MsgId of its delivery id, and GitHub redelivers deliveries up to three days old, so a

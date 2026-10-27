@@ -16,7 +16,7 @@ a receipt-backed request with the original role topic to the holder's direct age
 and it keeps open, listing them as kept, the subscriptions another plugin holds for that role.
 The agent pump replies after accepting the envelope; without a receipt within two seconds the
 listener emits a `delivery_failed` exception. Role messages are live only; they are not retained
-for a later claimant.
+for a later claimant, and a session does not recover one it missed.
 
 `envoy_list()` shows the union of the local subscriptions and the listener's persisted interest
 registry. Each reported interest identifies whether it is `live`, `registry`, or `both`, so
@@ -33,6 +33,23 @@ as a safe `unrecognised` value rather than exposed as raw bytes.
 and `summary`) for recovery after an interrupt. `envoy_role_get` returns the current holder and
 last-seen timestamp for a role. `envoy_subscribe` reports listener warnings in both its text and
 details result, including subscriptions whose stream currently has no matching event.
+
+A message published while the session's NATS connection or one of its subscriptions was down is
+recovered from Envoy's notification stream, which keeps messages for 72 hours: the session asks
+its listener (`POST /v1/replay`) for what the stream stored on its own agent subject and on each
+topic it follows, after the place it last read to, and shows each missed message once, as a card
+saying it was published while the connection was down. It asks after it reconnects, after a
+subscription is reopened, when it starts or resumes, and on every heartbeat. A targeted Dispatch
+delivery recovered this way (BTW, Aside, Steer, a person's Send) is shown as that card only and
+runs nothing. Role messages and team or other ad-hoc topics are live only and are not recovered,
+and neither is anything past the stream's 72-hour age or its size limit, published before the session followed the topic, or
+published before the session first ran this plugin. A message the session fails to show three
+times is replaced by one card naming it and saying how to read it. The session file keeps what
+it was shown and where it read to, so a restart skips nothing the stream still holds and shows
+nothing again (up to 20,000 messages shown in 72 hours); a crash between showing a message and
+recording it can show it twice, never lose it. Against a listener without the route, the session
+warns once that missed messages are not recovered, and live delivery goes on as before. "Missed
+messages" in `AGENTS.md` has the full rules.
 
 ## Session identity
 
