@@ -2,15 +2,23 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-177",
-  "completed": "2026-10-27T12:44:19Z",
+  "completed": "2026-10-27T13:15:58Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2354",
   "proof": [
+    {
+      "criterion": "A9: under the records' daemon the import does not move a branch in merging or awaiting_merge, and does not report it failed",
+      "surface": "legion handoffs import (handoffimport.Run) against the GitHub REST and Dispatch stand-ins",
+      "command": "cd packages/daemon && go test -count=1 -p 1 ./internal/handoffimport/ -run TestUnderTheRecordsDaemonAnAwaitingMergeBranchIsNotMoved -v; go test -count=1 -p 1 ./internal/handoffimport/",
+      "observed": "--- PASS: TestUnderTheRecordsDaemonAnAwaitingMergeBranchIsNotMoved; package ok. The tester's test is unchanged since b90497b8",
+      "headSha": "4dbcd2324231503eef34de92fccd46bc26ba4cd5",
+      "negativeControl": "at b90497b8 (before the fix) the same test is red: the import moved legion/LEG-8 (awaiting_merge) with its removal commit"
+    },
     {
       "criterion": "A6: a 40 KB handoff writes and reads back; two writes give versions 1 and 2",
       "surface": "the real `dispatch` CLI against the real Dispatch server, in scripts/e2e/handoff-records.sh",
       "command": "source /legion/harness/env.sh && LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/legion_m3?sslmode=disable LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server bash scripts/e2e/handoff-records.sh",
-      "observed": "all 13 checks ok at 4496efab, PASS in 70s (evidence /legion/scratch/tmp/legion-e2e-handoff-records-evidence.UGZZcNW1); two 41024-byte bodies are versions 1 and 2, each read back byte-identical",
-      "headSha": "4496efab477a128372d7fde5328f2a1fa8179c85",
+      "observed": "all checks ok at 4dbcd232, PASS in 66s (evidence /legion/scratch/tmp/legion-e2e-handoff-records-evidence.ARnWjAVf)",
+      "headSha": "4dbcd2324231503eef34de92fccd46bc26ba4cd5",
       "negativeControl": "a 262145-byte body: the CLI refuses it before sending, and a raw POST is answered 413 CAP_EXCEEDED"
     },
     {
@@ -97,16 +105,11 @@
     "Main's #2287 (an approval stands across handoff-only commits) extended the machinery this issue removes. In the merge, its classification and carry code, its approval-carry pass and its fixtures were dropped. Kept: its CI flag change, and its round-ends-on-the-approved-head case as an adapted test."
   ],
   "openQuestions": [],
-  "round": 3,
-  "reviewFindingsAnswered": [
-    "1 runbook: the import detects old/new daemon by daemon.schemaVersion (>= 60 = migration 0060_handoff_records). The old daemon gets only .legion/<KEY>/ removed and other dirs kept (line 'kept'); the new daemon defers the removal in testing/reviewing (line 'removal deferred'). docs/kubernetes.md steps 2 and 4 name each phase's effect (f887c783).",
-    "2 move's 422: re-reads the branch and retries only when it moved; otherwise fails with GitHub's answer; unit case added (f887c783).",
-    "3 task line: 'dispatch handoff-read --issue <KEY> --phase <word> --version <n>'; the prompts, skills and live proof match (f887c783).",
-    "4 Contract change census added to the PR body (searches, hits with dispositions, rollout line).",
-    "5 READY loop: one loop; only a removed .legion/ file is skipped; an empty name counts as outside (f887c783).",
-    "6 phase.Handoff is the one table; recordWriters, its tie test and FileBacked are deleted; state read via cmd/legion get; ghbranch.Head/Move are shared; one scratch Dispatch starter (f887c783).",
-    "7 envoy-channel-server.ts comment now says the dispatch command acts as ENVOY_SESSION_ID (f887c783).",
-    "8 PR body Change line 4: the import copies only the issue's four phase files and removes the rest uncopied.",
-    "Main moved and conflicted again: forward merge 4496efab with main c892b97d; daemon migration 0060 and Dispatch migration 0130 (main took 0059 and 0129). PR is MERGEABLE."
+  "round": 4,
+  "testerFailuresAnswered": [
+    {
+      "failure": "A9: under the records' daemon the import moved a branch in awaiting_merge (withdrawing its READY)",
+      "answer": "Fixed in 4dbcd232, narrowed by the architect: under the records' daemon the removal is deferred for an issue in merging or awaiting_merge, as for testing and reviewing. The tester's red test TestUnderTheRecordsDaemonAnAwaitingMergeBranchIsNotMoved (b90497b8) passes unchanged (0-line diff). docs/kubernetes.md step 4 and the line list name the case, including that such a branch's other-issue directory reaches the default branch if it merges first. Nothing else changed."
+    }
   ]
 }
