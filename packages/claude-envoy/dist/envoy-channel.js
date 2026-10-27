@@ -41340,12 +41340,12 @@ function issueSummary(issue2, events, references, graph, linkBase, titles) {
   ].join(`
 `);
 }
-function referenceLines(edges) {
-  if (typeof edges === "string")
-    return [`- ${edges}`];
-  if (edges.length === 0)
+function referenceLines(read) {
+  if (typeof read === "string")
+    return [`- ${read}`];
+  if (read.edges.length === 0)
     return ["- none"];
-  return edges.map((edge) => {
+  return read.edges.map((edge) => {
     const excerpt2 = edge.excerpt === undefined ? "" : `${textHead(edge.excerpt.text)} \xB7 `;
     const block = edge.block === undefined ? "" : ` (block ${edge.block.ref ?? edge.block.id})`;
     return `- ${edge.kind} ${edge.node.kind} ${edge.node.ref ?? edge.node.id} (${excerpt2}${edge.created_at})${block}`;
@@ -41356,7 +41356,7 @@ function unavailableReason(error48) {
 }
 async function graphEdges(client, query) {
   try {
-    return (await client.getReferences(query)).edges;
+    return await client.getReferences(query);
   } catch (error48) {
     return unavailableReason(error48);
   }
@@ -41376,7 +41376,26 @@ async function graphSections(client, ref) {
   return graphSectionLines(incoming, outgoing);
 }
 function graphSectionLines(incoming, outgoing) {
-  return ["Referenced by:", ...referenceLines(incoming), "Links:", ...referenceLines(outgoing)];
+  return [
+    ...typeof incoming === "string" ? [] : nodeLine(incoming.node),
+    "Referenced by:",
+    ...referenceLines(incoming),
+    "Links:",
+    ...referenceLines(outgoing)
+  ];
+}
+function nodeLine(node) {
+  if (node.made_by === undefined)
+    return [];
+  const [made, changed] = [
+    [node.made_by, node.made_at],
+    [node.changed_by, node.changed_at]
+  ].map(([by, time3]) => `${by === undefined || by.length === 0 ? "nobody recorded" : by.map(actorText).join(", ")}${time3 == null ? "" : ` at ${time3}`}`);
+  const { parent } = node;
+  const partOf = parent == null ? "" : ` \xB7 part of ${parent.ref ?? `${parent.kind} ${parent.id}`}${node.parent_version == null ? "" : ` (version ${node.parent_version})`}`;
+  return [
+    `Node: ${node.kind} ${node.ref ?? node.id} \xB7 made by ${made} \xB7 changed by ${changed}${partOf}`
+  ];
 }
 function blockLines(node, ref) {
   const head = [
@@ -42775,10 +42794,7 @@ ${trailer.join(`
           graphEdges(client, { from: blockRef })
         ]);
         return {
-          text: [
-            ...blockLines(incoming.node, ref),
-            ...graphSectionLines(incoming.edges, outgoing)
-          ].join(`
+          text: [...blockLines(incoming.node, ref), ...graphSectionLines(incoming, outgoing)].join(`
 `),
           details: {
             ...ref.owner.kind === "project" ? { project: ref.owner.project } : { issue: ref.owner.issue },
