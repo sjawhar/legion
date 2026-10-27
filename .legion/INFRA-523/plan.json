@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-523",
+  "completed": "2026-10-27T02:10:16Z",
+  "plan": "dispatch://INFRA-523/artifact/plan-md",
+  "catalog": "dispatch://INFRA-523/artifact/rerun-catalog-md",
+  "measurementScript": "dispatch://INFRA-523/artifact/rerun-measure-py",
+  "summary": "108 job attempts failed and ran again in sjawhar/legion in the 7 days to 2026-10-26T23:50Z: 34 already fixed on main, 37 registry or network faults, 10 not flaky, 28 on 21 causes still on main, plus issue.e2e.ts:697 read later. Tasks T0-T24 fix every still-open cause at its root (product races in eventCursorCheck, duty.Exclusive, the outbox lane start, agentsecrets LoginStatus and the tmux spawn's secret files; test races elsewhere; two worker image build causes), each with a negative control and a stress loop under load at the PR head.",
+  "tasks": [
+    {"id": "T0", "what": "pod rig: Postgres 17+pgvector, nats-server, Playwright, tmux under $TMPDIR; diagnosis rigs under /legion/scratch/tmp/infra523-*"},
+    {"id": "T1", "what": "eventCursorCheck one statement (packages/envoy/internal/dispatch/api/delivery_live_events.go:77-93) + truncate-between-queries regression test"},
+    {"id": "T2", "what": "duty.Exclusive buckets by the tick's due time (packages/envoy/internal/dispatch/duty/exclusive.go:44-78) and every caller passes it"},
+    {"id": "T3", "what": "await broadcast delivery in body_cap_test.go:38-42 and sibling broadcast tests"},
+    {"id": "T4", "what": "hub tests on a still clock at noon UTC (delivery_live_hub_test.go)"},
+    {"id": "T5", "what": "pmdoc linearity: drop 2048 race size, interleave samples, cputest resolves the clock step, TestRenderIsLinear on cpu growth; comments"},
+    {"id": "T6", "what": "outbox wakeLane nudges before starting the lane goroutine (packages/daemon/internal/daemon/outbox_lanes.go:115-133)"},
+    {"id": "T7", "what": "controller restart test waits for the stored locator"},
+    {"id": "T8", "what": "inflight stop tests wait for the boot liveness line before quietStop"},
+    {"id": "T9", "what": "intake tests assert AckFloor.Stream/pending, not delivery counts"},
+    {"id": "T10", "what": "agentsecrets login state as one atomic snapshot"},
+    {"id": "T11", "what": "tmux spawn refuses a live incarnation before writing files; WriteSecretFiles replaces atomically"},
+    {"id": "T12", "what": "launcher test asserts the dial deadline instead of a wall-clock round trip"},
+    {"id": "T13", "what": "gc kill waits for tmp_pack_*; planted-lock subcase through Fetch"},
+    {"id": "T14", "what": "claudebridge isStreaming asserted on the hang turn; drop the racy get_state"},
+    {"id": "T15", "what": "VersionView test uses findByRole"},
+    {"id": "T16", "what": "agent-view-settings waits for the fake Envoy's sent frame and replies to its attempt"},
+    {"id": "T17", "what": "claude-envoy: per-test timeout above the waits, waitFor names its step, stress to find and fix the role-claim cause"},
+    {"id": "T18", "what": "claude-envoy session-handoff test reads calls recorded before shutdown"},
+    {"id": "T19", "what": "delete worker.Dockerfile:1 syntax directive"},
+    {"id": "T20", "what": "pi-codegraph plugin installed from a committed lockfile under packages/daemon/docker/omp-plugins/"},
+    {"id": "T21", "what": "log capture helpers restore log.Writer and log.Flags"},
+    {"id": "T22", "what": "no relay goroutine on context.Background in api tests"},
+    {"id": "T23", "what": "lock-waiter tests watch the pid of the call under test (INFRA-436 item)"},
+    {"id": "T24", "what": "issue.e2e.ts:697 in-view after viewport change: read trace, fix cause"}
+  ],
+  "order": "T0, T17 started early in parallel, Envoy T1-T5 T21-T23, daemon T6-T14, web T15 T16 T24, T18, image T19 T20, PR body, CI green. Base on main; bring the base in only on a real conflict (#2186, #2229 touch worker.Dockerfile and bridge_test.go).",
+  "acceptance": [
+    {"criterion": "A1 catalog complete", "surface": "GitHub Actions API + Dispatch artifact", "command": "python3 rerun-measure.py --from 2026-10-19T23:50:00Z --to 2026-10-26T23:50:00Z --list; job ids equal the catalog's"},
+    {"criterion": "A2 each open cause fixed at its root", "surface": "pod rig at the PR head; CI Tests/test, envoy-go, envoy-go-race, dispatch, claude-envoy, Worker Image/build", "command": "each task's negative control and stress loop in plan.md"},
+    {"criterion": "A2a no retry, no race-hiding timeout, no skip, no workflow file", "surface": "the PR diff", "command": "gh pr diff <n> --name-only shows no .github/workflows/"},
+    {"criterion": "A3 (restated, SD1) test-or-code re-run minutes over [merge, merge+7d) under 655", "surface": "GitHub Actions API", "command": "python3 rerun-measure.py --from <merge> --to <merge+7d>"}
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase rules, the proof object (criterion, surface, command, observed, headSha, negativeControl), the PR body and the push/trailer rules",
+      "ce-simplify-code: the simplify pass pr-body.md names before the implementer's proof head",
+      "dispatch: the production check reads and records the A3 measurement and the catalog on Dispatch"
+    ],
+    "test": [
+      "legion-worker: tester rules (re-run the implementer's negative controls and stress loops, try to break the fixes, read CI at the head, no CI lane re-run as evidence)"
+    ],
+    "review": [
+      "legion-worker: merge-gate.md review rules and the PR body's proof lines; check each change removes its cause rather than waiting, retrying or skipping"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "Acceptance 3 cannot be met by test and code fixes: 816 min of cancel/approval re-runs and 426 min of registry re-runs in the spec's 3-day window exceed the 578-minute target; its window, scale and method are ambiguous", "answer": "SD1: restated to test-or-code re-run minutes over [merge, merge+7d) by rerun-measure.py, target under 655 (a quarter of 1,124 min/3 d scaled to 7 d); measured by the implementer's production check; sent to the architect"},
+      {"finding": "Four causes overlap INFRA-436 and INFRA-407; INFRA-436 item 1 names the wrong test; INFRA-436 requires gVisor passes and 90-run loops", "answer": "SD5: the plan takes INFRA-436 and INFRA-407 whole (T1, T2, T5 incl. TestBareURLShapes on gVisor, T12, T23) and meets their loop counts; the wrong-test correction goes to the architect"},
+      {"finding": "Some causes have no root fix in scope: claude-envoy cause undetermined, api package deadline is a workflow line, registry faults, #2229's residual port gap, #2212's resend loop", "answer": "T17 instruments and stresses to find the cause, reports to the architect if 3,000 loaded runs show nothing; SD2 routes the api deadline to INFRA-520 and rules out a TestMain flag.Set; SD4 lists registry faults as external, T19 removes one fetch; #2229 owns the port gap; the resend loop is the browser protocol and is kept, with a 3,000-run check that the refused append is exercised"},
+      {"finding": "Acceptance 1's window moves and the deliverable location is unnamed; the catalog table dropped a second failing test per job", "answer": "Window fixed at 2026-10-19T23:50Z..2026-10-26T23:50Z read at 00:10Z; catalog regenerated with every failing test per job and attached as dispatch://INFRA-523/artifact/rerun-catalog-md; the later-read row issue.e2e.ts:697 is T24; the PR body links the catalog"},
+      {"finding": "Acceptance 2 and Proven on give no machine check; 'run repeatedly' conflicts with no-CI-rerun-as-evidence; several diagnosis proofs never ran", "answer": "Every task carries a negative control and a stress count; SD3 replaces CI re-runs with loaded local loops at the PR head plus the PR's own CI; unrun proofs (tmux, delayed fake Envoy, mutants, 4096 race size, omp path install, built-in frontend) are tasks for the implementer with a CI fallback named"},
+      {"finding": "Open PRs #2186 and #2229 touch the same files; INFRA-521 and INFRA-520 overlap unknown", "answer": "Base on main, merge forward only on real conflict; T14 and T20 say what to do if #2186 merged first; INFRA-521 told over Envoy that only agent-view-settings.e2e.ts (and T24's issue.e2e.ts body) change; INFRA-520 receives the api deadline (SD2); packages/daemon/** is already in worker-image paths"},
+      {"finding": "Comments and docs/solutions entries become false", "answer": "Comments at exclusive.go:44-52, outbox_lanes.go:115-119, linear_sizes_race.go:14-15, cputest.go:2-4 and the Dockerfile install are fixed in T2, T5, T6, T20; the INFRA-391 doc stays true until SD2's deadline lands; the INFRA-303 unknown-blob doc stays true"},
+      {"finding": "Latent same-mechanism tests and adjacent defects need an in/out decision", "answer": "In: TestARowDueLater (T6), intake AckFloor.Consumer checks (T9), agent-view-settings :700 (T16), unawaited broadcast tests (T3), the session-handoff race (T18), log.Writer restore (T21), relay on context.Background (T22)"}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": [
+    {
+      "spec": "Acceptance 3: re-run minutes in sjawhar/legion in the 7 days after the merge under a quarter of the measured rate (2,313 minutes in 3 days).",
+      "plan": "Measure re-run minutes in runs whose earlier attempt failed a test or code step, over [merge, merge+7d), with rerun-measure.py; target under 655 min (a quarter of the 1,124-minute baseline of that quantity in the spec's 3-day window, scaled to 7 days). Registry-only and no-failed-job re-runs are printed but not counted. Checked by the implementer's production check.",
+      "evidence": "Same method over the spec's window: 2,366 min total, 816 in runs with no failed job (bulk cancels by sjawhar-agent[bot] at 10-26 10:20Z and 19:06Z, concurrency cancels, action_required approvals) and 426 in registry-only failures: 1,242 min no test or code change touches, over twice the 578-minute target.",
+      "outcome": {"kind": "changed", "acceptance": ["3"]}
+    },
+    {
+      "spec": "Each cause is fixed at its root in the test or the code; no longer timeouts.",
+      "plan": "The dispatch/api package's 'panic: test timed out after 10m0s' gets no code change: the fix is an explicit package deadline on the envoy-go step in INFRA-520's router, as the race lane has (-timeout 30m). A TestMain flag.Set is ruled out.",
+      "evidence": "envoy-and-contracts.yaml:841 runs xargs go test with no -timeout; the package takes 396-600 s on CI; its line on main grew 85 s (2026-09-26) to 514 s (2026-10-26) with no single step; both timed-out goroutine dumps show no hung test.",
+      "outcome": {"kind": "changed", "acceptance": ["2"], "scope": "the api package deadline moves to INFRA-520's workflow change"}
+    },
+    {
+      "spec": "Proven on: the affected jobs on this pull request, run repeatedly.",
+      "plan": "Each fix is proven by a negative control and a stress loop under CPU load at the PR head in the pod, plus the PR's own CI at each push; no CI job is re-run as evidence.",
+      "evidence": "The test workflows have no workflow_dispatch; a CI re-run adds to the minutes acceptance 3 measures; skills/legion-worker/references/pr-body.md says no CI lane is rerun as evidence; a few CI runs cannot show a 1% flake gone.",
+      "outcome": {"kind": "changed", "scope": "how the change is proven"}
+    },
+    {
+      "spec": "Each cause is fixed at its root in the test or the code.",
+      "plan": "The 37 registry and network failures (mirror.gcr.io unknown blob in 10-25 05:07-05:40Z and 10-26 05:11-05:20Z, proxy.golang.org, an npm tarball, a debian layer) get no fix beyond T19's removed frontend fetch; image sources are workflow configuration (INFRA-520).",
+      "evidence": "The images are named only in workflow files (docs.yaml, envoy-and-contracts.yaml, pr-and-main.yaml, worker-image.yaml); every failure passed on the next attempt; the same faults hit unrelated images in the same windows.",
+      "outcome": {"kind": "changed", "acceptance": ["2"]}
+    },
+    {
+      "spec": "Scope: the sjawhar/legion tests that fail and then pass when run again.",
+      "plan": "Also take the rest of INFRA-436 and INFRA-407: TestBareURLShapesParseAndRenderLinearly on gVisor (T5) and the two lock-waiter tests (T23), so both issues close with this merge and no second tree edits linear_test.go, cputest.go or exclusive.go.",
+      "evidence": "INFRA-436 lists T1, T5, T12 and misnames T2's test; INFRA-407 is T2 plus the package deadline; both are todo with the legion label.",
+      "outcome": {"kind": "changed", "scope": "adds INFRA-436's and INFRA-407's remaining items"}
+    }
+  ]
+}
