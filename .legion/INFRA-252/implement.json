@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-252",
-  "completed": "2026-10-27T05:39:38Z",
+  "completed": "2026-10-27T07:35:40Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2226",
   "proof": [
     {
@@ -180,6 +180,22 @@
       "observed": "All(): 57 awaiting_person, 58 catch_up_cursor, 59 issue_ancestry, no error; every suite ok; main's blocked-issue test ok; child adoption e2e PASS in 67s; GitHub reports MERGEABLE",
       "headSha": "5851a336da30779f25df6deeea9a4d50f6729348",
       "negativeControl": "before these merges GitHub reported the pull request CONFLICTING (tester round 14); without the renumber the merged tree holds two version-58 files, which migrations.All refuses"
+    },
+    {
+      "criterion": "Review 5663055101 finding 2: a root that takes a slot drops the chain it queued under, so an answered awaiting_person root is never held by a leftover chain",
+      "surface": "admission over real PostgreSQL: the promotion, then Waiting, as the daemon reads the line",
+      "command": "LEGION_TEST_PG_DSN=<fresh database> go test -count=1 -run TestAnAnsweredRootIsNotHeldByTheChainItQueuedUnder ./internal/admit/; then the admit, workflow and api suites",
+      "observed": "PASS; Waiting lists the answered root while the ancestor on its old chain holds the slot; admit, workflow and api suites ok",
+      "headSha": "ab1f5b0da293ce93c6527fd9379628f50edf605e",
+      "negativeControl": "with `candidate.Ancestry = nil` commented out the test fails: the promoted record still carries [LEGION-169 LEGION-168]"
+    },
+    {
+      "criterion": "Review 5663055101 finding 1: this PR's daemon-package tests are cheap, and the live proof is not in the default package run",
+      "surface": "go test -json ./internal/daemon/ on this head and on main 448a4100 in the pod; CI test-job package times",
+      "command": "go test -count=1 -json -skip <pod skip list> ./internal/daemon/ (head and a git archive of main 448a4100); go test -v -run <the 9 tests> ./internal/daemon/ (https://github.com/sjawhar/legion/pull/2226#issuecomment-6436332224)",
+      "observed": "the 9 tests this PR adds or changes: 27.0 s before, 14.3 s after (TestPrepareReadsTheDispatchChainAboveAParent 16.3 s to 1.5 s); child_adoption_live_test.go is //go:build e2e; CI daemon package: main 448a4100 401 s, this branch's earlier heads 362-381 s, 5851a336 600 s timeout with no test failing",
+      "headSha": "ab1f5b0da293ce93c6527fd9379628f50edf605e",
+      "negativeControl": "before ab1f5b0d the preparation test migrated 13 databases and took 16.3 s"
     }
   ],
   "filesChanged": [
@@ -227,7 +243,8 @@
     "merge of main 5c4548f0 (#2253) at 2286fec9: migration_0055_test.go keeps main's gate-marks test, this branch's backfill test moves to migration_0056_test.go (seeded through 55); store_test.go keeps both new tests; migration renamed 0056_issue_ancestry; adopt_test.go's applyFact helper removed in favour of #2253's identical-signature one; PR body deploy note and size line say 0056",
     "merge of main ba9a24e2 (#2258) at c78e5a51: intake/facts.go keeps Ancestry/Reread and main's ClaimedBy/ClaimKnown; migration_0056_test.go keeps main's mirror test, this branch's backfill test moves to migration_0057_test.go (seeded through 56); migration renamed 0057_issue_ancestry; the retro learning's evidence and the PR body's present-tense mentions say 0057",
     "merge of main bc98d3e7 (#2273, #2281) at 8f2a161d: record fields and columns of both sides; line uses #2273's filter, Waiting applies the ancestry hold then #2273's sort, liveRoots counts an awaiting root's tree as live (new record test); promoteHolds runs the adoption sweep, then ReconcileAwaiting; settleReread and adoptChildren pass on given-back slots; migration renamed 0058_issue_ancestry and its test migration_0058_test.go; admission.md (generated copy rebuilt); retro note evidence says 0058",
-    "four forward merges onto aa64baf6 (#2293 boot records an unrecorded child; parentsFirst on this branch's types), b6d8fa2a (#2290 in-request recording after this branch's adoption/refusal), c3d09eec (#2280 holdForCatchUp before admission.Reconcile; migration renamed 0059_issue_ancestry, test migration_0059_test.go; outbox_test fake takes #2271's lock argument; retro note says 0059), 448a4100 (#2317's SlottedIssues taken as is)"
+    "four forward merges onto aa64baf6 (#2293 boot records an unrecorded child; parentsFirst on this branch's types), b6d8fa2a (#2290 in-request recording after this branch's adoption/refusal), c3d09eec (#2280 holdForCatchUp before admission.Reconcile; migration renamed 0059_issue_ancestry, test migration_0059_test.go; outbox_test fake takes #2271's lock argument; retro note says 0059), 448a4100 (#2317's SlottedIssues taken as is)",
+    "round 16: packages/daemon/internal/admit/admit.go (promotion clears Ancestry), packages/daemon/internal/admit/adopt_test.go (TestAnAnsweredRootIsNotHeldByTheChainItQueuedUnder), packages/daemon/internal/daemon/ancestor_tree_test.go (the preparation cases share one database)"
   ],
   "trickyParts": [
     "Adoption bumps every adopted record's generation: that is the fence the old self-tree's LingerClose, supervise and issue-suspend rows already check; WorkspaceRemove had none, so it now names its tree.",
@@ -253,14 +270,15 @@
     "Fast-follow item 2 kept one bool: applyReread stays write-only and applyFact keeps its result to settle the paths that record nothing. Settling inside applyReread would release and promote before the fact's own record is written, so a freed root could take a slot before a newly recorded root exists and slot order would change. That is a behaviour change, which the send-back forbids.",
     "Merge round: two fixtures adapted with no assertion changed: the adoption harness sets DispatchProject (#2188's releaseOutcome reads blocker rows by project), and the release D1 case's handed-over root carries TakenBack=true, which every handed-over run has under #2188. Pod-only failures (launcher, natsauth, runtime/sandbox, runtime/tmux, Docker-backed daemon tests) are in packages byte-identical to main; CI runs them.",
     "Round 6: a new column rather than an existing record, because none existed for an uncarried hand-over: the handovers fence is deleted at re-admission, and handed_over_roots is written only for a carried orphan and drives the architect's catch-up ('decompose nothing anew'), which is wrong for an uncarried one. The workflow package needed -timeout 40m once under pod load (511 s); the default 10 m timeout cut one run, not a failure.",
-    "Round 15: 8 check_wake_test.go tests time out in the issue pod on this head and on a clean archive of main c3d09eec ('timed out waiting for the look's start row resuming the implementer'); the controller has the repro, and CI's test run on 5851a336 decides whether they are the pod's environment."
+    "Round 15: 8 check_wake_test.go tests time out in the issue pod on this head and on a clean archive of main c3d09eec ('timed out waiting for the look's start row resuming the implementer'); the controller has the repro, and CI's test run on 5851a336 decides whether they are the pod's environment.",
+    "Round 16: this PR's tests cost ~27 s of the pod's daemon package, which does not explain the 200 s jump to the 600 s timeout at 5851a336. Tests run 40467949591 on ab1f5b0d gives the next CI number; if it times out again with this PR's tests at 14 s, the remainder is main's package cost."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
     "Every todo event of an unrecorded issue or a recorded root under an unrecorded Dispatch parent now costs one Dispatch read per ancestor at preparation, labelled or not.",
     "Every event of an unrecorded issue now reads the issues table once at preparation; Dispatch is read only when a parented queued root exists (normally none)."
   ],
-  "round": 15,
+  "round": 16,
   "reviewRound": 3,
-  "codeHead": "5851a336da30779f25df6deeea9a4d50f6729348"
+  "codeHead": "ab1f5b0da293ce93c6527fd9379628f50edf605e"
 }
