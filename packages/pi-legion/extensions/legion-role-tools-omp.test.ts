@@ -91,24 +91,21 @@ async function toolsPane(
   );
 }
 
-/** The one-line intent of every tool call a pane is scripted to make. */
-const INTENT = "Checking the pane's tools";
-
 /** The turns every pane runs, one tool call each: write, read and edit the scratch file, then the
  * `jj undo --help` control, then the settling reply. Paths are relative to the workspace, the
  * pane's cwd. */
 const SCRATCH_TURNS: readonly Reply[] = [
-  [call("write", { path: "scratch.txt", content: "first line\n" }, INTENT)],
-  [call("read", { path: "scratch.txt" }, INTENT)],
+  [call("write", { path: "scratch.txt", content: "first line\n" })],
+  [call("read", { path: "scratch.txt" })],
   (request) => {
     const read = toolResultsIn(request).at(-1);
     if (read === undefined) throw new Error("the read turn carried no tool result");
     // The hashline edit anchors on the read's own header line, `[scratch.txt#XXXX]`: the file
     // and the 4-hex snapshot tag the host computed, which the model copies rather than invents.
     const header = read.text.split("\n")[0] ?? "";
-    return [call("edit", { input: `${header}\nPUT 1.=1:\n+edited line` }, INTENT)];
+    return [call("edit", { input: `${header}\nPUT 1.=1:\n+edited line` })];
   },
-  [call("bash", { command: "jj undo --help" }, INTENT)],
+  [call("bash", { command: "jj undo --help" })],
   // The phase-stall follow-up (src/phase-stall.ts) sends a phase worker whose run settles
   // without a handoff one more turn, unless its last reply starts WAITING: so the settling reply
   // does, and the run ends on the scripted turns alone.
@@ -140,8 +137,8 @@ test.skipIf(omp === undefined && !onActions)(
   async () => {
     if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
     const pane = await toolsPane(omp, { role: "architect", root: true }, [
-      [call("bash", { command: "jj log" }, INTENT)],
-      [call("bash", { command: "cat /proc/self/cgroup" }, INTENT)],
+      [call("bash", { command: "jj log" })],
+      [call("bash", { command: "cat /proc/self/cgroup" })],
       ...SCRATCH_TURNS,
     ]);
     const [jjLog, cgroup] = await expectEverySucceeded(pane, 6);

@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeAll, expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
@@ -26,8 +26,8 @@ import { z } from "zod";
 // NATS server (the name the daemon's tests read, packages/daemon/internal/testnats/nats.go). A run
 // without both skips, except on GitHub Actions, where the pi-envoy job supplies both.
 // This file runs in a Bun process of its own (the package's `test` script): envoy.test.ts's
-// `mock.module("nats", …)` replaces `nats` for the whole process, and a file loaded after it would
-// get the mock's `connect`.
+// `mock.module("nats", …)` replaces `nats` for the whole process, and a file loaded after it gets
+// the mock's `connect`, which the check below turns into one clear failure.
 const omp = process.env.LEGION_TEST_OMP;
 const natsUrl = process.env.LEGION_TEST_NATS_URL;
 const onActions = process.env.GITHUB_ACTIONS === "true";
@@ -39,6 +39,23 @@ function setup(): { readonly binary: string; readonly nats: string } {
   if (natsUrl === undefined) throw new Error("LEGION_TEST_NATS_URL is unset on GitHub Actions");
   return { binary: omp, nats: natsUrl };
 }
+
+// The real `connect`'s connection reports the server it reached (`getServer`); the mock's has no
+// such method. Checked once, before any case spends a binary's startup on a connection that
+// reaches no server.
+beforeAll(async () => {
+  if (skip) return;
+  const probe = await connect({ servers: setup().nats });
+  try {
+    if (typeof probe.getServer !== "function") {
+      throw new Error(
+        "`nats` here is envoy.test.ts's mock: run this file in its own process with `bun run test`"
+      );
+    }
+  } finally {
+    await probe.close();
+  }
+});
 
 /** What the wake (src/card-wake.ts, `CardWake`) says, in its one- and many-card forms. */
 const WAKE_TEXT = /Envoy messages? above arrived with no turn to read (it|them)/;
@@ -61,9 +78,6 @@ function lastMessage(request: Request): string {
   const messages = Array.isArray(request.body.messages) ? request.body.messages : [];
   return JSON.stringify(messages.at(-1) ?? null);
 }
-
-/** The one-line intent of every tool call a case scripts. */
-const INTENT = "Running the case's step";
 
 function text(reply: string): Block {
   return { type: "text", text: reply };
@@ -489,7 +503,7 @@ test.skipIf(skip)(
     );
     // A tool the host runs to its end: a `bash` call is moved to the background when a message
     // is queued, and its result starts a run of its own.
-    held.reply([call("read", { path: "." }, INTENT)]);
+    held.reply([call("read", { path: "." })]);
 
     const next = await session.nextTurn("the model request after the held one");
     const firstWithSend = session.turns.find((turn) => conversation(turn.request).includes(send));
@@ -530,13 +544,9 @@ async function interruptKeepsCards(
     const release = path.join(session.root, "tool-release");
     cleanup.push(() => writeFile(release, ""));
     first.reply([
-      call(
-        "bash",
-        {
-          command: `touch '${started}'; while [ ! -e '${release}' ]; do sleep 0.1; done; echo released`,
-        },
-        INTENT
-      ),
+      call("bash", {
+        command: `touch '${started}'; while [ ! -e '${release}' ]; do sleep 0.1; done; echo released`,
+      }),
     ]);
     await session.until("the blocking tool call to start", async () =>
       (await Bun.file(started).exists()) ? true : undefined

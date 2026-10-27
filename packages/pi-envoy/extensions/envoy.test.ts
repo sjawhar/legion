@@ -9484,6 +9484,120 @@ describe("envoy OMP extension", () => {
     ]);
   });
 
+  // The wake for a card the host folds with no turn (`../src/card-wake.ts`, where its rules are
+  // tested) hears of runs, interrupts and the session's end only through this extension's own
+  // handlers. Each row starts a run, sends one card while the host is busy, folds it (its
+  // `message_end` with the host idle) and fires the row's host events, the send and the fold each
+  // before or after them; the check the fold arms waits on the host's timer until all of that is
+  // through, and the row says whether a wake follows.
+  describe("the wake for a folded card, through the extension's handlers", () => {
+    const busyCard = { deliverAs: "aside", triggerTurn: true };
+    const wake = { deliverAs: "nextTurn", triggerTurn: true };
+    for (const [index, [name, events, sendAt, foldAt, wakes]] of (
+      [
+        ["no host event", [], "before", "before", true],
+        [
+          "an interrupted automatic compaction",
+          [["auto_compaction_end", { aborted: true }]],
+          "before",
+          "after",
+          false,
+        ],
+        [
+          "a retry an interrupt cancelled",
+          [["auto_retry_end", { success: false, finalError: "Retry cancelled" }]],
+          "before",
+          "after",
+          false,
+        ],
+        [
+          "an announced session switch",
+          [["session_before_switch", { reason: "resume" }]],
+          "before",
+          "before",
+          false,
+        ],
+        ["a session switch", [["session_switch", { reason: "resume" }]], "before", "before", false],
+        ["shutdown", [["session_shutdown", {}]], "before", "before", false],
+        // The host's dispose flushes the asides it still holds after shutdown.
+        ["shutdown", [["session_shutdown", {}]], "before", "after", false],
+        // A switch to a new session aborts the run with the agent disconnected, so no agent_end
+        // comes, and a card sent while the next prompt is set up gets none.
+        [
+          "a switch to a new session",
+          [["session_switch", { reason: "new" }]],
+          "after",
+          "after",
+          false,
+        ],
+        ["a fork", [["session_switch", { reason: "fork" }]], "after", "after", true],
+        // A manual compaction aborts the run with the agent disconnected, as that switch does.
+        ["a manual compaction", [["session_compact", {}]], "after", "after", false],
+        // An automatic compaction runs inside the run, which goes on.
+        [
+          "an automatic compaction",
+          [
+            ["auto_compaction_start", {}],
+            ["session_compact", {}],
+            ["auto_compaction_end", { aborted: false }],
+          ],
+          "after",
+          "after",
+          true,
+        ],
+      ] as const satisfies readonly (readonly [
+        string,
+        readonly (readonly [string, unknown])[],
+        "before" | "after",
+        "before" | "after",
+        boolean,
+      ])[]
+    ).entries()) {
+      test(`${wakes ? "wakes" : "sends no wake"} for a card sent ${sendAt} and folded ${foldAt} ${name}`, async () => {
+        let idle = false;
+        const { context, delivered, fixture } = await bootDirectSession(`folded-card-${index}`, {
+          idle: () => idle,
+        });
+        const timers: (() => void | Promise<void>)[] = [];
+        const held: SessionContext = {
+          ...context,
+          setTimeout: (callback) => {
+            timers.push(callback);
+          },
+        };
+        const send = async (): Promise<void> => {
+          natsState.controls
+            .get("notifications.agent.ses_delivery")
+            ?.push(forwardedRoleEnvelope("legion-controller", "a card", `folded-card-${index}`));
+          await delivered(1);
+        };
+        const fold = async (): Promise<void> => {
+          const card = fixture.deliveries[0];
+          if (card === undefined) throw new Error("the card was not sent");
+          idle = true;
+          const { options: _options, ...record } = card;
+          await fixture.handlers.get("message_end")?.(
+            { message: { role: "custom", ...record } },
+            held
+          );
+        };
+
+        await fixture.handlers.get("agent_start")?.({}, context);
+        if (sendAt === "before") await send();
+        if (foldAt === "before") await fold();
+        for (const [event, payload] of events)
+          await fixture.handlers.get(event)?.(payload, context);
+        if (sendAt === "after") await send();
+        if (foldAt === "after") await fold();
+        for (const timer of timers.splice(0)) await timer();
+
+        expect(fixture.deliveries.map((delivery) => delivery.options)).toEqual(
+          wakes ? [busyCard, wake] : [busyCard]
+        );
+      });
+    }
+  });
+
   // A person's Send or Aside from the Agents page is the user's own turn, as if typed at the
   // terminal. The frame saying "a person wrote this" is not the proof - the listener takes its
   // source from the caller - so the session takes it only once Dispatch records the one

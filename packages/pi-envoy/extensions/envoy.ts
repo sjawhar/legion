@@ -1600,6 +1600,10 @@ export default function envoyExtension(pi: PiApi): void {
     if (!shuttingDown) cardWake.messageEnd(message, context);
     recordAgentStreamMessage(message, false);
   });
+  // The host asks whether any extension handles `session_before_compact`, which turns its
+  // background compaction off, but never these two: handling them changes nothing it does.
+  pi.on("auto_compaction_start", async () => cardWake.autoCompactionStart());
+  pi.on("session_compact", async () => cardWake.sessionCompact());
   pi.on("auto_compaction_end", async (event) => cardWake.autoCompactionEnd(event));
   pi.on("auto_retry_end", async (event) => cardWake.autoRetryEnd(event));
 
@@ -2744,7 +2748,10 @@ export default function envoyExtension(pi: PiApi): void {
     if (!(await isSubagent(context))) bindDispatchSession(context.sessionManager.getSessionId());
     await rebind(reason, context);
   };
-  pi.on("session_switch", (event, context) => rebindDispatch(event.reason, context));
+  pi.on("session_switch", (event, context) => {
+    cardWake.sessionSwitch(event);
+    return rebindDispatch(event.reason, context);
+  });
   pi.on("session_branch", (_event, context) => rebindDispatch(undefined, context));
   pi.on("session_tree", (_event, context) => rebind(undefined, context));
   // Oh My Pi emits these before it moves its session manager: the session the host leaves and
@@ -2873,9 +2880,9 @@ export default function envoyExtension(pi: PiApi): void {
 
   // Every run the host starts, typed or not: the user's prompt, an Envoy delivery waking the
   // session, another extension's continuation. `agent_end` compares it with what it read at the
-  // settle, so a verdict that arrives after the session has moved on steers nothing; the wake for
-  // a folded card counts runs the same way. A run that starts on the session a switch announced
-  // leaving is marked, and its end tells whether that switch went ahead (`runUnderAnnouncement`).
+  // settle, so a verdict that arrives after the session has moved on steers nothing. A run that
+  // starts on the session a switch announced leaving is marked, and its end tells whether that
+  // switch went ahead (`runUnderAnnouncement`).
   pi.on("agent_start", async (_event, context) => {
     runSeq += 1;
     cardWake.agentStart();

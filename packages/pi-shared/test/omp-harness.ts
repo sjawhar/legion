@@ -374,10 +374,10 @@ export function toolResultsIn(request: Request): ToolResult[] {
   });
 }
 
-/** A `tool_use` block calling tool `name` with `input` and the one-line intent (`i`) every
- *  Oh My Pi tool requires. */
-export function call(name: string, input: Record<string, unknown>, intent: string): Block {
-  return { type: "tool_use", name, input: { i: intent, ...input } };
+/** A `tool_use` block calling tool `name` with `input`, and the one-line intent (`i`) every Oh My
+ *  Pi tool requires, which no case reads. */
+export function call(name: string, input: Record<string, unknown>): Block {
+  return { type: "tool_use", name, input: { i: "Running the case's step", ...input } };
 }
 
 /** Whether a Messages request is one of a compaction's summary calls, which the host sends under

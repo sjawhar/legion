@@ -5,6 +5,7 @@ import type {
   AutoRetryEndEvent,
   PiApi,
   SessionContext,
+  SessionSwitchEvent,
 } from "@legion/pi-shared/pi-types";
 
 /**
@@ -48,16 +49,24 @@ import type {
  * no loop running, so no aborted assistant message comes, and abort's `finally` folds the queued
  * card under the latch the abort set (~10250-10252). So a card sent while the host is busy and no
  * run is active, which is from a run's `agent_start` to its `agent_end`, is a setup card and never
- * a candidate for the wake: if the prompt does run, its loop takes the queued card at the first
- * step. The host emits the extension `agent_end` only at the end of the run's maintenance pass
- * (~4467-4828, then `#settleAgentEnd`, ~5336-5362), after its auto-compaction, a retry's backoff
- * (awaited inside it) and the `session_stop` pass, so a card that lands during that maintenance
- * is the run's, and a fold under an earlier interrupt's latch still gets its wake. What stays
- * unseen is an interrupt during that maintenance at an await that is neither auto-compaction nor
- * a retry's backoff (the `session_stop` hooks, ~4827, the todo reminder and the goal and
- * empty-stop passes before them): the card the run's last step missed is folded under the latch
- * and woken. A setup card the host folds with no turn and no interrupt, in plan mode, gets no
- * wake.
+ * a candidate for the wake: if the prompt does run, its loop reads the queued aside at the run's
+ * first step boundary, after its first model response (`agent-loop.ts` ~1794, ~1822). So is a
+ * card sent after a run's `agent_end` while the host still settles because a continuation follows
+ * (`willContinue`): the continuation's loop reads it. The host can also drop a run with no
+ * `agent_end` for extensions: a switch to a new or resumed session (`newSession`, ~10280-10282;
+ * `switchSession`, ~11906-11907) and a manual or extension compaction (`session-maintenance.ts`
+ * `compact`, ~1201-1202) disconnect from the agent before they abort it. Such a run ends at the
+ * switch's `session_switch`, or at a `session_compact` outside an automatic compaction (from
+ * `auto_compaction_start` to `auto_compaction_end`), which runs inside a live run; and any run
+ * ends once the host is seen idle. The host emits the extension `agent_end` only at the end of
+ * the run's maintenance pass (~4467-4828, then `#settleAgentEnd`, ~5336-5362), after its
+ * auto-compaction, a retry's backoff (awaited inside it) and the `session_stop` pass, so a card
+ * that lands during that maintenance is the run's, and a fold under an earlier interrupt's latch
+ * still gets its wake. What stays unseen is an interrupt during that maintenance at an await that
+ * is neither auto-compaction nor a retry's backoff (the `session_stop` hooks, ~4827, the todo
+ * reminder and the goal and empty-stop passes before them): the card the run's last step missed
+ * is folded under the latch and woken. A setup card the host folds with no turn and no interrupt,
+ * in plan mode, gets no wake.
  *
  * The startup phase. Oh My Pi starts the sends an extension makes from `session_start` and
  * startup discovery only once that discovery is done (`runtime-init.ts` `initializeExtensions`
@@ -67,18 +76,21 @@ import type {
  * `triggerTurn` is a send that lasts as long as the run it starts, so a card that reached
  * pi-envoy in that window, as it opens its agent subject in `session_start`, ran a whole turn
  * inside the drain, and the host answered no RPC command (`get_state`, `prompt`) until it ended.
- * The host gives extensions no event once the drain is over. The phase is RPC mode's alone, the
- * one mode that reads nothing until the drain returns. Print and JSON mode prompt right after
- * their own awaits that follow it (`print-mode.ts`, MCP readiness and a tool refresh, ~250-254;
+ * The host gives extensions no event once the drain is over. The phase needs `ctx.mode` "rpc":
+ * RPC mode reads nothing until the drain returns. ACP initialises extensions with "rpc" too
+ * (`acp-agent.ts` ~2732), so the phase holds there as well, at no cost: ACP's bridge defers a
+ * turn the agent starts (`agent-session.ts` ~9301-9303), so the wake becomes hidden next-turn
+ * context there, as main's idle steer did. Print and JSON mode prompt right after their own
+ * awaits that follow it (`print-mode.ts`, MCP readiness and a tool refresh, ~250-254;
  * `session.prompt`, ~286), and that prompt throws `AgentBusyError` (`agent-session.ts`
  * ~7710-7717) if a wake started a turn first. A terminal applies its plan-mode default and
  * subscribes to the agent only after the drain (`interactive-mode.ts` ~2458-2498), so a wake's
  * turn could start ahead of both. In those modes, and on a context with no `mode`, an idle card
  * is a steer with `triggerTurn` from the start.
  *
- * So in RPC mode, while the phase holds, a card that finds the host idle goes as a `followUp` with
- * no `triggerTurn`: on an idle host that appends it to the context, persists it and emits its
- * `message_end`, starting no turn and awaiting nothing longer than its pictures
+ * So with mode "rpc", while the phase holds, a card that finds the host idle goes as a `followUp`
+ * with no `triggerTurn`: on an idle host that appends it to the context, persists it and emits
+ * its `message_end`, starting no turn and awaiting nothing longer than its pictures
  * (`agent-session.ts` `sendCustomMessage`'s idle append, ~9360-9382). The card is its own witness
  * that startup is over: the host starts a held send only once the hold settles (`send-queue.ts`
  * `dispatch`, ~52-55, on the hold `withHeld` settles in its `finally`, ~38-49), so its
@@ -110,29 +122,25 @@ const USER_INTERRUPT_LABEL = "Interrupted by user";
 const RETRY_CANCELLED = "Retry cancelled";
 
 /** What every card carries in its `details`, which the host keeps on the record and its persisted
- *  entry: an id no other card in the process shares, whether the card was a targeted Aside,
- *  `startup` on a card sent in the startup phase, and `setup` on one sent while the host set up a
- *  prompt. The session's own notices carry `LOCAL_ENVOY_NOTICE` instead. A type rather than an
- *  interface, so it is the host's `Record<string, unknown>` `details`. */
+ *  entry: an id no other card in the process shares, and what the card's `message_end` arms, decided
+ *  when it is sent: `startup` for a card sent in the startup phase, `fold` for one the wake covers
+ *  if the host folds it, and nothing for one it never covers. The session's own notices carry
+ *  `LOCAL_ENVOY_NOTICE` instead. A type rather than an interface, so it is the host's
+ *  `Record<string, unknown>` `details`. */
 export type EnvoyCardMarker = {
   readonly envoyCard: string;
-  readonly targetedAside: boolean;
-  readonly startup?: true;
-  readonly setup?: true;
+  readonly wake?: "startup" | "fold";
 };
 
 /** The card marker a host message's or a branch entry's `details` carries; undefined for none. */
 function envoyCardMarker(details: unknown): EnvoyCardMarker | undefined {
-  if (typeof details !== "object" || details === null) return undefined;
-  if (!("envoyCard" in details) || !("targetedAside" in details)) return undefined;
-  const { envoyCard, targetedAside } = details;
-  if (typeof envoyCard !== "string" || typeof targetedAside !== "boolean") return undefined;
-  return {
-    envoyCard,
-    targetedAside,
-    ...("startup" in details && details.startup === true && { startup: true as const }),
-    ...("setup" in details && details.setup === true && { setup: true as const }),
-  };
+  if (typeof details !== "object" || details === null || !("envoyCard" in details)) {
+    return undefined;
+  }
+  const { envoyCard } = details;
+  if (typeof envoyCard !== "string") return undefined;
+  const wake = "wake" in details ? details.wake : undefined;
+  return wake === "startup" || wake === "fold" ? { envoyCard, wake } : { envoyCard };
 }
 
 /** What of the host's context the wake reads: the session pi-envoy delivers into. */
@@ -198,9 +206,12 @@ export class CardWake {
   #run = 0;
   /** Whether an interrupt the extension saw holds the wake back until the next run starts. */
   #interrupted = false;
-  /** Whether a run is active as this extension sees it: from its `agent_start` to its
-   *  `agent_end`. A host busy with none is setting a prompt up, or settling after one. */
+  /** Whether a run is active as this extension sees it: from its `agent_start` to its `agent_end`,
+   *  or to the host dropping it unseen (`sessionSwitch`, `sessionCompact`) or being seen idle. A
+   *  host busy with none is setting a prompt up, or settling after one. */
   #runActive = false;
+  /** Automatic compactions started and not yet ended. */
+  #autoCompactions = 0;
   #startupPhase = true;
   /** Startup cards sent and not yet seen, with when each was sent. */
   readonly #unseenStartup = new Map<string, number>();
@@ -224,12 +235,21 @@ export class CardWake {
    */
   deliveryFor(targetedAside: boolean, context: CardWakeContext | undefined): CardDelivery {
     const idle = context?.isIdle?.();
+    // An idle host has no run, whatever end of it no extension was told of.
+    if (idle === true) this.#runActive = false;
     const startup = this.#startupPhase && idle === true && context?.mode === "rpc";
+    // A card sent while the host sets a prompt up is never woken. Under main every targeted Aside
+    // went as an aside, which the host folds with no turn under the latch or in plan mode, so a
+    // wake for one would start a turn main never started. A startup targeted Aside does get one:
+    // in the startup phase every idle card goes as a follow-up with no turn, where main's idle
+    // aside started a turn outside the latch and plan mode, and a fresh process has no latch. Plan
+    // mode at startup is the one case where that wake starts a turn main did not, which
+    // `AGENTS.md` states.
+    const setup = idle === false && !this.#runActive;
+    const wake = startup ? "startup" : setup || targetedAside ? undefined : "fold";
     const details: EnvoyCardMarker = {
       envoyCard: randomUUID(),
-      targetedAside,
-      ...(startup && { startup: true as const }),
-      ...(idle === false && !this.#runActive && { setup: true as const }),
+      ...(wake !== undefined && { wake }),
     };
     if (startup) {
       this.#unseenStartup.set(details.envoyCard, this.#deps.now());
@@ -266,19 +286,9 @@ export class CardWake {
       return;
     }
     const marker = envoyCardMarker(message.details);
-    if (marker === undefined || marker.setup === true) return;
-    if (marker.startup === true) {
-      this.#unseenStartup.delete(marker.envoyCard);
-    } else if (marker.targetedAside) {
-      // Under main every targeted Aside went as an aside, which the host folds with no turn under
-      // the latch or in plan mode, so a wake here would start a turn main never started. A
-      // startup targeted Aside does get one: in the startup phase every idle card goes as a
-      // follow-up with no turn, where main's idle aside started a turn outside the latch and
-      // plan mode, and a fresh process has no latch. Plan mode at startup is the one case where
-      // that wake starts a turn main did not, which `AGENTS.md` states.
-      return;
-    }
-    this.#seen.push({ id: marker.envoyCard, run: this.#run, startup: marker.startup === true });
+    if (marker?.wake === undefined) return;
+    if (marker.wake === "startup") this.#unseenStartup.delete(marker.envoyCard);
+    this.#seen.push({ id: marker.envoyCard, run: this.#run, startup: marker.wake === "startup" });
     this.#arm(context);
   }
 
@@ -297,7 +307,34 @@ export class CardWake {
     }
   }
 
+  /** The host moved to a new or resumed session (`agent-session.ts` `newSession`, ~10280-10282;
+   *  `switchSession`, ~11906-11907), and before it emitted that it disconnected from the agent
+   *  and then aborted any run, whose `agent_end` so never reaches an extension. A fork (`fork`,
+   *  ~10494) does neither, and a run it finds goes on. */
+  sessionSwitch(event: SessionSwitchEvent): void {
+    if (event.reason === "new" || event.reason === "resume") this.#runActive = false;
+  }
+
+  /** An automatic compaction started. Each automatic path (`session-maintenance.ts`
+   *  `runAutoCompaction`, `#runExperimentalContextRollover`) emits its `session_compact` after
+   *  this and before its `auto_compaction_end`. A count rather than a flag: a compaction between
+   *  a run's steps hands its `auto_compaction_end` to extensions detached, which can reach this
+   *  module after the next compaction's start. */
+  autoCompactionStart(): void {
+    this.#autoCompactions += 1;
+  }
+
+  /** A compaction committed. Outside an automatic one it is a manual or an extension's
+   *  (`session-maintenance.ts` `compact`), which disconnected from the agent and then aborted any
+   *  run (~1201-1202), whose `agent_end` so never reaches an extension; a handoff, the other
+   *  manual one, is refused while a run streams. An automatic compaction runs inside a live run,
+   *  between its steps or in its post-run maintenance, and leaves it running. */
+  sessionCompact(): void {
+    if (this.#autoCompactions === 0) this.#runActive = false;
+  }
+
   autoCompactionEnd(event: AutoCompactionEndEvent): void {
+    if (this.#autoCompactions > 0) this.#autoCompactions -= 1;
     if (event.aborted) this.#interrupted = true;
   }
 
@@ -340,17 +377,21 @@ export class CardWake {
       this.#arm(context, waitMs);
       return;
     }
+    if (context.isIdle?.() !== true) {
+      // A host busy at the check runs a turn, which reads the cards, or settles an interrupt no
+      // extension saw (an Esc while it set a prompt up), whose folded cards wait for the next
+      // turn. A startup card stays for the run's `agent_end` to check again.
+      this.#seen = this.#seen.filter((card) => card.startup);
+      return;
+    }
     // A card fed to a run that has since started is that run's to read, and one an interrupt
     // found stays folded; a startup card is neither's.
     const pending = this.#seen.filter(
       (card) => card.startup || (!this.#interrupted && card.run === this.#run)
     );
-    if (context.isIdle?.() !== true) {
-      this.#seen = this.#seen.filter((card) => card.startup);
-      return;
-    }
     this.#seen = [];
     this.#startupPhase = false;
+    this.#runActive = false;
     if (pending.length === 0) return;
     const unread = unreadCards(
       context.sessionManager.getBranch?.() ?? [],

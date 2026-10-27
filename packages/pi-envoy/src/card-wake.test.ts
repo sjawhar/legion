@@ -166,7 +166,7 @@ describe("the delivery a card gets", () => {
 
     expect(host.card("busy").delivery).toEqual({
       ...aside,
-      details: { envoyCard: expect.any(String), targetedAside: false },
+      details: { envoyCard: expect.any(String), wake: "fold" },
     });
   });
 
@@ -177,7 +177,7 @@ describe("the delivery a card gets", () => {
 
     expect(host.card("idle").delivery).toEqual({
       ...steer,
-      details: { envoyCard: expect.any(String), targetedAside: false },
+      details: { envoyCard: expect.any(String), wake: "fold" },
     });
   });
 
@@ -190,8 +190,8 @@ describe("the delivery a card gets", () => {
     const idle = host.card("idle-aside", true).delivery;
 
     expect([busy, idle]).toEqual([
-      { ...aside, details: { envoyCard: expect.any(String), targetedAside: true } },
-      { ...aside, details: { envoyCard: expect.any(String), targetedAside: true } },
+      { ...aside, details: { envoyCard: expect.any(String) } },
+      { ...aside, details: { envoyCard: expect.any(String) } },
     ]);
   });
 
@@ -350,6 +350,26 @@ describe("a card the host folds into the context with no turn", () => {
     expect(host.sent).toEqual([]);
   });
 
+  // An Esc while the host sets up a prompt shows to no extension and leaves the host busy at the
+  // check with no run: the cards that check found are that interrupt's to keep folded, and a later
+  // idle check counts only the cards seen since.
+  test("counts only the card seen after a check found the host busy", async () => {
+    const host = harness();
+    host.run();
+    const before = host.card("before-busy-check");
+    const after = host.card("after-busy-check");
+    host.message(host.reply());
+    host.end();
+    host.fold(before);
+    host.setIdle(false);
+    await host.fire();
+    host.fold(after);
+    await host.fire();
+
+    expect(host.sent).toHaveLength(1);
+    expect(contentOf(host.sent[0])).toContain("1 Envoy message ");
+  });
+
   test("sends no wake on a host that reports no idle state", async () => {
     const host = harness({ reportsIdle: false });
     host.run();
@@ -437,7 +457,7 @@ describe("in the startup phase", () => {
 
       expect(host.card("startup-follow-up", targeted).delivery).toEqual({
         ...followUp,
-        details: { envoyCard: expect.any(String), targetedAside: targeted, startup: true },
+        details: { envoyCard: expect.any(String), wake: "startup" },
       });
     });
   }
@@ -452,7 +472,7 @@ describe("in the startup phase", () => {
 
       expect(host.card("startup-steer").delivery).toEqual({
         ...steer,
-        details: { envoyCard: expect.any(String), targetedAside: false },
+        details: { envoyCard: expect.any(String), wake: "fold" },
       });
     });
   }
@@ -613,6 +633,100 @@ describe("a card sent while the host sets up a prompt", () => {
     expect(host.sent).toEqual([]);
   });
 
+  // A switch to a new or resumed session (`agent-session.ts` `newSession` ~10280-10282,
+  // `switchSession` ~11906-11907) and a manual or extension compaction (`session-maintenance.ts`
+  // ~1201-1202) disconnect the host from the agent before they abort a running run, so that run's
+  // `agent_end` never reaches an extension.
+  for (const [name, drop] of [
+    ["a switch to a new session", (wake) => wake.sessionSwitch({ reason: "new" })],
+    ["a switch to a resumed session", (wake) => wake.sessionSwitch({ reason: "resume" })],
+    ["a manual compaction", (wake) => wake.sessionCompact()],
+  ] as const satisfies readonly (readonly [string, (wake: CardWake) => void])[]) {
+    test(`gets no wake when sent after ${name} dropped the run`, async () => {
+      const host = harness();
+      await host.endStartup();
+      host.run();
+      drop(host.wake);
+      const card = host.card("after-drop");
+      host.fold(card);
+      await host.fire();
+
+      expect(host.sent).toEqual([]);
+    });
+  }
+
+  // A host seen idle has no run, whichever event it gave no extension.
+  test("gets no wake when sent after a card found the host idle", async () => {
+    const host = harness();
+    await host.endStartup();
+    host.run();
+    host.setIdle(true);
+    host.card("idle");
+    host.setIdle(false);
+    const card = host.card("after-idle-card");
+    host.fold(card);
+    await host.fire();
+
+    expect(host.sent).toEqual([]);
+  });
+
+  test("gets no wake when sent after a check found the host idle", async () => {
+    const host = harness();
+    await host.endStartup();
+    host.run();
+    host.fold(host.card("woken"));
+    await host.fire();
+    expect(host.sent).toHaveLength(1);
+
+    host.setIdle(false);
+    host.fold(host.card("after-idle-check"));
+    await host.fire();
+
+    expect(host.sent).toHaveLength(1);
+  });
+
+  // A fork neither disconnects the agent nor aborts the run (`agent-session.ts` `fork`, ~10494),
+  // and an automatic compaction runs inside a live run (between steps, or in its post-run
+  // maintenance), emitting `session_compact` between its `auto_compaction_start` and
+  // `auto_compaction_end`: the run goes on, and its cards keep their wake.
+  for (const [name, during] of [
+    ["a fork", (wake) => wake.sessionSwitch({ reason: "fork" })],
+    [
+      "an automatic compaction",
+      (wake) => {
+        wake.autoCompactionStart();
+        wake.sessionCompact();
+        wake.autoCompactionEnd({ aborted: false });
+      },
+    ],
+    // A mid-run compaction's `auto_compaction_end` goes to extensions detached, so it can reach
+    // this module after the next compaction's start.
+    [
+      "an automatic compaction that started before the last one's end",
+      (wake) => {
+        wake.autoCompactionStart();
+        wake.autoCompactionStart();
+        wake.autoCompactionEnd({ aborted: false });
+        wake.sessionCompact();
+        wake.autoCompactionEnd({ aborted: false });
+      },
+    ],
+  ] as const satisfies readonly (readonly [string, (wake: CardWake) => void])[]) {
+    test(`leaves a card sent in a run after ${name} its wake`, async () => {
+      const host = harness();
+      await host.endStartup();
+      host.run();
+      during(host.wake);
+      const card = host.card("after-run-goes-on");
+      host.message(host.reply());
+      host.fold(card);
+      host.end();
+      await host.fire();
+
+      expect(host.sent).toHaveLength(1);
+    });
+  }
+
   // A card that lands in a run's post-run maintenance or auto-compaction (after its last step,
   // before the extension's `agent_end`) is that run's, and a fold under an earlier interrupt's
   // latch still gets its wake.
@@ -633,7 +747,7 @@ describe("a card sent while the host sets up a prompt", () => {
 describe("unreadCards", () => {
   const cardEntry = (id: string) => ({
     type: "custom_message",
-    details: { envoyCard: id, targetedAside: false },
+    details: { envoyCard: id, wake: "fold" },
   });
   const assistantEntry = { type: "message", message: { role: "assistant" } };
 
