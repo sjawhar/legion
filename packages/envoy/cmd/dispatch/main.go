@@ -623,35 +623,17 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		return bootConfig{}, err
 	}
 	boot.PprofAddr = pprofAddr
-	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_SETTLE_DELAY")); raw != "" {
-		if !boot.TestHooksEnabled {
-			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_SETTLE_DELAY")
+	for _, setting := range []struct {
+		name   string
+		target *time.Duration
+	}{
+		{"DISPATCH_TEST_SETTLE_DELAY", &boot.SettleDelay},
+		{"DISPATCH_TEST_DELIVERY_RESUME_INTERVAL", &boot.DeliveryResumeInterval},
+		{"DISPATCH_TEST_ROUTE_ROSTER_TTL", &boot.RouteRosterTTL},
+	} {
+		if err := testHookDuration(env, setting.name, boot.TestHooksEnabled, setting.target); err != nil {
+			return bootConfig{}, err
 		}
-		delay, err := time.ParseDuration(raw)
-		if err != nil || delay <= 0 {
-			return bootConfig{}, fmt.Errorf("DISPATCH_TEST_SETTLE_DELAY=%q (expected a positive Go duration)", raw)
-		}
-		boot.SettleDelay = delay
-	}
-	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_DELIVERY_RESUME_INTERVAL")); raw != "" {
-		if !boot.TestHooksEnabled {
-			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_DELIVERY_RESUME_INTERVAL")
-		}
-		interval, err := time.ParseDuration(raw)
-		if err != nil || interval <= 0 {
-			return bootConfig{}, fmt.Errorf("DISPATCH_TEST_DELIVERY_RESUME_INTERVAL=%q (expected a positive Go duration)", raw)
-		}
-		boot.DeliveryResumeInterval = interval
-	}
-	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_ROUTE_ROSTER_TTL")); raw != "" {
-		if !boot.TestHooksEnabled {
-			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_ROUTE_ROSTER_TTL")
-		}
-		ttl, err := time.ParseDuration(raw)
-		if err != nil || ttl <= 0 {
-			return bootConfig{}, fmt.Errorf("DISPATCH_TEST_ROUTE_ROSTER_TTL=%q (expected a positive Go duration)", raw)
-		}
-		boot.RouteRosterTTL = ttl
 	}
 	identityMode := strings.TrimSpace(env.get("DISPATCH_IDENTITY"))
 	if err := checkSignInSettings(boot, identityMode); err != nil {
@@ -1065,6 +1047,25 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore fil
 			SchemaVersion *int    `json:"schema_version"`
 		}{OK: ok, DB: databaseOK, NATS: natsOK, Files: filesOK, Commit: reportedCommit, SchemaVersion: schemaVersion})
 	}
+}
+
+// testHookDuration reads the test-only duration setting name into target, leaving target as it
+// is when the setting is unset. Such a setting is refused without DISPATCH_TEST_HOOKS=1, and so
+// is any value that is not a positive Go duration.
+func testHookDuration(env settingValues, name string, testHooksEnabled bool, target *time.Duration) error {
+	raw := strings.TrimSpace(env.get(name))
+	if raw == "" {
+		return nil
+	}
+	if !testHooksEnabled {
+		return fmt.Errorf("DISPATCH_TEST_HOOKS=1 required with %s", name)
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil || value <= 0 {
+		return fmt.Errorf("%s=%q (expected a positive Go duration)", name, raw)
+	}
+	*target = value
+	return nil
 }
 
 // listenAddress builds the listen address from DISPATCH_LISTEN_HOST and DISPATCH_PORT

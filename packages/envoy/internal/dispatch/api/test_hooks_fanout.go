@@ -57,7 +57,7 @@ const (
 	// testHookPartBytes bounds the slice of a call one notification carries. Postgres refuses a
 	// NOTIFY payload of 8000 bytes or more, and a published frame - a long transcript's replay,
 	// which the browser suite sets - is often larger, so a call is split into parts sent in one
-	// transaction; the remaining hundred bytes are each part's header (testHookPart).
+	// transaction; the remaining hundred bytes are each part's header (splitTestHookCall).
 	testHookPartBytes = 7900
 )
 
