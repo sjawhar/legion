@@ -4,6 +4,10 @@
 
 ### Added
 
+- Every registration names the plugin: `plugin` `@sjawhar/pi-envoy` and `plugin_version` this
+  package's version, which the listener's `GET /v1/sessions` and `GET /v1/registry/<id>`, and
+  `envoy_sessions`, show (INFRA-548).
+
 - A session shows once each Envoy message it missed while its NATS connection or a subscription
   was down, NATS was restarting or the session was not running. It asks its listener's new
   `POST /v1/replay` for what the notification stream (72 hours) stored on its own agent subject
@@ -96,6 +100,12 @@
   repositories, and its issues reference gives the per-source output and `--repo`.
 
 ### Fixed
+
+- A session whose NATS path freezes (packets stop, neither side closes) reconnects within 30 s,
+  52 s when its first redial also hangs, instead of after up to 6 minutes: it dials with
+  `@legion/envoy-client/nats-connection`'s options, a ping every 10 s and the connection dropped
+  after two unanswered pings, in place of nats.js's default 120 s ping. The reconnect runs the
+  catch-up, so the session shows the messages sent meanwhile once (INFRA-548).
 
 - A live view held open while its session is relaunched with `--resume` now shows the resumed
   process's model, thinking level and command changes. Two things stopped it. Every process

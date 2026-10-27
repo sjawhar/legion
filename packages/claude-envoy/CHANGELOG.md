@@ -4,6 +4,12 @@
 
 ### Added
 
+- Every registration names the plugin: `plugin` `@sjawhar/claude-envoy` and `plugin_version` the
+  version directory Claude Code's plugin cache installed it under (the marketplace commit's first
+  12 characters), or `source` for a bundle outside the plugin cache, which the listener's
+  `GET /v1/sessions` and `GET /v1/registry/<id>`, and `envoy_sessions`, show. `dist/` was rebuilt
+  (INFRA-548).
+
 - The channel server delivers once each Envoy message the session missed while its NATS
   subscriptions were down, NATS was restarting or Claude Code was not running. It asks the
   listener's new `POST /v1/replay` for what the notification stream (72 hours) stored on the
@@ -103,6 +109,13 @@
   a topic as before (INFRA-122).
 
 ### Fixed
+
+- A session whose NATS path freezes (packets stop, neither side closes) reconnects within 30 s,
+  52 s when its first redial also hangs, instead of after up to 6 minutes: the channel server
+  dials with `@legion/envoy-client/nats-connection`'s options, a ping every 10 s and the
+  connection dropped after two unanswered pings, in place of nats.js's default 120 s ping. The
+  reconnect runs the catch-up, so the session is handed the messages sent meanwhile once. `dist/`
+  was rebuilt (INFRA-548).
 
 - The Legion tool's `handoff_complete` waits out a daemon restart: a connection refused, reset or
   closed before a response, or a 502 or 503 from a proxy, is retried with backoff for up to 10

@@ -4,6 +4,12 @@
 
 ### Added
 
+- `POST /v1/interests/subscribe` stores the `plugin` and `plugin_version` a registration sends
+  (the npm package the session registers through and that plugin's build, trimmed of surrounding
+  space) on the session entry, and `GET /v1/sessions` and `GET /v1/registry/<id>` return both. A
+  session registered by a plugin that sends neither shows neither key. The `listener subscribe`
+  log line names both (INFRA-548).
+
 - The listener answers `POST /v1/replay` with the messages `ENVOY_NOTIFICATIONS` stored for a
   session after a cursor per subject, so a session that receives on its own NATS subscriptions
   (pi-envoy, claude-envoy) reads back what it missed while they were down. It serves only the

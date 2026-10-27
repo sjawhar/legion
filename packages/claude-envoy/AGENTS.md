@@ -46,6 +46,19 @@ topics come back at start
 the registry (`closeReplayedRemoval`), and which one-time notices are a card rather than a warning
 (`routeReplayNotice`); this server keeps only how it shows a card, where it warns, and its file.
 
+`runEnvoyChannelServer` dials NATS with the shared options of
+`@legion/envoy-client/nats-connection` (`natsConnectionOptions`): a ping every 10 s and the
+connection dropped on the tick that finds two pings unanswered, so a path that freezes without
+closing (packets stop, neither side closes) is left within 30 s and redialed at once, 52 s when
+that redial also hangs on nats.js's 20 s dial timeout and the 2 s reconnect wait; it reconnects
+forever, 2 s apart, and each `reconnect` status starts the sweep above. nats.js's default 120 s
+ping interval left a frozen path for up to 6 minutes. Every registration names the plugin:
+`plugin` `@sjawhar/claude-envoy` and `plugin_version` the version segment of the plugin-cache
+directory the bundle runs from (`…/plugins/cache/<marketplace>/<plugin>/<version>/`, the first 12
+characters of the marketplace commit Claude Code installed; `installedPluginVersion` in
+`src/claude-channel.ts`), or `source` for a bundle outside the plugin cache (a checkout,
+`--plugin-dir`); `package.json`'s `version` names no build and is never sent.
+
 A session advertises the delivery modes its deliveries' path can honour, never `btw`, and none at
 all when its deliveries are channel notifications Claude Code did not load (`src/claude-channel.ts`;
 a Legion pane's go to the bridge's inbox instead, so the gate does not apply to it). One whose
@@ -80,6 +93,7 @@ Dispatch asks stay on Dispatch.
 | Manual channel smoke | `scripts/smoke-channel.sh` | Real smoke, unattended (answers every startup dialog, captures the pane); documented and deliberately excluded from CI. |
 | Manual `/clear` smoke | `scripts/smoke-clear-rebind.sh` | Real `/clear` against the live listener with the build in `CLAUDE_PLUGIN_DIR` (default: this package); checks the registry entry moves to the new id without the old direct subject. Sends no prompt to the model; excluded from CI. |
 | Manual session-title smoke | `scripts/smoke-session-title.sh` | Real nats-server, a listener built from this tree, and the committed `dist/` for both the hook and the channel server: a chosen name registers, a rename replaces it, taking the name away restores the folder-and-short-id fallback, and the `dispatch` command's stamp carries the same name, each read back through the listener's `GET /v1/sessions`; the base revision's bundle is the negative control. Claude Code cannot run in a pod, so the two hook payloads are written to its documented shape; excluded from CI. |
+| NATS stall test | `tests/envoy-channel-stall.test.ts`, `../envoy-client/src/testing/stall-proxy.ts`, `../envoy-client/src/testing/envoy-stack.ts` | Runs only with `LEGION_E2E_ENVOY_STACK=1` (CI's `envoy-session-stall` job), and needs `go` on `PATH` to build natsd and the listener from `packages/envoy`: with the gate set, a missing `go` or a failed build fails it rather than skipping it. The real channel server process registers against that listener (its row shows `plugin` `@sjawhar/claude-envoy` and `plugin_version` `source`), the proxy freezes its NATS path, and the session reconnects within 60 s and is handed the message sent meanwhile once, replayed. |
 | Legion phase worker on Claude Code | `src/legion-claim.ts`, `src/legion-tool.ts`, `src/legion-inbox.ts` | Active only when `legion claude-bridge` launched the pane (`LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL`, `CLAUDE_CONFIG_DIR` set). The claim waits for the session transcript, then boots through the claim boot `@sjawhar/pi-legion` shares (`bootLegionClaim`, `@legion/pi-shared/legion-claim-core`): registers with the daemon, claims the issue's Envoy role soft and calls ready, again on every `onRoleRegained`. The `legion` MCP tool is the phase ops `@sjawhar/pi-legion`'s tool serves too (`@legion/pi-shared/legion-phase-ops`: one schema, one executor, and the shared description template with its `read_record` and `request_backward_move` sentences, naming `mcp__legion__envoy_publish`). With `LEGION_CLAUDE_INBOX` set, deliveries go to the bridge's socket instead of channel notifications. `package.json` `legion.daemonApiVersion` is pinned by `tests/daemon-api-version.test.ts`. |
 | Generated Legion plugin | `legion/`, `scripts/build.ts` | Never edit by hand: `scripts/build.ts` stages pi-legion's skills and converts `packages/pi-legion/agents` (tool names mapped to Claude Code's, `glob`/`grep`/`todo` dropped). `scripts/build.ts --check` and `tests/legion-plugin-fresh.test.ts` fail on drift. `tests/legion-pane-mcp.test.ts` runs a Legion pane's server end to end against stand-ins. |
 

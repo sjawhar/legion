@@ -145,7 +145,9 @@ its listener for it, `POST /v1/replay`, when it starts or resumes, when it recon
 subscription comes back, and on every heartbeat. The listener reads the stream for the session's
 own inbox topic and for each topic it registered, after the place the session last read to, and
 the session shows each message it was not shown yet, once, marked as published while its
-connection was down.
+connection was down. Both plugins ping NATS every 10 seconds and drop a connection that leaves two
+pings unanswered, so a connection that stops answering without closing, as when the network path
+under it freezes, is left within 30 seconds and redialed, and the session asks on the reconnect.
 
 - **What comes back:** messages on the session's inbox topic, `notifications.agent.<session_id>`,
   and on the topics it follows that the stream keeps, such as an issue's
@@ -185,6 +187,32 @@ serves it to any request whose `Host` is loopback or a name in `ENVOY_ALLOWED_HO
 list names the hub's own tailnet name, as the GCP hub's listener does with no bearer, every tailnet
 peer the tailnet's access rules let reach the listener's port can call it. It refuses a wildcard id, another
 session's inbox reached through a registered topic, and every failed-delivery lane.
+
+## The session list
+
+`GET /v1/sessions` lists the live sessions, and `GET /v1/registry/<session_id>` answers for one.
+Besides each session's id, title, directory, topics and roles, a row carries the plugin the
+session registered through, which every registration sends:
+
+| Field | Oh My Pi | Claude Code | OpenCode |
+| --- | --- | --- | --- |
+| `plugin` | `@sjawhar/pi-envoy` | `@sjawhar/claude-envoy` | `@sjawhar/opencode-legion-envoy` |
+| `plugin_version` | the package version (a source checkout reports the version of the last release in its history) | the first 12 characters of the marketplace commit Claude Code installed it from, or `source` when it runs from outside Claude Code's plugin cache (a checkout, `--plugin-dir`) | the package version |
+
+A session whose plugin predates the two fields shows neither. The `envoy_sessions` tool of the
+Oh My Pi and Claude Code plugins shows them too.
+
+Whether a session has the recovery of missed messages above and the 10-second connection check,
+read from its row:
+
+- **Oh My Pi:** it does when its `plugin_version` is at or above the first `@sjawhar/pi-envoy`
+  release cut after the change that added these fields merged (the first whose changelog lists
+  `plugin_version`).
+- **Claude Code:** it does when its commit contains that change's squash commit:
+  `gh api repos/sjawhar/legion/compare/<squash commit>...<plugin_version> --jq .status` answers
+  `ahead` or `identical`.
+- **Anything else:** `source`, a row without the fields, and an OpenCode session (whose plugin has
+  no recovery of missed messages) are checked by hand, or counted as not having it.
 
 ## The NATS grant a Legion daemon needs
 

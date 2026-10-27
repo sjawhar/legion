@@ -4,6 +4,12 @@
 
 ### Changed
 
+- **Breaking:** `subscribe()` takes a required `plugin: { name, version }` and sends it on every
+  registration as `plugin` and `plugin_version`, so the listener's session list names the plugin
+  and build each session runs. `SessionWireSchema` (and so `listSessions` and `envoy_sessions`)
+  keeps both as optional strings, so a row from an older listener or plugin still parses
+  (INFRA-548).
+
 - **Breaking:** `dispatch architecture-sync` imports every architecture source of the project,
   one per repository, and prints each source's answer in turn: `Synced P architecture from
   repo@branch: commit C (time).`, or `Sync failed for P (repo@branch): error` followed by `The
@@ -41,6 +47,17 @@
   (INFRA-122).
 
 ### Added
+
+- `@legion/envoy-client/nats-connection`: `natsConnectionOptions({ servers, name, seed })`, the
+  nats.js `connect` options every session plugin dials with: its credential, reconnecting forever
+  2 s apart, and a ping every 10 s (`NATS_PING_INTERVAL_MS`) with the connection dropped after
+  two unanswered pings (`NATS_MAX_PINGS_OUT`), so a path that freezes without closing is left
+  within 30 s, where nats.js's default 120 s interval left it for up to 6 minutes. Bun-only test
+  helpers `@legion/envoy-client/testing/stall-proxy` (a TCP proxy whose `freeze()` stops
+  forwarding without closing either side) and `@legion/envoy-client/testing/envoy-stack` (a real
+  natsd and listener built with `go build` from `packages/envoy`, for tests gated on
+  `LEGION_E2E_ENVOY_STACK=1`) back `src/__tests__/nats-stall.test.ts` and the plugins' stall tests
+  (INFRA-548).
 
 - `@legion/envoy-client/replay`: `createReplayEngine` shows a session, once, each message the
   notification stream stored on a subject it follows while its own NATS subscription was down,

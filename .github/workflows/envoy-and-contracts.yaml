@@ -129,6 +129,7 @@ jobs:
       envoy_client: ${{ steps.filter.outputs.envoy_client }}
       envoy: ${{ steps.filter.outputs.envoy }}
       envoy_e2e_local: ${{ steps.filter.outputs.envoy_e2e_local }}
+      envoy_session_stall: ${{ steps.filter.outputs.envoy_session_stall }}
       envoy_image: ${{ steps.filter.outputs.envoy_image }}
       plugin: ${{ steps.filter.outputs.plugin }}
       claude_plugin: ${{ steps.filter.outputs.claude_plugin }}
@@ -258,6 +259,25 @@ jobs:
               - 'package.json'
               - 'bun.lock'
               - *bun_toolchain
+            # The session stall suites (envoy-session-stall): envoy-client's stall proxy and stack
+            # build natsd and the listener with go build in workspace mode (envoy's note above)
+            # and run each plugin's NATS client through them; the plugins inline pi-shared, and
+            # the workflow file holds the job.
+            envoy_session_stall:
+              - 'packages/envoy/**'
+              - 'packages/envoy-client/**'
+              - 'packages/pi-envoy/**'
+              - 'packages/claude-envoy/**'
+              - 'packages/pi-shared/**'
+              - 'packages/contracts/**'
+              - 'go.work'
+              - 'go.work.sum'
+              - 'packages/daemon/go.mod'
+              - 'packages/daemon/go.sum'
+              - 'package.json'
+              - 'bun.lock'
+              - *bun_toolchain
+              - '.github/workflows/envoy-and-contracts.yaml'
             plugin:
               - 'packages/envoy-plugin/**'
               - 'packages/envoy-client/**'
@@ -1253,3 +1273,41 @@ jobs:
         with:
           name: envoy-e2e-local-evidence-${{ github.run_attempt }}
           path: packages/envoy/out/e2e
+
+  # The session stall suites (INFRA-548): each freezes a session's NATS path behind
+  # envoy-client's stall proxy (src/testing/stall-proxy.ts) on a real natsd and listener, which
+  # src/testing/envoy-stack.ts builds with go build from packages/envoy, and holds the client to a
+  # reconnect within 60 s: envoy-client's shared connection options on their own, then the real
+  # pi-envoy extension and the real claude-envoy channel server, each showing the message sent
+  # while it was cut off once, replayed. They run only with LEGION_E2E_ENVOY_STACK=1, which only
+  # this job sets, so the envoy-client, pi-envoy and claude-envoy jobs, which set up no Go, skip
+  # them.
+  envoy-session-stall:
+    needs: changes
+    if: needs.changes.outputs.envoy_session_stall == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      LEGION_E2E_ENVOY_STACK: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-bun
+      - run: bun install --frozen-lockfile
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+          cache-dependency-path: packages/envoy/go.sum
+      - name: Build contracts for the stall suites
+        run: bun run build
+        working-directory: packages/contracts
+      - name: Stall test of envoy-client's NATS connection options
+        run: bun test src/__tests__/nats-stall.test.ts
+        working-directory: packages/envoy-client
+      - name: Stall test of pi-envoy
+        run: bun test extensions/envoy.test.ts -t "NATS path freezes"
+        working-directory: packages/pi-envoy
+      - name: Stall test of claude-envoy
+        run: bun test tests/envoy-channel-stall.test.ts
+        working-directory: packages/claude-envoy

@@ -4,6 +4,10 @@
 
 ### Added
 
+- Every registration names the plugin: `plugin` `@sjawhar/opencode-legion-envoy` and
+  `plugin_version` this package's version, which the listener's `GET /v1/sessions` and
+  `GET /v1/registry/<id>` show (INFRA-548).
+
 - The packaged skills gain `asd-ste100`, which OpenCode finds on the skills path the config hook
   adds: the ASD-STE100 rules (Simplified Technical English) for text a reader must not misread.
   It is Legion's copy of the MIT-licensed `danyuchn/asd-ste100-skill` at 32511c69, with its

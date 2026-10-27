@@ -57,6 +57,8 @@ events and sends them to the current Claude Code session as supported
   after a reconnect, on every heartbeat and after a new follow, and delivers each missed message
   once, the same way as a live one, with a line saying when it was published while the connection
   was down. It runs nothing: a Dispatch delivery recovered this way is that event and no more.
+  The server pings NATS every 10 seconds and drops a connection that leaves two pings unanswered,
+  so a connection that stops answering without closing is left within 30 seconds and redialed.
   Role messages and team or other ad-hoc topics are live only and are not recovered, and neither
   is anything older than 72 hours, from before the session followed the topic, or from before it
   first ran this version of the plugin; a `/clear` starts afresh, as a new session does. What the

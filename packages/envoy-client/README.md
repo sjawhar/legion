@@ -98,6 +98,22 @@ frame was stored (`followedBefore`, through the host's `close`), then starts the
 belongs: `not_served` and `unavailable` are a warning, `stream_recreated` and `retention_gap` a
 card rendered by `envoyNoticeText`.
 
+## NATS connection
+
+`natsConnectionOptions({ servers, name, seed })` (`@legion/envoy-client/nats-connection`) is the
+nats.js `connect` options every session plugin dials with: the credential `natsAuthOptions` builds
+from the seed, reconnecting forever 2 s apart, and a ping every 10 s (`NATS_PING_INTERVAL_MS`) with
+the connection dropped on the tick that finds two pings unanswered (`NATS_MAX_PINGS_OUT`). So a
+path that freezes without closing is left within 30 s and redialed at once, and a session is back
+within 52 s when that redial also hangs on nats.js's 20 s dial timeout and the 2 s wait; nats.js's
+default 120 s interval left a frozen path for up to 6 minutes.
+
+`@legion/envoy-client/testing/stall-proxy` and `@legion/envoy-client/testing/envoy-stack` (Bun
+only, not built) are what the stall tests run: a TCP proxy whose `freeze()` stops forwarding on
+the connections open at that moment without closing either side, and a real natsd and listener
+built with `go build` from `packages/envoy`. A test that uses the stack runs only with
+`LEGION_E2E_ENVOY_STACK=1`.
+
 ## HTTP transport
 
 `createEnvoyClient` sends and receives the listener's `/v1` JSON contracts. Send and publish
@@ -108,9 +124,11 @@ the envelope and an optional role holder. Network failures and 5xx responses ret
 listener's bearer is the `token` the client is given (`envoySettings`); without one it sends no
 `Authorization` header.
 
-`subscribe` exposes listener warnings, including a topic that has no event in the configured
-stream. `getRole` returns a role holder with its last-seen timestamp, and `listSessions` accepts
-optional directory and title filters.
+`subscribe` sends the host's `plugin` (`{name, version}`, required) as `plugin` and
+`plugin_version` on every registration, and exposes listener warnings, including a topic that has
+no event in the configured stream. `getRole` returns a role holder with its last-seen timestamp,
+and `listSessions` accepts optional directory and title filters; its rows carry `plugin` and
+`plugin_version` when the session registered them.
 
 `replay` posts `POST /v1/replay` once, with no retry and a 10 s timeout, and returns the
 listener's answer in its wire shape; an error body's `code` (such as `REPLAY_UNAVAILABLE`) is on
