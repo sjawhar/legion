@@ -2,40 +2,51 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-528",
-  "completed": "2026-10-27T03:30:00Z",
+  "completed": "2026-10-27T04:30:00Z",
   "proof": [
     {
-      "criterion": "A1 and the spec Summary: a comment, Inbox ask, issue message and reply holding a mermaid block show a drawn diagram; a refused source shows its reason; a markup label draws as text; another language stays code",
-      "surface": "Dispatch Conversation and Inbox against the real Go Dispatch server and Postgres 17 + pgvector, in Desktop Chrome, iPhone 13 (Chromium), Desktop Safari (WebKit) and Desktop Firefox",
+      "criterion": "Review PRRT_kwDORFy7ds6wiXhE: drawing cost is bounded and never holds the reader's main thread",
+      "surface": "Dispatch Conversation against the real Go Dispatch server and Postgres 17 + pgvector, in Desktop Chrome, iPhone 13 (Chromium), Desktop Safari (WebKit) and Desktop Firefox",
       "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox",
-      "observed": "At head 9607c1b9 (merge of main 9f8766c6 plus the open-fence fix): 28 passed (2.2m). Round 1 at d2e90bba: 28 passed; at the red commit ecc18ff3: 24 failed, 4 passed.",
-      "headSha": "9607c1b933cf84a437dab8f596b96488261f96b3",
-      "negativeControl": "The red commit ecc18ff3 (no drawing code): every drawing row fails on the missing diagram image in all four projects, and the guard row (a ts fence) passes at both commits."
+      "observed": "At head d9ff6c61: 32 passed (2.9m). The new row 'a diagram too large to draw in time shows the reason, and the page keeps responding' (an 800-node flowchart, 2 edges per node) passes in all four projects: five 100 ms page timers each arrive within 1 s while the worker draws, then 'Unable to render Mermaid diagram: it did not finish within 5 seconds' shows with the source open and no image.",
+      "headSha": "d9ff6c6169634f601b8a041414a4bbfd5ae45d60",
+      "negativeControl": "The same row run against the round-1 code head 9607c1b9 (spec copied onto it in an unpushed scratch commit, SPA built there, chromium): failed with a 100 ms page timer arriving after 11014.8 ms, because the layout ran on the page's thread."
     },
     {
-      "criterion": "Tester failures 1 and 2: a closed mermaid fence followed by a link reference definition draws; a body ending in a line that cannot close its fence (shorter or other-character fence) keeps it as code",
-      "surface": "Dispatch Conversation, chromium, real server (throwaway e2e, deleted after the run); MarkdownBody unit suite (happy-dom)",
-      "command": "throwaway e2e/zz-mermaid-fence.e2e.ts: one comment '```mermaid graph TD X --> Y ```' + '[spec]: https://example.com/spec', one comment opened with '````mermaid' and ending in '```'; `cd packages/dispatch && bun test web/src/features/refs/MarkdownBody.test.tsx`",
-      "observed": "Browser: REFDEF_IMAGES 1 (the diagram drew, holding 'Y'), OPEN4_IMAGES 0 (source visible as code). Unit: 27 pass, 0 fail, including the tester's two red tests from 313753db, unmodified, and a new quote/list-item case.",
-      "headSha": "9607c1b933cf84a437dab8f596b96488261f96b3",
-      "negativeControl": "At the merge commit 9f8766c6 (main merged, before the fix) the tester's two tests fail (24 pass, 2 fail); replacing the probe with a bare '\\n\\n' + probe line makes the new quote/list-item case fail (26 pass, 1 fail), so it guards the container-aware probe."
+      "criterion": "A1 and the spec Summary rows still hold: comment, Inbox ask, message, reply draw; refusal; markup label as text; other language stays code; open-fence rules",
+      "surface": "Same four browser projects; MarkdownBody unit suite (happy-dom, fake Worker answering through the worker module's handler)",
+      "command": "same browser command; `cd packages/dispatch && bun test --parallel web/src e2e/__tests__`",
+      "observed": "All 7 earlier rows pass in all four projects at d9ff6c61; unit suite 2433 pass / 0 fail, including the tester's two red tests (unmodified), the time-limit case (refused with source open, worker terminated, the next source drawn by a fresh worker, the refused source never reaching the renderer), the cached-draws-synchronously case and the worker-failure case (one console.error across four paints, retry after online).",
+      "headSha": "d9ff6c6169634f601b8a041414a4bbfd5ae45d60",
+      "negativeControl": "Red commit ecc18ff3 (no drawing code): 24 failed / 4 passed on the earlier rows (round 1); disabling the cancel makes the rewritten cancel case fail (reported by the worker that wrote it)."
     }
   ],
   "filesChanged": [
-    "packages/dispatch/AGENTS.md",
-    "packages/dispatch/web/src/features/refs/MarkdownBody.test.tsx",
+    "biome.json",
+    "packages/proof-editor/package.json",
+    "packages/proof-editor/src/mermaid-render.ts (new)",
+    "packages/proof-editor/src/mermaid-svg.ts",
+    "packages/proof-editor/tests/mermaid-svg.test.ts",
+    "packages/proof-editor/AGENTS.md",
+    "packages/dispatch/web/src/features/refs/mermaid-render.worker.ts (new)",
     "packages/dispatch/web/src/features/refs/mermaid-diagrams.ts",
     "packages/dispatch/web/src/features/refs/useRenderedMarkdown.tsx",
-    "packages/envoy/CHANGELOG.md (merge resolution only)"
+    "packages/dispatch/web/src/features/refs/MarkdownBody.test.tsx",
+    "packages/dispatch/web/vite.config.ts",
+    "packages/dispatch/e2e/mermaid.e2e.ts",
+    "packages/dispatch/AGENTS.md",
+    "packages/envoy/CHANGELOG.md"
   ],
   "trickyParts": [
-    "Open-fence rule is the parser's: when the body's last leaf block is a mermaid code block, the body is parsed again with a probe line (U+2063-wrapped) after it, inside the last line's quote/list containers and with no blank line before it; the fence is open exactly when the probe lands inside that mermaid code block. A bare blank line + probe would end an open fence's quote or list item and read a streamed quoted diagram as closed.",
-    "drawMermaidDiagrams takes a reparse function; useRenderedMarkdown passes (source) => engine.parse(source, softBreaks), so the probe parse uses the same engine and soft-break policy as the body.",
-    "Merge of main (caa05c1a) resolved one conflict in packages/envoy/CHANGELOG.md's Unreleased/Fixed list: this issue's entry first, then main's envoy-infra integer entry, main's own spacing kept. Fingerprint unchanged: 228c8655 f800bfae... -> merge 9f8766c6 f800bfae...",
-    "Browser harness: /legion/harness/setup.sh and env.sh; lanes by LEGION_ROLE (tester 20777, db dispatch_tester_e2e)."
+    "In a browser worker ELK's bundled engine sees `self` and no `document`, takes the worker for an ELK worker and claims its onmessage, so every flowchart was refused ('En is not a constructor') in all three engines; beautiful-mermaid's `delete globalThis.self` does not reach WorkerGlobalScope.prototype's accessor. mermaid-render.worker.ts shadows `self` with an undefined accessor on the global's own prototype for the duration of each draw.",
+    "The 5 s clock starts when the worker posts {ready: true} (its imports loaded), not while its chunk downloads, so a slow connection never gets a normal diagram refused and cached.",
+    "Vite builds the worker as its own bundle; the third-party-notices plugin now records each worker bundle's files and inputs, leaves those files out of the page bundle check and adds their packages to THIRD_PARTY_NOTICES.txt.",
+    "Bundle at d9ff6c61: org.eclipse.elk only in mermaid-render.worker-*.js (1,565,608 B) and the lazy editor chunk lib-*.js (1,748,554 B); the entry and the headless chunks carry neither. Chromium worker timings: 50-edge flowchart 226/144 ms (first/warm), 100 nodes x2 edges ~1.2 s, 200 nodes ~3 s (5.4-5.7 s in WebKit/Firefox).",
+    "Browser harness: /legion/harness/setup.sh and env.sh; lanes by LEGION_ROLE (tester 20777, db dispatch_tester_e2e). web/dist was last built from the scratch negative-control commit: rebuild before any run."
   ],
   "deviations": [
-    "The probe line keeps the last line's block quote markers and turns its list markers into spaces, beyond 'append a probe line', so a fence still open inside a quote or list item stays code; covered by a new unit case."
+    "Time limit instead of a size budget: a source is sent to the worker and refused after 5 s; no character cap beyond Dispatch's 32,000-character body cap.",
+    "resetMermaidDiagrams(limitMs) takes an optional time limit for the unit tests (documented test seam)."
   ],
   "openQuestions": []
 }
