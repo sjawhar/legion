@@ -21,18 +21,17 @@ const commitOrderAdvisoryLock int64 = 0x4449535041544348
 // to local subscribers. NATS publication is an outbox concern owned by A5.
 //
 // Its fan-out is a Stream of its own (stream.go), so the one implementation of the overflow
-// contract serves both it and the reader's live feed. A Broker's subscribers are the ones that
-// want this process's own writes as it commits them: the outbox's local wake
-// (outbox/publisher.go) and the delivery hub's intake (api/delivery_live_hub_intake.go). An open
-// SSE connection is not one of them; it reads the relay's stream, which carries the other
-// process's events too.
+// contract serves both it and the reader's live feed. A Broker's subscriber is the one that wants
+// this process's own writes as it commits them: the outbox's local wake (outbox/publisher.go).
+// Neither an open SSE connection nor the delivery hub is one; both read the event stream relay's
+// stream (api/event_stream_relay.go), which carries the other process's events too.
 type Broker struct {
 	stream *Stream[model.Event]
 }
 
 // brokerBuffer is how far behind a Broker subscriber may fall before the stream drops it: 64
-// events, more than any one request commits. A dropped subscriber (the outbox's wake, the delivery
-// hub's intake) subscribes again and catches up from the database.
+// events, more than any one request commits. A dropped subscriber (the outbox's wake) subscribes
+// again and catches up from the database.
 const brokerBuffer = 64
 
 // NewBroker creates an empty in-process broker.

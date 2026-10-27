@@ -348,8 +348,8 @@ func (r *eventStreamRelay) publish(g *relayGeneration, page []relayedEvent) {
 }
 
 // resetCursor tells an event log that was reset under g's cursor from one that has merely gone
-// quiet, and answers a reset by ending g and every subscription it holds. The check is the
-// delivery hub's, through the same read (eventCursorCheck, catchUpEvents): a log whose newest id
+// quiet, and answers a reset by ending g and every subscription it holds. The check reads
+// eventCursorCheck, the same read that starts a generation's cursor: a log whose newest id
 // is below the cursor, or whose row at the cursor is gone or carries another created_at — a
 // `truncate events restart identity` refilled past it, which is what e2e/seed.ts does between
 // browser scenarios — is a log the cursor no longer names a position in. Nothing of the first kind
@@ -366,9 +366,10 @@ func (r *eventStreamRelay) publish(g *relayGeneration, page []relayedEvent) {
 // reconnect-from-last-id, which resolves its position against the log as it now stands. The next
 // subscription starts a new generation, whose cursor is the new log's newest row.
 //
-// The delivery hub answers the same reset by marking its views dirty rather than by dropping
-// anything, because it holds a projection of its own that it can recompute from the database; the
-// relay holds nothing but a reader's stream, which only that reader can rebuild.
+// The delivery hub, one of those subscriptions, answers the closed feed by subscribing again and
+// marking every view dirty rather than by dropping anything, because it holds a projection of its
+// own that it can recompute from the database; an SSE connection holds nothing but a reader's
+// stream, which only that reader can rebuild.
 func (r *eventStreamRelay) resetCursor(ctx context.Context, g *relayGeneration) (bool, error) {
 	cursor, at := r.at(g)
 	maxID, _, cursorAt, err := eventCursorCheck(ctx, r.server.deps.Store.Pool, cursor)

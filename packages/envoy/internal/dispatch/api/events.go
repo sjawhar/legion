@@ -330,8 +330,9 @@ func (s *server) resolveEventReplay(ctx context.Context, sinceProvided bool, sin
 // disconnectAllStreams closes every currently open SSE connection, forcing each client through
 // its reconnect-from-lastId path. Test-only: mounted by Register only when Deps.TestHooksEnabled
 // is set, so e2e suites can prove reconnect behavior on demand. It ends the relay's running
-// generation, whose subscriptions are what an open connection holds; the broker's subscribers
-// are the outbox and the delivery hub, which no reconnect test is about.
+// generation, whose subscriptions are what an open connection and the delivery hub hold; the hub
+// subscribes again and recomputes every view. The broker's one subscriber is the outbox, which no
+// reconnect test is about.
 func (s *server) disconnectAllStreams(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return

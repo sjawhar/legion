@@ -1266,18 +1266,30 @@ in flight under one five-second budget) and whether an issue's claim holder is s
 per-session read tells a session that ended from one that cache has not refilled yet, and a read
 that did not answer never reports the session gone: a broadcast and a claim are refused `503
 ENVOY_UNAVAILABLE`, the broadcast with nothing written, while a mention's comment is still
-created `201` and that mention's delivery is recorded `failed` with the listener's own `envoy
-listener: …` text. A write -
+created `201`. A mention lookup is bounded at 250 ms (`mentionLookupTimeout`, as is the route's
+when the comment mentions anyone, and up to 8 run at once): one cut short leaves its mention
+unresolved, for the sender to resolve when it sends, and one the listener answered with its own
+`envoy listener: …` error records that mention's delivery `failed` with that text. A write -
 `Envoy.Send`, `Unsubscribe` - runs after a commit, never inside: the attempt is committed first,
 sent, and settled by a second short transaction, so a process that dies in between leaves a
 record of the attempt rather than losing it.
 
 Both delivery paths are that pair, and the same claim. A comment mention's attempt is the
-`comment_deliveries` row the creating transaction commits as `pending`; the post-commit sender -
-and every later `POST /api/v1/comments/{id}/deliveries` retry - claims it (`claimed_at`, migration
-`0046`), resolves, records that resolution on the claimed row, sends, and records `sent` or
-`failed` with its `comment.delivery` event in a second transaction. A targeted message is the
-same shape on `message_deliveries`, resolved before the claim rather than after it:
+`comment_deliveries` row the creating transaction commits as `pending`, and the create answers
+with it still `pending`; the post-commit sender - and every later `POST
+/api/v1/comments/{id}/deliveries` retry - claims it (`claimed_at`, migration `0046`), resolves,
+records that resolution on the claimed row, sends, and records `sent` or `failed` with its
+`comment.delivery` event in a second transaction. The post-commit sender (`mentionSender`,
+`api/comment_mention_sender.go`) runs after the response, one FIFO lane per recipient (the
+session the mention's lookup pinned, else its target as written, so `role:X` and
+`session:<X's holder>` share a lane): each recipient gets the comments this process accepted in
+the order it accepted them, at most 8 lanes send at once, and at most 4,096 sends wait. A send
+past that bound is not queued and stays `pending` and unclaimed. Once the server's lifetime ends
+no queued send starts, and the sends in flight get 10 s (`mentionDrainTimeout`) before their
+context is cancelled. A recovery pass at startup, and again once an overflowed queue drains,
+resumes the attempts that are `pending`, unclaimed or with a lapsed claim, and created in the last
+hour, through the same claim, so an attempt a live sender holds is not sent twice. A targeted
+message is the same shape on `message_deliveries`, resolved before the claim rather than after it:
 `recordPendingMessageDelivery` claims or opens the attempt and commits it `pending` carrying that
 resolution, the send follows, and `completeMessageDelivery` settles it with the `message.delivery`
 event. Either way the pending row names the session its frame is going to before that frame is

@@ -439,10 +439,13 @@ turns off the configured route. A watcher checks each pane the daemon launches â
 the ones it starts on its own included â€” as soon as its OMP process exists, before the plugin
 registers and so before any turn; a mismatch kills the private tmux server and aborts naming the
 pane, and the audit fails naming any launch the watcher never saw. At
-the end, a read-only audit replays production Dispatch events from a baseline read at boot (the
-baseline event is the replay's positive control) and fails on any event a rig session authored or
-that names the rig's project key, then reads the operator's Envoy listener (`GET /v1/sessions`,
-`STAGE3_PRODUCTION_ENVOY_URL`, default `http://127.0.0.1:9020`) and fails on any rig session. The
+the end, a read-only audit lists the production Dispatch issues updated since a time read at boot,
+reads each one's events above a baseline event id read just after that time, and reads the
+production projects. It fails on any such event a rig session authored or that names the rig's
+project key, and on any production project naming that key, then reads the operator's Envoy
+listener (`GET /v1/sessions`, `STAGE3_PRODUCTION_ENVOY_URL`, default `http://127.0.0.1:9020`) and
+fails on any rig session. A read that fails, or a listing of updated issues none of whose events
+is above the baseline (the control that the reads reached the run's window), fails the audit. The
 audit writes nothing. It reads the operator's Dispatch as a command run from the operator's shell
 resolves it ([`lib/operator-dispatch.sh`](#liboperator-dispatchsh)), with the `DISPATCH_TOKEN` the
 script read at start and took out of its environment, so nothing the run starts inherits it. A file,
@@ -3036,10 +3039,10 @@ production_baseline     # sets prod_dispatch_url, prod_token, prod_baseline (`no
 ```
 
 The two Stage 3 scripts call `operator_dispatch_hold_token` once at start, so nothing a run starts
-inherits the operator's production bearer, and `production_baseline` to open their audit's window:
-it resolves the operator's Dispatch with the held bearer and reads the newest event id of the
-issues updated in the last 24 hours, through a 0600 header file under the caller's `$work`
-(`prod_header_file`).
+inherits the operator's production bearer, and `production_baseline` to open their audit's window,
+just after they record the time the window opens: it resolves the operator's Dispatch with the held
+bearer and reads the newest event id of the issues updated in the last 24 hours, through a 0600
+header file under the caller's `$work` (`prod_header_file`).
 
 `operator_dispatch` runs `bun scripts/e2e/lib/operator-dispatch.ts <bearer file>`, which resolves
 Dispatch with `@legion/envoy-client` as every command does, so no script keeps its own copy of the which-file or

@@ -1205,6 +1205,13 @@ type CommentEventPayload struct {
 	ThreadRootID string `json:"thread_root_id,omitempty"`
 	// SuppressRoute and SuppressedAuthors are resolved before the comment event commits,
 	// so the outbox can deduplicate without consulting the live session registry.
+	// SuppressRoute says the issue route's copy is skipped because a mention delivers the
+	// comment to the session it reaches: the route resolved to a session a mention lookup
+	// pinned (SuppressedRoute is the route string, SuppressedRouteSessionID that session), or
+	// the route string equals a mention's target whose lookup went unanswered within its bound
+	// (SuppressedRoute alone, no session known). A route string that differs from every
+	// mention's target and resolves to no pinned session suppresses nothing, even when it names
+	// the same session, which then receives two copies.
 	// SuppressedAuthors names the sessions the author routes skip because a mention delivers the
 	// comment to them: on a reply, its thread's root author when mentioned; on a new comment not
 	// in an ask's thread, every session a mention resolved to, since the outbox reads the

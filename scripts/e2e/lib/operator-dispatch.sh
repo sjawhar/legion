@@ -51,8 +51,9 @@ prod_header_file() {
   (umask 077 && printf 'Authorization: Bearer %s\n' "$prod_token" >"$header")
   printf '%s\n' "$header"
 }
-# production_baseline reads a recent production Dispatch event id so the post-run audit replays
-# only this run's window. It is a read-only query to the operator's Dispatch, resolved as every
+# production_baseline reads a recent production Dispatch event id so the post-run audit reads only
+# events above it, on the issues updated since the time the caller recorded just before. It is a
+# read-only query to the operator's Dispatch, resolved as every
 # command of the operator's resolves it (operator_dispatch) with the DISPATCH_TOKEN the script took
 # out of its environment at start (operator_dispatch_hold_token); a file, URL or token that prevents
 # it fails the run, naming it. With no Dispatch configured there is no production Dispatch to audit.

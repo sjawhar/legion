@@ -170,7 +170,7 @@ func waitRelayRead(t *testing.T, reads <-chan int64) {
 }
 
 // relayListenBackends counts the database's backends whose last statement is the relay's LISTEN.
-// The delivery hub listens on three channels in one statement, so its backend is not counted.
+// The delivery hub listens on its two channels in one statement, so its backend is not counted.
 func relayListenBackends(t *testing.T, database *store.Store) int {
 	t.Helper()
 	var count int
@@ -360,7 +360,7 @@ func TestEventStreamRelayCatchesUpWhenItsListenerReconnects(t *testing.T) {
 // ids restart at 1, below the cursor the relay has published through, and `id > cursor` matches
 // nothing. A relay that only ever published forward would fall silent there for good: every live
 // update of every later scenario would be lost, with no error anywhere. The relay reads the reset
-// the way the delivery hub does (eventCursorCheck) and ends its generation with every subscription
+// through eventCursorCheck and ends its generation with every subscription
 // it holds -- the stream's answer to a reader it can no longer serve in order, which sends a
 // browser through its reconnect -- and the next subscription starts a generation on the new log.
 func TestEventStreamRelayRecoversWhenTheEventLogIsReset(t *testing.T) {

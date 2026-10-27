@@ -1100,9 +1100,12 @@ func payloadBool(payload any, key string) bool {
 	return value
 }
 
-// suppressesCurrentRoute applies a create-time suppression to the route that was resolved
-// alongside the mention, including a later direct route to that same resolved session. A route
-// edit to any other target must still wake its new destination.
+// suppressesCurrentRoute applies a create-time suppression to the current route: the route string
+// the comment's creation suppressed, and, when that suppression named a session, a later direct
+// route to that same session. A suppression made by string alone (the route equalled a mention's
+// target whose lookup went unanswered) carries no session, so a route later moved to that
+// session's direct form is not suppressed. A route edit to any other target still wakes its new
+// destination.
 func suppressesCurrentRoute(payload any, current *string) bool {
 	if !payloadBool(payload, "suppress_route") || current == nil || *current == "" {
 		return false
