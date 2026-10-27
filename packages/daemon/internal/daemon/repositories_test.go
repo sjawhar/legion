@@ -1,13 +1,19 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -15,6 +21,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
+	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -176,6 +183,63 @@ func TestTheBootRefusesOnlyAnEmptyMapping(t *testing.T) {
 					err, w.repositories.Accepted(), w.repositories.Refused(), tc.served, tc.leftOut)
 			}
 		})
+	}
+}
+
+// unreadyDispatch is a Dispatch with no ready endpoint for its first refusals reads of the
+// repository mapping: each is refused at the dial, as a Service with no ready endpoint refuses it,
+// and reported as the real client reports a refused dial (a TransientError around it). Every read
+// after them answers the mapping.
+type unreadyDispatch struct {
+	mappingDispatch
+	refusals int64
+	reads    atomic.Int64
+}
+
+func (d *unreadyDispatch) ListRepoProjects(ctx context.Context) ([]dispatch.RepoProject, error) {
+	if d.reads.Add(1) <= d.refusals {
+		return nil, &dispatch.TransientError{Err: &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}}
+	}
+	return d.mappingDispatch.ListRepoProjects(ctx)
+}
+
+// A Dispatch with no ready endpoint refuses every dial for as long as it has none. The boot's read
+// of the mapping waits that out without limit (readinessRetry), logging each wait, as the boot's
+// listing for admission does: bounded at appMintRetry's attempts, it exited the daemon, whose
+// supervisor restarted it straight back into the same refusal. Here Dispatch refuses two reads more
+// than appMintRetry's budget allows and then answers, and the boot serves the mapped repository.
+// GitHub's installation reads keep appMintRetry's budget: one that keeps failing is refused at its end.
+func TestTheBootWaitsForTheMappingWhileDispatchRefusesEveryDial(t *testing.T) {
+	quickAppMints(t)
+	fastReadiness(t, bootprobe.Retry{Initial: time.Millisecond, Max: 4 * time.Millisecond})
+	mapped := []dispatch.RepoProject{{Repo: "acme/widgets", Project: "LEGION", Default: true}}
+	refusals := appMintRetry.Attempts + 2
+	client := &unreadyDispatch{mappingDispatch: mappingDispatch{mappings: mapped}, refusals: int64(refusals)}
+	var logged bytes.Buffer
+	w := &workflowRuntime{dispatch: client, dispatchProject: "LEGION", installs: &installations{},
+		repositories: newRepositories("LEGION"), log: slog.New(slog.NewTextHandler(&logged, nil))}
+	if err := w.loadMapping(context.Background()); err != nil {
+		t.Fatalf("loadMapping = %v, want it to wait out %d refused dials and serve acme/widgets", err, refusals)
+	}
+	if got := w.repositories.Accepted(); len(got) != 1 || got[0] != ghrepo.MustParse("acme/widgets") {
+		t.Fatalf("Accepted = %v, want acme/widgets", got)
+	}
+	if got, want := client.reads.Load(), int64(refusals)+1; got != want {
+		t.Fatalf("Dispatch saw %d mapping reads, want %d: the %d refused and the one that answered", got, want, refusals)
+	}
+	if got := strings.Count(logged.String(), `probe="repository mapping read"`); got != refusals {
+		t.Fatalf("the boot logged %d waits on the mapping read, want one per refused dial (%d):\n%s", got, refusals, logged.String())
+	}
+	if !strings.Contains(logged.String(), "connect: connection refused") {
+		t.Fatalf("the waits do not name the refused dial:\n%s", logged.String())
+	}
+
+	w = &workflowRuntime{dispatch: &mappingDispatch{mappings: mapped}, dispatchProject: "LEGION",
+		installs:     &installations{fail: &appauth.TransientError{Err: errors.New("GitHub answered 502")}},
+		repositories: newRepositories("LEGION"), log: quietLogger()}
+	want := "the repository installation check probe never completed within its retry budget (3 attempts): "
+	if err := w.loadMapping(context.Background()); err == nil || !strings.HasPrefix(err.Error(), want) || !strings.Contains(err.Error(), "GitHub answered 502") {
+		t.Fatalf("loadMapping with GitHub's installation reads failing = %v, want %q naming GitHub's 502", err, want)
 	}
 }
 

@@ -475,7 +475,7 @@ func fillTable(t *builder) {
 	t.ignore(onAcked, noSend, unready...)
 	t.ignore(onAcked, noSend, gone...)
 
-	t.row(onRefused, "the prompt was refused (charged) or lost (not charged): re-queue it", refused,
+	t.row(onRefused, "the prompt was refused (charged, unless the agent is in a turn of its own) or lost (not charged): re-queue it", refused,
 		[]ClaimState{StateLaunching, StateFailed, StateSuspended}, StateReady, StateIdle, StateWorking)
 	t.ignore(onRefused, noSend, unready...)
 	t.ignore(onRefused, noSend, gone...)
@@ -747,8 +747,14 @@ func acked(m *Machine, ctx context.Context, _ Event) error {
 //
 // A refusal is the agent's answer and is charged like a prompt that started no turn (LEGION-60:
 // an agent that refused every prompt would otherwise be retried forever); it is retried by the next
-// sweep, hello, turn end, or ready, never on the spot. A prompt lost to the transport is not
-// charged and waits for the shim's next hello — which may already have come while the send was out.
+// sweep, hello, turn end, or ready, never on the spot. Oh My Pi's busy answer (agentBusy) is the
+// exception, as it is for a late refusal (lateRefused): the agent is in a turn of its own — an
+// Envoy notice's, which a tree publishes freely while its worker boots — so it is working, not
+// refusing to work, and charging it would spend the budget of the very turn doing the work, three
+// such collisions retiring the agent mid-turn. The task waits unread, charged nothing, and that
+// turn's end sends it (the next sweep does, when the turn's start was not seen). A prompt lost to
+// the transport is not charged and waits for the shim's next hello — which may already have come
+// while the send was out.
 func refused(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(PromptRefused)
 	resend := m.helloDuringSend
@@ -760,6 +766,11 @@ func refused(m *Machine, ctx context.Context, ev Event) error {
 		}
 	}
 	if errors.Is(r.Err, runtime.ErrPromptRefused) {
+		if agentBusy(runtime.RefusalReason(r.Err)) {
+			m.log.Warn("supervise: the agent refused the prompt; it is in a turn of its own, whose end sends the task again",
+				"delivery", r.DeliveryID, "error", r.Err)
+			return nil
+		}
 		m.log.Warn("supervise: the agent refused the prompt", "delivery", r.DeliveryID, "error", r.Err)
 		return m.chargePrompt(ctx, "refused: "+r.Err.Error())
 	}

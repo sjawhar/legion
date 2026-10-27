@@ -339,7 +339,9 @@ image build's own run passes no `--role-namespaces`, since a build's container m
 namespaces. The runtime requires
 `capabilities=checked` too: an image whose `legion` predates the capability check prints no such mark and
 is refused naming that (`Succeeded without checking the capability list (its legion CLI predates the
-check): build the image from this daemon's commit`), and a probe pod that exits 1 on a missing capability
+check): build the image from this daemon's commit`), a line that carries `capabilities=browser-skipped`
+(a probe run with `--skip-browser`, which the daemon's probe never passes) is refused naming that mark,
+and a probe pod that exits 1 on a missing capability
 is refused with its log tail, which names it (`capability <name> is missing: <detail>` under the table's
 `missing` row; the stage 4a harness's `image-probe-capability-negative` check drives that with an operator
 pod env `PUPPETEER_EXECUTABLE_PATH=/nonexistent/chromium`). An image the kubelet cannot use refuses
@@ -407,6 +409,12 @@ mark for the deployment's capability report ([The deployment's capability report
 `docker run --rm ghcr.io/sjawhar/legion-worker@sha256:… probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models`
 (both roots are required: the Legion and Envoy plugin roots a Sandbox pod loads the plugins from, so the probe loads them the same way; without
 `--skip-agent-models` it also resolves each agent's model, which needs the operator's model roles).
+`--skip-browser` leaves the browser row unchecked, for the build of an image meant for a deployment
+that turns Oh My Pi's browser off (`browser.enabled: false`) and so carries no Chromium: that row
+reads `unchecked`, and the OK line carries `capabilities=browser-skipped` in place of
+`capabilities=checked`. The daemon's probe never passes the flag and refuses that line, so such an
+image runs only where no probe runs, under `runtime: tmux`. Oh My Pi downloads Chrome for Testing
+on first use when it finds no browser, so the deployment's own overlay must turn the browser off.
 A step of its own, before that final one, runs every toolchain command listed above as `legion`, from
 the image `PATH` — the language servers (`gopls version`, `typescript-language-server --version`,
 `tsc --version`, and `pyright --version` for `pyright-langserver`, which takes no `--version`), `go
@@ -2544,8 +2552,9 @@ usually empty during a plain refused dial, since nats.go clears it on every fail
 own cause while a handshake keeps failing, since nats.go leaves that one in place until the
 connection succeeds. At boot an unreachable NATS or Dispatch delays the boot instead of exiting,
 retried one second doubling to one minute, forever, logged at warn as `boot probe failed
-transiently; waiting to run it again` with its `probe` (naming which), `attempt`, `retryIn` and
-`detail`.
+transiently; waiting to run it again` with its `probe` (naming which: `repository mapping read`,
+the boot's first Dispatch read, `connect Envoy NATS`, or `list Dispatch issues for admission`),
+`attempt`, `retryIn` and `detail`.
 
 A malformed seed refuses the boot immediately at startup, before any network connection is
 attempted. A NATS authorization violation at connect time is the same: the server said no
@@ -2592,7 +2601,9 @@ waits and the logged `detail` may never name the authorization error at all (LEG
 While the readiness gate waits, callers outside the daemon see it as still booting, not as down:
 the API port is already bound by this point (the same as during the image probe, both before this
 gate), so it accepts a connection but serves nothing until the gate passes, and `legion status`
-reports the daemon's PID alive but not yet answering. A pane's `legion` tool calls (`read_record`
+reports the daemon's PID alive but not yet answering. The repository mapping read waits before the
+port is bound, so while it waits a connection to the API is refused, as for a daemon that is not
+running, and only the daemon's log says it waits. A pane's `legion` tool calls (`read_record`
 and `handoff_complete`, the latter minting its grant in-process first) and `controller start` all
 wait on that same API, so none of them succeeds until the daemon actually serves; a pane's plain
 `gh` and `git` do not, since they read the role's credential from its gh files and call the daemon
