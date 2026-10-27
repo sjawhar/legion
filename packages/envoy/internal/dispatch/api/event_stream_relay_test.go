@@ -106,12 +106,12 @@ func newCountedRelay(t *testing.T, deps Deps) (*eventStreamRelay, chan int64) {
 // subscribeRelay subscribes to the relay, cancelled when the test ends if not before.
 func subscribeRelay(t *testing.T, relay *eventStreamRelay) (<-chan relayedEvent, func(), int64) {
 	t.Helper()
-	subscription, cancel, head, err := relay.subscribe(context.Background(), relayTestBuffer)
+	subscription, err := relay.subscribe(context.Background(), relayTestBuffer)
 	if err != nil {
 		t.Fatalf("subscribe to the relay: %v", err)
 	}
-	t.Cleanup(cancel)
-	return subscription, cancel, head
+	t.Cleanup(subscription.cancel)
+	return subscription.events, subscription.cancel, subscription.head
 }
 
 // insertRelayEvent commits one event on the issue in one statement, so one notification, and

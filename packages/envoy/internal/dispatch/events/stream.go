@@ -4,10 +4,11 @@ import "sync"
 
 // Stream fans values out to the subscribers of one process, each on a channel whose size the
 // subscriber chooses. A subscriber whose channel is full is dropped and its channel closed rather
-// than waited for: that ends an SSE response body and sends the browser to its
-// reconnect-from-last-id, which resolves what it missed against the event log, instead of letting
-// it miss an event in silence. A stream that blocked for a subscriber that is not reading would
-// hold up every other subscriber of this process.
+// than waited for, so it learns that it missed a value instead of missing it in silence: an SSE
+// connection subscribes again and catches up what it missed from the event log, or ends its
+// response when that backlog is past the replay's bounds (api/events.go streamEvents). A stream
+// that blocked for a subscriber that is not reading would hold up every other subscriber of this
+// process.
 //
 // The reader's live feed is a Stream of its own, held by the event stream relay
 // (api/event_stream_relay.go) and published into only by that relay, from the rows it reads back
@@ -61,8 +62,8 @@ func (s *Stream[T]) SubscriberCount() int {
 }
 
 // Publish fans a value out to the subscribers. A subscriber whose channel is full is dropped and
-// its channel closed, so an SSE client is disconnected before it can advance its resume cursor
-// past an event it was never sent.
+// its channel closed, after the values it already holds, so it can tell where it stopped receiving
+// and recover from there rather than skip a value it was never sent.
 func (s *Stream[T]) Publish(value T) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

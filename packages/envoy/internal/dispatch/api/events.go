@@ -20,8 +20,9 @@ const (
 	maxSSEReplay      = 256
 	maxSSEReplayBytes = 1 << 20
 	// eventStreamBuffer is how many relayed events one SSE connection may fall behind before the
-	// relay's stream drops it, which ends its response and sends its client to a reconnect: 64,
-	// more than any one request commits. A connection that cannot drain 64 frames is not reading.
+	// relay's stream drops its subscription: 64, more than any one request commits. A dropped
+	// connection subscribes again and catches up what it missed from the event log, within the
+	// replay's bounds (streamEvents).
 	eventStreamBuffer = 64
 	// eventReplayHeader is set to "complete" on an SSE response whose replay is everything its
 	// client lacks; a client that reconnects without it refetches what it shows.
@@ -124,13 +125,13 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	// and not through a request of its own: a client that fetched its own head first and then
 	// opened this connection with since=<that head> would lose an event committing between the
 	// two, excluded from the replay (id <= since) and missed by a subscription made only afterwards.
-	subscription, cancel, head, err := s.eventRelay.subscribe(r.Context(), eventStreamBuffer)
+	subscription, err := s.eventRelay.subscribe(r.Context(), eventStreamBuffer)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	defer cancel()
-	replay, err := s.resolveEventReplay(r.Context(), sinceProvided, since, head)
+	defer func() { subscription.cancel() }()
+	replay, err := s.resolveEventReplay(r.Context(), sinceProvided, since, subscription.head)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -156,16 +157,24 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	flusher.Flush()
-	// The live loop compares an event's id against one fixed position, replay.after, and never
-	// against the last id it sent: the relay publishes in id order, and the commit-order lock
-	// events.Broker.Append holds until commit means no id at or below a committed max(id) is still
-	// uncommitted, so nothing above replay.after can hide below it later. What the comparison
-	// skips is what this connection already holds: the replay, or what its client held through
-	// since when the relay stands behind it.
+	// The live loop skips an event at or below after, the highest id this connection holds: it
+	// starts at replay.after (the replay, or what the client held through since when the relay
+	// stands behind it) and moves to each id the loop writes. The relay publishes in id order, and
+	// the commit-order lock events.Broker.Append holds until commit means no id at or below a
+	// committed max(id) is still uncommitted, so nothing above after can hide below it later.
+	//
+	// A connection that falls eventStreamBuffer events behind is dropped by the relay's stream,
+	// which closes its channel while the generation runs on (Stream.Publish). The loop writes what
+	// the channel still holds, subscribes again and catches up from the log what it missed after
+	// after (resumeAfterOverflow), then goes on live on the new subscription. A backlog past the
+	// replay's bounds ends the response instead: the client reconnects with its last id, which
+	// resolves its position as any resume does.
 	//
 	// A reset reuses ids, and the comparison cannot tell this reader apart from the events of the
-	// log it was reading; the relay ends the subscription at a reset instead, and the reader comes
-	// back on a new connection, which resolves its position against the new log here.
+	// log it was reading; the relay ends the generation at a reset instead, which ends the
+	// response, and the reader comes back on a new connection, which resolves its position against
+	// the new log here. The test hook disconnectAllStreams ends the generation the same way.
+	after := replay.after
 	heartbeat := time.NewTicker(s.deps.StreamHeartbeat)
 	defer heartbeat.Stop()
 	shutdown := s.lifetime().Done()
@@ -178,17 +187,41 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 			// http.Server.Shutdown would wait its whole budget for it. Ending it sends the client
 			// to its reconnect, which resumes from the last id it saw on whichever server is up.
 			return
-		case event, open := <-subscription:
-			if !open {
-				return
-			}
-			if event.Event.ID <= replay.after {
+		case event, open := <-subscription.events:
+			if open {
+				if event.Event.ID <= after {
+					continue
+				}
+				if hook := s.eventRelay.beforeLiveWrite; hook != nil {
+					hook()
+				}
+				if _, err := w.Write(event.Frame); err != nil {
+					return
+				}
+				flusher.Flush()
+				after = event.Event.ID
 				continue
 			}
-			if _, err := w.Write(event.Frame); err != nil {
+			select {
+			case <-subscription.ended:
+				// The generation ended (a reset, disconnectAllStreams, the lifetime): the
+				// response ends and the client reconnects.
+				return
+			default:
+			}
+			next, caughtUp, ok := s.resumeAfterOverflow(r.Context(), after)
+			if !ok {
 				return
 			}
+			subscription.cancel()
+			subscription = next
+			for _, frame := range caughtUp.frames {
+				if _, err := w.Write(frame); err != nil {
+					return
+				}
+			}
 			flusher.Flush()
+			after = caughtUp.after
 		case <-heartbeat.C:
 			// The caller is resolved again on every heartbeat, so a stream outlives its session
 			// (a logout, a membership the sign-in issuer no longer confirms) by one beat at most.
@@ -203,9 +236,28 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// eventReplay is what one connection is replayed before its live loop: the frames, whether they
-// are everything its client lacks (complete), and the id at or below which the live loop skips an
-// event (after).
+// resumeAfterOverflow answers a connection whose subscription overflowed, holding every event
+// through after, a new subscription and what it missed: (after, head] of the new subscription,
+// resolved as a resume from after (resolveEventReplay). The new subscription is made before the
+// caller cancels the old one, so the generation runs on between them. false is a catch-up that is
+// not complete (past the replay's bounds, or from a log replaced meanwhile) or that failed; the
+// caller then ends its response, and its client reconnects with its last id.
+func (s *server) resumeAfterOverflow(ctx context.Context, after int64) (relaySubscription, eventReplay, bool) {
+	next, err := s.eventRelay.subscribe(ctx, eventStreamBuffer)
+	if err != nil {
+		return relaySubscription{}, eventReplay{}, false
+	}
+	caughtUp, err := s.resolveEventReplay(ctx, true, after, next.head)
+	if err != nil || !caughtUp.complete {
+		next.cancel()
+		return relaySubscription{}, eventReplay{}, false
+	}
+	return next, caughtUp, true
+}
+
+// eventReplay is what one connection is replayed before its live loop, or after an overflow
+// (resumeAfterOverflow): the frames, whether they are everything its client lacks (complete), and
+// the id at or below which the live loop skips an event (after).
 type eventReplay struct {
 	frames   [][]byte
 	complete bool

@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2125,6 +2126,117 @@ func TestSSESendsNoReplayWhoseFramesExceedTheByteBound(t *testing.T) {
 	}
 }
 
+// holdFirstLiveWrite makes the first live frame any connection on the relay writes wait until
+// release is called, so the connection takes one event off its subscription and reads nothing
+// more while the relay publishes. release is idempotent. It is set before the test's httptest
+// server starts, which the handler's read of it then follows.
+func holdFirstLiveWrite(relay *eventStreamRelay) (release func()) {
+	released := make(chan struct{})
+	var hold, done sync.Once
+	relay.beforeLiveWrite = func() { hold.Do(func() { <-released }) }
+	return func() { done.Do(func() { close(released) }) }
+}
+
+// waitForRelayOverflow waits for the relay to publish through the event through, then fails
+// unless that has dropped every subscription its running generation holds: the one open
+// connection's, overflowed while its reader was held.
+func waitForRelayOverflow(t *testing.T, relay *eventStreamRelay, through int64) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		relay.mu.Lock()
+		g := relay.generation
+		published, subscribed := false, 0
+		if g != nil {
+			published, subscribed = g.cursor >= through, g.stream.SubscriberCount()
+		}
+		relay.mu.Unlock()
+		if published {
+			if subscribed != 0 {
+				t.Fatalf("the relay published through %d with %d subscriptions left, want the held connection's dropped", through, subscribed)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the relay did not publish through %d in 5s", through)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// readFrameIDsToEnd reads the stream until its response ends, and answers every frame id it read.
+func readFrameIDsToEnd(t *testing.T, scanner *bufio.Scanner) []int64 {
+	t.Helper()
+	ids := []int64{}
+	for scanner.Scan() {
+		raw, ok := strings.CutPrefix(scanner.Text(), "id: ")
+		if !ok {
+			continue
+		}
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			t.Fatalf("SSE frame id %q: %v", raw, err)
+		}
+		ids = append(ids, id)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("read the stream to its end: %v", err)
+	}
+	return ids
+}
+
+// TestSSECatchesUpAConnectionWhoseSubscriptionOverflowed: a connection that falls more than
+// eventStreamBuffer events behind is dropped by the relay's stream, and its response goes on: it
+// writes what its subscription held, catches up the rest from the event log, and streams live
+// again, every event once and in order. Its reader is held at its first live write until the
+// relay has published past its buffer, so the overflow is certain rather than a race.
+func TestSSECatchesUpAConnectionWhoseSubscriptionOverflowed(t *testing.T) {
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{})
+	key := createStreamIssue(t, handler)
+	release := holdFirstLiveWrite(served.eventRelay)
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+	t.Cleanup(release)
+	opened := eventHead(t, database)
+	scanner := openSSEStream(t, httpServer.URL+"/api/v1/events")
+
+	backlog := seedStreamEvents(t, database, key, 2*eventStreamBuffer, 0)
+	waitForRelayOverflow(t, served.eventRelay, backlog)
+	release()
+	if got, want := readFramesThrough(t, scanner, backlog), eventIDsBetween(t, database, opened, backlog); !slices.Equal(got, want) {
+		t.Fatalf("frames after the overflow = %v, want each event committed since the connection opened once, in order: %v", got, want)
+	}
+
+	live := renameStreamIssue(t, handler, database, key, "Renamed after the overflow")
+	if got, want := readFramesThrough(t, scanner, live), eventIDsBetween(t, database, backlog, live); !slices.Equal(got, want) {
+		t.Fatalf("live frames after the catch-up = %v, want %v", got, want)
+	}
+}
+
+// TestSSEEndsAConnectionWhoseOverflowIsPastTheBound: a connection that overflowed with more than
+// maxSSEReplay events missed is not caught up. It writes what its subscription held and its
+// response ends, so its client reconnects with its last id and resolves its position as any
+// resume does.
+func TestSSEEndsAConnectionWhoseOverflowIsPastTheBound(t *testing.T) {
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{})
+	key := createStreamIssue(t, handler)
+	release := holdFirstLiveWrite(served.eventRelay)
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+	t.Cleanup(release)
+	opened := eventHead(t, database)
+	scanner := openSSEStream(t, httpServer.URL+"/api/v1/events")
+
+	backlog := seedStreamEvents(t, database, key, eventStreamBuffer+maxSSEReplay+2, 0)
+	waitForRelayOverflow(t, served.eventRelay, backlog)
+	release()
+	got := readFrameIDsToEnd(t, scanner)
+	want := eventIDsBetween(t, database, opened, backlog)
+	if len(got) == 0 || len(got) > eventStreamBuffer+1 || !slices.Equal(got, want[:len(got)]) {
+		t.Fatalf("frames before the response ended = %v, want the first events its subscription held, at most %d, of %v", got, eventStreamBuffer+1, want)
+	}
+}
+
 func TestDisconnectAllStreamsHookIsGatedByTestHooksEnabled(t *testing.T) {
 	handler := newTestHandler(t)
 	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/events/_test/disconnect", nil, "alice")
@@ -2430,9 +2542,9 @@ func sseFrameID(t *testing.T, frame []string) int64 {
 // already seen, so a connection whose since is above the relay's head but within the log skips
 // everything through since.
 //
-// The comparison is safe because that position is fixed for the connection, and the commit-order
-// lock events.Broker.Append holds until its transaction commits leaves no uncommitted id at or
-// below a committed max(id): no late-committing lower id can hide below it
+// The comparison is safe because that position only rises, to each id the connection writes, and
+// the commit-order lock events.Broker.Append holds until its transaction commits leaves no
+// uncommitted id at or below a committed max(id): no late-committing lower id can hide below it
 // (TestOnlyTheBrokerInsertsEvents keeps the broker the only writer).
 func TestSSEDoesNotResendAnEventAtOrBelowItsSince(t *testing.T) {
 	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{})

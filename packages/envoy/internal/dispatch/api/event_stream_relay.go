@@ -74,6 +74,10 @@ type eventStreamRelay struct {
 	// readAfter reads one page of the committed events after an id, in id order; nil is
 	// readEventsAfterID.
 	readAfter func(ctx context.Context, after int64) ([]model.Event, error)
+	// beforeLiveWrite runs before an SSE connection writes a live frame (streamEvents); nil in
+	// every server the deployment builds. A test blocks it to hold a reader still while the relay
+	// publishes past its buffer.
+	beforeLiveWrite func()
 
 	// running counts every generation's goroutines. Add runs under mu and only while closed is
 	// false, so no Add can follow the Wait in wait.
@@ -101,7 +105,9 @@ type eventStreamRelay struct {
 // has published. cursorAt is what tells an event log that was reset from one that has merely gone
 // quiet: see resetCursor.
 type relayGeneration struct {
-	stop   context.CancelFunc
+	stop context.CancelFunc
+	// ended is the generation context's Done: closed once the generation has stopped.
+	ended  <-chan struct{}
 	stream *events.Stream[relayedEvent]
 	// wake holds at most one signal: what a read answers covers every notification before it.
 	wake chan struct{}
@@ -117,10 +123,24 @@ func newEventStreamRelay(s *server, lifetime context.Context) *eventStreamRelay 
 	return &eventStreamRelay{server: s, lifetime: lifetime}
 }
 
-// subscribe answers one consumer its live feed on a channel of buffer slots, a cancel function
-// (idempotent) that ends it, and head: the id the relay has published through when the
-// subscription was made. Every event above head reaches the channel, in id order; every event at
-// or below it is committed, so the consumer reads those from the log itself.
+// relaySubscription is one consumer's live feed from the relay (subscribe).
+type relaySubscription struct {
+	// events carries every event above head, in id order, until it closes. It closes for one of
+	// two reasons: the consumer fell its buffer behind (Stream.Publish drops it) while its
+	// generation runs on, or its generation ended (a reset, disconnect, the lifetime).
+	events <-chan relayedEvent
+	// ended is closed once the subscription's generation has ended, and always before that end
+	// closes events (endLocked stops the generation, then closes its subscriptions): events closed
+	// while ended is still open is an overflow.
+	ended <-chan struct{}
+	// head is the id the relay had published through when the subscription was made. Every event
+	// at or below it is committed, so the consumer reads those from the log itself.
+	head int64
+	// cancel ends the subscription; it is idempotent.
+	cancel func()
+}
+
+// subscribe answers one consumer its live feed on a channel of buffer slots (relaySubscription).
 //
 // The subscription, the head and the start of a generation when none runs happen under mu, which
 // the read loop also holds across publishing a page and moving the cursor over it: a page is
@@ -131,22 +151,23 @@ func newEventStreamRelay(s *server, lifetime context.Context) *eventStreamRelay 
 // again. Once the lifetime has ended, subscribe refuses.
 //
 // Cancelling the last subscription of the running generation stops that generation: its listening
-// connection closes and it reads nothing more.
-func (r *eventStreamRelay) subscribe(ctx context.Context, buffer int) (<-chan relayedEvent, func(), int64, error) {
+// connection closes and it reads nothing more. An overflowed subscription still counts until it is
+// cancelled, so a consumer that subscribes again before cancelling it keeps the generation running.
+func (r *eventStreamRelay) subscribe(ctx context.Context, buffer int) (relaySubscription, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed || r.lifetime.Err() != nil {
-		return nil, nil, 0, errorf(http.StatusServiceUnavailable, "SHUTTING_DOWN", "the server is shutting down")
+		return relaySubscription{}, errorf(http.StatusServiceUnavailable, "SHUTTING_DOWN", "the server is shutting down")
 	}
 	g := r.generation
 	if g == nil {
 		started, err := r.startLocked(ctx)
 		if err != nil {
-			return nil, nil, 0, err
+			return relaySubscription{}, err
 		}
 		g = started
 	}
-	subscription, unsubscribe := g.stream.Subscribe(buffer)
+	feed, unsubscribe := g.stream.Subscribe(buffer)
 	g.subscribers++
 	var once sync.Once
 	cancel := func() {
@@ -161,7 +182,7 @@ func (r *eventStreamRelay) subscribe(ctx context.Context, buffer int) (<-chan re
 			}
 		})
 	}
-	return subscription, cancel, g.cursor, nil
+	return relaySubscription{events: feed, ended: g.ended, head: g.cursor, cancel: cancel}, nil
 }
 
 // startLocked reads the cursor and runs a new generation's listener and read loop, with mu held.
@@ -173,6 +194,7 @@ func (r *eventStreamRelay) startLocked(ctx context.Context) (*relayGeneration, e
 	runCtx, stop := context.WithCancel(r.lifetime)
 	g := &relayGeneration{
 		stop:     stop,
+		ended:    runCtx.Done(),
 		stream:   events.NewStream[relayedEvent](),
 		wake:     make(chan struct{}, 1),
 		cursor:   cursor,
@@ -339,11 +361,10 @@ func (r *eventStreamRelay) publish(g *relayGeneration, page []relayedEvent) {
 // reused: the rows it would read as `id > cursor` are not the ones it published, and every open
 // subscription's position (streamEvents' dedupe cursor) is in a log that no longer exists, so no
 // frame it sent could mean what its reader would take it to mean. Ending the subscriptions is the
-// honest answer and the one the stream already has for a subscriber it cannot serve in order: it
-// closes the SSE response body, exactly as an overflowed subscriber's is closed (Stream.Publish),
-// and sends each browser through its reconnect-from-last-id, which resolves its position against
-// the log as it now stands. The next subscription starts a new generation, whose cursor is the new
-// log's newest row.
+// honest answer: the generation ends, so each SSE connection ends its response rather than
+// catching up as it does after an overflow, and each browser goes through its
+// reconnect-from-last-id, which resolves its position against the log as it now stands. The next
+// subscription starts a new generation, whose cursor is the new log's newest row.
 //
 // The delivery hub answers the same reset by marking its views dirty rather than by dropping
 // anything, because it holds a projection of its own that it can recompute from the database; the
