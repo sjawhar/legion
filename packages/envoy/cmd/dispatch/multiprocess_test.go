@@ -1166,14 +1166,6 @@ func waitOutABucketBoundary(t *testing.T, pair *dispatchPair, period time.Durati
 
 // ───── one signing key across the processes ────────────────────────────────
 
-// The sign-in client the fake issuer serves, and the group it admits.
-const (
-	cookieClientID     = "dispatch-multiprocess-client"
-	cookieClientSecret = "dispatch-multiprocess-secret"
-	cookieGroup        = "dispatch-members"
-	cookiePerson       = "alice@example.test"
-)
-
 // A person signs in on one process and their next request lands on the other, which is what a
 // load balancer in front of two tasks does on every page load. The session itself is in Postgres,
 // which both read; what each process needs of its own is DISPATCH_SIGNING_KEY. A process carrying
@@ -1279,72 +1271,6 @@ func requireRefusedToStart(t *testing.T, p *dispatchProcess, name string) {
 	if p.logged(`msg="dispatch: listening"`) {
 		t.Errorf("%s logged that it serves:\n%s", name, output)
 	}
-}
-
-// signInThrough signs cookiePerson in on the process, the whole code flow a browser walks:
-// /auth/start for the issuer's authorization URL and the state cookie, the issuer's own sign-in,
-// then /auth/callback, which answers the session cookie. It returns that cookie.
-func signInThrough(t *testing.T, p *dispatchProcess, issuer *oidctest.Issuer) *http.Cookie {
-	t.Helper()
-	issuer.SignInAs(map[string]any{
-		"sub":              "alice-subject",
-		"cognito:username": "ExampleIdP_" + cookiePerson,
-		"cognito:groups":   []string{cookieGroup},
-		"identities":       []map[string]any{{"providerName": "ExampleIdP"}},
-	})
-	started := browserGet(t, p.url("/auth/start"), nil)
-	defer started.Body.Close()
-	if started.StatusCode != http.StatusFound {
-		t.Fatalf("/auth/start answered %d, want a redirect to the issuer", started.StatusCode)
-	}
-	var state *http.Cookie
-	for _, cookie := range started.Cookies() {
-		if cookie.Name == "dispatch_oauth_state" {
-			state = cookie
-		}
-	}
-	if state == nil {
-		t.Fatalf("/auth/start set no sign-in state cookie: %v", started.Cookies())
-	}
-	code, returned := issuer.Authorize(t, started.Header.Get("Location"))
-	callback := browserGet(t, p.url("/auth/callback?code="+url.QueryEscape(code)+"&state="+url.QueryEscape(returned)), state)
-	defer callback.Body.Close()
-	for _, cookie := range callback.Cookies() {
-		if cookie.Name == "dsession" && cookie.Value != "" {
-			return cookie
-		}
-	}
-	body, _ := io.ReadAll(callback.Body)
-	t.Fatalf("/auth/callback answered %d and set no session cookie: %s", callback.StatusCode, body)
-	return nil
-}
-
-// browserGet is one GET a browser makes during a sign-in: it sends cookie when there is one and
-// never follows the redirect, since the redirect's own response is where the cookie is set.
-func browserGet(t *testing.T, target string, cookie *http.Cookie) *http.Response {
-	t.Helper()
-	request, err := http.NewRequest(http.MethodGet, target, nil)
-	if err != nil {
-		t.Fatalf("build %s: %v", target, err)
-	}
-	if cookie != nil {
-		request.AddCookie(cookie)
-	}
-	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	response, err := client.Do(request)
-	if err != nil {
-		t.Fatalf("GET %s: %v", target, err)
-	}
-	return response
-}
-
-// whoami asks the process who the session cookie names, and answers its body and status.
-func whoami(t *testing.T, p *dispatchProcess, session *http.Cookie) (string, int) {
-	t.Helper()
-	response := browserGet(t, p.url("/auth/whoami"), session)
-	defer response.Body.Close()
-	body, _ := io.ReadAll(response.Body)
-	return strings.TrimSpace(string(body)), response.StatusCode
 }
 
 // ───── the fleet's build ────────────────────────────────────────────────────

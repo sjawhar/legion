@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
+	"github.com/sjawhar/envoy/internal/oidc"
 )
 
 type testSessionStore struct {
@@ -244,6 +246,11 @@ func TestWriteErrorMapsNoIdentityToUnauthorized(t *testing.T) {
 	WriteError(w, ErrNoIdentity)
 	if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), `"code":"NO_IDENTITY"`) {
 		t.Errorf("no identity: status %d body %s, want 401 NO_IDENTITY", w.Code, w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	WriteError(w, fmt.Errorf("oidc: refresh: %w: oauth2: 503", oidc.ErrIssuerUnavailable))
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), `"code":"SIGNIN_UNAVAILABLE"`) || !strings.Contains(w.Body.String(), "try again in a minute") {
+		t.Errorf("sign-in issuer unreachable: status %d body %s, want 503 SIGNIN_UNAVAILABLE", w.Code, w.Body.String())
 	}
 	w = httptest.NewRecorder()
 	WriteError(w, errors.New("database down"))

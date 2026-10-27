@@ -2,6 +2,7 @@ package oidc
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -9,7 +10,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
@@ -22,24 +22,30 @@ const (
 	flowDomain       = "example.com"
 )
 
-// newCodeFlowFor starts a code-flow issuer for flowClientID and discovers it in group mode, the
-// Cognito sign-in pool's.
+// newCodeFlowFor starts a code-flow issuer for flowClientID and a code flow for it in group mode,
+// the Cognito sign-in pool's.
 func newCodeFlowFor(t *testing.T) (*oidctest.Issuer, *CodeFlow) {
 	t.Helper()
 	return newCodeFlowForDomain(t, "")
 }
 
-// newCodeFlowForDomain starts a code-flow issuer for flowClientID and discovers it for the hosted
-// domain, empty for group mode.
+// newCodeFlowForDomain starts a code-flow issuer for flowClientID and a code flow for it for the
+// hosted domain, empty for group mode. The flow discovers the issuer on its first call.
 func newCodeFlowForDomain(t *testing.T, domain string) (*oidctest.Issuer, *CodeFlow) {
 	t.Helper()
 	issuer := oidctest.New(t)
 	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), flowClientID, flowClientSecret)
-	flow, err := NewCodeFlow(context.Background(), issuer.URL(), flowClientID, flowClientSecret, domain)
+	return issuer, NewCodeFlow(issuer.URL(), flowClientID, flowClientSecret, domain)
+}
+
+// authURL is flow's authorization URL for flowRedirect, failing the test when there is none.
+func authURL(t *testing.T, flow *CodeFlow, state, nonce string) string {
+	t.Helper()
+	location, err := flow.AuthURL(context.Background(), flowRedirect, state, nonce)
 	if err != nil {
-		t.Fatalf("NewCodeFlow(%s): %v", issuer.URL(), err)
+		t.Fatalf("AuthURL: %v", err)
 	}
-	return issuer, flow
+	return location
 }
 
 // googleClaims is a Google ID token's claims for an account of the Workspace domain flowDomain,
@@ -57,7 +63,7 @@ func googleClaims(emailVerified any) map[string]any {
 func exchange(t *testing.T, issuer *oidctest.Issuer, flow *CodeFlow, claims map[string]any) Session {
 	t.Helper()
 	issuer.SignInAs(claims)
-	code, _ := issuer.Authorize(t, flow.AuthURL(flowRedirect, "state-1", "nonce-1"))
+	code, _ := issuer.Authorize(t, authURL(t, flow, "state-1", "nonce-1"))
 	session, err := flow.Exchange(context.Background(), flowRedirect, code, "nonce-1")
 	if err != nil {
 		t.Fatalf("Exchange: %v", err)
@@ -148,7 +154,7 @@ func TestCodeFlowAuthURLAsksGoogleForOfflineAccessInTheDomain(t *testing.T) {
 	_, domainFlow := newCodeFlowForDomain(t, flowDomain)
 	_, groupFlow := newCodeFlowFor(t)
 	query := func(flow *CodeFlow) url.Values {
-		location, err := url.Parse(flow.AuthURL(flowRedirect, "state-1", "nonce-1"))
+		location, err := url.Parse(authURL(t, flow, "state-1", "nonce-1"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -184,8 +190,8 @@ func TestCodeFlowExchangesACodeForTheSignedInPerson(t *testing.T) {
 	issuer, flow := newCodeFlowFor(t)
 	issuer.SignInAs(personClaims("dispatch-members", "other-group"))
 
-	authURL := flow.AuthURL(flowRedirect, "state-1", "nonce-1")
-	code, state := issuer.Authorize(t, authURL)
+	location := authURL(t, flow, "state-1", "nonce-1")
+	code, state := issuer.Authorize(t, location)
 	if state != "state-1" {
 		t.Fatalf("authorization returned state %q, want state-1", state)
 	}
@@ -212,7 +218,7 @@ func TestCodeFlowExchangesACodeForTheSignedInPerson(t *testing.T) {
 
 func TestCodeFlowAuthURLAsksForTheCodeWithTheClientsScopes(t *testing.T) {
 	issuer, flow := newCodeFlowFor(t)
-	authURL := flow.AuthURL(flowRedirect, "state-1", "nonce-1")
+	location := authURL(t, flow, "state-1", "nonce-1")
 	for _, want := range []string{
 		issuer.URL() + "/authorize?",
 		"client_id=" + flowClientID,
@@ -222,8 +228,8 @@ func TestCodeFlowAuthURLAsksForTheCodeWithTheClientsScopes(t *testing.T) {
 		"nonce=nonce-1",
 		"redirect_uri=https%3A%2F%2Fdispatch.example%2Fauth%2Fcallback",
 	} {
-		if !strings.Contains(authURL, want) {
-			t.Errorf("AuthURL %q does not carry %q", authURL, want)
+		if !strings.Contains(location, want) {
+			t.Errorf("AuthURL %q does not carry %q", location, want)
 		}
 	}
 }
@@ -233,7 +239,7 @@ func TestCodeFlowAuthURLAsksForTheCodeWithTheClientsScopes(t *testing.T) {
 func TestCodeFlowExchangeRefusesAnIDTokenForAnotherNonce(t *testing.T) {
 	issuer, flow := newCodeFlowFor(t)
 	issuer.SignInAs(personClaims("dispatch-members"))
-	code, _ := issuer.Authorize(t, flow.AuthURL(flowRedirect, "state-1", "nonce-of-another-sign-in"))
+	code, _ := issuer.Authorize(t, authURL(t, flow, "state-1", "nonce-of-another-sign-in"))
 	if _, err := flow.Exchange(context.Background(), flowRedirect, code, "nonce-1"); err == nil || !strings.Contains(err.Error(), "nonce") {
 		t.Fatalf("Exchange with another sign-in's nonce: err = %v, want a nonce refusal", err)
 	}
@@ -242,7 +248,7 @@ func TestCodeFlowExchangeRefusesAnIDTokenForAnotherNonce(t *testing.T) {
 func TestCodeFlowExchangeRefusesACodeTheIssuerRefuses(t *testing.T) {
 	issuer, flow := newCodeFlowFor(t)
 	issuer.SignInAs(personClaims("dispatch-members"))
-	code, _ := issuer.Authorize(t, flow.AuthURL(flowRedirect, "state-1", "nonce-1"))
+	code, _ := issuer.Authorize(t, authURL(t, flow, "state-1", "nonce-1"))
 	if _, err := flow.Exchange(context.Background(), flowRedirect, code, "nonce-1"); err != nil {
 		t.Fatalf("first Exchange: %v", err)
 	}
@@ -254,7 +260,7 @@ func TestCodeFlowExchangeRefusesACodeTheIssuerRefuses(t *testing.T) {
 func TestCodeFlowRefreshReadsThePersonsCurrentClaims(t *testing.T) {
 	issuer, flow := newCodeFlowFor(t)
 	issuer.SignInAs(personClaims("dispatch-members"))
-	code, _ := issuer.Authorize(t, flow.AuthURL(flowRedirect, "state-1", "nonce-1"))
+	code, _ := issuer.Authorize(t, authURL(t, flow, "state-1", "nonce-1"))
 	session, err := flow.Exchange(context.Background(), flowRedirect, code, "nonce-1")
 	if err != nil {
 		t.Fatalf("Exchange: %v", err)
@@ -287,12 +293,50 @@ func TestCodeFlowRefreshReadsThePersonsCurrentClaims(t *testing.T) {
 	}
 }
 
+// A refresh fails as ErrGrantRefused only when the token endpoint answers 400 or 401 with the OAuth
+// error invalid_grant (RFC 6749 section 5.2), the issuer saying the sign-in is over. Any other
+// failure says nothing about the sign-in and matches ErrIssuerUnavailable instead: a Google outage
+// must not read as the person's grant being withdrawn.
+func TestCodeFlowRefreshClassifiesItsFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		fail    func(issuer *oidctest.Issuer)
+		refused bool
+	}{
+		{"a revoked refresh token", func(issuer *oidctest.Issuer) { issuer.RevokeGrants() }, true},
+		{"400 invalid_grant", func(issuer *oidctest.Issuer) { issuer.FailToken(http.StatusBadRequest, "invalid_grant") }, true},
+		{"401 invalid_grant", func(issuer *oidctest.Issuer) { issuer.FailToken(http.StatusUnauthorized, "invalid_grant") }, true},
+		{"403 invalid_grant", func(issuer *oidctest.Issuer) { issuer.FailToken(http.StatusForbidden, "invalid_grant") }, false},
+		{"500", func(issuer *oidctest.Issuer) { issuer.FailToken(http.StatusInternalServerError, "") }, false},
+		{"503", func(issuer *oidctest.Issuer) { issuer.FailToken(http.StatusServiceUnavailable, "") }, false},
+		{"429", func(issuer *oidctest.Issuer) { issuer.FailToken(http.StatusTooManyRequests, "") }, false},
+		{"401 invalid_client", func(issuer *oidctest.Issuer) { issuer.FailToken(http.StatusUnauthorized, "invalid_client") }, false},
+		{"400 invalid_request", func(issuer *oidctest.Issuer) { issuer.FailToken(http.StatusBadRequest, "invalid_request") }, false},
+		{"no answer", func(issuer *oidctest.Issuer) { issuer.DropToken() }, false},
+		// The refreshed ID token names another issuer, so it does not verify.
+		{"an ID token that does not verify", func(issuer *oidctest.Issuer) { issuer.AdvertiseIssuer("https://another-issuer.example") }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			issuer, flow := newCodeFlowFor(t)
+			session := exchange(t, issuer, flow, personClaims("dispatch-members"))
+			tc.fail(issuer)
+			_, err := flow.Refresh(context.Background(), session.RefreshToken)
+			if refused, unavailable := errors.Is(err, ErrGrantRefused), errors.Is(err, ErrIssuerUnavailable); refused != tc.refused || unavailable == tc.refused {
+				t.Fatalf("Refresh: err = %v (ErrGrantRefused %t, ErrIssuerUnavailable %t), want ErrGrantRefused %t and ErrIssuerUnavailable %t", err, refused, unavailable, tc.refused, !tc.refused)
+			}
+			if strings.Contains(err.Error(), session.RefreshToken) {
+				t.Errorf("Refresh's error carries the refresh token: %v", err)
+			}
+		})
+	}
+}
+
 // Revoke sends the refresh token to the revocation endpoint the issuer's discovery names, as the
 // client, and the issuer ends it: the next refresh with it is refused.
 func TestCodeFlowRevokeEndsTheRefreshToken(t *testing.T) {
 	issuer, flow := newCodeFlowFor(t)
 	issuer.SignInAs(personClaims("dispatch-members"))
-	code, _ := issuer.Authorize(t, flow.AuthURL(flowRedirect, "state-1", "nonce-1"))
+	code, _ := issuer.Authorize(t, authURL(t, flow, "state-1", "nonce-1"))
 	session, err := flow.Exchange(context.Background(), flowRedirect, code, "nonce-1")
 	if err != nil {
 		t.Fatalf("Exchange: %v", err)
@@ -348,10 +392,7 @@ func TestCodeFlowRevokeFailsAgainstAnIssuerWithNoRevocationEndpoint(t *testing.T
 	issuer := oidctest.New(t)
 	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), flowClientID, flowClientSecret)
 	issuer.OmitRevocationEndpoint()
-	flow, err := NewCodeFlow(context.Background(), issuer.URL(), flowClientID, flowClientSecret, "")
-	if err != nil {
-		t.Fatalf("NewCodeFlow: %v", err)
-	}
+	flow := NewCodeFlow(issuer.URL(), flowClientID, flowClientSecret, "")
 	if err := flow.Revoke(context.Background(), "plain-refresh-token"); err == nil || !strings.Contains(err.Error(), "revocation_endpoint") {
 		t.Fatalf("Revoke against an issuer with no revocation endpoint: err = %v, want one naming revocation_endpoint", err)
 	}
@@ -360,21 +401,18 @@ func TestCodeFlowRevokeFailsAgainstAnIssuerWithNoRevocationEndpoint(t *testing.T
 	}
 }
 
-func TestNewCodeFlowRefusesAnIssuerWithNoCodeFlowEndpoints(t *testing.T) {
+// An issuer whose discovery document names no authorization or token endpoint offers no sign-in:
+// its discovery fails, naming token_endpoint, and so does every call that needs it.
+func TestCodeFlowDiscoveryRefusesAnIssuerWithNoCodeFlowEndpoints(t *testing.T) {
 	issuer := oidctest.New(t)
 	issuer.PublishKey(t, "signing-key")
 	issuer.OmitCodeFlowEndpoints()
-	_, err := NewCodeFlow(context.Background(), issuer.URL(), flowClientID, flowClientSecret, "")
-	if err == nil || !strings.Contains(err.Error(), "token_endpoint") {
-		t.Fatalf("NewCodeFlow against an issuer with no code-flow endpoints: err = %v, want a refusal naming token_endpoint", err)
+	flow := NewCodeFlow(issuer.URL(), flowClientID, flowClientSecret, "")
+	err := flow.Discover(context.Background())
+	if !errors.Is(err, ErrIssuerUnavailable) || !strings.Contains(err.Error(), "token_endpoint") {
+		t.Fatalf("Discover against an issuer with no code-flow endpoints: err = %v, want ErrIssuerUnavailable naming token_endpoint", err)
 	}
-}
-
-func TestDiscoverCodeFlowRefusesAnIssuerWhoseDiscoveryFails(t *testing.T) {
-	issuer := oidctest.New(t)
-	issuer.FailDiscovery(503)
-	_, err := DiscoverCodeFlow(context.Background(), issuer.URL(), flowClientID, flowClientSecret, "", time.Second)
-	if err == nil || !strings.Contains(err.Error(), issuer.URL()) {
-		t.Fatalf("DiscoverCodeFlow against a failing issuer: err = %v, want one naming the issuer", err)
+	if flow.Discovered() {
+		t.Fatal("an issuer that offers no sign-in reads as discovered")
 	}
 }

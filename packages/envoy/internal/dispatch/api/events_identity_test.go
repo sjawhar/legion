@@ -243,10 +243,7 @@ func newDocumentSocketRig(t *testing.T, heartbeat time.Duration) *documentSocket
 	ctx := context.Background()
 	rig := &documentSocketRig{pool: oidctest.New(t), email: "alice@d.example"}
 	rig.pool.EnableCodeFlow(rig.pool.PublishKey(t, "signing-key"), "dispatch-client", "dispatch-secret")
-	flow, err := oidc.NewCodeFlow(ctx, rig.pool.URL(), "dispatch-client", "dispatch-secret", "")
-	if err != nil {
-		t.Fatalf("discover the sign-in pool: %v", err)
-	}
+	flow := oidc.NewCodeFlow(rig.pool.URL(), "dispatch-client", "dispatch-secret", "")
 	const redirect = "https://dispatch.example/auth/callback"
 	rig.pool.SignInAs(map[string]any{
 		"sub":              "person-subject",
@@ -254,7 +251,11 @@ func newDocumentSocketRig(t *testing.T, heartbeat time.Duration) *documentSocket
 		"cognito:groups":   []string{"dispatch-members"},
 		"identities":       []map[string]any{{"providerName": "ExampleIdP"}},
 	})
-	code, _ := rig.pool.Authorize(t, flow.AuthURL(redirect, "state", "nonce"))
+	authURL, err := flow.AuthURL(ctx, redirect, "state", "nonce")
+	if err != nil {
+		t.Fatalf("start the sign-in: %v", err)
+	}
+	code, _ := rig.pool.Authorize(t, authURL)
 	signIn, err := flow.Exchange(ctx, redirect, code, "nonce")
 	if err != nil {
 		t.Fatalf("exchange the sign-in code: %v", err)
@@ -318,4 +319,71 @@ func newDocumentSocketRig(t *testing.T, heartbeat time.Duration) *documentSocket
 		PrimaryArtifactID string `json:"primary_artifact_id"`
 	}](t, created).PrimaryArtifactID
 	return rig
+}
+
+// A person whose confirmation has lapsed while the sign-in issuer cannot answer is refused 503
+// SIGNIN_UNAVAILABLE by the API and by the document socket's handshake, never 401 or 500, and stays
+// signed in: their session generation and refresh token are kept, and once the issuer answers the
+// same cookie is served again after one refresh.
+func TestASignInIssuerOutageAnswersTheAPIAndTheDocumentSocket503AndKeepsTheSession(t *testing.T) {
+	rig := newDocumentSocketRig(t, time.Hour)
+	ctx := context.Background()
+	signedIn, found, err := rig.people.Membership(ctx, rig.email)
+	if err != nil || !found {
+		t.Fatalf("the member's membership: found %t, %v", found, err)
+	}
+	if err := rig.people.Confirm(ctx, rig.email, signedIn.RefreshToken, time.Now().Add(-2*time.Hour)); err != nil {
+		t.Fatalf("date the confirmation two hours back: %v", err)
+	}
+	rig.pool.FailToken(http.StatusServiceUnavailable, "")
+
+	whoami := func() (int, string) {
+		t.Helper()
+		request, err := http.NewRequest(http.MethodGet, rig.server.URL+"/api/v1/whoami", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.AddCookie(rig.cookie)
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatalf("GET /api/v1/whoami: %v", err)
+		}
+		defer response.Body.Close()
+		body, _ := io.ReadAll(response.Body)
+		return response.StatusCode, string(body)
+	}
+	socket := func() (int, string) {
+		t.Helper()
+		header := http.Header{"Cookie": []string{rig.cookie.Name + "=" + rig.cookie.Value}}
+		connection, response, err := gws.DefaultDialer.Dial("ws"+strings.TrimPrefix(rig.server.URL, "http")+"/ws/doc/"+rig.artifactID, header)
+		if connection != nil {
+			_ = connection.Close()
+		}
+		if response == nil {
+			t.Fatalf("the document socket's handshake got no answer: %v", err)
+		}
+		defer response.Body.Close()
+		body, _ := io.ReadAll(response.Body)
+		return response.StatusCode, string(body)
+	}
+	if status, body := whoami(); status != http.StatusServiceUnavailable || !strings.Contains(body, `"code":"SIGNIN_UNAVAILABLE"`) {
+		t.Fatalf("GET /api/v1/whoami while the issuer answers 503: %d %s, want 503 SIGNIN_UNAVAILABLE", status, body)
+	}
+	if status, body := socket(); status != http.StatusServiceUnavailable || !strings.Contains(body, `"code":"SIGNIN_UNAVAILABLE"`) {
+		t.Fatalf("the document socket's handshake while the issuer answers 503: %d %s, want 503 SIGNIN_UNAVAILABLE", status, body)
+	}
+	if generation, _, err := rig.sessions.CurrentSessionGeneration(ctx, rig.email); err != nil || generation != rig.generation {
+		t.Fatalf("session generation during the outage = %d (%v), want %d", generation, err, rig.generation)
+	}
+	if kept, _, err := rig.people.Membership(ctx, rig.email); err != nil || kept.RefreshToken != signedIn.RefreshToken {
+		t.Fatalf("the membership during the outage kept its refresh token: %t (%v), want true", kept.RefreshToken == signedIn.RefreshToken, err)
+	}
+
+	rig.pool.FailToken(0, "")
+	if status, body := whoami(); status != http.StatusOK || !strings.Contains(body, rig.email) {
+		t.Fatalf("GET /api/v1/whoami once the issuer answers: %d %s, want 200 naming %s", status, body, rig.email)
+	}
+	if status, body := socket(); status != http.StatusSwitchingProtocols {
+		t.Fatalf("the document socket's handshake once the issuer answers: %d %s, want 101", status, body)
+	}
 }

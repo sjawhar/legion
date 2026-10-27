@@ -101,7 +101,7 @@ type AppContextOptions struct {
 	Events        *events.Broker
 	App           *auth.AppConfig
 	GitHubAPIBase string
-	OIDC          *oidc.Verifier
+	OIDC          api.ServiceTokenVerifier
 	AgentStream   agentstream.Source
 	Lifetime      context.Context
 	// AgentSecretsURL/AgentSecretsTokenFile configure the credential-request UI's secrets broker
@@ -236,7 +236,8 @@ func New(ctx *AppContext) (http.Handler, func()) {
 // authStart sends the browser to the issuer to sign in. The sign-in in flight (its state, nonce,
 // the page it returns to and when it lapses) travels in the browser's dispatch_oauth_state cookie,
 // signed under a key derived from the current signing key (signOAuthState), and no process keeps
-// it: whichever process holding that key the issuer's redirect reaches completes the sign-in.
+// it: whichever process holding that key the issuer's redirect reaches completes the sign-in. An
+// issuer not yet discovered is answered 503 SIGNIN_UNAVAILABLE, with no state cookie set.
 func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
 	if r.ctx.SignIn == nil {
 		signInUnconfigured(w)
@@ -252,6 +253,12 @@ func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusInternalServerError, "state")
 		return
 	}
+	authURL, err := r.ctx.SignIn.AuthURL(req.Context(), callbackURL(r.ctx.ServerURL, req), state, nonce)
+	if err != nil {
+		slog.Warn("dispatch: sign-in not started: the sign-in issuer is not discovered", "error", err)
+		identity.WriteError(w, err)
+		return
+	}
 	value, err := signOAuthState(r.ctx.SigningKey, oauthState{
 		State: state,
 		Nonce: nonce,
@@ -263,7 +270,7 @@ func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	http.SetCookie(w, oauthStateCookieFor(value, oauthStateMaxAge, !r.ctx.InsecureCookie))
-	http.Redirect(w, req, r.ctx.SignIn.AuthURL(callbackURL(r.ctx.ServerURL, req), state, nonce), http.StatusFound)
+	http.Redirect(w, req, authURL, http.StatusFound)
 }
 
 // authCallback completes a sign-in the issuer redirected back: it exchanges the code for the
@@ -277,7 +284,9 @@ func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
 // has not lapsed, and names the state the issuer returned in the URL. Nothing records that a
 // state was used, yet each completes at most once: the callback clears the cookie before anything
 // else, the issuer's authorization code is single-use, and Exchange accepts only an ID token
-// carrying the nonce the cookie bound the sign-in to.
+// carrying the nonce the cookie bound the sign-in to. An exchange that meets an issuer this
+// process has not discovered (another process started the sign-in) is answered 503
+// SIGNIN_UNAVAILABLE; any other failed exchange 502.
 func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 	if r.ctx.SignIn == nil {
 		signInUnconfigured(w)
@@ -300,6 +309,11 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	session, err := r.ctx.SignIn.Exchange(req.Context(), callbackURL(r.ctx.ServerURL, req), code, pending.Nonce)
+	if errors.Is(err, oidc.ErrIssuerUnavailable) {
+		slog.Warn("dispatch: sign-in code exchange failed: the sign-in issuer is not discovered", "error", err)
+		identity.WriteError(w, err)
+		return
+	}
 	if err != nil {
 		slog.Warn("dispatch: sign-in code exchange failed", "error", err)
 		writeError(w, http.StatusBadGateway, "sign-in failed: "+err.Error())

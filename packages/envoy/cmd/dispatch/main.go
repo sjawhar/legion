@@ -253,13 +253,14 @@ func main() {
 		}
 	}
 
-	signIn, err := discoverSignIn(ctx, boot)
-	if err != nil {
-		slog.Error("dispatch: discover the sign-in issuer", "error", err)
-		os.Exit(1)
-	}
+	// INFRA-555: neither issuer is read at boot. The sign-in issuer's code flow and the
+	// service-account token verifier each discover their issuer in the background from here, and
+	// until then what needs one answers 503 (SIGNIN_UNAVAILABLE, OIDC_ISSUER_UNAVAILABLE) while
+	// everything else serves; /healthz reports each as `signin` and `service_tokens`.
+	signIn := signInFlow(boot)
 	if signIn != nil {
 		signInRule(boot).BootLog(boot.SignInIssuer, boot.SignInClientID)
+		go signIn.Run(ctx)
 	}
 
 	people, signingKey, err := openPeople(boot, dataDir, database.Pool, signIn)
@@ -291,13 +292,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	serviceTokens, err := oidc.Discover(ctx, boot.OIDCIssuer, boot.OIDCAudience, oidc.DiscoveryTimeout)
-	if err != nil {
-		slog.Error("dispatch: discover OIDC issuer", "error", err)
-		os.Exit(1)
-	}
+	serviceTokens := serviceTokenVerifier(boot)
 	if serviceTokens != nil {
 		slog.Info("dispatch: verifying service-account tokens", "issuer", boot.OIDCIssuer, "audience", boot.OIDCAudience)
+		go serviceTokens.Run(ctx)
 	}
 
 	// embedder is nil (meaning search off, search answers keyword-only and says so) when Bedrock,
@@ -309,7 +307,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	appCtx, err := routes.BuildAppContext(appContextOptions(boot, routes.AppContextOptions{
+	built := routes.AppContextOptions{
 		SigningKey:  signingKey,
 		WebDistDir:  webDistDir,
 		AssetStore:  assetStore,
@@ -323,11 +321,16 @@ func main() {
 		Embedder:    embedder,
 		Events:      broker,
 		App:         appCfg,
-		OIDC:        serviceTokens,
 		AgentStream: agentStream,
 		Files:       fileStore,
 		Lifetime:    ctx,
-	}))
+	}
+	// Set only when configured: a nil *oidc.LazyVerifier in the interface field would read as a
+	// configured verifier, and every JWT-shaped bearer would be sent to it.
+	if serviceTokens != nil {
+		built.OIDC = serviceTokens
+	}
+	appCtx, err := routes.BuildAppContext(appContextOptions(boot, built))
 
 	if err != nil {
 		slog.Error("dispatch: build app context", "error", err)
@@ -463,7 +466,7 @@ func main() {
 	announcer := startup.New(startup.Deps{Pool: database.Pool, Publisher: announcements})
 
 	routesHandler, waitDelivery := routes.New(appCtx)
-	handler := dispatchHandler(routesHandler, database, natsClient, fileStore, buildCommit, announcer)
+	handler := dispatchHandler(routesHandler, database, natsClient, fileStore, buildCommit, announcer, issuers{signIn: signIn, serviceTokens: serviceTokens})
 	server := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: readHeaderTimeout,
@@ -1000,11 +1003,30 @@ func serverBus(extra ...bus.ConnectOption) []bus.ConnectOption {
 // dispatchHandler mounts the one /healthz the process serves above every dashboard and API
 // route, so the probe is answered whatever the router is doing. Go's ServeMux prefers the
 // longer pattern, so "GET /healthz" wins over the router's "/".
-func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string, announcer *startup.Announcer) http.Handler {
+func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string, announcer *startup.Announcer, issuers issuers) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("GET /healthz", healthzHandler(database, natsClient, fileStore, commit, announcer))
+	mux.Handle("GET /healthz", healthzHandler(database, natsClient, fileStore, commit, announcer, issuers))
 	mux.Handle("/", handler)
 	return mux
+}
+
+// issuers are the two OIDC issuers the process discovers in the background, as /healthz reports
+// them: the sign-in issuer's code flow and the service-account token verifier, each nil when boot
+// configures none.
+type issuers struct {
+	signIn        *oidc.CodeFlow
+	serviceTokens *oidc.LazyVerifier
+}
+
+// serviceTokenVerifier is the verifier of the projected service-account tokens boot's
+// DISPATCH_OIDC_ISSUER issues to DISPATCH_OIDC_AUDIENCE, nil when boot configures none. It reads
+// nothing: the issuer is discovered in the background (oidc.LazyVerifier.Run, which main starts at
+// boot) or by the first token, and until then a JWT-shaped bearer is answered 503.
+func serviceTokenVerifier(boot bootConfig) *oidc.LazyVerifier {
+	if boot.OIDCIssuer == "" {
+		return nil
+	}
+	return oidc.NewLazyVerifier(boot.OIDCIssuer, boot.OIDCAudience)
 }
 
 // healthzHandler answers the readiness probe: 200 while this process can serve requests, which is
@@ -1030,6 +1052,14 @@ func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bu
 // otherwise take documents, asks and comments down with the files. A deploy check that wants the
 // bucket asserts `files: true` itself.
 //
+// Where a sign-in issuer is configured, `signin` reports whether its discovery document has been
+// read, and where a service-account token issuer is, `service_tokens` reports the same of that
+// one; each is null when not configured. Neither decides `ok`: a process whose issuer is down
+// serves agents and the people whose confirmation stands, answers only what needs the issuer 503,
+// and discovers it in the background (oidc.CodeFlow.Run, oidc.LazyVerifier.Run), so failing the
+// probe would take that service away for an outage it serves through. A deploy check that needs
+// sign-in asserts `signin: true` itself.
+//
 // Beside those it reports what is deployed: `commit`, the legion commit this process's binary
 // was built from (null when the build did not stamp one), `fleet_commit`, the commit of the latest
 // announcement that every live server process serves one build (startup.Announcer.FleetCommit:
@@ -1040,7 +1070,7 @@ func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bu
 // compares commit and schema_version with the commit its image pin names and that commit's
 // migrations, so neither is ever filled with a guess; the Legion daemon reads fleet_commit, since
 // mid-roll whichever process answers it may serve a build the rest do not.
-func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string, announcer *startup.Announcer) http.HandlerFunc {
+func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string, announcer *startup.Announcer, issuers issuers) http.HandlerFunc {
 	var reportedCommit *string
 	if commit != "" {
 		reportedCommit = &commit
@@ -1081,6 +1111,15 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore fil
 			connected := natsClient.Connected()
 			natsOK = &connected
 		}
+		var signInOK, serviceTokensOK *bool
+		if issuers.signIn != nil {
+			discovered := issuers.signIn.Discovered()
+			signInOK = &discovered
+		}
+		if issuers.serviceTokens != nil {
+			discovered := issuers.serviceTokens.Discovered()
+			serviceTokensOK = &discovered
+		}
 		<-filesProbed
 		ok := databaseOK
 		status := http.StatusOK
@@ -1094,10 +1133,12 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore fil
 			DB            bool    `json:"db"`
 			NATS          *bool   `json:"nats"`
 			Files         *bool   `json:"files"`
+			SignIn        *bool   `json:"signin"`
+			ServiceTokens *bool   `json:"service_tokens"`
 			Commit        *string `json:"commit"`
 			FleetCommit   *string `json:"fleet_commit"`
 			SchemaVersion *int    `json:"schema_version"`
-		}{OK: ok, DB: databaseOK, NATS: natsOK, Files: filesOK, Commit: reportedCommit, FleetCommit: announcer.FleetCommit(), SchemaVersion: schemaVersion})
+		}{OK: ok, DB: databaseOK, NATS: natsOK, Files: filesOK, SignIn: signInOK, ServiceTokens: serviceTokensOK, Commit: reportedCommit, FleetCommit: announcer.FleetCommit(), SchemaVersion: schemaVersion})
 	}
 }
 

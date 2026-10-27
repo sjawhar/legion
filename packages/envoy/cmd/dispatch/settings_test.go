@@ -371,12 +371,12 @@ func signInPool(t *testing.T, clientID, clientSecret string) *oidctest.Issuer {
 }
 
 // signInRouter is the router main serves for boot over people, with the sign-in pool's code flow
-// main discovers from boot's DISPATCH_SIGNIN_* settings (discoverSignIn).
+// main builds from boot's DISPATCH_SIGNIN_* settings (signInFlow).
 func signInRouter(t *testing.T, boot bootConfig, people auth.PeopleStore) http.Handler {
 	t.Helper()
-	flow, err := discoverSignIn(context.Background(), boot)
-	if err != nil || flow == nil {
-		t.Fatalf("discover the sign-in pool %s: %v, %v", boot.SignInIssuer, flow, err)
+	flow := signInFlow(boot)
+	if flow == nil {
+		t.Fatalf("boot configures no sign-in pool: %+v", boot)
 	}
 	return routerFor(t, boot, routes.AppContextOptions{SignIn: flow, People: people})
 }
@@ -612,14 +612,18 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			// Cookie identity is Google sign-in: with none of the sign-in settings, the server refuses to start.
 			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": "", "DISPATCH_SIGNIN_CLIENT_ID": "", "DISPATCH_SIGNIN_CLIENT_SECRET": "", "DISPATCH_SIGNIN_GROUP": ""},
 				"cookie identity signs people in: DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET and one of DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN are required")
-			// The pool main discovers: /auth/start sends the browser to its authorization endpoint.
+			// The pool main builds the code flow for: /auth/start sends the browser to its
+			// authorization endpoint. A pool whose discovery fails does not stop the router being
+			// built: /auth/start answers 503 SIGNIN_UNAVAILABLE until the pool answers.
 			t.Run("router", func(t *testing.T) {
 				if location := startSignIn(t, signInRouter(t, boot, peopleStore(t))).Header().Get("Location"); !strings.HasPrefix(location, pool.URL()+"/") {
 					t.Errorf("DISPATCH_SIGNIN_ISSUER=%s: GET /auth/start redirected to %q, want the pool's authorization endpoint", pool.URL(), location)
 				}
 				pool.FailDiscovery(http.StatusServiceUnavailable)
-				if _, err := discoverSignIn(context.Background(), boot); err == nil || !strings.Contains(err.Error(), pool.URL()) {
-					t.Errorf("a pool whose discovery fails: err = %v, want a refusal naming %s", err, pool.URL())
+				response := httptest.NewRecorder()
+				signInRouter(t, boot, peopleStore(t)).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/start", nil))
+				if response.Code != http.StatusServiceUnavailable || errorCode(response) != "SIGNIN_UNAVAILABLE" {
+					t.Errorf("a pool whose discovery fails: GET /auth/start answered %d %s, want 503 SIGNIN_UNAVAILABLE", response.Code, response.Body.String())
 				}
 			})
 		},

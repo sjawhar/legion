@@ -127,7 +127,7 @@ func requireCookieSignIn(boot bootConfig, devSignIn bool) error {
 
 // signInRule is who boot's sign-in admits: the members of a Cognito pool's group, or the people of
 // a Google Workspace domain; nil when boot configures neither (header identity, or dev sign-in),
-// matching discoverSignIn.
+// matching signInFlow.
 func signInRule(boot bootConfig) identity.SignInRule {
 	switch {
 	case boot.SignInDomain != "":
@@ -139,20 +139,23 @@ func signInRule(boot bootConfig) identity.SignInRule {
 	}
 }
 
-// discoverSignIn is the sign-in issuer's code flow for boot's DISPATCH_SIGNIN_* settings, its
-// endpoints read from the issuer's discovery document, asking Google for boot's Workspace domain
-// in domain mode; nil when boot configures no sign-in (header identity, or dev sign-in).
-func discoverSignIn(ctx context.Context, boot bootConfig) (*oidc.CodeFlow, error) {
+// signInFlow is the sign-in issuer's code flow for boot's DISPATCH_SIGNIN_* settings, asking
+// Google for boot's Workspace domain in domain mode; nil when boot configures no sign-in (header
+// identity, or dev sign-in). It reads nothing: the issuer's discovery document is read when first
+// needed (oidc.CodeFlow.Run, which main starts at boot, or the first request), so a sign-in issuer
+// that is down at boot delays sign-ins and nothing else.
+func signInFlow(boot bootConfig) *oidc.CodeFlow {
 	if boot.SignInIssuer == "" {
-		return nil, nil
+		return nil
 	}
-	return oidc.DiscoverCodeFlow(ctx, boot.SignInIssuer, boot.SignInClientID, boot.SignInClientSecret, boot.SignInDomain, oidc.DiscoveryTimeout)
+	return oidc.NewCodeFlow(boot.SignInIssuer, boot.SignInClientID, boot.SignInClientSecret, boot.SignInDomain)
 }
 
 // openPeople is the people store main serves boot with over pool, and the keys session cookies are
 // signed with (sessionSigningKey): the store seals each refresh token under the current key and
 // opens one sealed under any of them, and revokes a token stored in plain text at signIn's pool,
-// nil when boot configures none.
+// nil when boot configures none. A revocation the undiscovered issuer cannot take fails that one
+// token, which stays for the next boot.
 func openPeople(boot bootConfig, dataDir string, pool *store.Pool, signIn *oidc.CodeFlow) (*store.PgPeopleStore, auth.SigningKeys, error) {
 	signingKey, err := sessionSigningKey(boot, dataDir)
 	if err != nil {
@@ -167,9 +170,9 @@ func openPeople(boot bootConfig, dataDir string, pool *store.Pool, signIn *oidc.
 
 // retirePlainRefreshTokens is the boot's retirement of the refresh tokens people holds in plain
 // text (store.PgPeopleStore.RetirePlainRefreshTokens), bounded by timeout (bootTask): a pool that
-// does not answer fails each token not yet revoked, and the start goes on. It logs the counts,
-// never a token; each token the pool did not revoke has its own ERROR line, and stays for the next
-// boot.
+// does not answer, or has not been discovered, fails each token not yet revoked, and the start goes
+// on. It logs the counts, never a token; each token the pool did not revoke has its own ERROR line,
+// and stays for the next boot.
 func retirePlainRefreshTokens(ctx context.Context, people *store.PgPeopleStore, timeout time.Duration) {
 	bootTask(ctx, timeout, "dispatch: retire the refresh tokens stored in plain text", "dispatch: retired the refresh tokens stored in plain text",
 		func(ctx context.Context) ([]any, error) {

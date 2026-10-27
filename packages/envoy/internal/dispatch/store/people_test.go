@@ -97,16 +97,12 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 
 // revokingPool is a sign-in pool on this machine with Dispatch's app client and the revocation
 // endpoint its discovery names, and the code flow a people store revokes through, as main hands it
-// the one it discovers.
+// the one it builds.
 func revokingPool(t *testing.T) (*oidctest.Issuer, *oidc.CodeFlow) {
 	t.Helper()
 	pool := oidctest.New(t)
 	pool.EnableCodeFlow(pool.PublishKey(t, "pool-key"), "dispatch-client", "client-secret")
-	flow, err := oidc.NewCodeFlow(context.Background(), pool.URL(), "dispatch-client", "client-secret", "")
-	if err != nil {
-		t.Fatalf("discover the sign-in pool: %v", err)
-	}
-	return pool, flow
+	return pool, oidc.NewCodeFlow(pool.URL(), "dispatch-client", "client-secret", "")
 }
 
 // storePlainRefreshToken stores token for email in plain text with the statement the release

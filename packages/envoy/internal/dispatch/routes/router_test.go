@@ -215,10 +215,7 @@ func newSignInRigFor(t *testing.T, serverURL string, rule identity.SignInRule, h
 	t.Helper()
 	issuer := oidctest.New(t)
 	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), rigClientID, "dispatch-secret")
-	flow, err := oidc.NewCodeFlow(context.Background(), issuer.URL(), rigClientID, "dispatch-secret", hostedDomain)
-	if err != nil {
-		t.Fatalf("NewCodeFlow: %v", err)
-	}
+	flow := oidc.NewCodeFlow(issuer.URL(), rigClientID, "dispatch-secret", hostedDomain)
 	rig := &signInRig{issuer: issuer, people: newMemoryPeople(), sessions: &memorySessionStore{generations: map[string]int64{}}, now: time.Now()}
 	rig.people.sessions = rig.sessions
 	rig.membership = &identity.Membership{People: rig.people, Sessions: rig.sessions, SignIn: flow, Rule: rule, Now: rig.clock}
@@ -231,6 +228,7 @@ func newSignInRigFor(t *testing.T, serverURL string, rule identity.SignInRule, h
 		SignInRule: rule,
 		ServerURL:  serverURL,
 	}
+	var err error
 	rig.ctx, err = BuildAppContext(rig.options)
 	if err != nil {
 		t.Fatalf("build context: %v", err)
@@ -416,6 +414,38 @@ func TestSignInRefusesAUsernameNoProviderIssued(t *testing.T) {
 	response := rig.signIn(t, claims)
 	if response.Code != http.StatusForbidden || sessionCookie(response) != nil {
 		t.Fatalf("callback for a pool account: status %d cookie %v, want 403 and no session", response.Code, sessionCookie(response))
+	}
+}
+
+// While the sign-in issuer has not been discovered, /auth/start answers 503 SIGNIN_UNAVAILABLE and
+// sets no state cookie, and a callback whose exchange meets the undiscovered issuer (a sign-in a
+// process that had discovered it started) answers the same, never 502.
+func TestSignInAgainstAnUndiscoveredIssuerAnswers503(t *testing.T) {
+	rig := newSignInRig(t, "")
+	rig.issuer.SignInAs(personClaims(rigGroup))
+	authURL, stateCookie := rig.start(t, "http://dispatch.test/auth/start")
+	code, state := rig.issuer.Authorize(t, authURL.String())
+
+	rig.issuer.FailDiscovery(http.StatusServiceUnavailable)
+	options := rig.options
+	options.SignIn = oidc.NewCodeFlow(rig.issuer.URL(), rigClientID, "dispatch-secret", "")
+	ctx, err := BuildAppContext(options)
+	if err != nil {
+		t.Fatalf("build the undiscovered process's context: %v", err)
+	}
+	undiscovered, _ := New(ctx)
+
+	response := httptest.NewRecorder()
+	undiscovered.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/start", nil))
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"SIGNIN_UNAVAILABLE"`) {
+		t.Fatalf("/auth/start before discovery: %d %s, want 503 SIGNIN_UNAVAILABLE", response.Code, response.Body.String())
+	}
+	if cookies := response.Result().Cookies(); len(cookies) != 0 {
+		t.Fatalf("/auth/start before discovery set %v, want no cookie", cookies)
+	}
+	callback := callbackOn(undiscovered, code, state, stateCookie)
+	if callback.Code != http.StatusServiceUnavailable || !strings.Contains(callback.Body.String(), `"code":"SIGNIN_UNAVAILABLE"`) || sessionCookie(callback) != nil {
+		t.Fatalf("a callback whose exchange meets an undiscovered issuer: %d %s, want 503 SIGNIN_UNAVAILABLE and no session", callback.Code, callback.Body.String())
 	}
 }
 

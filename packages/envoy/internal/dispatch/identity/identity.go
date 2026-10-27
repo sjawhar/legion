@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
+	"github.com/sjawhar/envoy/internal/oidc"
 )
 
 // ErrNoIdentity means the request did not prove a person: no cookie or header, a cookie whose
@@ -73,13 +74,25 @@ func (i HeaderIdentity) Login(r *http.Request) (string, error) {
 	return email, nil
 }
 
-// WriteError renders an Identity error as Dispatch's JSON error response.
+// signInUnavailableMessage is what WriteError answers, with the code SIGNIN_UNAVAILABLE, a request
+// that needs the sign-in issuer while the issuer cannot be reached.
+const signInUnavailableMessage = "the sign-in issuer cannot be reached; try again in a minute"
+
+// WriteError renders an Identity error, or a sign-in's, as Dispatch's JSON error response: 401
+// NO_IDENTITY for ErrNoIdentity; 503 SIGNIN_UNAVAILABLE for an error matching
+// oidc.ErrIssuerUnavailable, the sign-in issuer not reachable when a sign-in starts or completes or
+// when a lapsed confirmation needs it (Membership: the person stays signed in, and the first
+// request after the issuer answers is served); and 500 IDENTITY_ERROR for anything else.
 func WriteError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
 	body := map[string]string{"error": "identity resolution failed", "code": "IDENTITY_ERROR"}
-	if errors.Is(err, ErrNoIdentity) {
+	switch {
+	case errors.Is(err, ErrNoIdentity):
 		status = http.StatusUnauthorized
 		body = map[string]string{"error": "unauthorized", "code": "NO_IDENTITY"}
+	case errors.Is(err, oidc.ErrIssuerUnavailable):
+		status = http.StatusServiceUnavailable
+		body = map[string]string{"error": signInUnavailableMessage, "code": "SIGNIN_UNAVAILABLE"}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
