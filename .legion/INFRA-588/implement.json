@@ -2,82 +2,74 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-588",
-  "completed": "2026-10-27T16:05:00Z",
+  "completed": "2026-10-27T16:58:00Z",
+  "round": 1,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2411",
-  "head": "fa1502d187dd6945f0ff4808b4eb9adb915e7a60",
-  "proofComment": "https://github.com/sjawhar/legion/pull/2411#issuecomment-6446604724",
+  "head": "ebeda2541e7f82a1285901fb7ac8f9841ca35f97",
+  "proofComment": "https://github.com/sjawhar/legion/pull/2411#issuecomment-6447880445",
+  "reviewAnswered": "Round 1 at 1479162df767: 3 Important + 6 Minor, all fixed; 9 threads answered and resolved one by one.",
   "proof": [
     {
-      "criterion": "The script is committed with tests that re-run a known merge and list its conflicted files",
-      "surface": "bun test scripts/conflicts (local; the CI test job runs the same three steps added to .github/workflows/pr-and-main.yaml)",
+      "criterion": "The script is committed with tests that re-run a known merge and list its conflicted files (and, round 1: a missing parent is never given a state; only PRs that existed in the window are counted; the .changes/ rule is tested)",
+      "surface": "bun test scripts/conflicts (local; the CI test job runs the same three steps)",
       "command": "cd $LEGION_WORKSPACE && bun test scripts/conflicts && bunx biome check --error-on-warnings scripts/conflicts && bunx tsc --noEmit -p scripts/conflicts",
-      "observed": "27 pass, 0 fail across analyse.test.ts (a built conflicting merge returns conflicts exactly [\"packages/x/CHANGELOG.md\"], a clean one [], two files sorted, other-branch kind, fix states before/transition/after, refused fix commits), summary.test.ts (window bounds, dedupe, prefix, tiers, per-file and per-glob counts, comparison) and measure.test.ts (CLI exit codes); biome clean on 13 files; tsc exit 0",
-      "headSha": "fa1502d187dd6945f0ff4808b4eb9adb915e7a60",
-      "negativeControl": "resolveFixes with a commit not on origin/main and an unresolvable one throws UsageError (asserted in analyse.test.ts); the CLI refuses JSON without prs with exit 2 (measure.test.ts)"
+      "observed": "35 pass, 0 fail; biome clean on 13 files; tsc exit 0. New: a merge with an absent upstream parent is recorded forward / conflicts null / 'parent object missing'; classifyFixes rejects a pair whose parent is absent; isAncestor throws on a missing object; PRs created after until without a merge in the window, merged before since, or closed before since are not read in a selection run but are in a Python-file run; category('.changes/unreleased/x.yaml') and the per-package form give changelog, near misses do not",
+      "headSha": "ebeda2541e7f82a1285901fb7ac8f9841ca35f97",
+      "negativeControl": "isAncestor with an absent oid rejects (asserted); classifyFixes with an absent upstream or branch parent rejects with an Error that is not a UsageError (asserted)"
     },
     {
-      "criterion": "The port reproduces the before measurement (P1)",
+      "criterion": "The port reproduces the before measurement (P1, before numbers unchanged)",
       "surface": "the CLI on the Python run's raw records (dispatch://INFRA-588/artifact/conflict-baseline-2026-10-20-to-27-json)",
       "command": "bun scripts/conflicts/measure.ts --from-json \"$TMPDIR/before.json\" --branch-prefix legion/",
-      "observed": "combined 126 read / 80 carrying / 253 conflicting / tier changelog-only 89 / tier changelog+guides+generated 108 / packages/envoy/CHANGELOG.md 89 events in 39 PRs; merged section 68/38/117/106 (36 PRs)/11, tiers 31/41/43/62; merged, other, force-push and snapshot sections diff-equal to baseline.md Part 1, and with no prefix to Part 2 (193 merged), after normalising separator rows, blank lines, Dispatch's __tests__ -> **tests** rewrite and the renamed header lines",
-      "headSha": "fa1502d187dd6945f0ff4808b4eb9adb915e7a60",
-      "negativeControl": "--from-json of {since,until,origin_main} without prs -> 'raw records: \"prs\" is missing or not an array', exit 2"
+      "observed": "byte-identical to round 0's output at fa1502d187dd: combined 126 / 80 / 253, tiers 89 and 108, packages/envoy/CHANGELOG.md 89 in 39; merged section 68/38/117/106 (36 PRs)/11, tiers 31/41/43/62; the throwaway driver's diffs against baseline.md Part 1 and Part 2 are empty",
+      "headSha": "ebeda2541e7f82a1285901fb7ac8f9841ca35f97",
+      "negativeControl": "--from-json of {since,until,origin_main} without prs -> exit 2"
     },
     {
-      "criterion": "The script measures live GitHub history the same way (P2)",
-      "surface": "the CLI against sjawhar/legion on GitHub, fresh workdir",
-      "command": "rm -rf $TMPDIR/conflicts && bun scripts/conflicts/measure.ts --since 2026-10-20 --until 2026-10-27T11:21:00Z --branch-prefix legion/ --workdir \"$TMPDIR/conflicts\"",
-      "observed": "exit 0, 218 s, workdir 619 MB; merged-in-window section byte-equal to P1's; combined 133/82/259, differences named per PR: #2235 closed unmerged (+1 read, +1 carrying, +1 merge), #2397 opened later carrying a 08:16Z merge, #2402-#2406 opened later with no conflicting merge, merges dated 11:15-11:20Z pushed after the Python run on #2233, #2361, #2366, #2373; snapshot differs because it is taken now",
-      "headSha": "fa1502d187dd6945f0ff4808b4eb9adb915e7a60",
-      "negativeControl": "--since 2026-10-28 --until 2026-10-27 -> '--since 2026-10-28 is after --until 2026-10-27', exit 2, no workdir created"
+      "criterion": "The script measures live GitHub history the same way (P2), counting only PRs that existed in the window",
+      "surface": "the CLI against sjawhar/legion on GitHub, fresh workdir $TMPDIR/conflicts2",
+      "command": "bun scripts/conflicts/measure.ts --since 2026-10-20 --until 2026-10-27T11:21:00Z --branch-prefix legion/ --workdir \"$TMPDIR/conflicts2\"",
+      "observed": "exit 0, 218 s, 621 MB; merged section byte-equal to P1's; 140 legion/ PRs listed, 128 read = 126 + #2235 (closed unmerged) + #2397 (opened 11:27Z, merge dated 08:16Z); #2402-#2406, #2411, #2414, #2416, #2419, #2420, #2422, #2423 (created after --until, nothing in the window) not read; carrying 82, merges 259",
+      "headSha": "ebeda2541e7f82a1285901fb7ac8f9841ca35f97",
+      "negativeControl": "--since 2026-10-28 --until 2026-10-27 -> exit 2, no workdir created"
     },
     {
-      "criterion": "Fix states work on real history (P3)",
-      "surface": "the CLI with --fixed against the live clone",
-      "command": "P2's command plus --fixed 'packages/envoy/CHANGELOG.md=1b8d5c13e496'",
-      "observed": "envoy CHANGELOG row 91 events (89 + the 2 merges P2 explains) = before 79 + transition 10 + after 2; git merge-base --is-ancestor 1b8d5c13e496 on ce39bc6b7f9c (before: upstream 1, branch 1), 6c7b9483ff36 (transition: upstream 0, branch 1), cd3c748767ee (after: upstream 0, branch 0); --fixed 'packages/claude-envoy/legion/**=…' totals 25 merges in 11 PRs, the spec's figure",
-      "headSha": "fa1502d187dd6945f0ff4808b4eb9adb915e7a60",
-      "negativeControl": "--fixed 'packages/envoy/CHANGELOG.md=0000000000000000000000000000000000000000' -> 'does not resolve to a commit', exit 2; --fixed with refs/pull/2397/head (1f0f61d4401a, not on main) -> 'is not on origin/main', exit 2"
+      "criterion": "Fix states work on real history and a missing parent is refused (P3)",
+      "surface": "the CLI with --fixed against the live clone; and --fixed on --from-json records with an absent parent",
+      "command": "P2's command plus --fixed 'packages/envoy/CHANGELOG.md=1b8d5c13e496' --fixed 'packages/claude-envoy/legion/**=1b8d5c13e496'; and bun scripts/conflicts/measure.ts --from-json r1-missing.json --branch-prefix legion/ --no-fetch --workdir $TMPDIR/conflicts --fixed 'packages/envoy/CHANGELOG.md=1b8d5c13e496'",
+      "observed": "envoy CHANGELOG 91 = before 79 + transition 10 + after 2 (as round 0, each state confirmed by git merge-base in round 0); claude-envoy/legion/** 25 merges in 11 PRs, all before",
+      "headSha": "ebeda2541e7f82a1285901fb7ac8f9841ca35f97",
+      "negativeControl": "r1-missing.json (before records with merge cd3c748767ee's upstream_parent set to 0123456789abcdef0123456789abcdef01234567) -> exit 1, 'merge cd3c748767ee…: parent 0123…4567 is missing and could not be fetched', no report (the review saw before 80 / after 1, exit 0 at fa1502d187dd); --fixed …=0000… and --fixed refs/pull/2397/head -> exit 2"
     },
     {
       "criterion": "The comparison the production check runs works before the merge (P4)",
       "surface": "the CLI with --compare-with the before records, live window since the Python run",
-      "command": "bun scripts/conflicts/measure.ts --since 2026-10-27T11:21:00Z --branch-prefix legion/ --compare-with \"$TMPDIR/before.json\"",
-      "observed": "exit 0, 37 s; before column 126 read / 80 carrying (63.5%) / 253 merges (2.01 per PR) / tiers 89 and 108, equal to P1's combined section; after 48 / 29 / 49; 373 file rows, one per file of either window",
-      "headSha": "fa1502d187dd6945f0ff4808b4eb9adb915e7a60",
-      "negativeControl": "--compare-with a file containing 'not json' -> 'raw records are not JSON', exit 2"
+      "command": "bun scripts/conflicts/measure.ts --since 2026-10-27T11:21:00Z --branch-prefix legion/ --workdir \"$TMPDIR/conflicts2\" --compare-with \"$TMPDIR/before.json\"",
+      "observed": "exit 0, 43 s; before column 126 / 80 (63.5%) / 253 (2.01) / 89 / 108, equal to P1; after 56 / 33 / 57",
+      "headSha": "ebeda2541e7f82a1285901fb7ac8f9841ca35f97",
+      "negativeControl": "--compare-with a file containing 'not json' -> exit 2"
     }
   ],
   "filesChanged": [
-    "scripts/conflicts/measure.ts",
     "scripts/conflicts/git.ts",
-    "scripts/conflicts/github.ts",
     "scripts/conflicts/analyse.ts",
+    "scripts/conflicts/github.ts",
     "scripts/conflicts/summary.ts",
-    "scripts/conflicts/render.ts",
+    "scripts/conflicts/measure.ts",
     "scripts/conflicts/types.ts",
-    "scripts/conflicts/tsconfig.json",
     "scripts/conflicts/README.md",
     "scripts/conflicts/__tests__/analyse.test.ts",
     "scripts/conflicts/__tests__/summary.test.ts",
-    "scripts/conflicts/__tests__/measure.test.ts",
-    "scripts/conflicts/__fixtures__/window.json",
-    "scripts/conflicts/__fixtures__/after.json",
-    ".github/workflows/pr-and-main.yaml"
+    "scripts/conflicts/__tests__/measure.test.ts"
   ],
   "trickyParts": [
-    "Python's category table orders tied rows by set iteration (hash order); the port breaks ties by first appearance over events in order and each event's sorted paths, which matches baseline.md in both parts.",
-    "The Python file (no `selection` key) splits merged/other by `state`; a run of this script splits by `mergedAt` inside the window.",
-    "A --fixed glob's totals count each merge once (a directory glob would otherwise count a merge once per matched file); the comparison computes the before run's glob totals without git.",
-    "baseline.md as Dispatch stores it rewrote `__tests__` to `**tests**` and added blank lines; the reproduction diff normalises both."
+    "An all-on-PR merge stays `internal` before any git call; every other merge fetches its parents first, and a parent still missing makes it `forward` with conflicts null and error 'parent object missing' (no ancestry call).",
+    "The window filter applies only to runs with `selection`; the Python records are read as they are, so P1 is unchanged. Runs without `closedAt` (earlier live runs) keep CLOSED PRs.",
+    "summarise owns the glob matching and returns fixPairs; classifyFixes computes ancestry for those pairs only; applyFixStates is pure."
   ],
   "deviations": [
-    "Added per-glob merge/PR totals (summary and comparison) beyond the plan's per-file fix columns, because the spec counts packages/claude-envoy/legion as one group (25 merges) and the Production line needs it before and after.",
-    "--since/--until together with --from-json are refused (exit 2): the file carries its window.",
-    "The other section's tables are titled 'other PRs read' and the force-push section 'every PR read' (Python: 'open PRs', 'merged + open PRs'), since a live run's other set includes closed and merged-after-window PRs."
+    "Raw records gain `closedAt` (after `createdAt`), read from GitHub; absent from the Python run's records."
   ],
   "openQuestions": [],
-  "discoveredComplexity": [
-    "The Python records carry no measured_at, so a comparison gives the before window as 8.00 days (through 2026-10-27T23:59:59Z) though that run was made at about 11:21Z; README says so and the comparison's shares are what compare windows."
-  ]
+  "discoveredComplexity": []
 }
