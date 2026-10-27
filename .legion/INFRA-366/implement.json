@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-366",
-  "completed": "2026-10-27T03:10:00Z",
+  "completed": "2026-10-27T04:45:00Z",
   "proof": [
+    {
+      "criterion": "Forward merge of main baadccdc (#2317 fixes the daemon admission test #2289 turned red) with nothing else changed, migrations still after main's 0120",
+      "surface": "the merged tree's builds and suites, and the unchanged-diff fingerprint",
+      "command": "claude-envoy check-dist; pi-envoy skills-guard; contracts tsc + bun test; tsc in dispatch, envoy-client, claude-envoy, pi-envoy; go build ./... and go vet of the Dispatch server; root biome check .; check-private-names.sh; fingerprint of 58fadff0 and the merge",
+      "observed": "No path conflicted. Fingerprint e367cee7… -> e367cee7…, unchanged. check-dist matches (main regenerated claude-envoy's legion/ skills); skills-guard 10 pass; contracts 293 pass; tsc ok in five packages; go ok; biome no errors; names ok.",
+      "headSha": "cfc79e39455ae7821f84a63a8daedeb5f6a73288",
+      "negativeControl": "At 58fadff0 the head carried 47e85fdd without #2317, so the required test was red in packages/daemon's admission tests (main's red, per the controller); main@origin baadccdc carries the fix"
+    },
     {
       "criterion": "Forward merge of main 9b92ac14 (which carries #2301's skill word fix and #2302's pool change) after the third retro: no conflict left, both sides' connection counts composed, migrations still after main's 0120",
       "surface": "the merged tree's builds and suites, the Dispatch store's pool, lease and migration tests on a fresh Postgres database, and the unchanged-diff fingerprint",
@@ -197,7 +205,8 @@
     "Round 13: RefLink.tsx doc comment, packages/dispatch/AGENTS.md, e2e/pictures.e2e.ts (REF_PREVIEW_OPEN_DELAY_MS, leftover comment), claude-envoy CHANGELOG (87a81d62); forward merge of main 16e4bb0f with RefPreview documentOwner returning AgentName (f586da9d)",
     "Round 14: forward merge of main 1357b95c, packages/envoy/CHANGELOG.md resolved keeping both entries (47506f1a)",
     "Round 15: forward merge of main bc98d3e7, the contracts and pi-envoy CHANGELOGs resolved keeping both entries (737a099b)",
-    "Round 16: forward merge of main 9b92ac14, docs/site running-dispatch.md and envoy store/pool.go resolved (25a605b5)"
+    "Round 16: forward merge of main 9b92ac14, docs/site running-dispatch.md and envoy store/pool.go resolved (25a605b5)",
+    "Round 17: forward merge of main baadccdc, no conflict (cfc79e39)"
   ],
   "trickyParts": [
     "Every document version write now also indexes its blocks (about eight more statements in the version's transaction). TestAHealthyRoomUnderWritesIsNeverRefused passes on an idle pod at the head (27-41 writes against its floor of 20, main 36-54), but failed twice under CPU contention while other Go packages ran in parallel (11-15 writes); main passed the same contended run (24 writes). CI's runners are the judge.",
