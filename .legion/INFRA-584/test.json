@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-584",
+  "completed": "2026-10-27T06:28:00Z",
+  "testedHead": "d0c01b1bf5ae67987731cbe302ac322033615549",
+  "prHead": "20f743b5618c5ef4b53b99d8cbc571bfff8a5730",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's queries independently. The caches API gives 0 entries for refs/pull/2328, 2329 and 2330/merge. The jobs API shows every actions/cache/save step skipped in Tests 40448807743 (lint, typecheck, test), in Docs build 40448807751, and in the Envoy pi-legion job 122019420589 and envoy-infra-go job 122019420789. The Worker Image 40448807776 log shows `docker buildx build` with only `--cache-from type=gha,scope=worker-image`. Scratch #2329's lint job 122003730209 ran the paths filter and skipped the notices restore, step and save (0.90 min). The probe runs 40445439022/40445440160/40445585659/40445586575 were refused as invalid workflow files. The AC4 before-medians reproduce from the jobs API (last 30 completed pull_request runs before 03:00Z): lint 11.82, typecheck 0.57, test 17.75 min. Worker Image build reproduces as 13.43 min, not 13.74; the difference is small and the conclusion holds. The implementer's positive control for a Go change (#2330) was still queued at handoff. I observed it here: Tests 40453966804 attempt 2 ran the filter, the restore and the notices step."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "1. No pull-request run writes a cache entry (pre-merge, this pull request's runs and the scratch pull requests)",
+      "surface": "GitHub Actions caches API and run logs in sjawhar/legion: Tests 40448807743, Docs 40448807751, Worker Image 40448807776, Envoy and Contracts 40448807666 (pi-legion, envoy-infra-go), scratch #2329 (Tests 40447991840) and #2330",
+      "command": "for n in 2328 2329 2330; do gh api \"repos/sjawhar/legion/actions/caches?ref=refs/pull/$n/merge&per_page=100\" --jq .total_count; done; gh api repos/sjawhar/legion/actions/runs/40448807743/jobs --jq '.jobs[]|.name as $n|.steps[]|select(.name|test(\"cache/save\"))|[$n,.conclusion]'; gh run view 40448807776 -R sjawhar/legion --log | grep 'docker buildx build' | grep -o -- '--cache-[a-z]* [^ ]*'; plus a pyyaml script over the four workflows that pairs every actions/cache/save with its restore",
+      "observed": "0, 0, 0 entries at 06:05Z. Every save step was skipped in lint, typecheck, test, the docs build, pi-legion and envoy-infra-go. The buildx line has only `--cache-from type=gha,scope=worker-image` and no --cache-to. Every save in the four workflows uses the same paths and the same action SHA as its restore, takes its key from that restore's cache-primary-key, and has `github.ref == 'refs/heads/main'` in its if. The seven envoy-and-contracts setup-go sites left on default caching log `Restore cache failed: Dependencies file is not found … go.mod`, so they also write nothing: the caches list has no setup-go key hashed from packages/envoy/go.sum under any ref.",
+      "headSha": "d0c01b1bf5ae67987731cbe302ac322033615549",
+      "negativeControl": "Pull requests without this change, run in the same hour, wrote entries under their own refs: refs/pull/2303, 2313, 2320 and 2322/merge wrote go-notices-Linux-3477fd73… (2.2 GB each, 05:57–06:01Z). refs/pull/2226, 2233, 2269, 2292, 2300, 2309 and 2365/merge wrote setup-go-Linux-x64-ubuntu24-go-1.27.1-1e6edc76… (485 MB each, 05:59–06:02Z). That hash is hashFiles(packages/daemon/go.sum, packages/envoy/go.sum), which is docs.yaml's old setup-go cache that this change replaces. refs/pull/2282/merge wrote a 50 MB bun-* entry, and refs/pull/2299/merge wrote 51 buildkit-blob entries."
+    },
+    {
+      "criterion": "Spec v3: lint's notices step runs on a pull request only when one of its Go inputs changes (a TypeScript-only scratch pull request skips it, a Go-change one runs it)",
+      "surface": "GitHub Actions in sjawhar/legion: scratch #2329 (only scripts/github-apps/create.ts), scratch #2330 (only packages/daemon/cmd/legion/main.go), this pull request #2328 (changes .github/workflows/pr-and-main.yaml)",
+      "command": "gh api repos/sjawhar/legion/actions/jobs/122003730209 --jq '.steps[]|[.name,.conclusion]'; gh api repos/sjawhar/legion/actions/runs/40453966804/jobs --jq '.jobs[]|select(.name==\"lint\")|.steps[]|select(.name|test(\"paths-filter|cache|notices\";\"i\"))|[.name,.status,.conclusion]'; gh api repos/sjawhar/legion/actions/jobs/122006382230/logs | grep 'Filter go_notices'; bun t.ts (picomatch 2.3.1 with {dot:true}, which is the matcher dorny/paths-filter@ceb8a2b uses in src/filter.ts, over the job's nine patterns)",
+      "observed": "#2329: the paths filter succeeded, and the notices restore, the notices step and the save were skipped. Lint took 0.90 min (05:15:51Z–05:16:45Z). #2330, Tests 40453966804 attempt 2 (lint job 122036575355): the filter succeeded at 06:16:32Z, the restore ran, and the notices step was in_progress from 06:16:33Z. #2328: `Filter go_notices = true`, and the step ran for 13.3 min. picomatch matches packages/daemon/cmd/legion/main.go, packages/envoy/infra/go.sum and go.work. It skips scripts/github-apps/create.ts, packages/pi-legion/src/index.ts, packages/daemonx/a.go and docs/kubernetes.md.",
+      "headSha": "d0c01b1bf5ae67987731cbe302ac322033615549",
+      "negativeControl": "The skip is not the default. The two pull requests whose diffs name a filtered path (#2330 with a Go file, #2328 with the workflow file) both run the step. A near-miss path (packages/daemonx/a.go) does not match `packages/daemon/**`."
+    },
+    {
+      "criterion": "Only main writes: the setup-bun wrapper passes exactly `no-cache: ${{ github.ref != 'refs/heads/main' }}`, and check-bun-version.sh refuses any other value",
+      "surface": ".github/scripts/check-bun-version.sh, run on a copy of the tree at d0c01b1b (the lint job runs the same check on every pull request), and the Setup Bun step log of Tests 40448807743",
+      "command": "cd $TMPDIR/bv/tree && for v in false true \"\\\"\\${{ github.ref != 'refs/heads/main' }}\\\"\" '${{github.ref != ...}}' '${{ github.ref == ...main }}' '${{ github.event_name == ... }}'; do sed -i \"s|no-cache: .*|no-cache: $v|\" .github/actions/setup-bun/action.yml; uv run --with pyyaml bash .github/scripts/check-bun-version.sh; done",
+      "observed": "The file as shipped exits 0. The quoted form of the same expression exits 0, and so does a file with no no-cache line (the input is optional, as the script's comment says). In Tests 40448807743, Setup Bun ran with `no-cache: true` and the Post Setup Bun step saved nothing: refs/pull/2328/merge has no bun-* entry.",
+      "headSha": "d0c01b1bf5ae67987731cbe302ac322033615549",
+      "negativeControl": "For `no-cache: false`, `true`, `${{github.ref != 'refs/heads/main'}}` (no spaces), `${{ github.ref == 'refs/heads/main' }}` and `${{ github.event_name == 'pull_request' }}`, the script exits 1 with `.github/actions/setup-bun/action.yml:21: the wrapper passes no-cache: <value> — the one value it may pass is ${{ github.ref != 'refs/heads/main' }}`."
+    },
+    {
+      "criterion": "4. The pull request states the measured minutes saved per pull-request push, before and after",
+      "surface": "the pull request body's 'Minutes per pull-request push (AC4)' table, recomputed from the GitHub Actions jobs API",
+      "command": "python3 $TMPDIR/ac4.py (for each of Tests lint/typecheck/test and Worker Image build: the median of completed_at − started_at over the jobs of the last 30 completed pull_request runs created before 2026-10-27T03:00Z), and gh api repos/sjawhar/legion/actions/jobs/<id> for jobs 122006379110, 122006382230, 122006382534, 122006382453 and 122003730209",
+      "observed": "Before: lint 11.82, typecheck 0.57, test 17.75, Worker Image build 13.43 min (the body says 13.74). After: Worker Image build 5.47, lint (#2328) 14.43, typecheck 1.98, test 16.82, and lint on #2329 0.90 min. The body's lint, typecheck and test figures match. The body explains the slower 'after' rows (cold go-daemon key, main's notices entry evicted).",
+      "headSha": "d0c01b1bf5ae67987731cbe302ac322033615549",
+      "negativeControl": "The before set excludes runs at or after 03:00Z. The same query without that bound would include this change's own fast runs. The cut keeps the 'after' samples (#2328, #2329) out of the 'before' median."
+    },
+    {
+      "criterion": "5. Docs: the pull request corrects the README and code-comment prose that describes what it changes",
+      "surface": "repository text at d0c01b1b",
+      "command": "rg -n 'type=gha|cache-to|Actions cache|go-notices|setup-go.*cach|cache-dependency-path' docs .github packages/daemon/docker README.md AGENTS.md packages/*/AGENTS.md | grep -v 'docs/solutions\\|docs/plans'",
+      "observed": "docs/kubernetes.md:500-503 now gives `cache-from: type=gha,scope=worker-image` and, on main only, `cache-to: type=gha,mode=max,scope=worker-image`. The workflow comments at pr-and-main.yaml:88 (lint's setup-go), :117-140 (filter and notices cache), the typecheck and test restore comments, worker-image.yaml:190-196, and the docs.yaml and envoy-and-contracts.yaml restore comments describe main-only writes. The remaining `type=gha` and `cache-dependency-path` hits are release-envoy-listener.yaml, release.yaml and release-envoy-infra.yaml. Those workflows run only on push to main, so this change leaves them alone.",
+      "headSha": "d0c01b1bf5ae67987731cbe302ac322033615549",
+      "negativeControl": "The old prose `cache-from: type=gha`, `cache-to: type=gha,mode=max` (docs/kubernetes.md before the change) no longer matches anywhere in docs/ or in worker-image.yaml."
+    }
+  ],
+  "ciAtTestedHead": "Read on GitHub at d0c01b1b: lint, typecheck, pr-title, Docs build and Worker Image build succeeded. The required `test` failed only in TestApplyFact*/TestPromotion* with `read a slotted issue … got 20 and 31`, which is main's failure before #2317. GitHub made this run's merge ref at 04:16:15Z, #2317 (baadccdc) merged at 04:19:29Z, and main's Tests run has been green since then (40449104347, 40451059126). A rerun keeps the old merge commit. A push without the skip-checks trailer, which retro's push is, makes a new merge ref with #2317. Envoy and Contracts attempt 2 (40448807666) is queued, and its attempt 1 was cancelled. This PR changes no Go code.",
+  "notes": [
+    "Post-merge items stay with the production check: AC1 over every later pull-request run, AC2 (the one-off delete and the report), AC3 (notices p90 < 3 min for 72 h) and the 'main still writes' guard. The save branch (github.ref == 'refs/heads/main') cannot run before the merge. pull_request runs use the merge commit's workflow files, so every pull-request run after the merge follows the new rule.",
+    "Outside this change: the seven envoy-and-contracts setup-go sites on default caching (dispatch, envoy-go, envoy-go-race, dispatch-memory, dispatch-multiprocess, broker-multiprocess, envoy-smoke) never restore or save a Go cache, because setup-go finds no go.mod or go.sum at the repository root and no cache-dependency-path is set. They write nothing, so AC1 holds. Reported to the architect, because it is CI waste for the INFRA-490 tree."
+  ]
+}
