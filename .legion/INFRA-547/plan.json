@@ -1,0 +1,123 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-547",
+  "completed": "2026-10-27T02:38:10Z",
+  "plan": "dispatch://INFRA-547/artifact/plan-md",
+  "summary": "POST /v1/messages/publish stops publishing a role message on the role lane: it resolves the holder and forwards to the holder's agent subject with RequestCoreTo, retrying (holder re-resolved, same event_id and dedupe key, Nats-Msg-Id on each forward) until a receipt or a 4 s deadline from the request's arrival that bounds every read; 200 on receipt, 404 as today with no live claim, 403 for an unadvertised delivery mode, 504 {reason receipt_timeout|delivery_failed, event_id, dedupe_key, holder, attempts} otherwise, no exception envelope. An ad-hoc topic is still published on core NATS and also forwarded with a receipt to every live self_subscribed session registered on it (any machine, not the source), 504 naming each that did not confirm. Captured topics unchanged (stored before the 200; #2228's catch-up). Durable consumers acknowledge a stored forward copy (agent subject whose topic differs) without delivering it. The role lane stays as is. The Legion daemon maps 504 receipt_timeout to its existing capped re-hold, 504 delivery_failed to an uncapped retry, 403 to a finished row; daemons take the release before listeners. Acceptance soak: three in-process nats-servers, two listener binaries at three replicas, a gated session stand-in, role/ad-hoc/captured senders every 250 ms for at least 60 s through lame duck and forced kill of the stand-in's server.",
+  "tasks": [
+    "1. testnats: StartCluster(t, n) (fixed route ports from the gate band, no_advertise, lame_duck_duration 4s, grace 1s), Server.Name(), Server.LameDuck(t); a rig test. Shared with INFRA-546: build once.",
+    "2. bus: Nats-Msg-Id on RequestCoreTo forwards; store.Registry lookup of matching interests across machines; tests.",
+    "3. listener: confirmed send for role and ad-hoc topics in the publish route (deadline threaded through reads), answers 200/404/403/504, durable forward-copy rule; unit tests; rewrite tests that expect 200 plus an exception from the route.",
+    "4. daemon: notify.ErrNotDelivered / ErrRefusedByHolder from the JSON body; outbox.notice re-holds on receipt_timeout, retries on delivery_failed, finishes on refusal; mergeQueue; tests.",
+    "5. soak test packages/envoy/cmd/listener/server_change_test.go under build tag serverchange; CI job listener-server-change; captured-topic case on #2228's POST /v1/replay, merge after #2228.",
+    "6. docs: packages/envoy/AGENTS.md 10-13, 1297-1300, 1957, 1962, 2020, 2315-2330; .dispatch/architecture/envoy-listener.md:7; packages/envoy/docs/architecture.md 65, 78-104; docs/site/src/content/docs/dispatch/envoy.md 122, 129-131; envoy-client tool-contract.ts:187 + claude-envoy dist rebuild; pi-envoy README/AGENTS/envoy.ts:1106-1109; daemon notice_exceptions.go and notify comments; CHANGELOGs (envoy, envoy-client, claude-envoy) with the release order.",
+    "7. simplify pass, proofs, PR with 'Dispatch: INFRA-547'."
+  ],
+  "acceptance": [
+    {
+      "criterion": "A role message sent every 250 ms for at least 60 s through the sending listener is received by the holder or its sender's call errs, while the holder's server is lame-ducked and force-killed; every repeat carries its first id",
+      "surface": "the real envoy-listener binary over a three-server in-process nats-server cluster, driven over its HTTP API as envoy-client drives it",
+      "command": "cd packages/envoy && go test -tags serverchange -count=1 -timeout 15m -v -run TestServerChange ./cmd/listener",
+      "negativeControl": "the same test file and rig on base a2a6afc9 fail assertion 1 (messages answered 200 that never arrived) for the role kind"
+    },
+    {
+      "criterion": "The same holds for a topic message sent through /v1/messages/publish to a subscribed session (ad-hoc topic and stream-captured topic)",
+      "surface": "same",
+      "command": "same",
+      "negativeControl": "base a2a6afc9 fails assertion 1 for the ad-hoc kind; with the stand-in's replay call removed the captured kind fails assertion 1"
+    },
+    {
+      "criterion": "packages/envoy/AGENTS.md and .dispatch/architecture/envoy-listener.md describe when a send is answered",
+      "surface": "the two documents",
+      "command": "grep -n \"answering once the server has accepted the publish\\|Do not add durable role consumers or retry transit\" packages/envoy/AGENTS.md (prints nothing); grep -n '504 {' packages/envoy/AGENTS.md (prints the /v1/messages/publish row); grep -n '504' .dispatch/architecture/envoy-listener.md (prints the new sentence)",
+      "negativeControl": "on the base commit the first grep prints both phrases and the other two print nothing"
+    },
+    {
+      "criterion": "(plan) the route answers inside its deadline and the daemon handles each answer",
+      "surface": "listener unit tests on a real nats-server; daemon notify/outbox tests",
+      "command": "cd packages/envoy && go test -count=1 ./cmd/listener ./internal/bus ./internal/store ./internal/testnats ./infra/core; cd packages/daemon && go test -count=1 ./internal/notify ./internal/daemon",
+      "negativeControl": "each new test fails with the route or the mapping reverted"
+    }
+  ],
+  "productionCheck": "Once a deployment's listener carries the merge (deploys belong to INFRA-551/553): from the pod, register a self_subscribed session with no NATS subscription through /v1/interests/subscribe, claim a scratch role for it, publish to that role through /v1/messages/publish and read 504 receipt_timeout in about 4 s; publish to the implementer's own role topic without source_session and read 200 with its holder; delete the scratch session. INFRA-552's measurement job is the full production measurement.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: handoff, PR body, proof objects and negative controls, push and identity rules",
+      "ce-simplify-code: the simplify pass on the settled diff that legion-worker's pr-body reference asks for",
+      "dispatch: the production record and any Dispatch write"
+    ],
+    "test": [
+      "legion-worker: proof objects, negative controls and the tester's evidence rules for the soak, unit and grep criteria"
+    ],
+    "review": [
+      "legion-worker: merge gate, review threads and approving the head by SHA"
+    ]
+  },
+  "decisions": [
+    {"decision": "The send waits for the holder's receipt; role messages are not stored for later", "reason": "storing needs a replay of role forwards, which #2228 deliberately excludes, and gives the sender no error"},
+    {"decision": "The route forwards itself instead of requesting through the role lane", "reason": "a listener's grant cannot publish _INBOX.> (packages/envoy/infra/core/permissions.go:50-70), so a lane reply would change every hub's rendered authorization; and every listener machine's lane forwards each role message (no machine filter in roleTopicDelivery, delivery.go:426-526)"},
+    {"decision": "4 s deadline from the request's arrival, 2 s receipt window per attempt, 100 ms between attempts, holder re-resolved every attempt", "reason": "inside envoy-client's 5 s attempt (transport.ts:6), the daemon's 10 s client (notify.go:17) and the listener's 10 s write timeout; two attempts cover a 1.5-2 s reconnect; a relaunched holder gets the next attempt"},
+    {"decision": "A partial ad-hoc delivery answers 504, not 200 with a list", "reason": "the spec asks for an error at the sender; envoy-client's one retry re-sends under the same publish.<uuid> key, which each recipient's dedupe drops"},
+    {"decision": "The daemon re-holds only on receipt_timeout; delivery_failed retries without a cap; capability refusal finishes the row", "reason": "a hub outage longer than the re-hold schedule (~8 min) must drop no notice; a refusal must not hold later notices behind the fence forever"},
+    {"decision": "No NATS grant change; role lane and the daemon's exception subscription stay", "reason": "a grant change replaces a GCP hub VM on its next update (packages/envoy/CHANGELOG.md:1617-1619); listeners of earlier releases still publish on the lane and report exceptions during a rollout"},
+    {"decision": "Forwards carry Nats-Msg-Id (forwarded dedupe key + subject)", "reason": "the stream captures notifications.agent.>, so without it each retry and each ad-hoc recipient copy is stored again"}
+  ],
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "1. Acceptance line 2 cannot pass for captured topics with a 'received or in the stream' check; recovery for captured topics is #2228's catch-up.", "answer": "The soak's session stand-in runs #2228's POST /v1/replay after every reconnect as the plugins do and counts only real receipt; the captured-topic half builds on #2228 and the PR merges after it (specDepartures 3). The topic is under notifications.github., which #2228 replays (the Legion controller lane is refused not_followed)."},
+      {"finding": "2. Confirmed ad-hoc topics change the documented 'live only' contract; a stopped but registered session makes publishes 504 for up to 5 min; Registry.Match filters by machine; serve-port sessions cannot confirm.", "answer": "Chosen and documented (design 2, specDepartures 4); a new cross-machine interest lookup; the test waits for the sender's GET /v1/sessions to list the stand-in's topics; recipients are self_subscribed sessions only, serve-port sessions keep live-lane delivery."},
+      {"finding": "3. Every forward copy is stored on the agent subject; old durables and #2228 act on stored copies; no MsgId; stream volume for INFRA-546.", "answer": "Forwards carry Nats-Msg-Id; new durables acknowledge a forward copy (agent subject whose topic differs) without delivering; the rollout effect on old durables is stated in the PR body; the extra volume and #2228's replay of an ad-hoc copy on the session's own agent subject are reported to the architect."},
+      {"finding": "4. The daemon cannot treat every 504 as a capped re-hold; needs reason separation, a required JSON reason, and finite handling of 403.", "answer": "receipt_timeout re-holds on the existing schedule and cap; delivery_failed retries without a cap; a 504 without the JSON reason is a generic error; 403 capability finishes the row with a log; mergeQueue retries or posts the refusal."},
+      {"finding": "5. Releasing the listener before the daemon makes an old daemon retry a 504 without a cap and fence later notices; mergeQueue duplicates; older plugins' receipts.", "answer": "Release order daemon first, stated in the CHANGELOG and PR body; mergeQueue duplicates are bounded by the listener's dedupe cache and accepted; expectsLaneReceipt's general rule (topic differs from the agent subject) is on main and older than the plugins INFRA-548 requires before the move."},
+      {"finding": "6. The listener's documented dedupe (skip a delivered key) would disappear.", "answer": "The route uses dedupeCache per (key, recipient): a delivered key answers 200 without forwarding; recorded only on receipt."},
+      {"finding": "7. 'Every repeat has its first id' needs a definition; HTTP retries mint new event_ids.", "answer": "Defined: a later copy carries the first copy's event_id, or the first copy's dedupe_key that contracts.DedupeKeyNamesTheUpstreamEvent accepts; the test sender mimics envoy-client (UUID idempotency key, one retry on 5xx)."},
+      {"finding": "8. Nothing enforces the 4 s deadline through role-claim and session reads; per-attempt window; re-resolution; liveness rule for 404 vs forward.", "answer": "One deadline set at arrival bounds every read, senderStamp and forward; a stalled read ends the send with 504 delivery_failed (unit test with Server.Freeze); 2 s window; holder re-resolved by the role lane's ClaimStaleAfter rule each attempt; 404 keeps resolveLiveRoleHolder's reasons."},
+      {"finding": "9. Fail-before may not reproduce on a soak; prove disruptions happened; reconnect settings; raft quorum waits; CI time.", "answer": "The stand-in connects through testnats Gates closed during each disruption and reopened 1.5 s after its connection drops, making the base-commit loss deterministic; assertions that each disruption ran, the server changed, and messages were sent while disconnected; waits for leaders and current replicas and /healthz before each disruption; build tag serverchange with its own CI job."},
+      {"finding": "10. Cluster rig needs fixed route ports below the ephemeral range, no_advertise, a lame-duck helper that clears srv; overlap with INFRA-546; nats-server 2.10.29 vs hub 2.15.1.", "answer": "All in task 1; the helper is built once with INFRA-546 (reported to the architect); the version difference is noted, INFRA-552 measures production."},
+      {"finding": "11. Dispatch outbox role route: no acceptance line, 60 s claim window vs 4 s stalls, forward marker, capability guard, 'as today' wrong; scope is the owner's.", "answer": "Excluded from this plan and reported to the architect as discovered scope of parent item 7 with this evidence."},
+      {"finding": "12. Claims: the sender partly learns today (exceptions, daemon re-hold); the new 403 changes the contract.", "answer": "Recorded as specDepartures 5; 403 kept because the spec asks for an error at the sender, matching sendHandler's existing answer."},
+      {"finding": "13. AGENTS.md:1957 forbids retry transit and misstates the daemon; doc lines to update.", "answer": "Task 6 rewrites the rule and the daemon sentence and lists every line the analyst named."},
+      {"finding": "14. Doc acceptance and running-system command not checkable as written.", "answer": "Exact greps and the tagged go test command are in the acceptance table; specDepartures 1 records the tagged job."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": [
+    {
+      "spec": "Running system: the Go test suite of packages/envoy with an in-process NATS cluster.",
+      "plan": "The soak is in packages/envoy's Go suite under build tag serverchange, run by its own CI job listener-server-change with go test -tags serverchange -timeout 15m.",
+      "evidence": "The soak runs at least 60 s plus two listener builds and a three-server cluster; envoy-go's unit step runs under go test's ten-minute package deadline, which is why dispatch-memory and dispatch-multiprocess are jobs of their own (.github/workflows/envoy-and-contracts.yaml:986-1055).",
+      "outcome": {"kind": "unchanged"}
+    },
+    {
+      "spec": "The fix is in Envoy (Outcome; Running system: packages/envoy).",
+      "plan": "Also changes the Legion daemon's notify and outbox to read the new answers, the envoy_publish tool description in envoy-client (rebuilt into claude-envoy's dist), and states a release order: daemons before listeners.",
+      "evidence": "The daemon publishes notices through POST /v1/messages/publish (packages/daemon/internal/notify/notify.go:83-122) and today reads any non-200 except a role-holder 404 as a generic error retried without a cap (internal/daemon/outbox.go:677-680, 395-402).",
+      "outcome": {"kind": "changed", "scope": "adds packages/daemon (notify, outbox) and packages/envoy-client / packages/claude-envoy (tool description) to the change"}
+    },
+    {
+      "spec": "Acceptance: the same holds for a topic message sent through /v1/messages/publish to a subscribed session.",
+      "plan": "For a stream-captured topic the session gets a missed message through sjawhar/legion#2228's catch-up; the soak's stand-in runs #2228's POST /v1/replay, so this half builds on #2228 and the pull request merges after it.",
+      "evidence": "A captured topic is answered after the stream stores it (internal/bus/nats.go:898-927); sessions receive it only over core NATS; #2228 (open) adds the replay route.",
+      "outcome": {"kind": "changed", "scope": "ordering: INFRA-547 merges after sjawhar/legion#2228"}
+    },
+    {
+      "spec": "Acceptance line 2 (topic message) with no word on today's documented contract for ad-hoc topics.",
+      "plan": "An ad-hoc topic publish answers 504 naming each registered self_subscribed session that did not confirm; a stopped but still registered session causes that for up to 5 min. Serve-port sessions are not confirmed.",
+      "evidence": "Ad-hoc topics are documented live only, not retained or retried (packages/envoy/AGENTS.md:2315-2320, packages/envoy-client/src/tool-contract.ts:187); session registrations live 5 min after the last heartbeat (packages/daemon/internal/daemon/notice_exceptions.go:37-41).",
+      "outcome": {"kind": "changed", "scope": "user-visible: envoy_publish to an ad-hoc topic can now fail with an error naming the sessions that did not confirm"}
+    },
+    {
+      "spec": "Outcome: the sender never learns that a role message was dropped.",
+      "plan": "Plan reads it as: an envoy-client sender never learns, and nobody learns when the exception is lost; the daemon learns today from role-lane exceptions and re-holds its notices.",
+      "evidence": "packages/envoy/cmd/listener/delivery.go:491-520 publishes receipt_timeout and delivery_failed exceptions; packages/daemon/internal/daemon/notice_exceptions.go re-holds from them.",
+      "outcome": {"kind": "unchanged"}
+    }
+  ],
+  "reportedToArchitect": [
+    "Dispatch outbox role routes (packages/envoy/internal/dispatch/outbox/publisher.go:761-777) publish straight onto NATS with the same loss and no sender error; parent item 7 covers them and no INFRA-14 child owns them.",
+    "INFRA-546 needs the same three-server testnats cluster helper: build once.",
+    "Each ad-hoc publish now stores one copy per self_subscribed recipient on its agent subject (once, by Nats-Msg-Id): INFRA-546's byte-limit sizing must count it.",
+    "#2228's replay would replay an ad-hoc forward copy stored on the session's own agent subject; that is the session's own message and its dedupe drops a repeat."
+  ]
+}
