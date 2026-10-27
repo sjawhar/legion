@@ -27,9 +27,19 @@ const (
 	defaultDispatchNamespace       = "dispatch"
 	defaultDispatchReplicas        = 1
 
+	// defaultDispatchFrontDoorReplicas and defaultDispatchListenerReplicas are the front door's
+	// and the listener's pod counts when frontDoorReplicas and listenerReplicas are unset. The
+	// front door runs two by default, since with one pod every node drain, upgrade or scale-down
+	// that moves it takes Dispatch off the tailnet until its replacement is ready.
+	defaultDispatchFrontDoorReplicas = 2
+	defaultDispatchListenerReplicas  = 1
+
 	// minDispatchReplicas is the fewest pods a workload of this component may run, and the count
-	// at which a Deployment must be recreated rather than rolled: two processes of one pod's kind
-	// must not overlap. It is what an unset replicas happens to default to, not the same rule.
+	// at which its Deployment is recreated rather than rolled: a roll runs the outgoing build and
+	// the incoming one together, which is safe only once the outgoing build follows the rules for
+	// two builds running side by side and keeps its assets in the shared store. An operator who
+	// runs a workload above this count runs such builds. It is what an unset replicas happens to
+	// default to, not the same rule.
 	minDispatchReplicas = 1
 
 	// dispatchStrategyRecreate stops every running pod before starting the new one;
@@ -37,6 +47,12 @@ const (
 	// between them.
 	dispatchStrategyRecreate      = "Recreate"
 	dispatchStrategyRollingUpdate = "RollingUpdate"
+
+	// dispatchAvailabilityZonal and dispatchAvailabilityRegional are the two Cloud SQL
+	// availability types databaseAvailabilityType takes: one zone, the default and the instance's
+	// value before the input existed, or a standby in a second zone that Cloud SQL fails over to.
+	dispatchAvailabilityZonal    = "ZONAL"
+	dispatchAvailabilityRegional = "REGIONAL"
 
 	// defaultAzureFederationAudience is the audience of the keyless form's projected token when
 	// azureFederationAudience is unset: the one Entra's federated credentials expect by default.
@@ -53,8 +69,9 @@ const (
 	dispatchProxyMemory = "256Mi"
 )
 
-// Autopilot's bounds for the app pod's total request, the general-purpose compute class's under the
-// safe-to-evict annotation (https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-resource-requests):
+// Autopilot's bounds for the app pod's total request, the general-purpose compute class's for a pod
+// with pod anti-affinity, which every Dispatch pod carries, or with the safe-to-evict annotation,
+// which a pod no budget covers carries (https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-resource-requests):
 // below the floor or outside the memory-per-CPU ratio Autopilot raises the pod's request, so the
 // container would not run at the size the component renders; above the ceiling it rejects the pod.
 var (
@@ -121,7 +138,11 @@ type DispatchArgs struct {
 	DatabaseVersion    *string `pulumi:"databaseVersion,optional"`
 	DatabaseTier       *string `pulumi:"databaseTier,optional"`
 	DeletionProtection *bool   `pulumi:"deletionProtection,optional"`
-	Namespace          *string `pulumi:"namespace,optional"`
+	// DatabaseAvailabilityType is the Cloud SQL instance's availability type: ZONAL, one zone and
+	// the default, or REGIONAL, a standby in a second zone that Cloud SQL fails over to. Switching
+	// changes the instance in place, restarting it once.
+	DatabaseAvailabilityType *string `pulumi:"databaseAvailabilityType,optional"`
+	Namespace                *string `pulumi:"namespace,optional"`
 	// ExistingNamespace: use the namespace as it exists in the cluster rather than creating it
 	// (another program owns the namespace).
 	ExistingNamespace *bool `pulumi:"existingNamespace,optional"`
@@ -129,6 +150,11 @@ type DispatchArgs struct {
 	// Replicas is the app Deployment's replica count, 1 by default. Above 1 the Deployment rolls
 	// its pods instead of being recreated.
 	Replicas *int `pulumi:"replicas,optional"`
+	// FrontDoorReplicas is the front door's (<hostname>-tailnet) replica count, 2 by default, and
+	// ListenerReplicas the listener's (<hostname>-listener), 1 by default; each at least 1. Each
+	// Deployment is recreated at one replica and rolls above one, by its own count.
+	FrontDoorReplicas *int `pulumi:"frontDoorReplicas,optional"`
+	ListenerReplicas  *int `pulumi:"listenerReplicas,optional"`
 
 	// AppCpu and appMemory size the app Deployment's envoy-dispatch container, as Kubernetes
 	// quantities set as both its request and its limit: 1 CPU and 4Gi by default. The pod's
@@ -143,16 +169,22 @@ type DispatchArgs struct {
 	// listens.
 	PprofPort *int `pulumi:"pprofPort,optional"`
 
-	// AppPriorityClassName is the app pod's priorityClassName, the name of a PriorityClass that
-	// already exists in the cluster, which this component reads but never creates: a missing class
-	// fails the preview or update before the app Deployment changes, since Kubernetes refuses every
-	// pod naming one. Unset, the pod names none and runs at the cluster's default priority. The
-	// front door and the listener are unchanged.
-	AppPriorityClassName *string `pulumi:"appPriorityClassName,optional"`
+	// PriorityClassName is the priorityClassName of every pod of the three Deployments (the app,
+	// the front door and the listener), the name of a PriorityClass that already exists in the
+	// cluster, which this component reads once but never creates: a missing class fails the
+	// preview or update before any Deployment changes, since Kubernetes refuses every pod naming
+	// one. Unset, the pods name none and run at the cluster's default priority.
+	PriorityClassName *string `pulumi:"priorityClassName,optional"`
 
 	// AppPdbMinAvailable turns on a PodDisruptionBudget, <hostname>, over the app's pods: its
-	// minAvailable, from 1 to replicas. Unset, the component creates no budget.
-	AppPdbMinAvailable *int `pulumi:"appPdbMinAvailable,optional"`
+	// minAvailable, from 1 to replicas. FrontDoorPdbMinAvailable turns on <hostname>-tailnet over
+	// the front door's pods, from 1 to frontDoorReplicas, and ListenerPdbMinAvailable
+	// <hostname>-listener over the listener's, from 1 to listenerReplicas. Unset, the component
+	// creates no budget for that Deployment, and its pods carry the cluster autoscaler's
+	// safe-to-evict "false" annotation instead.
+	AppPdbMinAvailable       *int `pulumi:"appPdbMinAvailable,optional"`
+	FrontDoorPdbMinAvailable *int `pulumi:"frontDoorPdbMinAvailable,optional"`
+	ListenerPdbMinAvailable  *int `pulumi:"listenerPdbMinAvailable,optional"`
 
 	// AllowedNamespaces names the Kubernetes namespaces, in the Dispatch pod's own cluster, whose
 	// pods the app's NetworkPolicy admits on port 8766. Unset or empty admits no in-cluster
@@ -223,14 +255,17 @@ func dispatchSeededInput(args *DispatchArgs) (string, bool) {
 	if args.DatabaseTier != nil && bus.HoldsSeed(*args.DatabaseTier) {
 		return "databaseTier", true
 	}
+	if args.DatabaseAvailabilityType != nil && bus.HoldsSeed(*args.DatabaseAvailabilityType) {
+		return "databaseAvailabilityType", true
+	}
 	if args.AppCpu != nil && bus.HoldsSeed(*args.AppCpu) {
 		return "appCpu", true
 	}
 	if args.AppMemory != nil && bus.HoldsSeed(*args.AppMemory) {
 		return "appMemory", true
 	}
-	if args.AppPriorityClassName != nil && bus.HoldsSeed(*args.AppPriorityClassName) {
-		return "appPriorityClassName", true
+	if args.PriorityClassName != nil && bus.HoldsSeed(*args.PriorityClassName) {
+		return "priorityClassName", true
 	}
 	if args.Namespace != nil && bus.HoldsSeed(*args.Namespace) {
 		return "namespace", true
@@ -272,18 +307,21 @@ type dispatchSettings struct {
 	images                                      struct{ envoy, tailscale, proxy string }
 	signIn                                      struct{ clientID, domain string }
 	databaseVersion, databaseTier               string
+	databaseAvailabilityType                    string
 	agentSecretsURL, agentSecretsAudience       string
 	appClientID, appID                          string
 	appKeySecretName, appKeySecretKey           string
 	deletionProtection, existingNamespace       bool
 	replicas                                    int
+	frontDoorReplicas, listenerReplicas         int
 	appCPU, appMemory                           string
 	pprofPort                                   int
-	appPriorityClassName                        string
-	appPDBMinAvailable                          int
-	strategy                                    dispatchStrategy
-	serveConfig                                 string
-	azure                                       dispatchAzure
+	disruption                                  dispatchDisruption
+	// strategy is the app Deployment's update strategy; frontDoorStrategy and listenerStrategy
+	// are the front door's and the listener's, each from that Deployment's own replica count.
+	strategy, frontDoorStrategy, listenerStrategy dispatchStrategy
+	serveConfig                                   string
+	azure                                         dispatchAzure
 }
 
 // dispatchAzure is the Azure embedder's plain configuration, the zero value when
@@ -362,19 +400,21 @@ type dispatchRollingUpdate struct {
 	maxUnavailable, maxSurge int
 }
 
-// dispatchStrategy is the app Deployment's update strategy. rollingUpdate is set only when
+// dispatchStrategy is one Deployment's update strategy. rollingUpdate is set only when
 // strategyType is dispatchStrategyRollingUpdate; a Recreate Deployment carries no such block.
 type dispatchStrategy struct {
 	strategyType  string
 	rollingUpdate *dispatchRollingUpdate
 }
 
-// dispatchStrategyFor turns a workload's replica count into its Deployment's update strategy. At
-// minDispatchReplicas two processes of that workload must never overlap, since a second
-// envoy-dispatch cannot bind the exclusive NATS push durable, so Recreate, which stops the old pod
-// before starting the new one, is the only safe strategy. Above that count the operator has
-// accepted the overlap and wants no gap in service, so the Deployment rolls: one new pod comes up
-// before any old one goes down.
+// dispatchStrategyFor turns a workload's replica count into its Deployment's update strategy; each
+// of the three Deployments takes it from its own count. At minDispatchReplicas the Deployment is
+// recreated, stopping the old pod before starting the new one: a roll would run the outgoing and
+// the incoming builds together, which is safe only once the outgoing build follows the rules for
+// two builds running side by side and keeps its assets in the shared store, and a one-pod release
+// cannot know that of the build it replaces. Above that count the operator runs such builds and
+// wants no gap in service, so the Deployment rolls: one new pod comes up before any old one goes
+// down.
 func dispatchStrategyFor(replicas int) dispatchStrategy {
 	if replicas <= minDispatchReplicas {
 		return dispatchStrategy{strategyType: dispatchStrategyRecreate}
@@ -497,7 +537,6 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 		databaseTier:       defaultDispatchDatabaseTier,
 		deletionProtection: true,
 		namespace:          defaultDispatchNamespace,
-		replicas:           defaultDispatchReplicas,
 	}
 	s.images.envoy = args.EnvoyImage
 	s.images.tailscale = args.TailscaleImage
@@ -523,23 +562,38 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 		}
 		s.databaseTier = *args.DatabaseTier
 	}
+	s.databaseAvailabilityType = dispatchAvailabilityZonal
+	if args.DatabaseAvailabilityType != nil {
+		switch availability := *args.DatabaseAvailabilityType; availability {
+		case dispatchAvailabilityZonal, dispatchAvailabilityRegional:
+			s.databaseAvailabilityType = availability
+		default:
+			return dispatchSettings{}, fmt.Errorf("databaseAvailabilityType %q must be %s or %s; leave it unset for %s",
+				availability, dispatchAvailabilityZonal, dispatchAvailabilityRegional, dispatchAvailabilityZonal)
+		}
+	}
 	if args.DeletionProtection != nil {
 		s.deletionProtection = *args.DeletionProtection
 	}
-	if args.Replicas != nil {
-		if *args.Replicas < minDispatchReplicas {
-			return dispatchSettings{}, fmt.Errorf("replicas %d must be at least %d", *args.Replicas, minDispatchReplicas)
-		}
-		s.replicas = *args.Replicas
+	if s.replicas, err = dispatchReplicas("replicas", args.Replicas, defaultDispatchReplicas); err != nil {
+		return dispatchSettings{}, err
+	}
+	if s.frontDoorReplicas, err = dispatchReplicas("frontDoorReplicas", args.FrontDoorReplicas, defaultDispatchFrontDoorReplicas); err != nil {
+		return dispatchSettings{}, err
+	}
+	if s.listenerReplicas, err = dispatchReplicas("listenerReplicas", args.ListenerReplicas, defaultDispatchListenerReplicas); err != nil {
+		return dispatchSettings{}, err
 	}
 	s.strategy = dispatchStrategyFor(s.replicas)
+	s.frontDoorStrategy = dispatchStrategyFor(s.frontDoorReplicas)
+	s.listenerStrategy = dispatchStrategyFor(s.listenerReplicas)
 	if s.appCPU, s.appMemory, err = newDispatchAppResources(args); err != nil {
 		return dispatchSettings{}, err
 	}
 	if s.pprofPort, err = newDispatchPprofPort(args); err != nil {
 		return dispatchSettings{}, err
 	}
-	if s.appPriorityClassName, s.appPDBMinAvailable, err = newDispatchAppDisruption(args, s.replicas); err != nil {
+	if s.disruption, err = newDispatchDisruption(args, s.replicas, s.frontDoorReplicas, s.listenerReplicas); err != nil {
 		return dispatchSettings{}, err
 	}
 	s.existingNamespace = args.ExistingNamespace != nil && *args.ExistingNamespace
@@ -601,32 +655,67 @@ func newDispatchPprofPort(args *DispatchArgs) (int, error) {
 	return port, nil
 }
 
-// newDispatchAppDisruption resolves appPriorityClassName and appPdbMinAvailable, the app pod's
-// priority class and its PodDisruptionBudget's minAvailable: "" and 0, rendering nothing, when
-// unset. It refuses a class name that is empty or not a DNS subdomain, and one with the system-
-// prefix, which Kubernetes reserves for its own system-cluster-critical and system-node-critical
-// classes: those outrank every workload so the cluster's own components are scheduled first, and
-// an application pod holding one could preempt them. It refuses a budget below 1, which protects
-// no pod, and above replicas, which no number of ready pods can meet.
-func newDispatchAppDisruption(args *DispatchArgs, replicas int) (priorityClass string, pdbMinAvailable int, err error) {
-	if args.AppPriorityClassName != nil {
-		priorityClass = *args.AppPriorityClassName
+// dispatchReplicas resolves one Deployment's replica count, input, to fallback when it is unset,
+// refusing a count below minDispatchReplicas, which leaves the workload with no pod.
+func dispatchReplicas(input string, value *int, fallback int) (int, error) {
+	if value == nil {
+		return fallback, nil
+	}
+	if *value < minDispatchReplicas {
+		return 0, fmt.Errorf("%s %d must be at least %d", input, *value, minDispatchReplicas)
+	}
+	return *value, nil
+}
+
+// dispatchDisruption is the pods' resolved disruption protection: the one priority class every
+// pod of the three Deployments names, and each Deployment's PodDisruptionBudget minAvailable. ""
+// and 0, rendering nothing, are unset.
+type dispatchDisruption struct {
+	priorityClass                                string
+	appPDBMinAvailable, frontDoorPDBMinAvailable int
+	listenerPDBMinAvailable                      int
+}
+
+// newDispatchDisruption resolves priorityClassName and the three budgets, appPdbMinAvailable,
+// frontDoorPdbMinAvailable and listenerPdbMinAvailable, each refusal naming its own input. It
+// refuses a class name that is empty or not a DNS subdomain, and one with the system- prefix,
+// which Kubernetes reserves for its own system-cluster-critical and system-node-critical classes:
+// those outrank every workload so the cluster's own components are scheduled first, and an
+// application pod holding one could preempt them. It refuses a budget below 1, which protects no
+// pod, and above its Deployment's replica count, which no number of ready pods can meet.
+func newDispatchDisruption(args *DispatchArgs, replicas, frontDoorReplicas, listenerReplicas int) (dispatchDisruption, error) {
+	var d dispatchDisruption
+	if args.PriorityClassName != nil {
+		d.priorityClass = *args.PriorityClassName
 		switch {
-		case priorityClass == "":
-			return "", 0, errors.New("appPriorityClassName is empty; leave it unset for no priority class")
-		case !dnsSubdomain(priorityClass):
-			return "", 0, fmt.Errorf("appPriorityClassName %q must be a DNS subdomain, the shape of a PriorityClass's name", priorityClass)
-		case strings.HasPrefix(priorityClass, "system-"):
-			return "", 0, fmt.Errorf("appPriorityClassName %q is a class Kubernetes reserves for its own system components (the system- prefix); name a PriorityClass of your own", priorityClass)
+		case d.priorityClass == "":
+			return dispatchDisruption{}, errors.New("priorityClassName is empty; leave it unset for no priority class")
+		case !dnsSubdomain(d.priorityClass):
+			return dispatchDisruption{}, fmt.Errorf("priorityClassName %q must be a DNS subdomain, the shape of a PriorityClass's name", d.priorityClass)
+		case strings.HasPrefix(d.priorityClass, "system-"):
+			return dispatchDisruption{}, fmt.Errorf("priorityClassName %q is a class Kubernetes reserves for its own system components (the system- prefix); name a PriorityClass of your own", d.priorityClass)
 		}
 	}
-	if args.AppPdbMinAvailable != nil {
-		pdbMinAvailable = *args.AppPdbMinAvailable
-		if pdbMinAvailable < 1 || pdbMinAvailable > replicas {
-			return "", 0, fmt.Errorf("appPdbMinAvailable %d must be from 1 to replicas (%d); leave it unset for no PodDisruptionBudget", pdbMinAvailable, replicas)
+	for _, budget := range []struct {
+		input, replicasInput string
+		value                *int
+		replicas             int
+		into                 *int
+	}{
+		{"appPdbMinAvailable", "replicas", args.AppPdbMinAvailable, replicas, &d.appPDBMinAvailable},
+		{"frontDoorPdbMinAvailable", "frontDoorReplicas", args.FrontDoorPdbMinAvailable, frontDoorReplicas, &d.frontDoorPDBMinAvailable},
+		{"listenerPdbMinAvailable", "listenerReplicas", args.ListenerPdbMinAvailable, listenerReplicas, &d.listenerPDBMinAvailable},
+	} {
+		if budget.value == nil {
+			continue
 		}
+		if *budget.value < 1 || *budget.value > budget.replicas {
+			return dispatchDisruption{}, fmt.Errorf("%s %d must be from 1 to %s (%d); leave it unset for no PodDisruptionBudget",
+				budget.input, *budget.value, budget.replicasInput, budget.replicas)
+		}
+		*budget.into = *budget.value
 	}
-	return priorityClass, pdbMinAvailable, nil
+	return d, nil
 }
 
 // newDispatchAppResources resolves appCpu and appMemory, the envoy-dispatch container's request
@@ -661,7 +750,7 @@ func newDispatchAppResources(args *DispatchArgs) (cpu, memory string, err error)
 	podCPU := new(big.Rat).Add(appCPU, proxyCPU)
 	podMemory := new(big.Rat).Add(appMemory, proxyMemory)
 	if podCPU.Cmp(autopilotPodMinCPU) < 0 {
-		return "", "", fmt.Errorf("appCpu %q must be at least %s: with cloud-sql-proxy's %s the app pod would request less than %s, below which Autopilot raises it",
+		return "", "", fmt.Errorf("appCpu %q must be at least %s: with cloud-sql-proxy's %s the app pod would request less than %s, below which Autopilot raises it, since the pod carries pod anti-affinity (and safe-to-evict when no budget covers it)",
 			cpu, milliCPU(new(big.Rat).Sub(autopilotPodMinCPU, proxyCPU)), dispatchProxyCPU, milliCPU(autopilotPodMinCPU))
 	}
 	if podCPU.Cmp(autopilotPodMaxCPU) > 0 {
@@ -669,7 +758,7 @@ func newDispatchAppResources(args *DispatchArgs) (cpu, memory string, err error)
 			cpu, milliCPU(new(big.Rat).Sub(autopilotPodMaxCPU, proxyCPU)), dispatchProxyCPU, autopilotPodMaxCPU.RatString())
 	}
 	if podMemory.Cmp(autopilotPodMinMemory) < 0 {
-		return "", "", fmt.Errorf("appMemory %q must be at least %s: with cloud-sql-proxy's %s the app pod would request less than %s, below which Autopilot raises it",
+		return "", "", fmt.Errorf("appMemory %q must be at least %s: with cloud-sql-proxy's %s the app pod would request less than %s, below which Autopilot raises it, since the pod carries pod anti-affinity (and safe-to-evict when no budget covers it)",
 			memory, mebibytes(new(big.Rat).Sub(autopilotPodMinMemory, proxyMemory)), dispatchProxyMemory, mebibytes(autopilotPodMinMemory))
 	}
 	if podMemory.Cmp(autopilotPodMaxMemory) > 0 {

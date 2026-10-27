@@ -229,18 +229,6 @@ func TestDispatchRefusesAPprofPortBeforeRegistering(t *testing.T) {
 	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
 }
 
-// Above one replica the operator has accepted two overlapping envoy-dispatch processes, so the
-// Deployment rolls a new pod up before taking an old one down.
-func TestDispatchSeveralReplicasRollWithoutGoingUnavailable(t *testing.T) {
-	args := dispatchArgs()
-	args.Replicas = pulumi.IntRef(3)
-	settings, err := gcp.ResolveDispatch(args)
-	require.NoError(t, err)
-	require.Equal(t, 3, settings.Replicas)
-	require.Equal(t, "RollingUpdate", settings.StrategyType)
-	require.Equal(t, &gcp.DispatchRollingUpdate{MaxUnavailable: 0, MaxSurge: 1}, settings.RollingUpdate)
-}
-
 func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 	cases := []struct {
 		name string
@@ -317,17 +305,19 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		{name: "an invalid app private key secret name", edit: func(a *gcp.DispatchArgs) { setApp(a); a.AppPrivateKeySecretName = "Example_Key" }, err: []string{"appPrivateKeySecretName", "DNS subdomain"}},
 		{name: "an invalid app private key secret key", edit: func(a *gcp.DispatchArgs) { setApp(a); a.AppPrivateKeySecretKey = "bad/key" }, err: []string{"appPrivateKeySecretKey", "must match"}},
 		{name: "fewer than one replica", edit: func(a *gcp.DispatchArgs) { a.Replicas = pulumi.IntRef(0) }, err: []string{"replicas", "at least 1"}},
+		{name: "fewer than one front-door replica", edit: func(a *gcp.DispatchArgs) { a.FrontDoorReplicas = pulumi.IntRef(0) }, err: []string{"frontDoorReplicas 0", "at least 1"}},
+		{name: "fewer than one listener replica", edit: func(a *gcp.DispatchArgs) { a.ListenerReplicas = pulumi.IntRef(-1) }, err: []string{"listenerReplicas -1", "at least 1"}},
 		{name: "a pprof port of 0", edit: func(a *gcp.DispatchArgs) { a.PprofPort = pulumi.IntRef(0) }, err: []string{"pprofPort 0", "1-65535", "leave it unset"}},
 		{name: "a negative pprof port", edit: func(a *gcp.DispatchArgs) { a.PprofPort = pulumi.IntRef(-1) }, err: []string{"pprofPort -1", "1-65535"}},
 		{name: "a pprof port past 65535", edit: func(a *gcp.DispatchArgs) { a.PprofPort = pulumi.IntRef(65536) }, err: []string{"pprofPort 65536", "1-65535"}},
 		{name: "a pprof port on envoy-dispatch's own port", edit: func(a *gcp.DispatchArgs) { a.PprofPort = pulumi.IntRef(8766) }, err: []string{"pprofPort 8766", "envoy-dispatch"}},
 		{name: "a pprof port on cloud-sql-proxy's port", edit: func(a *gcp.DispatchArgs) { a.PprofPort = pulumi.IntRef(5432) }, err: []string{"pprofPort 5432", "cloud-sql-proxy"}},
-		{name: "an empty app priority class", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("") }, err: []string{"appPriorityClassName is empty", "leave it unset for no priority class"}},
-		{name: "an app priority class that is no DNS subdomain", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("Example_Priority") }, err: []string{`appPriorityClassName "Example_Priority"`, "DNS subdomain"}},
-		{name: "an app priority class with trailing whitespace", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("example-priority ") }, err: []string{`appPriorityClassName "example-priority "`, "DNS subdomain"}},
-		{name: "an app priority class longer than 253 characters", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef(strings.Repeat("a.", 127) + "a") }, err: []string{"appPriorityClassName", "DNS subdomain"}},
-		{name: "a system cluster-critical app priority class", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("system-cluster-critical") }, err: []string{`appPriorityClassName "system-cluster-critical"`, "reserves for its own system components"}},
-		{name: "a system node-critical app priority class", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("system-node-critical") }, err: []string{`appPriorityClassName "system-node-critical"`, "reserves for its own system components"}},
+		{name: "an empty priority class", edit: func(a *gcp.DispatchArgs) { a.PriorityClassName = pulumi.StringRef("") }, err: []string{"priorityClassName is empty", "leave it unset for no priority class"}},
+		{name: "a priority class that is no DNS subdomain", edit: func(a *gcp.DispatchArgs) { a.PriorityClassName = pulumi.StringRef("Example_Priority") }, err: []string{`priorityClassName "Example_Priority"`, "DNS subdomain"}},
+		{name: "a priority class with trailing whitespace", edit: func(a *gcp.DispatchArgs) { a.PriorityClassName = pulumi.StringRef("example-priority ") }, err: []string{`priorityClassName "example-priority "`, "DNS subdomain"}},
+		{name: "a priority class longer than 253 characters", edit: func(a *gcp.DispatchArgs) { a.PriorityClassName = pulumi.StringRef(strings.Repeat("a.", 127) + "a") }, err: []string{"priorityClassName", "DNS subdomain"}},
+		{name: "a system cluster-critical priority class", edit: func(a *gcp.DispatchArgs) { a.PriorityClassName = pulumi.StringRef("system-cluster-critical") }, err: []string{`priorityClassName "system-cluster-critical"`, "reserves for its own system components"}},
+		{name: "a system node-critical priority class", edit: func(a *gcp.DispatchArgs) { a.PriorityClassName = pulumi.StringRef("system-node-critical") }, err: []string{`priorityClassName "system-node-critical"`, "reserves for its own system components"}},
 		{name: "a disruption budget of no pod", edit: func(a *gcp.DispatchArgs) { a.AppPdbMinAvailable = pulumi.IntRef(0) }, err: []string{"appPdbMinAvailable 0", "from 1 to replicas (1)", "leave it unset for no PodDisruptionBudget"}},
 		{name: "a negative disruption budget", edit: func(a *gcp.DispatchArgs) { a.AppPdbMinAvailable = pulumi.IntRef(-1) }, err: []string{"appPdbMinAvailable -1", "from 1 to replicas (1)"}},
 		{name: "a disruption budget above the default replica count", edit: func(a *gcp.DispatchArgs) { a.AppPdbMinAvailable = pulumi.IntRef(2) }, err: []string{"appPdbMinAvailable 2", "from 1 to replicas (1)"}},
@@ -335,6 +325,25 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 			a.Replicas = pulumi.IntRef(3)
 			a.AppPdbMinAvailable = pulumi.IntRef(4)
 		}, err: []string{"appPdbMinAvailable 4", "from 1 to replicas (3)"}},
+		{name: "a front-door budget of no pod", edit: func(a *gcp.DispatchArgs) { a.FrontDoorPdbMinAvailable = pulumi.IntRef(0) }, err: []string{"frontDoorPdbMinAvailable 0", "from 1 to frontDoorReplicas (2)", "leave it unset for no PodDisruptionBudget"}},
+		{name: "a front-door budget above the default front-door count", edit: func(a *gcp.DispatchArgs) { a.FrontDoorPdbMinAvailable = pulumi.IntRef(3) }, err: []string{"frontDoorPdbMinAvailable 3", "from 1 to frontDoorReplicas (2)"}},
+		{name: "a front-door budget above the front-door count", edit: func(a *gcp.DispatchArgs) {
+			a.FrontDoorReplicas = pulumi.IntRef(1)
+			a.FrontDoorPdbMinAvailable = pulumi.IntRef(2)
+		}, err: []string{"frontDoorPdbMinAvailable 2", "from 1 to frontDoorReplicas (1)"}},
+		{name: "a front-door budget measured against the app's count", edit: func(a *gcp.DispatchArgs) {
+			a.Replicas = pulumi.IntRef(5)
+			a.FrontDoorPdbMinAvailable = pulumi.IntRef(4)
+		}, err: []string{"frontDoorPdbMinAvailable 4", "from 1 to frontDoorReplicas (2)"}},
+		{name: "a listener budget of no pod", edit: func(a *gcp.DispatchArgs) { a.ListenerPdbMinAvailable = pulumi.IntRef(0) }, err: []string{"listenerPdbMinAvailable 0", "from 1 to listenerReplicas (1)", "leave it unset for no PodDisruptionBudget"}},
+		{name: "a listener budget above the default listener count", edit: func(a *gcp.DispatchArgs) { a.ListenerPdbMinAvailable = pulumi.IntRef(2) }, err: []string{"listenerPdbMinAvailable 2", "from 1 to listenerReplicas (1)"}},
+		{name: "a listener budget above the listener count", edit: func(a *gcp.DispatchArgs) {
+			a.ListenerReplicas = pulumi.IntRef(3)
+			a.ListenerPdbMinAvailable = pulumi.IntRef(4)
+		}, err: []string{"listenerPdbMinAvailable 4", "from 1 to listenerReplicas (3)"}},
+		{name: "a lowercase database availability type", edit: func(a *gcp.DispatchArgs) { a.DatabaseAvailabilityType = pulumi.StringRef("regional") }, err: []string{`databaseAvailabilityType "regional"`, "ZONAL or REGIONAL"}},
+		{name: "an empty database availability type", edit: func(a *gcp.DispatchArgs) { a.DatabaseAvailabilityType = pulumi.StringRef("") }, err: []string{`databaseAvailabilityType ""`, "ZONAL or REGIONAL", "leave it unset for ZONAL"}},
+		{name: "an unknown database availability type", edit: func(a *gcp.DispatchArgs) { a.DatabaseAvailabilityType = pulumi.StringRef("MULTI_REGIONAL") }, err: []string{`databaseAvailabilityType "MULTI_REGIONAL"`, "ZONAL or REGIONAL"}},
 		{name: "an app CPU that is not a quantity", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("two") }, err: []string{`appCpu "two"`, "Kubernetes quantity"}},
 		{name: "an app CPU with a memory suffix in the wrong case", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("1gi") }, err: []string{`appCpu "1gi"`, "Kubernetes quantity"}},
 		{name: "an app memory that is not a quantity", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("4 GiB") }, err: []string{`appMemory "4 GiB"`, "Kubernetes quantity"}},
@@ -475,9 +484,10 @@ func TestDispatchRefusesAnNKeySeedInAPlainInput(t *testing.T) {
 		{"a seed inside the sign-in domain", "signInDomain", func(a *gcp.DispatchArgs) { a.SignInDomain = lower + ".example.com" }},
 		{"a seed in the database version", "databaseVersion", func(a *gcp.DispatchArgs) { a.DatabaseVersion = pulumi.StringRef(seed) }},
 		{"a seed in the database tier", "databaseTier", func(a *gcp.DispatchArgs) { a.DatabaseTier = pulumi.StringRef(seed) }},
+		{"a seed as the database availability type", "databaseAvailabilityType", func(a *gcp.DispatchArgs) { a.DatabaseAvailabilityType = pulumi.StringRef(seed) }},
 		{"a seed as the app CPU", "appCpu", func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef(seed) }},
 		{"a seed as the app memory", "appMemory", func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef(seed) }},
-		{"a seed as the app priority class", "appPriorityClassName", func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef(lower) }},
+		{"a seed as the priority class", "priorityClassName", func(a *gcp.DispatchArgs) { a.PriorityClassName = pulumi.StringRef(lower) }},
 		{"a seed as the namespace", "namespace", func(a *gcp.DispatchArgs) { a.Namespace = pulumi.StringRef(lower) }},
 		{"a seed in an allowed namespace", "allowedNamespaces[1]", func(a *gcp.DispatchArgs) { a.AllowedNamespaces = []string{"envoy", lower} }},
 		{"a seed inside the agent secrets URL", "agentSecretsUrl", func(a *gcp.DispatchArgs) { a.AgentSecretsUrl = "https://" + lower + ".internal.example" }},
@@ -702,32 +712,73 @@ func TestDispatchListenerSecretHoldsOnlyItsAPIToken(t *testing.T) {
 	require.Equal(t, map[string]any{"ENVOY_API_TOKEN": "example-dispatch-listener-token-result"}, normalizedProperty(data))
 }
 
-// One replica is the default, and its Deployment carries no rollingUpdate at all: Kubernetes
-// refuses a rollingUpdate block on a Recreate Deployment.
-func TestDispatchDeploymentRecreatesOneReplicaByDefault(t *testing.T) {
-	m, err := runDispatch(t, dispatchArgs(), true)
-	require.NoError(t, err)
-
-	spec := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").Inputs.Mappable()["spec"].(map[string]any)
-	require.EqualValues(t, 1, spec["replicas"])
-	strategy := spec["strategy"].(map[string]any)
-	require.Equal(t, "Recreate", strategy["type"])
-	require.NotContains(t, strategy, "rollingUpdate")
+// dispatchWorkloads are the component's three Deployments, each with the input that sets its
+// replica count and the one that sets its PodDisruptionBudget.
+var dispatchWorkloads = []struct {
+	deployment       string
+	replicas, budget func(*gcp.DispatchArgs, int)
+}{
+	{"example-dispatch",
+		func(a *gcp.DispatchArgs, n int) { a.Replicas = pulumi.IntRef(n) },
+		func(a *gcp.DispatchArgs, n int) { a.AppPdbMinAvailable = pulumi.IntRef(n) }},
+	{"example-dispatch-tailnet",
+		func(a *gcp.DispatchArgs, n int) { a.FrontDoorReplicas = pulumi.IntRef(n) },
+		func(a *gcp.DispatchArgs, n int) { a.FrontDoorPdbMinAvailable = pulumi.IntRef(n) }},
+	{"example-dispatch-listener",
+		func(a *gcp.DispatchArgs, n int) { a.ListenerReplicas = pulumi.IntRef(n) },
+		func(a *gcp.DispatchArgs, n int) { a.ListenerPdbMinAvailable = pulumi.IntRef(n) }},
 }
 
-func TestDispatchDeploymentRollsSeveralReplicas(t *testing.T) {
-	args := dispatchArgs()
-	args.Replicas = pulumi.IntRef(3)
-	m, err := runDispatch(t, args, true)
-	require.NoError(t, err)
+// deploymentSpec returns one Deployment's spec, with every output and secret wrapper off.
+func deploymentSpec(t *testing.T, m *pulumitest.Mocks, deployment string) map[string]any {
+	t.Helper()
+	return normalizedProperty(m.Named(t, "kubernetes:apps/v1:Deployment", deployment).Inputs["spec"]).(map[string]any)
+}
 
-	spec := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").Inputs.Mappable()["spec"].(map[string]any)
-	require.EqualValues(t, 3, spec["replicas"])
-	strategy := spec["strategy"].(map[string]any)
-	require.Equal(t, "RollingUpdate", strategy["type"])
-	rollingUpdate := strategy["rollingUpdate"].(map[string]any)
-	require.EqualValues(t, 0, rollingUpdate["maxUnavailable"])
-	require.EqualValues(t, 1, rollingUpdate["maxSurge"])
+// requireStrategy fails unless deployment runs replicas pods, recreated at one replica, with no
+// rollingUpdate block (Kubernetes refuses one on a Recreate Deployment), and rolled above it, one
+// new pod up before any old one goes down.
+func requireStrategy(t *testing.T, m *pulumitest.Mocks, deployment string, replicas int) {
+	t.Helper()
+	spec := deploymentSpec(t, m, deployment)
+	require.EqualValues(t, replicas, spec["replicas"], deployment)
+	if replicas == 1 {
+		require.Equal(t, map[string]any{"type": "Recreate"}, spec["strategy"], deployment)
+		return
+	}
+	require.Equal(t, map[string]any{
+		"type":          "RollingUpdate",
+		"rollingUpdate": map[string]any{"maxUnavailable": float64(0), "maxSurge": float64(1)},
+	}, spec["strategy"], deployment)
+}
+
+// Each Deployment takes its strategy from its own replica count: recreated at one replica, since a
+// roll runs the outgoing and incoming builds together, and rolled above it. By default the front
+// door runs two pods and rolls, so no single pod carries the tailnet name; the app and the
+// listener run one each and are recreated. One workload's count leaves the other two Deployments'
+// specs as the defaults render them.
+func TestDispatchEachWorkloadRecreatesAtOneReplicaAndRollsAbove(t *testing.T) {
+	defaults, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	requireStrategy(t, defaults, "example-dispatch", 1)
+	requireStrategy(t, defaults, "example-dispatch-tailnet", 2)
+	requireStrategy(t, defaults, "example-dispatch-listener", 1)
+	for _, workload := range dispatchWorkloads {
+		for _, replicas := range []int{1, 3} {
+			t.Run(fmt.Sprintf("%s at %d", workload.deployment, replicas), func(t *testing.T) {
+				args := dispatchArgs()
+				workload.replicas(args, replicas)
+				m, err := runDispatch(t, args, true)
+				require.NoError(t, err)
+				requireStrategy(t, m, workload.deployment, replicas)
+				for _, other := range dispatchWorkloads {
+					if other.deployment != workload.deployment {
+						require.Equal(t, deploymentSpec(t, defaults, other.deployment), deploymentSpec(t, m, other.deployment), other.deployment)
+					}
+				}
+			})
+		}
+	}
 }
 
 // deploymentPodTemplate returns one workload's pod template, with every output and secret
@@ -772,47 +823,28 @@ func containerEnv(t *testing.T, container map[string]any) map[string]any {
 
 // A Deployment's name and its selector are immutable in place, and the consumer patches the app's
 // Deployment by name: either one moving turns the consumer's preview into a replacement, which
-// takes the app down, rather than an update.
-func TestDispatchAppDeploymentKeepsItsNameAndSelector(t *testing.T) {
+// takes that workload down, rather than an update. The same holds for the front door's SOCKS5
+// Service, which the app and the listener dial by name; and a pod of the front door or the
+// listener wearing the app's label would be sent user traffic by Service example-dispatch.
+func TestDispatchDeploymentsKeepTheirNamesAndSelectors(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 
-	deployment := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch")
-	require.Equal(t, "example-dispatch", deployment.Name)
-	inputs := deployment.Inputs.Mappable()
-	require.Equal(t, "example-dispatch", inputs["metadata"].(map[string]any)["name"])
-	spec := inputs["spec"].(map[string]any)
-	require.Equal(t, map[string]any{"app": "example-dispatch"},
-		spec["selector"].(map[string]any)["matchLabels"])
-	require.Equal(t, map[string]any{"app": "example-dispatch"},
-		deploymentPodTemplate(t, m, "example-dispatch")["metadata"].(map[string]any)["labels"],
-		"the pods the selector matches are the pods this Deployment creates")
-}
-
-// One tailnet node holds the hostname and the single-use auth key's state, so the front door is
-// recreated at one replica whatever the app's count; and a front-door pod wearing the app's label
-// would be sent user traffic by Service example-dispatch.
-func TestDispatchFrontDoorStaysSingleWhileTheAppScales(t *testing.T) {
-	args := dispatchArgs()
-	args.Replicas = pulumi.IntRef(3)
-	m, err := runDispatch(t, args, true)
-	require.NoError(t, err)
-
-	spec := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch-tailnet").Inputs.Mappable()["spec"].(map[string]any)
-	require.EqualValues(t, 1, spec["replicas"])
-	strategy := spec["strategy"].(map[string]any)
-	require.Equal(t, "Recreate", strategy["type"])
-	require.NotContains(t, strategy, "rollingUpdate", "Kubernetes refuses a rollingUpdate block on a Recreate Deployment")
-
-	template := deploymentPodTemplate(t, m, "example-dispatch-tailnet")
-	labels := template["metadata"].(map[string]any)["labels"].(map[string]any)
-	require.Equal(t, map[string]any{"app": "example-dispatch-tailnet"}, labels)
-	require.NotEqual(t, "example-dispatch", labels["app"], "Service example-dispatch selects app=example-dispatch")
-	pod := template["spec"].(map[string]any)
-	require.Equal(t, "example-dispatch", pod["serviceAccountName"], "the state Secret's Role is bound to this account")
-	require.Len(t, pod["containers"].([]any), 1)
-	env := containerEnv(t, podContainer(t, template, "tailscale"))
-	require.Equal(t, "example-dispatch-tailscale-state", env["TS_KUBE_SECRET"])
+	for _, workload := range dispatchWorkloads {
+		deployment := m.Named(t, "kubernetes:apps/v1:Deployment", workload.deployment)
+		require.Equal(t, workload.deployment, deployment.Name)
+		inputs := deployment.Inputs.Mappable()
+		require.Equal(t, workload.deployment, inputs["metadata"].(map[string]any)["name"])
+		labels := map[string]any{"app": workload.deployment}
+		require.Equal(t, labels, deploymentSpec(t, m, workload.deployment)["selector"].(map[string]any)["matchLabels"])
+		require.Equal(t, labels, deploymentPodTemplate(t, m, workload.deployment)["metadata"].(map[string]any)["labels"],
+			"the pods the selector matches are the pods this Deployment creates")
+	}
+	socks5 := m.Named(t, "kubernetes:core/v1:Service", "example-dispatch-tailnet").Inputs.Mappable()
+	require.Equal(t, "example-dispatch-tailnet", socks5["metadata"].(map[string]any)["name"])
+	spec := socks5["spec"].(map[string]any)
+	require.Equal(t, map[string]any{"app": "example-dispatch-tailnet"}, spec["selector"], "the SOCKS5 Service selects the front door's pods")
+	require.Equal(t, []any{map[string]any{"port": float64(1055), "targetPort": float64(1055)}}, spec["ports"])
 }
 
 // The app's image reaching the front door's Deployment would roll the tailnet node, and with it
@@ -869,20 +901,11 @@ func TestDispatchListenerWaitsForTheFrontDoor(t *testing.T) {
 	requireWaitsForTheFrontDoor(t, m, "example-dispatch-listener", "the listener")
 }
 
-// Two listeners with one machine id never both bind that id's exclusive durable, and a listener
-// bound to 0.0.0.0 refuses to start without a bearer. The app reaches the listener and the proxy
-// over the network now, each running in a pod of its own.
-func TestDispatchListenerStaysSingleAndAuthenticated(t *testing.T) {
-	args := dispatchArgs()
-	args.Replicas = pulumi.IntRef(3)
-	m, err := runDispatch(t, args, true)
+// A listener bound to 0.0.0.0 refuses to start without a bearer. The app reaches the listener and
+// the proxy over the network, each running in pods of its own.
+func TestDispatchListenerIsAuthenticated(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
-
-	spec := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch-listener").Inputs.Mappable()["spec"].(map[string]any)
-	require.EqualValues(t, 1, spec["replicas"])
-	strategy := spec["strategy"].(map[string]any)
-	require.Equal(t, "Recreate", strategy["type"])
-	require.NotContains(t, strategy, "rollingUpdate")
 
 	const socks5Proxy = "example-dispatch-tailnet.dispatch.svc.cluster.local:1055"
 	listenerToken := map[string]any{"name": "example-dispatch-listener", "key": "ENVOY_API_TOKEN"}
@@ -896,6 +919,19 @@ func TestDispatchListenerStaysSingleAndAuthenticated(t *testing.T) {
 	require.Equal(t, "http://example-dispatch-listener.dispatch.svc.cluster.local:9020", app["ENVOY_URL"])
 	require.Equal(t, listenerToken, app["ENVOY_TOKEN"])
 	require.Equal(t, socks5Proxy, app["ENVOY_NATS_SOCKS5_PROXY"])
+}
+
+// A stopping listener pod keeps answering /v1 while its removal from Service example-dispatch-
+// listener reaches every node's proxy: it waits 5 s before it is signalled, and its 35 s grace
+// period covers that wait, the listener's own stop of about 26 s, and a margin.
+func TestDispatchListenerKeepsServingUntilItsRemovalFromRoutingPropagates(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	template := deploymentPodTemplate(t, m, "example-dispatch-listener")
+	require.EqualValues(t, 35, template["spec"].(map[string]any)["terminationGracePeriodSeconds"])
+	require.Equal(t, map[string]any{"preStop": map[string]any{"exec": map[string]any{"command": []any{"sleep", "5"}}}},
+		podContainer(t, template, "envoy-listener")["lifecycle"])
 }
 
 // A pod the apiserver has marked terminating leaves routing asynchronously, and it does so
@@ -1116,23 +1152,135 @@ func TestDispatchListenerPodMatchesGolden(t *testing.T) {
 	requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
 }
 
-// Without the annotation the cluster autoscaler evicts a pod whenever it consolidates its node,
-// and the one-replica front door takes Dispatch off the tailnet until the replacement is ready:
-// every Deployment the component registers, now the app, the front door and the listener, carries it.
-func TestDispatchPodsAreNotEvictedForScaleDown(t *testing.T) {
+// Every workload's pods keep apart at any replica count, over that Deployment's own selector:
+// required anti-affinity on the node, so a node's loss takes one pod at most, and a zone spread
+// that leaves a pod Pending rather than stacking a zone, counting a second zone before Autopilot
+// has a node there (minDomains 2). Old and new revisions count together (no matchLabelKeys), so a
+// surge pod lands away from the pods it replaces.
+func TestDispatchSpreadsEveryWorkloadAcrossNodesAndZones(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
-	var deployments []string
-	for _, r := range m.Registrations() {
-		if r.Type != "kubernetes:apps/v1:Deployment" {
-			continue
-		}
-		deployments = append(deployments, r.Name)
-		annotations, _ := deploymentPodTemplate(t, m, r.Name)["metadata"].(map[string]any)["annotations"].(map[string]any)
-		require.Equal(t, "false", annotations["cluster-autoscaler.kubernetes.io/safe-to-evict"],
-			"Deployment %s's pod template lacks cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\"", r.Name)
+
+	for _, workload := range dispatchWorkloads {
+		selector := map[string]any{"matchLabels": map[string]any{"app": workload.deployment}}
+		require.Equal(t, selector, deploymentSpec(t, m, workload.deployment)["selector"])
+		pod := deploymentPodTemplate(t, m, workload.deployment)["spec"].(map[string]any)
+		require.Equal(t, map[string]any{"podAntiAffinity": map[string]any{
+			"requiredDuringSchedulingIgnoredDuringExecution": []any{map[string]any{"labelSelector": selector, "topologyKey": "kubernetes.io/hostname"}},
+		}}, pod["affinity"], workload.deployment)
+		require.Equal(t, []any{map[string]any{
+			"labelSelector":     selector,
+			"topologyKey":       "topology.kubernetes.io/zone",
+			"maxSkew":           float64(1),
+			"minDomains":        float64(2),
+			"whenUnsatisfiable": "DoNotSchedule",
+		}}, pod["topologySpreadConstraints"], workload.deployment)
 	}
-	require.ElementsMatch(t, []string{"example-dispatch", "example-dispatch-tailnet", "example-dispatch-listener"}, deployments)
+}
+
+// podChecksums returns a pod template's checksum/ annotations.
+func podChecksums(t *testing.T, m *pulumitest.Mocks, deployment string) map[string]any {
+	t.Helper()
+	annotations, _ := deploymentPodTemplate(t, m, deployment)["metadata"].(map[string]any)["annotations"].(map[string]any)
+	checksums := map[string]any{}
+	for key, value := range annotations {
+		if strings.HasPrefix(key, "checksum/") {
+			checksums[key] = value
+		}
+	}
+	return checksums
+}
+
+// A running container never re-reads a Secret it reads through its environment, so each pod
+// template carries checksum/<secret> for exactly the component Secrets its environment reads, set
+// to that Secret's resourceVersion (the mocks compute <name>-resource-version), and its Deployment
+// registers after the Secret: a changed Secret rolls the pods that read it, and no other. The
+// app reads its own Secret and ENVOY_TOKEN from the listener's; the listener its own; the front
+// door the tailnet auth key.
+func TestDispatchPodsRollWhenTheSecretsTheyReadChange(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	for deployment, secrets := range map[string][]string{
+		"example-dispatch":          {"example-dispatch-dispatch", "example-dispatch-listener"},
+		"example-dispatch-listener": {"example-dispatch-listener"},
+		"example-dispatch-tailnet":  {"example-dispatch-tailnet-auth-key"},
+	} {
+		want := map[string]any{}
+		deps := m.Named(t, "kubernetes:apps/v1:Deployment", deployment).RPC.GetDependencies()
+		for _, secret := range secrets {
+			want["checksum/"+secret] = secret + "-resource-version"
+			require.Contains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$kubernetes:core/v1:Secret::"+secret, deployment)
+		}
+		require.Equal(t, want, podChecksums(t, m, deployment), deployment)
+	}
+}
+
+// podProbes returns every container of a pod template, init containers included, by name.
+func podProbes(t *testing.T, m *pulumitest.Mocks, deployment string) map[string]map[string]any {
+	t.Helper()
+	pod := deploymentPodTemplate(t, m, deployment)["spec"].(map[string]any)
+	containers := map[string]map[string]any{}
+	for _, field := range []string{"initContainers", "containers"} {
+		items, _ := pod[field].([]any)
+		for _, item := range items {
+			container := item.(map[string]any)
+			containers[container["name"].(string)] = container
+		}
+	}
+	return containers
+}
+
+// A liveness probe restarts a container, so it fails only when the process does not answer at
+// all: Dispatch's and the listener's /healthz answer 503 while Postgres or NATS is down, and a
+// liveness or startup probe failing on that would turn a dependency outage into a restart of
+// every pod. So no liveness or startup command passes curl -f (any short-option cluster holding f,
+// or --fail) and none is an httpGet on /healthz. Every serving container of the app and the
+// listener has both probes; the listener's readiness allows the 6 s its /healthz may take to
+// answer; and the app's startup probe allows 30 minutes, since envoy-dispatch migrates the
+// database before it listens and nothing bounds a migration's run time.
+func TestDispatchLivenessFailsOnlyWhenAProcessDoesNotAnswer(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	for _, workload := range dispatchWorkloads {
+		for name, container := range podProbes(t, m, workload.deployment) {
+			for _, kind := range []string{"startupProbe", "livenessProbe"} {
+				probe, ok := container[kind].(map[string]any)
+				if !ok {
+					continue
+				}
+				if exec, ok := probe["exec"].(map[string]any); ok {
+					for _, arg := range exec["command"].([]any) {
+						arg := arg.(string)
+						shortCluster := strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--")
+						require.False(t, (shortCluster && strings.Contains(arg, "f")) || arg == "--fail",
+							"%s's %s %s passes curl %s", workload.deployment, name, kind, arg)
+					}
+				}
+				if get, ok := probe["httpGet"].(map[string]any); ok {
+					require.NotEqual(t, "/healthz", get["path"], "%s's %s %s", workload.deployment, name, kind)
+				}
+			}
+		}
+	}
+	for deployment, serving := range map[string][]string{
+		"example-dispatch":          {"cloud-sql-proxy", "envoy-dispatch"},
+		"example-dispatch-listener": {"envoy-listener"},
+	} {
+		containers := podProbes(t, m, deployment)
+		for _, name := range serving {
+			require.Contains(t, containers[name], "livenessProbe", "%s's %s", deployment, name)
+			require.Contains(t, containers[name], "startupProbe", "%s's %s", deployment, name)
+		}
+	}
+	ready := podProbes(t, m, "example-dispatch-listener")["envoy-listener"]["readinessProbe"].(map[string]any)
+	require.GreaterOrEqual(t, ready["timeoutSeconds"], float64(6))
+	startup := podProbes(t, m, "example-dispatch")["envoy-dispatch"]["startupProbe"].(map[string]any)
+	require.GreaterOrEqual(t, startup["periodSeconds"].(float64)*startup["failureThreshold"].(float64), float64(30*60))
+	proxy := podProbes(t, m, "example-dispatch")["cloud-sql-proxy"]
+	require.Subset(t, proxy["args"], []any{"--health-check", "--http-address=0.0.0.0", "--http-port=9801"},
+		"the proxy serves the endpoints its probes call")
 }
 
 // Pulumi's deletionProtection stops only a Pulumi delete; the instance's own setting stops the API
@@ -1538,15 +1686,30 @@ const (
 	priorityClassType       = "kubernetes:scheduling.k8s.io/v1:PriorityClass"
 )
 
-// Unset, appPriorityClassName and appPdbMinAvailable leave the component as it was before they
-// existed: no PodDisruptionBudget, no PriorityClass read, and an app pod naming no priority class
-// (TestDispatchPodMatchesGolden pins the whole template).
+// safeToEvict reports whether deployment's pod template carries the cluster autoscaler's
+// safe-to-evict annotation, failing when it carries another value than "false".
+func safeToEvict(t *testing.T, m *pulumitest.Mocks, deployment string) bool {
+	t.Helper()
+	annotations, _ := deploymentPodTemplate(t, m, deployment)["metadata"].(map[string]any)["annotations"].(map[string]any)
+	value, ok := annotations["cluster-autoscaler.kubernetes.io/safe-to-evict"]
+	if ok {
+		require.Equal(t, "false", value, deployment)
+	}
+	return ok
+}
+
+// Unset, priorityClassName and the three budgets leave no trace: no PodDisruptionBudget, no
+// PriorityClass read, no pod naming a priority class, and every pod template carrying
+// safe-to-evict "false", so the autoscaler never evicts a pod no budget protects.
 func TestDispatchRegistersNoBudgetOrPriorityClassUnset(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 	require.Zero(t, countRegistrations(m, podDisruptionBudgetType))
 	require.Zero(t, countRegistrations(m, priorityClassType))
-	require.NotContains(t, deploymentPodTemplate(t, m, "example-dispatch")["spec"], "priorityClassName")
+	for _, workload := range dispatchWorkloads {
+		require.NotContains(t, deploymentPodTemplate(t, m, workload.deployment)["spec"], "priorityClassName", workload.deployment)
+		require.True(t, safeToEvict(t, m, workload.deployment), workload.deployment)
+	}
 }
 
 // requireKubernetesChild asserts that r is a child of the component on its own Kubernetes
@@ -1558,86 +1721,148 @@ func requireKubernetesChild(t *testing.T, r pulumitest.Registration) {
 	require.Contains(t, r.RPC.GetDependencies(), "urn:pulumi:s::p::"+dispatchType+"$gcp:container/cluster:Cluster::example-dispatch")
 }
 
-// appPriorityClassName reaches the app's pod and nothing else: its template is the default's with
-// priorityClassName added, and the front door's and the listener's pods match their goldens. The
-// component creates no PriorityClass; it reads the named one, and the app Deployment waits on
-// that read, so a class the cluster lacks fails the update before any pod is replaced.
-func TestDispatchAppPriorityClassReachesTheAppPodAlone(t *testing.T) {
+// priorityClassName reaches every pod of the three Deployments: each template is the default's
+// with priorityClassName added. The component creates no PriorityClass; it reads the named one
+// once, and all three Deployments wait on that read, so a class the cluster lacks fails the update
+// before any pod is replaced.
+func TestDispatchPriorityClassReachesEveryPod(t *testing.T) {
 	defaults, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 	for _, class := range []string{"example-priority", "example.priority"} {
 		t.Run(class, func(t *testing.T) {
 			args := dispatchArgs()
-			args.AppPriorityClassName = pulumi.StringRef(class)
+			args.PriorityClassName = pulumi.StringRef(class)
 			m, err := runDispatch(t, args, true)
 			require.NoError(t, err)
 
-			want := deploymentPodTemplate(t, defaults, "example-dispatch")
-			want["spec"].(map[string]any)["priorityClassName"] = class
-			require.Equal(t, want, deploymentPodTemplate(t, m, "example-dispatch"))
-			requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
-			requirePodGolden(t, m, "example-dispatch-tailnet", "dispatch-tailnet-pod.golden")
-
+			require.Equal(t, 1, countRegistrations(m, priorityClassType), "the class is read once")
 			read := m.Named(t, priorityClassType, "example-dispatch-priority-class")
 			require.Equal(t, class, read.ID)
 			require.Nil(t, read.RPC, "the PriorityClass is read, never registered")
 			require.Equal(t, "urn:pulumi:s::p::"+dispatchType+"::example-dispatch", read.ReadRPC.GetParent())
 			require.Contains(t, read.ReadRPC.GetProvider(), "pulumi:providers:kubernetes::example-dispatch-kubernetes::")
 			require.Contains(t, read.ReadRPC.GetDependencies(), "urn:pulumi:s::p::"+dispatchType+"$gcp:container/cluster:Cluster::example-dispatch")
-			deps := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").RPC.GetDependencies()
-			require.Contains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$"+priorityClassType+"::example-dispatch-priority-class")
+			for _, workload := range dispatchWorkloads {
+				want := deploymentPodTemplate(t, defaults, workload.deployment)
+				want["spec"].(map[string]any)["priorityClassName"] = class
+				require.Equal(t, want, deploymentPodTemplate(t, m, workload.deployment), workload.deployment)
+				deps := m.Named(t, "kubernetes:apps/v1:Deployment", workload.deployment).RPC.GetDependencies()
+				require.Contains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$"+priorityClassType+"::example-dispatch-priority-class", workload.deployment)
+			}
 			require.ElementsMatch(t, append(defaults.Types(), priorityClassType), m.Types())
 		})
 	}
 }
 
-// appPdbMinAvailable registers one PodDisruptionBudget, named for the app, in its namespace,
-// selecting the app's pods by the label the app Deployment's own selector matches, and no other
-// workload's, with Kubernetes' default unhealthyPodEvictionPolicy. It is a Kubernetes child of the
-// component like every other, and the app's pod template is unchanged.
-func TestDispatchAppPdbCoversTheAppPods(t *testing.T) {
+// requireBudget fails unless one PodDisruptionBudget, named for deployment, in namespace, covers
+// that Deployment's pods by the selector the Deployment itself matches, with minAvailable and
+// Kubernetes' default unhealthyPodEvictionPolicy, as a Kubernetes child of the component.
+func requireBudget(t *testing.T, m *pulumitest.Mocks, deployment, namespace string, minAvailable int) {
+	t.Helper()
+	registration := m.Named(t, podDisruptionBudgetType, deployment)
+	requireKubernetesChild(t, registration)
+	budget := registration.Inputs.Mappable()
+	require.Equal(t, map[string]any{"name": deployment, "namespace": namespace}, budget["metadata"])
+	require.Equal(t, map[string]any{
+		"minAvailable": float64(minAvailable),
+		"selector":     map[string]any{"matchLabels": map[string]any{"app": deployment}},
+	}, budget["spec"])
+	require.Equal(t, deploymentSpec(t, m, deployment)["selector"], budget["spec"].(map[string]any)["selector"])
+}
+
+// Each budget input registers one PodDisruptionBudget over its own Deployment's pods alone, and
+// that Deployment's template drops safe-to-evict, which the budget replaces, and is otherwise the
+// default's; the other two Deployments keep the annotation and get no budget.
+func TestDispatchEachBudgetCoversItsOwnPods(t *testing.T) {
 	defaults, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
-	for _, row := range []struct {
-		replicas, minAvailable int
-		namespace              string
-	}{{1, 1, ""}, {3, 2, ""}, {3, 3, ""}, {1, 1, "example-namespace"}} {
-		t.Run(fmt.Sprintf("%d of %d in %q", row.minAvailable, row.replicas, row.namespace), func(t *testing.T) {
-			args := dispatchArgs()
-			args.Replicas = pulumi.IntRef(row.replicas)
-			args.AppPdbMinAvailable = pulumi.IntRef(row.minAvailable)
-			namespace := "dispatch"
-			if row.namespace != "" {
-				args.Namespace = pulumi.StringRef(row.namespace)
-				namespace = row.namespace
-			}
-			m, err := runDispatch(t, args, true)
-			require.NoError(t, err)
+	for _, workload := range dispatchWorkloads {
+		for _, row := range []struct {
+			replicas, minAvailable int
+			namespace              string
+		}{{1, 1, ""}, {3, 2, ""}, {3, 3, ""}, {2, 1, "example-namespace"}} {
+			t.Run(fmt.Sprintf("%s %d of %d in %q", workload.deployment, row.minAvailable, row.replicas, row.namespace), func(t *testing.T) {
+				args := dispatchArgs()
+				workload.replicas(args, row.replicas)
+				workload.budget(args, row.minAvailable)
+				namespace := "dispatch"
+				if row.namespace != "" {
+					args.Namespace = pulumi.StringRef(row.namespace)
+					namespace = row.namespace
+				}
+				m, err := runDispatch(t, args, true)
+				require.NoError(t, err)
 
-			registration := m.Named(t, podDisruptionBudgetType, "example-dispatch")
-			requireKubernetesChild(t, registration)
-			budget := registration.Inputs.Mappable()
-			require.Equal(t, map[string]any{"name": "example-dispatch", "namespace": namespace}, budget["metadata"])
-			require.Equal(t, map[string]any{
-				"minAvailable": float64(row.minAvailable),
-				"selector":     map[string]any{"matchLabels": map[string]any{"app": "example-dispatch"}},
-			}, budget["spec"])
-			deploymentSpec := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").Inputs.Mappable()["spec"].(map[string]any)
-			require.Equal(t, deploymentSpec["selector"], budget["spec"].(map[string]any)["selector"])
-			if row.namespace == "" {
-				require.Equal(t, deploymentPodTemplate(t, defaults, "example-dispatch"), deploymentPodTemplate(t, m, "example-dispatch"))
-				require.ElementsMatch(t, append(defaults.Types(), podDisruptionBudgetType), m.Types())
-			}
+				require.Equal(t, 1, countRegistrations(m, podDisruptionBudgetType))
+				requireBudget(t, m, workload.deployment, namespace, row.minAvailable)
+				for _, other := range dispatchWorkloads {
+					require.Equal(t, other.deployment != workload.deployment, safeToEvict(t, m, other.deployment),
+						"safe-to-evict on %s exactly when no budget covers it", other.deployment)
+				}
+				if row.namespace == "" {
+					want := deploymentPodTemplate(t, defaults, workload.deployment)
+					delete(want["metadata"].(map[string]any)["annotations"].(map[string]any), "cluster-autoscaler.kubernetes.io/safe-to-evict")
+					require.Equal(t, want, deploymentPodTemplate(t, m, workload.deployment))
+					require.ElementsMatch(t, append(defaults.Types(), podDisruptionBudgetType), m.Types())
+				}
+			})
+		}
+	}
+}
+
+// All three budgets set, each Deployment has its own, under its own name and selector, and no
+// template carries safe-to-evict.
+func TestDispatchBudgetsOnEveryWorkloadStayDistinct(t *testing.T) {
+	args := dispatchArgs()
+	for _, workload := range dispatchWorkloads {
+		workload.replicas(args, 3)
+		workload.budget(args, 2)
+	}
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+
+	require.Equal(t, 3, countRegistrations(m, podDisruptionBudgetType))
+	for _, workload := range dispatchWorkloads {
+		requireBudget(t, m, workload.deployment, "dispatch", 2)
+		require.False(t, safeToEvict(t, m, workload.deployment), workload.deployment)
+	}
+}
+
+// A budget its Deployment's replica count cannot meet is refused by the resolver, naming its own
+// input, before the component registers, so nothing beyond the test's providers exists.
+func TestDispatchRefusesABudgetBeforeRegistering(t *testing.T) {
+	for _, row := range []struct {
+		edit func(*gcp.DispatchArgs)
+		err  string
+	}{
+		{func(a *gcp.DispatchArgs) { a.AppPdbMinAvailable = pulumi.IntRef(2) }, "appPdbMinAvailable 2 must be from 1 to replicas (1)"},
+		{func(a *gcp.DispatchArgs) { a.FrontDoorPdbMinAvailable = pulumi.IntRef(3) }, "frontDoorPdbMinAvailable 3 must be from 1 to frontDoorReplicas (2)"},
+		{func(a *gcp.DispatchArgs) { a.ListenerPdbMinAvailable = pulumi.IntRef(2) }, "listenerPdbMinAvailable 2 must be from 1 to listenerReplicas (1)"},
+	} {
+		t.Run(row.err, func(t *testing.T) {
+			args := dispatchArgs()
+			row.edit(args)
+			m, err := runDispatch(t, args, true)
+			require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: "+row.err)
+			require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
 		})
 	}
 }
 
-// A budget the app's replica count cannot meet is refused by the resolver, before the component
-// registers, so nothing beyond the test's providers exists.
-func TestDispatchRefusesAnAppPdbBeforeRegistering(t *testing.T) {
-	args := dispatchArgs()
-	args.AppPdbMinAvailable = pulumi.IntRef(2)
-	m, err := runDispatch(t, args, true)
-	require.ErrorContains(t, err, `envoy-infra:gcp:Dispatch example-dispatch: appPdbMinAvailable 2 must be from 1 to replicas (1)`)
-	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
+// databaseAvailabilityType reaches the Cloud SQL instance's settings: ZONAL, the instance's value
+// before the input existed, when unset, and REGIONAL, a standby in a second zone, when set.
+func TestDispatchDatabaseAvailabilityTypeReachesTheInstance(t *testing.T) {
+	for _, row := range []struct {
+		value *string
+		want  string
+	}{{nil, "ZONAL"}, {pulumi.StringRef("ZONAL"), "ZONAL"}, {pulumi.StringRef("REGIONAL"), "REGIONAL"}} {
+		t.Run(row.want, func(t *testing.T) {
+			args := dispatchArgs()
+			args.DatabaseAvailabilityType = row.value
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+			settings := m.One(t, "gcp:sql/databaseInstance:DatabaseInstance").Inputs.Mappable()["settings"].(map[string]any)
+			require.Equal(t, row.want, settings["availabilityType"])
+		})
+	}
 }

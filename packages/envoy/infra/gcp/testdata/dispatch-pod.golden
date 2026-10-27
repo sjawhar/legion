@@ -1,6 +1,8 @@
 {
   "metadata": {
     "annotations": {
+      "checksum/example-dispatch-dispatch": "example-dispatch-dispatch-resource-version",
+      "checksum/example-dispatch-listener": "example-dispatch-listener-resource-version",
       "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
     },
     "labels": {
@@ -8,6 +10,20 @@
     }
   },
   "spec": {
+    "affinity": {
+      "podAntiAffinity": {
+        "requiredDuringSchedulingIgnoredDuringExecution": [
+          {
+            "labelSelector": {
+              "matchLabels": {
+                "app": "example-dispatch"
+              }
+            },
+            "topologyKey": "kubernetes.io/hostname"
+          }
+        ]
+      }
+    },
     "containers": [
       {
         "command": [
@@ -115,6 +131,22 @@
             }
           }
         },
+        "livenessProbe": {
+          "exec": {
+            "command": [
+              "curl",
+              "-sS",
+              "-o",
+              "/dev/null",
+              "--max-time",
+              "8",
+              "http://127.0.0.1:8766/healthz"
+            ]
+          },
+          "failureThreshold": 3,
+          "periodSeconds": 10,
+          "timeoutSeconds": 9
+        },
         "name": "envoy-dispatch",
         "readinessProbe": {
           "exec": {
@@ -139,6 +171,22 @@
             "memory": "4Gi"
           }
         },
+        "startupProbe": {
+          "exec": {
+            "command": [
+              "curl",
+              "-sS",
+              "-o",
+              "/dev/null",
+              "--max-time",
+              "8",
+              "http://127.0.0.1:8766/healthz"
+            ]
+          },
+          "failureThreshold": 180,
+          "periodSeconds": 10,
+          "timeoutSeconds": 9
+        },
         "volumeMounts": [
           {
             "mountPath": "/var/run/secrets/envoy",
@@ -156,9 +204,21 @@
           "--structured-logs",
           "--address=127.0.0.1",
           "--port=5432",
+          "--health-check",
+          "--http-address=0.0.0.0",
+          "--http-port=9801",
           "example-project:us-central1:example-dispatch"
         ],
         "image": "example.invalid/cloud-sql-proxy@sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "livenessProbe": {
+          "failureThreshold": 3,
+          "httpGet": {
+            "path": "/liveness",
+            "port": 9801
+          },
+          "periodSeconds": 10,
+          "timeoutSeconds": 5
+        },
         "name": "cloud-sql-proxy",
         "resources": {
           "limits": {
@@ -173,11 +233,33 @@
         "restartPolicy": "Always",
         "securityContext": {
           "runAsNonRoot": true
+        },
+        "startupProbe": {
+          "failureThreshold": 60,
+          "httpGet": {
+            "path": "/startup",
+            "port": 9801
+          },
+          "periodSeconds": 1,
+          "timeoutSeconds": 5
         }
       }
     ],
     "serviceAccountName": "example-dispatch",
     "terminationGracePeriodSeconds": 35,
+    "topologySpreadConstraints": [
+      {
+        "labelSelector": {
+          "matchLabels": {
+            "app": "example-dispatch"
+          }
+        },
+        "maxSkew": 1,
+        "minDomains": 2,
+        "topologyKey": "topology.kubernetes.io/zone",
+        "whenUnsatisfiable": "DoNotSchedule"
+      }
+    ],
     "volumes": [
       {
         "csi": {

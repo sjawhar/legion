@@ -1,6 +1,7 @@
 {
   "metadata": {
     "annotations": {
+      "checksum/example-dispatch-listener": "example-dispatch-listener-resource-version",
       "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
     },
     "labels": {
@@ -8,6 +9,20 @@
     }
   },
   "spec": {
+    "affinity": {
+      "podAntiAffinity": {
+        "requiredDuringSchedulingIgnoredDuringExecution": [
+          {
+            "labelSelector": {
+              "matchLabels": {
+                "app": "example-dispatch-listener"
+              }
+            },
+            "topologyKey": "kubernetes.io/hostname"
+          }
+        ]
+      }
+    },
     "containers": [
       {
         "env": [
@@ -50,6 +65,32 @@
           }
         ],
         "image": "example.invalid/envoy@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "lifecycle": {
+          "preStop": {
+            "exec": {
+              "command": [
+                "sleep",
+                "5"
+              ]
+            }
+          }
+        },
+        "livenessProbe": {
+          "exec": {
+            "command": [
+              "curl",
+              "-sS",
+              "-o",
+              "/dev/null",
+              "--max-time",
+              "8",
+              "http://127.0.0.1:9020/healthz"
+            ]
+          },
+          "failureThreshold": 3,
+          "periodSeconds": 10,
+          "timeoutSeconds": 9
+        },
         "name": "envoy-listener",
         "readinessProbe": {
           "exec": {
@@ -58,7 +99,10 @@
               "-fsS",
               "http://127.0.0.1:9020/healthz"
             ]
-          }
+          },
+          "failureThreshold": 2,
+          "periodSeconds": 5,
+          "timeoutSeconds": 6
         },
         "resources": {
           "limits": {
@@ -69,6 +113,22 @@
             "cpu": "500m",
             "memory": "512Mi"
           }
+        },
+        "startupProbe": {
+          "exec": {
+            "command": [
+              "curl",
+              "-sS",
+              "-o",
+              "/dev/null",
+              "--max-time",
+              "8",
+              "http://127.0.0.1:9020/healthz"
+            ]
+          },
+          "failureThreshold": 60,
+          "periodSeconds": 5,
+          "timeoutSeconds": 9
         },
         "volumeMounts": [
           {
@@ -81,6 +141,20 @@
     ],
     "enableServiceLinks": false,
     "serviceAccountName": "example-dispatch",
+    "terminationGracePeriodSeconds": 35,
+    "topologySpreadConstraints": [
+      {
+        "labelSelector": {
+          "matchLabels": {
+            "app": "example-dispatch-listener"
+          }
+        },
+        "maxSkew": 1,
+        "minDomains": 2,
+        "topologyKey": "topology.kubernetes.io/zone",
+        "whenUnsatisfiable": "DoNotSchedule"
+      }
+    ],
     "volumes": [
       {
         "csi": {

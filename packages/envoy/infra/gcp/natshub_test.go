@@ -54,7 +54,8 @@ const (
 
 // newMocks is the mock engine with the outputs the hub reads, as the gcp provider computes them:
 // an account's email and member, a network's and a health check's self link, a template's unique
-// self link and a group's name.
+// self link and a group's name; and those Dispatch reads, a Kubernetes Secret's resourceVersion
+// among them.
 func newMocks() *pulumitest.Mocks {
 	return &pulumitest.Mocks{
 		Computed: func(args pulumi.MockResourceArgs) (string, resource.PropertyMap) {
@@ -80,6 +81,17 @@ func newMocks() *pulumitest.Mocks {
 				out["connectionName"] = resource.NewProperty("example-project:us-central1:example-dispatch")
 			case "random:index/randomPassword:RandomPassword":
 				out["result"] = resource.NewProperty(args.Name + "-result")
+			case "kubernetes:core/v1:Secret":
+				// The API server sets a Secret's resourceVersion on every write; the state keeps the
+				// metadata the program registered, with it added.
+				metadata := resource.PropertyMap{}
+				if registered, ok := args.Inputs["metadata"]; ok && registered.IsObject() {
+					for key, value := range registered.ObjectValue() {
+						metadata[key] = value
+					}
+				}
+				metadata["resourceVersion"] = resource.NewProperty(args.Name + "-resource-version")
+				out["metadata"] = resource.NewProperty(metadata)
 			}
 			return "", out
 		},

@@ -134,12 +134,18 @@ func TestConstructRefusesDispatchAppResourcesFromAnotherResource(t *testing.T) {
 	}
 }
 
-// appPriorityClassName is a plain string and appPdbMinAvailable a plain *int, each refused from
-// another resource's output as replicas is.
-func TestConstructRefusesDispatchAppDisruptionInputsFromAnotherResource(t *testing.T) {
+// priorityClassName and databaseAvailabilityType are plain strings, and the front door's and the
+// listener's replica counts and the three budgets plain *ints, each refused from another
+// resource's output as replicas is.
+func TestConstructRefusesDispatchDisruptionInputsFromAnotherResource(t *testing.T) {
 	for input, value := range map[string]property.Value{
-		"appPriorityClassName": property.New("example-priority"),
-		"appPdbMinAvailable":   property.New(1.0),
+		"priorityClassName":        property.New("example-priority"),
+		"databaseAvailabilityType": property.New("REGIONAL"),
+		"frontDoorReplicas":        property.New(3.0),
+		"listenerReplicas":         property.New(2.0),
+		"appPdbMinAvailable":       property.New(1.0),
+		"frontDoorPdbMinAvailable": property.New(1.0),
+		"listenerPdbMinAvailable":  property.New(1.0),
 	} {
 		t.Run(input, func(t *testing.T) {
 			inputs := dispatchConstructInputs()

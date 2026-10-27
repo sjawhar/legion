@@ -1,6 +1,7 @@
 {
   "metadata": {
     "annotations": {
+      "checksum/example-dispatch-tailnet-auth-key": "example-dispatch-tailnet-auth-key-resource-version",
       "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
     },
     "labels": {
@@ -8,6 +9,20 @@
     }
   },
   "spec": {
+    "affinity": {
+      "podAntiAffinity": {
+        "requiredDuringSchedulingIgnoredDuringExecution": [
+          {
+            "labelSelector": {
+              "matchLabels": {
+                "app": "example-dispatch-tailnet"
+              }
+            },
+            "topologyKey": "kubernetes.io/hostname"
+          }
+        ]
+      }
+    },
     "containers": [
       {
         "env": [
@@ -100,6 +115,19 @@
     ],
     "enableServiceLinks": false,
     "serviceAccountName": "example-dispatch",
+    "topologySpreadConstraints": [
+      {
+        "labelSelector": {
+          "matchLabels": {
+            "app": "example-dispatch-tailnet"
+          }
+        },
+        "maxSkew": 1,
+        "minDomains": 2,
+        "topologyKey": "topology.kubernetes.io/zone",
+        "whenUnsatisfiable": "DoNotSchedule"
+      }
+    ],
     "volumes": [
       {
         "configMap": {
