@@ -3,6 +3,7 @@ package dispatch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -32,6 +33,9 @@ type Client interface {
 	HandOver(ctx context.Context, issue Issue, status string) error
 	PostMessage(ctx context.Context, key, body string) error
 	MessageBodiesSince(ctx context.Context, key string, since time.Time) ([]string, error)
+	// EventsAfter is the issue's event log after a sequence, oldest first, each event as Dispatch
+	// serves it: the boot catch-up's read of what a root's durable stream may not have delivered.
+	EventsAfter(ctx context.Context, key string, after int64) ([]json.RawMessage, error)
 	Approval(ctx context.Context, artifactID string) (Approval, error)
 	BuildCommit(ctx context.Context) (string, error)
 	ListRepoProjects(ctx context.Context) ([]RepoProject, error)

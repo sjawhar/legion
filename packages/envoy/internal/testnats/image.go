@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/docker/docker/api/types/container"
 	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
@@ -38,6 +39,12 @@ func StartImageConfig(t testing.TB, image, config string, serverArgs []string, a
 			Reader:            strings.NewReader(config),
 			ContainerFilePath: imageConfigPath,
 			FileMode:          0o644,
+		}),
+		// One CPU and 512 MiB, as every container the repository's tests and proofs start is capped
+		// on a shared host: a test server holds a few small streams.
+		testcontainers.WithHostConfigModifier(func(hostConfig *container.HostConfig) {
+			hostConfig.NanoCPUs = 1_000_000_000
+			hostConfig.Memory = 512 << 20
 		}),
 	)
 	testcontainers.CleanupContainer(t, ctr)
