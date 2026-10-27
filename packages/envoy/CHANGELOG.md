@@ -796,6 +796,32 @@
 
 ### Changed
 
+- Dispatch's events outbox publishes from one process at a time. Every process runs it, and only
+  the one holding the publisher hold `dispatch-outbox` (a row of the new `duty_holds`, renewed
+  every 2 s, lapsing 6 s after its last renewal) reads and sends events. A holder that stops
+  releases the hold and the other process takes it at once; one that is killed is replaced when
+  its hold lapses; one whose NATS stays down for 3 s, or whose failed sends meet a connection that
+  does not answer a probe, gives the hold up; and one frozen past its deadline sends nothing when
+  it resumes. `/healthz` reports `outbox_publisher`, `true` on the process that publishes now and
+  `false` on the other and with NATS disabled; it never decides `ok`. Each issue's, document's and
+  project's events reach each destination in order, one send in flight per destination: an event
+  that has not reached a session or the owner's topic family holds back that destination's later
+  events of its owner, and nothing else. A role route is no longer published on
+  `notifications.role.<role>`: Dispatch resolves the holder as the listener does and forwards the
+  event to the holder's own subject, publishing it only once the holder's receipt arrives (for a
+  holder with a serving port, the stream's acknowledgement of the stored copy). A send NATS does
+  not acknowledge on a live connection is now backed off with its attempt counted and the error
+  kept in `events.publish_error`, where it was resent at every scan. Nothing scans on a period any
+  more: a LISTEN on new events and on the hold's release, the process's own commits, a NATS
+  reconnect and a timer to the earliest due retry wake it. Each process uses one more Postgres
+  connection (the outbox's pool is two, so its hold's renewal never waits behind a batch) and holds
+  one more LISTEN connection: 83 connections per process at its ceiling, from 81. Migrations
+  `0121_duty_holds` (a new table) and `0122_outbox_claim` (three partial indexes on `events`,
+  `events.publish_error`, and the drop of `events_unpublished` and `events_unpublished_ready`)
+  apply at boot; `0122`'s index builds hold writes to `events` while they run, 1.1 s on a million
+  rows. A process of the release before this one takes no hold and goes on publishing beside the
+  holder while a rolling update runs both, so deploy this release by replacing the running server
+  (`strategy: Recreate`) to keep every issue's notifications in order across the deploy.
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a

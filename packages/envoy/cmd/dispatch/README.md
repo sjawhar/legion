@@ -384,10 +384,22 @@ server of the earlier release running, and that is an exception named in the pul
 
 What the two processes share, and what each keeps to itself:
 
-- Each event is published once. The outbox claims a batch (`for update skip locked`) before it
-  publishes it, so two processes never publish one event twice. A process that dies between a
-  publish and its `published_at` write republishes once the claim's minute lapses, which is
-  at-least-once on the `notifications.role.*` core-NATS lanes, whose receivers dedupe by key.
+- One process publishes the events outbox at a time. Each process's outbox reads and sends events
+  only while it holds the publisher hold `dispatch-outbox` (`duty.Hold`, migration
+  `0121_duty_holds`), renewed every two seconds on the outbox's own pool, and stands by while the
+  other holds it; `/healthz` says which (`outbox_publisher`). A holder that stops releases the
+  hold, which wakes the standby at once; one that is killed is replaced once its hold lapses, six
+  seconds after its last renewal; one whose NATS stays down for three seconds, or whose failed
+  sends meet a connection that does not answer a probe, releases the hold too. A holder sends
+  nothing once its hold's deadline has passed, so one that freezes and resumes publishes nothing
+  beside the new holder. Each owner's events (an issue's, a document's or a project's) keep their
+  order per destination: an event goes to a session's subject, or to the owner's topic family, only
+  after every earlier unpublished event of its owner bound there has reached it.
+- Each event reaches each receiver once, delivered at least once. A holder that dies between
+  NATS's acknowledgement and the write that records it leaves the batch to be sent again by the
+  next holder: JetStream drops the repeat by its MsgId inside its 72-hour duplicate window, and a
+  role's holder, to which the outbox forwards a role-routed event itself with a receipt, drops a
+  repeat forward by its dedupe key. Dispatch publishes nothing on `notifications.role.*`.
 - A reader's live SSE stream carries the other process's events. It is re-sourced from Postgres
   through a per-process relay on `listen dispatch_events` (migration `0107_events_notify`), so an
   event committed on either process reaches every open stream with no reconnect.
@@ -401,11 +413,11 @@ What the two processes share, and what each keeps to itself:
   and a rolling update starts the second process minutes after the first — finds the period
   already served and logs the same skip. The settlement resumption, the delivery live hub, the
   event-stream relay, the stale-room evictor and the document rooms' timers stay per-process by
-  design, and the embedding queue, the task progress reconciliation and the outbox's own scan
-  claim their own work; the embedding queue's coverage pass runs in every process with no lease,
-  each of its steps safe beside another process's, and drops every vector its own embedder did not
-  make, so every process takes the same embedder settings (Search, below); `cmd/dispatch/main.go`
-  says at the call site which loop is which and why.
+  design, the embedding queue and the task progress reconciliation claim their own work, and the
+  outbox publishes under its hold (above); the embedding queue's coverage pass runs in every
+  process with no lease, each of its steps safe beside another process's, and drops every vector
+  its own embedder did not make, so every process takes the same embedder settings (Search,
+  below); `cmd/dispatch/main.go` says at the call site which loop is which and why.
 
 **Two processes do not share a live document session.** Durable convergence is unconditional:
 every edit is appended under the document's advisory lock, Yjs updates commute, and the stored
@@ -801,6 +813,42 @@ the release before it runs over the new schema unchanged, and the trigger gives 
 release writes its sequence. The auto-deployer is the exception, by its own rule above: once the
 schema has moved it refuses to start the previous tag, and recovery there is forward.
 
+Migration `0121_duty_holds` creates `duty_holds (name, holder, token, expires_at)`, one row per name
+a process holds by renewing it (`duty.Hold`): the events outbox's publisher holds `dispatch-outbox`
+there (Running more than one process, above). `expires_at` is always the database's `now()` plus
+the hold's TTL, so a lapse is judged on the database's clock and never on two hosts' wall clocks,
+and `token` is free text the holder records, the outbox's host and process id. A release deletes
+the row and notifies `dispatch_duty_holds` with the name in one statement, which wakes a standby at
+once. It creates a table and touches no row, and the release before it neither reads nor writes
+it; its census answers `0`.
+
+Migration `0122_outbox_claim` gives the outbox's batch read three partial indexes and drops the two
+the per-row claim read. `events_outbox_fresh` on `(id)` holds the unpublished events never tried,
+`events_outbox_retry` on `(next_attempt_at, id)` those waiting on a back-off, and
+`events_outbox_owner` on `(coalesce(issue_key, artifact_id::text, project_key), id)` each owner's
+unpublished events; none holds a published event or a pending subscription command, so the read
+walks past neither. It adds `events.publish_error`, nullable text with no default, a catalog change
+that rewrites no row: why an event's last attempt failed, cleared once it is published. It drops
+`events_unpublished` (`0003`) and `events_unpublished_ready` (`0020`), which only the per-row claim
+read; the release before it reads neither the new column nor the new indexes, and its claim still
+runs without the dropped ones. The index builds read every row of `events` under `SHARE`, which
+holds writes to `events` until the migration's transaction commits (no `concurrently`, which a
+migration's transaction cannot run): 1.1 s on 1,000,000 event rows and 7.2 s on 5,000,000, on
+Postgres 17 with two cores. Its census answers `0`, since it refuses and rewrites no row, and the
+census reports `events`, the table it locks, with its row count and size.
+
+From `0122`'s release on, `next_attempt_at` is only a back-off, and an unpublished event holds back
+its owner's later events from each destination it has not reached. The rows that start doing so
+at the deploy are the unpublished events that are not pending commands; count them by attempt
+before the deploy with `select attempt_count, count(*) from events where published_at is null and
+(payload ->> 'pending') is distinct from 'true' group by attempt_count order by attempt_count`. The
+release before it takes no publisher hold and still claims and publishes batches of its own, and
+this release reads those one-minute claims as back-offs alone, so while a rolling update runs both
+the two publish side by side: an issue's events can arrive out of order, as they could between two
+processes of the earlier release, and one event can be sent by both, its second copy dropped by
+JetStream's MsgId or by its receiver's dedupe. A deployment that wants neither replaces the running
+server rather than rolling it for this one release (`strategy: Recreate`).
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
@@ -1193,7 +1241,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/auth/whoami` | GET | cookie or trusted header | Return the resolved person, `{kind: "user", login}` with `login` their lowercase email. |
 | `/auth/_dev/signin` | GET | none; `DISPATCH_DEV_SIGNIN=1` only; loopback peer, no forwarding header | Sign in the person `login` names, lowercased, without the sign-in issuer: `302` to the sanitized `next` (default `/`) with the session cookie. `400 DEV_SIGNIN_INPUT` without `login`, `403 DEV_SIGNIN_FORBIDDEN` for a non-loopback peer or a request carrying `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Real-IP` or `Via`. Each mint logs at WARN with the email and the peer. Not mounted otherwise. |
 | `/api/github/rest/...` | GET | cookie or trusted header | Read GitHub as the GitHub App installation that covers the repository: a pull request (`repos/{o}/{r}/pulls/{n}`), an issue (`repos/{o}/{r}/issues/{n}`), a commit's check runs (`repos/{o}/{r}/commits/{sha}/check-runs`) or a commit's workflow runs (`repos/{o}/{r}/actions/runs?head_sha={sha}`, the query being the full 40-hex `head_sha` and at most a numeric `per_page` and `page`, each once), the only reads the web app makes; the checks pill joins each check run to its workflow run for the workflow name and event, keeping the newest run of each check as GitHub's merge does and dropping the runs of an event GitHub does not evaluate for a pull request (only `push`, `pull_request`, `pull_request_review`, `pull_request_target`, `deployment` and `deployment_status` count). A workflow-runs answer of `200` is trimmed to `total_count` and, per run in GitHub's order, only `check_suite_id`, `event` and `name`, so a run's head commit (message, author), actor and repository never reach the browser; a body that does not decode is `502 GITHUB_UPSTREAM`, and any other status passes through unchanged. The pill needs the App's Actions: read, which the delivery reconcile already needs: without it `actions/runs` answers `403` and the pill disappears. Every person shares the App's credential, which reads far more of a repository than that, so any other method is `405 METHOD_NOT_ALLOWED`; any other path, a workflow-runs read with any other query, or a path under it (`actions/runs/{id}`, its jobs or logs) `404 GITHUB_PATH_REFUSED`; and a repository the App is not installed on, or no App key, `503 GITHUB_TOKEN_UNAVAILABLE`. |
-| `/healthz` | GET | none | Report that the process serves, Postgres answers within `store.healthProbeTimeout` (two seconds) on the health pool — a dedicated one-connection pool, never the shared one — NATS is connected where configured, and the file store's bucket answers a two-second `HeadBucket` where `DISPATCH_FILE_STORE_BUCKET` is set (`files`; null when it is not). A database that stops answering is `503` with `db: false` inside that bound, never silence, and the reason is logged. `files` is reported and never decides `ok` or the status: a bucket that stops answering is `200` with `files: false`, so a bucket outage fails uploads and downloads and nothing else, and a deploy check that wants the bucket asserts `files: true` itself. Two seconds fits the tightest prober here, the three-second compose healthcheck and deploy script, as well as the ALB's five. The body also names what is deployed: `commit`, the legion commit the image build stamped (the Dockerfile's `LEGION_COMMIT`; `null` in an unstamped build), and `schema_version`, the highest migration `schema_migrations` records, read by the same probe (`null` when `db` is false). |
+| `/healthz` | GET | none | Report that the process serves, Postgres answers within `store.healthProbeTimeout` (two seconds) on the health pool — a dedicated one-connection pool, never the shared one — NATS is connected where configured, and the file store's bucket answers a two-second `HeadBucket` where `DISPATCH_FILE_STORE_BUCKET` is set (`files`; null when it is not). A database that stops answering is `503` with `db: false` inside that bound, never silence, and the reason is logged. `files` is reported and never decides `ok` or the status: a bucket that stops answering is `200` with `files: false`, so a bucket outage fails uploads and downloads and nothing else, and a deploy check that wants the bucket asserts `files: true` itself. Two seconds fits the tightest prober here, the three-second compose healthcheck and deploy script, as well as the ALB's five. The body also names what is deployed: `commit`, the legion commit the image build stamped (the Dockerfile's `LEGION_COMMIT`; `null` in an unstamped build), and `schema_version`, the highest migration `schema_migrations` records, read by the same probe (`null` when `db` is false). `outbox_publisher` says whether this process publishes the events outbox now: `true` while it holds the outbox's publisher hold and the hold's deadline has not passed, `false` while it stands by for another process's, after it lost the hold, and with NATS disabled. One process of a deployment publishes at a time, so a healthy process may report `false`, and the field never decides `ok` or the status. |
 | `/api/v1/events` | GET | cookie, trusted header, or bearer | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |
 | `/api/v1/artifacts/_test/quiesce` | POST | as above, plus `DISPATCH_TEST_HOOKS=1` | Close every live document and wait for the settlements in flight; not mounted unless `DISPATCH_TEST_HOOKS=1`. |
 | `/api/v1/artifacts/{id}/_test/outside-schema` | POST | as above, plus `DISPATCH_TEST_HOOKS=1` | Write the crafted malformed tree e2e uses; not mounted unless `DISPATCH_TEST_HOOKS=1`. |

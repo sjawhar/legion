@@ -290,7 +290,7 @@ func (p *Pool) Leases() (*pgxpool.Pool, error) {
 // record is allowed, longer than the hold's two seconds between renewals.
 const outboxPoolSize = 2
 
-// Outbox is the pool the events outbox claims, reads and records events through, reads the
+// Outbox is the pool the events outbox reads and records events through, reads the
 // followers and authors a publish routes to, and holds its publisher hold on. Under load the API's
 // requests queue for the shared pool's connections, and an outbox statement queued behind them
 // holds back every event behind it, or lets the hold lapse; on a pool of its own it waits for none

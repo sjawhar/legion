@@ -9,7 +9,7 @@
 -- that takes or renews it: two processes' wall clocks differ by whatever their hosts' do, so the
 -- database's is the one clock a lapse is judged by. A process takes a name whose row is absent,
 -- lapsed (expires_at <= now()) or already its own, in one statement. token is free text the holder
--- records (an intake's deliver subject); the outbox records none.
+-- records (an intake's deliver subject; the outbox's host and process id).
 --
 -- Release deletes the row and sends pg_notify('dispatch_duty_holds', name) in the same statement,
 -- so a standby listening there takes the name at once rather than at the lapse.

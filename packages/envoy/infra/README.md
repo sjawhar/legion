@@ -462,10 +462,12 @@ therefore takes an `up` with `deletionProtection: false` before `destroy`.
 
 `envoy-dispatch` itself is not yet safe at more than one concurrent process: its two delivery
 consumers are exclusive push durables, so a second process logs a bind error for as long as it
-runs, its SSE broker and its live document rooms are per-process, its outbox publisher claims no
-row before it publishes, and several of its loops are written for the one process that runs them,
-so a second copy runs them again. The component carries the capability and leaves the default at
-1; raising a production deployment above it waits on that separate work.
+runs, its SSE broker and its live document rooms are per-process, and several of its loops are
+written for the one process that runs them, so a second copy runs them again. Its events outbox is
+not among them: one process publishes at a time, under a hold the other takes over
+(`packages/envoy/cmd/dispatch/README.md`, "Running more than one process"). The component carries
+the capability and leaves the default at 1; raising a production deployment above it waits on that
+separate work.
 
 To inspect pending migrations before an image update, run the image with the deployment's service
 account and `DATABASE_URL` from its Secret:

@@ -236,7 +236,7 @@ Sign in, then open **Settings**:
 `GET /healthz` needs no credential. It answers `200` when the server is healthy:
 
 ```json
-{"ok":true,"db":true,"nats":null,"files":null,"commit":null,"schema_version":63}
+{"ok":true,"db":true,"nats":null,"files":null,"commit":null,"schema_version":63,"outbox_publisher":false}
 ```
 
 - `db` is whether Postgres answered within two seconds. When it does not, the answer is `503` with
@@ -249,6 +249,9 @@ Sign in, then open **Settings**:
 - `commit` is the source commit the image was built from, or `null` in a build that was not
   stamped.
 - `schema_version` is the newest database migration applied.
+- `outbox_publisher` is whether this server is the one publishing notifications to NATS now. One
+  server publishes at a time, so a healthy server can say `false`, and it always does when NATS is
+  turned off. It never decides `ok` or the status.
 
 ## Running more than one copy
 
@@ -270,21 +273,16 @@ one. Three things have to be true first, and Dispatch can check none of them for
 - **Every migration leaves the version before it able to read and write the database**
   ([Migrations](#migrations)), because a rolling update runs both versions against the one
   database while it lasts.
-- **Expect an issue's notifications out of order while two servers publish.** Each server's
-  events outbox claims a batch of events at a time, and nothing yet keeps two servers from
-  publishing adjacent batches at once, so a later event of an issue can reach NATS before an
-  earlier one, and the Legion daemon drops the earlier one as stale. Run one server, and replace it
-  rather than rolling it (Kubernetes `strategy: Recreate`), until a single-publisher lock lands.
 
 A second server also costs connections, and Postgres counts them per server. Each server opens up
 to 64 connections for requests, up to 8 for the periodic work it runs once across the servers, up
-to 4 for loading documents, one for the health check, and one for the events outbox, and it holds
-three more open for as long as it runs: one each for the three things that wait on Postgres
-notifications, which are delivery, the live event stream, and closing a document session another
-server has written to. That is 81 connections for one server at its ceiling, and twice that for
-two, past a default Postgres's limit of 100. Check the database's connection
-limit before you start the second server: a limit sized for one server, with whatever else uses
-that database counted in, is the thing that runs out.
+to 4 for loading documents, one for the health check, and two for publishing notifications, and it
+holds four more open for as long as it runs: one each for the four things that wait on Postgres
+notifications, which are delivery, the live event stream, closing a document session another
+server has written to, and publishing notifications. That is 83 connections for one server at its
+ceiling, and twice that for two, past a default Postgres's limit of 100. Check the database's
+connection limit before you start the second server: a limit sized for one server, with whatever
+else uses that database counted in, is the thing that runs out.
 
 What a reader sees while two servers are serving:
 
@@ -292,6 +290,9 @@ What a reader sees while two servers are serving:
   under that document's lock, edits made at the same time merge rather than overwrite, and the
   stored history holds all of them. A server whose copy of a document is not the current one
   writes no version from it and settles nothing on it; it reloads the document instead.
+- Notifications are published by one server at a time, so a second server does not reorder an
+  issue's notifications. When the publishing server stops, dies or loses NATS, the other takes
+  over within ten seconds; the health check's `outbox_publisher` says which server publishes.
 - A document's live session belongs to one server. While someone has a document open on one
   server, that session does not carry the other server's edits, so the people shown as present,
   and their cursors, are the ones editing on that server. A write that lands on the other server

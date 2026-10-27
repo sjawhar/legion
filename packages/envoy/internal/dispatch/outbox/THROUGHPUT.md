@@ -33,8 +33,10 @@ Treat the numbers as order-of-magnitude figures.
 |---|---|---|---|---|---|---|
 | Old (`origin/main` at 1357b95c2, one synchronous publish and one write per destination) | 2.7 ev/s (5.3 run alone) | 3.0 ev/s | 1.7 ev/s | 1.9 ev/s | | |
 | One window per batch, every send before any answer, one outcome write, outbox pool of its own | 1,100-1,340 ev/s | 1,100-1,230 ev/s | 540-570 ev/s | 480-540 ev/s | | |
+| The same one-window design, the INFRA-590 harness commit `bed0fdc4` (`main` at `c3d09eec` plus the burst cases), 2 cores, 2026-10-27 | 749.1 ev/s | 219.0 ev/s | 443.7 ev/s | 357.9 ev/s | 725.9 ev/s (100 in 138 ms) | 251.4 ev/s (100 in 398 ms) |
 | Chains: each issue's sends to each destination one at a time, issues and destinations side by side (INFRA-590, two runs on 2026-10-27) | 321-323 ev/s | 169-277 ev/s | 122-124 ev/s | 113-117 ev/s | 18.6 ev/s | 6.5 ev/s |
 | Chains, role routes forwarded to the holder with a receipt (INFRA-590, two runs on 2026-10-27) | 196-199 ev/s | 171-188 ev/s | 73-74 ev/s | 71-72 ev/s | 17.3-17.6 ev/s | 6.2 ev/s |
+| The same, the INFRA-590 head `891e854b`, same machine as the harness-commit row | 175.5 ev/s | 183.9 ev/s | 71.3 ev/s | 70.5 ev/s | 16.7 ev/s (100 in 5.99 s) | 6.2 ev/s (100 in 16.2 s) |
 
 The test requires 25 ev/s of the backlog cases and holds the burst cases to no rate. The old
 design fails it in every case. Chains cost one round trip per event per destination of one issue:
@@ -43,6 +45,32 @@ on one issue takes one round trip per event, which is the price of each destinat
 issue's events in order whatever fails (`planChains`). With role routes forwarded to the holder
 and answered by its receipt, the backlog cases took about 1.6 times as long as with role routes
 published to the role's topic, and the burst cases about as long.
+
+## Two real processes at the production step and ten times it
+
+`TestTheOutboxLoadSteps` (`cmd/dispatch/outbox_load_steps_test.go`, build tag `multiprocess`, run
+only with `DISPATCH_OUTBOX_LOAD_STEPS=1`) is black box: real `envoy-dispatch` processes on one
+Postgres and one NATS (no added latency), comments on 40 issues written through the processes'
+HTTP API (alternating between them with two processes), one issue routed to a role whose holder
+answers forwards with its receipt, and a test session that counts each event once at its first
+arrival. The publish rate is distinct events received per second while writing; the latency runs
+from the event's commit (`IssuedAt`) to that arrival. The burst writes 100 comments on one issue
+through one process. Same file, same 2-core machine, 2026-10-27: "before" at the harness commit
+`bed0fdc4` (`main` at `c3d09eec` plus this test), "after" at `891e854b`.
+
+| Run | Processes | Before: published/s | Before: p50 / p99 ms | After: published/s | After: p50 / p99 ms |
+|---|---|---|---|---|---|
+| 4 events/s for 60 s | 1 | 4.00 | 9.2 / 19.7 | 4.00 | 9.2 / 19.9 |
+| 40 events/s for 60 s | 1 | 40.00 | 8.9 / 1,063.3 | 39.99 | 8.4 / 530.4 |
+| 4 events/s for 60 s | 2 | 4.00 | 10.8 / 19.7 | 4.00 | 9.8 / 34.7 |
+| 40 events/s for 60 s | 2 | 39.99 | 12.4 / 1,271.3 | 39.99 | 10.6 / 1,054.4 |
+| Burst of 100 on one issue, drain | 1 | 981 ms (p50 9.7, p99 70.4) | | 863 ms (p50 16.7, p99 29.8) | |
+| Burst of 100 on one issue, drain | 2 | 728 ms (p50 10.1, p99 17.4) | | 1,462 ms (p50 17.7, p99 48.7) | |
+
+Every step delivered every written event, the role holder's included, before and after. The
+burst's drain time includes about one second of writing one comment after another. With NATS on
+the same host a chain's round trip is about a millisecond, so ordering per destination costs the
+steady steps nothing; the remote-latency rows above are where it costs.
 
 ## Order and crash safety
 
