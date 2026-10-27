@@ -26,6 +26,10 @@ legion({ op: "sign_off", issue: "LEGION-40" })
 ```
 
 - The issue's Dispatch status stays `needs_review` in `accepting`; `sign_off` moves it to `retro`.
+- A `catch-up` whose `reason` names an issue as waiting for your acceptance is the wake for it: it
+  is in `accepting` with nothing beneath it in the workflow, and the `phase-finished` notice that
+  moved it there may never have reached you (the daemon drops a notice to a failed architect, so a
+  retried one learns of the wait from its catch-up alone). Accept it as above.
 - Only what is beneath the issue counts for `SIGNOFF_CHILD_IN_WORKFLOW`: a child with nothing
   beneath it is accepted while its own root runs.
 - `request_backward_move` names the issue, because your grant serves the tree; the daemon starts
@@ -33,6 +37,13 @@ legion({ op: "sign_off", issue: "LEGION-40" })
 - `handoff_complete` from you in `accepting` is refused `ACCEPTANCE_IS_SIGN_OFF`. CI red at the head
   in `accepting` returns the issue to `implementing` by the daemon's table.
 - No `Production:` line is asked here: the production check is the implementer's, after the close.
+- A finding ask on the issue holds the acceptance: one a worker sent you, or one `dispatch read`
+  lists under `Open asks:` whose question opens `Finding from ` or `Clear defect from `
+  (`skill://legion-worker/references/findings.md`, "When no controller takes it"). Follow each
+  (`dispatch follow --ask <id> --action follow`) and, once it is answered, publish its reference
+  to the controller topic. Accept only once each is resolved, or carries the controller's
+  `Filed dispatch://`, `Handed dispatch://` or `Not filed:` reply, because a closed issue hides its
+  asks from the controller.
 
 ## The order after your acceptance
 
@@ -128,9 +139,10 @@ The merge closes the issue: when GitHub reports the pull request merged while th
   every member's open production check has closed.
 
 Nothing of the production check is yours. Its record lives on the pull request alone, since
-Dispatch refuses a write on a closed issue; a defect it finds is a `dispatch ask`, never an issue;
-and `read_record` shows a closed issue's open check (`check`: the pull request, the merge commit,
-the looks, what woke the last one and when the next is due).
+Dispatch refuses a write on a closed issue. A defect it finds is never an issue the implementer
+files: a clear defect goes to the controller, and any other is a `dispatch ask`. `read_record`
+shows a closed issue's open check (`check`: the pull request, the merge commit, the looks, what
+woke the last one and when the next is due).
 
 ## Hand-over at a root's linger
 

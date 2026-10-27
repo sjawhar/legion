@@ -123,6 +123,50 @@ func lastCatchUp(t *testing.T, pool *pgxpool.Pool) record.CatchUp {
 	return *got
 }
 
+// An issue in accepting waits for its tree architect alone: no worker runs there, and the one
+// phase-finished notice that moved it there is ended undelivered when the architect's claim has
+// failed (the outbox's notice), so a retried architect was never told. Its catch-up is its only
+// wake, and it names every issue of the tree in accepting whose sign-off would be accepted now:
+// one with nothing beneath it still in the workflow. An issue with a child still running is not
+// named, since its sign-off is refused until that child leaves (signOff), and the child's close
+// tells the architect then.
+func TestACatchUpNamesEveryIssueWaitingForTheArchitectsAcceptance(t *testing.T) {
+	const base = "the tree of LEGION-1 at generation 1 as the daemon records it now; start or resume it as your role says"
+	awaiting := func(keys string) string {
+		return base + "; in accepting, waiting for your acceptance, which no worker gives: " + keys + " (read the evidence, then sign_off or request_backward_move)"
+	}
+	for _, tc := range []struct {
+		name                    string
+		root, child             phase.Phase
+		rootStatus, childStatus string
+		want                    string
+	}{
+		{"the root accepting, its child done", phase.Accepting, phase.Done, "needs_review", "done", awaiting("LEGION-1")},
+		{"the root accepting, its child parked in backlog", phase.Accepting, phase.Done, "needs_review", "backlog", awaiting("LEGION-1")},
+		{"the root accepting, its child still implementing", phase.Accepting, phase.Implementing, "needs_review", "in_progress", base},
+		{"a child accepting while the root implements", phase.Implementing, phase.Accepting, "in_progress", "needs_review", awaiting("LEGION-2")},
+		{"the root and its child both accepting", phase.Accepting, phase.Accepting, "needs_review", "needs_review", awaiting("LEGION-2")},
+		{"the root awaiting its merge", phase.AwaitingMerge, phase.Done, "retro", "done", base},
+		{"nothing accepting", phase.Reviewing, phase.Testing, "needs_review", "testing", base},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			root := seedAdmittedTree(t, pool, 1)
+			root.Phase, root.Status = tc.root, tc.rootStatus
+			seedIssue(t, pool, root)
+			parent := root.Key
+			seedIssue(t, pool, record.Issue{Key: "LEGION-2", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-1", Project: "LEGION", Title: "Child", Parent: &parent,
+				Phase: tc.child, Generation: 1, Status: tc.childStatus, Rank: "V"})
+			claimReady(t, pool, testEngine(config.DesignGateRootIssues, nil), root.Key, claim.RoleArchitect, 1)
+			got := catchUps(t, pool)
+			want := fmt.Sprintf("gen=1 launch=1 policy=root-issues issues=LEGION-1,LEGION-2 reason=%s", tc.want)
+			if len(got) != 1 || got[0] != want {
+				t.Fatalf("catch-ups %v; want [%s]", got, want)
+			}
+		})
+	}
+}
+
 // Only a live tree's root architect is told its tree. A tree that lingers or has left the
 // workflow is told nothing, nor is a sub-architect, nor a phase worker on the root.
 func TestOnlyALiveTreesRootArchitectIsToldItsTree(t *testing.T) {

@@ -54,16 +54,34 @@ type DispatchIssue struct {
 	// not yet recorded, and clears this; the workflow fills a recorded issue's from its record, and
 	// never records an issue from a fact still missing it.
 	ResolvedRepoMissing bool
+	// ClaimedBy is who the observation shows holding the issue's Dispatch claim, `<kind>:<id>`, or
+	// "" for nobody, and ClaimKnown says the observation showed the claim at all: an event retained
+	// from a Dispatch that did not yet send it, or an event or read whose claim names no actor
+	// (dispatch.IssueSummary.ClaimUnread), says nothing of it. blockers.Mirror writes a known claim
+	// at the observation's Seq, behind the claim's own fence (record.PutDispatchClaim).
+	ClaimedBy  string
+	ClaimKnown bool
 	// Observed is a fact made from Dispatch's view of an issue the workflow did not record when the
 	// fact was prepared (ObservedIssue), not from one event, so no actor is known to have written
-	// its state. It reaches only an issue still unrecorded when it applies: ApplyFact, under the fact
-	// lock, applies Delivered in its place once the issue is recorded (release_children, or another
-	// delivery, recording it meanwhile), or nothing when Delivered is nil, so a state the view shows
-	// never reaches a record without the actor of the event that wrote it.
+	// its state. It reaches only an issue still unrecorded when it applies, and only while no later
+	// event of the issue has applied (the mirror's sequence, record.DispatchIssueSeq): ApplyFact,
+	// under the fact lock, applies Delivered in its place once the issue is recorded
+	// (release_children, or another delivery, recording it meanwhile), or nothing when Delivered is
+	// nil, so a state the view shows never reaches a record without the actor of the event that
+	// wrote it.
 	Observed bool
-	// Delivered is the event an Observed fact was prepared in place of, as it was delivered; nil for
-	// release_children's view, prepared in place of no event.
+	// Delivered is the event an Observed fact was prepared in place of, as it was delivered, or the
+	// event a route's own status write made (api's recordOwnStatusWrite); nil for a view prepared in
+	// place of no event (release_children's view of a child Dispatch already showed todo).
 	Delivered *DispatchIssue
+	// StatusMove is a status Dispatch confirmed the daemon wrote: the fact an API route applies for
+	// its own write (OwnStatusWrite), at the sequence Dispatch answered it with. The workflow takes
+	// its status as a move even when the record already shows Dispatch at that status: the record
+	// can be behind events the consumer has not delivered (a session's status and the daemon's
+	// re-assert of its own), so Dispatch's status at the event before this one is not known, and the
+	// edit test (a status equal to the one Dispatch showed before) does not hold for it. Never set by
+	// a decoded event.
+	StatusMove bool
 }
 
 // ObservedIssue is issue as Dispatch's detail shows it now, as an Observed fact at the sequence
@@ -76,7 +94,23 @@ func ObservedIssue(issue dispatch.Issue) DispatchIssue {
 		parent = *issue.Parent
 	}
 	return DispatchIssue{Key: issue.Key, Seq: issue.LastSeq, Status: issue.Status, Title: issue.Title, Parent: parent,
-		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, Blockers: issue.BlockedBy, Observed: true}
+		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, Blockers: issue.BlockedBy,
+		ClaimedBy: issue.Claim.Holder(), ClaimKnown: !issue.ClaimUnread, Observed: true}
+}
+
+// OwnStatusWrite is the event the daemon's own status write makes, as the Dispatch consumer
+// decodes it (decodeDispatchEvent): written is the issue Dispatch answered that write with
+// (dispatch.Client.SetStatus), the state the event carries, at the event's sequence, and its actor
+// is the daemon's own session. An API route that writes a status applies it in the request, so the
+// record does not wait for the event to come back through the consumer; the event, at a sequence no
+// later than this one, then finds its fence.
+func OwnStatusWrite(written dispatch.Issue) DispatchIssue {
+	event := ObservedIssue(written)
+	event.Observed, event.DaemonActor, event.StatusMove, event.Type = false, true, true, "issue.updated"
+	if written.Status == "done" {
+		event.Type = "issue.closed"
+	}
+	return event
 }
 
 // ListedIssue is issue as Dispatch's issue listing shows it, as a fact at the issue's sequence, with
@@ -87,7 +121,8 @@ func ListedIssue(issue dispatch.IssueSummary) DispatchIssue {
 		parent = *issue.Parent
 	}
 	return DispatchIssue{Key: issue.Key, Seq: issue.LastSeq, Status: issue.Status, Title: issue.Title, Parent: parent,
-		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, Blockers: issue.BlockedBy}
+		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, Blockers: issue.BlockedBy,
+		ClaimedBy: issue.ClaimedBy, ClaimKnown: !issue.ClaimUnread}
 }
 
 // Handover is the outbox's direct completion of a hand-over whose Dispatch state is already todo
@@ -121,16 +156,124 @@ const (
 	DispatchArtifactVersion          DispatchArtifactKind = "version"
 )
 
-// DispatchArtifact records one review or version event for a registered design document.
+// DispatchArtifact records one review or version event for a registered design document, from a
+// live event or from the daemon's own read of Dispatch's approval (the gate seed). Every source
+// applies alike: a key per review, not the source, keeps the architect from hearing one changes
+// request twice (the workflow's tellChanges). Mark places the event in the issue's Dispatch event log: the event's
+// sequence and Dispatch's time of it, from the event itself, or, for a review, from the read's
+// latest review (dispatch.Approval's Seq and At), whichever of them that read gave. A version the
+// gate seed read from Dispatch carries none.
 type DispatchArtifact struct {
 	Key        string
 	ArtifactID string
 	Kind       DispatchArtifactKind
 	Version    int
 	Reason     string
+	Mark       record.EventMark
 }
 
 func (DispatchArtifact) isFact() {}
+
+// GateAboveDispatch is the gate seed of a generation (Generation) finding the document at a version
+// below the one the seed was queued at (Above): Read is what the seed read of Dispatch, as the fact
+// it would otherwise apply, at Dispatch's latest version. Dispatch's versions only rise and the
+// seed reads after the daemon applied whatever moved the gate, so the gate stands above any version
+// Dispatch wrote, and is reset to Dispatch's.
+type GateAboveDispatch struct {
+	Generation uint64
+	Above      int
+	Read       DispatchArtifact
+}
+
+func (GateAboveDispatch) isFact() {}
+
+// DispatchAskOpened is an ask a session or a person opened on an issue, with its kind (Kind:
+// record.AskQuestion, record.AskApproval, or "" for a kind this daemon does not know, such as an
+// event retained from before Dispatch had the two), the document an approval request asks a person
+// to approve (Artifact, "" for a question; every ask.* event of an approval ask carries it), the
+// session that opened it (AuthorSession, "" for a person), and its event's place in the issue's
+// Dispatch event log (Mark). On a root it opens the ask's mirror row (record.RootAsk).
+type DispatchAskOpened struct {
+	Key           string
+	Ask           string
+	Kind          string
+	Artifact      string
+	AuthorSession string
+	Mark          record.EventMark
+}
+
+func (DispatchAskOpened) isFact() {}
+
+// DispatchAskRestored is Dispatch's settlement restoring a decision block it retracted: the ask
+// opened again (Open), or closed again with the answer given before the retraction. Nobody acted,
+// so it moves the ask's mirror row alone and is never a person's act.
+type DispatchAskRestored struct {
+	Key      string
+	Ask      string
+	Kind     string
+	Artifact string
+	Open     bool
+	Mark     record.EventMark
+}
+
+func (DispatchAskRestored) isFact() {}
+
+// DispatchAskClosed is an answered or resolved ask (State `answered` or `resolved`), its kind and
+// document as DispatchAskOpened names them, the actor who closed it, and where Dispatch recorded
+// that act (Mark).
+type DispatchAskClosed struct {
+	Key      string
+	Ask      string
+	Kind     string
+	Artifact string
+	State    string
+	Actor    dispatch.Actor
+	Mark     record.EventMark
+}
+
+func (DispatchAskClosed) isFact() {}
+
+// DispatchAskReply is a comment on an ask (comment.created, or comment.answered for a reply sent
+// through a delivery's callback), or Dispatch's ask.handed_back of an approval request (Kind
+// record.AskApproval and its Artifact; a comment names neither), with whose turn it leaves the ask
+// on (WaitingOn: `agent` or `human` on an open ask, a hand-back `human`, and "" on a closed one),
+// the actor who made it, and its event's place in the issue's Dispatch event log (Mark).
+type DispatchAskReply struct {
+	Key       string
+	Ask       string
+	Kind      string
+	Artifact  string
+	WaitingOn string
+	Actor     dispatch.Actor
+	Mark      record.EventMark
+}
+
+func (DispatchAskReply) isFact() {}
+
+// DispatchApprovalMoved is an approval request of Artifact that a version of its document moved
+// past the version its agent last handed to the person (Dispatch's ask.edited of an approval ask
+// whose requested_version is below its version), at Mark: Dispatch shows such a request waiting on
+// its agent until the agent hands it back. Nobody replied, so it is never a person's act.
+type DispatchApprovalMoved struct {
+	Key      string
+	Ask      string
+	Artifact string
+	Mark     record.EventMark
+}
+
+func (DispatchApprovalMoved) isFact() {}
+
+// DispatchClaim is the holder Dispatch records for an issue at Seq, from its issue.claimed or
+// issue.released event: ClaimedBy is `<kind>:<id>`, or "" when the release cleared the claim.
+// blockers.Mirror writes it to the claims mirror (record.PutDispatchClaim) behind the claim's own
+// fence, whether or not the issue has a mirrored row yet.
+type DispatchClaim struct {
+	Key       string
+	Seq       int64
+	ClaimedBy string
+}
+
+func (DispatchClaim) isFact() {}
 
 // DispatchConsumerPosition is one measurement of the Dispatch consumer's own position: its ack
 // floor as a stream sequence — the point before which every matching message is acknowledged,
@@ -161,12 +304,15 @@ func (p DispatchConsumerPosition) Reached(target int64) bool {
 // the keys it says it is blocked by, and the Dispatch sequence that view stands at. The periodic
 // turn's re-read carries them on its ControllerTick, and blockers.Mirror writes each through the
 // same sequence-fenced write an event's own row takes, so a view older than an event already
-// applied changes nothing.
+// applied changes nothing. ClaimedBy and ClaimKnown are DispatchIssue's: the issue read behind
+// this view shows the claim unless it names no actor.
 type IssueStatus struct {
-	Key      string
-	Status   string
-	Blockers []string
-	Seq      int64
+	Key        string
+	Status     string
+	Blockers   []string
+	Seq        int64
+	ClaimedBy  string
+	ClaimKnown bool
 }
 
 // ControllerTick is the daemon's periodic wake for the project's controller, applied as a
@@ -334,7 +480,7 @@ func (RequiredChecks) isFact() {}
 
 // PullRequestMergeability is GitHub's lazily computed verdict for whether a pull request's head
 // can be merged into Base without a conflict, decoded from GitHub's nullable `mergeable` field on
-// pullRequestMergeability's own /pulls/{number} read, which also names the base branch: never
+// readPullRequest's own /pulls/{number} read, which also names the base branch: never
 // decoded from an event, applied as a synthetic fact by the daemon's own read of each open pull
 // request (workflowRuntime.readRequiredChecks), before requiredFor's own rulesets and workflow
 // reads run. Mergeable is record.MergeabilityUnknown while GitHub is still computing it,
@@ -439,7 +585,8 @@ type HandoffComplete struct {
 	MergeNote string
 	// RecordedHead and RecordedHeadAt are the head the daemon's record held for the issue's pull
 	// request when the route read it for READY, and the record's clock then
-	// (record.PullRequest.HeadUpdatedAt). The record follows GitHub only by webhook, so it can lag:
+	// (record.PullRequest.HeadUpdatedAt). The record follows GitHub only by webhook and the
+	// daemon's two-minute read of each pull request, so it can lag:
 	// the workflow accepts READY while the record is still exactly that snapshot, or already at
 	// Commit, and otherwise refuses it, since a push landed in between. Both fields are compared, so
 	// a record that left this head and came back to it (a force push and its undo) is a moved one.
@@ -484,11 +631,35 @@ type SignOff struct{ Issue string }
 
 func (SignOff) isFact() {}
 
-// GateRegistered records a design document and its current version.
+// GateRegistered records a design document and its current version, with what register_gate read
+// of Dispatch's approval of it, so a person's review given before the architect registered is
+// applied at registration. ApprovedVersion is the version Dispatch showed approved, set only when
+// that approval is of Dispatch's latest version, and 0 otherwise: the gate opens at registration,
+// keeping that approval's place in the issue's Dispatch event log (ApprovedMark).
+// ChangesRequestedVersion is the version of a changes request Dispatch showed on its latest
+// version, with its reason and the review's place in the issue's Dispatch event log
+// (ChangesRequestedMark), and 0 otherwise: the gate closes with the architect told.
+// DispatchVersion is the document's latest version as that read found it: Version is the caller's,
+// and the gate is registered at the newer of the two. Since is the issue's event sequence read
+// before the approval, with no time, so every review the read did not show comes after it
+// (record.EventMark.After): a review the gate already applied after Since is newer than the read.
+// RequestAsk is the approval request the read found open (dispatch.Approval.AskID, "" when none
+// was), and RequestWaitsOnAgent says it waited on the agent (a reply or a newer version since it
+// was handed to the person): the registration writes that request's mirror row as the read found
+// it, at Since.
 type GateRegistered struct {
-	Issue      string
-	ArtifactID string
-	Version    int
+	Issue                   string
+	ArtifactID              string
+	Version                 int
+	ApprovedVersion         int
+	ApprovedMark            record.EventMark
+	ChangesRequestedVersion int
+	ChangesReason           string
+	ChangesRequestedMark    record.EventMark
+	DispatchVersion         int
+	Since                   record.EventMark
+	RequestAsk              string
+	RequestWaitsOnAgent     bool
 }
 
 func (GateRegistered) isFact() {}
@@ -530,6 +701,18 @@ type ClaimReady struct {
 }
 
 func (ClaimReady) isFact() {}
+
+// TaskConfirmed is a role's agent taking the work the daemon gave it: a turn of its pending
+// delivery started (supervise's confirm). The workflow changes nothing on it; admission takes it
+// as every other fact, so a root whose wait was held because its architect had not yet taken its
+// task is decided here rather than at the next tick (workflow's ReconcileAwaiting).
+type TaskConfirmed struct {
+	Issue      string
+	Role       claim.Role
+	Generation uint64
+}
+
+func (TaskConfirmed) isFact() {}
 
 // LingerExpired records the generation whose post-close linger elapsed.
 type LingerExpired struct {
@@ -759,22 +942,60 @@ func ApplyFact(ctx context.Context, pool *pgxpool.Pool, source, eventID string, 
 	return result, nil
 }
 
+// Applied is which of eventIDs from source ApplyFact has already applied, read in one query and
+// outside the fact lock. A fact's processed_events row commits with the fact and is never removed,
+// so an id read here as applied is one ApplyFact would only take the lock to skip. A caller that
+// replays many facts it has most likely applied before (the boot's terminal replay) applies only
+// the rest: the duplicates cost one read between them, not a transaction each queued on the lock
+// behind every live fact.
+func Applied(ctx context.Context, pool *pgxpool.Pool, source string, eventIDs []string) (map[string]bool, error) {
+	applied := make(map[string]bool, len(eventIDs))
+	if len(eventIDs) == 0 {
+		return applied, nil
+	}
+	rows, err := pool.Query(ctx, `select event_id from processed_events where source = $1 and event_id = any($2::text[])`, source, eventIDs)
+	if err != nil {
+		return nil, fmt.Errorf("read which %s facts are applied: %w", source, err)
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("read which %s facts are applied: %w", source, err)
+	}
+	for _, id := range ids {
+		applied[id] = true
+	}
+	return applied, nil
+}
+
 // settleObserved is the fact ApplyFact applies in fact's place, under the fact lock, and whether it
 // applies one: an Observed issue fact's view, as a plain observation, while the workflow records no
 // issue of its key, and once one is recorded the event it was prepared in place of (Delivered), or
 // nothing when it was prepared in place of none. Every other fact applies as it is, so no handler
 // sees Observed or Delivered.
+//
+// A view older than an event of the issue the daemon has already applied (the mirror, which every
+// applied issue event writes first, holds a later sequence) applies nothing while the issue is
+// unrecorded: Dispatch has said something since, which the view does not show — a person's
+// withdrawal after the release's write, say — and that later event, applied, recorded no issue.
 func settleObserved(ctx context.Context, tx pgx.Tx, fact Fact) (Fact, bool, error) {
 	issue, ok := fact.(DispatchIssue)
 	if !ok || !issue.Observed {
 		return fact, true, nil
 	}
-	recorded, err := record.NewStore().Issue(ctx, tx, issue.Key)
+	store := record.NewStore()
+	recorded, err := store.Issue(ctx, tx, issue.Key)
 	if err != nil {
 		return nil, false, fmt.Errorf("read the record of %s before applying Dispatch's view of it: %w", issue.Key, err)
 	}
 	switch {
 	case recorded == nil:
+		mirrored, found, err := store.DispatchIssueSeq(ctx, tx, issue.Key)
+		if err != nil {
+			return nil, false, err
+		}
+		if found && mirrored > issue.Seq {
+			return nil, false, nil
+		}
 		issue.Observed, issue.Delivered = false, nil
 		return issue, true, nil
 	case issue.Delivered == nil:

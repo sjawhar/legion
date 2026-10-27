@@ -4,6 +4,32 @@
 
 ### Added
 
+- `envoy-infra:gcp:Dispatch` takes `pprofPort`, which sets `DISPATCH_PPROF_PORT` on the app
+  Deployment's `envoy-dispatch` container alone, so a deployment turns on Dispatch's loopback-only
+  profiler through the component rather than by editing the Deployment, which the next update
+  would revert. Unset, nothing is rendered and the pod is the one it always was. The component
+  refuses, naming the input, a value outside 1-65535 and the ports the app pod already binds on its
+  loopback, `8766` and the `cloud-sql-proxy` sidecar's `5432`.
+- `envoy-infra:gcp:Dispatch` takes `appCpu` and `appMemory`, the Kubernetes quantities that size
+  the app Deployment's `envoy-dispatch` container as both its request and its limit: 1 CPU and
+  `4Gi` by default, the size it always had, so a deployment that sets neither renders the same pod.
+  The `cloud-sql-proxy` sidecar, the front door and the listener keep their sizes. The component
+  refuses, naming the input, a value that is not a quantity or is empty, a decimal exponent
+  outside `e-9` to `e18`, and a size at which GKE Autopilot would not run the app pod (the two
+  containers' sum) as rendered: below `500m` or `512Mi` or outside 1 to 6.5 GiB of memory per
+  CPU, which Autopilot raises, or above 30 CPU or `110Gi`, which it rejects. On a cluster without
+  Pod bursting Autopilot also rounds the pod's CPU up to a multiple of 250m.
+- `envoy-infra:gcp:Dispatch` takes `appPriorityClassName` and `appPdbMinAvailable`, which protect
+  the app Deployment's pods from being displaced, so a deployment sets both in its program rather
+  than by hand. `appPriorityClassName` is the app pod's `priorityClassName`, naming a PriorityClass
+  that already exists in the cluster; the component reads the class and the app Deployment waits
+  on the read, so a missing class fails the preview or update rather than leaving the one app pod
+  stopped and its replacement refused. `appPdbMinAvailable` registers a PodDisruptionBudget named
+  for the app, over its pods alone, with that `minAvailable` and Kubernetes' default
+  `unhealthyPodEvictionPolicy`, so a drain waits for the app. The front door and the listener are
+  unchanged, and with neither set the component renders what it always did. The component
+  refuses, naming the input, an `appPriorityClassName` that is empty, not a DNS subdomain or in
+  the reserved `system-` prefix, and an `appPdbMinAvailable` below 1 or above `replicas`.
 - Dispatch writes one access-log line per served request, so the callers behind a load spike can
   be named: `dispatch: request` at INFO when the request ends, with the method, the route's own
   pattern, the escaped request path, the caller (a person's email, a bearer's session, a personal
@@ -33,6 +59,13 @@
   exits 2 on a narrowing the broker would refuse `INVALID_NARROWING` before it sends any request,
   and runs its command only once the broker names the narrowing it applied, so deploy the broker
   before any caller passes `--github-owner`.
+- Dispatch can serve the Go profiler: `DISPATCH_PPROF_PORT` set to a port serves
+  `net/http/pprof` on `127.0.0.1:<port>` alone, on a mux of its own, so a CPU profile of a busy
+  server is one `kubectl port-forward` and `go tool pprof` away. Unset or empty, nothing listens;
+  a value that is not a port 1-65535 refuses startup naming the variable, the profiler binds
+  before anything connects, and it closes at once on shutdown, delaying nothing. `DISPATCH_PORT`
+  is read by the same rule, so a value past the integer range, which the old check accepted and
+  only the bind refused (after NATS and the migrations had run), is refused at startup too.
 - Dispatch's meaning search embeds through AWS Bedrock (the default, unchanged) or Azure AI
   Foundry, chosen by `DISPATCH_EMBEDDER`. Azure takes `DISPATCH_AZURE_EMBED_ENDPOINT`,
   `DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE` (the deployment's quota, two thirds of which paces
@@ -768,6 +801,13 @@
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a
   body naming a rate limit (GitHub's secondary limit, Google's `rateLimitExceeded`). A rate limit
   is not the App owner's to fix. The release's answer is unchanged, `502 MINT_FAILED`.
+- An issue read with a route no longer calls the Envoy listener and decodes the whole live-session
+  list each time. Dispatch keeps one copy of that list per process, at most 5 s old, and one
+  listener call refreshes it for every issue read that asks while the call runs. A listener that
+  fails or does not answer is asked again only after 5 s, so the reads in that window read
+  `route_status: unknown` at once instead of each waiting up to 2 s. A `route_status` can
+  therefore be up to 5 s old; its values and the `503 ENVOY_UNAVAILABLE` of a `live` or
+  `no_holder` filter are unchanged.
 - **Breaking:** `envoy-dispatch backfill-embeddings` is removed: the server's coverage pass does
   its work at boot and every 10 minutes, and an operator script that still runs it exits 2.
   Migration `0119` drops its checkpoint table, `embeddings_backfill_progress`, in the same release,
@@ -1412,6 +1452,13 @@
   source address's nor its account's rate-limit bucket, so the Legion daemon, which retries such a
   login every few seconds through the outage, is not refused 429 on its first login after it.
 
+- Every `envoy-infra` component refuses a number in an integer input that is not a whole number
+  within the 64-bit integer range, at any depth (an object type's property, an array element, a
+  map value), naming the component and the input's path and never quoting a secret value, before
+  anything registers. Pulumi decoded such a number into the component's integer by conversion, so
+  a typed SDK or Pulumi YAML program sending `replicas: 2.5` got 2 replicas with no error, and one
+  past the range got whatever the conversion gave. The check reads the plugin's own schema, so an
+  integer input added later is covered with no list to keep.
 - A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
   such as a session's answer to a model switch, without waiting for the stream's heartbeat.
   Firefox opened the stream only once its first byte arrived, and a stream with no backlog and no
