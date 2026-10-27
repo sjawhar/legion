@@ -639,16 +639,18 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 // row finishes; when the listener could not forward it at all (`delivery_failed`), as when the hub
 // is down, the row retries on its backoff as any failed publish does, so an outage drops nothing.
 // A holder that does not advertise the notice's delivery mode (notify.ErrRefusedByHolder) refuses
-// every attempt until another session holds the role, so the row finishes undelivered with one
-// log line rather than hold every later notice to the architect behind the fence. A listener of
-// an earlier release answers 200 and reports a forward that then fails as a role-lane exception,
-// which is queued again by the same policy (rehold). Neither queues a copy when its architect
-// stopped with its finished tree. The runner executes a row it leased from memory, so a row
-// deleted under its lease since (a catch-up a newer ready dropped) is found gone in the tree's
-// snapshot and finishes without a publish, and so does a catch-up a newer one superseded
-// (catchUpSuperseded, read against the snapshot's root and the claim as it runs now): the re-hold
-// reads the claim from memory and writes its copy outside ApplyFact's lock, so it can lose the
-// race to a ready and commit an older copy after the fresh catch-up.
+// every attempt until another session holds the role, and a forward the listener's own NATS grant
+// denies (notify.ErrPublishDenied) is denied on every attempt until an operator changes the grant,
+// so either row finishes undelivered with one log line naming the reason rather than hold every
+// later notice to the architect behind the fence. A listener of an earlier release answers 200 and
+// reports a forward that then fails as a role-lane exception, which is queued again by the same
+// policy (rehold). Neither re-hold queues a copy when its architect stopped with its finished
+// tree. The runner executes a row it leased from memory, so a row deleted under its lease since (a
+// catch-up a newer ready dropped) is found gone in the tree's snapshot and finishes without a
+// publish, and so does a catch-up a newer one superseded (catchUpSuperseded, read against the
+// snapshot's root and the claim as it runs now): the re-hold reads the claim from memory and
+// writes its copy outside ApplyFact's lock, so it can lose the race to a ready and commit an older
+// copy after the fresh catch-up.
 func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload record.Notice) error {
 	if r.notices == nil {
 		return errors.New("notice executor has no Envoy publisher")
@@ -695,6 +697,7 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	published := r.notices.Publish(ctx, notify.RoleTopicPrefix+string(architect), noticeSummary(payload.Kind, row.Issue), notice, key)
 	var notDelivered notify.ErrNotDelivered
 	var refused notify.ErrRefusedByHolder
+	var denied notify.ErrPublishDenied
 	switch {
 	case published == nil:
 		return nil
@@ -710,6 +713,10 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 		r.log.Warn("outbox notice finished undelivered: its architect's session does not advertise the delivery mode",
 			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "holder", refused.Holder, "error", published)
 		return nil
+	case errors.As(published, &denied):
+		r.log.Warn("outbox notice finished undelivered: the listener's NATS grant denied the forward to its architect",
+			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "reason", denied.Message)
+		return nil
 	case !errors.Is(published, notify.ErrNoHolder):
 		return fmt.Errorf("publish notice for %s to its architect %s: %w", row.Issue, architect, published)
 	}
@@ -723,11 +730,13 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 
 // mergeQueue publishes the merger's READY packet, or the daemon's withdrawal of it, to the
 // project's merge queue role, keyed by the row so a retried row is one delivery. A role with no
-// live holder refuses every attempt until someone claims it, and so does a holder that does not
+// live holder refuses every attempt until someone claims it, so does a holder that does not
 // advertise the packet's delivery mode (notify.ErrRefusedByHolder) until another session holds the
-// role, so waiting would retry forever; the Dispatch message the same READY posted already carries
-// the packet, and the issue's status shows a withdrawal, so the issue is told the role had no
-// holder, or that its holder refused the packet, as the merger's prompt says the daemon does
+// role, and so does the listener's own NATS grant when it denies the forward
+// (notify.ErrPublishDenied) until an operator changes it, so waiting would retry forever; the
+// Dispatch message the same READY posted already carries the packet, and the issue's status shows
+// a withdrawal, so the issue is told the role had no holder, that its holder refused the packet,
+// or that the listener was denied the forward, as the merger's prompt says the daemon does
 // (internal/prompts/go/merger.md), and the row is done. A holder that did not confirm the packet
 // in time (notify.ErrNotDelivered) is retried on the row's backoff as any failed publish is: the
 // holder, or the session that next claims the role, can take it.
@@ -743,6 +752,11 @@ func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload r
 	if errors.As(err, &refused) {
 		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s refused the packet: its holder %s does not advertise the delivery mode, at %s",
 			payload.Role, refused.Holder, r.now().UTC().Format(time.RFC3339))})
+	}
+	var denied notify.ErrPublishDenied
+	if errors.As(err, &denied) {
+		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s: the listener's NATS grant denied the forward (%s), at %s",
+			payload.Role, denied.Message, r.now().UTC().Format(time.RFC3339))})
 	}
 	if err != nil {
 		return fmt.Errorf("publish %s's READY packet or its withdrawal to merge queue role %s: %w", row.Issue, payload.Role, err)

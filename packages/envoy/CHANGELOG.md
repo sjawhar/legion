@@ -999,8 +999,10 @@
   `internal/daemon/outbox.go`; the daemon keeps no CHANGELOG of its own). A 504 `receipt_timeout`
   queues the notice again on the existing capped schedule, at most three copies; a 504
   `delivery_failed` is retried on the row's backoff without a cap, so a hub outage drops no notice;
-  a 403 `capability` finishes the row undelivered, and for a merge-queue packet posts a Dispatch
-  message naming the refusal. It still re-holds from the role-lane exceptions a listener of an
+  a 403 `capability`, and the 403 a forward the listener's own NATS grant denies (no `reason`,
+  `notify.ErrPublishDenied`), each finish the row undelivered with one log line naming the reason,
+  so no later notice waits behind it, and for a merge-queue packet post a Dispatch message naming
+  the refusal. It still re-holds from the role-lane exceptions a listener of an
   earlier release raises. **Release order:** a deployment's Legion daemons take this release
   before its listeners do. An earlier daemon reads both new answers, the 504 and the 403
   `capability`, as a generic error and retries the notice without a cap, and every later notice to

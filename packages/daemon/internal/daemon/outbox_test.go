@@ -711,9 +711,11 @@ func TestOutboxMergeQueueWithNoLiveHolderSaysSoOnTheIssue(t *testing.T) {
 }
 
 // A merge queue holder that does not advertise the packet's delivery mode (403 capability)
-// refuses every attempt until another session holds the role, as a role with no holder does: the
-// issue is told the role refused the packet and which holder did, and the row is done. A holder
-// that did not confirm the packet in time (504 receipt_timeout or delivery_failed) is retried.
+// refuses every attempt until another session holds the role, and the listener's own NATS grant
+// denies every forward (403 with no reason) until an operator changes it, as a role with no holder
+// does: the issue is told the role refused the packet and which holder did, or that the listener
+// was denied the forward and why, and the row is done. A holder that did not confirm the packet in
+// time (504 receipt_timeout or delivery_failed) is retried.
 func TestOutboxMergeQueueAnswersOfTheConfirmedPublishRoute(t *testing.T) {
 	row := mustOutboxRow(t, "LEGION-2", record.MergeQueuePublish{Role: "merge-queue", Packet: "READY #7"}, time.Now())
 	row.ID = 59
@@ -731,6 +733,19 @@ func TestOutboxMergeQueueAnswersOfTheConfirmedPublishRoute(t *testing.T) {
 		t.Fatalf("Dispatch messages = %q, want one naming the role and the holder that refused the packet", got)
 	}
 
+	denied := mustOutboxRow(t, "LEGION-2", record.MergeQueuePublish{Role: "merge-queue", Packet: "READY #7"}, time.Now())
+	denied.ID = 60
+	const denial = `envoy: the message bus denied the publish under this listener's own permissions: bus: NATS denied the publish to "notifications.agent.ses_mq"`
+	publisher.err = fmt.Errorf(`publish notice to notifications.role.merge-queue: listener returned 403 Forbidden: {"error":%q}: %w`, denial, notify.ErrPublishDenied{Message: denial})
+	if err := runner.execute(context.Background(), denied); err != nil {
+		t.Fatalf("execute merge queue publish the listener was denied: %v", err)
+	}
+	if got := client.messages; len(got) != 2 ||
+		!strings.HasPrefix(got[1], "merge queue role merge-queue: the listener's NATS grant denied the forward ("+denial+"), at 2026-09-25T03:04:05Z") ||
+		!strings.HasSuffix(got[1], "<!-- legion-outbox:60 -->") {
+		t.Fatalf("Dispatch messages = %q, want a second naming the role and the listener's denial", got)
+	}
+
 	for _, reason := range []string{notify.ReasonReceiptTimeout, notify.ReasonDeliveryFailed} {
 		publisher.err = fmt.Errorf("publish notice to notifications.role.merge-queue: listener returned 504 Gateway Timeout: %w", notify.ErrNotDelivered{Reason: reason, Holder: "ses_mq"})
 		var notDelivered notify.ErrNotDelivered
@@ -738,7 +753,7 @@ func TestOutboxMergeQueueAnswersOfTheConfirmedPublishRoute(t *testing.T) {
 			t.Fatalf("merge queue publish answered %s = %v, want the answer as a failure, retried", reason, err)
 		}
 	}
-	if got := client.messages; len(got) != 1 {
+	if got := client.messages; len(got) != 2 {
 		t.Fatalf("Dispatch messages = %q, want no message for a packet that is retried", got)
 	}
 }

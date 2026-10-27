@@ -76,6 +76,21 @@ func (e ErrRefusedByHolder) Error() string {
 	return fmt.Sprintf("the role's holder %q does not advertise the delivery mode", e.Holder)
 }
 
+// ErrPublishDenied is a role publish the listener answered 403 without reason "capability": the
+// NATS server refused the forward under the listener's own publish permissions, so the listener
+// forwarded nothing (writeBusUnavailable and publishDeniedPrefix,
+// packages/envoy/cmd/listener/api.go). Message is the error the listener's body gives, which names
+// the subject its grant does not cover; it is bounded by refusalBodyLimit as the refusal is. Sending
+// it again changes nothing until an operator changes the listener's grant. A 403 whose body is not
+// that JSON stays a plain refusal.
+type ErrPublishDenied struct {
+	Message string
+}
+
+func (e ErrPublishDenied) Error() string {
+	return fmt.Sprintf("the listener's NATS grant denied the forward (%s)", e.Message)
+}
+
 // RoleTopicPrefix is the Envoy subject a role token is reached on (ROLE_TOPIC_PREFIX,
 // packages/contracts/src/subject.ts): a notice goes to its architect's, and a review-stuck notice
 // names its reviewer's, so the architect need not build it.
@@ -159,6 +174,7 @@ func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payl
 		body, _ := io.ReadAll(io.LimitReader(response.Body, refusalBodyLimit))
 		refusal := fmt.Errorf("publish notice to %s: listener returned %s: %s", topic, response.Status, strings.TrimSpace(string(body)))
 		var answer struct {
+			Error   string `json:"error"`
 			Reason  string `json:"reason"`
 			Holder  string `json:"holder"`
 			EventID string `json:"event_id"`
@@ -173,6 +189,8 @@ func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payl
 			return fmt.Errorf("%w: %w", refusal, ErrNotDelivered{Reason: answer.Reason, Holder: answer.Holder, EventID: answer.EventID})
 		case response.StatusCode == http.StatusForbidden && answer.Reason == "capability":
 			return fmt.Errorf("%w: %w", refusal, ErrRefusedByHolder{Holder: answer.Holder})
+		case response.StatusCode == http.StatusForbidden:
+			return fmt.Errorf("%w: %w", refusal, ErrPublishDenied{Message: answer.Error})
 		}
 		return refusal
 	}
