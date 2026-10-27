@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-511",
-  "completed": "2026-10-27T14:10:00Z",
+  "completed": "2026-10-27T16:50:00Z",
   "proof": [
+    {
+      "criterion": "Review round 5: the skill and role-prompt edits leave this pull request for their own, and nothing that reads those files breaks",
+      "surface": "the role-prompt rules and the claude-envoy generated-copy check, run on this branch and on the new branch from main",
+      "command": "cd packages/daemon && go test ./internal/prompts/; cd packages/claude-envoy && bun run check-dist; cd packages/pi-legion && bun test src/skills-guard.test.ts; jj diff --from 'fork_point(main@origin | @)' --to @ --stat <the three files>",
+      "observed": "on legion/INFRA-511 at ce61a779: the three files' diff from main is empty, internal/prompts ok, check-dist matches, skills guard 0 fail; on legion/INFRA-511-skill-text (PR #2420, from main at 2df3353c): internal/prompts ok, check-dist matches, skills guards 13 pass (pi-legion) and 10 pass (pi-envoy)",
+      "headSha": "ce61a77974fd85e4686211212eb11b5f020a148c",
+      "negativeControl": "the generated-copy check (check-dist) fails whenever the skill source and its claude-envoy copy differ; both branches keep them equal"
+    },
     {
       "criterion": "Review round 4 regression: a re-claim refusal widget shown for S2 comes down after a switch back to the registered session S1",
       "surface": "pi-legion unit suite with the real extension wiring and the host widget recorded; the real interactive Oh My Pi 18.12.2 file for regressions",
@@ -120,7 +128,8 @@
     "Tester round 6: packages/pi-legion/extensions/controller-start-omp.test.ts (STARTUP_DEADLINE_MS 150 s from the spawn, STEP_DEADLINE_MS 30 s per wait after it, CASE_TIMEOUT_MS 600 s)",
     "Tester round 7: packages/pi-legion/extensions/controller-start-omp.test.ts (the focused-subagent case waits for the subagent's first model request before focusing it)",
     "Tester round 8: packages/pi-legion/extensions/controller-start-omp.test.ts (the focused-subagent case's wait skips the task-label request)",
-    "Review round 4: packages/pi-legion/src/controller-session.ts (clear another session's claim widget before the early return), packages/pi-legion/extensions/legion.test.ts (the regression test)"
+    "Review round 4: packages/pi-legion/src/controller-session.ts (clear another session's claim widget before the early return), packages/pi-legion/extensions/legion.test.ts (the regression test)",
+    "Review round 5: skills/legion-controller/references/session.md, packages/claude-envoy/legion/skills/legion-controller/references/session.md and packages/daemon/internal/prompts/roles/controller-root.md restored to main; their edits are in #2420"
   ],
   "trickyParts": [
     "Sending the start message after the Envoy role claim was flaky (4/30): the listener forwards a role-lane card as soon as it records the role, which can reach the session before claimEnvoyRole resolves; the send now happens right after claims/register, before the role claim and the subscription.",
