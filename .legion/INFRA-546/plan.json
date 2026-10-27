@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-546",
+  "completed": "2026-10-27T02:36:00Z",
+  "plan": "dispatch://INFRA-546/artifact/plan-md",
+  "branch": {
+    "stackedOn": "sjawhar/legion#2228 (legion/INFRA-439) at 067a15af",
+    "prBase": "legion/INFRA-439 until #2228 merges; GitHub retargets to main (delete_branch_on_merge is true), then merge main into the branch per the retarget rule",
+    "readyGate": "READY only once the pull request's base is main and #2228 is merged"
+  },
+  "summary": [
+    "ensureStreamWithConfig builds every update from the deployed config and overlays only Subjects, MaxAge, Duplicates, Replicas = max(deployed, setting), MaxBytes (setting when set, else deployed), Discard = DiscardOld, Metadata as #2228 keeps it; the early return also compares Replicas, owned MaxBytes and Discard.",
+    "EnsureKeyValue raises an existing bucket whose KV_<bucket> stream has fewer copies than config.Replicas, by UpdateStream of the deployed stream config with only Replicas changed; covers all five buckets.",
+    "bucketPermissions gains $JS.API.STREAM.UPDATE.KV_<bucket> (listener, host, Dispatch grants; tests; gcp cloud-config goldens; infra README).",
+    "ENVOY_NATS_REPLICAS (1..5, refused otherwise) read by the listener and by Dispatch (settings row; server ConnectOwningStream; redeliver.OpenState in server and redeliver-webhooks); aws rendering and render refuse > 5.",
+    "ENVOY_STREAM_MAX_BYTES (positive bytes) read by both programs; unset creates no limit and keeps the deployed one; server refusals name the variable and value.",
+    "Sizing measured from a core subscription to notifications.> (stream subjects only) over >= 1 h, Dispatch share scaled to INFRA-514's 4 events/s shape, x10 x 259,200 s; memory per retained message-id and disk per server reported; table in the PR and numbers to the architect.",
+    "#2228's gap notice text ('older than 72 hours') reworded in envoy-client, pi-envoy, claude-envoy (src + dist) to name the age or size limit; #2228's implementer told over Envoy.",
+    "Tests on a new in-process three-server testnats cluster (acceptance lines 3a-3l); production-like proof P1-P3 with real envoy-listener and envoy-dispatch binaries against three nats-server v2.15.1 processes (go run) read with natscli v0.5.1; negative control: replicas 3 against one standalone server refuses naming ENVOY_NATS_REPLICAS=3."
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase, push, handoff, proof and simplify-pass rules (pr-body.md, conflicts-and-rewrites.md for the stacked base and the retarget merge, tools.md for pinned runners and the Postgres harness)",
+      "ce-simplify-code: the one simplify pass on the pull request's runtime diff",
+      "envoy: messages to the architect (sizing numbers) and to #2228's implementer (notice wording)",
+      "dispatch: linking the pull request on INFRA-546 with dispatch issue-update --external-link",
+      "asd-ste100: messages to teammates, as the deployment instructions require"
+    ],
+    "test": [
+      "legion-worker: verifying the implementer's proof, re-running P1-P3 and the negative control, test handoff, reading CI on GitHub",
+      "envoy: questions to the implementer or the architect"
+    ],
+    "review": [
+      "legion-worker: merge gate (base must be main and #2228 merged before approval leads to READY), review threads, the body lines the reviewer owns",
+      "ce-simplify-code: judging the simplify pass's record and the diff's structure"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "EV-1 / INFRA-514 architecture-review.md does not exist, and 'ten-times load' has three readings (today's rate, tonight-scaled, INFRA-514's 40 events/s target).", "answer": "Plan defines the rate itself with the spec's own definition: >=1 h measured stream-subject bytes, Dispatch share scaled by f = max(1, 4 / measured Dispatch events/s) to INFRA-514's tonight shape, x10 x 259,200 s; PR table; recorded as a spec departure (source only)."},
+      {"finding": "Nobody owns Theorem's byte-limit and replica values; core.ListenerConfig, gcp:NatsHub, host:Listener and INFRA-549's component render neither; differing values would ping-pong.", "answer": "Unset byte limit keeps the deployed one, so only setters matter; coordination item 1 to the architect recommends the child that raises replicas to 3 at the move sets the byte limit too, and INFRA-549/550 accept or leave it unset."},
+      {"finding": "The grant change rewrites the VM's cloud-config (replaces the VM), overlaps #2228's permissions.go edit, conflicts with INFRA-551's no-replacement preview, and INFRA-549's hub needs it.", "answer": "Stacked on #2228 so no file conflict; coordination item 2: merge before the envoy-infra release INFRA-553 step 1 applies, so one replacement carries both; live negative-control test 3l."},
+      {"finding": "Old binaries (desired := *cfg) scale the stream back to 1; the move restores at R3 while settings are 1.", "answer": "Decision 3 never lowers (max); coordination item 3 makes every ConnectOwningStream caller carry this change before the restore a precondition of the move."},
+      {"finding": "#2228's notice says 'messages older than 72 hours may be missing', false once the byte limit binds.", "answer": "Decision 9 / task 7: reword in envoy-client, pi-envoy, claude-envoy src and dist, tests and CHANGELOGs in this PR; tell #2228's implementer."},
+      {"finding": "The 72 h duplicate window, the 'retention equals duplicate window by construction' statements, and per-message-id memory at 10x load.", "answer": "Task 6 measures memory per retained message-id in-process and reports memory per server; task 8 rewrites the three statements (AGENTS.md, stream.go comment, contracts dispatch-api.ts); coordination item 4 leaves shortening the window to the architect."},
+      {"finding": "Durable consumers set no Replicas; do they follow a raise?", "answer": "Read nats-server v2.10.29 jetstream_cluster.go:6480-6490: Replicas 0 durables auto-scale with the stream; acceptance 3d asserts each durable reports 3 replicas after a raise."},
+      {"finding": "A refused create/raise stops the start; drains, concurrent raises and raises under publish load are unverified.", "answer": "Decision 8 keeps fail-on-refusal; tests 3i (publish during raise, two concurrent raisers) and 3j (one server down: steady state no-op succeeds, new create at 3 fails naming the setting)."},
+      {"finding": "Tests link nats-server 2.10.29, the hub runs 2.15.1 (metadata keys, decoded fields).", "answer": "Production-like proof P1-P3 runs three nats-server v2.15.1 processes via go run; the no-op check never compares whole Metadata."},
+      {"finding": "No byte-limit default leaves default deployments unlimited.", "answer": "Decision 7: deliberate, because a sized default above the VM's reservable store would stop Dispatch and the VM listener at boot; Theorem's value is set at the move (coordination item 1)."},
+      {"finding": "'From the Dispatch server' is ambiguous (bus call vs envoy-dispatch boot).", "answer": "Decision 10: one options builder per program used by main and tests; the envoy-dispatch boot is smoke P3."},
+      {"finding": "Missing checks: MaxBytes/DiscardOld on create, out-of-range settings, redeliver-webhooks, raised bucket keeps every field, the five buckets named.", "answer": "Acceptance 3e, 3f, 3g, 3k; task 4 covers redeliver-webhooks; aws rendering/render refuse > 5."},
+      {"finding": ".dispatch/architecture/envoy-listener.md says nothing about copies, so 'update it' is uncheckable; real one-copy statements are elsewhere.", "answer": "Task 8 adds the sentence to envoy-listener.md and lists every one-copy statement found (scout inventory); docs acceptance is the parent's grep plus the reviewer's read."},
+      {"finding": "Disk sizing needs stream limit plus KV plus Raft headroom.", "answer": "Task 6 reports disk per server = byte limit + measured KV bytes + Raft headroom."},
+      {"finding": "Unsourced claims: delete_branch_on_merge, #2228 head, server behaviour.", "answer": "Verified: gh api repos/sjawhar/legion delete_branch_on_merge true; #2228 head 067a15af after fetch; nats-server v2.10.29 source read at stream.go:418, jetstream.go:2254-2285, jetstream_cluster.go:6403-6490."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": [
+    {
+      "spec": "Size the byte limit from dispatch://INFRA-514's ten-times load (its finding EV-1, in INFRA-514's architecture-review.md).",
+      "plan": "Measure the stream-subject message and byte rate from a worker pod's core subscription over >= 1 h, scale Dispatch's share to INFRA-514's 4 events/s shape, x10 x 259,200 s, and record the arithmetic in the PR.",
+      "evidence": "On 2026-10-27 INFRA-514 holds only spec.md and dispatch-architecture-review-md, a Dispatch-server review with no EV findings; dispatch search for EV-1 finds only the INFRA-14 and INFRA-546 specs citing it. A 180 s probe from this pod measured 1.9 msg/s and 3.6 KB/s on stream subjects.",
+      "outcome": {"kind": "unchanged"}
+    }
+  ]
+}
