@@ -260,6 +260,73 @@ func seedCommentReplyBacklog(t *testing.T, database *store.Store, broker *events
 	return seeded
 }
 
+// seedUnclaimedCommentBacklog inserts the project TT and issues issues TT-1 on, with no route and
+// no claim, and appends count events across them: a person's comments, two on each issue in turn.
+// The issue's primary document (artifacts.is_primary) was written by session writer-N, and holds a
+// thread with the person's root comment and a reply from session replier-N. The first comment is
+// on the issue's conversation and reaches its issue topic and writer-N's topic, through the query
+// of the issues' primary documents. The second is a reply in the thread, which reaches its issue
+// topic, writer-N's topic and replier-N's topic, through that query and the query of the threads'
+// sessions. It returns the events in id order.
+func seedUnclaimedCommentBacklog(t *testing.T, database *store.Store, broker *events.Broker, issues, count int) []model.Event {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := database.Pool.Exec(ctx, `insert into projects (key, name) values ('TT', 'Test')`); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	person := model.Actor{Kind: "user", ID: "alice"}
+	personJSON, err := json.Marshal(person)
+	if err != nil {
+		t.Fatalf("encode the person: %v", err)
+	}
+	keys := make([]string, issues)
+	roots := make([]string, issues)
+	for index := range issues {
+		number := index + 1
+		keys[index] = fmt.Sprintf("TT-%d", number)
+		if _, err := database.Pool.Exec(ctx, `
+			insert into issues (key, project_key, number, title, created_by, rank)
+			values ($1, 'TT', $2, 'Load', '{"kind":"user","id":"alice"}', 'U')
+		`, keys[index], number); err != nil {
+			t.Fatalf("create issue %s: %v", keys[index], err)
+		}
+		writer := model.Actor{Kind: "session", ID: fmt.Sprintf("writer-%d", index)}
+		document := seedDocument(t, database, new(keys[index]), "spec", writer, []model.Actor{writer})
+		if _, err := database.Pool.Exec(ctx, `update artifacts set is_primary = true where id = $1`, document); err != nil {
+			t.Fatalf("make the document of %s primary: %v", keys[index], err)
+		}
+		anchor, err := json.Marshal(anchorOn(document))
+		if err != nil {
+			t.Fatalf("encode the anchor: %v", err)
+		}
+		if err := database.Pool.QueryRow(ctx, `
+			insert into comments (issue_key, author, body, anchor) values ($1, $2, 'On this passage.', $3)
+			returning id::text
+		`, keys[index], personJSON, anchor).Scan(&roots[index]); err != nil {
+			t.Fatalf("create the thread root on %s: %v", keys[index], err)
+		}
+		seedComment(t, database, keys[index], model.Actor{Kind: "session", ID: fmt.Sprintf("replier-%d", index)}, "Done.", &roots[index])
+	}
+	seeded := make([]model.Event, 0, count)
+	for index := range count {
+		issue := (index / 2) % issues
+		key := keys[issue]
+		var replyTo *string
+		if index%2 == 1 {
+			replyTo = new(roots[issue])
+		}
+		comment := seedComment(t, database, key, person, "Load", replyTo)
+		seeded = append(seeded, appendEvent(t, database, broker, model.Event{
+			IssueKey: new(key), Type: "comment.created", Actor: person,
+			Payload: model.CommentEventPayload{
+				Comment:           model.Comment{ID: comment, IssueKey: new(key), Author: person, Body: "Load", ReplyTo: replyTo},
+				SuppressedAuthors: []string{},
+			},
+		}))
+	}
+	return seeded
+}
+
 // seedLoadMessageIssues inserts the project TT and issues issues TT-1 on, each routed to
 // role:reviewer and holding a message from a session (agent-N), and returns their keys and those
 // messages' ids.
@@ -412,11 +479,13 @@ func (r *throughputRig) roleArrivals() []int64 {
 // API keeps the shared database pool busy, and it keeps the order consumers rely on: each issue's
 // events reach its subject in id order (the Legion daemon fences an issue's facts on their
 // sequence and drops one older than the last it applied), and on the success path the stream and
-// the role lane hold them in id order overall. It does so for a backlog of messages and for one
-// whose half are a person's replies in comment threads, which take the issue's claimant and a
-// query of the threads' sessions. The rate, and the destinations each event type reached, are
-// logged for comparison; the count of destinations is checked last, so a publisher that reaches
-// fewer still reports its rate and order.
+// the role lane hold them in id order overall. It does so for a backlog of messages, for one whose
+// half are a person's replies in comment threads, which take the issue's claimant and a query of
+// the threads' sessions, and for one of a person's comments on issues with no route and no claim,
+// which take a query of the issues' primary documents' sessions and, for a reply, of the threads'
+// sessions. The rate, and the destinations each event type reached, are logged for comparison; the
+// count of destinations is checked last, so a publisher that reaches fewer still reports its rate
+// and order.
 func TestOutboxThroughputUnderRemoteLatency(t *testing.T) {
 	const (
 		issues   = 20
@@ -437,6 +506,9 @@ func TestOutboxThroughputUnderRemoteLatency(t *testing.T) {
 		// Each comment reply's issue topic, its claimant's topic and its document writer's; each
 		// message's issue topic, and the message replies' author topic.
 		{"comment replies", seedCommentReplyBacklog, 3*count/2 + count/2 + count/4, count / 2},
+		// Each comment's issue topic and its primary document writer's; each reply's thread
+		// replier's.
+		{"unclaimed comments", seedUnclaimedCommentBacklog, 2*count + count/2, 0},
 	} {
 		t.Run(load.name, func(t *testing.T) {
 			for _, tc := range []struct {
@@ -509,14 +581,19 @@ func TestOutboxThroughputUnderRemoteLatency(t *testing.T) {
 }
 
 // logDestinations logs, for each event type of seeded, how many destinations its events reached
-// on average: the stream messages that carry them (stream) and the role-lane envelopes (roles).
+// on average: the stream messages that carry them (stream) and the role-lane envelopes (roles). A
+// reply in a comment thread counts apart from a comment that starts one.
 func logDestinations(t *testing.T, name string, seeded []model.Event, stream, roles []int64) {
 	t.Helper()
 	types := make(map[int64]string, len(seeded))
 	counts := map[string]int{}
 	for _, event := range seeded {
-		types[event.ID] = event.Type
-		counts[event.Type]++
+		eventType := event.Type
+		if payload, ok := event.Payload.(model.CommentEventPayload); ok && payload.Comment.ReplyTo != nil {
+			eventType += " reply"
+		}
+		types[event.ID] = eventType
+		counts[eventType]++
 	}
 	destinations := map[string]int{}
 	for _, id := range slices.Concat(stream, roles) {

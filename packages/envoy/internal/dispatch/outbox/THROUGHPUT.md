@@ -31,37 +31,57 @@ The test requires 25 ev/s. The old design fails it in every case.
 
 ## Comment replies to the claimant and the thread (2026-10-27, INFRA-596)
 
-INFRA-596 sends a person's comment to the session that claimed an unrouted issue. It also sends
-a reply to every session in its thread and to every session that wrote the thread's document.
-The outbox reads the claimant in its scan, and reads the thread's sessions for the whole batch in
-one query.
+INFRA-596 sends a person's comment on an issue with no route to the session that claimed the
+issue. When no session claimed the issue, it sends the comment to every session that wrote the
+issue's primary document. It also sends a reply to every session in its thread and to every
+session that wrote the thread's document. The outbox reads the claimant in its scan. For the
+whole batch, it reads the threads' sessions in one query (`loadCommentRecipients`) and the
+primary documents' sessions in one query (`loadPrimaryDocumentAuthors`).
 
-Method: the test has a second load, `comment replies` (`seedCommentReplyBacklog`). It has 200
-events across 20 issues. Half are a person's replies in a comment thread, on 10 claimed issues
-with no route. Each thread is on a passage of the issue's document and holds the person's root
-comment and a reply from the session that wrote the document. The other half are messages on 10
-issues routed to `role:reviewer`, as in the `messages` load.
+Method: the test has three loads. Each has 200 events across 20 issues, so each batch of 100 has
+every kind of event in its load.
 
-- Main: `origin/main` at 448a41003 (the outbox package is the same as at the merge base
-  c3d09eec9). Head: 4c3eb5caf. Main ran this head's `throughput_test.go` in an exported copy of
-  its tree.
-- Postgres 17, 2 CPUs. Three runs of each tree, main and head in turn, back to back.
+- `messages` (`seedThroughputBacklog`): the load of the Method section above.
+- `comment replies` (`seedCommentReplyBacklog`): half are a person's replies in a comment thread,
+  on 10 claimed issues with no route. Each thread is on a passage of the issue's document and
+  holds the person's root comment and a reply from the session that wrote the document. The
+  other half are messages on 10 issues routed to `role:reviewer`, as in the `messages` load.
+- `unclaimed comments` (`seedUnclaimedCommentBacklog`): all are a person's comments on 20 issues
+  with no route and no claim. A session wrote the primary document of each issue. Half are
+  comments on the issue's conversation. The other half are replies in a thread on a passage of
+  the primary document, which holds the person's root comment and a reply from a second session.
+  Every batch runs `loadPrimaryDocumentAuthors` and `loadCommentRecipients`.
+
+The trees and the runs:
+
+- Main: `origin/main` at 1b8d5c13e. Its outbox package is the same as at the merge base
+  c3d09eec9; its `internal/bus` package has changes that head does not have. Head: c2a223fcb.
+  Main ran head's `throughput_test.go` in an exported copy of its tree.
+- Postgres 17, 2 CPUs. Three runs of each tree, main and head in turn, back to back. Each run
+  ran all three loads.
 - Each cell is the range of the three runs, in events per second.
 
 | Load | Tree | 50 ms idle | 50 ms busy | 150 ms idle | 150 ms busy | Destinations per event |
 |---|---|---|---|---|---|---|
-| `messages` | main | 646-741 | 442-562 | 379-424 | 339-402 | 2.5 |
-| `messages` | head | 626-723 | 483-549 | 375-428 | 320-373 | 2.5 |
-| `comment replies` | main | 454-561 | 255-412 | 189-374 | 172-327 | 1.75 (comment 1, message 2.5) |
-| `comment replies` | head | 674-689 | 500-636 | 423-440 | 333-386 | 2.75 (comment 3, message 2.5) |
+| `messages` | main | 445-693 | 550-610 | 420-437 | 366-386 | 2.5 |
+| `messages` | head | 492-764 | 363-693 | 211-436 | 288-345 | 2.5 |
+| `comment replies` | main | 391-572 | 337-394 | 324-379 | 315-332 | 1.75 (reply 1, message 2.5) |
+| `comment replies` | head | 707-793 | 615-656 | 357-434 | 354-381 | 2.75 (reply 3, message 2.5) |
+| `unclaimed comments` | main | 620-630 | 302-559 | 381-391 | 291-363 | 1 (comment 1, reply 1) |
+| `unclaimed comments` | head | 676-856 | 604-682 | 438-447 | 305-383 | 2.5 (comment 2, reply 3) |
 
-On main, a comment reply reaches only its issue topic. It does not reach the claimant or the
-document's writer, so main fails the test's count of stream messages (250 of 450). Main passes the
-25 ev/s requirement in every case.
+On main, a person's comment on an issue with no route reaches only its issue topic. It does not
+reach the claimant, the primary document's writer or the thread's sessions. So main fails the
+test's count of stream messages: 250 of 450 for `comment replies` and 200 of 500 for
+`unclaimed comments`. Main passes the 25 ev/s requirement in every case.
 
-Judgement: the change costs no measurable throughput. The `messages` load is the same within the
-spread of the runs. The `comment replies` load is faster on head, although each reply reaches
-three destinations in place of one.
+The `messages` load at 150 ms is lower on head in these three runs. Five more runs of that case
+alone, main and head in turn, read 395-431 (idle) and 286-387 (busy) ev/s on main and 306-430
+(idle) and 297-371 (busy) on head, so the difference is in the spread of the runs.
+
+Judgement: the change costs no measurable throughput: both comment loads are as fast or faster
+on head, although each comment reaches two or three destinations in place of one, and the
+`messages` load is the same within the spread of the runs.
 
 ## Order and crash safety
 
