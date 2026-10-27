@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-521",
+  "completed": "2026-10-27T14:00:54Z",
+  "round": 5,
+  "headSha": "42256ccb3d5a9775a173c208dc5cda9ea99bc5af",
+  "branchHead": "eb355edb85822d1114c9e151318d492152decd01 (adds only .legion/INFRA-521/implement.json over 42256ccb)",
+  "recheck": "96fcf1de75116291e1f8256684d911a88afd231c -> 42256ccb3d5a9775a173c208dc5cda9ea99bc5af: no code change (jj diff --from 96fcf1de --to 42256ccb -- packages/ is empty; only retro's five docs/solutions notes and .legion/ removal), bare gates only",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Read the Tests run 40479108388 attempts by API and log: attempt 1's job test failed only TestRunRecordsAnOperatorSuspensionWhoseProcessExitsWithinTheDrain (packages/daemon/internal/daemon/inflight_test.go:619, a 'controller not registered' WARN during the stop), outside this diff; attempt 2's test, lint and typecheck jobs succeeded. Read the dispatch job 122133785614 by API (step 11:40:25Z-12:16:21Z, 35.9 min) and its log ([iphone] 223 passed, no line without @phone)."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "bare gates after a return with no code change: the repository's CI green at the head",
+      "surface": "GitHub Actions check runs at 42256ccb (Tests, Legion Envoy and Contracts, Docs, PR Title)",
+      "command": "gh api repos/sjawhar/legion/commits/42256ccb3d5a9775a173c208dc5cda9ea99bc5af/check-runs (newest run of each name); gh api repos/sjawhar/legion/actions/runs/40479108388/attempts/{1,2}/jobs; gh run view 40479108388 --attempt 1 --log-failed",
+      "observed": "build, changes, dispatch, envoy-smoke, lint, pr-title, test, typecheck success (deploy, dispatch-memory, dispatch-multiprocess skipped by their own conditions). Tests attempt 1: test failure in TestRunRecordsAnOperatorSuspensionWhoseProcessExitsWithinTheDrain (inflight_test.go:619), lint and typecheck success; attempt 2: test, lint, typecheck success.",
+      "headSha": "42256ccb3d5a9775a173c208dc5cda9ea99bc5af",
+      "negativeControl": "The failing test lives in packages/daemon, and jj diff --from 1357b95c --to 42256ccb touches no file under packages/daemon; the same job at the same head failed once and passed once."
+    },
+    {
+      "criterion": "3. the browser step with all 223 @phone tests; every phone test passes under iphone (smoke)",
+      "surface": "GitHub Actions, Legion Envoy and Contracts run 40479108788, job dispatch 122133785614; Playwright CLI in packages/dispatch at the head",
+      "command": "gh api repos/sjawhar/legion/actions/jobs/122133785614; gh run view 40479108788 --job 122133785614 --log, [project] result lines counted; PLAYWRIGHT_BASE_URL=http://127.0.0.1:1 bunx playwright test --config e2e/playwright.config.ts --list --reporter=json, then cmp.ts and keep.ts against base and table v2",
+      "observed": "dispatch job success, browser step 35.9 min (base median 45.3); log: iphone 223 passed, chromium 773 passed 25 skipped, webkit 51+2, firefox 51+2, webkit-iphone 11, firefox-download-navigation 1, chromium-plain-http 4, '1114 passed (35.9m)', every [iphone] line @phone. --list at the head: iphone 223 = table v2 keep rows (0 extra, 0 missing), every other project 0 added 0 removed against base.",
+      "headSha": "42256ccb3d5a9775a173c208dc5cda9ea99bc5af",
+      "negativeControl": "The same --list count at base 1357b95c gives iphone 786 (base-list.json), so the 223 is the grep's selection."
+    }
+  ],
+  "ci": {
+    "readAt": "2026-10-27T14:00Z",
+    "head42256ccb": "all required checks green (test via attempt 2); the Tests run's own status still reads in_progress through the API although its three jobs are completed success.",
+    "headEb355edb": "handoff-only push with skip-checks: no runs, as expected."
+  }
+}
