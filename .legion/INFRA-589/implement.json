@@ -1,0 +1,100 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-589",
+  "completed": "2026-10-27T06:55:00Z",
+  "proof": [
+    {
+      "criterion": "A1: harness in the repo; real Postgres (no Docker), nats-server with JetStream, Dispatch and listener from the checkout; N sessions on agent and issue topics; all five event kinds and requests at a given rate and route mix",
+      "surface": "packages/envoy/loadtest CLI on a 2-vCPU gVisor Legion issue pod (nproc 2, kernel 4.19.0-gvisor), LOADTEST_ROOT=/legion/scratch/tmp/dispatch-loadtest",
+      "command": "packages/envoy/loadtest/run-step.sh smoke-kinds --events 2 --sessions 50 --requests 10 --duration 90s --event-mix comment=20,anchored=20,reply=20,edit=20,upload=20; jq '.events.by_kind, .events.issue_topic_receipts, .events.expected_issue_topic_receipts' $LOADTEST_ROOT/runs/smoke-kinds/summary.json; ps -o pid,args -p <stack.json pids>",
+      "observed": "comment 29/29, anchored 30/30, reply 30/30, edit 50/50, upload 34/34 committed/offered, each with delivery latencies (comment.created for the three comment kinds, artifact.version for edit and upload); issue-topic receipts 865 got / 865 expected; run.log 'nats: 300 subscriptions on 50 connections' and 'registered 50 sessions (0 errors)'; ps shows pgserver postgres 16.2, nats-server -js, envoy-listener, envoy-dispatch and loadgen proxy under $LOADTEST_ROOT/bin; no docker process (pgrep docker exit 1); meta.json build_commit f8d7b4fa, build_dirty false",
+      "headSha": "f8d7b4fa35794baddb5fa084dcab8591b775cac4",
+      "negativeControl": "route-mix file with 'POST /api/v1/issues/{key}/comments' on line 3 -> 'loadgen run: route mix .../routes-post.txt line 3: method \"POST\" is refused', exit 1, before any request; --event-mix comment=50,bogus=10 -> '\"bogus\" is not a kind', exit 1"
+    },
+    {
+      "criterion": "A2: one command runs a named step; a second runs the series from 0.25x to 10x",
+      "surface": "same pod and CLI",
+      "command": "packages/envoy/loadtest/run-series.sh",
+      "observed": "series-20261027T062004Z holds step-0.25x, step-0.5x, step-1x, step-2x, step-5x, step-10x, each with summary.json, TABLES.md, cpu.pprof, heap.pprof; one series TABLES.md with six rows in each per-step table; 0.25x and 0.5x healthy (100% requests 2xx, lock held 7% and 34%), 1x lock held 100% and 2.02 of 3.99 events/s committed, 2x and 5x pool collapse (lock 0% held, 3,887 and 9,583 goroutines waiting for a pool connection p50), 10x connect timeouts (README 'Connect timeouts above 1x')",
+      "headSha": "f8d7b4fa35794baddb5fa084dcab8591b775cac4",
+      "negativeControl": "run-series.sh --events 3 -> 'run-series.sh: --events is set by the series for each step; it cannot be passed through', exit 1; run-step.sh smoke-kinds again -> '.../runs/smoke-kinds already holds a step; remove it or name another step', exit 1 (a finished step is never overwritten)"
+    },
+    {
+      "criterion": "A3: delivery latency measured from the write's arrival at Dispatch and from commit",
+      "surface": "same pod and CLI",
+      "command": "jq '.events.delivery_ms_from_arrival, .events.delivery_ms_from_commit, .events.clock_anomalies' on runs/smoke-kinds and runs/step-1x summary.json",
+      "observed": "smoke-kinds: from arrival p50/p90/p99 349/720/1,345 ms, from commit 34/103/492 ms, clock_anomalies 0; step-1x: from arrival 27,771/29,533/30,522 ms, from commit 210/670/1,312 ms, clock_anomalies 0; arrival >= commit at every percentile",
+      "headSha": "f8d7b4fa35794baddb5fa084dcab8591b775cac4",
+      "negativeControl": "listener killed by its stack.json pid -> 'loadgen run: guard: listener check failed: ... connection refused', exit 1, events max id 10004 before and after (no write reached Dispatch)"
+    },
+    {
+      "criterion": "A4: tonight's step (4 events/s, 400 sessions, 60 requests/s) on main reproduces the root report's first knee (the commit-order lock held in most samples) on a 2-core machine",
+      "surface": "same pod and CLI; Dispatch built from the PR head, whose Dispatch code is main c3d09eec (INFRA-591's lock fix is not on main)",
+      "command": "packages/envoy/loadtest/run-step.sh step-1x --events 4 --sessions 400 --requests 60; run-step.sh step-1x-report-mix --events 4 --sessions 400 --requests 60 --event-mix report-2026-10-27; jq '.commit_order_lock.held_fraction, .commit_order_lock.waiters, .events.offered, .events.committed'",
+      "observed": "step-1x: held_fraction 1.0, waiters p50 45 / max 52, hold p50 397 ms, committed 385 of 719 offered (2.14 of 3.99 events/s); step-1x-report-mix: held_fraction 1.0, waiters p50 48, committed 2.89 of 3.83 events/s (the root report's step-1x: 2.89 of 4.12, step-1x-rerun 1.91 of 3.97); series step-1x repeats it: held 100%, 2.02 committed",
+      "headSha": "f8d7b4fa35794baddb5fa084dcab8591b775cac4",
+      "negativeControl": "step-0.25x of the series (1 event/s, 100 sessions, 15 req/s) on the same build: lock held 7%, waiters p50 0, every write committed: the knee is absent below it"
+    },
+    {
+      "criterion": "A5: the request generator takes the route mix as input; INFRA-512's generator joins this one (one generator)",
+      "surface": "same pod and CLI",
+      "command": "run-step.sh routes-alt --events 0 --sessions 20 --requests 5 --duration 60s --route-mix <file: '1 other agent GET /api/v1/projects'>; jq '.requests.routes | keys' and jq '.events.offered'",
+      "observed": "routes keys [\"other GET /api/v1/projects\"]; events offered 0, committed 0. INFRA-512 is 0 commits ahead of main (gh api compare). INFRA-512's architect answered over Envoy at 06:26Z: INFRA-512 builds no second generator; its LINUX write replay goes into packages/envoy/loadtest as a second request source beside routes.go writing the same reqRec, after this merges",
+      "headSha": "f8d7b4fa35794baddb5fa084dcab8591b775cac4",
+      "negativeControl": "loadgen run -url http://127.0.0.1:9020 (the pod's live listener) -> '-url differs from stack.json ... refused (pass -allow-foreign ...)', exit 1, before any connection"
+    },
+    {
+      "criterion": "A6: the package README says how to run it and what each column means",
+      "surface": "packages/envoy/loadtest/README.md",
+      "command": "every distinct column header of the series TABLES.md and of the smoke-kinds/step-1x TABLES.md (header rows '| step |' and '| route |'), each searched in backticks in packages/envoy/loadtest/README.md with grep -F",
+      "observed": "checked=37 missing=0 at the README head; README covers run, seed, reset, before/after across commits, event kinds and markers, route-mix format, delivery definitions, failed-request timing and the 10x connect timeouts, output files, guard, differences from production and from the root report, what the harness does not do",
+      "headSha": "3b6c5ab4d0471ac6f139cbc8eaf1567c248c5004",
+      "negativeControl": "check-private-names.sh over packages/envoy/loadtest passes (26 files); a README missing a header would show in the coverage check as missing > 0"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/loadtest/main.go",
+    "packages/envoy/loadtest/api.go",
+    "packages/envoy/loadtest/guard.go",
+    "packages/envoy/loadtest/seed.go",
+    "packages/envoy/loadtest/run.go",
+    "packages/envoy/loadtest/events.go",
+    "packages/envoy/loadtest/routes.go",
+    "packages/envoy/loadtest/delivery.go",
+    "packages/envoy/loadtest/sample.go",
+    "packages/envoy/loadtest/lockprobe.go",
+    "packages/envoy/loadtest/proxy.go",
+    "packages/envoy/loadtest/tables.go",
+    "packages/envoy/loadtest/commit-trigger.sql",
+    "packages/envoy/loadtest/routes-2026-10-26-1719Z.txt",
+    "packages/envoy/loadtest/delivery_test.go",
+    "packages/envoy/loadtest/events_test.go",
+    "packages/envoy/loadtest/guard_test.go",
+    "packages/envoy/loadtest/lockprobe_test.go",
+    "packages/envoy/loadtest/main_test.go",
+    "packages/envoy/loadtest/routes_test.go",
+    "packages/envoy/loadtest/stack.sh",
+    "packages/envoy/loadtest/run-step.sh",
+    "packages/envoy/loadtest/run-series.sh",
+    "packages/envoy/loadtest/README.md",
+    "packages/envoy/CHANGELOG.md",
+    "packages/envoy/AGENTS.md"
+  ],
+  "trickyParts": [
+    "Delivery from commit needs the commit time of the inserting transaction; events rows are updated by the outbox (published_at), so commit-trigger.sql copies marked events into loadtest.event_commits inside the inserting transaction and pg_xact_commit_timestamp(xmin) is read from there (track_commit_timestamp on at initdb).",
+    "Committed is counted from loadtest.event_commits, not HTTP status: at 1x 356-378 writes hit the 30 s client timeout but many committed and still get delivery latencies.",
+    "The guard sends the listener a wrong token too: a listener with no ENVOY_API_TOKEN accepts every caller (cmd/listener/apiauth.go:37-56), so 2xx with the stack token alone would not prove it is the stack's listener.",
+    "Every stack process runs under env -i: the pod's DISPATCH_URL, ENVOY_URL, ENVOY_NATS_URL, AWS_* and HOME never reach Dispatch, which would otherwise read $XDG_CONFIG_HOME/legion/envoy.json and call Bedrock. Processes are stopped only by pidfile pid after checking /proc/<pid>/exe."
+  ],
+  "deviations": [
+    "stack.sh has extra subcommands reset, loadgen, build-info, stop NAME..., seed --force so run-step.sh and run-series.sh share one implementation; README lists them.",
+    "Dispatch's signing key lives under the stack's HOME instead of DISPATCH_SIGNING_KEY; Dispatch is stopped at the end of each step so the box is idle between steps.",
+    "Route names use the full template ('browser GET /api/v1/issues/{key}'), as the plan's format says, not the archive's short names.",
+    "loadgen tables takes -tops=false; run-series.sh uses it for the combined table, since each step already rendered its pprof tops."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "At 10x on the 2-vCPU pod most requests and writes fail with 'dial tcp: i/o timeout' after 5 s. A second 10x run with a side monitor showed curl from another process also failed to connect while ~3,200 connections sat in SYN_SENT, recovering when the generators stopped: new connections to Dispatch's port stop being accepted on the box. README 'Connect timeouts above 1x' records it; dispatch://INFRA-592 (refuse excess load instead of collapsing) is the tree's issue for that behaviour."
+  ]
+}
