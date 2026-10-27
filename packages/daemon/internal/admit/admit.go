@@ -490,11 +490,11 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 		// event), from the parent the listing shows now. Without this, a child no event of it ever
 		// recorded stays unrecorded under its running tree, and no later event of it need come:
 		// Dispatch already shows it todo, so nothing writes that status again. Two ways that
-		// consumer created fresh takes only what is published after it, so an event published while
-		// the project had none never arrives), and one it received while the child's parent had no
-		// record or its tree was not live, where the workflow records nothing. A child the workflow
-		// does not record here (its tree is not live) is left to the root path below, as an orphan
-		// handed to Legion is.
+		// happens — an event the daemon never received (a durable consumer created fresh takes only
+		// what is published after it, so an event published while the project had none never
+		// arrives), and one it received while the child's parent had no record or its tree was not
+		// live, where the workflow records nothing. A child the workflow does not record here (its
+		// tree is not live) is left to the root path below, as an orphan handed to Legion is.
 		if listed.Parent != "" {
 			if _, err := a.engine.Apply(ctx, tx, listed); err != nil {
 				return fmt.Errorf("record %s under its parent's tree: %w", summary.Key, err)
