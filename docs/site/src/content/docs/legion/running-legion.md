@@ -324,6 +324,12 @@ What each part is for:
   decimals allowed), `review_round_cap` (3), `max_fix_attempts`
   (3), `controller_wake_interval_seconds` (3600), and the supervision budgets
   `launch_failure_limit` (3), `prompt_failure_limit` (3) and `prompt_retire_limit` (2).
+- **`worker_idle_suspend_seconds`** (optional, 1800) is how long a worker keeps its process once
+  its turn is over and nothing is waiting for it. At that point the daemon suspends the claim and
+  keeps its session, so the next task resumes the same agent where it stopped; the suspension is
+  the daemon's own, and `legion claims list` shows it `suspended` by `idle`. Anything that reaches
+  the worker before the wait is spent — a task, a turn of its own — ends the wait, which starts
+  again when that turn ends. `0` keeps every idle worker running.
 - **`worker_backends`** (optional) runs a role on Claude Code instead of Oh My Pi:
   `worker_backends: {implementer: claude}`. Each key is an issue role, each value `omp` (the
   default) or `claude`. Claude Code runs the phase workers (`planner`, `implementer`, `tester`,

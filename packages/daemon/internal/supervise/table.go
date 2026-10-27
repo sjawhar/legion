@@ -97,6 +97,10 @@ const (
 	// lifecycle check failed with no cleanup reserved, or a launch whose write failed. The claim waits
 	// launching with no process until it fires.
 	TimerRelaunch TimerKind = "relaunch"
+	// TimerIdle is the idle suspend's wait (worker_idle_suspend_seconds): armed when a turn ends
+	// with nothing waiting, disarmed by anything that gives the agent work, and firing to suspend a
+	// claim that is idle still.
+	TimerIdle TimerKind = "idle"
 )
 
 // Timer is a timer the machine armed, firing.
@@ -290,6 +294,7 @@ const (
 	onProbeTimer    eventKind = timerPrefix + eventKind(TimerProbe)
 	onSuspendTimer  eventKind = timerPrefix + eventKind(TimerSuspend)
 	onRelaunchTimer eventKind = timerPrefix + eventKind(TimerRelaunch)
+	onIdleTimer     eventKind = timerPrefix + eventKind(TimerIdle)
 	onSpawn         eventKind = "request_spawn"
 	onRegister      eventKind = "request_register"
 	onReady         eventKind = "request_ready"
@@ -524,6 +529,13 @@ func fillTable(t *builder) {
 		[]ClaimState{StateFailed, StateSuspended}, StateLaunching)
 	t.ignore(onRelaunchTimer, "no relaunch is waiting", StateQueued, StateLaunchUncertain, StateShimConnected, StateRegistered,
 		StateReady, StateWorking, StateIdle, StateSuspended, StateFailed, StateRetired)
+
+	t.row(onIdleTimer, "the worker has been idle its whole idle suspend: suspend it, keeping its session", idleSuspend,
+		[]ClaimState{StateSuspended, StateFailed}, StateIdle)
+	t.ignore(onIdleTimer, "the agent is in a turn, so it is not idle", StateWorking)
+	t.ignore(onIdleTimer, "no turn of this claim has ended, so no idle suspend is armed",
+		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateRegistered, StateReady)
+	t.ignore(onIdleTimer, noProcess, gone...)
 
 	// A re-adopted claim found still speaking another plugin contract, at boot or at a later sweep.
 	t.row(onStalePlugin, "the process speaks another plugin contract: relaunch it onto the current one", refreshStalePlugin,
@@ -930,6 +942,9 @@ func agentBusy(reason string) bool {
 func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 	start := ev.(StreamTurnStart)
 	m.claim.State = StateWorking
+	// A turn of the agent's own ends the idle suspend's wait as a delivery does: the agent is at
+	// work, whoever asked it.
+	m.leftIdle()
 	p := m.claim.Pending
 	_, awaiting := m.timers[TimerTurn]
 	inFlight := m.send != nil || awaiting || m.askFirst
@@ -966,7 +981,27 @@ func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 	if err := m.settle(ctx); err != nil {
 		return err
 	}
-	return m.sendPending(ctx)
+	if err := m.sendPending(ctx); err != nil {
+		return err
+	}
+	m.armIdleSuspend()
+	return nil
+}
+
+// idleSuspend is the idle suspend's timer: the worker's turn ended a whole
+// worker_idle_suspend_seconds ago and nothing has reached it since. Its process is taken back and
+// its session kept, so the next task resumes the same agent, and the suspension is the daemon's
+// own by rule (SuspendedByIdle), which the boot's resume by rule and every wake act on. A claim
+// the timer finds with work — a delivery queued, sent or waiting for its turn — is left alone and
+// armed again by the turn that work becomes: the timer is a wait, never a decision of its own.
+func idleSuspend(m *Machine, ctx context.Context, _ Event) error {
+	if busy, why := m.notIdle(); busy {
+		m.log.Info("supervise: the idle suspend found work waiting; the claim keeps its process", "waiting", why)
+		return nil
+	}
+	m.log.Info("supervise: the worker was idle for its whole idle suspend; suspending it and keeping its session",
+		"idleSuspend", m.deps.Timeouts.IdleSuspend)
+	return m.suspendNow(ctx, RequestSuspend{Claim: m.claim.Token, Reason: "idle for worker_idle_suspend_seconds", By: SuspendedByIdle})
 }
 
 func bootInterval(m *Machine, ctx context.Context, _ Event) error {

@@ -117,6 +117,9 @@ func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, d); err != nil {
 		return err
 	}
+	// The claim has work, so the idle suspend's wait says nothing about it any more; the turn this
+	// task becomes arms the next one at its end.
+	m.leftIdle()
 	m.claim.Pending, m.unsaved = &d, false
 	return nil
 }

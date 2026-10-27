@@ -85,12 +85,17 @@ const (
 	SuspendedByDaemon SuspendSource = "daemon"
 	// SuspendedByExit: the tree root's agent reported its own exit, which suspends a root.
 	SuspendedByExit SuspendSource = "exit"
+	// SuspendedByIdle: the worker had nothing to do for worker_idle_suspend_seconds, so the daemon
+	// took its process back and kept its session (idleSuspend).
+	SuspendedByIdle SuspendSource = "idle"
 )
 
-// ByRule is whether the source is one the daemon itself recorded, the daemon's own suspend or a
-// root's exit: the only sources the boot's resume by rule acts on, and the only suspended phase
-// workers the stranded report leaves out.
-func (s SuspendSource) ByRule() bool { return s == SuspendedByDaemon || s == SuspendedByExit }
+// ByRule is whether the source is one the daemon itself recorded — the daemon's own suspend, a
+// root's exit, or an idle worker's: the only sources the boot's resume by rule acts on, and the
+// only suspended phase workers the stranded report leaves out.
+func (s SuspendSource) ByRule() bool {
+	return s == SuspendedByDaemon || s == SuspendedByExit || s == SuspendedByIdle
+}
 
 // Claim is one role claim as the supervisor holds and persists it.
 type Claim struct {
@@ -260,6 +265,10 @@ type Timeouts struct {
 	// Stop is how long a suspension that arrives while the agent is in a turn waits for that turn
 	// to end before it stops the process anyway (worker_stop_timeout_seconds).
 	Stop time.Duration
+	// IdleSuspend is how long a worker's process is kept once its turn is over and nothing is
+	// waiting for it, before the daemon suspends the claim and keeps its session
+	// (worker_idle_suspend_seconds, idleSuspend). Zero keeps every idle worker running.
+	IdleSuspend time.Duration
 	// LaunchBackoff is the first wait before a launch is tried again after a charged launch
 	// failure, doubled for each failure charged since the claim was last ready, and jittered
 	// (backoff.Wait): a launch the runtime refused, and a process relaunched after its charge
@@ -1190,6 +1199,44 @@ func (m *Machine) armRegistration() {
 		grace = m.deps.Runtime.ProvisionBound()
 	}
 	m.arm(TimerRegistration, runtime.RegistrationDeadline(m.deps.Timeouts.Boot, m.deps.Timeouts.RegistrationIntervals, grace), "")
+}
+
+// armIdleSuspend starts the idle suspend's wait for a claim whose turn is over and that has
+// nothing waiting: the one place the wait begins (turnEnded). A claim with work keeps its process
+// and is armed by the turn that work becomes; a deployment whose worker_idle_suspend_seconds is 0
+// arms nothing, and every claim that leaves idle disarms it (notIdle, leftIdle).
+func (m *Machine) armIdleSuspend() {
+	if m.deps.Timeouts.IdleSuspend <= 0 || m.claim.State != StateIdle {
+		return
+	}
+	if busy, _ := m.notIdle(); busy {
+		return
+	}
+	m.arm(TimerIdle, m.deps.Timeouts.IdleSuspend, "")
+}
+
+// leftIdle disarms the idle suspend: the claim has work, a turn, a suspension or no process, so
+// the wait it began at its last turn's end says nothing about it. The wait starts again at the
+// next turn's end.
+func (m *Machine) leftIdle() { m.disarm(TimerIdle) }
+
+// notIdle is whether anything is waiting for the agent, and what: a delivery queued, on its way or
+// confirmed, a prompt whose turn has not started, or a suspension held for the turn. It is what
+// the idle suspend is armed and fired against, so the timer never takes a process from an agent
+// that is about to be given work.
+func (m *Machine) notIdle() (bool, string) {
+	switch {
+	case m.claim.Pending != nil:
+		return true, "a delivery"
+	case m.send != nil:
+		return true, "a prompt on its way"
+	case m.held != nil:
+		return true, "a held suspension"
+	}
+	if _, awaiting := m.timers[TimerTurn]; awaiting {
+		return true, "an acknowledged prompt whose turn has not started"
+	}
+	return false, ""
 }
 
 // arm schedules one timer of a kind, replacing any of that kind already armed. Its event carries

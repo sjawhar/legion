@@ -108,6 +108,7 @@ func defaultsFor(port int) Config {
 		WorkerBootRegistrationDeadlineIntervals: 3,
 		WorkerRPCTimeout:                        5 * time.Second,
 		WorkerStopTimeout:                       10 * time.Second,
+		WorkerIdleSuspend:                       1800 * time.Second,
 		TreeStopTimeout:                         60 * time.Second,
 		SlowCommandTimeout:                      300 * time.Second,
 		ProbeInterval:                           30 * time.Second,
@@ -169,6 +170,7 @@ worker_boot_timeout_seconds: 90
 worker_boot_registration_deadline_intervals: 4
 worker_rpc_timeout_seconds: 7
 worker_stop_timeout_seconds: 11
+worker_idle_suspend_seconds: 900
 tree_stop_timeout_seconds: 61
 slow_command_timeout_seconds: 301
 probe_interval_seconds: 15
@@ -204,6 +206,7 @@ nats_nkey_seed_file: secrets/legion-pane.nk
 	want.WorkerBootRegistrationDeadlineIntervals = 4
 	want.WorkerRPCTimeout = 7 * time.Second
 	want.WorkerStopTimeout = 11 * time.Second
+	want.WorkerIdleSuspend = 900 * time.Second
 	want.TreeStopTimeout = 61 * time.Second
 	want.SlowCommandTimeout = 301 * time.Second
 	want.ProbeInterval = 15 * time.Second
@@ -1346,6 +1349,7 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		{key: "worker_boot_registration_deadline_intervals", line: "worker_boot_registration_deadline_intervals: 3", class: modelled},
 		{key: "worker_rpc_timeout_seconds", line: "worker_rpc_timeout_seconds: 5", class: modelled},
 		{key: "worker_stop_timeout_seconds", line: "worker_stop_timeout_seconds: 10", class: modelled},
+		{key: "worker_idle_suspend_seconds", line: "worker_idle_suspend_seconds: 1800", class: modelled},
 		{key: "tree_stop_timeout_seconds", line: "tree_stop_timeout_seconds: 60", class: modelled},
 		{key: "slow_command_timeout_seconds", line: "slow_command_timeout_seconds: 300", class: modelled},
 		{key: "envoy_url", line: "envoy_url: http://127.0.0.1:9020", class: modelled},
