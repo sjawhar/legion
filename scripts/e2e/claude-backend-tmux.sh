@@ -26,7 +26,7 @@
 # key command that prints that copy (Claude Code's apiKeyHelper), so the key reaches no pane's
 # environment, no argv and no transcript.
 # The rig is Stage 3's without its GitHub ingress bridge: scratch
-# Postgres, NATS, Envoy listener and Dispatch, Legion's role Apps through `secrets` (this
+# Postgres, NATS, Envoy listener and Dispatch, Legion's role Apps through `agent-secrets` (this
 # deployment's own pair unless the four LEGION_E2E_*_APP_* inputs name another deployment's,
 # lib/github-apps.sh; each key is resolved by the daemon's private_key_command and once by
 # lib/app-logins.ts, which proves it is its id's App before the run writes anything, never in this
@@ -542,7 +542,7 @@ if [ "$model_route" = key-file ]; then
     fail "LEGION_E2E_ANTHROPIC_KEY_FILE names $agent_key_file, which is not a readable file"
 fi
 refuse_leftovers legion-e2ecc
-for tool in go docker jq curl ss tmux bun mise secrets gh jj pgrep claude; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go docker jq curl ss tmux bun mise agent-secrets gh jj pgrep claude; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 [ "$model_route" != gateway ] || command -v hawk-token >/dev/null || fail "hawk-token is required under LEGION_E2E_MODEL_ROUTE=gateway"
 (umask 077 && tr -d '[:space:]' <"$key_file" >"$work/claude-model-key")
 [ -s "$work/claude-model-key" ] || fail "$key_file_var ($key_file) holds no key"
@@ -554,12 +554,6 @@ code=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -H "@$work/claude-k
 rm -f "$work/claude-key-header"
 [ "$code" = 200 ] || fail "Anthropic refuses the key in $key_file_var ($key_file): GET /v1/models answered $code"
 note "the Claude Code implementer's key from $key_file: Anthropic accepts it"
-for key in "$implement_app_key_name" "$review_app_key_name"; do
-  status=$(secrets get "$key" --no-request 2>&1) || fail "secrets get $key does not resolve: $status"
-  jq -e --arg key "$key" '.key == $key and .tier == "agent"' <<<"$status" >/dev/null 2>&1 ||
-    fail "secrets get $key reports $status, want the agent tier"
-  note "secrets get $key: $status"
-done
 # Legion's two role Apps proved against GitHub before the run writes anything (lib/github-apps.sh);
 # legion.yaml's github_apps is the block proved.
 write_github_apps implement review

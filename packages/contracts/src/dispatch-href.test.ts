@@ -30,7 +30,7 @@ describe("itemFromSearch", () => {
 });
 
 test("the golden table covers both item shapes on every document path", () => {
-  const items = DISPATCH_HREF_REFERENCES.filter((row) => row.href.includes("?"));
+  const items = DISPATCH_HREF_REFERENCES.filter((row) => /\?(ask|comment)=/.test(row.href));
   expect(items.map((row) => row.href)).toEqual([
     "/issues/CORE-1/spec?comment=44444444-4444-4444-8444-444444444444",
     "/issues/CORE-1/artifacts/notes-md?comment=55555555-5555-4555-8555-555555555555",

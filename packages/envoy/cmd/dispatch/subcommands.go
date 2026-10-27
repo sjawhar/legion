@@ -253,8 +253,8 @@ func rebuildRefs(ctx context.Context, databaseURL, serverURL string, out io.Writ
 }
 
 func writeRebuildRefsReport(out io.Writer, report refs.Rebuild) {
-	fmt.Fprintf(out, "rebuild-refs: documents=%d asks=%d comments=%d messages=%d orphans=%d edges=%d\n",
-		report.Documents, report.Asks, report.Comments, report.Messages, report.Orphans, report.Edges)
+	fmt.Fprintf(out, "rebuild-refs: documents=%d asks=%d comments=%d messages=%d orphans=%d edges=%d blocks_owed=%d\n",
+		report.Documents, report.Asks, report.Comments, report.Messages, report.Orphans, report.Edges, report.BlocksOwed)
 }
 
 func writeAnchorBlockBackfillReport(out io.Writer, result docs.AnchorBlockBackfill) {
