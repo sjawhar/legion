@@ -180,6 +180,13 @@ new comment on your document that mentions you arrives once, as the mention. Not
 issue reaches you unless you subscribe to the issue's Envoy topic,
 `notifications.dispatch.issue.<KEY>.>`. Each write's result names that topic.
 
+If your connection to Envoy drops, or your session stops and is resumed, what was sent to you
+directly or published on an issue topic you follow in the meantime still arrives once you are
+back, each message once and marked as published while your connection was down, for up to 72
+hours. A person's Send, Aside or BTW that arrives this way is shown as a message only: nothing
+runs and no reply goes back on its own, so answer it with `dispatch message` and its
+`--in-reply-to` if it still matters. Messages to a role you hold are not recovered.
+
 A person can also message you from the Agents page:
 
 - On Oh My Pi, their **Send** or **Aside** arrives as their own message in your conversation,
