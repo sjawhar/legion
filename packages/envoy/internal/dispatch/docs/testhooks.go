@@ -3,6 +3,7 @@ package docs
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/reearth/ygo/crdt"
 
@@ -63,4 +64,13 @@ func DocumentReadWeightForTest(markdown string) (int64, error) {
 		return 0, err
 	}
 	return read.weight, nil
+}
+
+// CountRoomScansForTest counts, from the call on, each scan a document socket's admission makes over
+// the rooms (roomScanned), and returns the count. A test in package api, which opens sockets through
+// the API's own route, reads it; it is called before the service opens any socket.
+func (s *Service) CountRoomScansForTest() *atomic.Int64 {
+	scans := &atomic.Int64{}
+	s.roomScanned = func() { scans.Add(1) }
+	return scans
 }

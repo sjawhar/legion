@@ -451,11 +451,17 @@ func (s *Service) canOpenRoom(room string) bool {
 	if s.srv.GetDoc(room) != nil {
 		return true
 	}
+	if s.roomScanned != nil {
+		s.roomScanned()
+	}
 	live := s.srv.Rooms()
 	return len(live) < maxLiveRooms || slices.Contains(live, room)
 }
 
 func (s *Service) canAddConnection() bool {
+	if s.roomScanned != nil {
+		s.roomScanned()
+	}
 	count := 0
 	s.rooms.Range(func(_, value any) bool {
 		state := value.(*roomState)

@@ -234,6 +234,9 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, ErrServiceUnavailable.Error(), http.StatusServiceUnavailable)
 		return
 	}
+	if s.afterSocketIssueRead != nil {
+		s.afterSocketIssueRead(room)
+	}
 	// A browser editor normalizes a tree it cannot represent and writes the result back, so no
 	// connection - a first one, or a provider's reconnect - joins a room outside the Proof schema
 	// until it is replaced from markdown. The server decides it here, for every client at once, by
@@ -241,6 +244,9 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// refused exactly when that read is ErrDocOutsideSchema.
 	tree, loaded, err := s.loadTree(r.Context(), room)
 	if err == nil && tree != nil {
+		if s.admissionRendered != nil {
+			s.admissionRendered(room)
+		}
 		if _, renderErr := documentMarkdown(tree); errors.Is(renderErr, ErrDocOutsideSchema) {
 			err = renderErr
 		}
@@ -257,6 +263,9 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		preload := &preloadedDocument{loaded: *loaded}
 		s.preloads.Store(room, preload)
 		defer s.preloads.CompareAndDelete(room, preload)
+		if s.afterSocketPreload != nil {
+			s.afterSocketPreload(room, loaded)
+		}
 	}
 	connection := &connectionState{}
 	ctx := context.WithValue(r.Context(), connectionContextKey{}, connection)
@@ -433,6 +442,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// the room's ready barrier after it), so nothing writes the tree while this walks it.
 	tree, err := treeOf(doc)
 	if err == nil {
+		if s.admissionRendered != nil {
+			s.admissionRendered(room)
+		}
 		_, err = documentMarkdown(tree)
 	}
 	var askBlocks map[string]struct{}

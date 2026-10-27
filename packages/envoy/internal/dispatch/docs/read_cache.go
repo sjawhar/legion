@@ -57,6 +57,12 @@ func readDocumentStamp(ctx context.Context, q Queryer, room string) (DocumentSta
 // (cmd/dispatch/memory_test.go). An entry heavier than an eighth of it is never stored.
 const documentReadBudget = 256 << 20
 
+// readBudgetFor is the cold reads' cache budget for a process whose Go memory limit is memoryLimit
+// (debug.SetMemoryLimit(-1), math.MaxInt64 when none is set): documentReadBudget, whatever the limit.
+func readBudgetFor(memoryLimit int64) int64 {
+	return documentReadBudget
+}
+
 // coldReadTimeout bounds a cold read's fold of the stored history (LoadDocument), which belongs to
 // the document rather than to the request that started it, so no request's end cancels it.
 var coldReadTimeout = 60 * time.Second

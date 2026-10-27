@@ -206,6 +206,23 @@ type Service struct {
 	// which waits through the second - and each re-arm retrySettleSoon makes for a settlement whose
 	// wait ran out. Nil outside tests; tests count the wake-ups a room whose appends lag costs.
 	settlementWoke func(room string)
+	// roomScanned runs at each scan a document socket's admission makes over the rooms:
+	// canAddConnection's pass over every room record, and canOpenRoom's copy of ygo's live room
+	// names. Nil outside tests; tests count the scans one socket open costs.
+	roomScanned func()
+	// admissionRendered runs at each render of a whole document that admitting a socket makes:
+	// ServeHTTP's check of the tree it loaded against the Proof schema, and onLoadDocument's check
+	// of the room it loads. Nil outside tests; tests count the renders one socket open costs.
+	admissionRendered func(room string)
+	// afterSocketIssueRead runs in a document socket's admission (ServeHTTP) once it has read the
+	// document's issue and before it loads the document's tree (loadTree). Nil outside tests;
+	// tests use it to close the issue while the socket loads.
+	afterSocketIssueRead func(room string)
+	// afterSocketPreload runs in a cold document socket's admission (ServeHTTP) once it has offered
+	// the durable state it loaded to the room's load (preloads), and before it hands the socket to
+	// ygo. Nil outside tests; tests use it to hold two cold sockets of one room until both have
+	// offered theirs, and to watch what becomes of each one's state.
+	afterSocketPreload func(room string, loaded *persistence.LoadResult)
 	// inServiceTransaction runs first in every transaction a service mutation makes through
 	// Server.Apply (serviceTransact). Nil outside tests; tests use it to change the live document
 	// between the mutation's read of it and its write, where a peer's update can land: Apply runs
