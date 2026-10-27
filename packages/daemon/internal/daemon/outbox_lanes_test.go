@@ -152,8 +152,8 @@ func (d *postingDispatch) ListIssues(context.Context, string, []string) ([]dispa
 func (d *postingDispatch) GetIssue(_ context.Context, key string) (dispatch.Issue, error) {
 	return dispatch.Issue{Key: key}, nil
 }
-func (d *postingDispatch) SetStatus(context.Context, string, string) error {
-	return errors.New("postingDispatch takes no status")
+func (d *postingDispatch) SetStatus(context.Context, string, string) (dispatch.Issue, error) {
+	return dispatch.Issue{}, errors.New("postingDispatch takes no status")
 }
 func (d *postingDispatch) HandOver(context.Context, dispatch.Issue, string) error {
 	return errors.New("postingDispatch takes no hand-over")
@@ -203,16 +203,16 @@ func (d *laneBoard) GetIssue(_ context.Context, key string) (dispatch.Issue, err
 	defer d.mu.Unlock()
 	return dispatch.Issue{Key: key, Status: d.status}, nil
 }
-func (d *laneBoard) SetStatus(_ context.Context, _ string, status string) error {
+func (d *laneBoard) SetStatus(_ context.Context, _ string, status string) (dispatch.Issue, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.failures > 0 {
 		d.failures--
-		return errors.New("dispatch unavailable")
+		return dispatch.Issue{}, errors.New("dispatch unavailable")
 	}
 	d.status = status
 	d.landed = append(d.landed, status)
-	return nil
+	return dispatch.Issue{}, nil
 }
 func (d *laneBoard) HandOver(context.Context, dispatch.Issue, string) error {
 	return errors.New("laneBoard takes no hand-over")

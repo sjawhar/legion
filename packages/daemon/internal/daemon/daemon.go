@@ -186,8 +186,9 @@ type Build struct {
 // ctx decides one thing: how long the daemon serves. The boot record and its stamp are the
 // daemon's own bookkeeping and run on a context the shutdown did not cancel, so a signal that
 // arrives mid-startup still leaves a recorded, stamped boot rather than a row with no end. A
-// signal that arrives while the plugin gate, the GitHub App tokens' mint, or the image probe waits
-// ends the daemon there, cleanly: it has served nothing and records nothing.
+// signal that arrives while the plugin gate, the repository mapping read, the GitHub App tokens'
+// mint, or the image probe waits ends the daemon there, cleanly: it has served nothing and records
+// nothing.
 //
 // build is the binary's own build (Build), which the boot compares against the open production
 // checks of the repository it is built from.
@@ -250,14 +251,15 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 	if cfg.DispatchURL != "" {
 		log.Info("legion workflow boot stage", "stage", "store")
 	}
-	// The mapping read and the App mint wait out GitHub's and Dispatch's transient failures, which the
-	// boot budget does not bound, as it does not bound the plugin gate or the image probe: the work
-	// after them has a budget of its own.
+	// The mapping read waits out an unreachable Dispatch without limit, and the mapping's
+	// installation check and the App mint wait out GitHub's transient failures within appMintRetry;
+	// the boot budget bounds none of them, as it does not bound the plugin gate or the image probe:
+	// the work after them has a budget of its own.
 	workflow, err := openWorkflow(ctx, cfg, st, plan.project, plan.dispatchToken, plan.repositories, log, o.workflowTokens, o.githubAPI, build)
 	if err != nil {
 		st.Close()
 		if ctx.Err() != nil {
-			log.Info("legion daemon stopped before its GitHub App tokens were minted", "project", cfg.Project)
+			log.Info("legion daemon stopped before it read its repository mapping and minted its GitHub App tokens", "project", cfg.Project)
 			return nil
 		}
 		return err
@@ -273,6 +275,7 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		// from; Stage 2's supervision runs on claims alone, where every delivery holds and every
 		// tree closes.
 		plan.phaseHolds, plan.treeClosable = workflow.phaseHolds, workflow.treeClosable
+		plan.taskConfirmed = workflow.taskConfirmed
 	}
 	if cfg.Runtime.Name == "tmux" {
 		executable, err := os.Executable()
@@ -523,6 +526,8 @@ type plan struct {
 	// nil without a workflow, where every delivery holds and every tree closes.
 	phaseHolds   func(ctx context.Context, issue string, p phase.Phase) (bool, error)
 	treeClosable func(ctx context.Context, c supervise.Claim) (bool, error)
+	// taskConfirmed tells the workflow each agent that took its task; nil without a workflow.
+	taskConfirmed func(c supervise.Claim)
 	// tools are the git and jj boot resolved on the host, by name, for workspace provisioning;
 	// nil without a repository, and under a runtime whose agents run the worker image's own.
 	tools         map[string]string
@@ -990,12 +995,13 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			mergeRules: cfg.Projects[cfg.Project].Merge, runtimeName: cfg.Runtime.Name, plugins: p.plugins,
 			backend: cfg.BackendFor,
 		},
-		Identity:     adoptIdentity(p.identity, p.repository),
-		Secrets:      p.secretsEnroller,
-		PhaseHolds:   p.phaseHolds,
-		TreeClosable: p.treeClosable,
-		Clock:        p.clock,
-		Log:          log,
+		Identity:      adoptIdentity(p.identity, p.repository),
+		Secrets:       p.secretsEnroller,
+		PhaseHolds:    p.phaseHolds,
+		TreeClosable:  p.treeClosable,
+		TaskConfirmed: p.taskConfirmed,
+		Clock:         p.clock,
+		Log:           log,
 		Limits: supervise.Limits{
 			LaunchFailures: cfg.LaunchFailureLimit,
 			PromptFailures: cfg.PromptFailureLimit,
