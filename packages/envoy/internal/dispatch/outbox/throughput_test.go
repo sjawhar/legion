@@ -328,26 +328,39 @@ func (r *throughputRig) roleArrivals() []int64 {
 // events reach its subject in id order (the Legion daemon fences an issue's facts on their
 // sequence and drops one older than the last it applied), and on the success path the stream and
 // the role lane hold them in id order overall. The rate is logged for comparison.
+//
+// The burst cases put a batch of events on one issue, the shape whose events share every
+// destination, and log the drain time: from the outbox's start until every event is marked
+// published. They hold no rate floor; the drain time is the reading.
 func TestOutboxThroughputUnderRemoteLatency(t *testing.T) {
 	const (
-		issues   = 20
-		count    = 2 * batchSize
-		minRate  = 25.0
-		waitTime = 3 * time.Minute
+		backlogIssues = 20
+		backlogCount  = 2 * batchSize
+		burstCount    = batchSize
+		minRate       = 25.0
+		waitTime      = 3 * time.Minute
 	)
 	for _, tc := range []struct {
-		rtt  time.Duration
-		busy bool
+		rtt   time.Duration
+		busy  bool
+		burst bool
 	}{
-		{50 * time.Millisecond, false},
-		{50 * time.Millisecond, true},
-		{150 * time.Millisecond, false},
-		{150 * time.Millisecond, true},
+		{50 * time.Millisecond, false, false},
+		{50 * time.Millisecond, true, false},
+		{50 * time.Millisecond, false, true},
+		{150 * time.Millisecond, false, false},
+		{150 * time.Millisecond, true, false},
+		{150 * time.Millisecond, false, true},
 	} {
 		rtt := tc.rtt
 		name := rtt.String() + " idle pool"
 		if tc.busy {
 			name = rtt.String() + " busy pool"
+		}
+		issues, count := backlogIssues, backlogCount
+		if tc.burst {
+			name = rtt.String() + " single-issue burst"
+			issues, count = 1, burstCount
 		}
 		t.Run(name, func(t *testing.T) {
 			rig := newThroughputRig(t, rtt)
@@ -367,9 +380,16 @@ func TestOutboxThroughputUnderRemoteLatency(t *testing.T) {
 			elapsed := time.Since(started)
 			left := unpublishedCount(t, rig.database)
 			rate := float64(count-left) / elapsed.Seconds()
-			t.Logf("%s: published %d of %d events in %s: %.1f events/s", name, count-left, count, elapsed.Round(time.Millisecond), rate)
-			if left > 0 || rate < minRate {
-				t.Fatalf("%s: %.1f events/s with %d left unpublished, want every event at %.0f events/s or more", name, rate, left, minRate)
+			if tc.burst {
+				t.Logf("%s: drained %d of %d events on one issue in %s: %.1f events/s", name, count-left, count, elapsed.Round(time.Millisecond), rate)
+				if left > 0 {
+					t.Fatalf("%s: %d of %d events left unpublished after %s", name, left, count, waitTime)
+				}
+			} else {
+				t.Logf("%s: published %d of %d events in %s: %.1f events/s", name, count-left, count, elapsed.Round(time.Millisecond), rate)
+				if left > 0 || rate < minRate {
+					t.Fatalf("%s: %.1f events/s with %d left unpublished, want every event at %.0f events/s or more", name, rate, left, minRate)
+				}
 			}
 
 			bySubject, all := streamOrder(t, rig.reader)
