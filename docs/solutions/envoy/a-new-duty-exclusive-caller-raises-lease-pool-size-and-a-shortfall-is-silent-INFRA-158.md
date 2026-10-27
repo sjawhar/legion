@@ -37,4 +37,7 @@ related_issues:
   - the delivery reconcile, the reference excerpts, the block index, the document compaction;
   - the webhook redelivery sweep;
   - one per delivery durable through `delivery/intake.go`, which makes two.
+- It happened again on the sixteenth forward merge: main's sjawhar/legion#2137 added the edit-notice
+  sweep (lease `edit-notices`), and each side held `leasePoolSize` at 10 for its own tenth caller.
+  The merged tree has eleven callers, and `leasePoolSize` went from 10 to 11.
 - The size appears only in `pool.go`. Neither `duty/` nor `packages/envoy/AGENTS.md` mentions it.

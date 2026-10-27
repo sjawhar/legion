@@ -1298,14 +1298,16 @@ func lockTables(t *testing.T, database *store.Store, mode string, tables ...stri
 // holds - which is the only way two processes' passes are made to overlap on purpose rather than
 // by luck.
 //
-// Four of the eight leases are observable inside a window a test can wait out:
+// Four of the nine leases are observable inside a window a test can wait out:
 // reference-excerpts, block-index and webhook-redelivery, whose first pass is immediate, and
-// suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in. The other four
+// suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in. The other five
 // are not, and this row says so rather than pretending: document-compaction's ticker is 24 h;
 // issue-ask-repair's first leased pass is one IssueAskRepairInterval (10 min) in, the boot's
 // repair taking no lease; architecture-import's and delivery-reconcile's first pass is jittered
 // uniformly over SyncInterval/ReconcileInterval (5 min) and each process draws its own, so whether
-// their passes ever overlap is a coin toss no test should turn into a flake.
+// their passes ever overlap is a coin toss no test should turn into a flake; and edit-notices'
+// period is five seconds, so this window holds many of its periods, each served once
+// (docs.TestEditNoticeSweepOfTwoServicesSendsEachNoticeOnce holds what its lease is for).
 func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	pair := newPair(t)
 	fake := startGitHubFake(t)
@@ -1366,6 +1368,7 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 		{"issue-ask-repair", "its first leased pass is one IssueAskRepairInterval (10 min) after each process started"},
 		{"architecture-import", "its first pass is jittered over SyncInterval (5 min) and each process draws its own"},
 		{"delivery-reconcile", "its first pass is jittered over ReconcileInterval (5 min) and each process draws its own"},
+		{"edit-notices", "its period is 5 s, so the window holds many periods, each served once"},
 	} {
 		if ran := countLease(pair.a, leaseRan, unobserved.lease) + countLease(pair.b, leaseRan, unobserved.lease); ran > 0 {
 			t.Logf("%s ran %d times in the window, which this row does not hold to a count: %s",
