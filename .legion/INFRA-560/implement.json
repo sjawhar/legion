@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-560",
-  "completed": "2026-10-27T11:27:15Z",
+  "completed": "2026-10-27T11:48:39Z",
   "proof": [
     {
       "criterion": "Pulumi mock tests and goldens show each item (front door on two or more pods hosting one Tailscale Service with a stored certificate, per-workload replicas and strategy, zone and node spreading, budgets and one priority class, liveness probes, Secret checksums, Cloud SQL availability, proxy sizing, default tier); fail before, pass after",
       "surface": "envoy-infra's Go suite and the dispatch server's Go suite, as CI's envoy-infra-go job and the release job run them",
       "command": "cd packages/envoy/infra && go test ./... -count=1 -timeout 30m; cd packages/envoy && go test ./cmd/dispatch/ -count=1",
       "observed": "gcp, provider and every other infra package ok except TestTheDataDiskIsFormattedOnlyWhenItReadsAsZerosToItsEnd and TestARefusedDataDiskIsNeverFormattedOnALaterBoot ('these tests need mkfs.ext4 on this machine'; data_disk_test.go and cloudconfig.go unchanged); cmd/dispatch ok, TestServerClosesConnectionsAfterShutdownBegins now through newHTTPServer",
-      "headSha": "cde9232f880b5f5dc98a22f66e2ee0f8543acbd1",
+      "headSha": "d31fcb180037cef8e343b07de226ca8b56e65627",
       "negativeControl": "The head's _test.go files and goldens copied onto a git archive of base 819dc283d: the gcp test build fails (undefined: dispatchCertPaths, undefined: tailnetServiceHost, unknown field TailnetService) and the cmd/dispatch test build fails (undefined: newHTTPServer, undefined: maxConnAge); at head, a resolved tailnetService other than svc:<hostname> is refused naming tailnetService and not echoing the value (TestDispatchRefusesATailnetServiceOtherThanItsOwn)"
     },
     {
@@ -17,7 +17,7 @@
       "surface": "the pulumi-resource-envoy-infra plugin binary Pulumi installs, read with the Pulumi CLI v3.268.0 that .github/actions/install-pulumi pins",
       "command": "cd packages/envoy/infra && go build -o $TMPDIR/pre-head ./cmd/pulumi-resource-envoy-infra && pulumi package get-schema $TMPDIR/pre-head | jq '.resources[\"envoy-infra:gcp:Dispatch\"] | (.inputProperties|keys), .requiredInputs'",
       "observed": "inputs include databaseAvailabilityType, frontDoorPdbMinAvailable, frontDoorReplicas, frontDoorToolsImage, listenerPdbMinAvailable, listenerReplicas, priorityClassName, proxyCpu, proxyMemory, tailnetService; requiredInputs include tailnetService and frontDoorToolsImage; no appPriorityClassName",
-      "headSha": "cde9232f880b5f5dc98a22f66e2ee0f8543acbd1",
+      "headSha": "d31fcb180037cef8e343b07de226ca8b56e65627",
       "negativeControl": "the same query on a plugin built from base 819dc283d lists appPriorityClassName and none of the new inputs"
     },
     {
@@ -25,7 +25,7 @@
       "surface": "the claim gate script as the cert-publish container runs it, under sh against a stand-in Kubernetes API server answering PartialObjectMetadata (dispatch_frontdoor_test.go)",
       "command": "cd packages/envoy/infra && go test ./gcp/ -run 'TestDispatchCertificateBudget' -count=1 -v",
       "observed": "all 13 TestDispatchCertificateBudget* tests PASS, including the tester's SkipsAMalformedEpoch (epochs 08, 0177, a 23-digit epoch and 09 in the registry are skipped; the gate takes its claim and registers its node) and the new ReadsOnlyItsOwnAnnotation (a key legionxdev/... is not read as the ledger) and DropsAnEntryItCannotWrite (an entry an escaped quote cut short is dropped, the merge patch is valid JSON)",
-      "headSha": "cde9232f880b5f5dc98a22f66e2ee0f8543acbd1",
+      "headSha": "d31fcb180037cef8e343b07de226ca8b56e65627",
       "negativeControl": "the same three tests against the previous dispatch_frontdoor.go (commit before the fix): SkipsAMalformedEpoch fails with '/bin/sh: Illegal number: 09', ReadsOnlyItsOwnAnnotation takes a claim from a full week, DropsAnEntryItCannotWrite gets 400 for the invalid JSON patch"
     },
     {
@@ -33,15 +33,15 @@
       "surface": "the rendered front-door pod and Role (Pulumi mocks), and cert-publish's script run under sh (dash and bash) against a stand-in Kubernetes API server",
       "command": "cd packages/envoy/infra && go test ./gcp/ -run 'TestDispatchFrontDoorAloneWritesItsTLSSecret|TestDispatchFrontDoorPodHostsTheTailscaleService|TestDispatchCertPublish|TestTailnetServiceAdvertiserExitsOnSIGTERM' -count=1 -v (and with ENVOY_TEST_SHELL=bash; the TailnetService tests also as a compiled test binary with PATH and ENVOY_TEST_SHELL on busybox 1.35)",
       "observed": "Role verbs exactly get and patch; automountServiceAccountToken false and only cert-publish mounts the projected token; cert-publish exits 1 with one 'the claim gate (pid N) has exited' line at its next pass once the gate dies (each pass ends in a 60 s sleep, so in production that is within about 60 s; the test shortens the pause), and keeps running while the gate lives; on SIGTERM cert-publish exits 0 in under 0.1 s while its loop sleeps (TestDispatchCertPublishExitsOnSIGTERM) and the advertiser exits 0 in under 5 s (TestTailnetServiceAdvertiserExitsOnSIGTERM, copied byte for byte with tailnet_service.go from INFRA-549's 8bf4bfe7); all pass under dash and bash, the TailnetService tests also under busybox",
-      "headSha": "cde9232f880b5f5dc98a22f66e2ee0f8543acbd1",
+      "headSha": "d31fcb180037cef8e343b07de226ca8b56e65627",
       "negativeControl": "TestDispatchCertPublishExitsOnSIGTERM without the trap: 'cert-publish was killed by SIGTERM rather than exiting on it'; with a foreground sleep 60: 'cert-publish still runs 5s after SIGTERM, held by its sleep'; with the gate alive, cert-publish runs on and logs no gate line"
     },
     {
-      "criterion": "Spec BG-12: the default tier fits Dispatch at more than one pod, and every comment and document states a true bound (tester round 5 failure: the stale 82)",
-      "surface": "envoy-infra's Go suite: TestDispatchConnectionsPerPodIsTheServers compares gcp's dispatchConnectionsPerPod with envoy-dispatch's store.ConnectionsPerProcess and checks dispatchDefaultTierRollingReplicas against the default tier's 500 connections less PostgreSQL's 3 superuser slots",
+      "criterion": "Spec BG-12: the default tier fits Dispatch at more than one pod, and every comment and document is true of the code (tester round 5: stale 82; review round 4: the stated replica bound left out terminating pods)",
+      "surface": "envoy-infra's Go suite: TestDispatchConnectionsPerPodIsTheServers compares gcp's dispatchConnectionsPerPod with envoy-dispatch's store.ConnectionsPerProcess",
       "command": "cd packages/envoy/infra && go test ./gcp/ -run TestDispatchConnectionsPerPodIsTheServers -count=1 -v",
-      "observed": "PASS: per pod 83 (64+4+1+10+1+3), bound 4 replicas rolling ((4+1) x 83 = 415 <= 497, (4+2) x 83 = 498 > 497); dispatch.go, README.md, CHANGELOG.md, pool.go and the test comments name dispatchDefaultTierRollingReplicas / ConnectionsPerProcess instead of restating figures",
-      "headSha": "cde9232f880b5f5dc98a22f66e2ee0f8543acbd1",
+      "observed": "PASS: 83 per pod on both sides; the README, CHANGELOG, dispatch.go and pool.go state the rule (replicas, surge pod and terminating pods times store.ConnectionsPerProcess within max_connections less 3 reserved slots; a consumer sets databaseTier for its replica count) and no replica bound for the default tier",
+      "headSha": "d31fcb180037cef8e343b07de226ca8b56e65627",
       "negativeControl": "dispatchConnectionsPerPod set to 82 (the stale figure): the test fails with \"dispatchConnectionsPerPod must be envoy-dispatch's store.ConnectionsPerProcess\""
     }
   ],
@@ -85,7 +85,8 @@
     "Review round 1: the reviewer's fast-follow (shared helpers of the certificate scripts) is done in this pull request, not deferred: one kube() API helper, one notafter() check that left() calls, one copycert() used by cert-seed and the gate, and cert-publish's variables rendered once.",
     "Review round 2 (narrowed by the INFRA-63 architect to the SIGTERM fix and four wording items): tailnet_service.go and tailnet_service_test.go are byte for byte INFRA-549's 8bf4bfe7451e; cert-publish gets the same trap 'exit 0' TERM with each sleep as sleep N & wait. The kube() --max-time hardening and the dispatchWorkload struct fast-follow are left out by that decision.",
     "Conflict return: merged main@origin forward (728b5e29; conflicts in packages/envoy/CHANGELOG.md, both entries kept, and packages/envoy/AGENTS.md, this PR's two edits applied again on main's rewritten lines). Fingerprint d5e89e64 → 7b60706a, changed only on the AGENTS.md Health endpoints line (main's wording). Bare gates re-run at 728b5e29: build, vet, cmd/dispatch and infra suites as in proof[0].",
-    "Tester round 5 (stale 82 after main raised leasePoolSize to 10), per the INFRA-63 architect: store.ConnectionsPerProcess sums the server pools in pool.go; gcp computes dispatchDefaultTierRollingReplicas = (500 - 3) / dispatchConnectionsPerPod - 1 = 4, pinned to the server by TestDispatchConnectionsPerPodIsTheServers; the docs name those constants; the default tier stays db-custom-4-15360."
+    "Tester round 5 (stale 82 after main raised leasePoolSize to 10), per the INFRA-63 architect: store.ConnectionsPerProcess sums the server pools in pool.go; gcp computes dispatchDefaultTierRollingReplicas = (500 - 3) / dispatchConnectionsPerPod - 1 = 4, pinned to the server by TestDispatchConnectionsPerPodIsTheServers; the docs name those constants; the default tier stays db-custom-4-15360.",
+    "Review round 4, per the INFRA-63 architect: dispatchDefaultTierRollingReplicas and every stated replica bound for the default tier are removed, since a roll also holds terminating pods for up to their grace period; the docs state the rule without a number; store.ConnectionsPerProcess and TestDispatchConnectionsPerPodIsTheServers stay. The production count is INFRA-561's."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
