@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-600",
+  "completed": "2026-10-27T07:34:00Z",
+  "round": 1,
+  "reviewedCodeHead": "20fa840cbec2b62f1e36075376e8bbd5cf8f1065",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 3,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": ".github/scripts/check-image-trigger-paths.sh",
+      "description": "NEUTRAL (line 119) admits `!github.event.pull_request.draft` on the grounds that `ready_for_review` builds the head next, but the check never verifies that any pull_request trigger reaching the build lists `ready_for_review`. Reproduced: with `ready_for_review` removed from worker-image.yaml's types at 20fa840c, check-image-trigger-paths.sh exits 0 ('every image trigger covers every input its build reads'), while a draft marked ready without a push would merge with no image build at its final head. The allowlist's own rule is 'unknown means refused, never ungated'. Fix: admit the draft term only when every pull_request/pull_request_target trigger that runs the holder (its workflow, and each caller reaching it through workflow_call) lists ready_for_review in types; add a refused fixture with the default types."
+    },
+    {
+      "severity": "minor",
+      "file": ".github/workflows/worker-image.yaml",
+      "description": "Lines 104 and 108-109: 'a run never cancels a main, workflow_call or workflow_dispatch run' is false for a pending run (GitHub keeps one pending run per group and cancels the older pending one whatever cancel-in-progress says); 'a job group named like its workflow's would wait on itself' is wrong: GitHub detects the deadlock and cancels the run (GitHub docs, concurrency; github/vscode-github-actions#135)."
+    },
+    {
+      "severity": "minor",
+      "file": ".github/workflows/envoy-and-contracts.yaml",
+      "description": "Lines 117-118: a ref key 'would name main's group' is wrong here, since this workflow's non-PR runs key on github.sha; the real reason is the one pr-and-main.yaml gives (the number is the one key that names the pull request on every event)."
+    },
+    {
+      "severity": "minor",
+      "file": ".github/workflows/pr-and-main.yaml",
+      "description": "Lines 6-7 say marking a draft ready starts a run whose checks replace the skipped ones with no condition; GitHub starts no run on a conflicting head, so the skips can stay newest (PR body residual 1). Add the one-line caveat where a future editor reads it."
+    }
+  ],
+  "ci": "Code head 20fa840c: Tests 40465663407, Docs 40465663384, Worker Image 40465663736, Envoy 40465663472 and PR Title 40466006364 all still queued at 07:30Z (runner pool busy); compare 20fa840c...49c13834 handoffsOnly true, 2 files. Not waited on: changes are requested.",
+  "thermonuclear": "DeepReview APPROVE at 20fa840c (3 Minor, no Critical/Important); QualityReview CHANGES at 20fa840c (prose duplication, test-loop duplication, unchecked ready_for_review assumption, one wrong comment). The ready_for_review gap both raised was reproduced and judged Important, since it opens the image-trigger gate.",
+  "fastFollow": "Deduplicate the quick-reopen race prose (six copies: docs.yaml, envoy-and-contracts.yaml, pr-and-main.yaml, tests-closed.yaml, worker-image.yaml, docs/kubernetes.md) and the event-term rationale (three copies in check-image-trigger-paths.sh, two in its test) to one home each with pointers; fold the 'event terms stay accepted' loop into the existing neutral-terms loop; stop restating the lint job's triggers in check-pr-text.sh, check-private-names.sh, pr-title.yaml, pr-and-main.yaml and AGENTS.md."
+}
