@@ -409,3 +409,54 @@ func TestReclaimDoesNotDoubleRelaunchAcrossALeaseLapse(t *testing.T) {
 		t.Fatalf("resumes = %d, want the bounded second attempt once the backoff elapsed", got)
 	}
 }
+
+// (Gate2432C BLOCKING) A claim that recovers forgets its reclaim history, so separate, fully-recovered
+// incidents over a long life do not accumulate into a permanent give-up. clearReclaim is what a
+// successful publish does (see the wiring test below). With the attempt cap at 2 and no reset, the
+// third of these five independent, recovered incidents would be refused; with the reset each is healed.
+func TestARecoveredClaimResetsItsReclaimCount(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	clock := time.Now()
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", supervisor: sup, project: "legion",
+		now: func() time.Time { return clock }, reclaimTryCap: 2, reclaimInterval: time.Nanosecond}
+	token := reclaimArchitect(t, sup, "LEGION-1", supervise.StateReady, "ses_arch")
+
+	for range 5 {
+		runner.reclaimUnheldRunning(context.Background(), token, "publish")
+		driveClaimReady(t, sup, token)
+		runner.clearReclaim(token) // the recovery: the architect's role is held again
+		clock = clock.Add(time.Minute)
+	}
+
+	if got := len(rt.CallsOf("Resume")); got != 5 {
+		t.Fatalf("resumes = %d, want each independent, recovered incident healed (the count resets on recovery)", got)
+	}
+}
+
+// (Gate2432C BLOCKING, wiring) A successful notice publish to an architect clears its reclaim history,
+// which is how a recovered claim's count resets and how the map stays bounded.
+func TestASuccessfulNoticePublishClearsTheReclaimHistory(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, false)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	publisher := &holderPublisher{}
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records,
+		notices: publisher, supervisor: sup, project: "legion", now: time.Now, reclaimInterval: time.Nanosecond}
+	token := reclaimArchitect(t, sup, "LEGION-1", supervise.StateReady, "ses_arch")
+
+	// Seed a reclaim history for the architect.
+	runner.reclaimUnheldRunning(context.Background(), token, "publish")
+	if _, ok := runner.reclaimTries[token]; !ok {
+		t.Fatalf("expected a reclaim history after a reclaim")
+	}
+	// A successful publish (the holder is live) clears it.
+	row := leasedOutboxRow(t, pool, records, mustOutboxRow(t, "LEGION-2", reclaimNotice(), time.Now()))
+	if err := runner.notice(context.Background(), row, reclaimNotice()); err != nil {
+		t.Fatalf("notice: %v", err)
+	}
+	if _, ok := runner.reclaimTries[token]; ok {
+		t.Fatalf("a successful publish did not clear the architect's reclaim history")
+	}
+}

@@ -699,6 +699,10 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	published := r.notices.Publish(ctx, notify.RoleTopicPrefix+string(architect), noticeSummary(payload.Kind, row.Issue), notice, key)
 	switch {
 	case published == nil:
+		// The role is held again, so any reclaim incident for this architect is over: forget its
+		// reclaim history, so a later independent loss starts with fresh attempts rather than
+		// accumulating toward a permanent give-up (reclaim_unheld.go, clearReclaim).
+		r.clearReclaim(architect)
 		return nil
 	case !errors.Is(published, notify.ErrNoHolder):
 		return fmt.Errorf("publish notice for %s to its architect %s: %w", row.Issue, architect, published)

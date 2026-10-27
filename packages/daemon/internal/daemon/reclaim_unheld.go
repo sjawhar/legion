@@ -98,6 +98,11 @@ func reclaimBooting(state supervise.ClaimState) bool {
 // so this heals architect role claims — which is what the deaf roles are — and not a worker role (a
 // worker is never daemon-role-addressed; it is driven on its worker stream) or the controller (it has
 // its own session-side recovery). A peer agent's publish to an unheld running role is the residual.
+// Keeping this to architects is also what makes the no-live-holder guarantee below safe without a
+// listener query: an architect's claim boot issues a HARD Envoy claim (it always lands, never 409s),
+// so relaunching one onto a role a holder has since taken cannot crash-loop on boot. A phase worker's
+// claude-backed boot claim is SOFT and WOULD 409 into a live holder, so extending this recognizer to
+// worker roles must add a real holder check first; it is architect-only until then.
 //
 // The relaunch runs synchronously under the claim's machine, so the row can outlive its lease and be
 // re-run by the sweep; the in-flight and backoff accounting covers the whole relaunch so that cannot
@@ -153,7 +158,7 @@ func (r *outbox) reclaimUnheldRunning(ctx context.Context, token claim.Token, tr
 func (r *outbox) admitReclaim(token claim.Token) bool {
 	r.reclaimMu.Lock()
 	defer r.reclaimMu.Unlock()
-	r.pruneReclaimInFlightLocked()
+	r.pruneReclaimLocked()
 	try := r.reclaimTries[token]
 	if try.gaveUp {
 		return false
@@ -185,7 +190,9 @@ func (r *outbox) admitReclaim(token claim.Token) bool {
 
 // releaseReclaim undoes an admitted reclaim whose relaunch the machine refused (a reserved tree
 // cleanup, a store error): the slot frees, the attempt is not counted — the relaunch never started —
-// and the claim's backoff is cleared so its held message's next retry asks again at once.
+// the claim's backoff is cleared so its held message's next retry asks again at once, and the
+// fleet-wide stagger it reserved is rolled back so a relaunch that never started does not delay the
+// next, different claim by an interval.
 func (r *outbox) releaseReclaim(token claim.Token) {
 	r.reclaimMu.Lock()
 	defer r.reclaimMu.Unlock()
@@ -196,6 +203,7 @@ func (r *outbox) releaseReclaim(token claim.Token) {
 	}
 	try.nextAt = time.Time{}
 	r.setReclaimTryLocked(token, try)
+	r.reclaimNextAt = r.now()
 }
 
 func (r *outbox) setReclaimTryLocked(token claim.Token, try reclaimTry) {
@@ -205,13 +213,33 @@ func (r *outbox) setReclaimTryLocked(token claim.Token, try reclaimTry) {
 	r.reclaimTries[token] = try
 }
 
-// pruneReclaimInFlightLocked drops every in-flight claim whose relaunch has finished — it is prompted
-// again, or has failed, retired, or suspended — so its slot frees. View never waits on a decision in
-// flight, so a claim mid-relaunch is read without blocking (supervisedClaim).
-func (r *outbox) pruneReclaimInFlightLocked() {
+// clearReclaim forgets a claim's reclaim history — its attempt count, backoff, and give-up — and
+// drops its in-flight slot. The notice executor calls it when a publish to the architect succeeds:
+// the role is held again, so this incident is over and a later, independent loss starts fresh.
+// Without it, separate fully-recovered incidents over a long-lived claim's life would accumulate
+// into a permanent give-up — the very recurrence this change exists to heal — and the map would grow
+// by one entry per claim ever reclaimed.
+func (r *outbox) clearReclaim(token claim.Token) {
+	r.reclaimMu.Lock()
+	defer r.reclaimMu.Unlock()
+	delete(r.reclaimTries, token)
+	delete(r.reclaimInFlight, token)
+}
+
+// pruneReclaimLocked frees every in-flight claim whose relaunch has finished — it is prompted again,
+// or has failed, retired, or suspended — and forgets the reclaim history of a claim this daemon no
+// longer supervises or that has failed or retired, so the map stays bounded by the claims currently
+// in a reclaim cycle. View never waits on a decision in flight, so a claim mid-relaunch is read
+// without blocking (supervisedClaim).
+func (r *outbox) pruneReclaimLocked() {
 	for token := range r.reclaimInFlight {
 		if !reclaimBooting(r.claimState(token)) {
 			delete(r.reclaimInFlight, token)
+		}
+	}
+	for token := range r.reclaimTries {
+		if claimEnded(r.claimState(token)) {
+			delete(r.reclaimTries, token)
 		}
 	}
 }
