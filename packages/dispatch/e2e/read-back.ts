@@ -14,3 +14,9 @@ export function engineTables(markdown: string): string[][][] {
   const script = fileURLToPath(new URL("./engine-tables.ts", import.meta.url));
   return JSON.parse(execFileSync("bun", [script], { encoding: "utf8", input: markdown }));
 }
+
+/** The headless engine's reading of stored markdown: each paragraph's text. */
+export function engineParagraphs(markdown: string): string[] {
+  const script = fileURLToPath(new URL("./engine-text.ts", import.meta.url));
+  return JSON.parse(execFileSync("bun", [script], { encoding: "utf8", input: markdown }));
+}
