@@ -2,17 +2,25 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-569",
-  "completed": "2026-10-27T07:49:57Z",
+  "completed": "2026-10-27T10:09:44Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2363",
-  "codeHead": "b7b1325d21837bc5b1efe09de299785a6dd55e69",
+  "codeHead": "5c49fe2b546a6ab2b88c58af2ca3b669307539b7",
   "proof": [
     {
-      "criterion": "The merged head still marks an answered ask with its latest answer in the search panel, and its diff against main is unchanged by the merge.",
-      "surface": "Dispatch's browser suite (Playwright chromium + iphone) against the real Go server and SPA on the pod harness; the PR diff fingerprint",
-      "command": "( source /legion/harness/env.sh && cd packages/contracts && bun run build && cd ../dispatch && bun run e2e -- search.e2e.ts ); fingerprint per skill://legion-worker/references/conflicts-and-rewrites.md at 8413b9c0 and b7b1325d",
-      "observed": "20 passed, 6 skipped (spec's own skips), including `✓ [chromium] › e2e/search.e2e.ts:169:1 › an ask hit says whether it is answered, …` and `✓ [iphone] › e2e/search.e2e.ts:338:1 › phone search rows …`; fingerprint c456ff9a… before and after (log e2e-merge.log)",
-      "headSha": "b7b1325d21837bc5b1efe09de299785a6dd55e69",
-      "negativeControl": "Round 1's run of the base app (94ab028a) with this spec failed on `Expected substring: \"Answered\"`; the fingerprint check counts any failed step or unresolvable SHA as changed, and it printed the same hash for both heads."
+      "criterion": "The issue event log and live stream serve a stored ask.answered event's answer.selected and previous_answer.selected as [], never null, and the web event body tolerates a missing list.",
+      "surface": "real Dispatch server + Postgres 17/pgvector (bun run dispatch:local on /legion/harness), GET /api/v1/issues/{key}/events",
+      "command": "bash /legion/scratch/tmp/i569/event-proof.sh (answer an ask with [\"Colza\"], change it with expected_answer_at and no selected, SQL-null both selected lists on the stored ask.answered event, read the issue event log)",
+      "observed": "SQL nulls the stored event's selected lists: null|null; GET /api/v1/issues/CORE-1/events ask.answered: answer.selected = [] previous_answer.selected = [] (event-proof.log). TestAnsweredEventStoredWithNullSelectedServesEmptyLists passes for the event log, stream catch-up and a live relay frame; EventBody.test.tsx renders a null previous selected as `was: Go now.`.",
+      "headSha": "5c49fe2b546a6ab2b88c58af2ca3b669307539b7",
+      "negativeControl": "At b7b1325d: `issue event log answer: answer = {\"at\":…,\"selected\":null,…}, want \"selected\":[]` (Go), and `TypeError: null is not an object (evaluating 'previous.selected.join')` (EventBody unit test)."
+    },
+    {
+      "criterion": "The search panel still marks an answered ask with its latest answer after the cleanup (ANSWER_PREVIEW_CHARS named, wording fixed).",
+      "surface": "Dispatch's browser suite (Playwright chromium + iphone) on the pod harness",
+      "command": "( source /legion/harness/env.sh && cd packages/contracts && bun run build && cd ../dispatch && bun run e2e -- search.e2e.ts )",
+      "observed": "20 passed, 6 skipped (spec's own skips), including `✓ [chromium] › e2e/search.e2e.ts:169:1 › an ask hit says whether it is answered, …` (e2e-r4.log)",
+      "headSha": "5c49fe2b546a6ab2b88c58af2ca3b669307539b7",
+      "negativeControl": "Round 1's base-app run (94ab028a) with this spec failed on `Expected substring: \"Answered\"`; SearchPalette.test.tsx now derives its exact expected cut from ANSWER_PREVIEW_CHARS, so a change to the constant without the cut fails it."
     }
   ],
   "filesChanged": [
@@ -45,7 +53,12 @@
     "packages/envoy/internal/dispatch/api/ask_selected_test.go",
     "packages/dispatch/web/src/features/refs/markdown-fragment.ts",
     "packages/dispatch/web/src/features/refs/markdown-fragment.test.ts",
-    "packages/envoy-plugin/CHANGELOG.md"
+    "packages/envoy-plugin/CHANGELOG.md",
+    "packages/envoy/internal/dispatch/api/events.go",
+    "packages/envoy/internal/dispatch/api/events_test.go",
+    "packages/dispatch/web/src/features/activity/EventBody.tsx",
+    "packages/dispatch/web/src/features/activity/EventBody.test.tsx",
+    "packages/dispatch/web/src/features/refs/MarkdownPreview.tsx"
   ],
   "trickyParts": [
     "A resolved ask's answer survives only in ask.answered events for rows document settlement retracted while answered (constraint 0007 forces answer null on resolved rows); attachAskStates reads them with loadAskAnswersByAsk only when a resolved ask hit is on the page, and the Go test seeds such a row as ask_answer_change_test.go does.",
@@ -60,22 +73,12 @@
     "Round 2: the selected-null rule lives in model.AskAnswer.UnmarshalJSON (every decode of an answer gets it) and the write path stores []; attachAskStates' own normalization loop was removed as redundant.",
     "Round 3: merge conflicts resolved by keeping both sides — contracts and pi-envoy CHANGELOG [Unreleased] entries, SearchPalette.tsx imports (main's nodeRouteFromHref plus Timestamp), SearchPalette.test.tsx (this branch's two ask tests plus main's long-named-document test)."
   ],
-  "openQuestions": [],
+  "openQuestions": [
+    "One full `bun run test` in packages/dispatch at 5c49fe2b reported 2506 pass / 1 fail; two reruns gave 2507 pass / 0 fail, and the failing test was not identified (parallel-run flake, not reproduced)."
+  ],
   "discoveredComplexity": [
     "dispatch://INFRA-568 adds the same SearchAsk/attachAskStates names on its branch; whichever pull request merges second resolves the overlap in model.go, search_ask.go and search.go."
   ],
-  "round": 3,
-  "answersReview": "conflict with main (GitHub CONFLICTING/DIRTY at 8413b9c0): forward merge of main@origin, no rebase",
-  "fingerprint": {
-    "before": {
-      "head": "8413b9c087d4251b1de53b249aebe223e5826a44",
-      "sha256": "c456ff9a1aef9847c69936b74176ebf0a2ebe2ad5d5e1c3aae20630545aad4a8"
-    },
-    "after": {
-      "head": "b7b1325d21837bc5b1efe09de299785a6dd55e69",
-      "sha256": "c456ff9a1aef9847c69936b74176ebf0a2ebe2ad5d5e1c3aae20630545aad4a8"
-    },
-    "verdict": "unchanged",
-    "comment": "https://github.com/sjawhar/legion/pull/2363#issuecomment-6436548346"
-  }
+  "round": 4,
+  "answersReview": "INFRA-148 architect's acceptance send-back: event log selected null with the EventBody guard and tests; the Fast-follow wording and ANSWER_PREVIEW_CHARS cleanup. Nothing else changed."
 }
