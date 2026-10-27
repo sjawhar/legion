@@ -756,8 +756,6 @@ const (
 //   - each LISTEN that stands, for every room this process has loaded (sweep): a notification
 //     sent while the hub had no connection reached nobody;
 //   - each room instance that starts (schedule), whose load can have raced an append;
-//   - a browser append the gate refused because the room's history was replaced
-//     (servicePersistenceAdapter.StoreUpdateContext), whose catch-up closes the room;
 //   - a retry, for a room whose last catch-up reached no verdict (woke).
 //
 // Requests coalesce per room: a burst of notifications for one room that arrive before its

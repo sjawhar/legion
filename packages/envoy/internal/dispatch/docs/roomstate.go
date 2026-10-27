@@ -51,17 +51,18 @@ type roomState struct {
 	askBlocks         map[string]struct{}
 	askAuthors        map[string]model.Actor
 	pendingAskAuthors map[string]model.Actor
-	// lastActor is the most recent edit's source: the actor of a service mutation, or the sole
-	// connected peer of a browser edit. A version lists its authors, so a settlement that runs
-	// after an edit's own version was committed would otherwise attribute the block asks it
-	// indexes to nobody.
+	// lastActor is the most recent edit's source this process saw: the actor of a service
+	// mutation, or the sole connected peer of a browser edit. A settlement names the source the
+	// document's pending-settlement row holds, which every process's appends and commits write
+	// (settlementAuthors), not this one; the record keeps its own for what has not reached that row
+	// - closing an issue writes it there (SetIssueClosed) - and takes the row's when a room loads.
 	lastActor *model.Actor
 	// unsettled marks a lastActor no settlement has read since: the settlement it was recorded
 	// for names it, so the state holds it until one commits (settleRoomWithin). Closing persists
 	// it on the pending-settlement row before clearing it (SetIssueClosed), so that row carries it
 	// through a room release or restart. The authors themselves are in F and R, never only here.
 	unsettled      bool
-	updateClasses  []documentUpdateClass
+	updateClasses  []*documentUpdateClass
 	pendingUpdates int
 	settle         *time.Timer
 	unrecorded     map[pmdoc.MarkRef]time.Time
@@ -106,12 +107,22 @@ type roomState struct {
 // work the room's state waits on, the browser edit's in-flight credit, nil for an update no
 // browser edit credited, and cursor, the durable version the room instance the update was made in
 // stands at, which gates and then takes in the update's own append (StoreUpdateContext).
+//
+// An update only the room holds - not a published live write's nor a catch-up's, which are stored
+// already - also names instance, the room instance it was made in, whose list of unstored updates
+// holds it from the moment the observer classified it until its append has returned
+// (roomInstance.unstored), and ahead, where it is stored once it is: a live write that forks the
+// room stores it in its own transaction ahead of its own row (storeRoomUpdatesAhead), and its
+// room's append then finds it there instead of storing it again (PgVersioned.appendUpdate).
+// Every field is set before the class is listed anywhere and never written after, but ahead.
 type documentUpdateClass struct {
 	update         []byte
 	contentChanged bool
 	durable        bool
 	credit         *UpdateCredit
 	cursor         *roomCursor
+	instance       *roomInstance
+	ahead          *storedAhead
 }
 
 // lockState returns room's state locked, creating it when the service holds none.
@@ -262,11 +273,14 @@ func (s *Service) unusedLocked(state *roomState) bool {
 // recordUpdateClass records what the room's update observer read off one update, for the
 // persistence that takes it next (consumeUpdateClass). Only a durable class is work the room's
 // state waits on: a repair's update is recorded for the room instance it names alone, and its
-// writer, not the room's persistence, is what makes it durable.
-func (s *Service) recordUpdateClass(room string, update []byte, class documentUpdateClass) {
+// writer, not the room's persistence, is what makes it durable. A class the observer made keeps the
+// copy of update it took then.
+func (s *Service) recordUpdateClass(room string, update []byte, class *documentUpdateClass) {
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
-	class.update = append([]byte(nil), update...)
+	if class.update == nil {
+		class.update = append([]byte(nil), update...)
+	}
 	state.updateClasses = append(state.updateClasses, class)
 	if class.durable {
 		state.pendingUpdates++
@@ -279,10 +293,10 @@ func (s *Service) recordUpdateClass(room string, update []byte, class documentUp
 // transaction's observers after the transaction has released the document's lock, so two peers'
 // updates reach persistence in the order their read loops hand them on, which need not be the
 // order the room recorded them in.
-func (s *Service) consumeUpdateClass(room string, update []byte) (documentUpdateClass, *roomState, bool) {
+func (s *Service) consumeUpdateClass(room string, update []byte) (*documentUpdateClass, *roomState, bool) {
 	state := s.lockExistingState(room)
 	if state == nil {
-		return documentUpdateClass{contentChanged: true}, nil, false
+		return &documentUpdateClass{contentChanged: true}, nil, false
 	}
 	defer s.unlockState(room, state)
 	for index, class := range state.updateClasses {
@@ -295,7 +309,7 @@ func (s *Service) consumeUpdateClass(room string, update []byte) (documentUpdate
 		}
 		return class, state, true
 	}
-	return documentUpdateClass{contentChanged: true}, nil, false
+	return &documentUpdateClass{contentChanged: true}, nil, false
 }
 
 func (s *Service) hasPendingUpdates(room string) bool {

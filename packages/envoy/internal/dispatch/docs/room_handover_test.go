@@ -282,9 +282,13 @@ func TestARoomLoadedOntoAKeptRecordTakesTheStoredEditSource(t *testing.T) {
 	if state != kept.(*roomState) {
 		t.Fatal("the close dropped the record its edit source held, so the reload made a fresh one and nothing here is tested")
 	}
+	_, recorded, err := readOwedSettlement(context.Background(), service.store.Pool, artifactID)
+	if err != nil {
+		t.Fatalf("read the document's pending settlement: %v", err)
+	}
 	state.mu.Lock()
 	lastActor := state.lastActor
-	credit := settlementAuthors(state, map[string]model.Actor{actorKey(alice): alice})
+	credit := settlementAuthors(state, map[string]model.Actor{actorKey(alice): alice}, recorded)
 	state.mu.Unlock()
 	if lastActor != nil {
 		t.Fatalf("the reloaded room keeps %+v as the latest edit source, want none, as the stored row names", lastActor)
@@ -488,7 +492,7 @@ func TestAFailedRoomsUnstoredUpdatesGoToTheRecordThatReplacesIt(t *testing.T) {
 
 	update := []byte("bob's update")
 	credit := &UpdateCredit{}
-	service.recordUpdateClass(artifactID, update, documentUpdateClass{contentChanged: true, durable: true, credit: credit})
+	service.recordUpdateClass(artifactID, update, &documentUpdateClass{contentChanged: true, durable: true, credit: credit})
 	state := service.room(artifactID)
 	state.mu.Lock()
 	service.handOverFailedRoomLocked(artifactID, state)
@@ -550,10 +554,10 @@ func TestAFailedRoomsUpdatesEndOrMoveWithTheRecordThatReplacesIt(t *testing.T) {
 	dropped := []byte("the update the failure dropped")
 	droppedCredit := service.creditContentChange(artifactID, nil, hold)
 	service.recordUpdateClass(artifactID, dropped,
-		documentUpdateClass{contentChanged: true, durable: true, credit: droppedCredit})
+		&documentUpdateClass{contentChanged: true, durable: true, credit: droppedCredit})
 	_, stranded := peerEdit(t, service.srv.GetDoc(artifactID), appendBlocks(t, "typed while the room was failing.\n"))
 	service.recordUpdateClass(artifactID, stranded,
-		documentUpdateClass{contentChanged: true, durable: true, credit: service.creditContentChange(artifactID, nil, hold)})
+		&documentUpdateClass{contentChanged: true, durable: true, credit: service.creditContentChange(artifactID, nil, hold)})
 	state.mu.Lock()
 	state.failed = errors.New("the room failed on an append")
 	state.mu.Unlock()

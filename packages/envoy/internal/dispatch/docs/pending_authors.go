@@ -187,10 +187,19 @@ func (hold *roomHold) snapshot() heldUpdates {
 // would apply one row twice. Lock order: the document's advisory lock (only a caller that already
 // holds it, a settlement), then catchUp, then the room's state.mu; the catch-up itself never takes
 // the advisory lock.
+//
+// unstored is every update made in this instance that only the room holds - a browser's, or a
+// service repair the room's persistence stores - from the moment the room's update observer
+// classified it until its append has returned, in the order the room committed them (the update
+// log's order, which the observer classifies in). A live write forked from this instance stores
+// them ahead of its own row (storeRoomUpdatesAhead). unstoredMu guards it alone.
 type roomInstance struct {
 	hold    roomHold
 	cursor  roomCursor
 	catchUp sync.Mutex
+
+	unstoredMu sync.Mutex
+	unstored   []*documentUpdateClass
 }
 
 // roomLoad is one room load's record of the durable history behind the room it loads, kept from
@@ -674,14 +683,17 @@ func (capture authorCapture) withoutInflight(write *liveWrite, actor *model.Acto
 
 // uploadCapture is an upload's capture over write: the in-flight credits observed by its last read
 // of the room (liveWrite.forkSeq), and the updates the room instance it read held then
-// (liveWrite.forkHold). The upload holds the document's advisory lock from before that read, so no
-// append lands between it and the commit.
+// (liveWrite.forkHold), with the room updates its own transaction stored ahead of its row whose
+// credits that read took in (liveWrite.heldCopies). The upload holds the document's advisory lock
+// from before that read, so no append lands between it and the commit.
 func uploadCapture(write *liveWrite) authorCapture {
 	state := write.state
 	state.mu.Lock()
 	inflight := state.unconsumedInflightLocked(write.forkSeq)
 	state.mu.Unlock()
-	return authorCapture{state: state, inflight: inflight, upload: &uploadHold{held: write.forkHold.snapshot(), hold: write.forkHold}}
+	held := write.forkHold.snapshot()
+	held.since = append(held.since, write.heldCopies...)
+	return authorCapture{state: state, inflight: inflight, upload: &uploadHold{held: held, hold: write.forkHold}}
 }
 
 // unconsumedInflightLocked is state's F credits no committed version has listed, observed no later
@@ -899,7 +911,8 @@ func markSettlementPending(ctx context.Context, tx pgx.Tx, rooms []string, lastA
 
 // readOwedSettlement reports whether room owes a settlement and the latest edit source its row
 // names. A room's load reads it on the pool reserved for loads and takes no advisory lock, which
-// a durable writer can hold for as long as its transaction runs.
+// a durable writer can hold for as long as its transaction runs; a settlement reads it in its own
+// transaction under that lock, for the actor its version names (settlementAuthors).
 func readOwedSettlement(ctx context.Context, q Queryer, room string) (owed bool, lastActor *model.Actor, err error) {
 	var encoded []byte
 	err = q.QueryRow(ctx, `

@@ -118,10 +118,17 @@ func (p *PgVersioned) AppendUpdateWithCredit(ctx context.Context, room string, u
 	return p.appendUpdate(ctx, room, update, contentChanged, credit)
 }
 
+// appendUpdate is a room's own append of update, in a transaction of its own under the document's
+// advisory lock. An update a live write of this process already stored ahead of its own row
+// (storeRoomUpdatesAhead), in a transaction that committed, is not stored again: the append takes
+// the version that holds it and writes nothing, not even the credit, which the write's transaction
+// wrote with the update. Either way the update's room instance takes that version in, and its
+// marker records it (storedAhead), so a later write finds it stored.
 func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
 	if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
 		return 0, err
 	}
+	ahead := storedAheadFrom(ctx)
 	var version persistence.Version
 	err := p.withRoomLock(ctx, room, func(conn *pgxpool.Conn) error {
 		// The credit lands while withRoomLock still holds the document's lock, whether the
@@ -133,12 +140,20 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 			return fmt.Errorf("begin document update: %w", err)
 		}
 		defer tx.Rollback(ctx)
-		version, err = p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit)
+		at, stored, err := ahead.storedAt(ctx, tx, room, update)
 		if err != nil {
+			return err
+		}
+		if stored {
+			version = at
+		} else if version, err = p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit); err != nil {
 			return err
 		}
 		if err := tx.Commit(ctx); err != nil {
 			return fmt.Errorf("commit document update: %w", err)
+		}
+		if ahead != nil {
+			ahead.version.Store(int64(version))
 		}
 		credit.held(version)
 		if p.afterAppendCommit != nil {
@@ -158,10 +173,19 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 // AppendUpdateTx appends an already validated V1 update inside tx, recording whether it changes
 // the document's content: settlement versions a document only past a content update.
 func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error) {
+	return p.AppendUpdateTxWithCredit(ctx, tx, room, update, contentChanged, nil)
+}
+
+// AppendUpdateTxWithCredit is AppendUpdateTx for a room's own update that a live write stores in
+// its transaction ahead of its own row (storeRoomUpdatesAhead): it writes the browser edit's
+// in-flight credit with it, as the room's own append would have (AppendUpdateWithCredit), in tx,
+// so the credit is durable exactly when the update is. The credit lands when the room's own append
+// returns, as ever.
+func (p *PgVersioned) AppendUpdateTxWithCredit(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
 	if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
 		return 0, itemCapError(update, err)
 	}
-	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, nil)
+	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit)
 }
 
 // lockDocumentRoom serializes every durable mutation of one document. Callers
@@ -215,6 +239,15 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	}
 	if err := p.recoverPruneTx(ctx, tx, room); err != nil {
 		return 0, err
+	}
+	// A live write's append stores first, in its transaction, the updates its room holds and the
+	// store does not, which its fork can hold and its row can depend on (storeRoomUpdatesAhead,
+	// plan D3.8): under this lock no other append of the document lands until the transaction
+	// ends, so its row never commits ahead of them.
+	if write := ledgerFrom(ctx).liveWriteFor(room); write != nil && write.storeAhead != nil {
+		if err := write.storeAhead(ctx, tx); err != nil {
+			return 0, err
+		}
 	}
 	// The gate: the room the update was made in, read after the lock and before the head, so a
 	// peer of this very room whose append committed under this lock has already advanced the

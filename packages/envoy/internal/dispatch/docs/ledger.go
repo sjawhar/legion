@@ -258,12 +258,20 @@ func (l *Ledger) commit(ctx context.Context) error {
 // these versions takes nothing in - advanceRoomCursor only advances by the version that follows
 // the one it stands at - and the publish records them again on the room it reaches
 // (publishLiveUpdate).
+//
+// The room updates the write stored ahead of its own rows (storeRoomUpdatesAhead) are already in
+// the instance its fork came from, and in no other: their versions go to that instance's cursor and
+// hold alone, as a repair's do (advanceRoomCursor), never to a room loading meanwhile.
 func (l *Ledger) takeRoomCursors() {
 	for _, artifactID := range l.order {
 		write := l.live[artifactID]
 		for _, version := range write.versions {
 			advanceRoomCursor(write.forkCursor, version)
 			l.service.tookResidentVersion(artifactID, version)
+		}
+		for _, version := range write.copies {
+			advanceRoomCursor(write.forkCursor, version)
+			write.forkHold.add(int64(version))
 		}
 	}
 }

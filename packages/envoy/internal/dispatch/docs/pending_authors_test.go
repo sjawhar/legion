@@ -319,8 +319,11 @@ func TestTwoProcessesListEveryEditorOnExactlyOneVersion(t *testing.T) {
 // settlement was refused there three times in a row: the third refusal failed the room, and the
 // process's next named version, made before the failure's eviction had run, was refused with it.
 // The first seed also named a version from that room, which recorded text missing the other
-// process's paragraphs at a cursor saying it held them.
-var twoProcessRegressionSeeds = []int64{1792831380700443036, 1792844341416325912}
+// process's paragraphs at a cursor saying it held them. The third (INFRA-556) had a browser append
+// refused because a compaction on the other process replaced the history under its room; the room
+// must fail and reload so the browser's resend lands, and a refusal that only asked the room-sync
+// lane for a catch-up lost the edit wherever that lane does not run.
+var twoProcessRegressionSeeds = []int64{1792831380700443036, 1792844341416325912, 1793084442294211495}
 
 // TestTwoProcessesListEveryEditorOnExactlyOneVersion, for each seed of twoProcessRegressionSeeds.
 func TestTwoProcessesListEveryEditorOnExactlyOneVersionForSeedsThatFailed(t *testing.T) {

@@ -194,6 +194,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	if err != nil {
 		return fmt.Errorf("append transactional live document update: %w", err)
 	}
+	write.appended = append(write.appended, version)
 	if len(write.versions) == 0 {
 		// The transaction holds the document's advisory lock from this append until it ends.
 		s.hooks.parkLiveWrite(artifactID, PauseAfterFirstAppend)
