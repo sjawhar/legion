@@ -108,6 +108,16 @@ path that freezes without closing is left within 30 s and redialed at once, and 
 within 52 s when that redial also hangs on nats.js's 20 s dial timeout and the 2 s wait; nats.js's
 default 120 s interval left a frozen path for up to 6 minutes.
 
+nats.js 2.29.3, the last 2.x release, leaves a redial's socket open when it gives up on that dial
+at its 20 s timeout (a TCP connect that hangs, or a server that never sends `INFO`): it closes
+only a transport that finished connecting, so the socket keeps the process alive and a channel
+server never exits on SIGTERM. `patches/nats@2.29.3.patch` (root `package.json`'s
+`patchedDependencies`, applied by bun at install and so carried by both plugins' bundles) makes
+`NodeTransport` keep the socket from the moment it dials and destroy it when a transport that never
+connected is closed; `src/__tests__/nats-stall.test.ts` fails without it. Bun ignores a
+`patchedDependencies` entry for a version that is not installed without a word, so moving nats
+means carrying the patch to the new version.
+
 `@legion/envoy-client/testing/stall-proxy` and `@legion/envoy-client/testing/envoy-stack` (Bun
 only, not built) are what the stall tests run: a TCP proxy whose `freeze()` stops forwarding on
 the connections open at that moment without closing either side, and a real natsd and listener

@@ -107,6 +107,11 @@
   after two unanswered pings, in place of nats.js's default 120 s ping. The reconnect runs the
   catch-up, so the session shows the messages sent meanwhile once (INFRA-548).
 
+- A NATS redial that hangs (its TCP connect, or a server that never sends `INFO`) is closed once
+  nats.js gives up on it at its 20 s dial timeout, instead of keeping its socket open for the
+  process's life: the bundle carries `patches/nats@2.29.3.patch`, which makes nats.js destroy the
+  socket of a transport that never finished connecting (INFRA-548).
+
 - A live view held open while its session is relaunched with `--resume` now shows the resumed
   process's model, thinking level and command changes. Two things stopped it. Every process
   numbered its agent-stream frames from 0, and the page keeps a `settings` or `commands` frame only

@@ -138,6 +138,13 @@
 
 ### Fixed
 
+- A NATS redial that hangs (its TCP connect, or a server that never sends `INFO`) no longer keeps
+  its socket open after nats.js gives up on it at its 20 s dial timeout: nats.js 2.29.3 closed
+  only a transport that had finished connecting, so the abandoned socket held the process alive.
+  `patches/nats@2.29.3.patch`, which bun applies at install, makes nats.js's `NodeTransport` keep
+  the socket from the moment it dials and destroy it when a transport that never connected is
+  closed. `src/__tests__/nats-stall.test.ts` checks the hung redial is closed (INFRA-548).
+
 - The `dispatch` command logs a refusal it makes before the call reaches Dispatch (an unknown
   flag or command, a missing or unknown host, a session it cannot name a directory for, a file
   that turns Dispatch off) to the session's ledger, whenever the call knows its session. A reader

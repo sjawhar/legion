@@ -117,6 +117,12 @@
   reconnect runs the catch-up, so the session is handed the messages sent meanwhile once. `dist/`
   was rebuilt (INFRA-548).
 
+- A channel server whose NATS redial once hung (its TCP connect, or a server that never sends
+  `INFO`) still exits on SIGTERM: nats.js gave up on that redial at its 20 s dial timeout but left
+  its socket open, which held the process alive. The bundle carries `patches/nats@2.29.3.patch`,
+  which makes nats.js destroy the socket of a transport that never finished connecting. `dist/`
+  was rebuilt (INFRA-548).
+
 - The Legion tool's `handoff_complete` waits out a daemon restart: a connection refused, reset or
   closed before a response, or a 502 or 503 from a proxy, is retried with backoff for up to 10
   minutes, each attempt with a fresh grant, until the MCP client cancels the request

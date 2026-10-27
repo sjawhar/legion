@@ -253,6 +253,7 @@
     "@milkdown/plugin-clipboard@7.22.1": "patches/@milkdown%2Fplugin-clipboard@7.22.1.patch",
     "@milkdown/preset-gfm@7.22.1": "patches/@milkdown%2Fpreset-gfm@7.22.1.patch",
     "prosemirror-tables@1.8.5": "patches/prosemirror-tables@1.8.5.patch",
+    "nats@2.29.3": "patches/nats@2.29.3.patch",
   },
   "packages": {
     "@ampproject/remapping": ["@ampproject/remapping@2.3.0", "", { "dependencies": { "@jridgewell/gen-mapping": "^0.3.5", "@jridgewell/trace-mapping": "^0.3.24" } }, "sha512-30iZtAPgz+LTIYoeivqYo853f02jBYSd5uGnGpkFV0M3xOt9aN73erkgYAmZU43x4VfqcnLxW9Kpg3R5LC4YYw=="],

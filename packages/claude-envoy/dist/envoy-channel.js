@@ -15631,6 +15631,7 @@ var require_node_transport = __commonJS((exports) => {
         d.resolve(socket);
         socket.removeAllListeners();
       });
+      this.socket = socket;
       socket.on("error", (err) => {
         dialError = err;
       });
@@ -15913,8 +15914,11 @@ var require_node_transport = __commonJS((exports) => {
     }
     _closed(err_1) {
       return __awaiter(this, arguments, undefined, function* (err, internal = true) {
-        if (!this.connected)
+        if (!this.connected) {
+          if (this.socket)
+            this.socket.destroy();
           return;
+        }
         if (this.done)
           return;
         this.closeError = err;

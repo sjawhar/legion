@@ -1,0 +1,27 @@
+diff --git a/lib/src/node_transport.js b/lib/src/node_transport.js
+index 64752b9ff22603b70421170613e7cdac2b50cce2..1081995218c8a360361dbb55ae89a1465f7cf4c8 100644
+--- a/lib/src/node_transport.js
++++ b/lib/src/node_transport.js
+@@ -112,6 +112,7 @@ class NodeTransport {
+             d.resolve(socket);
+             socket.removeAllListeners();
+         });
++        this.socket = socket;
+         socket.on("error", (err) => {
+             dialError = err;
+         });
+@@ -420,9 +421,12 @@ class NodeTransport {
+     }
+     _closed(err_1) {
+         return __awaiter(this, arguments, void 0, function* (err, internal = true) {
+-            // if this connection didn't succeed, then ignore it.
+-            if (!this.connected)
++            // if this connection didn't succeed, then drop its socket.
++            if (!this.connected) {
++                if (this.socket)
++                    this.socket.destroy();
+                 return;
++            }
+             if (this.done)
+                 return;
+             this.closeError = err;
