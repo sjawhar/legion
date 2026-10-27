@@ -71,6 +71,8 @@
   and the id's percent-encoding, `dispatch ask --help` takes a block reference, and
   `dispatch doc-edit --help` says a block id past 256 bytes is stored but its block is no graph
   node.
+- Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
+  and `parent_version`, and `dispatch read` prints them on a `Node:` line.
 - The `dispatch` skill never claims an issue with the `legion` label unless the session is a
   Legion role of its tree, even when its claim reads `not running`: the Legion daemon suspends a
   root's architect while the root waits on a person, and taking that claim takes the tree out of
