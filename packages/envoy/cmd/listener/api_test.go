@@ -1074,7 +1074,16 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 	handler := publishHandler(state, logging.New("test"))
 
-	t.Run("unheld role returns 404 without publishing", func(t *testing.T) {
+	assertNoRoleTopicMessage := func(name string, probe *nats.Subscription) {
+		t.Helper()
+		if message, err := probe.NextMsg(100 * time.Millisecond); err == nil {
+			t.Fatalf("unexpected %s message: %s", name, message.Data)
+		} else if !errors.Is(err, nats.ErrTimeout) {
+			t.Fatalf("wait for %s message: %v", name, err)
+		}
+	}
+
+	t.Run("unheld role returns 404 and raises one exception", func(t *testing.T) {
 		roleProbe, err := client.Conn.SubscribeSync("notifications.role.unheld")
 		if err != nil {
 			t.Fatalf("subscribe to unheld role: %v", err)
@@ -1099,18 +1108,51 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 		if body := recorder.Body.String(); body != "{\"error\":\"no holder for role unheld\",\"reason\":\"unclaimed\"}\n" {
 			t.Fatalf("body = %q", body)
 		}
-		assertNoMessage := func(name string, probe *nats.Subscription) {
-			t.Helper()
-			message, err := probe.NextMsg(100 * time.Millisecond)
-			if err == nil {
-				t.Fatalf("unexpected %s message: %s", name, message.Data)
-			}
-			if !errors.Is(err, nats.ErrTimeout) {
-				t.Fatalf("wait for %s message: %v", name, err)
-			}
+		// The publisher still gets the same 404, and nothing reaches the role topic itself.
+		assertNoRoleTopicMessage("unheld role", roleProbe)
+		// The refusal now raises exactly one role-lane exception, reason unclaimed, no recipient.
+		assertOneRoleRefusalException(t, exceptionProbe, "notifications.role.unheld", "unclaimed", "", "please review", "")
+	})
+
+	t.Run("lapsed holder returns 404 and raises one exception", func(t *testing.T) {
+		if _, err := registry.SetRole("ses_lapsed", "test-machine", "lapsed", false); err != nil {
+			t.Fatalf("set lapsed holder: %v", err)
 		}
-		assertNoMessage("unheld role", roleProbe)
-		assertNoMessage("unheld-role exception", exceptionProbe)
+		roleProbe, err := client.Conn.SubscribeSync("notifications.role.lapsed")
+		if err != nil {
+			t.Fatalf("subscribe to lapsed role: %v", err)
+		}
+		t.Cleanup(func() { _ = roleProbe.Unsubscribe() })
+		exceptionProbe, err := client.Conn.SubscribeSync("notifications.envoy.exceptions.notifications.role.lapsed")
+		if err != nil {
+			t.Fatalf("subscribe to lapsed-role exception lane: %v", err)
+		}
+		t.Cleanup(func() { _ = exceptionProbe.Unsubscribe() })
+		if err := client.Conn.Flush(); err != nil {
+			t.Fatalf("flush lapsed-role subscriptions: %v", err)
+		}
+
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.role.lapsed","message":"please review"}`))
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404; body = %s", recorder.Code, recorder.Body.String())
+		}
+		t.Logf("publish lapsed role: %s", recorder.Body.String())
+		var answer struct {
+			Reason string `json:"reason"`
+			Holder string `json:"holder"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
+			t.Fatalf("decode lapsed 404 body: %v", err)
+		}
+		if answer.Reason != "holder_lapsed" || answer.Holder != "ses_lapsed" {
+			t.Fatalf("lapsed 404 body reason=%q holder=%q, want holder_lapsed ses_lapsed", answer.Reason, answer.Holder)
+		}
+		// Nothing reaches the role topic itself.
+		assertNoRoleTopicMessage("lapsed role", roleProbe)
+		// The refusal raises exactly one role-lane exception, reason holder_lapsed, the lapsed holder named.
+		assertOneRoleRefusalException(t, exceptionProbe, "notifications.role.lapsed", "holder_lapsed", "ses_lapsed", "please review", "")
 	})
 
 	t.Run("live holder is returned", func(t *testing.T) {
@@ -1151,6 +1193,82 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 			t.Fatalf("role lookup status = %d, want 404; body = %s", roleRecorder.Code, roleRecorder.Body.String())
 		}
 	})
+}
+
+// assertOneRoleRefusalException reads exactly one role-lane exception off probe and checks it is the
+// envelope the Legion daemon's consumer (packages/daemon/internal/daemon/notice_exceptions.go,
+// roleLaneException) decodes for a refused publish to roleTopic: source envoy, the exception keyed
+// to roleTopic, and a payload naming the original topic, the refusal's reason, the known recipient
+// session, and the published message. It then checks no second exception follows, so one refused
+// publish raises exactly one.
+func assertOneRoleRefusalException(t *testing.T, probe *nats.Subscription, roleTopic, reason, recipient, summary, payload string) {
+	t.Helper()
+	message, err := probe.NextMsg(5 * time.Second)
+	if err != nil {
+		t.Fatalf("read role refusal exception: %v", err)
+	}
+	var exception contracts.Envelope
+	if err := json.Unmarshal(message.Data, &exception); err != nil {
+		t.Fatalf("decode role refusal exception: %v", err)
+	}
+	if err := exception.Validate(); err != nil {
+		t.Fatalf("role refusal exception validation: %v", err)
+	}
+	if exception.Source != "envoy" {
+		t.Fatalf("exception source = %q, want envoy", exception.Source)
+	}
+	if exception.Topic != "notifications.envoy.exceptions."+roleTopic {
+		t.Fatalf("exception topic = %q, want the exception lane of %q", exception.Topic, roleTopic)
+	}
+	if exception.SourceEventID == "" {
+		t.Fatalf("exception names no source event")
+	}
+	var body struct {
+		OriginalTopic    string `json:"original_topic"`
+		EventID          string `json:"event_id"`
+		Reason           string `json:"reason"`
+		RecipientSession string `json:"recipient_session"`
+		PayloadSummary   string `json:"payload_summary"`
+		Payload          string `json:"payload"`
+		DedupeKey        string `json:"dedupe_key"`
+		Source           string `json:"source"`
+		SourceSession    string `json:"source_session"`
+	}
+	if err := json.Unmarshal([]byte(exception.Payload), &body); err != nil {
+		t.Fatalf("decode role refusal exception payload: %v", err)
+	}
+	if body.OriginalTopic != roleTopic {
+		t.Fatalf("exception original topic = %q, want %q", body.OriginalTopic, roleTopic)
+	}
+	if body.EventID != exception.SourceEventID {
+		t.Fatalf("exception payload event ID = %q, want the source event %q", body.EventID, exception.SourceEventID)
+	}
+	if body.Reason != reason {
+		t.Fatalf("exception reason = %q, want %q", body.Reason, reason)
+	}
+	if body.RecipientSession != recipient {
+		t.Fatalf("exception recipient = %q, want %q", body.RecipientSession, recipient)
+	}
+	if body.PayloadSummary != summary {
+		t.Fatalf("exception payload summary = %q, want %q", body.PayloadSummary, summary)
+	}
+	if body.Payload != payload {
+		t.Fatalf("exception payload = %q, want %q", body.Payload, payload)
+	}
+	if body.Source != "agent" {
+		t.Fatalf("exception payload source = %q, want agent", body.Source)
+	}
+	if body.SourceSession != "" {
+		t.Fatalf("exception source session = %q, want empty", body.SourceSession)
+	}
+	if !strings.HasPrefix(body.DedupeKey, "publish.") {
+		t.Fatalf("exception dedupe key = %q, want a minted publish key", body.DedupeKey)
+	}
+	if extra, err := probe.NextMsg(100 * time.Millisecond); err == nil {
+		t.Fatalf("second role refusal exception: %s", extra.Data)
+	} else if !errors.Is(err, nats.ErrTimeout) {
+		t.Fatalf("wait for a second role refusal exception: %v", err)
+	}
 }
 
 func TestRoleGetHandlerReturnsLiveHolder(t *testing.T) {

@@ -153,6 +153,14 @@ func isExceptionsTopic(topic string) bool {
 	return strings.HasPrefix(topic, bus.ExceptionTopicPrefix)
 }
 
+// publishDeliveryException raises one exception envelope for a role/control-lane delivery that
+// failed or a role-lane publish that was refused, keyed to the original topic
+// (ExceptionTopicPrefix+item.Topic). Both the delivery path (applyDeliveryOutcome) and the publish
+// route's unheld-role refusal (publishHandler, api.go) build the exception through here, so the
+// Legion daemon's consumer (packages/daemon/internal/daemon/notice_exceptions.go) decodes one
+// shape. A role-lane exception topic is outside the stream, so client.Publish routes it over core
+// NATS (usesCoreTransport); fanoutRefusal forces the core path for a generic-fanout refusal, whose
+// exception topic is likewise core-only.
 func publishDeliveryException(client *bus.Client, item contracts.Envelope, reason, recipientSession string, fanoutRefusal bool) error {
 	payload, err := json.Marshal(deliveryExceptionPayload{
 		OriginalTopic:    item.Topic,
