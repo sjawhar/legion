@@ -416,10 +416,12 @@ type PullRequest struct {
 	// and said which head it replaced, which carry an approval across, and the pushes whose heads
 	// have not arrived yet. A push that may change code is spent once its head arrives.
 	Pushes []ClassifiedPush
-	// Moves are the moves the record has made, newest last and at most the last 32: each head's
-	// arrival from the head before it, and each push on the chain of pushes it found between them. A
-	// push whose own move is among them is spent (classify.keptPushes), whenever it arrives; a push
-	// for a move not made yet - one that returns the branch to a commit it held before, say - is not.
+	// Moves are the moves the record has made, newest last and at most the last 32, each pair of
+	// heads once: each head's arrival from the head before it, and each push on the chain of pushes
+	// it found between them. A push whose own move is among them is spent (classify.unspentPushes),
+	// whenever it arrives: as the move's own push when the move has none recorded yet (Move.Pushed),
+	// and otherwise kept on the move as its repeat (Move.Repeat). A push for a move not made yet -
+	// one that returns the branch to a commit it held before, say - is not spent.
 	Moves []Move
 	// HeadCounted is the head the fix-attempt count last counted, a push onto a red verdict, kept
 	// across every head pushed on top of it until one is pushed onto a green verdict, or onto a
@@ -505,9 +507,20 @@ type Judgement struct {
 }
 
 // Move is a move from the head Before to the head SHA, which a push with the same two heads makes.
+// Pushed is whether that push is recorded: the move was made by it, it arrived after the move and
+// the move spent it, or a chain of several recorded pushes made the move, for which GitHub sends no
+// push of its own. A move made by a push that carries an approval across is not pushed, since such
+// a push is never spent. Repeat is the newest push of the two heads that arrived once the move
+// was pushed, which the move spent too: the push delivered again, or the branch moving between the
+// two heads again. A head that arrives again by the same move, with no chain of other recorded
+// pushes leading to it, takes the repeat for its push (classify.arrivalPushes); making the move
+// again clears it. A move recorded before these fields existed reads as not pushed, so the next
+// push of its two heads is taken as its own, as every such push was before.
 type Move struct {
-	Before string `json:"before"`
-	SHA    string `json:"sha"`
+	Before string          `json:"before"`
+	SHA    string          `json:"sha"`
+	Pushed bool            `json:"pushed,omitempty"`
+	Repeat *ClassifiedPush `json:"repeat,omitempty"`
 }
 
 // RunStep is one fact a head run replays: exactly one of a head's arrival (Head), a CI settlement
