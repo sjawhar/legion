@@ -646,7 +646,7 @@ func (s *server) createCommentDelivery(w http.ResponseWriter, r *http.Request) {
 	// The send outlives the request's connection, as createStoredMessage's does: the attempt is
 	// committed before the listener call, and a cut connection must not strand it.
 	attempt, err := s.deliverResolvedCommentMention(
-		context.WithoutCancel(r.Context()), comment, created, resolved, actor, 0, newTakeoverRetry(),
+		context.WithoutCancel(r.Context()), comment, created, resolved, actor, 0, s.newTakeoverRetry(),
 	)
 	if err != nil {
 		s.writeHandlerError(w, err)

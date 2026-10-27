@@ -179,10 +179,14 @@ func deliveryReceiptsOf(t *testing.T, database *store.Store, receiptType, field,
 // a few seconds. A send that meets one of those waits out the take-over under the attempt it
 // holds and its own key, and reaches the session once the listener answers. Anything else the
 // listener says - the session does not take this mode, the send itself is refused - is its
-// answer, and the attempt settles failed on that first try.
+// answer, and the attempt settles failed on that first try. The server's window is a short one
+// of its own, which still fits every try a case's take-over takes: a receipt timeout's 300 ms try
+// and its retry, and the starting gate's two retries 250 ms and 750 ms after the first try.
 func TestAListenerTakeOverIsWaitedOutAndARefusalSettlesAtOnce(t *testing.T) {
 	listener := startTakeOverListener(t)
-	handler, database := newTargetedMessageHandler(t, listener.server.URL, 300*time.Millisecond)
+	handler, database, _ := newTestServer(t, testServerOptions{
+		envoyURL: listener.server.URL, envoyTimeout: 300 * time.Millisecond, takeoverWindow: 3 * time.Second,
+	})
 
 	lateAnswer := func(l *takeOverListener, w http.ResponseWriter, _ *http.Request, send resumeSend) {
 		// The listener publishes before it answers, and this answer misses the client's window.
@@ -272,9 +276,10 @@ func TestAListenerTakeOverIsWaitedOutAndARefusalSettlesAtOnce(t *testing.T) {
 	}
 }
 
-// With no listener configured there is no take-over to wait out: the send settles failed at once.
+// With no listener configured there is no take-over to wait out: the send settles failed at once,
+// well inside the production window the server runs.
 func TestASendWithNoListenerConfiguredSettlesAtOnce(t *testing.T) {
-	handler, _ := newTargetedMessageHandler(t, "")
+	handler, _, _ := newTestServer(t, testServerOptions{takeoverWindow: listenerTakeoverWindow})
 	started := time.Now()
 	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages",
 		map[string]any{"body": "Nobody listens", "delivery": "steer"}, "alice")
@@ -293,7 +298,9 @@ func TestASendWithNoListenerConfiguredSettlesAtOnce(t *testing.T) {
 // A sender waiting out a take-over renews its claim before each try and settles on the claim it
 // renewed last, so the attempt never reads as abandoned while its sender is still trying: the
 // resume loop, run during the wait, sends nothing and opens nothing beside it, and the attempt
-// reaches its session once, under attempt 1, with one receipt.
+// reaches its session once, under attempt 1, with one receipt. The server runs the production
+// window, which the take-over below - three tries, a resume pass, then the listener answering -
+// stays inside.
 func TestASenderWaitingOutAListenerTakeOverRenewsItsClaimBeforeEachTry(t *testing.T) {
 	for _, tc := range []struct {
 		name, table, column, receipt, path string
@@ -315,7 +322,9 @@ func TestASenderWaitingOutAListenerTakeOverRenewsItsClaimBeforeEachTry(t *testin
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			listener := startTakeOverListener(t)
-			handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.server.URL})
+			handler, database, deps := newTestServer(t, testServerOptions{
+				envoyURL: listener.server.URL, takeoverWindow: listenerTakeoverWindow,
+			})
 			path := tc.path
 			if path == "" {
 				issue := createInteractionIssue(t, handler, "TEST", "A take-over", "before")

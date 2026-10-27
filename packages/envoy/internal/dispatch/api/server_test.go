@@ -3,6 +3,7 @@ package api
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -93,7 +94,19 @@ type testServerOptions struct {
 	lifetime context.Context
 	// streamHeartbeat replaces the event streams' and the sockets' fifteen-second heartbeat.
 	streamHeartbeat time.Duration
+	// takeoverWindow replaces the listener take-over window (Deps.ListenerTakeoverWindow); zero is
+	// testTakeoverWindow. A test proving the window itself passes its own, listenerTakeoverWindow
+	// for the production twelve seconds.
+	takeoverWindow time.Duration
 }
+
+// testTakeoverWindow is the listener take-over window of a test server that sets none. A send to
+// a session that is gone, or a listener that refuses, waits the window out before it settles, and
+// the production twelve seconds made every such test sleep that long. 750 ms leaves exactly one
+// retry: the first, after takeoverFirstBackoff (250 ms), still starts inside it whenever the first
+// try took under half a second, which a test whose take-over answers on the second try relies on,
+// and the second, 500 ms later, never does, so a window run out costs about a quarter second.
+const testTakeoverWindow = 750 * time.Millisecond
 
 // headerIdentity is the test header identity that records each named person in the database.
 func headerIdentity(database *store.Store) identity.HeaderIdentity {
@@ -170,24 +183,25 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 	})
 	seedPeople(t, database, "alice", "bob")
 	deps, err := NewDeps(DepsInput{
-		Store:            database,
-		Identity:         headerIdentity(database),
-		AgentTokens:      sharedAgentTokens(t, "agent-token"),
-		DefaultProject:   options.defaultProject,
-		ServerURL:        "https://dispatch.example",
-		Docs:             documentService,
-		Events:           broker,
-		App:              options.app,
-		GitHubAPIBase:    options.githubAPIBase,
-		TestHooksEnabled: options.testHooks,
-		Lifetime:         lifetime,
-		StreamHeartbeat:  options.streamHeartbeat,
-		EnvoyURL:         options.envoyURL,
-		EnvoyTimeout:     options.envoyTimeout,
-		OIDC:             options.oidc,
-		AgentStream:      options.agentStream,
-		Embedder:         options.embedder,
-		Files:            options.files,
+		Store:                  database,
+		Identity:               headerIdentity(database),
+		AgentTokens:            sharedAgentTokens(t, "agent-token"),
+		DefaultProject:         options.defaultProject,
+		ServerURL:              "https://dispatch.example",
+		Docs:                   documentService,
+		Events:                 broker,
+		App:                    options.app,
+		GitHubAPIBase:          options.githubAPIBase,
+		TestHooksEnabled:       options.testHooks,
+		Lifetime:               lifetime,
+		StreamHeartbeat:        options.streamHeartbeat,
+		EnvoyURL:               options.envoyURL,
+		EnvoyTimeout:           options.envoyTimeout,
+		ListenerTakeoverWindow: cmp.Or(options.takeoverWindow, testTakeoverWindow),
+		OIDC:                   options.oidc,
+		AgentStream:            options.agentStream,
+		Embedder:               options.embedder,
+		Files:                  options.files,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)

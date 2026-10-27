@@ -118,6 +118,12 @@ type Deps struct {
 	// another (cmd/dispatch: DISPATCH_TEST_ROUTE_ROSTER_TTL, under the test hooks), so a row that
 	// reads two processes inside one answer's life needs no timing window.
 	RouteRosterTTL time.Duration
+	// ListenerTakeoverWindow replaces how long a sender keeps trying a listener that is being
+	// replaced (listenerTakeoverWindow, envoy_resolve.go). Zero keeps twelve seconds; neither
+	// routes.BuildAppContext nor cmd/dispatch sets it, so every deployment runs twelve seconds.
+	// Only this package's tests set another, so a send to a session that is gone settles without
+	// sleeping the production window.
+	ListenerTakeoverWindow time.Duration
 }
 
 // defaultStreamHeartbeat is StreamHeartbeat when DepsInput leaves it zero.
@@ -165,6 +171,9 @@ type DepsInput struct {
 	// RouteRosterTTL replaces the five seconds a stored listener answer serves issue reads; see
 	// Deps.RouteRosterTTL.
 	RouteRosterTTL time.Duration
+	// ListenerTakeoverWindow replaces the twelve-second listener take-over window; see
+	// Deps.ListenerTakeoverWindow.
+	ListenerTakeoverWindow time.Duration
 }
 
 // NewDeps parses boot configuration once and returns API dependencies.
@@ -212,25 +221,26 @@ func NewDeps(input DepsInput) (Deps, error) {
 		heartbeat = defaultStreamHeartbeat
 	}
 	return Deps{
-		Store:            input.Store,
-		Identity:         input.Identity,
-		AgentTokens:      input.AgentTokens,
-		DefaultProject:   defaultProject,
-		ServerURL:        strings.TrimSuffix(input.ServerURL, "/"),
-		Docs:             input.Docs,
-		Embedder:         input.Embedder,
-		Envoy:            envoyClient,
-		Events:           input.Events,
-		GitHub:           github,
-		Architecture:     architecture.NewImporter(input.Store, github, input.Events),
-		OIDC:             input.OIDC,
-		AgentStream:      input.AgentStream,
-		AgentSecrets:     agentSecretsClient,
-		Files:            input.Files,
-		Lifetime:         input.Lifetime,
-		TestHooksEnabled: input.TestHooksEnabled,
-		StreamHeartbeat:  heartbeat,
-		RouteRosterTTL:   input.RouteRosterTTL,
+		Store:                  input.Store,
+		Identity:               input.Identity,
+		AgentTokens:            input.AgentTokens,
+		DefaultProject:         defaultProject,
+		ServerURL:              strings.TrimSuffix(input.ServerURL, "/"),
+		Docs:                   input.Docs,
+		Embedder:               input.Embedder,
+		Envoy:                  envoyClient,
+		Events:                 input.Events,
+		GitHub:                 github,
+		Architecture:           architecture.NewImporter(input.Store, github, input.Events),
+		OIDC:                   input.OIDC,
+		AgentStream:            input.AgentStream,
+		AgentSecrets:           agentSecretsClient,
+		Files:                  input.Files,
+		Lifetime:               input.Lifetime,
+		TestHooksEnabled:       input.TestHooksEnabled,
+		StreamHeartbeat:        heartbeat,
+		RouteRosterTTL:         input.RouteRosterTTL,
+		ListenerTakeoverWindow: input.ListenerTakeoverWindow,
 	}, nil
 }
 

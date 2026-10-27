@@ -527,6 +527,8 @@ func TestTargetedMessagePrefixesUnavailableListenerErrors(t *testing.T) {
 	t.Run("timeout", func(t *testing.T) {
 		// An unanswered read is what a listener take-over gives, so the send asks again for the
 		// take-over window before it settles; every one of those reads is cancelled the same way.
+		// The listener client's window is a short one, so those reads cost a fraction of a second
+		// each rather than the client's five.
 		cancelled := make(chan struct{})
 		var cancelledOnce sync.Once
 		listener := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
@@ -534,7 +536,7 @@ func TestTargetedMessagePrefixesUnavailableListenerErrors(t *testing.T) {
 			cancelledOnce.Do(func() { close(cancelled) })
 		}))
 		defer listener.Close()
-		handler, _ := newTargetedMessageHandler(t, listener.URL)
+		handler, _ := newTargetedMessageHandler(t, listener.URL, 300*time.Millisecond)
 		issue := createInteractionIssue(t, handler, "TEST", "Timeout listener", "before")
 		message := createIssueMessage(t, handler, issue.Key, map[string]any{
 			"body": "Can you receive?", "target": "session:s1", "delivery": "steer",

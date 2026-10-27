@@ -1336,10 +1336,12 @@ renews its claim (`claimed_at = now()`, scoped to the claim it holds, as every s
 is) before each try, and settles on the claim it renewed last. The backoff is 250 ms doubling to
 2 s, and no try starts later than `listenerTakeoverWindow` (12 s) after the first; the attempt
 then settles with the last try's outcome exactly as before, so a session that is really gone
-still reads `failed: no live session`, about 12 seconds after the send. Any other outcome - a
-mode the session does not take, a send the listener refused, the listener's own answer
-(`envoy listener answered: …`) - settles at once. Every sender takes this path: a request's own
-send (whose request therefore answers up to 12 s later), a broadcast worker, a Retry and the
+still reads `failed: no live session`, about 12 seconds after the send. Every deployment runs
+12 s: only the api package's tests set `Deps.ListenerTakeoverWindow`, their server's default
+being 750 ms (`testTakeoverWindow`), so a send that runs the window out does not sleep 12 s. Any
+other outcome - a mode the session does not take, a send the listener refused, the listener's own
+answer (`envoy listener answered: …`) - settles at once. Every sender takes this path: a request's
+own send (whose request therefore answers up to 12 s later), a broadcast worker, a Retry and the
 resume loop. A process killed during the wait leaves the attempt pending under the claim it
 renewed last, which the resume loop sends once that claim's lease has passed.
 
@@ -1358,8 +1360,11 @@ mention whose comment records `mentions_decide_routes` keeps that resolution whi
 finishes it - the creating request, the resume loop, or a Retry that takes it after its sender
 died: a pinned session is only rechecked, and a resolve error settles the attempt `failed` with
 that error, never resolved again, so the route holder does not hear the comment from the route and
-again from the mention under a key the listener cannot match. A comment's lookups run at once, and
-so do its mentions' sends, so its request waits about one window however many mentions it carries.
+again from the mention under a key the listener cannot match. That once-only guarantee is attempt
+1's: a person's Retry after attempt 1 has settled opens attempt 2, which resolves the mention
+afresh and can reach a route holder the route already reached, as a Retry always has - it is the
+person's explicit resend. A comment's lookups run at once, and so do its mentions' sends, so its
+request waits about one window however many mentions it carries.
 
 A claim outlives its sender by a minute, which Postgres judges (`claimLapsed`) against the
 `claimed_at` Postgres itself wrote, so no task's clock skew can read a live claim as lapsed or
@@ -1369,8 +1374,11 @@ attempt keeps the recipient it was opened for - a comment attempt its pinned ses
 resolve error, a message attempt the session its row names - because that is the session holding
 the frame; a role that has moved since is reached by an attempt of its own rather than by
 re-pointing this one, and only whether the original recipient can still receive the mode is
-re-derived. A take-over retry of a resumed comment attempt whose comment does not record
-`mentions_decide_routes` resolves an unpinned row's own target again, as every sender does. An
+re-derived. A take-over retry of a resumed comment attempt resolves an unpinned row's own target
+again, as every sender does, unless the attempt keeps the resolution its comment's routes were
+decided on - only attempt 1 of a comment that records `mentions_decide_routes`, and only when its
+row recorded a session or a resolve error. An attempt after the first, and an attempt-1 row that
+recorded neither, are resolved again on such a comment too (`deliverResolvedCommentMention`). An
 attempt stranded before anything was resolved has no recipient to keep and is resolved afresh
 under that same number, never reported undeliverable unsent.
 

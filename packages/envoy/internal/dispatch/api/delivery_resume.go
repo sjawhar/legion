@@ -255,7 +255,7 @@ func (s *server) resumeCommentAttempt(ctx context.Context, stranded strandedComm
 	}
 	mention := ResolvedMention{Target: stranded.target, Delivery: stranded.delivery}
 	if _, err := s.deliverResolvedCommentMention(
-		ctx, comment, created, mention, comment.Author, stranded.attempt, newTakeoverRetry(),
+		ctx, comment, created, mention, comment.Author, stranded.attempt, s.newTakeoverRetry(),
 	); err != nil {
 		slog.Warn("dispatch: resume a stranded mention attempt", "comment", stranded.commentID,
 			"target", stranded.target, "attempt", stranded.attempt, "error", err)

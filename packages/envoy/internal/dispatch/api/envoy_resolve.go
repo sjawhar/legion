@@ -1,6 +1,7 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -174,7 +175,9 @@ func deliveryErrorText(err error) string {
 // is being replaced. The listener's take-over is meant to end within 10 seconds (INFRA-557), so a
 // send made at its start still reaches the session once the successor answers; the two seconds
 // past that target leave room for the last backoff. A session that is really gone settles
-// "no live session" that much later than its first try.
+// "no live session" that much later than its first try. It is the window every deployment runs:
+// Deps.ListenerTakeoverWindow replaces it only when set, and neither routes.BuildAppContext nor
+// cmd/dispatch sets it; only this package's tests do.
 const listenerTakeoverWindow = 12 * time.Second
 
 // takeoverFirstBackoff is the wait before a sender's first retry; each later wait doubles it,
@@ -218,11 +221,19 @@ func retryableDeliveryFailure(failure string) bool {
 type takeoverRetry struct {
 	first   time.Time
 	backoff time.Duration
+	// window is how long after first a try may still start: listenerTakeoverWindow, or the
+	// server's Deps.ListenerTakeoverWindow when set.
+	window time.Duration
 }
 
-// newTakeoverRetry starts the pacing of a sender about to make its first try.
-func newTakeoverRetry() takeoverRetry {
-	return takeoverRetry{first: time.Now(), backoff: takeoverFirstBackoff}
+// newTakeoverRetry starts the pacing of a sender about to make its first try, in this server's
+// take-over window.
+func (s *server) newTakeoverRetry() takeoverRetry {
+	return takeoverRetry{
+		first:   time.Now(),
+		backoff: takeoverFirstBackoff,
+		window:  cmp.Or(s.deps.ListenerTakeoverWindow, listenerTakeoverWindow),
+	}
 }
 
 // retry is the one take-over loop every sender runs: it makes a try, and while again allows
@@ -264,7 +275,7 @@ func (r *takeoverRetry) retry(ctx context.Context, try func() string, renew func
 func (s *server) resolveThroughTakeover(
 	ctx context.Context, target, delivery string, wait bool,
 ) (ResolvedMention, takeoverRetry) {
-	takeover := newTakeoverRetry()
+	takeover := s.newTakeoverRetry()
 	var resolved ResolvedMention
 	resolve := func() string {
 		resolved = s.resolveMentionTargets(ctx, []string{target}, delivery)[0]
@@ -281,14 +292,14 @@ func (s *server) resolveThroughTakeover(
 
 // again reports whether the sender tries once more after a try that recorded failure, having
 // waited out the backoff first: only for a take-over's failure, and only while that next try still
-// starts inside listenerTakeoverWindow. Otherwise, or when ctx ends during the wait, the sender
-// settles its attempt with failure.
+// starts inside the window (listenerTakeoverWindow unless the server sets another). Otherwise, or
+// when ctx ends during the wait, the sender settles its attempt with failure.
 //
 // A sender that tries again renews its claim before the try and settles on the claim it renewed
 // last, so a claim never ages toward the claimLapsed lease while its sender is still trying: the
 // resume loop finds nothing to take, and a person's Retry finds the attempt held.
 func (r *takeoverRetry) again(ctx context.Context, failure string) bool {
-	if !retryableDeliveryFailure(failure) || time.Since(r.first)+r.backoff > listenerTakeoverWindow {
+	if !retryableDeliveryFailure(failure) || time.Since(r.first)+r.backoff > r.window {
 		return false
 	}
 	wait := time.NewTimer(r.backoff)

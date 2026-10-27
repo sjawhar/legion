@@ -666,7 +666,7 @@ func (s *server) deliverMessageResuming(
 	// listener scopes it further by recipient, which is what lets a role's new holder still be
 	// reached.
 	key := message.ID + ":" + pending.resolved.Delivery
-	takeover := newTakeoverRetry()
+	takeover := s.newTakeoverRetry()
 	var envelopeID *string
 	var duplicate bool
 	deliveryError, err := takeover.retry(ctx,
