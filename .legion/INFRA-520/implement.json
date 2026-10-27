@@ -2,9 +2,25 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-520",
-  "completed": "2026-10-27T09:45:34Z",
+  "completed": "2026-10-27T10:07:19Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2316",
   "proof": [
+    {
+      "criterion": "The pull request can be tested and merged at its head, with every change main merged into a deleted workflow carried into ci.yaml (tester failure 1)",
+      "surface": "GitHub on sjawhar/legion#2316",
+      "command": "forward merge jj new legion/INFRA-520 \"main\"@origin (main 719aae24) -> 0ae68a17; gh pr view 2316 --json mergeable,mergeStateStatus; gh run list --branch legion/INFRA-520 --workflow ci.yaml; coverage.py .github/workflows/ci.yaml",
+      "observed": "mergeable MERGEABLE (mergeStateStatus BLOCKED: waiting on checks and review), and CI run 40485844632 started at 0ae68a17. #2167's envoy-go-race changes are in ci.yaml: timeout-minutes 75 with its comment and the step 'Race-test the listener, the registry store and kvwatch'. The coverage script, given that step, first printed `envoy-go-race: 1 uncovered packages/contracts/fixtures/dispatch-targeted-delivery.json` (cmd/listener/api_test.go:191); the filter now names it and all 21 filters print 0 uncovered. Fingerprint comment: https://github.com/sjawhar/legion/pull/2316#issuecomment-6438995012",
+      "headSha": "0ae68a179d69f8e39b2e0ea865bb1b7d6138822d",
+      "negativeControl": "At b6561ba2 GitHub reported CONFLICTING/DIRTY and started no CI run; a trial merge listed envoy-and-contracts.yaml as a 2-sided conflict including 1 deletion"
+    },
+    {
+      "criterion": "Public text names no private host: the pull request body passes check-pr-text.sh (tester failure 2)",
+      "surface": "sjawhar/legion#2316's live title, body, commits, comments and reviews, read by .github/scripts/check-pr-text.sh",
+      "command": "gh api repos/sjawhar/legion/pulls/2316 | jq '{pull_request: .}' > event.json && GITHUB_EVENT_PATH=event.json GITHUB_REPOSITORY=sjawhar/legion .github/scripts/check-pr-text.sh",
+      "observed": "exit 0: 'no text names a private internal host or a Tailscale MagicDNS host (6 files under title body branch commits comment review review-comment)'; the E2E line cites dispatch://INFRA-520/artifact/infra-520-coverage-tar-gz with no https link",
+      "headSha": "0ae68a179d69f8e39b2e0ea865bb1b7d6138822d",
+      "negativeControl": "The same payload with the previous body -> '::error file=body,line=34::body:34: names a Tailscale MagicDNS host'"
+    },
     {
       "criterion": "1. A title or body edit starts no run of the router workflow",
       "surface": "GitHub Actions on sjawhar/legion#2316",
@@ -17,8 +33,8 @@
       "criterion": "2. Each job's path list names every file it reads",
       "surface": "ci.yaml's changes filters, read with .github/scripts/workflow_paths.py, and scratch pull requests on GitHub Actions",
       "command": "PYTHONPATH=.github/scripts coverage.py .github/workflows/ci.yaml (dispatch://INFRA-520/artifact/infra-520-coverage-tar-gz: live `go list -deps -test [-tags]` closures of every job's go commands, the closures of the go commands its tests start, repository-root reads, embeds, module files, and every non-Go step input); then 16 scratch pull requests stacked on legion/INFRA-520 (#2332, #2334-#2349), each changing one file, run up to `changes` and cancelled",
-      "observed": "At 6b0588e3 (merged with main b08a56bc) every one of the 21 filters prints `0 uncovered` (e.g. test 2981 files, docs 2885, envoy-go 1737, dispatch-memory 1034). Each scratch run selected exactly the jobs whose filter names its file: #2343 (a guide memory_profile_test.go reads) only dispatch-memory, at the filter of 6467a0a7 (at 6b0588e3 that guide left the filter: the test reads it only when DISPATCH_EDIT_PROFILE_OUT is set), #2348 (install-pulumi) only envoy-smoke, #2335 envoy-plugin only, #2341 claude-envoy only, #2339 (AGENTS.md) pi-legion only, #2346 (infra seed.go) envoy-infra-go, envoy-go, envoy-go-race and changes' log `Filter go_notices = true`, #2349 (a docs/solutions page) no job but lint (`Filter go_notices = false`, run 40449412482). The scratch runs used ci.yaml as of 6467a0a7 (the scratch pull requests' base when they were pushed)",
-      "headSha": "6b0588e3a8267b38b1e47d2b869eafcb0164ec2e",
+      "observed": "At 0ae68a17 (merged with main 719aae24) every one of the 21 filters prints `0 uncovered` (e.g. test 2981 files, docs 2885, envoy-go-race 1741, dispatch-memory 1034). Each scratch run selected exactly the jobs whose filter names its file: #2343 (a guide memory_profile_test.go reads) only dispatch-memory, at the filter of 6467a0a7 (at 6b0588e3 that guide left the filter: the test reads it only when DISPATCH_EDIT_PROFILE_OUT is set), #2348 (install-pulumi) only envoy-smoke, #2335 envoy-plugin only, #2341 claude-envoy only, #2339 (AGENTS.md) pi-legion only, #2346 (infra seed.go) envoy-infra-go, envoy-go, envoy-go-race and changes' log `Filter go_notices = true`, #2349 (a docs/solutions page) no job but lint (`Filter go_notices = false`, run 40449412482). The scratch runs used ci.yaml as of 6467a0a7 (the scratch pull requests' base when they were pushed)",
+      "headSha": "0ae68a179d69f8e39b2e0ea865bb1b7d6138822d",
       "negativeControl": "coverage.py --drop 'dispatch=packages/envoy/internal/routing/*' prints routing/match.go and match_test.go uncovered and exits 1; the docs/solutions-only scratch #2349 selected no test job"
     },
     {
@@ -50,7 +66,7 @@
       "surface": ".github/scripts tests and the checks on the tree",
       "command": "PATH=<pyyaml venv>:$PATH bash .github/scripts/check-image-trigger-paths.test.sh; bash .github/scripts/check-bun-version.test.sh; .github/scripts/check-image-trigger-paths.sh; .github/scripts/check-bun-version.sh",
       "observed": "image-trigger tests 'Results: 896 passed, 0 failed'; bun-version tests 'Results: 110 passed, 0 failed'; on the tree: 'every image trigger covers every input its build reads (4 image build(s))', the worker-image gate 'matches only files its image builds read', envoy-smoke's left alone as it does more than build",
-      "headSha": "6b0588e3a8267b38b1e47d2b869eafcb0164ec2e",
+      "headSha": "0ae68a179d69f8e39b2e0ea865bb1b7d6138822d",
       "negativeControl": "The new tests against the unmodified checkers: 'Results: 829 passed, 17 failed' (event/draft/cache), 'Results: 863 passed, 33 failed' (reverse check, some-with-excludes), bun-version '108 passed, 2 failed'; the tree with one worker_image `!` line removed fails naming a .dockerignore-dropped file"
     },
     {
@@ -58,7 +74,7 @@
       "surface": "actionlint",
       "command": "GOFLAGS=-mod=mod go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/ci.yaml .github/workflows/worker-image.yaml .github/workflows/pr-title.yaml",
       "observed": "exit 0, no findings",
-      "headSha": "6b0588e3a8267b38b1e47d2b869eafcb0164ec2e",
+      "headSha": "0ae68a179d69f8e39b2e0ea865bb1b7d6138822d",
       "negativeControl": "The same actionlint over release-envoy-listener.yaml reports `cache-mode`/`queue` keys it does not know (exit 1), so it does read and refuse"
     },
     {
@@ -68,6 +84,14 @@
       "observed": "the step wrote {pull_request, number: 2316}; check-pr-text.sh passed over title, body, branch, commits, comments and reviews; 'PR title is conventional'. The merge-group run itself exists only after the ruleset turns the queue on: the production check's",
       "headSha": "6467a0a705658a5c8b90e9a49c4a0e85af2d862d",
       "negativeControl": "head_ref refs/heads/gh-readonly-queue/main/2316-<40 hex> (no pr- prefix) -> '::error::merge_group.head_ref \u2026 names no queued pull request', exit 1"
+    },
+    {
+      "criterion": "The worker image is not built for a change only to files its build does not read (worker_image's ! patterns under some-with-excludes)",
+      "surface": "scratch pull request #2381 (packages/envoy/internal/bus/nkey_test.go, a file the .dockerignore drops) on GitHub Actions, ci.yaml as of 8bc475c7",
+      "command": "jobs of run 40465877990 after changes completed (gh api repos/sjawhar/legion/actions/runs/40465877990/jobs)",
+      "observed": "changes success; worker-image skipped; the jobs that read internal/bus were selected (typecheck and docs passed, test, envoy-go, envoy-go-race, dispatch, dispatch-memory, dispatch-multiprocess, envoy-infra-go, envoy-smoke, envoy-e2e-local queued); the run was then cancelled",
+      "headSha": "c1b200869a537d93961cc8cba045b55a9fd51692",
+      "negativeControl": "#2344 (packages/envoy/internal/testsocks5/testsocks5.go, a non-test file the build reads) selected worker-image / build"
     }
   ],
   "requiredChecksCutover": {
@@ -249,11 +273,11 @@
     "pr-title.yaml runs on merge_group (spec v7 after the architect accepted the GitHub doc reading).",
     "The reverse check from #2305 is carried and widened to the router's image gates (architect's direction); worker_image drops what the .dockerignore drops with `!` patterns under some-with-excludes.",
     "dispatch-memory's filter leaves out four guides its tests read only when DISPATCH_EDIT_PROFILE_OUT is set (INFRA-583's review).",
-    "release-envoy-listener.yaml's gha buildkit cache (about 1.6 GB of new entries per run) is INFRA-522's to move; acceptance 5 is restated by the architect as no refs/pull/ entry, notices p90 under 3 minutes, and totals reported by ref and family."
+    "release-envoy-listener.yaml's gha buildkit cache (about 1.6 GB of new entries per run) is INFRA-522's to move; acceptance 5 is restated by the architect as no refs/pull/ entry, notices p90 under 3 minutes, and totals reported by ref and family.",
+    "Round 2: main's #2167 edited envoy-and-contracts.yaml after the first merge; a second forward merge carries its envoy-go-race timeout and race step into ci.yaml, and envoy_go_race's filter gains the fixture the listener's tests read."
   ],
   "openQuestions": [],
   "productionCheck": [
-    "Rows 3, 5, 7, 9 and the queue rows are read after the merge: first 100 pull_request runs of ci.yaml (minutes with a runner vs the reference sets), cache usage by ref and family for 7 days (no refs/pull/ entry after the merge), lint notices step p90, release start within 30 minutes of a merge, the PR Title run after a review getting a runner within 10 minutes at p90, the first pull requests through the merge queue, and main's two release worker builds both completing (row 6's negative control).",
-    "#2381 (an envoy test file only) shows the worker image is not selected for a file the .dockerignore drops; its run was still queued at handoff."
+    "Rows 3, 5, 7, 9 and the queue rows are read after the merge: first 100 pull_request runs of ci.yaml (minutes with a runner vs the reference sets), cache usage by ref and family for 7 days (no refs/pull/ entry after the merge), lint notices step p90, release start within 30 minutes of a merge, the PR Title run after a review getting a runner within 10 minutes at p90, the first pull requests through the merge queue, and main's two release worker builds both completing (row 6's negative control)."
   ]
 }
