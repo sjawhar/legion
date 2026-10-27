@@ -76,11 +76,17 @@ if [ "$running" != "true" ]; then
   )
 fi
 # The same listing runs against the old container before the dump and the new one after the
-# restore, so the two outputs compare line for line.
+# restore, so the two outputs compare line for line. The same count of the tables in the dispatch
+# database (the one POSTGRES_DB in run_flags names) runs on both too: after an empty dump restores
+# nothing, the new container still lists postgres and dispatch, which it creates itself, but its
+# dispatch database holds no table.
 list_databases=(docker exec "$container" psql -U postgres -Atc 'select datname from pg_database where not datistemplate order by 1')
+count_tables=(docker exec "$container" psql -U postgres -d dispatch -Atc "select count(*) from pg_class where relkind = 'r' and relnamespace = 'public'::regnamespace")
 steps+=(
   "Keep the output of this: the databases the old container holds, every one of which the new container must list after the restore."
   "  $(quote "${list_databases[@]}")"
+  "Keep the output of this too: the number of tables in the old container's dispatch database."
+  "  $(quote "${count_tables[@]}")"
   "Then dump them and move the old container aside:"
   "  $(quote docker exec "$container" pg_dumpall -U postgres --clean --if-exists) > $(quote "$dump")"
   "  $(quote docker stop "$container")"
@@ -92,6 +98,8 @@ steps+=(
   "  $(quote docker exec -i "$container" psql -h 127.0.0.1 -U postgres -q -f -) < $(quote "$dump")"
   "This lists the new container's databases. It must list every database the old container's listing printed; if one is missing, the dump is incomplete, so stop here and keep the old container and the dump:"
   "  $(quote "${list_databases[@]}")"
+  "This counts the tables in the new container's dispatch database. It must print the same number as the old container did; if it differs (an empty dump restores none), stop here, before \`$(quote docker rm -v "$backup")\`, and keep the old container and the dump:"
+  "  $(quote "${count_tables[@]}")"
   "These print 1 and 18xxxx once the new container serves the restored data:"
   "  $(quote docker exec "$container" psql -U postgres -Atc "select 1 from pg_available_extensions where name = 'vector'")"
   "  $(quote docker exec "$container" psql -U postgres -Atc 'show server_version_num')"

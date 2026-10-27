@@ -5,13 +5,13 @@
 # the script makes from the scenario its environment describes, and records every invocation, so
 # each case asserts both what the script printed and every docker command it ran. A stale
 # `dispatch-pg` (any image but the pinned one, pgvector on PostgreSQL 18) is refused naming the
-# container, both images and, in order, the commands that list and dump its databases, restore
-# them into a new container on the pinned image, list them again there, and remove the old
-# container with its anonymous volume, and the script itself never stops, renames, removes, starts
-# or creates anything for it. The printed listing, dump, run and restore lines are replayed through
-# bash to prove they paste as they read. Its `quote`, which prints those commands, is held to
-# fixtures/shell-quote.json, the table packages/dispatch's shellQuote test reads too, so the two
-# copies of the rule cannot drift apart.
+# container, both images and, in order, the commands that list its databases, count the tables in
+# its dispatch database, dump them, restore them into a new container on the pinned image, list
+# and count them again there, and remove the old container with its anonymous volume, and the
+# script itself never stops, renames, removes, starts or creates anything for it. The printed
+# listing, dump, run and restore lines are replayed through bash to prove they paste as they read.
+# Its `quote`, which prints those commands, is held to fixtures/shell-quote.json, the table
+# packages/dispatch's shellQuote test reads too, so the two copies of the rule cannot drift apart.
 set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -113,11 +113,14 @@ readonly spaced_tmp="${temporary_dir}/tmp dir"
 mkdir -p "$spaced_tmp"
 readonly dump="${spaced_tmp}/${backup}.sql"
 readonly list_databases="docker exec dispatch-pg psql -U postgres -Atc 'select datname from pg_database where not datistemplate order by 1'"
+readonly count_tables="docker exec dispatch-pg psql -U postgres -d dispatch -Atc 'select count(*) from pg_class where relkind = '\''r'\'' and relnamespace = '\''public'\''::regnamespace'"
 readonly wait_ready="docker exec dispatch-pg pg_isready -h 127.0.0.1 -U postgres"
-# The dump-and-restore sequence the refusal prints, every line in this order. The listing runs
-# twice, against the old container before the dump and the new one after the restore.
+# The dump-and-restore sequence the refusal prints, every line in this order. The listing and the
+# table count run twice, against the old container before the dump and the new one after the
+# restore.
 readonly sequence=(
   "$list_databases"
+  "$count_tables"
   "docker exec dispatch-pg pg_dumpall -U postgres --clean --if-exists > '$dump'"
   "docker stop dispatch-pg"
   "docker rename dispatch-pg $backup"
@@ -125,6 +128,7 @@ readonly sequence=(
   "$wait_ready"
   "docker exec -i dispatch-pg psql -h 127.0.0.1 -U postgres -q -f - < '$dump'"
   "$list_databases"
+  "$count_tables"
   "docker exec dispatch-pg psql -U postgres -Atc 'select 1 from pg_available_extensions where name = '\''vector'\'''"
   "docker exec dispatch-pg psql -U postgres -Atc 'show server_version_num'"
   "docker rm -v $backup"
@@ -221,7 +225,7 @@ run_case TMPDIR="$spaced_tmp" FAKE_IMAGE_ID="$old_pin_id" FAKE_CONFIG_IMAGE="$ol
 start_line="$(line_of "docker start dispatch-pg")"
 ready_line="$(line_of "$wait_ready" "${start_line:-0}")"
 list_line="$(line_of "${sequence[0]}")"
-dump_line="$(line_of "${sequence[1]}")"
+dump_line="$(line_of "${sequence[2]}")"
 if [ "$status" -ne 1 ] || [ -s "$out" ] || ! read_only || [ -z "$start_line" ] || [ -z "$ready_line" ] \
   || [ -z "$list_line" ] || [ -z "$dump_line" ] || [ "$ready_line" -ge "$list_line" ] \
   || ! grep -qF "a dump taken before then is refused and leaves an empty file" "$err" || ! in_order; then
