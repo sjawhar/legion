@@ -93,3 +93,43 @@ func TestAFactJudgesHeldChildrenWithAsManyStatementsWhateverNumberOfTreesHoldOne
 		t.Errorf("a fact sent %d statements with %d trees holding a child, %d with 1; want as many", lots, many, few)
 	}
 }
+
+// One judgement covers several trees, and each tree's own state decides its own children: the
+// child of a live tree whose design gate is open starts, and the child of a live tree whose gate
+// is closed waits for that gate, in the very same fact.
+func TestOneFactStartsTheChildOfTheTreeWhoseGateIsOpenAndLeavesTheOtherHeld(t *testing.T) {
+	pool := migratedPool(t)
+	open, closed := "LEGION-300", "LEGION-400"
+	for _, root := range []string{open, closed} {
+		seedSlotted(t, pool, root, root)
+		child := root + "-child"
+		putIssue(t, pool, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+			Project: testProject, Title: child, Tree: root, Parent: &root, Phase: phase.Admitted, Generation: 1,
+			Status: "todo", Rank: root + "-B", LastDispatchSeq: 1})
+		seedMirror(t, pool, child, "todo")
+	}
+	approved := 2
+	inTx(t, pool, func(tx pgx.Tx) {
+		records := record.NewStore()
+		if err := records.PutGate(context.Background(), tx, record.DesignGate{Issue: open, ArtifactID: "spec-open", LatestVersion: 2, ApprovedVersion: &approved}); err != nil {
+			t.Fatalf("put the open gate: %v", err)
+		}
+		if err := records.PutGate(context.Background(), tx, record.DesignGate{Issue: closed, ArtifactID: "spec-closed", LatestVersion: 3, ApprovedVersion: &approved}); err != nil {
+			t.Fatalf("put the closed gate: %v", err)
+		}
+	})
+
+	admission := newAdmission(t, 4, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	fact := intake.DispatchArtifact{Key: open, ArtifactID: "spec-open", Kind: intake.DispatchArtifactVersion, Version: 2}
+	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "a document version", fact,
+		blockers.NewMirror(record.NewStore(), testProject), admission.engine, admission); err != nil {
+		t.Fatalf("apply a fact with one open and one closed tree: %v", err)
+	}
+
+	if started := issue(t, pool, open+"-child"); started.Phase != phase.Planning {
+		t.Errorf("the child of the tree whose gate is open = %s, want it planning", started.Phase)
+	}
+	if held := issue(t, pool, closed+"-child"); held.Phase != phase.Admitted {
+		t.Errorf("the child of the tree whose gate is closed = %s, want it still admitted", held.Phase)
+	}
+}

@@ -1049,13 +1049,13 @@ func (e *Engine) treesStartingChildren(ctx context.Context, tx pgx.Tx, issues []
 	for _, waiting := range record.Waiting(issues, slots) {
 		live[waiting.Key] = true
 	}
-	lingers := map[string]bool{}
+	lingering := map[string]bool{}
 	for _, issue := range issues {
-		lingers[issue.Key] = issue.Lingers()
+		lingering[issue.Key] = issue.Lingers()
 	}
 	open := make([]string, 0, len(trees))
 	for _, tree := range trees {
-		if recorded, ok := lingers[tree]; ok && !recorded && live[tree] {
+		if lingers, recorded := lingering[tree]; recorded && !lingers && live[tree] {
 			open = append(open, tree)
 		}
 	}
