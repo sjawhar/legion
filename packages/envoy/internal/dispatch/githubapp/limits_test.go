@@ -33,6 +33,10 @@ type limitGitHub struct {
 	mints          int
 	limitPath      string
 	requests       []string
+	// mintsAwaited and mintsArrived, set by holdMints, hold each mint's answer until that many
+	// mints have arrived.
+	mintsAwaited int
+	mintsArrived chan struct{}
 }
 
 func startLimitGitHub(t *testing.T) *limitGitHub {
@@ -48,11 +52,26 @@ func (f *limitGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	f.requests = append(f.requests, r.Method+" "+r.URL.Path+" "+r.Header.Get("Authorization"))
 	limited := r.URL.Path == f.limitPath
 	installationID := f.installationID
+	var held chan struct{}
 	if !limited && strings.HasSuffix(r.URL.Path, "/access_tokens") {
 		f.mints++
+		if f.mintsArrived != nil {
+			held = f.mintsArrived
+			if f.mintsAwaited--; f.mintsAwaited == 0 {
+				close(f.mintsArrived)
+				f.mintsArrived = nil
+			}
+		}
 	}
 	mints := f.mints
 	f.mu.Unlock()
+	if held != nil {
+		// A client that sends fewer mints than awaited is answered anyway, a little later.
+		select {
+		case <-held:
+		case <-time.After(2 * time.Second):
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if limited {
 		w.Header().Set("X-RateLimit-Remaining", "0")
@@ -80,6 +99,15 @@ func (f *limitGitHub) limit(path string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.limitPath = path
+}
+
+// holdMints holds each later mint's answer until n mints have arrived, so n callers that each
+// found no token mint at once.
+func (f *limitGitHub) holdMints(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mintsAwaited = n
+	f.mintsArrived = make(chan struct{})
 }
 
 // moveInstallation makes acme/web's installation lookup answer id.
@@ -181,6 +209,116 @@ func TestAnInstallationsLimitMetByOneProcessHoldsTheOthersReads(t *testing.T) {
 	}
 	if got := fake.count("GET /repos/acme/web/issues/2 Bearer " + tokenB); got != 1 {
 		t.Fatalf("GitHub got B's read %d times once the limit passed, want once", got)
+	}
+}
+
+// A token stays under its installation's limit until it expires, whatever mints after it: a
+// caller still holding the token from before another caller refreshed the installation's (an
+// architecture import mid-sync) is held by the installation's limit, with no request.
+func TestATokenMintedBeforeARefreshStaysUnderItsInstallationsLimit(t *testing.T) {
+	fake := startLimitGitHub(t)
+	_, a, b := twoProcesses(t, fake)
+	clock := &testClock{now: time.Now()}
+	a.now = clock.Now
+	ctx := context.Background()
+	held, err := a.Token(ctx, 7)
+	if err != nil {
+		t.Fatalf("A's first token: %v", err)
+	}
+	// Inside tokenExpirySlack of the first token's expiry, so the next caller mints anew, while
+	// the first token is still valid at GitHub.
+	clock.advance(time.Hour - tokenExpirySlack + time.Minute)
+	refreshed, err := a.Token(ctx, 7)
+	if err != nil || refreshed == held {
+		t.Fatalf("A's refreshed token %q (first %q), %v; want a new token", refreshed, held, err)
+	}
+	tokenB, err := b.Token(ctx, 7)
+	if err != nil {
+		t.Fatalf("B's token: %v", err)
+	}
+
+	fake.limit("/repos/acme/web/pulls/1")
+	if _, status, _, err := b.Read(ctx, tokenB, "/repos/acme/web/pulls/1"); err != nil || status != http.StatusForbidden {
+		t.Fatalf("B's limited read: status %d, %v; want GitHub's 403", status, err)
+	}
+	_, _, _, err = a.Read(ctx, held, "/repos/acme/web/issues/2")
+	requireHeld(t, err, "A's read under the token minted before the refresh")
+	_, _, _, err = a.Read(ctx, refreshed, "/repos/acme/web/issues/2")
+	requireHeld(t, err, "A's read under the refreshed token")
+	if got := fake.count("Bearer " + held); got != 0 {
+		t.Fatalf("GitHub got %d requests under the token minted before the refresh inside the installation's limit, want none", got)
+	}
+}
+
+// Two callers that find no token for an installation at once both mint, and each token is under
+// the installation's limit: the second mint to land does not drop the first's scope.
+func TestTwoConcurrentFirstMintsForOneInstallationAreBothUnderItsLimit(t *testing.T) {
+	fake := startLimitGitHub(t)
+	_, a, b := twoProcesses(t, fake)
+	ctx := context.Background()
+	fake.holdMints(2)
+	tokens := make([]string, 2)
+	errs := make([]error, 2)
+	var minting sync.WaitGroup
+	for i := range tokens {
+		minting.Go(func() { tokens[i], errs[i] = a.Token(ctx, 7) })
+	}
+	minting.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("A's concurrent mint %d: %v", i, err)
+		}
+	}
+	if got := fake.count("POST /app/installations/7/access_tokens"); got != 2 {
+		t.Fatalf("mints that reached GitHub = %d, want both callers' (tokens %q)", got, tokens)
+	}
+	tokenB, err := b.Token(ctx, 7)
+	if err != nil {
+		t.Fatalf("B's token: %v", err)
+	}
+
+	fake.limit("/repos/acme/web/pulls/1")
+	if _, status, _, err := b.Read(ctx, tokenB, "/repos/acme/web/pulls/1"); err != nil || status != http.StatusForbidden {
+		t.Fatalf("B's limited read: status %d, %v; want GitHub's 403", status, err)
+	}
+	for _, token := range tokens {
+		_, _, _, err = a.Read(ctx, token, "/repos/acme/web/issues/2")
+		requireHeld(t, err, "A's read under the token "+token)
+		if got := fake.count("Bearer " + token); got != 0 {
+			t.Fatalf("GitHub got %d requests under %s inside the installation's limit, want none", got, token)
+		}
+	}
+}
+
+// The client remembers a token's installation only until the token expires: the next mint forgets
+// every expired token, of any installation, so a long-running process holds no more than the
+// tokens still valid.
+func TestAnExpiredTokensInstallationIsForgottenAtTheNextMint(t *testing.T) {
+	fake := startLimitGitHub(t)
+	client := fake.newClient(t)
+	clock := &testClock{now: time.Now()}
+	client.now = clock.Now
+	ctx := context.Background()
+	var expired []string
+	for _, installation := range []int64{7, 9} {
+		token, err := client.Token(ctx, installation)
+		if err != nil {
+			t.Fatalf("token for installation %d: %v", installation, err)
+		}
+		expired = append(expired, token)
+	}
+	clock.advance(time.Hour + time.Minute)
+	current, err := client.Token(ctx, 7)
+	if err != nil {
+		t.Fatalf("token past the first ones' expiry: %v", err)
+	}
+	for _, token := range expired {
+		if scope := client.tokenScope(token); scope != "" {
+			t.Fatalf("expired token %s still answers scope %q", token, scope)
+		}
+	}
+	if scope := client.tokenScope(current); scope != installationScope(7) {
+		t.Fatalf("current token's scope = %q, want %q", scope, installationScope(7))
 	}
 }
 
