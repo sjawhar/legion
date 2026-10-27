@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-534",
+  "completed": "2026-10-27T14:03:53Z",
+  "round": 5,
+  "testedHead": "2909764e2b653b17d8edeb3872a99d2103c16298",
+  "codeHead": "feb2e9df",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Round 3 verification at 8c6b7c86e9c093cafe22511253b22d2dccddf642 stands: the fingerprint is unchanged at 98cccab2c4c97ed56a7ef2972fae64f917ea1a7c. Re-ran the implementer's browser command in the tester lane of /legion/scratch/harness-534 (real Dispatch server, Postgres 17): `bun run e2e -- e2e/strikethrough.e2e.ts e2e/zz-tester-tildes.e2e.ts e2e/zz-bytes.e2e.ts` at 8c6b7c86 (code 1a5c2dc2), with its throwaway zz-bytes.e2e.ts copied from /legion/scratch/tmp/infra534/: 12 passed on chromium and iphone, and the stored spec keeps `![**a*_](…)`, `![_*a**](…)` and `x ~~\\_\\_\\*\\*é\\_b~~**\\ y […]` byte for byte. Re-ran its differential corpora (the reviewer's rv2360/tgt.jsonl and adv.jsonl, the delimiter and URL corpora, an exhaustive corpus) against 4bbb2a9c, which holds the same pmdoc as 448a4100: the same numbers it reports (tgt: GATE 0 apart from misreads 1, t-27479, fixed 3672; adv: every GATE 0, fixed 1832). Confirmed that t-27479 is pre-existing: its minimal shape `x [.a www.a.com/x]\\(u) z` is a link in the engine and text in Go at the fork point too, where the write is refused."
+  },
+  "failed": 0,
+  "failures": [],
+  "proof": [
+    {
+      "criterion": "A1: a document written through the API shows the same strike as a comment (the spec's three cases), and correctly stored renderings keep their bytes (review round 1)",
+      "surface": "Dispatch issue page in a real browser (chromium, iphone) on the real Dispatch server and Postgres: live spec editor, past version ?v=1, Conversation comment, and GET /api/v1/issues/<KEY>/artifacts/spec/text",
+      "command": "cd packages/dispatch && . /legion/scratch/harness-534/env.sh && ZZ_ROWS=<29 rows> DATABASE_URL=\"$DB_URL\" bun run e2e -- e2e/strikethrough.e2e.ts e2e/zz-tester-tildes.e2e.ts e2e/zz-bytes.e2e.ts --reporter=list (zz-tester-tildes: the tester's throwaway, rows written through the API as an agent and each paragraph's text, strikes, emphasis and strong read in all three views; zz-bytes: the implementer's throwaway stored-bytes check)",
+      "observed": "rebase re-checks 8c6b7c86e9c093cafe22511253b22d2dccddf642 → 98cccab2c4c97ed56a7ef2972fae64f917ea1a7c → 2909764e2b653b17d8edeb3872a99d2103c16298: fingerprint unchanged, bare gates only. Real-surface result recorded at 8c6b7c86e9c093cafe22511253b22d2dccddf642: 12 passed. All 29 rows read the same in the editor, the past version and the comment: the spec's cases, the round-1 regressions (`p {em+del:**a} q`), the marker rows (`Plain b{em:~} text.`), the reviewer's `x ~~\\_\\_\\*\\*é\\_b~~**\\ y` and `![**a*_](u)`. strikethrough.e2e.ts passes 8 of 8. The stored text keeps the shapes main wrote, byte for byte.",
+      "headSha": "2909764e2b653b17d8edeb3872a99d2103c16298",
+      "negativeControl": "The round-2 head e2dae381 against the fork point, over the reviewer's 30085-document corpus (`differential.sh --base 4bbb2a9c --head e2dae381 --corpus rv2360/tgt.jsonl`): GATE churn 5, engine-tree churn 10, lost fixed points 3 (FAIL), for example main's stored `![__*b**](u)` rewritten as `![\\_\\_\\*b\\*\\*](u)`. The 27 tilde rows at the fork point (round 2): 14 differ between the editor and the comment."
+    },
+    {
+      "criterion": "Each case reads the same in Go and the headless engine; no reading regresses; correctly stored renderings keep their bytes (every GATE line 0)",
+      "surface": "pmdoc readers and writer against the browser's headless engine: the pmdoc differential (gen/differential.sh), base 4bbb2a9c against the head",
+      "command": "cd packages/envoy/internal/dispatch/pmdoc/gen && bash differential.sh --base 4bbb2a9c1db3daf897ba5af8406ca159078163e5 --corpus <c>, run once for each of: the delimiter + URL corpora; the tester's exhaustive `*`/`_`/`~`/`.`/space corpus of length 1-6; length 7-9 `~~`+`**`; length 3-7 `~`/`\\`/`*`/`a`; every image alt of length 2-6 and every link label of length 2-5 over `*`,`_`,`~`,`\\`,`a`; the reviewer's rv2360/tgt.jsonl and adv.jsonl",
+      "observed": "rebase re-checks 8c6b7c86e9c093cafe22511253b22d2dccddf642 → 98cccab2c4c97ed56a7ef2972fae64f917ea1a7c → 2909764e2b653b17d8edeb3872a99d2103c16298: fingerprint unchanged, bare gates only. Real-surface result recorded at 8c6b7c86e9c093cafe22511253b22d2dccddf642: Every GATE line 0 on six runs: delimiter+URL 30085 documents, fixed 942; first exhaustive 32173, all stored correctly; second 31624, all correct; third 18642, 18639 correct; alt/label 23326, all correct (fixed 686); reviewer adv 20085, fixed 1832. Reviewer tgt 30085: misreads 1 (t-27479, pre-existing bare-URL class), every other GATE line 0, fixed 3672. Linearity: 21 mixed shapes stay linear, ParseRendering at most 1.9 s at 1 MiB, about 2x for each doubling up to 2 MiB.",
+      "headSha": "2909764e2b653b17d8edeb3872a99d2103c16298",
+      "negativeControl": "The same reviewer corpus at the round-2 head e2dae381: churn 5, engine-tree churn 10, lost fixed points 3. The length-7-9 exhaustive corpus at the round-1 head 5d3a48a0: regressions 6, churn 6."
+    }
+  ],
+  "ci": "Read on GitHub at the code head 1a5c2dc2 at 08:23Z: typecheck, test, lint, changes, 2 build and 2 pr-title runs queued, 3 pr-title runs cancelled, none failed. The pull request is MERGEABLE (BLOCKED, waiting for checks and review). `git merge-tree` against the current main b08a56bc reports no conflict; main has changed pmdoc/parse.go since 448a4100 and merges cleanly.",
+  "observations": [
+    "My adversarial tilde corpus keeps the same 4 pre-existing `misread` rows as rounds 1 and 2 (autolink literals and an inline HTML node inside a strike). Main refused those writes; the head stores them; their tilde reading matches the engine.",
+    "The reviewer's minor finding (the PR body's INFRA-535 paragraph) is wording, outside the tester's surface."
+  ],
+  "rebaseRecheck": {
+    "summary": "rebase re-check 98cccab2c4c97ed56a7ef2972fae64f917ea1a7c → 2909764e2b653b17d8edeb3872a99d2103c16298: fingerprint unchanged, bare gates only",
+    "fingerprint": "340dab0f0cf379f091077dc93f454bce1db97eab3316e284570219f8c7e861a8 at both heads (fork_point(\"main\"@origin | <head>), fileset '~(.legion | docs/solutions)'); the new head's fork point is main 9d97293d",
+    "change": "retro's two commits (docs/solutions learnings, removal of .legion/INFRA-534/), the forward merge of main 9d97293d (feb2e9df; #2307, INFRA-530 email mailto links, conflict in packages/envoy/CHANGELOG.md only), and the implementer's round-5 handoff; no change to the branch's own diff",
+    "smoke": "`cd packages/dispatch && . /legion/scratch/harness-534/env.sh && DATABASE_URL=\"$DB_URL\" bun run e2e -- e2e/strikethrough.e2e.ts` at the merged head: 8 passed (chromium, iphone); pmdoc TestTildeRuns*, TestRenderKeepsStoredMarkdown*, TestRenderKeepsImageAltText and the Email/Linkify tests main brought pass together",
+    "ci": "Read on GitHub at the merged code head feb2e9df at 14:03Z: typecheck, test, lint, changes, 2 pr-title and 2 build runs queued, nothing failed; 2909764e is handoff-only (skip-checks). PR MERGEABLE, review APPROVED, mergeStateStatus BLOCKED."
+  }
+}
