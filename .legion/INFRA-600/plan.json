@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-600",
+  "completed": "2026-10-27T04:07:29Z",
+  "planDocument": "dispatch://INFRA-600/artifact/plan-md",
+  "baseCommit": "9b92ac14351a926361c982edb7953e0325fab0de",
+  "summary": "Drafts skip every job in pr-and-main (lint/typecheck/test), envoy-and-contracts (via `changes`), docs (`build`) and worker-image (`build`) with `ready_for_review` added; Envoy, Docs and Worker Image also run on `closed` with every job skipped, keyed by PR number so a merged PR's closed run (github.ref = base branch) cancels the PR's runs and never main's docs deploy; Worker Image concurrency moves to workflow level with cancel-in-progress on pull_request; check-image-trigger-paths.sh admits exactly `!github.event.pull_request.draft` and `github.event.action != 'closed'`; Tests gets no `closed` trigger (departure D1, architect decides).",
+  "tasks": [
+    "pr-and-main.yaml: types + ready_for_review; `if: ${{ !github.event.pull_request.draft }}` on lint, typecheck, test; comments 3-4, 14-16, 77-81.",
+    "envoy-and-contracts.yaml: explicit types [opened, synchronize, reopened, ready_for_review, closed]; `changes` gets `if: ${{ github.event.action != 'closed' && !github.event.pull_request.draft }}`; group key PR number on pull_request, github.sha otherwise; comment 110-112.",
+    "docs.yaml: same types; `build` same if; group docs-<PR number> on pull_request, github.ref otherwise; comments 3-7, 27.",
+    "worker-image.yaml: types add ready_for_review, closed; `build` same if; workflow-level concurrency worker-image-<PR number|sha>, cancel-in-progress on pull_request; delete the job-level block; comments 43-59, 92-98, 106-110.",
+    "check-image-trigger-paths.sh NEUTRAL gets the two exact terms with the rationale in its header and gate_outputs docstring; check-image-trigger-paths.test.sh gets accepted cases (alone, with a filter clause, on a build job and on a needed job) and refused cases (positive draft, draft == true, action == 'closed'). Quote or wrap `!github…` in YAML.",
+    "Prose: AGENTS.md:149; pr-title.yaml:11,30 and check-pr-text.sh:32-34 comments; docs/kubernetes.md ~504; docs/solutions notes LEGION-767 (33-35), INFRA-255 (46-48, 60), LEGION-631 (44-48), pull-request-trigger-paths-follow-the-pr-head.md:46; the two greps in plan.md task 7, every hit read; README.md has no CI prose.",
+    "Measurement script in $TMPDIR (D drafts, C closed, W superseded image builds per workflow over a fixed window), attached to the issue with dispatch artifact; before = trailing 72 h plus INFRA-490's 3-day D and W figures.",
+    "Local: actionlint v1.7.7 via go run (caches under $TMPDIR), check-image-trigger-paths.sh and its test, check-action-pins.sh, check-private-names.sh.",
+    "Scratch proofs P1-P5 from plan.md, then delete the scratch branches."
+  ],
+  "acceptance": [
+    {"criterion": "1 Drafts skip; ready_for_review starts the run; statement of what lint/typecheck/test report", "surface": "GitHub Actions in sjawhar/legion, scratch draft PR S1 off the INFRA-600 head plus an empty commit", "check": "P1: after `gh pr create --draft`, `gh api repos/sjawhar/legion/actions/runs?head_sha=<H1>&event=pull_request` lists Tests, Legion Envoy and Contracts, Docs, Worker Image runs whose `/jobs` are all conclusion skipped with no runner; P2: after `gh pr ready`, `gh api repos/sjawhar/legion/commits/<H1>/check-runs` shows a lint check run with a higher id than the skipped one, queued/in_progress within seconds, ending success. Statement in the PR body per plan.md D3 with residuals (i)-(iii)."},
+    {"criterion": "2 Closed PR's waiting runs cancelled by a closed run with every job skipped", "surface": "GitHub Actions, scratch PR S1 closed while its runs wait", "check": "P4: `gh pr close`; a closed-event run per Envoy/Docs/Worker Image with every job skipped; each earlier unfinished run of S1 cancelled within seconds of closed_at, annotation naming <workflow>-<S1 number>. Merged path in the production check: the Docs push run at the merge commit is success and the INFRA-600 PR's closed runs exist. Tests excluded per D1 unless the architect chooses otherwise."},
+    {"criterion": "3 Worker Image: newer push cancels older head's build; non-PR events never cancel", "surface": "GitHub Actions, S1 and a push-triggered scratch caller workflow", "check": "P3: two pushes to S1; the older build cancelled with annotation `worker-image-<S1 number>`. P5: scratch branch whose workflow calls ./.github/workflows/worker-image.yaml on push under group release-${{ github.ref }}; two quick pushes, both callee builds success, neither cancelled, attest ran."},
+    {"criterion": "4 Queued runs and runner minutes removed, before and after", "surface": "GitHub Actions API via the measurement script attached to the issue", "check": "Script output before (trailing 72 h) and the scratch job minutes after, in the PR body; post-merge 24 h re-run in the production check: D = 0 for the four workflows, W = 0, C near 0 for Envoy/Docs/Worker Image except the listed residuals."},
+    {"criterion": "5 Docs and code-comment prose corrected", "surface": "the repository at the PR head", "check": "The two greps in plan.md task 7 with every remaining hit read and stated in the PR body."}
+  ],
+  "decisionsForArchitect": [
+    "D1: Tests gets no closed trigger, because its closed run would post skipped (passing) lint/typecheck/test at a head other runs tested, which the spec's shared context forbids, and it can stand (reopen while conflicting, then main clears the conflict; or a re-run of the closed run). Alternatives: (a) the spec as written with the residual accepted; (b) a fifth workflow whose job joins tests-<number> at job level with cancel-in-progress, leaving cancelled (fail-closed).",
+    "Overlap: sjawhar/legion#2305 (open, unapproved) makes Worker Image's cancel job-level and edits check-image-trigger-paths.sh; a job-level group cannot be cancelled by a closed run, so this plan's workflow-level group supersedes its concurrency part. Whichever merges second rebases.",
+    "INFRA-520 (sjawhar/legion#2316) must carry: PR-number keys (a merged PR's closed run has github.ref = refs/heads/main, and under docs' key it would cancel main's Pages deploy), and no passing ci-ok/lint/typecheck/test posted by a closed run at a tested head."
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the PR body, proof objects, push and handoff rules (references/pr-body.md, skip-checks-trailer.md, default-branch-check.md).",
+      "dispatch: attaching the measurement script with `dispatch artifact` and any note on the issue.",
+      "asd-ste100: the PR body and docs prose a teammate reads, per the deployment instructions.",
+      "ce-simplify-code: the simplify pass pr-body.md asks of the implementer on the workflow and check-script diff."
+    ],
+    "test": [
+      "legion-worker: re-running P1, P2 and P4 on a fresh scratch PR at the head that merges and recording proof objects (references/pr-body.md#what-a-proof-is)."
+    ],
+    "review": [
+      "legion-worker: review threads, the merge gate and judging proofs (references/merge-gate.md, review-threads.md, pr-body.md)."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "A merged PR's closed run has github.ref = base branch, so ref-keyed groups miss the PR, and docs' docs-${{ github.ref }} would cancel main's Pages deploy.", "answer": "D4: every PR key is github.event.pull_request.number, push keys unchanged; the merged path is checked in the production check (Docs push run at the merge commit success)."},
+      {"finding": "Skipped required checks pass; acceptance 1's 'never shows a passing required check' versus 'skips'; acceptance 2's closed run posts skips at a tested head, against the spec's shared rule; reopen-while-conflicting and re-runs leave skips standing.", "answer": "D1 (Tests gets no closed trigger, departure for the architect, alternatives named) and D3 (what lint/typecheck/test report on a draft, why it cannot merge, residuals i-iii); P2 checks the ready run's check-run ids supersede the skips."},
+      {"finding": "check-image-trigger-paths.sh refuses draft/closed gates on worker-image build and envoy changes.", "answer": "D5 and task 6: NEUTRAL admits exactly the two terms, with rationale and tests for accepted and refused shapes."},
+      {"finding": "Worker Image workflow-level concurrency in a called workflow; self-deadlock with a same-named job group; unproven under workflow_call.", "answer": "D4 deletes the job-level block; P5 proves the call path with a push-triggered scratch caller under release.yaml's group; production check reads the next release run."},
+      {"finding": "Open PR #2305 delivers acceptance 3 job-level on the same files; #2316 rebases onto this.", "answer": "D6 and decisionsForArchitect: workflow-level supersedes #2305's concurrency part; INFRA-520 carry-overs named."},
+      {"finding": "Scope readings: Worker Image in the draft skip; converted_to_draft; explicit types for Envoy and Docs.", "answer": "D2: Worker Image skips drafts (370 min measured), kubernetes.md updated; converted_to_draft not added; explicit types listed in tasks 3-5."},
+      {"finding": "paths filters apply to closed against the final diff.", "answer": "Residual stated in the PR body; P4 asserts a closed run per workflow on a scratch PR whose diff matches all."},
+      {"finding": "Conflicting PRs start no run (closed, ready, reopen).", "answer": "Residuals stated in the PR body and in D3."},
+      {"finding": "Acceptance 4 cannot be checked before merge as written; no baseline for closed PRs.", "answer": "Task 8 measurement script (D, C, W) over a fixed window, attached to the issue; before measured, after from scratch proofs, post-merge 24 h in the production check."},
+      {"finding": "The docs to change are not the README.", "answer": "Task 7 names AGENTS.md, pr-title.yaml, check-pr-text.sh, kubernetes.md and four docs/solutions notes, plus greps; README has no CI prose."},
+      {"finding": "Lint's text check on drafts.", "answer": "Residual: pr-title.yaml still runs check-pr-text.sh on synchronize; drafts lose lint's file-tree checks until ready; comments updated."},
+      {"finding": "Legion consumers (daemon, reviewer) read skipped as passing.", "answer": "No daemon or prompt change: auto-merge waits on DRAFT and ready runs the tests before GitHub can merge; stated as a residual."},
+      {"finding": "Proof logistics: scratch PRs must target main with the INFRA-600 commits; cost; merged and workflow_call paths not shown by scratch PRs.", "answer": "Proofs section: one scratch PR S1 for P1-P4 with distinct heads, P5 for workflow_call, cost stated, merged path in the production check."},
+      {"finding": "Spec claims without sources (queue counts, closed-PR waste baseline, INFRA-520 carrying the same draft behaviour).", "answer": "The closed-PR baseline is measured by task 8; the INFRA-520 difference is in D6; the relayed queue counts are left to the architect and not used as evidence by the plan."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": [
+    {
+      "spec": "Acceptance 2: each of the four workflows (Tests included) also runs on pull_request closed, in the same concurrency group with cancel-in-progress, with every job skipped.",
+      "plan": "Envoy and Contracts, Docs and Worker Image run on closed as specified; Tests (pr-and-main.yaml) gets no closed trigger, so its runs for an unmerged closed PR finish as before.",
+      "evidence": "The spec's shared context forbids a run that skips the tests posting at a head another run tested. A skipped job's check run passes for GitHub's required-check rule and for the daemon (packages/daemon/internal/classify/required.go:101-111; newest check-run id per name wins, packages/envoy/internal/cistore/cistore.go:470-480). lint, typecheck and test are required (ruleset on main), so a Tests closed run would replace a red or cancelled result at the PR head with a pass; GitHub starts no run on a reopen while the PR conflicts, so the pass can stand. Envoy, Docs and Worker Image are not required, so their skipped closed checks decide nothing. A merged PR's Tests runs at its head have already finished, so the waste kept is unmerged closes only; the implementer measures it.",
+      "outcome": {"kind": "changed", "acceptance": ["2. Closed pull requests: Tests (pr-and-main.yaml) is excluded; Envoy and Contracts, Docs and Worker Image run on closed as written."], "scope": "Acceptance 2 does not apply to pr-and-main.yaml unless the architect chooses the spec as written or a fail-closed canceller."}
+    }
+  ]
+}
