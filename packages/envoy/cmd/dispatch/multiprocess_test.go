@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1407,4 +1408,506 @@ func whoami(t *testing.T, p *dispatchProcess, session *http.Cookie) (string, int
 	defer response.Body.Close()
 	body, _ := io.ReadAll(response.Body)
 	return strings.TrimSpace(string(body)), response.StatusCode
+}
+
+// ───── deliveries a request or a process left behind ───────────────────────
+
+// listenerRoute is one of the Envoy listener routes Dispatch calls, which a row can hold.
+type listenerRoute string
+
+const (
+	listenerRegistry listenerRoute = "GET /v1/registry/{session_id}"
+	listenerSessions listenerRoute = "GET /v1/sessions"
+	listenerSend     listenerRoute = "POST /v1/messages/send"
+)
+
+// listenerSession is a live session's record as the listener answers it, on its registry read and
+// on its live list alike.
+type listenerSession struct {
+	SessionID    string   `json:"session_id"`
+	Title        string   `json:"title"`
+	Roles        []string `json:"roles"`
+	Capabilities []string `json:"capabilities"`
+}
+
+// listenerSendRecord is one send the fake listener answered: the key and the session it was sent
+// under, its urgency, and whether the listener answered it as a repeat of a send it had already
+// answered.
+type listenerSendRecord struct {
+	Key, Recipient, Urgency string
+	Duplicate               bool
+}
+
+// heldRequest is one request a hold keeps unanswered: its route, what it names - the session id a
+// registry read asks about, the idempotency key a send carries - and a channel closed once its
+// caller has given up on it, a cancelled call or a killed process alike.
+type heldRequest struct {
+	route   listenerRoute
+	subject string
+	gone    <-chan struct{}
+}
+
+// listenerHold keeps every request on its route unanswered from when it is taken until Release,
+// and reports each one on arrived as it comes in.
+type listenerHold struct {
+	arrived chan heldRequest
+	release chan struct{}
+	once    sync.Once
+}
+
+// Release answers every request the hold keeps and lets every later one through.
+func (h *listenerHold) Release() { h.once.Do(func() { close(h.release) }) }
+
+func (h *listenerHold) released() bool {
+	select {
+	case <-h.release:
+		return true
+	default:
+		return false
+	}
+}
+
+// next waits up to within for the next request the hold keeps, and fails the test, naming what was
+// awaited, when none arrives.
+func (h *listenerHold) next(t *testing.T, within time.Duration, what string) heldRequest {
+	t.Helper()
+	select {
+	case held := <-h.arrived:
+		return held
+	case <-time.After(within):
+		t.Fatalf("%s never reached the listener within %v", what, within)
+		return heldRequest{}
+	}
+}
+
+// requireAbandoned waits up to ten seconds for each held request's caller to have gone away, as
+// every request a killed process made has, so a release that follows answers none of them: a
+// send the listener answers to a dead process would be one the row did not mean to land.
+func requireAbandoned(t *testing.T, held ...heldRequest) {
+	t.Helper()
+	for _, request := range held {
+		select {
+		case <-request.gone:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("the caller of %s %s never went away", request.route, request.subject)
+		}
+	}
+}
+
+// fakeListener is the Envoy listener both processes of a pair deliver through (ENVOY_URL): an
+// httptest server in the test process that knows a fixed set of live sessions, serves the three
+// routes a delivery calls (the registry read, the live list and the send) and records every send
+// it answers. A send whose key and recipient it has already answered is answered as a duplicate,
+// as the real listener answers a repeat inside contracts.DeliveryDuplicateWindow, and recorded
+// as one. A row holds a route (hold) to keep a request unanswered while it acts on the processes;
+// a held request whose caller goes away is never answered and never recorded, so a send a killed
+// process made is not one that reached the session. Every hold is released when the test ends,
+// before the server closes, since a close waits for every request still in flight.
+//
+// Each route's answer is decided in serve, in one place per route, so a row that needs the
+// listener to misbehave for a while - refuse a connection, answer 503, not know a session yet -
+// adds that there, beside the hold.
+type fakeListener struct {
+	server   *httptest.Server
+	sessions []listenerSession
+
+	mu       sync.Mutex
+	answered []listenerSendRecord
+	holds    map[listenerRoute]*listenerHold
+}
+
+// startFakeListener serves the sessions on loopback until the test ends.
+func startFakeListener(t *testing.T, sessions ...listenerSession) *fakeListener {
+	t.Helper()
+	f := &fakeListener{sessions: sessions, holds: map[listenerRoute]*listenerHold{}}
+	f.server = httptest.NewServer(http.HandlerFunc(f.serve))
+	t.Cleanup(func() {
+		f.mu.Lock()
+		for _, hold := range f.holds {
+			hold.Release()
+		}
+		f.mu.Unlock()
+		f.server.Close()
+	})
+	return f
+}
+
+// processEnv is what a Dispatch process delivering through this listener is started with: the
+// listener's URL, and the interval its resume loop sends stranded attempts on.
+func (f *fakeListener) processEnv(resumeInterval time.Duration) map[string]string {
+	return map[string]string{
+		"ENVOY_URL":                              f.server.URL,
+		"DISPATCH_TEST_DELIVERY_RESUME_INTERVAL": resumeInterval.String(),
+	}
+}
+
+// hold keeps every request on route unanswered from now until the returned hold is released. A
+// hold the route already had is released first, so nothing it keeps is left waiting for the end
+// of the test.
+func (f *fakeListener) hold(route listenerRoute) *listenerHold {
+	hold := &listenerHold{arrived: make(chan heldRequest, 64), release: make(chan struct{})}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if previous := f.holds[route]; previous != nil {
+		previous.Release()
+	}
+	f.holds[route] = hold
+	return hold
+}
+
+// sendsUnder is every send the listener answered under key, in the order it answered them.
+func (f *fakeListener) sendsUnder(key string) []listenerSendRecord {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var sends []listenerSendRecord
+	for _, send := range f.answered {
+		if send.Key == key {
+			sends = append(sends, send)
+		}
+	}
+	return sends
+}
+
+func (f *fakeListener) serve(w http.ResponseWriter, r *http.Request) {
+	// The whole body is read before anything waits, so the server sees the request end and
+	// notices its caller going away while the request is held.
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	switch {
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/registry/"):
+		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/registry/")
+		if !f.await(listenerRegistry, sessionID, r) {
+			return
+		}
+		session, ok := f.session(sessionID)
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "no live session " + sessionID})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(session)
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+		if !f.await(listenerSessions, "", r) {
+			return
+		}
+		_ = json.NewEncoder(w).Encode(f.sessions)
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
+		var send struct {
+			TargetSession  string `json:"target_session"`
+			IdempotencyKey string `json:"idempotency_key"`
+			Urgency        string `json:"urgency"`
+		}
+		if err := json.Unmarshal(body, &send); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if !f.await(listenerSend, send.IdempotencyKey, r) {
+			return
+		}
+		if _, ok := f.session(send.TargetSession); !ok {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "no live session " + send.TargetSession})
+			return
+		}
+		f.mu.Lock()
+		duplicate := false
+		for _, prior := range f.answered {
+			duplicate = duplicate || (prior.Key == send.IdempotencyKey && prior.Recipient == send.TargetSession)
+		}
+		f.answered = append(f.answered, listenerSendRecord{
+			Key: send.IdempotencyKey, Recipient: send.TargetSession, Urgency: send.Urgency, Duplicate: duplicate,
+		})
+		envelope := fmt.Sprintf("envelope-%d", len(f.answered))
+		f.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"event_id": envelope, "recipient": send.TargetSession, "duplicate": duplicate,
+		})
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+// await keeps r unanswered while route is held, and reports whether it is still to be answered:
+// false when its caller went away first.
+func (f *fakeListener) await(route listenerRoute, subject string, r *http.Request) bool {
+	f.mu.Lock()
+	hold := f.holds[route]
+	f.mu.Unlock()
+	if hold == nil || hold.released() {
+		return true
+	}
+	hold.arrived <- heldRequest{route: route, subject: subject, gone: r.Context().Done()}
+	select {
+	case <-hold.release:
+		return r.Context().Err() == nil
+	case <-r.Context().Done():
+		return false
+	}
+}
+
+func (f *fakeListener) session(sessionID string) (listenerSession, bool) {
+	for _, session := range f.sessions {
+		if session.SessionID == sessionID {
+			return session, true
+		}
+	}
+	return listenerSession{}, false
+}
+
+// resumeSession is the one live session the delivery rows send to; it takes every mode.
+var resumeSession = listenerSession{
+	SessionID: "resume-session", Title: "resume", Roles: []string{}, Capabilities: []string{"btw", "aside", "steer"},
+}
+
+// deliveryUnderTest is one delivery a row follows: what a failure calls it, the attempt table its
+// rows are in, and the idempotency key its send carries, which begins with the id of its message
+// or comment.
+type deliveryUnderTest struct {
+	what, table, key string
+}
+
+func messageDelivery(what, key string) deliveryUnderTest {
+	return deliveryUnderTest{what: what, table: "message_deliveries", key: key}
+}
+
+func mentionDelivery(what, key string) deliveryUnderTest {
+	return deliveryUnderTest{what: what, table: "comment_deliveries", key: key}
+}
+
+// owner is the column naming the message or comment, the receipt event type and the payload
+// field naming it there, and its id.
+func (d deliveryUnderTest) owner() (column, receipt, field, id string) {
+	id, _, _ = strings.Cut(d.key, ":")
+	if d.table == "message_deliveries" {
+		return "message_id", "message.delivery", "message_id", id
+	}
+	return "comment_id", "comment.delivery", "comment_id", id
+}
+
+// attempts is every attempt of the delivery's message or comment, as "<attempt>:<state>".
+func (d deliveryUnderTest) attempts(t *testing.T, database *store.Store) []string {
+	t.Helper()
+	column, _, _, id := d.owner()
+	rows, err := database.Pool.Query(context.Background(),
+		`select attempt::text || ':' || state from `+d.table+` where `+column+` = $1 order by attempt`, id)
+	if err != nil {
+		t.Fatalf("read the attempts of %s: %v", d.what, err)
+	}
+	states, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatalf("read the attempts of %s: %v", d.what, err)
+	}
+	return states
+}
+
+// receipts is how many delivery receipts the events hold for attempt 1 of the delivery.
+func (d deliveryUnderTest) receipts(t *testing.T, database *store.Store) int {
+	t.Helper()
+	_, receipt, field, id := d.owner()
+	var count int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from events
+		where type = $1 and payload ->> $2 = $3 and (payload ->> 'attempt')::int = 1
+	`, receipt, field, id).Scan(&count); err != nil {
+		t.Fatalf("count the receipts of %s: %v", d.what, err)
+	}
+	return count
+}
+
+// requireDeliveredOnce waits up to within for every delivery to settle and requires each to have
+// reached its session exactly once under its own key: attempt 1 alone, sent, with one receipt,
+// and one send the listener answered as new. A delivery still unsettled at the deadline is
+// reported, and so is every one after it, with the processes' output once.
+func requireDeliveredOnce(t *testing.T, pair *dispatchPair, listener *fakeListener, within time.Duration, deliveries ...deliveryUnderTest) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	unsettled := false
+	for _, delivery := range deliveries {
+		states := delivery.attempts(t, pair.database)
+		for len(states) == 0 || slices.ContainsFunc(states, func(state string) bool {
+			return strings.HasSuffix(state, ":pending")
+		}) {
+			if time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+			states = delivery.attempts(t, pair.database)
+		}
+		if !slices.Equal(states, []string{"1:sent"}) {
+			t.Errorf("%s reads %v %v after the row began waiting; want attempt 1 alone, sent", delivery.what, states, within)
+			unsettled = true
+			continue
+		}
+		if sends := listener.sendsUnder(delivery.key); len(sends) != 1 || sends[0].Duplicate || sends[0].Recipient != resumeSession.SessionID {
+			t.Errorf("%s: the listener answered %+v under %s; want one new send to %s",
+				delivery.what, sends, delivery.key, resumeSession.SessionID)
+		}
+		if receipts := delivery.receipts(t, pair.database); receipts != 1 {
+			t.Errorf("%s: attempt 1 has %d delivery receipts, want one", delivery.what, receipts)
+		}
+	}
+	if unsettled {
+		t.Fatalf("the processes' output:\nA:\n%s\nB:\n%s", pair.a.Output.String(), pair.b.Output.String())
+	}
+}
+
+// sendInBackground sends body to path on p without waiting for the answer, for a request the row
+// expects never to answer: the process is killed while it is held.
+func (p *dispatchProcess) sendInBackground(method, path, body string) {
+	go func() {
+		if response, err := p.send(method, path, body); err == nil {
+			_ = response.Body.Close()
+		}
+	}()
+}
+
+// kill ends the process the way a task replaced mid-deploy or killed for memory ends, with no
+// chance to finish anything, and returns once it has exited.
+func (p *dispatchProcess) kill(t *testing.T) {
+	t.Helper()
+	if err := p.Cmd.Process.Kill(); err != nil {
+		t.Fatalf("kill the process: %v", err)
+	}
+	<-p.Exited
+}
+
+// backDatePendingAttempts moves every pending attempt's claim and creation two minutes back, past
+// the one-minute claim lease the resume loop waits out, so a row does not wait a real minute.
+func backDatePendingAttempts(t *testing.T, database *store.Store) {
+	t.Helper()
+	for _, table := range []string{"message_deliveries", "comment_deliveries"} {
+		if _, err := database.Pool.Exec(context.Background(), `
+			update `+table+`
+			set claimed_at = claimed_at - interval '2 minutes', created_at = created_at - interval '2 minutes'
+			where state = 'pending'
+		`); err != nil {
+			t.Fatalf("back-date the pending attempts of %s: %v", table, err)
+		}
+	}
+}
+
+// A process killed while it delivers leaves its attempts pending: a direct message and a comment
+// mention whose own request was sending them, and a broadcast recipient a background worker was
+// sending. The other process's resume loop sends each one once its claim has lapsed, under the
+// attempt and the idempotency key the killed process used, so the session gets each once. The
+// subtest kills the process earlier, after the message is stored and before anything is resolved
+// or claimed: the attempt the storing transaction wrote is what the survivor sends.
+func TestADeliveryAKilledProcessLeftPendingIsSentByTheOther(t *testing.T) {
+	t.Run("killed while sending", func(t *testing.T) {
+		listener := startFakeListener(t, resumeSession)
+		sends := listener.hold(listenerSend)
+		pair := startPair(t, listener.processEnv(time.Second))
+		project := uniqueProjectKey(t, "RSM")
+		pair.a.createProject(t, project, "Resumed deliveries")
+		issue, _ := pair.a.createIssueIn(t, project, "Mentioned while sending", "spec")
+
+		pair.a.sendInBackground(http.MethodPost, "/api/v1/agents/"+resumeSession.SessionID+"/messages",
+			`{"body":"A direct message","delivery":"steer"}`)
+		direct := sends.next(t, 30*time.Second, "the direct message's send")
+		pair.a.sendInBackground(http.MethodPost, "/api/v1/issues/"+issue+"/comments",
+			fmt.Sprintf(`{"body":"A mention","mentions":[{"target":"session:%s"}]}`, resumeSession.SessionID))
+		mention := sends.next(t, 30*time.Second, "the mention's send")
+		pair.a.call(t, http.MethodPost, "/api/v1/broadcasts", fmt.Sprintf(
+			`{"body":"A broadcast","delivery":"steer","session_ids":[%q],"idempotency_key":"killed-while-sending"}`,
+			resumeSession.SessionID), http.StatusCreated)
+		broadcast := sends.next(t, 30*time.Second, "the broadcast recipient's send")
+
+		pair.a.kill(t)
+		requireAbandoned(t, direct, mention, broadcast)
+		sends.Release()
+		backDatePendingAttempts(t, pair.database)
+		requireDeliveredOnce(t, pair, listener, 30*time.Second,
+			messageDelivery("the direct message", direct.subject),
+			mentionDelivery("the mention", mention.subject),
+			messageDelivery("the broadcast recipient's message", broadcast.subject),
+		)
+	})
+
+	t.Run("killed before the claim", func(t *testing.T) {
+		listener := startFakeListener(t, resumeSession)
+		lookups := listener.hold(listenerRegistry)
+		pair := startPair(t, listener.processEnv(time.Second))
+		pair.a.sendInBackground(http.MethodPost, "/api/v1/agents/"+resumeSession.SessionID+"/messages",
+			`{"body":"Stored, then killed","delivery":"steer"}`)
+		lookup := lookups.next(t, 30*time.Second, "the direct message's registry read")
+		pair.a.kill(t)
+		requireAbandoned(t, lookup)
+		lookups.Release()
+		var messageID string
+		if err := pair.database.Pool.QueryRow(context.Background(),
+			`select id::text from messages where target = $1`, "session:"+resumeSession.SessionID,
+		).Scan(&messageID); err != nil {
+			t.Fatalf("read the stored message: %v", err)
+		}
+		backDatePendingAttempts(t, pair.database)
+		requireDeliveredOnce(t, pair, listener, 30*time.Second,
+			messageDelivery("the message stored before the kill", messageID+":steer"))
+	})
+}
+
+// cancelGrace is how long cancelOnceHeld gives Dispatch to act on a cancelled request before the
+// listener answers the send that request made, when Dispatch does not abandon that send itself:
+// well inside the listener client's five-second window, so the answer is still awaited.
+const cancelGrace = 2 * time.Second
+
+// cancelOnceHeld sends body to path on p with a request the test cancels as soon as the listener
+// holds the send it made, which is after its commit, and waits for the client to return. The send
+// is then answered once Dispatch has had the cancellation: at once if Dispatch gave up on the send
+// with its request, after cancelGrace if it did not. It answers the send's idempotency key.
+func cancelOnceHeld(t *testing.T, p *dispatchProcess, listener *fakeListener, path, body string) string {
+	t.Helper()
+	sends := listener.hold(listenerSend)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, p.url(path), strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("build POST %s: %v", path, err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Dispatch-User", dispatchTestLogin)
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		if response, err := http.DefaultClient.Do(request); err == nil {
+			_ = response.Body.Close()
+		}
+	}()
+	held := sends.next(t, 30*time.Second, "the send of POST "+path)
+	cancel()
+	select {
+	case <-returned:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("POST %s did not return within 10s of its cancellation", path)
+	}
+	select {
+	case <-held.gone:
+	case <-time.After(cancelGrace):
+	}
+	sends.Release()
+	return held.subject
+}
+
+// A request cut off after its commit - a closed tab, a front door's pod roll - must not take the
+// send it was making with it: the direct message and the mention each reach their session once
+// and read sent, with no Retry. The resume loop is an hour out, so nothing but the request's own
+// send can deliver them.
+func TestASendWhoseRequestIsCancelledAfterItsCommitReachesItsRecipient(t *testing.T) {
+	listener := startFakeListener(t, resumeSession)
+	pair := startPair(t, listener.processEnv(time.Hour))
+	project := uniqueProjectKey(t, "CNL")
+	pair.a.createProject(t, project, "Cancelled requests")
+	issue, _ := pair.a.createIssueIn(t, project, "Mentioned, then cut off", "spec")
+
+	direct := cancelOnceHeld(t, pair.a, listener, "/api/v1/agents/"+resumeSession.SessionID+"/messages",
+		`{"body":"Cut off after its commit","delivery":"steer"}`)
+	mention := cancelOnceHeld(t, pair.a, listener, "/api/v1/issues/"+issue+"/comments",
+		fmt.Sprintf(`{"body":"A mention cut off after its commit","mentions":[{"target":"session:%s"}]}`, resumeSession.SessionID))
+	requireDeliveredOnce(t, pair, listener, 15*time.Second,
+		messageDelivery("the direct message", direct),
+		mentionDelivery("the mention", mention),
+	)
 }
