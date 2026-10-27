@@ -130,6 +130,13 @@ type cachedToken struct {
 	expires time.Time
 }
 
+// mintedToken is what the client remembers of a token it minted: the installation that scopes
+// the token's calls, until GitHub's expiry for it.
+type mintedToken struct {
+	installation int64
+	expires      time.Time
+}
+
 // ttlCache is a small time-bounded cache keyed by K, shared by ListInstallations (one fixed key),
 // ListInstallationRepositoriesByID (one key per installation id) and RepositoryToken (one key per
 // "owner/repo"). A singleflight.Group collapses concurrent cold-cache fetches for the same key
@@ -247,9 +254,13 @@ type Client struct {
 	// token is valid at once; storing tokens in the database would put live credentials in Postgres
 	// and its backups.
 	tokens map[int64]cachedToken
-	// installationOf maps each token in tokens to its installation, so a call made with a token is
-	// made under that installation's scope (tokenScope).
-	installationOf map[string]int64
+	// installationOf maps each token this client minted to its installation and expiry, so a call
+	// made with a token is made under that installation's scope (tokenScope). A token keeps its
+	// entry until it expires, not only while it is the cached one: a caller that took it before
+	// the next mint replaced it in tokens (a long sync, or a concurrent first mint) still holds a
+	// token GitHub budgets under that installation. Each mint removes the expired entries, so the
+	// map holds no more than the tokens still valid.
+	installationOf map[string]mintedToken
 	// repositories caches the installation that covers each "owner/repo", for RepositoryToken, for
 	// installationsCacheTTL: an App moved to another installation is found within that, whatever
 	// the old installation still answers. A token that cannot be minted drops the entry at once.
@@ -296,7 +307,7 @@ func New(app *auth.AppConfig, base string, options ...Option) (*Client, error) {
 		http:           &http.Client{},
 		now:            time.Now,
 		tokens:         map[int64]cachedToken{},
-		installationOf: map[string]int64{},
+		installationOf: map[string]mintedToken{},
 	}
 	for _, option := range options {
 		option(c)
@@ -614,11 +625,14 @@ func (c *Client) Token(ctx context.Context, installationID int64) (string, error
 		return "", fmt.Errorf("decode installation token: %w", err)
 	}
 	c.mu.Lock()
-	if previous, ok := c.tokens[installationID]; ok {
-		delete(c.installationOf, previous.token)
+	now := c.now()
+	for token, minted := range c.installationOf {
+		if !now.Before(minted.expires) {
+			delete(c.installationOf, token)
+		}
 	}
 	c.tokens[installationID] = cachedToken{token: payload.Token, expires: payload.ExpiresAt}
-	c.installationOf[payload.Token] = installationID
+	c.installationOf[payload.Token] = mintedToken{installation: installationID, expires: payload.ExpiresAt}
 	c.mu.Unlock()
 	return payload.Token, nil
 }
@@ -654,12 +668,13 @@ func (c *Client) CheckSource(ctx context.Context, owner, repo string) (Source, e
 }
 
 // tokenScope is the scope of a call made with token: its installation's when this client minted
-// it. A token this client did not mint is under no shared limit, since nothing says whose it is.
+// it, until the next mint after its expiry forgets it. A token this client did not mint is under
+// no shared limit, since nothing says whose it is.
 func (c *Client) tokenScope(token string) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if id, ok := c.installationOf[token]; ok {
-		return installationScope(id)
+	if minted, ok := c.installationOf[token]; ok {
+		return installationScope(minted.installation)
 	}
 	return ""
 }
