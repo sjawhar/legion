@@ -2,48 +2,36 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-560",
-  "completed": "2026-10-27T08:25:42Z",
-  "round": 3,
+  "completed": "2026-10-27T09:10:01Z",
+  "round": 4,
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surfaces independently at code head c40c8634 (head 25f958aa adds only the handoff). The rendered Role grants exactly get and patch on Secret example-dispatch-tailnet-tls. The front-door pod has automountServiceAccountToken false and one projected volume (serviceAccountToken 3607 s, kube-root-ca.crt ca.crt, namespace) mounted read-only at /var/run/secrets/kubernetes.io/serviceaccount in cert-publish alone. Running the whole rendered cert-publish, it exits 1 with one 'the claim gate (pid N) has exited' line after its gate is killed, and keeps running while the gate lives. The exit comes on the publish loop's next pass, which is up to about 60 s in real time, not the 'within 30 s' the proof states (see observations). The script tests (`go test ./gcp/ -run 'TestDispatchCertificateBudget|TestDispatchCert|TailnetService|FrontDoor'`) pass: 45 tests, 0 fail."
+    "how": "At code head 6f5055a0 (head 6151bc54 adds only the handoff), I ran the rendered advertiser and cert-publish, each as PID 1 of its own PID namespace. Both exit 0 at once on SIGTERM; the scripts before this round die of the signal (details in proof). TestDispatchCertPublishExitsOnSIGTERM and TestTailnetServiceAdvertiserExitsOnSIGTERM pass at the head. Each turns red under the mutation it names: no trap gives 'signal: terminated', and a foreground `sleep 60` in cert-publish gives 'still runs 5s after SIGTERM'. tailnet_service.go and tailnet_service_test.go are byte-identical (sha256) to INFRA-549's 8bf4bfe7 and to legion/INFRA-549@origin."
   },
   "failed": 0,
   "failures": [],
-  "changedSince": "Round 2 tested code head d0e63dd3. Round 3 changes the front door (token projection, Role verbs, the gate-death exit, the shared script helpers), docs, conn_age_test.go and go.work.sum. The server's and listener's non-test code is unchanged, so their round 2 live run at d0e63dd3 stands, and the changed surfaces were tested again.",
+  "changedSince": "Round 3 tested code head c40c8634. Round 4 changes only the advertiser's and cert-publish's script text (SIGTERM traps, sleeps under wait), their tests and README wording. The rendered front-door pod spec is identical apart from container args (jq diff with .spec.containers[].args removed), so round 3's preview, schema validation and claim-gate runs stand for everything else.",
   "proof": [
     {
-      "criterion": "The component exposes its inputs and renders the hardened front door; refusals name the input through the operator's tool",
-      "surface": "pulumi preview, Pulumi CLI v3.268.0, of a Pulumi YAML program that uses envoy-infra:gcp:Dispatch from the plugin rebuilt at the head, with the gcp provider's resourceManager, cloudBilling and compute endpoints pointed at a local stub",
-      "command": "cd $TMPDIR/t560/prog && pulumi preview --non-interactive --json (replicas 3/3/2, budgets 2/2/1, priorityClassName example-priority, databaseAvailabilityType REGIONAL, tailnetService svc:example-dispatch)",
-      "observed": "exit 0: create 44, read 1. Role example-dispatch-tailnet-tls has verbs [get, patch], and Deployment example-dispatch-tailnet has automountServiceAccountToken false",
-      "headSha": "c40c8634e0280ba1d7ec2e7ad7cbb8b5e40a8351",
-      "negativeControl": "tailnetService svc:secret-other-name gives exit 1 'tailnetService must be svc:example-dispatch … (not echoed)', and the value appears 0 times in the output"
+      "criterion": "Every front-door container exits when the kubelet sends SIGTERM, so a replaced pod stops when its containers do, not at the 60 s grace period's SIGKILL (review round 2's important finding)",
+      "surface": "the advertiser and cert-publish scripts rendered in testdata/dispatch-tailnet-pod.golden (paths rewritten to temp dirs, a stub tailscale on PATH), each run as PID 1 of its own PID namespace (`unshare -Urpf --mount-proc`) under dash and under busybox sh 1.35, with SIGTERM sent from the parent namespace 3 s in",
+      "command": "cd $TMPDIR/t560/r4 && python3 pid1b.py <dash | busybox sh> $PWD/<head|before>-<advertiser|cert-publish>.sh 3",
+      "observed": "head-cert-publish: exited 0.00 s after SIGTERM, rc=0 (dash and busybox). head-advertiser: exited 0.00 s, rc=0 (dash and busybox). Both were inside a wait at the time (cert-publish in its 60 s publishing sleep), and neither left a process behind",
+      "headSha": "6f5055a0",
+      "negativeControl": "the same scripts rendered at c40c8634 (before the fix): rc=-15, killed by the default action because there is no handler, under both shells. On this gVisor host the signal reaches a PID 1 that has no handler; on Linux a container's PID 1 with no handler drops a signal sent from the host (pid_namespaces(7)). So rc 0 against rc -15 is the observable difference between a handler and none. The kernel drop itself cannot be reproduced here: gVisor delivers the signal and exposes no SigCgt in /proc/<pid>/status"
     },
     {
-      "criterion": "Every rendered Kubernetes object is valid; only the front door and its Role changed this round",
-      "surface": "every Kubernetes object the component registers (dumped from the mock engine at default and scaled inputs), validated against Kubernetes 1.34.1's strict schemas",
-      "command": "kubeconform -strict -summary -kubernetes-version 1.34.1 -ignore-missing-schemas man3-default/kubernetes_*.json man3-scaled/kubernetes_*.json",
-      "observed": "43 resources: 41 valid, 0 invalid, 2 skipped (SecretProviderClass CRD). Against round 2's dump, only Deployment example-dispatch-tailnet and Role example-dispatch-tailnet-tls differ. In the front-door pod only cert-publish mounts the token; tailscale, advertiser and cert-seed mount none. containerboot needs no token with TS_KUBE_SECRET=\"\": tailscale.com v1.104.1 cmd/containerboot/settings.go:114-122 keeps the explicit empty value, and main.go:461 builds no kube client then",
-      "headSha": "c40c8634e0280ba1d7ec2e7ad7cbb8b5e40a8351",
-      "negativeControl": "an app Deployment with topologySpreadConstraints[0].minDomainz and livenessProbe.periodSeconds 'ten' is reported invalid"
-    },
-    {
-      "criterion": "Spec item 1: certificates come from the stored Secret under the 3-per-7-days claim budget; the gate keeps deciding whatever the ledger holds, and its death restarts the container",
-      "surface": "the rendered cert-publish (gate and publish loop, run whole), cert-seed, advertiser and preStop, under dash and busybox sh, against an HTTPS stand-in Secret API that answers PartialObjectMetadata and returns 409 on a resourceVersion mismatch",
-      "command": "cd $TMPDIR/t560/GateScriptRound3 && python3 drive.py; python3 pub.py; python3 death.py <shell> <scenario>; python3 advsmoke.py",
-      "observed": "Gate: a two-pod race for the last claim gave exactly one 200 and one 409 in 10 of 10 trials. Exhausted budget, the 7-day window, own-claim reuse, the 30-day registry, cached and published certificates (copycert byte-identical, modes 0644/0600), SAN mismatches, API errors, malformed epochs and decoy keys all behave per contract. All 228 requests carried the pod's own Bearer token. Publish loop and cert-seed: 71 of 71 pass. With the gate killed, cert-publish exits rc=1 with one line naming the gate. With the API answering 500, refusing connections, or never completing TLS for 70 s, cert-publish stays up and advertises once the API returns",
-      "headSha": "c40c8634e0280ba1d7ec2e7ad7cbb8b5e40a8351",
-      "negativeControl": "the stand-in served a lookalike CA not signed by the projected ca.crt: the gate logged 'the claim ledger could not be read', set no flag, and no request reached the server"
+      "criterion": "The tests pin the fix",
+      "surface": "the repository's own SIGTERM tests, run against the head and against two temporary mutations of the head (each reverted with jj restore)",
+      "command": "cd packages/envoy/infra && go test ./gcp/ -run 'TestDispatchCertPublishExitsOnSIGTERM|TestTailnetServiceAdvertiserExitsOnSIGTERM' -count=1 -v",
+      "observed": "At the head both PASS (0.08 s each). With cert-publish's trap removed: 'cert-publish was killed by SIGTERM rather than exiting on it … signal: terminated'. With its `sleep 60 & wait` turned back into `sleep 60`: 'cert-publish still runs 5s after SIGTERM, held by its sleep'. With the advertiser's trap removed: FAIL 'signal: terminated'",
+      "headSha": "6f5055a0",
+      "negativeControl": "the three mutations above, each red"
     }
   ],
   "observations": [
-    "Proof wording only: the implementer's proof says cert-publish exits 'within 30 s' of its gate dying. The loop checks `kill -0` once per pass and each pass ends with `sleep 60`, so the measured exit was 57.5-59.0 s after the gate died (5.6 s when the gate died just before a check). The code comment ('the next pass says so') is accurate. TestDispatchCertPublishExitsWhenTheClaimGateDies shortens the sleep, so it does not measure real time.",
-    "PR body staleness: the 'Look at first' line still says the move runbook 'does not yet grant tailnet clients access to svc:<hostname>', but README.md:173-179 and :726-733 now give the grant and the tcp:443 port.",
-    "Hand edit only, as in rounds 1 and 2: a claims value that uses a JSON tab or newline as a separator, or holds an escaped quote before its last entry, is undercounted, so a pod can take a claim that is already spent.",
-    "Self-healing: when the cache holds a certificate later than the Secret's, the publish loop's data PATCH can move the resourceVersion between the gate's GET and its PATCH, so the gate's first PATCH gets 409 and advertising waits 30 s (2 of 10 full runs).",
-    "[INFERENCE] kube() calls curl with no --max-time, so an API connection that never answers after the handshake could hold the gate in one pass while `kill -0` still sees it alive. The API server's own request timeout normally bounds this; not exercised.",
-    "Running go build or go test in packages/envoy/infra at this head rewrites packages/envoy/infra/go.work.sum (restored here). CI's envoy-infra-go lane will show whether that matters.",
-    "CI at 25f958aa was queued when read (2026-10-27T08:25Z): build, changes, lint, test, typecheck. Not settled; the reviewer reads it."
+    "kube() still runs curl with no --max-time. The architect left that out of this round (implement.json deviations); round 3's note stands.",
+    "Hand-edited ledgers, unchanged from rounds 1-3: a JSON tab, newline or escaped quote between claim entries is undercounted.",
+    "CI at 6151bc54 was queued when read (2026-10-27T09:10Z: build, changes, lint, test, typecheck). CI has not settled on any head of this PR since 07:11Z, and the repository shows 16 queued and 4 pending runs among its 30 most recent, which looks like a shared runner backlog. The reviewer reads CI before approving."
   ]
 }
