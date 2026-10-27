@@ -51,6 +51,16 @@ const natsConnections: {
 let natsSubscribeObserver: ((subject: string) => void) | undefined;
 /** A connect for a connection name calls its gate, when a test sets one, and waits on it. */
 const natsConnectGates = new Map<string, () => Promise<void>>();
+/**
+ * Every callback a fixture context's `setTimeout` was handed, in order, until a test runs them
+ * (`runScheduledTimeouts`); cleared afterEach. The host runs them on its own managed timer; a test
+ * runs them when it chooses, with no clock involved.
+ */
+const scheduledTimeouts: (() => void | Promise<void>)[] = [];
+/** Runs, in order, every callback a fixture context's `setTimeout` was handed so far. */
+async function runScheduledTimeouts(): Promise<void> {
+  for (const callback of scheduledTimeouts.splice(0)) await callback();
+}
 // @legion/envoy-client/nats-auth resolves the NATS credential with the real nkey exports.
 const { nkeyAuthenticator, nkeys } = await import("nats");
 mock.module("nats", () => ({
@@ -244,6 +254,7 @@ afterEach(async () => {
   natsConnections.splice(0);
   natsSubscribeObserver = undefined;
   natsConnectGates.clear();
+  scheduledTimeouts.splice(0);
   setLegionBootstrapExitForTests((code) => process.exit(code) as never);
   delete (globalThis as Record<symbol, unknown>)[LEGACY_LEGION_LOADED_KEY];
   testAgentRoster().splice(0);
@@ -445,7 +456,9 @@ function sessionContext(
       ...(title === undefined ? {} : hostTitleReader(title)),
     },
     setInterval: () => undefined,
-    setTimeout: () => undefined,
+    setTimeout: (callback) => {
+      scheduledTimeouts.push(callback);
+    },
     ui: { notify: () => undefined },
   };
 }
@@ -3078,7 +3091,9 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
   // A re-claim after a session change registers the new session before it claims the role, so a
   // role claim refused there leaves that session registered: the warning says its `legion` tool
   // still mints, and the next navigation, though it changes nothing, claims again, since the last
-  // claim did not finish.
+  // claim did not finish. The warning comes from the context's timer once the handler has
+  // returned: Oh My Pi's `/new` resets the transcript after its session_switch handlers return,
+  // which would wipe a notice shown while the handler ran.
   test("a re-claim after a session change refused at the role claim warns that the session keeps its registration, and the next navigation claims again", async () => {
     let refuseRole = false;
     const controller = await launchedController({
@@ -3100,6 +3115,8 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     refuseRole = true;
     await controller.handlers.get("session_switch")?.({}, after);
 
+    expect(notices).toEqual([]);
+    await runScheduledTimeouts();
     expect(notices).toEqual([
       {
         message:
@@ -3116,6 +3133,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
 
     refuseRole = false;
     await controller.handlers.get("session_tree")?.({}, after);
+    await runScheduledTimeouts();
 
     expect(registrations()).toHaveLength(3);
     expect(controller.holder()).toBe("ses_controller_reclaim_after");
@@ -3128,7 +3146,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
   // A re-claim refused at its registration (a later `legion controller start` revoked the
   // capability) registered nothing, though the session id is still the one the last claim
   // registered: the warning says the session has no controller grant, not that it keeps a
-  // registration.
+  // registration. It too comes from the context's timer once the handler has returned.
   test("a re-claim refused at its registration warns without saying the session keeps its registration, even for the session last registered", async () => {
     let refuseRegister = false;
     const controller = await launchedController({
@@ -3152,6 +3170,8 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     refuseRegister = true;
     await controller.handlers.get("session_tree")?.({}, moved);
 
+    expect(notices).toEqual([]);
+    await runScheduledTimeouts();
     expect(notices).toEqual([
       {
         message:
@@ -3183,9 +3203,12 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
   // A `/new` while the command's claim runs: the claim registered the replaced session, and the
   // start message sent there would mark a session Envoy holds no role claim for, the role claim
   // for it would fail, and the warning would say the start message was sent. The claim stops at its
-  // registration instead, sending nothing, and the session change's re-claim registers the new
-  // session and sends the one start message there, marking it.
-  test("a /new during the start command's claim sends nothing from that claim, and the session change's re-claim registers the new session and sends the one start message there", async () => {
+  // registration instead, sending nothing and saying nothing, and the session change's re-claim
+  // registers the new session, sends the one start message there, marking it, and says the claim
+  // moved to the new session. It says so from the context's timer once its handler has returned:
+  // Oh My Pi's `/new` resets the transcript after its session_switch handlers return, which wipes
+  // a notice shown before (the start claim ends while the handler still waits behind it).
+  test("a /new during the start command's claim sends nothing from that claim, and the session change's re-claim registers the new session, sends the one start message there, and says so once its handler has returned", async () => {
     const before = "ses_controller_before_new";
     const after = "ses_controller_after_new";
     const message = "Legion controller start: follow skill://legion-controller";
@@ -3228,15 +3251,24 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     const { value: notices, errors } = await started;
     await switched;
 
-    expect(notices).toEqual([
+    expect(notices).toEqual([]);
+    expect(errors).toEqual([]);
+    expect(switchNotices).toEqual([]);
+    await runScheduledTimeouts();
+    // The re-claim's wait notice is there only when the start claim was still in flight as the
+    // handler reached the re-claim, which the released registration races; the rest is fixed.
+    expect(
+      switchNotices.filter(
+        (notice) =>
+          notice.message !== "legion: waiting for the controller claim already running to finish."
+      )
+    ).toEqual([
       {
         message:
           "legion: the session changed while the controller claim ran; the claim for the new session follows and sends the start message there.",
         level: "info",
       },
     ]);
-    expect(errors).toEqual([]);
-    expect(switchNotices.filter((notice) => notice.level === "warning")).toEqual([]);
     // The start claim registered the replaced session and sent nothing; the re-claim registered
     // the new one, then sent the start message into it.
     expect(sentAtRegister).toEqual([

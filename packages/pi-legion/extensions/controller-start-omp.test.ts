@@ -133,8 +133,11 @@ interface ControllerSession {
 
 /** What a case's stand-in does beyond answering the controller's claim. */
 interface StandinHooks {
-  /** The daemon's answer to the controller's registration, in place of the fixture's. */
-  readonly register?: () => Response;
+  /**
+   * The daemon's answer to the controller's registration (its request body given), in place of
+   * the fixture's; a promise holds the registration until it settles.
+   */
+  readonly register?: (body: Record<string, unknown>) => Response | Promise<Response>;
   /**
    * Called with the claiming session's id once the stand-in has answered the controller role's
    * claim (`/v1/roles/set` for `legion-legion-controller`): the next turn of its event loop, after
@@ -147,6 +150,8 @@ interface StandinHooks {
    * controller topic's NATS subscription (`subscribeNotice`).
    */
   readonly onNoticeInterest?: (sid: string) => void;
+  /** Called with the session id each Envoy listener request names, as it arrives. */
+  readonly onListener?: (sid: string) => void;
 }
 
 /**
@@ -200,7 +205,7 @@ async function startController(hooks: StandinHooks = {}): Promise<ControllerSess
     if (url.pathname.startsWith("/anthropic/")) return Response.json({ data: [] });
     if (url.pathname === "/legion/v1/state") return Response.json(daemonState);
     if (url.pathname === "/legion/v1/claims/register") {
-      return hooks.register?.() ?? Response.json(registered);
+      return hooks.register?.(body) ?? Response.json(registered);
     }
     if (url.pathname === "/legion/v1/grants") {
       grants += 1;
@@ -217,6 +222,7 @@ async function startController(hooks: StandinHooks = {}): Promise<ControllerSess
     // The Envoy listener: the role claim records its holder, the role read names it, and
     // registration and any other read answer with an interest.
     const sid = typeof body.session_id === "string" ? body.session_id : "";
+    hooks.onListener?.(sid);
     if (url.pathname === "/v1/roles/set") {
       if (body.role === registered.claimToken && roleHolder === "") {
         setImmediate(() => hooks.onRoleClaim?.(sid));
@@ -699,6 +705,91 @@ test.skipIf(skip)(
       "re-claiming the controller for this session failed",
       "capability revoked"
     );
+  },
+  120_000
+);
+
+// A `/new` typed while the start command's claim is in flight stops that claim at its
+// registration, and the session change's re-claim registers the new session and sends the start
+// message there, saying so in an info notice (`reclaimAfterSessionChange`). That claim ends while
+// the `/new`'s session_switch handler still waits behind it, before Oh My Pi resets the transcript
+// and clears the scrollback (command-controller.ts `#runNewSessionFlow` in the pinned build), so a
+// notice it showed was wiped; the re-claim shows it once the `/new` has redrawn the screen. The
+// first registration is held until the new session exists: Envoy's own session_switch handler,
+// which runs before pi-legion's, names it to the listener.
+test.skipIf(skip)(
+  "the operator sees the hand-over notice after a /new during the start claim",
+  async () => {
+    const fixture: unknown = JSON.parse(
+      await readFile(
+        path.resolve(
+          import.meta.dir,
+          "../../contracts/fixtures/daemon-api/register-controller.json"
+        ),
+        "utf8"
+      )
+    );
+    const registrations: Record<string, unknown>[] = [];
+    const held = Promise.withResolvers<void>();
+    let firstSession: string | undefined;
+    let newSession: string | undefined;
+    const session = await startController({
+      register: async (body) => {
+        registrations.push(body);
+        if (registrations.length === 1) await held.promise;
+        return Response.json(fixture);
+      },
+      onListener: (sid) => {
+        if (firstSession !== undefined && sid !== "" && sid !== firstSession) newSession ??= sid;
+      },
+    });
+    const first = await session.until("the start claim's registration", () => registrations[0]);
+    firstSession = String(first.sessionId);
+
+    session.terminal.write("/new");
+    await session.shows("/new in the composer", "/new");
+    session.terminal.write("\r");
+    const switched = await session.until("the new session's listener request", () => newSession);
+    held.resolve();
+    await session.shows(
+      "the hand-over notice on screen after the /new's reset",
+      "New session started",
+      "the session changed while the controller claim ran"
+    );
+
+    const start = await session.nextTurn("the start turn's model request");
+    const reclaimed = await session.until("the re-claim's registration", () => registrations[1]);
+    expect(reclaimed.sessionId).toBe(switched);
+    const messages = Array.isArray(start.request.body.messages) ? start.request.body.messages : [];
+    expect(messages).toHaveLength(1);
+    expect(lastMessage(start.request)).toContain(START_MESSAGE_JSON);
+    start.reply("Start procedure done.");
+    await session.shows("the start turn's reply", "Start procedure done.");
+
+    // The start message is the new session's first user message, and the replaced session has none.
+    const [replacedUsers, newUsers] = await session.until(
+      "the new session's transcript to hold the start message",
+      async () => {
+        const users = await Promise.all(
+          [first.ompSessionFile, reclaimed.ompSessionFile].map(async (file) =>
+            (await readFile(String(file), "utf8"))
+              .split("\n")
+              .filter(Boolean)
+              .flatMap((line) => {
+                const entry = MessageEntrySchema.safeParse(JSON.parse(line));
+                return entry.success && entry.data.message.role === "user"
+                  ? [JSON.stringify(entry.data)]
+                  : [];
+              })
+          )
+        );
+        return (users[1]?.length ?? 0) > 0 ? users : undefined;
+      }
+    );
+    expect(newUsers?.[0]).toContain(START_MESSAGE_JSON);
+    expect(newUsers?.filter((entry) => entry.includes(START_MESSAGE_JSON))).toHaveLength(1);
+    expect(replacedUsers).toEqual([]);
+    expect(session.turns).toHaveLength(1);
   },
   120_000
 );
