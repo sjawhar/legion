@@ -2,33 +2,31 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-528",
-  "completed": "2026-10-27T07:37:00Z",
-  "testedHead": "8c37d5bfb494160b1df58bb84fdb045183ad3132 (code head 25fba83e57509f251052e760cb2e60370da6baa9, merge of main b08a56bc)",
-  "rebaseCheck": "Fingerprint (conflicts-and-rewrites.md, fileset '~(.legion | docs/solutions)') at my last verified head 04728453: 0bbefab27a0501b849ab88ad807e7f2207de35a14b230606fed64b2421a3995a; at 8c37d5bf: 314ca169ce859c13fe5f179c9a4ab8555ac5ac62b31e16d043ef1e1f457f1918. Changed, so a full round. The two diffs differ only in two lines of packages/proof-editor/AGENTS.md (the legion-own file count, 'Eleven' over main's 'Nine' before and 'Twelve' over main's 'Ten' now, and the file list that now also names main's read-only-directives.ts). No code line differs. Main's #2303 (INFRA-529) makes the shared parser read-only, so unknown directives draw as text. That change reaches the parse the open-fence probe re-runs, so this round drives the two together.",
+  "completed": "2026-10-27T08:37:00Z",
+  "testedHead": "54d81fe8949d2255384395965a6a61d535be93f3 (code head 59dacf3affbab5b0b955708b2932163fcec64dd5)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its two commands on the tester lane after `bun run build:web` at 8c37d5bf: `bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox` -> 32 passed (3.0m), and INFRA-529's `e2e/unknown-directive.e2e.ts --project chromium --project iphone` -> 8 passed (28.6s), both matching its counts."
+    "how": "Drove its lone-CR claims on the same surface independently (my own throwaway e2e, chromium, tester lane, web/dist built at 54d81fe8; the server stores the lone CRs as sent: `\"body\":\"Lead\\r\\r```mermaid\\rgraph TD\\r…\"`), and re-ran its four-project command `bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox` -> 32 passed (2.9m), matching its 32."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "A1, the spec Summary rows and the time limit at the merged head: comment, Inbox ask, message, reply, refusal, too-large refusal with the page responsive, markup label, other-language guard",
+      "criterion": "A1, the spec Summary rows and the time limit: comment, Inbox ask, message, reply, refusal, too-large refusal with the page responsive, markup label, other-language guard",
       "surface": "Dispatch Conversation and Inbox against the real Go Dispatch server and Postgres 17 + pgvector, Desktop Chrome, iPhone 13, WebKit, Firefox",
       "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox",
-      "observed": "32 passed (3.0m)",
-      "headSha": "8c37d5bfb494160b1df58bb84fdb045183ad3132",
+      "observed": "32 passed (2.9m)",
+      "headSha": "54d81fe8949d2255384395965a6a61d535be93f3",
       "negativeControl": "Round 1: the same suite at the red commit ecc18ff3 -> 24 failed, 4 passed (9.1m)."
     },
     {
-      "criterion": "Main's read-only directive parsing (#2303) and the mermaid drawing work together: a diagram inside or after an unknown directive draws, and a fence still open inside an unclosed directive stays code",
+      "criterion": "Review round 3: with lone-CR (and CRLF) line ends, a mermaid fence still open in a quote, list item or directive stays code, and a closed one draws its diagram",
       "surface": "Dispatch Conversation, chromium, real server, throwaway e2e (deleted after the run), one comment per body",
-      "command": "bunx playwright test --config e2e/playwright.config.ts e2e/zz-tester-probe6.e2e.ts --project chromium",
-      "observed": "7/7 as expected, no fallback body, no page error: drawn (1 image) inside `:::note` … `:::`, inside an unclosed `:::note`, after a Pandoc `::: warning` line, after a `::leaf` line, inside `:::note` followed by a link reference definition, and plain. Kept as code (0 images, no refusal): `:::note` then a mermaid fence still open. The directive fences show as text around the diagram, as INFRA-529 draws them.",
-      "headSha": "8c37d5bfb494160b1df58bb84fdb045183ad3132",
-      "negativeControl": "The open fence inside the unclosed directive stays code while the same diagram with its fence closed draws, so the probe's verdict is the parser's and not the directive's."
+      "command": "bunx playwright test --config e2e/playwright.config.ts e2e/zz-tester-probe7.e2e.ts --project chromium",
+      "observed": "13/13 as expected, and none showed a refusal line. Drawn (1 image): lone-CR bodies closed plain, in a quote, in a list item, followed by a link definition, and inside `:::note` … `:::`; CRLF closed in a quote; a fence mixing CRLF, CR and LF. Kept as code (0 images): lone-CR bodies open plain, in a quote, in a list item, inside an unclosed `:::note`; CRLF open in a quote and in a list item.",
+      "headSha": "54d81fe8949d2255384395965a6a61d535be93f3",
+      "negativeControl": "In the same run each open lone-CR fence stays code while its closed twin draws. The implementer's control at 6b9f6b50 (probe fixed, sources not normalized): the closed lone-CR comment showed `Unable to render Mermaid diagram: Invalid mermaid header`, which this head no longer shows."
     }
   ],
-  "notCarriedOver": "Round 4's leave-the-page and edit-during-draw probes were not repeated: mermaid-diagrams.ts and the worker are byte-identical between 04728453 and 8c37d5bf (the fingerprint diff holds only the two AGENTS.md lines).",
-  "ci": "At 25fba83e on GitHub when read (07:35Z): build pending/queued, changes, lint, pr-title, test, typecheck queued; no lane concluded. 8c37d5bf (handoff-only) has no runs."
+  "ci": "At 2b03e5f2 (the first commit with the code at 59dacf3a that GitHub ran) when read (08:35Z): build pending/queued, changes, lint, pr-title, test, typecheck queued; no lane concluded. 54d81fe8 (handoff-only): pr-title only. 59dacf3a has no runs (pushed with the handoff)."
 }
