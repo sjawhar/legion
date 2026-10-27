@@ -2,60 +2,32 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-588",
-  "completed": "2026-10-27T16:16:43Z",
+  "completed": "2026-10-27T17:15:22Z",
+  "round": 2,
   "decision": "changes_requested",
-  "reviewedHead": "87343054557124b8825748b561459551bbaf1fd6",
-  "codeHead": "fa1502d187dd6945f0ff4808b4eb9adb915e7a60",
-  "ci": "Required set lint, typecheck, test, pr-title (rulesets; no branch protection). CI head fa1502d187dd: lint, typecheck, test and pr-title all queued since 15:48Z, no result at 16:16Z; compare fa1502d187dd...87343054 handoffsOnly true (2 files). Not read as green; a request for changes does not wait on it.",
-  "thermonuclear": "deep-review: CHANGES at 87343054 (2 Medium: PRs-read denominator, --fixed error-as-state). code-quality: CHANGES at 87343054 (4 structural items).",
+  "reviewedHead": "3b97183ba27c01df06190f394e659610042bb44f",
+  "codeHead": "ebeda2541e7f82a1285901fb7ac8f9841ca35f97",
+  "ci": "Required lint, typecheck, test, pr-title. CI head ebeda2541e7f: lint, typecheck and test queued since 16:37Z, no result at 17:15Z (repository-wide runner backlog: every branch's runs queued); compare ebeda2541e7f...3b97183b handoffsOnly true (2 files). Not read as green.",
+  "thermonuclear": "deep-review: APPROVE at 3b97183b (round-1 findings fixed; 3 Minor). code-quality: CHANGES at 3b97183b (3 structural refinements, judged not defects in the review body).",
+  "round1Verified": "All 9 round-1 threads fixed, verified at 3b97183b (missing-parent records now exit 1; P1 byte-identical to round 0; 35 tests pass, biome and tsc clean) and answered as accepted.",
   "critical": 0,
-  "important": 3,
-  "minor": 6,
+  "important": 1,
+  "minor": 2,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "scripts/conflicts/analyse.ts",
-      "description": "classifyFixes (153-155) and analysePullRequest (33, 47-48) read GitRepo.isAncestor's exit 128 (missing object) as 'not an ancestor': reproduced, --from-json --fixed with merge cd3c748767ee's upstream parent unavailable reports before 80 / after 1 instead of 79 / 2, exit 0; live, a parent newer than the clone's fetch turns a forward merge into other-branch."
-    },
-    {
-      "severity": "important",
-      "file": "scripts/conflicts/summary.ts",
-      "description": "PRs read (477, 487, and other at 483) counts every PR updated since `since`, including PRs opened after `until` and PRs merged before `since`; the comparison's shares divide by it. Tester's P2 raw records: #2402-#2406 and #2411, opened after --until with no merge in the window, take the carrying share from 63.5% to 61.2%; an after run made days after its window inflates it more."
-    },
-    {
-      "severity": "important",
-      "file": "scripts/conflicts/summary.ts",
-      "description": "category()'s new .changes/ rule (29), which INFRA-629's changie fragments make decide the after run's changelog tier, has no test; the tester's mutation of it passed the suite."
-    },
-    {
-      "severity": "minor",
-      "file": "scripts/conflicts/summary.ts",
-      "description": "The --fixed glob matching rule is implemented twice (classifyFixes and applyFixes) kept in step by conflictingMerges, a runtime throw (378) and a guard test; one place should own it."
-    },
-    {
-      "severity": "minor",
-      "file": "scripts/conflicts/measure.ts",
-      "description": "Options types since/fromJson as both optional, forcing the cast at 145 and nullable git/specs lets in main."
-    },
-    {
-      "severity": "minor",
       "file": "scripts/conflicts/github.ts",
-      "description": "PullRequestSource (43) is an unexported interface with one implementation and no test double."
+      "description": "listPullRequests reads only PRs updated since `since`; a PR open through the window with no update in it is missing from a run made at the window's end but counted by a later run once anything touches it, and the Python before run counted every open PR. The README's claim (65) that a late run counts the same PRs as one made as the window ended does not hold for it. Union the list with the open PRs."
     },
     {
       "severity": "minor",
       "file": "scripts/conflicts/analyse.ts",
-      "description": "The outer if at 28 is redundant with the two checks inside it."
+      "description": "A merge with an unfetchable parent is recorded kind forward (40-53) without an ancestry check; README 15-23 defines forward by ancestry. Say so in the README."
     },
     {
       "severity": "minor",
-      "file": "scripts/conflicts/README.md",
-      "description": "Line 109 says a glob shows zeros when it matched nothing; it also shows zeros when an earlier glob shadows every path it matches."
-    },
-    {
-      "severity": "minor",
-      "file": "scripts/conflicts/__tests__/measure.test.ts",
-      "description": "Line 66 asserts only that stdout is non-empty."
+      "file": "scripts/conflicts/summary.ts",
+      "description": "readRawRun (116-131) does not check createdAt/mergedAt, which existedInWindow now reads; a record without createdAt silently drops out of a selection run."
     }
   ]
 }
