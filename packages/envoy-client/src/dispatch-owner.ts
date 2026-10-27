@@ -1,4 +1,8 @@
-import { dispatchDocumentSubject, dispatchIssueSubject } from "@legion/contracts";
+import {
+  dispatchDocumentSubject,
+  dispatchIssueSubject,
+  parseBlockFragment,
+} from "@legion/contracts";
 
 /**
  * Where an owner's events go and how a session names it: the label agents read in tool
@@ -57,16 +61,66 @@ export type Owner =
 /** A `dispatch://` reference as `parseDispatchRef` reads it. */
 export interface ParsedDispatchRef {
   readonly owner: Owner;
-  readonly kind: "issue" | "spec" | "log" | "children" | "artifact" | "ask" | "comment" | "message";
+  readonly kind:
+    | "issue"
+    | "spec"
+    | "log"
+    | "children"
+    | "artifact"
+    | "block"
+    | "ask"
+    | "comment"
+    | "message";
+  /** The item's id; for a block, the id of its document (`spec` or the slug). */
   readonly id: string;
   readonly version?: number;
-  /** The document slug a project-owned ask or comment ref names. */
+  /** The document slug a project-owned ask, comment or block ref names. */
   readonly artifact?: string;
+  /** The id of the block a block ref names, decoded. */
+  readonly block?: string;
+  /** The reference of the document a block ref names a block of. */
+  readonly document?: string;
+  /** The version of its document a pinned block ref (`#b-<id>@v<N>`) names: N's decimal digits as
+   *  written (`parseBlockFragment`), which a number past 2^53 would round. */
+  readonly pin?: string;
 }
 
-/** `ref` as the issue or project item it names, or null for text that is no such reference.
- *  An agent conversation's upload (`dispatch://agent/...`) is `parseAgentArtifactRef`'s. */
+/**
+ * `ref` as the block reference `<document ref>#b-<block id>[@v<N>]` names, or null when it is no
+ * such reference: the fragment as `parseBlockFragment` reads it, and the document an issue's spec
+ * or document, or a project's document, at no version.
+ */
+function parseBlockRef(document: string, fragment: string): ParsedDispatchRef | null {
+  const target = parseBlockFragment(fragment);
+  const parsed = parseDispatchRef(document);
+  if (
+    target === undefined ||
+    parsed === null ||
+    parsed.version !== undefined ||
+    (parsed.kind !== "spec" && parsed.kind !== "artifact")
+  ) {
+    return null;
+  }
+  return {
+    owner: parsed.owner,
+    kind: "block",
+    id: parsed.id,
+    block: target.block,
+    document,
+    ...(parsed.owner.kind === "project" ? { artifact: parsed.id } : {}),
+    ...(target.pin === undefined ? {} : { pin: target.pin }),
+  };
+}
+
+/** `ref` as the issue or project item it names, or null for text that is no such reference. A
+ *  tool argument is a read request, so the server's target bound, which decides only what text
+ *  indexes, is no part of this: a document of any name is read by its own reference. An agent
+ *  conversation's upload (`dispatch://agent/...`) is `parseAgentArtifactRef`'s. */
 export function parseDispatchRef(ref: string): ParsedDispatchRef | null {
+  const hash = ref.indexOf("#");
+  if (hash !== -1 && ref.startsWith("b-", hash + 1)) {
+    return parseBlockRef(ref.slice(0, hash), ref.slice(hash + 3));
+  }
   const projectDocument = ref.match(
     /^dispatch:\/\/([A-Z][A-Z0-9]{1,9})\/artifact\/([^/@]+)(?:@v(\d+))?(?:\/(ask|comment)\/([^/]+))?$/
   );
