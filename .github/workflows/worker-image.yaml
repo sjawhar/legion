@@ -122,9 +122,8 @@ permissions:
 jobs:
   build:
     # workflow_dispatch and a workflow_call from release.yaml (on push or workflow_dispatch) carry
-    # no pull_request and no closed action, so they always build; on a pull request this skips a
-    # draft's head, which `ready_for_review` builds next, and a closed pull request, which merges
-    # nothing more. .github/scripts/check-image-trigger-paths.sh admits these two terms.
+    # no pull_request and no closed action, so they always build.
+    # .github/scripts/check-image-trigger-paths.sh admits these two terms.
     if: ${{ github.event.action != 'closed' && !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     env:

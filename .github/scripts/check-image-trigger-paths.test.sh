@@ -543,7 +543,10 @@ check "always() is read as ungated" "$(is "$status" 0)"
 
 echo "case: an if: this check does not model is refused, never read as ungated"
 shape_index=0
-for shape in "false" "vars.RUN_IT == 'true'" "needs.changes.outputs.img == 'true' && vars.RUN_IT" "needs.changes.outputs.img == 'true' && false"; do
+# The last three are a positive draft test and an == 'closed' test: each is false on push,
+# workflow_call and workflow_dispatch, so it would skip every pinnable build.
+for shape in "false" "vars.RUN_IT == 'true'" "needs.changes.outputs.img == 'true' && vars.RUN_IT" "needs.changes.outputs.img == 'true' && false" \
+  "github.event.pull_request.draft" "github.event.pull_request.draft == true" "github.event.action == 'closed'"; do
   shape_index=$((shape_index + 1))
   root=$(fixture "gate-unmodelled-$shape_index")
   gate_probe "$root" "  docker:
@@ -629,22 +632,6 @@ changes_if "$root" "github.event.pull_request.draft"
 run_check "$root"
 check "a positive draft test on the needed changes job is refused" "$(is "$status" 1)"
 check "  and names that job" "$(contains "$out" 'jobs.changes builds or calls an image, and its if: is narrowed by')"
-
-echo "case: a positive draft test or an == 'closed' test is refused"
-# Each is false on push, workflow_call and workflow_dispatch, so it skips every pinnable build.
-shape_index=0
-for shape in "github.event.pull_request.draft" "github.event.pull_request.draft == true" "github.event.action == 'closed'"; do
-  shape_index=$((shape_index + 1))
-  root=$(fixture "gate-event-refused-$shape_index")
-  gate_probe "$root" "  docker:
-    needs: changes
-    if: $shape
-    runs-on: ubuntu-24.04
-"
-  run_check "$root"
-  check "if: $shape is refused" "$(is "$status" 1)"
-  check "  and quotes the term" "$(contains "$out" 'which this check cannot')"
-done
 
 echo "case: needs.<job>.result is neutral only when it admits 'skipped'"
 # The live shape this guards: envoy-smoke tidied up to reuse envoy-go's setup. always() does not

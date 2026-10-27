@@ -60,8 +60,6 @@ on:
       - "scripts/go-third-party-notices.sh"
       - "scripts/assemble-third-party-notices.sh"
       - ".github/go-release-targets.json"
-  # `closed` runs only to cancel the pull request's runs still waiting or running (the concurrency
-  # comment below); the changes job skips it and a draft's head, so every job skips with it.
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, closed]
     paths:
