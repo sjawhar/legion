@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-612",
+  "completed": "2026-10-27T14:22:04Z",
+  "decision": "changes_requested",
+  "reviewedHead": "1883885a56c0d7cc3459ce3535423454ac9bbf43",
+  "codeHead": "5a2593b2e321",
+  "critical": 0,
+  "important": 1,
+  "minor": 4,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/dispatch/e2e/text-typed-blocks.e2e.ts:205-242",
+      "description": "The new nested-decision case copies the setup of the existing reply case at :144-181 (project, issue, editArtifact insert of #storage, open_asks poll and guard, createComment with ask_id, decision/thread locators). Move the shared setup into one helper, e.g. replyUnderDocumentDecision(browser, title, body) returning { alice, page, thread }, and use it in both cases."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/proof-editor/src/read-only-directives.ts:148-149",
+      "description": "Security[untrusted-input] hardening: clientAttributes returns node.attributes unfiltered when the type is not found. That arm is unreachable today (typedBlockRefusal refuses an unknown name, block-schema.ts:234-235), but it fails open on the one place that drops forged server attributes. Pass the type the refusal check found, or throw, so the drop cannot be skipped silently."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/e2e/text-typed-blocks.e2e.ts:309-311",
+      "description": "The body leg finds the blank option with li:empty, which pins the text path's unwrap of a tight item's <p>. If that unwrap goes, the existing [&_li:has(>p:empty)]:hidden rule still hides the item but toHaveCount(1) fails. Select by position as the document leg does ([data-proof-block-content] > ul > li, count 2, nth(1)) and keep the display none check."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/doc/typed-block-drawing.ts:195",
+      "description": "export type AskBlockStamps has no importer (only :195 and :207); the simplify pass made AskBlockShell and askBlockShell private. Drop the export."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/proof-editor/src/read-only-directives.ts:197-201",
+      "description": "remarkReadOnlyDirectives' doc repeats readOnlyDirective's rationale for the server-attribute drop (:158-162) nearly word for word. Keep it in one place and point to it from the other."
+    }
+  ],
+  "declined": [
+    {
+      "file": "packages/dispatch/web/src/features/refs/useRenderedMarkdown.tsx:54-70",
+      "reason": "Code-quality suggestion to replace the inline paired record with parallel arrays: not a defect. The two passes are what keep 'write only after every shell paired', and the alternative needs index lookups into two arrays."
+    }
+  ],
+  "ci": "Required checks (rulesets): lint, typecheck, test, pr-title. CI head 7a4796cf (compare to 1883885a: handoffsOnly true, 1 file). At 14:20Z every check there was queued behind a repository backlog of 129 queued runs; not read green. The request for changes does not wait on it.",
+  "threads": "0 review threads on the pull request before this review.",
+  "thermonuclear": "Deep review at 1883885a: no finding; forged server attributes dropped at every depth (12-case probe against the real blocks.json engine), no path to a typed block skips readOnlyDirective, CSS (0,5,0) has no side effect. Code quality at 1883885a: 6 findings, 5 accepted above, 1 declined.",
+  "security": "untrusted-input: a body's directive attributes are neutralised at packages/proof-editor/src/read-only-directives.ts:169 (clientAttributes :144-153) after typedBlockRefusal :166; nothing later re-creates them (block-schema.ts:106-121 fills schema defaults, parseDOM skips server attributes block-schema.ts:167-170). agent-def: packages/dispatch/AGENTS.md and packages/proof-editor/AGENTS.md change only file-map descriptions; nothing steers a reviewer."
+}
