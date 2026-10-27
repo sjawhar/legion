@@ -100,35 +100,20 @@ func (w *workflowRuntime) openRecord(ctx context.Context, pr record.PullRequest)
 	return *current, nil
 }
 
-// githubCompare is what GET /compare/{base}...{head} says of the commits from base to head: ahead
-// when head is base with commits on top, and the files they change, a renamed one under both its
-// names, up to compareFilesCap.
-type githubCompare struct {
-	Status string `json:"status"`
-	Files  []struct {
-		Filename         string `json:"filename"`
-		PreviousFilename string `json:"previous_filename"`
-	} `json:"files"`
-}
-
-// compareFilesCap is the most files GitHub lists in a comparison: a list that long may be cut.
-const compareFilesCap = 300
-
 // handoffPush is the intake.Push that took pr's branch from from to to, as the push webhook would
-// have carried it, when GitHub's compare of the two shows to is from with commits on top that
-// change only the issue's own handoffs, .legion/<issue>/ (classify.HandoffPath): followHead's
-// recorded head and GitHub's, or readApprovalCarry's approved head and the recorded one. Every
-// other comparison says why it is not one, and the push is left to its webhook: a path outside
-// the issue's handoffs (code, or another issue's handoffs, which READY refuses as code too), a
-// rewritten history or a head behind from, no file list or a list GitHub may have cut, and a from
-// GitHub does not know. Any other failure of the read is an error. The compare asks for one commit
-// a page: its status and file list cover the whole comparison whatever the page size. The push
-// names no pusher: the pusher decides only a code push's planned mark and whether a push takes
-// back its head's counted attempt, which a handoff-only push takes back whoever pushed it
-// (classify.ApplyPush).
+// have carried it, when GitHub's compare of the two (githubrest.Client.Compare, the compare READY
+// reads) shows to is from with commits on top that change only the issue's own handoffs,
+// .legion/<issue>/ (classify.HandoffPath): followHead's recorded head and GitHub's, or
+// readApprovalCarry's approved head and the recorded one. Every other comparison says why it is not
+// one, and the push is left to its webhook: a path outside the issue's handoffs (code, or another
+// issue's handoffs, which READY refuses as code too), a rewritten history or a head behind from, no
+// file list or a list GitHub may have cut (githubrest.CompareFilesLimit), and a from GitHub does not
+// know. Any other failure of the read is an error. The push names no pusher: the pusher decides
+// only a code push's planned mark and whether a push takes back its head's counted attempt, which a
+// handoff-only push takes back whoever pushed it (classify.ApplyPush).
 func handoffPush(ctx context.Context, github githubrest.Client, pr record.PullRequest, from, to string) (intake.Push, string, error) {
-	var compare githubCompare
-	if err := github.Get(ctx, fmt.Sprintf("/compare/%s...%s?per_page=1", url.PathEscape(from), url.PathEscape(to)), &compare); err != nil {
+	compare, err := github.Compare(ctx, from, to)
+	if err != nil {
 		var answer *githubrest.Answer
 		if errors.As(err, &answer) && answer.Status == http.StatusNotFound {
 			return intake.Push{}, fmt.Sprintf("GitHub does not know %s, or cannot compare it with %s", from, to), nil
@@ -138,21 +123,17 @@ func handoffPush(ctx context.Context, github githubrest.Client, pr record.PullRe
 	switch {
 	case compare.Status != "ahead":
 		return intake.Push{}, fmt.Sprintf("GitHub's compare of %s with %s is %q, so %s is not %s with commits on top", from, to, compare.Status, to, from), nil
-	case len(compare.Files) == 0:
+	case compare.Files == nil:
+		return intake.Push{}, fmt.Sprintf("GitHub's compare of %s with %s answered no file list", from, to), nil
+	case len(*compare.Files) == 0:
 		return intake.Push{}, fmt.Sprintf("GitHub's compare of %s with %s lists no changed file", from, to), nil
-	case len(compare.Files) >= compareFilesCap:
-		return intake.Push{}, fmt.Sprintf("GitHub's compare of %s with %s lists %d changed files, the most it lists, so a path past them is unread", from, to, len(compare.Files)), nil
+	case len(*compare.Files) >= githubrest.CompareFilesLimit:
+		return intake.Push{}, fmt.Sprintf("GitHub's compare of %s with %s lists %d changed files, the most it lists, so a path past them is unread", from, to, len(*compare.Files)), nil
 	}
-	paths := make([]string, 0, len(compare.Files))
-	for _, file := range compare.Files {
-		for _, path := range []string{file.Filename, file.PreviousFilename} {
-			if path == "" {
-				continue
-			}
-			if !classify.HandoffPath(pr.Issue, path) {
-				return intake.Push{}, fmt.Sprintf("%s changed between %s and %s, outside .legion/%s/", path, from, to, pr.Issue), nil
-			}
-			paths = append(paths, path)
+	paths := githubrest.ChangedPaths(*compare.Files)
+	for _, path := range paths {
+		if !classify.HandoffPath(pr.Issue, path) {
+			return intake.Push{}, fmt.Sprintf("%s changed between %s and %s, outside .legion/%s/", path, from, to, pr.Issue), nil
 		}
 	}
 	changed, whole, unforced := strings.Join(paths, "\n"), "false", "false"

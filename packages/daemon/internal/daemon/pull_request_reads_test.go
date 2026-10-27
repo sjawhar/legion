@@ -215,10 +215,10 @@ func TestHandoffPushTakesOnlyAComparisonThatProvesTheCodeUnchanged(t *testing.T)
 		handoff bool
 	}{
 		{"only .legion/ on top of the recorded head", `{"status":"ahead","files":[{"filename":".legion/CAPTURE-1/review.json"}]}`, true},
-		{"the most files GitHub lists in full, all under .legion/", `{"status":"ahead","files":[` + legionFiles(compareFilesCap-1) + `]}`, true},
+		{"the most files GitHub lists in full, all under .legion/", `{"status":"ahead","files":[` + legionFiles(githubrest.CompareFilesLimit-1) + `]}`, true},
 		{"diverged from the recorded head", `{"status":"diverged","files":[{"filename":".legion/CAPTURE-1/review.json"}]}`, false},
 		{"behind the recorded head", `{"status":"behind","files":[{"filename":".legion/CAPTURE-1/review.json"}]}`, false},
-		{"a list GitHub may have cut", `{"status":"ahead","files":[` + legionFiles(compareFilesCap) + `]}`, false},
+		{"a list GitHub may have cut", `{"status":"ahead","files":[` + legionFiles(githubrest.CompareFilesLimit) + `]}`, false},
 		{"a rename into .legion/ from code", `{"status":"ahead","files":[{"filename":".legion/CAPTURE-1/widget.go","previous_filename":"src/widget.go"}]}`, false},
 		{"code changed", `{"status":"ahead","files":[{"filename":"src/widget.go"}]}`, false},
 		{"another issue's handoffs", `{"status":"ahead","files":[{"filename":".legion/CAPTURE-2/review.json"}]}`, false},
