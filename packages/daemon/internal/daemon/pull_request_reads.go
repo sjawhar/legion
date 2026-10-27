@@ -35,12 +35,12 @@ import (
 // the head read here, judging it again, until the next pass moves it forward.
 //
 // Before the synchronize it applies the push that reached the new head when GitHub shows it
-// changed only .legion/ (handoffPush): the push webhook waits in the same backlog, and without it a
-// reviewer's approval followed by its handoff push would read as not covering the head
-// (classify.ApprovalStands), a round stuck for nothing. A push that may change code is left to its
-// webhook, as when a synchronize beats its push: a code head with no known push is judged as such,
-// and the push's own handler settles what only the pusher decides (classify.ApplyPush's planned
-// mark and take-back).
+// changed only the issue's own .legion/<issue>/ (handoffPush): the push webhook waits in the same
+// backlog, and without it a reviewer's approval followed by its handoff push would read as not
+// covering the head (classify.ApprovalStands), a round stuck for nothing. A push that may change
+// code is left to its webhook, as when a synchronize beats its push: a code head with no known push
+// is judged as such, and the push's own handler settles what only the pusher decides
+// (classify.ApplyPush's planned mark and take-back).
 //
 // It returns the record as the pass goes on with it: as it stands when the head did not move, and
 // otherwise as the synchronize left it, so the mergeability, review and required-check reads after
@@ -56,7 +56,8 @@ func (w *workflowRuntime) followHead(ctx context.Context, github githubrest.Clie
 	}
 	pr = current
 	read, cancel := context.WithTimeout(ctx, requiredChecksRead)
-	push, handoff, err := handoffPush(read, github, pr, pull.Head.SHA)
+	push, notHandoff, err := handoffPush(read, github, pr, pr.HeadSHA, pull.Head.SHA)
+	handoff := notHandoff == ""
 	cancel()
 	if err != nil {
 		return pr, err
@@ -108,37 +109,49 @@ type githubCompare struct {
 // compareFilesCap is the most files GitHub lists in a comparison: a list that long may be cut.
 const compareFilesCap = 300
 
-// handoffPush is the intake.Push that took pr from its recorded head to head, and true, when GitHub
-// shows head is the recorded head with commits on top that change only .legion/
-// (classify.ClassifyPush), as the push webhook would have carried it. Every other comparison - one
-// that changes code, a rewritten history, a list GitHub may have cut, or a recorded head GitHub no
-// longer has - is false, and the push is left to its webhook. The push names no pusher: the pusher
-// decides only a code push's planned mark and whether a push takes back its head's counted attempt,
-// which a handoff-only push takes back whoever pushed it (classify.ApplyPush).
-func handoffPush(ctx context.Context, github githubrest.Client, pr record.PullRequest, head string) (intake.Push, bool, error) {
+// handoffPush is the intake.Push that took pr's branch from from to to, as the push webhook would
+// have carried it, when GitHub's compare of the two shows to is from with commits on top that
+// change only the issue's own handoffs, .legion/<issue>/ (classify.HandoffPath): followHead's
+// recorded head and GitHub's, or readApprovalCarry's approved head and the recorded one. Every
+// other comparison says why it is not one, and the push is left to its webhook: a path outside
+// the issue's handoffs (code, or another issue's handoffs, which READY refuses as code too), a
+// rewritten history or a head behind from, no file list or a list GitHub may have cut, and a from
+// GitHub does not know. Any other failure of the read is an error. The compare asks for one commit
+// a page: its status and file list cover the whole comparison whatever the page size. The push
+// names no pusher: the pusher decides only a code push's planned mark and whether a push takes
+// back its head's counted attempt, which a handoff-only push takes back whoever pushed it
+// (classify.ApplyPush).
+func handoffPush(ctx context.Context, github githubrest.Client, pr record.PullRequest, from, to string) (intake.Push, string, error) {
 	var compare githubCompare
-	if err := github.Get(ctx, fmt.Sprintf("/compare/%s...%s", url.PathEscape(pr.HeadSHA), url.PathEscape(head)), &compare); err != nil {
+	if err := github.Get(ctx, fmt.Sprintf("/compare/%s...%s?per_page=1", url.PathEscape(from), url.PathEscape(to)), &compare); err != nil {
 		var answer *githubrest.Answer
 		if errors.As(err, &answer) && answer.Status == http.StatusNotFound {
-			return intake.Push{}, false, nil
+			return intake.Push{}, fmt.Sprintf("GitHub does not know %s, or cannot compare it with %s", from, to), nil
 		}
-		return intake.Push{}, false, fmt.Errorf("compare %s with %s: %w", pr.HeadSHA, head, err)
+		return intake.Push{}, "", fmt.Errorf("compare %s with %s: %w", from, to, err)
 	}
-	if compare.Status != "ahead" || len(compare.Files) == 0 || len(compare.Files) >= compareFilesCap {
-		return intake.Push{}, false, nil
+	switch {
+	case compare.Status != "ahead":
+		return intake.Push{}, fmt.Sprintf("GitHub's compare of %s with %s is %q, so %s is not %s with commits on top", from, to, compare.Status, to, from), nil
+	case len(compare.Files) == 0:
+		return intake.Push{}, fmt.Sprintf("GitHub's compare of %s with %s lists no changed file", from, to), nil
+	case len(compare.Files) >= compareFilesCap:
+		return intake.Push{}, fmt.Sprintf("GitHub's compare of %s with %s lists %d changed files, the most it lists, so a path past them is unread", from, to, len(compare.Files)), nil
 	}
 	paths := make([]string, 0, len(compare.Files))
 	for _, file := range compare.Files {
-		paths = append(paths, file.Filename)
-		if file.PreviousFilename != "" {
-			paths = append(paths, file.PreviousFilename)
+		for _, path := range []string{file.Filename, file.PreviousFilename} {
+			if path == "" {
+				continue
+			}
+			if !classify.HandoffPath(pr.Issue, path) {
+				return intake.Push{}, fmt.Sprintf("%s changed between %s and %s, outside .legion/%s/", path, from, to, pr.Issue), nil
+			}
+			paths = append(paths, path)
 		}
 	}
 	changed, whole, unforced := strings.Join(paths, "\n"), "false", "false"
-	if !classify.ClassifyPush(classify.PushPayload{ChangedPaths: &changed, ChangedPathsTruncated: &whole}).HandoffOnly {
-		return intake.Push{}, false, nil
-	}
-	return intake.Push{Repo: pr.Repo, Branch: pr.Branch, Before: pr.HeadSHA, After: head, ChangedPaths: &changed, Truncated: &whole, Forced: &unforced}, true, nil
+	return intake.Push{Repo: pr.Repo, Branch: pr.Branch, Before: from, After: to, ChangedPaths: &changed, Truncated: &whole, Forced: &unforced}, "", nil
 }
 
 // openedWarnEvery bounds readUnrecordedPullRequests's warning to one an hour for each pull request
