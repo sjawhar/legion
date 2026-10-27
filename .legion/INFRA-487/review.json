@@ -2,32 +2,18 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-487",
-  "completed": "2026-10-26T22:28:00Z",
-  "round": 2,
-  "scope": "Narrowed by the INFRA-115 architect past review_round_cap=3: judge the three round-1 findings and the required CI at the new head; also check that the per-process broker_serving rows are pruned or bounded, and that enrollment_lease_live's read of the latest row stays an indexed lookup at all nine sites (either missing is a correctness defect).",
-  "reviewedHead": "7a736786d722d8a0eb7c8c0822a59134b156bb1d (code head 301addfdb1bd; only .legion/ above it)",
-  "decision": "changes_requested",
+  "completed": "2026-10-27T03:13:30Z",
+  "round": 3,
+  "scope": "Narrowed by the INFRA-115 architect: the index on broker_serving (last_serving_at desc), its EXPLAIN, and the required CI at the new head. The architect added that the Legion Envoy and Contracts run (envoy-go, envoy-go-race, broker-multiprocess) must also be green at 68d3f6c0 before approval.",
+  "reviewedHead": "bfc8fdf0fe2b49e234237a634f99dcaa6d30fefa (code head e847db828666; CI head 68d3f6c0, with only .legion/ above it)",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/broker/store/migrations/0019_broker_serving.up.sql:37",
-      "description": "enrollment_lease_live's read of the latest row is not indexed. broker_serving has only its primary key on process, and the function body runs `order by last_serving_at desc limit 1`, so each call seq-scans and sorts the table. Postgres does not inline the function and calls it once per evaluated row at all nine sites. Measured on Postgres 16.4 (127.0.0.1:54487, throwaway schema, dropped after), with 20000 lapsed enrollments and the EndLapsed predicate: 50 rows and no index 826 ms; 5050 rows and no index 31178 ms; 5050 rows with `create index on broker_serving (last_serving_at desc)` 293 ms; 50 rows with that index 322 ms. Fix: add that index in 0019, which is unreleased, and prove it with EXPLAIN of the function's lookup."
-    }
-  ],
-  "roundOneFindings": [
-    "main.go clock start: fixed in 301addfd. clock.Run(serving) now starts after close(serveStarted), beside srv.Serve. TestABrokerThatDiesBeforeServingRecordsNoServingBeat runs the real binary into exchangeKeys' fatal() and finds broker_serving unchanged. The implementer's negative control (clock at its old place) fails.",
-    "Beat deadline: fixed in 301addfd. context.WithTimeout(Interval), with lock_timeout, statement_timeout and idle_in_transaction_session_timeout set_config'd local to its transaction, and a WARN carrying timed_out. With one row per process, a held row stalls only that process's beat (TestAHeldServingLockFailsTheBeatAndAnotherBrokerKeepsTheGuardOff).",
-    "Contract change census: present in the body. I re-ran its rg search at the head: the same 12 files, each with a disposition. I re-ran gh search code on theorem-labs/agent-infra: [] for both names, and the BROKER_DATABASE_URL positive control finds the broker files. The rollout is an immediate refusal naming what it closes."
-  ],
-  "architectChecks": {
-    "rowsBounded": "Holds. Each beat deletes rows more than servingPrune (1 h) behind the latest (serving.go, delete ... for update skip locked), in the same transaction after its own row is written, so a process that exited leaves its row for at most an hour after any broker beats. TestABeatPrunesRowsAnHourBehindTheLatest covers it.",
-    "indexedLookup": "Missing: the finding above."
-  },
-  "ci": "Required checks (lint, typecheck, test, pr-title) at CI head 24da304f were queued at 22:26Z. The compare 24da304f...7a736786 is handoffsOnly true, 1 file. A request for changes does not wait on CI.",
-  "thermonuclear": "Not run this round: the architect narrowed the round to the three findings, the two added checks and CI.",
-  "threads": "Three threads, all mine from round 1. Each carries the implementer's fix reply and is resolved. I answer each in my own words at this round.",
-  "fastFollow": "One definition of the outage rule in SQL: Beat's CTE and its gap query restate enrollment_lease_live's condition, and they must agree exactly. My two round-1 Minors stay not defects."
+  "keyFindings": [],
+  "indexCheck": "0019 creates broker_serving_latest on broker_serving (last_serving_at desc). I applied the migration file itself to a throwaway schema on Postgres 16.4 (127.0.0.1:54487), then dropped it. EXPLAIN ANALYZE of the function's lookup: Limit -> Index Scan using broker_serving_latest, at 5050 rows (0.627 ms) and at 1 row. 20000 enrollment_lease_live calls at 5050 rows took 360 ms; round 2 measured 31178 ms without the index.",
+  "ci": "At 68d3f6c0 the required set is green: lint, typecheck and test (Tests run 40413885348) and pr-title. Legion Envoy and Contracts, run 40413885347, completed success on attempt 3: envoy-go, envoy-go-race, broker-multiprocess, envoy-smoke, envoy-e2e-local, envoy-infra-go, dispatch-multiprocess, dispatch-memory and pi-legion. Attempts 1 and 2 were cancelled by the repo-wide queue trim the controller traced; my one rerun was attempt 2, and session 01a13c57 started attempt 3. The compare 68d3f6c0...bfc8fdf0 is handoffsOnly true, 1 file.",
+  "threads": "Four threads. Three are mine from round 1 and one from round 2; each is answered by me, accepted, and resolved by the implementer. No bot threads.",
+  "thermonuclear": "Not rerun: the architect narrowed rounds 2 and 3. The pair ran in round 1 at 04740773.",
+  "fastFollow": "One definition of the outage rule in SQL: Beat's CTE and its gap query restate enrollment_lease_live's condition. My two round-1 Minors stay not defects: the config bound leaves out the renewer's 10 s retry, and local transport faults are classed as broker-unavailable."
 }
