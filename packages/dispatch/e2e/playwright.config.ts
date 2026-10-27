@@ -12,6 +12,13 @@ import { takenPorts } from "./port-probe";
 // open the plain-HTTP name, which only that project maps, and the origin rows' first assertion
 // fails on loopback by design.
 const plainHttpSpecs = /plain-http-(origin|proxy)\.e2e\.ts/;
+// The `iphone` project runs only tests tagged `@phone`: the tests that take a phone-only path
+// (they branch on the project or on the phone layout, read the window's size, use touch, run
+// only on the phone, or say they cover the phone layout). An untagged test drops out of `iphone`
+// with no failure. The full rule is in `packages/dispatch/AGENTS.md`, "Phone acceptance". The
+// regex is anchored because Playwright's grep text also holds the project name `iphone` and file
+// names like `phone.e2e.ts`.
+const phoneTagged = /(^|\s)@phone(\s|$)/;
 const startsOwnServers = !process.env.PLAYWRIGHT_BASE_URL;
 
 // The rows of e2e/harness-listeners.ts this run starts: every one for a local run, the `deployed`
@@ -119,6 +126,7 @@ export default defineConfig({
     {
       name: "iphone",
       testIgnore: plainHttpSpecs,
+      grep: phoneTagged,
       use: { ...devices["iPhone 13"], browserName: "chromium" },
     },
     // A caret beside a collaborator's cursor behaves per engine, the issue picker's keyboard-step

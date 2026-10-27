@@ -126,7 +126,7 @@ const session = {
   as: "agent" as const,
 };
 
-test("issue header identifies session and human creators", async ({ browser }, testInfo) => {
+test("issue header identifies session and human creators @phone", async ({ browser }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   await setLiveSessions([
     {
@@ -189,7 +189,7 @@ test("issue header identifies session and human creators", async ({ browser }, t
   }
 });
 
-test("issue header copies its key and persists its title, status, and route", async ({
+test("issue header copies its key and persists its title, status, and route @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -410,7 +410,7 @@ test("editing the parent line moves the issue across Children tabs live", async 
   }
 });
 
-test("an answered ask remains in the issue conversation", async ({ browser }, testInfo) => {
+test("an answered ask remains in the issue conversation @phone", async ({ browser }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "First decision" });
   const ask = await createAsk(
@@ -441,7 +441,7 @@ test("an answered ask remains in the issue conversation", async ({ browser }, te
   }
 });
 
-test("a quote-anchored ask identifies its document in the margin and Conversation", async ({
+test("a quote-anchored ask identifies its document in the margin and Conversation @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -489,7 +489,7 @@ test("a quote-anchored ask identifies its document in the margin and Conversatio
   }
 });
 
-test("closing an issue removes its asks from the inbox and pinning stays private", async ({
+test("closing an issue removes its asks from the inbox and pinning stays private @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -545,7 +545,7 @@ test("closing an issue removes its asks from the inbox and pinning stays private
   }
 });
 
-test("pinning survives an immediate full navigation", async ({ browser }, testInfo) => {
+test("pinning survives an immediate full navigation @phone", async ({ browser }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Navigation-safe event pin" });
   await createMessage(issue.key, { body: "Pinned before navigation" });
@@ -697,10 +697,6 @@ async function subscribeSession(issueKey: string): Promise<void> {
 test("issue header keeps every control in a shared row on a phone and the whose-turn indicator in view at every width", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "the viewports are set explicitly in the desktop browser project"
-  );
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Header on a phone" });
   await patchIssue(issue.key, {
@@ -816,10 +812,6 @@ test("issue header flips between Waiting on you and Waiting on agents as the new
 test("issue header gives the title the row's free space beside a short details line", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "the viewports are set explicitly in the desktop browser project"
-  );
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Header keeps its title readable" });
 
@@ -899,10 +891,6 @@ test("issue header gives the title the row's free space beside a short details l
 test("issue header delivers the click that ends a title edit to the control under the pointer", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "the viewports are set explicitly in the desktop browser project"
-  );
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Short title" });
 
@@ -1197,7 +1185,7 @@ test("an issue page whose mappings read fails says so and retries it, rather tha
   }
 });
 
-test("an issue's whole title wraps at every width, whether prose or one unbroken word", async ({
+test("an issue's whole title wraps at every width, whether prose or one unbroken word @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -1235,7 +1223,7 @@ test("an issue's whole title wraps at every width, whether prose or one unbroken
   }
 });
 
-test("the details rail fades its trailing edge only while it has somewhere to scroll", async ({
+test("the details rail fades its trailing edge only while it has somewhere to scroll @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "the rail only overflows at a phone width");

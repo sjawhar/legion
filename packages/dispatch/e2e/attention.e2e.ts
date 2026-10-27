@@ -46,7 +46,7 @@ async function readingAnchor(page: Page, root: string, item: string): Promise<st
   return value ?? "";
 }
 
-test("a reader scrolled up keeps their Conversation viewport when a new card arrives", async ({
+test("a reader scrolled up keeps their Conversation viewport when a new card arrives @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -76,7 +76,7 @@ test("a reader scrolled up keeps their Conversation viewport when a new card arr
   }
 });
 
-test("a reader at the Conversation top follows a new card", async ({ browser }) => {
+test("a reader at the Conversation top follows a new card @phone", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Attention test" });
   for (let index = 0; index < 30; index += 1) {
@@ -108,7 +108,7 @@ test("a reader at the Conversation top follows a new card", async ({ browser }) 
 // Paging is the Activity tab's: the Conversation reads each of its three lists whole and offers
 // no `Load older` at all. Older events land beneath the rows already on screen, so the row the
 // reader is on does not move.
-test("loading older Activity rows keeps the reader anchor", async ({ browser }) => {
+test("loading older Activity rows keeps the reader anchor @phone", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Older events" });
   for (let index = 0; index < 250; index += 1) {
@@ -261,7 +261,7 @@ async function verifyGapDetection(
   }
 }
 
-test("a read mark moving under a reader parked in a Conversation gap keeps the lower card fixed", async ({
+test("a read mark moving under a reader parked in a Conversation gap keeps the lower card fixed @phone", async ({
   browser,
 }) => {
   await verifyGapDetection(browser);

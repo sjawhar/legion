@@ -9,7 +9,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("the Pipeline rail entry opens the page", async ({ browser }) => {
+test("the Pipeline rail entry opens the page @phone", async ({ browser }) => {
   await seedPipelineFixture();
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
@@ -37,7 +37,7 @@ test("the Pipeline rail entry opens the page", async ({ browser }) => {
   await context.close();
 });
 
-test("the Pipeline page shows each stage's timing and the failing jobs", async ({
+test("the Pipeline page shows each stage's timing and the failing jobs @phone", async ({
   browser,
 }, testInfo) => {
   await seedPipelineFixture();

@@ -161,7 +161,7 @@ test("an issue's spec and Conversation tabs render the dark palette in dark mode
   }
 });
 
-test("the margin review sheet renders the dark palette in dark mode on an iPhone viewport", async ({
+test("the margin review sheet renders the dark palette in dark mode on an iPhone viewport @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(

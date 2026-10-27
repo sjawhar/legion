@@ -399,7 +399,7 @@ test("an answer started before a hand-back that rewords nothing is saved, and th
   }
 });
 
-test("an approval ask's Inbox card shows a question carrying a long summary whole", async ({
+test("an approval ask's Inbox card shows a question carrying a long summary whole @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "GATE", name: "Gate" });
@@ -573,7 +573,7 @@ test("rejecting a suggestion on part of an identifier in an approved spec leaves
   }
 });
 
-test("an approval request for an unassigned issue's non-primary document remains actionable while the primary is draft", async ({
+test("an approval request for an unassigned issue's non-primary document remains actionable while the primary is draft @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "GATE", name: "Gate" });
@@ -712,7 +712,7 @@ test("an approval ask's Inbox row, drawer link and bare ask route land on the sp
   }
 });
 
-test("an open approval ask's document link reaches the issue's Conversation, and a project document's own approval link reaches its document, while the margin omits the link on both", async ({
+test("an open approval ask's document link reaches the issue's Conversation, and a project document's own approval link reaches its document, while the margin omits the link on both @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "GATE", name: "Gate" });

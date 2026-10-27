@@ -70,7 +70,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("Agents puts who needs you first, folds silent and inactive sessions, shows one whose-turn pill per side, pins a card, copies identifiers, and holds an issue-less BTW conversation", async ({
+test("Agents puts who needs you first, folds silent and inactive sessions, shows one whose-turn pill per side, pins a card, copies identifiers, and holds an issue-less BTW conversation @phone", async ({
   browser,
 }, testInfo) => {
   await setLiveSessions([planner, reviewer, silent, archivist]);
@@ -315,7 +315,7 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
   }
 });
 
-test("Agents shows the newest exchange, folds the older ones, and lets the viewer clear the conversation", async ({
+test("Agents shows the newest exchange, folds the older ones, and lets the viewer clear the conversation @phone", async ({
   browser,
 }, testInfo) => {
   await setLiveSessions([planner]);
@@ -1725,7 +1725,7 @@ test("the Agents page loads through one dropped request for its agents", async (
   }
 });
 
-test("an agent row shows the whole session name at every width, and shortens its directory only where a hover can show the path", async ({
+test("an agent row shows the whole session name at every width, and shortens its directory only where a hover can show the path @phone", async ({
   browser,
 }, testInfo) => {
   // The row is sized against what these fixtures put in it, so each one's length is asserted

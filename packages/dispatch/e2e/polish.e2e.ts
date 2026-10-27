@@ -13,7 +13,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("project filters stay collapsed until needed and margin asks use the compact composer", async ({
+test("project filters stay collapsed until needed and margin asks use the compact composer @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });

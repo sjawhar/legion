@@ -257,7 +257,7 @@ async function expectSelectedMarginItem(
   }
 }
 
-test("emitted document item hrefs select and scroll their anchored thread", async ({
+test("emitted document item hrefs select and scroll their anchored thread @phone", async ({
   browser,
 }, testInfo) => {
   const { issue } = await seedIssue();
@@ -323,7 +323,7 @@ test("emitted document item hrefs select and scroll their anchored thread", asyn
   }
 });
 
-test("a document link followed while the page before it is still downloading its document opens the link", async ({
+test("a document link followed while the page before it is still downloading its document opens the link @phone", async ({
   browser,
 }, testInfo) => {
   const { issue } = await seedIssue();
@@ -360,7 +360,7 @@ test("a document link followed while the page before it is still downloading its
   }
 });
 
-test("a linked card the margin's later cards push down is scrolled back into view", async ({
+test("a linked card the margin's later cards push down is scrolled back into view @phone", async ({
   browser,
 }, testInfo) => {
   const { issue } = await seedIssue();
@@ -398,10 +398,7 @@ test("a linked card the margin's later cards push down is scrolled back into vie
   }
 });
 
-test("a desktop document item link shows its far-away card and its quote", async ({
-  browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "the phone sheet has its own landing rule");
+test("a desktop document item link shows its far-away card and its quote", async ({ browser }) => {
   const { comment, issue, markId } = await seedLongDocument();
   const context = await asUser(browser, "alice");
 
@@ -422,7 +419,7 @@ test("a desktop document item link shows its far-away card and its quote", async
   }
 });
 
-test("a composer opened from the document is in the margin's view after a comment link", async ({
+test("a composer opened from the document is in the margin's view after a comment link @phone", async ({
   browser,
 }, testInfo) => {
   const { comment, issue, markId } = await seedLongDocument();
@@ -470,11 +467,7 @@ test("a composer opened from the document is in the margin's view after a commen
 
 test("a press in the document while a comment link is still landing does not end the hold", async ({
   browser,
-}, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "the phone arms the hold only once the reader opens the sheet"
-  );
+}) => {
   const { comment, issue, markId } = await seedLongDocument();
   await seedAsks(issue.key, 3);
   const context = await asUser(browser, "alice");
@@ -533,11 +526,7 @@ const crossDocumentLandingStates = [
 for (const state of crossDocumentLandingStates) {
   test(`a press while a comment link reached from another document is landing and ${state.name} does not end the hold`, async ({
     browser,
-  }, testInfo) => {
-    test.skip(
-      testInfo.project.name === "iphone",
-      "the phone arms the hold only once the reader opens the sheet"
-    );
+  }) => {
     const { comment, issue, markId } = await seedLongDocument();
     // A document the reader is already on, whose own offsets the margin has. Following a link out
     // of it is a client-side navigation: the margin provider never unmounts, so offsets left
@@ -633,11 +622,7 @@ const hiddenEditorJourneys = [
 ] as const;
 
 for (const journey of hiddenEditorJourneys) {
-  test(journey.name, async ({ browser }, testInfo) => {
-    test.skip(
-      testInfo.project.name === "iphone",
-      "the phone arms the hold only once the reader opens the sheet"
-    );
+  test(journey.name, async ({ browser }) => {
     const { comment, issue, markId } = await seedLongDocument();
     if (journey.namedVersion) {
       await createNamedVersion(issue.primary_artifact_id, "Initial long document");
@@ -675,13 +660,7 @@ for (const journey of hiddenEditorJourneys) {
   });
 }
 
-test("a resolving reference above a linked card does not end the hold", async ({
-  browser,
-}, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "the phone arms the hold only once the reader opens the sheet"
-  );
+test("a resolving reference above a linked card does not end the hold", async ({ browser }) => {
   const { comment, issue } = await seedLongDocument();
   const target = await createIssue({
     project: "CORE",
@@ -737,11 +716,7 @@ test("a resolving reference above a linked card does not end the hold", async ({
 
 test("the margin stops holding a landed card once the reader works the document", async ({
   browser,
-}, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "the phone arms the hold only once the reader opens the sheet"
-  );
+}) => {
   // Anchored near the top: the quote is on screen from the first frame, so the landing needs no
   // correction at all. A hold that only lets go once it has corrected something never lets go
   // here, and the asks below drag the margin thousands of pixels while the reader reads.
@@ -810,13 +785,13 @@ async function placementAfterArrival(
   };
 }
 
-test("a linked card's placement ignores the margin's own scroll", async ({ browser }, testInfo) => {
+test("a linked card's placement ignores the margin's own scroll", async ({ browser }) => {
+  // Only the desktop margin places cards by mark, so this row is not tagged `@phone`.
   // The compact sheet stacks its cards from the top of its column rather than tracking marks -
   // measured here, the linked card sits at 102 px and an arrival above it moves it to 204 px,
   // the arriving card's own height - so a placement is not a mark's offset there and holding one
   // equal across arrivals is not the sheet's contract. The sheet's landing and hold are covered
   // by the phone tests above.
-  test.skip(testInfo.project.name === "iphone", "only the desktop margin places cards by mark");
   const { comment, issue, markId } = await seedLongDocument();
   const context = await asUser(browser, "alice");
 
@@ -849,7 +824,7 @@ test("a linked card's placement ignores the margin's own scroll", async ({ brows
   }
 });
 
-test("an iPhone document item link brings its far-away mark above the closed review sheet", async ({
+test("an iPhone document item link brings its far-away mark above the closed review sheet @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "the closed sheet is phone-only");
@@ -880,7 +855,7 @@ test("an iPhone document item link brings its far-away mark above the closed rev
   }
 });
 
-test("an iPhone secondary-document link scrolls its selected card after opening the review sheet", async ({
+test("an iPhone secondary-document link scrolls its selected card after opening the review sheet @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "the bottom-sheet viewport is phone-only");
@@ -932,7 +907,7 @@ test("an iPhone secondary-document link scrolls its selected card after opening 
   }
 });
 
-test("an unanchored project-document comment is selected in its only discussion surface", async ({
+test("an unanchored project-document comment is selected in its only discussion surface @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -960,7 +935,7 @@ test("an unanchored project-document comment is selected in its only discussion 
   }
 });
 
-test("an unanchored comment deep link still focuses its Conversation turn", async ({
+test("an unanchored comment deep link still focuses its Conversation turn @phone", async ({
   browser,
 }, testInfo) => {
   const { issue } = await seedIssue();
@@ -987,7 +962,7 @@ test("an unanchored comment deep link still focuses its Conversation turn", asyn
   }
 });
 
-test("an item link the SPA cannot resolve names what is missing, inside the shell", async ({
+test("an item link the SPA cannot resolve names what is missing, inside the shell @phone", async ({
   browser,
 }, testInfo) => {
   const { issue } = await seedIssue();
@@ -1016,7 +991,7 @@ test("an item link the SPA cannot resolve names what is missing, inside the shel
 
 // A landing marks exactly one conversation card, whatever bucket that conversation is in, and
 // where the link names a reply rather than the root it marks that reply's own row inside it.
-test("every item link lands on exactly one marked card, and a reply link marks its row too", async ({
+test("every item link lands on exactly one marked card, and a reply link marks its row too @phone", async ({
   browser,
 }, testInfo) => {
   const isPhone = testInfo.project.name === "iphone";

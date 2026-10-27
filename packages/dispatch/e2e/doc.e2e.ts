@@ -36,7 +36,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("the spec opens as a formatted, editable document with no source pane", async ({
+test("the spec opens as a formatted, editable document with no source pane @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "READ", name: "Readable" });
@@ -164,7 +164,7 @@ test("reading a document gives its headings ids without versioning it or crediti
   }
 });
 
-test("two users edit the same spec, see each other's text and cursor, and settle one version attributed to both", async ({
+test("two users edit the same spec, see each other's text and cursor, and settle one version attributed to both @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -518,7 +518,7 @@ test("document marks and table alignment use classes rather than inline styles",
   );
 
   // Dispatch omits collaborative awareness below 1280 px, so exercise the peer selection in an
-  // explicit desktop context even while the mark/table invariant runs under every project.
+  // explicit desktop context.
   const [alice, selectionAlice, selectionBob] = await Promise.all([
     asUser(browser, "alice"),
     asUser(browser, "alice", { viewport: { height: 900, width: 1440 } }),
@@ -648,7 +648,7 @@ test("a version deep link renders the comment's original quote highlighted in a 
   }
 });
 
-test("clicking a Markdown dispatch:// link in the live editor navigates in-app without a reload", async ({
+test("clicking a Markdown dispatch:// link in the live editor navigates in-app without a reload @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "NAV", name: "Navigation" });

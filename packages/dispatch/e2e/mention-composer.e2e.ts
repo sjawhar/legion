@@ -244,8 +244,7 @@ test("a same-task Reply cannot send a conversation comment to an agent's message
 // while that reply is out - from Send's own task on - and its refusal and draft stay there.
 test("a conversation thread's own reply holds Collapse thread while it is out", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "a phone opens the thread full-screen instead");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Held thread" });
   const earlier = await createComment(issue.key, { body: "Earlier comment" });
@@ -408,8 +407,7 @@ test("an issue closed and reopened under a docked send leaves that send's compos
 // thread's own reply - its draft, the send it has out and that send's refusal - stays with it.
 test("a thread resolved while its own reply is out stays open with the reply and its refusal", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "a phone opens the thread full-screen instead");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Resolved under a reply" });
   const earlier = await createComment(issue.key, { body: "Earlier comment" });
@@ -444,8 +442,7 @@ test("a thread resolved while its own reply is out stays open with the reply and
 // Conversation, and its reply's refusal shows there with the draft.
 test("a thread's own reply out when the viewport narrows to a phone keeps its draft and refusal", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "the row starts on a wider screen");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Narrowed under a reply" });
   const earlier = await createComment(issue.key, { body: "Earlier comment" });
@@ -473,7 +470,7 @@ test("a thread's own reply out when the viewport narrows to a phone keeps its dr
   }
 });
 
-test("E7b and Retry: removing a prefilled mention creates a plain reply, and retries name their target", async ({
+test("E7b and Retry: removing a prefilled mention creates a plain reply, and retries name their target @phone", async ({
   browser,
 }) => {
   await setLiveSessions([planner]);

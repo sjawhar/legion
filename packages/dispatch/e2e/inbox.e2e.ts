@@ -42,7 +42,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("ask cards show urgency accents and copy their session ID, title, and tmux target", async ({
+test("ask cards show urgency accents and copy their session ID, title, and tmux target @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -391,7 +391,7 @@ test("a quote-anchored inbox ask names and opens its document", async ({ browser
   }
 });
 
-test("inbox shows current asks and answers issue asks in the margin", async ({
+test("inbox shows current asks and answers issue asks in the margin @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -1133,7 +1133,7 @@ test("Nothing needs you stays on screen through a focus and a return to the Inbo
   }
 });
 
-test("an unanchored issue-level comment reaches Conversation, not document review", async ({
+test("an unanchored issue-level comment reaches Conversation, not document review @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -1435,7 +1435,7 @@ test("clearing the filter lists every question, and Assign to me takes one under
 // `features/inbox/BlockedOnYou.tsx`): open questions whose next move is a person's, on issues
 // assigned to them. Widening the list they are looking at is not more work waiting on them, so
 // no count moves with it; another issue assigned to them is, so they all move together.
-test("the rail, the banner and an Agents card count the reader's own work, whatever the filter lists", async ({
+test("the rail, the banner and an Agents card count the reader's own work, whatever the filter lists @phone", async ({
   browser,
 }) => {
   await setLiveSessions([{ session_id: session.actor.id, title: "e2e-session-title" }]);
@@ -1611,7 +1611,7 @@ for (const refusal of [
       "snoozed_until must be in the future, and this deployment refuses a moment more than one year ahead of the request it arrived on",
   },
 ]) {
-  test(`a refused snooze wraps inside the row and never widens the page: ${refusal.label}`, async ({
+  test(`a refused snooze wraps inside the row and never widens the page: ${refusal.label} @phone`, async ({
     browser,
   }) => {
     await createProject({ key: "CORE", name: "Core" });
@@ -1666,7 +1666,7 @@ for (const refusal of [
   });
 }
 
-test("an ask card's time stays with its author, never opening a line of its own", async ({
+test("an ask card's time stays with its author, never opening a line of its own @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "the provenance line only wraps where it must");

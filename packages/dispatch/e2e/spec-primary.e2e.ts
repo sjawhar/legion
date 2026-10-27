@@ -14,7 +14,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("issue landing keeps Spec primary and puts open asks in Needs you", async ({
+test("issue landing keeps Spec primary and puts open asks in Needs you @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "SPEC", name: "Spec primary" });

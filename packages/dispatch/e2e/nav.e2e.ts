@@ -10,7 +10,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("sidebar shows Inbox, Pinned, one row per project with its open-ask badge, and Settings — never an issue row — on desktop and in the phone drawer", async ({
+test("sidebar shows Inbox, Pinned, one row per project with its open-ask badge, and Settings — never an issue row — on desktop and in the phone drawer @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -131,7 +131,7 @@ test("issue tabs are URL-driven and keyboard-navigable, and titles follow direct
 
 // One count, one colour: the Inbox badge means the viewer must act, and a reader who learns it
 // in the drawer must recognise it in the top bar.
-test("the needs-you count is the same badge in the phone top bar and the drawer", async ({
+test("the needs-you count is the same badge in the phone top bar and the drawer @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "the compact top bar exists below the xl rail");

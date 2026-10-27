@@ -14,7 +14,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("edits issue labels from a searchable multi-select and filters project issues by every selected label", async ({
+test("edits issue labels from a searchable multi-select and filters project issues by every selected label @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -112,10 +112,6 @@ test("edits issue labels from a searchable multi-select and filters project issu
 test("eight thirty-character labels scroll inside the header's details line without widening the page", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "the viewports are set explicitly in the desktop browser project"
-  );
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Long labels" });
   const context = await asUser(browser, "alice");

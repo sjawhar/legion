@@ -53,7 +53,7 @@ test.beforeEach(async () => {
 // A send's composer is the one that shows its outcome, and the one on screen: a thread opened over
 // it while the message is on its way leaves it where it was, holding the draft until the answer,
 // and then it takes the next message.
-test("on a phone, a docked send keeps its composer through a thread and back, which then takes typing", async ({
+test("on a phone, a docked send keeps its composer through a thread and back, which then takes typing @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -89,7 +89,7 @@ test("on a phone, a docked send keeps its composer through a thread and back, wh
 
 // A refusal is the sending composer's, and a thread opened over it keeps both the refusal and the
 // draft it hands back for the reader to find on Back.
-test("on a phone, Expand thread while a send is out keeps the draft and its refusal", async ({
+test("on a phone, Expand thread while a send is out keeps the draft and its refusal @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -130,7 +130,7 @@ test("on a phone, Expand thread while a send is out keeps the draft and its refu
 // A comment's Reply on a phone answers in the comment's thread, by a composer of its own. Back
 // while that reply is on its way leaves the composer with its thread, and reopening the thread
 // finds it, holding the reply until the answer.
-test("on a phone, a thread reply keeps its composer through Back, and reopening the thread finds it", async ({
+test("on a phone, a thread reply keeps its composer through Back, and reopening the thread finds it @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -172,7 +172,7 @@ test("on a phone, a thread reply keeps its composer through Back, and reopening 
 
 // Each composer has its own reply: a thread's reply, sent and left behind with Back, neither takes
 // the docked composer's reply and draft away when the thread opens nor clears them when it lands.
-test("on a phone, a thread reply leaves the docked composer's own reply and draft where they were", async ({
+test("on a phone, a thread reply leaves the docked composer's own reply and draft where they were @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -222,7 +222,7 @@ test("on a phone, a thread reply leaves the docked composer's own reply and draf
 // A thread card's own reply composer names its send as the tab's composers do, so the thread's
 // Reply holds while it is out - in Send's own task too - rather than swapping the reply on its
 // way for another composer, which on a phone closed the thread.
-test("on a phone, a thread's own reply holds the thread's Reply while it is out", async ({
+test("on a phone, a thread's own reply holds the thread's Reply while it is out @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -265,7 +265,7 @@ test("on a phone, a thread's own reply holds the thread's Reply while it is out"
 
 // A thread card's own reply composer lives in the thread view, so the view holds open while its
 // reply is out - Back and Escape both - and the reader sees the reply's refusal and draft there.
-test("on a phone, a thread's own reply holds Back and Escape while it is out, and its refusal stays in the thread", async ({
+test("on a phone, a thread's own reply holds Back and Escape while it is out, and its refusal stays in the thread @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -312,7 +312,7 @@ test("on a phone, a thread's own reply holds Back and Escape while it is out, an
 // A comment's Reply on a phone answers in the thread by the thread view's own composer, which
 // takes the place of the card's reply composer. The card's composer stays mounted, hidden, so a
 // refusal it holds - the draft it handed back and the reason - is there again once that reply ends.
-test("on a phone, a thread's Reply over its card's refused reply keeps that draft and refusal for after", async ({
+test("on a phone, a thread's Reply over its card's refused reply keeps that draft and refusal for after @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -351,7 +351,7 @@ test("on a phone, a thread's Reply over its card's refused reply keeps that draf
 // The thread composer's refusal is the thread's while it shows: Back, Escape from the thread and
 // Escape in the composer's field each drop it, its draft with it, as they drop the card's own
 // reply's, so neither the thread opened again nor the next Reply brings it back.
-test("on a phone, Back and Escape from a thread reply's refusal drop its draft and refusal", async ({
+test("on a phone, Back and Escape from a thread reply's refusal drop its draft and refusal @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -412,7 +412,7 @@ test("on a phone, Back and Escape from a thread reply's refusal drop its draft a
 
 // The reader's own Resolve closes the thread once the server takes it, and the thread's reply stays
 // theirs: its refusal, its draft and the comment it answers are there when the thread opens again.
-test("on a phone, the reader's own Resolve keeps a thread reply's refusal and its comment", async ({
+test("on a phone, the reader's own Resolve keeps a thread reply's refusal and its comment @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -450,7 +450,7 @@ test("on a phone, the reader's own Resolve keeps a thread reply's refusal and it
 // The thread composer's refusal is its comment's: left with Back while its send was out, it comes
 // back in that comment's thread when the reader replies to another comment, rather than under the
 // other comment's Reply.
-test("on a phone, a thread reply refused after Back comes back in its own thread on another Reply", async ({
+test("on a phone, a thread reply refused after Back comes back in its own thread on another Reply @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -490,7 +490,7 @@ test("on a phone, a thread reply refused after Back comes back in its own thread
 // A send from the thread view keeps it open past the phone layout: while that send is out the
 // view stays full-screen at any width, with its card's reply composer - the draft, the send and
 // that send's refusal - until the reader leaves it with Back.
-test("on a phone, a thread's own reply out when the viewport widens keeps its thread, draft and refusal", async ({
+test("on a phone, a thread's own reply out when the viewport widens keeps its thread, draft and refusal @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -529,7 +529,7 @@ test("on a phone, a thread's own reply out when the viewport widens keeps its th
 
 // A thread the reader has open stays open whoever resolves its comment, so its own reply - the
 // draft, the send it has out and that send's refusal - stays in front of them.
-test("on a phone, a thread resolved while its own reply is out stays open with the reply and its refusal", async ({
+test("on a phone, a thread resolved while its own reply is out stays open with the reply and its refusal @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -566,7 +566,7 @@ test("on a phone, a thread resolved while its own reply is out stays open with t
 // server never answers must not keep the reader there: past the client's deadline they let go,
 // and Back takes the reader out. The send is not refused - the server may still take it - so the
 // thread offers no Retry, and the draft stays held.
-test("on a phone, a thread reply the server never answers lets Back go at the deadline", async ({
+test("on a phone, a thread reply the server never answers lets Back go at the deadline @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -609,7 +609,7 @@ test("on a phone, a thread reply the server never answers lets Back go at the de
 // On a phone the docked composer sits at the foot of the screen, and a refusal's row grows it
 // upward. `Jump to latest` shows while the reader is scrolled down, which is when they reach for
 // the refusal's Retry, or a closed issue's Discard draft, so it never sits over the composer.
-test("on a phone, Jump to latest covers none of the docked composer's Retry or Discard draft", async ({
+test("on a phone, Jump to latest covers none of the docked composer's Retry or Discard draft @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -663,7 +663,9 @@ test("on a phone, Jump to latest covers none of the docked composer's Retry or D
 // sits and grows upward with a refusal's row. In both of its states it sits above the composer,
 // on the narrowest phone and a common one, so it covers neither Retry, nor Send, nor the line
 // under Send.
-test("on a phone, the connection pill covers none of the docked composer", async ({ browser }) => {
+test("on a phone, the connection pill covers none of the docked composer @phone", async ({
+  browser,
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Connection pill over a refusal" });
   const alice = await asUser(browser, "alice");
@@ -704,7 +706,9 @@ test("on a phone, the connection pill covers none of the docked composer", async
 // A thread opened full-screen on a phone has its own composers fixed at the foot of the screen:
 // the one a comment's Reply opens there, and the thread card's own inline reply. The connection
 // pill sits above whichever is on screen, grown by a refusal's row, in both of the pill's states.
-test("on a phone, the connection pill covers none of a thread's composers", async ({ browser }) => {
+test("on a phone, the connection pill covers none of a thread's composers @phone", async ({
+  browser,
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Connection pill over a thread" });
   const root = await createComment(issue.key, { body: "Thread root" });
@@ -758,7 +762,7 @@ test("on a phone, the connection pill covers none of a thread's composers", asyn
 // A thread opened full-screen covers the Conversation, and the pill acts on the Conversation's
 // place, which the reader cannot see from the thread: it stays off the thread view, where it would
 // sit over the thread's own reply composer, and comes back with the Conversation on Back.
-test("on a phone, Jump to latest stays off a thread opened over the Conversation", async ({
+test("on a phone, Jump to latest stays off a thread opened over the Conversation @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -841,7 +845,7 @@ async function tapsLostAboveTurns(page: Page): Promise<string[]> {
 // just under them, so a reader scrolling back up passes a band where they are on screen while
 // `Jump to latest` shows. The pill never rises above where the turns begin, so a tap on a tab, or
 // on any control above the turns, reaches it everywhere in that band.
-test("on a phone, Jump to latest covers none of the issue's tabs or the controls above the turns", async ({
+test("on a phone, Jump to latest covers none of the issue's tabs or the controls above the turns @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });

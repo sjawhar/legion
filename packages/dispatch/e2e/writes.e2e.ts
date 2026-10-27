@@ -21,7 +21,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("a failed pin shows a retryable error, never lies to the sidebar, and recovers on retry", async ({
+test("a failed pin shows a retryable error, never lies to the sidebar, and recovers on retry @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "WR", name: "Writes" });
@@ -126,7 +126,7 @@ test("double-clicking Submit posts exactly one comment", async ({ browser }) => 
   await context.close();
 });
 
-test("a pre-fold comment lifecycle pin remains removable from Pinned", async ({
+test("a pre-fold comment lifecycle pin remains removable from Pinned @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "WR", name: "Writes" });

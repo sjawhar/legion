@@ -97,7 +97,7 @@ async function mouseDrag(page: Page, source: Locator, target: Locator, yOffset?:
   await clicksDelivered(page);
 }
 
-test("the board is the kanban: whole-card drag orders List and Board alike, Icebox and Done collapse behind a toggle", async ({
+test("the board is the kanban: whole-card drag orders List and Board alike, Icebox and Done collapse behind a toggle @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -231,8 +231,7 @@ test("the board is the kanban: whole-card drag orders List and Board alike, Iceb
 
 test("v toggles List and Board; Shift+J/K rank a focused card through the one move path; o, Enter, p and Escape work the card; Space lifts nothing", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const cards = [];
   for (const title of ["Alpha", "Bravo", "Charlie"]) {
@@ -385,8 +384,7 @@ test("v toggles List and Board; Shift+J/K rank a focused card through the one mo
 
 test("a stale board refreshes and says so when the server rejects the rank", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "the stale-rank drag exercises a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const cards = [];
   for (const title of ["Alpha", "Bravo", "Charlie"]) {
@@ -480,7 +478,7 @@ test("board cards carry the unread dot the project list shows", async ({ browser
   }
 });
 
-test("project list rows and board cards set an issue's priority in place", async ({
+test("project list rows and board cards set an issue's priority in place @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -567,13 +565,7 @@ test("project list rows and board cards set an issue's priority in place", async
   }
 });
 
-test("board scrolls horizontally inside its own container at 1100px", async ({
-  browser,
-}, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "the board scroll check exercises a desktop viewport"
-  );
+test("board scrolls horizontally inside its own container at 1100px", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   await createIssue({ project: "CORE", title: "Board scrolls without widening the page" });
   const context = await asUser(browser, "alice");
@@ -649,7 +641,7 @@ async function scrollToColumn(scroller: Locator, index: number): Promise<void> {
   await ended();
 }
 
-test("on the phone a finger drives the board: hold lifts, tap opens, swipes scroll and snap", async ({
+test("on the phone a finger drives the board: hold lifts, tap opens, swipes scroll and snap @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "touch gestures exercise the phone project");
@@ -873,7 +865,7 @@ test("a filtered drag names the visible neighbours and the hidden card interleav
   }
 });
 
-test("the board groups into priority swimlanes on a toggle that persists per signed-in user, and dragging across lanes reassigns priority", async ({
+test("the board groups into priority swimlanes on a toggle that persists per signed-in user, and dragging across lanes reassigns priority @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });

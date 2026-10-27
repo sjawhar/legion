@@ -68,7 +68,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("Conversation owns the route, lists one card per message newest first, and resolves live agent names", async ({
+test("Conversation owns the route, lists one card per message newest first, and resolves live agent names @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -240,7 +240,7 @@ test("Conversation updates an open ask in place after an agent edit and preserve
   }
 });
 
-test("a deep link to an old unanchored comment scrolls its Conversation turn into view", async ({
+test("a deep link to an old unanchored comment scrolls its Conversation turn into view @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -306,7 +306,7 @@ test("a message reply nests under its parent with the quoted link, and deep link
   }
 });
 
-test("a reply in a session-authored comment thread pre-fills a deletable agent mention", async ({
+test("a reply in a session-authored comment thread pre-fills a deletable agent mention @phone", async ({
   browser,
 }) => {
   await setLiveSessions([planner]);
@@ -558,7 +558,7 @@ test("Conversation answers an ask in place, draws no event row, and keeps its ca
   }
 });
 
-test("Conversation marks unread conversations, sends with Ctrl+Enter, and jumps to newer ones", async ({
+test("Conversation marks unread conversations, sends with Ctrl+Enter, and jumps to newer ones @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -655,7 +655,7 @@ test("Conversation marks unread conversations, sends with Ctrl+Enter, and jumps 
   }
 });
 
-test("the iPhone Conversation fits controls and keeps the composer above the review panel", async ({
+test("the iPhone Conversation fits controls and keeps the composer above the review panel @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "phone geometry is covered by the iphone project");
@@ -731,7 +731,7 @@ test("the iPhone Conversation fits controls and keeps the composer above the rev
 // A live session's title is free text and can be a whole sentence. An Activity line that lets
 // its author set its own width pushed the line, the list and the document past the viewport, so
 // a reader scrolled sideways through the history.
-test("a long session title never widens the Activity list past its column", async ({
+test("a long session title never widens the Activity list past its column @phone", async ({
   browser,
 }, testInfo) => {
   const sessionId = "e2e-long-title-session";

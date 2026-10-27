@@ -160,7 +160,7 @@ test("a broadcast lists recipient cards in the non-alphabetical order the sender
 // recipient's copy on the Agents page, and the list's one-line preview. A numbered list is a
 // list, not one run-on line, on the desktop and on a phone; and the preview, which runs the list
 // onto one line, shows exactly one line of it.
-test("a broadcast written as a numbered list renders as a list on the broadcast page, the Agents page and the broadcasts list", async ({
+test("a broadcast written as a numbered list renders as a list on the broadcast page, the Agents page and the broadcasts list @phone", async ({
   browser,
 }, testInfo) => {
   await setLiveSessions([planner, tester]);

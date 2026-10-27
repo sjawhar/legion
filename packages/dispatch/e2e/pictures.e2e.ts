@@ -326,7 +326,7 @@ test("a picture line the browser cannot draw, or that pins no version, shows a l
     // is brought into view first, with the link still in it: `dragTo` scrolls its target into
     // view only as it moves there, after the press, and Chromium begins no drag when the page
     // scrolled between the press and the move (the desktop viewport puts the paragraph below the
-    // fold; the phone's does not).
+    // fold).
     const below = editor.getByText("Below the pictures.");
     await below.evaluate((paragraph) => paragraph.scrollIntoView({ block: "nearest" }));
     await expect(versionedLink).toBeInViewport();

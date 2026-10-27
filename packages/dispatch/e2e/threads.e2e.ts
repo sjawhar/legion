@@ -69,7 +69,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("an ask is a thread: replies before and after answering, then a live agent reply", async ({
+test("an ask is a thread: replies before and after answering, then a live agent reply @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -153,7 +153,7 @@ test("an ask is a thread: replies before and after answering, then a live agent 
 // The row above, with the race it can lose made certain: the margin's answered-ask read is held
 // until a reply has been typed into the answered card's thread, so the card moves out of Needs you
 // with the reply in it. The card moves in place, and the reply is still there to send.
-test("an answered ask's thread keeps a reply typed before the card leaves Needs you", async ({
+test("an answered ask's thread keeps a reply typed before the card leaves Needs you @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -214,7 +214,7 @@ test("an answered ask's thread keeps a reply typed before the card leaves Needs 
   }
 });
 
-test("a Conversation reply after an agent-authored reply targets the root without copying its anchor", async ({
+test("a Conversation reply after an agent-authored reply targets the root without copying its anchor @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -259,7 +259,7 @@ test("a Conversation reply after an agent-authored reply targets the root withou
     await alice.close();
   }
 });
-test("resolve, reopen, then edit leaves one comment turn in its final state", async ({
+test("resolve, reopen, then edit leaves one comment turn in its final state @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "THREAD", name: "Thread controls" });
@@ -321,7 +321,7 @@ test("resolve, reopen, then edit leaves one comment turn in its final state", as
   }
 });
 
-test("only comment authors edit root and reply text in Conversation", async ({
+test("only comment authors edit root and reply text in Conversation @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "EDIT", name: "Comment edits" });
@@ -376,7 +376,9 @@ test("only comment authors edit root and reply text in Conversation", async ({
   }
 });
 
-test("an agent comment reply appears in the root Conversation thread", async ({ browser }) => {
+test("an agent comment reply appears in the root Conversation thread @phone", async ({
+  browser,
+}) => {
   await createProject({ key: "AGENT", name: "Agent reply" });
   const issue = await createIssue({
     project: "AGENT",
@@ -402,7 +404,7 @@ test("an agent comment reply appears in the root Conversation thread", async ({ 
   }
 });
 
-test("the phone Conversation opens a full-height thread view with its composer pinned at the bottom", async ({
+test("the phone Conversation opens a full-height thread view with its composer pinned at the bottom @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "This scenario exercises the phone-specific view.");
@@ -445,7 +447,7 @@ test("the phone Conversation opens a full-height thread view with its composer p
     await alice.close();
   }
 });
-test("a session retraction leaves its reason on the card and removes the human's live inbox item", async ({
+test("a session retraction leaves its reason on the card and removes the human's live inbox item @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -538,7 +540,7 @@ test("a session retraction leaves its reason on the card and removes the human's
   await alice.close();
 });
 
-test("two suggestions on one block are each accepted from their collapsed card", async ({
+test("two suggestions on one block are each accepted from their collapsed card @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "SUGG", name: "Suggestion cards" });
@@ -678,7 +680,7 @@ test("accepting a later suggestion over an earlier one's text leaves the earlier
   }
 });
 
-test("an orphaned suggestion stays non-actionable through resolve and reopen", async ({
+test("an orphaned suggestion stays non-actionable through resolve and reopen @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "SUGG", name: "Suggestion cards" });
@@ -833,7 +835,7 @@ async function seedSuggestion(
 // A decided suggestion's thread offers no reply, but a reply already out when someone else accepts
 // the suggestion is still the reader's: its composer stays with the draft until the server answers,
 // a refusal hands that draft back beside Retry, and Retry still sends it as a reply.
-test("a suggestion accepted while its thread's own reply is out keeps the reply's draft and refusal", async ({
+test("a suggestion accepted while its thread's own reply is out keeps the reply's draft and refusal @phone", async ({
   browser,
 }) => {
   const { comments, issueKey, suggestionId } = await seedSuggestion("Accepted under a reply");
@@ -873,7 +875,7 @@ test("a suggestion accepted while its thread's own reply is out keeps the reply'
 
 // The composer a decided suggestion's thread keeps for a reply out is only that reply's: once the
 // reply lands it leaves, as the thread offers no new one.
-test("a reply out when its suggestion is accepted lands and leaves no composer behind", async ({
+test("a reply out when its suggestion is accepted lands and leaves no composer behind @phone", async ({
   browser,
 }) => {
   const { comments, issueKey, suggestionId } = await seedSuggestion(

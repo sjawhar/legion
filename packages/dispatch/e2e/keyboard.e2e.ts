@@ -273,7 +273,6 @@ function patchOf(page: Page, key: string) {
 test("board focus roves with j/k/h/l over cards, empty columns and the Done rail, and ? lists the Board and Project scopes", async ({
   browser,
 }, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
   const { alpha, bravo, delta } = await seedBoard();
   const context = await asUser(browser, "alice");
   try {
@@ -382,8 +381,7 @@ test("board focus roves with j/k/h/l over cards, empty columns and the Done rail
 
 test("Shift+L/H move a focused card to the top of the adjacent status through the one move path: into Done closes, out of Done reopens, Triage has no previous", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   const { bravo, delta, echo, foxtrot } = await seedBoard();
   const golf = await createIssue({ project: "CORE", title: "Golf" });
   const context = await asUser(browser, "alice");

@@ -19,7 +19,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("a block-anchored comment remains with its block through a reword and quote deletion", async ({
+test("a block-anchored comment remains with its block through a reword and quote deletion @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
