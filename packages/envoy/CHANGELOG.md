@@ -833,20 +833,30 @@
 - `ENVOY_NOTIFICATIONS` and every key-value bucket Envoy opens (`envoy_interests`, `envoy_roles`,
   `envoy_sessions`, `envoy_ci_state`, `envoy_webhook_redelivery`) now hold the deployment's
   replica count, `ENVOY_NATS_REPLICAS`: a whole number from 1 to 5, default 1. A start creates the
-  stream or a bucket at that count, raises one it finds with fewer copies, and never lowers one;
-  lowering is an operator step (`nats stream edit <stream> --replicas=<n>`). The listener reads it
-  in `config.Load`, and now refuses 0, a negative number, more than 5 and a non-integer at load,
-  naming the variable, where it took any integer. Dispatch's server reads it from a new settings
-  table row, where it created the stream and its redelivery bucket with a single replica, and so
-  does `envoy-dispatch redeliver-webhooks`. More than 1 needs a clustered NATS: a single server
+  stream or a bucket at that count and raises one it finds with fewer copies; the keeper (below)
+  raises it again after a concurrent start lowered it. The copies stay at the setting only when
+  every program of a deployment carries the same value: a clustered deployment sets it in every
+  envoy-listener and in the Dispatch server. Lowering copies is an operator step that needs every
+  program's setting lowered first, or the keeper raises it back
+  (`nats stream edit <stream> --replicas=<n>`). The listener reads it in `config.Load`, and now
+  refuses 0, a negative number, more than 5 and a non-integer at load, naming the variable, where
+  it took any integer. Dispatch's server reads it from a new settings table row, where it created
+  the stream and its redelivery bucket with a single replica, and so does
+  `envoy-dispatch redeliver-webhooks`. More than 1 needs a clustered NATS: a single server
   (nats-server v2.15.1 included) refuses both a create and a raise above 1, and the start then
-  stops with an error naming `ENVOY_NATS_REPLICAS=<n>`. Every Envoy program of a deployment sets
-  the same value (INFRA-546).
+  stops with an error naming `ENVOY_NATS_REPLICAS=<n>`; a refused bucket raise names the bucket
+  too, as `raise KV_envoy_interests: ENVOY_NATS_REPLICAS=3: context deadline exceeded` (a grant
+  without `$JS.API.STREAM.UPDATE.KV_<bucket>` shows as that timeout after 10 seconds). A cluster
+  with one of three servers stopped creates a new stream at 3 copies, one offline peer assigned,
+  and the start succeeds on nats-server v2.15.1; v2.10.29 refuses that create (INFRA-546).
 - `ENVOY_STREAM_MAX_BYTES`, new, read by the listener and by Dispatch's server (a new settings
   table row): a positive whole number of bytes, the stream's byte limit, past which it discards its
   oldest messages first (`DiscardOld`, now set on every start). Unset, the stream is created with
-  no byte limit and a deployed limit is kept, so programs that leave it unset never fight one that
-  sets it; removing a limit is an operator step
+  no byte limit and a start keeps a deployed limit. The limit stays put only when every program of
+  a deployment carries the same value, a clustered deployment setting it in every envoy-listener
+  and in the Dispatch server: a start that leaves it unset can still put back the limit it read
+  over another's (below), and programs with different limits each restore their own every 30
+  seconds. Removing a limit is an operator step that needs every program's setting removed first
   (`nats stream edit ENVOY_NOTIFICATIONS --max-bytes=-1`). 0, a negative number or a non-integer is
   refused at load naming the variable, and a limit above what the server can reserve is refused at
   create or update, the start then stopping with an error naming `ENVOY_STREAM_MAX_BYTES=<n>`. The
@@ -862,15 +872,34 @@
   this binary's configuration over them, its replica count scaling a replicated stream down to the
   starting program's count, which for Dispatch's server was always 1. A start that finds the
   stream as it should be sends no update (INFRA-546).
+- The listener and Dispatch's server, the programs that own `ENVOY_NOTIFICATIONS`, now keep it
+  while they run. JetStream's stream update has no compare-and-swap, so a start with other or no
+  settings that reads the stream before another start's raise and writes after it puts the old
+  copies, byte limit and metadata back. Every 30 seconds each program's keeper reads the stream
+  again and puts back copies below its `ENVOY_NATS_REPLICAS`, a byte limit other than its
+  `ENVOY_STREAM_MAX_BYTES` (when set) and a missing `envoy_stream_id`, logging the WARN line
+  `envoy nats keeper restored the stream` with
+  `restored="replicas 1 -> 3, max_bytes -1 -> 2000000, envoy_stream_id added as <id>"`. It never
+  touches the subjects, the age, the duplicate window or discard, which only a start sets, so two
+  releases with different subject lists do not switch the stream back and forth. It also raises
+  the buckets its program opens (the listener's `envoy_interests`, `envoy_roles`,
+  `envoy_sessions` and `envoy_ci_state`, Dispatch's `envoy_webhook_redelivery`) back to
+  `ENVOY_NATS_REPLICAS`, logging `envoy nats keeper raised a bucket` with `replicas="1 -> 3"`. A
+  failed pass logs `envoy nats keeper could not restore the stream` or
+  `envoy nats keeper could not raise a bucket` and the next period tries again; it never stops
+  the program. With mixed settings during a rollout the stream can sit below the setting for up
+  to one period after the last start (INFRA-546).
 - envoy-infra: `ListenerPermissions`, and through it `HostPermissions` and `DispatchPermissions`,
   gains `$JS.API.STREAM.UPDATE.KV_<bucket>` for each bucket the listener opens, and
-  `DispatchPermissions` the same for the webhook redelivery bucket: the update a start sends to
-  raise a bucket's copies. `gcp:NatsHub` renders it into the users it derives from those sets, so
-  moving a hub with a `listener`, a `machineId` user or a `dispatchMachineId` user to this release
-  replaces its VM once. A hub must hold the new grant (`gcp:NatsHub` moved to this release, or the
-  subject added to a hand-written grant such as an `aws:NatsService` `authorization`) before a
-  program with `ENVOY_NATS_REPLICAS` above a bucket's copies starts, or that raise is refused and
-  the start stops naming the setting (INFRA-546).
+  `DispatchPermissions` the same for the webhook redelivery bucket: the update a start, and the
+  keeper every 30 seconds after it, sends to raise a bucket's copies. `gcp:NatsHub` renders it
+  into the users it derives from those sets, so moving a hub with a `listener`, a `machineId` user
+  or a `dispatchMachineId` user to this release replaces its VM once. A hub must hold the new
+  grant (`gcp:NatsHub` moved to this release, or the subject added to a hand-written grant such as
+  an `aws:NatsService` `authorization`) before a program with `ENVOY_NATS_REPLICAS` above a
+  bucket's copies starts, or that raise times out after 10 seconds and the start stops naming the
+  bucket and the setting: `raise KV_envoy_interests: ENVOY_NATS_REPLICAS=3: context deadline
+  exceeded` (INFRA-546).
 - envoy-infra: `aws:WebhookListener` refuses a `natsReplicas` above 5, and
   `envoy-infra render webhook-listener-env` a `--nats-replicas` above 5, since the listener
   refuses more at load (INFRA-546).

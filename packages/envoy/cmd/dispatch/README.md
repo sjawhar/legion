@@ -140,7 +140,10 @@ bus: unlike the server it neither creates nor updates `ENVOY_NOTIFICATIONS`, and
 NATS server that is not the machine it runs on, naming the URL. It opens the redelivery bucket as
 the server does, at `ENVOY_NATS_REPLICAS` copies (creating it, or raising one it finds with fewer),
 so run it with the server's value; a value other than a whole number from 1 to 5 stops it before
-it connects. Run inside the Dispatch
+it connects. It runs no keeper: the server's keeper raises the bucket back to the server's value
+every 30 seconds, and a refused raise names the bucket,
+`raise KV_envoy_webhook_redelivery: ENVOY_NATS_REPLICAS=3: context deadline exceeded` under a
+grant without its stream update. Run inside the Dispatch
 container it reaches that deployment's NATS with `ENVOY_ALLOW_REMOTE_NATS=1
 envoy-dispatch redeliver-webhooks …`. It connects as the nkey user `NATS_NKEY_SEED_FILE` (or
 `NATS_NKEY_SEED`) names and runs no `!` command, so it never reads `envoy.natsSeed`: a run against

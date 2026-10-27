@@ -76,9 +76,11 @@ func ListenerPermissions(machineID string) Permissions {
 
 // bucketPermissions are the calls nats.go's KV makes on one bucket, in the order the grants list
 // them: ListenerPermissions lists them for each of listenerBuckets, DispatchPermissions for the
-// redelivery bucket. Beside them is the update of the bucket's stream: a start that finds the
-// bucket with fewer copies than the deployment's replica count (bus.ReplicasEnvVar) raises it with
-// a stream update (bus.EnsureKeyValue), and never lowers it.
+// redelivery bucket. Beside them is the update of the bucket's stream: a start, and the program's
+// keeper every 30 seconds after it, raises a bucket found with fewer copies than the deployment's
+// replica count (bus.ReplicasEnvVar) with a stream update (bus.EnsureKeyValue,
+// bus.WithKeptBuckets). Without that grant the raise times out and the start stops naming the
+// bucket.
 func bucketPermissions(bucket string) []string {
 	stream := kvStream + bucket
 	return []string{

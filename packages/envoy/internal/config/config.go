@@ -15,7 +15,8 @@ type Service struct {
 	MachineID string
 	NATSURLs  []string
 	// NATSReplicas is ENVOY_NATS_REPLICAS (ParseNATSReplicas): the deployment's replica count for
-	// the stream and every bucket the listener opens.
+	// the stream and every bucket the listener opens, which the listener raises them to at start
+	// and every keeper period after (bus.ConnectOwningStream).
 	NATSReplicas int
 	// StreamMaxBytes is ENVOY_STREAM_MAX_BYTES (ParseStreamMaxBytes): the stream's byte limit, or 0
 	// when unset, which sets none and keeps a deployed one.
@@ -96,7 +97,9 @@ const MaxNATSReplicas = 5
 // count: unset or blank is 1, and otherwise a whole number from 1 to MaxNATSReplicas. Anything else
 // (0, a negative number, more than NATS keeps, a word) is refused naming the variable and the
 // value, at load rather than as a server's refusal at the stream. envoy-listener (Load) and
-// envoy-dispatch read the setting through it.
+// envoy-dispatch read the setting through it. Every program of a deployment carries the same
+// value: one with a lower value can lower the stream until the others' keepers raise it back
+// (bus.ConnectOwningStream).
 func ParseNATSReplicas(raw string) (int, error) {
 	value := strings.TrimSpace(raw)
 	if value == "" {
@@ -113,6 +116,8 @@ func ParseNATSReplicas(raw string) (int, error) {
 // limit: unset or blank is 0, which sets no limit (a deployed stream keeps the one it has), and
 // otherwise a positive whole number of bytes. 0, a negative number or a word is refused naming the
 // variable and the value. envoy-listener (Load) and envoy-dispatch read the setting through it.
+// Every program of a deployment carries the same value: programs with different limits each put
+// their own back every keeper period (bus.ConnectOwningStream).
 func ParseStreamMaxBytes(raw string) (int64, error) {
 	value := strings.TrimSpace(raw)
 	if value == "" {

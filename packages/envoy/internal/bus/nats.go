@@ -25,6 +25,8 @@ type connectOpts struct {
 	name                        string
 	replicas                    int
 	streamMaxBytes              int64
+	keepInterval                time.Duration
+	keptBuckets                 []string
 	publishAcknowledgementClock AcknowledgementClock
 	reconnectErrClock           func() time.Time
 	environment                 func(string) (string, bool)
@@ -32,7 +34,7 @@ type connectOpts struct {
 
 // parseConnectOptions applies options over the defaults every connect starts from.
 func parseConnectOptions(options []ConnectOption) connectOpts {
-	opts := connectOpts{name: "envoy", replicas: 1, publishAcknowledgementClock: wallClock{}, environment: os.LookupEnv}
+	opts := connectOpts{name: "envoy", replicas: 1, keepInterval: defaultKeepInterval, publishAcknowledgementClock: wallClock{}, environment: os.LookupEnv}
 	for _, o := range options {
 		o(&opts)
 	}
@@ -80,18 +82,32 @@ const (
 )
 
 // WithReplicas sets the deployment's replica count, ReplicasEnvVar, for the stream
-// ConnectOwningStream ensures (default 1): the count the stream is created at, and a floor for a
-// deployed stream, which is raised to it and never lowered (ensureStreamWithConfig).
+// ConnectOwningStream ensures (default 1): the count the stream is created at, and the count a
+// deployed stream with fewer copies is raised to, at the start (ensureStreamWithConfig) and by the
+// client's keeper after it (keepStream). A start never writes fewer copies than it read, but a
+// concurrent start with a lower count can put back the copies it read, until the keeper raises
+// them again a period later: the count holds only while every program of the deployment carries it.
 func WithReplicas(n int) ConnectOption {
 	return func(o *connectOpts) { o.replicas = n }
 }
 
 // WithStreamMaxBytes sets the deployment's byte limit, StreamMaxBytesEnvVar, for the stream
 // ConnectOwningStream ensures: the stream's MaxBytes at create and at every reconcile, its oldest
-// messages discarded first once it is full. 0, the default, sets none: the stream is created with
-// no byte limit, and a deployed stream keeps the limit it has (ensureStreamWithConfig).
+// messages discarded first once it is full, and put back by the client's keeper when it finds the
+// stream with another (keepStream). 0, the default, sets none: the stream is created with no byte
+// limit, and a deployed stream keeps the limit it has (ensureStreamWithConfig). Every program of a
+// deployment carries the same limit: two with different ones each put their own back every period.
 func WithStreamMaxBytes(n int64) ConnectOption {
 	return func(o *connectOpts) { o.streamMaxBytes = n }
+}
+
+// WithKeptBuckets names the KV buckets this program opens with EnsureKeyValue at the deployment's
+// replica count, which the keeper of a ConnectOwningStream client raises back to WithReplicas'
+// count each period (keep). Each name must be a bucket the program's NATS grant covers: the
+// keeper reads and updates each one's stream. A named bucket that does not exist yet is skipped
+// until the program creates it.
+func WithKeptBuckets(buckets ...string) ConnectOption {
+	return func(o *connectOpts) { o.keptBuckets = buckets }
 }
 
 // WithEnvironment names where a connect reads ENVOY_ALLOW_REMOTE_NATS (AllowRemoteEnvVar),
@@ -200,6 +216,10 @@ type Client struct {
 	recovering int32
 	stopCh     chan struct{}
 	closeOnce  sync.Once
+
+	// keeperDone is closed when the keeper of a ConnectOwningStream client ends (keep), nil on a
+	// client that runs none.
+	keeperDone chan struct{}
 }
 
 // Dial opens a tuned core NATS connection using envoy's standard options (5s connect timeout,
@@ -251,6 +271,10 @@ func Connect(urls []string, options ...ConnectOption) (*Client, error) {
 // binary's subjects, retention and duplicate window and the deployment's replica count and byte
 // limit (WithReplicas, WithStreamMaxBytes; ensureStreamWithConfig), creating the stream when the
 // server has none. Only the deployed services call it: envoy-listener and envoy-dispatch's server.
+// The client then keeps the stream until it stops: every 30 seconds its keeper puts back the
+// copies, the byte limit and the stream's id that a concurrent start or an operator took away
+// (keepStream), and raises each bucket WithKeptBuckets names that has fewer copies than
+// WithReplicas' count (raiseReplicas).
 func ConnectOwningStream(urls []string, options ...ConnectOption) (*Client, error) {
 	return newClient(urls, true, parseConnectOptions(options))
 }
@@ -285,8 +309,8 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 		nc.Close()
 		return nil, err
 	}
+	cfg := opts.streamConfig()
 	if ownsStream {
-		cfg := opts.streamConfig()
 		if err := ensureStreamWithConfig(js, &cfg); err != nil {
 			nc.Close()
 			return nil, err
@@ -294,6 +318,9 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 	}
 	c.Conn = nc
 	c.js = js
+	if ownsStream {
+		c.startKeeper(cfg, opts.keptBuckets, opts.keepInterval)
+	}
 	return c, nil
 }
 
@@ -576,7 +603,8 @@ func (c *Client) stopped() bool {
 	}
 }
 
-// Close stops any recovery goroutine and closes the underlying NATS connection.
+// Close stops any recovery goroutine and the keeper, and closes the underlying NATS connection. It
+// returns once the keeper has ended (awaitKeeper).
 func (c *Client) Close() {
 	c.subscriptionsMu.Lock()
 	if c.stopMode == clientRunning {
@@ -585,10 +613,11 @@ func (c *Client) Close() {
 	c.subscriptionsMu.Unlock()
 	c.stop()
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.Conn != nil {
 		c.Conn.Close()
 	}
+	c.mu.Unlock()
+	c.awaitKeeper()
 }
 
 // Drain stops the client and drains it, letting the deliveries already in their handlers finish,
@@ -608,7 +637,8 @@ func (c *Client) Close() {
 // installs its own, which the next pass drains, and one that ends after the last pass drains its
 // own, which the connection's drain takes (endBind). The close ends one still in flight. A
 // reconnect nats.go reports once the client has stopped closes the connection only when it came
-// after the stop (closeStopped).
+// after the stop (closeStopped). The stop ends the keeper too, which Drain waits for once the
+// connection is closed (awaitKeeper).
 func (c *Client) Drain(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	deliveriesDeadline := deadline.Add(-min(drainHookReserve, timeout*3/10))
@@ -624,6 +654,7 @@ func (c *Client) Drain(timeout time.Duration) error {
 	conn := c.Conn
 	c.drainedReconnects = conn.Stats().Reconnects
 	c.mu.Unlock()
+	defer c.awaitKeeper()
 	defer conn.Close()
 	if conn.IsReconnecting() {
 		return fmt.Errorf("drain NATS: %w", nats.ErrConnectionReconnecting)

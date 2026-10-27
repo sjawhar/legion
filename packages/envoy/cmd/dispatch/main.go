@@ -568,14 +568,19 @@ func loadAppCredentials(env settingValues, dataDir string) (*auth.AppConfig, app
 
 // dispatchStreamOptions are the options the Dispatch server's publisher connects with, the
 // stream's other owner (bus.ConnectOwningStream): its name, the settings table's lookup for NATS's
-// reach and nkey, and the deployment's replica count and byte limit from boot. main and the tests
-// that start Dispatch's stream both take them from here.
+// reach and nkey, the deployment's replica count and byte limit from boot, and the webhook
+// redelivery bucket, the one bucket Dispatch opens at that count (webhookSweeper) and its NATS
+// grant covers, which the client's keeper raises back to it when a concurrent start or an
+// operator lowered it (bus.WithKeptBuckets). A server with no App key opens no such bucket, and
+// the keeper skips one that does not exist. main and the tests that start Dispatch's stream both
+// take them from here.
 func dispatchStreamOptions(boot bootConfig, env settingValues) []bus.ConnectOption {
 	return []bus.ConnectOption{
 		bus.WithEnvironment(env.lookup),
 		bus.WithName("dispatch"),
 		bus.WithReplicas(boot.NATSReplicas),
 		bus.WithStreamMaxBytes(boot.StreamMaxBytes),
+		bus.WithKeptBuckets(bus.WebhookRedeliveryBucket),
 	}
 }
 

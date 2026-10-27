@@ -60,7 +60,8 @@ func TestListenerPermissionsRaiseABucketOnACluster(t *testing.T) {
 	refused, refusedJS, refusedErrs := connectGranted(t, cluster.URL(), refusedSeed, 2*time.Second)
 	_, err = bus.EnsureKeyValue(refusedJS, bucket(3))
 	require.Error(t, err, "a client without the bucket's stream update raised it")
-	require.True(t, strings.HasPrefix(err.Error(), bus.ReplicasEnvVar+"=3: "), "the refused raise's error %q does not name %s", err, bus.ReplicasEnvVar)
+	refusedRaise := "raise KV_" + bus.InterestBucket + ": " + bus.ReplicasEnvVar + "=3: "
+	require.True(t, strings.HasPrefix(err.Error(), refusedRaise), "the refused raise's error %q does not start %q", err, refusedRaise)
 	t.Logf("the refused raise: %v", err)
 	require.NoError(t, refused.Flush())
 	requirePublishRefused(t, refusedErrs, "$JS.API.STREAM.UPDATE.KV_"+bus.InterestBucket)

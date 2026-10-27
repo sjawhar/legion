@@ -354,11 +354,13 @@ func (r streamReconciliation) log() {
 //
 // The update starts from the deployed configuration and sets only what this binary owns:
 //   - the subjects (reconcileSubjects), the age and the duplicate window, cfg's;
-//   - the replicas, the deployed count or cfg's when that is more: a start never lowers them, so a
-//     program whose setting is lower (an older setting, or one restarted before the others) leaves
-//     a raised stream as it is, and lowering is an operator step;
+//   - the replicas, the deployed count or cfg's when that is more: a start never writes fewer
+//     copies than it read, so a program whose setting is lower (an older setting, or one restarted
+//     before the others) leaves a raised stream it reads as it is, though not one raised after its
+//     read (below); lowering is an operator step that needs every program's setting lowered first;
 //   - the byte limit, cfg's when it sets one and the deployed limit otherwise, so a program that
-//     sets none never removes another's, and removing one is an operator step;
+//     sets none keeps the limit it read (below for one set after its read), and removing one is an
+//     operator step that needs every program's setting removed first;
 //   - discard, DiscardOld, so a full stream drops its oldest messages and still takes a publish;
 //   - the metadata, the deployed metadata kept as it is, its StreamIDMetadataKey included; a stream
 //     without that key gets one (identifiedMetadata).
@@ -370,14 +372,20 @@ func (r streamReconciliation) log() {
 //
 // Every bus.ConnectOwningStream caller runs this on the one stream, and JetStream's stream update
 // has no compare-and-swap, so two starts can each read the stream before either writes, and the
-// later write wins. A deployment sets one replica count and one byte limit for all its programs,
-// so both writes carry the same values and the race is harmless. One race does show: nats-server
-// can leave one of two replica changes proposed at once unanswered (seen with v2.10.29,
-// TestTwoStartsRaisingOneStreamAtOnceBothSucceed), so an update whose answer never came is checked
-// against the stream read again, and a stream that by then needs nothing more is the start's
-// success (unanswered). A stream one start creates first is reconciled by the other, keeping the
-// id it was created with (AddStream answers ErrStreamNameAlreadyInUse, as its config's id
-// differs). Two that both find no id write the same one, derived from what both read.
+// later write wins. A start can therefore lose to a concurrent start with other settings: one that
+// read the stream before this start's raise and writes after it puts back the copies, the byte
+// limit and the metadata it read. The client this start returns keeps the stream (keepStream):
+// within one keeper period it puts back the copies, the byte limit and StreamIDMetadataKey its
+// settings ask for, so the race ends where every program's settings agree. That steady state needs
+// every program of a deployment to carry the same ENVOY_NATS_REPLICAS and ENVOY_STREAM_MAX_BYTES:
+// two programs with different byte limits would each restore their own every period. One race
+// shows even with the same settings: nats-server can leave one of two replica changes proposed at
+// once unanswered (seen with v2.10.29, TestTwoStartsRaisingOneStreamAtOnceBothSucceed), so an
+// update whose answer never came is checked against the stream read again, and a stream that by
+// then needs nothing more is the start's success (unanswered). A stream one start creates first is
+// reconciled by the other, keeping the id it was created with (AddStream answers
+// ErrStreamNameAlreadyInUse, as its config's id differs). Two that both find no id write the same
+// one, derived from what both read.
 func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) error {
 	info, err := js.StreamInfo(Stream)
 	if errors.Is(err, nats.ErrStreamNotFound) {
@@ -416,30 +424,50 @@ func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) er
 
 // reconciledStream is the configuration ensureStreamWithConfig writes over the deployed stream info
 // describes, and the subject reconciliation in it: the deployed configuration with only what this
-// binary owns set from cfg.
+// binary owns set from cfg, the keeper's part (keptStream) and the subjects, the age, the
+// duplicate window and discard, which only a start sets.
 func reconciledStream(info *nats.StreamInfo, cfg *nats.StreamConfig) (nats.StreamConfig, streamReconciliation) {
 	reconciliation := reconcileSubjects(info.Config.Subjects, cfg.Subjects)
-	desired := info.Config
+	desired := keptStream(info, cfg)
 	desired.Subjects = reconciliation.subjects
 	desired.MaxAge = cfg.MaxAge
 	desired.Duplicates = cfg.Duplicates
-	desired.Replicas = max(info.Config.Replicas, cfg.Replicas)
-	if cfg.MaxBytes > 0 {
-		desired.MaxBytes = cfg.MaxBytes
-	}
 	desired.Discard = nats.DiscardOld
-	desired.Metadata = identifiedMetadata(info)
 	return desired, reconciliation
 }
 
-// streamReconciled reports whether the stream, read again, already holds everything cfg asks of it.
+// keptStream is the deployed configuration info describes with only what the deployment's settings
+// in cfg ask of every program kept: the replicas, the deployed count or cfg's when that is more;
+// the byte limit, cfg's when it sets one and the deployed limit otherwise; and the metadata with a
+// StreamIDMetadataKey (identifiedMetadata). Both a start (reconciledStream) and the keeper
+// (keepStream) write it.
+func keptStream(info *nats.StreamInfo, cfg *nats.StreamConfig) nats.StreamConfig {
+	kept := info.Config
+	kept.Replicas = max(info.Config.Replicas, cfg.Replicas)
+	if cfg.MaxBytes > 0 {
+		kept.MaxBytes = cfg.MaxBytes
+	}
+	kept.Metadata = identifiedMetadata(info)
+	return kept
+}
+
+// streamReconciled reports whether the stream, read again, already holds everything cfg asks of a
+// start.
 func streamReconciled(js nats.JetStreamContext, cfg *nats.StreamConfig) bool {
+	return streamHolds(js, cfg, func(info *nats.StreamInfo, cfg *nats.StreamConfig) nats.StreamConfig {
+		desired, _ := reconciledStream(info, cfg)
+		return desired
+	})
+}
+
+// streamHolds reports whether the stream, read again, already holds the configuration desired
+// builds over it from cfg.
+func streamHolds(js nats.JetStreamContext, cfg *nats.StreamConfig, desired func(*nats.StreamInfo, *nats.StreamConfig) nats.StreamConfig) bool {
 	info, err := js.StreamInfo(Stream)
 	if err != nil {
 		return false
 	}
-	desired, _ := reconciledStream(info, cfg)
-	return reflect.DeepEqual(desired, info.Config)
+	return reflect.DeepEqual(desired(info, cfg), info.Config)
 }
 
 // unanswered reports whether err is a JetStream request's wait running out with no answer, rather

@@ -71,12 +71,29 @@ step below works from. Both lines are written only after the stream carries the 
 
 `MaxAge` and the duplicate window still take the starting binary's values. The rest of an update
 starts from the deployed configuration too: the replicas become the deployed count or
-`ENVOY_NATS_REPLICAS`, whichever is more, so a start never lowers them; the byte limit becomes
-`ENVOY_STREAM_MAX_BYTES` when it is set and otherwise stays as deployed, so a start never removes
-one; discard is `DiscardOld`; and the metadata, `envoy_stream_id` included, and every field Envoy
-does not own (`MaxMsgsPerSubject`, `MaxMsgSize`, placement, compression and the rest) stay as they
-are. Lowering the replicas and removing the limit are operator steps, like retiring a subject:
-`nats stream edit ENVOY_NOTIFICATIONS --replicas=<n>` and
+`ENVOY_NATS_REPLICAS`, whichever is more; the byte limit becomes `ENVOY_STREAM_MAX_BYTES` when it
+is set and otherwise stays as deployed; discard is `DiscardOld`; and the metadata,
+`envoy_stream_id` included, and every field Envoy does not own (`MaxMsgsPerSubject`,
+`MaxMsgSize`, placement, compression and the rest) stay as they are. A start's own write
+therefore never lowers the copies or removes the limit it read, but the copies and the limit stay
+put only when every program of a deployment carries the same `ENVOY_NATS_REPLICAS` and
+`ENVOY_STREAM_MAX_BYTES`, so a clustered deployment sets both in every envoy-listener and in the
+Dispatch server. JetStream's stream update has no compare-and-swap: a start with other or no
+settings that reads the stream before another start's raise and writes after it puts the old
+copies, limit and metadata back.
+
+So every program that owns the stream runs a keeper (`internal/bus/keeper.go`): every 30 seconds
+it reads the stream again and puts back copies below its `ENVOY_NATS_REPLICAS`, a byte limit other
+than its `ENVOY_STREAM_MAX_BYTES` (when set) and a missing `envoy_stream_id`, logging
+`envoy nats keeper restored the stream` at WARN with
+`restored="replicas 1 -> 3, max_bytes -1 -> 2000000, envoy_stream_id added as <id>"`. The keeper
+never touches the subjects, the age, the duplicate window or discard: only a start reconciles
+those, since a keeper that reconciled subjects would have two releases with different subject
+lists switch the stream back and forth every period. With mixed settings during a rollout the
+stream can sit below the setting for up to one period after the last start, and programs with
+different byte limits each restore their own every period, which their WARN lines show. Lowering
+the replicas and removing the limit are operator steps that need every program's setting changed
+first, or the keeper puts them back: `nats stream edit ENVOY_NOTIFICATIONS --replicas=<n>` and
 `nats stream edit ENVOY_NOTIFICATIONS --max-bytes=-1`.
 
 An earlier version of this page described the opposite behaviour, which was true until

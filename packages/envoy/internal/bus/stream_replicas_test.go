@@ -413,7 +413,8 @@ func TestTwoStartsRaisingOneStreamAtOnceBothSucceed(t *testing.T) {
 }
 
 // A raise the cluster refuses, more copies than it has servers, fails the start naming the replica
-// setting, for the stream and for a bucket, and leaves both as they were.
+// setting, for the stream and for a bucket, whose error names the bucket's stream first, and leaves
+// both as they were.
 func TestARefusedRaiseNamesTheReplicaSetting(t *testing.T) {
 	cluster, js := startClusterJetStream(t)
 	startOnCluster(t, cluster, WithReplicas(1))
@@ -432,8 +433,8 @@ func TestARefusedRaiseNamesTheReplicaSetting(t *testing.T) {
 		t.Fatalf("start error = %q, want the server's refusal naming %s=5", err, ReplicasEnvVar)
 	}
 	_, err = EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 5})
-	if err == nil || !strings.HasPrefix(err.Error(), ReplicasEnvVar+"=5: ") || !errors.As(err, &apiErr) {
-		t.Fatalf("raise the bucket to five copies = %v, want the server's refusal naming %s=5", err, ReplicasEnvVar)
+	if want := "raise KV_" + bucket + ": " + ReplicasEnvVar + "=5: "; err == nil || !strings.HasPrefix(err.Error(), want) || !errors.As(err, &apiErr) {
+		t.Fatalf("raise the bucket to five copies = %v, want the server's refusal starting %q", err, want)
 	}
 	for _, stream := range []string{Stream, "KV_" + bucket} {
 		if info := awaitStream(t, js, stream); info.Config.Replicas != 1 {
