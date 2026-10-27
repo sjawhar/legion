@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-546",
+  "completed": "2026-10-27T05:58:04Z",
+  "headSha": "0681b1218da2ce3b9a14dbe56448e2b6ee3d1ab7",
+  "codeHeadSha": "b2e6471b14e570a2258d1ab80cc09d2a52e85b38",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran `bash /legion/scratch/tmp/p546/proof.sh /legion/workspaces/sjawhar/legion/infra-546` twice at 0681b121 (same code as b2e6471b). Run 2 reproduced P1, P2, P3 and every negative control as the E2E (implementer) line states. In run 1, P3's envoy-dispatch wrote an empty log and exited before 'listening'. It did not occur again in 8 later boots (run 2, and 7 boots in the tester's Dispatch+listener runs)."
+  },
+  "failed": 2,
+  "failures": [
+    {
+      "criterion": "The pull request can merge and CI has judged it: lint, types, and the Go and TypeScript suites, the 3a-3l tests included",
+      "evidence": "`gh pr view 2362 --repo sjawhar/legion --json mergeable,mergeStateStatus` -> CONFLICTING / DIRTY against legion/INFRA-439. That branch moved from 067a15af to 3ea454d3: #2228's commit fcc7d008 adds `stream_moved_back` beside the `retention_gap` notice line this PR rewords, in packages/envoy-client/src/replay.ts and packages/claude-envoy/dist/envoy-channel.js, with README/CHANGELOG/AGENTS edits in the same packages. `gh api 'repos/sjawhar/legion/actions/runs?branch=legion/INFRA-546'` is empty, and the check-runs at b2e6471b and 0681b121 are empty, so no CI lane has ever run on this change. The fix: merge legion/INFRA-439@origin into the branch (plan decision 1: on a GitHub-reported conflict). The merge changes the diff, so the next round is a full test round. No red test: this is the state of the branch, not code behaviour."
+    },
+    {
+      "criterion": "Copies are never lowered and a program that sets no byte limit never removes one (plan decisions 3 and 7; spec: a stream update keeps three copies and the byte limit) - with programs of one deployment starting at the same moment with different settings",
+      "evidence": "Real binaries on three nats-server v2.15.1 processes. The deployed stream is R1 with an older subject list, so every start updates it. One program has ENVOY_NATS_REPLICAS=3 ENVOY_STREAM_MAX_BYTES=2000000. The other has neither setting (Dispatch's default; gcp:Dispatch takes both 'unset unless given'). Both start at the same moment. `bash /legion/scratch/tmp/t546/race.sh <workspace> 4 75` keeps both running for 75 s, then reads the stream. At 0681b121, 7 of 8 pairs (listener||listener and envoy-dispatch||listener) end with {\"replicas\":1,\"max_bytes\":-1}, both programs alive, buckets at 3: https://github.com/sjawhar/legion/pull/2362#issuecomment-6434935100 . Earlier runs: tF 2/3, tK-M 2/4, tD 3/3 (https://github.com/sjawhar/legion/pull/2362#issuecomment-6434575953). Cause: the unset program reads the stream before the raise and writes its subject update after the raise, carrying R1 and no limit. JetStream's stream update has no compare-and-swap. The code comment accepts this race only on the condition of one value per deployment, but the CHANGELOG, packages/envoy/AGENTS.md and the setting descriptions state the guarantee without that condition. Test 3i covers same-setting raisers only. The INFRA-14 architect decided (Envoy, 2026-10-27T05:31Z, sent to the implementer): (c). The docs make the guarantee conditional on one value per deployment, and a program that has the settings re-checks the stream and buckets at least once a minute and raises any that it finds lowered. Acceptance: race.sh ends, within one period after both starts, with three copies, the byte limit and the id in every round. No red Go test was committed: where the periodic re-check lives (bus.Client, or each program's main loop) is the implementer's design, and cmd/listener's main() has no in-process entry that a test could start. The red check is the real-binary harness race.sh (RESULT: FAIL at this head), which the next test round runs."
+    }
+  ],
+  "observations": [
+    "On v2.15.1, a NEW stream at 3 copies with one of three servers stopped is created (one offline peer assigned) and the start succeeds. Plan test 3j's second half holds only on the v2.10.29 server that the Go tests link. If a doc claims that this start fails, the doc must say which server version.",
+    "ENVOY_STREAM_MAX_BYTES=1 is accepted. The stream then holds no message (C4: msgs 0 after a publish).",
+    "A refused bucket raise on a grant without STREAM.UPDATE.KV_* shows as 'ENVOY_NATS_REPLICAS=3: context deadline exceeded' after 10 s. It names no bucket and no permission.",
+    "Commit 6e81391c carries 25 lines of unrelated packages/envoy/infra/go.work.sum churn. The implementer's own trickyParts says to restore that file before committing."
+  ],
+  "ran": [
+    "proof.sh x2 (implementer's harness)",
+    "/legion/scratch/tmp/t546/tA.sh - fresh create R3+limit through the rendered example-host-a grant from cloud-config.golden; 0 STREAM.UPDATE over 3 starts (replicas 3, 3, then 1 with no limit), from the $JS.EVENT.ADVISORY.> trace",
+    "tB.sh - R1 raise through the rendered grant: stream and 3 buckets to 3, KV value kept; the grant without STREAM.UPDATE.KV_* refused (negative control)",
+    "tC.sh - limit 50000 below 196292 stored bytes: 50 msgs, first_seq 151, id, max_msgs_per_subject and max_msg_size kept; with the limit unset, the deployed limit is kept",
+    "tD.sh - SIGKILL 150 ms into a raise, then restart: R3, limit, id",
+    "tE.sh - same-setting concurrent listeners 4/4 correct; mixed 2/3 lowered",
+    "tG.sh - envoy-dispatch redeliver-webhooks --dry-run raises KV_envoy_webhook_redelivery R1 -> 3 (history 1, key kept); =6 refused; =1 leaves 3",
+    "tH.sh - Dispatch boot refusals (0, 6, x, 3.0; bytes 0, -5, 1GB, 2^66); listener boundaries (' 3 ', +3, 03 accepted; 1e1 refused; 5 on 3 servers and int64 max refused naming the setting)",
+    "tJ.sh / tJ2.sh - one server down with all at 3: ready, 0 STREAM.UPDATED; a new create at 3 with one down succeeds on v2.15.1",
+    "tK.sh - envoy-dispatch || listener: same settings 3/3 correct, mixed 2/4 lowered",
+    "tL.sh - R1 stream with allow_msg_ttl, allow_direct, compression s2, description: raised to 3, all kept",
+    "race.sh 4 75 - 7/8 pairs lowered (RESULT: FAIL)"
+  ]
+}
