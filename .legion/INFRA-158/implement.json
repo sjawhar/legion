@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-158",
-  "completed": "2026-10-27T11:21:45Z",
+  "completed": "2026-10-27T12:57:20Z",
   "proof": [
+    {
+      "criterion": "Review round 10: an unsettled paste keeping its source's id gives no id to two version blocks, so no block a version holds is recorded deleted; an open document the live-ahead cache held is indexed once its issue closes; one method enforces one id per block and one block per id",
+      "surface": "the closed-document matcher as a pure function, and real Postgres with the block-index tick, its live-ahead cache map, settlement and refs resolution",
+      "command": "go test -count=1 ./internal/dispatch/docs/ ; go test -count=5 -run 'TestAClosedDocumentsCrossedEditsKeepTheirRowsHistory|TestClosedVersionBlocks' ./internal/dispatch/docs/ ; go test ./internal/dispatch/refs/ ; go test -run 'Repair|Unloadable|TestClosingAnIssue|Block|TestTheBlockIndex' ./internal/dispatch/api/",
+      "observed": "TestClosedVersionBlocksCountsOnlyTheFirstHolderOfAnID gives [p1 p2] for both pastes; TestAClosedDocumentsPasteKeepingItsSourcesIDTakesNoRow keeps the second block at version 1 and resolves it; TestBlockIndexRereadsALiveAheadDocumentWhoseIssueCloses indexes the document on the next tick; the four tester red tests pass unmodified; docs (781 s), refs and the api subset pass",
+      "headSha": "fd3bfa69b2efd7f0093d9675bc1bc3690afee306",
+      "negativeControl": "Before the fix: matcher [p1 p1]; second block 'dated 0 … (deleted true) at version 1'; cached document 'Documents:0 LiveAhead:1 OwedDocuments:1' after its close"
+    },
     {
       "criterion": "Testing round 14: with no row, a closed document's repeated text is matched only when the version and the live document hold equally many copies, so a copy typed after the close is never dated version 1, while equal counts resolve every copy at version 1",
       "surface": "real Postgres with the docs service, block-index tick, settlement after the reopen and refs resolution; the full docs package and cmd/dispatch at the sixteenth merge",
@@ -54,6 +62,7 @@
     }
   ],
   "filesChanged": [
+    "round 15 (review round 10): docs/closed_version_blocks.go (new: matcher with take, first-holder rule), docs/closed_version_blocks_test.go, docs/block_index.go (cache open flag, one live-ahead condition), docs/block_index_test.go, refs/blocks.go (BlockTextSum), packages/envoy/AGENTS.md",
     "round 14: docs/block_index.go (repeated text paired only on equal counts), packages/envoy/AGENTS.md; sixteenth forward merge b3855fb2 (store/pool.go leasePoolSize 11, cmd/dispatch/README.md nine loops, cmd/dispatch/multiprocess_test.go nine leases, docs/service.go main's settle code to settleOutcome, docs/ask_lifecycle_test.go settlementAuthors' new argument), docs/solutions lease learning (sixteenth merge)",
     "round 13: docs/block_index.go (rows claim first: stage A, stored-row claim, gap text alignment, unique-text pass), docs/block_index_test.go (crossing test), packages/envoy/AGENTS.md; fifteenth forward merge 6c7b9483 (packages/envoy/CHANGELOG.md, both kept)",
     "round 12: docs/block_index.go (closedVersionBlocks with difflib alignment and stored-row hash match; live-text path removed), docs/block_index_test.go (edited-untyped-block test; round-9 docs test back to version text), packages/envoy/AGENTS.md",
