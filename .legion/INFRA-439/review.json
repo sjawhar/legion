@@ -2,29 +2,30 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-439",
-  "completed": "2026-10-27T10:34:03Z",
-  "round": "confirmation after the forward merge 5579f099 (fingerprint equal), held by a new conflict",
-  "reviewedHead": "5579f099d21e36d1a81e13e9a880efcad0522aff",
-  "decision": "changes_requested",
+  "completed": "2026-10-27T12:23:45Z",
+  "round": "review of the merge adaptations after two forward merges (fingerprint moved)",
+  "reviewedHead": "cd3c748767ee2760e9ff59f1c1aaeebb9bec526d",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
   "fingerprint": {
-    "approved": "fcfbc288f05b54a8f89461975c53a87e0da717f16b03149df2a0cf507b638fcf (34b3e846, approval 5664587411 at 21808616)",
-    "now": "fcfbc288f05b54a8f89461975c53a87e0da717f16b03149df2a0cf507b638fcf (5579f099)",
-    "verdict": "equal: the code is the approved code"
+    "approved": "fcfbc288f05b54a8f89461975c53a87e0da717f16b03149df2a0cf507b638fcf (34b3e846 and 5579f099)",
+    "now": "50792ce80e87eb6f6db826aef7702385aed83eccbe5604bb857faf0f9df2c620 (cd3c7487)",
+    "difference": "Only the adaptation of the PR's own call sites to main's context-taking Registry.Get/Remove and publishConfirmed, plus AGENTS.md table rows merged with main's ErrMalformedInterest text and the claude-envoy dist rebuild."
   },
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "pull request",
-      "description": "GitHub reports #2228 CONFLICTING with main again as of 10:33Z, and the required checks at 5579f099 have not finished (test in progress; lint, typecheck and pr-title queued, 80 minutes after the push). Merge main forward again on this reported conflict, changing nothing else, so the next head carries the merge and its CI. No code finding stands."
-    }
+  "verifiedFixed": [
+    "replayFollowed takes the replay handler's ctx (r.Context bounded by the 5 s replay budget) and passes it to registry.Get; the ErrKeyNotFound tolerance and error paths are unchanged.",
+    "requestConfirmed passes its own ctx (always carrying a deadline, storedMessageWait when the caller set none) to publishConfirmed; an ended ctx is refused before the publish, and reader.read still answers a budget-ended read as a bound.",
+    "The context.Background() call sites in the diff are tests (main_test.go, replay_test.go, kv_test.go); dropPrivateStreamTopics still runs on both store writes (kv.go 602, 840).",
+    "Main's ErrMalformedInterest: a session whose stored row cannot be decoded gets a plain 503 from /v1/replay (logged and retried by the engine) until its next registration replaces the row; self-healing within a heartbeat."
   ],
+  "keyFindings": [],
   "ci": {
-    "codeHead": "5579f099d21e36d1a81e13e9a880efcad0522aff",
+    "codeHead": "cd3c748767ee2760e9ff59f1c1aaeebb9bec526d",
     "required": ["lint", "typecheck", "test", "pr-title"],
-    "observed": "test in_progress (122105373105); lint (122105372859), typecheck (122105373080), pr-title (122105623650) queued at 10:33Z; compare 5579f099...a817758f changes only .legion/."
+    "observed": "lint success (122150294732), typecheck success (122150295437), test success (122150295372), pr-title success (122150254854) at 12:23Z; newest pull_request run head is cd3c7487; compare cd3c7487...6ca8f605 changes only .legion/."
   },
-  "nextRound": "After the next forward merge: an equal fingerprint and the four required checks green at the code head, then APPROVE with Fast-follow none."
+  "threads": "23 threads, all resolved; I answered the four from rounds 5 and 6 (PRRT_kwDORFy7ds6wgLP8, wgLQF, wg7ak, wg7an) as accepted this round.",
+  "fastFollow": "none"
 }
