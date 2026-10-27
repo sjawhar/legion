@@ -3938,7 +3938,9 @@ annotation (`docker buildx imagetools inspect --raw ghcr.io/sjawhar/legion/envoy
 which signs the same digest `image_index` hands over. The attestation is separate from the
 BuildKit provenance (`provenance: mode=min`) each `docker` leg attaches to its platform's image,
 and the index carries both legs' provenance, which a deployment reads to map a digest to its
-commit.
+commit. The package's `buildcache-amd64` and `buildcache-arm64` tags are each `docker` leg's
+BuildKit layer cache (a registry cache manifest that only a build on `main` writes), not images,
+so nothing pins, verifies or inspects them as images.
 
 `.github/workflows/release-envoy-listener.yaml`'s `legion-envoy-v*` release also ships
 `cmd/agent-secrets` for Linux and macOS, and the host helper `cmd/agent-secrets-helper` for Linux

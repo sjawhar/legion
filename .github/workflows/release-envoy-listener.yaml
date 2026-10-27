@@ -198,8 +198,8 @@ jobs:
       # `load: true` is Docker's documented test-before-push shape, and the only build form
       # .github/scripts/check-image-trigger-paths.sh can read. Same Dockerfile, context, builder
       # and LEGION_COMMIT as the publish step below, so each leg smoke-tests the platform it
-      # pushes, natively, before it pushes it. It reads the leg's BuildKit cache, which the publish
-      # step writes.
+      # pushes, natively, before it pushes it. It reads the leg's registry layer cache, which the
+      # publish step writes on main; the package is public, so the read needs no login.
       - name: Build the listener image the smoke test runs against
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         env:
@@ -213,7 +213,7 @@ jobs:
           file: packages/envoy/docker/Dockerfile
           load: true
           provenance: false
-          cache-from: type=gha,scope=envoy-${{ matrix.arch }}
+          cache-from: type=registry,ref=ghcr.io/sjawhar/legion/envoy:buildcache-${{ matrix.arch }}
           build-args: |
             LEGION_COMMIT=${{ github.sha }}
           tags: ${{ env.ENVOY_SMOKE_IMAGE }}
@@ -255,10 +255,17 @@ jobs:
           # both legs have pushed. `outputs` replaces `push` and `tags`; `push` beside it would
           # request a second exporter.
           outputs: type=image,name=ghcr.io/sjawhar/legion/envoy,push-by-digest=true,name-canonical=true,push=true
-          # Each leg has a cache scope of its own: two legs writing one scope would overwrite each
-          # other's cache index.
-          cache-from: type=gha,scope=envoy-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=envoy-${{ matrix.arch }}
+          # The layer cache is a registry cache, one tag per platform in the image's own package
+          # (`envoy:buildcache-amd64`, `envoy:buildcache-arm64`): a cache manifest, not an image,
+          # written with the ghcr.io login above (packages: write). Every build reads it; only a
+          # build on main writes it (a workflow_dispatch from another branch writes none), so the
+          # Actions cache gets no BuildKit entry from this workflow. The `type=gha,mode=max` export
+          # it replaces added about 1.6 GB of new Actions-cache entries per main run, at 27-29 runs
+          # a day, and evicted the entries pull requests read (INFRA-520, 2026-10-27). Each
+          # platform has a tag of its own: two legs writing one cache ref would overwrite each
+          # other's cache manifest.
+          cache-from: type=registry,ref=ghcr.io/sjawhar/legion/envoy:buildcache-${{ matrix.arch }}
+          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/sjawhar/legion/envoy:buildcache-{0},mode=max', matrix.arch) || '' }}
           # envoy-dispatch's /healthz reports this as the commit it was built from; the
           # Dockerfile refuses anything but a full sha.
           build-args: |
