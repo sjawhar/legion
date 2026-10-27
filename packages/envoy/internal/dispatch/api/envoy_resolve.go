@@ -14,12 +14,13 @@ import (
 )
 
 // Dispatch's Envoy listener client is a cross-service HTTP call bounded only by its five
-// second timeout (internal/dispatch/envoy/client.go), and production runs one Dispatch task
-// on a pool of store.sharedPoolSize connections. A listener call made while a transaction is
-// open therefore holds one of them - and the rows that transaction locked - for as long as
-// the listener takes to answer, so that many concurrent ones empty the pool and stall every
-// unrelated Dispatch request until the listener replies. A listener restart, which happens on
-// every listener deploy, is enough to trigger it.
+// second timeout (internal/dispatch/envoy/client.go), and each Dispatch process serves every
+// request it takes from its own pool of store.sharedPoolSize connections. A listener call made
+// while a transaction is open therefore holds one of them - and the rows that transaction
+// locked, which the other processes' requests wait on too - for as long as the listener takes
+// to answer, so that many concurrent ones empty the pool and stall every unrelated Dispatch
+// request until the listener replies. A listener restart, which happens on every listener
+// deploy, is enough to trigger it.
 //
 // So no listener call runs with a transaction or a pooled connection held, and this file is
 // the one place the shape is spelled:
@@ -37,6 +38,11 @@ import (
 //  1. claim  - one short transaction commits the attempt as pending and takes it;
 //  2. send   - the listener call, with nothing held;
 //  3. settle - a second short transaction records the outcome and appends the receipt.
+//
+// A sender that never reaches its settle - its process killed, the database refusing the write -
+// leaves the attempt pending under its claim. Whichever process runs the resume loop next sends it
+// once the claim lease (claimLapsed) has passed, under the attempt's own number and idempotency
+// key (delivery_resume.go); only an attempt older than the loop's horizon waits for a Retry.
 
 // errStaleResolution is how a locked write reports that a row the pre-transaction listener
 // resolution depended on had changed by the time it held the lock. It never reaches a client:

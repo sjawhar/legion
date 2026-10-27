@@ -1417,6 +1417,26 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			refusedWith(t, map[string]string{"DISPATCH_TEST_SETTLE_DELAY": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
 		},
+		"DISPATCH_TEST_DELIVERY_RESUME_INTERVAL": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{}); boot.DeliveryResumeInterval != api.DeliveryResumeInterval {
+				t.Errorf("DISPATCH_TEST_DELIVERY_RESUME_INTERVAL unset: DeliveryResumeInterval = %v, want %v",
+					boot.DeliveryResumeInterval, api.DeliveryResumeInterval)
+			}
+			const shortInterval = time.Second
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":                    "1",
+				"DISPATCH_TEST_DELIVERY_RESUME_INTERVAL": shortInterval.String(),
+			})
+			if boot.DeliveryResumeInterval != shortInterval {
+				t.Errorf("DISPATCH_TEST_DELIVERY_RESUME_INTERVAL: DeliveryResumeInterval = %v, want %v",
+					boot.DeliveryResumeInterval, shortInterval)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_DELIVERY_RESUME_INTERVAL": invalid},
+					fmt.Sprintf("DISPATCH_TEST_DELIVERY_RESUME_INTERVAL=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_DELIVERY_RESUME_INTERVAL": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
 	}
 	for _, row := range settings {
 		test, ok := cases[row.Name]

@@ -44,7 +44,10 @@ func (s *server) createDelivery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "MESSAGE_NOT_FOUND", http.StatusNotFound, "message not found")
 		return
 	}
-	attempt, err := s.deliverMessage(r.Context(), message, input.Delivery, nil, actor, nil)
+	// The send outlives the request's connection, keeping its values and dropping its
+	// cancellation, as createStoredMessage's does: the attempt is committed before the listener
+	// call, and a cut connection must not strand it.
+	attempt, err := s.deliverMessage(context.WithoutCancel(r.Context()), message, input.Delivery, nil, actor, nil)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -265,19 +268,21 @@ type pendingMessageDelivery struct {
 // such attempt or it was stranded before anything was resolved. A resumed attempt keeps its
 // recipient - it is the attempt the listener has already deduplicated under its idempotency key,
 // so re-pointing it at whoever holds the message's role now would deliver one attempt number to
-// two sessions and leave the first unable to answer the frame it was sent. This runs with
-// nothing held, before the resolution; recordPendingMessageDelivery re-reads the attempt under
-// the message's lock and redoes the pair when the row it locked names a different recipient.
-func (s *server) messageDeliveryRoute(ctx context.Context, message model.Message) (string, error) {
+// two sessions and leave the first unable to answer the frame it was sent. The attempt read is
+// the one a bound sender (resumeAttempt > 0) owns, and otherwise the lowest pending one, which is
+// the one an unbound send resumes. This runs with nothing held, before the resolution;
+// recordPendingMessageDelivery re-reads the attempt under the message's lock and redoes the pair
+// when the row it locked names a different recipient.
+func (s *server) messageDeliveryRoute(ctx context.Context, message model.Message, resumeAttempt int) (string, error) {
 	var pinned string
 	var lapsed bool
 	err := s.deps.Store.Pool.QueryRow(ctx, `
 		select session_id, `+claimLapsed+`
 		from message_deliveries
-		where message_id = $1 and state = 'pending'
+		where message_id = $1 and state = 'pending' and ($2 = 0 or attempt = $2)
 		order by attempt
 		limit 1
-	`, message.ID).Scan(&pinned, &lapsed)
+	`, message.ID, resumeAttempt).Scan(&pinned, &lapsed)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return "", err
 	}
@@ -330,9 +335,13 @@ func (s *server) recordPendingMessageDelivery(
 	pending := pendingMessageDelivery{resolved: resolved}
 	if resumeAttempt > 0 {
 		// A bound sender takes its own attempt or nothing. The row must still be pending, still
-		// in the mode this send resolved for, still pointed at the session the resolution was
-		// taken for, and free (nobody else inside the claim lease) - anything else means this
-		// send is not the one that owes the frame.
+		// in the mode this send resolved for, and free (nobody else inside the claim lease) -
+		// anything else means this send is not the one that owes the frame. Its recipient is the
+		// one the resolution must have been taken for: the session a pinned row names, which a
+		// different resolution means another sender's; or, for a row written before anything was
+		// resolved (a direct message's attempt 1, which createStoredMessage opens in the
+		// transaction that stores the message), the message's own target, which a different
+		// resolution means a stale one.
 		var bound model.MessageDelivery
 		var free bool
 		err = tx.QueryRow(ctx, `
@@ -347,15 +356,24 @@ func (s *server) recordPendingMessageDelivery(
 		if err != nil {
 			return pendingMessageDelivery{}, err
 		}
-		if !free || bound.Delivery != resolved.Delivery || "session:"+bound.SessionID != resolved.Target {
+		if !free || bound.Delivery != resolved.Delivery ||
+			(bound.SessionID != "" && "session:"+bound.SessionID != resolved.Target) {
 			return pendingMessageDelivery{}, errAttemptNotPending
 		}
+		if bound.SessionID == "" && target != resolved.Target {
+			return pendingMessageDelivery{}, errStaleResolution
+		}
+		// An unpinned row takes the session this resolution found, as the unbound resume below
+		// pins one, so the row names the session its frame is going to and that session can
+		// answer it.
 		pending.attempt = bound.Attempt
 		if err := tx.QueryRow(ctx, `
-			update message_deliveries set claimed_at = now()
+			update message_deliveries
+			set claimed_at = now(), session_id = coalesce(nullif(session_id, ''), $3)
 			where message_id = $1 and attempt = $2 and state = 'pending'
 			returning claimed_at, session_id
-		`, message.ID, pending.attempt).Scan(&pending.claimedAt, &pending.resolved.attemptSessionID); err != nil {
+		`, message.ID, pending.attempt, resolved.attemptSessionID,
+		).Scan(&pending.claimedAt, &pending.resolved.attemptSessionID); err != nil {
 			return pendingMessageDelivery{}, err
 		}
 		if err := finishPendingMessageDelivery(ctx, tx, s, message, replyThread, &pending); err != nil {
@@ -602,10 +620,12 @@ var errAttemptNotPending = errors.New("delivery attempt is no longer pending")
 
 // deliverMessageResuming is deliverMessage bound to one attempt. resumeAttempt > 0 sends that
 // attempt and nothing else: it never opens a second attempt beside it and never supersedes it,
-// answering errAttemptNotPending instead. A broadcast's workers send that way, because their
-// attempts exist before they start: a human who changes the mode from the agent card in the
-// meantime settles attempt 1 and sends their own, and a worker that then opened an attempt of
-// its own would put a second frame on the session's subject.
+// answering errAttemptNotPending instead. Every sender whose attempt exists before it starts sends
+// that way: a direct message's own request (createStoredMessage opens attempt 1 in the
+// transaction that stores the message), a broadcast's workers, and the resume loop
+// (delivery_resume.go). A human who changes the mode from the agent card in the meantime settles
+// the attempt and sends their own, and a bound sender that then opened an attempt of its own
+// would put a second frame on the session's subject.
 func (s *server) deliverMessageResuming(
 	ctx context.Context,
 	message model.Message,
@@ -617,7 +637,7 @@ func (s *server) deliverMessageResuming(
 ) (model.MessageDelivery, error) {
 	pending, err := resolveThenLock(ctx,
 		func(ctx context.Context) (ResolvedMention, error) {
-			route, err := s.messageDeliveryRoute(ctx, message)
+			route, err := s.messageDeliveryRoute(ctx, message, resumeAttempt)
 			if err != nil {
 				return ResolvedMention{}, err
 			}

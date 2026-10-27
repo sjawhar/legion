@@ -1456,10 +1456,12 @@ func TestTargetedMessageAttemptIsPendingAcrossItsSend(t *testing.T) {
 	}
 }
 
-// A slow listener and a client that gives up strand a pending attempt. The retry must resume it
-// under its original idempotency key - the listener deduplicates that key against the send that
-// did land - rather than allocating a new attempt, whose new key delivers the message a second
-// time to an agent that already has it.
+// A sender that dies between its send and its settle strands a pending attempt whose send landed.
+// The retry must resume it under its original idempotency key - the listener deduplicates that key
+// against the send that did land - rather than allocating a new attempt, whose new key delivers
+// the message a second time to an agent that already has it. A client that gives up on a slow
+// listener no longer strands the attempt (a request's own send outlives its connection), so the
+// row a dead sender leaves is written here directly once that send has completed.
 func TestStrandedMessageAttemptIsResumedRatherThanDeliveredTwice(t *testing.T) {
 	var listenerState struct {
 		sync.Mutex
@@ -1516,32 +1518,35 @@ func TestStrandedMessageAttemptIsResumedRatherThanDeliveredTwice(t *testing.T) {
 	request.Header.Set("X-Dispatch-User", "alice")
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
-	if recorder.Code == http.StatusCreated {
-		t.Fatalf("the 700ms client should not have seen the 1.5s send complete: body=%s", recorder.Body.String())
+	if abandoned.Err() == nil {
+		t.Fatalf("the message answered before its client's 700ms deadline, so no client gave up on it")
 	}
 
 	var messageID string
 	if err := database.Pool.QueryRow(context.Background(),
 		`select id::text from messages where body = $1`, body,
 	).Scan(&messageID); err != nil {
-		t.Fatalf("read the abandoned sender's message: %v", err)
+		t.Fatalf("read the abandoned client's message: %v", err)
 	}
 	var attempt int
 	var state string
 	if err := database.Pool.QueryRow(context.Background(), `
 		select attempt, state from message_deliveries where message_id = $1
 	`, messageID).Scan(&attempt, &state); err != nil {
-		t.Fatalf("read the stranded attempt: %v", err)
+		t.Fatalf("read the attempt: %v", err)
 	}
-	if attempt != 1 || state != "pending" {
-		t.Fatalf("stranded attempt = %d/%q, want attempt 1 left pending", attempt, state)
+	if attempt != 1 || state != "sent" {
+		t.Fatalf("attempt = %d/%q, want attempt 1 sent: the client gave up after the commit, and the send outlives it", attempt, state)
 	}
 
-	// The sender never came back: its claim is old enough to be plainly abandoned.
+	// A sender that died between that send and its settle would have left the row pending,
+	// under a claim old enough to be plainly abandoned.
 	if _, err := database.Pool.Exec(context.Background(), `
-		update message_deliveries set claimed_at = now() - interval '5 minutes' where message_id = $1
+		update message_deliveries
+		set state = 'pending', envelope_id = null, claimed_at = now() - interval '5 minutes'
+		where message_id = $1
 	`, messageID); err != nil {
-		t.Fatalf("abandon the claim: %v", err)
+		t.Fatalf("strand the attempt: %v", err)
 	}
 
 	retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/messages/"+messageID+"/deliveries", map[string]any{

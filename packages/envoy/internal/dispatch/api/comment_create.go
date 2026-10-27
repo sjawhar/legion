@@ -660,8 +660,12 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		return
 	}
 	s.publish(events...)
+	// Each mention's send outlives the request's connection, keeping its values and dropping its
+	// cancellation, as createStoredMessage's does: attempt 1 is committed above, and a connection
+	// cut now must not leave it pending for a minute's lease and the resume loop.
+	sendCtx := context.WithoutCancel(r.Context())
 	for _, mention := range resolvedMentions {
-		attempt, err := s.deliverResolvedCommentMention(r.Context(), comment, event, mention, actor, true)
+		attempt, err := s.deliverResolvedCommentMention(sendCtx, comment, event, mention, actor, commentClaim{mode: claimCreating})
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return

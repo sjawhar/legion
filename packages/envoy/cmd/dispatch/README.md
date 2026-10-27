@@ -393,7 +393,14 @@ What the two processes share, and what each keeps to itself:
   event committed on either process reaches every open stream with no reconnect.
 - The two delivery durables keep their shape. NATS admits one binder; the second process stands
   by, asking every two seconds, and takes the durable over within seconds of the holder dying.
-- Six periodic maintenance loops run once per period across the processes, not once per process.
+- A delivery a process left behind is sent by another. A direct message's first attempt is
+  written in the transaction that stores it, and a request's own send outlives a cut connection.
+  An attempt a process left pending - killed between its claim and its settle, a direct message,
+  a broadcast recipient's, a comment mention's or a Retry's alike - is sent by whichever process
+  runs the delivery resume loop next (`api/delivery_resume.go`, every ten seconds), once its claim
+  is a minute old, under its own attempt number and idempotency key, so the session is handed it
+  once. An attempt older than an hour is left for a person's Retry.
+- Seven periodic maintenance loops run once per period across the processes, not once per process.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a
   process whose tick lands inside another's pass logs a skip; and, under that lease, each pass is
   recorded in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick
@@ -800,6 +807,23 @@ back past it is an image rollback alone, with no schema to restore and no backup
 the release before it runs over the new schema unchanged, and the trigger gives every review that
 release writes its sequence. The auto-deployer is the exception, by its own rule above: once the
 schema has moved it refuses to start the previous tag, and recovery there is forward.
+
+Migration `0121_message_delivery_urgency` adds `message_deliveries.urgency`, the urgency a targeted
+message was sent with, so a send that resumes a stranded attempt (`api/delivery_resume.go`) hands
+the listener the urgency the person chose. A direct message's attempt 1 is written with it in the
+transaction that stores the message; a broadcast recipient's carries none. It is internal: no API
+read selects it. It is nullable with no default, so it writes the catalog alone under
+`message_deliveries`' `ACCESS EXCLUSIVE` lock, refuses and rewrites no row, and the release before
+it, which names no urgency in its inserts, rolls beside it; an attempt that release wrote is resumed
+without an urgency, as its first send was. Its check, one of `low`, `med`, `high` and `blocking`, is
+a second statement added `not valid`, as the rule below requires, and nothing validates it later,
+since every row below the migration carries no urgency. `0121` also creates two partial indexes on
+`created_at` where `state = 'pending'`, `message_deliveries_pending_created` and
+`comment_deliveries_pending_created`, which the resume loop reads its candidates through, oldest
+first, without reading every settled attempt. They are plain `create index`, as `0120`'s is, and
+each build holds its table's lock while it reads the rows, which the census bounds by its 1 GiB
+limit. The census answers `0`. `0121` is additive, so rolling back past it is an image rollback
+alone.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a

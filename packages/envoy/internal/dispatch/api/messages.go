@@ -180,6 +180,24 @@ func (s *server) createStoredMessage(
 			return model.Message{}, nil, err
 		}
 	}
+	// A targeted message's attempt 1 is written here, in the transaction that stores the
+	// message, unclaimed and naming no session yet, as writeBroadcast opens each recipient's: a
+	// process that dies, or a request whose connection is cut, between this commit and the send
+	// then leaves a pending attempt the resume loop (delivery_resume.go) sends, where opening it
+	// after the listener lookup left a stored message with no attempt that nothing would ever
+	// send. It records who asked for it and the urgency they chose, which a resumed send carries.
+	if message.Target != nil {
+		requester, err := json.Marshal(actor)
+		if err != nil {
+			return model.Message{}, nil, err
+		}
+		if _, err := tx.Exec(ctx, `
+			insert into message_deliveries (message_id, attempt, delivery, session_id, state, requested_by, urgency)
+			values ($1, 1, $2, '', 'pending', $3, $4)
+		`, message.ID, delivery, requester, input.Urgency); err != nil {
+			return model.Message{}, nil, err
+		}
+	}
 	var advice *writeAdvice
 	if issueKey != nil {
 		advice = s.writeAdvice(
@@ -191,8 +209,25 @@ func (s *server) createStoredMessage(
 	}
 	s.publish(event)
 	if message.Target != nil {
-		attempt, err := s.deliverMessage(ctx, message, delivery, input.Urgency, actor, &thread)
-		if err != nil {
+		// The send keeps the request's values (its transaction tracking) and drops its
+		// cancellation: a connection cut after the commit - a closed tab, a front door's pod
+		// roll - must not take the send with it. Each step stays bounded, by the listener
+		// client's own timeout and by the database calls; a graceful shutdown already waits for
+		// handlers, and the server's lifetime is not used because a shutdown cancels it.
+		sendCtx := context.WithoutCancel(ctx)
+		// Bound to attempt 1, never the unbound send, so this request cannot open a second
+		// attempt beside one the resume loop or a person's Retry already took. Another sender
+		// owning attempt 1 means the message's delivery is under way there: the message is
+		// stored, so it is answered with attempt 1 as that sender has left it.
+		attempt, err := s.deliverMessageResuming(sendCtx, message, delivery, input.Urgency, actor, &thread, 1)
+		if errors.Is(err, errAttemptNotPending) {
+			attempts, err := s.loadMessageDeliveries(sendCtx, s.deps.Store.Pool, []string{message.ID})
+			if err != nil {
+				return model.Message{}, nil, err
+			}
+			// loadMessageDeliveries orders by attempt, and attempt 1 is never deleted.
+			attempt = attempts[message.ID][0]
+		} else if err != nil {
 			return model.Message{}, nil, err
 		}
 		message.Deliveries = []model.MessageDelivery{attempt}

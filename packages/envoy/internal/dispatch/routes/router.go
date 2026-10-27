@@ -36,6 +36,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
@@ -199,6 +200,14 @@ func (ctx *AppContext) Architecture() *architecture.Importer {
 // their own calls as the same App rather than loading credentials a second time.
 func (ctx *AppContext) GitHub() *githubapp.Client {
 	return ctx.apiDeps.GitHub
+}
+
+// RunDeliveryResume runs the loop that sends the delivery attempts a stopped request or process
+// left pending (api.RunDeliveryResume), on the dependencies the HTTP routes send with: the same
+// listener client and event broker, so a resumed send and its receipt are exactly what the
+// request's own send would have made. It returns when lifetime ends.
+func (ctx *AppContext) RunDeliveryResume(lifetime context.Context, interval time.Duration, leases duty.Leases) {
+	api.RunDeliveryResume(lifetime, ctx.apiDeps, interval, leases)
 }
 
 const (

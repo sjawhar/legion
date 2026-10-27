@@ -144,7 +144,7 @@ func TestInitialMentionDeliveryDoesNotAppendAfterReplyConsumesPending(t *testing
 		event,
 		ResolvedMention{Target: "session:s1", Delivery: "steer", SessionID: new("s1"), attemptSessionID: "s1"},
 		model.Actor{Kind: "user", ID: "alice"},
-		true,
+		commentClaim{mode: claimCreating},
 	)
 	if err != nil {
 		t.Fatalf("complete initial mention after its answer: %v", err)
@@ -213,7 +213,7 @@ func TestInitialMentionDeliveryReturnsFailedAttemptAfterErrorReplyConsumesPendin
 		event,
 		ResolvedMention{Target: "session:s1", Delivery: "steer", SessionID: new("s1"), attemptSessionID: "s1"},
 		model.Actor{Kind: "user", ID: "alice"},
-		true,
+		commentClaim{mode: claimCreating},
 	)
 	if err != nil {
 		t.Fatalf("complete initial mention after an error reply: %v", err)
@@ -431,6 +431,10 @@ func TestReplyDuringAMentionRetrySendStillRecordsTheDeliveryReceipt(t *testing.T
 // send, so the answer is accepted whether or not the sender ever comes back. The attempt's own
 // receipt is owed by the sender that died and nobody else pays it, but the answer is not lost
 // and the reply is not refused for the life of the comment.
+//
+// A client that gives up no longer strands the attempt - a request's own send outlives its
+// connection - so the row a dead sender leaves is written here directly, after the retry whose
+// client gave up has completed its send.
 func TestASessionAnswersAnAttemptStrandedBetweenItsSendAndItsSettle(t *testing.T) {
 	var listenerState struct {
 		sync.Mutex
@@ -449,8 +453,7 @@ func TestASessionAnswersAnAttemptStrandedBetweenItsSendAndItsSettle(t *testing.T
 			stall := listenerState.sends == 2
 			listenerState.Unlock()
 			if stall {
-				// The retry's client gives up while its send is still in flight, so that
-				// process never reaches its settle transaction.
+				// The retry's client gives up while its send is still in flight.
 				time.Sleep(1500 * time.Millisecond)
 			}
 			_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"s1"}`))
@@ -478,11 +481,21 @@ func TestASessionAnswersAnAttemptStrandedBetweenItsSendAndItsSettle(t *testing.T
 	request.Header.Set("X-Dispatch-User", "alice")
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
-	if recorder.Code == http.StatusCreated {
-		t.Fatalf("the 700ms client should not have seen the 1.5s send complete: body=%s", recorder.Body.String())
+	if abandoned.Err() == nil {
+		t.Fatalf("the retry answered before its client's 700ms deadline, so no client gave up on it")
+	}
+	if sent := commentAttemptRow(t, database, comment.ID, "session:s1", 2); sent != "sent///s1" {
+		t.Fatalf("attempt 2 = %q, want it sent: the client gave up after the claim, and the send outlives it", sent)
+	}
+	// The row a sender that died between that send and its settle would have left.
+	if _, err := database.Pool.Exec(context.Background(), `
+		update comment_deliveries set state = 'pending', envelope_id = null
+		where comment_id = $1 and target = 'session:s1' and attempt = 2
+	`, comment.ID); err != nil {
+		t.Fatalf("strand attempt 2 between its send and its settle: %v", err)
 	}
 	if stranded := commentAttemptRow(t, database, comment.ID, "session:s1", 2); stranded != "pending///s1" {
-		t.Fatalf("attempt 2 = %q, want it left pending by the sender that never returned", stranded)
+		t.Fatalf("attempt 2 = %q, want it left pending, naming the session its frame reached", stranded)
 	}
 
 	// The frame did reach the session, and it answers the attempt its sender abandoned.

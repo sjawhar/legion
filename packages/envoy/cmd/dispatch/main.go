@@ -80,6 +80,10 @@ type bootConfig struct {
 	// SettleDelay is how long a document waits after a live change before it settles, zero for the
 	// document service's own default; only DISPATCH_TEST_SETTLE_DELAY, under the test hooks, sets it.
 	SettleDelay time.Duration
+	// DeliveryResumeInterval is how often the resume loop looks for stranded delivery attempts:
+	// api.DeliveryResumeInterval, unless DISPATCH_TEST_DELIVERY_RESUME_INTERVAL, under the test
+	// hooks, sets another.
+	DeliveryResumeInterval time.Duration
 	// OIDCIssuer and OIDCAudience configure verification of projected
 	// service-account tokens. Both set or neither; empty means no verifier.
 	OIDCIssuer   string
@@ -329,16 +333,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Two envoy-dispatch processes serve one Postgres and one NATS (INFRA-66), so each periodic
-	// maintenance loop below either runs once overall or is deliberately per-process. The ones
-	// that must run once overall take a named lease on this pool for the length of their pass
-	// (duty.Exclusive): a lease is a session-level advisory lock on a connection of its own, so
-	// it needs a pool the shared one's sixteen request connections are not spent on. A boot that
-	// cannot open it is a boot whose loops would each run everywhere, so it ends here. Under that
-	// lease each pass is also recorded with its loop's own period (duty_passes, migration 0115),
-	// which is what makes a loop run once per period rather than once per process: two tickers
-	// started minutes apart almost never meet inside a pass, so the lease alone would exclude
-	// nothing.
+	// Two or more envoy-dispatch processes serve one Postgres and one NATS (INFRA-66), so each
+	// periodic maintenance loop below either runs once overall or is deliberately per-process.
+	// The ones that must run once overall take a named lease on this pool for the length of their
+	// pass (duty.Exclusive): a lease is a session-level advisory lock on a connection of its own,
+	// so it needs a pool the shared one's sixteen request connections are not spent on. A boot
+	// that cannot open it is a boot whose loops would each run everywhere, so it ends here. Under
+	// that lease each pass is also recorded with its loop's own period (duty_passes, migration
+	// 0115), which is what makes a loop run once per period rather than once per process: two
+	// tickers started minutes apart almost never meet inside a pass, so the lease alone would
+	// exclude nothing. The leased loops are the document compaction (the outbox's), the
+	// suggestion-outcome sweep, the delivery resume, the reference-excerpt reconciliation, the
+	// webhook redelivery sweep, the architecture import, the delivery reconcile and the delivery
+	// intakes' consumer reconciliation; store.leasePoolSize counts their callers.
 	//
 	// Deliberately NOT leased, in three classes:
 	//   - already claims its own work, so two processes never do one unit of it twice: the
@@ -395,6 +402,11 @@ func main() {
 	go documentService.RunStaleRoomEviction(ctx)
 	// LEGION-550: resolves write_suggestions outcomes off the write path, on its own schedule.
 	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, api.SuggestionSweepInterval, leases)
+	// INFRA-562: sends the delivery attempts a stopped request or process left pending - a
+	// message's, a broadcast recipient's, a comment mention's - once their claim has lapsed, on the
+	// dependencies the routes send with, so no attempt waits for a person's Retry because a
+	// process stopped mid-send.
+	go appCtx.RunDeliveryResume(ctx, boot.DeliveryResumeInterval, leases)
 	// Issues whose spec's task count is not their latest version's - every row the migration that
 	// added the count columns found, and any the task this one replaces versions while both run -
 	// are counted again, at start and on an interval, so their progress shows without anyone
@@ -566,23 +578,24 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		return bootConfig{}, err
 	}
 	boot := bootConfig{
-		DatabaseURL:        strings.TrimSpace(env.get("DATABASE_URL")),
-		RepoProjects:       strings.TrimSpace(env.get("DISPATCH_REPO_PROJECTS")),
-		DefaultProject:     strings.TrimSpace(env.get("DISPATCH_DEFAULT_PROJECT")),
-		GitHubAPIBase:      strings.TrimSpace(env.get("DISPATCH_GITHUB_API_BASE")),
-		SignInIssuer:       strings.TrimSpace(env.get("DISPATCH_SIGNIN_ISSUER")),
-		SignInClientID:     strings.TrimSpace(env.get("DISPATCH_SIGNIN_CLIENT_ID")),
-		SignInClientSecret: strings.TrimSpace(env.get("DISPATCH_SIGNIN_CLIENT_SECRET")),
-		SignInGroup:        strings.TrimSpace(env.get("DISPATCH_SIGNIN_GROUP")),
-		SignInDomain:       strings.TrimSpace(env.get("DISPATCH_SIGNIN_DOMAIN")),
-		NATSDisabled:       env.get("DISPATCH_NATS_DISABLED") == "1",
-		TestHooksEnabled:   env.get("DISPATCH_TEST_HOOKS") == "1",
-		WebDist:            env.get("DISPATCH_WEB_DIST"),
-		FileStoreBucket:    strings.TrimSpace(env.get("DISPATCH_FILE_STORE_BUCKET")),
-		AssetStoreBucket:   strings.TrimSpace(env.get("DISPATCH_ASSET_STORE_BUCKET")),
-		SigningKey:         env.get("DISPATCH_SIGNING_KEY"),
-		InsecureCookie:     env.get("DISPATCH_INSECURE_COOKIE") != "",
-		EnvoyToken:         env.get("ENVOY_TOKEN"),
+		DatabaseURL:            strings.TrimSpace(env.get("DATABASE_URL")),
+		RepoProjects:           strings.TrimSpace(env.get("DISPATCH_REPO_PROJECTS")),
+		DefaultProject:         strings.TrimSpace(env.get("DISPATCH_DEFAULT_PROJECT")),
+		GitHubAPIBase:          strings.TrimSpace(env.get("DISPATCH_GITHUB_API_BASE")),
+		SignInIssuer:           strings.TrimSpace(env.get("DISPATCH_SIGNIN_ISSUER")),
+		SignInClientID:         strings.TrimSpace(env.get("DISPATCH_SIGNIN_CLIENT_ID")),
+		SignInClientSecret:     strings.TrimSpace(env.get("DISPATCH_SIGNIN_CLIENT_SECRET")),
+		SignInGroup:            strings.TrimSpace(env.get("DISPATCH_SIGNIN_GROUP")),
+		SignInDomain:           strings.TrimSpace(env.get("DISPATCH_SIGNIN_DOMAIN")),
+		NATSDisabled:           env.get("DISPATCH_NATS_DISABLED") == "1",
+		TestHooksEnabled:       env.get("DISPATCH_TEST_HOOKS") == "1",
+		WebDist:                env.get("DISPATCH_WEB_DIST"),
+		FileStoreBucket:        strings.TrimSpace(env.get("DISPATCH_FILE_STORE_BUCKET")),
+		AssetStoreBucket:       strings.TrimSpace(env.get("DISPATCH_ASSET_STORE_BUCKET")),
+		SigningKey:             env.get("DISPATCH_SIGNING_KEY"),
+		InsecureCookie:         env.get("DISPATCH_INSECURE_COOKIE") != "",
+		EnvoyToken:             env.get("ENVOY_TOKEN"),
+		DeliveryResumeInterval: api.DeliveryResumeInterval,
 	}
 	if boot.DatabaseURL == "" {
 		return bootConfig{}, errors.New("DATABASE_URL required")
@@ -615,6 +628,16 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 			return bootConfig{}, fmt.Errorf("DISPATCH_TEST_SETTLE_DELAY=%q (expected a positive Go duration)", raw)
 		}
 		boot.SettleDelay = delay
+	}
+	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_DELIVERY_RESUME_INTERVAL")); raw != "" {
+		if !boot.TestHooksEnabled {
+			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_DELIVERY_RESUME_INTERVAL")
+		}
+		interval, err := time.ParseDuration(raw)
+		if err != nil || interval <= 0 {
+			return bootConfig{}, fmt.Errorf("DISPATCH_TEST_DELIVERY_RESUME_INTERVAL=%q (expected a positive Go duration)", raw)
+		}
+		boot.DeliveryResumeInterval = interval
 	}
 	identityMode := strings.TrimSpace(env.get("DISPATCH_IDENTITY"))
 	if err := checkSignInSettings(boot, identityMode); err != nil {
