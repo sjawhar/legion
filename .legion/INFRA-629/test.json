@@ -2,53 +2,52 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-629",
-  "completed": "2026-10-27T18:40:00Z",
-  "round": 3,
-  "headTested": "09b75c4ef169ad07284f4781972318127025f4c4 (code head 6b255451bb62; 09b75c4e adds only .legion/INFRA-629/implement.json)",
+  "completed": "2026-10-27T19:30:00Z",
+  "round": 4,
+  "headTested": "b47efb47589d5b4db5112105fdc40dee939b4d12 (code head 460a6f9e021b; b47efb47 adds only .legion/INFRA-629/implement.json)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's proof.sh ($TMPDIR/t629/impl-proof.sh) at 09b75c4e. One github-actions[bot] commit 'chore: fold changelog fragments [skip ci]' landed. The forged '## ' notes line was refused with exit 1, origin unchanged and the tree clean. The second run on the old base pushed nothing, printed '::notice title=Nothing pushed; a fresh run started::…' and called 'gh workflow run changelog-fold.yaml --repo sjawhar/legion --ref main'. Re-ran s1, s4 and s5 at the same head with the same results as round 2. The one difference: on success push-fold no longer prints its own 'Pushed …' line, and git's push output stands in its place."
+    "how": "Re-ran the implementer's proof.sh ($TMPDIR/t629/impl-proof.sh) at b47efb47. One github-actions[bot] commit 'chore: fold changelog fragments [skip ci]' landed. The forged '## ' notes line was refused with exit 1, origin unchanged and the tree clean. The second run on the old base pushed nothing, printed '::notice title=Nothing pushed; a fresh run started::…' and called 'gh workflow run changelog-fold.yaml --repo sjawhar/legion --ref main'. Re-ran s1, s4, s5 and s6 at the same head with the same results as round 3, except s6's renamed fragments, which now keep their first release. That is the change this round makes."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
+      "criterion": "Review round 2 finding: a fragment renamed after its release keeps the release that first shipped it (fold-plan: the lowest tag containing the commit which first added the entry, following renames).",
+      "surface": "release-push.sh fold-plan on a real clone of sjawhar/legion with its real tags and bump-shaped release tags",
+      "command": "PATH=$TMPDIR/t629/bin:$PATH bash $TMPDIR/t629/s7.sh b47efb47589d5b4db5112105fdc40dee939b4d12; ... s6.sh b47efb47…",
+      "observed": "s7: INFRA-20-moved.yaml was added in c1 and shipped in pi-legion-v99.0.0. It was then moved twice with git mv, to INFRA-20-moved-once.yaml and then INFRA-20-moved-twice.yaml, and fold-plan planned it under 99.0.0. One commit deleted INFRA-22-retracted.yaml and added the unrelated INFRA-23-new.yaml, and INFRA-23-new.yaml was planned under 99.1.0 (not taken as a rename). s6: the entries fold-plan refused in round 3, renamed with git mv after the 99.0.0 tag (unreleased/sjawhar/fix-thing.yaml → sjawhar-fix-thing.yaml, INFRA-9-x.yml → INFRA-9-x.yaml), are now planned under 99.0.0. At round 3's head they were planned under the next release.",
+      "headSha": "b47efb47589d5b4db5112105fdc40dee939b4d12",
+      "negativeControl": "INFRA-21-edited.yaml was renamed and its body edited in one commit, which takes it below git's rename similarity. It is a new entry and is planned under 99.1.0, which is the documented behaviour ('a deleted file and an added one alike enough')."
+    },
+    {
       "criterion": "1. From the pull request's head, two branches that each add a fragment for the same package (and two for different packages) merge in either order with git merge-tree --write-tree reporting no conflict; the same two changes written the old way into CHANGELOG.md conflict.",
       "surface": "git, in a clone of sjawhar/legion at the PR head ($TMPDIR/t629/c1)",
-      "command": "Branches from 09b75c4e: A3 adds packages/pi-legion/.changes/unreleased/INFRA-901-one.yaml, B3 adds INFRA-902-two.yaml in the same directory, and C3 adds packages/envoy/.changes/unreleased/INFRA-903-three.yaml. D and E are on main 2df3353c and each insert an entry after the first '### ' line of packages/pi-legion/CHANGELOG.md. Then `git merge-tree --write-tree --name-only` on A3 B3, B3 A3, A3 C3, C3 A3, D E and E D.",
-      "observed": "A3 B3, B3 A3, A3 C3 and C3 A3 each exit 0. D E and E D each exit 1 with a content conflict in packages/pi-legion/CHANGELOG.md.",
-      "headSha": "09b75c4ef169ad07284f4781972318127025f4c4",
-      "negativeControl": "F3 adds the same file name as A3: `git merge-tree --write-tree A3 F3` exits 1 (CONFLICT (add/add))."
+      "command": "Branches from b47efb47: A4 adds packages/pi-legion/.changes/unreleased/INFRA-901-one.yaml, B4 adds INFRA-902-two.yaml in the same directory, and C4 adds packages/envoy/.changes/unreleased/INFRA-903-three.yaml. D and E are on main 2df3353c and each insert an entry after the first '### ' line of packages/pi-legion/CHANGELOG.md. Then `git merge-tree --write-tree --name-only` on A4 B4, B4 A4, A4 C4, C4 A4, D E and E D.",
+      "observed": "A4 B4, B4 A4, A4 C4 and C4 A4 each exit 0. D E and E D each exit 1 with a content conflict in packages/pi-legion/CHANGELOG.md.",
+      "headSha": "b47efb47589d5b4db5112105fdc40dee939b4d12",
+      "negativeControl": "F4 adds the same file name as A4: `git merge-tree --write-tree A4 F4` exits 1 (CONFLICT (add/add))."
     },
     {
       "criterion": "2. Given fragments, the released package's CHANGELOG.md gains them under the version heading, every old line stays in order, the fragments are gone, and push-fold's checks accept exactly that commit and refuse anything else.",
-      "surface": "release-push.sh fold-plan, fold-notes (changie v1.26.0 from the pinned tarball) and push-fold on a real clone of sjawhar/legion with its real tags. The push goes to a local bare origin through the deploy-key insteadOf path, with a stub gh.",
-      "command": "PATH=$TMPDIR/t629/bin:$PATH bash $TMPDIR/t629/{s1,s4,s5,s6,impl-proof}.sh 09b75c4ef169ad07284f4781972318127025f4c4",
-      "observed": "s1: INFRA-1-[a].yaml and INFRA-2-one.yaml under 99.0.0, and INFRA-1-a.yaml under 99.1.0. s5: with legion-envoy-v99.0.0 tagged between the jobs, push-fold printed '::notice title=Fold deferred::packages/envoy 99.0.0 …', landed the pi-legion and contracts groups and exited 0; the next run folded envoy 99.0.0, and a third run planned nothing. s4: of two push-fold runs at once from one base, exactly one commit landed and the other started a fresh run, both exit 0. s6, new in this round: a subdirectory from a branch name (unreleased/sjawhar/fix-thing.yaml), INFRA-9-x.yml, a symlink INFRA-9-link.yaml and contracts' .gitkeep made fold-plan, fold-notes and push-fold each exit 1. Each printed one '::error::… packages/contracts/.changes/unreleased/.gitkeep packages/pi-legion/.changes/unreleased/INFRA-9-link.yaml packages/pi-legion/.changes/unreleased/INFRA-9-x.yml packages/pi-legion/.changes/unreleased/sjawhar at HEAD: each entry … must be a regular file whose name ends in .yaml …'. No plan was printed, no notes were written, and origin was unchanged. After they were renamed or removed, fold-plan planned again with exit 0.",
-      "headSha": "09b75c4ef169ad07284f4781972318127025f4c4",
+      "surface": "release-push.sh fold-plan, fold-notes (changie v1.26.0 from the pinned tarball) and push-fold on a real clone with real tags. The push goes to a local bare origin through the deploy-key insteadOf path, with a stub gh.",
+      "command": "PATH=$TMPDIR/t629/bin:$PATH bash $TMPDIR/t629/{s1,s4,s5,s6,impl-proof}.sh b47efb47589d5b4db5112105fdc40dee939b4d12",
+      "observed": "s1: INFRA-1-[a].yaml and INFRA-2-one.yaml under 99.0.0, and INFRA-1-a.yaml under 99.1.0. s5: with a tag pushed between the jobs, push-fold printed '::notice title=Fold deferred::packages/envoy 99.0.0 …', landed the other groups and exited 0; the next run folded envoy 99.0.0, and a third run planned nothing. s4: of two push-fold runs at once from one base, exactly one commit landed and the other started a fresh run. s6: a subdirectory, a .yml file, a symlink and a .gitkeep make fold-plan, fold-notes and push-fold each exit 1 with one ::error:: naming all four, and origin is unchanged. impl-proof: one github-actions[bot] commit with the fixed '[skip ci]' subject, with the blocks above '## Before changelog fragments'.",
+      "headSha": "b47efb47589d5b4db5112105fdc40dee939b4d12",
       "negativeControl": "A notes file with '## [1.0.0] - 2000-01-01' appended: push-fold exit 1, '::error::… holds a line starting '## '; the heading is push-fold's to write', origin unchanged. HEAD not at the base, a dirty tree, or no DEPLOY_KEY: exit 1 each, nothing written."
     },
     {
       "criterion": "3. bash .github/scripts/check-release-credentials.sh passes (lint, typecheck and test are read on GitHub)",
-      "surface": "the release credential check, run on a scratch copy of the head's .github ($TMPDIR/t629/crc3)",
+      "surface": "the release credential check, run on a scratch copy of the head's .github ($TMPDIR/t629/crc4)",
       "command": "uv run --with pyyaml==6.0.2 --no-project bash .github/scripts/check-release-credentials.sh",
-      "observed": "'9 credentialed job(s) and 9 build job(s) across 4 release and changelog-fold workflows keep credentials out of jobs that run dependency code', exit 0. CI at 6b255451 was still queued when this round ended (Tests run 40553414806: lint, test, typecheck); read as running, not evidence.",
-      "headSha": "09b75c4ef169ad07284f4781972318127025f4c4",
-      "negativeControl": "A step 'Render again' running `.github/scripts/release-push.sh fold-notes` added to fold_publish: exit 1, 4 problems, including \"job 'fold_publish' runs dependency code (step 'Render again' runs '.github/scripts/release-push.sh fold-notes' (it runs changie)), so its last step must be the tripwire\"."
-    },
-    {
-      "criterion": "Review finding 1 (Security[secret]): fold_publish runs only code from a commit the event fixes, never one fold_build names.",
-      "surface": ".github/workflows/changelog-fold.yaml at the head, and GitHub's event reference",
-      "command": "grep -n 'needs.fold_build\\|github.sha' .github/workflows/changelog-fold.yaml; GitHub docs 'Events that trigger workflows' (https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)",
-      "observed": "Both checkouts use 'ref: ${{ github.sha }}' (:86, :149) and BASE is '${{ github.sha }}' (:164). The only output of fold_build that is still read is `fold` (:133). The docs give GITHUB_SHA for workflow_run and schedule as 'Last commit on default branch', and for workflow_dispatch as the last commit on GITHUB_REF. fold_publish runs only when github.ref is refs/heads/main.",
-      "headSha": "09b75c4ef169ad07284f4781972318127025f4c4",
-      "negativeControl": "Not a refusal surface: with fold_publish's BASE set back to needs.fold_build.outputs.base, check-release-credentials.sh still passes (exit 0). The github.sha checkout is held by the workflow text alone, and no check pins it. This is recorded for the reviewer and is not a failure: the review asked only for the github.sha checkout."
+      "observed": "'9 credentialed job(s) and 9 build job(s) across 4 release and changelog-fold workflows keep credentials out of jobs that run dependency code'. CI at 460a6f9e was still queued when this round ended (Tests run 40558137683: lint, test, typecheck); read as running, not evidence.",
+      "headSha": "b47efb47589d5b4db5112105fdc40dee939b4d12",
+      "negativeControl": "Round 3, on the same check logic (this round does not change check-release-credentials.sh): a release-push.sh fold-notes step in fold_publish → exit 1, \"runs '.github/scripts/release-push.sh fold-notes' (it runs changie)\"."
     }
   ],
   "observations": [
-    "Open-PR census ($TMPDIR/t629/census.sh at 09b75c4e, against the 97 open PR heads read in round 1): 62 touch a CHANGELOG.md; 0 new CHANGELOG.md conflicts. The same 7 new conflicts as before, each in a line that the plan tells this PR to edit and the other PR also edits: .dispatch/architecture/release-engineering.md in #2413, #2412, #2407, #2364 and #2316; AGENTS.md in #2186; AGENTS.md and check-release-credentials.sh/.test.sh in #2358.",
-    "The new fold-plan refusal blocks the fold of every package until the bad entry is fixed. This matches the plan's decision for malformed fragments. A fragment fixed by a rename after its release gets the next release's label, because the add that counts is the rename commit (s6).",
-    "Kept from round 2, for the reviewer: a version group whose notes file is absent is deferred with a notice, also when a faulty build left the file out (s5, 'faulty build' part). main@ groups are still refused.",
-    "Kept from round 1: the AGENTS.md `go run github.com/miniscruff/changie@v1.26.0 new …` instruction works from a package directory. The new AGENTS.md text, 'use the branch name, with each `/` written as `-`', matches the refusal of subdirectories."
+    "Open-PR census ($TMPDIR/t629/census.sh at b47efb47, against the 97 open PR heads read in round 1): 62 touch a CHANGELOG.md; 0 new CHANGELOG.md conflicts. The same 7 new conflicts, each in a line that the plan tells this PR to edit and the other PR also edits: .dispatch/architecture/release-engineering.md in #2413, #2412, #2407, #2364 and #2316; AGENTS.md in #2186; AGENTS.md and check-release-credentials.sh/.test.sh in #2358.",
+    "The changelog-fold.yaml header comment now says check-release-credentials.sh does not read which commit a job checks out. This matches round 3's observation that setting BASE back to needs.fold_build.outputs.base still passes the check.",
+    "Kept for the reviewer: a version group whose notes file is absent is deferred with a notice, also when a faulty build left it out (s5). main@ groups are still refused."
   ]
 }
