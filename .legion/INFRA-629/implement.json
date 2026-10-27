@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-629",
-  "completed": "2026-10-27T17:45:32Z",
+  "completed": "2026-10-27T18:15:28Z",
   "pr": "https://github.com/sjawhar/legion/pull/2419",
   "proof": [
+    {
+      "criterion": "Review round 2 finding 1: a fragment renamed after its release (the remedy fold-plan's refusal gives) keeps the release that first shipped it",
+      "surface": "release-push.sh fold-plan on a real clone of sjawhar/legion with its real tags; release-push.test.sh",
+      "command": "PATH=$TMPDIR/infra629/bin:$PATH bash $TMPDIR/infra629/proof.sh 460a6f9e021bc096228b046d71240d8f63d27a27 (log: https://github.com/sjawhar/legion/pull/2419#issuecomment-6450030196); bash .github/scripts/release-push.test.sh",
+      "observed": "packages/pi-legion/.changes/unreleased/sjawhar/fix.yaml added at a commit tagged pi-legion-v99.5.0 is refused by fold-plan (the error tells the author to rename in one commit with git mv); after git mv to sjawhar-fix.yaml in a commit tagged pi-legion-v99.6.0, fold-plan prints 'packages/pi-legion\t99.5.0\t2026-10-27\tpackages/pi-legion/.changes/unreleased/sjawhar-fix.yaml'. release-push.test.sh 413/0 (tester's blocks unchanged), changelog-fold.test.sh 12/0, check-release-credentials.sh green, land_on_main still byte-identical to INFRA-630's.",
+      "headSha": "460a6f9e021bc096228b046d71240d8f63d27a27",
+      "negativeControl": "`git log --follow --diff-filter=A -1` (the reviewer's suggested fix), measured in throwaway repos on git 2.47.3: it gave a never-renamed fragment, and a renamed glob-named one, an older fragment's commit through copy detection (C050), so the wrong release; the new test pins a similar new fragment INFRA-8-later.yaml to its own 1.1.0, which --follow would label 1.0.0."
+    },
     {
       "criterion": "Review round 1 (findings 1-4, the architect's land_on_main decision): the deploy key runs only the commit the event fixed; fold-plan never silently skips a fragment; fold-notes is dependency code to the credential check; land_on_main is INFRA-630's text and returns",
       "surface": "release-push.sh fold-plan / fold-notes / push-fold on a real clone of sjawhar/legion with its real tags, changie v1.26.0 and a local bare origin through the deploy-key path; check-release-credentials.sh and its tests; changelog-fold.yaml",
@@ -69,7 +77,8 @@
     "Each package's fragments for one release share one notes file per (package, label); fold-plan prints tab-separated lines <package-dir> <label> <date> <path>; specs are <package-dir>[=<tag-prefix>] arguments.",
     "Simplify pass: 5 applied, 1 skipped (git --sort=v:refname for the lowest release tag would order a tag prefix ending in digits differently from sort -V).",
     "Round 2: push-fold defers, rather than refuses, a version-labelled group whose notes file does not exist at all (its release tag was pushed after the build planned); its fragments stay for a later run (the release's completion starts one, the daily run is the backstop). A missing main@ group's notes stay a refusal. Known limit: a new tag of a LOWER version than an existing one, pushed between the jobs on a commit holding already-planned fragments, would re-label a group and push-fold refuses (exit 1); release tags only go up.",
-    "Round 3 (review round 1): changelog-fold.yaml checks out github.sha in both jobs (no base output); fold-plan refuses every non-regular or non-.yaml entry under unreleased/ (it used to skip them silently), so the shared test fixture's README.md moved into its own refusal cases; check-release-credentials reports release-push.sh fold-notes as dependency code; land_on_main and is_commit_sha are INFRA-630's text byte for byte (architect decision, 17:29Z), land_on_main returns 0 and prints no Pushed line; check_hand_over sets no EXIT trap."
+    "Round 3 (review round 1): changelog-fold.yaml checks out github.sha in both jobs (no base output); fold-plan refuses every non-regular or non-.yaml entry under unreleased/ (it used to skip them silently), so the shared test fixture's README.md moved into its own refusal cases; check-release-credentials reports release-push.sh fold-notes as dependency code; land_on_main and is_commit_sha are INFRA-630's text byte for byte (architect decision, 17:29Z), land_on_main returns 0 and prints no Pushed line; check_hand_over sets no EXIT trap.",
+    "Round 4 (review round 2): fold-plan finds a fragment's first add with first_added (follows diff-tree -M renames commit by commit, never copies) instead of git log --follow, which follows copies between alike fragments and mislabels never-renamed ones (measured). Known limit: a single commit that deletes one fragment and adds a different but similar one pairs them as a rename, so the new one takes the deleted one's first add. The workflow comment and the land_on_main header paragraph corrected; no new check, per the architect."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
@@ -77,5 +86,5 @@
     "Open pull requests that touch the same scripts: #2358 (INFRA-576) and #2316 (INFRA-520) edit release-push.test.sh and check-release-credentials.sh/.test.sh; INFRA-630 adds land_on_main's twin (whichever merges second takes the other's from main).",
     "Remaining 'Unreleased' hits outside CHANGELOG.md and docs/plans: AGENTS.md's new bullet (names the old heading on purpose), docs/solutions unchanged-diff-fingerprint:105, LEGION-247 forward-merge note :43 and a-name-a-package-stops-shipping :58 (dated records), packages/dispatch/e2e/agent-view.e2e.ts:78 (a chat fixture), daemon Go test names about unreleased child issues."
   ],
-  "round": 3
+  "round": 4
 }
