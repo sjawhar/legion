@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-522",
+  "completed": "2026-10-27T14:12:00Z",
+  "testedHead": "0fb74300a550c1a6176fb00189066b362df1f07d",
+  "prHead": "5a5dcd0a1c741ac6f098ead9b5b35e89a86d7efa",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Drove the same surfaces independently: read run 40468746977's jobs and both legs' logs myself, read the index, provenance and config labels from GHCR with my own anonymous-token script ($TMPDIR/t522/reg.sh), ran gh attestation verify myself (with --source-digest added), and re-ran the check-image-trigger-paths negative control (outputs removed from BUILD_ACTION_INPUTS -> exit 1 naming outputs) in a symlinked copy of the tree. Every figure in the implementer's proof matched. The before figure differs only by window edge: 92 runs, median 39.80 min for created 2026-10-20..2026-10-26 (PR: 89 runs, 39.72)."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "A1a each platform builds on its own native runner, no QEMU",
+      "surface": "GitHub Actions run 40468746977 (workflow_dispatch of release-envoy-listener.yaml on legion/INFRA-522)",
+      "command": "gh api repos/sjawhar/legion/actions/runs/40468746977/jobs --jq '.jobs[]|[.id,.name,.conclusion,(.labels|join(\",\"))]'; gh api --allow-escape-sequences repos/sjawhar/legion/actions/jobs/<122130971998|122130972102>/logs | grep -aE 'Image: |Architecture|qemu|binfmt|--- PASS'",
+      "observed": "docker (arm64) 122130971998 labels ubuntu-24.04-arm, Image: ubuntu-24.04-arm, Architecture: aarch64, success, TestSmoke PASS; docker (amd64) 122130972102 labels ubuntu-24.04, Architecture: x86_64, success; 0 qemu/binfmt lines in either log; step list has no setup-qemu step",
+      "headSha": "0fb74300a550c1a6176fb00189066b362df1f07d",
+      "negativeControl": "main's pre-change run 40153231727 ran a single `docker` job (the emulated one this change removes); the branch run has no job of that name"
+    },
+    {
+      "criterion": "A1b a manifest list joins them and names linux/amd64 and linux/arm64",
+      "surface": "GHCR registry API, anonymous pull token, and image_index job 122161678128's log",
+      "command": "bash $TMPDIR/t522/reg.sh 0fb74300a550c1a6176fb00189066b362df1f07d 0fb74300a550c1a6176fb00189066b362df1f07d; and the deployment repository's dispatch/roll-image.sh read_image function, extracted unchanged, against the same tag",
+      "observed": "application/vnd.oci.image.index.v1+json, sha256 of the bytes sha256:79b5d2ce25914b9f43c60ec361ddff6313a3ffaca7da3d476bbbec97b190e49e = image_index's imagetools output; platforms [arm64, amd64]; attestation manifests for 34275b97 (arm64) and 52f0189c (amd64); read_image prints 'sha256:79b5d2ce… 0fb74300…'",
+      "headSha": "0fb74300a550c1a6176fb00189066b362df1f07d",
+      "negativeControl": "image_index's script, extracted from the workflow and run with a stub docker, refuses 0, 1 and 3 digest files, an upper-case name, a 63-character name, 'x;touch PWNED' (no file created) and a name with a newline, all before any imagetools call; it refuses a metadata digest of null or sha256:abc after it"
+    },
+    {
+      "criterion": "A1c BuildKit provenance still covers both platforms",
+      "surface": "GHCR registry API",
+      "command": "for each attestation manifest of the index: its application/vnd.in-toto+json layer | jq '.predicate.buildDefinition.externalParameters.request.root.request.args[\"vcs:revision\"]' (the deployment's read path)",
+      "observed": "https://slsa.dev/provenance/v1 for both platforms, vcs:revision 0fb74300a550c1a6176fb00189066b362df1f07d on both; main's pre-change index for b69f636f has the same shape and gives b69f636f",
+      "headSha": "0fb74300a550c1a6176fb00189066b362df1f07d",
+      "negativeControl": "the same read on main's index b69f636f2ca11bf8458a45b10a59a6109ec67328 gives that commit, not 0fb74300, so the read reports the build's revision and is not a constant"
+    },
+    {
+      "criterion": "A1d GitHub attestation still covers the index",
+      "surface": "gh attestation verify against the published index",
+      "command": "gh attestation verify oci://ghcr.io/sjawhar/legion/envoy@sha256:79b5d2ce25914b9f43c60ec361ddff6313a3ffaca7da3d476bbbec97b190e49e --repo sjawhar/legion --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/legion/INFRA-522 --source-ref refs/heads/legion/INFRA-522 --source-digest 0fb74300a550c1a6176fb00189066b362df1f07d --deny-self-hosted-runners --format json",
+      "observed": "exit 0; subject 79b5d2ce2591; SAN …release-envoy-listener.yaml@refs/heads/legion/INFRA-522; sourceRepositoryDigest 0fb74300a550; runnerEnvironment github-hosted",
+      "headSha": "0fb74300a550c1a6176fb00189066b362df1f07d",
+      "negativeControl": "main identity and --source-ref refs/heads/main: exit 1 'verifying with issuer \"sigstore.dev\"'; the untagged per-leg amd64 push sha256:f45823256662c041dc8407109d18b1812a630af9a43610dad7a98511ee6e0544 with the branch identity: exit 1 HTTP 404 (no attestation), so an orphaned per-leg index cannot pass a consumer's check"
+    },
+    {
+      "criterion": "A1e the consumers' reads still hold, and the post-merge latest path accepts the new index",
+      "surface": "GHCR registry API and docker buildx v0.38.1 imagetools (the runner lists 0.38.0)",
+      "command": "reg.sh config-label read for linux/amd64 and linux/arm64; buildx imagetools inspect --format '{{.Manifest.Digest}}' ghcr.io/sjawhar/legion/envoy:0fb74300…; buildx imagetools create --dry-run --annotation index:org.opencontainers.image.revision=0fb74300… --tag ghcr.io/sjawhar/legion/envoy:latest ghcr.io/sjawhar/legion/envoy@sha256:79b5d2ce… | jq '(.annotations // {})[\"org.opencontainers.image.revision\"]'",
+      "observed": "amd64 and arm64 config org.opencontainers.image.revision = 0fb74300…; inspect gives sha256:79b5d2ce…; the dry-run latest index is OCI, keeps linux/arm64, linux/amd64 and both attestation manifests, and carries the revision annotation Determine latest reads (0fb74300…)",
+      "headSha": "0fb74300a550c1a6176fb00189066b362df1f07d",
+      "negativeControl": "inspect of the absent tag envoy:0000000000000000000000000000000000000000 answers 'not found', the text image_digest's grep treats as no image"
+    },
+    {
+      "criterion": "A3 the PR states minutes before and after; build cache hit and miss stated",
+      "surface": "PR #2297 body and the Actions API",
+      "command": "gh api repos/sjawhar/legion/pulls/2297 --jq .body; gh api …/actions/workflows/release-envoy-listener.yaml/runs -f branch=main -f created=2026-10-20T00:00:00Z..2026-10-26T23:59:59Z --paginate, then each run's successful `docker` job completed_at - started_at",
+      "observed": "body states before 39.72 min / 89 runs with window and command, the planner's 40.17 / 94, and after per-leg minutes with run ids for hit (3.58 slower) and miss+write (6.38 slower); my own count gives 92 jobs, median 39.80 min",
+      "headSha": "0fb74300a550c1a6176fb00189066b362df1f07d",
+      "negativeControl": "with the end bound inclusive of 2026-10-27 the same count gives 106 jobs, median 40.38, so the figure moves with the window edge as expected and the PR's window is stated"
+    }
+  ],
+  "ciAtTestedHead": "Read on GitHub, not re-run: at 0fb74300 lint, typecheck, test, build, pr-title and the envoy lanes success; at 5a5dcd0a (handoff-only, skip-checks) the daemon carries green and pr-title is queued.",
+  "notes": [
+    "A1a-A1e and A2 on main run first after the merge; the production check owns them (plan A2). The main-only paths I could reach without main were run: the cache-to gate expression was exercised with the branch ref by temporary commit 2444de11/17fa916a (run 40453177184 exported the registry cache), and Advance latest's imagetools create was dry-run against the new index.",
+    "Re-run behaviour: main run 40153231727 attempt 2 re-ran its build legs and replaced their same-named artifacts with no 409, so the new envoy-image-digest-<arch> artifacts behave the same on a full re-run. Their retention-days: 1 means a re-run of image_index alone more than a day after a leg finds no digests and stops with 'expected 2 digests … found 0'; a re-run of all jobs recovers. Reported to the architect, not a failure.",
+    "Risk reported to the architect for decision: the registry cache envoy:buildcache-<arch> can be written by any branch run that holds packages: write (run 40453177184 did, from this branch), and main's attested build reads it. The type=gha cache it replaces could not be written for main by a branch run. This comes from spec v3 and the INFRA-520 pattern (#2316), not from a deviation in this PR."
+  ]
+}
