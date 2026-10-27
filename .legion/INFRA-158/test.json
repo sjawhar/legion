@@ -2,65 +2,50 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-158",
-  "completed": "2026-10-27T12:10:00Z",
-  "round": 15,
+  "completed": "2026-10-27T13:40:00Z",
+  "round": 16,
   "generation": 4,
-  "head": "b3855fb2027f",
-  "verdictProvider": "No subagent judged anything in this round; the tester's own session ran every check, so no provider or model needs naming. The #2137 notice limit is recorded on the architect's ruling (Envoy d37afb29).",
+  "head": "fd3bfa69b2ef",
+  "verdictProvider": "No subagent judged anything in this round; the tester's own session ran every check, so no provider or model needs naming.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Red tests c12da9a2, 44cf9cac, 2f3a9b7f and 196f5a85 are unchanged at the head (sha256 of each function body equal). The implementer's count rule was driven on the surface in the deploy order (dep_r6, plus the equal-count control dep_q6) and in rows mode (edge_h6), with the results below."
+    "how": "Ran the implementer's three new tests at the head (pass) and at b3855fb2 (TestAClosedDocumentsPasteKeepingItsSourcesIDTakesNoRow and TestBlockIndexRereadsALiveAheadDocumentWhoseIssueCloses fail there). Drove both fixes on the real surface, below."
   },
   "failed": 0,
   "failures": [],
   "knownLimits": [
-    "A person's edit made inside the edit-notice window before a close gets no notice. On the head, alice typed with her tab open and an agent closed NT-2 a second later. The pre-close settlement wrote version 6, which lists alice, and the window opened. The sweep then removed it with no event, and the reopen does not send it. This is main's #2137 rule in sendEditNotice ('a closed issue's notice is dropped'), and main sends no notice for the same edit. The architect ruled it main's accepted behaviour, not a defect of this change (Envoy d37afb29).",
-    "In the deploy order, an original copy of a repeated paragraph left unmatched (the copy counts differ) is dated to the reopen's version, as #2210 dates any block it first indexes after the deploy (architect's accepted limit, Envoy 3d1ba166)."
+    "A person's edit made inside the edit-notice window before a close gets no notice: main's #2137 rule, ruled main's accepted behaviour by the architect (Envoy d37afb29).",
+    "In the deploy order, an original copy of a repeated paragraph left unmatched is dated to the reopen's version (architect's accepted limit, Envoy 3d1ba166).",
+    "Dispatch's web app gives a pasted block a fresh id. Pasted text and a pasted whole block both did, with versions refused. So the review's duplicate-id paste is not reachable through the browser, and the implementer's tests are its proof."
   ],
   "proof": [
     {
-      "criterion": "With no row, a repeated text is matched only when the version and the live document hold the same number of copies, and a paragraph typed after the close is never dated version 1; with equal counts, every copy resolves at version 1",
-      "surface": "dispatch:local with the head's Go server, web app and CLI rebuilt after the merge; databases written by main 1357b95c through Chromium (alice); resolve.sh and honest.sh",
-      "command": "old-rep.sh dep_r6 and old-q.sh dep_q6 on 1357b95c; srv.sh head; resolve.sh ED-1; honest.sh; dispatch-e2e rebuild-refs; alice reopens; dcli read --ref …#b-beedf3e1…@v1",
-      "observed": "dep_r6 closed: documents=1 owed_documents=0; all 4 live 'Same.' answer No block and 'Other.' resolves at v1; the same after rebuild-refs. After the reopen, the typed copy beedf3e1 is v2 and @v1 answers 'no block … at version 1'; the originals are v2 (the accepted limit); honest.sh is clean. dep_q6: all 3 'Same.' and 'Other.' resolve at v1, and 'Fresh line.' answers No block.",
-      "headSha": "b3855fb2027f",
-      "negativeControl": "6c7b9483 on the same seed shape (last round) dated the typed copy fe1ed832 to version 1"
+      "criterion": "Review finding 1: an unsettled paste at a close whose settlement fails records no version block deleted while that version holds it, plain or retyped, also after the reopen",
+      "surface": "dispatch:local, head; Chromium as alice; resolve.sh and honest.sh",
+      "command": "PA-4 and PA-5 ('## Plan / Foo. / Foo. / Other.') indexed while open; versions refused by trigger; BLOCKCOPY=Other. paste.ts copies the 'Foo.' block after 'Other.' (PA-5 then types ' retyped'); daemonclose; drop the trigger; dispatch-e2e rebuild-refs; tick; resolve.sh and honest.sh; alice reopens; resolve.sh and honest.sh",
+      "observed": "Closed: both 'Foo.' copies, 'Other.' and the heading resolve at v1 under their own ids, and the pasted blocks answer No block; honest.sh is clean. After the reopen: the pastes are v2, the version-1 blocks stay v1, and no deletion row exists. The browser gave each paste a fresh id (54ea64dd, 19a50757, cde9e278 beside their sources), so the duplicate-id case is proven by TestClosedVersionBlocksCountsOnlyTheFirstHolderOfAnID and TestAClosedDocumentsPasteKeepingItsSourcesIDTakesNoRow, which pass at the head.",
+      "headSha": "fd3bfa69b2ef",
+      "negativeControl": "At b3855fb2, TestAClosedDocumentsPasteKeepingItsSourcesIDTakesNoRow fails: 'block fc4dceee-… is dated 0 with text \"\" (deleted true) at version 1, want version 1 with version 1's text \"Foo.\"'"
     },
     {
-      "criterion": "Rows mode and the ask-state deploy order still hold after the fix and the merge",
-      "surface": "dispatch:local, head; Chromium as alice",
-      "command": "edge_h6: ED-1 indexed while open; versions refused by trigger; type.ts a new 'Same.' after 'Other.', move.ts Alpha after Gamma, NOENTER type.ts into Beta; daemonclose; drop the trigger; rebuild-refs; reopen. dep_h6: old-seed.sh on 1357b95c, srv.sh head, resolve.sh, d1@v4, rebuild-refs, reopen UP-1 (alice) and UP-3 (daemon)",
-      "observed": "edge_h6 closed: every block that version 1 holds stays at v1 under its own id (third Same. f79e9621 included); the new Same. and the new Alpha answer No block. After the reopen they and Beta's edit are v2, the old Alpha's deletion is at v2, and honest.sh is clean. dep_h6: withdrawn=15, documents=6 owed_documents=0, 12 of 12 per issue at v4, d1@v4 state=\"open\", the same after rebuild-refs; the reopens restored 5 asks and wrote no version.",
-      "headSha": "b3855fb2027f",
-      "negativeControl": "3a58ed47 recorded the held Same. 538a70a2 as deleted at version 1 (round 13)"
+      "criterion": "Review finding 2: a document the loop cached as live ahead while open is indexed on the tick after its issue closes, with no new pending mark",
+      "surface": "dispatch:local; the same cache-case.sh on the head and on b3855fb2",
+      "command": "cache-case.sh head cache_h7 and cache-case.sh base-b385 cache_n7: CA-1 indexed, versions refused, type.ts, rebuild-refs, a tick logs live_ahead=1, daemonclose CA-1 (settlement fails), then wait 65 s",
+      "observed": "Head: marked_at did not move (13:05:18.413588 before and after); the next tick logged documents=1 owed_documents=0 live_ahead=0, and the document is indexed at v1.",
+      "headSha": "fd3bfa69b2ef",
+      "negativeControl": "b3855fb2: the same steps leave owed_documents=1 live_ahead=1 and version null; TestBlockIndexRereadsALiveAheadDocumentWhoseIssueCloses fails there ('second tick … LiveAhead:1, OwedDocuments:1')"
     },
     {
-      "criterion": "#2137 (1): a close's, repair's or reopen's block-state write is no person's edit, so no agent gets an edit notice for it; a person's real edit still sends one",
-      "surface": "dispatch:local, head: document_edit_notices and events (artifact.human_edited)",
-      "command": "seed.ts NT 2; alice PATCH closes NT-1 and reopens it; dcli as nt-agent-2 closes NT-2; daemonclose reopens NT-2; wait 40 s; an agent's POST /edits on NT-1's spec; type.ts as alice on NT-1; wait 45 s. dep_h6 after the boot repair and two reopens",
-      "observed": "No notice row and no artifact.human_edited event after any close, reopen or the boot repair. The agent's version 5 lists only nt-agent-1. Alice's edit sent exactly one notice: NT-1 alice 5→6.",
-      "headSha": "b3855fb2027f",
-      "negativeControl": "The positive control: alice's typed edit produced the one artifact.human_edited event, so the check sees a real notice when one is sent"
-    },
-    {
-      "criterion": "#2137 (3): the leased loops, leasePoolSize 11, run once per pass across two processes",
-      "surface": "Two head processes (8795, 8796) on one database for 10.5 minutes",
-      "command": "run-server.sh twice on lease_r18; grep the 'leased pass ran|skipped' lines",
-      "observed": "issue-ask-repair ran once in A (11:35:14) and B skipped it. edit-notices: 124 runs and 120 skips. block-index 21/21; suggestion-outcomes, reference-excerpts, architecture-import and delivery-reconcile each ran in one process while the other skipped. No ERROR or WARN beyond the two expected. Webhook redelivery and the two delivery consumers need NATS and the GitHub App key, which this harness lacks, and the compaction did not come due in the window.",
-      "headSha": "b3855fb2027f",
-      "negativeControl": "Each skip line is the lease refusing a second holder"
-    },
-    {
-      "criterion": "The web app after main's merges (#2137, unknown-directive): no regression in the close, offline-edit and block surfaces",
-      "surface": "Dispatch's Playwright harness, chromium and iphone",
-      "command": "bunx playwright test --config e2e/playwright.config.ts close-withdraws-asks offline-edits doc margin ask-blocks references unknown-directive --project chromium --project iphone",
-      "observed": "242 passed, 6 skipped, 0 failed (24.6 minutes)",
-      "headSha": "b3855fb2027f",
-      "negativeControl": "Round 9: the web apps without the fix failed the review's reconnect path 2 of 2"
+      "criterion": "Regressions after the matcher moved file: the deploy order (count rule, equal-count control, ask states), the four tester red tests, and the browser suites whole",
+      "surface": "dispatch:local, head, on databases written by main 1357b95c; go test; Dispatch's Playwright harness on chromium and iphone",
+      "command": "deploy-check.sh dep_r7, dep_q7 and dep_h7; go test -run of 196f5a85's, 2f3a9b7f's, 44cf9cac's and c12da9a2's tests; bunx playwright test close-withdraws-asks offline-edits doc margin ask-blocks references unknown-directive --project chromium --project iphone",
+      "observed": "dep_r7: all 4 'Same.' answer No block and 'Other.' is v1. dep_q7: every 'Same.' and 'Other.' are v1, and 'Fresh line.' answers No block. dep_h7: withdrawn=15, documents=6 owed_documents=0, 12 of 12 per issue. honest.sh is clean on all. The four red tests pass. Suites: 242 passed, 6 skipped, 0 failed (24.2 minutes).",
+      "headSha": "fd3bfa69b2ef",
+      "negativeControl": "6c7b9483 dated the typed 'Same.' to version 1 on dep_r's seed shape (round 14)"
     }
   ],
-  "ci": "At b3855fb2: Tests 40495427442, Docs 40495427322 and Legion Envoy and Contracts 40495427438 are queued, and Worker Image 40495427415 is pending.",
+  "ci": "At fd3bfa69: Tests 40507706495, Docs 40507706559, Legion Envoy and Contracts 40507706514 and Worker Image 40507710494 are queued. At b3855fb2: Tests 40495427442 and Docs 40495427322 succeeded.",
   "evidenceComments": [
-    "https://github.com/sjawhar/legion/pull/2233#issuecomment-6441164470"
+    "https://github.com/sjawhar/legion/pull/2233#issuecomment-6442995080"
   ]
 }
