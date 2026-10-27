@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -171,13 +173,18 @@ func (h *listenerHarness) handleAgent(msg *natsgo.Msg, item contracts.Envelope) 
 		_ = msg.Ack()
 		return
 	}
-	interest, err := h.env.registry.Get(sessionID)
+	interest, err := h.env.registry.Get(context.Background(), sessionID)
 	var interestPtr *store.Interest
 	if err == nil {
 		interestPtr = &interest
 	}
+	entry, entryErr := h.env.sessions.Get(sessionID)
+	var entryPtr *session.SessionEntry
+	if entryErr == nil {
+		entryPtr = &entry
+	}
 	h.attemptCache.Record(item.DedupeKey, sessionID)
-	result := session.HandleAgentMessage(item, sessionID, h.machineID, interestPtr, &h.env.deliverer)
+	result := session.HandleAgentMessage(item, sessionID, h.machineID, interestPtr, entryPtr, &h.env.deliverer)
 	if result.Delivered {
 		h.dedupeCache.Record(item.DedupeKey, sessionID)
 	}
@@ -206,7 +213,14 @@ func (h *listenerHarness) handleFanout(msg *natsgo.Msg, item contracts.Envelope)
 			continue
 		}
 		h.attemptCache.Record(item.DedupeKey, interest.SessionID)
-		if err := h.env.deliverer.Deliver(item, interest); err != nil {
+		// The listener resolves the subscriber's record and delivers through it
+		// (fanoutDelivery, cmd/listener/delivery.go); the Deliverer reads no registry.
+		targetEntry, targetErr := h.env.sessions.Get(interest.SessionID)
+		var target *session.SessionEntry
+		if targetErr == nil {
+			target = &targetEntry
+		}
+		if _, err := h.env.deliverer.DeliverWithResultForEntry(item, interest, target); err != nil {
 			if fanoutShouldNAK(h.env.sessions, interest.SessionID, err) {
 				failed = true
 			}
@@ -221,29 +235,13 @@ func (h *listenerHarness) handleFanout(msg *natsgo.Msg, item contracts.Envelope)
 	_ = msg.Ack()
 }
 
-func fanoutShouldNAK(sessions session.SessionLookup, sessionID string, err error) bool {
+func fanoutShouldNAK(sessions *session.SessionRegistry, sessionID string, err error) bool {
 	if err == nil {
 		return false
 	}
 	_, getErr := sessions.Get(sessionID)
 	return getErr == nil
 }
-
-type mockSessionLookup struct {
-	entry session.SessionEntry
-	err   error
-}
-
-func (m *mockSessionLookup) Get(string) (session.SessionEntry, error) {
-	if m.err != nil {
-		return session.SessionEntry{}, m.err
-	}
-	return m.entry, nil
-}
-
-func (m *mockSessionLookup) Put(string, session.SessionEntry) error { return nil }
-
-func (m *mockSessionLookup) Delete(string) error { return nil }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
@@ -343,21 +341,34 @@ func TestE2E_AgentToAgent_LocalMachine(t *testing.T) {
 	recorder.expectNoDelivery(t, 300*time.Millisecond)
 }
 
+// TestE2E_AgentToAgent_RemoteMachine delivers to a session that runs on, and last registered
+// through, another machine while its stored subscription still names this listener: the stored
+// subscription makes this listener its owner (session.ErrWrongMachine is for a session another
+// listener owns), and the owner pushes to the machine the session's record names.
 func TestE2E_AgentToAgent_RemoteMachine(t *testing.T) {
 	env := setupTestEnv(t)
-	defer func(original session.SessionLookup, originalClient *http.Client) {
-		env.deliverer.Sessions = original
+	defer func(originalClient *http.Client) {
 		env.deliverer.HTTPClient = originalClient
-	}(env.deliverer.Sessions, env.deliverer.HTTPClient)
+	}(env.deliverer.HTTPClient)
 
-	env.deliverer.Sessions = &mockSessionLookup{entry: session.SessionEntry{Port: 7777, MachineID: "remote-machine", Dir: "/remote"}}
+	var pushes atomic.Int32
 	env.deliverer.HTTPClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		pushes.Add(1)
 		if r.URL.Hostname() != "remote-machine" {
-			t.Fatalf("expected remote-machine host, got %s", r.URL.Hostname())
+			t.Errorf("expected remote-machine host, got %s", r.URL.Hostname())
 		}
-		return nil, session.ErrWrongMachine
+		return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody, Header: make(http.Header)}, nil
 	})}
-	if _, err := env.registry.Upsert(store.Interest{SessionID: "ses_remote", MachineID: "remote-machine", Dir: "/remote"}, []string{contracts.AgentSubject("ses_remote")}); err != nil {
+	// The session's own record names the machine it runs on, and the listener resolves that
+	// record before it pushes, so the push is addressed to remote-machine rather than to this
+	// listener's own host. Without the record there is nothing to push to and the transport
+	// below is never reached, which is what the push count guards against.
+	if err := env.sessions.Put("ses_remote", session.SessionEntry{
+		Port: 7777, MachineID: "remote-machine", Dir: "/remote",
+	}); err != nil {
+		t.Fatalf("register the remote session: %v", err)
+	}
+	if _, err := env.registry.Upsert(store.Interest{SessionID: "ses_remote", MachineID: "test-machine", Dir: "/remote"}, []string{contracts.AgentSubject("ses_remote")}); err != nil {
 		t.Fatalf("upsert remote interest: %v", err)
 	}
 
@@ -373,6 +384,9 @@ func TestE2E_AgentToAgent_RemoteMachine(t *testing.T) {
 		}
 		return consumerInfo.NumPending == 0 && consumerInfo.AckFloor.Consumer > 0
 	})
+	if got := pushes.Load(); got != 1 {
+		t.Fatalf("the remote session was pushed to %d times, want exactly 1: the delivery must reach the machine the record names", got)
+	}
 }
 
 func TestE2E_RestartResilience(t *testing.T) {
@@ -462,11 +476,11 @@ func TestE2E_InterestReaperCleanup(t *testing.T) {
 		t.Fatalf("upsert stale interest: %v", err)
 	}
 
-	interest, err := env.registry.Get("ses_stale")
+	interest, err := env.registry.Get(context.Background(), "ses_stale")
 	if err != nil {
 		t.Fatalf("get stale interest: %v", err)
 	}
-	interest.UpdatedAt = time.Now().Add(-11 * time.Minute).UnixMilli()
+	interest.UpdatedAt = time.Now().Add(-(store.InterestReapGrace + store.InterestRefreshAge + time.Minute)).UnixMilli()
 	data, err := json.Marshal(interest)
 	if err != nil {
 		t.Fatalf("marshal stale interest: %v", err)
@@ -483,11 +497,11 @@ func TestE2E_InterestReaperCleanup(t *testing.T) {
 		t.Fatalf("put stale interest: %v", err)
 	}
 	waitUntil(t, 5*time.Second, "stale cache update", func() bool {
-		current, getErr := env.registry.Get("ses_stale")
+		current, getErr := env.registry.Get(context.Background(), "ses_stale")
 		return getErr == nil && current.UpdatedAt == interest.UpdatedAt
 	})
 
-	reaped, err := env.registry.Reap(func(string) bool { return false }, 10*time.Minute)
+	reaped, err := env.registry.Reap(func(string) bool { return false }, store.InterestReapGrace)
 	if err != nil {
 		t.Fatalf("reap stale interests: %v", err)
 	}
@@ -495,7 +509,7 @@ func TestE2E_InterestReaperCleanup(t *testing.T) {
 		t.Fatalf("expected 1 reaped interest, got %d", reaped)
 	}
 	waitUntil(t, 5*time.Second, "stale interest deletion", func() bool {
-		_, getErr := env.registry.Get("ses_stale")
+		_, getErr := env.registry.Get(context.Background(), "ses_stale")
 		return getErr != nil && errors.Is(getErr, natsgo.ErrKeyNotFound)
 	})
 }

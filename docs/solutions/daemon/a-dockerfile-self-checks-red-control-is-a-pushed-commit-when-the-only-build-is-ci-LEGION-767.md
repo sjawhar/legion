@@ -30,9 +30,12 @@ once before the fix lands" is therefore two pushes, not a local run.
 - Before the red push, read what the red can move. Check the workflow is not in the base's required
   set (`gh api repos/<owner>/<repo>/rules/branches/main`; `Worker Image` is not, so its red moves no
   issue), and that the red lands during implementing, which the daemon's CI-red move never touches.
-  Read the job's `concurrency`: `worker-image.yaml` serializes runs per pull request with
-  `cancel-in-progress: false`, so the fix push queues behind the red run instead of cancelling it (a
-  third push while one is still pending would cancel the pending one).
+  Read the workflow's `concurrency`. Since 2026-10-27 (dispatch://INFRA-600), a newer push to the
+  pull request cancels the older head's `Worker Image` run, waiting or running. So push the fix only
+  after the red run has failed in the guard's step. A fix push before then cancels the red run, and
+  you lose the negative control. A draft's head builds nothing: mark the pull request ready first.
+  (When this note was written, `worker-image.yaml` serialized runs per pull request with
+  `cancel-in-progress: false`, and the fix push queued behind the red run.)
 - Make the guard print what it saw, not just fail. Anchor it with a `stat -c '%a %n'` on each path
   (a moved or missing path fails the build instead of passing an empty `find`, and the modes land in
   the log), then capture `find <paths> -perm /6000` into a variable, `echo` it with a `none` default,
