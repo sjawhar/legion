@@ -7,6 +7,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	natsserver "github.com/nats-io/nats-server/v2/server"
 )
 
 // Cluster is n nats-servers in this test process, routed to each other with JetStream clustered
@@ -122,19 +125,122 @@ func (c *Cluster) URLs() []string {
 // client connects to whichever member answers and reconnects to another.
 func (c *Cluster) URL() string { return strings.Join(c.URLs(), ",") }
 
-// AwaitReady waits, within connectTimeout, until one running member leads the JetStream meta group,
-// that leader counts every running member, and no stopped one, as an online peer, every running
-// member is current with it, and JetStream answers an account info request on every running
-// member. A test calls it after it starts a stopped member again, or after it stops one, before it
-// asks JetStream for anything that needs the meta group.
+// AwaitReady waits until one running member leads the JetStream meta group, that leader counts
+// every running member, and no stopped one, as an online peer, every running member is current
+// with it, and JetStream answers an account info request on every running member. A test calls it
+// after it starts a stopped member again, or after it stops one, before it asks JetStream for
+// anything that needs the meta group.
+//
+// A member that no other running member's meta group hears from within muteAfter is restarted, at
+// most muteRestarts times in one call. Each restart starts the listening, and the connectTimeout
+// wait, over for every member, since a restarted member has heard no one yet.
+//
+// nats-server 2.10.29 can start a member whose every Raft message is dropped: its
+// setSystemAccount starts the Raft send queue's goroutine (server/server.go:1710), which registers
+// its client with s.SystemAccount() (server/sendq.go:48) before setSystemAccount stores the account
+// (server/server.go:1717), and a client with no account delivers nothing (server/client.go:3882).
+// Such a member follows the leader but never answers it or votes, so the leader never counts it,
+// for as long as that start runs; a restart is a fresh start. Under -race on two CPUs with four
+// test processes, 29 of 1,920 fresh clusters had such a member. nats-server v2.15.2 hands the
+// queue its account instead (newSendQ(acc)).
 func (c *Cluster) AwaitReady(t testing.TB) {
 	t.Helper()
-	waitForJetStream(t, c.metaReady)
+	// listening is when AwaitReady began listening for the members: its call, or its last restart.
+	listening := time.Now()
+	restarts := 0
+	for {
+		err := c.metaReady()
+		if err == nil {
+			break
+		}
+		if restarts < muteRestarts {
+			if i := c.mute(time.Since(listening)); i >= 0 {
+				t.Logf("restart cluster member %s: no other member's JetStream meta group heard from it within %s (%v)", c.Name(i), muteAfter, err)
+				c.Servers[i].stop()
+				c.Servers[i].launch(t)
+				restarts++
+				listening = time.Now()
+				continue
+			}
+		}
+		if time.Since(listening) >= connectTimeout {
+			t.Fatalf("JetStream was not ready within %s (%d members restarted): %v", connectTimeout, restarts, err)
+		}
+		time.Sleep(retryInterval)
+	}
 	for _, server := range c.Servers {
 		if server.running() {
 			Connect(t, server.URL()).Close()
 		}
 	}
+}
+
+const (
+	// muteAfter is how long AwaitReady listens for a running member before it restarts it. A
+	// working member is heard sooner whether or not the meta group has a leader: a leader hears
+	// each follower answer its heartbeat every second, and without a leader every member campaigns
+	// within nats-server's longest election timeout, 9 seconds, so the members it asks for a vote
+	// hear it and it hears their answers. Under -race on two CPUs, most beside three more such test
+	// processes, the 1,925 fresh clusters without a mute member were all ready within 7.8 seconds.
+	muteAfter = 15 * time.Second
+	// muteRestarts caps the restarts one AwaitReady makes, so a member nothing can hear, such as
+	// the last running one of a cluster that lost its quorum, fails the wait instead of being
+	// restarted for ever.
+	muteRestarts = 3
+	// metaGroupName is the Raft group JetStream's meta group runs as.
+	metaGroupName = "_meta_"
+)
+
+// mute is the index of a running member that no other running member's meta group has heard from
+// in the last listened, once that is muteAfter or longer, or -1 when there is none.
+func (c *Cluster) mute(listened time.Duration) int {
+	if listened < muteAfter {
+		return -1
+	}
+	groups := make([]*natsserver.RaftzGroup, len(c.Servers))
+	for i, server := range c.Servers {
+		if srv := server.natsServer(); srv != nil {
+			groups[i] = metaGroup(srv)
+		}
+	}
+	for i, group := range groups {
+		if group != nil && !heard(groups, i, listened) {
+			return i
+		}
+	}
+	return -1
+}
+
+// heard reports whether a member other than i last heard member i's meta group within the last
+// within, by each member's own Raft view of the group (groups, nil for a member without one).
+func heard(groups []*natsserver.RaftzGroup, i int, within time.Duration) bool {
+	for j, group := range groups {
+		if j == i || group == nil {
+			continue
+		}
+		peer, ok := group.Peers[groups[i].ID]
+		if !ok || peer.LastSeen == "" {
+			continue
+		}
+		if seen, err := time.ParseDuration(peer.LastSeen); err == nil && seen < within {
+			return true
+		}
+	}
+	return false
+}
+
+// metaGroup is srv's Raft view of the JetStream meta group, or nil while it has none.
+func metaGroup(srv *natsserver.Server) *natsserver.RaftzGroup {
+	status := srv.Raftz(&natsserver.RaftzOptions{GroupFilter: metaGroupName})
+	if status == nil {
+		return nil
+	}
+	for _, groups := range *status {
+		if group, ok := groups[metaGroupName]; ok {
+			return &group
+		}
+	}
+	return nil
 }
 
 // metaReady reports why the meta group is not ready yet, or nil when it is.

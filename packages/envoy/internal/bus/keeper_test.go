@@ -79,6 +79,9 @@ type interleavedJetStream struct {
 	afterRead, beforeUpdate func()
 	readOnce, updateOnce    sync.Once
 	updates                 atomic.Int32
+	// updateErr is the server's answer to the last update sent through the wrapper: nil when the
+	// update was applied, an unanswered wait when nats-server never answered it.
+	updateErr atomic.Pointer[error]
 }
 
 func (js *interleavedJetStream) StreamInfo(stream string, opts ...nats.JSOpt) (*nats.StreamInfo, error) {
@@ -94,7 +97,27 @@ func (js *interleavedJetStream) UpdateStream(cfg *nats.StreamConfig, opts ...nat
 		js.updateOnce.Do(js.beforeUpdate)
 	}
 	js.updates.Add(1)
-	return js.JetStreamContext.UpdateStream(cfg, opts...)
+	info, err := js.JetStreamContext.UpdateStream(cfg, opts...)
+	js.updateErr.Store(&err)
+	return info, err
+}
+
+// awaitRestoredLog waits, within keepWait, until the keeper's restore lines name every one of wants.
+// The keeper logs a restore after the server applied it, so a test that reads the stream as kept
+// can get there before the line is written.
+func awaitRestoredLog(t *testing.T, logs *capturedLogs, wants ...string) {
+	t.Helper()
+	deadline := time.Now().Add(keepWait)
+	for {
+		logged := restoredLog(t, logs)
+		if !slices.ContainsFunc(wants, func(want string) bool { return !strings.Contains(logged, want) }) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the keeper's lines restored %q within %s, want %q among them", logged, keepWait, wants)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // restoredLog is every field the keeper's restore lines logged so far, joined.
@@ -144,12 +167,21 @@ func TestTheKeeperEndsTheMixedSettingsRaceAtThreeCopiesTheByteLimitAndTheID(t *t
 	}
 
 	awaitKept(t, js, Stream, "three copies, the byte limit and the id", keptAtSettings(id))
-	logged := restoredLog(t, logs)
-	for _, want := range []string{"replicas 1 -> 3", fmt.Sprintf("max_bytes -1 -> %d", keeperByteLimit)} {
-		if !strings.Contains(logged, want) {
-			t.Fatalf("the keeper's lines restored %q, want %q among them", logged, want)
+	// Under load nats-server can leave a replica change unanswered (unanswered); the default
+	// program's start then reads the stream again, finds three copies, and counts its write as
+	// done. That write may never land, or land later: the keeper only has something to restore
+	// once it lands. So the restore line is required only when the server answered the stale write,
+	// and an unanswered one must still end at the settings a few periods later.
+	if stale := *defaultStart.updateErr.Load(); stale != nil {
+		if !unanswered(stale) {
+			t.Fatalf("the default program's stale write: %v", stale)
 		}
+		t.Logf("the server left the stale write unanswered (%v): checking the end state only", stale)
+		time.Sleep(4 * testKeepInterval)
+		awaitKept(t, js, Stream, "three copies, the byte limit and the id", keptAtSettings(id))
+		return
 	}
+	awaitRestoredLog(t, logs, "replicas 1 -> 3", fmt.Sprintf("max_bytes -1 -> %d", keeperByteLimit))
 }
 
 // The keeper's write is the stream as it read it with its own part put back, so a concurrent
@@ -401,9 +433,7 @@ func TestTheKeeperKeepsAnOperatorsRaiseOfTheByteLimitAndRaisesALowerOne(t *testi
 		t.Fatalf("operator lowering: %v", err)
 	}
 	awaitKept(t, js, Stream, "the byte limit", func(info *nats.StreamInfo) bool { return info.Config.MaxBytes == keeperByteLimit })
-	if want, logged := fmt.Sprintf("max_bytes %d -> %d", lower.MaxBytes, keeperByteLimit), restoredLog(t, logs); !strings.Contains(logged, want) {
-		t.Fatalf("the keeper's lines restored %q, want %q among them", logged, want)
-	}
+	awaitRestoredLog(t, logs, fmt.Sprintf("max_bytes %d -> %d", lower.MaxBytes, keeperByteLimit))
 }
 
 // The keeper raises a bucket its program names (WithKeptBuckets) back to the deployment's copies
