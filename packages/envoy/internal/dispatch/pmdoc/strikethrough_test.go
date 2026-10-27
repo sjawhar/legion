@@ -9,7 +9,7 @@ import (
 // A comment is drawn by the browser's headless engine, whose strikethrough
 // (micromark-extension-gfm-strikethrough) pairs a `~` run only with a closer of the same length,
 // 1 or 2, lets a run directly after an escaped `~` open or close, and pairs `~` runs and `*`/`_`
-// runs in separate passes: the kind whose run was tokenized first goes first at a textblock's top
+// runs in separate passes: the group whose run was tokenized first goes first at a textblock's top
 // level, and `~` goes first inside a link's label. A document is read by Go, so each row is
 // markdown and the reading the engine gives it, each textblock's text and marks (readingSummary),
 // asserted for every reader a document is read with - so a run without the engine still checks

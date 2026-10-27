@@ -70,8 +70,8 @@ type listedRun struct {
 }
 
 // runGroup is which pass pairs a run. micromark pairs `*` and `_` runs (its attention resolver) and
-// `~` runs (its strikethrough resolver) apart; under goldmark's rules every run is an emphasisRuns
-// run, so one pass pairs them all in order, as ProcessDelimiters does.
+// `~` runs (its strikethrough resolver) apart; under storedRules and flankingRules every run is an
+// emphasisRuns run, so one pass pairs them all in order, as goldmark's ProcessDelimiters does.
 type runGroup uint8
 
 const (
@@ -80,8 +80,8 @@ const (
 	runGroups
 )
 
-// runKind is which runs a closer may pair with: a run of its own character, and under micromark's
-// rules a `~` run only with one of its own length, so a single and a double `~` are two kinds there.
+// runKind is which runs a closer may pair with: a run of its own character, and under editorRules
+// a `~` run only with one of its own length, so a single and a double `~` are two kinds there.
 type runKind uint8
 
 const (
@@ -112,8 +112,8 @@ func (l *delimiterList) tokenized(group runGroup) {
 }
 
 // push adds d, which the inline parser has placed among the textblock's nodes, as the last run,
-// grouped and kinded by goldmark's rules or micromark's.
-func (l *delimiterList) push(d *parser.Delimiter, goldmarkRules bool) {
+// grouped and kinded by rules.
+func (l *delimiterList) push(d *parser.Delimiter, rules delimiterRules) {
 	if len(l.slab) == cap(l.slab) {
 		l.slab = make([]listedRun, 0, 64)
 	}
@@ -124,7 +124,7 @@ func (l *delimiterList) push(d *parser.Delimiter, goldmarkRules bool) {
 		run.kind = starRun
 	case d.Char == '_':
 		run.kind = underscoreRun
-	case goldmarkRules:
+	case rules != editorRules:
 		run.kind = tildeRun
 	case d.OriginalLength == 2:
 		run.group, run.kind = tildeRuns, doubleTildeRun
@@ -146,18 +146,16 @@ func (l *delimiterList) push(d *parser.Delimiter, goldmarkRules bool) {
 	l.lastInGroup[run.group] = run
 }
 
-// pairTextblock pairs the runs a textblock leaves once its inline markdown is all read. Under
-// micromark's rules the group whose run the textblock tokenized first is paired first, then the
-// other.
-func (l *delimiterList) pairTextblock(goldmarkRules bool) {
-	switch {
-	case goldmarkRules:
-		l.pair(0, emphasisRuns)
-	case l.first == tildeRuns:
+// pairTextblock pairs the runs a textblock leaves once its inline markdown is all read: the group
+// whose run the textblock tokenized first is paired first, then the other. Under storedRules and
+// flankingRules every run is an emphasisRuns run, so that group is first and the other's pass
+// finds no run.
+func (l *delimiterList) pairTextblock() {
+	if l.first == tildeRuns {
 		l.pair(0, tildeRuns, emphasisRuns)
-	default:
-		l.pair(0, emphasisRuns, tildeRuns)
+		return
 	}
+	l.pair(0, emphasisRuns, tildeRuns)
 }
 
 // openLabel records that a link or image label opened once bottom runs had been pushed.
@@ -177,13 +175,10 @@ func (l *delimiterList) closeLabel() (bottom int, open bool) {
 }
 
 // pairLabel pairs the runs of a link or image label that formed: those pushed after bottom, now the
-// link's children. Under micromark's rules the `~` runs go first, since micromark resolves a label
-// with the extensions' resolvers before its own attention (resolveToLabelEnd, insideSpan).
-func (l *delimiterList) pairLabel(bottom int, goldmarkRules bool) {
-	if goldmarkRules {
-		l.pair(bottom, emphasisRuns)
-		return
-	}
+// link's children. The `~` runs go first, since micromark resolves a label with the extensions'
+// resolvers before its own attention (resolveToLabelEnd, insideSpan); under storedRules and
+// flankingRules there are none.
+func (l *delimiterList) pairLabel(bottom int) {
 	l.pair(bottom, tildeRuns, emphasisRuns)
 }
 
@@ -198,11 +193,13 @@ type pairingPass struct {
 // pair pairs the runs of each of groups pushed after bottom, a pass per group in the order given,
 // and makes every pass a pair calls for. micromark resolves what a pair encloses as soon as it
 // makes the pair, with every resolver over the runs between its opener and closer (resolveAll over
-// insideSpan), so no run pairs out of a pair: a pass that pairs an opener and a closer enclosing
-// runs of the other group pairs those at once, in a pass of their own, before it goes on. A group's
-// pass starts at its first run left once the groups before it are paired. The passes are a stack
-// rather than calls, so how deeply pairs call for passes is bounded by memory, not by the
-// goroutine's stack.
+// insideSpan): a pass that pairs an opener and a closer enclosing runs of the other group pairs
+// those at once, in a pass of their own, before it goes on. The enclosed runs of the pass's own
+// group leave the list as text, as goldmark's ProcessDelimiters drops them; micromark runs its
+// attention again over them and may pair them inside the pair, so in `_**.****.a***_` pmdoc, as
+// main did, reads `**.**` as text where the engine makes `..a` strong. A group's pass starts at
+// its first run left once the groups before it are paired. The passes are a stack rather than
+// calls, so how deeply pairs call for passes is bounded by memory, not by the goroutine's stack.
 func (l *delimiterList) pair(bottom int, groups ...runGroup) {
 	var stack []pairingPass
 	for _, group := range groups {

@@ -11,24 +11,45 @@ import (
 )
 
 // inlineParsers is goldmark's default inline parsers, each found by its type as blockParsers finds
-// the block parsers it wraps: its emphasis parser replaced by emphasis, and its link parser
-// measuring the images it makes and pairing their labels' runs by emphasis's rules (imageNesting),
-// with tildeParser added, reading `~` runs by emphasis's rules, at the priority goldmark's
-// strikethrough extension gives its own (500).
-func inlineParsers(emphasis emphasisParser) []util.PrioritizedValue {
+// the block parsers it wraps: its emphasis parser replaced by emphasisParser, and its link parser
+// measuring the images it makes and pairing their labels' runs (imageNesting), with tildeParser
+// added at the priority goldmark's strikethrough extension gives its own (500), every delimiter
+// run read by rules.
+func inlineParsers(rules delimiterRules) []util.PrioritizedValue {
 	parsers := parser.DefaultInlineParsers()
 	emphasisType := reflect.TypeOf(parser.NewEmphasisParser())
 	linkType := reflect.TypeOf(parser.NewLinkParser())
 	for index, prioritized := range parsers {
 		switch reflect.TypeOf(prioritized.Value) {
 		case emphasisType:
-			parsers[index].Value = emphasis
+			parsers[index].Value = emphasisParser{rules: rules}
 		case linkType:
-			parsers[index].Value = imageNesting{goldmarkLinkParser: prioritized.Value.(goldmarkLinkParser), goldmarkRules: emphasis.goldmarkRules}
+			parsers[index].Value = imageNesting{prioritized.Value.(goldmarkLinkParser)}
 		}
 	}
-	return append(parsers, util.Prioritized(tildeParser{goldmarkRules: emphasis.goldmarkRules}, 500))
+	return append(parsers, util.Prioritized(tildeParser{rules: rules}, 500))
 }
+
+// delimiterRules is which rules a reader reads `*`, `_` and `~` delimiter runs by.
+type delimiterRules uint8
+
+const (
+	// editorRules reads them as the browser editor's parser (micromark) does: a `*` or `_` run can
+	// also open or close beside a `*`, `_` or `~` (emphasisParser), a `~` run pairs only with one of
+	// its length and is refused after a `~` no backslash escapes (tildeParser), and the `~` runs
+	// pair apart from the others, in micromark's order (delimiterList). Every document is read by
+	// these rules.
+	editorRules delimiterRules = iota
+	// storedRules reads them as Parse did before it read as the browser editor does: a `*` or `_`
+	// run can also open or close beside a `*` or `_` but not a `~`, a `~` run is read by goldmark's
+	// strikethrough, which pairs runs of either length and refuses one after any `~`, and every run
+	// is paired in goldmark's one loop over them in order.
+	storedRules
+	// flankingRules reads them as goldmark does, and as Parse did before it read a `*` or `_` run
+	// beside another as the browser editor does (LEGION-290): as storedRules, except that a `*` or
+	// `_` run is judged by CommonMark's flanking rules alone.
+	flankingRules
+)
 
 // emphasisParser reads `*` and `_` delimiter runs as the browser editor's parser (micromark) does:
 // it judges whether a run can open or close by CommonMark's flanking rules, except that a run can
@@ -45,13 +66,13 @@ func inlineParsers(emphasis emphasisParser) []util.PrioritizedValue {
 // toward a `~` never takes a `~` run as its partner. In `*~~**b~~*` the outer `*` runs open and
 // close toward the `~~` and pair around the struck `**b`, as the engine reads it.
 //
-// goldmarkRules reads every delimiter run by goldmark's rules instead: a `*` or `_` run by the
-// flanking rules alone, a `~` run by goldmark's strikethrough (tildeParser), and all of them paired
-// in goldmark's one loop over the runs in order (delimiterList.advance). The renderer keeps first a
-// spelling that reads back under both (inlineWithEscapes), so the bytes it wrote while Dispatch read
-// by goldmark's rules stay where they still read back.
+// That is its editorRules. Under storedRules a run opens or closes beside a `*` or `_` alone, and
+// under flankingRules by the flanking rules alone; under both every run is paired in goldmark's one
+// loop over them in order (delimiterList.advance). The renderer keeps first a spelling that reads
+// back under all three (inlineWithEscapes), so the bytes it wrote while Dispatch read by the stored
+// rules stay where they still read back.
 type emphasisParser struct {
-	goldmarkRules bool
+	rules delimiterRules
 }
 
 func (emphasisParser) Trigger() []byte {
@@ -78,9 +99,13 @@ func (p emphasisParser) Parse(_ ast.Node, block text.Reader, pc parser.Context) 
 	afterIsSpace, afterIsPunct := util.IsSpaceRune(after), util.IsPunctRune(after)
 	canOpen := !afterIsSpace && (!afterIsPunct || beforeIsSpace || beforeIsPunct)
 	canClose := !beforeIsSpace && (!beforeIsPunct || afterIsSpace || afterIsPunct)
-	if !p.goldmarkRules {
-		canOpen = canOpen || after == '*' || after == '_' || after == '~'
-		canClose = canClose || before == '*' || before == '_' || before == '~'
+	if p.rules != flankingRules {
+		canOpen = canOpen || after == '*' || after == '_'
+		canClose = canClose || before == '*' || before == '_'
+	}
+	if p.rules == editorRules {
+		canOpen = canOpen || after == '~'
+		canClose = canClose || before == '~'
 	}
 	if char == '_' {
 		canOpen, canClose = canOpen && (beforeIsSpace || beforeIsPunct || !canClose), canClose && (afterIsSpace || afterIsPunct || !canOpen)
@@ -98,7 +123,7 @@ func (p emphasisParser) Parse(_ ast.Node, block text.Reader, pc parser.Context) 
 	node := parser.NewDelimiter(canOpen, canClose, length, char, emphasisDelimiters{count: countedElements(pc)})
 	node.Segment = segment.WithStop(segment.Start + node.OriginalLength)
 	block.Advance(node.OriginalLength)
-	delimiters.push(node, p.goldmarkRules)
+	delimiters.push(node, p.rules)
 	return node
 }
 
@@ -107,9 +132,9 @@ func (p emphasisParser) Parse(_ ast.Node, block text.Reader, pc parser.Context) 
 // so the next textblock starts its own. Goldmark calls every inline parser's CloseBlock as each
 // block closes; the link parser's, which turns the labels a block leaves open into text, may run
 // before or after it, and neither changes how a run pairs.
-func (p emphasisParser) CloseBlock(_ ast.Node, _ text.Reader, pc parser.Context) {
+func (emphasisParser) CloseBlock(_ ast.Node, _ text.Reader, pc parser.Context) {
 	if delimiters, _ := pc.Get(delimitersKey).(*delimiterList); delimiters != nil {
-		delimiters.pairTextblock(p.goldmarkRules)
+		delimiters.pairTextblock()
 		pc.Set(delimitersKey, nil)
 	}
 }
@@ -120,13 +145,13 @@ func (p emphasisParser) CloseBlock(_ ast.Node, _ text.Reader, pc parser.Context)
 // a run after a `~` only where the event before is no character escape. Its runs pair only with a
 // run of their own length (tildeDelimiters).
 //
-// goldmarkRules reads a run as goldmark's strikethrough does: a run directly after any `~`, escaped
-// or not, is text, and runs of either length pair.
+// Under storedRules and flankingRules it reads a run as goldmark's strikethrough does: a run
+// directly after any `~`, escaped or not, is text, and runs of either length pair.
 //
 // Goldmark scans a run after a `~` before it refuses it, so a run of n tildes cost n scans of the
 // rest of it; returning before the scan keeps that result and makes the run linear (LEGION-465). A
 // run after an escaped `~` is scanned once, and the run after it is refused again before its scan.
-type tildeParser struct{ goldmarkRules bool }
+type tildeParser struct{ rules delimiterRules }
 
 func (tildeParser) Trigger() []byte {
 	return []byte{'~'}
@@ -135,16 +160,16 @@ func (tildeParser) Trigger() []byte {
 func (p tildeParser) Parse(parent ast.Node, block text.Reader, pc parser.Context) ast.Node {
 	before := block.PrecendingCharacter()
 	line, segment := block.PeekLine()
-	if before == '~' && (p.goldmarkRules || !escapedTilde(parent, block.Source(), segment.Start-1)) {
+	if before == '~' && (p.rules != editorRules || !escapedTilde(parent, block.Source(), segment.Start-1)) {
 		return nil
 	}
-	node := parser.ScanDelimiter(line, before, 1, tildeDelimiters{goldmarkRules: p.goldmarkRules})
+	node := parser.ScanDelimiter(line, before, 1, tildeDelimiters{rules: p.rules})
 	if node == nil || node.OriginalLength > 2 {
 		return nil
 	}
 	node.Segment = segment.WithStop(segment.Start + node.OriginalLength)
 	block.Advance(node.OriginalLength)
-	delimitersOf(pc).push(node, p.goldmarkRules)
+	delimitersOf(pc).push(node, p.rules)
 	return node
 }
 
@@ -162,17 +187,18 @@ func escapedTilde(parent ast.Node, source []byte, index int) bool {
 	return escapedByBackslashes(source[read.Segment.Start:index+1], index-read.Segment.Start)
 }
 
-// tildeDelimiters pairs an opener and a closer of `~`: under micromark's rules only runs of one
-// length, which a pair then uses up whole, and under goldmark's any two. A pair is a strikethrough
-// mark, which charges the parse's element count nothing, as goldmark's strikethrough charged none.
-type tildeDelimiters struct{ goldmarkRules bool }
+// tildeDelimiters pairs an opener and a closer of `~`: under editorRules only runs of one length,
+// which a pair then uses up whole, and under storedRules and flankingRules, as goldmark's
+// strikethrough, any two. A pair is a strikethrough mark, which charges the parse's element count
+// nothing, as goldmark's strikethrough charged none.
+type tildeDelimiters struct{ rules delimiterRules }
 
 func (tildeDelimiters) IsDelimiter(b byte) bool {
 	return b == '~'
 }
 
 func (t tildeDelimiters) CanOpenCloser(opener, closer *parser.Delimiter) bool {
-	return opener.Char == closer.Char && (t.goldmarkRules || opener.Length == closer.Length)
+	return opener.Char == closer.Char && (t.rules != editorRules || opener.Length == closer.Length)
 }
 
 func (tildeDelimiters) OnMatch(int) ast.Node {

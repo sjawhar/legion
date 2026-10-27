@@ -27,32 +27,25 @@ type markdownReader struct {
 	md goldmark.Markdown
 }
 
-// blockReader is the configuration every document is read with. goldmarkBlockReader reads the same
-// markdown with every delimiter run read by goldmark's rules (emphasisParser.goldmarkRules): the
-// renderer keeps an image's alt text as it wrote it only where it reads back under those rules too
-// (altReadsBack), as it keeps a textblock's runs (inlineWithEscapes).
-var blockReader, goldmarkBlockReader = newBlockReader(emphasisParser{}), newBlockReader(emphasisParser{goldmarkRules: true})
-
-// newBlockReader is the block reader whose delimiter runs are read by emphasis's rules.
-func newBlockReader(emphasis emphasisParser) markdownReader {
-	return markdownReader{md: goldmark.New(
-		goldmark.WithParser(parser.NewParser(
-			parser.WithBlockParsers(blockParsers()...),
-			parser.WithInlineParsers(inlineParsers(emphasis)...),
-			parser.WithParagraphTransformers(util.Prioritized(linkReferenceDefinitions{parser.LinkReferenceParagraphTransformer}, 100)),
-		)),
-		goldmark.WithExtensions(linkify{}, lazyAwareTable{}, taskList{}, footnotes{}),
-		goldmark.WithParserOptions(
-			parser.WithBlockParsers(
-				util.Prioritized(elementBlockCounter{}, -1),
-				util.Prioritized(nestingGuard{BlockParser: &typedDirectiveParser{}}, 950),
-				util.Prioritized(&unsupportedDirectiveParser{}, 900),
-				util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 999),
-			),
-			parser.WithInlineParsers(util.Prioritized(elementInlineCounter{}, -1)),
+// blockReader is the configuration every document is read with, its delimiter runs read by
+// editorRules.
+var blockReader = markdownReader{md: goldmark.New(
+	goldmark.WithParser(parser.NewParser(
+		parser.WithBlockParsers(blockParsers()...),
+		parser.WithInlineParsers(inlineParsers(editorRules)...),
+		parser.WithParagraphTransformers(util.Prioritized(linkReferenceDefinitions{parser.LinkReferenceParagraphTransformer}, 100)),
+	)),
+	goldmark.WithExtensions(linkify{}, lazyAwareTable{}, taskList{}, footnotes{}),
+	goldmark.WithParserOptions(
+		parser.WithBlockParsers(
+			util.Prioritized(elementBlockCounter{}, -1),
+			util.Prioritized(nestingGuard{BlockParser: &typedDirectiveParser{}}, 950),
+			util.Prioritized(&unsupportedDirectiveParser{}, 900),
+			util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 999),
 		),
-	)}
-}
+		parser.WithInlineParsers(util.Prioritized(elementInlineCounter{}, -1)),
+	),
+)}
 
 // blockParsers is goldmark's default block parsers with its list parser held off an empty item
 // that would interrupt a paragraph (emptyItemGuard), its list and quote parsers opening no
@@ -111,17 +104,10 @@ func parseStamped(markdown string, budget *WriteBudget) (*Node, error) {
 	return parseStampedAt(markdown, fromStart, budget)
 }
 
-// parseByGoldmarkRules is Parse read by goldmarkBlockReader, with no block ids stamped: what a
-// markdown means under the delimiter rules Dispatch read by before it read as the browser editor
-// does, which the renderer's alt text keeps reading back under (altReadsBack).
-func parseByGoldmarkRules(markdown string) (*Node, error) {
-	return parseUnstamped(goldmarkBlockReader, markdown, fromStart, true, NewWriteBudget())
-}
-
 // parseStampedAt is parseStamped of markdown that stands at at in what the caller wrote, so a
 // refusal names the caller's line and charges nothing for what the server wrote ahead of it.
 func parseStampedAt(markdown string, at origin, budget *WriteBudget) (*Node, error) {
-	doc, err := parseUnstamped(blockReader, markdown, at, true, budget)
+	doc, err := parseUnstamped(markdown, at, true, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +143,7 @@ func ParseFragment(markdown string, opensDocument bool, budget *WriteBudget) (*N
 }
 
 func parseForWrite(markdown string, live *Node, readFrontmatter bool, budget *WriteBudget) (*Node, error) {
-	doc, err := parseUnstamped(blockReader, LineFeeds(markdown), fromStart, readFrontmatter, budget)
+	doc, err := parseUnstamped(LineFeeds(markdown), fromStart, readFrontmatter, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -215,11 +201,11 @@ func LineFeedAttrs(attrs map[string]any) map[string]any {
 	return out
 }
 
-// parseUnstamped is Parse before EnsureBlockIDs, read with reader: blocks keep the ids their
-// markdown names, and a block that names none has none yet. Without readFrontmatter a closed
-// front-matter block is read as the blocks its lines make. at is where markdown stands in what the
-// caller wrote, which a refusal's line number counts from.
-func parseUnstamped(reader markdownReader, markdown string, at origin, readFrontmatter bool, budget *WriteBudget) (doc *Node, err error) {
+// parseUnstamped is Parse before EnsureBlockIDs: blocks keep the ids their markdown names, and a
+// block that names none has none yet. Without readFrontmatter a closed front-matter block is read
+// as the blocks its lines make. at is where markdown stands in what the caller wrote, which a
+// refusal's line number counts from.
+func parseUnstamped(markdown string, at origin, readFrontmatter bool, budget *WriteBudget) (doc *Node, err error) {
 	defer recoverPanic(&doc, &err, "reading markdown")
 	source := []byte(markdown)
 	var front *Node
@@ -231,7 +217,7 @@ func parseUnstamped(reader markdownReader, markdown string, at origin, readFront
 		at.server = max(0, at.server-rest)
 		source = source[rest:]
 	}
-	root, err := reader.parse(source, unclosedFrontmatter, budget, at)
+	root, err := blockReader.parse(source, unclosedFrontmatter, budget, at)
 	if nesting := (nestingError{}); errors.As(err, &nesting) {
 		nesting.line += at.line - 1
 		return nil, nesting
@@ -261,14 +247,14 @@ func parseUnstamped(reader markdownReader, markdown string, at origin, readFront
 
 // inlineParserOptions is how inline markdown is read: a paragraph is the only block, so a leading
 // list marker, heading marker, fence, or directive is text, and the inline syntax is Parse's, its
-// delimiter runs read by emphasis's rules, `~` runs among them (tildeParser).
-func inlineParserOptions(emphasis emphasisParser) []parser.Option {
+// delimiter runs read by rules, `~` runs among them (tildeParser).
+func inlineParserOptions(rules delimiterRules) []parser.Option {
 	return []parser.Option{
 		parser.WithBlockParsers(
 			util.Prioritized(elementBlockCounter{}, -1),
 			util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 1000),
 		),
-		parser.WithInlineParsers(inlineParsers(emphasis)...),
+		parser.WithInlineParsers(inlineParsers(rules)...),
 		parser.WithInlineParsers(
 			util.Prioritized(elementInlineCounter{}, -1),
 			util.Prioritized(newLinkifyGuard(), 999),
@@ -283,16 +269,18 @@ type inlineReader struct {
 	run, withDefinitions parser.Parser
 }
 
-func newInlineReader(emphasis emphasisParser) inlineReader {
+func newInlineReader(rules delimiterRules) inlineReader {
 	return inlineReader{
-		run:             parser.NewParser(inlineParserOptions(emphasis)...),
-		withDefinitions: parser.NewParser(append(inlineParserOptions(emphasis), footnoteParserOptions()...)...),
+		run:             parser.NewParser(inlineParserOptions(rules)...),
+		withDefinitions: parser.NewParser(append(inlineParserOptions(rules), footnoteParserOptions()...)...),
 	}
 }
 
-// inlineMarkdown reads inline markdown as Parse does; goldmarkMarkdown reads it with every delimiter
-// run read by goldmark's rules (emphasisParser.goldmarkRules).
-var inlineMarkdown, goldmarkMarkdown = newInlineReader(emphasisParser{}), newInlineReader(emphasisParser{goldmarkRules: true})
+// inlineMarkdown reads inline markdown as Parse does (editorRules). storedMarkdown and
+// flankingMarkdown read it with its delimiter runs read as Parse read them before (storedRules and
+// flankingRules), the rules most stored markdown was written under, which the renderer keeps
+// writing a run's bytes to read back under where it can (inlineWithEscapes, altReadsBack).
+var inlineMarkdown, storedMarkdown, flankingMarkdown = newInlineReader(editorRules), newInlineReader(storedRules), newInlineReader(flankingRules)
 
 // parseInlineWithDefinitions reads one textblock's inline markdown with reader as ParseInline
 // does, after a definition for each of labels, the footnote labels it refers to. It is the

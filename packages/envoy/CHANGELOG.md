@@ -1437,13 +1437,15 @@
   Reading a paragraph of mixed `~` and `*` runs is now linear in its length: a mebibyte of
   `~~a ` then `a* ` took over a minute. So is a paragraph whose `*` runs the rule of three keeps
   apart: 437 KiB of `**a ` then `a*a` took 100 seconds and now takes under one. A rendering stored
-  correctly keeps its bytes; one the
-  browser misread, such as text `~~~x~~` stored as `\~~~x~~`, which the browser strikes, is written
-  anew (`&#126;&#126;&#126;x&#126;&#126;`) when its document is next rendered, and no stored
-  document is rewritten. An image inside an image's label now adds its own alt text to the outer
-  alt text, as the browser editor reads it. A `*` or `_` run beside a tilde now opens or closes
-  toward it as the browser editor reads it, so `*~~**b~~*` is emphasis around struck `**b`, and
-  `Plain b*~* text.` is emphasis `~` (INFRA-534).
+  correctly keeps its bytes, an image's alt text included: the writer takes first a spelling that
+  reads back under the browser editor's rules and under both sets of rules Dispatch stored
+  markdown under, so the spelling it wrote before stays wherever the browser reads it back as
+  written. One the browser misread, such as text `~~~x~~` stored as `\~~~x~~`, which the browser
+  strikes, is written anew (`&#126;&#126;&#126;x&#126;&#126;`) when its document is next
+  rendered, and no stored document is rewritten. An image inside an image's label now adds its own
+  alt text to the outer alt text, as the browser editor reads it. A `*` or `_` run beside a tilde
+  now opens or closes toward it as the browser editor reads it, so `*~~**b~~*` is emphasis around
+  struck `**b`, and `Plain b*~* text.` is emphasis `~` (INFRA-534).
 
 - Every `envoy-infra` component refuses a number in an integer input that is not a whole number
   within the 64-bit integer range, at any depth (an object type's property, an array element, a

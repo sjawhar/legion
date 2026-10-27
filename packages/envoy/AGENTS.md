@@ -1544,16 +1544,18 @@ does Go. A run of `~` pairs only with a run of its own length, one or two, and a
 run directly after a `~` is text unless a backslash escapes that `~` (`tildeParser`), as the
 browser editor's strikethrough reads them. pmdoc pairs the runs itself (`delimiterList`), never on
 goldmark's delimiter stack: `~` runs and `*`/`_` runs in separate passes, as that parser's two
-resolvers do, the kind whose run the textblock tokenized first going first, `~` first inside a
-link or image label, and the runs a pair encloses paired inside it; and a closer looks only at the
-last opener of each of the at most six buckets its kind's openers are filed in by what the rule of
-three reads of them (`nearestOpener`), so pairing is linear in the runs. The writer takes a
-spelling that reads
-back under goldmark's rules as well (`goldmarkMarkdown`: flanking alone, `~` runs of either length
-paired, a run after any `~` refused, every run in one loop) before one that reads back under that
-parser's alone (`inlineWithEscapes`), and an image's alt text must read back under both
-(`altReadsBack`), so it keeps the bytes it wrote while Dispatch read by goldmark's rules. A code
-span keeps the whitespace that
+resolvers do, the group whose run the textblock tokenized first going first, `~` first inside a
+link or image label, and the runs of the other group a pair encloses paired inside it; and a
+closer looks only at the last opener of each of the at most six buckets its kind's openers are
+filed in by what the rule of three reads of them (`nearestOpener`), so pairing is linear in the
+runs. A correctly stored rendering keeps its bytes: the writer keeps a spelling that reads back
+under that parser's rules (`inlineMarkdown`, `editorRules`) and both readers Dispatch stored
+markdown under (`storedMarkdown`: `*`/`_` judged beside another `*` or `_` but not a `~`, `~` runs
+of either length paired, a run after any `~` refused, every run in one loop; `flankingMarkdown`:
+the same with flanking alone), and failing that under the first two, and failing that under
+that parser's alone (`inlineWithEscapes`), so wherever the bytes main wrote read back as that
+parser reads them they stay; an image's alt text is kept the same way under `Parse` and
+`storedMarkdown` (`altReadsBack`). A code span keeps the whitespace that
 starts each of its later lines past the prefix of the containers around it, as the browser editor's
 parser reads it, a line holding only whitespace before the closer included; goldmark's paragraph
 trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A space or a line feed is the padding

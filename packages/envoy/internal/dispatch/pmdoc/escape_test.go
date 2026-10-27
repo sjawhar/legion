@@ -472,6 +472,10 @@ func TestRenderKeepsImageAltText(t *testing.T) {
 		"a*b":                       "![a*b](https://x.test/i.png) after\n",
 		"Screenshot 2024-01-01.png": "![Screenshot 2024-01-01.png](https://x.test/i.png) after\n",
 		"~b~~":                      "![\\~b\\~\\~](https://x.test/i.png) after\n",
+		"**a*_":                     "![**a*_](https://x.test/i.png) after\n",
+		"*a**_":                     "![*a**_](https://x.test/i.png) after\n",
+		"_**a*":                     "![_**a*](https://x.test/i.png) after\n",
+		"_*a**":                     "![_*a**](https://x.test/i.png) after\n",
 	} {
 		if got := mustRender(t, image(alt)); got != want {
 			t.Fatalf("Render(alt %q) = %q, want the bytes main writes, %q", alt, got, want)
@@ -877,6 +881,7 @@ func TestRenderKeepsStoredMarkdownThatReadsBack(t *testing.T) {
 		"![\\~b\\~\\~](u)\n",
 		// Main's own rendering of a struck `**` inside emphasis, which the engine reads back as written.
 		"*[~~**é~~*\n",
+		`x ~~\_\_\*\*é\_b~~**\ y [~~\_\_\*\*é\_b~~**]\(u) z` + "\n",
 		"| a | b |\n| :--- | :--- |\n| ::1 | --- |\n",
 		"<br is an element.\n",
 		"<span class is not closed.\n",
