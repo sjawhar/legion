@@ -2,28 +2,20 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-534",
-  "completed": "2026-10-27T10:27:57Z",
+  "completed": "2026-10-27T11:57:47Z",
   "round": 2,
-  "codeHead": "1a5c2dc2d40d021884deeff3ee0560c2918bb6ff",
+  "kind": "fingerprint confirmation after a conflict-forced merge (not a new round)",
   "decision": "approved",
   "critical": 0,
   "important": 0,
-  "minor": 2,
-  "keyFindings": [
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/pmdoc/render_inline.go:103-161, escape.go:803-891",
-      "description": "Cleanup, the named fast-follow (no behaviour change). One rule, the earliest spelling with the greatest read-back depth, is written out step by step in two places, each with a proof comment. A spelling is rewritten up to 3 times and parsed up to 6 times. altReadsBack returns two bools that depend on each other."
-    },
-    {
-      "severity": "minor",
-      "file": "render_inline.go:114-121, escape.go:806-809, delimiters.go:200, AGENTS.md:1556, strikethrough_test.go:61",
-      "description": "Wording: permanent comments call the writer before this change \"main\", which names this code after the merge. strikethrough_test.go:61 still says \"kind\" where the code means runGroup."
-    }
-  ],
-  "roundOneFindings": "Both byte-stability findings are fixed in 1a5c2dc2. Reviewer probe (Parse+Render at main 448a4100 and at 1a5c2dc2): ![**a*_](u), ![*a**_](u), ![_**a*](u), ![_*a**](u), the same alt text in a heading, and `x ~~\\_\\_\\*\\*é\\_b~~**\\ y [...]` are byte-identical at both. The deep review's differential --base 448a41003a17 over tgt+adv+in-repo (50,085 documents): every GATE line 0 except misreads 1 (t-27479). Over two new adversarial corpora (40,085): regressions, churn, engine-tree churn and lost fixed points 0, misreads 248. Each misread is an older non-delimiter difference (linkify, mailto, entity without `;`, `<?>`) in a document main refused only because of its tilde writer. The PR body's risk lines record this class.",
-  "ci": "CI head 1a5c2dc2 (compare to 3977cb9c: handoffsOnly true, 2 files). Required lint, typecheck, test and pr-title: completed success. The non-required envoy-go/envoy-go-race jobs have stayed queued with no runner since 09:03Z. The reviewer ran `go test -p 1 ./internal/dispatch/pmdoc -count=1` at the head with bun installed: everything passed except three timing tests, each measuring 0 s on the host's 10 ms CPU clock. Two of them fail the same way at main. The third times writeUpdate, which this diff does not touch.",
-  "thermonuclear": "Pair run once at 3977cb9c. Deep review: APPROVE. storedRules/flankingRules read exactly as main's inlineMarkdown/flankingOnlyMarkdown on 3,257,436 exhaustive strings; the only difference, in random and corpus inputs, is the intended nested-image alt. Writer choice: 0 violations in 5,933,918 documents. Render is linear, 1.1-2.3x main at the cap. Security: no sensitive surface. Code quality: CHANGES on cleanup only; round 1's four items are resolved, except one remaining kind/group word.",
-  "fastFollow": "pmdoc writer choice as one rule (read-back depth in inlineWithEscapes and imageAlt; remove runReadsBackUnder and the proof comments; altReadsBack returns a depth), and say \"the writer before INFRA-534\" in place of \"main\" in permanent comments; group, not kind, at strikethrough_test.go:61.",
-  "threads": "PRRT_kwDORFy7ds6wlM25, PRRT_kwDORFy7ds6wlM27, PRRT_kwDORFy7ds6wlM3E: the reviewer's round-1 threads, fixed in 1a5c2dc2, verified and accepted; the implementer already resolved them."
+  "minor": 0,
+  "keyFindings": [],
+  "confirmation": {
+    "lastReview": "APPROVE at 54699fd5017e5e7a4936e3e2ff15cfc6f9c069f9",
+    "newCodeHead": "6a02e62572e934f7d693dfdb56a2c745d04ec184 (merge of main 1b8d5c13 into 54699fd5)",
+    "fingerprint": "340dab0f0cf379f091077dc93f454bce1db97eab3316e284570219f8c7e861a8 at both 54699fd5 and f8ea7b80 (fork_point(\"main\"@origin | <head>), fileset '~(.legion | docs/solutions)'): unchanged",
+    "baseChangeInPmdoc": "main 448a4100..1b8d5c13 changes only a doc comment in pmdoc/parse.go (ParseForWrite) and nothing else under pmdoc."
+  },
+  "ci": "CI head 6a02e625 (compare to f8ea7b80: handoffsOnly true, 2 files). Required lint, typecheck, test and pr-title completed success at 11:57Z; one earlier pr-title run cancelled, superseded by the successful one.",
+  "fastFollow": "Unchanged from round 2: pmdoc writer choice as one rule (read-back depth in inlineWithEscapes and imageAlt), and \"the writer before INFRA-534\" in place of \"main\" in permanent comments; group, not kind, at strikethrough_test.go:61."
 }
