@@ -249,6 +249,14 @@ func (in *Intake) routeWorkflowEnvelope(ctx context.Context, settings DeliverySe
 // not a string, or a pull request's or workflow run's payload holding anything but strings.
 var errMalformedPayload = errors.New("malformed envelope payload")
 
+// errRepositoryHasNoApp is handlePullRequestEnvelope's answer for a merged pull request in a
+// repository Envoy's GitHub App is not installed on: deliver drops the envelope, writing nothing
+// and logging nothing. It is a sentinel rather than a plain "handled nothing" so the freshness
+// row is not written either: the envelope was carried by the GitHub notifications poller
+// (internal/ghnotify) on behalf of a repository this deployment holds no credential for, and
+// nothing about it belongs in this intake's record (dispatch://INFRA-611, R11).
+var errRepositoryHasNoApp = errors.New("the GitHub App is not installed on the repository")
+
 // flatPayload is a pull request's or workflow run's fields as the flat string map its handler
 // reads, or errMalformedPayload when a field is not a string. The field's name is left out of the
 // error, since an envelope's keys are its publisher's to choose.
@@ -642,9 +650,10 @@ func reconcileDurableConsumer(js natsgo.JetStreamContext, wanted natsgo.Consumer
 // rather than by NATS redelivery -- see the package doc comment. The deadline is what makes
 // intakeAckWait a bound rather than a hope: without it one stuck GitHub call could hold an
 // in-flight slot past the ack wait and have the message redelivered underneath it. An envelope
-// handle reports it does not handle (an empty payload, or a kind route sends to no handler) is
-// acknowledged and nothing else: no log line and no freshness write. One it handles records the
-// event's time, whatever its handler decided.
+// handle reports it does not handle (an empty payload, or a kind route sends to no handler), and
+// one it answers errRepositoryHasNoApp for (a merged pull request in a repository the App is not
+// installed on), are acknowledged and nothing else: no log line and no freshness write. One it
+// handles records the event's time, whatever its handler decided.
 func (in *Intake) deliver(msg *natsgo.Msg, handle func(context.Context, string) (bool, error)) {
 	defer func() {
 		err := msg.Ack()
@@ -673,6 +682,8 @@ func (in *Intake) deliver(msg *natsgo.Msg, handle func(context.Context, string) 
 	case errors.Is(err, errMalformedPayload):
 		slog.Error("dispatch delivery: decode envelope payload", "subject", msg.Subject, "error", err)
 		return
+	case errors.Is(err, errRepositoryHasNoApp):
+		return
 	case err != nil:
 		slog.Warn("dispatch delivery: process event", "subject", msg.Subject, "error", err)
 		return
@@ -687,8 +698,9 @@ func (in *Intake) deliver(msg *natsgo.Msg, handle func(context.Context, string) 
 // handlePullRequestEnvelope processes one `kind:"pr"` envelope. Only a merge (action "closed",
 // merged "true") does anything; author and excluded-repository checks run on the envelope's own
 // fields first, with no GitHub call, so a merge by anyone outside the population costs nothing.
-// It reports whether it stored the pull request's row: a row it deleted, a pull request outside
-// the population, ships with nothing.
+// It reports whether it stored the pull request's row: a row it deleted, and a pull request
+// outside the population, ship with nothing; one in a repository the App is not installed on is
+// answered errRepositoryHasNoApp, which deliver drops.
 func (in *Intake) handlePullRequestEnvelope(ctx context.Context, settings DeliverySettings, payload map[string]string) (wrote bool, err error) {
 	if payload["kind"] != "pr" || payload["action"] != "closed" || payload["merged"] != "true" {
 		return false, nil
@@ -713,6 +725,15 @@ func (in *Intake) handlePullRequestEnvelope(ctx context.Context, settings Delive
 	}
 
 	fetched, fetchErr := FetchPullRequest(ctx, in.github, owner, repo, number)
+	if errors.Is(fetchErr, githubapp.ErrNoInstallation) {
+		// A repository Envoy's GitHub App is not installed on, whose pr.<n> events reach this
+		// intake from the GitHub notifications poller (internal/ghnotify). The fetch answers the
+		// same 404 however often it is retried, so the pull request can be neither read nor
+		// recorded, and it is outside this intake's population as surely as an excluded
+		// repository is. deliver drops the envelope on this sentinel: a WARN would be one line
+		// per upstream merge naming a decision no operator can act on.
+		return false, errRepositoryHasNoApp
+	}
 	if fetchErr != nil {
 		// The population/task-label decision needs the fetch (labels aren't in the webhook
 		// payload); without it we cannot tell whether this PR belongs in the population at all,

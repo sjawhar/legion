@@ -112,6 +112,62 @@ func TestIntakeDedupesAMergedPullRequestEnvelope(t *testing.T) {
 	_ = settings
 }
 
+// TestIntakeIsSilentForAMergedPullRequestWhoseRepositoryTheAppIsNotOn: the GitHub notifications
+// poller (internal/ghnotify) publishes pr.<n> events for repositories Envoy's GitHub App is not
+// installed on, which are the first merged-PR envelopes the intake receives from one. Its
+// completing fetch cannot resolve an installation there, so it answers githubapp.ErrNoInstallation
+// however often it is retried, and the pull request is outside this intake's population whatever
+// its author: nothing is written and no WARN line is logged, where any other fetch failure stays
+// the WARN the five-minute reconcile then retries.
+func TestIntakeIsSilentForAMergedPullRequestWhoseRepositoryTheAppIsNotOn(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	seedDeliverySettings(t, ctx, pool)
+	logs := captureLogs(t)
+
+	fake := newFakeGitHub(t)
+	// GitHub answers 404 for the installation of a repository the App is not on, which the client
+	// reports as githubapp.ErrNoInstallation. The more specific pattern wins over the fake's
+	// default installation route, which answers every other repository.
+	fake.handle("GET /repos/upstream-org/upstream/installation", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		mustEncode(t, w, map[string]any{"message": "Not Found"})
+	})
+	fake.handle("GET /repos/upstream-org/upstream/pulls/7", func(_ http.ResponseWriter, r *http.Request) {
+		t.Errorf("the intake read %s on a repository whose installation GitHub answers 404", r.URL.Path)
+	})
+
+	natsClient := intakeTestClient(t)
+	startIntake(t, newIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient(), events.NewBroker()))
+	awaitBoundDurable(t, natsClient)
+
+	publishPullRequestEnvelope(t, natsClient, "upstream-org", "upstream", 7, map[string]string{
+		"kind": "pr", "action": "closed", "repo": "upstream-org/upstream", "number": "7",
+		"title": "fix: a defect", "author": "octocat", "url": "https://github.com/upstream-org/upstream/pull/7",
+		"merged": "true", "merge_commit_sha": "abc123", "updated_at": "2024-01-01T02:00:00Z",
+	})
+	awaitAcknowledged(t, natsClient)
+
+	for _, record := range logs() {
+		if record["level"] == "WARN" && strings.HasPrefix(fmt.Sprint(record["msg"]), "dispatch delivery:") {
+			t.Errorf("intake logged a WARN for a repository the App is not installed on: %v", record)
+		}
+	}
+	settings, err := GetSettings(ctx, pool)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	if settings.LastEventAt != nil {
+		t.Errorf("last_event_at = %v, want null: a merged pull request the intake records nothing for writes nothing", *settings.LastEventAt)
+	}
+	var prs int
+	if err := pool.QueryRow(ctx, "select count(*) from delivery_pull_requests").Scan(&prs); err != nil {
+		t.Fatalf("count pull requests: %v", err)
+	}
+	if prs != 0 {
+		t.Errorf("stored %d pull requests, want none for a repository the App is not installed on", prs)
+	}
+}
+
 // TestIntakeAcksAKindItDoesNotRecordWithoutLoggingOrWriting: the durable is handed every GitHub
 // notification on the bus (githubIntakeSubject), CI settlements and comments among them. A CI
 // settlement's payload carries arrays (cistore.Summary), which no handler here reads. It and a
