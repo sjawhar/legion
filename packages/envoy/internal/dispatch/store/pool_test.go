@@ -302,6 +302,69 @@ func TestListenerIsServedWhileTheSharedPoolIsFullyAcquired(t *testing.T) {
 	}
 }
 
+// RoomAppends hands out connections of a pool of its own: a connection taken there is not one of
+// the shared pool's, names itself dispatch-room-appends to Postgres, and is counted by Use, which
+// the process drain waits on (cmd/dispatch's waitUntilIdle) before it closes the pool. A rooms
+// connection names itself dispatch-rooms, so pg_stat_activity tells a load from a room's append
+// and both from a request.
+func TestRoomAppendsIsAPoolOfItsOwnThatUseCounts(t *testing.T) {
+	database := openTestStore(t)
+	ctx := context.Background()
+	appends, err := database.Pool.RoomAppends()
+	if err != nil {
+		t.Fatalf("open the room-appends pool: %v", err)
+	}
+	if again, err := database.Pool.RoomAppends(); err != nil || again != appends {
+		t.Fatalf("a second RoomAppends = %p, %v; want the pool the first opened, %p", again, err, appends)
+	}
+	if got := appends.Config().MaxConns; got != roomAppendsPoolSize {
+		t.Fatalf("room-appends pool holds at most %d connections, want %d", got, roomAppendsPoolSize)
+	}
+
+	sharedAcquires := database.Pool.Stat().AcquireCount()
+	before := database.Pool.Use()
+	conn, err := appends.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire a room-appends connection: %v", err)
+	}
+	released := false
+	defer func() {
+		if !released {
+			conn.Release()
+		}
+	}()
+	var name string
+	if err := conn.QueryRow(ctx, "select current_setting('application_name')").Scan(&name); err != nil {
+		t.Fatalf("read the room-appends connection's application name: %v", err)
+	}
+	if name != roomAppendsApplicationName {
+		t.Fatalf("room-appends connection's application_name = %q, want %q", name, roomAppendsApplicationName)
+	}
+	if got := database.Pool.Stat().AcquireCount(); got != sharedAcquires {
+		t.Fatalf("a room-appends connection took %d connections of the shared pool, want none", got-sharedAcquires)
+	}
+	if use := database.Pool.Use(); use.InUse != before.InUse+1 {
+		t.Fatalf("Use counts %d connections in use with one room-appends connection held, want %d", use.InUse, before.InUse+1)
+	}
+	conn.Release()
+	released = true
+	if use := database.Pool.Use(); use.InUse != before.InUse || use.Returned != before.Returned+1 {
+		t.Fatalf("after the room-appends connection's release Use = %+v, want %d in use and %d returned",
+			use, before.InUse, before.Returned+1)
+	}
+
+	rooms, err := database.Pool.Rooms()
+	if err != nil {
+		t.Fatalf("open the rooms pool: %v", err)
+	}
+	if err := rooms.QueryRow(ctx, "select current_setting('application_name')").Scan(&name); err != nil {
+		t.Fatalf("read the rooms connection's application name: %v", err)
+	}
+	if name != roomsApplicationName {
+		t.Fatalf("rooms connection's application_name = %q, want %q", name, roomsApplicationName)
+	}
+}
+
 // A refusal is keyed and logged by the call site that asked for the connection: one caller
 // tripping the guard in a loop logs its stack once, and another caller still logs its own.
 // Leaving Begin's guard to BeginTx, instead of to the unexported begin both entry points share,
