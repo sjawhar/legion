@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-158",
-  "completed": "2026-10-27T15:48:53Z",
+  "completed": "2026-10-27T16:59:08Z",
   "proof": [
+    {
+      "criterion": "The implementing task to split the skill edits out of PR #2233 is cancelled: the rule it rested on was withdrawn (controller, 2026-10-27 16:34Z), so no code changes and the code head stays ec86df97",
+      "surface": "the issue branch legion/INFRA-158 on GitHub",
+      "command": "jj log -r 'legion/INFRA-158@origin'; jj diff --from ec86df97 --to @- --name-only",
+      "observed": "Since ec86df97 the branch changes only .legion/INFRA-158/ (the tester's handoff and this one); the four skill files stay as #2233 has them, and no legion/INFRA-158-skills branch or second pull request was opened",
+      "headSha": "ec86df97ac82e07909a3dc429e75eaf30c261fab",
+      "negativeControl": "No skill file reverted: jj diff --from ec86df97 lists no path outside .legion/"
+    },
     {
       "criterion": "The review's fast-follow: the live-ahead cache's open rule stated once at the write, with the always-true check in stillLiveAhead dropped, and no behaviour change",
       "surface": "real Postgres with the full docs package, including every block-index and cache test",
@@ -78,6 +86,7 @@
     }
   ],
   "filesChanged": [
+    "skill-split task cancelled: no code change; code head ec86df97 unchanged",
     "approval follow-up: docs/block_index.go (open rule stated at the cache write; found.open dropped from stillLiveAhead)",
     "round 16 (review round 11): docs/block_index.go (cache only open listings), docs/service.go (afterBlockIndexListed hook), docs/block_index_test.go, docs/closed_version_blocks.go (leftovers()), packages/envoy/AGENTS.md; seventeenth forward merge ef8afb2f (packages/envoy/CHANGELOG.md; web AskBlockCard.tsx TextAskBlockCard rowResolution)",
     "round 15 (review round 10): docs/closed_version_blocks.go (new: matcher with take, first-holder rule), docs/closed_version_blocks_test.go, docs/block_index.go (cache open flag, one live-ahead condition), docs/block_index_test.go, refs/blocks.go (BlockTextSum), packages/envoy/AGENTS.md",
@@ -89,6 +98,7 @@
     "fourteenth forward merge 4440fc7b: packages/envoy/internal/dispatch/store/pool.go (leasePoolSize 10, ten-name comment), packages/envoy/cmd/dispatch/main.go (both loops start), packages/envoy/cmd/dispatch/README.md (eight loops), packages/dispatch/web/src/features/doc/ProofDocument.decisions.test.tsx (both tests kept)"
   ],
   "deviations": [
+    "The daemon's implementing task asked to split the skill edits into their own pull request under a rule the controller withdrew at 16:34Z; on the architect's instruction the split was not done.",
     "Accepted limit (architect): with no row, an original copy of a repeated text the counts leave unmatched is dated to the reopen's version.",
     "In a document with no rows (deploy order), a deleted-then-retyped identical paragraph takes the deleted one's version text under the retyped id: text-true, identity unknowable without rows.",
     "Decision 22 (architect, ship as is): a block only a closed document's live text holds has no row until a settlement versions it; its #b- reference resolves after the reopen.",
