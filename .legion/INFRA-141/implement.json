@@ -2,34 +2,31 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T23:42:56Z",
-  "round": "generation 4, the tester's fail at a9a44ddd (handoff bd9796df): a data race in TestARoleViewWhoseFirstScanTimedOutIsTheBusNotAnsweringOnTheSessionRoutes; per the architect's ruling of 23:30Z, fix it and add ./cmd/listener to CI's race job; nothing else changed; main not merged (MERGEABLE)",
+  "completed": "2026-10-27T00:11:09Z",
+  "round": "generation 4, review 5660728893 at 6dc1a199: the race step must cover ./internal/store and ./internal/kvwatch, and its -timeout 30m could never fire under the job's 45-minute limit; per the architect's ruling of 00:08Z only .github/workflows/envoy-and-contracts.yaml changes; main not merged (MERGEABLE)",
   "proof": [
     {
-      "criterion": "The data race is gone: TestARoleViewWhoseFirstScanTimedOutIsTheBusNotAnsweringOnTheSessionRoutes shows no race under -race in 30 runs, and still fails when the view answers while incomplete",
-      "surface": "go test -race of ./cmd/listener against the in-process NATS. The helper timeOutRoleClaimScan no longer replaces Registry.holders by reflection without holdersMu (roles_from_claims_test.go:209 at a9a44ddd). It stops the old watcher and swaps in the timed-out one, and leaves the holders the old watcher delivered in place, so the view still names the holder's role and only its completeness can refuse the answer",
-      "command": "cd packages/envoy && CGO_ENABLED=1 go test -race ./cmd/listener -count=30 -run '^TestARoleViewWhoseFirstScanTimedOutIsTheBusNotAnsweringOnTheSessionRoutes$'",
-      "observed": "ok 23.025s, rc=0, 0 'WARNING: DATA RACE' in the log (the tester saw 2 of 30 runs fail with a race at a9a44ddd)",
-      "headSha": "1e7885a92fc21bb8b958b7c0886059ba776fe246",
-      "negativeControl": "go test -overlay, workspace untouched, RolesHeldBy answering on Ready() in place of Complete(): the test fails — 'GET /v1/sessions with a role claim view whose first scan timed out: status 200', the same for GET /v1/registry/ses_timed_out_view_holder, and 'a send whose role claim view timed out stamps roles [reviewer], want none'. With the holders left in place the incomplete view would name the role, so the test now catches more than before, when an emptied view answered [] "
+      "criterion": "The race step covers the packages where this PR's concurrency lives (the listener, the role-holder view with holdersMu and the epoch fence in internal/store, completeness and WithRescan in internal/kvwatch), and those packages are race-free",
+      "surface": "envoy-go-race's step 'Race-test the listener, the registry store and kvwatch': go test -race -timeout 30m ./cmd/listener/ ./internal/store/ ./internal/kvwatch/... in packages/envoy; the same command run on this pod",
+      "command": "cd packages/envoy && CGO_ENABLED=1 go test -race -count=1 -timeout 40m ./internal/store/ ./internal/kvwatch/...; the listener's -race run of the previous round at 1e7885a9 (unchanged code since)",
+      "observed": "ok internal/store 36.048s, ok internal/kvwatch 65.866s, 69 s wall, 0 'WARNING: DATA RACE'; ./cmd/listener -race ok 446.276s with 0 races (previous round, same code). The step's CI time is reported on the pull request once its run settles",
+      "headSha": "81c75d73f5a952436637354dd2a91b71644742e8",
+      "negativeControl": "at 6dc1a199 the step ran ./cmd/listener/ alone and no workflow race-tested ./internal/store or ./internal/kvwatch (review 5660728893), so a race in the role-holder view or the watcher's completeness could reach only a tester"
     },
     {
-      "criterion": "CI runs ./cmd/listener under -race, so a race in this PR's watcher concurrency is visible to CI, and the whole listener suite is race-free",
-      "surface": ".github/workflows/envoy-and-contracts.yaml envoy-go-race: a new step 'Race-test the listener' runs go test -race -timeout 30m ./cmd/listener/ in packages/envoy (no other job ran ./cmd/listener under -race; the existing step names only internal/dispatch packages and internal/bus). The local full run below",
-      "command": "cd packages/envoy && CGO_ENABLED=1 go test -race ./cmd/listener -count=1 -skip '^(TestDispatchMentionResolvesASessionTheCacheHasNotRefilled|TestDispatchBroadcastResolvesSessionsTheCacheHasNotRefilled|TestDispatchRefusesABroadcastWhenASessionReadDoesNotAnswer|TestDispatchRefusesAClaimTakeoverWhileTheCacheRefills)$' -timeout 60m; uv run --with pyyaml==6.0.2 bash .github/scripts/check-action-pins.sh; same for check-image-trigger-paths.sh and check-private-names.sh",
-      "observed": "ok github.com/sjawhar/envoy/cmd/listener 446.276s (454 s wall), 0 data races; the three checks pass. envoy-go-race on main's last green run took 15 m 38 s (22:50:49Z to 23:06:27Z) inside its 45-minute limit; the listener step adds about 7.5 minutes on this pod. The job's wall time at this head is reported on the pull request once its run settles",
-      "headSha": "1e7885a92fc21bb8b958b7c0886059ba776fe246",
-      "negativeControl": "at a9a44ddd the tester's full -race run of ./cmd/listener failed with one DATA RACE (write by reflect.Value.Set from timeOutRoleClaimScan, earlier read by setRoleHolderLocked under holdersMu), and envoy-go-race did not run the package, so CI could not see it"
+      "criterion": "The race steps' -timeout 30m fires before the runner cancels the job, so a hung test prints the dump that names it",
+      "surface": "envoy-go-race timeout-minutes, with the arithmetic in a comment beside it; yaml parsed with pyyaml; check-action-pins and check-private-names",
+      "command": "uv run --with pyyaml==6.0.2 python3 -c '<load jobs.envoy-go-race; print timeout-minutes and the last step>'; gh api repos/sjawhar/legion/actions/runs/<main's last green Legion Envoy and Contracts run>/jobs (step times)",
+      "observed": "timeout-minutes 75. Arithmetic: setup about 1 minute (52 s on main's last green run), the first step up to its own 30 minutes (880 s there), up to 5 minutes to compile the second step's race binaries, then its 30 minutes: 66 minutes, under 75. Both checks pass",
+      "headSha": "81c75d73f5a952436637354dd2a91b71644742e8",
+      "negativeControl": "at 6dc1a199 timeout-minutes was 45: the first step's 12-18 minutes plus the second step's 30-minute test timeout exceed it, so the runner would cancel the job first"
     }
   ],
   "filesChanged": [
-    "packages/envoy/cmd/listener/roles_from_claims_test.go — timeOutRoleClaimScan no longer writes Registry.holders",
-    ".github/workflows/envoy-and-contracts.yaml — envoy-go-race gains the step 'Race-test the listener'"
-  ],
-  "trickyParts": [
-    "The fix leaves the old holders in the view rather than emptying them under the lock: emptying them needs a store-level seam the tests do not need, and a view that still names the holder's role is the stronger case for A10, since only the completeness check can refuse it."
+    ".github/workflows/envoy-and-contracts.yaml — the race step adds ./internal/store/ and ./internal/kvwatch/... and is renamed; envoy-go-race timeout-minutes 45 → 75 with the arithmetic in a comment"
   ],
   "deviations": [
+    "75 minutes rather than about 60: 60 holds only while the first step stays at its observed 12-18 minutes, and the second step's timeout would not fire first if the first step ran near its own 30-minute bound and passed.",
     "The retro notes drafted before the send-backs are held outside the workspace for the next retro."
   ],
   "openQuestions": []
