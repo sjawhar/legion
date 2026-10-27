@@ -52,7 +52,6 @@ git -C "$a" config user.name "fold test"
 git -C "$a" config user.email "fold-test@example.com"
 cp "$package_src/.changie.yaml" "$package_src/CHANGELOG.md" "$pkg/"
 cp "$pkg/CHANGELOG.md" "$work/old-CHANGELOG.md"
-old_log=$(<"$work/old-CHANGELOG.md")
 printf '{"name": "@sjawhar/pi-legion", "version": "1.2.2"}\n' > "$pkg/package.json"
 git -C "$a" add -A
 git -C "$a" commit -q -m "chore: seed"
@@ -135,7 +134,6 @@ run push-fold "$base" "$work/notes"
 check "push-fold: exits 0, pushing" "$(is "$rc|$(contains "$out" '^Pushed ')" "0|true")"
 check "push-fold: calls no gh" "$(is "$(<"$work/calls")" "")"
 git -C "$work/origin.git" show main:packages/pi-legion/CHANGELOG.md > "$work/new-CHANGELOG.md"
-new_log=$(<"$work/new-CHANGELOG.md")
 first=$(grep -n -m 1 '^## ' "$work/old-CHANGELOG.md" | cut -d: -f1)
 block='## [1.2.3] - 2026-07-01
 
@@ -168,7 +166,7 @@ block='## [1.2.3] - 2026-07-01
 check "push-fold: the release's block, kinds in order and bodies as bullets, stands right above the old first ## heading" \
   "$(cmp -s "$work/expected-CHANGELOG.md" "$work/new-CHANGELOG.md" && echo true || echo false)"
 check "push-fold: every old line stays, in order" \
-  "$(is "$(contains "$(diff <(printf '%s\n' "$old_log") <(printf '%s\n' "$new_log") || true)" '^<')" false)"
+  "$(is "$(contains "$(diff "$work/old-CHANGELOG.md" "$work/new-CHANGELOG.md" || true)" '^<')" false)"
 check "push-fold: no fragment is left on main" \
   "$(is "$(git -C "$work/origin.git" ls-tree --name-only main -- packages/pi-legion/.changes/unreleased/)" "")"
 

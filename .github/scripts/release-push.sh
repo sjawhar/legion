@@ -362,13 +362,11 @@ check_hand_over() {
   shift 2
   for file in "$@"; do
     if [ -z "$file" ] || [ "$file" = . ] || [ "$file" = .. ] || [[ $file == */* ]]; then
-      echo "::error::release-push.sh $command: $(quote_all "$file") is not a file name: each <file> is a name in <dir>, with no /" >&2
-      exit 1
+      fail_error "$(quote_all "$file") is not a file name: each <file> is a name in <dir>, with no /"
     fi
   done
   if [ ! -d "$dir" ] || [ -L "$dir" ]; then
-    echo "::error::release-push.sh $command: $(quote_all "$dir") is not a directory" >&2
-    exit 1
+    fail_error "$(quote_all "$dir") is not a directory"
   fi
 
   for file in "$@"; do
@@ -412,6 +410,9 @@ check_hand_over() {
   fi
 }
 
+# commit_date <rev>: the UTC date, YYYY-MM-DD, of <rev>'s commit.
+commit_date() { TZ=UTC git log -1 --date=format-local:%Y-%m-%d --format=%cd "$1"; }
+
 # fold_plan <spec>...: set plan to the fold's plan, the lines fold-plan prints
 # (the header's fold-plan paragraph), each ending in a newline; empty when there
 # is nothing to fold. Sets groups to its distinct <package-dir><TAB><label>
@@ -422,7 +423,7 @@ fold_plan() {
   local package_dir_re='^[A-Za-z0-9_-][A-Za-z0-9._-]*(/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$'
   head=$(git rev-parse HEAD)
   head_label="main@${head:0:12}"
-  head_date=$(TZ=UTC git log -1 --date=format-local:%Y-%m-%d --format=%cd HEAD)
+  head_date=$(commit_date HEAD)
   for spec in "$@"; do
     dir=${spec%%=*} prefix=''
     [[ $spec != *=* ]] || prefix=${spec#*=}
@@ -455,7 +456,7 @@ fold_plan() {
           fi
         done
         [ -n "$label" ] || continue
-        date=$(TZ=UTC git log -1 --date=format-local:%Y-%m-%d --format=%cd "$tag^{commit}")
+        date=$(commit_date "$tag^{commit}")
       fi
       lines+="$index"$'\t'"$dir"$'\t'"$label"$'\t'"$date"$'\t'"$path"$'\n'
     done < <(git ls-tree -z HEAD -- "$dir/.changes/unreleased/")
@@ -470,6 +471,9 @@ fold_plan() {
 group_column() {
   awk -F '\t' -v dir="$1" -v label="$2" -v column="$3" '$1 == dir && $2 == label { print $column }' <<<"$plan"
 }
+
+# notes_name <package-dir> <label>: the name of the notes file of that group.
+notes_name() { printf '%s\n' "${1##*/}_$2.md"; }
 
 # render_notes <package-dir> <out> <fragment>...: run `changie batch 0.0.0` over
 # those fragments, as HEAD holds them, in a directory of their own beside a copy
@@ -970,7 +974,7 @@ case "$command" in
     while IFS=$'\t' read -r dir label; do
       git cat-file -e "HEAD:$dir/.changie.yaml" 2>/dev/null || fail_error "$dir holds no .changie.yaml at HEAD to render its fragments with"
       mapfile -t fragments < <(group_column "$dir" "$label" 4)
-      notes_file="$notes_dir/${dir##*/}_$label.md"
+      notes_file="$notes_dir/$(notes_name "$dir" "$label")"
       if ! render_notes "$dir" "$notes_file" "${fragments[@]}"; then
         # changie does not name the fragment of every refusal (an unknown kind):
         # each fragment is rendered alone to find the ones it refuses.
@@ -1005,13 +1009,13 @@ case "$command" in
     fi
     names=()
     while IFS=$'\t' read -r dir label; do
-      names+=("${dir##*/}_$label.md")
+      names+=("$(notes_name "$dir" "$label")")
     done <<<"$groups"
     check_hand_over "$notes_dir" "the fold's plan names no notes for" "${names[@]}"
     while IFS=$'\t' read -r dir label; do
-      notes_file="$notes_dir/${dir##*/}_$label.md"
+      notes_file="$notes_dir/$(notes_name "$dir" "$label")"
       shown=$(quote_all "$notes_file")
-      [ "$(tr -d '\000' < "$notes_file" | wc -c)" = "$(wc -c < "$notes_file")" ] || fail_error "$shown, the notes of $dir for $label, holds a NUL byte"
+      [ "$({ tr -dc '\000' | wc -c; } < "$notes_file")" = 0 ] || fail_error "$shown, the notes of $dir for $label, holds a NUL byte"
       LC_ALL=C grep -q '[^[:space:]]' "$notes_file" || fail_error "$shown, the notes of $dir for $label, holds nothing but blank lines"
       if LC_ALL=C grep -q '^## ' "$notes_file"; then
         fail_error "$shown, the notes of $dir for $label, holds a line starting '## '; the heading is push-fold's to write"
@@ -1022,7 +1026,7 @@ case "$command" in
     done <<<"$groups"
     while IFS=$'\t' read -r dir label; do
       date=$(group_column "$dir" "$label" 3 | sed -n 1p)
-      insert_block "$dir/CHANGELOG.md" "$label" "$date" "$notes_dir/${dir##*/}_$label.md"
+      insert_block "$dir/CHANGELOG.md" "$label" "$date" "$notes_dir/$(notes_name "$dir" "$label")"
     done <<<"$groups"
     mapfile -t fragments < <(printf '%s' "$plan" | cut -f4)
     mapfile -t changelogs < <(printf '%s\n' "$groups" | cut -f1 | uniq | sed 's|$|/CHANGELOG.md|')
