@@ -538,10 +538,17 @@ repository and number, read from the subject, and a workflow run under its paylo
 since each fetches its pull request's or run's current state from GitHub and writes it, and run
 at once an older fetch could be written over a newer one; messages of different keys run at
 once, at most 4, the durable's `MaxAckPending`. Its durable's `AckWait`, `MaxAckPending` and
-filter subject are unchanged. `Intake.StopDelivering` hands the durable over: it drains the
-subscription, negatively acknowledges every message waiting behind its key so NATS redelivers it
-at once to the next holder, and lets each message in its handler finish and be acknowledged;
-`Run` calls it when the process stops.
+filter subject are unchanged. `Intake.StopDelivering` hands the durable over, and `Run` calls it
+when the process stops. It drains the subscription, so the server delivers it nothing more, and
+holds every message waiting behind its key, and every message the client is handed meanwhile,
+until no handler is running. The messages in their handlers get until the stop's context ends —
+`intakeStopBudget`, 15 s after `Run`'s context ends, or sooner when the caller's own deadline is
+nearer — to finish and be acknowledged; the handlers still running then are given up, their
+GitHub calls cancelled, and their messages negatively acknowledged. Only then does it negatively
+acknowledge the held messages, so NATS redelivers them at once to the next holder, which can then
+not start a pull request's or run's next message while this process still works on the one
+before it. Last it waits for the drain to end and releases the subscription's registration on the
+client (`bus.Client.Release`), so no reconnect binds the stopped subscription again.
 
 ## Database migrations
 

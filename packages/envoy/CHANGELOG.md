@@ -893,10 +893,17 @@
   `MaxAckPending`, where it handled one message at a time: messages about one pull request or one
   run still run in order, one after the other, so an older GitHub fetch is never written over a
   newer one. A message whose subject cannot carry a pull request or a run (checks, comments,
-  pushes, jobs, `pr.<n>.review`) is acknowledged without decoding it. When the intake stops, the
-  messages queued behind a busy pull request or run are handed back to NATS for the next holder,
-  and those in a handler finish and are acknowledged. The consumer's `AckWait`, `MaxAckPending` and
-  filter subject are unchanged (INFRA-607).
+  pushes, jobs, `pr.<n>.review`) is acknowledged without decoding it. The consumer's `AckWait`,
+  `MaxAckPending` and filter subject are unchanged (INFRA-607).
+- When the GitHub intake stops, it drains its subscription and holds the messages queued behind a
+  busy pull request or run, and those NATS hands it meanwhile, until no handler is running. The
+  messages in a handler get up to 15 s from the stop (less when the process's own stop deadline is
+  nearer) to finish and be acknowledged; the handlers still running then are given up, their GitHub
+  calls cancelled, and their messages handed back to NATS. Only then are the held messages handed
+  back, so the next holder never runs a pull request's or run's next message while this process
+  still runs the one before it. The intake then waits for the drain to end and releases the
+  subscription, so a reconnect does not bind the stopped one again (`cmd/dispatch/README.md`,
+  "Background loops") (INFRA-607).
 - A document whose reference excerpts cannot be read or stored is retried one minute after its
   first failure, doubling to at most six hours, plus up to a fifth again of jitter, instead of on
   every pass, and is left out of the batches meanwhile, so documents that keep failing no longer
@@ -905,8 +912,9 @@
   rather than on every pass for the hour after start (INFRA-607).
 - The suggestion outcome sweep reads only the events written since its last pass and the
   suggestions recorded since, so its work follows what changed rather than how many suggestions
-  are still pending; it judges a suggestion once the events that resolve it are a minute old, and
-  the first pass on a database judges every pending suggestion once, as before (INFRA-607).
+  are still pending; it judges a suggestion once the suggestion and the events that resolve it are
+  a minute old, and the first pass on a database judges every pending suggestion once, as before
+  (INFRA-607).
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a

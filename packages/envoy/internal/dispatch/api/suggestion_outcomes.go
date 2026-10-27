@@ -65,27 +65,39 @@ var suggestionOutcomeSchedule = suggestionSchedule{minGap: time.Minute, settle: 
 const everySuggestion = `select * from write_suggestions`
 
 // touchedSuggestions is a later pass's candidates: the suggestions recorded since the last pass
-// ($1, ids as text), and the pending ones whose source issue or suggested issue is an issue of a
-// page's events ($2) or whose source document is a document of a page's events ($3, ids as text).
-// Those are the only suggestions a page can resolve: each rule needs an event on the source or
-// suggested issue, or on the source document - a citation lands an event there too, from the
-// write that indexed the citing body - after the suggestion was recorded, and a suggestion
-// recorded since the last pass is judged against all its events, not only the page's. Each arm
-// reads whole rows through an index of its own (the primary key, write_suggestions_pending_source,
-// write_suggestions_pending_target, write_suggestions_pending_artifact), which an OR across the
-// columns would not, and the union keeps one copy of a row two arms find; no arm reaches a row it
-// does not match, so a pending suggestion no arm names is never read.
+// ($1, ids as text), and the pending ones at least $4 seconds old (settle) whose source issue or
+// suggested issue is an issue of a page's events ($2) or whose source document is a document of a
+// page's events ($3, ids as text). Those are the only suggestions a page can resolve: each rule
+// needs an event on the source or suggested issue, or on the source document - a citation lands an
+// event there too, from the write that indexed the citing body - after the suggestion was
+// recorded, and a suggestion recorded since the last pass is judged against all its events, not
+// only the page's. The age bound keeps a suggestion younger than settle out of the pass, as
+// readSuggestionPage keeps it out of $1: a page's events are all settle old, so none of them is
+// newer than such a suggestion and none can resolve it, and judging it then would judge it by its
+// younger events alone - the comment on the source without the moments-later update of the
+// suggested issue. It is still judged once it is settle old: after the first pass a suggestion is
+// swept only once it is settle old, so one this bound passes over is still unswept, the page
+// reports when it settles (readSuggestionPage), and the pass then judges it in $1 against all its
+// events.
+// Each arm reads whole rows through an index of its own (the primary key,
+// write_suggestions_pending_source, write_suggestions_pending_target,
+// write_suggestions_pending_artifact), which an OR across the columns would not, and the union
+// keeps one copy of a row two arms find; no arm reaches a row it does not match, so a pending
+// suggestion no arm names is never read.
 const touchedSuggestions = `
 select * from write_suggestions where id = any($1::text[]::uuid[])
 union
 select * from write_suggestions
  where outcome = 'ignored' and source_issue_key = any($2::text[])
+   and created_at <= now() - $4::float8 * interval '1 second'
 union
 select * from write_suggestions
  where outcome = 'ignored' and suggested_issue_key is not null and suggested_issue_key = any($2::text[])
+   and created_at <= now() - $4::float8 * interval '1 second'
 union
 select * from write_suggestions
- where outcome = 'ignored' and source_artifact_id is not null and source_artifact_id = any($3::text[]::uuid[])`
+ where outcome = 'ignored' and source_artifact_id is not null and source_artifact_id = any($3::text[]::uuid[])
+   and created_at <= now() - $4::float8 * interval '1 second'`
 
 // suggestionActedOnByCitation marks 'acted_on' every pending suggestion whose suggested item was
 // cited — a `dispatch://` mention landing a new reference-graph edge (packages/envoy/internal/
@@ -303,12 +315,13 @@ func judgeSuggestionPageInTransaction(ctx context.Context, pool *store.Pool, pag
 // an earlier page already read; judging each newly recorded suggestion against all its events,
 // rather than only this page's, is what still finds that event.
 //
-// An event or suggestion younger than settle waits for a later page. The rules see every event
-// committed when they run, not only the page's, so judging by an event no sooner than settle after
-// it was written judges with it every write its actor made in that time: an update to the
-// suggested issue a few seconds after a comment on the source counts as acted_on, both acted_on
-// rules running before the overridden one, rather than the comment being judged alone the moment
-// it woke the loop.
+// An event or suggestion younger than settle waits for a later page, also when an older event of
+// its issues or document is in this one (touchedSuggestions). The rules see every event committed
+// when they run, not only the page's, so judging by an event no sooner than settle after it was
+// written, and judging a suggestion no sooner than settle after it was recorded, judges with it
+// every write its actor made in that time: an update to the suggested issue a few seconds after a
+// comment on the source counts as acted_on, both acted_on rules running before the overridden
+// one, rather than the comment being judged alone the moment it woke the loop.
 //
 // Reading `id > cursor` skips no event because events.id is commit order today:
 // events.Broker.Append takes the database-wide commit-order lock before its insert and holds it
@@ -354,7 +367,7 @@ func judgeSuggestionPage(ctx context.Context, tx pgx.Tx, page int, settle time.D
 	if events == 0 && len(fresh) == 0 {
 		return false, settlesIn, nil
 	}
-	if err := runSuggestionRules(ctx, tx, touchedSuggestionRules, fresh, issues, documents); err != nil {
+	if err := runSuggestionRules(ctx, tx, touchedSuggestionRules, fresh, issues, documents, settle.Seconds()); err != nil {
 		return false, 0, err
 	}
 	if _, err := tx.Exec(ctx, advanceSuggestionCursor, fresh, last); err != nil {
