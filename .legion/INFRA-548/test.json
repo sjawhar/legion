@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-548",
+  "completed": "2026-10-27T05:05:00Z",
+  "testedHead": "55ba8a69c43f8237b05c48061ff2199088dc7f5d",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran all four of the implementer's commands at 55ba8a69 on this pod. envoy-client nats-stall.test.ts: 2 pass; row A 'reconnect 30.0 s, first publish received 30.0 s', row B 'reconnect 50.0 s, first publish received 50.2 s'. pi-envoy envoy.test.ts -t 'NATS path freezes': 1 pass, 'resubscribed 30.0 s, missed message shown 30.0 s'. claude-envoy envoy-channel-stall.test.ts: 1 pass, 'resubscribed 29.9 s, missed message shown 29.9 s'. go test ./cmd/listener/ ./internal/session/ -run 'Subscribe|SessionEntry|Registry' -count=1: ok 18.6 s and 6.2 s. Both doc greps print line 7 of each named architecture file."
+  },
+  "failed": 2,
+  "failures": [
+    {
+      "criterion": "A client behind a TCP proxy that stops forwarding without closing either side reconnects within 60 s (shared code path). Reconnecting must not leave the hung redial's socket open.",
+      "evidence": "This change makes redials routine: every freeze now causes one, and a route that stays dead causes one every 22 s. When a redial is accepted and the server then sends nothing (row B's case), nats.js 2.29.3 stops waiting after its 20 s dial timeout but never closes the socket. protocol.js dial() calls transport.close(err), and node_transport.js _closed() returns at once because `if (!this.connected) return;`, so socket.destroy() never runs. Each such redial leaks one TCP socket for as long as the peer keeps it open. Red test: packages/envoy-client/src/__tests__/nats-stall.test.ts 'a redial that hangs is closed once nats.js gives up on it, so the client holds no socket to it' (commit a68f83db). Command: `cd packages/envoy-client && LEGION_E2E_ENVOY_STACK=1 bun test src/__tests__/nats-stall.test.ts -t \"redial that hangs is closed\"`. Result: (fail) [32194.66ms], expect(hung[0]?.closedAt).toBeDefined() got undefined, so the socket was still open 30 s after the accept. Then I edited node_modules/nats/lib/src/node_transport.js for one run only, so that _closed() destroys the socket when the connection is not connected: 1 pass, 'accepted 2.1 s after the drop, closed 20.0 s after it was accepted'. I restored node_modules after the run. The fix can be in envoy-client, such as a pinned patch of nats.js, or another choice of the implementer's. The test only asks that the abandoned socket is closed."
+    },
+    {
+      "criterion": "The Claude Code plugin's code path recovers from a frozen path (consumer-visible: the MCP channel server Claude Code runs must still stop when Claude Code stops it)",
+      "evidence": "This is the effect of the leak above that a user can see. After one hung redial, the claude-envoy channel server never exits on SIGTERM. In my independent drive it was still running 120 s after SIGTERM (stderr was empty). Temporary stderr markers in shutdown() showed forwarder.close() and unregisterSession both finished, so the process stays alive only because of the leaked socket. Without a hung redial, it exits in 0.0 s (no freeze), 1.0 s (while frozen) and 0.0 s (after a recovery with no hung redial). Red test: packages/claude-envoy/tests/envoy-channel-stall.test.ts 'a session whose redial once hung still exits on SIGTERM' (commit 3b7ea79b). Command: `cd packages/claude-envoy && LEGION_E2E_ENVOY_STACK=1 bun test tests/envoy-channel-stall.test.ts -t \"still exits on SIGTERM\"`. Result: (fail) [65784.18ms], Expected \"exited\" Received \"running\" 15 s after SIGTERM. With the same one-run nats.js edit as above: 1 pass, 'SIGTERM -> exited after 0.0 s'."
+    }
+  ],
+  "observations": [
+    "CI never ran on this pull request. GitHub shows 0 workflow runs for branch legion/INFRA-548 (`gh api repos/sjawhar/legion/actions/runs?branch=legion/INFRA-548` gives total_count 0), and no check runs at 55ba8a69 or ff74845e. The implementer pushed its code commits and its handoff commit in one push. The head of that push, ff74845e, ends with `skip-checks: true`, so GitHub ran no workflow for the code either. This test push carries red tests and no trailer, so CI runs on it, and the red tests make the envoy-session-stall job red. The implementer's next push with the fix must not have the trailer.",
+    "These parts held when I drove them independently (throwaway script, now deleted). I ran the committed dist/envoy-channel.js bundle, the file Claude Code runs, from a plugin-cache path …/.claude/plugins/cache/legion-mkt/claude-envoy/0123456789ab/dist/. GET /v1/sessions listed plugin @sjawhar/claude-envoy and plugin_version 0123456789ab for both sessions. Two sessions shared one stall proxy. In round 1 (a freeze plus one hung redial), every missed message was shown 46.6 s after the freeze. In round 2 (a second freeze after the reconnect), 28.0 s after it. Each session got 3 messages during each frozen window: all 12 were shown once, with the replay suffix. All 6 live messages (before, after round 1, after round 2) were shown once, without it.",
+    "The release-shaped pi-envoy bundle inlines the version. I set package.json's version to 99.4.2-tester, as release.yaml's 'Set release version' step does before the pack, then ran `bun run build`. dist/envoy.js holds '99.4.2-tester' once and '\"@sjawhar/pi-envoy\"' once. I restored package.json, and jj status was clean.",
+    "The committed claude-envoy dist is current: `bun run build` left no change in the working copy."
+  ],
+  "proof": []
+}
