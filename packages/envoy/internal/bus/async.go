@@ -47,9 +47,11 @@ type Sender interface {
 // a JetStream acknowledgement (the JetStream context's PublishAsyncTimeout), or a core publish's own
 // flush, confirmed as PublishCoreTo confirms one (confirmFlushed). A core publish that its own
 // flush cannot confirm because another publish on the connection changed its last error in the
-// meantime is published again alone through PublishCoreTo, which answers for it: once every core
-// flush of the window has returned, and one such republish at a time, so that another of the
-// window's denials cannot land during it and leave it unconfirmed too.
+// meantime is published again alone on the window's connection, which answers for it: once every
+// core flush of the window has returned, and one such republish at a time, so that another of the
+// window's denials cannot land during it and leave it unconfirmed too. A republish costs a round
+// trip of its own, so a batch in which one denial left many sends unconfirmed takes that many
+// round trips more.
 func (c *Client) Window() Sender {
 	w := &window{client: c}
 	w.settled = sync.NewCond(&w.mu)
@@ -125,13 +127,15 @@ func (w *window) current() bool {
 }
 
 // sendCore publishes data, item's encoding, to item's topic over core NATS and returns what
-// confirms that the server accepted it.
+// confirms that the server accepted it. The send counts itself in flushing before it reads the
+// clock, so time it spent waiting behind a republish for the window's lock is not taken from its
+// own flush.
 func (w *window) sendCore(item contracts.Envelope, data []byte) (func() error, error) {
-	deadline := time.Now().Add(publishAcknowledgementTimeout)
-	before := observe(w.conn)
 	w.mu.Lock()
 	w.flushing++
 	w.mu.Unlock()
+	deadline := time.Now().Add(publishAcknowledgementTimeout)
+	before := observe(w.conn)
 	if err := w.conn.PublishMsg(&nats.Msg{Subject: item.Topic, Data: data}); err != nil {
 		w.flushed()
 		return nil, w.unsent(err, len(data))
@@ -139,23 +143,41 @@ func (w *window) sendCore(item contracts.Envelope, data []byte) (func() error, e
 	return func() error {
 		err := confirmFlushed(w.conn, item.Topic, before, deadline)
 		w.flushed()
-		if err == nil || errors.Is(err, ErrPublishDenied) {
-			return err
+		if err == nil || errors.Is(err, ErrPublishDenied) || !errors.Is(err, errPublishUnconfirmed) {
+			return w.answered(err)
 		}
-		if !w.current() || errors.Is(err, nats.ErrConnectionClosed) || errors.Is(err, nats.ErrConnectionReconnecting) ||
-			errors.Is(err, nats.ErrTimeout) {
-			return fmt.Errorf("bus: %w: %w", ErrUnavailable, err)
-		}
-		if errors.Is(err, errPublishUnconfirmed) {
-			w.mu.Lock()
-			defer w.mu.Unlock()
-			for w.flushing > 0 {
-				w.settled.Wait()
-			}
-			return w.client.PublishCoreTo(item.Topic, item)
-		}
-		return err
+		return w.republish(item, data)
 	}, nil
+}
+
+// republish publishes data, item's encoding, again alone on the window's connection, once every
+// core flush of the window has returned, holding the window's lock so that one republish runs at
+// a time and no send of the window lands during it.
+func (w *window) republish(item contracts.Envelope, data []byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for w.flushing > 0 {
+		w.settled.Wait()
+	}
+	if !w.current() {
+		return fmt.Errorf("bus: %w: the window's connection was lost or reconnected before the publish to %q was sent again", ErrUnavailable, item.Topic)
+	}
+	msg := &nats.Msg{Subject: item.Topic, Data: data}
+	return w.answered(w.client.publishConfirmed(w.conn, msg, time.Now().Add(publishAcknowledgementTimeout), w.conn.PublishMsg))
+}
+
+// answered names a core publish's confirmation: accepted, denied, still unconfirmed, or
+// ErrUnavailable when the connection failed or the flush ran out of time, so whether it landed
+// is unknown.
+func (w *window) answered(err error) error {
+	if err == nil || errors.Is(err, ErrPublishDenied) || errors.Is(err, ErrUnavailable) || errors.Is(err, ErrRefused) {
+		return err
+	}
+	if !w.current() || errors.Is(err, nats.ErrConnectionClosed) || errors.Is(err, nats.ErrConnectionReconnecting) ||
+		errors.Is(err, nats.ErrTimeout) || errors.Is(err, errFlushWindowElapsed) {
+		return fmt.Errorf("bus: %w: %w", ErrUnavailable, err)
+	}
+	return err
 }
 
 // flushed records that one of the window's core sends has its flush's answer.

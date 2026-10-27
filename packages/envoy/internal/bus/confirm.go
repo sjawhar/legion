@@ -34,12 +34,16 @@ func (c *Client) publishConfirmed(conn *nats.Conn, msg *nats.Msg, deadline time.
 	return confirmFlushed(conn, msg.Subject, before, deadline)
 }
 
+// errFlushWindowElapsed is wrapped by confirmFlushed's answer when its deadline had passed before
+// the flush began, so whether the publish landed is unknown.
+var errFlushWindowElapsed = errors.New("window elapsed before the publish was flushed")
+
 // confirmFlushed flushes conn within deadline and confirms that the server accepted the core
 // publish to subject made on it after before was observed (confirmPublished).
 func confirmFlushed(conn *nats.Conn, subject string, before connState, deadline time.Time) error {
 	remaining := time.Until(deadline)
 	if remaining <= 0 {
-		return fmt.Errorf("bus: window elapsed before the publish to %q was flushed", subject)
+		return fmt.Errorf("bus: publish to %q: %w", subject, errFlushWindowElapsed)
 	}
 	if err := conn.FlushTimeout(remaining); err != nil {
 		return fmt.Errorf("bus: flush publish to %q: %w", subject, err)
