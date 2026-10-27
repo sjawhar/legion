@@ -2,47 +2,47 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-367",
-  "completed": "2026-10-27T10:58:00Z",
-  "round": "after review round 1 (implementer head 5ad3589f, code 69d138bb)",
+  "completed": "2026-10-27T11:30:00Z",
+  "round": "after review round 2 (implementer head 692446de, code 7bbf6b71: main merged in, migrations renumbered to 0130-0134). The diff changed (renumbering, RemovedBlockNode, the driver's component_node), so this is a full round, not a fingerprint re-check.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's commands on a fresh local harness built from head 5ad3589f. block-graph.sh with COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9022 exited 0 with 67 PASS (29 R12). With COMPONENT_SOURCE unset it exited 0 with 64 PASS and the one SKIP line. A comment author set to [1] read 500, and 200 once restored."
+    "how": "Re-ran the implementer's commands on a harness built from head 692446de on a database created fresh for this run (dispatch_r3). block-graph.sh with COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9022 exited 0 with 67 PASS (29 R12). With COMPONENT_SOURCE unset it exited 0 with 64 PASS and the one SKIP line. schema_migrations held 127..134."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Contract change census: block-graph.sh for every caller and every COMPONENT_SOURCE value (warn-first)",
-      "surface": "The driver packages/dispatch/e2e/acceptance/block-graph.sh, run as its callers run it, against the local harness built from this head",
-      "command": "DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE bash packages/dispatch/e2e/acceptance/block-graph.sh, run with: COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9022 | unset | empty | none (no source) | existing (source acme/t367-keep on OPS) | none (that source present) | bogus | fixture without FAKE_GITHUB_PORT",
-      "observed": "fixture: exit 0, 67 PASS. Unset: exit 0, 64 PASS and 'SKIP: R12 component: COMPONENT_SOURCE is unset, so no component node is read; …'. Empty: the same as unset. none with no source: exit 0, 65 PASS. existing: exit 0, 66 PASS, including 'component web carries its facts' and 'part of platform'. none with a source present: exit 1, 'FAIL: R12 component: this server has architecture sources, so run with COMPONENT_SOURCE=existing'; no open ask and no open issue from a block-graph-* session remained. Output: https://github.com/sjawhar/legion/pull/2389#issuecomment-6440018849",
-      "headSha": "5ad3589fb0fe10df4ea11792099670a5e58139ef",
-      "negativeControl": "COMPONENT_SOURCE=bogus: exit 2 with 'COMPONENT_SOURCE is bogus; want fixture, existing or none' and the usage. COMPONENT_SOURCE=fixture without FAKE_GITHUB_PORT: exit 2, 'required environment variable FAKE_GITHUB_PORT is unset'"
+      "criterion": "Main's 0129 and this pull request's 0130-0134 apply, on a fresh database and on an existing one with data, and the backfill records the right versions",
+      "surface": "Postgres 17: the harness's boot on dispatch_r3, and a copy of the database a base-b69f636f server wrote (migrations to 128, with comments, asks and approvals)",
+      "command": "bun run dispatch:local with DATABASE_URL naming dispatch_r3; createdb dispatch_roll template dispatch_base; psql -1 -f for 0129_document_edit_notices, 0130_comments_written_version, 0131_asks_written_version, 0132_component_facts, 0133_comments_written_version_backfill and 0134_asks_written_version_backfill",
+      "observed": "Boot: schema_migrations 127..134, and both written_version triggers present. Copy: all six applied. Comments at v1 and v2 give 1 and 2, unanchored asks 1, an approval opened at v2 whose row says version 3 gives 2, and a spec approval 2.",
+      "headSha": "692446deeb599c3db47235793ef2a7a7608822c0",
+      "negativeControl": "The copy before the migrations is at version 128 (select max(version) from schema_migrations), with no written_version column"
     },
     {
-      "criterion": "An actor column that does not decode fails the graph read; JSON null and SQL NULL read as nobody recorded",
-      "surface": "The harness HTTP API and the real dispatch CLI, with one row changed and then restored with psql",
-      "command": "K=CORE-21 bash /legion/scratch/tmp/t367/strict.sh",
-      "observed": "issues.created_by \"alice\", events.actor [] (latest issue.updated), comments.author [1] and artifact_versions.authors {object}: each read is 500, and 200 once the row is restored. A corrupt comment author also fails ?to=<spec>, where the comment is an anchored_to edge end. issues.created_by null: 200 with made_by [], and the CLI prints 'made by nobody recorded at …'. Each column decoded strictly here is already decoded strictly by an existing route (comments, events, artifacts and their versions, api/asks.go loadAskEdits), so production rows those routes read decode here too.",
-      "headSha": "5ad3589fb0fe10df4ea11792099670a5e58139ef",
-      "negativeControl": "In a scratch copy, storedActor and storedActors were changed to return [] on a decode error: TestAnActorThatDoesNotDecodeFailsTheRead fails ('a comment whose author is \"not an actor\": … status=200')"
+      "criterion": "Contract change census: block-graph.sh for every caller and every COMPONENT_SOURCE value, after the component_node refactor",
+      "surface": "The driver packages/dispatch/e2e/acceptance/block-graph.sh against the harness built from this head",
+      "command": "DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE bash packages/dispatch/e2e/acceptance/block-graph.sh, run with: COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9022 | unset | none (no source) | existing (source acme/t367-keep on OPS) | none (that source present) | bogus | fixture without FAKE_GITHUB_PORT",
+      "observed": "fixture: exit 0, 67 PASS. Unset: exit 0, 64 PASS and the SKIP line. none with no source: exit 0, 65 PASS. existing: exit 0, 66 PASS, including 'component web carries its facts' and 'part of platform'. none with the source present: exit 1, 'FAIL: R12 component: this server has architecture sources, so run with COMPONENT_SOURCE=existing', and no open ask from a block-graph-* session remained. Output: https://github.com/sjawhar/legion/pull/2389#issuecomment-6440707226",
+      "headSha": "692446deeb599c3db47235793ef2a7a7608822c0",
+      "negativeControl": "COMPONENT_SOURCE=bogus: exit 2 with 'COMPONENT_SOURCE is bogus; want fixture, existing or none'. COMPONENT_SOURCE=fixture without FAKE_GITHUB_PORT: exit 2, 'required environment variable FAKE_GITHUB_PORT is unset'"
     },
     {
-      "criterion": "A node with no recorded maker (made_at null) reads and prints as nobody recorded",
-      "surface": "The harness HTTP API and the real dispatch CLI (dispatch read --ref <block>)",
-      "command": "In strict.sh: dispatch doc-edit inserts a paragraph at v3; the document_indexed_versions row of v2 is deleted; ?to= and dispatch read --ref run; then the row is restored",
-      "observed": "With v2 unindexed: made_by [], made_at null, parent_version 3; CLI 'Node: block dispatch://CORE-21/spec#b-3473bcba-… · made by nobody recorded · changed by session tester-r2 at … · part of dispatch://CORE-21/spec (version 3)'. Restored: 'made by session tester-r2 at …'.",
-      "headSha": "5ad3589fb0fe10df4ea11792099670a5e58139ef",
-      "negativeControl": "The same read with the v2 row restored names the maker, so the empty maker comes from the missing index row and from nothing else"
+      "criterion": "A pin to a removed block is a whole block node carrying the removed block's facts (RemovedBlockNode)",
+      "surface": "The harness HTTP API and the real dispatch CLI",
+      "command": "dispatch doc-edit --issue CORE-19 --artifact spec deleting block c89bdb83 (v4); GET /api/v1/references?to=dispatch://CORE-19/spec#b-c89bdb83-…@v3; dispatch read --ref of the same pin",
+      "observed": "The node is {kind block, id CORE-19/spec#c89bdb83-…, block_id, issue_key CORE-19, project CORE, ref, document dispatch://CORE-19/spec}. made_by tester-r2 (the v3 author), changed_by tester-r3 (the v4 author), parent the spec, parent_version 3, pin removed, removed_version 4. CLI: 'Node: block … · made by session tester-r2 at … · changed by session tester-r3 at … · part of dispatch://CORE-19/spec (version 3)'.",
+      "headSha": "692446deeb599c3db47235793ef2a7a7608822c0",
+      "negativeControl": "The same block read without the pin answers 'No block … in dispatch://CORE-19/spec' (round 1), so the node comes only from the pinned read"
     },
     {
-      "criterion": "Round-1 behaviour unchanged after the loader changes (comment parent join, strict decoding, RemovedBlockFacts)",
-      "surface": "The harness HTTP API as a session and as alice and bob",
-      "command": "bash probe.sh; P=CORE bash components.sh; bash blockask.sh (in /legion/scratch/tmp/t367)",
-      "observed": "probe: 18 OK, BAD count 0 (reply to a reply, ask-thread comment, unanchored and approval versions, changes that must not count). Components: 8 OK, BAD count 0. Block asks: 2 OK, with parent_version 2 and 3.",
-      "headSha": "5ad3589fb0fe10df4ea11792099670a5e58139ef",
-      "negativeControl": "Round 1: the same probe against a server built at base b69f636f gave BAD count 14"
+      "criterion": "Earlier rounds' behaviour holds after the merge of main: two-actor facts, components across imports, block asks, strict actor decoding, nobody recorded",
+      "surface": "The harness HTTP API as a session and as alice and bob, psql changes that are then restored, and the real dispatch CLI",
+      "command": "In /legion/scratch/tmp/t367/r3: bash probe.sh; P=CORE bash components.sh; bash blockask.sh; K=CORE-19 bash strict.sh",
+      "observed": "probe: 18 OK, BAD count 0. Components: 8 OK, BAD count 0. Block asks: 2 OK, parent_version 2 and 3. Corrupt issues.created_by, events.actor, comments.author or artifact_versions.authors: 500 each, and 200 once restored. JSON-null created_by: made_by [], and the CLI prints 'made by nobody recorded'. A block with v2 unindexed: made_at null, 'made by nobody recorded'; restored, it names its maker.",
+      "headSha": "692446deeb599c3db47235793ef2a7a7608822c0",
+      "negativeControl": "A corrupt comments.author ([1]) is refused with HTTP 500 and reads 200 once restored. Round 1: the probe against a base-built server gave BAD count 14"
     }
   ],
-  "ci": "At code head 69d138bb, CI on GitHub showed build, changes, lint, test and typecheck queued (pr-title one cancelled, one queued) when this was written. It was read only, not rerun or waited for."
+  "ci": "At 692446de, whose push carries no skip-checks line, CI on GitHub showed build, changes, lint, test and typecheck queued (pr-title one cancelled, one queued) when this was written. It was read only, not rerun or waited for."
 }
