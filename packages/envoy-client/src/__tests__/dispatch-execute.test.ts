@@ -4952,6 +4952,84 @@ describe("executeDispatchTool", () => {
       );
     });
 
+    test("a block read prints the Node line, pinned and removed too", async () => {
+      const facts = {
+        made_by: [{ kind: "user", id: "alice@example.com" }],
+        made_at: "2026-10-18T00:00:00Z",
+        changed_by: [{ kind: "session", id: "s1" }],
+        parent: { kind: "artifact", id: "artifact-1", ref: "dispatch://CORE-1/spec" },
+      };
+      const current = {
+        ...blockNode,
+        ...facts,
+        changed_version: 3,
+        changed_at: "2026-10-20T00:00:00Z",
+        parent_version: 3,
+        text: "We ship on Friday.",
+      };
+      const head = [
+        "Block: décision:1",
+        "Document: dispatch://CORE-1/spec",
+        "Changed in version: 3",
+        "Text:",
+        "We ship on Friday.",
+      ];
+      const nodeLine = `Node: block ${blockRef} · made by user alice@example.com at 2026-10-18T00:00:00Z · changed by session s1 at 2026-10-20T00:00:00Z · part of dispatch://CORE-1/spec (version 3)`;
+      const sections = ["Referenced by:", "- none", "Links:", "- none"];
+
+      expect(
+        (await readBlock(blockRef, () => response({ node: current, edges: [] })).result).text
+      ).toBe([...head, nodeLine, ...sections].join("\n"));
+
+      const pinned = `${blockRef}@v3`;
+      const pin = { version: 3, ref: pinned, text: "We ship on Friday.", state: "unchanged" };
+      expect(
+        (await readBlock(pinned, () => response({ node: { ...current, pin }, edges: [] })).result)
+          .text
+      ).toBe(
+        [
+          ...head,
+          "Pinned to version: 3",
+          "Unchanged since version 3.",
+          "Text at version 3:",
+          "We ship on Friday.",
+          nodeLine,
+          ...sections,
+        ].join("\n")
+      );
+
+      // A removed block's last change is the version that removed it, and it belongs to the
+      // last version known to hold it.
+      const removedPin = `${blockRef}@v2`;
+      const removed = {
+        ...blockNode,
+        ...facts,
+        changed_at: "2026-10-21T00:00:00Z",
+        parent_version: 2,
+        pin: {
+          version: 2,
+          ref: removedPin,
+          text: "We ship on Friday.",
+          state: "removed",
+          removed_version: 3,
+        },
+      };
+      expect(
+        (await readBlock(removedPin, () => response({ node: removed, edges: [] })).result).text
+      ).toBe(
+        [
+          "Block: décision:1",
+          "Document: dispatch://CORE-1/spec",
+          "Pinned to version: 2",
+          "Removed in version 3.",
+          "Text at version 2:",
+          "We ship on Friday.",
+          `Node: block ${blockRef} · made by user alice@example.com at 2026-10-18T00:00:00Z · changed by session s1 at 2026-10-21T00:00:00Z · part of dispatch://CORE-1/spec (version 2)`,
+          ...sections,
+        ].join("\n")
+      );
+    });
+
     test("a block no current version holds is an error naming the block and its document", async () => {
       const absent = () => notFound('no block "décision:1" in dispatch://CORE-1/spec');
       const { result } = readBlock(blockRef, absent, absent);
@@ -8119,6 +8197,119 @@ describe("executeDispatchTool", () => {
       "/api/v1/references?from=dispatch%3A%2F%2FDSP-42%2Fcomment%2Fcccccccc-0000-4000-8000-000000000042",
     ]);
   });
+
+  describe("the Node line of a read", () => {
+    const commentId = "cccccccc-0000-4000-8000-000000000042";
+    const commentRef = `dispatch://DSP-1/comment/${commentId}`;
+    /** The text of a read of `commentRef` against a server whose `?to=` answer names `node`. */
+    const readComment = async (node: Record<string, unknown>) => {
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const target = new URL(String(url));
+        if (target.pathname === `/api/v1/comments/${commentId}`) {
+          return response({
+            comment: {
+              id: commentId,
+              issue_key: "DSP-1",
+              author: { kind: "session", id: "s1" },
+              body: "Ship it.",
+              anchor: null,
+              reply_to: null,
+              resolved: false,
+              suggestion: null,
+              created_at: "2026-10-24T10:00:00Z",
+            },
+            replies: [],
+          });
+        }
+        if (target.pathname === "/api/v1/references" && target.searchParams.has("to")) {
+          return response({
+            node: { kind: "comment", id: commentId, ref: commentRef, ...node },
+            edges: [],
+          });
+        }
+        if (target.pathname === "/api/v1/references") return response(emptyGraph("comment"));
+        throw new Error(`unexpected request: ${target.pathname}`);
+      };
+      return (
+        await executeDispatchTool({
+          tool: "dispatch_read",
+          args: { ref: commentRef },
+          cwd: "/workspace",
+          host: "omp",
+          config,
+          env: {},
+          exec: repoExec("owner/repo"),
+          fetchImpl: fetchImpl as typeof fetch,
+        })
+      ).text;
+    };
+
+    test("read prints the node's maker, last change and parent before its edges", async () => {
+      const text = await readComment({
+        made_by: [{ kind: "session", id: "s1" }],
+        made_at: "2026-10-24T10:00:00Z",
+        changed_by: [{ kind: "user", id: "alice@example.com" }],
+        changed_at: "2026-10-25T09:00:00Z",
+        parent: {
+          kind: "artifact",
+          id: "aaaaaaaa-0000-4000-8000-000000000001",
+          ref: "dispatch://DSP-1/spec",
+        },
+        parent_version: 3,
+      });
+
+      expect(text).toBe(
+        [
+          "Comment:",
+          `${commentId} · session s1`,
+          "Body: Ship it.",
+          "Reply chain:",
+          "- none",
+          `Node: comment ${commentRef} · made by session s1 at 2026-10-24T10:00:00Z · changed by user alice@example.com at 2026-10-25T09:00:00Z · part of dispatch://DSP-1/spec (version 3)`,
+          "Referenced by:",
+          "- none",
+          "Links:",
+          "- none",
+        ].join("\n")
+      );
+    });
+
+    test("a node with no recorded maker, no parent and no version says so", async () => {
+      const unrecorded = {
+        made_by: [],
+        made_at: null,
+        changed_by: [],
+        changed_at: null,
+        parent: null,
+        parent_version: null,
+      };
+
+      expect(await readComment(unrecorded)).toContain(
+        `\nNode: comment ${commentRef} · made by nobody recorded · changed by nobody recorded\nReferenced by:\n`
+      );
+      // A parent with no reference is named by its kind and id; several actors read as a list.
+      expect(
+        await readComment({
+          ...unrecorded,
+          made_by: [
+            { kind: "session", id: "s1" },
+            { kind: "user", id: "alice@example.com" },
+          ],
+          parent: { kind: "session", id: "s1" },
+        })
+      ).toContain(
+        `\nNode: comment ${commentRef} · made by session s1, user alice@example.com · changed by nobody recorded · part of session s1\nReferenced by:\n`
+      );
+    });
+
+    test("a server older than the facts prints no Node line", async () => {
+      const text = await readComment({ changed_at: "2026-10-25T09:00:00Z" });
+
+      expect(text).not.toContain("Node:");
+      expect(text).toEndWith("Reply chain:\n- none\nReferenced by:\n- none\nLinks:\n- none");
+    });
+  });
+
   test("prints where an anchored comment's block stands after its quote", async () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));

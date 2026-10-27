@@ -458,7 +458,7 @@ end the holder or let it finish and start the server again.
 That query can come back empty: a prepared transaction's locks carry no pid, so the join to `pg_stat_activity` drops them (LEGION-432).
 A migration that needs another bound sets its own `SET LOCAL lock_timeout`.
 
-The notes below describe migrations through `0128`.
+The notes below describe migrations through `0134`.
 A new migration describes itself in the header comment of its own `.up.sql`, as `0129_document_edit_notices.up.sql` does, and adds nothing here, so two pull requests that each add a migration do not edit this section.
 
 Migrations `0056`–`0062` make search indexing linear.
@@ -715,6 +715,34 @@ Its own migration, so its transaction holds `comments` alone:
 the drop holds it `ACCESS EXCLUSIVE`, and every read and write of a comment waits while the one index builds.
 It refuses and rewrites no row; its census answers `0`.
 
+Migration `0130_comments_written_version` adds `comments.written_version`, the version of its document current when a comment was written on it without an anchor (the comment's graph node's `parent_version`, [Reference graph](#reference-graph)), and a `before insert` trigger that sets it to the highest `artifact_versions.number` of the document on every comment with `artifact_id` set and `anchor` null whose insert names none, so the earlier release's inserts during the roll record it too.
+The column is nullable with no default, a catalog change that rewrites and scans no row;
+its own migration, so its transaction holds `comments` `ACCESS EXCLUSIVE` alone, for milliseconds.
+It refuses and rewrites no row; its census answers `0`.
+
+Migration `0131_asks_written_version` does the same for `asks`:
+its trigger sets an approval ask's `written_version` to `approval.version`, the version the request names when it opens, which stays while the row's `approval.version` moves with later versions, and that of an ask with `artifact_id` set, `anchor` null and `block_artifact_id` null to the highest version of its document.
+Its own migration, so its transaction holds `asks` `ACCESS EXCLUSIVE` alone, for milliseconds.
+It refuses and rewrites no row; its census answers `0`.
+
+Migration `0132_component_facts` creates `component_facts`, when each component was made and last changed and the digest of its own fields at its last recorded change, keyed `(project_key, id)` as `components` is, which every import keeps from then on (`packages/envoy/AGENTS.md`, "References form one graph").
+Its foreign key to `projects` cascades, and it has none to `components`, whose rows every import deletes and inserts again.
+Its one insert seeds a row with all three null for each component already stored: when those were made or last changed was never recorded.
+It reads `components` under `ACCESS SHARE`, and the foreign key takes `SHARE ROW EXCLUSIVE` on `projects` for the catalog change.
+It refuses and rewrites no existing row; its census answers `0`.
+
+Migration `0133_comments_written_version_backfill` fills `written_version` on the comments with `artifact_id` set and `anchor` null stored before `0130`'s trigger:
+each takes the highest version of its document created at or before it, the only record those rows have, so a comment written while a version's transaction was still open can name that version.
+A comment the trigger recorded keeps its value, one on a document with no version that old keeps null, and no update trigger fires.
+It takes `comments` `EXCLUSIVE` before it writes a row, as `0089` takes `issues`, so no write that locks two of its rows in another order deadlocks with it:
+every read goes on, and every comment write waits until it commits.
+Its census answers `0`: it fills a column only this release reads and changes no value any reader had, and it cannot name the column, which does not exist when the census is taken.
+
+Migration `0134_asks_written_version_backfill` does the same for `asks`, holding `asks` `EXCLUSIVE`:
+an approval ask takes `approval.version` of its `ask.opened` event (the type list of `events_ask_payload_id`, `0030`, lets the lookup read that index), the version the request named when it opened, and keeps null without one;
+another ask with `artifact_id` set, `anchor` null and `block_artifact_id` null takes the highest version of its document created at or before it, as `0133` reads a comment's.
+Its census answers `0` for the same reasons.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their count, and re-derives them from source text on the next write.
 It aborts server boot before a migration record or schema change only when an existing artifact has no owning issue.
 On success it backfills each artifact's project and generated `ref_key`.
@@ -881,6 +909,15 @@ An agent's conversation's file is `dispatch://agent/<session id>/artifact/<slug>
 a session id holding a `/`, `?`, `#` or whitespace names nothing.
 `graph_edges` has no structural edge for such a file (no `attached_to`, since it belongs to no issue):
 it appears in the graph through the mentions that cite it.
+
+Every node the graph reads carries six facts, whatever its kind:
+`made_by` and `made_at` (who made it and when), `changed_by` and `changed_at` (who last changed its own text or fields and when, its maker while nothing has changed it since), `parent` (`{kind, id, ref?}`, the node it belongs to, `id` that node's own id) and `parent_version` (the version of that parent it belongs to:
+for a block its changed version; for an ask or comment written on a document the version its anchor names, for a block ask the version that first held its block, for an approval request the version it named when it opened, else the version current when it was written).
+A fact Dispatch never recorded is `[]` for an actor list and `null` otherwise:
+a session has none, a component's makers are never recorded and its times only from this release on, and a block's maker, and a block ask's version, are known only when the block is in the document's first version or Dispatch indexed the version before the one that first held it (`packages/envoy/AGENTS.md`, "References form one graph", gives each kind's sources and what counts as a change).
+Migrations `0130`-`0134` (Database migrations above) add what the facts read:
+the version current when an unanchored comment or ask is written on a document, recorded at insert and filled for the rows already stored, and `component_facts`, which every import keeps.
+`dispatch read` prints the facts of the node it reads on a `Node:` line, before `Referenced by:`.
 
 ## Search
 
@@ -1271,7 +1308,9 @@ Each item below names a path with its method and identity, then its purpose.
   Edges of one node in the reference graph, newest first and cross-project:
   exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference, read whatever its length (`text.ParseRef`);
   `kind` filters a csv of edge kinds; `since=<events.id>` keeps mentions introduced after it (structural edges excluded).
+  The answer is `{node, edges}`, the node read and its edges.
   Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`.
+  The node read, each edge's `node` and each edge's `block` carry the six facts of every node, `made_by`, `made_at`, `changed_by`, `changed_at`, `parent` and `parent_version` ([Reference graph](#reference-graph)).
   A mention a block of a document holds is listed from that block (`node.kind` `block`, `node.document` its document);
   a document's own read also lists the edges at its blocks, each naming the block as `block`, and leaves out their `part_of` edges unless `kind` names `part_of`.
   A block reference (`#b-<id>`) names a `block` node carrying its whole current `text`;
@@ -1283,7 +1322,8 @@ Each item below names a path with its method and identity, then its purpose.
 
   The links from blocks of the document `from` names to blocks of the document `to` names (an issue's spec or document, or a project's document;
   one document may be both), each reference read whatever its length:
-  `{from, to, links}`, each link with its `kind`, both block nodes, and the `created_at` and `created_version` at which the source block first held it, newest first.
+  `{from, to, links}`, each link with its `kind`, both block nodes, and the `created_at` and `created_version` at which the source block first held it, newest first;
+  `from`, `to` and every link's two blocks carry the six facts of every node ([Reference graph](#reference-graph)).
   A link is listed only while both blocks are current blocks of their documents.
   `400 INVALID_REFERENCE` when either is not a document reference; `404 NOT_FOUND` for a document that does not exist.
 

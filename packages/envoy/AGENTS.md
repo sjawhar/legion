@@ -998,6 +998,61 @@ Versions are Postgres `integer`, so `refs.BlockTextAt` answers a pin above 21474
 `404 NOT_FOUND` `no version <N> of <document ref>`.
 `GET /api/v1/block-links?from=<document>&to=<document>` (`refs.BlockLinks`) lists the links from blocks of one document to blocks of another, or of the same one, while both blocks are current.
 
+Every node carries six facts, whatever its kind, always present on the wire (`model.GraphNode`):
+`made_by` and `made_at`, who made it and when;
+`changed_by` and `changed_at`, who last changed its own text or fields and when, its maker while nothing has changed it since;
+`parent` (`model.NodeParent`), the node it belongs to, by `kind`, `id` (the parent node's own id:
+an artifact's uuid, an issue's key, a component's `<project>/<id>`) and `ref`, absent for a parent with none (a session, a direct message, a document no project owns);
+and `parent_version`, the version of the parent it belongs to.
+A fact Dispatch never recorded is empty: `made_by` and `changed_by` are then `[]`, never null, and the others null.
+`refs.storedActor` reads a single-actor column (a creator, an author, an event's actor, an edit's editor) and `refs.storedActors` a list column (a version's authors):
+SQL NULL (a left join that found no row, an edit that names no editor) and JSON null are nobody recorded, and any other value that does not decode as a `model.Actor` (a list of them) fails the read.
+`GET /api/v1/references` carries them on `node`, each `edges[].node` and each `edges[].block`, and `GET /api/v1/block-links` on `from`, `to` and both blocks of each link.
+Each entry of `nodeLoaders` reads its own kind's (`refs/graph.go`).
+An issue is made by `issues.created_by` at `created_at`, last changed by the actor of its latest `issue.created`, `issue.updated` or `issue.closed` event at that event's time, and part of its parent issue.
+An artifact (a document, a file, a picture) is made by `artifacts.created_by` at `created_at`, last changed by the authors of its latest version at that version's time, and part of its issue, else of the session whose conversation owns it, else (a project document) of no node.
+A message is made by its author, and last changed by its maker when it was made, since no route edits one;
+a reply is part of the message it answers, another issue message of its issue, a direct message of no node.
+A component is made and changed by nobody recorded, since Dispatch does not import a component's git author, at the times `component_facts` records (below), and is part of its parent component while the model holds it.
+A session has no fact on record.
+None of those parents has versions, so `parent_version` is null.
+An ask is made by its author; its last change is its own edit, which stamps `edited_at` (`PATCH /api/v1/asks/{id}`, a block ask's settlement, an approval request's move to a later version), by the editor its latest `ask.edited` event names (nobody recorded when there is none) at `edited_at`.
+A comment is made by its author, and only its author edits it, so its last change is its author at `edited_at`.
+A reply comment is part of its thread's head (`reply_to`) and a comment in an ask's thread part of the ask, with no version.
+Any other ask or comment is part of the document it is written on:
+the one its anchor names, at `anchor.version`;
+a block ask's document, at the version that first held its block when Dispatch knows it (below), else at none;
+an approval request's document, the one it asks a person to approve, at `written_version`; else the document that owns it, at `written_version`.
+One written on no document is part of its issue, with no version, as an unanchored comment on an issue is: the issue owns it, not its spec.
+A change is what the node's own edit writes:
+an issue's fields through `PATCH /api/v1/issues/{key}` (its body is its spec, a node of its own), an ask's wording, a comment's body, a document's version.
+A claim or release, the deploy notice, an answer, a resolution and a suggestion's acceptance change no issue, ask or comment.
+
+A block is made by the authors of the version that first held it, at that version's time, when Dispatch knows that version (`refs.blockFirstVersion`):
+F, the lowest version `document_block_texts` records a text of the block in, is 1, or a block-aware build indexed version F-1 (`document_indexed_versions`), which did not hold it.
+Otherwise it has `made_by: []` and `made_at: null`:
+the reconciliation indexes a document no block-aware build indexed at its latest version alone, so every block that version holds first appears there, as does a block first seen after a version no block-aware build indexed.
+A block is last changed by the authors of its `changed_version`, at `changed_at`, and is part of its document at `changed_version`.
+The removed block a pinned reference names (`refs.RemovedBlockNode`) is made by the same rule, last changed by the authors of `removed_version` at its time, and part of its document at the latest version `document_indexed_versions` holds below `removed_version`, the last one known to hold it (null when none is);
+a pin to a current block carries the current block's facts.
+
+Two records serve those facts from this release on.
+`comments.written_version` and `asks.written_version` (migrations `0130` and `0131`) hold the version current when an item was written on a document without an anchor.
+A `before insert` trigger on each table sets it, so every build's insert records it, the earlier release's during the roll included:
+on a comment with `artifact_id` set and `anchor` null, and on an ask with `artifact_id` set, `anchor` null and `block_artifact_id` null, to the highest `artifact_versions.number` of that document;
+on an approval ask to `approval.version`, the version the request names when it opens, which stays while the row's `approval.version` moves with later versions.
+An insert that names a value keeps it.
+`0133` and `0134` fill the rows stored before the triggers:
+an approval ask takes `approval.version` of its `ask.opened` event, and another unanchored document comment or ask the highest version of its document created at or before it, the only record those rows have (one written while a version's transaction was still open can name that version).
+`component_facts` (migration `0132`, keyed `(project_key, id)` as `components` is) holds when each component was made and last changed, since every import deletes a source's components and inserts them again.
+It has no foreign key to `components`, whose rows each import replaces, and the migration seeds a row with null times and digest for each component already stored:
+when those were made or last changed was never recorded.
+Each import, in its transaction after the inserts (`architecture.recordComponentFacts`), upserts a row per component it projects with its digest (`componentDigest`:
+the SHA-256 of a canonical JSON of `title`, `prose`, `parent`, `external`, `paths` in the model's order and `depends_on` sorted):
+a component with no row is made and changed now, a row with a null digest gains the digest and keeps its unrecorded times, a row whose digest differs is changed now, and an equal digest leaves the row as it is.
+It then deletes each row of the project whose component no source projects any more (`architecture.DeleteOrphanComponentFacts`), which the source delete route also runs after its cascade, so a component retired and imported again later is made again.
+An earlier build's import during the roll leaves `component_facts` alone, so recorded times survive it, and a component that build imports first has no row until this build's next import records it.
+
 What no block-aware write indexed, the server indexes itself.
 Migration 0121 marks every document owed;
 0122's trigger marks a document owed on every markdown version any build inserts, which a block-aware writer's own index settles later in the same transaction;
@@ -1122,7 +1177,7 @@ goldmark continues the paragraph the table is made of with the line, where the b
 So is a table a line opening another block would be a row of - a list item that cannot interrupt a paragraph, whatever its marker, or indented code (`markBlockRows`):
 goldmark's table is a paragraph, which such a line continues, where that parser's table is no paragraph and ends there, reading the line as that block.
 So is a table a body row of which holds text in a cell past its delimiter row's width (`markWideRows`), naming the row and both fixes (a pipe inside a cell written `\|`, or header and delimiter rows as wide as the row):
-goldmark drops the cells past the table's width, where that parser keeps them, and a cell ends at every `|` not written `\|`, inside code and links too, so a code span holding a bare `|` in a row that fills its table lost the rest of the row's text when it was stored.
+goldmark drops the cells past the table's width, where that parser keeps them, and a cell ends at every `|` not written `\|`, inside code and links too, and at a `|` after an even run of backslashes (`\\|`), which `splitAtEvenEscapedPipes` splits where goldmark's cell runs on, so a code span holding a bare `|` in a row that fills its table lost the rest of the row's text when it was stored.
 A row whose cells past the width are blank loses nothing and is read at the table's width.
 A bare-row insert (`InsertTableRows`) decides in three steps.
 First, its fragment, less its blank lines at either end, must have every line yield a cell and an unescaped `|` (a lone `|` yields no cell, and a line whose only pipe is `\|` has no separator), with no line delimiter-shaped (cells of three hyphens or more, `tableDelimiterRow`).
@@ -1654,7 +1709,8 @@ An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and
   — the closer is a line that is exactly `---`, and an empty block is defaults
   — duplicate ids, unknown parent/depends_on, containment cycles, path hygiene;
   `parent` and `depends_on` name components of the same source's files only), and projects it in one transaction:
-  an immutable `architecture_snapshots` row per `(project, commit)`, delete+reinsert of that source's own `components`/`component_depends` (every other source's stay), and the source row's `last_sync_at`/`last_commit`/`last_tree_sha`/`last_error`.
+  an immutable `architecture_snapshots` row per `(project, commit)`, delete+reinsert of that source's own `components`/`component_depends` (every other source's stay), when each component it projects was made and last changed (`component_facts`, migration `0132`;
+  "References form one graph"), and the source row's `last_sync_at`/`last_commit`/`last_tree_sha`/`last_error`.
   Component ids are project-wide: a model holding an id another source of the project currently projects fails for the importing source alone, naming each id and the repository that holds it (`component id "x" is already a component of P from owner/name`), and the source holding the id keeps it.
   An invalid set, a colliding id, or a projection PostgreSQL refuses only records `last_error` on that source's row (capped at 4 KiB:
   the first problems and a count of the rest, the same text the `sync_failed` payload carries);
@@ -1674,7 +1730,7 @@ An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and
   404 without a source); `POST /api/v1/projects/{key}/architecture-source/sync`, kept for `dispatch` clients older than this release and logged at warn on every call (the every-source import, answering one row:
   the first in id order whose `last_error` is set, else the first;
   404 without a source); and the `dispatch architecture-sync` command of this release riding the every-source route, or the one-source route with `--repo`.
-  `DELETE /api/v1/projects/{key}/architecture-sources/{owner}/{repo}` deletes that source's `components` by the foreign key's cascade, and their `component_depends` by theirs, in the same transaction (the graph loses those component arms);
+  `DELETE /api/v1/projects/{key}/architecture-sources/{owner}/{repo}` deletes that source's `components` by the foreign key's cascade, and their `component_depends` by theirs, in the same transaction (the graph loses those component arms), then the `component_facts` rows whose component no source of the project projects any more (`architecture.DeleteOrphanComponentFacts`);
   every other source's components stay, and snapshots remain as history.
   A sync that hits its own two-minute deadline while the caller is still alive is recorded on the row like any other failure (the record write runs on a cancel-free context);
   a caller that has gone away records nothing.
