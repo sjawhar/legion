@@ -152,9 +152,9 @@ Two notes on what the script had to learn about its own surface:
 
 ### In CI
 
-On every pull request, the required `typecheck` job of `.github/workflows/pr-and-main.yaml` runs
+On every pull request whose diff selects them, the `typecheck` job of `.github/workflows/ci.yaml` runs
 `go vet -tags e2e ./...` (which also compiles the e2e-tagged Stage 4a harness) in
-`packages/daemon`, and its required `test` job installs `tmux` — the tmux runtime's tests drive a
+`packages/daemon`, and its `test` job installs `tmux` — the tmux runtime's tests drive a
 real tmux server and skip without one, and the daemon refuses to start without it — and the pinned
 `jj` (through mise, as the pi-legion job does) — the workspace tests drive a real jj, and the daemon
 resolves jj at boot and refuses to start without it — then runs `go test ./...` against its
@@ -874,7 +874,7 @@ LEGION_E2E_PREVIOUS_IMAGE=<worker image of main at contract 37 or 38, before one
 ```
 
 **Devbox only, against a real cluster; CI compiles the harness (`go vet -tags e2e ./...`
-in the Tests workflow's `typecheck` job) and does not run it.** Stage 4a's gate: `internal/runtime/sandbox` drives
+in the `typecheck` job of `ci.yaml`) and does not run it.** Stage 4a's gate: `internal/runtime/sandbox` drives
 Agent Sandbox pods in namespace `legion` from the devbox, the way the 4b daemon will. Four
 independent inputs — never auto-detected from one another — pick the cluster's shape:
 `LEGION_E2E_RUNTIME_IDENTITY_KIND` (`aws-iam-role` or `kubernetes-service-account`, how the
@@ -1011,7 +1011,7 @@ that reachability with a reverse tunnel, entirely of the run's own:
 | `LEGION_E2E_RUNTIME_IDENTITY_KIND` | required | `aws-iam-role` (an assumed IAM role mapped to RBAC group `legion-daemon`, EKS's shape) or `kubernetes-service-account` (a plain `system:serviceaccount:<namespace>:legion-daemon` with no such mapping, GKE's shape); `identity`'s assertions and a `network path` failure's diagnostics branch on it |
 | `LEGION_E2E_PLATFORM` | required | `eks` or `gke-autopilot`: the cluster's own platform, independent of identity and pod reachability. Every platform-specific relaxation in the Go harness (the gVisor cpu floor, the ephemeral-storage clamp, the extended-duration-pods affinity, the cgroup cpu quota check in place of `nproc`) keys off this field alone |
 | `LEGION_E2E_OPERATOR_CONTEXT` | `production` | the devbox's admin context, for operator steps only |
-| `LEGION_E2E_IMAGE` | required | the worker image under test, by digest: a `worker-image.yaml` run on the branch under test |
+| `LEGION_E2E_IMAGE` | required | the worker image under test, by digest: a `worker-image.yaml` build of the branch under test (ci.yaml's `worker-image` job on its pull request, or a dispatched run) |
 | `LEGION_E2E_POD_REACHABILITY` | required | `aws-private-ip` (the devbox's private address, directly routable) or `bridge` (a reverse tunnel through a scratch pod+Service of the run's own, for a cluster whose pods cannot reach the devbox at all; [above](#the-bridge-legion_e2e_pod_reachabilitybridge)) |
 | `LEGION_E2E_MODEL_ROUTE` | required | `gateway` (a model gateway, today's shape) or `key-file` (no gateway: `ANTHROPIC_API_KEY` reaches the agent as a provider key) |
 | `LEGION_E2E_STORAGE_CLASS` | required | the issue volumes' StorageClass — AWS's `gp2`, GKE's `standard-rwo`, or whatever else the cluster under test defaults to; the cluster has no default of its own to fall back on |

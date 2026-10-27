@@ -49,7 +49,7 @@
 # time, and check it is named but never shown.
 #
 # Run from anywhere: .github/scripts/release-push.test.sh
-# CI runs it in the Tests workflow (pr-and-main.yaml, job test).
+# CI runs it in ci.yaml's test job.
 set -euo pipefail
 # Hermetic: the developer's global/system git config (commit.gpgsign,
 # core.hooksPath, rerere, rebase.*) must not reach the seed repos or the script

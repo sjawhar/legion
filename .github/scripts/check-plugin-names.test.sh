@@ -9,7 +9,7 @@
 # path, which the symlink puts at the fixture root.
 #
 # Run from anywhere: .github/scripts/check-plugin-names.test.sh
-# CI runs it in the Tests workflow (pr-and-main.yaml, job test).
+# CI runs it in ci.yaml's test job.
 set -euo pipefail
 shopt -s inherit_errexit
 

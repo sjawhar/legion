@@ -87,7 +87,7 @@
 # What this check is for, so it is held to the right bar: it pins the release workflows' shape
 # against drift — a later well-meant edit that puts dependency code, a cache or a credential in the
 # wrong job, or loosens a checkout — not against someone editing a workflow file to hide a command
-# from it, who could as well remove this check from pr-and-main.yaml. The build/publish split is
+# from it, who could as well remove this check from ci.yaml. The build/publish split is
 # the boundary; this check is a tripwire on that boundary, and the pass-through class above (a
 # variable in command position, `xargs`, `nohup`, an unlisted program, a `bun` behind `docker -Dl
 # debug run`) is accepted on that ground.
@@ -98,7 +98,7 @@
 # read the jobs they name. Rule 6 reads every job's `if:`, steps or not.
 #
 # Run from anywhere: .github/scripts/check-release-credentials.sh
-# CI runs it in the lint job of pr-and-main.yaml, and its tests in that workflow's test job.
+# CI runs it in ci.yaml's lint job, and its tests in ci.yaml's test job.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."

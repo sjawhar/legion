@@ -3830,7 +3830,7 @@ Tests: `cd packages/envoy && go vet ./... && go test ./internal/broker/... ./cmd
 than fail, when `BROKER_TEST_DATABASE_URL` is unset (`t.Skip`, e.g. `internal/broker/store`,
 `internal/broker/requests`); `packages/envoy/scripts/dev-postgres.sh` starts a local Postgres for
 them, the same script `cmd/dispatch/README.md` documents for its own Postgres-backed tests, and
-CI's `envoy-go` job (`.github/workflows/envoy-and-contracts.yaml`) points
+CI's `envoy-go` job (in `.github/workflows/ci.yaml`) points
 `BROKER_TEST_DATABASE_URL` at the same server as `DISPATCH_TEST_DATABASE_URL`.
 `storetest.URL` stays the helper for everything ordinary: a migrated schema of its own per test,
 cheaper than a database and isolating rows just as well. `storetest.DatabaseURL` hands out a
@@ -3949,8 +3949,9 @@ would itself be the directory mise strips. `release_build` builds them with the 
 stamped in, and `release_publish` attests every `agent-secrets-*.tar.gz`; the `build` matrix job
 builds only `legion-envoy-<arch>.tar.gz` (envoy-listener alone, with its
 `THIRD_PARTY_NOTICES`). Each `agent-secrets` tarball also holds `agent-secrets/THIRD_PARTY_NOTICES`,
-the licenses of the Go modules its binaries compile in, and `pr-and-main.yaml` writes those
-notices for every archive and compiles the darwin client on each pull request. A host installs
+the licenses of the Go modules its binaries compile in, and the lint job of `ci.yaml` writes those
+notices for every archive and compiles the darwin client on each pull request whose change its
+`go_notices` filter matches. A host installs
 both binaries from this release (through the operator's dotfiles, under the broker design's
 devbox-enrollment plan), and a laptop the CLI.
 

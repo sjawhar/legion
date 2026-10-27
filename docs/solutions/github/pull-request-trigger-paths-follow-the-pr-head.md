@@ -43,8 +43,22 @@ Two consequences for the built artifact under `pull_request`:
   `github.event.pull_request.head.sha`, falling back to `github.sha` for `workflow_call` and
   `workflow_dispatch`:
   `BUILT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}`.
-- Concurrency should key on the PR, not the ref: `group: ${{ github.event.pull_request.number ||
-  github.ref }}` serialises two pushes to one PR and leaves other events on the ref key.
+- Concurrency should key on the PR, not the ref. `worker-image.yaml` uses `group:
+  worker-image-${{ github.event_name == 'pull_request' && github.event.pull_request.number ||
+  github.sha }}`. Since 2026-10-27 (INFRA-520, the CI router) it has `cancel-in-progress` on
+  `pull_request`: a new head's run cancels the older head's build, so push the next commit only
+  after the image run you need has completed. Other events key on the commit and never cancel.
+  (The note first described a key with `github.ref` for other events and a group that serialized
+  two pushes to one PR.)
+
+**Changed 2026-10-27 (INFRA-520, the CI router):** `worker-image.yaml` has no `pull_request`
+trigger of its own any more. `.github/workflows/ci.yaml` runs on every pull request with no
+`paths:`, and its `changes` job selects the `worker-image` job, which calls `worker-image.yaml`,
+with a dorny/paths-filter filter (`worker_image`) evaluated against the pull request's file list,
+the whole PR diff. The mechanism above still holds for that selection: every head of a pull request
+whose diff touches an image file gets the build, on any base. The Fix block below is the
+2026-09-12 shape. docs/solutions/github/join-a-job-to-the-ci-router.md covers how a job joins the
+router.
 
 Same-repo `pull_request` runs receive the workflow's declared `permissions` (here `contents: read`
 and `packages: write`); a fork PR would get a read-only token. Say which you rely on.

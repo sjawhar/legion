@@ -30,9 +30,14 @@ once before the fix lands" is therefore two pushes, not a local run.
 - Before the red push, read what the red can move. Check the workflow is not in the base's required
   set (`gh api repos/<owner>/<repo>/rules/branches/main`; `Worker Image` is not, so its red moves no
   issue), and that the red lands during implementing, which the daemon's CI-red move never touches.
-  Read the job's `concurrency`: `worker-image.yaml` serializes runs per pull request with
-  `cancel-in-progress: false`, so the fix push queues behind the red run instead of cancelling it (a
-  third push while one is still pending would cancel the pending one).
+  Read the job's `concurrency`. Since 2026-10-27 (INFRA-520, the CI router) `worker-image.yaml`
+  cancels a pull request's older build when a newer head starts its own run (`cancel-in-progress`
+  on `pull_request`, per PR number; ci.yaml's `worker-image` job is the call). So push the fix only
+  after the red run has completed and you have recorded its failure: a fix pushed earlier cancels
+  the red run, and the negative control is lost. (Before that date the group serialized instead,
+  and the fix push queued behind the red run.) The same change makes ci.yaml's `ci-ok` wait for
+  the `worker-image` job, so once main's ruleset requires `ci-ok` a red image build fails a
+  required check: read the ruleset again before you rely on the red moving nothing.
 - Make the guard print what it saw, not just fail. Anchor it with a `stat -c '%a %n'` on each path
   (a moved or missing path fails the build instead of passing an empty `find`, and the modes land in
   the log), then capture `find <paths> -perm /6000` into a variable, `echo` it with a `none` default,
@@ -45,9 +50,12 @@ once before the fix lands" is therefore two pushes, not a local run.
   pod), then `dpkg-deb -c` for the modes and `dpkg-deb -e` for `DEBIAN/postinst`, finds both; a guard
   scoped to the spec's one file would have failed the fixed image on the other.
 - A fix inside the apt `RUN` rebuilds every layer below it, so the fix push's run is cold and is the
-  one whose later steps print; the next head's run reuses them and prints `CACHED`
+  one whose later steps print; the next head's run reused them and printed `CACHED`
   (docs/solutions/daemon/a-cached-image-layer-s-output-is-in-the-run-that-built-it-cite-both-runs-LEGION-764.md).
-  Cite both runs.
+  Since 2026-10-27 (INFRA-520) a pull request's image build writes no cache: only builds on main
+  write the registry cache `ghcr.io/sjawhar/legion-worker:buildcache`. A later head of the same
+  pull request reuses only the layers main's builds cached, so it rebuilds the fix's layers and
+  prints the same lines again. Cite the fix run, or the run of the head you rely on.
 
 ## Evidence
 

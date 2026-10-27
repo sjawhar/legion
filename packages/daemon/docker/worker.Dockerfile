@@ -1,9 +1,10 @@
 # syntax=mirror.gcr.io/docker/dockerfile:1.7
 # Legion worker image: every Legion agent process under `runtime: kubernetes` runs from this image.
 # Build context: the repo root. Built by .github/workflows/worker-image.yaml on the GitHub-hosted runner
-# (called from release.yaml after `legion`, on every head of a pull request against main that touches a file
-# it builds from, or dispatched post-merge). Never build it on a workstation — no `docker build`,
-# `docker buildx`, or `docker compose build` (Sami, 2026-09-12); the CI runner is not a workstation.
+# (called from release.yaml after `legion`, from ci.yaml's worker-image job on every head of a pull
+# request that touches a file it builds from, or dispatched post-merge). Never build it on a
+# workstation — no `docker build`, `docker buildx`, or `docker compose build` (Sami, 2026-09-12);
+# the CI runner is not a workstation.
 #
 # Contents: pinned Bun; the Go `legion` (packages/daemon) compiled from this checkout at go.work's
 # Go version, static, at /opt/legion/bin/legion (one binary: worker-shim, launcher, workspace-init,

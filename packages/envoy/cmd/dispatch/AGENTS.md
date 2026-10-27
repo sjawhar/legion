@@ -570,7 +570,7 @@ go vet ./...
 
 The real-process memory tests (`memory_test.go`, LEGION-481) start a Dispatch server per row and
 read its resident memory from `/proc`, so they build only under the `memory` tag and run in their
-own CI job (`dispatch-memory` in `.github/workflows/envoy-and-contracts.yaml`), past `go test`'s
+own CI job (`dispatch-memory` in `.github/workflows/ci.yaml`), past `go test`'s
 default ten-minute deadline:
 
 ```sh
@@ -582,7 +582,7 @@ Postgres and one NATS and drive the properties a rolling release depends on — 
 across the leased maintenance loops, the delivery intake's standby and takeover, each outbox row
 published once, a live event stream fed from the other process, and a document room closed when
 the other process writes it. They build only under the `multiprocess` tag and run in their own CI
-job (`dispatch-multiprocess` in `.github/workflows/envoy-and-contracts.yaml`), because two servers
+job (`dispatch-multiprocess` in `.github/workflows/ci.yaml`), because two servers
 and their NATS take minutes rather than seconds:
 
 ```sh

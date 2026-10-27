@@ -29,7 +29,7 @@
 # of them, which would make `grep -I` treat the file as binary and skip it, is stripped first.
 #
 # Usage: GITHUB_EVENT_PATH=<payload> GITHUB_REPOSITORY=<owner>/<repo> .github/scripts/check-pr-text.sh
-# CI runs it in the required lint job of pr-and-main.yaml on every pull request push, and in
+# CI runs it in ci.yaml's lint job on every pull request push, and in
 # pr-title.yaml when a pull request is opened, reopened or edited or a review on it is submitted
 # or edited; its tests are in check-private-names.test.sh.
 set -euo pipefail

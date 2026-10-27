@@ -8,8 +8,8 @@
 # LEGION_POSTGRES_DSN (or postgres_dsn below) names a Postgres.
 # Every example.com host is a documentation domain (RFC 2606) and legion-daemon-widgets.legion.svc
 # the Service name this example's convention gives (below); the App ids are made up; the image
-# digest is all zeros, where yours is the one a Worker Image workflow run or a legion-v<version>
-# release publishes.
+# digest is all zeros, where yours is the one a worker-image.yaml build on main (its run summary)
+# or a legion-v<version> release publishes.
 
 project: WIDGETS                       # the Dispatch project key this daemon runs; also a key of projects
 state_dir: ./state                     # the daemon's local state

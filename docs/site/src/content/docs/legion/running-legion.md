@@ -205,7 +205,7 @@ prefix in an unprivileged container, unpacking
 one by hand works for some tools and not others, and what rules out a client a role unpacks onto
 its own `PATH` is the withheld `operator-setup` capability, not the unpacking itself.
 `legion.yaml` accepts the image only by digest (`ghcr.io/sjawhar/legion-worker@sha256:…`). A digest
-is published in each Worker Image workflow run's summary and in the body of each `legion-v<version>`
+is published in the summary of each run that builds the worker image and in the body of each `legion-v<version>`
 GitHub release; for a `sha-` or release-version worker-image tag,
 `docker buildx imagetools inspect ghcr.io/sjawhar/legion-worker:<tag>` prints its digest. Worker-image
 tags are `sha-<the commit's first 12 hex digits>` for every build and `<legion version>` for a

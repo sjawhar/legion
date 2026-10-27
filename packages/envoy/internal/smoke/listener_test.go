@@ -38,8 +38,8 @@ func TestSmoke(t *testing.T) {
 			"  ENVOY_SMOKE_IMAGE=$img go test -tags smoke -v ./internal/smoke/\n" +
 			"`-q` prints the image id, and go's test cache keys on the value of this variable, " +
 			"so rebuilding re-runs the test. A fixed tag would replay a cached PASS against an " +
-			"image that had since changed. In CI the build is a step of its own; see " +
-			".github/workflows/envoy-and-contracts.yaml.")
+			"image that had since changed. In CI the build is a step of its own; see the " +
+			"envoy-smoke job of .github/workflows/ci.yaml.")
 	}
 
 	ctx := context.Background()

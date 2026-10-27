@@ -328,7 +328,7 @@ publish, the agent stream relay, Dispatch creating the redelivery bucket, which 
 then reads and writes, and that Dispatch's own user is refused a publish to a session's frames; its
 negative control removes the delivery durable's filtered create permission and receives that server
 violation alone. The `envoy-infra-go` job in
-`.github/workflows/envoy-and-contracts.yaml` runs, from `packages/envoy/infra`:
+`.github/workflows/ci.yaml` runs, from `packages/envoy/infra`:
 
 ```sh
 test -z "$(gofmt -l .)"
@@ -337,8 +337,8 @@ go test ./...
 go test -tags natslive ./core/ ./seed/
 ```
 
-The release workflow's `build` job runs vet and the unit tests again before it builds. The required
-`lint` job of `.github/workflows/pr-and-main.yaml` compiles the module's commands for every release
+The release workflow's `build` job runs vet and the unit tests again before it builds. The
+`lint` job of `.github/workflows/ci.yaml` compiles the module's commands for every release
 target. Run those steps from those jobs after changing what they cover.
 
 A component's tests run on `pulumitest.Mocks`, which records every registration and answers with

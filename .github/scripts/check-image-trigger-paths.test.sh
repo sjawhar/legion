@@ -367,7 +367,7 @@ PYEOF
 
 echo "case: the building job's own if: gate narrows what the trigger covers"
 # gate_build_job <root> <filter patterns>: adds a changes job to image.yaml and gates the
-# building job on one of its filters, the shape envoy-and-contracts.yaml uses.
+# building job on one of its filters, the shape ci.yaml uses.
 gate_build_job() {
   local root=$1 patterns=$2
   python3 - "$root/.github/workflows/image.yaml" "$patterns" <<'PY'

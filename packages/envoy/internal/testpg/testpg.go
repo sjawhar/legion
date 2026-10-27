@@ -33,8 +33,8 @@ const databaseURLEnv = "DISPATCH_TEST_DATABASE_URL"
 // dropped when the test ends. It is reached two ways.
 //
 // With DISPATCH_TEST_DATABASE_URL set, the database is created on the server that variable names
-// — the Postgres service the envoy-go job already runs
-// (.github/workflows/envoy-and-contracts.yaml) — and dropped from it afterwards. That variable is
+// — the Postgres service the envoy-go job of .github/workflows/ci.yaml already runs — and
+// dropped from it afterwards. That variable is
 // storetest's own, reused rather than doubled: it is how every Postgres-backed Dispatch test is
 // already told which server CI provides, and a second name would have to be set beside it on every
 // job and in every developer's shell for the same answer. Its database path is ignored exactly as

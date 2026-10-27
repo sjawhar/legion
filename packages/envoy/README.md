@@ -86,7 +86,7 @@ Evidence remains in `packages/envoy/out/e2e/` after the run:
 
 Set `E2E_NATS_PORT`, `E2E_PORT`, or `E2E_SESSION_PORT` when the default local
 ports are occupied. CI runs it as the `envoy-e2e-local` job of
-`.github/workflows/envoy-and-contracts.yaml`.
+`.github/workflows/ci.yaml`.
 
 ## Contract source of truth
 

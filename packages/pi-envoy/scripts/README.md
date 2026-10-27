@@ -40,7 +40,7 @@ Run from a host with:
 - A configured model provider: the script makes a real model call inside the
   spawned session, so it costs tokens and needs live credentials.
 
-CI does not run this script — `.github/workflows/pr-and-main.yaml` has no
+CI does not run this script — `.github/workflows/ci.yaml` has no
 step for it, and none should be added while these prerequisites are unmet in
 CI's sandbox.
 

@@ -22,7 +22,7 @@ import (
 // localRun is how to run the live tests by hand, from the repository root.
 const localRun = "From the repository root, build the listener image and fetch the docker provider " +
 	"plugin v" + DockerPluginVersion + ", checking it against the SHA-256 the envoy-smoke job of " +
-	".github/workflows/envoy-and-contracts.yaml pins:\n" +
+	".github/workflows/ci.yaml pins:\n" +
 	"  docker buildx build --load -t legion-envoy-smoke:local -f packages/envoy/docker/Dockerfile .\n" +
 	"  curl -fsSL -o /tmp/" + dockerPluginTarball + " " +
 	"https://github.com/pulumi/pulumi-docker/releases/download/v" + DockerPluginVersion + "/" +
@@ -32,8 +32,8 @@ const localRun = "From the repository root, build the listener image and fetch t
 	"ENVOY_INFRA_DOCKER_PLUGIN=/tmp/" + dockerPluginTarball + " " +
 	"go test -count=1 -tags pulumilive -v -timeout 15m ./host/\n" +
 	"-count=1 because go's test cache cannot see the image behind a fixed tag, and would " +
-	"replay a cached PASS against an image that had since changed. In CI each is a step of its " +
-	"own; see .github/workflows/envoy-and-contracts.yaml."
+	"replay a cached PASS against an image that had since changed. In CI each is a step of the " +
+	"envoy-smoke job; see .github/workflows/ci.yaml."
 
 // DockerPluginVersion is the docker provider plugin the live programs pin, and so the version of
 // the tarball DockerPluginEnv names. CI reads it from here when it downloads that tarball.

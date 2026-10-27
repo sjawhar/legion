@@ -31,12 +31,14 @@ const autoMergeTimeout = 30 * time.Second
 // which replaces the payload on purpose (readyMergeConflict), resets the two together and they can
 // never disagree. Measured from created_at they would: the upsert leaves it at the original
 // queueing, so a reopen of an hours-old row would warn at once about a submission seconds old.
-// Measured on sjawhar/legion on 2026-10-23, main requires the checks lint, typecheck, test and
-// pr-title; over the last eight main heads those took test 12-16 minutes, lint 3-5, typecheck and
-// pr-title under a minute, and across the last 97 completed pull_request runs the median was 2.5
-// minutes and the 90th percentile 17, with one 82-minute outlier. An hour is above every required
-// check's observed maximum and above the 90th percentile of every run, so a row still waiting then
-// waits on something the repository's own checks will not end.
+// With the CI router (INFRA-520), main requires ci-ok, which waits for every job its change
+// selected, and pr-title. One of those jobs, the Playwright browser job (dispatch), takes a median
+// of 46 minutes and a 90th percentile of 50, plus queue time
+// (dispatch://INFRA-490/artifact/ci-router-measurement-2026-10-26-md). A merge that waits for it
+// can pass an hour, so readyMergeWaiting can fire on a merge its checks will still end. The hour
+// stays as one informational notice (the INFRA-490 architect's decision). It was first set when,
+// measured on 2026-10-23, main required lint, typecheck, test and pr-title, test took 12-16
+// minutes, and the 90th percentile of every pull_request run was 17.
 const mergeWaitWarn = time.Hour
 
 // autoMergeDisable disarms pull request payload.Number as the implement App, which submits READY's

@@ -787,7 +787,7 @@ func TestTheStallTransitionTableIsPiLegions(t *testing.T) {
 	bun, err := exec.LookPath("bun")
 	if err != nil {
 		if os.Getenv("GITHUB_ACTIONS") == "true" {
-			t.Fatal("bun is not on PATH on GitHub Actions: the Tests workflow's test job installs it before the Go tests")
+			t.Fatal("bun is not on PATH on GitHub Actions: ci.yaml's test job installs it before the Go tests")
 		}
 		t.Skipf("bun is not on PATH: %v", err)
 	}

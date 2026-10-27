@@ -139,7 +139,12 @@ the process stays alive until the driver kills it.
 that actually installs the release inside the image. Read its `Build and push` log for
 `mise github:sjawhar/oh-my-pi@<tag> ✓ installed`, `omp/18.1.18`, and `probe-image: OK
 (/opt/omp/bin/omp)`. A later handoff-only commit re-runs the workflow fully `CACHED` — the first run
-is the evidence. Why the check attaches to every PR head is
+is the evidence. (Superseded 2026-10-27, INFRA-520, the CI router: the pull request's image build is
+now the `worker-image` job of ci.yaml, which calls `worker-image.yaml`. A handoff-only push carries
+`skip-checks: true` and starts no run; a push without it cancels the first run if that run is
+unfinished, and a pull request's build writes no cache, since only builds on main write the
+registry cache `ghcr.io/sjawhar/legion-worker:buildcache`, so its run rebuilds every layer main's
+cache lacks.) Why the check attaches to every PR head is
 `docs/solutions/github/pull-request-trigger-paths-follow-the-pr-head.md`; the image's probe ordering
 is `docs/solutions/infra/omp-in-a-container-image.md`.
 

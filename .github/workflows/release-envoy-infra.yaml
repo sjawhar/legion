@@ -121,8 +121,8 @@ jobs:
             --patch-path scripts/go-third-party-notices.sh --patch-path .github/envoy-infra-targets.json \
             -- "${paths[@]}" >> "$GITHUB_OUTPUT"
       # The module's vet, both live-test tags included, and its unit tests, before anything is
-      # built: envoy-and-contracts.yaml's envoy-infra-go job, which runs them on a pull request, is
-      # not a required check, so the release checks the behaviour it publishes itself, as
+      # built: ci.yaml's envoy-infra-go job runs them on a pull request only when its filter selects
+      # the job, so the release checks the behaviour it publishes itself, as
       # release-envoy-listener.yaml runs its container smoke test in its docker job before
       # release_publish publishes. Vet compiles the live tests without running them; the unit tests
       # start no container, so this job needs no Docker.
