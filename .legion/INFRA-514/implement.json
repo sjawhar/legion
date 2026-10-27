@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-514",
+  "completed": "2026-10-27T15:52:00Z",
+  "proof": [
+    {
+      "criterion": "R1 EV-5: Get/List/LastSeen take only the shared lock and change nothing; Get at 3,000 sessions within 2x of 400; a reaper pass at 3,000 within 10x of 400",
+      "surface": "Go benchmarks in packages/envoy (internal/session, cmd/listener) on the 2-core issue pod, main ae36683e plus the benchmark files against the head",
+      "command": "bench/run2.sh main <main export> off && bench/run2.sh head2 packages/envoy (go test -run '^$' -bench 'Registry|Reap' -benchmem -count 5); medians.py main head2; benchstat main-all.txt head2-all.txt (dispatch://INFRA-514/artifact/infra514-measurements-tar-gz v2)",
+      "observed": "Registry/Get 14.2/36.3/122 us -> 0.162/0.182/0.197 us at 400/1,000/3,000 (head 3,000/400 = 1.22x, base 8.6x); Reap 5.34 ms/32.7 ms/304 ms -> 7.23/24.8/54.4 us (head 7.5x, base 57x); GetEach 372 ms -> 622 us at 3,000; benchstat p=0.008 for each",
+      "headSha": "278c9c06140d1b26f678ff2b31b8c64cbac3da6a",
+      "negativeControl": "The same benchmark file on main's code (pruning reads under the exclusive lock, isAlive under the interest lock) gives Get 8.6x and Reap 57x from 400 to 3,000 sessions"
+    },
+    {
+      "criterion": "R4/R5 EV-7: a Rewatch after a completed scan applies only what was written since; warm-up outcome resumed; a 1,000- and 25,000-key rewatch costs what an empty bucket does",
+      "surface": "INFRA-589 reproduction harness (three real envoy-listener processes, nats-server 2.10.29 restarted 6 minutes into the step) and Go benchmarks internal/kvwatch, internal/cistore",
+      "command": "harness-514.sh head2-1x 1 bin/envoy-listener-head2; harness-514.sh head2-10x 10 bin/envoy-listener-head2; analyze-514.py; go test -run '^$' -bench Rewatch -benchmem -count 5 ./internal/kvwatch/ ./internal/cistore/",
+      "observed": "After the nats-server restart every listener logged interest/session warm-up outcome resumed with 0-8 entries (1x: 0 and 1; 10x: 4 and 7) against completed 400/1,000 on main; cistore Rewatch of 25,000 records 3.20 s, 3,428 ms CPU, 207 MB -> 5.2 ms, 6 ms, 117 KB; entries/op 25,000 -> 0; allocations 806-808 at 1,000 and 25,000 keys against 657 at 0 keys",
+      "headSha": "278c9c06140d1b26f678ff2b31b8c64cbac3da6a",
+      "negativeControl": "harness-514.sh main-1x/main-10x with main's listener (ae36683e): the same restart gives outcome completed with every key read (400 and 1,000 entries per bucket per listener)"
+    },
+    {
+      "criterion": "R6 EV-11: an unchanged heartbeat writes the interest row only once it is 5 minutes old; KV writes per heartbeat 2.0 -> <=1.3 at 1x and 10x",
+      "surface": "INFRA-589 reproduction harness: loadgen's 400/1,000 sessions heartbeat every 90 s through POST /v1/interests/subscribe on the real listener; KV_envoy_interests and KV_envoy_sessions LastSeq read from the NATS monitor /jsz",
+      "command": "harness-514.sh main-1x|head2-1x 1 and main-10x|head2-10x 10; analyze-514.py (LastSeq delta between minutes 1 and 6 / heartbeats in that window); CGO_ENABLED=1 go test -race -run TestHeartbeatKVWritesPerHeartbeat -v ./cmd/listener/",
+      "observed": "KV writes per heartbeat 2.00 -> 1.30 at 1x and 1.96 -> 1.26 at 10x (interest 1.00 -> 0.30; session ~1.00 both); the go test logs interest writes/heartbeat=0.00 at head, 1.00 on main",
+      "headSha": "278c9c06140d1b26f678ff2b31b8c64cbac3da6a",
+      "negativeControl": "main's listener (ae36683e) in the same harness writes 2.00 KV rows per heartbeat; TestUpsertWritesAChangedTopicSetAtOnce shows a heartbeat that adds a topic still writes at once"
+    },
+    {
+      "criterion": "R9 delivery p99 no worse at head",
+      "surface": "INFRA-589 reproduction harness, Dispatch -> NATS -> sessions",
+      "command": "harness-514.sh main-1x 1 / head2-1x 1; summary.json events.delivery_ms_from_response_all",
+      "observed": "delivery p50/p99 56.2/351 ms on main, 55.7/292 ms at head; request p99 30.1/30.0 s; at 10x Dispatch committed no events on main or head (INFRA-589 finding 5)",
+      "headSha": "278c9c06140d1b26f678ff2b31b8c64cbac3da6a",
+      "negativeControl": "1 of 1,924 (main) and 9 of 1,973 (head) committed events got no receipt; those sessions are self_subscribed with port 0, so the listener is not on their delivery path, and the inference is that they missed what was published while nats-server restarted"
+    }
+  ],
+  "filesChanged": [
+    ".dispatch/architecture/envoy-listener.md",
+    ".github/workflows/envoy-and-contracts.yaml",
+    "docs/solutions/envoy/a-cache-miss-must-not-release-what-another-listener-wrote.md",
+    "packages/envoy/AGENTS.md",
+    "packages/envoy/CHANGELOG.md",
+    "packages/envoy/docs/architecture.md",
+    "packages/envoy/cmd/listener/main.go",
+    "packages/envoy/cmd/listener/api_test.go",
+    "packages/envoy/cmd/listener/heartbeat_writes_test.go",
+    "packages/envoy/cmd/listener/reaper_bench_test.go",
+    "packages/envoy/cmd/listener/restart_test.go",
+    "packages/envoy/internal/bus/kvresume.go",
+    "packages/envoy/internal/bus/kvresume_test.go",
+    "packages/envoy/internal/cistore/rewatch_bench_test.go",
+    "packages/envoy/internal/kvwatch/kvwatch.go",
+    "packages/envoy/internal/kvwatch/resume_test.go",
+    "packages/envoy/internal/kvwatch/rewatch_bench_test.go",
+    "packages/envoy/internal/kvwatch/warmup_test.go",
+    "packages/envoy/internal/session/cache_test.go",
+    "packages/envoy/internal/session/expiry.go",
+    "packages/envoy/internal/session/expiry_test.go",
+    "packages/envoy/internal/session/registry.go",
+    "packages/envoy/internal/session/registry_bench_test.go",
+    "packages/envoy/internal/store/kv.go",
+    "packages/envoy/internal/store/kv_test.go"
+  ],
+  "trickyParts": [
+    "kvwatch keeps one complete flag (the atomic) that both #2167's Complete() and the resume read; a resumed generation is complete at its own nil marker, and a WithRescan rescan passes no connection so it always reads in full.",
+    "A full-read generation resets hw to 0, so an hw above LastSeq (a restored older snapshot) cannot force a full read at every later Rewatch.",
+    "The reaper deletes with nats.LastRevision(checked revision); JetStream's wrong-last-sequence answer (nats.ErrKeyExists) counts as skipped. Revision 0 falls back to deleteInterest because LastRevision(0) is no condition.",
+    "The session cache does not insert an already-expired put for an id it does not hold, so a stale delivery after the fence has gone cannot make the id live or bring back a LastSeen answer.",
+    "EV-11 lives in Registry.UpsertWithin (#2167), which Upsert and the subscribe route both reach."
+  ],
+  "deviations": [
+    "The race job: #2167 added a listener race step, so ./internal/session/ joined that step (plan T5's stated alternative); kvwatch was already in it.",
+    "#2167's TestCompleteIsTheCurrentWatchersFirstScanDeliveringEveryKey now writes a key while its watcher is away, because a rewatch resumes and delivers nothing otherwise; it checks the same thing.",
+    "Before/after numbers are main ae36683e (merge base after #2167 and INFRA-610) against the head; the earlier 1357b95c run is kept in the artifact and agrees.",
+    "The restart test asserts resumed with 0 entries: the server is down during the restart, so no write lands while the listener is away; the k-writes case is resume_test.go's."
+  ],
+  "openQuestions": [
+    "R7's gate is the tester's: INFRA-610's production check showing all three listeners on its build before this goes to review."
+  ]
+}
