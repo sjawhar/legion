@@ -30,6 +30,9 @@ export interface FakeEditor {
   root: HTMLElement;
   /** Whether the fake view's selection is empty (a caret); a test sets it to select text. */
   selectionEmpty: boolean;
+  /** The innermost block with an id that holds the selection, as `blockIdAtSelection` answers;
+   *  a test sets it to copy a block link. */
+  selectedBlock: string | null;
   /** The fake view's props bag, where `setProps` accumulates node views the host installs. */
   viewProps: Record<string, unknown>;
 }
@@ -105,12 +108,16 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       remoteMarks: [],
       root,
       selectionEmpty: true,
+      selectedBlock: null,
       viewProps: { nodeViews: {} },
     };
     root.textContent = options.ydoc.getXmlFragment("prosemirror").toString();
     const handle = {
       applyRemoteMarks(metadata: Record<string, StoredMark>) {
         editor.remoteMarks.push(metadata);
+      },
+      blockIdAtSelection() {
+        return editor.selectedBlock;
       },
       commentOnSelection() {
         editor.commented += 1;
