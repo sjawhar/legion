@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-521",
-  "completed": "2026-10-27T06:03:13Z",
+  "completed": "2026-10-27T06:33:20Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2313",
-  "headSha": "2cd0e10371bf1669d84617e671347a581a156221",
+  "headSha": "0fc4e40a721cfcee0257ee8a20b82a6d60c6a5a1",
   "proof": [
+    {
+      "criterion": "Tester round 2 failure (criterion 2): the documented rule gives the selection; issue.e2e.ts:1226 (iphone-only, sets 1920 then 390) stays tagged under it",
+      "surface": "packages/dispatch/AGENTS.md \"Phone acceptance\" applied to the specs; Playwright CLI in packages/dispatch",
+      "command": "bun $TMPDIR/infra521/viewport-scan.ts packages/dispatch/e2e (every tagged test whose literal widths are all >= 768) and viewport-scan2.ts (every untagged test that reaches a width < 768 and does not skip all but chromium/webkit-iphone); bunx playwright test --config e2e/playwright.config.ts --list --project iphone --reporter=json | bun $TMPDIR/infra521/check-iphone.ts",
+      "observed": "The desktop-viewport exception now names only a test that sets a desktop width for every project and never reaches a phone width, and a test that skips every project but iphone is always tagged (R5). Tagged tests with only desktop literal widths: 13, each sets them in a project branch (chromium only) or is in phone*.e2e.ts, so the exception reaches none of them; issue.e2e.ts:1226 reaches 390 and is R5. Untagged tests that reach a phone width: agent-name.e2e.ts:478, ask-blocks.e2e.ts:110, claim.e2e.ts:15, references.e2e.ts:25 (fixed widths for every project, so R3 is exempt, and no title or own comment names the phone), delivery.e2e.ts:264 (a 12 px slider box, not a viewport), mention-composer.e2e.ts:443 (the narrowing exception). iphone --list: 223 = table v2 keep rows, 0 extra, 0 missing.",
+      "headSha": "0fc4e40a721cfcee0257ee8a20b82a6d60c6a5a1",
+      "negativeControl": "Under the round-2 text (\"sets a desktop viewport for every project before it checks anything\"), issue.e2e.ts:1226 matched and an author would untag it; the tester showed it then runs nowhere (iphone --list 222, chromium skips it). Under the new text it is excluded from that clause twice: it reaches 390, and it skips every project but iphone."
+    },
     {
       "criterion": "Review round 1 (PR #2313 review 5662777061): the documented rule gives the selection; iphone runs the 223 kept tests",
       "surface": "Playwright CLI in packages/dispatch and a real browser in the issue pod (harness /legion/scratch/harness, lane implementer)",
@@ -113,7 +121,8 @@
     "packages/dispatch/AGENTS.md (Phone acceptance: what iphone runs, R1-R6, tag syntax, silent-drop caveat and --list check; the grep-exception sentence)",
     "packages/dispatch/README.md (the seven projects as the config defines them)",
     "docs/solutions/testing/a-layout-change-is-proven-by-the-whole-project-...-INFRA-92.md (dated INFRA-521 note)",
-    "Round 2: packages/dispatch/AGENTS.md (precondition before R1-R6; skip sentence narrowed to === \"iphone\" skips, !== \"chromium\" skips stay), e2e/issue.e2e.ts (:697 tagged), e2e/margin-thread-reply.e2e.ts (:226 passes \"chromium\"), e2e/agents-search.e2e.ts and e2e/inbox.e2e.ts (dead iphone width ternaries inlined to 1280), e2e/playwright.config.ts (anchor comment); AGENTS.md precondition also names a test that starts at the project width expecting a desktop one and narrows the window itself (mention-composer.e2e.ts:443)"
+    "Round 2: packages/dispatch/AGENTS.md (precondition before R1-R6; skip sentence narrowed to === \"iphone\" skips, !== \"chromium\" skips stay), e2e/issue.e2e.ts (:697 tagged), e2e/margin-thread-reply.e2e.ts (:226 passes \"chromium\"), e2e/agents-search.e2e.ts and e2e/inbox.e2e.ts (dead iphone width ternaries inlined to 1280), e2e/playwright.config.ts (anchor comment); AGENTS.md precondition also names a test that starts at the project width expecting a desktop one and narrows the window itself (mention-composer.e2e.ts:443)",
+    "Round 3: packages/dispatch/AGENTS.md (the desktop-viewport exception covers only a test that never reaches a phone width; a test that skips every project but iphone is always tagged)"
   ],
   "trickyParts": [
     "Playwright's project grep text also holds the project name 'iphone' and file paths like phone.e2e.ts, so the grep is anchored on whitespace: /(^|\\s)@phone(\\s|$)/.",
@@ -130,5 +139,5 @@
   "discoveredComplexity": [
     "The first version of the PR description carried the private Dispatch host in a link; it was replaced within 21 minutes. The person the work is for chose to leave the old revision in GitHub's edit history (dispatch://INFRA-521/ask/ec8e50ba-8f28-4c80-bacc-12f751bdec25)."
   ],
-  "round": 2
+  "round": 3
 }
