@@ -1749,7 +1749,8 @@ function routeHeldBySession(issue: RoutedIssue): boolean {
 /**
  * An issue's route as every agent surface reads it: where its messages go and whether that
  * reaches anyone, from the `route_status` the server resolved on this read. A route to a role
- * nobody holds, or to a session that is not running, reaches nobody at the moment of the read,
+ * nobody holds, or to a session that is not running, reaches nobody as of the server's copy of
+ * the listener's session list, at most 5 s old,
  * so it says so - and says "right now", because a restarting session is absent for minutes.
  */
 function routeText(issue: RoutedIssue, titles?: ReadonlyMap<string, string>): string {

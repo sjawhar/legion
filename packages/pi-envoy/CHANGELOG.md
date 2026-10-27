@@ -4,6 +4,11 @@
 
 ### Added
 
+- The `dispatch` skill never claims an issue with the `legion` label unless the session is a
+  Legion role of its tree, even when its claim reads `not running`: the Legion daemon suspends a
+  root's architect while the root waits on a person, and taking that claim takes the tree out of
+  the workflow.
+
 - `dispatch-first`'s blocker rule says a design question that a document records is an ask block in that document, and any other blocker a `dispatch ask`. `packages/pi-shared/test/skills-partition.test.ts` now fails when a shipped skill or a daemon prompt names a `skill://` that neither plugin ships.
 
 - The agent stream reports the model and thinking level the session runs now, so Dispatch's live
