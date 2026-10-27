@@ -31,6 +31,7 @@ import (
 	"net/url"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -107,13 +108,20 @@ func startPair(t *testing.T, env map[string]string) *dispatchPair {
 }
 
 // databaseURL is the connection string a process is started with: the database storetest cloned
-// for this test, as its pool's configuration names it. The credential is written through
-// url.UserPassword when the pool carries a password, since CI's Postgres takes one
-// (DISPATCH_TEST_DATABASE_URL) where a trust-authenticated development server does not, and a URL
-// built without it is refused with SQLSTATE 28P01 before the process can serve anything.
+// for this test (databaseURLOf).
 func (p *dispatchPair) databaseURL(t *testing.T) string {
 	t.Helper()
-	config := p.database.Pool.Config().ConnConfig
+	return databaseURLOf(t, p.database)
+}
+
+// databaseURLOf is the connection string of database as its pool's configuration names it. The
+// credential is written through url.UserPassword when the pool carries a password, since CI's
+// Postgres takes one (DISPATCH_TEST_DATABASE_URL) where a trust-authenticated development server
+// does not, and a URL built without it is refused with SQLSTATE 28P01 before the process can serve
+// anything.
+func databaseURLOf(t *testing.T, database *store.Store) string {
+	t.Helper()
+	config := database.Pool.Config().ConnConfig
 	credential := url.User(config.User).String()
 	if config.Password != "" {
 		credential = url.UserPassword(config.User, config.Password).String()
@@ -2323,9 +2331,10 @@ func backDateRedeliveryClaim(t *testing.T, natsURL, guid string, by time.Duratio
 // A webhook redelivery whose process was killed between claiming the delivery and recording
 // GitHub's answer is requested again by the next sweep once the claim's deadline (three GitHub
 // request timeouts, a minute) has passed. Two `envoy-dispatch redeliver-webhooks --since 1h` runs
-// share one NATS and one GitHub; the first is SIGKILLed while its redelivery request is held on
-// the way to GitHub, the test moves the claim's time back past the deadline rather than waiting
-// it out, and the second run asks GitHub for the delivery, once.
+// share one NATS, one database (the GitHub rate limits every process obeys) and one GitHub; the
+// first is SIGKILLed while its redelivery request is held on the way to GitHub, the test moves the
+// claim's time back past the deadline rather than waiting it out, and the second run asks GitHub
+// for the delivery, once.
 func TestAWebhookRedeliveryWhoseProcessDiedAfterItsClaimIsRequestedAgain(t *testing.T) {
 	natsURL := multiprocessNATS(t)
 	key, pemText := githubapptest.Key(t)
@@ -2338,6 +2347,7 @@ func TestAWebhookRedeliveryWhoseProcessDiedAfterItsClaimIsRequestedAgain(t *test
 	env["DISPATCH_APP_CLIENT_ID"] = clientID
 	env["DISPATCH_APP_PEM_B64"] = base64.StdEncoding.EncodeToString([]byte(pemText))
 	env["NATS_URLS"] = natsURL
+	env["DATABASE_URL"] = databaseURLOf(t, storetest.Open(t))
 	binary := cmdtest.Build(t, "envoy-dispatch")
 
 	first := startRedeliverWebhooks(t, binary, env)
@@ -2367,6 +2377,110 @@ func TestAWebhookRedeliveryWhoseProcessDiedAfterItsClaimIsRequestedAgain(t *test
 	}
 	if !strings.Contains(second.Output.String(), " redelivered=1") {
 		t.Fatalf("the second run does not report the delivery redelivered:\n%s", second.Output.String())
+	}
+}
+
+// ───── one GitHub rate limit across the processes ──────────────────────────
+
+// rateLimitGitHub is the GitHub both processes' proxy reads go to: acme/web, the installation
+// covering it (77), a token mint answering rateLimitToken, and every read under that token, which
+// it records. A read of rateLimitedRead answers as GitHub answers an exhausted rate limit: 403,
+// X-RateLimit-Remaining: 0 and Retry-After. Every other App call answers an empty list, as
+// githubFake's do.
+type rateLimitGitHub struct {
+	server *httptest.Server
+
+	mu         sync.Mutex
+	tokenReads []string
+}
+
+const (
+	rateLimitToken  = "ghs_rate_limit_77"
+	rateLimitedRead = "/repos/acme/web/pulls/1"
+)
+
+func startRateLimitGitHub(t *testing.T) *rateLimitGitHub {
+	t.Helper()
+	fake := &rateLimitGitHub{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/{owner}/{repo}/installation", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"id":77,"app_slug":"multiprocess","permissions":{"pull_requests":"read"}}`)
+	})
+	mux.HandleFunc("POST /app/installations/{id}/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = fmt.Fprintf(w, `{"token":%q,"expires_at":%q}`, rateLimitToken, time.Now().Add(time.Hour).Format(time.RFC3339))
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Header.Get("Authorization") != "Bearer "+rateLimitToken {
+			_, _ = io.WriteString(w, "[]")
+			return
+		}
+		fake.mu.Lock()
+		fake.tokenReads = append(fake.tokenReads, r.Method+" "+r.URL.RequestURI())
+		fake.mu.Unlock()
+		if r.URL.Path == rateLimitedRead {
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"message":"API rate limit exceeded for installation ID 77."}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"state":"open","title":"Ship it"}`)
+	})
+	fake.server = httptest.NewServer(mux)
+	t.Cleanup(fake.server.Close)
+	return fake
+}
+
+// reads is every request GitHub has been sent under the installation's token, by either process.
+func (f *rateLimitGitHub) reads() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.tokenReads)
+}
+
+// proxyRead sends GET path to p's GitHub proxy as the test's login and returns the status, the
+// Retry-After header and the error code of the answer.
+func (p *dispatchProcess) proxyRead(t *testing.T, path string) (status int, retryAfter, code string) {
+	t.Helper()
+	response, err := p.send(http.MethodGet, path, "")
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	defer response.Body.Close()
+	var body struct {
+		Code string `json:"code"`
+	}
+	_ = json.NewDecoder(response.Body).Decode(&body)
+	return response.StatusCode, response.Header.Get("Retry-After"), body.Code
+}
+
+// GitHub budgets an installation, not a process, so a rate limit one process meets holds every
+// process. A meets an exhausted limit reading acme/web as its installation; B's read of another
+// path under the same installation answers 503 GITHUB_RATE_LIMITED with a Retry-After, and GitHub
+// is sent nothing more under the installation's token. B's installation lookup and token mint are
+// the App's calls, under the App's own limit, and may still reach GitHub.
+func TestARateLimitOneProcessMetStopsTheOtherFromCallingGitHub(t *testing.T) {
+	github := startRateLimitGitHub(t)
+	pair := startPair(t, githubAppEnv(t, github.server.URL))
+
+	statusA, retryA, codeA := pair.a.proxyRead(t, "/api/github/rest"+rateLimitedRead)
+	if reads := github.reads(); len(reads) != 1 {
+		t.Fatalf("GitHub got %v under the installation's token, want A's one read", reads)
+	}
+	statusB, retryB, codeB := pair.b.proxyRead(t, "/api/github/rest/repos/acme/web/issues/2")
+	if reads := github.reads(); len(reads) != 1 {
+		t.Errorf("GitHub got %v under the installation's token: B asked it inside the limit A met", reads)
+	}
+	if statusB != http.StatusServiceUnavailable || codeB != "GITHUB_RATE_LIMITED" {
+		t.Errorf("B's read inside the limit: status %d code %q, want 503 GITHUB_RATE_LIMITED", statusB, codeB)
+	}
+	if seconds, err := strconv.Atoi(retryB); err != nil || seconds < 1 || seconds > 60 {
+		t.Errorf("B's Retry-After %q, want the seconds left of GitHub's 60", retryB)
+	}
+	if statusA != http.StatusServiceUnavailable || codeA != "GITHUB_RATE_LIMITED" || retryA != "60" {
+		t.Errorf("A's limited read: status %d code %q Retry-After %q, want 503 GITHUB_RATE_LIMITED after 60", statusA, codeA, retryA)
 	}
 }
 
