@@ -150,6 +150,10 @@ export interface CreateProofEditorOptions {
   blockSchema?: BlockSchema;
   /** Renders a host-owned typed block node when the schema declares `render: "host"`. */
   renderBlock?: HostBlockRenderer;
+  /** The open document's unversioned Dispatch reference (`dispatch://<ISSUE>/spec`, or
+   *  `dispatch://<ISSUE or PROJECT>/artifact/<slug>`), so the typed-block commands refuse a
+   *  `block[]` pointer to one of its own blocks whose type the attribute does not allow. */
+  documentRef?: string;
 }
 
 export interface ProofEditorHandle extends TypedBlockCommands {
@@ -406,6 +410,7 @@ export async function createProofEditor(
 
   const typedBlockCommands = createTypedBlockCommands({
     blockSchema: opts.blockSchema,
+    documentRef: opts.documentRef,
     getState: () => view.state,
     dispatch: (transaction) => {
       view.dispatch(transaction);

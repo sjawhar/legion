@@ -30,7 +30,7 @@ pin changes nothing in the table; it changes what `node_modules/proof-sdk-upstre
 | `src/lib.css` | The editor stylesheet |
 | `src/tests/*.test.ts` | The suites that came with those files |
 
-Nine files under `src/` are legion's own rather than copies, so the file-by-file audit below does
+Ten files under `src/` are legion's own rather than copies, so the file-by-file audit below does
 not reach them:
 
 | File | What it is |
@@ -43,9 +43,10 @@ not reach them:
 | `src/record-mark-history.ts` | The plugin that keeps the composer's own record-mark writes out of undo history in both undo managers, so neither undo nor redo writes one back: a write of `proofComment`, `proofSuggestion` or `dispatchAsk` steps that takes nothing from another record (it removes no span, as a creation over another record's mark does not since the three declare `excludes: ''`, or puts back what it removes, as upstream's suggestion restamp does), and `removeRecordMark`'s removal; any other removal of a record mark keeps its undo step (LEGION-363, LEGION-458); it is also biome-checked |
 | `src/record-mark-retype.ts` | Retyping a provisional record mark for the margin composer's Comment / Suggest / Ask switch, and the precise span-by-span removal behind the handle's `removeMark`, over text and inline atoms such as an image alike (LEGION-363); it is also biome-checked |
 | `src/record-mark-target.ts` | Which mark a click or a hover in the document names: of the mark spans around the target, the record mark whose range is the smallest, the innermost span's among marks the same size, since which of two overlapping record marks nests inside the other follows the order they were made in (LEGION-458); it is also biome-checked |
+| `src/block-pointers.ts` | A typed block's `block[]` attribute (INFRA-156): `parseBlockPointers` reads a value as markdown and a pasted block write it, deciding it with `@legion/contracts`' `parseBlockPointerValue` (the parser the server's twin is tested against with the same table, `DISPATCH_BLOCK_POINTER_VALUES`); `blockPointerProblem` checks a command's array of pointers; `blockPointerRefusal` refuses a pointer a command introduces to a block of the editor's own document (`documentRef`) whose type the attribute's `targets` do not allow. Its messages read as the server's (pmdoc `ParseBlockPointerValue`, `CheckBlockPointers`); it is also biome-checked |
 | `src/tests/harness.ts` | The `bun test` registration the copied suites call instead of their own `test()` tally |
 
-Fifteen kinds of edit are allowed in the copied files, and no others: the import specifiers of
+Sixteen kinds of edit are allowed in the copied files, and no others: the import specifiers of
 upstream modules; `bun test` registration in the suites (`src/tests/harness.ts` replaces each
 file's own `test()` tally and its `process.exit` tail); `src/tests/headless-no-dom.test.ts`,
 whose entry named the fork's built `dist/headless.js` and now names `../lib-headless.js` — its
@@ -77,12 +78,23 @@ so a click on text two record marks cover opens the narrower one (LEGION-458);
 `src/dispatch-action-bar.ts`'s Comment / Suggest / Ask buttons and its exported
 `commentOnSelection` taking one path, `ActionBarController.act`, which marks nothing for an empty
 or stale range or a read-only view, with `src/lib.ts` exposing `commentOnSelection` on the handle
-for Dispatch's `Ctrl+Alt+M` (LEGION-680); and annotations, casts and assertions that make a file
-type-check, each of which erases before runtime (below).
+for Dispatch's `Ctrl+Alt+M` (LEGION-680); the `block[]` attribute kind (INFRA-156), which reads,
+writes and checks its values through `./block-pointers` — in `src/block-schema.ts`,
+`BlockAttributeKind` gaining `block[]`, `BlockAttributeSchema` gaining `targets`,
+`validateBlockSchema` refusing `targets` on any other kind as the server does, `parseAttribute`'s
+`block[]` case calling `parseBlockPointers` and `attributeText` joining the pointers with one
+space; in `src/typed-block-commands.ts`, `TypedBlockCommandContext.documentRef`, `validateValue`'s
+`block[]` case calling `blockPointerProblem`, and `insert`, `retype` and `setAttributes` building
+their transaction first and throwing `blockPointerRefusal`'s refusal before dispatching it, so a
+refused command leaves the document unchanged; in `src/lib.ts`,
+`CreateProofEditorOptions.documentRef` passed to `createTypedBlockCommands`; and in
+`src/tests/block-schema.test.ts`, the imports of `DISPATCH_BLOCK_POINTER_VALUES`, `EditorState`
+and `createTypedBlockCommands` and the suite's three cases for it; and annotations, casts and
+assertions that make a file type-check, each of which erases before runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
 24a5fc94 root:src/<file>`; every file in the copied-files table has that counterpart, and the
-only lines that differ should be the fifteen kinds.
+only lines that differ should be the sixteen kinds.
 
 `scripts/`, `tests/` and `upstream/` are legion's own. `scripts/` and `tests/` are linted and
 type-checked like any other package's; `upstream/` is generated, and Biome is off over it the
@@ -178,7 +190,15 @@ against the pinned commit stays readable. `assist` matters as much as the other 
 `organizeImports` is a safe fix, so one `biome check --write` or an editor with organize-on-save
 would reorder the copy's imports. `upstream/` is excluded the same way, for the same reason:
 it is tsc's output, not source. Anything legion writes here — `scripts/`, `tests/`,
-`src/collab-cursor-plugin.ts`, `src/editor-highlights.ts`, `src/editor/schema/uuid.ts`, `src/trailing-newline-input.ts`,
-`src/record-mark-history.ts`, `src/record-mark-retype.ts`, `src/record-mark-target.ts`,
-`src/tests/harness.ts` — follow the
-repo's conventions and are checked.
+`src/block-pointers.ts`, `src/collab-cursor-plugin.ts`, `src/editor-highlights.ts`,
+`src/editor/schema/uuid.ts`, `src/trailing-newline-input.ts`, `src/record-mark-history.ts`,
+`src/record-mark-retype.ts`, `src/record-mark-target.ts`, `src/tests/harness.ts` — follow the
+repo's conventions and are checked: each is excluded by name from the first override of the root
+`biome.json`, the one that turns Biome off over the copy, and a new file of legion's own joins that
+list.
+
+The package depends on `@legion/contracts` (`workspace:*`), served from source like this package,
+for what the editor shares with the document service: `src/block-pointers.ts` reads a `block[]`
+value with its `parseBlockPointerValue` and `parseCanonicalBlockReference`, and
+`src/tests/block-schema.test.ts` runs its `DISPATCH_BLOCK_POINTER_VALUES` table. The package's
+consumers, `packages/dispatch` and the pmdoc fixture generator, are workspaces that resolve it.
