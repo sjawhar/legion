@@ -31,6 +31,7 @@ import (
 	gws "github.com/gorilla/websocket"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
@@ -1461,7 +1462,8 @@ func answersSharedToken(response *httptest.ResponseRecorder) bool {
 // setting does not list. A request that authenticates with a value after the first is logged once
 // per address and User-Agent, with the load balancer's address and never a token.
 func sharedAgentTokenListReachesTheAPIAndTheDocumentWebsocket(t *testing.T) {
-	var logged bytes.Buffer
+	// The server's request goroutines write the log while the test reads it.
+	var logged cmdtest.LockedBuffer
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&logged, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
