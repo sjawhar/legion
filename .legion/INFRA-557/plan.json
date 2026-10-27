@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-557",
+  "completed": "2026-10-27T02:46:05Z",
+  "planDocument": "dispatch://INFRA-557/artifact/plan-md",
+  "baseCommit": "819dc283",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: proof rules (pr-body.md 'what a proof is'), the fail-before/pass-after evidence each finding needs, the simplify pass, push and handoff mechanics",
+      "ce-simplify-code: the simplify pass over the settled listener change before the proof head",
+      "envoy: coordinate shared files with the INFRA-558 implementer (internal/bus/stream.go, nats.go) and answer INFRA-560/INFRA-563 roles over Envoy",
+      "asd-ste100: every Envoy message to another agent and every PR comment is written in ASD-STE100 per the deployment instructions"
+    ],
+    "test": [
+      "legion-worker: re-run the named two-process and two-build commands at the head, check each proof's negative control, and the handoff fields"
+    ],
+    "review": [
+      "legion-worker: merge-gate.md and review-threads.md for approving the head by SHA and judging the fail-before evidence of each audit finding"
+    ]
+  },
+  "design": {
+    "oneDeliverer": "Per-machine KV lease (bucket envoy_listener, key lease.<durable>, CAS, monotonic clocks: renew 1s, TTL 5s, margin 1s, standby poll 500ms). The push durable keeps its name, type and cursor; only the lease holder subscribes (core ChanSubscribe) on its deliver subject and handles a message only while it holds the lease. Graceful release marks the record released; a standby takes it at once. Absent/released record + PushBound = pre-INFRA-557 build bound: wait; expired unreleased record + PushBound = dead holder: subscribe.",
+    "consumerPolicy": "No FilterSubjects; AckWait 6s with InProgress every 2s for every held message; MaxAckPending 256, MaxDeliver 20, InactiveThreshold 7d unchanged; only the holder writes the policy.",
+    "takeoverBounds": "graceful ~2s (test 10s); SIGKILL ~6s (test 10s); node loss: standby subscribes ~6s, messages pushed only to the dead connection return by ~12s (test 15s).",
+    "sharedState": "Delivery ledger (delivery.<durable>.<sha256>.<session>) replaces both in-memory caches on all lanes; an attempt by another boot younger than RequestLimit+5s defers, older is taken over. last-seen in seen.<session>. Role-claim grace keyed to service_since in the lease record. Deterministic exception ids.",
+    "readinessContract": "GET /healthz: 503 {status:starting} until NATS connected, webhook and /v1 gates open, OIDC discovered when configured; then 200 with role active|standby (standby names active_instance) on both; 503 on NATS flush failure, role-lane or live-lane subscription loss, cache watch failure; handler bounded at 5s. Readiness exec probe needs timeoutSeconds >= 6; liveness without -f; terminationGracePeriodSeconds >= 30. Agreed with the INFRA-63 architect (for INFRA-14) and sent to the INFRA-560 planner on 2026-10-27.",
+    "ciJob": "listener-multiprocess in .github/workflows/envoy-and-contracts.yaml: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/listener (INFRA-563 makes it required; its planner had no live holder, so the architect relays the name).",
+    "grantChange": "infra/core/permissions.go listenerBuckets gains envoy_listener; nothing else (durable create/info/acks and _INBOX.> already granted)."
+  },
+  "proofCommands": [
+    "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/listener",
+    "cd packages/envoy && go test -count=1 ./cmd/listener/... ./internal/session/... ./internal/store/... ./internal/dedupe/... ./internal/logging/... ./infra/core/... ./infra/aws/... ./infra/gcp/...",
+    "ENVOY_LISTENER_OLD_BINARY=$TMPDIR/listener-base go test -tags multiprocess -run TestTwoBuilds -v ./cmd/listener (listener-base built from a separate clone at 819dc283 under $TMPDIR)",
+    "each new row run on 819dc283 with only the test and harness applied, output quoted as the fail-before control"
+  ],
+  "architectQuestions": [
+    {
+      "question": "Deploy order of the NATS grant",
+      "detail": "The build needs envoy_listener in the listener grant; a hub user change replaces the hub VM (infra/docs/nats-hub.md 172) and the listener ships in the server image (infra/gcp/dispatch.go 502). Default: the listener exits at start with an ERROR naming the grant; INFRA-561 and INFRA-14 order the grant before the image."
+    },
+    {
+      "question": "Per-session order after a hard take-over",
+      "detail": "After SIGKILL or node loss, messages in the dead pod's hands arrive after newer ones. Keeping order costs one AckWait (6s) before subscribing, pushing hard take-over to ~12s, past the 10s bound. Default: not done here; decide with INFRA-514, whose acceptance asks for order while a listener restarts."
+    }
+  ],
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "A shared attempt record written just before a crash would make the new holder skip the message forever.", "answer": "Attempt records carry the writer's boot id; another boot's unresolved attempt younger than RequestLimit+5s defers (durable NAK with delay), older is taken over by CAS and re-prompted (same event id). Two-process row 'attempt then crash' proves delivery (plan 1.4, section 3)."},
+      {"finding": "Node-loss take-over can exceed 10s and order breaks across a take-over.", "answer": "Bounds stated from constants: SIGKILL ~6s (test 10s), node loss ~12s (test 15s, spec item 2 says 'within seconds'); AckWait 6s with InProgress keepalive. Order kept on graceful hand-over; order after a hard take-over put to the architect (Q2) with its cost."},
+      {"finding": "Push-to-pull migration is unsafe beside pre-change builds (deliver-all replay, rollback delivers nothing).", "answer": "Design changed: the push durable keeps its name, type and cursor; no delete, no recreate. Fencing is the lease plus a core subscription only the holder makes. Rollback to a pre-change build works; plan 1.1 records the rejected pull and priority-group alternatives."},
+      {"finding": "Deploy order: new grants, VM replacement on user change, listener ships with the server image.", "answer": "Grant change reduced to one bucket (envoy_listener). Listener refuses at start with an ERROR naming the grant. Ordering put to the architect (Q1) for INFRA-561/INFRA-14."},
+      {"finding": "bus.Client has no pull subscription type.", "answer": "No pull consumer; the holder's core subscription is managed by the listener's receive loop, not bus.Client's single JetStream slot, so bus.Client and Dispatch's intakes are untouched."},
+      {"finding": "Self-health, /healthz and rebuild assume a bound push durable; a standby would kill itself.", "answer": "Self-health reworked: durable checks only on the holder (consumer exists, deliver subject matches, subscription valid); standby never terminal for 'not bound'. Test: standby stays up past three monitor intervals and 140s."},
+      {"finding": "Readiness change reaches host:Listener, ECS, compose, deploy probe; NATS-loss readiness, liveness and probe timeout undecided.", "answer": "Contract fixed (design.readinessContract): 503 on NATS loss after ready, liveness without -f, exec probe timeoutSeconds >= 6, handler <= 5s. NATS unreachable at start no longer exits. Docs list covers infra/README host and ECS health text, scripts/README, envoy.md compose wait."},
+      {"finding": "Repeated delivery exceptions after take-over get new random ids.", "answer": "Exception id and DedupeKey become a deterministic hash of (source event id, session, reason); test row 'exception id'."},
+      {"finding": "Lease adds load and pauses on slow links; single-pod hosts too.", "answer": "Renew 1/s per machine; a holder whose renewal resumes and finds its own revision current keeps the lease at once (CAS); delivery during a NATS stall is impossible anyway. Single-pod deployments run the same code."},
+      {"finding": "New buckets must use the deployment's copy count.", "answer": "One bucket, created with Replicas cfg.NATSReplicas; lease unit test checks the replica count."},
+      {"finding": "Ledger costs KV round trips per delivery; keys must be encoded.", "answer": "Key delivery.<durable>.<sha256 hex 32>.<session>; ledger I/O only for pairs the listener prompts over HTTP or forwards, never for self-subscribed targets; MaxAckPending and serial handler unchanged; cost visible to INFRA-514 in the PR."},
+      {"finding": "NATS server version floor; priority groups as an alternative.", "answer": "No floor raised: the design uses only 2.10 features (KV CAS, push consumer). Priority groups rejected (2.11 floor plus migration), reason in plan 1.1."},
+      {"finding": "Which two builds does the two-build test run; 7c RoleClaim missing.", "answer": "CI: this build vs the same build tagged envoy_twobuild with an extra stream subject, both directions. Recorded proof: base 819dc283 binary as the old build in the first-rollout direction. Production's previous release is INFRA-558's harness and the integration child's. 7c covers SessionEntry, Interest and RoleClaim."},
+      {"finding": "'Enforced' for port-session addresses undefined; a pod-independence test passes before.", "answer": "Enforced: registrations carry accepted_host; a pod-local address (loopback bridge or host.docker.internal) on a different host is not POSTed; delivery_failed with reason 'address not reachable from this listener pod'. Row fails on base (B POSTs to its own loopback)."},
+      {"finding": "'Reaches its session': port session or self-subscribed?", "answer": "Take-over rows use port sessions (httptest prompt_async counters); the send-during-take-over row uses /v1/messages/send to the standby for self-subscribed delivery, per the architect's 02:35Z contract."},
+      {"finding": "What INFRA-557 delivers for '18's listener side'.", "answer": "The listener's multi-pod behaviour and the readiness/liveness/grace contract given to INFRA-560; INFRA-557 edits no infra/gcp file and none of the replica/strategy statements (INFRA-560 item 8)."},
+      {"finding": "Role-claim grace gap definition, clock, last-seen write cost undefined.", "answer": "Gap: lease record absent or last write older than 2x lease TTL. Server KV timestamps compared with the pod clock, skew accepted against a 5 min TTL. last-seen: one KV Put per registration write (every 90s per session)."},
+      {"finding": "Does 'every log line' include bus text lines pinned for metric filters?", "answer": "Yes via log.Lmsgprefix + SetPrefix('instance=<x> '), date stays first so the startup_test.go format pin holds; implementer checks the deployed text filters in theorem-labs/agent-infra still match and records it."},
+      {"finding": "Background loops vs the lease.", "answer": "Reapers, marker collector and CI summary loop start on lease acquisition with the subscription up and stop on loss or release."},
+      {"finding": "NATS unreachable at start still exits.", "answer": "In scope: connect retried every 2s until connected or signalled, /healthz 503 starting meanwhile; row 'readiness' fails on base."},
+      {"finding": "SIGKILL test probably passes before.", "answer": "SIGKILL row holds a message in hand (blocked prompt to T, S queued): base AckWait 60s fails the 10s bound. Separate node-loss row with relay freeze()."},
+      {"finding": "Pod-deletion test passes before unless shutdown is held up.", "answer": "Graceful row holds an in-flight slow prompt during SIGTERM: base keeps the durable ~23s."},
+      {"finding": "'/v1/sessions within 10s of take-over' passes before.", "answer": "Measured through every take-over row and the 140s standby row, which fails on base (standby exits at 135s)."},
+      {"finding": "Two pods starting together needs forced interleaving.", "answer": "Kept as a regression row (20 simultaneous starts); finding 1's fail-before is the deterministic reconnect-in-place row (relay drop 7s)."},
+      {"finding": "Docs place 'cmd/listener docs' does not exist; 'nothing Dispatch-specific' unchecked.", "answer": "New cmd/listener/README.md plus the full docs list in plan 2.12; every test uses arbitrary machine ids and the reviewer greps the change for Dispatch-specific branches."},
+      {"finding": "Audit 13 and 16 lack items or acceptance.", "answer": "Rows: standby across a NATS restart logs no 'envoy nats recovery resubscribe failed'; OIDC issuer unreachable at start keeps the process up at 503 until discovery succeeds."},
+      {"finding": "CI changes: multiprocess tag job, old tests pinning behaviour, required checks.", "answer": "Job listener-multiprocess; old untagged two-listener tests rewritten or deleted (list in task 11); INFRA-563 makes it required."}
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": []
+}
