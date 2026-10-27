@@ -9,11 +9,15 @@
 #
 #   packages/envoy/scripts/build-dispatch-build.sh --commit <sha|tag> --out <dir>
 #   packages/envoy/scripts/build-dispatch-build.sh --previous-release --out <dir>
+#   packages/envoy/scripts/build-dispatch-build.sh --commit <sha|tag> --resolve
+#   packages/envoy/scripts/build-dispatch-build.sh --previous-release --resolve
 #
 # --previous-release builds the newest legion-envoy-v* tag that is an ancestor of
 # `git merge-base HEAD origin/main`: the release production ran before this branch. --commit HEAD
 # builds the current branch the same way. Put <dir> under $TMPDIR. <dir> must be absent or empty,
-# or hold a complete build of the same commit, which the script then leaves as it is.
+# or hold a complete build of the same commit, which the script then leaves as it is. --resolve
+# builds nothing: it makes the same refusals and prints the full sha it would build, so a caller
+# can key a cache of <dir> by it before the build (CI's dispatch-two-builds job).
 #
 # <dir> then holds:
 #   src/                              the commit's archive, where the parts were built
@@ -31,7 +35,7 @@
 set -euo pipefail
 
 usage() {
-  printf 'usage: %s --commit <sha|tag> --out <dir>\n       %s --previous-release --out <dir>\n' "$0" "$0" >&2
+  printf 'usage: %s (--commit <sha|tag> | --previous-release) (--out <dir> | --resolve)\n' "$0" >&2
   exit 2
 }
 
@@ -46,6 +50,7 @@ note() {
 
 commit=
 previous_release=
+resolve=
 out=
 while (($# > 0)); do
   case "$1" in
@@ -58,6 +63,10 @@ while (($# > 0)); do
     previous_release=1
     shift
     ;;
+  --resolve)
+    resolve=1
+    shift
+    ;;
   --out)
     (($# >= 2)) || usage
     out=$2
@@ -66,10 +75,12 @@ while (($# > 0)); do
   *) usage ;;
   esac
 done
-[[ -n "$out" ]] || usage
+[[ -n "$out" && -z "$resolve" || -z "$out" && -n "$resolve" ]] || usage
 [[ -n "$commit" && -z "$previous_release" || -z "$commit" && -n "$previous_release" ]] || usage
 
-for command in git tar go bun; do
+required=(git)
+[[ -n "$resolve" ]] || required+=(tar go bun)
+for command in "${required[@]}"; do
   command -v "$command" >/dev/null || fail "the command $command is necessary. Install it and run this script again."
 done
 
@@ -104,6 +115,11 @@ done < <(git -C "$root" ls-tree --name-only "$sha" "$migrations/")
 ((newest > 0)) || fail "$commit ($sha) has no Dispatch migrations in $migrations. The two-build test needs migration $(printf '%04d' "$floor") or later in the earlier build."
 ((newest >= floor)) ||
   fail "$commit ($sha) has migrations up to $(printf '%04d' "$newest") only. The two-build test needs migration $(printf '%04d' "$floor") or later in the earlier build."
+
+if [[ -n "$resolve" ]]; then
+  printf '%s\n' "$sha"
+  exit 0
+fi
 
 mkdir -p -- "$out"
 out=$(cd -- "$out" && pwd -P)

@@ -246,3 +246,11 @@ hold a complete build of the same commit, which the script leaves as it is. It t
 `bun dispatch.js`), `pmdoc/testdata/corpus/`, `pmdoc/schema/blocks.json` and `text/testdata/` from
 the commit, and `COMMIT`, the full sha, written last. Point `DISPATCH_PREVIOUS_BUILD` at `<dir>` to
 run the two-build test.
+
+`--resolve` in place of `--out <dir>` builds nothing: it makes the same refusals and prints the full
+sha the script would build, which CI's `dispatch-two-builds` job keys its cache of the build by
+before it builds.
+
+```bash
+packages/envoy/scripts/build-dispatch-build.sh --previous-release --resolve
+```

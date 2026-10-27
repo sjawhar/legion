@@ -14,8 +14,11 @@
 // server from cmdtest.Build, its CLI run as `bun packages/envoy-client/bin/dispatch.ts`, its corpus
 // read from the working tree.
 //
-// Its own build tag and its own CI job (dispatch-two-builds), for the reason the multiprocess
-// suite has its own: a row waits for durable hand-overs and settings polls, tens of seconds each.
+// Its own build tag and its own CI job, dispatch-two-builds in
+// .github/workflows/envoy-and-contracts.yaml, for the reason the multiprocess suite has its own: a
+// row waits for durable hand-overs and settings polls, tens of seconds each. That job builds the
+// previous release with build-dispatch-build.sh (or the commit a manual run names in its
+// previous_commit input), caches the build by its commit, and runs this suite against it.
 
 package main
 

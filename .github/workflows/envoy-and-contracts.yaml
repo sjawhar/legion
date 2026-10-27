@@ -106,6 +106,15 @@ on:
       - ".github/go-release-targets.json"
   merge_group:
     types: [checks_requested]
+  # A manual run names the previous build the dispatch-two-builds job runs beside this one: any
+  # commit in the history of the run's ref, such as the one production ran before the release being
+  # measured. Left empty, the job takes the previous release, as on a pull request.
+  workflow_dispatch:
+    inputs:
+      previous_commit:
+        description: "The commit or tag the dispatch-two-builds job runs as the previous build (empty: the newest legion-envoy-v* release in the history of origin/main)"
+        type: string
+        default: ""
 
 # A new push to a pull request cancels that pull request's still-running checks here; outside
 # pull_request the key is github.sha, not github.ref, so a busy runner pool never drops a
@@ -1053,6 +1062,84 @@ jobs:
           go-version-file: packages/envoy/go.mod
       - name: Two-process tests of the Dispatch server
         run: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/dispatch
+        working-directory: packages/envoy
+
+  # The two-build tests (packages/envoy/cmd/dispatch/twobuild_test.go, INFRA-558): each row starts
+  # an envoy-dispatch of the previous build and one of this tree against one Postgres and one NATS,
+  # which is what a rolling release runs, and drives each build's CLI, stored documents, document
+  # socket and bus traffic against the other (cmd/dispatch/README.md, "Two builds at once"). They
+  # build only under the `twobuild` tag and are a job of their own for the reason
+  # dispatch-multiprocess is: a row waits out durable hand-overs and settings polls, tens of seconds
+  # each, and the previous build is built here first. The previous build is the commit a manual run
+  # names (previous_commit), else the newest legion-envoy-v* release in the history of origin/main;
+  # build-dispatch-build.sh resolves it, which needs the whole history and the tags (fetch-depth 0),
+  # and builds it from `git archive`. The build is cached by the commit and the script that built
+  # it, so a pull request builds each release once; its src/ is left out of the cache, since the test
+  # reads only the parts the script copies out of it. The manual run always runs this job, whatever
+  # the path filters say, since it is how a chosen previous build is tested. Each row's NATS runs in
+  # its own test process (internal/testnats), so the job needs no container runtime of its own.
+  dispatch-two-builds:
+    needs: changes
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      needs.changes.outputs.envoy == 'true' || needs.changes.outputs.dispatch == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+      - uses: ./.github/actions/setup-bun
+      # The current build's CLI runs from the tree (`bun packages/envoy-client/bin/dispatch.ts`).
+      - run: bun install --frozen-lockfile
+      - name: Resolve the previous build's commit
+        id: previous
+        env:
+          PREVIOUS_COMMIT: ${{ inputs.previous_commit }}
+        run: |
+          if [ -n "$PREVIOUS_COMMIT" ]; then
+            commit=$(packages/envoy/scripts/build-dispatch-build.sh --commit "$PREVIOUS_COMMIT" --resolve)
+          else
+            commit=$(packages/envoy/scripts/build-dispatch-build.sh --previous-release --resolve)
+          fi
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+      # The cache saves the build when the job ends in success and found none under this key.
+      - name: Cache the previous build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/dispatch-previous
+            !${{ runner.temp }}/dispatch-previous/src
+          key: dispatch-previous-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packages/envoy/scripts/build-dispatch-build.sh') }}-${{ steps.previous.outputs.commit }}
+      # A restored directory holds the complete build of that commit, which the script leaves as it
+      # is. The runner context is not available in a job's env, so each step that reads the build's
+      # directory names it in its own.
+      - name: Build the previous build
+        env:
+          PREVIOUS_COMMIT: ${{ steps.previous.outputs.commit }}
+          DISPATCH_PREVIOUS_BUILD: ${{ runner.temp }}/dispatch-previous
+        run: packages/envoy/scripts/build-dispatch-build.sh --commit "$PREVIOUS_COMMIT" --out "$DISPATCH_PREVIOUS_BUILD"
+      - name: Two-build tests of the Dispatch server
+        env:
+          DISPATCH_PREVIOUS_BUILD: ${{ runner.temp }}/dispatch-previous
+        run: go test -tags twobuild -count=1 -timeout 30m ./cmd/dispatch
         working-directory: packages/envoy
 
   # The two-process tests of the secrets broker (packages/envoy/cmd/broker/multiprocess_test.go,
