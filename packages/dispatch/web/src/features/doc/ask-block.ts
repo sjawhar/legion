@@ -7,7 +7,6 @@ import { pictureNodeView } from "./picture-view";
 import {
   type AskBlockHost,
   applyAskBlockShell,
-  askBlockFacts,
   askShellSlots,
   renderAskBlockShell,
   renderTypedBlock,
@@ -71,11 +70,9 @@ class AskBlockView implements NodeView {
 
   private applyShell(): void {
     // The block's identity is the editor's alone (`renderAskBlockShell` says why).
-    const { blockId } = askBlockFacts(this.node);
+    const blockId = String(this.node.attrs.blockId);
     this.dom.dataset.blockId = blockId;
     this.dom.dataset.dispatchAskBlock = blockId;
-    // The card renders the options as rows; the source list shows while malformed, or while the
-    // caret is inside the block (`askBlockEditingPlugin`).
     applyAskBlockShell(this.dom, this.contentDOM, this.node);
   }
 

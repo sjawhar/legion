@@ -39,7 +39,7 @@ const NO_ASK_HOSTS: readonly AskBlockHost[] = [];
 function collectAskHosts(element: HTMLElement, parsed: ProseMirrorNode): readonly AskBlockHost[] {
   const shells = element.querySelectorAll<HTMLElement>('section[data-proof-block-type="ask"]');
   if (shells.length === 0) {
-    return [];
+    return NO_ASK_HOSTS;
   }
   const nodes: ProseMirrorNode[] = [];
   parsed.descendants((node) => {
@@ -49,7 +49,7 @@ function collectAskHosts(element: HTMLElement, parsed: ProseMirrorNode): readonl
     return !node.isTextblock;
   });
   if (nodes.length !== shells.length) {
-    return [];
+    return NO_ASK_HOSTS;
   }
   const paired: {
     readonly content: HTMLElement;
@@ -57,13 +57,12 @@ function collectAskHosts(element: HTMLElement, parsed: ProseMirrorNode): readonl
     readonly shell: HTMLElement;
   }[] = [];
   for (const [index, node] of nodes.entries()) {
-    const shell = shells[index];
-    const slots = shell === undefined ? undefined : askShellSlots(shell);
-    if (shell === undefined || slots === undefined) {
-      return [];
+    const slots = askShellSlots(shells[index]);
+    if (slots === undefined) {
+      return NO_ASK_HOSTS;
     }
     const { content, footer, header } = slots;
-    paired.push({ content, host: { footer, header, key: index, node }, shell });
+    paired.push({ content, host: { footer, header, key: index, node }, shell: shells[index] });
   }
   for (const { content, host, shell } of paired) {
     applyAskBlockShell(shell, content, host.node);
@@ -162,10 +161,7 @@ export function useRenderedMarkdown(
       } else {
         paint(element, parsed, engine.serializer);
         if (Card !== undefined) {
-          const collected = collectAskHosts(element, parsed);
-          if (collected.length > 0) {
-            hosts = collected;
-          }
+          hosts = collectAskHosts(element, parsed);
         }
       }
       setAskHosts(hosts);

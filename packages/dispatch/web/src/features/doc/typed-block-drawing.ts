@@ -201,7 +201,7 @@ export type AskBlockStamps = {
 /** How a decision block's shell presents itself: the frame's classes (the card frame with its
  * urgency accent and tint), the content hole's classes, the attributes the frame stamps, and
  * whether a mounted card folds the source option list. */
-export interface AskBlockShell {
+interface AskBlockShell {
   readonly frameClass: string;
   readonly contentClass: string;
   readonly stamps: AskBlockStamps;
@@ -211,7 +211,7 @@ export interface AskBlockShell {
   readonly foldsOptions: boolean;
 }
 
-export function askBlockShell(facts: AskBlockFacts): AskBlockShell {
+function askBlockShell(facts: AskBlockFacts): AskBlockShell {
   const malformed = facts.malformedReason !== undefined;
   return {
     contentClass: malformed
