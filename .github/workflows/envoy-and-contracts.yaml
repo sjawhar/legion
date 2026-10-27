@@ -60,6 +60,9 @@ on:
       - "scripts/go-third-party-notices.sh"
       - "scripts/assemble-third-party-notices.sh"
       - ".github/go-release-targets.json"
+  # A `closed` run tests nothing; it cancels the pull request's runs (concurrency comment below).
+  # GitHub can create it after a reopen within about a minute of the close. It then cancels the
+  # reopened runs, and its skipped checks stand at the head. Push, or reopen again, to rerun them.
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, closed]
     paths:

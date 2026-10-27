@@ -20,6 +20,8 @@ on:
 # event carries github.ref = the base branch, so the number is the only key that names the pull
 # request on every event. Outside pull_request the key is github.sha, not github.ref, so a busy
 # runner pool never drops a main push's or merge-queue entry's run (why: this PR's description).
+# GitHub can create tests-closed.yaml's run after a reopen within about a minute of the close, and
+# that run then cancels the reopened Tests run. Push, or reopen again, to rerun the checks.
 concurrency:
   group: tests-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

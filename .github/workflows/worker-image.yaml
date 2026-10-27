@@ -57,7 +57,10 @@ on:
   # publishing nothing. A draft's head builds no image until the pull request is marked ready
   # (`ready_for_review`), which builds that head. A `closed` run builds nothing: it enters the
   # concurrency group below and cancels the pull request's build still waiting or running, as a
-  # newer head's run cancels an older head's.
+  # newer head's run cancels an older head's. GitHub can create the `closed` run after a reopen
+  # within about a minute of the close. That run then cancels the reopened build, and that head
+  # gets no image. To refresh the build, push, or wait a minute between close and reopen. After a
+  # quick reopen with a cancelled or skipped check, push or reopen again.
   # .github/scripts/check-image-trigger-paths.sh fails the build when this list misses a file the
   # image build reads.
   pull_request:

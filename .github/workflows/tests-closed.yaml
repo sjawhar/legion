@@ -1,30 +1,39 @@
 name: Tests (closed pull request)
 
-# Cancels a closed pull request's Tests run (pr-and-main.yaml) still waiting or running. The one job
-# joins Tests' concurrency group, tests-<pull request number>, with cancel-in-progress, so that Tests
-# run ends `cancelled`, which neither GitHub nor the Legion daemon counts as passing: it fails
-# closed, never a skipped pass. No paths filter, because Tests has none.
+# Cancels a closed pull request's Tests run (pr-and-main.yaml) still waiting or running. This
+# workflow joins Tests' concurrency group, tests-<pull request number>, with cancel-in-progress, so
+# that Tests run ends `cancelled`, which neither GitHub nor the Legion daemon counts as passing: it
+# fails closed, never a skipped pass. No paths filter, because Tests has none.
+#
+# The group is set at workflow level, and the one job is always skipped. A run whose jobs all skip
+# still enters its workflow's group when GitHub creates it, and cancels the older run there. So a
+# close takes no runner and posts no required check: main's ruleset requires lint, typecheck, test
+# and pr-title, and this job is cancel-tests.
 #
 # It is a workflow of its own because a `closed` run inside Tests would post skipped lint, typecheck
 # and test, which GitHub and the Legion daemon count as passing, at a head another run tested, and
-# so could turn a failure there green. This job posts no required check name: main's ruleset
-# requires lint, typecheck, test and pr-title, and this job is cancel-tests.
+# so could turn a failure there green.
 #
-# On a reopen, the new Tests run enters the same group and may cancel this job if it still waits
-# for a runner. That is harmless: this job is no required check, and it has nothing left to cancel.
+# A race: when a pull request is reopened within about a minute of its close, GitHub can create this
+# run after the reopened pull request's Tests run. This run then cancels that Tests run. The
+# required checks end `cancelled` and fail closed, because Tests has no `closed` trigger. To refresh
+# a pull request's runs, push, or wait a minute between close and reopen. If Tests shows cancelled
+# after a quick reopen, push or reopen again.
 on:
   pull_request:
     types: [closed]
+
+concurrency:
+  group: tests-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 # The job reads and writes nothing.
 permissions: {}
 
 jobs:
   cancel-tests:
+    if: ${{ false }}
     runs-on: ubuntu-24.04
-    concurrency:
-      group: tests-${{ github.event.pull_request.number }}
-      cancel-in-progress: true
     steps:
       - name: Do nothing; joining the group is what cancels the Tests run
         run: "true"

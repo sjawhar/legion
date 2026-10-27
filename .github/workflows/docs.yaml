@@ -7,7 +7,10 @@ name: Docs
 # a change to the private-name guard the built site is checked with. A draft's head builds nothing
 # until the pull request is marked ready (`ready_for_review`), and a closed pull request's run
 # builds nothing: it only cancels that pull request's runs still waiting or running (the
-# concurrency comment below).
+# concurrency comment below). GitHub can create the `closed` run after a reopen within about a
+# minute of the close. That run then cancels the reopened run, and its skipped checks stand at the
+# head. To refresh the runs, push, or wait a minute between close and reopen. After a quick reopen
+# with cancelled or skipped checks, push or reopen again.
 on:
   push:
     branches: [main]
