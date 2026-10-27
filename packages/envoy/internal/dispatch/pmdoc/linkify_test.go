@@ -22,9 +22,9 @@ func TestLinkifyGuardReadsGoldmarksLocalPartCharacters(t *testing.T) {
 // The guard links exactly what goldmark's linkify links, and leaves text where goldmark did.
 func TestLinkifyGuardLinksWhatGoldmarkLinks(t *testing.T) {
 	for _, test := range []struct{ markdown, want string }{
-		{"mail alice@example.com now", `text "mail " | text "alice@example.com" link alice@example.com | text " now"`},
-		{"(bob@example.org)", `text "(" | text "bob@example.org" link bob@example.org | text ")"`},
-		{"a_a_a@b.c", `text "a_a_a@b.c" link a_a_a@b.c`},
+		{"mail alice@example.com now", `text "mail " | text "alice@example.com" link mailto:alice@example.com | text " now"`},
+		{"(bob@example.org)", `text "(" | text "bob@example.org" link mailto:bob@example.org | text ")"`},
+		{"a_a_a@b.c", `text "a_a_a@b.c" link mailto:a_a_a@b.c`},
 		{"a_a_a@b.c_", `text "a_a_a@b.c_"`},
 		{"x@y and a@@b.c", `text "x@y and a@@b.c"`},
 		{"see https://example.com/a_b and www.example.org/x", `text "see " | text "https://example.com/a_b" link https://example.com/a_b | text " and " | text "www.example.org/x" link http://www.example.org/x`},
