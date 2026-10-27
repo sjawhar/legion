@@ -956,7 +956,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.envoy == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Each race step's -timeout 30m must fire before the runner cancels the job, so a hung test
+    # prints the dump that names it. The worst case that still reaches the second step: about 1
+    # minute of setup, the first step up to its own 30 minutes (880 s on main's last green run), up
+    # to 5 minutes to compile the second step's race binaries, then its 30 minutes: 66 minutes.
+    timeout-minutes: 75
     services:
       postgres:
         image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
@@ -983,11 +987,11 @@ jobs:
         run: go test -race -timeout 30m ./internal/dispatch/docs/ ./internal/dispatch/api/ ./internal/dispatch/pmdoc/... ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/
         working-directory: packages/envoy
       # The listener is where the role claim watcher, the session and interest watchers and the
-      # request handlers meet, so its own tests are the ones that exercise their concurrency
-      # (INFRA-141). A step of its own, so its time and any race it finds are read apart from the
-      # packages above.
-      - name: Race-test the listener
-        run: go test -race -timeout 30m ./cmd/listener/
+      # request handlers meet; the role claim view, its lock and its epoch live in the store, and
+      # the watchers' completeness and rescans in kvwatch (INFRA-141). A step of its own, so its
+      # time and any race it finds are read apart from the packages above.
+      - name: Race-test the listener, the registry store and kvwatch
+        run: go test -race -timeout 30m ./cmd/listener/ ./internal/store/ ./internal/kvwatch/...
         working-directory: packages/envoy
 
   # The real-process memory tests (packages/envoy/cmd/dispatch/memory_test.go, LEGION-481): each
