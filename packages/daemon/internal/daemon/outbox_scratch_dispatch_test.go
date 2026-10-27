@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -241,8 +243,8 @@ func startScratchDispatchOn(t *testing.T, options scratchDispatchOptions) *scrat
 	return d
 }
 
-// start runs the server and returns once GET /api/v1 answers 200. The first start takes a free
-// port; a restart takes the same one again.
+// start runs the server and returns once GET /api/v1 answers 200. The first start serves on a port
+// the kernel chooses; a restart serves on the same one again.
 func (d *scratchDispatch) start() {
 	t := d.t
 	t.Helper()
@@ -253,81 +255,105 @@ func (d *scratchDispatch) start() {
 	if testDeadline, ok := t.Deadline(); ok && testDeadline.Add(-10*time.Second).Before(deadline) {
 		deadline = testDeadline.Add(-10 * time.Second)
 	}
-	restart := d.port != 0
-	// Dispatch binds the port it is given, and a free port found here is any process's until then:
-	// a first start that lost it to another process is started again on another, and a restart
-	// whose port the kernel still holds is started again on the same one.
-attempts:
-	for attempt := 1; ; attempt++ {
-		if d.port == 0 {
-			d.port = boundPort(t)
-			d.base = fmt.Sprintf("http://127.0.0.1:%d", d.port)
+	// Dispatch serves on a socket held here (DISPATCH_LISTEN_FD), so no other process can take the
+	// port before Dispatch serves it: the first start on a port the kernel chose (heldSocket), a
+	// restart on the port it served before (holdPortAgain).
+	var held *os.File
+	if d.port == 0 {
+		held, d.port = heldSocket(t)
+		d.base = fmt.Sprintf("http://127.0.0.1:%d", d.port)
+	} else {
+		held = d.holdPortAgain(deadline)
+	}
+	command := exec.Command(d.binary)
+	command.Dir = d.dir
+	// Nothing of the caller's Dispatch, Envoy or NATS settings reaches the scratch server, as
+	// run-server.sh drops them: a Legion pane exports DISPATCH_URL and friends.
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "DISPATCH_") && !strings.HasPrefix(entry, "ENVOY_") && !strings.HasPrefix(entry, "NATS_") && !strings.HasPrefix(entry, "HOME=") {
+			command.Env = append(command.Env, entry)
 		}
-		command := exec.Command(d.binary)
-		command.Dir = d.dir
-		// Nothing of the caller's Dispatch, Envoy or NATS settings reaches the scratch server, as
-		// run-server.sh drops them: a Legion pane exports DISPATCH_URL and friends.
-		for _, entry := range os.Environ() {
-			if !strings.HasPrefix(entry, "DISPATCH_") && !strings.HasPrefix(entry, "ENVOY_") && !strings.HasPrefix(entry, "NATS_") && !strings.HasPrefix(entry, "HOME=") {
-				command.Env = append(command.Env, entry)
+	}
+	// The bus is the one difference between the two forms: NATS off, or the test's own server,
+	// whose ENVOY_NOTIFICATIONS stream this process reconciles as it starts.
+	bus := "DISPATCH_NATS_DISABLED=1"
+	if d.natsURL != "" {
+		bus = "NATS_URLS=" + d.natsURL
+	}
+	command.Env = append(command.Env,
+		"DATABASE_URL="+d.database,
+		"DISPATCH_AGENT_TOKEN="+d.token,
+		"DISPATCH_IDENTITY=header:X-Dispatch-User",
+		"DISPATCH_IDENTITY_HEADER_TRUSTED=1",
+		bus,
+		// ExtraFiles' first entry is descriptor 3 in Dispatch.
+		"DISPATCH_LISTEN_FD=3",
+		"DISPATCH_LISTEN_HOST=127.0.0.1",
+		fmt.Sprintf("DISPATCH_PORT=%d", d.port),
+		"DISPATCH_SERVER_URL="+d.base,
+		"DISPATCH_WEB_DIST="+d.webDist,
+		"HOME="+d.home,
+	)
+	command.ExtraFiles = []*os.File{held}
+	output := &syncBuffer{}
+	command.Stdout = output
+	if d.log != nil {
+		command.Stdout = io.MultiWriter(output, d.log)
+	}
+	command.Stderr = command.Stdout
+	// From here Dispatch's is the only copy of the socket, so a Dispatch that exits releases the
+	// port and nothing of the test's answers on it.
+	err := command.Start()
+	_ = held.Close()
+	if err != nil {
+		t.Fatalf("start scratch Dispatch: %v", err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- command.Wait() }()
+	d.command, d.exited, d.output = command, exited, output
+	for {
+		select {
+		case err := <-exited:
+			d.command = nil
+			t.Fatalf("scratch Dispatch exited before it was ready (%v):\n%s", err, output.String())
+		default:
+		}
+		// Each poll is bounded (pollClient): until Dispatch serves, the held socket queues the
+		// connection unanswered.
+		if response, err := pollClient.Get(d.base + "/api/v1"); err == nil {
+			response.Body.Close()
+			if response.StatusCode == http.StatusOK {
+				return
 			}
 		}
-		// The bus is the one difference between the two forms: NATS off, or the test's own
-		// server, whose ENVOY_NOTIFICATIONS stream this process reconciles as it starts.
-		bus := "DISPATCH_NATS_DISABLED=1"
-		if d.natsURL != "" {
-			bus = "NATS_URLS=" + d.natsURL
+		if time.Now().After(deadline) {
+			t.Fatalf("scratch Dispatch did not become ready:\n%s", output.String())
 		}
-		command.Env = append(command.Env,
-			"DATABASE_URL="+d.database,
-			"DISPATCH_AGENT_TOKEN="+d.token,
-			"DISPATCH_IDENTITY=header:X-Dispatch-User",
-			"DISPATCH_IDENTITY_HEADER_TRUSTED=1",
-			bus,
-			"DISPATCH_LISTEN_HOST=127.0.0.1",
-			fmt.Sprintf("DISPATCH_PORT=%d", d.port),
-			"DISPATCH_SERVER_URL="+d.base,
-			"DISPATCH_WEB_DIST="+d.webDist,
-			"HOME="+d.home,
-		)
-		output := &syncBuffer{}
-		command.Stdout = output
-		if d.log != nil {
-			command.Stdout = io.MultiWriter(output, d.log)
-		}
-		command.Stderr = command.Stdout
-		if err := command.Start(); err != nil {
-			t.Fatalf("start scratch Dispatch: %v", err)
-		}
-		exited := make(chan error, 1)
-		go func() { exited <- command.Wait() }()
-		d.command, d.exited, d.output = command, exited, output
-		for time.Now().Before(deadline) {
-			select {
-			case err := <-exited:
-				d.command = nil
-				if attempt < 10 && strings.Contains(output.String(), "address already in use") {
-					if restart {
-						t.Logf("scratch Dispatch's port %d is still held; starting it on the same port again", d.port)
-						time.Sleep(500 * time.Millisecond)
-					} else {
-						t.Logf("scratch Dispatch lost port %d to another process before binding it; starting it on another", d.port)
-						d.port = 0
-					}
-					continue attempts
-				}
-				t.Fatalf("scratch Dispatch exited before it was ready (%v):\n%s", err, output.String())
-			default:
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// holdPortAgain binds the port the server served on before its stop and returns a descriptor of
+// its own for the listening socket, as heldSocket does for a port the kernel chooses. From the stop
+// until here the port is any process's, so one that finds it taken binds it again until deadline.
+func (d *scratchDispatch) holdPortAgain(deadline time.Time) *os.File {
+	d.t.Helper()
+	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(d.port))
+	for {
+		listener, err := net.Listen("tcp", address)
+		if err == nil {
+			file, err := listener.(*net.TCPListener).File()
+			_ = listener.Close()
+			if err != nil {
+				d.t.Fatalf("take the descriptor of scratch Dispatch's port %d: %v", d.port, err)
 			}
-			if response, err := pollClient.Get(d.base + "/api/v1"); err == nil {
-				response.Body.Close()
-				if response.StatusCode == http.StatusOK {
-					return
-				}
-			}
-			time.Sleep(50 * time.Millisecond)
+			return file
 		}
-		t.Fatalf("scratch Dispatch did not become ready:\n%s", output.String())
+		if time.Now().After(deadline) {
+			d.t.Fatalf("hold scratch Dispatch's port %d again: %v", d.port, err)
+		}
+		d.t.Logf("scratch Dispatch's port %d is still taken (%v); binding it again", d.port, err)
+		time.Sleep(500 * time.Millisecond)
 	}
 }
 
