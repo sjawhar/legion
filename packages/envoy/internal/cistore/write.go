@@ -1,6 +1,7 @@
 package cistore
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,40 +34,51 @@ const (
 // write carries every observation of a batch, so a NATS reconnect or a JetStream 503 during a
 // server restart must not fail them all, and GitHub does not redeliver a delivery the listener
 // refused. A lasting error fails it at once. Each attempt takes the handle the latest Rewatch
-// installed, and each KV call is given up on if the store is rewatched before it is answered. A
-// write that runs out of the budget logs `ci record exceeded its retry budget`, one JSON line
-// naming the head, the checks the record would have held (0 when no attempt read it), the attempts
-// it made, the observations it carried (each a delivery the webhook answers 503) and the last
-// attempt's error, so an alarm can count those 503s by their cause. It is an ERROR because each
-// one means GitHub was answered 503.
+// installed, and each KV call is given up on if the store is rewatched before it is answered. A KV
+// call is also given up on when ctx ends (errKVUnanswered, the caller's wait: update), which fails
+// the write at once, since no retry fits in an ended ctx. A write that runs out of the budget, or
+// of ctx, logs `ci record exceeded its retry budget`, one JSON line naming the head, the checks the
+// record would have held (0 when no attempt read it), the attempts it made, the observations it
+// carried (each a delivery the webhook answers 503) and the last attempt's error, so an alarm can
+// count those 503s by their cause. It is an ERROR because each one means GitHub was answered 503.
+//
+// A write given up on that way may still land after its callers have answered. It is a
+// compare-and-swap at the revision its attempt read (a create when it read none), so it never
+// overwrites a write that landed since: that write moved the revision and this one conflicts and
+// is dropped. If it lands, the record holds the batch's observations although each delivery was
+// answered 503, and the redelivery of one finds its observation there, which its mutation's rules
+// apply as no change, so nothing is written twice.
 //
 // A write that would take the record past maxRecordBytes, or its settlement past
 // maxSettlementBytes, is refused with bus.ErrTooLarge, which a redelivery would meet again: the
 // record is written as it was, marked Overflowed, so it never settles on the checks it could not
 // hold.
-func (s *Store) write(identity State, observations int, mutate func(*State) bool) error {
+func (s *Store) write(ctx context.Context, identity State, observations int, mutate func(*State) bool) error {
 	key := Key(identity.Owner, identity.Repo, identity.Number, identity.SHA)
 	deadline := time.Now().Add(recordBudget)
 	var retryErr error
 	checks := 0
+	spent := func(attempts int, err error) error {
+		s.logger.Error("ci record exceeded its retry budget",
+			slog.String("owner", identity.Owner),
+			slog.String("repo", identity.Repo),
+			slog.String("number", identity.Number),
+			slog.String("sha", identity.SHA),
+			slog.Int("checks", checks),
+			slog.Int("attempts", attempts),
+			slog.Int("observations", observations),
+			slog.String("error", err.Error()))
+		return err
+	}
 	for attempt := 0; ; attempt++ {
 		if retryErr != nil {
 			if time.Now().After(deadline) {
-				s.logger.Error("ci record exceeded its retry budget",
-					slog.String("owner", identity.Owner),
-					slog.String("repo", identity.Repo),
-					slog.String("number", identity.Number),
-					slog.String("sha", identity.SHA),
-					slog.Int("checks", checks),
-					slog.Int("attempts", attempt),
-					slog.Int("observations", observations),
-					slog.String("error", retryErr.Error()))
-				return retryErr
+				return spent(attempt, retryErr)
 			}
 			time.Sleep(casBackoff(attempt - 1))
 		}
 		kv := s.watcher.KV()
-		entry, err := kvCall(s.logger, s.nextRewatch(), func() (nats.KeyValueEntry, error) { return kv.Get(key) })
+		entry, err := kvCall(ctx, s.logger, s.nextRewatch(), func() (nats.KeyValueEntry, error) { return kv.Get(key) })
 		var st State
 		var rev uint64
 		switch {
@@ -77,6 +89,8 @@ func (s *Store) write(identity State, observations int, mutate func(*State) bool
 			rev = entry.Revision()
 		case errors.Is(err, nats.ErrKeyNotFound):
 			st = identity
+		case errors.Is(err, errKVUnanswered):
+			return spent(attempt+1, err)
 		case kvErrorLasts(err):
 			return err
 		default:
@@ -119,7 +133,7 @@ func (s *Store) write(identity State, observations int, mutate func(*State) bool
 				return err
 			}
 		}
-		_, err = kvCall(s.logger, s.nextRewatch(), func() (uint64, error) {
+		_, err = kvCall(ctx, s.logger, s.nextRewatch(), func() (uint64, error) {
 			if rev == 0 {
 				return kv.Create(key, buf)
 			}
@@ -128,6 +142,8 @@ func (s *Store) write(identity State, observations int, mutate func(*State) bool
 		switch {
 		case err == nil:
 			return refused
+		case errors.Is(err, errKVUnanswered):
+			return spent(attempt+1, err)
 		case kvErrorLasts(err):
 			return err
 		case isCASConflict(err):
@@ -170,24 +186,35 @@ func settlementSize(st State) (int, error) {
 // errKVRewatched is what a KV call answers when the store was rewatched before its answer came.
 var errKVRewatched = errors.New("cistore: store rewatched before the KV call was answered")
 
-// kvCall returns call's answer, or errKVRewatched if rewatched closes first. A legacy nats.go KV
-// call takes no context and waits up to the JetStream MaxWait for its answer. One sent just before
-// the server went away gets none, so it would hold its write, and every caller queued behind the
-// write, for the whole wait. Rewatch runs on every reconnect, so the call is given up on then and
-// retried on the new connection within the write's budget. Rewatch also runs when the listener's
-// self-health rebuilds a watcher on a live connection; a call given up on there may still have
-// been answered, and is retried like any other. Until the store is rewatched a call is waited for
-// as long as the server takes, up to the MaxWait, so a server that stalls and then answers still
-// answers that call. The write is not saved by that alone: its budget can run out during the
-// stall, and an attempt whose compare-and-swap then loses returns rather than reading again (the
-// deadline above), so a stall of a few seconds can still fail a batch when another writer's
-// request was queued at the same server. A call given up on ends on its own, with its answer or at
-// the MaxWait. A write it carried is a compare-and-swap at the revision its attempt read, so if
-// the server applies it after the retry's write it conflicts, and if before, the retry's fresh
-// read finds the batch's observations already there and writes nothing. A call that panics
-// re-panics in its caller, as it would without the goroutine, so the batch fails (writeBatch); one
-// that panics after its caller has moved on is logged through logger.
-func kvCall[T any](logger *logging.Logger, rewatched <-chan struct{}, call func() (T, error)) (T, error) {
+// errKVUnanswered is what a KV call answers, wrapping ctx's error, when ctx ended before its
+// answer came.
+var errKVUnanswered = errors.New("cistore: the KV call did not answer")
+
+// kvCall returns call's answer, errKVRewatched if rewatched closes first, or errKVUnanswered if ctx
+// ends first; a ctx that has already ended starts no call. A legacy nats.go KV call takes no
+// context and waits up to the JetStream MaxWait for its answer. One sent just before the server
+// went away gets none, so it would hold its write, and every caller queued behind the write, for
+// the whole wait. Rewatch runs on every reconnect, so the call is given up on then and retried on
+// the new connection within the write's budget. Rewatch also runs when the listener's self-health
+// rebuilds a watcher on a live connection; a call given up on there may still have been answered,
+// and is retried like any other. Otherwise a call is waited for until ctx ends (the caller's wait,
+// two budgets at most: update), even past the write's budget, so a server that stalls and then
+// answers within that wait still answers that call, and one that stays silent fails the write when
+// it ends rather than at the MaxWait. A stall of a few seconds can also fail a batch whose
+// compare-and-swap then loses, since such an attempt returns rather than reading again once the
+// budget is spent (write). This is bus.Bounded with the rewatch and the panic handling below added.
+// A call given up on ends on its own, with its answer or at the MaxWait. A write it carried is a
+// compare-and-swap at the revision its attempt read, so if the server applies it after the retry's
+// write it conflicts, and if before, the retry's fresh read finds the batch's observations already
+// there and writes nothing; one given up on at ctx's end has no retry, and write says why its
+// landing late is safe too. A call that panics re-panics in its caller, as it would without the
+// goroutine, so the batch fails (writeBatch); one that panics after its caller has moved on is
+// logged through logger.
+func kvCall[T any](ctx context.Context, logger *logging.Logger, rewatched <-chan struct{}, call func() (T, error)) (T, error) {
+	var zero T
+	if err := ctx.Err(); err != nil {
+		return zero, fmt.Errorf("%w: %w", errKVUnanswered, err)
+	}
 	type answer struct {
 		value    T
 		err      error
@@ -204,6 +231,13 @@ func kvCall[T any](logger *logging.Logger, rewatched <-chan struct{}, call func(
 		}()
 		a.value, a.err = call()
 	}()
+	giveUp := func(at string) {
+		go func() {
+			if a := <-answered; a.panicked != nil {
+				logger.Error("cistore: a KV call given up on at "+at+" panicked", slog.String("panic", fmt.Sprint(a.panicked)))
+			}
+		}()
+	}
 	select {
 	case a := <-answered:
 		if a.panicked != nil {
@@ -211,13 +245,11 @@ func kvCall[T any](logger *logging.Logger, rewatched <-chan struct{}, call func(
 		}
 		return a.value, a.err
 	case <-rewatched:
-		go func() {
-			if a := <-answered; a.panicked != nil {
-				logger.Error("cistore: a KV call given up on at a rewatch panicked", slog.String("panic", fmt.Sprint(a.panicked)))
-			}
-		}()
-		var zero T
+		giveUp("a rewatch")
 		return zero, errKVRewatched
+	case <-ctx.Done():
+		giveUp("its context's end")
+		return zero, fmt.Errorf("%w: %w", errKVUnanswered, ctx.Err())
 	}
 }
 
@@ -241,8 +273,9 @@ func (s *Store) nextRewatch() <-chan struct{} {
 // and what the retry actually rescues is a NATS reconnect (ErrReconnectBufExceeded, a request
 // refused while the connection reconnects, and errKVRewatched, a request given up on at the
 // rewatch that follows it), a JetStream 503 while a server restarts, and no responders, which a
-// request gets whenever no server answers for the stream it names; a timeout is transient too, but
-// it arrives only after the JetStream MaxWait, past the whole budget (recordBudget).
+// request gets whenever no server answers for the stream it names. A timeout is transient too,
+// though one at the JetStream MaxWait never comes: the caller's wait (update, two budgets) ends
+// first, and the call is given up on then (errKVUnanswered, which write fails on first).
 //
 // No responders is transient because it cannot be told apart from a restart: a restarting server
 // answers it for as long as it is away, and a batch that should have been retried failed instead.

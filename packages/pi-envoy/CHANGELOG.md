@@ -10,6 +10,9 @@
   reports no state, `Answer state not reported by this Dispatch; open the link to read the ask.`
   Its description says an ask hit says whether it is answered (INFRA-569).
 
+- A person's browser edit of a spec a session wrote reaches that session as one Envoy card, 30
+  seconds after the person stops editing: the card names the document, the two versions and each
+  editor, and the diff follows it in a fenced `diff` block. An idle session starts a turn on it.
 - The `dispatch` command this plugin ships reads one block of a document:
   `dispatch read --ref dispatch://KEY/spec#b-<id>` (or an issue's or a project's document with
   `#b-<id>`, optionally pinned to a version with `@v<N>`) prints the block, the version its text
@@ -22,9 +25,7 @@
   Legion role of its tree, even when its claim reads `not running`: the Legion daemon suspends a
   root's architect while the root waits on a person, and taking that claim takes the tree out of
   the workflow.
-
 - `dispatch-first`'s blocker rule says a design question that a document records is an ask block in that document, and any other blocker a `dispatch ask`. `packages/pi-shared/test/skills-partition.test.ts` now fails when a shipped skill or a daemon prompt names a `skill://` that neither plugin ships.
-
 - The agent stream reports the model and thinking level the session runs now, so Dispatch's live
   view can show and switch them: a `settings` frame carrying the current model (`provider/id`),
   every model the session lists as available, the configured thinking level `/effort` reports
