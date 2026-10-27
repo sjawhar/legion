@@ -716,6 +716,10 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 		return
 	}
 	if result.Err != nil {
+		// A refused address (session.ErrAddressNotReachable) sent nothing, so its ledger attempt is
+		// given up: the pair is not delivered, and a resend after the session registers through this
+		// pod is prompted rather than skipped as in flight. It is not retried (ShouldNAK is false).
+		refused := errors.Is(result.Err, session.ErrAddressNotReachable)
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID:    sessionID,
 			attempt:      attempt,
@@ -725,7 +729,7 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 				logger.DeliveryLog(slog.LevelError, "listener agent delivery failed", sessionID, item.Topic, item.EventID, "failed", slog.String("error", result.Err.Error()))
 			},
 			exceptionReason: "delivery_failed",
-			clearAttempt:    result.ShouldNAK,
+			clearAttempt:    result.ShouldNAK || refused,
 		})
 	}
 	if result.Delivered {
@@ -854,6 +858,25 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 			clearLedgerAttempt(cfg, item, attempt)
 			cfg.logger.DeliveryLog(slog.LevelWarn, "listener delivery cancelled at shutdown", interest.SessionID, item.Topic, item.EventID, "retry")
 			retryIn = max(retryIn, durableRetryDelay)
+			continue
+		}
+		if errors.Is(err, session.ErrAddressNotReachable) {
+			// The session's address is local to this pod and another pod accepted its registration:
+			// nothing was sent, and no attempt of this pod would reach it. The refusal is reported as
+			// a terminal fanout outcome, like the delivery-mode refusals above, its ledger attempt is
+			// given up (the pair is not delivered), and the message is not retried for it.
+			applyDeliveryOutcome(cfg, item, deliveryOutcome{
+				sessionID:    interest.SessionID,
+				attempt:      attempt,
+				metricStatus: "failed",
+				duration:     &deliveryTimer,
+				log: func(logger *logging.Logger) {
+					logger.DeliveryLog(slog.LevelError, "listener delivery failed", interest.SessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
+				},
+				exceptionReason: "delivery_failed",
+				fanoutRefusal:   true,
+				clearAttempt:    true,
+			})
 			continue
 		}
 		if err != nil {

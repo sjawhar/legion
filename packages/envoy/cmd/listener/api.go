@@ -1122,7 +1122,15 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			return
 		}
 		if body.Port > 0 || body.SelfSubscribed {
-			if err := d.sessions.Put(body.SessionID, sessionEntryFromSubscribe(body, machineID)); err != nil {
+			entry := sessionEntryFromSubscribe(body, machineID)
+			if body.Port > 0 {
+				// This pod accepted the registration, so it names itself: a delivery address local
+				// to a pod (a loopback bridge, host.docker.internal) reaches the session only from
+				// the pod the session can reach, and session.Deliverer refuses it on any other pod.
+				// A heartbeat accepted by another pod re-stamps it with that pod's name.
+				entry.AcceptedHost = d.podHostname
+			}
+			if err := d.sessions.Put(body.SessionID, entry); err != nil {
 				logger.Error("listener session registry put failed", slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
 				writeNATSError(w, err, http.StatusServiceUnavailable, "session registry unavailable")
 				return

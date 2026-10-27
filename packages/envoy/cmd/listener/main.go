@@ -49,6 +49,9 @@ type listenerDeps struct {
 	receiver   *durableReceiver
 	streamName string
 	streamInfo streamInfoLookup
+	// podHostname is this pod's host name (listenerPodHostname), which the subscribe handler stamps
+	// on a port registration as session.SessionEntry.AcceptedHost; empty when it is unknown.
+	podHostname string
 }
 
 // kvCache is what the listener asks of each KV-backed cache it keeps.
@@ -592,6 +595,24 @@ func listenerInstance() (string, error) {
 	return hostname, nil
 }
 
+// listenerPodHostname is the host name of the pod this listener runs in, which the subscribe handler
+// stamps on a port registration (session.SessionEntry.AcceptedHost) and the deliverer compares
+// before it dials a pod-local address (session.Deliverer.PodHost). It is os.Hostname, the pod's name
+// in Kubernetes and the shared host's name under host networking, where pods on one host reach one
+// loopback; ENVOY_POD_HOSTNAME overrides it, so two listener processes on one host can stand for two
+// pods (the tests). ENVOY_INSTANCE_ID does not: it names the process, not where its loopback is.
+// An unreadable host name returns "" and an error, and the listener then neither stamps nor refuses.
+func listenerPodHostname() (string, error) {
+	if hostname := os.Getenv("ENVOY_POD_HOSTNAME"); hostname != "" {
+		return hostname, nil
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		return "", fmt.Errorf("pod host name: ENVOY_POD_HOSTNAME is unset and the host name is unreadable: %w", err)
+	}
+	return hostname, nil
+}
+
 // startRetry is how long a start waits between attempts to reach NATS while it cannot answer: the
 // connect (connectListener), each store's buckets (openStartStore) and the listener state bucket
 // (openDeliveryLease). /healthz answers 503 "starting" meanwhile, and a SIGTERM or SIGINT ends the
@@ -1014,9 +1035,14 @@ func main() {
 		endListenerKVWatchers(ctx, caches)
 	})
 
+	podHostname, err := listenerPodHostname()
+	if err != nil {
+		logger.Warn("listener pod host name unknown: port registrations are not stamped with the accepting pod, and pod-local delivery addresses are not checked against it", slog.String("error", err.Error()))
+	}
 	deliver := session.Deliverer{
 		MachineID:    cfg.MachineID,
 		HostBridge:   os.Getenv("ENVOY_HOST_BRIDGE"),
+		PodHost:      podHostname,
 		RequestLimit: 30 * time.Second,
 		Sessions:     sessions,
 	}
@@ -1141,14 +1167,15 @@ func main() {
 	client.AddReconnectHook(receiver.reconnected)
 
 	ready := &listenerDeps{
-		client:     client,
-		live:       live,
-		registry:   registry,
-		sessions:   sessions,
-		ciStore:    ciStore,
-		caches:     caches,
-		receiver:   receiver,
-		streamName: bus.Stream,
+		client:      client,
+		live:        live,
+		registry:    registry,
+		sessions:    sessions,
+		ciStore:     ciStore,
+		caches:      caches,
+		receiver:    receiver,
+		streamName:  bus.Stream,
+		podHostname: podHostname,
 	}
 	openV1Routes(v1Gate, ready, cfg.MachineID, logger, listeningAt)
 

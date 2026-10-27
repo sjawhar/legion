@@ -57,6 +57,15 @@ type SessionEntry struct {
 	// through it, else to MachineID, and HostOrMachine falls back to MachineID so every display
 	// caller sees a populated value.
 	Host string `json:"host,omitempty"`
+	// AcceptedHost is the host name (os.Hostname, the pod's name in Kubernetes) of the listener pod
+	// that accepted the session's latest port registration: the subscribe handler stamps every
+	// registration with a port, so a heartbeat accepted by another pod of the machine re-stamps it
+	// with that pod's name, the pod that last heard from the session. Deliverer refuses a delivery
+	// whose address is local to the delivering pod (a loopback bridge, or host.docker.internal)
+	// when AcceptedHost names another pod, since that pod's loopback is not this one's. Empty for a
+	// registration without a port, or one written by a build before this field, which is delivered
+	// as before.
+	AcceptedHost string `json:"accepted_host,omitempty"`
 
 	// unknown holds the JSON of every key a stored registration carries that SessionEntry does not
 	// name: a field a newer build writes. encodeSessionEntry writes it back beside the known fields,
