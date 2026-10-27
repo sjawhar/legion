@@ -193,7 +193,8 @@ A root in `todo` without the label is never admitted, and a root in `triage` wit
 the controller. A child needs none: it runs under its tree's architect once its root is admitted,
 and its architect's `release_children` records it in the tree even when Dispatch already showed it
 `todo`. A `todo` child of a live tree that no event of it ever recorded — the event never reached
-the daemon, since a durable consumer created fresh takes only what is published after it, or it
+the daemon, because a durable consumer created fresh takes only what is published after it or
+because the notification stream drops a message 72 hours old whether or not anyone read it, or it
 reached the daemon while the child's parent had no record or its tree was not live — is recorded
 into the tree at the daemon's next boot, from the parent Dispatch's listing shows then, at any
 depth, as its own event would have. No later event need bring such a child in: Dispatch already
