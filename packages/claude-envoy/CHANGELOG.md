@@ -39,6 +39,10 @@
 
 ### Changed
 
+- The plugin's regenerated `legion/` copy of the `legion-worker` skill's merge gate says a
+  production check of `sjawhar/legion` wakes on Dispatch's `server.started` announcing that every
+  server process serves a build containing the merge, named in the look's task as
+  `Dispatch serving build <sha> on every server process` (INFRA-555).
 - The plugin declares daemon API contract 40 in `package.json`'s `legion.daemonApiVersion`:
   `GET /legion/v1/state` gains the phase `awaiting_person`, a root that gave its admission slot up
   while its architect waits on a person's answer, and the issue field `waitingOn`, naming the

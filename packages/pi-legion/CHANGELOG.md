@@ -208,6 +208,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The `legion-worker` merge-gate reference says a production check of `sjawhar/legion` wakes on
+  Dispatch's `server.started` announcing that every Dispatch server process serves a build
+  containing the merge, named in the look's task as `Dispatch serving build <sha> on every server
+  process`, where it said `Dispatch's start on build <sha>` (INFRA-555).
 - The `legion` tool's description no longer names a `SIGNOFF_CHILD_IN_WORKFLOW` refusal: the daemon
   accepts an architect's `sign_off` of an issue whatever still runs beneath it, and keeps the tree's
   order at the root's close instead, where a root whose pull request merged waits in
