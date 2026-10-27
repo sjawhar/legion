@@ -114,3 +114,5 @@ it returns reads back as `turns`, `selfChecks`, `toolResults` and `transcriptEnt
 ## Checks
 
 `bunx tsc --noEmit`, `bun test`, `bunx biome check src/ test/`, each from this directory.
+
+<!-- scratch INFRA-520 pi-shared -->
