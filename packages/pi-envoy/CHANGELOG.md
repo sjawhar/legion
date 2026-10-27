@@ -4,6 +4,18 @@
 
 ### Added
 
+- Every model request of a session with Dispatch — a top-level session, a Legion pane or a `task`
+  subagent — carries, as its last message, what people wrote to the session in the last 72 hours
+  that Dispatch delivered to it, newest first and word for word: answers to its asks, replies on
+  them and in its comment threads, comments on its documents and routed issues, mentions and
+  messages (dispatch://INFRA-148). A subagent carries its parent's list. The message is capped at
+  8,000 characters, leaving the oldest items out with a line that counts them and names
+  `dispatch answers`. Each request waits at most 800 ms for Dispatch, then carries the last list
+  read, with its read time, or a line saying the list could not be read; a Dispatch without the
+  answers route is not asked again for 5 minutes, and no `!` token command runs for the read. The
+  list is a separate user message after the conversation, so a change in it leaves the cached
+  conversation byte for byte and Oh My Pi puts no cache anchor on it; the `dispatch-first` skill
+  stays at the head as before.
 - `dispatch-first`'s blocker rule says a design question that a document records is an ask block in that document, and any other blocker a `dispatch ask`. `packages/pi-shared/test/skills-partition.test.ts` now fails when a shipped skill or a daemon prompt names a `skill://` that neither plugin ships.
 
 - The agent stream reports the model and thinking level the session runs now, so Dispatch's live

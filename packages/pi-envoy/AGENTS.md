@@ -351,6 +351,39 @@ every request as a session without it, plus the skill's own tokens. `src/dispatc
 holds the insertion rules, and `extensions/dispatch-first-omp.test.ts` checks turn 1, turn 2, after
 a compaction, and without Dispatch on the real binary.
 
+The same `context` handler appends, after the request's last message, what people wrote to the
+session in the last 72 hours (dispatch://INFRA-148): `readSessionAnswers` from
+`@legion/envoy-client/session-answers` over `GET /api/v1/agents/{session_id}/answers`, as a
+separate user message (`src/session-answers-context.ts`), never merged into the last message and
+never at the head. The session is the top-level one's `getSessionId()`; a `task` subagent reads
+its parent's, resolved through `resolveEnvoySession` as `replyAddress` resolves it, which is also
+the session it writes to Dispatch as (`DISPATCH_SESSION_ID`); a subagent this process cannot
+place carries no list. Dispatch is resolved per request with `commands: "kept"`, so no `!` token
+command runs on the request path. Position: Oh My Pi marks every message a `context` handler
+adds as per-call, and its Anthropic placement puts no `cache_control` on a per-call message, so
+the anchors stay on the conversation's own last messages and a change in the list re-reads none
+of the cached prefix; at the head, every change would invalidate everything after it. Its first
+line is `SESSION_ANSWERS_MARKER` (the failure line has its own), and only the last message is
+checked for it, so a second copy of the extension appends nothing and does not read again.
+Bounds, all in the shared module: 8,000 characters for the whole message, items newest first as a
+strict prefix with a left-out line naming `dispatch answers`; one read in flight per session for
+the whole process, the parent's and every subagent's requests joining it; each request waits at
+most `SESSION_ANSWERS_DEADLINE_MS` (800 ms), then carries the last list read (memory, then
+`answers.json` in the session's state directory) or the failure line, and a read that already
+passed its deadline is not waited on again; a 404 keeps that Dispatch URL from being asked for 5
+minutes. The pinned host hands a `context` handler no abort signal: it races the handler against
+the run's own and drops an aborted handler's result. A handler that throws loses everything it
+returns, the skill included, so a read that throws rather than answering carries the failure line
+naming the error. `src/session-answers-context.test.ts` holds the insertion rules,
+`extensions/envoy.test.ts` the handler, a subagent reading its parent's id and a Dispatch that
+answers no list, and `extensions/session-answers-omp.test.ts` the real binary: a new answer in
+the next turn, after a compaction and in a subagent's first request; every kind of item word for
+word; the cap; a route that never answers costing a request under one second; a route that
+answers 404; and the cache prefix byte for byte with no `cache_control` on the list. That case
+times the read against a profile whose model catalog is already built: a fresh profile builds it
+beside its first turn, holding the host's event loop for one to two seconds whatever the
+extension does.
+
 `before_agent_start` injects nothing into the conversation; its open-asks query arms the run-end
 nudge only for a turn carrying the user's own text, its snapshot `as_of` becoming the period's first
 window. It runs only for a session the stop could actually nudge — the host awaits this handler, so

@@ -13,7 +13,7 @@ import {
 import { createServer } from "node:net";
 import { hostname, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
-import { dispatchIssueSubject } from "@legion/contracts";
+import { dispatchIssueSubject, type SessionAnswer } from "@legion/contracts";
 import { shownPictures } from "@legion/envoy-client/dispatch-picture-tools";
 import {
   appendResult,
@@ -21,6 +21,7 @@ import {
   sessionDirectory,
 } from "@legion/envoy-client/dispatch-session-state";
 import { machineID } from "@legion/envoy-client/machine";
+import { renderSessionAnswers } from "@legion/envoy-client/session-answers";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
@@ -11892,6 +11893,139 @@ describe("envoy OMP extension", () => {
           },
         },
       ]);
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  /** A Dispatch whose answers route lists `text` as a person's answer, written a minute ago, and
+   *  records each path it is asked for; the listener's routes answer as usual. */
+  function answeringDispatch(text: string): {
+    readonly reads: string[];
+    readonly item: SessionAnswer;
+  } {
+    process.env.DISPATCH_URL = "http://dispatch.test";
+    process.env.DISPATCH_TOKEN = "answers-token";
+    const item: SessionAnswer = {
+      kind: "answer",
+      relation: "answered_your_ask",
+      id: "ask_1",
+      at: new Date(Date.now() - 60_000).toISOString(),
+      author: { kind: "user", id: "alice" },
+      text,
+      ask: { id: "ask_1", question: "Which way?" },
+      owner: { issue: { key: "LEGION-1", title: "The work" } },
+      ref: "dispatch://LEGION-1/ask/ask_1",
+      href: "/issues/LEGION-1#ask-ask_1",
+    };
+    const reads: string[] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.host !== "dispatch.test") return responseWithRegistration(input, init, {});
+      reads.push(url.pathname);
+      const session = url.pathname.split("/")[4] ?? "";
+      return Response.json({ session_id: session, since: item.at, total: 1, items: [item] });
+    };
+    return { reads, item };
+  }
+
+  /** The messages a `context` handler's result carries. */
+  function contextMessages(result: unknown): unknown[] {
+    if (typeof result !== "object" || result === null || !("messages" in result)) {
+      throw new Error(`the context handler returned ${JSON.stringify(result)}`);
+    }
+    return result.messages as unknown[];
+  }
+
+  test("the context handler appends what people wrote to the session after the request's last message", async () => {
+    const { reads, item } = answeringDispatch("Go the second way.");
+    const { default: envoyExtension } = await import("./envoy.ts?session-answers-top");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    const context = sessionContext("ses_answers_top");
+    await fixture.handlers.get("session_start")?.({}, context);
+    const conversation = [
+      { role: "user", content: [{ type: "text", text: "Fix the bug." }], timestamp: 1 },
+      {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "x.ts" } }],
+        timestamp: 2,
+      },
+      {
+        role: "toolResult",
+        toolCallId: "call-1",
+        toolName: "read",
+        content: [{ type: "text", text: "export {};" }],
+        isError: false,
+        timestamp: 3,
+      },
+    ];
+
+    const messages = contextMessages(
+      await fixture.handlers.get("context")?.({ messages: conversation }, context)
+    );
+
+    expect(reads).toEqual(["/api/v1/agents/ses_answers_top/answers"]);
+    // The skill stays at the head, the conversation is untouched, and the list is its own last
+    // message.
+    expect(JSON.stringify(messages[0])).toContain("<dispatch-first-skill>");
+    expect(messages.slice(1, -1)).toEqual(conversation);
+    expect(messages.at(-1)).toEqual({
+      role: "user",
+      content: [{ type: "text", text: renderSessionAnswers([item], { now: Date.now() }) }],
+      timestamp: 0,
+    });
+  });
+
+  // Oh My Pi drops everything a `context` handler returns when it throws: whatever Dispatch
+  // answers, the skill stays and the request says the list could not be read.
+  test("a Dispatch answering 200 with no list keeps the dispatch-first skill and carries the failure line", async () => {
+    process.env.DISPATCH_URL = "http://dispatch.test";
+    process.env.DISPATCH_TOKEN = "answers-token";
+    globalThis.fetch = async (input, init) =>
+      new URL(input.toString()).host === "dispatch.test"
+        ? Response.json({ unexpected: true })
+        : responseWithRegistration(input, init, {});
+    const { default: envoyExtension } = await import("./envoy.ts?session-answers-malformed");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    const context = sessionContext("ses_answers_malformed");
+    await fixture.handlers.get("session_start")?.({}, context);
+    const prompt = { role: "user", content: [{ type: "text", text: "Fix it." }], timestamp: 1 };
+
+    const messages = contextMessages(
+      await fixture.handlers.get("context")?.({ messages: [prompt] }, context)
+    );
+
+    expect(JSON.stringify(messages[0])).toContain("<dispatch-first-skill>");
+    expect(messages.slice(1, -1)).toEqual([prompt]);
+    expect(JSON.stringify(messages.at(-1))).toContain(
+      "[Dispatch: people's answers from the last 72 hours could not be read ("
+    );
+  });
+
+  test("a task subagent's context handler reads its parent's list", async () => {
+    const fixture = transcriptFixture();
+    try {
+      const { reads } = answeringDispatch("Go the parent's way.");
+      const host = await subagentProcess(
+        "session-answers-subagent",
+        "ses_answers_parent",
+        fixture.transcript
+      );
+      const child = await host.boot(
+        "ses_answers_child",
+        fixture.transcript("2026-09-23T00-00-00-000Z_ses_answers_parent/Scout.jsonl")
+      );
+      const prompt = { role: "user", content: [{ type: "text", text: "Look." }], timestamp: 1 };
+
+      const messages = contextMessages(
+        await child.handlers.get("context")?.({ messages: [prompt] }, child.context)
+      );
+
+      expect(reads).toEqual(["/api/v1/agents/ses_answers_parent/answers"]);
+      expect(messages.slice(1, -1)).toEqual([prompt]);
+      expect(JSON.stringify(messages.at(-1))).toContain("Go the parent's way.");
     } finally {
       fixture.remove();
     }

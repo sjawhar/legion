@@ -50,6 +50,10 @@ import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth";
 import {
+  readSessionAnswers,
+  sessionAnswersFailureLine,
+} from "@legion/envoy-client/session-answers";
+import {
   sessionConfigFile,
   sessionDispatchSettings,
   sessionSettings,
@@ -123,6 +127,7 @@ import {
 } from "../src/dispatch-user-turn";
 import { recordEnvoySession, resolveEnvoySession } from "../src/envoy-session";
 import { opensAsk } from "../src/opens-ask";
+import { withSessionAnswers } from "../src/session-answers-context";
 import { sideTurn } from "../src/side-turn";
 import { TypedPictures } from "../src/typed-pictures";
 import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";
@@ -2809,12 +2814,55 @@ export default function envoyExtension(pi: PiApi): void {
     registerEnvoyWhoamiCommand(pi, replyAddress);
   }
 
+  // What people wrote to the session in the last 72 hours, as the list of
+  // `@legion/envoy-client/session-answers` renders it: the top-level session's own list, and for a
+  // `task` subagent its parent's, the session it writes to Dispatch as (`DISPATCH_SESSION_ID`).
+  // Dispatch is resolved with `commands: "kept"`, so no `!` token command runs on the request path,
+  // and the read waits at most `SESSION_ANSWERS_DEADLINE_MS` before the last list read stands in.
+  // A subagent this process cannot place carries no list rather than another session's.
+  const sessionAnswersText = async (context: SessionContext): Promise<string | undefined> => {
+    const session = (await isSubagent(context))
+      ? resolveEnvoySession(context.sessionManager.getSessionFile())
+      : context.sessionManager.getSessionId();
+    if (session === "") return undefined;
+    let stateDirectory: string | undefined;
+    try {
+      stateDirectory = dispatchSessionDirectory(process.env, session);
+    } catch {
+      // An id that is no path segment keeps the cache in memory; the route says what is wrong.
+    }
+    try {
+      const read = await readSessionAnswers({
+        session,
+        dispatch: sessionDispatchSettings(CONFIG_FILE, process.env, {
+          cwd: process.cwd(),
+          commands: "kept",
+        }).dispatch,
+        stateDirectory,
+      });
+      return read.text;
+    } catch (error) {
+      // Oh My Pi drops all a `context` handler returns when it throws, the dispatch-first skill
+      // with it, so a read that throws instead of answering with its failure line still costs
+      // only the list: the request says the list could not be read, and why.
+      logger.warn(`envoy: people's answers could not be read: ${messageFor(error)}`);
+      return sessionAnswersFailureLine(messageFor(error));
+    }
+  };
+
   if (atStart.dispatch.enabled) {
     // Every session that reaches Dispatch, Legion panes and `task` subagents included, carries
-    // the dispatch-first skill on every request: any of them can file, ask, or start work.
-    pi.on("context", async (event) => {
-      const messages = withDispatchFirst(event.messages, DISPATCH_FIRST_CONTEXT);
-      return messages === undefined ? undefined : { messages };
+    // the dispatch-first skill on every request at the head, where its bytes never change, and
+    // what people wrote to it at the tail, where a change in the list re-reads no cached prefix.
+    // Oh My Pi hands this handler no abort signal: it races the handler against the run's own and
+    // drops what an aborted handler returns, and the read it shares goes on to fill the cache.
+    pi.on("context", async (event, context) => {
+      const withSkill = withDispatchFirst(event.messages, DISPATCH_FIRST_CONTEXT);
+      const messages = await withSessionAnswers(withSkill ?? event.messages, () =>
+        sessionAnswersText(context)
+      );
+      const result = messages ?? withSkill;
+      return result === undefined ? undefined : { messages: result };
     });
   }
 
