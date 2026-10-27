@@ -333,10 +333,12 @@ describe("the document", () => {
 
   test("a cause's meaning and fix are the texts of CAUSES", () => {
     expect(CAUSES["no-target"]?.fix).toBe(
-      "Partly: in this pull request a reply in a thread on a document goes to every session in " +
-        "the thread and to the document's session authors. A comment on an issue with no route " +
-        "and no session claim is owed to no session; the findings section gives each comment's " +
-        "cause."
+      "In this pull request: a reply in a thread on a document goes to every session in the " +
+        "thread and to the document's session authors, and a comment on an issue with no route " +
+        "and no session claim goes to the session authors of the issue's primary document. A " +
+        "Legion issue before admission, and an issue that nobody routes or claims and whose " +
+        "document's author has stopped (INFRA-49), still reach no session; the findings give " +
+        "each comment's cause."
     );
     expect(CAUSES["not-running"]?.meaning).toBe(
       "Dispatch sent the comment to the session, and the transcript store's recorded start and " +

@@ -2310,16 +2310,22 @@ the synchronous listener call records the sent or failed attempt instead of blin
   (`outbox/recipients.go`, `loadCommentRecipients`), keyed by the comment each reply is under.
   A person's `comment.created` or `comment.edited` on an issue with no route (the document's issue
   for a comment on an issue's document) also reaches the session that claimed the issue
-  (`issues.claimed_by`, read with the route); in an ask's thread too. A person's claim, or no
-  claim, adds nothing, and a routed issue reaches its route and not the claimant. The order of an
-  event's destinations is fixed: the owner topic, the route, the claimant, the author routes, the
-  ask's followers, the previous claimant; a topic is sent once. The claimant and author routes are
-  skipped for a human, who has no topic, for the event's own actor, so a session commenting on a
-  document it wrote is never told of its own comment, and for a session the comment's mentions
-  already reach (`suppressed_authors`: every session a mention resolved to, on a new comment, a
-  reply and an ask's thread, so a mentioned session hears the comment once; the follower routes do
-  not read it). An agent's comment notifies nobody (`notify` is false), so it takes no claimant or
-  author route at all. `ask.follower_added` and `ask.follower_removed` also route directly to the
+  (`issues.claimed_by`, read with the route); in an ask's thread too. When nobody or a person
+  claimed such an issue, the comment goes in the claimant's place to every session the issue's
+  primary document (`artifacts.is_primary`) credits, as `documentCreditsSQL` reads credits, so a
+  session that wrote the spec without a claim still hears comments on any of the issue's threads.
+  A batch reads those sessions for all such events in one query (`loadPrimaryDocumentAuthors`),
+  keyed by issue. A routed issue reaches its route and not the claimant or the primary document's
+  sessions, and a session claimant takes the slot alone. The order of an event's destinations is
+  fixed: the owner topic, the route, the claimant (or the primary document's sessions), the
+  author routes, the ask's followers, the previous claimant; a topic is sent once. The claimant,
+  primary-document and author routes are skipped for a human, who has no topic, for the event's
+  own actor, so a session commenting on a document it wrote is never told of its own comment, and
+  for a session the comment's mentions already reach (`suppressed_authors`: every session a
+  mention resolved to, on a new comment, a reply and an ask's thread, so a mentioned session hears
+  the comment once; the follower routes do not read it). An agent's comment notifies nobody
+  (`notify` is false), so it takes no claimant, primary-document or author route at all.
+  `ask.follower_added` and `ask.follower_removed` also route directly to the
   session they name, since a newly added follower is not subscribed to the issue topic by default.
 - Dispatch document events use `notifications.dispatch.document.<PROJECT>.<slug>.<type>` and
   are retained in JetStream. Consumers subscribe or tail that document topic directly; a document

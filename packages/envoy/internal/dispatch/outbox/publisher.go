@@ -185,16 +185,23 @@ type pendingEvent struct {
 	destinations []string
 	slug         string
 	route        *string
-	// claimant is the session that claimed the event's issue (the issue of the event's document,
-	// for a document event), or "" when nobody or a person claimed it.
+	// issue is the key of the event's issue (the issue of the event's document, for a document
+	// event), or "" when it has none. route and claimant are read from the same issue.
+	issue string
+	// claimant is the session that claimed the event's issue, or "" when nobody or a person
+	// claimed it.
 	claimant string
 	// threadSessions are the sessions a person's reply reaches through its thread
 	// (loadCommentRecipients), read for the whole batch by resolveCommentRecipients.
 	threadSessions []string
+	// primaryAuthors are the sessions the primary document of an issue with no route and no
+	// session claimant credits (loadPrimaryDocumentAuthors), which a person's comment reaches in
+	// the claimant's place, read for the whole batch by resolveCommentRecipients.
+	primaryAuthors []string
 	// failure is why the row cannot be published as it was read - it did not scan, or its
-	// actor or payload JSON did not decode, or its thread's sessions could not be read - and
-	// failureLog is the predicate it reports under. The batch backs such an event off instead
-	// of publishing it.
+	// actor or payload JSON did not decode, or its thread's sessions or its primary document's
+	// sessions could not be read - and failureLog is the predicate it reports under. The batch
+	// backs such an event off instead of publishing it.
 	failure    error
 	failureLog string
 }
@@ -433,7 +440,7 @@ func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, bool, er
 	rows, err := deps.Store.Pool.Query(ctx, `
 		select e.id, e.issue_key, e.artifact_id::text, coalesce(e.project_key, i.project_key, ar.project_key, ''), e.seq,
 		       e.type, e.actor, e.notify, e.created_at, e.payload, e.attempt_count, e.published_destinations,
-		       coalesce(ar.slug, ''), coalesce(i.route, ai.route),
+		       coalesce(ar.slug, ''), coalesce(i.route, ai.route), coalesce(i.key, ai.key, ''),
 		       case when coalesce(i.claimed_by, ai.claimed_by)->>'kind' = 'session'
 		            then coalesce(coalesce(i.claimed_by, ai.claimed_by)->>'id', '') else '' end
 		from events e
@@ -468,6 +475,7 @@ func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, bool, er
 			&item.destinations,
 			&item.slug,
 			&item.route,
+			&item.issue,
 			&item.claimant,
 		); err != nil {
 			// pgx scans positionally and treats a failure as fatal to the cursor, so this
@@ -571,7 +579,8 @@ func send(ctx context.Context, deps Deps, sender bus.Sender, pending pendingEven
 
 // publishDestinations sends item to each of the destinations of pending's event in turn, and
 // returns the first error that ends the attempt. The order is fixed: the owner topic, the route,
-// the claimant (publishClaimant), the author routes, the ask's followers, and the session that lost
+// the claimant or, when the issue has no route and no session claimant, the sessions of its primary
+// document (publishClaimant), the author routes, the ask's followers, and the session that lost
 // the issue's claim. The route, the claimant and the author routes are for an event that notifies
 // (events.Broker.Notify) and is no targeted message. A topic is sent once, in its first place
 // (publishDestination).
@@ -603,25 +612,37 @@ func publishDestinations(ctx context.Context, deps Deps, pending pendingEvent, i
 
 // publishClaimant sends a person's comment, or its edit, to the session that claimed the issue,
 // on its own topic, when the issue has no route. On an issue with a route, the route's holder hears
-// it, and the claimant does not; a person's claim, or no claim, adds no destination. The comment's
-// own thread does not matter: a comment in an ask's thread reaches the claimant too, as it would
-// reach the route. The actor is skipped, and so is a claimant the comment's mentions already reach
+// it, and the claimant does not. When nobody or a person claimed an issue with no route, the
+// comment goes in the claimant's place to every session the issue's primary document credits
+// (primaryAuthors, read by resolveCommentRecipients): a session that writes an issue's spec without
+// a claim still hears the comments on it. The comment's own thread does not matter: a comment in an
+// ask's thread, or a reply, reaches the claimant or those sessions too, as it would reach the
+// route. The actor is skipped, and so is a session the comment's mentions already reach
 // (suppressed_authors).
 func publishClaimant(deps Deps, item contracts.Envelope, pending pendingEvent, a *attempt) error {
-	event, route, claimant := pending.event, pending.route, pending.claimant
-	if claimant == "" || (route != nil && *route != "") {
+	event, route := pending.event, pending.route
+	if route != nil && *route != "" {
 		return nil
 	}
 	if event.Type != "comment.created" && event.Type != "comment.edited" {
 		return nil
 	}
-	if event.Actor.SameAs(model.Actor{Kind: "session", ID: claimant}) {
-		return nil
+	recipients, label := pending.primaryAuthors, "publish primary document author route to"
+	if pending.claimant != "" {
+		recipients, label = []string{pending.claimant}, "publish claimant route to"
 	}
-	if _, suppressed := payloadStringSet(event.Payload, "suppressed_authors")[claimant]; suppressed {
-		return nil
+	suppressedAuthors := payloadStringSet(event.Payload, "suppressed_authors")
+	targets := make([]string, 0, len(recipients))
+	for _, sessionID := range recipients {
+		if event.Actor.SameAs(model.Actor{Kind: "session", ID: sessionID}) {
+			continue
+		}
+		if _, suppressed := suppressedAuthors[sessionID]; suppressed {
+			continue
+		}
+		targets = append(targets, sessionID)
 	}
-	return publishSessionRoutes(deps, event.ID, item, a, []string{claimant}, "publish claimant route to")
+	return publishSessionRoutes(deps, event.ID, item, a, targets, label)
 }
 
 // attempt is one pass over an event's destinations, sent through sender, its batch's window

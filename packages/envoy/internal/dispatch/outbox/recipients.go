@@ -17,8 +17,9 @@ import (
 // order, and each version's authors in its list's order. An artifact that is not a document
 // credits no one. A version's authors are a JSON array, or JSON null where a writer encoded a nil
 // list, which every Go reader of the column decodes as no authors; the CTE reads null the same way
-// rather than failing on jsonb_array_elements' refusal of a scalar. loadDocumentSessionAuthors and
-// loadCommentRecipients both read it, so a document credits the same sessions for each.
+// rather than failing on jsonb_array_elements' refusal of a scalar. loadDocumentSessionAuthors,
+// loadCommentRecipients and loadPrimaryDocumentAuthors all read it, so a document credits the same
+// sessions for each.
 const documentCreditsSQL = `
 	select d.key, a.created_by as author, array[1, 0, 0]::bigint[] as rank
 	from documents d
@@ -142,11 +143,60 @@ func threadReplyOf(event model.Event) string {
 	return payloadString(event.Payload, "reply_to")
 }
 
-// resolveCommentRecipients reads the thread recipients of every reply event of a batch in one
-// query (loadCommentRecipients) and carries each on its event, for publishAuthorRoutes. An event
-// already failed is skipped. When the query fails, each reply event of the batch fails with it and
-// is backed off, as an event whose publish failed is, and the batch's other events go on.
+// primaryDocumentAuthorsQuery is loadPrimaryDocumentAuthors' one statement. $1 is the issue keys.
+// The documents are the issues' primary artifacts (artifacts.is_primary, one per issue at most).
+const primaryDocumentAuthorsQuery = `
+	with documents as (
+		select issue_key as key, id as artifact_id
+		from artifacts
+		where issue_key = any($1::text[]) and is_primary
+	),
+	credited as (` + documentCreditsSQL + `)
+	select key, author->>'id'
+	from credited
+	where ` + sessionCreditSQL + `
+	group by key, author->>'id'
+	order by key, min(rank)
+`
+
+// loadPrimaryDocumentAuthors reads, in one query for a whole batch, the sessions the primary
+// document of each issue of issueKeys credits (documentCreditsSQL), keyed by the issue's key: its
+// creator first, then each version's authors, each once. People, and session credits with no id,
+// are left out (sessionCreditSQL). An issue with no primary document, or with no row, has no entry.
+func loadPrimaryDocumentAuthors(ctx context.Context, deps Deps, issueKeys []string) (map[string][]string, error) {
+	if len(issueKeys) == 0 {
+		return map[string][]string{}, nil
+	}
+	rows, err := deps.Store.Pool.Query(ctx, primaryDocumentAuthorsQuery, issueKeys)
+	if err != nil {
+		return nil, fmt.Errorf("load primary document authors: %w", err)
+	}
+	authors := map[string][]string{}
+	var key, sessionID string
+	if _, err := pgx.ForEachRow(rows, []any{&key, &sessionID}, func() error {
+		authors[key] = append(authors[key], sessionID)
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("load primary document authors: %w", err)
+	}
+	return authors, nil
+}
+
+// resolveCommentRecipients reads, for a whole batch, the sessions a person's comment events reach
+// beyond their owner topic and route: the thread recipients of every reply event in one query
+// (loadCommentRecipients), for publishAuthorRoutes, and the primary document's sessions of every
+// event that reaches them in the claimant's place in one more (loadPrimaryDocumentAuthors), for
+// publishClaimant. Each is carried on its event. An event already failed is skipped. When a query
+// fails, each event of the batch that needed it fails with it and is backed off, as an event whose
+// publish failed is, and the batch's other events go on.
 func resolveCommentRecipients(ctx context.Context, deps Deps, pending []pendingEvent) {
+	resolveThreadSessions(ctx, deps, pending)
+	resolvePrimaryAuthors(ctx, deps, pending)
+}
+
+// resolveThreadSessions reads the thread recipients of every reply event of a batch in one query
+// (loadCommentRecipients) and carries each on its event as threadSessions.
+func resolveThreadSessions(ctx context.Context, deps Deps, pending []pendingEvent) {
 	// A reply's key is its comment's canonical uuid, or "" when it is not a uuid: such a reply
 	// has no entry, but still fails with the query.
 	type reply struct {
@@ -184,5 +234,52 @@ func resolveCommentRecipients(ctx context.Context, deps Deps, pending []pendingE
 		if r.key != "" {
 			item.threadSessions = recipients[r.key]
 		}
+	}
+}
+
+// primaryAuthorsIssueOf names the issue whose primary document's sessions a person's comment event
+// reaches in the claimant's place (publishClaimant), the key of its loadPrimaryDocumentAuthors
+// entry, or "" when the event takes no such recipients: it is no comment.created or
+// comment.edited, it does not notify (only a person's comment does, events.Broker.Notify), it has
+// no issue (a project document's comment), or its issue has a route or a session's claim, whose
+// holder hears it in place of the document's sessions. The comment's thread does not matter.
+func primaryAuthorsIssueOf(item pendingEvent) string {
+	event := item.event
+	if !event.Notify || (event.Type != "comment.created" && event.Type != "comment.edited") {
+		return ""
+	}
+	if item.claimant != "" || (item.route != nil && *item.route != "") {
+		return ""
+	}
+	return item.issue
+}
+
+// resolvePrimaryAuthors reads the primary document's sessions of every event of a batch that
+// takes them (primaryAuthorsIssueOf) in one query (loadPrimaryDocumentAuthors) and carries each on
+// its event as primaryAuthors.
+func resolvePrimaryAuthors(ctx context.Context, deps Deps, pending []pendingEvent) {
+	var indexes []int
+	var issueKeys []string
+	for index, item := range pending {
+		if item.failure != nil {
+			continue
+		}
+		if issueKey := primaryAuthorsIssueOf(item); issueKey != "" {
+			indexes = append(indexes, index)
+			issueKeys = append(issueKeys, issueKey)
+		}
+	}
+	if len(indexes) == 0 {
+		return
+	}
+	authors, err := loadPrimaryDocumentAuthors(ctx, deps, issueKeys)
+	for position, index := range indexes {
+		item := &pending[index]
+		if err != nil {
+			item.failure = err
+			item.failureLog = "dispatch outbox: load primary document authors"
+			continue
+		}
+		item.primaryAuthors = authors[issueKeys[position]]
 	}
 }

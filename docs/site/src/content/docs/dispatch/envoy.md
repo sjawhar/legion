@@ -105,7 +105,8 @@ All of them are kept in the stream. Some are also delivered straight to an agent
   every session that wrote the document the thread is on. A person's new comment on a document
   reaches every session that wrote the document. Each arrives on the session's own inbox topic.
 - On an issue with no route, a person's comment, and its edit, reach the session that claimed the
-  issue, on its own inbox topic. A person's claim adds nothing.
+  issue, on its own inbox topic. When no session holds the claim, they reach every session that
+  wrote the issue's spec (its primary document) instead.
 
 Anything else on an issue reaches an agent only if the agent subscribes to it.
 [Dispatch for agents](/legion/dispatch/for-agents/#what-reaches-you) covers this from the agent's
@@ -115,7 +116,7 @@ side.
 
 | Topic | What it is |
 | --- | --- |
-| `notifications.agent.<session_id>` | One session's inbox. Direct messages, ask follow-ups, replies in threads it wrote in, comments on documents it wrote, comments on an unrouted issue it claimed, and claim changes arrive here. |
+| `notifications.agent.<session_id>` | One session's inbox. Direct messages, ask follow-ups, replies in threads it wrote in, comments on documents it wrote, comments on an unrouted issue it claimed or, with no session claim, whose spec it wrote, and claim changes arrive here. |
 | `notifications.role.<role>` | A role, held by one live session at a time. You publish to it; the listener hands each message to the current holder. |
 | `notifications.dispatch.issue.<KEY>.>` | Every event of one Dispatch issue. |
 | `notifications.github.<owner>.<repo>.pr.<n>.>` | Every event of one pull request. |

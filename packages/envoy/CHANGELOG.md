@@ -1437,11 +1437,15 @@
   session that wrote the document the thread is on. It reads these sessions for a whole batch in
   one query (`outbox/recipients.go`). On an issue with no route, a person's comment, and its edit,
   now also reach the session that claimed the issue (a document comment uses the document's
-  issue), in an ask's thread too. A person's claim adds nothing, and a routed issue still reaches
-  its route and not the claimant. A comment's `suppressed_authors` now names every session a
-  mention resolved to, on a reply and in an ask's thread too, so a mentioned session hears the
-  comment once, from the mention. A resolve or a reopen still reaches the thread root's author
-  only, so the reopen that a reply makes in the same transaction tells no session twice.
+  issue), in an ask's thread too. When nobody or a person claimed such an issue, they reach every
+  session that wrote the issue's primary document (its creator and every version's authors) in the
+  claimant's place, so a session that wrote the spec without a claim still hears comments on the
+  issue. The outbox reads these sessions for a whole batch in one query too. A routed issue still
+  reaches its route and not the claimant or the spec's sessions, and a session claimant takes the
+  place alone. A comment's `suppressed_authors` now names every session a mention resolved to, on
+  a reply and in an ask's thread too, so a mentioned session hears the comment once, from the
+  mention. A resolve or a reopen still reaches the thread root's author only, so the reopen that a
+  reply makes in the same transaction tells no session twice.
 
 - Every `envoy-infra` component refuses a number in an integer input that is not a whole number
   within the 64-bit integer range, at any depth (an object type's property, an array element, a
