@@ -2,45 +2,45 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-497",
-  "completed": "2026-10-27T02:19:02Z",
-  "round": 3,
-  "headTested": "e00cc53cd6c612de7b1e1a55c2d8fccd95a875ae",
-  "codeHead": "655b7ac05dc40de46028a1d8b7d13cfe747e78bd",
+  "completed": "2026-10-27T03:11:45Z",
+  "round": 4,
+  "headTested": "e4059d1570b04f409274883dddb551bf8e344a5b",
+  "codeHead": "5741f6785ca199fcaf6f28e1a3e0dd25a7f14a64",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I re-ran the implementer's command, `cd packages/pi-envoy && LEGION_TEST_OMP=$TMPDIR/omp-pin/omp-v18.12.2-sami.20261026-135627-linux-x64/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:15335 bun run test`, on the pinned release binary with a fresh nats-server 2.10.29. It gave 1001 pass, 0 fail, then card-delivery-omp.test.ts in its own process gave 9 pass, 0 fail. I re-ran its A1 control: with main's 6cdb9995 envoy.ts swapped in, the run gave Expected 1, Received undefined. I also checked its wiring claim: removing cardWake.sessionSwitch, the session_compact handler or the auto_retry_end handler from envoy.ts each makes one envoy.test.ts test fail (876 pass, 1 fail). Every file was restored and checked with cmp."
+    "how": "I re-ran the implementer's command, `cd packages/pi-envoy && LEGION_TEST_OMP=$TMPDIR/omp-pin/omp-v18.12.2-sami.20261026-135627-linux-x64/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:15336 bun run test`, on the pinned release binary with a fresh nats-server 2.10.29. Result: 1006 pass, 0 fail, then card-delivery-omp.test.ts in its own process, 9 pass, 0 fail. I also checked its wiring claim: with cardWake.agentEnd(context) deleted from envoy.ts, envoy.test.ts gives 880 pass, 1 fail ('sends no wake for a card sent after and folded after the run's end'). The file was restored and checked with cmp."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Review round 2 finding 1 / A3: after a run the host drops with no agent_end for extensions (a switch to a new session, or a manual compaction), an Esc while the next prompt is set up keeps the card folded with no turn.",
-      "surface": "Pinned Oh My Pi v18.12.2-sami.20261026-135627 (linux-x64 release asset) in RPC mode with packages/pi-envoy/extensions/envoy.ts, real nats-server 2.10.29 on 127.0.0.1:15335, omp-harness stand-ins. The stand-in holds the next open-asks read so the prompt sits in before_agent_start.",
-      "command": "Scratch Bun test $TMPDIR/tester-r3.test.ts (source in https://github.com/sjawhar/legion/pull/2278#issuecomment-6432116548). Two cases. new_session: a held run is dropped by RPC new_session. compact: a held run is dropped by RPC compact with compaction.autoContinue false; the stand-in answers the compaction's 2 summary requests. Each case then prompts with setup held, sends a card, runs abort_and_restore_queue, and sends a probe prompt.",
-      "observed": "Both pass. The dropped run adds no RPC agent_end frame. No model request comes after the Esc. The probe's request carries the card and no wake text.",
-      "headSha": "e00cc53cd6c612de7b1e1a55c2d8fccd95a875ae",
-      "negativeControl": "With card-wake.ts and envoy.ts from the previous code head 149e44bb swapped in, both cases fail 'request N before the probe' with the message '1 Envoy message above arrived with no turn to read it'. That wake starts the turn the person stopped. Files restored by cmp."
+      "criterion": "Review rounds 2-3 finding 1 and round 3 finding 3 / A3: after a run the host drops with no agent_end for extensions, an Esc while the next prompt is set up keeps the card folded with no turn. The three drops tested are a switch to a new session, a manual compaction, and a manual compaction whose summarization fails, so no session_compact follows.",
+      "surface": "Pinned Oh My Pi v18.12.2-sami.20261026-135627 (linux-x64 release asset) in RPC mode with packages/pi-envoy/extensions/envoy.ts, real nats-server 2.10.29 on 127.0.0.1:15336, omp-harness stand-ins. The stand-in holds the next open-asks read so the prompt sits in before_agent_start, and answers HTTP 400 to summary requests in the failing-compaction case.",
+      "command": "Scratch Bun test $TMPDIR/tester-r4.test.ts (source in https://github.com/sjawhar/legion/pull/2278#issuecomment-6432798669), with cases new_session, compact (compaction.autoContinue false) and compact-fail",
+      "observed": "All 3 pass. The dropped run adds no RPC agent_end frame. compact-fail's RPC compact answers 'Summarization failed: 400'. No model request comes after the Esc, and the probe's request carries the card. Its last message is the probe, not the wake.",
+      "headSha": "e4059d1570b04f409274883dddb551bf8e344a5b",
+      "negativeControl": "With the input handler's cardWake.seenIdle removed, compact-fail fails 'request 3 before the probe' on the text '1 Envoy message above arrived with no turn to read it'. With all three seenIdle calls removed, new_session and compact fail the same way. Restored by cmp."
     },
     {
-      "criterion": "A1: cards queued while a turn runs, then a Send: the Send reaches the model at the first step after it was sent, ahead of the cards.",
+      "criterion": "Round 3 finding 1: the dropped-run reset rests on the host being idle at session_switch and session_compact, not on event order. Each reset path works on its own.",
       "surface": "Same RPC surface",
-      "command": "cd packages/pi-envoy && LEGION_TEST_OMP=<pinned omp> LEGION_TEST_NATS_URL=nats://127.0.0.1:15335 bun run test",
-      "observed": "The 'five cards then a Send' case passes: the Send is first in request k+1, ahead of all five cards.",
-      "headSha": "e00cc53cd6c612de7b1e1a55c2d8fccd95a875ae",
-      "negativeControl": "With main's 6cdb9995 envoy.ts swapped in: Expected 1, Received undefined. Restored by cmp."
+      "command": "The same scratch cases with envoy.ts edited and then restored: (b) only the input handler's seenIdle removed; (d) only the session_switch and session_compact seenIdle calls removed",
+      "observed": "(b): new_session and compact pass, so the host is idle when it emits session_switch and session_compact. (d): both pass on the input check alone.",
+      "headSha": "e4059d1570b04f409274883dddb551bf8e344a5b",
+      "negativeControl": "With all three calls removed, both fail with the wake starting the stopped turn (above)."
     },
     {
-      "criterion": "Earlier rounds still hold at this head: an abort during a retry's backoff and an Esc keep cards folded; idle and burst cards are read once; the host's own resume gets no second wake; print/JSON mode with a startup card exits 0.",
-      "surface": "Same pinned binary: RPC mode for T1 to T4, `omp -p --mode text|json` for the print cases",
-      "command": "Scratch $TMPDIR/tester-cases.test.ts (T1 to T4) and $TMPDIR/tester-print.test.ts, run from packages/pi-envoy/extensions with LEGION_TEST_OMP and LEGION_TEST_NATS_URL set",
-      "observed": "T1 to T4: 4 pass. Print text and json both exit 0; the model receives both the prompt and the card.",
-      "headSha": "e00cc53cd6c612de7b1e1a55c2d8fccd95a875ae",
-      "negativeControl": "Recorded in rounds 1 and 2, not re-run here. With the retry-cancel latch removed, T3 times out. With the mode check removed, print mode exits 1 with AgentBusyError."
+      "criterion": "Earlier rounds still hold at this head (A1, A2, A3 retry abort, A4/A5, print/JSON startup card).",
+      "surface": "Same pinned binary: RPC mode, and `omp -p --mode text|json`",
+      "command": "bun run test (above); scratch $TMPDIR/tester-cases.test.ts (T1 to T4) and $TMPDIR/tester-print.test.ts",
+      "observed": "The implementer's 9 real-binary cases pass. T1 to T4: 4 pass. Print text and json both exit 0, and the model receives both the prompt and the card.",
+      "headSha": "e4059d1570b04f409274883dddb551bf8e344a5b",
+      "negativeControl": "Recorded in rounds 1 to 3, not re-run here. With main's envoy.ts the A1 case fails Expected 1, Received undefined. Without the retry latch T3 times out. Without the mode check print mode exits 1 with AgentBusyError."
     }
   ],
-  "ciAtHead": "Read on GitHub at about 2026-10-27T02:15Z for code head 655b7ac0: lint, typecheck, test, changes and build were all queued. I did not wait for them.",
+  "ciAtHead": "Read on GitHub at about 2026-10-27T03:10Z for code head 5741f678: lint, typecheck, test, changes and build were all queued. I did not wait for them.",
   "notes": [
-    "The manual compact scenario needs compaction.autoContinue false. With the default, the host follows the compaction with a 'Resume the user's latest intent' run of its own, whose agent_start and agent_end restore the run bracket by themselves.",
-    "A7 (plan mode) is unchanged: no RPC path reaches plan mode in the pinned build."
+    "The CI change pins the nats:2.10 service image by digest. I read it in the diff and did not run it locally; CI's pi-envoy job runs it.",
+    "A7 (plan mode) is unchanged: no RPC path reaches plan mode in the pinned build. The no-interrupt fold of a setup card in plan mode is tracked by dispatch://INFRA-577, as packages/pi-envoy/AGENTS.md states."
   ]
 }
