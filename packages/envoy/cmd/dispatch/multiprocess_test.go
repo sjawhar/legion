@@ -2484,6 +2484,123 @@ func TestARateLimitOneProcessMetStopsTheOtherFromCallingGitHub(t *testing.T) {
 	}
 }
 
+// ───── the database's clock ────────────────────────────────────────────────
+
+// Each process's host keeps a clock of its own, so a time Dispatch stores is the database's: the
+// writing transaction's now(), which every column that transaction stamps shares to the
+// microsecond. A claim made on A answers a claim.at equal to the updated_at its own update
+// stamped, and its issue.claimed event was created at that time; an answer given on B to an ask
+// opened on A carries the `at` its ask.answered event was created at. No process's clock can
+// produce either equality.
+func TestClaimAndAnswerTimesComeFromTheDatabaseOnEitherProcess(t *testing.T) {
+	pair := startPair(t, nil)
+	ctx := context.Background()
+	project := uniqueProjectKey(t, "CLK")
+	pair.a.createProject(t, project, "Database clock")
+	key, _ := pair.a.createIssueIn(t, project, "Claimed on A, answered on B", "spec")
+
+	claimed := pair.a.call(t, http.MethodPost, "/api/v1/issues/"+key+"/claim", `{}`, http.StatusOK)
+	var issue struct {
+		UpdatedAt time.Time `json:"updated_at"`
+		Claim     *struct {
+			At time.Time `json:"at"`
+		} `json:"claim"`
+	}
+	if err := json.Unmarshal(claimed, &issue); err != nil || issue.Claim == nil {
+		t.Fatalf("decode the claim on A: %v: %s", err, claimed)
+	}
+	if !issue.Claim.At.Equal(issue.UpdatedAt) {
+		t.Errorf("A's claim: claim.at %s, updated_at %s, want the one transaction time",
+			issue.Claim.At.Format(time.RFC3339Nano), issue.UpdatedAt.Format(time.RFC3339Nano))
+	}
+	var claimedEvent time.Time
+	if err := pair.database.Pool.QueryRow(ctx, `select created_at from events where issue_key = $1 and type = 'issue.claimed'`, key).Scan(&claimedEvent); err != nil {
+		t.Fatalf("read the issue.claimed event: %v", err)
+	}
+	if !claimedEvent.Equal(issue.Claim.At) {
+		t.Errorf("A's claim: claim.at %s, issue.claimed created at %s, want the one transaction time",
+			issue.Claim.At.Format(time.RFC3339Nano), claimedEvent.Format(time.RFC3339Nano))
+	}
+
+	opened := pair.a.call(t, http.MethodPost, "/api/v1/issues/"+key+"/asks",
+		`{"question":"Ship it?","options":[{"label":"Ship"},{"label":"Hold"}]}`, http.StatusCreated)
+	var ask struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(opened, &ask); err != nil || ask.ID == "" {
+		t.Fatalf("decode the ask opened on A: %v: %s", err, opened)
+	}
+	answered := pair.b.call(t, http.MethodPost, "/api/v1/asks/"+ask.ID+"/answer",
+		`{"selected":["Ship"],"expected_edited_at":null}`, http.StatusOK)
+	var answer struct {
+		Answer *struct {
+			At time.Time `json:"at"`
+		} `json:"answer"`
+	}
+	if err := json.Unmarshal(answered, &answer); err != nil || answer.Answer == nil {
+		t.Fatalf("decode the answer given on B: %v: %s", err, answered)
+	}
+	var answeredEvent time.Time
+	if err := pair.database.Pool.QueryRow(ctx, `
+		select created_at from events where issue_key = $1 and type = 'ask.answered' and payload->>'id' = $2
+	`, key, ask.ID).Scan(&answeredEvent); err != nil {
+		t.Fatalf("read the ask.answered event: %v", err)
+	}
+	if !answeredEvent.Equal(answer.Answer.At) {
+		t.Errorf("B's answer: at %s, ask.answered created at %s, want the one transaction time",
+			answer.Answer.At.Format(time.RFC3339Nano), answeredEvent.Format(time.RFC3339Nano))
+	}
+}
+
+// ───── one configuration warning across the processes ──────────────────────
+
+// misconfiguredRun is the deploy run the warning row seeds: a successful run on main whose one job
+// is none of the production job names seedDeliverySettings configures.
+const misconfiguredRun = int64(38041790209)
+
+// A misconfigured production job name is named in the log once, not once per process: the Delivery
+// page judges every deploy run on each read, on whichever process the read reached. The settings
+// name a production job no job of the seeded run holds; the Delivery page is read on A, then on B,
+// and the two processes' logs hold exactly one warning for that run between them. Each process's
+// access line for its read is written after the read's warning, so once both are in, a warning
+// either process wrote is in too.
+func TestAConfigurationWarningIsLoggedOnceAcrossTheProcesses(t *testing.T) {
+	pair := newPair(t)
+	seedDeliverySettings(t, pair.database)
+	ctx := context.Background()
+	start := time.Date(2026, 10, 10, 9, 47, 17, 0, time.UTC)
+	success := delivery.DeliveryRunConclusionSuccess
+	run := strconv.FormatInt(misconfiguredRun, 10)
+	if err := delivery.UpsertRun(ctx, pair.database.Pool, delivery.DeliveryRun{
+		Repo: "acme/deploy", RunID: misconfiguredRun, Kind: delivery.DeliveryRunKindDeploy, HeadSHA: "sha" + run,
+		HeadCommitAt: start.Add(-time.Hour), StartedAt: start, CompletedAt: new(start.Add(15 * time.Minute)), Conclusion: &success,
+		URL: "https://github.com/acme/deploy/actions/runs/" + run, HeadBranch: new("main"), Event: new("workflow_dispatch"),
+	}); err != nil {
+		t.Fatalf("seed the run: %v", err)
+	}
+	if err := delivery.UpsertRunJobs(ctx, pair.database.Pool, "acme/deploy", misconfiguredRun, []delivery.DeliveryRunJob{{
+		Repo: "acme/deploy", RunID: misconfiguredRun, Name: "prod-apply / prod-apply",
+		Conclusion: new(delivery.DeliveryJobConclusionSuccess), CompletedAt: new(start.Add(10 * time.Minute)),
+	}}, true); err != nil {
+		t.Fatalf("seed the run's job: %v", err)
+	}
+	pair.start(t, nil)
+
+	const timeline = "/api/v1/delivery/timeline?from=2026-10-10T00:00:00Z&to=2026-10-11T00:00:00Z"
+	read := []string{`msg="dispatch: request"`, "route=/api/v1/delivery/timeline", "status=200"}
+	pair.a.call(t, http.MethodGet, timeline, "", http.StatusOK)
+	pair.a.waitForLog(t, 10*time.Second, read...)
+	pair.b.call(t, http.MethodGet, timeline, "", http.StatusOK)
+	pair.b.waitForLog(t, 10*time.Second, read...)
+
+	warning := []string{"no job matching the configured production_job_names", "run_id=" + run}
+	onA, onB := pair.a.logLines(warning...), pair.b.logLines(warning...)
+	if len(onA)+len(onB) != 1 {
+		t.Fatalf("warnings for run %s: %d on A, %d on B, want one between them:\nA:\n%s\nB:\n%s",
+			run, len(onA), len(onB), strings.Join(onA, "\n"), strings.Join(onB, "\n"))
+	}
+}
+
 // ───── two processes syncing one architecture source ───────────────────────
 
 // architectureGitHub is the GitHub both processes' architecture syncs read: one repository whose
