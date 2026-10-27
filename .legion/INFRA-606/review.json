@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-606",
+  "completed": "2026-10-27T18:01:40Z",
+  "round": 1,
+  "headReviewed": "8593890dd064abaed53532e983d87a2696f19171",
+  "codeHead": "a248dad3a60b25025dfb661baeb45c7afef12f4b",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 4,
+  "minor": 2,
+  "ci": "Required set lint, typecheck, test, pr-title (rulesets; no branch protection). CI head c792db86 (compare to 8593890d: handoffsOnly true, 1 file): every required check queued at review time; the request for changes does not wait on it.",
+  "thermonuclear": "Run once at 8593890d. Deep review: CHANGES (2 medium, 2 minor; security rows authz, untrusted-input, secret, transport, supply-chain, agent-def answered). Code quality: CHANGES (1 structural, 5 minor, none changing behaviour).",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/api/comment_create.go",
+      "description": "A session:<id> mention whose lookup goes unanswered within 250 ms adds nothing to mentionedSessions, so suppressed_authors omits that session: a reply in a thread a session rooted, or a new comment on a document a session wrote, reaches it twice (author route dispatch-<event id> and the mention <comment>:<target>:<mode>). Base resolved inside the client's 5 s window and suppressed it. The test at comment_delivery_sender_test.go:377-380 pins the duplicate."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/api/comment_mention_sender.go",
+      "description": "Once the Lifetime ends, queueLocked refuses every send silently (comments committing during the HTTP drain, sends still queued). Only a process that starts later recovers them; under the gcp:Dispatch RollingUpdate for replicas > 1 (maxSurge 1, maxUnavailable 0) the successor starts first and runs its one pass before the old pod's SIGTERM, so those attempts stay pending for good. Production runs replicas 1 (Recreate) today; the component supports more."
+    },
+    {
+      "severity": "important",
+      "file": "scripts/e2e/lib/operator-dispatch.sh",
+      "description": "No Contract change census: the PR changes GET /api/v1/events resume (past 256 events / 1 MiB nothing is replayed), POST comments deliveries (pending at the answer) and adds a refusal to the Stage 3 audit (a Dispatch without GET /api/v1/events/log fails it). The audit's rollout is an immediate refusal: every Stage 3 run fails from the merge until production Dispatch is redeployed (no automatic deploy, INFRA-64). Recommended: fall back to the stream replay when the route answers 404."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/CHANGELOG.md",
+      "description": "No changelog entry for a new route, a new response header, the bounded replay and the POST comments deliveries now answered pending; earlier Dispatch changes (#2302, #2267, #2264) each add one."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/comment_delivery.go",
+      "description": "The PR body says every lookup runs at once so a silent listener costs one timeout; mentionLookupConcurrency = 8 and no mention cap make it ceil(N/8) x 250 ms. Correct the claim."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/comment_mention_sender.go",
+      "description": "lane() keys an unanswered role:X by its string and a resolved one by session, so one recipient can sit in two lanes and receive out of order; the doc comment says they share a lane. State the exception in the doc and the PR body."
+    }
+  ],
+  "fastFollow": "Code-quality cleanup, no behaviour change: move the delivery hub's views and conns into hubGeneration and drop the nine stale-generation guards; split the mention tests out of cmd/dispatch/shutdown_test.go (now 1,095 lines); one readEventsAfterID with a limit for listEventLog and the relay; drop deliveryHub.feed; signal(q.wake) in agentStreamQueue.",
+  "threadsAnswered": []
+}
