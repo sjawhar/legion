@@ -2,18 +2,12 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-569",
-  "completed": "2026-10-27T13:48:00Z",
-  "round": 5,
-  "testedHead": "a494be24a8adb25db77f275b72e18e98f867bf65",
-  "fingerprint": {
-    "from": {"head": "5c49fe2b546a6ab2b88c58af2ca3b669307539b7", "sha256": "de44852171837f82ae218fa7fc913b6edc03f9a4b788d4ed8ae07297e61c98d3"},
-    "to": {"head": "a494be24a8adb25db77f275b72e18e98f867bf65", "sha256": "2ad6e933f431814fc8ef1d472ee3771c1f189052b5f65f9e3cc93c1ec2160bfa"},
-    "verdict": "changed, so this is a full test round",
-    "whatChanged": "Diffing the two branch diffs shows only comments, a fixed expected value in SearchPalette.test.tsx, a dropped live-frame half in events_test.go, the CHANGELOG naming the event routes, and one blank line from the merge. No runtime line changed. I still re-ran every proof on the real surface at the new head, which also carries main's new code."
-  },
+  "completed": "2026-10-27T15:06:00Z",
+  "round": 6,
+  "testedHead": "e72fb7e79669f0d559dc94d9fe1e85666a751299",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I drove the same surfaces myself on the tester lane at a494be24, using asks of my own. I re-ran r2.sh (the CLI states and selected [] on every ask route) and r4.sh (the issue event log and SSE catch-up with null, then absent, stored selected lists). I also checked two things nothing else proves now: a live SSE frame, since the round-5 commit dropped its test half, and the artifact event log, which the CHANGELOG now names. Then I re-ran the search, palette, activity, margin, answers and inbox browser specs."
+    "how": "Round 5's independent full round at a494be24 stands. The documentation-only conflict merge to e72fb7e7 leaves the branch's diff unchanged (my own fingerprint at both heads, equal to the implementer's), and my smoke run at e72fb7e7 reproduced the CLI and route results."
   },
   "failures": [],
   "failed": 0,
@@ -43,8 +37,16 @@
       "negativeControl": "In round 1, the head's search.e2e.ts run against the base app and server (94ab028a) failed: Expected substring \"Answered\" at search.e2e.ts:218 (/legion/scratch/tmp/i569-test/e2e-base.log)."
     }
   ],
-  "ci": "At 13:47Z code head a494be24 had its own workflow runs on GitHub: build, changes, lint, test, typecheck and pr-title were queued, and one superseded pr-title run was cancelled. I read them as running and did not wait. Handoff head 40169ea4 carries skip-checks: true, which is correct now that the code head has runs.",
+  "ci": "At 15:05Z merge head e72fb7e7 had its own workflow runs on GitHub: build, changes, lint, test, typecheck and pr-title were queued, and a superseded pr-title run was cancelled. I read them as running and did not wait. Handoff head 8324ab98 carries skip-checks: true, which is correct now that the code head has runs.",
   "observations": [
     "Not a defect: when markdownHead cuts inside a Markdown link or code fence, the palette shows the cut source text. The preview links to the full ask."
-  ]
+  ],
+  "rebaseRecheck": {
+    "from": "a494be24a8adb25db77f275b72e18e98f867bf65",
+    "to": "e72fb7e79669f0d559dc94d9fe1e85666a751299",
+    "fingerprintFrom": "2ad6e933f431814fc8ef1d472ee3771c1f189052b5f65f9e3cc93c1ec2160bfa",
+    "fingerprintTo": "2ad6e933f431814fc8ef1d472ee3771c1f189052b5f65f9e3cc93c1ec2160bfa",
+    "verdict": "rebase re-check a494be24 → e72fb7e7: fingerprint unchanged, bare gates only",
+    "smoke": "bun run dispatch:local at e72fb7e7 built the SPA (2830 modules), booted the server and passed the seed. bash /legion/scratch/tmp/i569-test/r2.sh exited 0 with the same lines as round 5: indented multi-line reasons under 'Closed with no answer' and 'Closed after an answer', 'Answered by alice … · options chosen: none' with indented text, and selected [] on the POST and every GET in all three stored states (log /legion/scratch/tmp/i569-test/r6-smoke.log)."
+  }
 }
