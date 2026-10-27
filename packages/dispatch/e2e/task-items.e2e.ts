@@ -92,9 +92,9 @@ type Rect = { height: number; width: number; x: number; y: number };
 
 /** A shot of `box` padded by `BOX_SHOT_PADDING` on every side, with the box's rect and the clip
  *  shot, both in CSS pixels of the viewport. The clip is widened to whole CSS pixels, so its shot
- *  maps back to it exactly at any device pixel ratio. The shot is taken once two in a row match
- *  with the box in the same place: the page can shift for a frame between reading the box's rect
- *  and the shot, which would then show whatever passed under the box. */
+ *  maps back to it exactly at any whole device pixel ratio. The shot is taken once two in a row
+ *  match with the box in the same place: the page can shift for a frame between reading the box's
+ *  rect and the shot, which would then show whatever passed under the box. */
 async function steadyShotOf(box: Locator): Promise<{ clip: Rect; rect: Rect; shot: Buffer }> {
   let previous: { rect: Rect; shot: Buffer } | undefined;
   for (let attempt = 0; attempt < STEADY_SHOT_ATTEMPTS; attempt++) {
@@ -129,8 +129,7 @@ async function steadyShotOf(box: Locator): Promise<{ clip: Rect; rect: Rect; sho
  *  the per-channel median of the outermost `BACKGROUND_RING` device pixels of the box's shot. */
 async function inkedShareOfMiddle(box: Locator): Promise<number> {
   const { clip, rect, shot } = await steadyShotOf(box);
-  // The page decodes the PNG; a Blob read by `createImageBitmap` is no fetch the page's CSP could
-  // refuse.
+  // The page decodes the PNG.
   return box.page().evaluate(
     async ({ base64, clip, contrast, rect, ring }) => {
       const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
