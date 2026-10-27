@@ -673,6 +673,62 @@ func TestAnExhaustedFixAttemptCountHoldsTheCountedAttemptUntilAHeadIsPushedOntoG
 	}
 }
 
+// A head the daemon reached past one it never recorded - h2 to h4, h3 between - is judged by the
+// chain of pushes h2..h3..h4 whichever of the pushes and the head arrives first. Two pushes of the
+// review App's spare the move and plan h4's red: pushed first they count nothing, and arriving late
+// they take back the count h4's arrival made, though the push completing the chain can name h3, not
+// the head, so the work stays in testing in every order. The review App's red tests then the
+// implementer's fix count the move and leave h4's red unplanned, held at the exhausted count.
+func TestASkippedHeadIsJudgedByItsChainOfPushesInEitherOrder(t *testing.T) {
+	const required, implementer = "pr-checks-result", "legion-implementer[bot]"
+	for _, tc := range []struct {
+		name          string
+		first, second intake.Fact
+		attempts      int
+		mark          string
+		planned       bool
+	}{
+		{"two pushes of the review App's", pushedFromTo("h2", "h3", testReviewApp), pushedFromTo("h3", "h4", testReviewApp), 2, "h2", true},
+		{"the review App's red tests, then the implementer's fix", pushedFromTo("h2", "h3", testReviewApp), pushedFromTo("h3", "h4", implementer), 3, "h4", false},
+	} {
+		for _, order := range []struct {
+			name  string
+			facts []intake.Fact
+		}{
+			{"pushes first", []intake.Fact{tc.first, tc.second, syncedTo("h4"), settledAt("h4", required, 2, required)}},
+			{"head first, pushes late in order", []intake.Fact{syncedTo("h4"), settledAt("h4", required, 2, required), tc.first, tc.second}},
+			{"head first, the earlier head's push last", []intake.Fact{syncedTo("h4"), settledAt("h4", required, 2, required), tc.second, tc.first}},
+		} {
+			t.Run(tc.name+", "+order.name, func(t *testing.T) {
+				pool := migratedPool(t)
+				seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+					Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
+				seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+					Number: 42, Branch: "legion/LEGION-208", HeadSHA: "h2", CheckedHead: "h2", Failing: []string{required},
+					CheckRuns: []record.AttemptRun{{Name: required, ID: 1}}, Required: []string{required}, FixAttempts: 2, HeadCounted: "h2"})
+				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+				engine := readyEngine("merge-queue")
+				for _, fact := range order.facts {
+					applyRefusingNothing(t, pool, engine, fact)
+				}
+				if got := issuePhase(t, pool); got != phase.Testing {
+					t.Fatalf("after every fact the issue is in %s, want testing", got)
+				}
+				var attempts int
+				var mark string
+				var planned bool
+				if err := pool.QueryRow(context.Background(), "select fix_attempts, head_counted, planned_red from pull_requests where issue = 'LEGION-208'").
+					Scan(&attempts, &mark, &planned); err != nil {
+					t.Fatalf("read the pull request: %v", err)
+				}
+				if attempts != tc.attempts || mark != tc.mark || planned != tc.planned {
+					t.Fatalf("fix attempts %d, counted head %q, planned red %v; want %d, %q and %v", attempts, mark, planned, tc.attempts, tc.mark, tc.planned)
+				}
+			})
+		}
+	}
+}
+
 // A reopened pull request whose head moved while it was closed - commits pushed then reach no
 // synchronize - is judged as a synchronize to that head would be. At an exhausted count already
 // reported, a reopen past a red counts the push and reports the new count when the reopened head's
@@ -730,6 +786,36 @@ func TestAReopenedPullRequestJudgesItsNewHeadAsASynchronizeWould(t *testing.T) {
 					checksRed, blocked, attempts, mark, tc.checksRed, tc.blocked, tc.attempts, tc.mark)
 			}
 		})
+	}
+}
+
+// A reopen past a head the daemon never recorded keeps the pushes recorded while the pull request
+// was closed, so a push that arrives after the reopen completes the chain the reopen's move took:
+// the review App's pushes h2..h3, pushed while closed, and h3..h4 after the reopen at h4 take back
+// the count the reopen made and plan h4's red.
+func TestAReopenKeepsThePushesItsMoveIsJudgedBy(t *testing.T) {
+	const required = "pr-checks-result"
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+		Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestClosed, Issue: "LEGION-208", Repo: "sjawhar/legion",
+		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "h2", CheckedHead: "h2", Failing: []string{required},
+		CheckRuns: []record.AttemptRun{{Name: required, ID: 1}}, Required: []string{required}, FixAttempts: 2, HeadCounted: "h2"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+	engine := readyEngine("merge-queue")
+	applyRefusingNothing(t, pool, engine, pushedFromTo("h2", "h3", testReviewApp))
+	applyRefusingNothing(t, pool, engine, intake.PullRequestOpened{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208",
+		HeadSHA: "h4", Reopened: true})
+	applyRefusingNothing(t, pool, engine, pushedFromTo("h3", "h4", testReviewApp))
+	var attempts int
+	var mark string
+	var planned bool
+	if err := pool.QueryRow(context.Background(), "select fix_attempts, head_counted, planned_red from pull_requests where issue = 'LEGION-208'").
+		Scan(&attempts, &mark, &planned); err != nil {
+		t.Fatalf("read the pull request: %v", err)
+	}
+	if attempts != 2 || mark != "h2" || !planned {
+		t.Fatalf("fix attempts %d, counted head %q, planned red %v; want 2, \"h2\" and true", attempts, mark, planned)
 	}
 }
 

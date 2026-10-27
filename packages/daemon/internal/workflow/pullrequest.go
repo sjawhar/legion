@@ -68,7 +68,11 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 			carried = classify.AdvancePullRequestHead(carried, fact.HeadSHA)
 		}
 		pr.FixAttempts, pr.BlockedAttempts, pr.ReviewSeen = carried.FixAttempts, carried.BlockedAttempts, recorded.ReviewSeen
-		pr.HeadCounted, pr.HeadCountedBefore = carried.HeadCounted, carried.HeadCountedBefore
+		pr.HeadCounted, pr.HeadCountedBefore, pr.HeadCountedFrom = carried.HeadCounted, carried.HeadCountedBefore, carried.HeadCountedFrom
+		// The pushes are facts about commits, and with where the head arrived from and the planned
+		// mark they let a push that arrives after the reopen settle the move the reopen made, as it
+		// would have had it arrived first (classify.ApplyPush).
+		pr.Pushes, pr.HeadArrivedFrom, pr.PlannedRed = carried.Pushes, carried.HeadArrivedFrom, carried.PlannedRed
 		pr.Required, pr.Workflows, pr.WorkflowsHead = recorded.Required, recorded.Workflows, recorded.WorkflowsHead
 		pr.HeadUpdatedAt = classify.LatestClock(recorded.HeadUpdatedAt, fact.UpdatedAt)
 	}
@@ -157,23 +161,32 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
 		return intake.Result{}, err
 	}
+	// Past its bound the record lets the oldest push waiting for a link go (classify.ApplyPush): a
+	// webhook behind it never arrived, and the move it would have linked into is judged without it.
+	for _, dropped := range classify.DroppedPushes(prior.Pushes, pr.Pushes) {
+		e.warnOnCommit(ctx, "workflow: a pull request holds the most pushes waiting for a link; the oldest is let go",
+			"issue", pr.Issue, "pullRequest", pr.Number, "before", dropped.Before, "after", dropped.SHA)
+	}
 	// A push naming the recorded head - its synchronize arrived first - settles the head's planned
 	// mark and can take back the fix attempt its arrival counted (classify.ApplyPush), which can
 	// change what the CI rule decides there (standingRed), in whatever phase the issue is: GitHub
 	// delivers a push webhook and its synchronize in either order, and the implementer's completion
 	// waits on no webhook, so the head can move and the issue enter testing, retro or merging before
 	// the push arrives. It can also be the first fact outside implementing to see a red that stood
-	// while implementing, so it applies the rule. A phase with no checks_red row - implementing,
-	// planning - moves nothing (sendBack), and in awaiting_merge the rule does not act (standingRed).
-	// A push for a head that has not arrived yet (its synchronize still on its way) changes nothing
-	// the rule reads at the recorded head, whose red may be the one the push fixed, so it applies
-	// nothing. In reviewing a push on its way shows the current head is about to change, so the round
-	// is settled again; the round's re-ask is reviewing's alone.
+	// while implementing, so it applies the rule. So does a push for an earlier head that completes
+	// the chain of the recorded head's move (classify.ApplyPush): its take-back can lift the
+	// fix-attempt cap off the red that stands there, and its planned mark can change. A phase with no
+	// checks_red row - implementing, planning - moves nothing (sendBack), and in awaiting_merge the
+	// rule does not act (standingRed). Any other push for a head that has not arrived yet (its
+	// synchronize still on its way) changes nothing the rule reads at the recorded head, whose red
+	// may be the one the push fixed, so it applies nothing. In reviewing a push on its way shows the
+	// current head is about to change, so the round is settled again; the round's re-ask is
+	// reviewing's alone.
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	if fact.After == prior.HeadSHA {
+	if fact.After == prior.HeadSHA || pr.FixAttempts < prior.FixAttempts || pr.PlannedRed != prior.PlannedRed {
 		if moved, err := e.standingRed(ctx, tx, *issue, pr); err != nil || moved {
 			return intake.Result{}, err
 		}

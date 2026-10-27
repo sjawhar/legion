@@ -385,14 +385,15 @@ package api
 // record id in place of the commit. `commit` stays the implementer's (its pushed tip, and retro's
 // commit) and the merger's; the planner, tester and reviewer send none, and the daemon no longer
 // requires one of them. `api.PhaseView` gains `handoffRecord`, `{id, version}`, absent until the
-// worker's completion of its current file-backed phase names one; store migration 0060 keeps it
+// worker's completion of its current file-backed phase names one; store migration 0061 keeps it
 // on the phase row. A 40 plugin posts a commit and no record, which this daemon refuses, and its
 // strict reader refuses a state carrying `handoffRecord`, so the boot gate and `legion
 // probe-image` refuse the mixed pair. (This branch took 40 and store migration 0055; main then
 // landed `awaiting_person` at 40 with store migrations 0055 to 0058, and `issue_ancestry` as store
-// migration 0059, so this change takes 41 and store migration 0060, as the collision note says.
-// Other open branches may declare 41 or a store migration 0060 too: whichever merges after another
-// takes the next free contract number and renumbers its store migration past main's, every site
-// that names either included, among them the rollback's `delete from schema_version where version
-// = 60` in docs/kubernetes.md.)
+// migration 0059, so this change took 41 and store migration 0060; main then landed
+// `pull_request_head_move_starts` as store migration 0060 at 40, so this change keeps 41 and takes
+// store migration 0061, as the collision note says. Other open branches may declare 41 or a store
+// migration 0061 too: whichever merges after another takes the next free contract number and
+// renumbers its store migration past main's, every site that names either included, among them
+// the rollback's `delete from schema_version where version = 61` in docs/kubernetes.md.)
 const DaemonAPIVersion = 41

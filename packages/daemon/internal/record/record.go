@@ -425,10 +425,23 @@ type PullRequest struct {
 	// a red within that attempt (classify.FixAttemptCapHolds).
 	HeadCounted string
 	// HeadCountedBefore is the mark HeadCounted held before the count that set it. A count made
-	// before its head's push arrived is taken back when that push proves the review App's
+	// before its head's pushes arrived is taken back when they prove the move spares it
 	// (classify.ApplyPush), which restores this mark, so the counted attempt does not depend on
-	// which of the push and the head's arrival GitHub delivers first.
+	// which of the pushes and the head's arrival GitHub delivers first, while the counted head is
+	// still the recorded head (classify.AdvancePullRequestHead names the order it does not cover).
 	HeadCountedBefore string
+	// HeadCountedFrom is the recorded head (HeadSHA) that HeadCounted replaced when it was counted:
+	// the head the counted move started from. The count is taken back once the recorded pushes chain
+	// from this head to HeadCounted, each the review App's (classify.ApplyPush); a push that reached
+	// the counted head from another head is on no such chain. Empty when no count stands, and for a
+	// mark a take-back restored, which nothing takes back.
+	HeadCountedFrom string
+	// HeadArrivedFrom is the head HeadSHA replaced when it arrived (classify.AdvancePullRequestHead),
+	// set on every head move, empty before the first and after a new generation. The planned mark
+	// (PlannedRed) is the push that left HeadSHA on the chain of recorded pushes from this head,
+	// whichever of the pushes and the head arrives first (classify.ApplyPush), also when the daemon
+	// reached the head past heads it never recorded.
+	HeadArrivedFrom string
 	// PlannedRed is whether the newest head was the review App's (the tester's red tests): a red on
 	// it is planned, so the next head is not a fix attempt.
 	PlannedRed bool

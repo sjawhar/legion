@@ -499,7 +499,9 @@ The attestation is separate from the image's own BuildKit provenance, which the 
 
 `.github/workflows/worker-image.yaml` builds on the GitHub-hosted runner with `docker/setup-buildx-action`
 + `docker/build-push-action` (the pair `release-envoy-listener.yaml` uses), layer cache in GitHub Actions
-cache (`cache-from: type=gha`, `cache-to: type=gha,mode=max`), pushed with the workflow's own `GITHUB_TOKEN`
+cache under the image's own scope (`cache-from: type=gha,scope=worker-image`, and on `main` only
+`cache-to: type=gha,mode=max,scope=worker-image`), read by every build and written only by a build on
+`main`, pushed with the workflow's own `GITHUB_TOKEN`
 — no third-party builder, no project variable, no extra credential. It runs (1) from `release.yaml` after
 the `legion_build` and `legion_publish` jobs on every `main` push that touches any file the image builds
 from, (2) on a pull request against `main` whose diff touches any of those files — building
@@ -2018,17 +2020,17 @@ takes a file-backed phase's completion (planning, implementing, testing, reviewi
 names the handoff record its worker wrote on the Dispatch issue with `dispatch handoff-write`, and
 reads that record back from Dispatch (`GET /api/v1/handoffs/{id}`) before it records anything;
 its workers' plugins report the record, so the daemon and the plugins move together, as every
-contract bump does. Store migration 0060 adds two columns to `phases`, `handoff_record` and
+contract bump does. Store migration 0061 adds two columns to `phases`, `handoff_record` and
 `handoff_version`: the record a role's completion of its current phase named, and its version.
 
 To roll this release back to contract 40, stop the daemon and drop both columns, with the row
-`schema_version` records for 0060:
+`schema_version` records for 0061, which leaves the store at 60, the earlier release's schema:
 
 ```sh
 psql '<postgres_dsn>' -X -v ON_ERROR_STOP=1 <<'SQL'
 begin;
 alter table phases drop column if exists handoff_record, drop column if exists handoff_version;
-delete from schema_version where version = 60;
+delete from schema_version where version = 61;
 commit;
 SQL
 ```
@@ -2040,14 +2042,14 @@ left in place, but it never clears them: a role it starts on a new phase or roun
 of its last one, and an upgrade back to this release would read that record as the new phase's
 completion (`record.PhaseRow.Completed`), ending a review round on an approval alone or starting
 the implementer on a red without waiting for the tester's turn. Dropping the columns and the row
-makes that upgrade apply 0060 again, to empty columns. `last_handoff` keeps the record id each role
+makes that upgrade apply 0061 again, to empty columns. `last_handoff` keeps the record id each role
 last named; the earlier release compares a completion's commit with it, which no record id equals,
 so no completion is refused `HANDOFF_NOT_NEW` for it. The records themselves stay on their Dispatch
-issues. The `60` is the number of `0060_handoff_records.up.sql`; where that file carries another
+issues. The `61` is the number of `0061_handoff_records.up.sql`; where that file carries another
 number in the release you roll back from, use that number. The SQL was run on 2026-10-26 against
 PostgreSQL 17 on a scratch schema holding `phases` and `schema_version` after that migration (then
-numbered 0055): the first run dropped both columns and the row, and a second printed the two
-notices and changed nothing.
+numbered 0055, later 0060): the first run dropped both columns and the row, and a second printed
+the two notices and changed nothing.
 
 ### Contract discipline
 
@@ -5225,8 +5227,8 @@ still in flight at the release carries files its next role would never see.
 moves them. From the daemon's own configuration — `project`, `dispatch_url` and
 `dispatch_token_file`, the implement GitHub App, and `daemon_url` — it reads the running daemon's
 unauthenticated `GET /legion/v1/state` for every issue in a phase other than done, and for the
-daemon's `daemon.schemaVersion`, which tells which release runs: at or past 60, the store migration
-`0060_handoff_records` the records' release added, it is the new daemon; below it, the old one.
+daemon's `daemon.schemaVersion`, which tells which release runs: at or past 61, the store migration
+`0061_handoff_records` the records' release added, it is the new daemon; below it, the old one.
 For each issue, as the implement App, it:
 
 - lists `.legion/` on `legion/<KEY>` through GitHub's contents API, and writes each of
