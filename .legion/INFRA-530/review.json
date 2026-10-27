@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-530",
+  "completed": "2026-10-27T03:42:30Z",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 1,
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "packages/envoy/CHANGELOG.md",
+      "description": "The entry says an existing [addr](addr) link keeps its bare target 'until it is edited'; it keeps it through any edit of the document (doc-replace with its own doc-read output included) and changes only when that address is rewritten as a bare or <...> autolink. Wording only, named as the Fast-follow."
+    }
+  ],
+  "reviewedCodeHead": "b6a86edf087d3fa27e6d76c79af3ec14eae8887e",
+  "ci": "Required set (main ruleset): lint, typecheck, test, pr-title. CI head b6a86edf: lint, typecheck, test, pr-title all completed success (read 03:41Z); compare b6a86edf...544dfd5c: handoffsOnly true, 1 file. Non-required envoy-go, dispatch and related Envoy jobs were still queued at that read.",
+  "threads": "0 review threads, 0 prior reviews (gh api graphql reviewThreads, read 03:40Z).",
+  "proofLines": "E2E (implementer) and E2E (tester) both present in the PR body; each names surface, command, observation, head and a negative control at 5158fd92 (main + tests). Code is unchanged since 8a431a76 by the fingerprint 10032dfc... both recorded.",
+  "reviewerRuns": [
+    "go test ./internal/dispatch/pmdoc -run 'TestLinkifyGuardLinksWhatGoldmarkLinks|TestAnEmailAutolinkIsAMailLinkInGoAndTheEngine|TestEmailReadingsThatDifferAreRecorded|TestRenderKeepsStoredMarkdownThatReadsBack' at the head: 4 PASS, engine compared (bun present)",
+    "negative control via go test -overlay with parse.go from 08c345f7 (main): TestAnEmailAutolinkIsAMailLinkInGoAndTheEngine FAIL on all 7 rows (Go href a@b.test vs engine mailto:a@b.test)",
+    "overlay probe at head: <mailto:a@b.test> -> href mailto:a@b.test (no double prefix); <MAILTO:a@b.test> keeps its scheme; 'Mail mailto:a@b.test now.' reads no link (D1 row); [x](a@b.test) and [a@b.test](https://x.test) unchanged; code span stays plain",
+    "bun run e2e -- email-links.e2e.ts in the reviewer lane (38777, real Go server + Postgres 17): 2 passed (chromium, iphone)"
+  ],
+  "planChecks": "Render, linkify.go, literalURL and literalLength unchanged (diff touches parse.go only); stored bytes held by escape_test.go rows for [a@b.test](a@b.test) and [a@b.test](mailto:a@b.test); TestEmailReadingsThatDifferAreRecorded names D1 and links dispatch://INFRA-530/comment/92c28ada-e835-4632-acdf-554c395b8d9f, which reads as the D1 decision.",
+  "thermonuclear": "deep-review: Verdict APPROVE at 544dfd5c (no double mailto possible: goldmark emailTable excludes ':'; every Parse consumer reparses both sides with the same parser; no href allowlist refuses mailto:); code-quality: Verdict APPROVE at 544dfd5c (mutation check: old parse.go fails the new tests).",
+  "security": "untrusted-input: agent-written markdown gains only a fixed mailto: prefix on goldmark email autolinks (parse.go:957-964); the address cannot hold ':' (goldmark util.go emailTable), so no later pass makes another scheme; the browser opener keeps its protocol allowlist (proof-sdk markdown-link-click.ts:12)."
+}
