@@ -520,7 +520,199 @@ func TestClaudeKeeperRefusesASessionIDThatIsNoUUID(t *testing.T) {
 	if err != nil || k == nil {
 		t.Fatalf("newClaudeKeeper(session %q) made a keeper: %v, err %v; want a keeper", claudeSession, k != nil, err)
 	}
-	if want := filepath.Join(configDir, "legion-phase-stall-"+claudeSession+".json"); k.files[1].path != want {
-		t.Errorf("the kept record is %s, want %s", k.files[1].path, want)
+	if want := filepath.Join(configDir, "legion-phase-stall-"+claudeSession+".json"); k.record.path != want {
+		t.Errorf("the kept record is %s, want %s", k.record.path, want)
 	}
+}
+
+// rowFault is what the next row write of a keeper under test meets.
+type rowFault int
+
+const (
+	// noFault is the session table answering the write.
+	noFault rowFault = iota
+	// answerLost is a write that commits whose answer never reaches the keeper, as when its save's
+	// timeout runs out during COMMIT.
+	answerLost
+	// connectionLost is a write that fails before the row's lock answers, writing nothing.
+	connectionLost
+)
+
+// keeperRig is a Claude Code session's keeper driven one save at a time, as its periodic saves
+// would drive it, against a session table of the test's own, with its row writes meeting the
+// test's faults. The test plays Claude Code, writing the transcript and the phase-reminder record.
+type keeperRig struct {
+	t          *testing.T
+	k          *claudeKeeper
+	conn       *pgx.Conn
+	log        *lockedBuffer
+	transcript string
+	record     string
+	// fault is what the next row write meets; every write after it meets none.
+	fault rowFault
+}
+
+func newKeeperRig(t *testing.T, dsnFile string) *keeperRig {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := ompsessions.Connect(ctx, dsnFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
+	configDir := t.TempDir()
+	c := &keeperRig{t: t, conn: conn, log: &lockedBuffer{},
+		transcript: filepath.Join(configDir, "projects", "-legion-workspaces-legion-220", claudeSession+".jsonl"),
+		record:     filepath.Join(configDir, "legion-phase-stall-"+claudeSession+".json")}
+	env := []string{"CLAUDE_CONFIG_DIR=" + configDir, claudelaunch.SessionVariable + "=" + claudeSession,
+		ompsessions.StorageVariable + "=" + ompsessions.SQLStorage, ompsessions.DSNFileVariable + "=" + dsnFile}
+	if c.k, err = newClaudeKeeper(env, "", "", c.log); err != nil {
+		t.Fatal(err)
+	}
+	c.k.appendRow, c.k.replaceRow = c.faulty(ompsessions.Append), c.faulty(ompsessions.Replace)
+	if err := c.k.open(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(c.k.close)
+	return c
+}
+
+// faulty is write meeting the rig's fault.
+func (c *keeperRig) faulty(write rowWrite) rowWrite {
+	return func(ctx context.Context, conn *pgx.Conn, path string, saved int64, content []byte, mtime time.Time) error {
+		fault := c.fault
+		c.fault = noFault
+		switch fault {
+		case answerLost:
+			if err := write(ctx, conn, path, saved, content, mtime); err != nil {
+				c.t.Errorf("the write meant to commit unanswered was refused: %v", err)
+				return err
+			}
+			return fmt.Errorf("write session %s: %w", path, context.DeadlineExceeded)
+		case connectionLost:
+			return fmt.Errorf("write session %s: %w", path, io.ErrUnexpectedEOF)
+		}
+		return write(ctx, conn, path, saved, content, mtime)
+	}
+}
+
+// save is one of the keeper's periodic saves.
+func (c *keeperRig) save() {
+	ctx, cancel := context.WithTimeout(context.Background(), saveTimeout)
+	defer cancel()
+	c.k.save(ctx)
+}
+
+// finish ends the keeping as the child's exit does, its last save included.
+func (c *keeperRig) finish() {
+	go c.k.run()
+	c.k.finish(time.Now().Add(saveTimeout))
+}
+
+// wantRow fails the test unless the table holds want at path.
+func (c *keeperRig) wantRow(path, want, when string) {
+	c.t.Helper()
+	got, ok, err := ompsessions.Read(context.Background(), c.conn, path)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	if !ok || string(got) != want {
+		c.t.Fatalf("%s the table holds %q (row %t) at %s, want %q; the keeper logged %q", when, got, ok, path, want, c.log.String())
+	}
+}
+
+// local is the file at path.
+func local(t *testing.T, path string) string {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
+// A save that commits unanswered and a later save that fails outright are both saves that may have
+// landed, and the next save is refused because the first did. The keeper takes the row the first
+// left as saved and saves on from it, so the table ends holding the file whole, the last save
+// included: for a transcript it appends to, for a fresh transcript, whose marker the adopted save
+// is owed, and for a record replaced at the length its last committed save left. A row another
+// writer moved to the length a failed save would have left, with bytes of its own, is not one of
+// the keeper's, and the keeper stops saving that file rather than overwrite it.
+func TestAClaudeSaveTakesEverySaveThatMayHaveLandedAsSavedWhenTheRowMovedToIt(t *testing.T) {
+	_, dsnFile := testpg.DSNFile(t, "legion_launcher_keeper_test")
+
+	t.Run("an appended transcript", func(t *testing.T) {
+		c := newKeeperRig(t, dsnFile)
+		write(t, c.transcript, "{\"n\":1}\n", time.Now())
+		c.save()
+		c.wantRow(c.transcript, "{\"n\":1}\n", "after the first save")
+		c.fault = answerLost
+		appendTo(t, c.transcript, "{\"n\":2}\n")
+		c.save()
+		c.wantRow(c.transcript, "{\"n\":1}\n{\"n\":2}\n", "after the save that committed unanswered")
+		c.fault = connectionLost
+		appendTo(t, c.transcript, "{\"n\":3}\n")
+		c.save()
+		c.save()
+		c.wantRow(c.transcript, local(t, c.transcript), "after the save that followed both")
+		appendTo(t, c.transcript, "{\"n\":4}\n")
+		c.finish()
+		c.wantRow(c.transcript, local(t, c.transcript), "after the last save")
+	})
+
+	t.Run("a fresh transcript", func(t *testing.T) {
+		c := newKeeperRig(t, dsnFile)
+		marker := c.transcript + SavedMarkerSuffix
+		c.fault = answerLost
+		write(t, c.transcript, "{\"n\":1}\n", time.Now())
+		c.save()
+		c.fault = connectionLost
+		appendTo(t, c.transcript, "{\"n\":2}\n")
+		c.save()
+		if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("the transcript was marked saved before any save was answered (%v)", err)
+		}
+		c.save()
+		c.wantRow(c.transcript, local(t, c.transcript), "after the save that followed both")
+		if _, err := os.Stat(marker); err != nil {
+			t.Fatalf("the transcript the table holds is not marked saved: %v; the keeper logged %q", err, c.log.String())
+		}
+		c.finish()
+	})
+
+	t.Run("a record replaced at its saved length", func(t *testing.T) {
+		c := newKeeperRig(t, dsnFile)
+		write(t, c.record, `{"count":1}`, time.Now())
+		c.save()
+		c.fault = answerLost
+		write(t, c.record, `{"count":12}`, time.Now())
+		c.save()
+		c.fault = connectionLost
+		write(t, c.record, `{"count":3}`, time.Now())
+		c.save()
+		c.save()
+		c.wantRow(c.record, `{"count":3}`, "after the save that followed both")
+		c.finish()
+	})
+
+	t.Run("a row another writer moved to a failed save's length", func(t *testing.T) {
+		c := newKeeperRig(t, dsnFile)
+		write(t, c.record, `{"count":1}`, time.Now())
+		c.save()
+		c.fault = connectionLost
+		write(t, c.record, `{"count":12}`, time.Now())
+		c.save()
+		other := `{"other":12}`
+		if err := ompsessions.Replace(context.Background(), c.conn, c.record, int64(len(`{"count":1}`)), []byte(other), time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		c.save()
+		write(t, c.record, `{"count":4}`, time.Now())
+		c.save()
+		c.finish()
+		c.wantRow(c.record, other, "after the other writer's save")
+		if !strings.Contains(c.log.String(), "stops saving "+c.record) {
+			t.Errorf("the keeper logged %q, want it to say it stops saving %s", c.log.String(), c.record)
+		}
+	})
 }
