@@ -34,6 +34,14 @@ const (
 	// restart each server: the annotation changes the template, and the StatefulSet rolls its pods
 	// one at a time. Any other users change rewrites only auth.conf, which the reloader applies.
 	clusteredHubNoAuthUserAnnotation = "envoy-infra.sjawhar.dev/no-auth-user"
+	// clusteredHubMaxFileStoreAnnotation, on the hub's pod template, holds JetStream's
+	// max_file_store (maxFileStoreGb). nats-server v2.15.1 refuses a reload that lowers it
+	// (server/reload.go:1845-1885), and a reload is all or nothing against the options the server
+	// runs with, so after one lower limit in nats.conf every later reload is refused too, a users
+	// change in auth.conf among them. A store change therefore rolls the pods, each starting on the
+	// new nats.conf (the StatefulSet is applied after the ConfigMap), as a session-user change does;
+	// a raise rolls them as well, which costs a restart and keeps one rule.
+	clusteredHubMaxFileStoreAnnotation = "envoy-infra.sjawhar.dev/max-file-store"
 	// clusteredHubAuthConf is the file of the chart's ConfigMap holding the users' authorization,
 	// which nats.conf includes and the reloader watches.
 	clusteredHubAuthConf = "auth.conf"
@@ -195,12 +203,12 @@ func clusteredHubChartValues(s clusteredHubSettings) pulumi.Map {
 	if s.priorityClassName != "" {
 		podMerge["spec"] = pulumi.Map{"priorityClassName": pulumi.String(s.priorityClassName)}
 	}
+	annotations := pulumi.Map{clusteredHubMaxFileStoreAnnotation: gibibytes(s.size.maxFileStoreGb)}
 	if s.sessionNKey != "" {
-		podMerge["metadata"] = pulumi.Map{"annotations": pulumi.Map{clusteredHubNoAuthUserAnnotation: pulumi.String(s.sessionNKey)}}
+		annotations[clusteredHubNoAuthUserAnnotation] = pulumi.String(s.sessionNKey)
 	}
-	if len(podMerge) > 0 {
-		podTemplate["merge"] = podMerge
-	}
+	podMerge["metadata"] = pulumi.Map{"annotations": annotations}
+	podTemplate["merge"] = podMerge
 	servicePorts := pulumi.Map{}
 	for _, port := range []string{"nats", "leafnodes", "websocket", "mqtt", "cluster", "gateway", "monitor", "profiling"} {
 		servicePorts[port] = pulumi.Map{"enabled": pulumi.Bool(port == "nats")}

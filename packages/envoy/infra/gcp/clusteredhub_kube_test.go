@@ -164,7 +164,8 @@ func wantChartValues(authConf string) map[string]any {
 				"maxSkew": 1.0, "whenUnsatisfiable": "DoNotSchedule", "minDomains": 3.0,
 			}},
 			"merge": map[string]any{"metadata": map[string]any{"annotations": map[string]any{
-				"envoy-infra.sjawhar.dev/no-auth-user": keySessions,
+				"envoy-infra.sjawhar.dev/max-file-store": "9Gi",
+				"envoy-infra.sjawhar.dev/no-auth-user":   keySessions,
 			}}},
 		},
 		"podDisruptionBudget": map[string]any{"enabled": true},
@@ -205,6 +206,7 @@ func TestClusteredNatsHubChartValuesFollowTheSizes(t *testing.T) {
 	}
 	want["container"].(map[string]any)["resources"] = appResources("2", "4Gi")
 	want["container"].(map[string]any)["env"] = map[string]any{"GOMEMLIMIT": "3276MiB"}
+	podAnnotations(want)["envoy-infra.sjawhar.dev/max-file-store"] = "30Gi"
 	require.Equal(t, want, values)
 }
 
@@ -234,6 +236,7 @@ func TestClusteredNatsHubChartValuesFollowStreamMaxBytes(t *testing.T) {
 			}
 			want["container"].(map[string]any)["resources"] = appResources("1", row.memory)
 			want["container"].(map[string]any)["env"] = map[string]any{"GOMEMLIMIT": row.goMemLimit}
+			podAnnotations(want)["envoy-infra.sjawhar.dev/max-file-store"] = "47Gi"
 			require.Equal(t, want, chartValues(t, runClusteredHub(t, args)))
 		})
 	}
@@ -274,17 +277,26 @@ func withoutKeys(values map[string]any, paths ...[]string) map[string]any {
 }
 
 var (
-	authConfPath   = []string{"configMap", "merge", "data", "auth.conf"}
-	noAuthUserPath = []string{"podTemplate", "merge", "metadata", "annotations", "envoy-infra.sjawhar.dev/no-auth-user"}
+	authConfPath     = []string{"configMap", "merge", "data", "auth.conf"}
+	noAuthUserPath   = []string{"podTemplate", "merge", "metadata", "annotations", "envoy-infra.sjawhar.dev/no-auth-user"}
+	maxFileStorePath = []string{"podTemplate", "merge", "metadata", "annotations", "envoy-infra.sjawhar.dev/max-file-store"}
+	storeMaxSizePath = []string{"config", "jetstream", "fileStore", "maxSize"}
 )
+
+// podAnnotations is the hub pods' annotations in the chart's values.
+func podAnnotations(values map[string]any) map[string]any {
+	return values["podTemplate"].(map[string]any)["merge"].(map[string]any)["metadata"].(map[string]any)["annotations"].(map[string]any)
+}
 
 // A users change that keeps the session user rewrites auth.conf alone, which the reloader applies
 // without a restart: every other value, the pod template's among them, stays as it was, so the
-// StatefulSet does not roll. A session-user change changes the pods' annotation too, which rolls
-// them, since nats-server refuses to reload a changed no_auth_user. Without a session user the
-// pods carry no annotation.
-func TestClusteredNatsHubRollsThePodsOnlyForASessionUserChange(t *testing.T) {
+// StatefulSet does not roll. Two changes nats-server refuses to reload change the pods' annotations
+// too, which rolls them: a session-user change (no_auth_user), and a change of maxFileStoreGb
+// (a lower max_file_store, refused, would block every later reload, a users change's included).
+// Without a session user the pods carry the store's annotation alone.
+func TestClusteredNatsHubRollsThePodsOnlyForASessionUserOrStoreChange(t *testing.T) {
 	before := chartValues(t, runClusteredHub(t, clusteredArgs()))
+	require.Equal(t, "9Gi", podAnnotations(before)["envoy-infra.sjawhar.dev/max-file-store"])
 
 	_, added := testnats.User(t)
 	args := clusteredArgs()
@@ -298,15 +310,24 @@ func TestClusteredNatsHubRollsThePodsOnlyForASessionUserChange(t *testing.T) {
 	args = clusteredArgs()
 	args.SessionUser.NKey = session
 	changed := chartValues(t, runClusteredHub(t, args))
-	require.Equal(t, session, changed["podTemplate"].(map[string]any)["merge"].(map[string]any)["metadata"].(map[string]any)["annotations"].(map[string]any)["envoy-infra.sjawhar.dev/no-auth-user"])
+	require.Equal(t, session, podAnnotations(changed)["envoy-infra.sjawhar.dev/no-auth-user"])
 	require.NotEqual(t, before["configMap"], changed["configMap"])
 	require.Equal(t, withoutKeys(chartValues(t, runClusteredHub(t, clusteredArgs())), authConfPath, noAuthUserPath),
 		withoutKeys(changed, authConfPath, noAuthUserPath))
 
 	args = clusteredArgs()
+	args.MaxFileStoreGb = pulumi.IntRef(8)
+	lowered := chartValues(t, runClusteredHub(t, args))
+	require.Equal(t, "8Gi", lowered["config"].(map[string]any)["jetstream"].(map[string]any)["fileStore"].(map[string]any)["maxSize"])
+	require.Equal(t, "8Gi", podAnnotations(lowered)["envoy-infra.sjawhar.dev/max-file-store"], "a lower store rolls the pods")
+	require.Equal(t, withoutKeys(chartValues(t, runClusteredHub(t, clusteredArgs())), storeMaxSizePath, maxFileStorePath),
+		withoutKeys(lowered, storeMaxSizePath, maxFileStorePath))
+
+	args = clusteredArgs()
 	args.SessionUser = nil
 	podTemplate := chartValues(t, runClusteredHub(t, args))["podTemplate"].(map[string]any)
-	require.NotContains(t, podTemplate, "merge", "no session user, no annotation and no priority class")
+	require.Equal(t, map[string]any{"metadata": map[string]any{"annotations": map[string]any{"envoy-infra.sjawhar.dev/max-file-store": "9Gi"}}},
+		podTemplate["merge"], "no session user: the store's annotation alone, and no priority class")
 }
 
 // The chart takes one transform, which protects the chart's StatefulSet, so a change that would

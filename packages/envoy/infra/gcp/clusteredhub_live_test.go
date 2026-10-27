@@ -363,7 +363,10 @@ func TestClusteredNatsHubChart(t *testing.T) {
 
 	annotations := dig(t, pod, "metadata", "annotations").(map[string]any)
 	require.NotContains(t, annotations, "checksum/config")
-	require.Equal(t, map[string]any{"envoy-infra.sjawhar.dev/no-auth-user": r.keys.sessionKey}, annotations)
+	require.Equal(t, map[string]any{
+		"envoy-infra.sjawhar.dev/no-auth-user":   r.keys.sessionKey,
+		"envoy-infra.sjawhar.dev/max-file-store": fmt.Sprintf("%dGi", s.MaxFileStoreGb),
+	}, annotations, "the two values nats-server cannot reload roll the pods")
 	require.Equal(t, s.PriorityClassName, dig(t, pod, "spec", "priorityClassName"))
 
 	require.Equal(t, s.AuthConf, r.authConf, "the ConfigMap's auth.conf is the hub's rendering")
@@ -1219,4 +1222,49 @@ func TestClusteredNatsHubCluster(t *testing.T) {
 	})
 	require.Equal(t, newSessionKey, user)
 	t.Logf("(e) %s restarted (pid %d) makes a client with no credential the new session user %s", restarted.name, restarted.proc.Cmd.Process.Pid, user)
+
+	// (f) A lower max_file_store: nats-server refuses the whole reload, so a users change written
+	// beside it is not applied either, and every later reload repeats the refusal, until the server
+	// restarts on the new nats.conf. This is why the hub's pods carry maxFileStoreGb in an
+	// annotation (envoy-infra.sjawhar.dev/max-file-store), which rolls them when it changes.
+	natsConfPath := filepath.Join(restarted.dir, "nats.conf")
+	natsConf, err := os.ReadFile(natsConfPath)
+	require.NoError(t, err)
+	storeLine := fmt.Sprintf(`"max_file_store": %dGi`, r.settings.MaxFileStoreGb)
+	require.Equal(t, 1, strings.Count(string(natsConf), storeLine), "the rendered nats.conf sets %s once", storeLine)
+	lowered := strings.Replace(string(natsConf), storeLine, fmt.Sprintf(`"max_file_store": %dGi`, r.settings.MaxFileStoreGb-1), 1)
+	withAddedNewSession := liveHubArgs(r.keys)
+	withAddedNewSession.SessionUser.NKey = newSessionKey
+	withAddedNewSession.Users = withAdded.Users
+	storeRefusal := "config reload not supported for decreasing jetstream max memory and store"
+	storeRefusals := restarted.count(storeRefusal)
+	writeAtomically(t, natsConfPath, lowered)
+	writeAtomically(t, filepath.Join(restarted.dir, clusteredHubAuthConfKey), liveAuthConf(t, withAddedNewSession))
+	// The server's own SIGHUP, as the reloader sends it: the reloader may still name the pid the
+	// server had before (e)'s restart.
+	require.NoError(t, restarted.proc.Cmd.Process.Signal(syscall.SIGHUP))
+	within(t, 30*time.Second, restarted.name+" refuses the lower max_file_store", func() error {
+		if restarted.count(storeRefusal) == storeRefusals {
+			return errors.New("no refusal yet")
+		}
+		return nil
+	})
+	conn, err := testnats.ConnectSeed(t, restarted.url(), addedSeed)
+	if err == nil {
+		conn.Close()
+	}
+	require.ErrorIs(t, err, natsgo.ErrAuthorization, "the users change written beside the lower store is not applied")
+	t.Logf("(f) %s refused the reload of a lower max_file_store (%q) and with it the users change beside it: live-added is refused", restarted.name, storeRefusal)
+	restarted.proc.Terminate(t)
+	restarted.proc.WaitExit(t, "SIGTERM")
+	restarted.start(t)
+	within(t, 30*time.Second, restarted.name+" admits live-added after its restart", func() error {
+		conn, err := testnats.ConnectSeed(t, restarted.url(), addedSeed)
+		if err != nil {
+			return err
+		}
+		conn.Close()
+		return nil
+	})
+	t.Logf("(f) %s restarted (pid %d) on the lower max_file_store admits live-added", restarted.name, restarted.proc.Cmd.Process.Pid)
 }
