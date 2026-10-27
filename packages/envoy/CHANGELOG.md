@@ -796,18 +796,51 @@
 
 ### Changed
 
+- **Breaking:** `envoy-dispatch redeliver-webhooks` needs `DATABASE_URL`, the database the
+  Dispatch server uses, and exits 2 naming it when the variable is unset, before it connects to
+  NATS or GitHub: the GitHub rate limits it obeys now live in that database. It migrates nothing,
+  so run it against a database this release's server has already migrated. Add `DATABASE_URL` to
+  every script or job that runs the command before you deploy this release (INFRA-562).
+- GitHub's rate limits are shared by every Dispatch process. A limit one process meets is written
+  to the new table `github_rate_limits` (migration `0123`), under the App's scope (`app`: token
+  mints, installation lookups, the webhook delivery endpoints) or one installation's
+  (`installation:<id>`), for the wait GitHub asked, and until it passes by the database's clock no
+  process sends GitHub a request under that scope. The webhook redelivery sweep's own doubling
+  backoff moved from the NATS KV bucket into the same table (scope `redelivery`), so a limit met
+  on redelivery requests no longer holds token mints past GitHub's own wait. A database that
+  cannot be read or written leaves each process to GitHub's answers, with a log line. The GitHub
+  proxy (`/api/github/rest/...`) answers a rate limit, met now or recorded by any process,
+  `503 GITHUB_RATE_LIMITED` with `Retry-After` in whole seconds (at least one), where it answered
+  `502 GITHUB_UPSTREAM` or passed GitHub's `403` through. The repository-to-installation lookup a
+  process remembers now expires after 10 minutes, so an App moved to another installation is
+  found within that rather than when the process restarts. Installation tokens stay in each
+  process's memory and are never written to the database (INFRA-562).
+- Dispatch's test hooks act on every process serving the database, not only the one a call
+  reached, so a browser suite against two processes works whichever process each request lands
+  on: `POST /api/v1/events/_test/disconnect`, `POST /api/v1/delivery/_test/disconnect`,
+  `POST /api/v1/artifacts/_test/quiesce` and
+  `POST /api/v1/agents/{session_id}/stream/_test/publish` notify every process over Postgres
+  (`dispatch_test_hooks`) and answer once each has acted, or `504 TEST_HOOK_TIMEOUT` after 10 s
+  naming the lock keys of the processes that did not. With `DISPATCH_TEST_HOOKS=1` each process
+  holds one more Postgres connection, outside the shared pool, to hear them; without it nothing
+  changes. Two test-only settings, accepted only with `DISPATCH_TEST_HOOKS=1`, shorten the new
+  delivery resume loop's interval (`DISPATCH_TEST_DELIVERY_RESUME_INTERVAL`) and the stored route
+  list's life (`DISPATCH_TEST_ROUTE_ROSTER_TTL`) (INFRA-562).
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a
   body naming a rate limit (GitHub's secondary limit, Google's `rateLimitExceeded`). A rate limit
   is not the App owner's to fix. The release's answer is unchanged, `502 MINT_FAILED`.
 - An issue read with a route no longer calls the Envoy listener and decodes the whole live-session
-  list each time. Dispatch keeps one copy of that list per process, at most 5 s old, and one
-  listener call refreshes it for every issue read that asks while the call runs. A listener that
-  fails or does not answer is asked again only after 5 s, so the reads in that window read
+  list each time. Dispatch stores one copy of that list for every process, the `route_roster` row
+  (migration `0122`), at most 5 s old by the database's clock, and one listener call refreshes it
+  for every issue read on that process that asks while the call runs; an answer is never stored
+  over one from a later call. A listener that fails or does not answer is stored too, and asked
+  again only after 5 s, so the reads in that window, on every process, read
   `route_status: unknown` at once instead of each waiting up to 2 s. A `route_status` can
-  therefore be up to 5 s old; its values and the `503 ENVOY_UNAVAILABLE` of a `live` or
-  `no_holder` filter are unchanged.
+  therefore be up to 5 s old, and every process reads the same one, so a page filtered on
+  `route_status` holds the same issues whichever process serves it; its values and the
+  `503 ENVOY_UNAVAILABLE` of a `live` or `no_holder` filter are unchanged.
 - **Breaking:** `envoy-dispatch backfill-embeddings` is removed: the server's coverage pass does
   its work at boot and every 10 minutes, and an operator script that still runs it exits 2.
   Migration `0119` drops its checkpoint table, `embeddings_backfill_progress`, in the same release,
@@ -1428,6 +1461,67 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+
+- A message Dispatch accepted is no longer lost when the request that sent it, or the Dispatch
+  process serving it, stops before the send (INFRA-562):
+  - A direct message's first delivery attempt is written in the same transaction that stores the
+    message, as a broadcast recipient's already was, so a stored message always has an attempt.
+    Before, the attempt was written only after a listener lookup, and a process that stopped in
+    between left a message with no attempt that nothing would ever send.
+  - A request's own send no longer stops when its connection is cut (a closed tab, a front-door
+    pod roll): a direct message, a comment's mentions, and a Retry finish their send and record
+    its outcome after the browser has gone.
+  - A new leased loop, `delivery-resume`, runs every 10 s on every process (one process makes each
+    pass) and sends every message attempt and comment mention attempt left `pending` - by a
+    process killed between its claim and its settle, or a database write that failed - once its
+    claim is a minute old, under that attempt's own number and idempotency key, so a send that
+    had landed reads as a duplicate rather than reaching the session twice. Only attempts created
+    in the last hour are resumed; an older one waits for a person's Retry, as every stranded
+    attempt did before, since an instruction that old sent unasked could act on stale context. The
+    first deploy therefore sends, at its first passes, any attempt stranded in the hour before it.
+    A resumed direct message is more than a minute old, so its session shows it as a card
+    rather than as its user's own turn. Migration `0121` adds `message_deliveries.urgency`, so a
+    resumed direct message keeps the urgency it was sent with, and two partial indexes the loop
+    reads pending attempts through. The loop takes one more connection in the lease pool, which is
+    now nine connections (`store.leasePoolSize`).
+  - A send that meets an Envoy listener take-over (the new pod refusing connections, answering
+    502, 503 or 504, or not yet holding the session) or a receipt timeout tries again under the
+    same attempt and idempotency key, backing off from 250 ms to 2 s, for up to 12 s from its
+    first try, and only then settles `failed`. A send during a take-over therefore reaches its
+    session, a request that sends during one answers up to 12 s later, and a send to a session
+    that is really gone reads `failed: no live session` about 12 s after it was made rather than
+    at once.
+  - The listener client reads a 502, 503 or 504 that carries a JSON reason, such as the starting
+    listener's `503 {"error":"service starting"}`, as the listener being unavailable, keeping the
+    reason in the error's text, so a send waits it out as above. Before, it took the reason for
+    the listener's verdict on the request, and the attempt failed with it at once.
+- A webhook redelivery whose Dispatch process died after it claimed the delivery and before it
+  recorded GitHub's answer (a SIGKILL, an OOM kill, a lost node) is requested again once the claim
+  is 60 s old, even after the failed attempt has aged out of the sweep's one-hour window. Before,
+  every later sweep read the claim as a redelivery GitHub had accepted and never asked again.
+  Until the minute passes, other sweeps count the delivery `claimed_elsewhere`; a claim whose
+  answer could not be written is logged at ERROR with `claim_expires_at` (INFRA-562).
+- Two Dispatch processes syncing one project's architecture source at once never record the older
+  of the two branch heads they read over the newer one, nor a failure one met over the other's
+  success. Each importer write now commits only while the source's `last_sync_at` is the value its
+  sync loaded before fetching, and a sync another one overtook starts again from the load. Writes
+  are ordered by when each sync read the head, not by commit date, so a force-push back to an
+  older commit still imports (INFRA-562).
+- The two Delivery page configuration warnings (a successful run with no job matching
+  `production_job_names`, and a production job with no step named `production_apply_step_name`)
+  are logged once across every Dispatch process, not once in each: the process whose insert into
+  the new table `delivery_run_warnings` (migration `0124`) writes the run's row logs it. A
+  database that cannot record the row leaves the process to log it anyway (INFRA-562).
+- An issue's claim time, an ask's answer time (the answer route's and a carried approval's) and
+  the "snooze must be in the future" check use the database's clock, not the clock of the host
+  that served the request, so two processes on hosts whose clocks disagree no longer order a
+  claim or an answer against the other's times wrongly or refuse a snooze the other would take
+  (INFRA-562).
+- Migrations `0121` to `0124` are additive (a nullable column, two indexes and three new tables),
+  so the release before them keeps serving beside this one through a rolling update, and rolling
+  back past them is an image rollback alone. While both releases serve, only this release's
+  processes share the route list, the GitHub rate limits and the warnings, and resume stranded
+  deliveries (INFRA-562).
 
 - Every `envoy-infra` component refuses a number in an integer input that is not a whole number
   within the 64-bit integer range, at any depth (an object type's property, an array element, a

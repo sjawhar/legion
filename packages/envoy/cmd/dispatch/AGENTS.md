@@ -163,7 +163,7 @@ answers once every process that held a lock when it was sent has acknowledged or
 with the first error any reported, or `504 TEST_HOOK_TIMEOUT` after ten seconds naming the keys that
 did not answer (`internal/dispatch/api/test_hooks_fanout.go`). `STREAM_UNAVAILABLE` is still judged
 on the process the publish reached. The flag costs one Postgres connection per process outside
-`pool_max_conns`.
+the shared pool (`store.sharedPoolSize`).
 
 With NATS configured and the GitHub App private key loaded, startup also runs the webhook
 redelivery sweep (`internal/dispatch/redeliver`, wired in `cmd/dispatch/redeliver.go`). Every

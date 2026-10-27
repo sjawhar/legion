@@ -80,8 +80,9 @@ type Deps struct {
 	// GitHub reads; nil is the "no app credentials yet" state and answers ErrNoAppKey.
 	GitHub *githubapp.Client
 	// Architecture imports a project's architecture model from its configured
-	// source; the ticker, the Refresh route, and the sync tool share it so one
-	// project's syncs stay serialized.
+	// sources; the ticker, the Refresh route, and the sync tool share it, so this process never
+	// fetches one project twice at once. The source row, not this sharing, orders every process's
+	// writes (architecture.Importer).
 	Architecture *architecture.Importer
 	// OIDC verifies a JWT-shaped bearer as a Kubernetes pod's projected
 	// service-account token; nil is the unconfigured deployment, where a

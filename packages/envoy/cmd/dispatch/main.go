@@ -997,10 +997,10 @@ func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bu
 // healthcheck and the deploy script).
 //
 // Where a file store is configured, `files` reports whether its bucket answered, and that is
-// all it does: it never decides `ok`. The load balancer replaces a task whose probe fails, and
-// production runs one, so a bucket outage, a slow HeadBucket or a grant someone changed would
-// take documents, asks and comments down with the files. A deploy check that wants the bucket
-// asserts `files: true` itself.
+// all it does: it never decides `ok`. The load balancer replaces a process whose probe fails, and
+// every process probes the same bucket, so a bucket outage, a slow HeadBucket or a grant someone
+// changed would fail every process at once and take documents, asks and comments down with the
+// files. A deploy check that wants the bucket asserts `files: true` itself.
 //
 // Beside those it reports what is deployed: `commit`, the legion commit the binary was built
 // from (null when the build did not stamp one), and `schema_version`, the highest migration

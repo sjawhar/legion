@@ -21,7 +21,7 @@ below add only what a setting's one line cannot say.
 | `DISPATCH_AGENT_TOKEN` | One value, or several separated by whitespace, so the shared token can rotate with an overlap: write the new value followed by the old one, move every consumer to the new one, then write the new value alone. The first is the current value; the API and the document websocket accept every value, comparing a bearer with each in constant time. Whitespace at either end is ignored; startup refuses an empty entry (two whitespace characters in a row, a CR LF among them) or a repeated one, naming its position, never its value. A request that authenticates with a value after the first logs one WARN line, `dispatch: request authenticated with a previous shared agent token`, with `entry` (the value's position), `address` (the rightmost `X-Forwarded-For` entry, which is the load balancer's view of the caller, or the connection's own address without one), `user_agent` and `path`, at most once per address and User-Agent every 10 minutes, and never a token. Each field keeps its first 256 bytes, and the server remembers up to 10,000 callers; one past that is logged on each request. Callers that share an address and User-Agent share a line, so the log says whether a value on its way out is still in use, not who uses it. |
 | `DISPATCH_SIGNING_KEY` | The HMAC key every session cookie is signed and verified with, and the key the stored refresh tokens' seal is derived from (Identity, below). Unset, each process mints a key of its own in its own data directory (`auth.LoadOrCreateSigningKey`), so a deployment of more than one process sets one value every process is given: with a key apiece, a session minted on one process is refused by the other — every person is signed out by whichever process answers next — and every stored refresh token reads as absent. No process can see another's key, so nothing refuses the boot and `/healthz` cannot report it; it is a precondition of running more than one process, never a check (Running more than one process, below). Rotating it signs everyone out and leaves every stored refresh token unopenable. |
 | `NATS_NKEY_SEED_FILE`, `NATS_NKEY_SEED` | The NATS nkey user Dispatch connects as: a file holding the seed (trimmed; wins), or the seed. A set but unusable value refuses startup naming the variable and path; neither set connects without a credential. |
-| `DISPATCH_TEST_HOOKS` | Set to `1` to mount test-only routes: `POST /api/v1/events/_test/disconnect` closes every open SSE connection; `POST /api/v1/delivery/_test/disconnect` closes every open delivery socket with 1012; `POST /api/v1/artifacts/_test/quiesce` closes every live document and waits for settlements; `POST /api/v1/agents/{session_id}/stream/_test/publish` feeds the in-process agent relay a server without NATS serves; and `POST /api/v1/artifacts/{id}/_test/outside-schema` writes the crafted malformed document e2e uses. The first four act on every process serving the database, whichever one the call reached (Running more than one process, below), and the flag costs each process one more Postgres connection outside `pool_max_conns`, the one those hooks listen on. Leave unset in every real deployment. |
+| `DISPATCH_TEST_HOOKS` | Set to `1` to mount test-only routes: `POST /api/v1/events/_test/disconnect` closes every open SSE connection; `POST /api/v1/delivery/_test/disconnect` closes every open delivery socket with 1012; `POST /api/v1/artifacts/_test/quiesce` closes every live document and waits for settlements; `POST /api/v1/agents/{session_id}/stream/_test/publish` feeds the in-process agent relay a server without NATS serves; and `POST /api/v1/artifacts/{id}/_test/outside-schema` writes the crafted malformed document e2e uses. The first four act on every process serving the database, whichever one the call reached (Running more than one process, below), and the flag costs each process one more Postgres connection outside the shared pool, the one those hooks listen on. Leave unset in every real deployment. |
 | `DISPATCH_ASSET_STORE_BUCKET` | Optional bucket of immutable dashboard assets from earlier builds, each stored under its URL path without the leading slash (`assets/<file>`). When a local `/assets/*` file is absent, Dispatch reads the object under that key through the AWS SDK default credential chain, which takes its region and credentials from the task's environment. It reads the whole object, at most 8 MiB, within 3 seconds before it answers, so the browser's own download is not held to that time. It never reads `index.html` or a non-asset path from the bucket. An absent object stays a 404; any other store failure (an error, a short body, an object over the limit) is a 502 with no cache header, logged at ERROR with its key. An object stays in memory until its client has read it, so at most 64 MiB of retained objects are held at once: a request reserves 8 MiB before it asks the bucket, waiting within its 3 seconds for earlier requests to finish, and keeps its object's size until the response is written or the client goes away. A request that cannot reserve room in time, or whose admitted fetch then runs out of that same 3 seconds before the bucket answers, is a 503 with `Cache-Control: no-store` and `Retry-After: 1`, logged at WARN with its key — the bound expiring is never a 502, since the store was only asked too late to answer in time; a room refusal asks the bucket nothing. A client that disconnects while still queued for room logs nothing above a debug line and gets no response. The task role needs `s3:GetObject` on `<bucket>/assets/*` and `s3:ListBucket` on the bucket: without `ListBucket`, S3 answers a missing key with 403, and Dispatch returns 502 where it should return 404. Leave it unset for local-only static serving. |
 | `DISPATCH_DEV_SIGNIN` | Set to `1` to mount `GET /auth/_dev/signin?login=<email>&next=<path>`, which signs any person in by the email it names, with no sign-in pool, so a browser or test harness can be signed in to a local instance. Boot refuses it unless identity is `cookie`, no `DISPATCH_SIGNIN_*` setting is set, the listen address is a loopback IP literal, the dashboard origin (`DISPATCH_SERVER_URL` or `dispatch.serverUrl`) names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, `DISPATCH_SIGNING_KEY` is unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, `DISPATCH_AGENT_SECRETS_URL`, when set, names a loopback host, `ENVOY_URL` names a loopback host, and a loaded GitHub App private key comes from `DISPATCH_APP_PEM_B64` with `DISPATCH_GITHUB_API_BASE` naming a loopback host, never from the `pem` in `app.json`, where a developer keeps the real App's key: a signed-in session can have the App probe and import any repository it is installed on, and read GitHub through the App's proxy. That key must be a throwaway, as `packages/dispatch/e2e/run-server.sh` generates one, since every App call hands a signed App JWT to whatever listens at that base. While it is on every request must carry the dashboard origin as its `Host` (else `421 HOST_MISMATCH`). The session cookie is signed with a key generated for that process alone, so it is worthless on any other server; what a signed-in session writes to the database is not. It can mint a `dsp_` personal agent token, and its sign-out advances the person's session generation, and every server on the same database honours those rows. Give a dev-sign-in server a database no other server uses: the loopback check makes that likely, not certain, since a loopback address can be a tunnel to another machine's database or a database a second local server also runs on. Any value other than `1` or unset is refused. |
 | `DISPATCH_FILE_STORE_BUCKET` | Files are stored under `files/sha256/<hash>`, one object however often a file is uploaded; a document's markdown never leaves Postgres. The credential chain on Fargate is the task role, which needs `s3:GetObject` and `s3:PutObject` on `files/*` and `s3:ListBucket` on the bucket: without `ListBucket`, S3 answers a missing object 403, which Dispatch reads as a store failure. The SDK must also find a region (`AWS_REGION`, or the shared config); without one the boot is refused. An upload writes its object before its row and before any lock or connection is taken, within 30 seconds, so a store that refuses answers 502 `FILE_STORE_UNAVAILABLE` and writes no version. The version route serves a row still holding bytes from the row and any other from the bucket: it opens the object within 30 seconds, sends its headers and `Content-Length` only then, and streams the body at the client's pace, checking it against the row's hash as it goes; a bucket that does not answer is 502, a row whose object the bucket does not hold is 500 `FILE_MISSING` (a restore from the bucket's versioning, not a retry), a cleared row on a server with the setting unset is 503, and a body that fails or hashes wrong mid-stream is cut off rather than ended as if whole. `/healthz` reports `files`: null when unset, else whether the bucket answered a two-second `HeadBucket`; it never decides `ok`, since a bucket outage must not take the one task, and with it documents and asks, down. `envoy-dispatch backfill-files` moves the rows uploaded before the bucket, and `--restore` is the rollback ("Moving uploaded files to the bucket", below). |
@@ -416,9 +416,23 @@ What the two processes share, and what each keeps to itself:
   written in the transaction that stores it, and a request's own send outlives a cut connection.
   An attempt a process left pending - killed between its claim and its settle, a direct message,
   a broadcast recipient's, a comment mention's or a Retry's alike - is sent by whichever process
-  runs the delivery resume loop next (`api/delivery_resume.go`, every ten seconds), once its claim
-  is a minute old, under its own attempt number and idempotency key, so the session is handed it
-  once. An attempt older than an hour is left for a person's Retry.
+  runs the delivery resume loop next (`api/delivery_resume.go`, every ten seconds, under the
+  `delivery-resume` lease, one of the leased loops below), once its claim is a minute old, under
+  its own attempt number and idempotency key, so the session is handed it once. An attempt older
+  than an hour is left for a person's Retry.
+- A send waits out a listener take-over. While the active Envoy listener pod is replaced, its
+  successor refuses connections, answers 502, 503 or 504, or does not hold the session yet; a send
+  that meets one of those (or a receipt timeout) is tried again under the attempt it holds and the
+  same idempotency key, renewing its claim before each try, for up to 12 seconds from its first
+  try, and only then settles `failed` (`api/envoy_resolve.go`, `listenerTakeoverWindow`). A request
+  that sends during a take-over answers up to 12 seconds later, and a send to a session that is
+  really gone reads `failed: no live session` about 12 seconds after it was made. A process killed
+  during the wait leaves the attempt to the resume loop.
+- Times that one process writes and another compares come from the database's clock, never a
+  host's: an issue's `claimed_at`, an ask's answer time (the answer route's and a carried
+  approval's, the `created_at` of the `ask.answered` event beside it) and the "snooze must be in
+  the future" check, as the delivery claims' lease, the route roster's age and the GitHub rate
+  limits are.
 - Route status comes from one stored listener answer. Every issue read judges its `route_status`
   against the `route_roster` row (migration `0122`), the listener's last live-session list, so
   both processes read a route the same way and a `route_status` page read on either is cut from
@@ -443,7 +457,11 @@ What the two processes share, and what each keeps to itself:
   installation, not the token, and storing tokens would put live credentials in Postgres and its
   backups. A repository's installation is remembered for ten minutes, so every process finds an
   App moved to another installation within that.
-- Seven periodic maintenance loops run once per period across the processes, not once per process.
+- Eight periodic maintenance loops run once per period across the processes, not once per process:
+  the document compaction, the suggestion-outcome sweep, the delivery resume, the
+  reference-excerpt reconciliation, the webhook redelivery sweep, the architecture import, the
+  delivery reconcile and the delivery intakes' consumer reconciliation, which takes one lease per
+  durable, so nine callers hold a lease at once at most (`store.leasePoolSize`).
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a
   process whose tick lands inside another's pass logs a skip; and, under that lease, each pass is
   recorded in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick
@@ -451,17 +469,18 @@ What the two processes share, and what each keeps to itself:
   and a rolling update starts the second process minutes after the first — finds the period
   already served and logs the same skip. The settlement resumption, the delivery live hub, the
   event-stream relay, the stale-room evictor and the document rooms' timers stay per-process by
-  design, and the embedding queue, the task progress reconciliation and the outbox's own scan
-  claim their own work; the embedding queue's coverage pass runs in every process with no lease,
-  each of its steps safe beside another process's, and drops every vector its own embedder did not
-  make, so every process takes the same embedder settings (Search, below); `cmd/dispatch/main.go`
-  says at the call site which loop is which and why.
-- The delivery live hub and the event-stream relay run in every process, each on a `LISTEN`
-  connection of its own (`api/delivery_live_hub.go`, `api/event_stream_relay.go`). Each process
-  serves its own browser sockets - the Delivery and Pipeline pages' `GET /ws/delivery`, every SSE
-  stream - so each needs the notifications and the recomputed views for them, and sharing them
-  would need a cache across the processes. The cost is two Postgres connections per process
-  outside `pool_max_conns`.
+  design (below), and the embedding queue, the task progress reconciliation and the outbox's own
+  scan claim their own work; the embedding queue's coverage pass runs in every process with no
+  lease, each of its steps safe beside another process's, and drops every vector its own embedder
+  did not make, so every process takes the same embedder settings (Search, below);
+  `cmd/dispatch/main.go` says at the call site which loop is which and why.
+- The delivery live hub, the event-stream relay and the stale-room evictor run in every process,
+  each on a `LISTEN` connection of its own (`api/delivery_live_hub.go`, `api/event_stream_relay.go`,
+  `docs/stale_room.go`). Each process serves its own browser sockets - the Delivery and Pipeline
+  pages' `GET /ws/delivery`, every SSE stream, every live document - so each needs the
+  notifications and the recomputed views for them, and sharing them would need a cache across the
+  processes. The cost is up to three Postgres connections per process outside the shared pool
+  (`store.sharedPoolSize`).
 - A Delivery page configuration warning is logged once across the processes. Every read judges
   each deploy run, and a successful run holding none of `production_job_names`, or whose production
   job lists no step named `production_apply_step_name`, is named in the log; the process whose
@@ -479,7 +498,7 @@ What the two processes share, and what each keeps to itself:
   seconds naming the lock keys that never answered (`api/test_hooks_fanout.go`). `quiesce`
   therefore answers only once no process has a document open. A published frame larger than one
   notification's 8000 bytes travels in several, sent in one transaction. That connection is one
-  more per process outside `pool_max_conns`, under the test hooks alone.
+  more per process outside the shared pool, under the test hooks alone.
 
 **Two processes do not share a live document session.** Durable convergence is unconditional:
 every edit is appended under the document's advisory lock, Yjs updates commute, and the stored
