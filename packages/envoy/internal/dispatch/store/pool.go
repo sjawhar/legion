@@ -25,7 +25,7 @@ import (
 // release, and they are waiting for the lock. Two anchored writes and two document
 // settlements on one issue closed that cycle on a four-connection pool, and nothing but
 // pg_terminate_backend recovered it. Rationing connections cannot fix it, and neither can
-// sharedPoolSize's sixteen: the queue behind one writer's issue lock is unbounded - a
+// sharedPoolSize's size: the queue behind one writer's issue lock is unbounded - a
 // settlement per document, every issue-owned event append, the architecture importer - so a
 // bigger pool only moves the number of callers it takes.
 //
@@ -136,6 +136,7 @@ type Pool struct {
 	health *pgxpool.Pool
 	listen *pgxpool.Pool
 	leases *pgxpool.Pool
+	outbox *pgxpool.Pool
 	closed bool
 }
 
@@ -149,10 +150,12 @@ func NewPool(pool *pgxpool.Pool) *Pool {
 // blocked writer is all it takes to starve everything else: with four writers parked on one
 // issue's row lock, a read of an unrelated issue waited the whole seventeen seconds the lock
 // was held, where sixteen connections served 3,853 such reads at a four-millisecond median.
-// The shared Aurora cluster has thousands of connections spare, so the ceiling is picked here
-// rather than derived from the task's CPU allotment or read out of the DSN another
-// repository's URL builder writes.
-const sharedPoolSize = 16
+// The ceiling is picked here rather than derived from the task's CPU allotment or read out of
+// the DSN another repository's URL builder writes. It is 64, from 16, since 2026-10-27: a
+// request takes a connection per statement one after another (an issue read is about eleven),
+// so under ~240 agent requests a minute the API held all sixteen and every other request waited
+// seconds for one; the database (16 vCPU) has hundreds of connections spare.
+const sharedPoolSize = 64
 
 // roomsPoolSize bounds the connections document loads use. Loading takes no lock and always
 // finishes, so one is enough for the pool to be deadlock-free; a few let cold rooms load
@@ -256,18 +259,19 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 // (duty.Exclusive). One connection per caller that can be inside Exclusive at the same moment is
 // the whole requirement, and it is a caller and not a lease that needs one: Exclusive takes its
 // connection before it learns whether the lease is held, so a pass that skips because the other
-// process holds the lease holds a connection for that round trip too. INFRA-66 leases eight names
-// - the document compaction, the suggestion-outcome sweep, the reference-excerpt reconciliation,
-// the GitHub webhook redelivery sweep, the architecture import, the delivery reconcile and one
-// per delivery durable for the consumers' reconciliation (delivery.consumerLease, a name each for
-// delivery-events and delivery-jobs) - taken by eight callers, since each delivery intake takes
-// its own durable's name from a bind poll of its own, so eight callers can be inside Exclusive at
-// once. Eight connections are exactly those eight: the headroom is zero, not one, and the next
-// leased loop added here makes a ninth caller that waits for a connection rather than failing,
-// for as long as the longest pass then holding one. They cannot come from the shared pool:
-// a lease is held for the whole pass, which is minutes for the compaction, and sharedPoolSize's
-// sixteen are what every request reads through.
-const leasePoolSize = 8
+// process holds the lease holds a connection for that round trip too. Nine names are leased - the
+// document compaction, the suggestion-outcome sweep, the reference-excerpt reconciliation, the
+// block-index reconciliation, the GitHub webhook redelivery sweep, the architecture import, the
+// delivery reconcile and one per delivery durable for the consumers' reconciliation
+// (delivery.consumerLease, a name each for delivery-events and delivery-jobs) - taken by nine
+// callers, since each delivery intake takes its own durable's name from a bind poll of its own,
+// so nine callers can be inside Exclusive at once. Nine connections are exactly those nine: the
+// headroom is zero, not one, and the next leased loop added here makes a tenth caller that waits
+// for a connection rather than failing, for as long as the longest pass then holding one. They
+// cannot come from the shared pool: a lease is held for the whole pass, which is minutes for the
+// compaction, and the shared pool's sharedPoolSize connections are what every request reads
+// through.
+const leasePoolSize = 9
 
 // Leases is where a periodic maintenance loop takes the connection it holds its lease on, so that
 // only one process runs each pass (duty.Exclusive). The lease is a session-level advisory lock, so
@@ -277,6 +281,23 @@ const leasePoolSize = 8
 // connections (ErrNestedAcquire).
 func (p *Pool) Leases() (*pgxpool.Pool, error) {
 	return p.separate(&p.leases, leasePoolSize, "loop leases")
+}
+
+// outboxPoolSize bounds the pool the events outbox reads and records events through. The outbox
+// is one goroutine that runs one statement at a time and closes each cursor before its next
+// statement, so one connection is every connection it can use.
+const outboxPoolSize = 1
+
+// Outbox is the pool the events outbox claims, reads and records events through, and reads the
+// followers and authors a publish routes to. Under load the API's requests queue for the shared
+// pool's connections, and an outbox statement queued behind them holds back every event behind
+// it; on a pool of its own it waits for none of them, and holds no connection a request could use.
+func (p *Pool) Outbox() (*Pool, error) {
+	opened, err := p.separate(&p.outbox, outboxPoolSize, "events outbox")
+	if err != nil {
+		return nil, err
+	}
+	return NewPool(opened), nil
 }
 
 // separate opens the pool held at field on demand, sized at size and copied from the shared
@@ -316,10 +337,10 @@ func (p *Pool) Close() {
 		return
 	}
 	p.closed = true
-	rooms, health, listen, leases := p.rooms, p.health, p.listen, p.leases
-	p.rooms, p.health, p.listen, p.leases = nil, nil, nil, nil
+	rooms, health, listen, leases, outbox := p.rooms, p.health, p.listen, p.leases, p.outbox
+	p.rooms, p.health, p.listen, p.leases, p.outbox = nil, nil, nil, nil, nil
 	p.mu.Unlock()
-	for _, separate := range []*pgxpool.Pool{rooms, health, listen, leases} {
+	for _, separate := range []*pgxpool.Pool{rooms, health, listen, leases, outbox} {
 		if separate != nil {
 			separate.Close()
 		}

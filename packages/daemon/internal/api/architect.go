@@ -44,12 +44,13 @@ type WaveReleaseRequest struct {
 }
 
 // WaveReleaseResponse answers release_children. A release is accepted whatever the children's
-// links say, so released is every issue the request named, unchanged: no child of a wave is lost,
-// and the architect is never asked to send the request again. started and held then say what the
-// release did with each of them: started compares each child's record read before the request's
-// writes with its record read after them (startedByRelease), and held is judged from the blockers
-// Dispatch showed the request, against the mirror (blockers.UnfinishedOf) — the same list the
-// child's own todo event carries — not from the child's record.
+// links say, so released is every issue the request named, each once, in the order the request
+// first named it: no child of a wave is lost, and the architect is never asked to send the request
+// again. started and held then say what the release did with each of them: started compares each
+// child's record read before the request's writes with its record read after them
+// (startedByRelease), and held is judged from the blockers Dispatch showed the request, against
+// the mirror (blockers.UnfinishedOf) — the same list the child's own todo event carries — not from
+// the child's record.
 //
 // started names the children whose first phase this request started, and held each child the
 // request did not start because it waits on an unfinished issue, with the issues it waits on. A
@@ -584,6 +585,16 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 	if req.Issues == nil {
 		req.Issues = []string{}
 	}
+	// A wave that names a child twice releases it once, at its first place: a second write would
+	// make Dispatch append another todo event for the same move, the answer would name the child
+	// twice, and releaseOrder would add up the child's depth once per naming, so it could sort the
+	// child after a child of its own, which would then be applied before its parent is recorded.
+	named := make(map[string]bool, len(req.Issues))
+	req.Issues = slices.DeleteFunc(req.Issues, func(key string) bool {
+		twice := named[key]
+		named[key] = true
+		return twice
+	})
 	// One wave's children share ancestors, and the walk to the tree root re-read each of them
 	// per child: the reads are cached for the life of this request.
 	read := s.cachedIssueReader()
@@ -1036,9 +1047,14 @@ func (s *server) owns(ctx context.Context, grant credential.Grant, recorded reco
 }
 
 // parkChild takes a running child of the architect's tree out of the workflow by moving it to
-// backlog in Dispatch, the move a human would make. The move's event parks it as it parks any child
-// leaving the workflow (the workflow's leave): its workers are suspended and its phase parked, and
-// the architect is told. rerun_child, or release_children on the backlog child, runs it again.
+// backlog in Dispatch, the move a human would make, and applies that move to the record before it
+// answers (applyOwnStatusWrite), as the move's event would: the child is parked as any child leaving
+// the workflow is (the workflow's leave), its workers suspended and its phase parked, and the
+// architect is told. The record does not wait for the event to come back through the Dispatch
+// consumer, which can run far behind: until then the workflow would keep running the child, start
+// its next phase's worker on a completion, and refuse rerun_child. The event, once delivered, finds
+// the record at its sequence and changes nothing. rerun_child, or release_children on the backlog
+// child, runs it again.
 func (s *server) parkChild(w http.ResponseWriter, r *http.Request) {
 	child, ok := s.childOfTree(w, r)
 	if !ok {
@@ -1048,16 +1064,17 @@ func (s *server) parkChild(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusConflict, "CHILD_NOT_RUNNING", fmt.Sprintf("%s is already out of the workflow; rerun_child runs it again", child.Key))
 		return
 	}
-	if _, ok := s.setDispatchStatus(w, r, child.Key, "backlog"); ok {
+	if written, ok := s.setDispatchStatus(w, r, child.Key, "backlog"); ok && s.applyOwnStatusWrite(w, r, written) {
 		writeJSON(w, http.StatusOK, EmptyResponse{})
 	}
 }
 
 // rerunChild runs a child of the architect's tree again once it is out of the workflow, parked or
-// signed off, by moving it to todo in Dispatch, the move a human would make. The move's event starts
-// the child's next run under the tree from planning (the workflow's reenterChild). A running child
-// is parked first, and a lingering tree runs nothing more; a todo it reached anyway would admit the
-// child as an orphan root of its own.
+// signed off, by moving it to todo in Dispatch, the move a human would make, and applies that move to
+// the record before it answers (applyOwnStatusWrite), as the move's event would: the child's next
+// run starts under the tree from planning (the workflow's reenterChild), and the event, once
+// delivered, changes nothing. A running child is parked first, and a lingering tree runs nothing
+// more; a todo it reached anyway would admit the child as an orphan root of its own.
 func (s *server) rerunChild(w http.ResponseWriter, r *http.Request) {
 	child, ok := s.childOfTree(w, r)
 	if !ok {
@@ -1076,7 +1093,7 @@ func (s *server) rerunChild(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusConflict, "TREE_LINGERING", fmt.Sprintf("the tree %s is lingering after it left the workflow, so %s cannot run in it again", root.Key, child.Key))
 		return
 	}
-	if _, ok := s.setDispatchStatus(w, r, child.Key, "todo"); ok {
+	if written, ok := s.setDispatchStatus(w, r, child.Key, "todo"); ok && s.applyOwnStatusWrite(w, r, written) {
 		writeJSON(w, http.StatusOK, EmptyResponse{})
 	}
 }

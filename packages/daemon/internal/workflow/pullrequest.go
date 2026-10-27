@@ -275,11 +275,12 @@ func (e *Engine) closeMergedTelling(ctx context.Context, tx pgx.Tx, issue record
 // claims. The boot's sweep closes a migrated issue the same way (booted).
 //
 // A root's close waits for the rest of its tree: the linger it would begin suspends every member
-// mid-turn, so a child's finished phase would be refused 409 TREE_LINGERING and its work lost. The
-// wait reads the flat tree (treeMembers), not the parent relation openBeneath walks, because the
-// linger stops every member of the tree, whatever it hangs under. It is kept inside the branch
-// where the tree does not linger: a member of a tree that already lingers must still close at its
-// merge, which suspends nothing further and is the one thing that still moves there.
+// mid-turn, so a child's finished phase would be refused 409 TREE_LINGERING and its work lost. This
+// wait is where the daemon keeps a tree's order, so nothing beneath an issue holds its acceptance
+// (signOff). It reads the flat tree (treeMembers), not the parent relation, because the linger
+// stops every member of the tree, whatever it hangs under. It is kept inside the branch where the
+// tree does not linger: a member of a tree that already lingers must still close at its merge,
+// which suspends nothing further and is the one thing that still moves there.
 func (e *Engine) closeMerged(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) ([]string, error) {
 	if issue.Phase == phase.Held && issue.Hold != nil && issue.Hold.From == phase.AwaitingMerge {
 		issue.Phase, issue.Hold = phase.AwaitingMerge, nil
