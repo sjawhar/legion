@@ -144,17 +144,17 @@ type workflowRuntime struct {
 	// held in memory only, so a restart's first pass judges again with the permission GitHub gives
 	// then. Only the pass touches it.
 	refusedReviews map[int64]bool
-	// openedWarned is when the pass last warned, by repository and pull request number, that it
-	// applies an open pull request GitHub shows for an issue with none recorded
-	// (readUnrecordedPullRequests): one the workflow does not record is found again every pass, and
-	// is told at most once every openedWarnEvery. Only the pass touches it.
-	openedWarned map[string]time.Time
 	// uncarried is every comparison of an approved head with a recorded head, by repository, pull
 	// request and the two heads, that GitHub answered and that does not carry the approval
 	// (readApprovalCarry), so the pass does not ask again: the compare of two fixed commits never
 	// changes its answer. It is held in memory only; a restart's first pass asks again. Only the
 	// pass touches it.
 	uncarried map[string]bool
+	// unrecordedOpened is every open pull request the pass found for an issue with none recorded
+	// and applied, by what the workflow decides it by (readUnrecordedPullRequests), that the
+	// workflow did not record: the pass applies it again only once one of those changes. It is held
+	// in memory only; a restart's first pass applies each again. Only the pass touches it.
+	unrecordedOpened map[string]bool
 	// failed carries the first supervision terminal fact that could not be applied. serve stops
 	// the daemon with it: the claim's terminal state is durable, so the next boot's replay applies
 	// the fact the failed callback lost.

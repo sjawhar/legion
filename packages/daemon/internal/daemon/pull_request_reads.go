@@ -29,10 +29,12 @@ import (
 // clock, so the workflow decides it as it decides the webhook's (workflow's
 // pullRequestSynchronized), behind the same fence: a read older than the record's clock moves
 // nothing, and a webhook arriving later that is older than this read moves nothing either. The
-// fence orders by GitHub's whole seconds, so a clock equal to the record's is not late: a webhook
-// of the same second arriving later runs as a redelivery does, and a push of the same second whose
-// webhook is applied between this read and its apply is undone by it - the record moves back to
-// the head read here, judging it again, until the next pass moves it forward.
+// fence orders by GitHub's whole seconds, so a clock equal to the record's is not late. A record a
+// webhook moved after the pass listed it is kept when this read is no newer than its clock: the
+// read may predate that push within the same second, and following it would move the head back. A
+// webhook of the same second arriving later runs as a redelivery does, and one applied between this
+// function's read of the record and its apply is still undone by it - the record moves back to the
+// head read here, judging it again, until the next pass moves it forward.
 //
 // Before the synchronize it applies the push that reached the new head when GitHub shows it
 // changed only the issue's own .legion/<issue>/ (handoffPush): the push webhook waits in the same
@@ -53,6 +55,9 @@ func (w *workflowRuntime) followHead(ctx context.Context, github githubrest.Clie
 	current, err := w.openRecord(ctx, pr)
 	if err != nil || current.HeadSHA == pull.Head.SHA {
 		return current, err
+	}
+	if current.HeadSHA != pr.HeadSHA && !pull.UpdatedAt.After(current.HeadUpdatedAt) {
+		return current, nil
 	}
 	pr = current
 	read, cancel := context.WithTimeout(ctx, requiredChecksRead)
@@ -154,11 +159,6 @@ func handoffPush(ctx context.Context, github githubrest.Client, pr record.PullRe
 	return intake.Push{Repo: pr.Repo, Branch: pr.Branch, Before: from, After: to, ChangedPaths: &changed, Truncated: &whole, Forced: &unforced}, "", nil
 }
 
-// openedWarnEvery bounds readUnrecordedPullRequests's warning to one an hour for each pull request
-// it applies: one the workflow does not record (an opened older than the record's clock, a branch
-// that names no issue on the repository) is found and applied again every pass.
-const openedWarnEvery = time.Hour
-
 // readUnrecordedPullRequests is the required-checks pass's look for a pull request the daemon has
 // no record of. An implementer's completion moves its issue to testing only once the issue's pull
 // request is recorded (workflow's implementationReady), and only the opened or reopened webhook
@@ -172,6 +172,12 @@ const openedWarnEvery = time.Hour
 // (workflow's pullRequestOpened): it records the pull request and moves the issue on. An issue
 // whose implementer has not completed costs no read. ctx bounds the pass; a failed read is logged
 // and the next pass asks again, and a rate-limit answer ends the look there.
+//
+// The workflow can decline the opened (one older than a closed record's clock), and the issue is
+// then found again every pass. What it decides by is the pull request as GitHub shows it, the
+// issue's generation and its record, so while none of them changes the pass applies it, and warns,
+// once (unrecordedOpened), rather than writing a processed_events row and a warning every two
+// minutes; a change to any of them applies it again.
 func (w *workflowRuntime) readUnrecordedPullRequests(ctx context.Context) {
 	var waiting []record.Issue
 	recorded := map[string]*record.PullRequest{}
@@ -192,6 +198,17 @@ func (w *workflowRuntime) readUnrecordedPullRequests(ctx context.Context) {
 		}
 		return
 	}
+	// Only the opened facts this pass found declined again are kept, so the set holds no pull
+	// request that has gone; a pass cut short keeps every one it did not reach.
+	declined, complete := map[string]bool{}, false
+	defer func() {
+		if !complete {
+			for seen := range w.unrecordedOpened {
+				declined[seen] = true
+			}
+		}
+		w.unrecordedOpened = declined
+	}()
 	for _, issue := range waiting {
 		branch := claim.IssueBranch(issue.Key)
 		read, cancel := context.WithTimeout(ctx, requiredChecksRead)
@@ -217,21 +234,45 @@ func (w *workflowRuntime) readUnrecordedPullRequests(ctx context.Context) {
 			continue
 		}
 		prior, repo := recorded[issue.Key], w.heardSpelling(issue.GitHubRepo)
+		seen := fmt.Sprintf("%s#%d@%s:%s:%d:%s", repo, pull.Number, pull.Head.SHA, pull.UpdatedAt.Format(time.RFC3339Nano), issue.Generation, recordState(prior))
+		if w.unrecordedOpened[seen] {
+			declined[seen] = true
+			continue
+		}
 		fact := intake.PullRequestOpened{Repo: repo, Number: pull.Number, Branch: branch, HeadSHA: pull.Head.SHA, Body: pull.Body,
 			URL: pull.HTMLURL, UpdatedAt: pull.UpdatedAt, Reopened: prior != nil && prior.Number == pull.Number}
-		if key := fmt.Sprintf("%s#%d", repo, pull.Number); time.Since(w.openedWarned[key]) >= openedWarnEvery {
-			if w.openedWarned == nil {
-				w.openedWarned = map[string]time.Time{}
-			}
-			w.openedWarned[key] = time.Now()
-			w.log.Warn("workflow: GitHub holds an open pull request for an issue whose implementer completed, and the daemon has none recorded; applying the opened its webhook would",
-				"repo", repo, "pullRequest", pull.Number, "issue", issue.Key, "head", pull.Head.SHA, "reopened", fact.Reopened, "updated_at", pull.UpdatedAt)
-		}
+		w.log.Warn("workflow: GitHub holds an open pull request for an issue whose implementer completed, and the daemon has none recorded; applying the opened its webhook would",
+			"repo", repo, "pullRequest", pull.Number, "issue", issue.Key, "head", pull.Head.SHA, "reopened", fact.Reopened, "updated_at", pull.UpdatedAt)
 		eventID := fmt.Sprintf("opened-read:%s:%s:%s#%d:%d", w.dispatchProject, w.bootID, repo, pull.Number, time.Now().UnixNano())
 		if _, err := intake.ApplyFact(ctx, w.pool, "github", eventID, fact, w.handlers...); err != nil {
 			w.log.Warn("apply an open pull request read from GitHub", "repo", repo, "pullRequest", pull.Number, "issue", issue.Key, "error", err)
+			continue
+		}
+		var after *record.PullRequest
+		if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
+			var err error
+			after, err = w.records.PullRequest(ctx, tx, issue.Key)
+			return err
+		}); err != nil {
+			w.log.Warn("read whether the workflow recorded an open pull request read from GitHub", "repo", repo, "pullRequest", pull.Number, "issue", issue.Key, "error", err)
+			continue
+		}
+		if after == nil || after.State != record.PullRequestOpen || after.Number != pull.Number {
+			w.log.Info("workflow: the workflow did not record the open pull request; it is applied again once GitHub's pull request, the issue's generation or its record changes",
+				"repo", repo, "pullRequest", pull.Number, "issue", issue.Key)
+			declined[seen] = true
 		}
 	}
+	complete = true
+}
+
+// recordState is what of an issue's pull request record the workflow decides an opened by: none,
+// or its number, state and clock.
+func recordState(pr *record.PullRequest) string {
+	if pr == nil {
+		return "none"
+	}
+	return fmt.Sprintf("%d/%s/%s", pr.Number, pr.State, pr.HeadUpdatedAt.Format(time.RFC3339Nano))
 }
 
 // heardSpelling is repo as GitHub intake hears it, the spelling a webhook's fact names it by and a
@@ -249,7 +290,8 @@ func (w *workflowRuntime) heardSpelling(repo string) string {
 }
 
 // openPullRequestOn is the open pull request of repo whose head is branch in repo itself (GET
-// /pulls?head=<owner>:<branch>&state=open), and whether there is one. The workflow keeps one pull
+// /pulls?head=<owner>:<branch>&state=open), and whether there is one. The list's filter is not
+// taken on trust: only a pull request whose head is branch counts. The workflow keeps one pull
 // request per branch and assumes one is open at a time, so of two it takes the first GitHub lists.
 func (w *workflowRuntime) openPullRequestOn(ctx context.Context, repo, branch string) (githubPullRequest, bool, error) {
 	repository, err := ghrepo.Parse("the issue's repository", repo)
@@ -265,8 +307,10 @@ func (w *workflowRuntime) openPullRequestOn(ctx context.Context, repo, branch st
 	if err := github.Get(ctx, "/pulls?"+query.Encode(), &pulls); err != nil {
 		return githubPullRequest{}, false, err
 	}
-	if len(pulls) == 0 {
-		return githubPullRequest{}, false, nil
+	for _, pull := range pulls {
+		if pull.Head.Ref == branch {
+			return pull, true, nil
+		}
 	}
-	return pulls[0], true, nil
+	return githubPullRequest{}, false, nil
 }
