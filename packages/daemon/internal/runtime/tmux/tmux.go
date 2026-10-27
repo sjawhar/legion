@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -125,6 +126,10 @@ type Options struct {
 	// settings overlays every pane names in PI_CONFIG_FILES ahead of the turn-scoping overlay, which
 	// stays last so its keys outrank theirs. Nil is none.
 	PiConfigFiles []string
+	// RoleConfigFiles is the operator's `role_config_files`: absolute paths of Oh My Pi settings
+	// overlays a pane of that role alone names in PI_CONFIG_FILES, after PiConfigFiles and ahead of
+	// the turn-scoping overlay, by role, the controller's pane included. Nil is none.
+	RoleConfigFiles map[claim.Role][]string
 	// TakeOver is the operator's `runtime.tmux.take_over`: TakeOverKubernetes to take over the
 	// claims a daemon running the project under runtime kubernetes left in the store (foreign), ""
 	// to refuse them, as every locator of another runtime is refused without it.
@@ -177,6 +182,7 @@ type Runtime struct {
 	providerKeys     []string
 	operatorEnv      map[string]string
 	piConfigFiles    []string
+	roleConfigFiles  map[claim.Role][]string
 	// takeOver is the runtime whose locators this runtime takes over (Options.TakeOver):
 	// runtime.RuntimeSandbox under TakeOverKubernetes, "" for none.
 	takeOver string
@@ -273,7 +279,11 @@ func New(opts Options) (*Runtime, error) {
 	if err := checkPaneEnv(opts.PaneEnv, providerKeys); err != nil {
 		return nil, err
 	}
-	for _, path := range opts.PiConfigFiles {
+	overlays := slices.Clone(opts.PiConfigFiles)
+	for _, files := range opts.RoleConfigFiles {
+		overlays = append(overlays, files...)
+	}
+	for _, path := range overlays {
 		if !filepath.IsAbs(path) || strings.Contains(path, ":") {
 			return nil, fmt.Errorf("tmux runtime: Oh My Pi overlay %q is not an absolute path PI_CONFIG_FILES can name", path)
 		}
@@ -317,6 +327,7 @@ func New(opts Options) (*Runtime, error) {
 		providerKeys:     providerKeys,
 		operatorEnv:      opts.PaneEnv,
 		piConfigFiles:    opts.PiConfigFiles,
+		roleConfigFiles:  opts.RoleConfigFiles,
 		takeOver:         takeOver,
 		readProc:         os.ReadFile,
 		tracked:          map[string]*trackedProcess{},

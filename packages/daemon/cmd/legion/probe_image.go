@@ -6,13 +6,16 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
 	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
@@ -86,6 +89,8 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	skipBrowser := flags.Bool("skip-browser", false, "leave the browser row unchecked: the build of an image for a deployment that turns Oh My Pi's browser off (browser.enabled: false), which carries no Chromium")
 	roleReferences := flags.String("role-references", "", "the task agents and skills the daemon's own role prompts name, resolved in place of the role prompts this binary embeds")
 	roleNamespaces := flags.String("role-namespaces", "", "run one role generation's namespaces (legion launcher role-init) over a layout of its own in this directory, on a volume of its own, and refuse when it fails; its home is an empty directory there, not the image's (the probe Sandbox passes it)")
+	var roleOverlays roleConfigFilesFlag
+	flags.Var(&roleOverlays, strings.TrimPrefix(bootprobe.RoleConfigFilesFlag, "--"), "<role>=<file>[:<file>…]: a role's own Oh My Pi overlays (role_config_files), read after the environment's PI_CONFIG_FILES as that role's Oh My Pi starts on them; repeatable, one per role (the probe Sandbox passes it)")
 	if code, ok := parseFlags(flags, args); !ok {
 		return code
 	}
@@ -208,6 +213,23 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 		fmt.Fprintf(stderr, "legion probe-image: model-fallback not read; the deployment's capability report shows the row open: %v\n", err)
 		modelFallback = bootprobe.ModelFallbackUnread
 	}
+	// Each role's own overlays, read as that role's Oh My Pi will start on them, after the table so
+	// the log still reads as the declared list first.
+	for _, entry := range roleOverlays {
+		overlays := append(capabilities.OverlayEntries(envValue(environ, "PI_CONFIG_FILES")), entry.files...)
+		img := capabilities.Image{Launch: invocation, Env: environ, WorkDir: workDir}
+		why, err := capabilities.CheckOverlays(ctx, img, overlays, entry.files)
+		if err != nil {
+			// Oh My Pi never reached an exit of its own, which says nothing of the overlays: every
+			// file was read above, so the run is reported, as the model-fallback read is, not refused.
+			fmt.Fprintf(stderr, "legion probe-image: role %s's overlays were read but Oh My Pi did not answer on them: %v\n", entry.role, err)
+			continue
+		}
+		if why != "" {
+			fmt.Fprintln(stderr, bootprobe.RoleOverlaysRefusedLine(entry.role, why))
+			return 1
+		}
+	}
 	agentModels := bootprobe.AgentModelsResolved
 	if *skipAgentModels {
 		agentModels = bootprobe.AgentModelsSkipped
@@ -221,4 +243,58 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	}
 	fmt.Fprintln(stdout, bootprobe.OKLine(invocation, expected, agentModels, checked, modelFallback))
 	return 0
+}
+
+// roleOverlays is one --role-config-files value: a role and its own overlays, in order.
+type roleOverlays struct {
+	role  string
+	files []string
+}
+
+// roleConfigFilesFlag is every --role-config-files value, in the order given; a role given twice,
+// a name that is no Legion role, and a file that is not an absolute path are refused as the flag
+// is read.
+type roleConfigFilesFlag []roleOverlays
+
+func (f *roleConfigFilesFlag) String() string {
+	values := make([]string, len(*f))
+	for i, entry := range *f {
+		values[i] = bootprobe.RoleConfigFilesValue(entry.role, entry.files)
+	}
+	return strings.Join(values, " ")
+}
+
+func (f *roleConfigFilesFlag) Set(value string) error {
+	role, files, err := bootprobe.ParseRoleConfigFiles(value)
+	if err != nil {
+		return err
+	}
+	known := false
+	for _, legionRole := range config.RoleConfigRoles {
+		known = known || string(legionRole) == role
+	}
+	if !known {
+		return fmt.Errorf("%q is not a Legion role", role)
+	}
+	if slices.ContainsFunc(*f, func(entry roleOverlays) bool { return entry.role == role }) {
+		return fmt.Errorf("%s is given twice", role)
+	}
+	for _, file := range files {
+		if !filepath.IsAbs(file) {
+			return fmt.Errorf("%s's overlay %q is not an absolute path", role, file)
+		}
+	}
+	*f = append(*f, roleOverlays{role: role, files: files})
+	return nil
+}
+
+// envValue is the value environ gives name, "" when it gives none.
+func envValue(environ []string, name string) string {
+	value := ""
+	for _, pair := range environ {
+		if found, v, _ := strings.Cut(pair, "="); found == name {
+			value = v
+		}
+	}
+	return value
 }

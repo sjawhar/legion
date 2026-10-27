@@ -319,6 +319,18 @@ provider_keys:
 - **`pi_config_files`** paths resolve against `legion.yaml`'s directory and may not hold `:`.
   The runtime's turn-scope overlay stays last, so its two keys outrank the operator's overlays. The
   boot plugin gate probes Oh My Pi under the same overlays and variables.
+- **`role_config_files`**, a top-level key beside the block, gives one role's panes overlays no
+  other role's get (`role_config_files: {implementer: [/etc/legion-operator/fallback.yml]}`, the
+  controller's pane under `controller: daemon` too): such a pane's `PI_CONFIG_FILES` is
+  `pi_config_files`, then the role's own in order, then the turn-scope overlay, still last. Each
+  path must be absolute; boot and `legion start --check-config` refuse one the host does not hold
+  as a file the daemon's user can read, naming the role and the path, and a pane of a role the key
+  leaves out is told what it was told without it. After the plugin gate passes, the boot gate runs
+  `omp config get retry.modelFallback --json` under each named role's list and on each of its files
+  alone, and refuses the boot when Oh My Pi exits non-zero (`boot gate: role_config_files.<role>:
+  the <role>'s Oh My Pi would not start: Oh My Pi refuses <file>: error: …`), rather than letting
+  every launch of that role fail. `docs/kubernetes.md` ("Operator configuration") has the rest of
+  the key's rules.
 - **`take_over: kubernetes`** lets this daemon take over the claims a daemon running the project
   under `runtime: kubernetes` recorded on the same store ([Moving a project onto
   tmux](#moving-a-project-onto-tmux)). `kubernetes` is the only accepted value. Without the key, a
