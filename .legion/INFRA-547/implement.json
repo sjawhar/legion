@@ -2,31 +2,31 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-547",
-  "completed": "2026-10-27T07:04:56Z",
+  "completed": "2026-10-27T08:38:58Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2370",
   "proof": [
     {
       "criterion": "A role message sent every 250 ms for at least 60 s through the sending listener is received by the holder or its sender's call errs, while the holder's server is lame-ducked and force-killed; every repeat carries its first id",
       "surface": "the real envoy-listener binary (two processes, holder-host and sender-host, ENVOY_NATS_REPLICAS=3) over a three-server in-process nats-server cluster, driven over its HTTP API as envoy-client drives it",
       "command": "cd packages/envoy && go test -tags serverchange -count=1 -timeout 15m -v -run TestServerChange ./cmd/listener",
-      "observed": "--- PASS: TestServerChange (77.74s); sent for 1m7.886s with 9 disruptions; role: sent 272, received live 272, errored 0; ad-hoc: sent 272, received live 272, errored 0; captured: sent 272, received live 196 and 76 only by replay, errored 0; every repeat with its first id",
-      "headSha": "6112adc201ea4b3d9c2e325a54cfd897e79ff470",
+      "observed": "--- PASS: TestServerChange (148.67s). Lane off, senders through S: 8 disruptions over 1m1.039s, role 245/245 live, errored 0. Lane on (ENVOY_SUBSCRIBE_ALL_TOPICS=1), senders through H: 9 disruptions over 1m8.604s, role 275/275 live, errored 0. Every repeat with its first id. Log https://github.com/sjawhar/legion/pull/2370#issuecomment-6437303815",
+      "headSha": "e6644f73f2f34dd06253c4ea3ab24186a8ebc2aa",
       "negativeControl": "the same test file and cluster rig on sjawhar/legion#2228's tip 3ea454d3 (no change): --- FAIL, assertion 1: 12 role and 68 ad-hoc messages answered 200 and never received (log https://github.com/sjawhar/legion/pull/2370#issuecomment-6435358120; the tester reproduced it independently)"
     },
     {
       "criterion": "The same holds for a topic message sent through /v1/messages/publish to a subscribed session (ad-hoc topic and stream-captured topic)",
       "surface": "same as the role criterion",
       "command": "cd packages/envoy && go test -tags serverchange -count=1 -timeout 15m -v -run TestServerChange ./cmd/listener",
-      "observed": "ad-hoc: sent 272, received live 272, errored 0; captured: sent 272, 196 live and 76 only by #2228's replay, errored 0",
-      "headSha": "6112adc201ea4b3d9c2e325a54cfd897e79ff470",
-      "negativeControl": "base 3ea454d3 with the same test: assertion 1 fails for 68 ad-hoc messages answered 200 and never received; with the stand-in's replay call removed (soak worker run) assertion 1 fails for captured messages 24..238"
+      "observed": "lane off: ad-hoc 245/245 live, captured 175 live + 70 only by replay; lane on: ad-hoc 275/275 live, captured 201 live + 74 only by replay; errored 0 throughout",
+      "headSha": "e6644f73f2f34dd06253c4ea3ab24186a8ebc2aa",
+      "negativeControl": "base 3ea454d3 with the same test: assertion 1 fails for 68 ad-hoc messages answered 200 and never received; with the stand-in's replay call removed (soak worker run) assertion 1 fails for captured messages 24..238; lane-on subtest with the round-2 confirmation read (dedupeCache): assertion 1 fails, ad-hoc messages 26, 27, ... 246 answered 200 and never received"
     },
     {
       "criterion": "packages/envoy/AGENTS.md and .dispatch/architecture/envoy-listener.md describe when a send is answered",
       "surface": "the two documents",
       "command": "grep -n \"answering once the server has accepted the publish\\|Do not add durable role consumers or retry transit\" packages/envoy/AGENTS.md; grep -n '504 {' packages/envoy/AGENTS.md; grep -n '504' .dispatch/architecture/envoy-listener.md",
       "observed": "first grep prints nothing; second prints line 2028, the /v1/messages/publish row; third prints line 7, the sentence that the publish route answers once each recipient confirmed, or 504",
-      "headSha": "6112adc201ea4b3d9c2e325a54cfd897e79ff470",
+      "headSha": "e6644f73f2f34dd06253c4ea3ab24186a8ebc2aa",
       "negativeControl": "on base a2a6afc9 the first grep finds 2 lines and the other two find 0"
     },
     {
@@ -34,7 +34,7 @@
       "surface": "listener tests on a real in-process nats-server with holder stand-ins on their own connections; daemon notify/outbox tests on a real Postgres 16 and nats-server 2.10.29",
       "command": "cd packages/envoy && go test -count=1 -skip 'TestDispatch(MentionResolvesASessionTheCacheHasNotRefilled|BroadcastResolvesSessionsTheCacheHasNotRefilled|RefusesABroadcastWhenASessionReadDoesNotAnswer|RefusesAClaimTakeoverWhileTheCacheRefills)' ./cmd/listener; go test -count=1 ./internal/bus ./internal/store ./internal/testnats; (cd infra && go test -count=1 ./core); cd packages/daemon && LEGION_TEST_PG_DSN=... LEGION_TEST_NATS_URL=... go test -count=1 -run 'Notice|Rehold|Reheld|MergeQueue|HTTPPublisher' ./internal/notify ./internal/daemon",
       "observed": "all ok at the merged head: cmd/listener 297.3s (with the tester's TestPublishRouteAnswersAnAdHocTopicInsideItsWindowWhileTheServerIsDown, unmodified, 4.12s), internal/bus 223.4s, store, testnats; daemon notify 0.039s, daemon 67.5s",
-      "headSha": "6112adc201ea4b3d9c2e325a54cfd897e79ff470",
+      "headSha": "e6644f73f2f34dd06253c4ea3ab24186a8ebc2aa",
       "negativeControl": "old publishHandler body restored: receipt-retry test got 0 frames (want 2), silent holder got 200 (want 504), stalled read got 500 after 10 s, ad-hoc got 200 (want 504); daemon mappings turned off: the re-hold schedule, answer-and-exception, refusal and merge-queue tests fail"
     },
     {
@@ -42,8 +42,24 @@
       "surface": "the real envoy-listener binary (go build ./cmd/listener) on its own nats-server 2.10.29, driven with curl over its HTTP API, one self-subscribed session registered on notifications.team.smoke.>",
       "command": "POST http://127.0.0.1:18547/v1/messages/publish {topic: notifications.team.smoke.all, idempotency_key: smoke-down-1} after stopping the nats-server; and go test -count=1 -run TestPublishRouteAnswersAnAdHocTopicInsideItsWindowWhileTheServerIsDown ./cmd/listener",
       "observed": "hub down: 504 {reason not_confirmed, undelivered [{ses_smoke_silent, delivery_failed}]} in 4.003 s, the error string naming ses_smoke_silent; hub up before: 504 receipt_timeout in 4.003 s; the tester's red test passes unmodified (4.12 s)",
-      "headSha": "6112adc201ea4b3d9c2e325a54cfd897e79ff470",
+      "headSha": "e6644f73f2f34dd06253c4ea3ab24186a8ebc2aa",
       "negativeControl": "at 5f593338 (before 27e46f0d) the same hub-down publish answered 500 'bus: waiting for NATS to reconnect: context deadline exceeded' after 5.0 s (the tester's reproduction) and the red test failed"
+    },
+    {
+      "criterion": "(review High) only a receipt through the route counts as a recipient's confirmation, with the live topics lane on",
+      "surface": "the listener's publish route with the real live topics lane (openLiveTopics/liveDeliveryHandler) on a real nats-server, one silent self-subscribed recipient on the sending machine",
+      "command": "cd packages/envoy && go test -count=1 -run 'TestPublishRouteDoesNotCountTheLiveLanesSkippedPushAsAConfirmation|TestPublishRouteAnswersPublishFailedForAnAdHocTopicItCouldNotPublish' ./cmd/listener",
+      "observed": "504 not_confirmed naming ses_silent (receipt_timeout), and the lane did record its skip; publish_failed body exact for the hub down and a closed client; full cmd/listener suite ok 304.4 s",
+      "headSha": "e6644f73f2f34dd06253c4ea3ab24186a8ebc2aa",
+      "negativeControl": "confirmTopicRecipient reading dedupeCache (round 2): status 200 after 2.1 s, want 504"
+    },
+    {
+      "criterion": "(review census) the local acceptance script that drives the route still passes",
+      "surface": "packages/envoy/scripts/e2e-local.sh: real nats-server and envoy-listener, a serve-port fake session holding a role",
+      "command": "cd packages/envoy && bash scripts/e2e-local.sh",
+      "observed": "PASS: topic set, structured payloads, checks settlement, and both renderers match the local acceptance contract (14 s)",
+      "headSha": "e6644f73f2f34dd06253c4ea3ab24186a8ebc2aa",
+      "negativeControl": "the script as at 34b1ce5e (fake session does not answer the role forward's receipt): stops at curl: (22) The requested URL returned error: 504"
     }
   ],
   "filesChanged": [
@@ -63,7 +79,8 @@
     "skills/envoy/SKILL.md, skills/envoy/references/roles.md",
     ".github/workflows/envoy-and-contracts.yaml (job listener-server-change)",
     "packages/envoy/internal/bus/nats.go (PublishCoreContext), packages/envoy/cmd/listener/confirmed.go (round 2: the ad-hoc core publish ends with the send's window)",
-    "packages/envoy/internal/bus/async.go (merge with main: UsesCoreTransport, ForwardMsgID)"
+    "packages/envoy/internal/bus/async.go (merge with main: UsesCoreTransport, ForwardMsgID)",
+    "round 3: packages/envoy/cmd/listener/{confirmed.go,api.go,delivery.go,main.go,confirmed_test.go,api_test.go,main_test.go,server_change_test.go}, packages/envoy/internal/bus/nats.go, packages/envoy/internal/dispatch/api/issue_route_status.go (comment), packages/daemon/internal/notify/{notify.go,notify_test.go}, packages/envoy/scripts/e2e-local.sh, packages/envoy/{AGENTS.md,CHANGELOG.md,docs/architecture.md}, packages/envoy/infra/go.work.sum (main's copy), docs/solutions/{legion/proof-without-the-rig-\u2026md,testing/prove-a-daemon-only-kubernetes-change-\u2026md,envoy/heartbeat-role-reassertion-and-regain-hooks.md}"
   ],
   "trickyParts": [
     "A forward with a header gets its replies with an empty header block, so RequestCoreTo reads a receipt as a reply with no data and no header field (a stream PubAck and a no-responders answer are not receipts).",
@@ -77,13 +94,15 @@
     "504 error strings name the role holder and each unconfirmed session, because envoy-client's EnvoyApiError shows the agent only the error string and the tool text says the error names them.",
     "Claude Code's channel now presents a frame on the agent subject with its envelope's topic (a role forward and an ad-hoc forward), with a test; skills/envoy text updated for the new publish answers.",
     "Added bus.ForwardMsgID, agreed with INFRA-590, which reuses it for Dispatch's role forwards.",
-    "Round 2: a core publish the window cuts short is answered as a send with nothing forwarded (504 not_confirmed, every recipient delivery_failed), the same answer as a sender stamp read the window cuts short; a core publish refused before the deadline keeps writeNATSError's mapping."
+    "Round 2: a core publish the window cuts short is answered as a send with nothing forwarded (504 not_confirmed, every recipient delivery_failed), the same answer as a sender stamp read the window cuts short; a core publish refused before the deadline keeps writeNATSError's mapping.",
+    "Round 3: role sends also read the route-owned confirmation record (agentSubjectDelivery and fanoutDelivery record a Skipped self-subscribed push in dedupeCache without a receipt, and an explicit dedupe_key can be reused across a topic and a role); a key the role lane alone confirmed is forwarded again by the route, which the session's dedupe drops."
   ],
   "openQuestions": [
-    "Merge order: this pull request merges after sjawhar/legion#2228 (main merged forward then); INFRA-594 merges after this one and keeps the receipt-or-error contract and the soak green, as agreed with its planner and implementer.",
     "Locally unrun: four Docker-backed cmd/listener TestDispatch* tests and three daemon tests that start their own authorised NATS container (no Docker in this pod); CI runs them. Two bun failures here are unrelated to the diff: pi-envoy's Dispatch-skills word count (2,057 > 2,000; those skills are unchanged by this branch) and an envoy-client envoy.json shell-command timeout test.",
-    "A role send whose first role-claim read fails at once while the hub is down (nats: outbound buffer limit exceeded) is answered 500 at once, today's mapping for a read error that returns before the deadline, as the plan says; only a read the deadline cuts short is a 504."
+    "A role send whose first role-claim read fails at once while the hub is down (nats: outbound buffer limit exceeded) is answered 500 at once, today's mapping for a read error that returns before the deadline, as the plan says; only a read the deadline cuts short is a 504.",
+    "Merge order: #2370 carries sjawhar/legion#2228 at 3ea454d3 (now a92387a8 upstream, still open with changes requested) and must not merge before #2228 lands and main is merged forward; READY does not stop #2228's code or .legion/INFRA-439/ reaching main through this pull request (the reviewer's Not proven / risk line)."
   ],
-  "round": 2,
-  "answersTest": "test.json at 63800d11: failure 1 (ad-hoc publish while the hub is down answered 500 after 5 s) fixed in 27e46f0d; failure 2 (PR CONFLICTING with main, no CI) fixed by the forward merge 6112adc2, GitHub now reports MERGEABLE"
+  "round": 3,
+  "answersTest": "test.json at 63800d11: failure 1 (ad-hoc publish while the hub is down answered 500 after 5 s) fixed in 27e46f0d; failure 2 (PR CONFLICTING with main, no CI) fixed by the forward merge 6112adc2, GitHub now reports MERGEABLE",
+  "answersReview": "reviewer changes requested at 0f981f31: High (live lane skip counted as a confirmation) fixed in 7f2ebee1; Medium (publish cut short answered not_confirmed) fixed in 7f2ebee1 as 504 publish_failed; Medium (no contract change census) added to the PR body; cleanup: go.work.sum 9c04cf17, one resolver and one pre-forward verdict a7600dd3, PublishCoreContext fallback 7f2ebee1, listenerDeps holds the delivery config a7600dd3, typed sendOutcome 7f2ebee1, ErrNotDelivered.DedupeKey dropped a7600dd3, docs/solutions 34b1ce5e; e2e-local.sh fixed 0b5bec7f; release-order note names the 403 e6644f73. All six threads answered and resolved."
 }
