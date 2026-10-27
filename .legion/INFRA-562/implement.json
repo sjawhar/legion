@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-562",
-  "completed": "2026-10-27T11:52:00Z",
+  "completed": "2026-10-27T14:20:00Z",
   "proof": [
     {
       "criterion": "Items 1 and 2: a message or mention whose request is cancelled after commit reaches its recipient without a retry; pending attempts a killed process left are sent by the other process under their own key",
       "surface": "Dispatch HTTP API (POST /api/v1/agents/{session}/messages, POST /api/v1/issues/{key}/comments with a mention, POST /api/v1/broadcasts) on two real envoy-dispatch processes against one Postgres 17 and one NATS, with a fake Envoy listener",
       "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -tags multiprocess -count=1 -timeout 30m -v -run 'TestADeliveryAKilledProcess|TestASendWhoseRequest' ./cmd/dispatch",
-      "observed": "Whole two-process suite at the merged head: `go test -tags multiprocess -count=1 -timeout 40m -v ./cmd/dispatch` ok 436.978s, 95 PASS, 0 FAIL, 0 SKIP; TestADeliveryAKilledProcessLeftPendingIsSentByTheOther (both subtests) and TestASendWhoseRequestIsCancelledAfterItsCommitReachesItsRecipient PASS; each attempt reads 1:sent with one send per key and one receipt",
-      "headSha": "125a3bfb0484",
+      "observed": "Whole two-process suite at 58fd08bf4d64: `go test -tags multiprocess -count=1 -timeout 40m -v ./cmd/dispatch` ok 427.393s, 95 PASS, 0 FAIL, 0 SKIP; the INFRA-562 rows all PASS (each stranded or cancelled attempt reads 1:sent with one send per key and one receipt)",
+      "headSha": "58fd08bf4d64",
       "negativeControl": "The same rows at 2c76dfcfbb36 (tests only, on main's code): --- FAIL both rows; 'the direct message reads [1:pending] 30s after the row began waiting', 'the message stored before the kill reads [] 30s after', 'the mention reads [1:pending] 15s after'"
     },
     {
@@ -17,7 +17,7 @@
       "surface": "Dispatch HTTP API on two envoy-dispatch processes against a fake listener that goes away and comes back",
       "command": "cd packages/envoy && go test -tags multiprocess -count=3 -timeout 30m -v -run 'TestASendDuringAListenerTakeOver' ./cmd/dispatch",
       "observed": "--- PASS: TestASendDuringAListenerTakeOverReachesItsSession three times out of three (sent_during_the_take-over, sent_to_a_session_the_listener_never_knows, killed_during_the_wait all PASS); both keys met the 503 'service starting' gate at least once",
-      "headSha": "125a3bfb0484",
+      "headSha": "58fd08bf4d64",
       "negativeControl": "At 88bf24bf68b7 (tests only, before the retry): --- FAIL sent_during_the_take-over (attempts read [1:failed]) and killed_during_the_wait; at the client before the JSON-503 fix: TestRoleAndSendReportAStartingListenerAsUnavailable FAIL 'err = service starting, want ErrUnavailable true'"
     },
     {
@@ -25,7 +25,7 @@
       "surface": "envoy-dispatch redeliver-webhooks --since 1h, two processes against one NATS, one Postgres and the GitHub webhook fake behind a proxy that holds the POST",
       "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run 'TestAWebhookRedelivery' ./cmd/dispatch",
       "observed": "--- PASS: TestAWebhookRedeliveryWhoseProcessDiedAfterItsClaimIsRequestedAgain (4.86s): GitHub got the delivery's redelivery request exactly once from the second process, summary redelivered=1",
-      "headSha": "125a3bfb0484",
+      "headSha": "58fd08bf4d64",
       "negativeControl": "On the unfixed sweep: --- FAIL 'GitHub got redelivery requests [], want [<id>] once' (the second sweep read the dead claim as Pending)"
     },
     {
@@ -33,7 +33,7 @@
       "surface": "POST /api/v1/projects/{key}/architecture-sources/{owner}/{repo}/sync on two envoy-dispatch processes",
       "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run 'TestTwoProcessesSyncing' ./cmd/dispatch",
       "observed": "--- PASS: TestTwoProcessesSyncingOneProjectNeverWriteTheOlderCommit (7.83s): last_commit = Y, components [queue store], architecture.synced events exactly [Y]",
-      "headSha": "125a3bfb0484",
+      "headSha": "58fd08bf4d64",
       "negativeControl": "On the unfixed importer: --- FAIL 'last_commit = 1111\u2026, want 2222\u2026', components [api], synced events [2222\u2026 1111\u2026]"
     },
     {
@@ -41,7 +41,7 @@
       "surface": "GET /api/v1/issues/{key} and GET /api/v1/issues?route_status= on two envoy-dispatch processes",
       "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run 'TestBothProcessesJudge' ./cmd/dispatch",
       "observed": "--- PASS: TestBothProcessesJudgeARouteAgainstOneRoster (16.25s), an_issue's_route and a_filtered_page PASS: B and A read the same live with one sessions call; pages 1 (A) and 2 (B) hold exactly the first six, total 6 on both",
-      "headSha": "125a3bfb0484",
+      "headSha": "58fd08bf4d64",
       "negativeControl": "On the unfixed roster: --- FAIL 'B reads no_holder null after the listener stopped listing the holder, want the stored live', 'page 2 on B holds [-8 -10 -12]'"
     },
     {
@@ -49,7 +49,7 @@
       "surface": "GET /api/github/rest/\u2026, POST /api/v1/issues/{key}/claim, the ask answer route and the delivery timeline API on two envoy-dispatch processes",
       "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run 'TestARateLimitOneProcess|TestClaimAndAnswerTimes|TestAConfigurationWarning' ./cmd/dispatch",
       "observed": "--- PASS: TestARateLimitOneProcessMetStopsTheOtherFromCallingGitHub (7.90s): B answers 503 GITHUB_RATE_LIMITED and GitHub saw no request under the installation token after A's; --- PASS: TestClaimAndAnswerTimesComeFromTheDatabaseOnEitherProcess (7.77s); --- PASS: TestAConfigurationWarningIsLoggedOnceAcrossTheProcesses (8.32s)",
-      "headSha": "125a3bfb0484",
+      "headSha": "58fd08bf4d64",
       "negativeControl": "On the unfixed code: rate-limit row FAIL 'B's read inside the limit: status 200, want 503 GITHUB_RATE_LIMITED'; clock row FAIL (Go-clock times differ from the transaction's now()); warning row FAIL '1 on A, 1 on B, want one between them'"
     },
     {
@@ -57,7 +57,7 @@
       "surface": "POST /api/v1/events/_test/disconnect, /api/v1/delivery/_test/disconnect, /api/v1/artifacts/_test/quiesce, /api/v1/agents/{session}/stream/_test/publish on two envoy-dispatch processes, plus the browser suite on one process (chromium)",
       "command": "cd packages/envoy && go test -tags multiprocess -count=2 -timeout 30m -v -run 'TestEveryTestHookActsOnBothProcesses' ./cmd/dispatch; cd packages/dispatch && bun run e2e --project chromium live.e2e.ts:339 agents.e2e.ts:460 delivery-live.e2e.ts:332 agent-view.e2e.ts:371 agent-view.e2e.ts:744 agent-view.e2e.ts:970",
       "observed": "--- PASS twice (8.53s, 7.69s); the hook on A answered ~110 ms after B was SIGKILLed; e2e: 6 passed (31.9s), agent-view.e2e.ts:970 publishing a 12 KB replay split across notifications",
-      "headSha": "125a3bfb0484",
+      "headSha": "58fd08bf4d64",
       "negativeControl": "On the unfixed hooks: --- FAIL 'the event stream B held after the disconnect hook was called on A was still open 10s later'"
     },
     {
@@ -65,8 +65,16 @@
       "surface": "Dispatch HTTP API (POST /api/v1/issues/{key}/comments, message sends) and the architecture importer on a real Postgres 17, plus the merged tree's two-process suite",
       "command": "cd packages/envoy && go test -count=1 -v -run 'TestACommentDuringAListenerTakeOverReachesTheRouteHolderOnce|TestACommentMentioningSeveralEndedSessionsAnswersWithinOneTakeOverWindow|TestAListenerRefusingTheTokenSettlesTheSendAtOnce' ./internal/dispatch/api/ && go test -count=1 -v -run TestOneCallersCancellationDoesNotFailAnotherCallersRepositoryToken ./internal/dispatch/githubapp/ && go test -count=1 -v -run 'TestASettingsReSaveDuringTwoSyncsNeverLeavesTheEarlierHead|TestAHeldGitHubRateLimitEmitsOneSyncFailedEvent' ./internal/dispatch/architecture/",
       "observed": "all six tester tests PASS unmodified (diff against 84e50bd1 empty); PR reports MERGEABLE after the forward merge 125a3bfb; migrations 0130-0133 above main's 0129; leasePoolSize 11; full ./internal/dispatch/... ./cmd/dispatch/... green except the untouched files (no rootless Docker) and pmdoc (timing) packages",
-      "headSha": "125a3bfb0484",
+      "headSha": "58fd08bf4d64",
       "negativeControl": "The same six tests at the tester's commit 84e50bd1 (before the fixes): FAIL 'session s1 received the comment 2 times, want once', 'answered after 23.6s, want within 14s', 'asked for the registry 9 times over 11.8s', 'context canceled', 'the row records commit 1111\u2026, want 2222\u2026', '2 architecture.sync_failed events, want 1'"
+    },
+    {
+      "criterion": "Review round 1: a resumed or retried mention of a routed comment reaches the route holder once; a same-mode Retry of a stranded message sends its recorded urgency; a failed route_roster read on a route_status filter is a database failure, not ENVOY_UNAVAILABLE",
+      "surface": "Dispatch HTTP API (POST /api/v1/issues/{key}/comments, POST /api/v1/comments/{id}/deliveries, POST /api/v1/messages/{id}/deliveries, GET /api/v1/issues?route_status=) and the delivery-resume loop on a real Postgres 17",
+      "command": "cd packages/envoy && go test -count=1 -v -run 'TestAResumedMentionOfARoutedCommentReachesTheRouteHolderOnce|TestARetryCarriesTheUrgencyOfTheAttemptItResumesAndNoneOnANewAttempt|TestARouteStatusFilterAnswersAFailedRosterReadAsTheDatabases|TestAHookNotificationNamingMorePartsThanAnyCallIsDropped' ./internal/dispatch/api/",
+      "observed": "all PASS at 58fd08bf (the resume loop and a person's Retry each leave the route holder with one copy and the attempt [1:failed]; the resumed same-mode Retry sends urgency high, a new attempt none; the filter answers 500 INTERNAL); full ./internal/dispatch/... ./cmd/dispatch/... green except the untouched files (no rootless Docker) and pmdoc (timing) packages",
+      "headSha": "58fd08bf4d64",
+      "negativeControl": "Before each fix: 'session s1 received the comment 2 times, want once: 1 mention steer(s) and 1 route fan-out(s)' (at 4d537075, both the resume loop and the Retry case); the same-mode Retry sent urgency \"\"; the filter answered 503 ENVOY_UNAVAILABLE (logs red-resumed-mention.log, red-retry-urgency.log)"
     }
   ],
   "filesChanged": [
@@ -78,7 +86,8 @@
     "packages/envoy/{AGENTS.md,CHANGELOG.md}, packages/envoy-client/src/dispatch-execute.ts (comment)",
     "packages/dispatch/e2e/{message-agent,mention-composer,broadcast,agent-view-settings}.e2e.ts (the 12 s take-over window)",
     "tests: cmd/dispatch/multiprocess_test.go (10 new two-process rows and a fake listener), api/{delivery_resume,listener_takeover,test_hooks_fanout,database_clock}_test.go (new), api/{issue_route_status,issue_route_status_cache,delivery,messages,comment_delivery_*,issue_claim}_test.go, githubapp/limits_test.go (new), envoy/client_test.go, redeliver/sweep_test.go, architecture/importer_test.go, githubapi/proxy_test.go, cmd/dispatch/settings_test.go",
-    "round 2: api/comment_create.go, api/comment_delivery.go, api/envoy_resolve.go, api/issue_route_status.go, envoy/client.go(+client_test.go), githubapp/{client.go,deliveries.go,ratelimit/ratelimit.go}, architecture/importer.go, AGENTS.md, CHANGELOG.md; two forward merges with main (migrations renumbered to 0130-0133, store/pool.go leasePoolSize 11, cmd/dispatch/{README.md,main.go,settings.go,settings_test.go})"
+    "round 2: api/comment_create.go, api/comment_delivery.go, api/envoy_resolve.go, api/issue_route_status.go, envoy/client.go(+client_test.go), githubapp/{client.go,deliveries.go,ratelimit/ratelimit.go}, architecture/importer.go, AGENTS.md, CHANGELOG.md; two forward merges with main (migrations renumbered to 0130-0133, store/pool.go leasePoolSize 11, cmd/dispatch/{README.md,main.go,settings.go,settings_test.go})",
+    "review round 1: api/{comment_delivery,comment_create,envoy_resolve,message_delivery,messages,broadcasts,delivery_resume,issue_route_status,issue_queries,routes_table,test_hooks_fanout}.go, model/model.go, githubapi/proxy.go(+proxy_test.go comment), tests comment_mention_takeover_test.go (added a row), delivery_resume_test.go, issue_route_status{,_cache}_test.go, test_hooks_fanout_test.go, AGENTS.md, CHANGELOG.md, cmd/dispatch/README.md; PR body gains a Contract change census"
   ],
   "trickyParts": [
     "Item 8's take-over wait retries 'no live session' too, so a send to a session that is really gone reads failed about 12 s after its first try, and a request that sends during a take-over answers up to ~12 s later (up to ~22 s against a listener that hangs every read). Browser specs that assert a failed send were given their own timeouts naming listenerTakeoverWindow; 7 affected specs pass on chromium in the pod.",
@@ -93,7 +102,9 @@
     "Item 7 frame limit: chunked notifications instead of a 400 above 8000 bytes (the agent-view browser specs publish ~12 KB replays).",
     "Migrations are 0130-0133 (above main's 0129 at the last merge); leasePoolSize is 11 (main's 10 plus delivery-resume). The INFRA-63 sibling that merges later renumbers or adds its own lease.",
     "Held rate-limit error text names when the limit was recorded (updated_at), not its end time: the tester's test moves `until` between syncs, and a new or extended limit still changes the text.",
-    "A comment whose issue has a route, which replies to a thread, or which is on a document waits out a take-over before it commits (up to the 12 s window), so the route fan-out decision is made on a real listener answer; a comment with none of those commits at once and its senders wait under their claims."
+    "A comment whose issue has a route, which replies to a thread, or which is on a document waits out a take-over before it commits (up to the 12 s window), so the route fan-out decision is made on a real listener answer; a comment with none of those commits at once and its senders wait under their claims.",
+    "A comment.created payload gains `mentions_decide_routes` (omitempty): whether the comment fans out beyond its mentions (route, thread reply, document), recorded at commit so a resumed or retried mention knows its pre-commit resolution was final.",
+    "Replacing commentClaimMode with one bound-attempt int changes one rare state: if a Retry settled attempt 1 before the creating claim while a later attempt k is pending, the creating send now reports attempt 1 and leaves k to the resume loop instead of sending k itself."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
