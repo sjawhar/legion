@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { compare, readRawRun, resolveWindow, summarise } from "../summary.ts";
-import { type FixState, type RawRun, UsageError } from "../types.ts";
+import {
+  type FixState,
+  type MergeRecord,
+  type PullRequestRecord,
+  type RawRun,
+  UsageError,
+} from "../types.ts";
 
 async function fixture(name: string): Promise<RawRun> {
   return readRawRun(await Bun.file(join(import.meta.dir, "..", "__fixtures__", name)).text());
@@ -155,9 +161,108 @@ describe("summarise", () => {
     expect(fixOf(Y_CHANGELOG)).toEqual({ before: 0, transition: 0, after: 1 });
     expect(fixOf("AGENTS.md")).toBeUndefined();
     expect(summary.fixes).toEqual([
-      { glob: "packages/*/CHANGELOG.md", commit: "c1", before: 1, transition: 1, after: 2 },
-      { glob: "docs/**", commit: "c2", before: 0, transition: 0, after: 0 },
+      {
+        glob: "packages/*/CHANGELOG.md",
+        commit: "c1",
+        merges: 4,
+        prs: 3,
+        states: { before: 1, transition: 1, after: 2 },
+      },
+      {
+        glob: "docs/**",
+        commit: "c2",
+        merges: 0,
+        prs: 0,
+        states: { before: 0, transition: 0, after: 0 },
+      },
     ]);
+  });
+
+  describe("a directory glob", () => {
+    // k1 conflicts on two files under gen/ and is carried by both PRs; k2 on one of them.
+    const merge = (oid: string, date: string, conflicts: string[]): MergeRecord => ({
+      oid,
+      date,
+      headline: "Merge main",
+      parents: [`${oid}-branch`, `${oid}-main`],
+      kind: "forward",
+      branch_parent: `${oid}-branch`,
+      upstream_parent: `${oid}-main`,
+      conflicts,
+    });
+    const pr = (number: number, merges: MergeRecord[]): PullRequestRecord => ({
+      number,
+      title: `PR ${number}`,
+      state: "OPEN",
+      baseRefName: "main",
+      headRefName: `legion/C-${number}`,
+      headRefOid: `h${number}`,
+      mergedAt: null,
+      createdAt: "2026-10-20T00:00:00Z",
+      commit_count: merges.length,
+      merges,
+      force_pushes: [],
+    });
+    const k1 = merge("k1", "2026-10-21T00:00:00Z", ["gen/a.js", "gen/b.js"]);
+    const k2 = merge("k2", "2026-10-22T00:00:00Z", ["gen/a.js", "src/c.ts"]);
+    const k3 = merge("k3", "2026-10-23T00:00:00Z", ["src/c.ts"]);
+    const run: RawRun = {
+      since: "2026-10-20",
+      until: "2026-10-26",
+      origin_main: "o",
+      prs: [pr(30, [k1, k2]), pr(31, [k1, k3])],
+    };
+    const specs = [{ glob: "gen/**", commit: "c" }];
+
+    test("counts a merge on two matched files once, with its state, and PRs distinct", () => {
+      const states = new Map<string, Map<string, FixState>>([
+        [
+          "k1",
+          new Map<string, FixState>([
+            ["gen/a.js", "after"],
+            ["gen/b.js", "after"],
+          ]),
+        ],
+        ["k2", new Map<string, FixState>([["gen/a.js", "before"]])],
+      ]);
+      const summary = summarise(run, { prefix: "legion/", fixes: { specs, states } });
+      expect(summary.fixes).toEqual([
+        {
+          glob: "gen/**",
+          commit: "c",
+          merges: 2,
+          prs: 2,
+          states: { before: 1, transition: 0, after: 1 },
+        },
+      ]);
+      const fixOf = (path: string) =>
+        summary.combined.tables.files.find((row) => row.path === path)?.fix;
+      expect(fixOf("gen/a.js")).toEqual({ before: 1, transition: 0, after: 1 });
+      expect(fixOf("gen/b.js")).toEqual({ before: 0, transition: 0, after: 1 });
+      expect(fixOf("src/c.ts")).toBeUndefined();
+    });
+
+    test("without states the totals have no states and the file rows no fix", () => {
+      const summary = summarise(run, { prefix: "legion/", fixes: { specs } });
+      expect(summary.fixes).toEqual([
+        { glob: "gen/**", commit: "c", merges: 2, prs: 2, states: null },
+      ]);
+      expect(summary.combined.tables.files.every((row) => row.fix === undefined)).toBe(true);
+    });
+
+    test("two states for one merge under one spec is an error", () => {
+      const states = new Map<string, Map<string, FixState>>([
+        [
+          "k1",
+          new Map<string, FixState>([
+            ["gen/a.js", "after"],
+            ["gen/b.js", "before"],
+          ]),
+        ],
+        ["k2", new Map<string, FixState>([["gen/a.js", "before"]])],
+      ]);
+      expect(() => summarise(run, { prefix: "legion/", fixes: { specs, states } })).toThrow(Error);
+    });
   });
 });
 
@@ -213,6 +318,77 @@ describe("compare", () => {
       [3, 1],
     ]);
     expect(comparison.fixes).toBe(false);
+    expect(comparison.globs).toEqual([]);
+  });
+
+  test("glob rows give before and after totals, zeros where a glob matches nothing", async () => {
+    const specs = [
+      { glob: "packages/*/CHANGELOG.md", commit: "c1" },
+      { glob: "src/**", commit: "c2" },
+      { glob: "README.md", commit: "c3" },
+    ];
+    const before = summarise(await fixture("window.json"), {
+      prefix: "legion/",
+      fixes: { specs },
+    });
+    const states = new Map<string, Map<string, FixState>>([
+      ["n1", new Map<string, FixState>([[X_CHANGELOG, "after"]])],
+      ["n2", new Map<string, FixState>([["README.md", "before"]])],
+      ["n4", new Map<string, FixState>([[X_CHANGELOG, "transition"]])],
+    ]);
+    const after = summarise(await fixture("after.json"), {
+      prefix: "legion/",
+      fixes: { specs, states },
+    });
+    const comparison = compare(before, after);
+    expect(comparison.fixes).toBe(true);
+    expect(comparison.globs).toEqual([
+      {
+        glob: "packages/*/CHANGELOG.md",
+        before: { merges: 4, prs: 3, prsShare: 3 / 3 },
+        after: {
+          merges: 2,
+          prs: 2,
+          prsShare: 2 / 4,
+          states: { before: 0, transition: 1, after: 1 },
+        },
+      },
+      {
+        glob: "src/**",
+        before: { merges: 1, prs: 2, prsShare: 2 / 3 },
+        after: {
+          merges: 0,
+          prs: 0,
+          prsShare: 0,
+          states: { before: 0, transition: 0, after: 0 },
+        },
+      },
+      {
+        glob: "README.md",
+        before: { merges: 0, prs: 0, prsShare: 0 },
+        after: {
+          merges: 1,
+          prs: 1,
+          prsShare: 1 / 4,
+          states: { before: 1, transition: 0, after: 0 },
+        },
+      },
+    ]);
+  });
+
+  test("a glob the before summary has no totals for is zero before", async () => {
+    const before = summarise(await fixture("window.json"), { prefix: "legion/" });
+    const after = summarise(await fixture("after.json"), {
+      prefix: "legion/",
+      fixes: { specs: [{ glob: "packages/*/CHANGELOG.md", commit: "c1" }] },
+    });
+    expect(compare(before, after).globs).toEqual([
+      {
+        glob: "packages/*/CHANGELOG.md",
+        before: { merges: 0, prs: 0, prsShare: 0 },
+        after: { merges: 2, prs: 2, prsShare: 2 / 4, states: null },
+      },
+    ]);
   });
 
   test("a window's length runs to measured_at when it is before until", async () => {

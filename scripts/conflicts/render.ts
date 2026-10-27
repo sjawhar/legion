@@ -24,7 +24,7 @@ function tierLines(tiers: Tier[]): string[] {
   );
 }
 
-const fixCells = (fix: FixCounts | undefined) =>
+const fixCells = (fix: FixCounts | null | undefined) =>
   fix ? ` ${fix.before} | ${fix.transition} | ${fix.after} |` : "  |  |  |";
 
 function tableLines(tables: Tables, title: string, fixes = false): string[] {
@@ -74,15 +74,20 @@ function combinedLines(summary: Summary): string[] {
     ...tierLines(combined.tiers),
   ];
   for (const fix of fixes ?? []) {
+    const states = fix.states
+      ? `; before ${fix.states.before}, transition ${fix.states.transition}, ` +
+        `after ${fix.states.after}`
+      : "";
     lines.push(
-      `- files matching \`${fix.glob}\`, fixed by ${fix.commit.slice(0, 12)}: ` +
-        `before ${fix.before}, transition ${fix.transition}, after ${fix.after}`
+      `- conflicting merges on files matching \`${fix.glob}\`, fixed by ` +
+        `${fix.commit.slice(0, 12)}: ${fix.merges} (${fix.prs} PRs)${states}`
     );
   }
   lines.push("");
+  const withStates = fixes?.some((fix) => fix.states !== null) ?? false;
   return [
     ...lines,
-    ...tableLines(combined.tables, "Conflicting forward merges, all PRs read", fixes !== null),
+    ...tableLines(combined.tables, "Conflicting forward merges, all PRs read", withStates),
   ];
 }
 
@@ -187,5 +192,21 @@ export function renderComparison(c: Comparison): string {
     lines.push(c.fixes ? counts + fixCells(file.after.fix) : counts);
   }
   lines.push("");
+  if (c.globs.length > 0) {
+    lines.push(
+      "## Conflicting forward merges by fixed glob (a merge counts once per glob)",
+      "",
+      "| glob | merges before | PRs before (share of PRs read) | merges after " +
+        "| PRs after (share of PRs read) | after: before fix | after: transition | after: after fix |\n" +
+        "|---|---:|---:|---:|---:|---:|---:|---:|"
+    );
+    for (const { glob, before, after } of c.globs) {
+      lines.push(
+        `| \`${glob}\` | ${before.merges} | ${before.prs} (${percent(before.prsShare)}) | ` +
+          `${after.merges} | ${after.prs} (${percent(after.prsShare)}) |${fixCells(after.states)}`
+      );
+    }
+    lines.push("");
+  }
   return lines.join("\n");
 }

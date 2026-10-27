@@ -169,7 +169,10 @@ async function main(argv: string[]): Promise<void> {
   const summary = summarise(run, { prefix: options.prefix, fixes });
   console.log(renderSummary(summary));
   if (before !== null) {
-    console.log(renderComparison(compare(summarise(before, { prefix: options.prefix }), summary)));
+    // The before run's glob totals, without states: its merges need no git.
+    const beforeFixes = specs.length > 0 ? { specs } : undefined;
+    const was = summarise(before, { prefix: options.prefix, fixes: beforeFixes });
+    console.log(renderComparison(compare(was, summary)));
   }
 }
 

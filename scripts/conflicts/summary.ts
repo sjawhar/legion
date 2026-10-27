@@ -199,9 +199,14 @@ export interface SnapshotSection {
   rows: Array<{ pr: number; base: string; conflicts: string[] }>; // sorted by PR
 }
 
-export interface FixTotal extends FixCounts {
+/** A `--fixed` spec's totals over the combined section's conflicting forward merges with a
+ * conflicted path the spec matches (first matching spec wins per path); a merge counts once. */
+export interface FixTotal {
   glob: string;
   commit: string;
+  merges: number;
+  prs: number; // distinct PRs carrying those merges
+  states: FixCounts | null; // each merge once, in its state; null without fix states
 }
 
 export interface Summary {
@@ -221,7 +226,8 @@ export interface Summary {
 
 export interface SummaryOptions {
   prefix: string;
-  fixes?: { specs: FixSpec[]; states: FixStates };
+  /** Without `states`, the totals carry no states and the file rows no `fix`. */
+  fixes?: { specs: FixSpec[]; states?: FixStates };
 }
 
 /** A counted thing with conflicted paths: a merge, a force push or an open head. */
@@ -340,29 +346,53 @@ function conflictingOf(forward: MergeEvent[]): Array<MergeEvent & Conflicted> {
 
 const noFixes = (): FixCounts => ({ before: 0, transition: 0, after: 0 });
 
-/** Puts each conflicting merge's fix states on the file rows a spec matches (first spec wins)
- * and totals them per spec. */
+/** Totals each spec's matching merges, and with fix states puts them on the file rows a spec
+ * matches (per merge and path) and on the totals (per merge). */
 function applyFixes(
   section: MergeSection,
   events: Map<string, MergeEvent>,
   fixes: NonNullable<SummaryOptions["fixes"]>
 ): FixTotal[] {
-  const globs = fixes.specs.map((spec) => ({ spec, glob: new Bun.Glob(spec.glob) }));
-  const totals = new Map(fixes.specs.map((spec) => [spec, noFixes()]));
+  const { specs, states } = fixes;
+  const globs = specs.map((spec) => ({ spec, glob: new Bun.Glob(spec.glob) }));
+  const totals = new Map(
+    specs.map((spec) => [spec, { merges: [] as MergeEvent[], states: states ? noFixes() : null }])
+  );
   const rows = new Map(section.tables.files.map((row) => [row.path, row]));
   for (const event of conflictingOf([...events.values()].filter((e) => e.kind === "forward"))) {
+    const matched = new Map<FixSpec, FixState | null>();
     for (const path of event.conflicts) {
       const spec = globs.find(({ glob }) => glob.match(path))?.spec;
       if (!spec) continue;
-      const state = fixes.states.get(event.oid)?.get(path);
-      if (!state) throw new Error(`no fix state for ${path} in merge ${event.oid}`);
-      const row = rows.get(path) as FileRow;
-      row.fix ??= noFixes();
-      row.fix[state]++;
-      (totals.get(spec) as FixCounts)[state]++;
+      let state: FixState | null = null;
+      if (states) {
+        const found = states.get(event.oid)?.get(path);
+        if (!found) throw new Error(`no fix state for ${path} in merge ${event.oid}`);
+        state = found;
+        const row = rows.get(path) as FileRow;
+        row.fix ??= noFixes();
+        row.fix[state]++;
+      }
+      // A state depends only on the fix commit and the merge's parents, so one spec's paths in
+      // one merge share it.
+      if (matched.has(spec) && matched.get(spec) !== state) {
+        throw new Error(`merge ${event.oid} has two fix states for ${spec.glob}`);
+      }
+      matched.set(spec, state);
+    }
+    for (const [spec, state] of matched) {
+      const total = totals.get(spec) as { merges: MergeEvent[]; states: FixCounts | null };
+      total.merges.push(event);
+      if (state && total.states) total.states[state]++;
     }
   }
-  return [...totals].map(([{ glob, commit }, counts]) => ({ glob, commit, ...counts }));
+  return [...totals].map(([{ glob, commit }, total]) => ({
+    glob,
+    commit,
+    merges: total.merges.length,
+    prs: prsOf(total.merges).size,
+    states: total.states,
+  }));
 }
 
 function forcePushSection(
@@ -502,12 +532,20 @@ export interface ComparisonFile {
   after: { events: number; prs: number; fix?: FixCounts };
 }
 
+/** A `--fixed` glob's matching merges and the PRs carrying them. */
+export interface ComparisonGlob {
+  glob: string;
+  before: { merges: number; prs: number; prsShare: number }; // prsShare: of PRs read
+  after: { merges: number; prs: number; prsShare: number; states: FixCounts | null };
+}
+
 export interface Comparison {
   before: ComparisonSide;
   after: ComparisonSide;
   /** True when the after summary carries fix states. */
   fixes: boolean;
   files: ComparisonFile[]; // events before + after descending, then path
+  globs: ComparisonGlob[]; // the after summary's specs, in order; none without them
 }
 
 const share = (count: number, of: number) => (of === 0 ? 0 : count / of);
@@ -558,5 +596,26 @@ export function compare(before: Summary, after: Summary): Comparison {
       b.before.events + b.after.events - (a.before.events + a.after.events) ||
       byPath(a.path, b.path)
   );
-  return { before: side(before), after: side(after), fixes: after.fixes !== null, files };
+  const globs = (after.fixes ?? []).map((now): ComparisonGlob => {
+    const was = before.fixes?.find((fix) => fix.glob === now.glob);
+    const merges = was?.merges ?? 0;
+    const prs = was?.prs ?? 0;
+    return {
+      glob: now.glob,
+      before: { merges, prs, prsShare: share(prs, before.combined.prs) },
+      after: {
+        merges: now.merges,
+        prs: now.prs,
+        prsShare: share(now.prs, after.combined.prs),
+        states: now.states,
+      },
+    };
+  });
+  return {
+    before: side(before),
+    after: side(after),
+    fixes: after.fixes?.some((fix) => fix.states !== null) ?? false,
+    files,
+    globs,
+  };
 }

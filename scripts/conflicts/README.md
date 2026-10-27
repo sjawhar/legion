@@ -103,10 +103,13 @@ section, gets a state by ancestry (committer dates are not used, since jj rewrit
   held edits made before the fix.
 - `after`: the fix is in both parents: the fix did not prevent this conflict.
 
-The by-file table gains `before`, `transition` and `after` columns for the matched files, the
-section lists each glob with its totals (zeros when it matched nothing), and the comparison shows
-the after run's states. The first matching glob wins. Fix states need git, so `--fixed` with
-`--from-json` uses the bare clone in `--workdir`, fetched unless `--no-fetch`.
+The by-file table gains `before`, `transition` and `after` columns for the matched files, and the
+comparison shows the after run's states. The first matching glob wins. Each glob also totals the
+conflicting merges with a conflicted file it matches, each merge once however many of its files
+match, with the pull requests carrying them and each merge's state (zeros when it matched nothing);
+the comparison shows these totals before and after, the before run's counted without git. Fix states
+need git, so `--fixed` with `--from-json` uses the bare clone in `--workdir`, fetched unless
+`--no-fetch`.
 
 ## Raw records
 
