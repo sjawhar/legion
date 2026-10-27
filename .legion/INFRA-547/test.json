@@ -2,27 +2,37 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-547",
-  "completed": "2026-10-27T17:47:00Z",
-  "round": 6,
-  "headTested": "fc5a6b86c950180ebd91a48354fb080006f2f28f",
-  "codeHead": "6c31367394b585a3cf279ba116dcfecb7fcda249",
-  "scope": "Main 2df3353c was merged forward at c016d4a6, resolving round 5's 12 conflicts (role_holder.go, confirmed.go, request_record.go, replay.go and internal/bus/stored.go adapted). The skills/envoy text came back at 6c313673 after the skill-split rule was withdrawn; #2418 is closed. Main's #2167, merged in, adds two answers on the publish route: 503 bus_unavailable with Retry-After: 1 when the first holder lookup gets no bus answer within 3.5 s, and 403 publish_denied when the listener's grant denies a forward. Full round, plus the architect's request (17:36Z) to check that the daemon's notify publisher and envoy-client retry the 503 and treat the 403 as final.",
+  "completed": "2026-10-27T18:02:00Z",
+  "round": 7,
+  "headTested": "7382ff836229cac565ea5e8de3e7089f3a15c57a",
+  "codeHead": "a16d4af727ffc9eaccbbb47c3e3314ec098e0012",
+  "scope": "One code commit since round 6, a16d4af7. It adds notify.ErrPublishDenied for a JSON 403 without reason capability, makes outbox.notice finish such a row undelivered with one log line, makes mergeQueue post a Dispatch message for it, and updates the envoy CHANGELOG. jj diff --from 27782f76 --to 7382ff83 touches only packages/daemon (notify, outbox and their tests) and packages/envoy/CHANGELOG.md, so the listener is byte-for-byte the round-6 build. Round 6's real-binary checks and soak (--- PASS 146.86s, lane off and on, 0 lost) cover it, and I did not repeat them.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its command at the merged head: cd packages/envoy && go test -tags serverchange -count=1 -timeout 20m -v -run TestServerChange ./cmd/listener -> --- PASS: TestServerChange (146.86s). Lane off: 8 disruptions, role 248/248, ad-hoc 248/248, captured 181 live + 67 only by replay, errored 0. Lane on: 8 disruptions, role 255/255, ad-hoc 255/255, captured 190 live + 65 only by replay, errored 0. Re-ran the census script: E2E_NATS_PORT=14822 E2E_PORT=19220 E2E_SESSION_PORT=19221 bash scripts/e2e-local.sh -> PASS, its new #2167 case included ('client refusal: EnvoyApiError 503 envoy: the message bus did not answer …')."
+    "how": "Round 6's failure is fixed. My red test TestANoticeTheListenerIsDeniedToForwardFinishesUndelivered is unchanged since 3b759f77 and now passes: cd packages/daemon && LEGION_TEST_PG_DSN=<embedded Postgres 16.4> go test -count=1 -run 'TestANoticeTheListenerIsDeniedToForwardFinishesUndelivered|TestANoticeTheHolderRefusesFinishesUndelivered|MergeQueue' ./internal/daemon -> all PASS. go test -run TestHTTPPublisher ./internal/notify -> PASS."
   },
-  "failed": 1,
-  "failures": [
+  "failed": 0,
+  "failures": [],
+  "ci": "At 18:01Z on code head a16d4af7 every check is queued (build x2, changes, lint, test, typecheck, pr-title; one pr-title cancelled), and none has settled. The previous code head 6c313673's runs were all cancelled, so CI has not yet completed on any head that carries the merge of main.",
+  "notes": [
+    "notify maps every JSON 403 without reason capability to ErrPublishDenied, and the notice row then finishes undelivered. The listener's own publish route gives no other 403 (its API auth answers 401, a wrong Host 421, a capability refusal carries reason capability). The listener's body for this case always opens with publishDeniedPrefix ('envoy: the message bus denied the publish under this listener's own permissions'), so the daemon could match on that. As written, a JSON 403 from something in front of the listener, say a proxy answering {\"error\":\"forbidden\"} (the case notify_test now pins as ErrPublishDenied), would drop a notice where it used to be retried. I found no deployment that puts such a proxy between the daemon and its listener, so this is a note for the reviewer, not a failure."
+  ],
+  "proof": [
     {
-      "criterion": "(architect, 17:36Z) the Legion daemon's notify publisher treats the publish route's 403 publish_denied as final, as envoy-client does; and (plan decision) a refusal must not hold later notices behind the fence forever",
-      "evidence": "Real binaries at the merged head. A nats-server user 'listener' has publish denied on notifications.agent.ses_denied6, and ses_denied6 holds role t6-denied. POST /v1/messages/publish {topic: notifications.role.t6-denied} -> 403 {\"error\":\"envoy: the message bus denied the publish under this listener's own permissions: … Permissions Violation for Publish to \\\"notifications.agent.ses_denied6\\\"\"}, with no reason field, in 42 ms. envoy-client publish -> EnvoyApiError 403 in 82 ms with no retry: final. The daemon's notify.HTTPPublisher (throwaway test against the same binary, deleted) -> a plain error, neither ErrNoHolder, ErrNotDelivered nor ErrRefusedByHolder. That error makes outbox.notice return a failure (outbox.go:713-714), so the row is retried on its backoff without a cap, and earlierNoticeFor (outbox.go:691) holds every later notice to that architect behind it until an operator changes the grant. mergeQueue (outbox.go:747-748) retries such a packet forever too, where a 403 capability posts a Dispatch message and finishes. Red test, commit 3b759f77402d2d2048c4066fc46e7a1acfaad2c9: cd packages/daemon && LEGION_TEST_PG_DSN=<a Postgres 16> go test -count=1 -run TestANoticeTheListenerIsDeniedToForwardFinishesUndelivered ./internal/daemon -> FAIL: '1 rows left after the listener answered 403 publish_denied, want the row finished undelivered: the denial repeats until an operator changes the grant'. Its sibling TestANoticeTheHolderRefusesFinishesUndelivered passes in the same run. I ran this on an embedded Postgres 16.4 (github.com/fergusstrange/embedded-postgres in scratch), since the pod has no Docker."
+      "criterion": "(architect, 17:36Z) the Legion daemon treats the publish route's 403 publish_denied as final, and a denied notice holds no later notice to its architect",
+      "surface": "the daemon's real outbox runner with its real notify.HTTPPublisher (a throwaway test in internal/daemon, deleted after the run) against a real envoy-listener built at the head. The nats-server user 'listener' is denied publish to notifications.agent.ses_denied7. Embedded Postgres 16.4",
+      "command": "ZZ_LISTENER_URL=http://127.0.0.1:18581 LEGION_TEST_PG_DSN=<embedded Postgres> go test -count=1 -v -run TestZZOutboxAgainstRealListener ./internal/daemon. ses_denied7 holds role legion-legion-legion-1-architect; one notice is enqueued and RunOnce runs. Then ses_live7 claims the role, a second notice is enqueued, and RunOnce runs again",
+      "observed": "First RunOnce: rows left 0, one WARN 'outbox notice finished undelivered: the listener's NATS grant denied the forward to its architect … reason=\"envoy: the message bus denied the publish under this listener's own permissions: … notifications.agent.ses_denied7 …\"'. ses_denied7 received nothing. Second RunOnce: rows left 0, no log line, and ses_live7's stand-in printed 'FRAME notifications.agent.ses_live7': the next notice was not held behind the denied one",
+      "headSha": "a16d4af727ffc9eaccbbb47c3e3314ec098e0012",
+      "negativeControl": "at 27782f76, before the fix, the same red test failed with '1 rows left after the listener answered 403 publish_denied', and the daemon's publisher returned a plain error for the same 403 on a real binary (round 6)"
+    },
+    {
+      "criterion": "503 bus_unavailable is still retried by the daemon, and envoy-client's handling is unchanged",
+      "surface": "packages/daemon/internal/notify/notify.go at a16d4af7; envoy-client is untouched by this commit",
+      "command": "Read of HTTPPublisher.Publish: the new branch is `case response.StatusCode == http.StatusForbidden`, so a 503 still falls through to the plain refusal that outbox.notice retries. go test -run TestHTTPPublisher ./internal/notify -> PASS",
+      "observed": "Only 403 answers changed classification. Round 6's real-binary 503 drive (503, Retry-After: 1, in 3.55 s; envoy-client retried once and threw after 7.28 s; the daemon's plain error is retried) stands for this head, since neither the listener nor envoy-client changed",
+      "headSha": "a16d4af727ffc9eaccbbb47c3e3314ec098e0012",
+      "negativeControl": "a non-JSON 403 ('forbidden') stays a plain failure per the updated TestHTTPPublisherTellsTheConfirmedSendAnswersApart, which passes"
     }
-  ],
-  "verified": [
-    "503 bus_unavailable (the hub frozen with SIGSTOP on its exact PID, so connections stay open): role publish -> 503, 'envoy: the message bus did not answer: read role t6-live's claim: context deadline exceeded', Retry-After: 1, in 3.546 s. envoy-client retried it once and then threw EnvoyApiError 503 after 7.277 s. The daemon's HTTPPublisher -> a plain error after 3.508 s, which outbox.notice retries on its backoff: retried, as the architect expects. The ad-hoc send in the same state -> 504 publish_failed ('flush publish … nats: timeout; no session was sent it') in 4.04 s.",
-    "Role, through host-b to holders registered on host-a (lane on): confirming -> 200 in 43 ms; repeat -> 200 with no second forward; silent -> 504 receipt_timeout, attempts 2, in 4.046 s; unclaimed -> 404; btw to a holder without it -> 403 {reason capability}.",
-    "Ad-hoc: through lane-on host-a with one silent subscriber -> 504 not_confirmed naming it (receipt_timeout) in 4.04 s. A topic whose only recipient's forward is denied -> 504 not_confirmed naming it delivery_failed in 44 ms. No recipient -> 200."
-  ],
-  "ci": "At 17:45Z on code head 6c313673 every check is queued (build x2, changes, lint, test, typecheck, pr-title; one pr-title cancelled). None has settled. GitHub reports MERGEABLE.",
-  "proof": []
+  ]
 }
