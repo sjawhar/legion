@@ -2,64 +2,68 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-148",
-  "completed": "2026-10-27T08:42:00Z",
-  "headTested": "7b53f6229ac14decda3fb1360ad3b6ffbc7d5776",
+  "completed": "2026-10-27T09:42:00Z",
+  "headTested": "7eb8e74f3aca3cde959a3d5270c64d58e3179f78",
   "implementerProof": {
-    "verdict": "rejected",
-    "how": "Re-ran each proof at 7b53f622 (code = merge 16ed9c87). A1: the implementer's smoke3 driver, copied to /legion/scratch/tmp/infra148-test/driver.ts and pointed at my own build of the head (Postgres 17 on 5444, nats-server 2.10.29, Dispatch on 18866), passed: turn-3 checks lastHasAnswerVerbatim:true, lastCarriesCacheControl:false, 0 of 4 requests before the answer carried a list. A2-A4/A7/A8: `LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/session-answers-omp.test.ts`: 8 pass. Mutation control: with SESSION_ANSWERS_DEADLINE_MS set to 5000 (restored after), case (f) failed at 5050 ms. A9: `bun rig.ts TESTER original 3` on the real Anthropic route (claude-sonnet-4-5): turn 3 cacheRead 20358 = 20336 + 22, uncached input 114 -> 199. Control `rig.ts TESTERB altered 1`: cacheRead 8815, cacheWrite 11521. A10-A12: reproduced (see proof). A5 failed: `LEGION_TEST_CLAUDE=.../claude bun test tests/answers-claude.test.ts`, three runs: run 1, 2 pass 2 fail (resume and one more); run 2, exit 1; run 3, 3 pass 1 fail (compaction). See failures[0]."
+    "verdict": "verified",
+    "how": "Re-ran each proof at 7eb8e74f (code = be08baf6). A1: the smoke driver (the implementer's, pointed at my rig) against my own build of the head's Dispatch (Postgres 17 on 5444, nats-server 2.10.29, fresh database). turn-3 checks: lastHasAnswerVerbatim:true, lastCarriesCacheControl:false, 0 of 4 requests before the answer carried a list. A2-A4/A7/A8: `LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/session-answers-omp.test.ts`: 8 pass. A5: my red test `a hook whose start-up took past 800 ms still carries the list Dispatch answers at once` passes, and is unchanged since cd624cd8. tests/answers-hook.test.ts: 8 pass. tests/answers-claude.test.ts (Claude Code 2.1.311): 3 runs in a row, 4 pass each (in round 1, all 3 runs failed). A9: cache rig TESTER2 on the real Anthropic route: turn 3 cacheRead 20358 = 20336 + 22, uncached input 114 -> 199. Cap: a list of 7,999 characters is carried whole. At 8,000 the older item is left out with the left-out line. Doc-thread reply routing: see proof."
   },
-  "failures": [
-    {
-      "criterion": "A5: a Claude Code session carries the answer word for word at its start, resume, compaction and subagent start (and the plan's Claude path for A8)",
-      "evidence": "The answers hook (packages/claude-envoy/hooks/session-hook.ts, ANSWERS_BY_MS = 800, remainingUntil() counted from performance.now()'s origin) counts bun's own start-up against its 800 ms budget. Claude Code starts the open-asks, dispatch-first and answers hooks at the same time as itself, so on this pod the answers hook often reaches readSessionAnswers with deadlineMs 0. It then carries the failure line or a stale cached list, even when Dispatch answers at once, and it exits before the read can write answers.json. Observed on the real binary (Claude Code 2.1.311, `bun test tests/answers-claude.test.ts`): 3 of 3 runs failed at least one moment (resume, then compaction). In a probe copy of that test, round 2 of the second batch: Turn one carried `[Dispatch: people's answers from the last 72 hours could not be read (Dispatch did not answer within 0 ms); run `dispatch answers`.]`, while the stand-in Dispatch answered at once. The reason it names is false: Dispatch was given no time. Red test, its own commit: packages/claude-envoy/tests/answers-hook.test.ts, \"a hook whose start-up took past 800 ms still carries the list Dispatch answers at once\". A --preload holds the process to 820 ms, then Dispatch answers at once. Fails today: `cd packages/claude-envoy && bun test tests/answers-hook.test.ts -t 'start-up took past'` received `[Dispatch: people's answers from the last 72 hours could not be read (Dispatch did not answer within 0 ms); run `dispatch answers`.]` where the fresh list was expected."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
       "criterion": "A1: a session whose ask a person answered carries that answer word for word in its next model request (Oh My Pi)",
       "surface": "real omp 18.12.2 with the checkout's pi-envoy against my build of the head's Dispatch (Postgres 17 + pgvector on 127.0.0.1:5444, nats-server 2.10.29, outbox publishing) and a stand-in model gateway",
-      "command": "cd /legion/scratch/tmp/infra148-test && bun driver.ts (the implementer's smoke3 driver, re-pointed at my rig)",
-      "observed": "Session 01a17c75-…: ask.answered published to {notifications.dispatch.issue.SMK-1.ask.answered, notifications.agent.01a17c75-50a8-7553-990b-273ca04f673b}. The next request's last message was the list, carrying the answer byte for byte, with no cache_control (anchors on 5 and 7).",
-      "headSha": "7b53f6229ac14decda3fb1360ad3b6ffbc7d5776",
+      "command": "cd /legion/scratch/tmp/infra148-test && bun driver.ts (logs/driver2.log)",
+      "observed": "ask.answered was published to the session's notifications.agent.<id> topic. The next Messages request's last message was the list, carrying the answer byte for byte, with no cache_control (anchors on messages 5 and 7). A later mention was listed as `mentioned you`.",
+      "headSha": "7eb8e74f3aca3cde959a3d5270c64d58e3179f78",
       "negativeControl": "The 4 requests before the answer carried no list. `dispatch answers` for another session printed `No person wrote to this session in the last 72 hours.`"
     },
     {
-      "criterion": "A4/A6 and the item kinds: reply to its comment, comment on a document it wrote (edited), message to it, replaced answer, 71 h carried / 73 h not, agent comments and resolved asks not listed",
-      "surface": "the dispatch CLI (bun packages/envoy-client/bin/dispatch.ts) as session 01a17c99-…-01a17c7c2a8c against the local Dispatch; the person is alice through the dev sign-in",
-      "command": "cd /legion/scratch/tmp/infra148-test && bun probe-dispatch.ts && bun probe-dispatch2.ts <session> TPXZG-1; outputs out-probe/answers-cli.txt, answers-cli-2.txt, route-negatives.json",
-      "observed": "6 items, newest first: `answered your ask (replaces an earlier answer)` with Selected: B and PROBE-REPLACE-SECOND only; `sent you a message` (Direct message …, on no issue); an answer; `commented on a document · edited 2026-10-27T08:31:16.657456Z` with the edited body (V2) only; `replied in a comment thread`; the 71 h answer (backdated in events and asks.answer). Not listed: the 73 h answer, another session's reply in the session's thread, the ask resolved as moot with no answer.",
-      "headSha": "7b53f6229ac14decda3fb1360ad3b6ffbc7d5776",
-      "negativeControl": "GET /api/v1/agents/not%20a%20session!/answers -> 400 INVALID_SESSION_ID; since 8 days ago -> 400 `since must be no more than 7 days ago`; since in the future -> 400; max_chars=0 -> 400; no bearer -> 401; `dispatch answers` against a server with no route -> `This Dispatch (http://127.0.0.1:18999) has no answers route yet: its build predates INFRA-148.`, exit 1"
+      "criterion": "A4/A6: reply to its comment, comment on a document it wrote (now with replies in that document's threads), message to it; 72-hour window; one item per thing",
+      "surface": "the dispatch CLI (bun packages/envoy-client/bin/dispatch.ts) as session 01a17c99-0000-7000-8000-01a17cb3ca85 against the local Dispatch; the person is alice through the dev sign-in",
+      "command": "cd /legion/scratch/tmp/infra148-test && bun probe-dispatch.ts && bun probe-dispatch2.ts 01a17c99-0000-7000-8000-01a17cb3ca85 TPQTH-1 (out-probe/answers-cli-2.txt, events.txt)",
+      "observed": "11 items, newest first:\n- a replaced answer (latest words only, `(replaces an earlier answer)`);\n- a direct message;\n- an answer;\n- on a spec the agent wrote with `dispatch issue --spec`: the person's anchored comment, their reply and their reply at depth two (`commented on a document`, `replied in a comment thread` x2);\n- the person's doc-thread reply that mentions the session, listed once as `mentioned you` (its event went to the document topic only, suppressed_authors = [session]);\n- the person's reply in a thread on the session's project document, edited (new text only, `edited <time>`), its event now on notifications.agent.<session>;\n- the edited doc comment;\n- the reply in its issue thread;\n- the 71 h answer.",
+      "headSha": "7eb8e74f3aca3cde959a3d5270c64d58e3179f78",
+      "negativeControl": "Not listed: the 73 h answer, another agent session's reply in the same doc thread, and the ask resolved as moot. The route refuses a bad session id (400), since 8 days ago (400), since in the future (400), max_chars=0 (400) and no bearer (401)."
     },
     {
-      "criterion": "Oh My Pi edges: two pi-envoy copies in one process, a subagent while the route hangs, a process restart with Dispatch down, an item at exactly the cap, the list never persisted",
+      "criterion": "A5: Claude Code carries the list at start, resume, compaction and subagent start, including after a slow hook start-up",
+      "surface": "real Claude Code 2.1.311 with --plugin-dir packages/claude-envoy, and the committed hook bundle dist/session-hook.js run as Claude Code runs it against the local Dispatch",
+      "command": "cd packages/claude-envoy && LEGION_TEST_CLAUDE=/legion/scratch/tmp/claude-code-2.1.311/node_modules/.bin/claude bun test tests/answers-claude.test.ts (3 runs); bun test tests/answers-hook.test.ts; echo '{session_id,…resume}' | bun --preload slow.ts dist/session-hook.js answers with DISPATCH_URL at the local Dispatch",
+      "observed": "answers-claude: 3 of 3 runs passed all 4 moments. answers-hook: 8 pass, including the round-1 red test. With an 820 ms forced start-up against the real local Dispatch, the hook carried the fresh list (replaced answer first), wall 1017 ms.",
+      "headSha": "7eb8e74f3aca3cde959a3d5270c64d58e3179f78",
+      "negativeControl": "Forced 820 ms start-up with Dispatch hanging: a session with a saved list carried it marked `As read at …; Dispatch did not answer now.` (wall 1348 ms). One with none carried `could not be read (Dispatch did not answer within 139 ms)` (wall 1172 ms). With a normal start-up and Dispatch hanging: 871, 926 and 877 ms."
+    },
+    {
+      "criterion": "Oh My Pi edges and the cap: exactly 7,999 characters whole and 8,000 cut; two pi-envoy copies; a subagent while the route hangs; restart with Dispatch down; the list never persisted",
       "surface": "real omp 18.12.2 (/opt/omp/bin/omp) with the checkout's pi-envoy against a stand-in model gateway and Dispatch answers route",
-      "command": "cd /legion/scratch/tmp/infra148-test && bun probe-omp.ts twocopies subhang restart cap persist",
-      "observed": "Two copies (the source extension plus an independent bun build of it, bundle2/envoy.js): 1 list per turn, last message, 2 answers reads for 2 turns. Subagent while the route hangs: requests at +840 ms (waited the deadline), +928, +1335, +1379 ms after the one hanging read. The subagent and every later turn carried the cached list `As read at …; Dispatch did not answer now.` with the answer, and sent no second read. Restart: answers.json mode 600. A `--continue` process with DISPATCH_URL at a closed port carried the cached list with the answer. Cap: a list of exactly 8,000 characters was carried whole (8000). At 8,001 the older item was left out with `1 older item left out to stay under 8,000 characters: run \\`dispatch answers\\` …` (4,953 carried). Persist: the session .jsonl held the answer text 0 times after 3 turns that each carried the list.",
-      "headSha": "7b53f6229ac14decda3fb1360ad3b6ffbc7d5776",
-      "negativeControl": "The two-copies run, with the bundle failing to load (no skills dir), also showed 1 list. The decisive control is the restart run's DISPATCH_URL=http://127.0.0.1:9: no read succeeded, and the list came from disk alone."
+      "command": "cd /legion/scratch/tmp/infra148-test && bun probe-omp.ts cap twocopies subhang restart persist",
+      "observed": "Cap: the 7,999-character list was carried whole (7999). The 8,000-character list carried the newer item and `1 older item left out to stay under 8,000 characters: run `dispatch answers` …` (4952). Two copies (source plus an independent bun build): 1 list per turn. Subagent while hanging: the waits were 829 ms (turn 2), then no wait for the next turn and the subagent, each carrying the saved list with the answer. Restart: answers.json mode 600, and `--continue` with DISPATCH_URL at a closed port carried the saved list. Persist: the answer appeared 0 times in the session .jsonl after 3 turns.",
+      "headSha": "7eb8e74f3aca3cde959a3d5270c64d58e3179f78",
+      "negativeControl": "Restart run with DISPATCH_URL=http://127.0.0.1:9: no read could succeed, and the list came from disk alone. The 8,000-character list (one past the cap) was cut."
     },
     {
       "criterion": "A9: a change in the list does not invalidate the cached conversation",
       "surface": "real omp 18.12.2 with the checkout's pi-envoy on the pod's real Anthropic route (claude-sonnet-4-5)",
-      "command": "cd /legion/scratch/tmp/infra148/cache && bun rig.ts TESTER original 3",
+      "command": "cd /legion/scratch/tmp/infra148/cache && bun rig.ts TESTER2 original 3",
       "observed": "turn1 cacheRead 0 / write 20336; turn2 read 20336 / write 22; turn3 (list L1 -> L2) read 20358 / write 22; uncached input 114 -> 199",
-      "headSha": "7b53f6229ac14decda3fb1360ad3b6ffbc7d5776",
-      "negativeControl": "bun rig.ts TESTERB altered 1 (first message changed): cacheRead 8815, cacheWrite 11521"
+      "headSha": "7eb8e74f3aca3cde959a3d5270c64d58e3179f78",
+      "negativeControl": "Round 1 at 7b53f622 (placement code unchanged since): rig.ts TESTERB altered 1 (first message changed) read only 8815 and wrote 11521"
     },
     {
-      "criterion": "A10/A11: dispatch doc-read prints each open anchored comment's author, time and full text under its passage, and its help says so; a project document and --version",
+      "criterion": "A10/A11: dispatch doc-read prints each open anchored comment's author, time and full text under its passage, and its help says so",
       "surface": "the dispatch CLI against the local Dispatch",
-      "command": "dispatch doc-read --project TPXZG --artifact probe-doc.md; the same with --version 1; dispatch doc-read --issue SMK-2; dispatch doc-read --help",
-      "observed": "Project document: `Open anchored comments:` / `> The cache keeps one list per session.` / `comment c98d081c-… · user alice · 2026-10-27T08:31:15.532378Z · edited 2026-10-27T08:31:16.657456Z` / the edited body / `reply 33350b88-… · user alice · …` / its body. --version 1: heading `Open anchored comments (on the live document):`. The help contains the D8 sentence.",
-      "headSha": "7b53f6229ac14decda3fb1360ad3b6ffbc7d5776",
+      "command": "dispatch doc-read --project TPQTH --artifact probe-doc.md; dispatch doc-read --issue SMK-2; dispatch doc-read --help (driver2)",
+      "observed": "Under `> The cache keeps one list per session.`: the edited comment with author, time and `edited` time, then 3 replies with author and time (the person's edited reply, the person's mention reply, and the other session's reply), each with its full text. The help has the D8 sentence (driver: `help has sentence true`).",
+      "headSha": "7eb8e74f3aca3cde959a3d5270c64d58e3179f78",
       "negativeControl": "The resolved anchored comment on SMK-2 is absent: grep -c SMOKE-COMMENT-RESOLVED -> 0"
     }
   ],
   "observations": [
-    "Not a failure as the spec reads (\"that Dispatch delivered to that session\"): a person's reply in a thread on the session's own document, under a person's root comment, goes only to the document topic. Event seq 4 published_destinations = {notifications.dispatch.document.TPXZG.probe-doc-md.comment.created}, so the list leaves it out. doc-read shows it. This is the existing publisher's routing. Sent to the architect.",
-    "The list may be exactly 8,000 characters, but the spec and the left-out line both say \"under 8,000\". Sent to the architect.",
-    "CI at 7b53f622 was queued when read (build x2, changes, lint, test, typecheck queued; one pr-title cancelled, one queued). It is not read as passing."
+    "Three real-Claude runs started at the same time on this pod (3 claude processes plus 9 hooks at once) failed 3 of 12 moments, carrying a saved list or the failure line. Serial runs passed 12 of 12. Under that load the 150 ms least wait is the designed trade between the time bound and freshness.",
+    "The bound with a slow host: an 820 ms start-up plus Dispatch hanging held the hook 1.17-1.35 s. The reading part is at most 150 + 50 ms after the hook's code begins, and the rest is Bun's start-up and bundle load. This is the implementer's stated deviation.",
+    "Scope: a person's reply in any non-ask thread on a document now reaches every session the document credits, also as an Envoy delivery, not only in the list. Another agent session's reply in that thread was still not routed to the document's writer (seq 7 went to the document topic only).",
+    "CI at 7eb8e74f when read: build pending, and build, changes, lint, test, typecheck and pr-title queued (one pr-title cancelled). Not read as green."
   ]
 }
