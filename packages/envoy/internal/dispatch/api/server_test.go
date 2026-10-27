@@ -211,7 +211,7 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 // failed may have left a handler held on something only a later cleanup releases - one its own
 // heldUntilReleased registered before this server - so for it the wait is bounded and the cleanup
 // carries on, letting that release run, rather than hanging the package until its deadline.
-func waitBackgroundOf(t *testing.T, served *server) {
+func waitBackgroundOf(t testing.TB, served *server) {
 	if !t.Failed() {
 		served.waitBackground()
 		return
