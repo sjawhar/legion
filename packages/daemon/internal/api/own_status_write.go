@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
@@ -44,9 +45,13 @@ func (s *server) setDispatchStatus(w http.ResponseWriter, r *http.Request, issue
 // as the consumer prepares an unrecorded issue's event; one it records takes the event itself, with
 // the daemon's own actor. Either way the record stands at the write's sequence, so the event, when
 // the consumer delivers it, is at or below the record's sequence and changes nothing, in the
-// workflow, in admission and in the Dispatch mirror alike. A Dispatch that answered no sequence
-// gives the event no fence to find, so nothing applies here and the event applies the write, as
-// before.
+// workflow, in admission and in the Dispatch mirror alike. The event is a status move
+// (intake.DispatchIssue.StatusMove): it lands ahead of events the consumer has not delivered, so the
+// workflow takes its status even where the record last saw Dispatch at it. A Dispatch that
+// answered no sequence gives the event no fence to find, so nothing applies here and the event
+// applies the write, as before. Nor does an issue of another Dispatch project, which the
+// controller's set_status can name: the consumer drops every event of another project (intake's
+// decodeDispatchFact), so the record never takes one, and neither does this.
 //
 // Once the write has landed, a failure here leaves the record to the event, and the caller is
 // answered so (recordOwnStatusWrite says which failure). A route that writes the status again on
@@ -71,7 +76,7 @@ type ownWriteFailure struct {
 // event records the child when the consumer delivers it. It reports why the record did not take the
 // write, or nil when it did or when there was nothing to apply.
 func (s *server) recordOwnStatusWrite(ctx context.Context, written dispatch.Issue) *ownWriteFailure {
-	if written.LastSeq <= 0 {
+	if written.LastSeq <= 0 || !s.ownDispatchIssue(written.Key) {
 		return nil
 	}
 	event := intake.OwnStatusWrite(written)
@@ -96,4 +101,12 @@ func (s *server) recordOwnStatusWrite(ctx context.Context, written dispatch.Issu
 		return &ownWriteFailure{result.Refusal.Status, result.Refusal.Code, result.Refusal.Message}
 	}
 	return nil
+}
+
+// ownDispatchIssue says whether key is an issue of the daemon's own Dispatch project, by its key's
+// project as intake's decodeDispatchFact reads it. A server given no Dispatch project (a test's)
+// takes every key as its own.
+func (s *server) ownDispatchIssue(key string) bool {
+	project, _, _ := strings.Cut(key, "-")
+	return s.dispatchProject == "" || project == s.dispatchProject
 }
