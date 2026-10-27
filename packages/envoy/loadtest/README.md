@@ -26,7 +26,7 @@ same step before and after its change, and compares the two rows.
 | `delivery.go` | The join of writes, database commits and receipts into delivery latencies |
 | `sample.go` | The 5 s sampler: CPU, RSS, Postgres connections, goroutines, pool waiters, heap, NATS `/varz`. The transaction-id probe. |
 | `lockprobe.go` | The 20 ms sampler of the commit-order lock |
-| `locksampler.go` | The 20 ms sampler of every ungranted lock in `pg_locks` |
+| `locksampler.go` | The 1 s sampler of every ungranted lock in `pg_locks` |
 | `sse.go` | The parser of the dashboard SSE frames, and the SSE frame latencies |
 | `proxy.go` | The TCP latency proxy toward Postgres |
 | `tables.go` | `TABLES.md` from one or more `summary.json` files, the pprof tops and the goroutine summary |
@@ -637,7 +637,7 @@ cells are `-`.
 
 ### Ungranted locks
 
-The ungranted-lock sampler reads `pg_locks` every 20 ms, from the same start to the same end as the
+The ungranted-lock sampler reads `pg_locks` once a second, from the same start to the same end as the
 lock probe (Commit-order lock, above). It reads over a direct Postgres connection, not through the
 proxy. Each sample lists every heavyweight lock that a backend waits for (`granted` is false). The
 sampler groups these waits by lock type, target and mode.
@@ -657,10 +657,13 @@ The target names the lock:
 For each wait, the sampler records the waiter's statement and the statement of its first blocker.
 The first blocker is the backend with the lowest pid that holds the same lock, granted, in the same
 `pg_locks` read. For a relation lock, that holder can hold a mode that does not conflict with the
-wait. Each statement is the `query` of `pg_stat_activity`, cut to 80 characters. The sampler does
-not call `pg_blocking_pids`: that function takes exclusive access to Postgres's lock manager. When
-the sampler called it for each waiter every 20 ms, 1x committed 0.47 and 0.82 events/s, against
-1.63-1.81 without the sampler, on the same build and seed.
+wait. Each statement is the `query` of `pg_stat_activity`, cut to 80 characters.
+
+The sampler reads once a second, not every 20 ms as the lock probe does, because each read costs
+Postgres CPU on the box it measures. Read every 20 ms with about 45 waiters at 1x, one read took 75
+to 180 ms of a Postgres backend, and 1x committed 0.29 to 0.82 events/s, against 1.63 to 1.81
+without the sampler, on the same build and seed (2026-10-27). It never calls `pg_blocking_pids`,
+which takes exclusive access to Postgres's lock manager.
 
 | Column | Unit | What it shows | Source |
 | --- | --- | --- | --- |

@@ -560,8 +560,8 @@ func execute(cfg runConfig, sf seedFile) error {
 		}
 	}()
 
-	// Sampler, lock probe, ungranted-lock sampler, transaction-id probe and profiles. The two
-	// 20 ms samplers run from 20 s into the window to its end.
+	// Sampler, lock probe (20 ms), ungranted-lock sampler (1 s), transaction-id probe and profiles.
+	// The two lock samplers run from 20 s into the window to its end.
 	smp := newSampler(cfg.ep)
 	go smp.loop(ctx, winStart, winEnd)
 	lockFrom := winStart.Add(20 * time.Second)

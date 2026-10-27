@@ -25,7 +25,7 @@ type lockWait struct {
 	blockerQuery           string
 }
 
-// ungrantedSample is one 20 ms look at every ungranted lock.
+// ungrantedSample is one look at every ungranted lock.
 type ungrantedSample struct {
 	waits []lockWait
 }
@@ -35,12 +35,16 @@ type lockSampler struct {
 	samples []ungrantedSample
 }
 
+// ungrantedLockInterval is how often the sampler reads. Each read costs Postgres CPU on the box it
+// measures: read every 20 ms, with ~45 waiters at 1x, the query took 75-180 ms of one backend per
+// read, and 1x committed 0.29-0.82 events/s against 1.63-1.81 without the sampler (2026-10-27,
+// same build and seed). Once a second gives 160 reads in a 180 s window.
+const ungrantedLockInterval = time.Second
+
 // ungrantedLocksQuery reads pg_locks once per sample, in one materialized CTE, and names each
 // waiter's blocker from that same scan: a granted holder of the same lock (the lowest pid). It
-// never calls pg_blocking_pids, which takes exclusive access to the lock manager's shared state:
-// called for each of the ~45 waiters of a 1x step every 20 ms, it stalled every lock acquisition
-// in Dispatch and halved the committed rate it was measuring (1x: 0.47 and 0.82 events/s against
-// 1.63-1.81 without it, 2026-10-27). $1 and $2 are the commit-order lock's classid and objid.
+// never calls pg_blocking_pids, which takes exclusive access to the lock manager's shared state.
+// $1 and $2 are the commit-order lock's classid and objid.
 const ungrantedLocksQuery = `
 with l as materialized (
   select locktype, mode, pid, granted, database, relation, page, tuple, virtualxid, transactionid,
@@ -79,8 +83,7 @@ left join pg_database d on d.oid = w.database
 left join pg_stat_activity a on a.pid = w.pid
 left join pg_stat_activity b on b.pid = w.blocker`
 
-// loop samples every 20 ms from from to to over a direct Postgres connection, as the lock probe
-// does.
+// loop samples every ungrantedLockInterval from from to to over a direct Postgres connection.
 func (p *lockSampler) loop(ctx context.Context, url string, from, to time.Time, lg *log.Logger) {
 	p.url = url
 	conn, err := pgx.Connect(ctx, url)
@@ -92,7 +95,7 @@ func (p *lockSampler) loop(ctx context.Context, url string, from, to time.Time, 
 	if !sleepUntil(ctx, from) {
 		return
 	}
-	t := time.NewTicker(20 * time.Millisecond)
+	t := time.NewTicker(ungrantedLockInterval)
 	defer t.Stop()
 	errs := 0
 	for time.Now().Before(to) {

@@ -329,7 +329,7 @@ func renderTables(steps []stepData) string {
 	}
 
 	w("\n## Ungranted locks\n")
-	w("Every ungranted heavyweight lock in pg_locks, sampled every 20 ms from 20 s into the window to its end. Up to four locks per step, most samples with a waiter first.\n")
+	w("Every ungranted heavyweight lock in pg_locks, sampled once a second from 20 s into the window to its end. Up to four locks per step, most samples with a waiter first.\n")
 	ungrantedCells := []string{"step", "samples with an ungranted lock", "locks waited for: type target mode, samples with a waiter, waiters p50 / max",
 		"top waiter query → first blocker query (count), per lock"}
 	header(ungrantedCells...)
