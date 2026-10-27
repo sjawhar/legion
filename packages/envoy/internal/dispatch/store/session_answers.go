@@ -28,11 +28,11 @@ type Queryer interface {
 //     outbox's own record of each topic it published the event to (outbox.publishDestination), so
 //     the list holds what the follower, author and session routes delivered, and never what an
 //     issue's role: route delivered to a role topic, which names no session. It reads the partial
-//     index events_person_words (0121) for the window and filters the array on those rows.
+//     index events_person_words (0129) for the window and filters the array on those rows.
 //   - S2 (message_ids' second arm): the session's sent message deliveries (message_deliveries_session):
 //     targeted messages, direct or on an issue, and broadcast copies.
 //   - S3 (mentioned): the session's sent comment deliveries, a mention's (comment_deliveries_session,
-//     0122).
+//     0130).
 //
 // A delivery row's created_at is its transaction's now(), which for a first attempt can precede the
 // comment's or message's own clock_timestamp() created_at by as long as that transaction ran, so
