@@ -44,12 +44,12 @@ publishes nothing, so the first publisher wins. The object carries:
   identity (`src/subagent-session.ts`).
 - `startupTurn` — `{session, sentAt}`: the session whose first turn a start that runs after Oh My
   Pi's startup owns, and when that start was sent (milliseconds since the epoch, undefined until
-  sent). The Legion entry sets both: the operator's controller right before it sends its start
-  message, from the claim `/legion-controller-start` runs after Oh My Pi's startup (or a later
-  `/legion-claim-controller`), and the daemon-launched controller right before `claims/ready`.
-  That session's first `agent_start`, and its `session_shutdown`, clear both
-  (`packages/pi-legion/AGENTS.md`, "The controller's start turn"). The Envoy entry does not read it
-  yet; a later pi-envoy change uses it.
+  sent). The Legion entry sets both (`markStartupTurnSent`, `src/startup-turn.ts`): the operator's
+  controller right before it sends its start message, from the claim `/legion-controller-start`
+  runs after Oh My Pi's startup (or a later `/legion-claim-controller`), and the daemon-launched
+  controller right before `claims/ready`. That session's first `agent_start`, and its
+  `session_shutdown`, clear both (`clearStartupTurn`; `packages/pi-legion/AGENTS.md`, "The
+  controller's start turn"). The Envoy entry does not read it yet; a later pi-envoy change uses it.
 
 Every consumer resolves the object at each use through `envoyPluginInterface()`; nothing caches it
 at module scope, and `resetEnvoyPluginInterfaceForTests()` is the one test seam.

@@ -187,11 +187,7 @@ export function spawnRpc(
 ): Rpc {
   const child = Bun.spawn([binary, "--mode", "rpc", ...ompFlags(options)], {
     cwd: options.workspace,
-    env: {
-      HOME: options.home,
-      PATH: [options.bin, "/usr/local/bin:/usr/bin:/bin"].filter(Boolean).join(":"),
-      ...options.env,
-    },
+    env: { ...ompEnv(options), ...options.env },
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
@@ -251,6 +247,18 @@ function ompFlags(options: {
   ];
 }
 
+/** The environment `spawnRpc` and `spawnInteractive` start omp with: `home` as HOME, `bin` first
+ * on PATH. */
+function ompEnv(options: { readonly home: string; readonly bin?: string }): {
+  HOME: string;
+  PATH: string;
+} {
+  return {
+    HOME: options.home,
+    PATH: [options.bin, "/usr/local/bin:/usr/bin:/bin"].filter(Boolean).join(":"),
+  };
+}
+
 export interface Interactive {
   /**
    * The screen as the terminal renders it now, scrollback included: one string, each row's
@@ -301,13 +309,7 @@ export function spawnInteractive(
   });
   const child = Bun.spawn([binary, ...ompFlags(options), ...options.args], {
     cwd: options.workspace,
-    env: {
-      HOME: options.home,
-      PATH: [options.bin, "/usr/local/bin:/usr/bin:/bin"].filter(Boolean).join(":"),
-      TERM: "xterm-256color",
-      OMP_SKIP_SETUP: "1",
-      ...options.env,
-    },
+    env: { ...ompEnv(options), TERM: "xterm-256color", OMP_SKIP_SETUP: "1", ...options.env },
     terminal,
   });
   cleanup.push(async () => {

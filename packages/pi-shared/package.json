@@ -21,6 +21,10 @@
       "types": "./src/role-claim-bridge.ts",
       "bun": "./src/role-claim-bridge.ts"
     },
+    "./startup-turn": {
+      "types": "./src/startup-turn.ts",
+      "bun": "./src/startup-turn.ts"
+    },
     "./subagent-session": {
       "types": "./src/subagent-session.ts",
       "bun": "./src/subagent-session.ts"

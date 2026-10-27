@@ -248,11 +248,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	// validated above, before the capability mint), is the controller's addressing, the line its
 	// take comment reads before it promises anyone a design approval (skill://legion-controller).
 	// The start message travels as LEGION_CONTROLLER_START_MESSAGE (controllerEnvironment) and the
-	// command line ends with the word daemon.ControllerStartCommand: Oh My Pi runs that word as a
-	// prompt once its startup is over and its TUI listens, and the pi-legion command of that name
-	// sends the start message as the session's first turn, so a started or restarted controller runs
-	// its start procedure at once and deterministically, never racing a wake for the one first-turn
-	// slot.
+	// command line ends with the word daemon.ControllerStartCommand, whose doc says why.
 	addressing := daemon.DesignGateFragment(designGate) + " " + daemon.RepositoriesSentence(repositories)
 	command := omplaunch.WithPrefix(cfg.OmpLaunchPrefix, invocation) + " " + omplaunch.SystemPromptArgument(runtime.PromptParts{
 		RolePromptPaths:            controllerPrompts,

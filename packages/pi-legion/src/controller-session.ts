@@ -7,9 +7,9 @@ import {
 import type { LegionGrant } from "@legion/contracts/legion-api";
 import { messageFor } from "@legion/envoy-client/errors";
 import { LegionDaemonApiError, type LegionDaemonClient } from "@legion/pi-shared/daemon-client";
-import { envoyPluginInterface } from "@legion/pi-shared/interface";
 import type { CommandContext, PiApi, SessionContext } from "@legion/pi-shared/pi-types";
 import { claimEnvoyRole, subscribeLegionNotice } from "@legion/pi-shared/role-claim-bridge";
+import { markStartupTurnSent } from "@legion/pi-shared/startup-turn";
 import { recordBootstrappedSession } from "@legion/pi-shared/subagent-session";
 import pkg from "../package.json";
 import {
@@ -203,9 +203,7 @@ export function createControllerSession(deps: {
     // session speaks for itself. Nor does the daemon's own controller, whose start message the
     // daemon delivers once it reports ready below.
     if (startMessage !== undefined && !startMessageSent) {
-      const mark = envoyPluginInterface().startupTurn;
-      mark.session = sessionID;
-      mark.sentAt = Date.now();
+      markStartupTurnSent(sessionID);
       if ("isIdle" in context && context.isIdle?.() === false) {
         pi.sendUserMessage(startMessage, { deliverAs: "followUp" });
       } else {
@@ -233,9 +231,7 @@ export function createControllerSession(deps: {
     }
     if (supervised) {
       // The daemon delivers its start prompt at this ready, so the start is sent from here on.
-      const mark = envoyPluginInterface().startupTurn;
-      mark.session = sessionID;
-      mark.sentAt = Date.now();
+      markStartupTurnSent(sessionID);
       await client.ready({
         claimToken: registration.claimToken,
         sessionId: sessionID,
@@ -253,7 +249,8 @@ export function createControllerSession(deps: {
    * Only the controller the daemon launched claims at `session_start`: it has no start message of
    * its own to queue ahead of its role's lane, and its claim ends in the ready at which the daemon
    * sends it one. The operator-launched controller claims from `/legion-controller-start`
-   * (`startCommand`), after Oh My Pi's startup.
+   * (`startCommand`), after Oh My Pi's startup, and until then its `legion` tool answers that the
+   * session holds no registered claim.
    */
   const handleSessionStart = async (context: SessionContext): Promise<void> => {
     if (classifySession(process.env).kind !== "controller") return;
