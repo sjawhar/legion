@@ -107,7 +107,7 @@ const PENDING_NOTICE_MESSAGES: Record<ReplayPendingNotice, string> = {
   stream_recreated:
     "Envoy's notification stream was recreated, so messages published to this session while its connection was down before that may be lost.",
   retention_gap:
-    "The notification stream no longer holds some messages published to this session while its connection was down: messages older than 72 hours may be missing.",
+    "The notification stream no longer holds some messages published to this session while its connection was down: messages past the stream's 72-hour age or its size limit may be missing.",
 };
 
 /**

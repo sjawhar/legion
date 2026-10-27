@@ -13,7 +13,8 @@
   earlier sweep showed as a card saying it was published while the connection was down. A
   replayed BTW, Aside, Steer or person's Send is that card only: it runs no side turn, takes no
   user turn and posts no Dispatch reply. Role messages and team or other ad-hoc topics stay live
-  only, and nothing from before the session followed a topic, or older than 72 hours, comes back.
+  only, and nothing from before the session followed a topic, or past the stream's 72-hour age or
+  its size limit, comes back.
   A message counts as shown once Oh My Pi wrote its card, or the person's turn it became, to the
   session file (the message's `message_end`): a card or turn handed over while a turn streams,
   which Oh My Pi holds in memory until the turn takes it, is recorded only then, so a process that

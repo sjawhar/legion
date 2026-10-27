@@ -42,7 +42,7 @@ saying it was published while the connection was down. It asks after it reconnec
 subscription is reopened, when it starts or resumes, and on every heartbeat. A targeted Dispatch
 delivery recovered this way (BTW, Aside, Steer, a person's Send) is shown as that card only and
 runs nothing. Role messages and team or other ad-hoc topics are live only and are not recovered,
-and neither is anything older than 72 hours, published before the session followed the topic, or
+and neither is anything past the stream's 72-hour age or its size limit, published before the session followed the topic, or
 published before the session first ran this plugin. A message the session fails to show three
 times is replaced by one card naming it and saying how to read it. The session file keeps what
 it was shown and where it read to, so a restart skips nothing the stream still holds and shows

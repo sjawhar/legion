@@ -60,7 +60,8 @@
   field; a recreated stream (a stored `stream_id` the listener's `stream.id` no longer matches, or,
   from a listener that answers no id, a changed `created`; a `created` that moved under the same
   id is no recreation, and a state stored before ids takes the answer's id unless a cursor stands
-  past the stream's end), a cursor older than the stream's oldest message,
+  past the stream's end), a cursor older than the stream's oldest message (one the stream dropped
+  at its 72-hour age or at its size limit, a notice that names both),
   and a listener that does not replay (404) or cannot (503 `REPLAY_UNAVAILABLE`, 401, 403) are
   each told once. A sweep that only moved its cursors to the stream's end is written at most
   hourly; a recreation's cursor reset and a retention gap's cursor move are written with their

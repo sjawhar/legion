@@ -15008,7 +15008,9 @@ describe("messages missed while the subscription was down", () => {
         expect(second.cards("dispatch-8")).toHaveLength(0);
         expect(
           second.fixture.deliveries.filter((delivery) =>
-            delivery.content.includes("messages older than 72 hours may be missing")
+            delivery.content.includes(
+              "messages past the stream's 72-hour age or its size limit may be missing"
+            )
           )
         ).toHaveLength(1);
       } finally {
@@ -15036,7 +15038,9 @@ describe("messages missed while the subscription was down", () => {
         const second = await bootReplay("replay-issue-gap-busy-b", model, host);
         const gapNotices = () =>
           second.fixture.deliveries.filter((delivery) =>
-            delivery.content.includes("messages older than 72 hours may be missing")
+            delivery.content.includes(
+              "messages past the stream's 72-hour age or its size limit may be missing"
+            )
           );
         await second.tick();
         // A card handed while the turn streams is steered into it, and runs a model turn for it.
@@ -15085,7 +15089,9 @@ describe("messages missed while the subscription was down", () => {
         // Told once, by the session that came back, since the session it was raised in never was.
         expect(
           third.fixture.deliveries.filter((delivery) =>
-            delivery.content.includes("messages older than 72 hours may be missing")
+            delivery.content.includes(
+              "messages past the stream's 72-hour age or its size limit may be missing"
+            )
           )
         ).toHaveLength(1);
       } finally {
@@ -15115,7 +15121,9 @@ describe("messages missed while the subscription was down", () => {
       await first.tick();
       const gapNotices = (session: { readonly fixture: typeof first.fixture }) =>
         session.fixture.deliveries.filter((delivery) =>
-          delivery.content.includes("messages older than 72 hours may be missing")
+          delivery.content.includes(
+            "messages past the stream's 72-hour age or its size limit may be missing"
+          )
         );
       expect(gapNotices(first)).toHaveLength(0);
 
@@ -15160,7 +15168,7 @@ describe("messages missed while the subscription was down", () => {
       model.expireThrough(model.lastSeq);
       model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 33));
       await first.tick();
-      const gap = "messages older than 72 hours may be missing";
+      const gap = "messages past the stream's 72-hour age or its size limit may be missing";
       expect(first.fixture.deliveries.filter(({ content }) => content.includes(gap))).toEqual([]);
       expect(killedWith).toBeDefined();
 
@@ -15206,7 +15214,9 @@ describe("messages missed while the subscription was down", () => {
         await second.tick();
 
         const gapNotices = second.fixture.deliveries.filter((delivery) =>
-          delivery.content.includes("messages older than 72 hours may be missing")
+          delivery.content.includes(
+            "messages past the stream's 72-hour age or its size limit may be missing"
+          )
         );
         expect(gapNotices).toHaveLength(1);
         expect(gapNotices[0]?.details).toEqual(LOCAL_ENVOY_NOTICE);

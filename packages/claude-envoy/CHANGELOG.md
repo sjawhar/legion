@@ -6,7 +6,8 @@
 
 - The channel server delivers once each Envoy message the session missed while its NATS
   subscriptions were down, NATS was restarting or Claude Code was not running. It asks the
-  listener's new `POST /v1/replay` for what the notification stream (72 hours) stored on the
+  listener's new `POST /v1/replay` for what the notification stream (72 hours, or less once it
+  reaches its size limit) stored on the
   session's own subject and on every topic it follows after where it last read, at channel start
   (a resume included), on each NATS reconnect, on every heartbeat and after a new follow, and
   hands each message the session was not given on the same path as a live one (the channel

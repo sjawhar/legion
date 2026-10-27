@@ -71,7 +71,7 @@ not show, `replayedText`, `failureNoticeFields` and `replayNoticeFields` word th
 `envoyNoticeText` renders a notice's fields under `envoy:` in TOON, so a sender's summary that
 holds a newline stays inside its own field. The session is
 told once when the stream was recreated, when its cursor fell behind the stream's oldest message
-(older than 72 hours), and when the listener does not replay (404) or cannot (503
+(older than the stream's 72-hour age, or dropped once the stream reached its size limit), and when the listener does not replay (404) or cannot (503
 `REPLAY_UNAVAILABLE`, 401, 403). A stream is recreated when its `id` differs from the stored one;
 a `created` that moved under the same id is a restore (or, after a clustered restore, a later
 leader election), not a recreation. An

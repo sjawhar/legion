@@ -149,10 +149,11 @@ connection was down.
 
 - **What comes back:** messages on the session's inbox topic, `notifications.agent.<session_id>`,
   and on the topics it follows that the stream keeps, such as an issue's
-  `notifications.dispatch.issue.<KEY>.>`, up to 72 hours old.
+  `notifications.dispatch.issue.<KEY>.>`, up to 72 hours old while the stream is under its size
+  limit.
 - **What does not:** role messages and team topics, which are live only; anything from before the
   session existed, before it followed the topic, or before it first ran a plugin version that
-  recovers; anything older than 72 hours. When the stream was recreated, or the session read it
+  recovers; anything older than 72 hours, or dropped once the stream reached its size limit. When the stream was recreated, or the session read it
   too late to find everything still there, it is told once that messages may be missing.
 - **Nothing runs late:** a person's Send or Aside, a Steer or a BTW that comes back this way is
   shown as a message only, since a person's input run late could act on an old instruction. The

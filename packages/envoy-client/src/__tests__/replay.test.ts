@@ -763,7 +763,7 @@ describe("replay sweep", () => {
     await engine.sweep();
 
     expect(host.notices.map((notice) => notice.kind)).toEqual(["retention_gap"]);
-    expect(host.notices[0]?.message).toContain("older than 72 hours");
+    expect(host.notices[0]?.message).toContain("past the stream's 72-hour age or its size limit");
     expect(host.shown.map((frame) => frame.seq)).toEqual([3, 4, 5]);
   });
 

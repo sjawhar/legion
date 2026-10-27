@@ -58,7 +58,7 @@ events and sends them to the current Claude Code session as supported
   once, the same way as a live one, with a line saying when it was published while the connection
   was down. It runs nothing: a Dispatch delivery recovered this way is that event and no more.
   Role messages and team or other ad-hoc topics are live only and are not recovered, and neither
-  is anything older than 72 hours, from before the session followed the topic, or from before it
+  is anything past the stream's 72-hour age or its size limit, from before the session followed the topic, or from before it
   first ran this version of the plugin; a `/clear` starts afresh, as a new session does. What the
   session was shown and where it read to are kept in `replay-<session id>.json` in the plugin's
   data directory, so a resume skips nothing the stream still holds and delivers nothing again (up
