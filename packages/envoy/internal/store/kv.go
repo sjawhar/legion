@@ -1085,14 +1085,28 @@ func curValue(value string) string {
 	return value
 }
 
+const (
+	// InterestReapGrace is the grace window the listener passes to StartReaper: a dead
+	// session's interest stays at least this long after its row's last write, plus
+	// InterestRefreshAge.
+	InterestReapGrace = 10 * time.Minute
+	// InterestRefreshAge is the most an interest row's UpdatedAt may lag its session's last
+	// heartbeat: a writer may skip rewriting an unchanged row younger than this, and must
+	// rewrite it once it reaches this age. Reap adds it to the grace window, so a skipped
+	// rewrite never shortens the grace a paused session gets after its last heartbeat.
+	InterestRefreshAge = 5 * time.Minute
+)
+
 // Reap cross-references the interest cache with a session liveness check and
-// deletes interests whose sessions are dead AND whose UpdatedAt exceeds the
-// grace window. A role claim is intentionally not an interest: it remains
-// available for its holder to re-register after a listener restart, and the
-// role delivery path drops it if that holder never becomes live again.
+// deletes an interest only when its session is dead AND more than the grace
+// window plus InterestRefreshAge has passed since the row's last write
+// (UpdatedAt); a row exactly that old is kept. A role claim is intentionally
+// not an interest: it remains available for its holder to re-register after a
+// listener restart, and the role delivery path drops it if that holder never
+// becomes live again.
 func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (int, error) {
 	now := r.now().UnixMilli()
-	graceMs := graceWindow.Milliseconds()
+	allowanceMs := graceWindow.Milliseconds() + InterestRefreshAge.Milliseconds()
 
 	r.mu.RLock()
 	var stale []string
@@ -1100,8 +1114,8 @@ func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (i
 		if isAlive(sid) {
 			continue // session still alive
 		}
-		if now-item.UpdatedAt <= graceMs {
-			continue // within grace window
+		if now-item.UpdatedAt <= allowanceMs {
+			continue // within grace window plus refresh age
 		}
 		stale = append(stale, sid)
 	}

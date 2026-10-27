@@ -122,6 +122,30 @@ func TestThePassCarriesAnApprovalAcrossCommitsThatChangeOnlyTheIssuesHandoffs(t 
 	}
 }
 
+// The handoff-only push the compare records leaves the approved head, not the head the fix-attempt
+// count moved from, so it takes back no count: here the recorded head was counted as a fix pushed
+// from a red head between the two (middle), whose move can carry code the compare from the
+// approved head does not show. The approval stands and the count stands with it.
+func TestTheCarryFromAnApprovedHeadTakesBackNoCountFromAnotherHead(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	seedApprovalBelowHead(t, pool, "code")
+	setCapturePullRequest(t, pool, func(pr *record.PullRequest) {
+		pr.FixAttempts, pr.HeadCounted, pr.HeadCountedBefore, pr.HeadCountedFrom = 3, "handoff", "code", "middle"
+	})
+	var compares atomic.Int64
+	review, test := `{"filename":".legion/CAPTURE-1/review.json","status":"modified"}`, `{"filename":".legion/CAPTURE-1/test.json","status":"modified"}`
+	api := compareStandIn(t, http.StatusOK, `{"status":"ahead","ahead_by":2,"behind_by":0,"files":[`+review+`,`+test+`]}`, &compares).URL
+	reviewReadRuntime(pool, api).readRequiredChecks(context.Background())
+	got, pr := capturePhase(t, pool)
+	if got != phase.Accepting {
+		t.Fatalf("after the pass the issue is in %s, want %s: the approval of code stands", got, phase.Accepting)
+	}
+	if pr.FixAttempts != 3 || pr.HeadCounted != "handoff" || pr.HeadCountedBefore != "code" || pr.HeadCountedFrom != "middle" {
+		t.Fatalf("after the pass fixAttempts=%d headCounted=%q headCountedBefore=%q headCountedFrom=%q, want 3, \"handoff\", \"code\" and \"middle\": the carry from code took back the count of the move from middle",
+			pr.FixAttempts, pr.HeadCounted, pr.HeadCountedBefore, pr.HeadCountedFrom)
+	}
+}
+
 // The pass compares only while an approval is set aside: an approval of the recorded head itself
 // stands with no read, and so does one a recorded handoff-only push already carries; a round with
 // no approval, or an issue not in reviewing, has no approval for a compare to carry.
