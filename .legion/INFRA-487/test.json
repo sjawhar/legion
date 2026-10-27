@@ -2,33 +2,31 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-487",
-  "completed": "2026-10-26T22:46:08Z",
-  "round": 6,
-  "headTested": "68d3f6c0b7f1ac4cc2077b60341dd1d4aaa7b48a (code head e847db828666: migration 0019 adds index broker_serving_latest on broker_serving (last_serving_at desc), review round 2)",
+  "completed": "2026-10-27T03:23:51Z",
+  "round": 7,
+  "kind": "rebase re-check 68d3f6c0 → 723e837f: fingerprint unchanged, bare gates only",
+  "headTested": "723e837fa04ee16927467d3468af6be11e851299 (code head 015a2e699f65, merge: resolve conflict against main@origin)",
+  "fingerprint": {
+    "command": "base=$(gh pr view 2269 -R sjawhar/legion --json baseRefName -q '.baseRefName | @json'); jj -R \"$LEGION_WORKSPACE\" diff --from \"fork_point(${base}@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum",
+    "at68d3f6c0": "f265f321824ec11f926320d38b0f5a04bb4778b1a534e085d36af5e2c9ba0efd",
+    "at723e837f": "f265f321824ec11f926320d38b0f5a04bb4778b1a534e085d36af5e2c9ba0efd",
+    "result": "unchanged"
+  },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Migrated a fresh schema with the broker binary built at the head (`\\d broker_serving` shows broker_serving_latest btree (last_serving_at DESC)) and measured enrollment_lease_live on the tester's Postgres 16, 20000 calls each (`select count(*) filter (where enrollment_lease_live(now() - interval '1 second')) from generate_series(1,20000)`): 5050 serving rows with the index 575.5 ms, EXPLAIN of the function's lookup 'Limit -> Index Scan using broker_serving_latest'; the same 5050 rows with the index dropped 44990.7 ms, 'Limit -> Sort -> Seq Scan'; 1 row with the index 618.1 ms. Guard semantics unchanged with the index: latest row 10 s old against a 3 s threshold, a lease that ran out after it is live (t) and one that ran out before it is not (f). Re-ran the real-binary outage test once (proof)."
+    "how": "Fingerprint unchanged, so the real-surface verification of rounds 5-6 stands. The merge brings in no file under packages/envoy/internal/broker, packages/envoy/cmd/broker, packages/envoy/cmd/agent-secrets or packages/daemon/internal/agentsecrets, no other 0019 migration, and no lease predicate outside enrollment_lease_live and the beat. Smoke: the real-binary outage test passed once at the head (proof)."
   },
   "failures": [],
   "failed": 0,
-  "ci": "At 68d3f6c0 Tests 40413885348, Legion Envoy and Contracts 40413885347, Docs 40413885301 and Worker Image 40413885320 were queued at 22:46Z; read as queued, not waited for. 24da304f's runs were cancelled by this head's push before they ran, so no Tests or Legion Envoy and Contracts run has completed on any head of #2269 yet. This handoff push carries skip-checks: true, so it starts and cancels no run.",
-  "localNotes": "`go test ./internal/broker/enroll` ok at the head; `./internal/broker/store` fails only TestOpenSignsEveryNewConnectionInWithAFreshlyMintedToken ('signed in to a role that has a password; the test proves nothing'), because the tester's Postgres trusts every login: environmental, the same skip the implementer names, untouched by this change; CI runs it.",
+  "ci": "At the code head 015a2e69, Tests 40443580364, Legion Envoy and Contracts 40443580408, Docs 40443580331, Worker Image 40443580418 and PR Title 40443580479 were queued at 03:23Z; read as queued, not waited for. At the previous head 68d3f6c0 the required set (lint, typecheck, test, pr-title) and Legion Envoy and Contracts completed green, per the reviewer's round-3 record. The handoff head 723e837f carries skip-checks: true, as does this push.",
   "proof": [
     {
-      "criterion": "After an outage longer than the lease, a pod fetches again within one renewal interval of the broker serving, with no relaunch and no person; an ended enrollment stays ended; a broker that dies before serving records no beat",
+      "criterion": "After an outage longer than the lease, a pod fetches again within one renewal interval of the broker serving, with no relaunch and no person (smoke at the merged head)",
       "surface": "the real broker binary twice on one real Postgres 16 database and the real agent-secrets binary behind one forwarded address",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:54488/postgres?sslmode=disable go test -count=1 -v -run 'TestABrokerOutageLongerThanALease|TestABrokerThatDiesBeforeServingRecordsNoServingBeat' ./cmd/broker",
-      "observed": "both --- PASS (91.52s, 10.09s), 0 SKIP; survivor held 39.947s at the stop; fetch served 81ms after the second broker listened; renewer renewed to 44.912s past now 5.976s after; 'gave back ... gap=58.36687s ... enrollments=2'",
-      "headSha": "68d3f6c0b7f1ac4cc2077b60341dd1d4aaa7b48a",
-      "negativeControl": "round 1: the same outage test on eee16056 failed 'agent-secrets: proof invalid: not live (PROOF_INVALID)'"
-    },
-    {
-      "criterion": "Review round 2: the latest serving row is an index lookup, so enrollment_lease_live does not seq-scan and sort broker_serving per call",
-      "surface": "a schema migrated by the head's broker binary on real Postgres 16",
-      "command": "psql -f idx.sql: 5050 broker_serving rows, analyze, EXPLAIN of `select ... from broker_serving order by last_serving_at desc limit 1`, then 20000 enrollment_lease_live calls; repeated with the index dropped",
-      "observed": "with the index: 'Limit -> Index Scan using broker_serving_latest', 20000 calls 575.5 ms",
-      "headSha": "68d3f6c0b7f1ac4cc2077b60341dd1d4aaa7b48a",
-      "negativeControl": "index dropped: 'Limit -> Sort -> Seq Scan on broker_serving', 20000 calls 44990.7 ms"
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:54488/postgres?sslmode=disable go test -count=1 -v -run TestABrokerOutageLongerThanALease ./cmd/broker",
+      "observed": "--- PASS (86.87s), 0 SKIP; fetch served 98ms after the second broker listened; renewer renewed to 44.979s past now 5.9s after; 'gave back ... gap=58.396083s ... enrollments=2'",
+      "headSha": "723e837fa04ee16927467d3468af6be11e851299",
+      "negativeControl": "round 1: the same test on eee16056 failed 'agent-secrets: proof invalid: not live (PROOF_INVALID)'"
     }
   ]
 }
