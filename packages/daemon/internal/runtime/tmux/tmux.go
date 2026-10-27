@@ -336,6 +336,14 @@ func New(opts Options) (*Runtime, error) {
 	}
 	sort.Strings(r.environ)
 	r.run = r.runTmux
+	if r.takeOver != "" {
+		// One line at boot, in the log an operator reads first: while the key is set the
+		// same-agent refusal is off for the whole project — every session found nowhere starts a
+		// fresh agent (takingOverSession) — and a forgotten key leaves it off with no other trace
+		// than a per-launch warning and `take_over` in `legion state --json`.
+		r.log.Warn("tmux runtime: runtime.tmux.take_over is set, so every session found nowhere starts a fresh agent and no launch is charged for it; remove the key once the move is done (docs/deployment.md, \"Moving a project onto tmux\", step 5)",
+			"takeOver", opts.TakeOver, "takesOver", r.takeOver)
+	}
 	return r, nil
 }
 
