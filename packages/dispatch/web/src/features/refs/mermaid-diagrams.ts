@@ -147,7 +147,8 @@ function endsInOpenMermaidFence(
   const last = lastLeafBlock(parsed);
   if (last?.type.name !== "code_block" || !isMermaidLanguage(last.attrs.language)) return false;
   const source = markdown.trimEnd();
-  const lastLine = source.slice(source.lastIndexOf("\n") + 1);
+  // A line ends at LF, CR or CRLF, as micromark reads it; a CRLF's last LF follows its CR.
+  const lastLine = source.slice(Math.max(source.lastIndexOf("\n"), source.lastIndexOf("\r")) + 1);
   const lead = (CONTAINER_LEAD.exec(lastLine)?.[0] ?? "").replace(/[^\s>]/g, " ");
   const newline = markdown.endsWith("\n") ? "" : "\n";
   const probed = reparse(`${markdown}${newline}${lead}${OPEN_FENCE_PROBE}`);

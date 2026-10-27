@@ -978,6 +978,50 @@ describe("Mermaid diagrams", () => {
     }
   });
 
+  // A line ends at a lone CR too, as micromark reads it, so a body written with CR endings keeps
+  // a diagram still being written inside its quote or list item as code.
+  test("a mermaid fence still open inside a quote or a list item of a body with lone-CR line ends keeps it as code", async () => {
+    const done = "```mermaid\rsequenceDiagram\r  Alice->>Bob: Hi\r```\r";
+    for (const [streaming, closing] of [
+      ["> ```mermaid\r> sequenceDiagram\r>   Carol->>Dave: Yo", "\r> ```\r"],
+      ["- ```mermaid\r  sequenceDiagram\r    Carol->>Dave: Yo", "\r  ```\r"],
+    ] as const) {
+      resetMermaidDiagrams();
+      const view = render(<MarkdownBody markdown={`Lead\r${done}\r${streaming}`} />);
+      try {
+        await waitFor(() => expect(figuresIn(view.container).length).toBeGreaterThan(0));
+        expect(figuresIn(view.container)).toHaveLength(1);
+        const code = view.container.querySelectorAll("pre")[1];
+        expect(code?.textContent).toContain("Carol->>Dave: Yo");
+        expect(code?.closest("figure")).toBeNull();
+        view.rerender(<MarkdownBody markdown={`Lead\r${done}\r${streaming}${closing}`} />);
+        await waitFor(() => expect(figuresIn(view.container)).toHaveLength(2));
+      } finally {
+        view.unmount();
+      }
+    }
+  });
+
+  // A body's `:::` directive is parsed read-only, so a fence inside one follows the same rule: open
+  // it stays code, and closed it draws.
+  test("a mermaid fence inside a directive keeps it as code while open and draws once closed", async () => {
+    const streaming = ":::note\n```mermaid\nsequenceDiagram\n  Carol->>Dave: Yo";
+    const view = render(<MarkdownBody markdown={streaming} />);
+    try {
+      await waitFor(() =>
+        expect(view.container.querySelector("pre code")?.textContent).toContain("Carol->>Dave: Yo")
+      );
+      // Long enough for a draw the open fence must not start to have landed.
+      await Bun.sleep(50);
+      expect(figuresIn(view.container)).toHaveLength(0);
+      view.rerender(<MarkdownBody markdown={`${streaming}\n\`\`\`\n`} />);
+      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
+      expect(diagramIn(figuresIn(view.container)[0])?.textContent).toContain("Carol");
+    } finally {
+      view.unmount();
+    }
+  });
+
   test("a body whose source changes or that unmounts before the worker answers draws only the newest source", async () => {
     // With the engine loaded the body paints in its layout effect, so only the worker is late.
     await warmMarkdownRenderer();
