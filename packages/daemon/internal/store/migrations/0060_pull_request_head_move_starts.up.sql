@@ -1,4 +1,4 @@
--- 0059_pull_request_head_move_starts.up.sql — where a pull request's head moves started, so a move
+-- 0060_pull_request_head_move_starts.up.sql — where a pull request's head moves started, so a move
 -- is judged by the chain of recorded pushes it took, whichever of the pushes and the head arrives
 -- first.
 --
