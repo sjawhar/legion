@@ -2,16 +2,17 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-595",
-  "completed": "2026-10-27T10:45:09Z",
+  "completed": "2026-10-27T14:21:46Z",
   "round": 3,
+  "kind": "confirmation after a conflict-forced merge",
   "decision": "approved",
-  "reviewedCodeHead": "b1ce6a9d0fa3649d6207f68adab6f432366da5db",
+  "previousApproval": "9791bbe6d33dbe85223f49abd53ea64963b7b78d",
+  "reviewedCodeHead": "f48e32d9249c75cb9a82716b3c64cf8fea089305",
+  "fingerprint": "9cfde11a35ae2b9601d92dab83bcc08daf816ef0774db140ab7372beb45741e7 at 9791bbe6 and at e7a25a02 (fork point against main@origin, without .legion and docs/solutions): unchanged",
   "critical": 0,
   "important": 0,
   "minor": 0,
   "keyFindings": [],
-  "roundTwoFixVerified": "PRRT_kwDORFy7ds6wlR7Q: TestARecreatedBucketForgetsTheOldBucketsRecords now uses a 1 h debounce and reads pass's (held, next, ok); removing the queue reset fails at summary_loop_test.go:487 and removing the held reset fails at :484 (both thermonuclear agents, 3/3 runs each); no sleep or wall-time guard remains.",
-  "ci": "CI head b1ce6a9d (newest pull_request run); required lint, typecheck, test, pr-title completed success; compare b1ce6a9d...8bd553be handoffs only (2 files). envoy-go (not required) failed: internal/dispatch/api hit the 10 min go test timeout (last running TestWriteAdviceKeepsItsFieldsWhenTheLegionWalkFails); internal/cistore and cmd/listener passed in that job. This PR does not touch internal/dispatch/api; the timeout is tracked by dispatch://INFRA-523 and dispatch://INFRA-520 (explicit go test -timeout for envoy-go).",
-  "mergeability": "GitHub reports the PR CONFLICTING against main at 10:45Z: main changed packages/envoy/AGENTS.md and packages/envoy/CHANGELOG.md since the fork point c3d09eec. The implementer's forward merge follows conflicts-and-rewrites.md; the reviewer then compares the unchanged-diff fingerprint at 8bd553be and the merged head.",
-  "thermonuclear": "At b1ce6a9d: deep-review approve, no finding; code-quality approve, no finding."
+  "ci": "CI head f48e32d9 (the merge of main 2e8c68cd); required lint, typecheck, test, pr-title completed success; compare f48e32d9...e7a25a02 is handoffs only (2 files). envoy-go (not required) failed on TestSessionEntryRouteAnswersASessionTheCacheHasNotRefilled (cmd/listener role-claim-view race, a route this PR does not touch); evidence posted on dispatch://INFRA-523/comment/5cdbed94-2ecd-4899-bd85-052894cd03ff.",
+  "mergeability": "GitHub reports the PR CONFLICTING again at 14:21Z: main moved past 2e8c68cd and changed .dispatch/architecture/envoy-listener.md, packages/envoy/AGENTS.md, packages/envoy/CHANGELOG.md and packages/envoy/cmd/listener/main.go, all files this PR edits. Another forward merge and fingerprint confirmation follow."
 }
