@@ -449,7 +449,7 @@ Where the digest is published:
 - `docker buildx imagetools inspect ghcr.io/sjawhar/legion-worker:<tag>` for a `sha-` or
   `<legion version>` worker-image tag.
 
-Worker-image tags: `sha-<12 hex of the built commit>` on every run (on a pull request that is the
+Worker-image tags: `sha-<12 hex of the built commit>` on every run that builds (on a pull request that is the
 PR head, never the ephemeral merge commit); `<legion version>` only on `main` when the `legion_publish`
 job released that version in the same run. Runs from any other ref publish the `sha-` worker-image tag
 only and never touch a release. The package also currently holds `sha256-<image digest hex>` OCI
@@ -501,9 +501,13 @@ The attestation is separate from the image's own BuildKit provenance, which the 
 cache (`cache-from: type=gha`, `cache-to: type=gha,mode=max`), pushed with the workflow's own `GITHUB_TOKEN`
 — no third-party builder, no project variable, no extra credential. It runs (1) from `release.yaml` after
 the `legion_build` and `legion_publish` jobs on every `main` push that touches any file the image builds
-from, (2) on every head of a pull request against `main` whose diff touches any of those files — building
+from, (2) on a pull request against `main` whose diff touches any of those files — building
 the PR head and publishing `sha-` only — and (3) by `gh workflow run worker-image.yaml --ref <ref>` once the
-workflow exists on `main`. The
+workflow exists on `main`. Trigger (2) does not build every head. A draft's head builds no image and
+publishes no `sha-` tag. Marking the pull request ready builds that head. A newer push to the pull
+request cancels the build of an older head, waiting or running, so that older head gets no image.
+Closing the pull request cancels its build too. No `main`, `release.yaml` or `workflow_dispatch` run is
+ever cancelled this way. The
 files the image builds from are every context source `worker.Dockerfile` copies: the root manifest,
 lockfile, patches and each root workspace's `package.json` (the frozen install); the packages it copies
 whole — the Dockerfile (`packages/daemon/docker/**`), the two plugins and what they bundle (`packages/pi-envoy/**`,
@@ -531,7 +535,8 @@ then names `refs/pull/<n>/merge`, which the verify command above refuses.
 **The image is built only by this workflow, on the GitHub-hosted runner.** Never build it on a workstation
 — no `docker build`, `docker buildx`, or `docker compose build`: an unrelated buildx job took the devbox
 host to load 646 on 2026-09-12 and the Legion daemon with it (the CI runner is not a workstation). Iterate by
-pushing the PR branch (trigger 2) or, once merged, dispatching (trigger 3); check the Dockerfile and workflow
+pushing the PR branch (trigger 2; a draft builds only once it is marked ready, and a push cancels the
+previous head's build) or, once merged, dispatching (trigger 3); check the Dockerfile and workflow
 statically (`hadolint`, `actionlint` where installed) and run `bun test` for the TypeScript. Pulling and
 running the published image locally is fine. A failed build is retried with `gh run rerun <run-id> --failed`
 (`--failed` keeps `legion_build`'s and `legion_publish`'s recorded outputs) or by pushing the branch again. A

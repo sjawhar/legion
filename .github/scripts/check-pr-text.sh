@@ -25,13 +25,15 @@
 # from their list routes, which report no total, so each is read 100 at a time until a page comes
 # back short. There is no total to cross-check those lists against, and none is needed: a list
 # that changes while a run reads it is read again by the next push, edit or review run and by the
-# lint job at the next push, and those runs' checks are the ones the merge reads. A NUL byte in any
+# lint job at the next push to a pull request that is not a draft or when a draft is marked ready,
+# and those runs' checks are the ones the merge reads. A NUL byte in any
 # of them, which would make `grep -I` treat the file as binary and skip it, is stripped first.
 #
 # Usage: GITHUB_EVENT_PATH=<payload> GITHUB_REPOSITORY=<owner>/<repo> .github/scripts/check-pr-text.sh
-# CI runs it in the required lint job of pr-and-main.yaml on every pull request push, and in
-# pr-title.yaml when a pull request is opened, reopened or edited or a review on it is submitted
-# or edited; its tests are in check-private-names.test.sh.
+# CI runs it in the required lint job of pr-and-main.yaml at every push to a pull request that is
+# not a draft and when a draft is marked ready, and in pr-title.yaml at every push, draft or not,
+# and when a pull request is opened, reopened or edited or a review on it is submitted or edited;
+# its tests are in check-private-names.test.sh.
 set -euo pipefail
 
 event=${GITHUB_EVENT_PATH:?GITHUB_EVENT_PATH must name the pull request event payload}
