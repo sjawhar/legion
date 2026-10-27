@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-158",
+  "completed": "2026-10-27T07:20:00Z",
+  "proof": [
+    {
+      "criterion": "Fourteenth forward merge resolves main's conflicts, sizes the lease pool to the merged tree's leased callers, and leaves the pull request mergeable",
+      "surface": "the merged tree's builds, the store and duty Postgres suites, the repair/close/block-index tests in api and docs, the dispatch document unit tests; GitHub's mergeability",
+      "command": "go build ./... ; go vet ./cmd/dispatch/ ./internal/dispatch/store/ ; go test -count=1 ./internal/dispatch/store/ ./internal/dispatch/duty/ ; go test -count=1 -run 'Repair|Unloadable|TestClosingAnIssue|BlockIndex' ./internal/dispatch/api/ ./internal/dispatch/docs/ ; cd packages/dispatch && bun run typecheck && bun test web/src/features/doc ; claude-envoy check-dist ; gh pr view 2233 --json mergeable",
+      "observed": "All pass (store 183.6s, duty, api, docs ok; 182 doc tests pass); ten production duty.Exclusive callers on the merged tree (main's block-index reconciliation plus this branch's ask repair) and leasePoolSize = 10; MERGEABLE. Fingerprint changed b9213970 -> 2eeecd82 because the pool size and loop count now add to main's.",
+      "headSha": "4440fc7b57a27f3aa25936fc470183036e4db1e8",
+      "negativeControl": "At f509fd0f GitHub reported CONFLICTING (pool.go, cmd/dispatch/main.go, cmd/dispatch/README.md, ProofDocument.decisions.test.tsx) and ran no checks"
+    }
+  ],
+  "filesChanged": [
+    "fourteenth forward merge 4440fc7b: packages/envoy/internal/dispatch/store/pool.go (leasePoolSize 10, ten-name comment), packages/envoy/cmd/dispatch/main.go (both loops start), packages/envoy/cmd/dispatch/README.md (eight loops), packages/dispatch/web/src/features/doc/ProofDocument.decisions.test.tsx (both tests kept)"
+  ],
+  "deviations": [
+    "The fingerprint changed: main's #2210 added the block-index reconciliation, a leased loop, so this branch's ask repair is the tenth lease caller (leasePoolSize 10, not 9) and the README counts eight loops, not seven."
+  ]
+}
