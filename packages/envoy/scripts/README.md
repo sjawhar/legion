@@ -220,3 +220,35 @@ never a fixed number of milliseconds.
 ```bash
 DISPATCH_BENCH_DATABASE_URL=<copy> packages/envoy/scripts/search-latency-compare.sh <base-checkout> [rounds]
 ```
+
+## Measuring the related-item check on a project's duplicates
+
+`related-recall.sh` copies one project's duplicate pairs, and every other issue of the project they
+compete with, from a Dispatch server into a JSONL file, for `TestRelatedRecallOnDuplicates`
+(`internal/dispatch/api`). A duplicate is a done issue whose messages say
+`Duplicate of dispatch://<KEY>`, the reason `dispatch issue-update --status done --reason` posts
+just before the close. Each text is copied as it stood when the duplicate was filed: the
+duplicate's first title and first spec version, the survivor's title and spec as of that moment.
+Pairs whose survivor is in another project, or was filed after the duplicate, are counted and left
+out. It reads with the caller's own token, sends only `GET`s, one at a time, and prints counts
+only: pairs found, kept and left out by reason, chains (a survivor itself closed as a duplicate),
+and issues copied.
+
+```bash
+DISPATCH_URL=<server> DISPATCH_TOKEN_FILE=<token file> \
+  packages/envoy/scripts/related-recall.sh <project> "$TMPDIR/recall.jsonl"
+```
+
+The file is production data: it is written with mode 600 and never committed. The test loads it
+into a fresh test database, every issue open and under its own key, refreshes the term statistics,
+and for each pair runs the check's old 40-word OR query and its keyword search over the
+duplicate's text, printing whether each lists the survivor among its three related items and both
+totals. `DISPATCH_RECALL_REQUIRE_GAIN=1` fails it unless the keyword search lists more.
+`TestRelatedCheckLatencyOnRecallCorpus` loads the same corpus and prints the keyword search's p50,
+p95 and max over 20 runs for the text of the issue `DISPATCH_RECALL_LATENCY_ISSUE` names and for a
+10,000-word spec, and the refresh's duration.
+
+```bash
+cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<test database> DISPATCH_RECALL_CORPUS="$TMPDIR/recall.jsonl" \
+  go test ./internal/dispatch/api -run 'TestRelatedRecallOnDuplicates|TestRelatedCheckLatencyOnRecallCorpus' -v -count=1 -timeout 60m
+```
