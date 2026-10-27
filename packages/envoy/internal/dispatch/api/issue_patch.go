@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -465,13 +464,9 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if (before.ClosedAt == nil) != (after.ClosedAt == nil) {
-		// The refresh runs after the commit, so a client that hangs up now must not stop it:
-		// rooms that never got the closed flag keep taking edits until they are reloaded.
-		// Dropping only the cancellation keeps the context's transaction mark, which is what
-		// lets the pool refuse a refresh run while a transaction is still open.
-		s.deps.Docs.SetIssueClosed(context.WithoutCancel(r.Context()), key, after.ClosedAt != nil)
-	}
+	// A change of closed_at reaches the document rooms of every process, this one's included, from
+	// the commit itself: migration 0121's trigger notifies, and each process closes its rooms of
+	// the issue's documents so their browsers reconnect with the scope the issue now allows.
 	s.publish(events...)
 	WriteJSON(w, http.StatusOK, withAdvice(after, advice))
 }

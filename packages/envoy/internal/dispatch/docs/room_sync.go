@@ -63,7 +63,8 @@ const (
 	// documentAwarenessChannel carries a room's awareness (cursors, presence) between processes,
 	// and the queries for it; awareness_relay.go has its wire format.
 	documentAwarenessChannel = "dispatch_doc_awareness"
-	// issueOpenChangedChannel carries the key of an issue that was closed or reopened.
+	// issueOpenChangedChannel carries the key of an issue that was closed or reopened, sent by the
+	// trigger migration 0121 puts on issues.closed_at (Service.issueOpenChanged).
 	issueOpenChangedChannel = "dispatch_issue_open_changed"
 	// documentQueryChannel carries one process's question about a room to every other member,
 	// and documentAnswerChannel each member's answer to it.
@@ -146,8 +147,9 @@ type roomSync struct {
 	// awareness, issueOpenChanged, query and answer handle the four channels beside the
 	// document-change channels the service's catch-up follows (handlers): documentAwarenessChannel,
 	// issueOpenChangedChannel, documentQueryChannel and documentAnswerChannel. Nil drops that
-	// channel's notifications. awareness is the service's awareness relay (awarenessRelay.received);
-	// nothing sets the others yet outside tests.
+	// channel's notifications. awareness is the service's awareness relay (awarenessRelay.received)
+	// and issueOpenChanged the service's Service.issueOpenChanged; nothing sets the others yet
+	// outside tests.
 	awareness, issueOpenChanged, query, answer func(ctx context.Context, payload string)
 	// listening runs after each LISTEN's connected work has run (connected). Nil outside tests: a
 	// test waits on it before the write whose notification it expects, since a notification sent
@@ -156,7 +158,11 @@ type roomSync struct {
 }
 
 func newRoomSync(service *Service) *roomSync {
-	return &roomSync{service: service, awareness: service.awarenessRelay.received}
+	return &roomSync{
+		service:          service,
+		awareness:        service.awarenessRelay.received,
+		issueOpenChanged: service.issueOpenChanged,
+	}
 }
 
 // ProcessID is this process's id among the envoy-dispatch processes on its database, minted once
@@ -180,7 +186,9 @@ func (s *Service) RegisterRoomSync(hub *pglisten.Hub) (run func(ctx context.Cont
 // handlers is every channel room sync LISTENs on and what runs each one's notifications: the one
 // place a channel is tied to its handler. documentHeadChannel and documentChangedChannel share
 // the catch-up's lane, because the follower tells a write's bare announcement from an old build's
-// by the head announcement right before it (roomCatchUps.changed).
+// by the head announcement right before it (roomCatchUps.changed). The issue-open lane re-reads
+// the issue of every resident room after each LISTEN (Service.recheckResidentIssues), since a
+// close or a reopen notified while the hub had no connection reached nobody.
 func (r *roomSync) handlers() []roomSyncHandler {
 	catchUps := r.service.catchUps
 	return []roomSyncHandler{
@@ -195,7 +203,10 @@ func (r *roomSync) handlers() []roomSyncHandler {
 			attach:    catchUps.attach,
 		},
 		{channels: []roomSyncChannel{{name: documentAwarenessChannel, notified: r.awareness}}},
-		{channels: []roomSyncChannel{{name: issueOpenChangedChannel, notified: r.issueOpenChanged}}},
+		{
+			channels:  []roomSyncChannel{{name: issueOpenChangedChannel, notified: r.issueOpenChanged}},
+			connected: r.service.recheckResidentIssues,
+		},
 		{channels: []roomSyncChannel{{name: documentQueryChannel, notified: r.query}}},
 		{channels: []roomSyncChannel{{name: documentAnswerChannel, notified: r.answer}}},
 	}

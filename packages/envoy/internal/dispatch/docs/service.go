@@ -657,7 +657,7 @@ func New(deps Deps) *Service {
 	// Apply's return, and the sweeper flushes the room before it evicts it, so every write a room
 	// the sweeper evicts has taken is durable before a successor can load. CloseRoom
 	// checks peers alone too (Server.CloseRoom), and the service still calls it to close an
-	// issue's rooms (SetIssueClosed), for a room with an editor at Shutdown, and to evict one
+	// issue's rooms (setRoomIssueOpen), for a room with an editor at Shutdown, and to evict one
 	// (evictRoom): a write that commits on a room it has retired reaches the store through ygo's
 	// stranded persistence, on the committing goroutine: the room's doc.OnUpdate observer, which
 	// loadRoom registers (provider/websocket/server.go:1784-1826) and which runs on the goroutine
@@ -2352,66 +2352,181 @@ func waitGroup(ctx context.Context, wg *sync.WaitGroup) {
 	}
 }
 
-// SetIssueClosed refreshes the closed state every room of an issue remembers, and closes them when
-// the issue closes. A document with no state has no room to tell: its next load reads the issue.
-// Its caller runs it after its own transaction has committed, and it takes that caller's context
-// so the pool can see it: a caller that ever runs it with a transaction still open is refused, not
-// wedged. That context is one caller holding at most one connection, so the rooms are recorded and
-// closed one at a time.
-func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bool) {
-	rooms, err := s.documentRooms(ctx, "the issue's document rooms", `
-		select id::text from artifacts where issue_key = $1 and kind = 'doc'
-	`, issueKey)
+// roomIssueState is one document and whether its issue is open, as issueOpenChanged and
+// recheckResidentIssues read them.
+type roomIssueState struct {
+	room string
+	open bool
+}
+
+// issueDocumentsStatement reads every document of issue $1 and whether the issue is open now.
+const issueDocumentsStatement = `
+	select a.id::text, i.closed_at is null
+	from artifacts a join issues i on i.key = a.issue_key
+	where a.issue_key = $1 and a.kind = 'doc'`
+
+// residentIssuesStatement reads whether the issue of each document in $1 is open now, true for a
+// document of no issue (as issueOpen has it).
+const residentIssuesStatement = `
+	select a.id::text, coalesce(i.closed_at is null, true)
+	from artifacts a left join issues i on i.key = a.issue_key
+	where a.id = any($1::uuid[]) and a.kind = 'doc'`
+
+// readRoomIssueStates runs sql, one of the two statements above, through the pool.
+func (s *Service) readRoomIssueStates(ctx context.Context, sql string, arg any) ([]roomIssueState, error) {
+	rows, err := s.store.Pool.Query(ctx, sql, arg)
 	if err != nil {
-		// Every room keeps the closed flag it already had. A caller that ran this while it
-		// still held a connection is refused (store.ErrNestedAcquire) and has to be able to
-		// see which issue went stale.
-		slog.Error("dispatch: refresh the closed state of an issue's rooms",
-			"issue", issueKey, "error", err)
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (roomIssueState, error) {
+		var state roomIssueState
+		err := row.Scan(&state.room, &state.open)
+		return state, err
+	})
+}
+
+// issueOpenChanged is issueOpenChangedChannel's handler, on its room-sync lane (roomSync.handlers):
+// issueKey's closed_at changed, in a transaction of any process - this one's, another's, or an
+// earlier build's - whose commit the trigger of migration 0121 announced. It reads the issue's
+// state now rather than trusting the notification for it: a close and a reopen in quick
+// succession may both be read as the second, which is the truth by then. Every room this process
+// holds of the issue's documents takes that state (setRoomIssueOpen). A document no room here
+// holds has nothing to tell: its next load reads the issue.
+func (s *Service) issueOpenChanged(ctx context.Context, issueKey string) {
+	states, err := s.readRoomIssueStates(ctx, issueDocumentsStatement, issueKey)
+	if err != nil {
+		// Every room keeps the state it had until the next change of the issue, or the next
+		// LISTEN (recheckResidentIssues); meanwhile its browsers' appends are refused by the gate,
+		// which reads the issue itself (refuseClosedIssueAppend).
+		if ctx.Err() == nil {
+			slog.Error("dispatch: read the open state of an issue's documents", "issue", issueKey, "error", err)
+		}
 		return
 	}
-	for _, room := range rooms {
-		state := s.lockExistingState(room)
-		changed := true
-		var (
-			lastActor *model.Actor
-			creditSeq uint64
-		)
-		if state != nil {
-			changed = state.closed != closed
-			state.closed = closed
-			if closed && changed {
-				state.roomGeneration = s.nextRoomGeneration()
-				// The closed room's settlement failures are not the next room's (see
-				// reserveRoomCloseLocked): a record kept across the close and a reopen starts
-				// over.
-				state.settleFailures = 0
-				s.stopSettleTimer(state.settle)
-				// Snapshot while the state is locked, then write after unlocking: settlement holds
-				// the document's advisory lock before it takes state.mu, so taking that lock here
-				// while holding the state would invert the lock order. The authors are already in
-				// the document's pending authors or in flight to them; only the latest edit source
-				// lives in the state alone.
-				lastActor, creditSeq = state.lastActor, state.creditSeq.Load()
-			}
-			s.unlockState(room, state)
+	for _, state := range states {
+		s.setRoomIssueOpen(ctx, state.room, state.open, true)
+	}
+}
+
+// recheckResidentIssues is the issue-open lane's work after each LISTEN stands: a close or a
+// reopen notified while the listener had no connection reached nobody and is never sent again, so
+// the issue of every room this process holds is read once more, in one statement, and each room
+// whose record no longer matches takes the issue's state (setRoomIssueOpen).
+func (s *Service) recheckResidentIssues(ctx context.Context) {
+	var rooms []string
+	s.roomLoads.Range(func(key, _ any) bool {
+		if room := key.(string); s.srv.GetDoc(room) != nil {
+			rooms = append(rooms, room)
 		}
-		if closed && changed {
-			persisted := lastActor == nil
-			if lastActor != nil {
-				if err := s.persistLastActor(ctx, room, *lastActor); err != nil {
-					slog.Error("dispatch: record closing document's latest edit source", "room", room, "error", err)
-				} else {
-					persisted = true
-				}
-			}
-			if persisted {
-				s.lastActorPersisted(room, creditSeq)
-			}
-			// A room still loading has no state yet, and is closed once it has loaded.
+		return true
+	})
+	if len(rooms) == 0 {
+		return
+	}
+	states, err := s.readRoomIssueStates(ctx, residentIssuesStatement, rooms)
+	if err != nil {
+		if ctx.Err() == nil {
+			slog.Error("dispatch: read the open state of the resident documents' issues", "rooms", len(rooms), "error", err)
+		}
+		return
+	}
+	for _, state := range states {
+		s.setRoomIssueOpen(ctx, state.room, state.open, false)
+	}
+}
+
+// refuseClosedIssueAppend is a browser's append the gate refused because the document's issue is
+// closed (ErrIssueClosed). When room's record still holds the issue open, the issue closed without
+// this process hearing it yet - its listener redialing, or the notification still on its way - and
+// the room is closed for its issue here, as the notification would close it (setRoomIssueOpen), so
+// it stops taking edits and its browsers reconnect read-only. That runs on a goroutine of its own:
+// this is ygo's persistence worker, which the close waits for. A record already marked closed is
+// being closed for its issue, whose close hands the room's last updates here, and they are dropped.
+func (s *Service) refuseClosedIssueAppend(room string) {
+	state := s.lockExistingState(room)
+	if state == nil {
+		return
+	}
+	closed := state.closed
+	s.unlockState(room, state)
+	if closed {
+		return
+	}
+	slog.Info("dispatch: closing a document room whose issue closed before this process heard of it", "room", room)
+	// Shutdown joins the close, as it does a failed room's eviction (failRoomLocked); one that
+	// begins after Shutdown stopped accepting work runs unjoined, since the room still must close.
+	tracked := s.addUnlessStopping(&s.evictWG)
+	go func() {
+		if tracked {
+			defer s.evictWG.Done()
+		}
+		s.setRoomIssueOpen(store.WithTransactionTracking(context.Background()), room, false, false)
+	}()
+}
+
+// setRoomIssueOpen gives room's record open, its issue's state, and when the record held the other
+// state closes the room, so every browser reconnects with the scope the issue now allows: ygo fixes
+// a connection's read-only flag when it connects (sjawhar/ygo provider/websocket/peer.go), so a
+// connected browser's scope can change only by reconnecting. The close removes this process's
+// browsers' awareness first, relayed to the other processes (roomServer.beforeClose).
+//
+// Closing also ends what the record has armed - the generation bump ends a settlement whose timer
+// already fired, the timer's stop the one still armed - since a closed issue's rooms settle nothing
+// until it reopens, and it records the latest edit source on the pending-settlement row, which a
+// settlement after the reopen reads. Reopening only closes the room: the room that loads next
+// reads the issue open and settles what the document owes (onLoadDocument).
+//
+// closeUnrecorded is whether a room with no record is closed all the same, for a change this
+// process has just been told of (issueOpenChanged): a room still loading has no record yet, and may
+// have read the issue's state from before the change; ygo closes it once its load is done, and the
+// next load reads the issue again. A recheck (recheckResidentIssues) reads only rooms that hold a
+// record. Its ctx is the room-sync lane's or a close's own, holding no transaction, so the rooms are
+// recorded and closed one at a time.
+func (s *Service) setRoomIssueOpen(ctx context.Context, room string, open, closeUnrecorded bool) {
+	state := s.lockExistingState(room)
+	if state == nil {
+		if closeUnrecorded {
 			_ = s.srv.CloseRoom(room, true)
 		}
+		return
 	}
+	if state.closed == !open {
+		s.unlockState(room, state)
+		return
+	}
+	state.closed = !open
+	var (
+		lastActor *model.Actor
+		creditSeq uint64
+	)
+	if !open {
+		state.roomGeneration = s.nextRoomGeneration()
+		// The closed room's settlement failures are not the next room's (see
+		// reserveRoomCloseLocked): a record kept across the close and a reopen starts over.
+		state.settleFailures = 0
+		s.stopSettleTimer(state.settle)
+		// Snapshot while the state is locked, then write after unlocking: settlement holds the
+		// document's advisory lock before it takes state.mu, so taking that lock here while
+		// holding the state would invert the lock order. The authors are already in the
+		// document's pending authors or in flight to them; only the latest edit source lives in
+		// the state alone.
+		lastActor, creditSeq = state.lastActor, state.creditSeq.Load()
+	}
+	s.unlockState(room, state)
+	if !open {
+		persisted := lastActor == nil
+		if lastActor != nil {
+			if err := s.persistLastActor(ctx, room, *lastActor); err != nil {
+				slog.Error("dispatch: record closing document's latest edit source", "room", room, "error", err)
+			} else {
+				persisted = true
+			}
+		}
+		if persisted {
+			s.lastActorPersisted(room, creditSeq)
+		}
+	}
+	_ = s.srv.CloseRoom(room, true)
 }
 
 // lastActorPersisted forgets a closed document's latest edit source once its pending-settlement

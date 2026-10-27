@@ -55,11 +55,11 @@ type roomState struct {
 	// mutation, or the sole connected peer of a browser edit. A settlement names the source the
 	// document's pending-settlement row holds, which every process's appends and commits write
 	// (settlementAuthors), not this one; the record keeps its own for what has not reached that row
-	// - closing an issue writes it there (SetIssueClosed) - and takes the row's when a room loads.
+	// - closing an issue writes it there (setRoomIssueOpen) - and takes the row's when a room loads.
 	lastActor *model.Actor
 	// unsettled marks a lastActor no settlement has read since: the settlement it was recorded
 	// for names it, so the state holds it until one commits (settleRoomWithin). Closing persists
-	// it on the pending-settlement row before clearing it (SetIssueClosed), so that row carries it
+	// it on the pending-settlement row before clearing it (setRoomIssueOpen), so that row carries it
 	// through a room release or restart. The authors themselves are in F and R, never only here.
 	unsettled      bool
 	updateClasses  []*documentUpdateClass

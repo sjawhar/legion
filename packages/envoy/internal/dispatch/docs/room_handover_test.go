@@ -185,8 +185,8 @@ func TestAForcedCloseKeepsWhatTheRoomThatReplacedItLoaded(t *testing.T) {
 			t.Fatalf("load the document's room: %v", err)
 		}
 		waitForLandedAppends(t, service, artifactID)
-		// The issue's row alone: SetIssueClosed would close this room itself, and the close under
-		// test is the one the browser joins.
+		// The issue's row alone: the issue's notification would close this room itself
+		// (issueOpenChanged), and the close under test is the one the browser joins.
 		if _, err := service.store.Pool.Exec(context.Background(),
 			`update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
 			t.Fatalf("close the issue: %v", err)
@@ -460,7 +460,7 @@ func TestAnIssueCloseEndsItsRoomsSettlementFailures(t *testing.T) {
 	if _, err := service.store.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
 		t.Fatalf("close the document's issue: %v", err)
 	}
-	service.SetIssueClosed(context.Background(), "DOC-1", true)
+	service.issueOpenChanged(context.Background(), "DOC-1")
 
 	state.mu.Lock()
 	failures := state.settleFailures

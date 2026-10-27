@@ -194,9 +194,9 @@ func TestTwoCreditedWritersBothSurviveACrashRestart(t *testing.T) {
 	}
 }
 
-// The issue route closes an issue's rooms on its request's context, which the pool tracks as one
-// caller holding at most one connection. Every closing document still records its latest edit
-// source and releases its state, however many documents the issue has.
+// An issue's close reaches its rooms on the room-sync lane (issueOpenChanged), whose context the
+// pool tracks as one caller holding at most one connection. Every closing document still records
+// its latest edit source and releases its state, however many documents the issue has.
 func TestClosingAnIssueOnATrackedContextPersistsEveryDocumentsCredit(t *testing.T) {
 	for _, procs := range []int{4, 16} {
 		t.Run(fmt.Sprintf("GOMAXPROCS=%d", procs), func(t *testing.T) {
@@ -212,8 +212,8 @@ func TestClosingAnIssueOnATrackedContextPersistsEveryDocumentsCredit(t *testing.
 			if _, err := database.Pool.Exec(ctx, `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
 				t.Fatalf("close the documents' issue: %v", err)
 			}
-			// What PATCH /api/v1/issues/{key} hands it (api/issue_patch.go).
-			service.SetIssueClosed(context.WithoutCancel(store.WithTransactionTracking(ctx)), "DOC-1", true)
+			// What the room-sync lane hands it (roomSync.register).
+			service.issueOpenChanged(store.WithTransactionTracking(ctx), "DOC-1")
 
 			var persisted int
 			if err := database.Pool.QueryRow(ctx, `
@@ -1258,7 +1258,7 @@ func closeTestIssue(t *testing.T, service *Service) {
 	if _, err := service.store.Pool.Exec(ctx, `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
 		t.Fatalf("close the issue: %v", err)
 	}
-	service.SetIssueClosed(ctx, "DOC-1", true)
+	service.issueOpenChanged(ctx, "DOC-1")
 	waitFor(t, 30*time.Second, "the closed issue's room to close", func() bool {
 		return len(service.srv.Rooms()) == 0
 	})
@@ -1270,7 +1270,7 @@ func reopenTestIssue(t *testing.T, service *Service) {
 	if _, err := service.store.Pool.Exec(ctx, `update issues set closed_at = null where key = 'DOC-1'`); err != nil {
 		t.Fatalf("reopen the issue: %v", err)
 	}
-	service.SetIssueClosed(ctx, "DOC-1", false)
+	service.issueOpenChanged(ctx, "DOC-1")
 }
 
 func waitForAskAuthor(t *testing.T, service *Service, artifactID string, want model.Actor) {

@@ -36,7 +36,7 @@ func TestCloseGatesDoNotOutliveTheirRooms(t *testing.T) {
 	}
 	for number := 27; number <= 51; number++ { // closed issues, documents never loaded
 		createIssueDocument(t, service.store, number, "before")
-		service.SetIssueClosed(ctx, fmt.Sprintf("DOC-%d", number), true)
+		setIssueClosedHere(t, service, fmt.Sprintf("DOC-%d", number), true)
 	}
 	live := 0
 	for _, room := range append([]string{first}, evicted...) {

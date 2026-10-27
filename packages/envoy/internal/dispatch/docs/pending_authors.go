@@ -436,22 +436,33 @@ const (
 	// appendBrowser is a raw client delta (servicePersistenceAdapter.StoreUpdateContext): a Yjs
 	// update commutes with whatever landed since, so it is admitted from a room that is behind
 	// with its history intact, at the head, and its room's cursor folds it in once catch-up fills
-	// the gap. Only a replaced history refuses it.
+	// the gap. A replaced history refuses it, and so does a closed issue (ErrIssueClosed).
 	appendBrowser appendKind = iota
 	// appendDerived is an update computed from the room's content - settlement's repair append
 	// (settleRoomWithin), a live write's fork (applyLive through the transaction's liveWrite),
-	// the block-id backfill's stamp - and keeps the strict rule: the room must hold the head.
+	// the block-id backfill's stamp - and keeps the strict rule: the room must hold the head. It
+	// is not refused for a closed issue: a live write has already checked its issue under the
+	// issue's row lock (lockArtifactOwner), the backfill stamps a closed issue's document on
+	// purpose, and a settlement repairs only what was stored before the close.
 	appendDerived
 )
 
 // appendGateStatement is the gate's one read, under the document's advisory lock the appending
-// transaction holds: the head (max(version), 0 for none) and whether any stored row at or below
-// the room's cursor ($2) remains, which tells a room behind an intact history from one whose
-// history a rebuild, a prune or a compaction replaced (historyReplaced). It is one indexed scan of
-// one document's rows at each end. The issue-open check (plan D5) is a column this select gains,
-// so a browser append on a closed issue is refused by the same round trip.
+// transaction holds: the head (max(version), 0 for none), whether any stored row at or below the
+// room's cursor ($2) remains, which tells a room behind an intact history from one whose history a
+// rebuild, a prune or a compaction replaced (historyReplaced), and whether the document's issue is
+// open (true for a document of no issue, as issueOpen has it). It is one indexed scan of one
+// document's rows at each end and one primary-key lookup each in artifacts and issues.
+//
+// The issue is read here, in the append's own transaction, because a room whose process has not
+// heard the issue close (its listener redialing, up to RedialBackoff's ceiling, or the notification
+// still on its way) would otherwise store edits on a closed issue, which nothing settles. The read
+// takes no lock on the issue's row: an append whose read precedes the close's commit lands, as it
+// would have a moment earlier, and is settled once the issue reopens.
 const appendGateStatement = `
-	select coalesce(max(version), 0), coalesce(min(version) <= $2, false)
+	select coalesce(max(version), 0), coalesce(min(version) <= $2, false),
+		coalesce((select i.closed_at is null from artifacts a join issues i on i.key = a.issue_key
+			where a.id = $1), true)
 	from doc_updates where artifact_id = $1`
 
 // appendGate is one append's gate: the read queueAppendGate put on a batch, and the decision head
@@ -460,10 +471,12 @@ type appendGate struct {
 	room    string
 	through int64
 	kind    appendKind
-	// latest and intact are the read's answer: the head, and whether a stored row at or below
-	// through remains. read is whether the batch reached the read at all; err is its failure.
+	// latest, intact and open are the read's answer: the head, whether a stored row at or below
+	// through remains, and whether the document's issue is open. read is whether the batch
+	// reached the read at all; err is its failure.
 	latest int64
 	intact bool
+	open   bool
 	read   bool
 	err    error
 }
@@ -475,7 +488,7 @@ type appendGate struct {
 func queueAppendGate(b *pgx.Batch, room string, through int64, kind appendKind) *appendGate {
 	gate := &appendGate{room: room, through: through, kind: kind}
 	b.Queue(appendGateStatement, room, through).QueryRow(func(row pgx.Row) error {
-		if err := row.Scan(&gate.latest, &gate.intact); err != nil {
+		if err := row.Scan(&gate.latest, &gate.intact, &gate.open); err != nil {
 			gate.err = fmt.Errorf("read the document's head for the append gate: %w", err)
 			return gate.err
 		}
@@ -485,11 +498,11 @@ func queueAppendGate(b *pgx.Batch, room string, through int64, kind appendKind) 
 	return gate
 }
 
-// head is the gate's decision: the version the append goes after (it is stored at head+1), or
-// ErrRoomBehindHead. An appendDerived append is refused unless the room holds the head exactly;
-// an appendBrowser append is refused only when the room's history was replaced (historyReplaced).
-// Equality for the derived rule, not `through < head`: a room standing past the head holds a
-// history the store no longer has.
+// head is the gate's decision: the version the append goes after (it is stored at head+1),
+// ErrIssueClosed or ErrRoomBehindHead. An appendBrowser append is refused when the document's
+// issue is closed or the room's history was replaced (historyReplaced); an appendDerived append
+// unless the room holds the head exactly. Equality for the derived rule, not `through < head`: a
+// room standing past the head holds a history the store no longer has.
 func (g *appendGate) head() (int64, error) {
 	if g.err != nil {
 		return 0, g.err
@@ -498,6 +511,8 @@ func (g *appendGate) head() (int64, error) {
 		return 0, fmt.Errorf("read the document's head for the append gate: the batch never reached the read")
 	}
 	switch {
+	case g.kind == appendBrowser && !g.open:
+		return 0, fmt.Errorf("%w: room %s's document belongs to a closed issue", ErrIssueClosed, g.room)
 	case historyReplaced(g.through, g.latest, g.intact):
 		return 0, fmt.Errorf("%w: room %s holds the document through update %d, and the stored history was replaced under it (head %d)",
 			ErrRoomBehindHead, g.room, g.through, g.latest)
