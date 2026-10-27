@@ -1,16 +1,20 @@
 import { type APIResponse, expect, type Page, type Route, test } from "@playwright/test";
 
 import {
+  baseUrl,
+  createArtifactComment,
   createAsk,
   createComment,
   createIssue,
   createMessage,
   createProject,
   createProjectDocument,
+  editComment,
   patchIssue,
   putArchitectureSource,
   snoozeAsk,
   syncArchitectureSource,
+  userHeaders,
 } from "./api";
 import { seedFakeGithub } from "./fake-github-helpers";
 import { resetDatabase } from "./seed";
@@ -272,4 +276,113 @@ test("children: a child's priority write moves its active time in the open paren
   } finally {
     await alice.close();
   }
+});
+
+test("document panel: an edit of a comment on a project document shows its new text in the document's open Referenced by panel within 2 s", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const doc = await createProjectDocument("CORE", { content: "# Runbook\n", name: "Runbook" });
+  // Alice's own comment, edited from her other tab: only a person may edit a comment.
+  const comment = await createArtifactComment(doc.artifact.id, { body: "Original remark" });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await openLive(page, `/projects/CORE/documents/${doc.artifact.slug}`);
+    const panel = page.getByRole("region", { name: "Referenced by" });
+    await expect(panel).toContainText("Original remark");
+
+    await editComment(comment.id, { body: "Edited remark" });
+    await expect(panel).toContainText("Edited remark", live);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("budget: a document in another project citing 25 documents reads no issue detail, Inbox or ask list for an open issue page", async ({
+  browser,
+}, testInfo) => {
+  test.setTimeout(120_000);
+  await createProject({ key: "CORE", name: "Core" });
+  await createProject({ key: "OTHER", name: "Other" });
+  const issue = await createIssue({ project: "CORE", title: "Open issue page" });
+  const cited = [];
+  for (let index = 0; index < 25; index += 1) {
+    cited.push(
+      await createProjectDocument("OTHER", {
+        content: `# Chapter ${index + 1}\n`,
+        name: `Chapter ${String(index + 1).padStart(2, "0")}`,
+      })
+    );
+  }
+  const index = cited.map((doc) => `dispatch://OTHER/artifact/${doc.artifact.slug}`).join(" ");
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const gets: string[] = [];
+    page.on("request", (request) => {
+      const url = new URL(request.url());
+      if (
+        request.method() === "GET" &&
+        url.pathname.startsWith("/api/") &&
+        !eventStreamUrl.test(request.url())
+      ) {
+        gets.push(url.pathname);
+      }
+    });
+    await openLive(page, `/issues/${issue.key}/conversation`);
+    await expect(page.getByTestId("issue-header").getByRole("heading", { level: 1 })).toHaveText(
+      issue.title
+    );
+    await page.waitForTimeout(2_000);
+    gets.length = 0;
+
+    // One document in another project whose one paragraph cites 25 documents.
+    await createProjectDocument("OTHER", { content: `Index: ${index}\n`, name: "Index" }, bob);
+    await page.waitForTimeout(2_500);
+    console.log(`REFETCH-INDEX [${testInfo.project.name}] GETs: ${gets.join(", ")}`);
+    const unrelated = gets.filter(
+      (path) =>
+        path === `/api/v1/issues/${issue.key}` ||
+        path === "/api/v1/inbox" ||
+        /^\/api\/v1\/issues\/[^/]+\/(asks|comments|messages)$/.test(path)
+    );
+    expect(unrelated, "reads of what a citation in another project cannot change").toEqual([]);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("snooze: another person's event stream carries nothing that names the ask alice snoozed", async () => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Private triage" });
+  const ask = await createAsk(issue.key, { question: "Snoozed in private" }, bob);
+  await snoozeAsk(ask.id, new Date(Date.now() + 3_600_000).toISOString(), { login: "alice" });
+
+  // Bob's browser session replays the whole log, as a reconnecting tab of his would.
+  const controller = new AbortController();
+  const response = await fetch(new URL("/api/v1/events?since=0", baseUrl), {
+    headers: await userHeaders("bob"),
+    signal: controller.signal,
+  });
+  expect(response.status).toBe(200);
+  const reader = response.body?.getReader();
+  let replay = "";
+  const deadline = Date.now() + 2_000;
+  while (reader !== undefined && Date.now() < deadline) {
+    const chunk = await Promise.race([
+      reader.read(),
+      new Promise<undefined>((resolve) => setTimeout(resolve, 250)),
+    ]);
+    if (chunk?.value !== undefined) replay += new TextDecoder().decode(chunk.value);
+    if (chunk?.done === true) break;
+  }
+  controller.abort();
+  const aliceFrames = replay
+    .split("\n\n")
+    .filter((frame) => frame.includes("user_state.updated") && frame.includes('"login":"alice"'));
+  expect(replay).toContain(ask.id);
+  expect(aliceFrames.filter((frame) => frame.includes(ask.id))).toEqual([]);
 });
