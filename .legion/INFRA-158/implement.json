@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-158",
-  "completed": "2026-10-27T04:11:45Z",
+  "completed": "2026-10-27T05:29:05Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2233",
-  "head": "5d17db145c276bdd38f259b024f3aa64c6635186",
+  "head": "21c784af1c137773a07a1f18f2704bd3a6e53d9c",
   "proof": [
+    {
+      "criterion": "Thirteenth forward merge picks up main's #2317 fix of the daemon admission tests and leaves the change intact",
+      "surface": "the merged tree's builds and the daemon admission package against real Postgres; GitHub's mergeability",
+      "command": "go build ./... (envoy, daemon); dispatch typecheck; claude-envoy check-dist; cd packages/daemon && LEGION_TEST_PG_DSN=<local test db> go test -count=1 -skip TestCapturedDispatchTodoEventAdmitsAndProjectsActiveSlot ./internal/admit/",
+      "observed": "All pass; admit ok in 273.6s with no 'read a slotted issue' error; MERGEABLE; fingerprint b9213970 unchanged (066713c7 -> 21c784af)",
+      "headSha": "21c784af1c137773a07a1f18f2704bd3a6e53d9c",
+      "negativeControl": "At 5d17db14 the required test check was red in packages/daemon (run 40448347760) with main's #2289 'read a slotted issue' error"
+    },
     {
       "criterion": "Twelfth forward merge leaves the change intact, the lease pool sized to the leased callers, and the pull request mergeable",
       "surface": "the merged tree's builds and the store/duty Postgres suites; GitHub's mergeability",
@@ -192,6 +200,7 @@
     }
   ],
   "filesChanged": [
+    "round 12: thirteenth forward merge 21c784af (no conflicts; picks up #2317)",
     "round 11: twelfth forward merge 5d17db14 (pool.go leasePoolSize comment with main's wording and this branch's nine-caller count; pi-legion CHANGELOG.md both entries kept)",
     "round 10: pending-sync.ts (derived-only updates held, never counted or stored), connection.ts (admitted flag removed), connection.test.ts, pending-sync.test.ts, offline-edits.e2e.ts, packages/dispatch/AGENTS.md; docs/ask_lifecycle.go, docs/rebuild.go, api/issue_ask_lifecycle.go (WriteIssueAskStates logs, helper unexported); packages/envoy/CHANGELOG.md",
     "round 9: eleventh forward merge 83649d6a (packages/envoy/CHANGELOG.md, both sides kept)",
@@ -231,5 +240,5 @@
     "R7 local runs at 39c12172 (from a git archive of the head): api ok (1562 s), store ok, cmd/dispatch ok, -tags multiprocess cmd/dispatch ok (350 s); docs failed only TestAHealthyRoomUnderWritesIsNeverRefused ('too few to say anything' under load), which passes alone (ok 6.6 s) and is not in the diff; pmdoc failed only its timing tests and the differential tests that need the workspace's @legion/proof-editor link absent from the archive (pmdoc is not in the diff). bun test packages/contracts packages/envoy-client: one envoy-config timing test failed under load and passes alone. packages/dispatch: typecheck clean; bun test 2388 pass on the re-run (the first run under load had 2 failures not reproduced). biome check of contracts, dispatch, claude-envoy, envoy-client: no errors. claude-envoy check-dist passes. -race was not run locally (the pod has no C compiler); CI's envoy-go-race lane runs it."
   ],
   "openQuestions": [],
-  "round": 11
+  "round": 12
 }
