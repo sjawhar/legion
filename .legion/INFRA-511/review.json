@@ -2,51 +2,39 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-511",
-  "completed": "2026-10-27T06:28:45Z",
+  "completed": "2026-10-27T08:19:24Z",
   "decision": "changes_requested",
-  "round": 2,
-  "reviewedHead": "17aa79c90363d492203d3e2c8367f2d65be63546",
-  "codeHead": "05af9dbe4d6775fb23752ed9b20db9929bfabf73",
+  "round": 3,
+  "scope": "Narrowed by the INFRA-497 architect at the review-round cap: the five findings of review 5663090608 and any correctness regression their fixes add; cleanup goes to Fast-follow.",
+  "reviewedHead": "55267f340c5e6b85a45a364ef4f6ccd97bd1ed49",
+  "codeHead": "d42147b4f44d135c1f180110a96086d61480ad5d",
   "critical": 0,
-  "important": 1,
-  "minor": 4,
+  "important": 0,
+  "minor": 2,
   "previousFindings": {
-    "1 warning promised an unsent start message": "fixed (controller-session.ts:355-359), except the /new case below",
-    "2 startupTurn mark outlived a follow-up send / named the old session": "fixed (:264-267; tests legion.test.ts:3125, :3145)",
-    "3 contract change census": "added to the PR body; prose and record hits of its own searches carry no disposition (below)",
-    "4 startupTurn shape": "fixed (interface.ts:52, startup-turn.ts)",
-    "5 legion calls refused before the claim was recorded": "fixed (:247-251 before the send), except the /new case below",
-    "6 silent wait behind a hung claim": "partly fixed: claim() notifies, but a second /legion-controller-start waits silently (:334-335; legion.test.ts:2726 pins [NOTHING_TO_DO] only), contrary to packages/pi-legion/AGENTS.md:390-392",
-    "7 console.error over the TUI": "fixed (logger.error at :179, :233, :354)"
+    "1 /new during the start claim": "fixed: the claim stops after its registration when the session changed, before the send (controller-session.ts:301-304), and the session_switch re-claim registers the new session and sends there",
+    "2 silent second /legion-controller-start": "fixed for the command (noteWait at :380); regressed on the re-claim path (below)",
+    "3 re-claim warning after a refusal before registration": "fixed (ClaimProgress.registered, :282, :465)",
+    "4 AGENTS.md row": "fixed (packages/pi-legion/AGENTS.md:384)",
+    "5 census prose rows for searches 2 and 3": "fixed; search 1's 'deploy/, .github/: no hits' line is false (below)"
   },
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/pi-legion/src/controller-session.ts:263",
-      "description": "A /new during the start claim: claimWith registered the old session (sessionID read at :190, recorded at :250) but sends the start message into the new session, whose legion calls are refused (isClaimedSession false) until the switch's queued re-claim registers it; the role claim for the old session then fails and the warning (:357) says 'The start turn has the controller's registration; run /legion-claim-controller', both false (the queued re-claim does it; following the instruction rotates the secret once more). legion.test.ts:3161 pins that notice. Fix: after the registration, when the current session is not the registered one, do not send (startMessageSent stays false) and let the queued re-claim send it in the new session; word the warning for that case."
+      "severity": "minor",
+      "file": "packages/pi-legion/src/controller-session.ts:452",
+      "description": "Regression from the finding-1 fix: the re-claim's waiting notice goes into the deferred batch, flushed only in the finally after the re-claim settles, so behind a hung start claim the /new blocks (Oh My Pi awaits session_switch handlers) with nothing on screen, where round 2 showed the notice at once. Contradicts the noteWait comment (:180-181) and packages/pi-legion/AGENTS.md:391-393; legion.test.ts:3263 filters the notice out. Fix: noteWait(context) on the real context, and assert the notice."
     },
     {
       "severity": "minor",
-      "file": "packages/pi-legion/src/controller-session.ts:335",
-      "description": "Previous finding 6 open on one path: startCommand calls serialised directly, so a second /legion-controller-start behind a hung claim waits with no notice; the docs say every waiting claim says so."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/pi-legion/src/controller-session.ts:383",
-      "description": "The re-claim warning says the session keeps its registration whenever controllerSessionID equals the current session, including when the re-claim failed before registering (state() error, 403 because a later `legion controller start` revoked the capability), so it can say set_status still works when every grant fails. Decide from whether this claim registered."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/pi-legion/AGENTS.md:383",
-      "description": "The row 'the claim that sent it, or a later one, did not finish' does not match claimComplete, which resets only once a registration is in (:247)."
-    },
-    {
-      "severity": "minor",
-      "file": "PR body, Contract change census",
-      "description": "The census's own searches return prose and record hits it gives no disposition: search 2 (docs/kubernetes.md, docs/solutions/**, packages/{claude-envoy,contracts,pi-envoy,pi-legion}/AGENTS.md, the CHANGELOGs, packages/pi-legion/README.md, scripts/e2e/README.md), search 3 (docs/solutions/envoy/two-plugins-in-one-process-…md, packages/{pi-legion,pi-shared}/AGENTS.md, scripts/e2e/README.md), search 1's non-invocation hits (troubleshooting.md, concepts.md, walkthrough.md, the liveness verdict strings). None spells a stale number (checked); list them with 'unaffected'."
+      "file": "PR body, Contract change census, search 1",
+      "description": "'deploy/, .github/: no hits' is false: deploy/kubernetes/daemon/legion.yaml.example:29 and controller.yaml.example:1,27,40 match. Search 1's other non-invocation prose hits (running-legion.md, concepts.md, walkthrough.md, troubleshooting.md, controller-liveness-verdict.jq and its test) have no disposition. All are unaffected prose; a body edit fixes it."
     }
   ],
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. CI head 05af9dbe (compare to 17aa79c9: .legion/ only, 2 files): every required check queued at 06:20Z; not waited on, since this round requests changes.",
-  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality at 17aa79c9: both CHANGES (the /new warning; the silent second start command; the re-claim warning; AGENTS.md row; cleanup).",
-  "fastFollow": "the implementer's: share the command word between Go and TypeScript. Cleanup also open: isIdle declared on SessionContext so the `in` checks go, duplicated notice texts, launched && !supervised in claimWith, one loggedErrors helper."
+  "notBlocking": [
+    "R2: a same-id re-claim (session_tree/branch) refused before its registration by a transient state() failure says set_status fails though the earlier registration's grants may still mint; wording, to Fast-follow.",
+    "Assumption, unverified: the comment at controller-session.ts:424-425 says nothing but promises run between the handler's return and the transcript reset; command-controller.ts:1317 awaits unfocusSession() first when a subagent view is focused."
+  ],
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. CI head d42147b4 (compare to 55267f34: .legion/ only, 2 files): every required check queued at 07:59Z (repo-wide 201 runs queued); not waited on, since this round requests changes.",
+  "thermo": "At 55267f34: thermonuclear-deep-review APPROVE with minor regressions (R1 the deferred waiting notice, R2 the transient-failure wording); thermonuclear-code-quality CHANGES on the same deferred notice (behaviour, minor), plus cleanup.",
+  "fastFollow": "the implementer's command-word item, plus: queueClaim inlined into claim, the re-claim's transient-failure wording (R2), AGENTS.md:386 naming the waiting notice, one fixture loader in controller-start-omp.test.ts, isIdle on SessionContext, duplicated notice texts."
 }
