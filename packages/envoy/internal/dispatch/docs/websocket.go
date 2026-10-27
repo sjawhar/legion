@@ -60,6 +60,10 @@ func isOwnerVerified(ctx context.Context) bool {
 type servicePersistenceAdapter struct {
 	store   VersionedStore
 	service *Service
+	// validating runs as LoadDoc decodes a state its store loaded to check that a room can load
+	// it (validateUpdate). Nil outside tests; tests use it to count the room loads that decode the
+	// state before the room does.
+	validating func(room string)
 }
 
 // LoadDoc is the durable state a room loads. It records the load before it reads, and the head it
@@ -69,14 +73,29 @@ type servicePersistenceAdapter struct {
 // all. The read itself takes no advisory lock - a durable writer holds that one across its whole
 // transaction, and a load that waited for it would wedge a write that forks the room it loads -
 // so the record, not the lock, is what keeps a room from being born behind the head.
+//
+// A state that cannot load fails the room here (failRoom), before the room decodes it, so the
+// state is checked once before the room's own decode. A single stored row, which the store returns
+// as stored, is decoded here (validateUpdate), then by the room. A folded log is decoded by the
+// fold, which applies its rows, and by the fold's read-back, which decodes the state into the
+// document a room decodes it into, with the server's pending queue (readsBackOtherwise), then by
+// the room: Load records the read-back on the context this marks (withLoadReadBack), and this
+// does not decode that state again. A log that does not fold, which the store serves merged, and a
+// state a wrapping store answered with itself are decoded here as a single row is, which is what
+// fails the room for a history that cannot load. A preload (takePreload) was decoded by the
+// socket's admission check and is served as it is.
 func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
 	load := a.service.beginRoomLoad(room)
 	if loaded, ok := a.service.takePreload(room); ok {
 		load.readHead(loaded.Version)
 		return loaded.Update, nil
 	}
-	result, err := a.store.Load(context.Background(), room)
-	if err == nil {
+	readBack := &loadReadBack{}
+	result, err := a.store.Load(withLoadReadBack(context.Background(), readBack), room)
+	if err == nil && !readBack.holds(result.Update) {
+		if a.validating != nil {
+			a.validating(room)
+		}
 		err = validateUpdate(result.Update)
 	}
 	if err != nil {
@@ -85,6 +104,37 @@ func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
 	}
 	load.readHead(result.Version)
 	return result.Update, nil
+}
+
+// loadReadBackContextKey marks a room load's context with the record its store fills in
+// (withLoadReadBack).
+type loadReadBackContextKey struct{}
+
+// loadReadBack is the state a room's load (PgVersioned.Load) folded and read back into the
+// document a room decodes it into (stateThrough), nil while the load returned no such state: an
+// empty log, a single row as stored, or a log that does not fold, merged.
+type loadReadBack struct {
+	state []byte
+}
+
+// withLoadReadBack marks ctx with record, which a PgVersioned.Load under ctx fills in. A store that
+// wraps PgVersioned and loads through it passes ctx on, so the record names the state the store
+// below it read back; a wrapper that answers on its own leaves the record as it was.
+func withLoadReadBack(ctx context.Context, record *loadReadBack) context.Context {
+	return context.WithValue(ctx, loadReadBackContextKey{}, record)
+}
+
+// noteLoadReadBack records state on the record withLoadReadBack marked ctx with, if any.
+func noteLoadReadBack(ctx context.Context, state []byte) {
+	if record, ok := ctx.Value(loadReadBackContextKey{}).(*loadReadBack); ok {
+		record.state = state
+	}
+}
+
+// holds reports whether update is the very state the load read back, the same bytes rather than a
+// copy or another state a wrapping store handed on in its place.
+func (r *loadReadBack) holds(update []byte) bool {
+	return len(update) > 0 && len(update) == len(r.state) && &update[0] == &r.state[0]
 }
 
 func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) error {
@@ -145,7 +195,9 @@ func (a *servicePersistenceAdapter) Compact(ctx context.Context, room string) er
 
 // validateUpdate decodes a stored history, or an update about to replace one, as the room will
 // decode it: into a document with the server's pending queue (newDocumentCopy), so a history a room
-// served is never judged one that cannot load.
+// served is never judged one that cannot load. A room's load runs it on a state its store did not
+// already read back that way (LoadDoc); a rebuild runs it on its seed and on the history it
+// replaces.
 func validateUpdate(update []byte) error {
 	if len(update) == 0 {
 		return nil

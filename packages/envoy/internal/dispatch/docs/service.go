@@ -70,7 +70,9 @@ type Deps struct {
 // takes and lands under the document's advisory lock (UpdateCredit). Document writes that join an
 // API transaction use AppendUpdateTx, classifying the update the way the room's update observer
 // classifies a live one. RebuildTx replaces an unreadable history inside the rebuild's
-// transaction, through the same persistence boundary as its preflight load. Head is the version
+// transaction, through the same persistence boundary as its preflight load. Load, ygo's, is a
+// room's load; a store that wraps another and loads through it passes the context on, which
+// carries the record of the state the load read back (withLoadReadBack). Head is the version
 // Load would fold up to now, which says whether a state loaded earlier is still the stored one.
 // DocumentStamp names the stored state a read of the document meets now, and LoadDocument is that
 // state decoded once with the stamp it was read under, which a read of a document no room holds

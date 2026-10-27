@@ -121,30 +121,7 @@ func TestALoadAndACompactionKeepWhatTheDocumentParked(t *testing.T) {
 	database := storetest.Open(t)
 	versioned := NewPgVersioned(database)
 	ctx := context.Background()
-
-	writer := crdt.New(crdt.WithClientID(7))
-	text := writer.GetText("t")
-	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "base", nil) })
-	base := crdt.EncodeStateAsUpdateV1(writer, nil)
-	afterBase := writer.StateVector()
-	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 4, " lost", nil) })
-	lost := crdt.EncodeStateAsUpdateV1(writer, afterBase)
-	afterLost := writer.StateVector()
-	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 9, " kept", nil) })
-	parkedInsert := crdt.EncodeStateAsUpdateV1(writer, afterLost)
-
-	other := crdt.New(crdt.WithClientID(8))
-	if err := crdt.ApplyUpdateV1(other, base, nil); err != nil {
-		t.Fatalf("open the second writer: %v", err)
-	}
-	otherText := other.GetText("t")
-	other.Transact(func(txn *crdt.Transaction) { otherText.Insert(txn, 0, "gone ", nil) })
-	gone := crdt.EncodeStateAsUpdateV1(other, afterBase)
-	afterGone := other.StateVector()
-	other.Transact(func(txn *crdt.Transaction) { otherText.Delete(txn, 0, 5) })
-	parkedDelete := crdt.EncodeStateAsUpdateV1(other, afterGone)
-
-	stored := [][]byte{base, parkedInsert, parkedDelete}
+	stored, lost, gone := parkedHistory(t)
 	artifactID := createDocument(t, database, "parked")
 	for _, update := range stored {
 		if _, err := versioned.AppendUpdate(ctx, artifactID, update); err != nil {
@@ -153,15 +130,7 @@ func TestALoadAndACompactionKeepWhatTheDocumentParked(t *testing.T) {
 	}
 	arrive := func(t *testing.T, what string, state []byte) {
 		t.Helper()
-		doc := crdt.New()
-		for _, update := range [][]byte{state, lost, gone} {
-			if err := crdt.ApplyUpdateV1(doc, update, nil); err != nil {
-				t.Fatalf("%s: apply: %v", what, err)
-			}
-		}
-		if got := doc.GetText("t").ToString(); got != "base lost kept" {
-			t.Fatalf("%s, once the missing updates arrive, reads %q, want %q", what, got, "base lost kept")
-		}
+		requireParkedArrive(t, what, state, lost, gone)
 	}
 	merged, err := crdt.MergeUpdatesV1(stored...)
 	if err != nil {
@@ -179,6 +148,50 @@ func TestALoadAndACompactionKeepWhatTheDocumentParked(t *testing.T) {
 		t.Fatalf("load the compacted log: %v", err)
 	}
 	arrive(t, "the compacted load", compacted.Update)
+}
+
+// parkedHistory is a stored log that parks an insert whose dependency was never stored and a
+// delete of an item the log does not hold, and the two updates it lacks: lost, which the insert
+// depends on, and gone, which inserted what the delete deletes.
+func parkedHistory(t *testing.T) (stored [][]byte, lost, gone []byte) {
+	t.Helper()
+	writer := crdt.New(crdt.WithClientID(7))
+	text := writer.GetText("t")
+	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "base", nil) })
+	base := crdt.EncodeStateAsUpdateV1(writer, nil)
+	afterBase := writer.StateVector()
+	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 4, " lost", nil) })
+	lost = crdt.EncodeStateAsUpdateV1(writer, afterBase)
+	afterLost := writer.StateVector()
+	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 9, " kept", nil) })
+	parkedInsert := crdt.EncodeStateAsUpdateV1(writer, afterLost)
+
+	other := crdt.New(crdt.WithClientID(8))
+	if err := crdt.ApplyUpdateV1(other, base, nil); err != nil {
+		t.Fatalf("open the second writer: %v", err)
+	}
+	otherText := other.GetText("t")
+	other.Transact(func(txn *crdt.Transaction) { otherText.Insert(txn, 0, "gone ", nil) })
+	gone = crdt.EncodeStateAsUpdateV1(other, afterBase)
+	afterGone := other.StateVector()
+	other.Transact(func(txn *crdt.Transaction) { otherText.Delete(txn, 0, 5) })
+	parkedDelete := crdt.EncodeStateAsUpdateV1(other, afterGone)
+	return [][]byte{base, parkedInsert, parkedDelete}, lost, gone
+}
+
+// requireParkedArrive fails t unless state, a state of parkedHistory's log, shows the parked
+// insert and holds the parked delete once lost and gone arrive.
+func requireParkedArrive(t *testing.T, what string, state, lost, gone []byte) {
+	t.Helper()
+	doc := crdt.New()
+	for _, update := range [][]byte{state, lost, gone} {
+		if err := crdt.ApplyUpdateV1(doc, update, nil); err != nil {
+			t.Fatalf("%s: apply: %v", what, err)
+		}
+	}
+	if got := doc.GetText("t").ToString(); got != "base lost kept" {
+		t.Fatalf("%s, once the missing updates arrive, reads %q, want %q", what, got, "base lost kept")
+	}
 }
 
 // A stored update can hold a skipped clock range: a merge of one client's updates around a missing
@@ -375,21 +388,7 @@ func TestACompactedDocumentKeepsItsOrderThroughLaterUpdates(t *testing.T) {
 // A log whose updates park more items than the fold's pending queue holds is not folded: the load
 // serves the stored updates merged whole, and compaction leaves every row stored.
 func TestALogTheFoldCannotApplyIsLoadedMergedAndKept(t *testing.T) {
-	writer := crdt.New(crdt.WithClientID(7))
-	text := writer.GetText("t")
-	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "base", nil) })
-	base := crdt.EncodeStateAsUpdateV1(writer, nil)
-	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "x", nil) })
-	rows := [][]byte{base}
-	for range 2 {
-		before := writer.StateVector()
-		writer.Transact(func(txn *crdt.Transaction) {
-			for range maxUpdateItems/2 + 1 {
-				text.Insert(txn, 0, "y", nil)
-			}
-		})
-		rows = append(rows, crdt.EncodeStateAsUpdateV1(writer, before))
-	}
+	rows := unfoldableHistory()
 	database := storetest.Open(t)
 	versioned := NewPgVersioned(database)
 	ctx := context.Background()
@@ -416,6 +415,27 @@ func TestALogTheFoldCannotApplyIsLoadedMergedAndKept(t *testing.T) {
 	if stored := storedUpdateCount(t, database, artifactID); stored != len(rows) {
 		t.Fatalf("compaction left %d stored updates, want %d", stored, len(rows))
 	}
+}
+
+// unfoldableHistory is a log whose updates park more items than the fold's pending queue,
+// maxUpdateItems, holds: each of its two later rows depends on an insert no row holds.
+func unfoldableHistory() [][]byte {
+	writer := crdt.New(crdt.WithClientID(7))
+	text := writer.GetText("t")
+	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "base", nil) })
+	base := crdt.EncodeStateAsUpdateV1(writer, nil)
+	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "x", nil) })
+	rows := [][]byte{base}
+	for range 2 {
+		before := writer.StateVector()
+		writer.Transact(func(txn *crdt.Transaction) {
+			for range maxUpdateItems/2 + 1 {
+				text.Insert(txn, 0, "y", nil)
+			}
+		})
+		rows = append(rows, crdt.EncodeStateAsUpdateV1(writer, before))
+	}
+	return rows
 }
 
 // The read-back check passes a state whose clocks are the ones the document that made it held,

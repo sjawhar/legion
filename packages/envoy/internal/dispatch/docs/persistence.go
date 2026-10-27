@@ -44,6 +44,13 @@ type PgVersioned struct {
 	// takes the room's lock to write the fold back. Nil outside tests; tests use it to hold a
 	// compaction inside its fold while another writer changes the document.
 	duringCompactionFold func(room string)
+	// beforeFold runs as a load or a compaction starts to fold a room's rows (foldRead): once its
+	// read transaction has committed when it read them into memory, inside that transaction when
+	// it streams them. Nil outside tests; tests use it to see which connection a fold holds.
+	beforeFold func(room string)
+	// foldBufferLimit is the most stored update bytes a fold reads into memory (foldBuffer), zero
+	// for foldBufferBytes. Zero outside tests; tests lower it to fold a small log while it streams.
+	foldBufferLimit int64
 	// noteStored is the note of the Service that took this store last (New), which each append
 	// gives the version it committed and each load the versions it read (noteStoredUpdates), so
 	// the Service's compaction queue checks the room. Nil for a store no Service took.
@@ -75,7 +82,13 @@ func NewPgVersioned(database *store.Store) *PgVersioned {
 }
 
 // Load returns the room's state at its head (stateThrough), constrained by a pending prune
-// checkpoint when one exists, and notes the rows it read once its transaction ends (noted).
+// checkpoint when one exists, and notes the rows it read once its transaction ends (noted). It
+// reads in one repeatable-read transaction on the rooms pool: the head and the count and bytes of
+// the rows at or below it, then those rows, which it folds once the transaction has committed
+// when they total at most foldBufferBytes, so a fold holds no connection a room load waits for,
+// and folds inside the transaction while it streams them when they total more (foldRead). A
+// state the fold read back as a room decodes it is recorded on the record a room's load marked
+// ctx with (withLoadReadBack), so that load does not decode it again.
 func (p *PgVersioned) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
 	if err := ctx.Err(); err != nil {
 		return persistence.LoadResult{}, err
@@ -89,41 +102,27 @@ func (p *PgVersioned) Load(ctx context.Context, room string) (persistence.LoadRe
 		return persistence.LoadResult{}, fmt.Errorf("begin document load: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	head, err := p.head(ctx, tx, room)
+	stored, err := readStoredLog(ctx, tx, room)
 	if err != nil {
 		return persistence.LoadResult{}, err
 	}
+	head := persistence.Version(stored.stamp.Version)
 	if head == 0 {
 		return persistence.LoadResult{}, tx.Commit(ctx)
 	}
-	update, err := stateThrough(ctx, tx, room, head)
-	if err != nil {
+	var update []byte
+	var readBack bool
+	if err := p.foldRead(ctx, tx, room, head, stored.rows, stored.bytes, "document load", func(updates updateSource) (err error) {
+		update, readBack, err = stateThrough(room, head, updates)
+		return err
+	}); err != nil {
 		return persistence.LoadResult{}, err
 	}
-	oldest, err := p.oldestNoted(ctx, tx, room)
-	if err != nil {
-		return persistence.LoadResult{}, err
+	if readBack {
+		noteLoadReadBack(ctx, update)
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return persistence.LoadResult{}, fmt.Errorf("commit document load: %w", err)
-	}
-	p.noted(room, int64(head), oldest)
+	p.noted(room, int64(head), stored.oldest)
 	return persistence.LoadResult{Update: update, Version: head}, nil
-}
-
-// oldestNoted is the version of the room's oldest row as tx reads it, which a load notes with the
-// head it read (noted), or 0 without a read when no Service takes p's notes.
-func (p *PgVersioned) oldestNoted(ctx context.Context, tx pgx.Tx, room string) (int64, error) {
-	if p.noteStored.Load() == nil {
-		return 0, nil
-	}
-	var oldest int64
-	if err := tx.QueryRow(ctx, `
-		select coalesce(min(version), 0) from doc_updates where artifact_id = $1
-	`, room).Scan(&oldest); err != nil {
-		return 0, fmt.Errorf("read the document's oldest update: %w", err)
-	}
-	return oldest, nil
 }
 
 // Head is the version Load folds the room up to now, read through the pool that owns loads, as
@@ -424,7 +423,7 @@ func (p *PgVersioned) MaterializeAt(ctx context.Context, room string, version pe
 	if version > head {
 		version = head
 	}
-	update, err := stateThrough(ctx, tx, room, version)
+	update, _, err := stateThrough(room, version, storedUpdates(ctx, tx, room, version))
 	if err != nil {
 		return nil, err
 	}

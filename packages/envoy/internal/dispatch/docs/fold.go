@@ -1,8 +1,10 @@
 package docs
 
-// The fold and decode of a room's stored history: the state its updates make (stateThrough), the
-// document that state decodes into (documentThrough, LoadDocument), and the fold they and a
-// compaction (compactRoom) share (fold, readsBackOtherwise).
+// The fold and decode of a room's stored history: the read of its rows a load and a compaction
+// share (foldRead), which folds rows totalling at most foldBufferBytes from memory once its
+// transaction has ended and streams larger logs inside it; the state the rows make (stateThrough);
+// the document that state decodes into (documentThrough, LoadDocument); and the fold itself (fold,
+// readsBackOtherwise).
 
 import (
 	"context"
@@ -16,8 +18,10 @@ import (
 	"github.com/reearth/ygo/persistence"
 )
 
-// stateThrough returns the state the room's stored updates through version make, as one V1
-// update. It applies them one at a time, oldest first, to one document that collects garbage, and
+// stateThrough returns the state the room's stored updates through version, which updates replays,
+// make, as one V1 update, and whether the fold's read-back decoded that state as a room decodes it
+// (readBack), which a room's load (servicePersistenceAdapter.LoadDoc) does not decode again. It
+// applies the updates one at a time, oldest first, to one document that collects garbage, and
 // encodes that document, so a deleted item keeps its id and length but none of its content, and
 // what it holds at once is that document and the one update being applied, however much the
 // stored updates inserted and later deleted. Nothing reads deleted content back from the store:
@@ -38,24 +42,25 @@ import (
 // re-encoding that keeps every clock and moves text, such as a lost right origin:
 // TestACompactedDocumentKeepsItsOrderThroughLaterUpdates guards that on each ygo bump. A state that
 // reads back otherwise, or a log the fold's document cannot apply (one parking more than its
-// pending queue, maxUpdateItems, holds), is not used: stateThrough returns the stored updates
-// merged whole, as they were read before it folded them, and a compaction, which calls fold
-// itself, leaves them as stored. The merge of a log the fold cannot apply is what a load of it
-// decodes and refuses (ErrDocumentUnloadable), which offers its rebuild.
+// pending queue, maxUpdateItems, holds), is not used: stateThrough returns the same stored updates
+// merged whole, as they were stored (mergedThrough), and a compaction, which calls fold itself,
+// leaves them as stored. The merge of a log the fold cannot apply is what a load of it decodes and
+// refuses (ErrDocumentUnloadable), which offers its rebuild.
 //
 // A log of one update is returned as stored: a compaction leaves the rows it folds as one update
 // holding their state, and a document's first update deletes nothing an earlier one inserted.
-func stateThrough(ctx context.Context, tx pgx.Tx, room string, version persistence.Version) ([]byte, error) {
-	state, _, misread, err := fold(storedUpdates(ctx, tx, room, version))
+func stateThrough(room string, version persistence.Version, updates updateSource) (state []byte, readBack bool, err error) {
+	state, decoded, misread, err := fold(updates)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if misread == nil {
-		return state, nil
+		return state, decoded != nil, nil
 	}
 	slog.Warn(misreadWarning+"; serving them merged",
 		"room", room, "version", int64(version), "error", misread)
-	return mergedThrough(ctx, tx, room, version)
+	state, err = mergedThrough(updates)
+	return state, false, err
 }
 
 // documentThrough is the document stateThrough's state decodes into, decoded once: the document
@@ -63,15 +68,15 @@ func stateThrough(ctx context.Context, tx pgx.Tx, room string, version persisten
 // update, which the fold returns as stored, or a log that does not fold, which is served merged -
 // the state decoded into a document with the server's pending queue, as a room decodes it. A state
 // that does not decode is ErrDocumentUnloadable; a log holding no update is no document.
-func documentThrough(ctx context.Context, tx pgx.Tx, room string, version persistence.Version) (*crdt.Doc, error) {
-	state, readBack, misread, err := fold(storedUpdates(ctx, tx, room, version))
+func documentThrough(room string, version persistence.Version, updates updateSource) (*crdt.Doc, error) {
+	state, readBack, misread, err := fold(updates)
 	switch {
 	case err != nil:
 		return nil, err
 	case misread != nil:
 		slog.Warn(misreadWarning+"; serving them merged",
 			"room", room, "version", int64(version), "error", misread)
-		if state, err = mergedThrough(ctx, tx, room, version); err != nil {
+		if state, err = mergedThrough(updates); err != nil {
 			return nil, err
 		}
 	case readBack != nil:
@@ -87,20 +92,104 @@ func documentThrough(ctx context.Context, tx pgx.Tx, room string, version persis
 	return doc, nil
 }
 
-// mergedThrough is the room's stored updates through version merged whole, as they were stored.
-func mergedThrough(ctx context.Context, tx pgx.Tx, room string, version persistence.Version) ([]byte, error) {
-	var updates [][]byte
-	if err := eachUpdateThrough(ctx, tx, room, version, func(update []byte) error {
-		updates = append(updates, update)
+// mergedThrough is the stored updates updates replays merged whole, as they were stored.
+func mergedThrough(updates updateSource) ([]byte, error) {
+	var stored [][]byte
+	if err := updates(func(update []byte) error {
+		stored = append(stored, update)
 		return nil
 	}); err != nil {
 		return nil, err
 	}
-	merged, err := crdt.MergeUpdatesV1(updates...)
+	merged, err := crdt.MergeUpdatesV1(stored...)
 	if err != nil {
 		return nil, fmt.Errorf("merge document updates: %w", err)
 	}
 	return merged, nil
+}
+
+// foldBufferBytes is the most stored update bytes a fold reads into memory (foldRead): a load or a
+// compaction whose rows total at most this reads them, ends its read transaction and folds with no
+// connection held, and one past it folds while it streams them inside that transaction, one row at
+// a time. A fold holds its document beside the rows either way, so this bounds what reading the
+// rows first adds to it.
+const foldBufferBytes = 32 << 20
+
+// foldRead hands use the room's stored updates through version, the rows of them tx reads, which
+// number rows and total bytes, and ends tx, committing it as what names. Rows within foldBuffer
+// are read into memory and tx commits before use runs, so a fold of them holds no connection while
+// it works; past it use streams them inside tx (storedUpdates), which commits once use returns, so
+// a fold of a log however large holds one row at once beside its document. Either source replays
+// the rows as often as use asks (updateSource), from one snapshot.
+func (p *PgVersioned) foldRead(ctx context.Context, tx pgx.Tx, room string, version persistence.Version, rows int, bytes int64, what string, use func(updateSource) error) error {
+	commit := func() error {
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit %s: %w", what, err)
+		}
+		return nil
+	}
+	if bytes > p.foldBuffer() {
+		if p.beforeFold != nil {
+			p.beforeFold(room)
+		}
+		if err := use(storedUpdates(ctx, tx, room, version)); err != nil {
+			return err
+		}
+		return commit()
+	}
+	updates := make([][]byte, 0, rows)
+	if err := eachUpdateThrough(ctx, tx, room, version, func(update []byte) error {
+		updates = append(updates, update)
+		return nil
+	}); err != nil {
+		return err
+	}
+	if err := commit(); err != nil {
+		return err
+	}
+	if p.beforeFold != nil {
+		p.beforeFold(room)
+	}
+	return use(memoryUpdates(updates))
+}
+
+// foldBuffer is the most stored update bytes foldRead reads into memory: foldBufferBytes, or the
+// lower bound a test set (foldBufferLimit).
+func (p *PgVersioned) foldBuffer() int64 {
+	if p.foldBufferLimit != 0 {
+		return p.foldBufferLimit
+	}
+	return foldBufferBytes
+}
+
+// storedLog is what a load reads of a room's stored updates before it reads the updates
+// themselves, in one statement of its transaction: the stamp of the state at their head
+// (readDocumentStamp), the head included, how many rows stand at or below the head and their total
+// bytes, which decide where the fold reads them from (foldRead), and the version of the oldest
+// row, which the load notes with the head (noted).
+type storedLog struct {
+	stamp  DocumentStamp
+	rows   int
+	bytes  int64
+	oldest int64
+}
+
+// readStoredLog is the room's storedLog as tx reads it.
+func readStoredLog(ctx context.Context, tx pgx.Tx, room string) (storedLog, error) {
+	var stored storedLog
+	if err := tx.QueryRow(ctx, `
+		select h.version, coalesce(u.xmin::text, ''), r.updates, r.bytes, o.oldest
+		from (select `+headVersion+` as version) h
+		left join doc_updates u on u.artifact_id = $1 and u.version = h.version
+		cross join lateral (
+			select count(*) as updates, coalesce(sum(octet_length(d.update)), 0)::bigint as bytes
+			from doc_updates d where d.artifact_id = $1 and d.version <= h.version
+		) r
+		cross join (select coalesce(min(version), 0) as oldest from doc_updates where artifact_id = $1) o
+	`, room).Scan(&stored.stamp.Version, &stored.stamp.Row, &stored.rows, &stored.bytes, &stored.oldest); err != nil {
+		return storedLog{}, fmt.Errorf("read the document's stored updates: %w", err)
+	}
+	return stored, nil
 }
 
 // errUnfoldable marks a stored update the fold's document could not apply.
@@ -255,10 +344,12 @@ type LoadedDocument struct {
 }
 
 // LoadDocument is the room's document at its head, decoded once, and the stamp of the state it was
-// decoded from, both read in the one repeatable-read transaction Load reads in. Its document is
-// the one Load's state decodes into (documentThrough), so a read of it shows what a room load
-// would. A history that does not decode is ErrDocumentUnloadable. Like Load, it notes the rows it
-// read once its transaction ends (noted).
+// decoded from, both read in one repeatable-read transaction on the rooms pool, as Load reads.
+// Its document is the one Load's state decodes into (documentThrough), so a read of it shows what
+// a room load would. Like Load it reads the rows at or below the head into memory and folds them
+// once its transaction has ended when they total at most foldBufferBytes, and folds a larger log
+// while it streams it inside the transaction (foldRead). A history that does not decode is
+// ErrDocumentUnloadable. Like Load, it notes the rows it read once its transaction ends (noted).
 func (p *PgVersioned) LoadDocument(ctx context.Context, room string) (LoadedDocument, error) {
 	if err := ctx.Err(); err != nil {
 		return LoadedDocument{}, err
@@ -272,23 +363,24 @@ func (p *PgVersioned) LoadDocument(ctx context.Context, room string) (LoadedDocu
 		return LoadedDocument{}, fmt.Errorf("begin document load: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	stamp, err := readDocumentStamp(ctx, tx, room)
+	stored, err := readStoredLog(ctx, tx, room)
 	if err != nil {
 		return LoadedDocument{}, err
 	}
-	loaded := LoadedDocument{Stamp: stamp}
-	var oldest int64
-	if stamp.Version != 0 {
-		if loaded.Doc, err = documentThrough(ctx, tx, room, persistence.Version(stamp.Version)); err != nil {
-			return LoadedDocument{}, err
+	loaded := LoadedDocument{Stamp: stored.stamp}
+	if stored.stamp.Version == 0 {
+		if err := tx.Commit(ctx); err != nil {
+			return LoadedDocument{}, fmt.Errorf("commit document load: %w", err)
 		}
-		if oldest, err = p.oldestNoted(ctx, tx, room); err != nil {
+	} else {
+		head := persistence.Version(stored.stamp.Version)
+		if err := p.foldRead(ctx, tx, room, head, stored.rows, stored.bytes, "document load", func(updates updateSource) (err error) {
+			loaded.Doc, err = documentThrough(room, head, updates)
+			return err
+		}); err != nil {
 			return LoadedDocument{}, err
 		}
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return LoadedDocument{}, fmt.Errorf("commit document load: %w", err)
-	}
-	p.noted(room, stamp.Version, oldest)
+	p.noted(room, stored.stamp.Version, stored.oldest)
 	return loaded, nil
 }

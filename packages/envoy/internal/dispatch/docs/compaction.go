@@ -23,13 +23,6 @@ import (
 // is cached by (DocumentStamp). Rows that wait out the tail fold together, once.
 const compactTail = 2 * time.Minute
 
-// foldBufferBytes is the most stored update bytes a fold reads into memory: a compaction whose rows
-// total at most this reads them, ends its read transaction and folds with no connection held, and
-// one past it folds while it streams them inside that transaction, one row at a time, as a load
-// does. A fold holds its document beside the rows either way, so this bounds what reading the rows
-// first adds to it.
-const foldBufferBytes = 32 << 20
-
 // compactRule picks the row a compaction folds into, its fold point: every row at or below it is
 // folded into it, and every row below it is deleted.
 type compactRule struct {
@@ -165,9 +158,9 @@ func (p *PgVersioned) compactRoom(ctx context.Context, room string, rule compact
 }
 
 // readCompaction reads the rows at or below the room's fold point and folds them: in memory once
-// its transaction has ended when they total at most foldBufferBytes, streamed inside it otherwise.
-// It returns no rows, and the outcome the compaction ends with, when there is nothing to fold or
-// the negative cache already holds this fold point.
+// its transaction has ended when they total at most foldBufferBytes, streamed inside it otherwise
+// (foldRead, which a load shares). It returns no rows, and the outcome the compaction ends with,
+// when there is nothing to fold or the negative cache already holds this fold point.
 func (p *PgVersioned) readCompaction(ctx context.Context, pool *pgxpool.Pool, room string, rule compactRule) (compactFold, compactOutcome, error) {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
@@ -213,27 +206,14 @@ func (p *PgVersioned) readCompaction(ctx context.Context, pool *pgxpool.Pool, ro
 		return compactFold{}, compactUnfoldable, nil
 	}
 	through := persistence.Version(*point)
-	if total > foldBufferBytes {
-		if folded.state, _, folded.misread, err = fold(storedUpdates(ctx, tx, room, through)); err != nil {
-			return compactFold{}, compactNothing, fmt.Errorf("fold compacted document updates: %w", err)
+	if err := p.foldRead(ctx, tx, room, through, len(folded.rows), total, "compaction read", func(updates updateSource) error {
+		var err error
+		if folded.state, _, folded.misread, err = fold(updates); err != nil {
+			return fmt.Errorf("fold compacted document updates: %w", err)
 		}
-		if err := tx.Commit(ctx); err != nil {
-			return compactFold{}, compactNothing, fmt.Errorf("commit compaction read: %w", err)
-		}
-		return folded, compactNothing, nil
-	}
-	updates := make([][]byte, 0, len(folded.rows))
-	if err := eachUpdateThrough(ctx, tx, room, through, func(update []byte) error {
-		updates = append(updates, update)
 		return nil
 	}); err != nil {
 		return compactFold{}, compactNothing, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return compactFold{}, compactNothing, fmt.Errorf("commit compaction read: %w", err)
-	}
-	if folded.state, _, folded.misread, err = fold(memoryUpdates(updates)); err != nil {
-		return compactFold{}, compactNothing, fmt.Errorf("fold compacted document updates: %w", err)
 	}
 	return folded, compactNothing, nil
 }

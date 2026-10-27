@@ -29,7 +29,8 @@ import (
 // fold of the log bounds; their reads are logged rather than held to the bound. The writer is
 // killed rather than stopped, so its shutdown compacts nothing and every read meets the log the
 // writes left, as it meets one stored before LEGION-496; then a server that holds the room stops
-// as a deploy stops it, which compacts it.
+// as a deploy stops it, which compacts it once its rows are older than the tail a compaction
+// leaves as written (two minutes), as a document left at rest is.
 func TestAStoredHistoryCostsAColdReadOnlyTheDocumentItLeaves(t *testing.T) {
 	memory := newMemoryHarness(t)
 	words := make([]string, 0, 600)
@@ -152,6 +153,7 @@ func TestAStoredHistoryCostsAColdReadOnlyTheDocumentItLeaves(t *testing.T) {
 			if !strings.HasPrefix(text, "Before marker.") {
 				t.Fatalf("the edited document reads %.80q, want it to open with the edit", text)
 			}
+			memory.backdateUpdates(t, artifactID)
 			holder.stop(t)
 			stored := memory.storedUpdateBytes(t, artifactID)
 			state, marks := memory.foldedState(t, artifactID)
@@ -205,6 +207,17 @@ func (h *memoryHarness) storedUpdateBytes(t *testing.T, artifactID string) int {
 		t.Fatalf("measure the stored update log: %v", err)
 	}
 	return stored
+}
+
+// backdateUpdates ages the document's stored rows past the tail a compaction leaves as written
+// (two minutes), as a document left at rest is, so the compaction of a stop folds all of them.
+func (h *memoryHarness) backdateUpdates(t *testing.T, artifactID string) {
+	t.Helper()
+	if _, err := h.database.Pool.Exec(context.Background(),
+		`update doc_updates set created_at = now() - interval '1 hour' where artifact_id = $1`, artifactID,
+	); err != nil {
+		t.Fatalf("backdate the document's rows: %v", err)
+	}
 }
 
 // foldedState applies the document's stored updates in order to one document and reports the size
