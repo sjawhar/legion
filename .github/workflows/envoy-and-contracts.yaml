@@ -151,12 +151,17 @@ jobs:
           # Each filter names everything its job's checks read: the package and what its tests
           # and typecheck read outside it, the composite actions the job installs its tools
           # through, and, for a Go build in workspace mode, every module go.work binds, whose
-          # go.mod moves the versions the build compiles. A Go job's filter names the packages
-          # `go list -deps -test` lists for its test command, with that command's build tags, and
-          # the files its tests read outside them; a test that comes to import or read something
-          # new adds it to that job's filter. The first keys, each defined with an `&anchor`, are
-          # no job's gate: each is a group written once and named by the filters that need it
-          # through its anchor, which dorny/paths-filter flattens into the list that names it.
+          # go.mod moves the versions the build compiles. Each of the five per-job filters
+          # (dispatch_memory, dispatch_multiprocess, broker_multiprocess, envoy_go_race,
+          # envoy_infra_go) names the packages `go list -deps -test` lists for the job's command,
+          # with its build tags, the packages of each binary its tests build, and the files its
+          # tests read outside them. Any change that makes the job's command, or a binary its tests
+          # build, compile a new package or read a new file - production code included, not only a
+          # test - adds that package or file to the job's filter, since the pull request that adds
+          # the import still runs the job and nothing else reports the filter falling behind. The
+          # first keys, each defined with an `&anchor`, are no job's gate: each is a group written
+          # once and named by the filters that need it through its anchor, which dorny/paths-filter
+          # flattens into the list that names it.
           filters: |
             # The Bun pin and the action that installs it (.github/actions/setup-bun reads
             # .bun-version).
@@ -182,8 +187,7 @@ jobs:
               - 'packages/dispatch/package.json'
               - 'packages/envoy/internal/dispatch/pmdoc/gen/package.json'
               - 'docs/site/package.json'
-              - '.bun-version'
-              - '.github/actions/setup-bun/**'
+              - *bun_toolchain
             # The root Go workspace: a go command under go.work reads it, go.work.sum, and the
             # go.mod and go.sum of every module it binds, whose requirements move the versions the
             # build compiles.
@@ -197,7 +201,8 @@ jobs:
             # The Dispatch server, `go list -deps ./cmd/dispatch` in packages/envoy (its embedded
             # migrations and pmdoc schema included): what envoy-infra's natslive test builds
             # (infra/core/dispatch_permissions_live_test.go:51, through
-            # infra/core/permissions_live_test.go:298-299).
+            # infra/core/permissions_live_test.go:298-299). packages/envoy/listenfd: added by
+            # #2229 (cmd/dispatch, cmd/listener and internal/config import it).
             dispatch_server: &dispatch_server
               - 'packages/envoy/cmd/dispatch/*'
               - 'packages/envoy/internal/bus/*'
@@ -239,7 +244,9 @@ jobs:
               - 'packages/envoy/internal/pglisten/*'
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/routing/*'
-            # The listener's packages, `go list -deps ./cmd/listener` in packages/envoy.
+              - 'packages/envoy/listenfd/*'
+            # The listener's packages, `go list -deps ./cmd/listener` in packages/envoy
+            # (packages/envoy/listenfd: added by #2229).
             listener_command: &listener_command
               - 'packages/envoy/cmd/listener/*'
               - 'packages/envoy/internal/bus/*'
@@ -257,22 +264,18 @@ jobs:
               - 'packages/envoy/internal/store/*'
               - 'packages/envoy/internal/verify/*'
               - 'packages/envoy/internal/webhook/*'
-            # What `go test ./cmd/dispatch` reads under both its memory and its multiprocess tag:
-            # the packages it compiles, with the whole of cmd/dispatch and internal/dispatch, whose
-            # .go files cmd/dispatch/settings_test.go:136 walks, and the pod spec
-            # cmd/dispatch/pod_grace_period_test.go:17 reads.
+              - 'packages/envoy/listenfd/*'
+            # The Dispatch server's packages plus what `go test ./cmd/dispatch` adds under both its
+            # memory and its multiprocess tag: the whole of cmd/dispatch and internal/dispatch,
+            # whose .go files cmd/dispatch/settings_test.go:136 walks, the packages its tests
+            # compile, and the pod spec cmd/dispatch/pod_grace_period_test.go:17 reads.
             dispatch_command_tests: &dispatch_command_tests
+              - *dispatch_server
               - 'packages/envoy/cmd/dispatch/**'
               - 'packages/envoy/internal/dispatch/**'
-              - 'packages/envoy/internal/bus/*'
               - 'packages/envoy/internal/cmdtest/*'
               - 'packages/envoy/internal/contracts/**'
-              - 'packages/envoy/internal/githubappjwt/*'
-              - 'packages/envoy/internal/id/*'
               - 'packages/envoy/internal/oidc/**'
-              - 'packages/envoy/internal/pglisten/*'
-              - 'packages/envoy/internal/pgmigrate/*'
-              - 'packages/envoy/internal/routing/*'
               - 'packages/envoy/internal/testsocks5/*'
               - 'packages/envoy/infra/gcp/testdata/dispatch-pod.golden'
             # The envoy-infra module's own workspace (packages/envoy/infra/go.work binds it and
@@ -1272,10 +1275,10 @@ jobs:
   # package deadline, which the memory tests already took red at 600 s (run 37116639565), and the
   # rows here wait out a migration race, a ten-second fan-out window and a twelve-second drain,
   # tens of seconds each. A job of their own rather than a step in dispatch-multiprocess, whose
-  # Postgres service and shape this copies: the broker rows read their own Postgres variable
-  # (BROKER_TEST_DATABASE_URL) and compile their own import closure, so they get their own job and
-  # their own filter, `broker_multiprocess`, which gates this one. They need no NATS and no
-  # test-container pull - the broker starts nothing in a container - so neither step is here.
+  # Postgres service and shape this copies: the broker rows compile their own import closure, so
+  # they get their own job and their own filter, `broker_multiprocess`, which gates this one. They
+  # need no NATS and no test-container pull - the broker starts nothing in a container - so
+  # neither step is here.
   broker-multiprocess:
     needs: changes
     if: needs.changes.outputs.broker_multiprocess == 'true'
