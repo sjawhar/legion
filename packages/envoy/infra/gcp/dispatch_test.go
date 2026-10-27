@@ -848,9 +848,11 @@ func requireWaitsForTheFrontDoor(t *testing.T, m *pulumitest.Mocks, deployment, 
 		dials+" dials the proxy at its Service, not at the pod")
 }
 
-// envoy-dispatch exits 1 when it cannot reach NATS through the proxy, and its /healthz answers 503
-// until it connects, so an app pod started before the front door and its Service exist never goes
-// ready and the rollout waits it out.
+// envoy-dispatch serves without NATS: its /healthz readiness reads only Postgres, reporting nats
+// false, and its bus clients connect in the background once the front door's proxy answers. So an
+// app pod started before the front door and its Service would still go ready, serving without
+// the bus until the proxy answers; the app waits for the front door only so that it starts
+// connected.
 func TestDispatchAppWaitsForTheFrontDoor(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)

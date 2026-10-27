@@ -11,8 +11,9 @@
 -- beside a live process that does not share its current key both ways, which is how a process
 -- that minted a key of its own, or a pod rolled with a changed secret, is stopped before it signs
 -- anyone out. commit and dashboard_build name the build each process serves, '' when the binary
--- carries no stamp or the process serves no dashboard; the announcement of a fleet-wide build and
--- the dashboard's "new version" notice read them.
+-- carries no stamp or the process serves no dashboard. The announcement of a fleet-wide build reads
+-- commit; nothing reads dashboard_build yet (it is written, and scanned into
+-- processes.Process.DashboardBuild), and INFRA-559's dashboard "new version" notice will read it.
 --
 -- server_build_announcements is the record of each fleet-wide build the server fleet has announced
 -- on the bus (notifications.dispatch.server.started): one row each time every live process serves

@@ -442,7 +442,9 @@ and the rotation steps, and exiting 1, when a live process's key set does not sh
 ways: the other's current key among its keys, and its current key among the other's. The refusal
 stands only beside a process that stays live: refused, a process logs at WARN which live process
 refuses it and waits up to one live window (15 seconds) and a heartbeat for that process to stop
-heartbeating, trying again every heartbeat, before it exits 1, serving nothing meanwhile. So a
+heartbeating, trying again every heartbeat, before it exits 1, serving nothing meanwhile (a
+SIGTERM or Ctrl-C during the wait is a clean stop: the process logs `msg="dispatch: stopped while
+waiting for admission to the registry of live server processes"` at INFO and exits 0). So a
 restart after a kill, whose dead process's row still counts as live, starts once that row lapses,
 while a live process, heartbeating every 5 seconds, keeps refusing. A process with a minted key
 therefore refuses beside any live process, and a process refuses beside it; processes that share

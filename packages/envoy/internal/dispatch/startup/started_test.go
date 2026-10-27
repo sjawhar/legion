@@ -27,13 +27,18 @@ const (
 
 // recordingPublisher stands in for the bus client: it records every envelope it is asked to
 // publish while it is connected and not failing, and refuses the rest. delay is how long each
-// publish takes before it answers, as a stream's acknowledgement does.
+// publish takes before it answers, as a stream's acknowledgement does; a publish whose ctx ends
+// first records nothing and returns ctx's error, as the bus client sends nothing once its ctx has
+// ended. A hanging publisher's publish never answers before its ctx ends.
 type recordingPublisher struct {
 	delay        time.Duration
 	mu           sync.Mutex
 	disconnected bool
+	hanging      bool
 	failure      error
 	published    []contracts.Envelope
+	// running counts the publishes that have not returned.
+	running int
 }
 
 func (p *recordingPublisher) Connected() bool {
@@ -42,8 +47,25 @@ func (p *recordingPublisher) Connected() bool {
 	return !p.disconnected
 }
 
-func (p *recordingPublisher) PublishReportingDuplicate(item contracts.Envelope) (bool, error) {
-	time.Sleep(p.delay)
+func (p *recordingPublisher) PublishReportingDuplicateWithin(ctx context.Context, item contracts.Envelope) (bool, error) {
+	p.mu.Lock()
+	p.running++
+	hanging := p.hanging
+	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		p.running--
+	}()
+	var answered <-chan time.Time
+	if !hanging {
+		answered = time.After(p.delay)
+	}
+	select {
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case <-answered:
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.failure != nil {
@@ -51,6 +73,18 @@ func (p *recordingPublisher) PublishReportingDuplicate(item contracts.Envelope) 
 	}
 	p.published = append(p.published, item)
 	return false, nil
+}
+
+func (p *recordingPublisher) hang(hanging bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.hanging = hanging
+}
+
+func (p *recordingPublisher) inFlight() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.running
 }
 
 func (p *recordingPublisher) fail(err error) {
@@ -269,6 +303,36 @@ func TestAnAnnouncementIsPublishedOnceAPublishSucceeds(t *testing.T) {
 	if got := down.envelopes(); len(got) != 0 {
 		t.Fatalf("a publisher with no connection was asked to publish %+v", got)
 	}
+}
+
+// A publish that does not answer within publishTimeout is abandoned with its context, so nothing
+// of it runs on once its pass has given up and moved on: the announcement stays unpublished, and
+// a later pass whose publish answers publishes it.
+func TestAPublishThatOutlivesItsBoundIsAbandoned(t *testing.T) {
+	before := publishTimeout
+	publishTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { publishTimeout = before })
+	database := storetest.Open(t)
+	register(t, database, c1)
+	ctx := context.Background()
+
+	publisher := &recordingPublisher{}
+	publisher.hang(true)
+	announcer := New(Deps{Pool: database.Pool, Publisher: publisher})
+	announcer.pass(ctx)
+	if running := publisher.inFlight(); running != 0 {
+		t.Fatalf("%d publishes still running after the pass that gave up on them", running)
+	}
+	if rows := announcements(t, database); len(rows) != 1 || rows[0].published {
+		t.Fatalf("announcements after an abandoned publish = %+v, want one unpublished", rows)
+	}
+	if got := publisher.envelopes(); len(got) != 0 {
+		t.Fatalf("an abandoned publish published %+v", got)
+	}
+
+	publisher.hang(false)
+	announcer.pass(ctx)
+	requireEnvelopes(t, database, publisher, c1)
 }
 
 // fixturePath is the server.started envelope the Legion daemon's intake decodes, shared with it

@@ -480,9 +480,9 @@ func main() {
 
 	// LEGION-781, INFRA-555: the announcer publishes server.started once each time every live
 	// server process comes to serve one build (startup.Announcer), and /healthz reports the latest
-	// announcement's commit as fleet_commit. It runs once this process is registered, below. A
-	// process without NATS announces into the database and leaves the publish to a process whose
-	// bus answers.
+	// announcement's commit as fleet_commit. It runs once this process is registered, below
+	// (joinRegistry, registry.go). A process without NATS announces into the database and leaves
+	// the publish to a process whose bus answers.
 	var announcements startup.Publisher
 	if natsClient != nil {
 		announcements = natsClient
@@ -516,6 +516,13 @@ func main() {
 		SigningKeys:    signingKey.Fingerprints(),
 	}, leases, announcer)
 	if err != nil {
+		// A deploy that stops this process while the registration waits for a refusing peer's
+		// heartbeat to lapse (processes.Register's wait, up to a live window and a heartbeat) stops
+		// a process that has served nothing: a clean stop, not a failed start.
+		if ctx.Err() != nil && errors.Is(err, context.Canceled) {
+			slog.Info("dispatch: stopped while waiting for admission to the registry of live server processes")
+			return
+		}
 		slog.Error("dispatch: register this server process", "error", err)
 		os.Exit(1)
 	}
