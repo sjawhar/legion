@@ -12,12 +12,16 @@ afterAll(async () => {
   await window.happyDOM.close();
 });
 
+function allElements(root: Element): Element[] {
+  return [root, ...Array.from(root.getElementsByTagName("*"))];
+}
+
 function elementNames(root: Element): string[] {
-  return [root, ...Array.from(root.getElementsByTagName("*"))].map((element) => element.localName);
+  return allElements(root).map((element) => element.localName);
 }
 
 function attributeValues(root: Element): string[] {
-  return [root, ...Array.from(root.getElementsByTagName("*"))].flatMap((element) =>
+  return allElements(root).flatMap((element) =>
     Array.from(element.attributes, (attribute) => attribute.value)
   );
 }
@@ -64,7 +68,8 @@ describe("renderMermaidSvg", () => {
     for (const source of diagrams) {
       const markup = renderProofMermaidSvg(source);
       const raw = new window.DOMParser().parseFromString(markup, "image/svg+xml");
-      const svg = renderMermaidSvg(source, document);
+      const svg = sanitizeMermaidSvg(markup, document);
+      if (svg === null) throw new Error("beautiful-mermaid's svg did not parse");
       expect(elementNames(svg)).toEqual(elementNames(raw.documentElement as unknown as Element));
     }
   });

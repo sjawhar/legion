@@ -38,6 +38,8 @@ type MermaidModule = typeof MermaidRenderer;
 
 /** A drawn source: its sanitized SVG, or the status line a refusal shows. */
 type Drawing = { svg: SVGSVGElement } | { error: string };
+/** A body's blocks waiting for the renderer to load. */
+type PendingDraw = { element: HTMLElement; blocks: HTMLPreElement[] };
 
 /** How many drawn sources the cache keeps; the oldest insertion goes first. */
 const CACHE_LIMIT = 32;
@@ -50,6 +52,9 @@ const PREVIEW_STYLE = "svg{max-width:100%;height:auto;display:block}";
 let loading: Promise<MermaidModule> | undefined;
 let loaded: MermaidModule | undefined;
 const drawings = new Map<string, Drawing>();
+/** The late draws not yet cancelled, in paint order: drawn when the renderer loads and dropped
+ *  when it fails, so a cancelled draw holds none of its body's DOM while the chunk is awaited. */
+const pending = new Set<PendingDraw>();
 
 function noop(): void {}
 
@@ -77,20 +82,27 @@ function endsInOpenMermaidFence(parsed: ProseMirrorNode, markdown: string): bool
   return !CLOSING_FENCE.test(source.slice(source.lastIndexOf("\n") + 1));
 }
 
-function loadMermaid(): Promise<MermaidModule> {
-  if (loading !== undefined) return loading;
+function loadMermaid(): void {
+  if (loading !== undefined) return;
   const attempt = importWhenOnline(() => import("@legion/proof-editor/mermaid"));
   loading = attempt;
   attempt.then(
     (module) => {
-      if (loading === attempt) loaded = module;
+      if (loading !== attempt) return;
+      loaded = module;
+      const draws = Array.from(pending);
+      pending.clear();
+      for (const { element, blocks } of draws) drawBlocks(module, element, blocks);
     },
     (error: unknown) => {
-      if (loading === attempt) loading = undefined;
+      // The blocks stay code.
+      if (loading === attempt) {
+        loading = undefined;
+        pending.clear();
+      }
       console.error("Showing Mermaid source as code, the diagram renderer is unavailable", error);
     }
   );
-  return attempt;
 }
 
 function drawing(module: MermaidModule, source: string, document: Document): Drawing {
@@ -172,23 +184,19 @@ export function drawMermaidDiagrams(
     drawBlocks(loaded, element, blocks);
     return noop;
   }
-  let cancelled = false;
-  loadMermaid().then(
-    (module) => {
-      if (!cancelled) drawBlocks(module, element, blocks);
-    },
-    // loadMermaid reports the failure once; the blocks stay code.
-    noop
-  );
+  const draw: PendingDraw = { element, blocks };
+  pending.add(draw);
+  loadMermaid();
   return () => {
-    cancelled = true;
+    pending.delete(draw);
   };
 }
 
-/** Forgets the loaded renderer and every cached drawing, so a test starts from a page that has
- *  drawn nothing. */
+/** Forgets the loaded renderer, every cached drawing and every pending draw, so a test starts
+ *  from a page that has drawn nothing. */
 export function resetMermaidDiagrams(): void {
   loading = undefined;
   loaded = undefined;
   drawings.clear();
+  pending.clear();
 }

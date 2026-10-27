@@ -5,24 +5,24 @@ const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 /** The elements beautiful-mermaid emits, measured over one diagram of each type it draws
  *  (flowchart, state, sequence, class, ER, xychart), plus the text and description elements an
  *  SVG may carry. Anything else is removed with its subtree. */
-const ALLOWED_ELEMENTS: Record<string, true> = {
-  svg: true,
-  defs: true,
-  g: true,
-  marker: true,
-  path: true,
-  line: true,
-  polyline: true,
-  polygon: true,
-  rect: true,
-  circle: true,
-  ellipse: true,
-  text: true,
-  tspan: true,
-  title: true,
-  desc: true,
-  style: true,
-};
+const ALLOWED_ELEMENTS: ReadonlySet<string> = new Set([
+  "svg",
+  "defs",
+  "g",
+  "marker",
+  "path",
+  "line",
+  "polyline",
+  "polygon",
+  "rect",
+  "circle",
+  "ellipse",
+  "text",
+  "tspan",
+  "title",
+  "desc",
+  "style",
+]);
 
 /**
  * Draws a Mermaid source as the document editor does — upstream's `renderProofMermaidSvg`, so the
@@ -60,7 +60,7 @@ export function sanitizeMermaidSvg(markup: string, document: Document): SVGSVGEl
   if (parsed.getElementsByTagName("parsererror").length > 0) return null;
   if (svg.namespaceURI !== SVG_NAMESPACE || svg.localName.toLowerCase() !== "svg") return null;
   sanitizeElement(svg);
-  return document.importNode(svg, true) as SVGSVGElement;
+  return document.adoptNode(svg) as SVGSVGElement;
 }
 
 /** A `url(#id)` reference to an element of the same SVG, unquoted or quoted. */
@@ -95,8 +95,7 @@ function sanitizeElement(element: Element): void {
   }
   for (const child of Array.from(element.children)) {
     const allowed =
-      child.namespaceURI === SVG_NAMESPACE &&
-      ALLOWED_ELEMENTS[child.localName.toLowerCase()] === true;
+      child.namespaceURI === SVG_NAMESPACE && ALLOWED_ELEMENTS.has(child.localName.toLowerCase());
     if (allowed) sanitizeElement(child);
     else child.remove();
   }
