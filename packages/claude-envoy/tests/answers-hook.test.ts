@@ -322,3 +322,42 @@ test("a hook input it cannot read adds nothing and still exits 0", async () => {
   expect(run.stdout).toBe("")
   expect(run.stderr).toContain("envoy: people's answers were not added")
 })
+
+test("a hook whose start-up took past 800 ms still carries the list Dispatch answers at once", async () => {
+  // Claude Code starts the open-asks, dispatch-first and answers hooks at once beside itself, so on
+  // a loaded host the answers hook's own bun start-up can pass 800 ms before its code runs. The
+  // preload stands in for that start-up: it holds the process until 820 ms after it started.
+  // Dispatch then answers at once, so the session must get the list Dispatch holds now, not the
+  // failure line ("did not answer within 0 ms") or a stale list.
+  const dispatch = standinDispatch()
+  const items = [answer("ask-slow", "SLOW-START-ANSWER: written before this resume.", 1)]
+  dispatch.route = { kind: "list", items }
+  const { home, state } = await scratch()
+  const preload = join(home, "slow-start.ts")
+  await writeFile(preload, "while (performance.now() < 820) {}\n")
+  const started = performance.now()
+  const hook = Bun.spawn(["bun", "--preload", preload, bundle, "answers"], {
+    env: {
+      PATH: process.env["PATH"] ?? "",
+      CLAUDE_PLUGIN_ROOT: packageRoot,
+      HOME: home,
+      DISPATCH_STATE_DIR: state,
+      DISPATCH_URL: dispatch.base,
+      DISPATCH_TOKEN: "hook-token",
+    },
+    stdin: new TextEncoder().encode(JSON.stringify(sessionStart("resume", home))),
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const [exitCode, stdout, stderr] = await Promise.all([
+    hook.exited,
+    new Response(hook.stdout).text(),
+    new Response(hook.stderr).text(),
+  ])
+  const run: HookRun = { exitCode, stdout, stderr, wallMs: performance.now() - started }
+
+  expect(contextOf(run, "SessionStart")).toBe(
+    renderSessionAnswers(items, { now: Date.now(), total: items.length }) as string,
+  )
+  expect(dispatch.requests).toEqual([`Bearer hook-token /api/v1/agents/${SESSION}/answers`])
+})
