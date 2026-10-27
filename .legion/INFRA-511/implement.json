@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-511",
-  "completed": "2026-10-27T11:40:00Z",
+  "completed": "2026-10-27T12:30:00Z",
   "proof": [
+    {
+      "criterion": "Tester round 7: the focused-subagent real-binary case passes reliably on a slow host",
+      "surface": "the real interactive Oh My Pi 18.12.2 under a pseudo-terminal with both plugins, stand-ins and real NATS, a task subagent focused from the Agent Hub",
+      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:4222 bun test ./extensions/controller-start-omp.test.ts -t 'focused subagent view' (5 runs), then the whole committed file once",
+      "observed": "5 runs of the case: 5 pass, 0 fail; whole file: 9 pass, 0 fail (346 s)",
+      "headSha": "5fd0f13e16e368fd02815639240b89b2ce5d05a4",
+      "negativeControl": "at 9613f45a (no wait for the subagent's request) the tester saw the case fail 2 of 5 runs at 'the subagent's view focused', the hub showing the subagent at '0 req'"
+    },
     {
       "criterion": "Tester round 6: the real-binary proof passes as committed on a slow but normal host",
       "surface": "the real interactive Oh My Pi 18.12.2 under a pseudo-terminal with both plugins, stand-ins and real NATS, in this pod where Oh My Pi's startup takes about 27 s",
@@ -93,7 +101,8 @@
     "Review round 1: packages/pi-legion/src/controller-session.ts (registration recorded before the send, claimComplete, two-form warning, no mark for a follow-up send, mark names the session current at the send, one promise chain, operatorLaunchedController, logger), packages/pi-shared/src/{interface.ts (startupTurn one optional slot), startup-turn.ts, pi-types.ts (CommandContext.isIdle required)}, packages/pi-legion/extensions/{legion.test.ts, controller-start-omp.test.ts}, packages/pi-legion/AGENTS.md, packages/pi-shared/AGENTS.md, packages/pi-legion/CHANGELOG.md, skills/legion-controller/references/session.md and its claude-envoy copy",
     "Tester round 5: packages/pi-legion/src/controller-session.ts (re-claim notices deferred to after the session_switch handler via the host timer; startHandedOver), packages/pi-legion/extensions/{legion.test.ts (fixture timer), controller-start-omp.test.ts (register hook takes the body and may hold; onListener hook; new hand-over case)}, packages/pi-legion/AGENTS.md, CHANGELOG.md",
     "Review round 3: packages/pi-legion/src/controller-session.ts (noteWait on the real context; hand-over and refusal notices in the legion-controller-claim widget, cleared at the next run or claim; timer fallback), packages/pi-legion/extensions/legion.ts (handleAgentStart), packages/pi-shared/src/pi-types.ts (optional ui.setWidget), tests and docs",
-    "Tester round 6: packages/pi-legion/extensions/controller-start-omp.test.ts (STARTUP_DEADLINE_MS 150 s from the spawn, STEP_DEADLINE_MS 30 s per wait after it, CASE_TIMEOUT_MS 600 s)"
+    "Tester round 6: packages/pi-legion/extensions/controller-start-omp.test.ts (STARTUP_DEADLINE_MS 150 s from the spawn, STEP_DEADLINE_MS 30 s per wait after it, CASE_TIMEOUT_MS 600 s)",
+    "Tester round 7: packages/pi-legion/extensions/controller-start-omp.test.ts (the focused-subagent case waits for the subagent's first model request before focusing it)"
   ],
   "trickyParts": [
     "Sending the start message after the Envoy role claim was flaky (4/30): the listener forwards a role-lane card as soon as it records the role, which can reach the session before claimEnvoyRole resolves; the send now happens right after claims/register, before the role claim and the subscription.",
