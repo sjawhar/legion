@@ -20,15 +20,25 @@ var delimitersKey = parser.NewContextKey()
 // empty list and returns at once (parser/delimiter.go:158-161 at v1.8.6), and the runs are paired at
 // a link or image's formation (imageNesting) and at the textblock's end (emphasisParser.CloseBlock).
 //
-// Each run is linked to the runs before and after it three ways: among every run, among its group's
-// (runGroup) and among its kind's (runKind). A closer looks back only at runs of its kind, the only
-// ones it could pair with, down to the start of the scope it is paired in; a pair takes every run
-// between its opener and closer off the list, so each run is taken off once and pairing a textblock
-// takes time linear in its runs, apart from the openers the rule of three makes a closer pass.
+// Each run is linked to the runs before and after it among every run and among its group's
+// (runGroup). A pass files each run its closers have gone past that can still open among its
+// kind's openers (runKind, openers), in a bucket by what CommonMark's rule of three reads of it.
+// The rule rejects a bucket's runs all or none, so a closer finds the nearest opener it could pair
+// with among the last runs of at most six buckets (nearestOpener), however many openers the rule
+// keeps it from; a pair takes every run between its opener and closer off the list, so each run
+// is taken off once and pairing a textblock takes time linear in its runs.
 type delimiterList struct {
 	last        *listedRun
 	lastInGroup [runGroups]*listedRun
-	lastOfKind  [runKinds]*listedRun
+	// openers is, for each kind, the last run of each bucket of openers a pass has filed (enlist):
+	// by the length the rule of three reads (ruleLength) modulo three, then by whether the run can
+	// close, each bucket's runs linked in the order they were pushed. A pass files a run as its
+	// closer goes past it, and a pair takes every run between its opener and closer off the list,
+	// so a run filed is the latest of its group filed. A pass of a group inside another pass of
+	// it pairs runs inside a pair that outer pass made, whose runs of the group are off the list,
+	// so the runs filed above its bottom are its own, and it takes them all off (clear) before the
+	// outer pass goes on. Outside pair every bucket is empty.
+	openers [runKinds][3][2]*listedRun
 	// pushed is the seq of the last run pushed, so a run pushed after a link label opens has a seq
 	// above the one pushed when it opened.
 	pushed int
@@ -45,7 +55,9 @@ type delimiterList struct {
 }
 
 // listedRun is a run on delimiterList: the delimiter goldmark's inline parser placed among the
-// textblock's nodes, the order it was pushed in (seq, from 1), and its neighbours on the list.
+// textblock's nodes, the order it was pushed in (seq, from 1), its neighbours on the list, and
+// those in the bucket of openers it is filed in (bucket, that bucket's last-run slot, nil while it
+// is filed in none).
 type listedRun struct {
 	delimiter                *parser.Delimiter
 	seq                      int
@@ -53,7 +65,8 @@ type listedRun struct {
 	kind                     runKind
 	prev, next               *listedRun
 	prevInGroup, nextInGroup *listedRun
-	prevOfKind, nextOfKind   *listedRun
+	prevOpener, nextOpener   *listedRun
+	bucket                   **listedRun
 }
 
 // runGroup is which pass pairs a run. micromark pairs `*` and `_` runs (its attention resolver) and
@@ -131,11 +144,6 @@ func (l *delimiterList) push(d *parser.Delimiter, goldmarkRules bool) {
 		run.prevInGroup.nextInGroup = run
 	}
 	l.lastInGroup[run.group] = run
-	run.prevOfKind = l.lastOfKind[run.kind]
-	if run.prevOfKind != nil {
-		run.prevOfKind.nextOfKind = run
-	}
-	l.lastOfKind[run.kind] = run
 }
 
 // pairTextblock pairs the runs a textblock leaves once its inline markdown is all read. Under
@@ -223,41 +231,39 @@ func (l *delimiterList) firstAfter(group runGroup, bottom int) *listedRun {
 
 // advance pairs pass's closers in order as goldmark's ProcessDelimiters pairs a list's
 // (parser/delimiter.go:179-237 at v1.8.6): a closer pairs with the nearest earlier opener its
-// processor accepts and the rule of three lets it use, the runs between them move into the mark,
-// the runs of the group between them leave the list as text, and a run used up leaves it. A closer
-// that pairs with nothing and cannot open leaves the list unless the rule of three alone stopped it.
-// The walk back looks only at runs of the closer's kind: each processor refuses a run of another
-// character (and micromark's `~` one of another length) before it changes anything, so that walk
-// pairs as goldmark's walk over every run does. It stops at a pair that encloses runs of the other
-// group and returns the pass over those, which pair makes before this one goes on.
+// processor accepts and the rule of three lets it use (nearestOpener), the runs between them move
+// into the mark, the runs of the group between them leave the list as text, and a run used up
+// leaves it. A closer that pairs with nothing and cannot open leaves the list unless the rule of
+// three alone stopped it. A run the pass goes past that can open is filed among the openers. It
+// stops at a pair that encloses runs of the other group and returns the pass over those, which
+// pair makes before this one goes on.
 func (l *delimiterList) advance(pass *pairingPass) (pairingPass, bool) {
 	for pass.closer != nil && pass.closer.seq < pass.top {
 		closer := pass.closer
 		end := closer.delimiter
 		if !end.CanClose {
 			pass.closer = closer.nextInGroup
+			if end.CanOpen {
+				l.enlist(closer)
+			}
 			continue
 		}
-		var opener *listedRun
-		consume, maybeOpener := 0, false
-		for candidate := closer.prevOfKind; candidate != nil && candidate.seq > pass.bottom; candidate = candidate.prevOfKind {
-			start := candidate.delimiter
-			if start.CanOpen && start.Processor.CanOpenCloser(start, end) {
-				maybeOpener = true
-				if consume = start.CalcComsumption(end); consume > 0 {
-					opener = candidate
-					break
-				}
-			}
-		}
+		opener, maybeOpener := l.nearestOpener(closer, pass.bottom)
 		if opener == nil {
 			pass.closer = closer.nextInGroup
-			if !maybeOpener && !end.CanOpen {
+			switch {
+			case end.CanOpen:
+				l.enlist(closer)
+			case !maybeOpener:
 				l.remove(closer)
 			}
 			continue
 		}
 		start := opener.delimiter
+		// The processor accepts the pair (nearestOpener); asking it still gives an emphasis run's
+		// OriginalLength the length CalcComsumption reads, which then measures more than nothing.
+		start.Processor.CanOpenCloser(start, end)
+		consume := start.CalcComsumption(end)
 		start.ConsumeCharacters(consume)
 		end.ConsumeCharacters(consume)
 		mark := start.Processor.OnMatch(consume)
@@ -278,6 +284,11 @@ func (l *delimiterList) advance(pass *pairingPass) (pairingPass, bool) {
 		enclosed := opener.next
 		if start.Length == 0 {
 			l.remove(opener)
+		} else {
+			// What it has left may file it in another bucket, at whose end it belongs: it is the
+			// latest run of its group filed, every one after it being off the list.
+			l.delist(opener)
+			l.enlist(opener)
 		}
 		if end.Length == 0 {
 			pass.closer = closer.nextInGroup
@@ -324,14 +335,7 @@ func (l *delimiterList) remove(run *listedRun) {
 	} else {
 		l.lastInGroup[run.group] = run.prevInGroup
 	}
-	if run.prevOfKind != nil {
-		run.prevOfKind.nextOfKind = run.nextOfKind
-	}
-	if run.nextOfKind != nil {
-		run.nextOfKind.prevOfKind = run.prevOfKind
-	} else {
-		l.lastOfKind[run.kind] = run.prevOfKind
-	}
+	l.delist(run)
 	d := run.delimiter
 	parent := d.Parent()
 	if d.Length != 0 {
@@ -339,4 +343,76 @@ func (l *delimiterList) remove(run *listedRun) {
 	} else {
 		parent.RemoveChild(parent, d)
 	}
+}
+
+// nearestOpener is the nearest opener pushed after bottom that closer could pair with, and whether
+// an opener of closer's kind is left there at all: what goldmark's walk back over every earlier run
+// finds, the first that can open, that the processor accepts and that CalcComsumption measures at
+// more than nothing. The processor refuses a run of another kind before it changes anything:
+// another character, and under micromark's rules a `~` run of another length. It accepts every run
+// of closer's kind, since a pair uses up micromark's `~` runs whole, so a run of a kind keeps the
+// length its kind is. CalcComsumption measures nothing exactly where the rule of three rejects the
+// pair, and the rule reads of the opener only its length modulo three and whether it can close,
+// what its bucket is, so it rejects a bucket's runs all or none: the nearest opener is the latest
+// of the last runs of the buckets it does not reject. The openers filed are every run of the
+// pass's group pushed before closer, after bottom and still on the list, that can open.
+func (l *delimiterList) nearestOpener(closer *listedRun, bottom int) (opener *listedRun, maybeOpener bool) {
+	end := closer.delimiter
+	length := ruleLength(closer) % 3
+	for openerLength, buckets := range &l.openers[closer.kind] {
+		for canClose, last := range buckets {
+			if last == nil || last.seq <= bottom {
+				continue
+			}
+			maybeOpener = true
+			if (canClose == 1 || end.CanOpen) && (openerLength+length)%3 == 0 && length != 0 {
+				continue
+			}
+			if opener == nil || last.seq > opener.seq {
+				opener = last
+			}
+		}
+	}
+	return opener, maybeOpener
+}
+
+// ruleLength is the length of run the rule of three reads, where Delimiter.CalcComsumption reads
+// OriginalLength: what a `*` or `_` run has left, which emphasisDelimiters.CanOpenCloser makes its
+// OriginalLength before every measure, and what a `~` run was written with, which tildeDelimiters
+// leaves.
+func ruleLength(run *listedRun) int {
+	if run.kind == starRun || run.kind == underscoreRun {
+		return run.delimiter.Length
+	}
+	return run.delimiter.OriginalLength
+}
+
+// enlist files run, which can open, as the last of its bucket of openers.
+func (l *delimiterList) enlist(run *listedRun) {
+	canClose := 0
+	if run.delimiter.CanClose {
+		canClose = 1
+	}
+	run.bucket = &l.openers[run.kind][ruleLength(run)%3][canClose]
+	run.prevOpener = *run.bucket
+	if run.prevOpener != nil {
+		run.prevOpener.nextOpener = run
+	}
+	*run.bucket = run
+}
+
+// delist takes run out of the bucket of openers it is filed in, if any.
+func (l *delimiterList) delist(run *listedRun) {
+	if run.bucket == nil {
+		return
+	}
+	if run.prevOpener != nil {
+		run.prevOpener.nextOpener = run.nextOpener
+	}
+	if run.nextOpener != nil {
+		run.nextOpener.prevOpener = run.prevOpener
+	} else {
+		*run.bucket = run.prevOpener
+	}
+	run.prevOpener, run.nextOpener, run.bucket = nil, nil, nil
 }

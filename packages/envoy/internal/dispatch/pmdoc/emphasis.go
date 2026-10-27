@@ -83,11 +83,11 @@ func (p emphasisParser) Parse(_ ast.Node, block text.Reader, pc parser.Context) 
 		canOpen, canClose = canOpen && (beforeIsSpace || beforeIsPunct || !canClose), canClose && (afterIsSpace || afterIsPunct || !canOpen)
 	}
 	if !canOpen && !canClose {
-		// A run that can neither open nor close pairs with nothing. A closer looks for its opener
-		// back over every run of its character still on the list (delimiterList.advance), as
-		// goldmark's ProcessDelimiters did over every run, and nothing takes such a run off it, so a
-		// paragraph of `a_b*a_b*…` cost time quadratic in its length (LEGION-465). It is read as the
-		// text it would have become; cmark pushes no such run.
+		// A run that can neither open nor close pairs with nothing. goldmark's ProcessDelimiters
+		// walked every delimiter still on its list when a closer looked for its opener and never
+		// took such a run off it, so a paragraph of `a_b*a_b*…` cost time quadratic in its length
+		// (LEGION-465). It is read as the text it would have become, so it costs the delimiter list
+		// nothing; cmark pushes no such run.
 		text := ast.NewTextSegment(segment.WithStop(segment.Start + length))
 		block.Advance(length)
 		return text

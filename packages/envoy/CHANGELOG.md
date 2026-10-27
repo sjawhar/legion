@@ -1424,7 +1424,9 @@
   `Plain ~\~~ end.` strikes the tilde where a document showed `~~~`; and `~` runs pair apart from
   `*` and `_` runs, in the browser editor's order, so `x* ~~a*b~~c*` is emphasis `b~~c` in both.
   Reading a paragraph of mixed `~` and `*` runs is now linear in its length: a mebibyte of
-  `~~a ` then `a* ` took over a minute. A rendering stored correctly keeps its bytes; one the
+  `~~a ` then `a* ` took over a minute. So is a paragraph whose `*` runs the rule of three keeps
+  apart: 437 KiB of `**a ` then `a*a` took 100 seconds and now takes under one. A rendering stored
+  correctly keeps its bytes; one the
   browser misread, such as text `~~~x~~` stored as `\~~~x~~`, which the browser strikes, is written
   anew (`&#126;&#126;&#126;x&#126;&#126;`) when its document is next rendered, and no stored
   document is rewritten. An image inside an image's label now adds its own alt text to the outer

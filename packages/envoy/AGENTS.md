@@ -1539,8 +1539,10 @@ run directly after a `~` is text unless a backslash escapes that `~` (`tildePars
 browser editor's strikethrough reads them. pmdoc pairs the runs itself (`delimiterList`), never on
 goldmark's delimiter stack: `~` runs and `*`/`_` runs in separate passes, as that parser's two
 resolvers do, the kind whose run the textblock tokenized first going first, `~` first inside a
-link or image label, and the runs a pair encloses paired inside it; and a closer looks back only
-at runs of its own kind, so pairing is linear in the runs. The writer takes a spelling that reads
+link or image label, and the runs a pair encloses paired inside it; and a closer looks only at the
+last opener of each of the at most six buckets its kind's openers are filed in by what the rule of
+three reads of them (`nearestOpener`), so pairing is linear in the runs. The writer takes a
+spelling that reads
 back under goldmark's rules as well (`goldmarkMarkdown`: flanking alone, `~` runs of either length
 paired, a run after any `~` refused, every run in one loop) before one that reads back under that
 parser's alone (`inlineWithEscapes`), and an image's alt text must read back under both
