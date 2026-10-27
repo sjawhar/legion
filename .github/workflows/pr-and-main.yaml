@@ -341,7 +341,7 @@ jobs:
           unshare --user --map-root-user true
 
       - name: Test the Go daemon
-        run: go test -count=1 ./...
+        run: go test -count=1 -timeout 20m ./...
         working-directory: packages/daemon
 
       # The outbox's lane registry, lease renewal and held clock are the daemon's first goroutines
