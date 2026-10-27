@@ -77,8 +77,9 @@ type Deps struct {
 // classifies a live one, and AppendUpdateTxWithCredit for a room's own update such a write stores
 // ahead of its own row, with that update's credit (storeRoomUpdatesAhead). RebuildTx replaces an
 // unreadable history inside the rebuild's transaction, through the same persistence boundary as
-// its preflight load. Head is the version Load would fold up to now, which says whether a state
-// loaded earlier is still the stored one.
+// its preflight load, and only while its head is still the one that load read. Head is the
+// version Load would fold up to now, which says whether a state loaded earlier is still the
+// stored one.
 // DocumentStamp names the stored state a read of the document meets now, and LoadDocument is that
 // state decoded once with the stamp it was read under, which a read of a document no room holds
 // caches its rendering by (coldRead).
@@ -87,7 +88,7 @@ type VersionedStore interface {
 	AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error)
 	AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error)
 	AppendUpdateTxWithCredit(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error)
-	RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error)
+	RebuildTx(ctx context.Context, tx pgx.Tx, room string, loaded persistence.Version, seed []byte) (RebuildReport, error)
 	Head(ctx context.Context, room string) (persistence.Version, error)
 	DocumentStamp(ctx context.Context, room string) (DocumentStamp, error)
 	LoadDocument(ctx context.Context, room string) (LoadedDocument, error)

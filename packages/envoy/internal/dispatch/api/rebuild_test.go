@@ -64,7 +64,7 @@ func TestRebuildArtifactRouteIsHumanOnlyAndRefusesADocumentThatLoads(t *testing.
 }
 
 // invalidLoadOnceStore loads a document failNextLoad names once, for a room or a cold read, as a
-// history that does not decode.
+// history that does not decode, at the head it stands at.
 type invalidLoadOnceStore struct {
 	docs.VersionedStore
 	mu      sync.Mutex
@@ -88,7 +88,11 @@ func (s *invalidLoadOnceStore) takeInvalid(room string) bool {
 
 func (s *invalidLoadOnceStore) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
 	if s.takeInvalid(room) {
-		return persistence.LoadResult{Update: []byte{0xff}}, nil
+		head, err := s.VersionedStore.Head(ctx, room)
+		if err != nil {
+			return persistence.LoadResult{}, err
+		}
+		return persistence.LoadResult{Update: []byte{0xff}, Version: head}, nil
 	}
 	return s.VersionedStore.Load(ctx, room)
 }

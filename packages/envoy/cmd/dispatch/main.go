@@ -348,14 +348,12 @@ func main() {
 	//     (its claim window) and the delivery intakes (NATS's push-durable exclusivity, which
 	//     delivery.StartIntakes takes).
 	//   - per-process by design, because each serves this process's own connections or memory:
-	//     the settlement resumption (it arms this process's rooms, and docs/resume.go says it
-	//     runs on an interval precisely because a rolling deploy overlaps two processes), the
-	//     delivery live hub and its listener (migration 0107_events_notify.up.sql states that
+	//     the delivery live hub and its listener (migration 0107_events_notify.up.sql states that
 	//     purpose), the event stream relay, the document rooms' timers, the process's shared
 	//     listener hub (its connection is this process's membership, so it has to run in every
 	//     process) and the room sync registered on it (it serves the rooms resident in this
-	//     process - today it closes the ones the other process's writes left behind the durable
-	//     head).
+	//     process: it catches them up with the other processes' writes and answers their room
+	//     queries).
 	//   - a boot one-shot already serialised by an advisory lock or idempotent: the migrations,
 	//     retirePlainRefreshTokens, restoreDecidedWordings and SeedRepoProjects above.
 	leases, err := database.Pool.Leases()
@@ -390,15 +388,15 @@ func main() {
 	}
 	go embedqueue.Run(ctx, embedqueue.Deps{Store: database, Embedder: backgroundEmbedder})
 	// A settlement a shutdown cut short, here or in the task this one replaces, runs without
-	// anyone opening its document.
-	go documentService.RunSettlementResumption(ctx)
+	// anyone opening its document. One process per period arms them (docs.RunSettlementResumption).
+	go documentService.RunSettlementResumption(ctx, leases)
 	// INFRA-66, INFRA-556: this process's one shared LISTEN connection. Every subsystem that
 	// learns of another envoy-dispatch process's work through a NOTIFY channel registers that
 	// channel on this hub before it runs, and its connection's name is what makes this process a
 	// member (docs/room_sync.go). The document rooms register first: a document written by another
-	// process is announced over Postgres, and the room this process holds for it closes within
-	// that round trip, so its browsers reconnect and re-sync instead of reading text the store no
-	// longer holds. Both stop with ctx, like the loops beside them; the service's NOTIFY sender
+	// process is announced over Postgres, and the room this process holds for it catches up from
+	// the stored updates within that round trip, so its browsers see the write without a
+	// reconnect. Both stop with ctx, like the loops beside them; the service's NOTIFY sender
 	// stays open until documentService.Shutdown has drained the rooms.
 	listenerHub := &pglisten.Hub{
 		Owner: "dispatch",

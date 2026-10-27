@@ -127,7 +127,17 @@ func replaceStoredHistory(t *testing.T, database *store.Store, artifactID, markd
 		t.Fatalf("begin the rebuild: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err := NewPgVersioned(database).RebuildTx(ctx, tx, artifactID, seed); err != nil {
+	// The head is read under the document's lock, which RebuildTx takes again, so no append lands
+	// between the read and the replacement.
+	if err := lockDocumentRoom(ctx, tx, artifactID); err != nil {
+		t.Fatalf("lock the document: %v", err)
+	}
+	persist := NewPgVersioned(database)
+	head, err := persist.head(ctx, tx, artifactID)
+	if err != nil {
+		t.Fatalf("read the head the rebuild replaces: %v", err)
+	}
+	if _, err := persist.RebuildTx(ctx, tx, artifactID, head, seed); err != nil {
 		t.Fatalf("rebuild the stored history: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {

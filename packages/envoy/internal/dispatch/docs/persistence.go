@@ -646,13 +646,26 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 
 // RebuildTx replaces a room's durable history with one fresh update at the next version, inside
 // tx, which holds the room's lock until it ends. Its caller has already proved that ygo cannot load
-// the old merged history; this method never makes that destructive decision itself.
-func (p *PgVersioned) RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error) {
+// the old merged history, as it stood at loaded; this method never makes that destructive decision
+// itself, and refuses with ErrDocumentLive, writing nothing, when the head it reads under the lock
+// is no longer loaded. Another rebuild committed since (on this process or another, which loaded
+// the same history and was let through the owner row first), or an append landed: either way the
+// history the caller judged is not the one it would replace.
+func (p *PgVersioned) RebuildTx(ctx context.Context, tx pgx.Tx, room string, loaded persistence.Version, seed []byte) (RebuildReport, error) {
 	if err := validateUpdate(seed); err != nil {
 		return RebuildReport{}, wrapUnlessTooLarge(itemCapError(seed, err), "validate rebuilt document seed")
 	}
 	if err := lockDocumentRoom(ctx, tx, room); err != nil {
 		return RebuildReport{}, err
+	}
+	// The head as Load reads it, a pending prune's ceiling included, before the prune's recovery
+	// below lowers it.
+	current, err := p.head(ctx, tx, room)
+	if err != nil {
+		return RebuildReport{}, err
+	}
+	if current != loaded {
+		return RebuildReport{}, fmt.Errorf("%w: document %s changed while it was being rebuilt (its head moved from %d to %d), by another rebuild or an edit; read it again before rebuilding", ErrDocumentLive, room, loaded, current)
 	}
 	if err := p.recoverPruneTx(ctx, tx, room); err != nil {
 		return RebuildReport{}, err
