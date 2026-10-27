@@ -25,6 +25,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/notify"
@@ -493,6 +494,17 @@ func (w *workflowRuntime) identity(ctx context.Context, role claim.Role, owner s
 		return runtime.GitIdentity{}, fmt.Errorf("mint the %s App lease for %s on %s: %w", appauth.AppRoleFor(role), role, owner, err)
 	}
 	return lease.Identity, nil
+}
+
+// ensureWorkspace provisions an issue's workspace on the daemon's host when a launch finds it
+// missing or not checked out (outbox.ensureWorkspace), through the outbox, which orders every
+// provision of the shared clones (provisionLocks). The outbox exists from attach on, and attach
+// runs before supervision restores or launches any claim.
+func (w *workflowRuntime) ensureWorkspace(ctx context.Context, issue string, repo ghrepo.Repository, defaultBranch string) error {
+	if w.outbox == nil {
+		return fmt.Errorf("provision the workspace of %s: the workflow's outbox is not attached yet", issue)
+	}
+	return w.outbox.ensureWorkspace(ctx, issue, repo, defaultBranch)
 }
 
 func (w *workflowRuntime) attach(supervision *supervision) {

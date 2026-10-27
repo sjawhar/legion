@@ -876,12 +876,24 @@ func TestOutboxWorkspaceRemovalUsesDeterministicLocationAndReturnsFailure(t *tes
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	row := mustOutboxRow(t, issue.Key, record.WorkspaceRemove{Linger: issue.Generation}, time.Now())
 	var removed workspace.Workspace
-	runner := &outbox{
+	var runner *outbox
+	runner = &outbox{
 		dispatchProject: "LEGION",
 		pool:            pool, records: records, supervisor: sup, project: "legion", log: quietLogger(),
 		stateDir: t.TempDir(),
-		remove: func(_ context.Context, got workspace.Workspace) error {
+		remove: func(_ context.Context, got workspace.Workspace, store sync.Locker) error {
 			removed = got
+			// The removal is handed its repository's store lock, the one its provisions are, not
+			// held: workspace.Remove takes it, and lets it go before it deletes the workspace's files.
+			shared, release := runner.provisions.stores.take(got.Clone)
+			defer release()
+			if store != sync.Locker(shared) {
+				t.Errorf("the removal was handed store lock %p, want its repository's %p", store, shared)
+			} else if !shared.TryLock() {
+				t.Error("the removal was handed its repository's store lock held, want it free for workspace.Remove to take")
+			} else {
+				shared.Unlock()
+			}
 			return nil
 		},
 	}
@@ -893,7 +905,7 @@ func TestOutboxWorkspaceRemovalUsesDeterministicLocationAndReturnsFailure(t *tes
 		t.Fatalf("removed workspace = %#v, want %#v", removed, want)
 	}
 
-	runner.remove = func(context.Context, workspace.Workspace) error { return errors.New("remove failed") }
+	runner.remove = func(context.Context, workspace.Workspace, sync.Locker) error { return errors.New("remove failed") }
 	if err := runner.execute(context.Background(), row); err == nil || !strings.Contains(err.Error(), "remove failed") {
 		t.Fatalf("workspace removal failure = %v, want remove failure", err)
 	}
@@ -1265,7 +1277,7 @@ func TestALingerExpiryRowAfterReadmissionActsOnNothing(t *testing.T) {
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
 		},
-		remove: func(context.Context, workspace.Workspace) error { removals++; return nil },
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error { removals++; return nil },
 	}
 	if err := runner.execute(ctx, mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleTester, Generation: 1, Phase: phase.Testing,
 		Task: "Carry on testing.", ResumeTask: true}, time.Now())); err != nil {
@@ -1316,7 +1328,7 @@ func TestAnEarlierLingersRowsActOnNothingInALaterLinger(t *testing.T) {
 	}
 	removals := 0
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, trees: outboxTreeStore(t, pool, root.Key), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(),
-		remove: func(context.Context, workspace.Workspace) error { removals++; return nil },
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error { removals++; return nil },
 	}
 	closeOf := func(linger uint64) record.OutboxRow {
 		return mustOutboxRow(t, child.Key, record.SuperviseRequest{Op: "tree_close", Tree: root.Key, Role: claim.RoleTester, Generation: child.Generation, Linger: linger}, time.Now())
@@ -1375,7 +1387,7 @@ func TestAWorkspaceIsRemovedOnlyOnceTheCloseRetiredEveryClaim(t *testing.T) {
 	removals := 0
 	trees := outboxTreeStore(t, pool, root.Key)
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, trees: trees, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(),
-		remove: func(context.Context, workspace.Workspace) error { removals++; return nil },
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error { removals++; return nil },
 	}
 	closeRow := mustOutboxRow(t, child.Key, record.SuperviseRequest{Op: "tree_close", Tree: root.Key, Role: claim.RoleTester, Generation: 1, Linger: 3}, time.Now())
 	removal := mustOutboxRow(t, child.Key, record.WorkspaceRemove{Linger: 3}, time.Now())
@@ -2127,7 +2139,7 @@ func TestAClosedTreeSetBackToTodoRelaunchesItsArchitect(t *testing.T) {
 			provisioned++
 			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
 		},
-		remove: func(context.Context, workspace.Workspace) error { removed++; return nil },
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error { removed++; return nil },
 	}
 
 	// The tree's architect ran on a session before the tree closed.
@@ -2203,7 +2215,7 @@ func TestAnEarlierGenerationsWorkspaceRemovalLeavesTheReadmittedTreesWorkspace(t
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
 		},
-		remove: func(context.Context, workspace.Workspace) error {
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error {
 			removals++
 			if busy {
 				return errors.New("jj workspace forget: the repository is locked")
@@ -2267,7 +2279,7 @@ func TestARuntimeThatProvisionsInItsPodsLeavesTheHostWithoutWorkspaces(t *testin
 			provisions++
 			return workspace.Workspace{}, nil
 		},
-		remove: func(context.Context, workspace.Workspace) error { removals++; return nil },
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error { removals++; return nil },
 	}
 
 	start := record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleArchitect, Generation: issue.Generation}
