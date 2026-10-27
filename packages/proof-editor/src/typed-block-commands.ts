@@ -110,11 +110,10 @@ function dispatchUnlessRefused(
   context: TypedBlockCommandContext,
   tr: Transaction,
   type: BlockTypeSchema,
-  blockId: string | null,
+  prior: ProseMirrorNode | null,
   attrs: Readonly<Record<string, unknown>>,
-  held: Readonly<Record<string, unknown>>,
 ): void {
-  const refusal = blockPointerRefusal(tr.doc, type, blockId, attrs, held, context.documentRef);
+  const refusal = blockPointerRefusal(tr.doc, type, prior, attrs, context.documentRef);
   if (refusal !== undefined) throw new Error(refusal);
   context.dispatch(tr);
 }
@@ -127,7 +126,7 @@ function insert(context: TypedBlockCommandContext, schema: BlockSchema, typeName
   if (paragraph === null) throw new Error('editor schema cannot create an empty paragraph');
   const block = typedNode.createAndFill(clientAttributes(type, attrs), paragraph);
   if (block === null) throw new Error(`typed block ${JSON.stringify(typeName)} cannot contain a paragraph body`);
-  dispatchUnlessRefused(context, state.tr.replaceSelectionWith(block), type, null, block.attrs, {});
+  dispatchUnlessRefused(context, state.tr.replaceSelectionWith(block), type, null, block.attrs);
   return true;
 }
 
@@ -142,10 +141,7 @@ function retype(context: TypedBlockCommandContext, schema: BlockSchema, blockId:
     ...clientAttributes(type, attrs),
     [BLOCK_ID_ATTR]: blockId,
   }, body);
-  // A pointer the old type held under the same name is introduced unless the type is unchanged:
-  // the new type's targets may be narrower.
-  const held = source.node.type.name === type.name ? source.node.attrs : {};
-  dispatchUnlessRefused(context, state.tr.replaceWith(source.pos, source.pos + source.node.nodeSize, replacement), type, blockId, replacement.attrs, held);
+  dispatchUnlessRefused(context, state.tr.replaceWith(source.pos, source.pos + source.node.nodeSize, replacement), type, source.node, replacement.attrs);
   return true;
 }
 
@@ -156,7 +152,7 @@ function setAttributes(context: TypedBlockCommandContext, schema: BlockSchema, b
   const type = findType(schema, located.node.type.name);
   const changes = clientAttributes(type, attrs);
   if (Object.keys(changes).length === 0) return true;
-  dispatchUnlessRefused(context, state.tr.setNodeMarkup(located.pos, undefined, { ...located.node.attrs, ...changes }, located.node.marks), type, blockId, changes, located.node.attrs);
+  dispatchUnlessRefused(context, state.tr.setNodeMarkup(located.pos, undefined, { ...located.node.attrs, ...changes }, located.node.marks), type, located.node, changes);
   return true;
 }
 

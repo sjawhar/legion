@@ -193,8 +193,10 @@ export function parseBlockPointerValue(value: string): string[] | undefined {
 }
 
 /**
- * Why `value` is not a `block[]` attribute as markdown writes it (`parseBlockPointerValue`), in
- * the words of Go's `pmdoc.ParseBlockPointerValue`, or undefined when it is one.
+ * Why `value` is not a `block[]` attribute as markdown writes it (`parseBlockPointerValue`),
+ * following the wording of Go's `pmdoc.ParseBlockPointerValue` (the value quoted with
+ * `JSON.stringify` where Go uses `%q`, which escapes a control or non-printing character
+ * differently), or undefined when it is one.
  */
 export function blockPointerValueProblem(value: string): string | undefined {
   if (value === "") {
@@ -208,8 +210,8 @@ export function blockPointerValueProblem(value: string): string | undefined {
 
 /**
  * Why `values` are not the pointers of a `block[]` attribute - one is not a canonical block
- * reference (`parseCanonicalBlockReference`), or one is named twice - in the words of Go's
- * `pmdoc.validateBlockPointerValues`, or undefined when they are.
+ * reference (`parseCanonicalBlockReference`), or one is named twice - following the wording of
+ * Go's `pmdoc.validateBlockPointerValues`, quoted as above, or undefined when they are.
  */
 export function blockPointersProblem(values: readonly string[]): string | undefined {
   const seen = new Set<string>();

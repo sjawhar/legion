@@ -43,7 +43,7 @@ not reach them:
 | `src/record-mark-history.ts` | The plugin that keeps the composer's own record-mark writes out of undo history in both undo managers, so neither undo nor redo writes one back: a write of `proofComment`, `proofSuggestion` or `dispatchAsk` steps that takes nothing from another record (it removes no span, as a creation over another record's mark does not since the three declare `excludes: ''`, or puts back what it removes, as upstream's suggestion restamp does), and `removeRecordMark`'s removal; any other removal of a record mark keeps its undo step (LEGION-363, LEGION-458); it is also biome-checked |
 | `src/record-mark-retype.ts` | Retyping a provisional record mark for the margin composer's Comment / Suggest / Ask switch, and the precise span-by-span removal behind the handle's `removeMark`, over text and inline atoms such as an image alike (LEGION-363); it is also biome-checked |
 | `src/record-mark-target.ts` | Which mark a click or a hover in the document names: of the mark spans around the target, the record mark whose range is the smallest, the innermost span's among marks the same size, since which of two overlapping record marks nests inside the other follows the order they were made in (LEGION-458); it is also biome-checked |
-| `src/block-pointers.ts` | A typed block's `block[]` attribute (INFRA-156): `parseBlockPointers` reads a value as markdown and a pasted block write it, refusing one with `@legion/contracts`' `blockPointerValueProblem` (the reason, in the server's words, that `parseBlockPointerValue` refuses it; the server's twin is tested against the same table, `DISPATCH_BLOCK_POINTER_VALUES`); `findBlock` finds the first block of a document holding an id, for it and the typed-block commands; `blockPointerRefusal` refuses a pointer a command introduces to a block of the editor's own document (`documentRef`) whose type the attribute's `targets` do not allow. Its messages read as the server's (pmdoc `ParseBlockPointerValue`, `CheckBlockPointers`); it is also biome-checked |
+| `src/block-pointers.ts` | A typed block's `block[]` attribute (INFRA-156): `parseBlockPointers` reads a value as markdown and a pasted block write it, with `@legion/contracts`' `parseBlockPointerValue`, and refuses one with the reason its `blockPointerValueProblem` gives (the server's twin is tested against the same table, `DISPATCH_BLOCK_POINTER_VALUES`); `findBlock` finds the first block of a document holding an id, for it and the typed-block commands; `blockPointerRefusal`, given the block a command replaces or changes, refuses a pointer the command introduces to a block of the editor's own document (`documentRef`) whose type the attribute's `targets` do not allow. Its messages follow the server's wording (pmdoc `ParseBlockPointerValue`, `CheckBlockPointers`), quoting a value with `JSON.stringify` where Go uses `%q` and with no `block pointer refused:` prefix on a type refusal; it is also biome-checked |
 | `src/read-only-directives.ts` | `remarkReadOnlyDirectives`, the headless engine's read-only stand-in for `remarkTypedBlocks`: a container directive the block schema refuses (or any, with no schema) is drawn in place as a paragraph of its opening line, its content formatted (the label paragraph dropped) and a paragraph of its closing fence when the source closes it, and the paragraph-line directive refusals are not applied, so a body only shown to a reader formats around a block Dispatch does not know instead of falling back whole to its raw source (INFRA-529). A typed block whose content would break its content rule, checked innermost first against the ProseMirror schema with `NodeType.createAndFill`, is drawn the same way, since Milkdown drops such a node and its text without throwing; it is also biome-checked |
 | `src/tests/harness.ts` | The `bun test` registration the copied suites call instead of their own `test()` tally |
 
@@ -92,10 +92,10 @@ written as statements, joining the pointers with one space; in `src/typed-block-
 `TypedBlockCommandContext.documentRef`, `validateValue`'s `block[]` case calling `@legion/contracts`'
 `blockPointersProblem`, `findBlock` moved to `./block-pointers` (which returns the first holder of
 a repeated id, as the server reads one), and `insert`, `retype` and `setAttributes` building their
-transaction first and handing it to `dispatchUnlessRefused`, which throws `blockPointerRefusal`'s
-refusal before dispatching it, so a refused command leaves the document unchanged, with `retype`
-passing the block's attributes before the command as held only when its type is unchanged, so a
-pointer the old type held under the same name meets the new type's targets; in `src/lib.ts`,
+transaction first and handing it, with the block it replaces or changes, to `dispatchUnlessRefused`,
+which throws `blockPointerRefusal`'s refusal before dispatching it, so a refused command leaves the
+document unchanged; `blockPointerRefusal` treats that block's pointers as already held only when its
+type is unchanged, so a pointer the old type held under the same name meets the new type's targets; in `src/lib.ts`,
 `CreateProofEditorOptions.documentRef` passed to `createTypedBlockCommands`; and in
 `src/tests/block-schema.test.ts`, the imports of `DISPATCH_BLOCK_POINTER_VALUES`, `EditorState`
 and `createTypedBlockCommands` and the suite's four cases for it; and annotations, casts and
@@ -210,6 +210,6 @@ list.
 The package depends on `@legion/contracts` (`workspace:*`), served from source like this package,
 for what the editor shares with the document service: `src/block-pointers.ts` and
 `src/typed-block-commands.ts` decide a `block[]` value and give the reason one is refused with its
-`blockPointerValueProblem`, `blockPointersProblem` and `parseCanonicalBlockReference`, and
+`parseBlockPointerValue`, `blockPointerValueProblem`, `blockPointersProblem` and `parseCanonicalBlockReference`, and
 `src/tests/block-schema.test.ts` runs its `DISPATCH_BLOCK_POINTER_VALUES` table. The package's
 consumers, `packages/dispatch` and the pmdoc fixture generator, are workspaces that resolve it.

@@ -1,16 +1,22 @@
 /**
  * A typed block's `block[]` attribute: the blocks it points at, as canonical block references.
  * Which values it may hold, and why one is refused, is decided by `@legion/contracts`
- * (`blockPointerValueProblem`, `blockPointersProblem`, `parseCanonicalBlockReference`), the
- * parsers the document service's twins are tested against with the same table, in the service's
- * words, so the editor and the service never disagree on a value. A pointer to a block of the
- * editor's own document is also refused when the block's type is not one the attribute's
- * `targets` allow; a block of another document is the service's to check, since only it knows
- * that document's blocks. Each refusal reads as the service's does (pmdoc
- * `ParseBlockPointerValue` and `CheckBlockPointers`).
+ * (`parseBlockPointerValue`, `blockPointerValueProblem`, `parseCanonicalBlockReference`), the
+ * parsers the document service's twins are tested against with the same table, so the editor and
+ * the service never disagree on a value. A pointer to a block of the editor's own document is
+ * also refused when the block's type is not one the attribute's `targets` allow; a block of
+ * another document is the service's to check, since only it knows that document's blocks. The
+ * refusals follow the service's wording (pmdoc `ParseBlockPointerValue` and `CheckBlockPointers`)
+ * but are not byte for byte the same: a value is quoted with `JSON.stringify` where Go uses `%q`,
+ * which escapes a control or non-printing character differently, and a type refusal carries no
+ * `block pointer refused:` prefix.
  */
 
-import { blockPointerValueProblem, parseCanonicalBlockReference } from "@legion/contracts";
+import {
+  blockPointerValueProblem,
+  parseBlockPointerValue,
+  parseCanonicalBlockReference,
+} from "@legion/contracts";
 import type { Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
 import type { BlockTypeSchema } from "./block-schema";
 import { blockIdOf } from "./editor/schema/block-ids";
@@ -43,35 +49,39 @@ export function findBlock(
  * joined by exactly one space. Any other value is refused, never normalised.
  */
 export function parseBlockPointers(typeName: string, name: string, value: string): string[] {
-  const problem = blockPointerValueProblem(value);
-  if (problem !== undefined) {
+  const pointers = parseBlockPointerValue(value);
+  if (pointers === undefined) {
     throw new Error(
-      `typed block ${JSON.stringify(typeName)} attribute ${JSON.stringify(name)}: ${problem}`
+      `typed block ${JSON.stringify(typeName)} attribute ${JSON.stringify(name)}: ${blockPointerValueProblem(value)}`
     );
   }
-  return value === "" ? [] : value.split(" ");
+  return pointers;
 }
 
 /**
- * Why a command may not leave `doc` with the typed block `type` (`block` its id, null for a block
- * not yet given one) holding the attribute values `attrs`, or undefined when it may: a `block[]`
- * value it introduces - one `held`, the block's attributes before the command as the same type,
- * does not already hold in that attribute - names a block of `doc` whose type the attribute's
- * `targets` do not allow. A pointer names a block of `doc` when its document is `documentRef`, the
- * document's unversioned reference; without one nothing is refused here. A pointer to a block
- * `doc` lacks is accepted, as the service accepts one to an absent block.
+ * Why a command may not leave `doc` with a typed block of `type` holding the attribute values
+ * `attrs`, or undefined when it may. `prior` is the block the command replaces or changes (null
+ * for a new one); its id names the block in the refusal, and its attributes are the pointers
+ * already held when it is of `type` too, since a retype from another type that declares the same
+ * name may narrow its `targets`. A `block[]` value the command introduces - one the prior block
+ * does not already hold in that attribute - is refused when it names a block of `doc` whose type
+ * the attribute's `targets` do not allow. A pointer names a block of `doc` when its document is
+ * `documentRef`, the document's unversioned reference; without one nothing is refused here. A
+ * pointer to a block `doc` lacks is accepted, as the service accepts one to an absent block.
  */
 export function blockPointerRefusal(
   doc: ProseMirrorNode,
   type: BlockTypeSchema,
-  block: string | null,
+  prior: ProseMirrorNode | null,
   attrs: Readonly<Record<string, unknown>>,
-  held: Readonly<Record<string, unknown>>,
   documentRef: string | undefined
 ): string | undefined {
   if (documentRef === undefined) {
     return undefined;
   }
+  const block = prior === null ? null : blockIdOf(prior);
+  const held: Readonly<Record<string, unknown>> =
+    prior !== null && prior.type.name === type.name ? prior.attrs : {};
   for (const name of Object.keys(attrs).sort()) {
     const targets = type.attributes[name]?.targets ?? [];
     const values = attrs[name];
@@ -82,13 +92,13 @@ export function blockPointerRefusal(
     ) {
       continue;
     }
-    const prior: unknown = held[name];
+    const heldValues: unknown = held[name];
     for (const value of values as readonly string[]) {
       const reference = parseCanonicalBlockReference(value);
       if (
         reference === undefined ||
         value.slice(0, value.indexOf("#")) !== documentRef ||
-        (Array.isArray(prior) && prior.includes(value))
+        (Array.isArray(heldValues) && heldValues.includes(value))
       ) {
         continue;
       }
