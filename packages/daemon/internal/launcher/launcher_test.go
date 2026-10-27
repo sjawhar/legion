@@ -985,19 +985,31 @@ var testDatabase = ompsessions.Database{Instance: testInstance, Name: "legion_se
 // which the test owns, and check is the credential work the connector does before each of them, so
 // a test can refuse one dial and allow the next. While stalling (stallAt), every dial reaches a
 // silent upstream instead and stalls in a real TLS handshake, which, like the connector's own, ends
-// only when the dial's context does.
+// only when the dial's context does. Every dial records when it began and its context's deadline
+// (bounds), so a test reads the bound a dial was given from the dial itself, not from a clock.
 type sessionDialer struct {
 	addr  string
 	check func() error
 
 	mu     sync.Mutex
 	dials  []string
+	bounds []dialBound
 	silent string
 }
 
+// dialBound is what one Dial was given: the time it was entered and its context's deadline, if any.
+type dialBound struct {
+	entered     time.Time
+	deadline    time.Time
+	hasDeadline bool
+}
+
 func (d *sessionDialer) Dial(ctx context.Context, instance string) (net.Conn, error) {
+	bound := dialBound{entered: time.Now()}
+	bound.deadline, bound.hasDeadline = ctx.Deadline()
 	d.mu.Lock()
 	d.dials = append(d.dials, instance)
+	d.bounds = append(d.bounds, bound)
 	silent := d.silent
 	d.mu.Unlock()
 	if silent != "" {
@@ -1169,6 +1181,10 @@ func TestAGenerationWhoseSessionDatabaseRefusesIsNotStarted(t *testing.T) {
 // generation left on disk or bound. The command loop is free again: the Stop the daemon sends after
 // a start it gave up on, already queued behind that start, is read and obeyed, and the next
 // generation, once the instance answers, starts and is served.
+//
+// The bound is read from the stalled dial itself, its context's deadline against the time it was
+// entered, never from how long the reply took to arrive: everything around the dial (the
+// generation directory, the credential, the listen, the reply) runs as fast as the host lets it.
 func TestAGenerationWhoseSessionDatabaseNeverAnswersIsRefusedWhileTheDaemonWaits(t *testing.T) {
 	dialer := &sessionDialer{addr: idleUpstream(t)}
 	dialer.stallAt(silentUpstream(t))
@@ -1176,13 +1192,20 @@ func TestAGenerationWhoseSessionDatabaseNeverAnswersIsRefusedWhileTheDaemonWaits
 	g := newSessionRig(t, Config{SessionDatabase: testDatabase, SessionDialer: dialer.build, StopGrace: grace})
 	marker := filepath.Join(t.TempDir(), "marker")
 
-	began := time.Now()
 	g.send(g.childStart(1, marker, nil))
 	stop := shimwire.LauncherStop{ID: "stop-1", Generation: 1, GraceMs: 1000}
 	g.send(stop)
 	got, ok := g.reply().(shimwire.LauncherStartResult)
-	if waited := time.Since(began); waited >= grace {
-		t.Fatalf("the start was answered %s after it was sent, past the %s stop grace", waited, grace)
+	dialer.mu.Lock()
+	bounds := append([]dialBound(nil), dialer.bounds...)
+	dialer.mu.Unlock()
+	if len(bounds) != 1 {
+		t.Fatalf("generation 1 made %d dials, want its one proof dial", len(bounds))
+	}
+	if proof := bounds[0]; !proof.hasDeadline {
+		t.Fatal("generation 1's proof dial had no deadline")
+	} else if limit := proof.deadline.Sub(proof.entered); limit > grace/2 {
+		t.Fatalf("generation 1's proof dial was given %s, past half the %s stop grace", limit, grace)
 	}
 	if !ok || got.OK || !strings.Contains(got.Error, "generation 1") || !strings.Contains(got.Error, testInstance) ||
 		!strings.Contains(got.Error, "no answer within 200ms") {
