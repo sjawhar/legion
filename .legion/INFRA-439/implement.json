@@ -2,23 +2,29 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-439",
-  "completed": "2026-10-27T09:15:08Z",
+  "completed": "2026-10-27T10:59:01Z",
   "pr": 2228,
-  "round": "forward merge of main on a reported conflict (09:03Z); approval 5664587411 at 21808616 stands; nothing else changed",
+  "round": "forward merge of main on a reported conflict (10:33Z), merged twice because main moved during the first",
   "proof": [
     {
-      "criterion": "The forward merge leaves this branch's diff unchanged and resolves the conflict by keeping both sides",
-      "surface": "the unchanged-diff fingerprint (jj diff from the fork point, .legion and docs/solutions excluded) and the four resolved CHANGELOGs",
-      "command": "fingerprint at 21808616 vs at merge 5579f099d21e (https://github.com/sjawhar/legion/pull/2228#issuecomment-6438026599); jj diff --git --from <each parent> on each CHANGELOG",
-      "observed": "fingerprint fcfbc288f05b54a8f89461975c53a87e0da717f16b03149df2a0cf507b638fcf before and after, unchanged; each resolved CHANGELOG removes no line of either parent; locally bun test envoy-client 970, pi-envoy 1016, claude-envoy 216 pass with 0 fail; tsc, go build (envoy, daemon), check-dist and biome green",
-      "headSha": "5579f099d21e36d1a81e13e9a880efcad0522aff",
-      "negativeControl": "GitHub reported the PR CONFLICTING at 21808616 (the four CHANGELOGs' [Unreleased] sections, where main added the document-block entries)"
+      "criterion": "The forward merges compile against main's changed store and bus APIs, keep this branch's behaviour, and leave the PR MERGEABLE",
+      "surface": "go test of the envoy packages this branch changes, bun test of the three plugins, the unchanged-diff fingerprint",
+      "command": "go test ./internal/bus ./cmd/listener ./internal/store ./cmd/dispatch at c167ce7c (ok); go vet ./... at cd3c7487 (clean); bun test at cd3c7487 (envoy-client 977, pi-envoy 1016, claude-envoy 216, 0 fail); fingerprints in https://github.com/sjawhar/legion/pull/2228#issuecomment-6440200864",
+      "observed": "fingerprint fcfbc288... -> 50792ce8... at the first merge (call-site adaptation to Registry.Get/Remove and publishConfirmed taking a context, and the subscribe handler's UpsertWithin), unchanged 50792ce8... at the second; GitHub reports MERGEABLE at cd3c748767ee",
+      "headSha": "cd3c748767ee2760e9ff59f1c1aaeebb9bec526d",
+      "negativeControl": "without the adaptation the first merge did not compile: internal/bus/stored.go publishConfirmed argument mismatch and cmd/listener/replay.go registry.Get missing its context"
     }
   ],
   "filesChanged": [
-    "packages/envoy/CHANGELOG.md (merge resolution)",
-    "packages/envoy-client/CHANGELOG.md (merge resolution)",
-    "packages/pi-envoy/CHANGELOG.md (merge resolution)",
-    "packages/claude-envoy/CHANGELOG.md (merge resolution)"
+    "packages/envoy/internal/bus/stored.go (merge adaptation)",
+    "packages/envoy/cmd/listener/replay.go (merge adaptation)",
+    "packages/envoy/cmd/listener/api.go (merge resolution)",
+    "packages/envoy/internal/store/kv.go (merge resolution, comment)",
+    "packages/envoy/cmd/listener/replay_test.go, main_test.go, internal/store/kv_test.go (context arguments)",
+    "packages/envoy/AGENTS.md, packages/envoy/docs/architecture.md (merge resolution)",
+    "packages/envoy/CHANGELOG.md, packages/envoy-client/CHANGELOG.md, packages/pi-envoy/CHANGELOG.md, packages/claude-envoy/CHANGELOG.md (merge resolution)"
+  ],
+  "deviations": [
+    "The fingerprint changed at the first merge: main changed the signatures this branch calls, so the merge carries call-site adaptations; no behaviour of this branch changed."
   ]
 }
