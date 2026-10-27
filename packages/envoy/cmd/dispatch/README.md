@@ -100,7 +100,7 @@ reach the stream adds nothing to the stream.
   stops the sweep and counts nothing against the delivery. No sweep sends GitHub anything until
   the time GitHub gave (`Retry-After`, or `x-ratelimit-reset` when no requests remain), and at
   least one minute, doubling while limits follow one another, up to 64 minutes. Both live in
-  `github_rate_limits` (migration `0131`), judged by the database's clock: GitHub's own wait under
+  `github_rate_limits` (migration `0132`), judged by the database's clock: GitHub's own wait under
   the App's scope, `app`, which every process's App calls obey (Running more than one process,
   below), and the doubling under the sweep's own, `redelivery`, so a limit met on redelivery
   requests never holds token mints and installation lookups past GitHub's wait. Each sweep reads
@@ -434,7 +434,7 @@ What the two processes share, and what each keeps to itself:
   the future" check, as the delivery claims' lease, the route roster's age and the GitHub rate
   limits are.
 - Route status comes from one stored listener answer. Every issue read judges its `route_status`
-  against the `route_roster` row (migration `0130`), the listener's last live-session list, so
+  against the `route_roster` row (migration `0131`), the listener's last live-session list, so
   both processes read a route the same way and a `route_status` page read on either is cut from
   the same answer. A process that finds the row older than five seconds by the database's clock
   asks the listener once, however many of its reads wait, and stores the answer, unless the other
@@ -444,7 +444,7 @@ What the two processes share, and what each keeps to itself:
   any change does under offset paging.
 - GitHub's rate limits hold every process. GitHub budgets the App and each installation, not a
   process, and warns that requests sent while limited may get the integration banned, so a limit
-  one process meets is recorded in `github_rate_limits` (migration `0131`) and every process reads
+  one process meets is recorded in `github_rate_limits` (migration `0132`) and every process reads
   it before it sends GitHub anything (`githubapp.Client.request`, `githubapp/ratelimit`). Scope
   `app` holds the calls the App JWT signs (installation lookups, token mints, the webhook delivery
   endpoints) and `installation:<id>` the calls under that installation's token, each for the wait
@@ -457,12 +457,12 @@ What the two processes share, and what each keeps to itself:
   installation, not the token, and storing tokens would put live credentials in Postgres and its
   backups. A repository's installation is remembered for ten minutes, so every process finds an
   App moved to another installation within that.
-- Nine periodic maintenance loops run once per period across the processes, not once per process:
+- Ten periodic maintenance loops run once per period across the processes, not once per process:
   the document compaction, the suggestion-outcome sweep, the delivery resume, the
-  reference-excerpt reconciliation, the block-index reconciliation, the webhook redelivery sweep,
-  the architecture import, the delivery reconcile and the delivery intakes' consumer
-  reconciliation, which takes one lease per durable, so ten callers hold a lease at once at most
-  (`store.leasePoolSize`).
+  reference-excerpt reconciliation, the edit-notice sweep, the block-index reconciliation, the
+  webhook redelivery sweep, the architecture import, the delivery reconcile and the delivery
+  intakes' consumer reconciliation, which takes one lease per durable, so eleven callers hold a
+  lease at once at most (`store.leasePoolSize`).
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a
   process whose tick lands inside another's pass logs a skip; and, under that lease, each pass is
   recorded in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick
@@ -485,7 +485,7 @@ What the two processes share, and what each keeps to itself:
 - A Delivery page configuration warning is logged once across the processes. Every read judges
   each deploy run, and a successful run holding none of `production_job_names`, or whose production
   job lists no step named `production_apply_step_name`, is named in the log; the process whose
-  insert into `delivery_run_warnings` (migration `0132`) writes the run's row logs it, and every
+  insert into `delivery_run_warnings` (migration `0133`) writes the run's row logs it, and every
   other process finds the row and stays quiet. A database that cannot record the row leaves the
   process to log it anyway.
 - A test hook acts on every process (`DISPATCH_TEST_HOOKS=1` only, so never in a real
@@ -960,7 +960,7 @@ is written. Its own migration, so its transaction holds `comments` alone: the dr
 `ACCESS EXCLUSIVE`, and every read and write of a comment waits while the one index builds. It
 refuses and rewrites no row; its census answers `0`.
 
-Migration `0129_message_delivery_urgency` adds `message_deliveries.urgency`, the urgency a targeted
+Migration `0130_message_delivery_urgency` adds `message_deliveries.urgency`, the urgency a targeted
 message was sent with, so a send that resumes a stranded attempt (`api/delivery_resume.go`) hands
 the listener the urgency the person chose. A direct message's attempt 1 is written with it in the
 transaction that stores the message; a broadcast recipient's carries none. It is internal: no API
@@ -969,15 +969,15 @@ read selects it. It is nullable with no default, so it writes the catalog alone 
 it, which names no urgency in its inserts, rolls beside it; an attempt that release wrote is resumed
 without an urgency, as its first send was. Its check, one of `low`, `med`, `high` and `blocking`, is
 a second statement added `not valid`, as the rule below requires, and nothing validates it later,
-since every row below the migration carries no urgency. `0129` also creates two partial indexes on
+since every row below the migration carries no urgency. `0130` also creates two partial indexes on
 `created_at` where `state = 'pending'`, `message_deliveries_pending_created` and
 `comment_deliveries_pending_created`, which the resume loop reads its candidates through, oldest
 first, without reading every settled attempt. They are plain `create index`, as `0120`'s is, and
 each build holds its table's lock while it reads the rows, which the census bounds by its 1 GiB
-limit. The census answers `0`. `0129` is additive, so rolling back past it is an image rollback
+limit. The census answers `0`. `0130` is additive, so rolling back past it is an image rollback
 alone.
 
-Migration `0130_route_roster` creates `route_roster`, one row (its `id` checked `true`, as
+Migration `0131_route_roster` creates `route_roster`, one row (its `id` checked `true`, as
 `embeddings_rate_limit`'s is) holding the listener's last answer to `GET /v1/sessions` that every
 process judges issue reads' `route_status` against: whether it answered, the sessions it listed
 with only their `session_id`, `roles` and `last_seen`, when the call was sent and until when the
@@ -988,7 +988,7 @@ release before it neither reads nor writes the table and keeps its per-process c
 while both serve, so only processes of this release agree on a route; rolling back past it is an
 image rollback alone.
 
-Migration `0131_github_rate_limits` creates `github_rate_limits`, one row per scope GitHub
+Migration `0132_github_rate_limits` creates `github_rate_limits`, one row per scope GitHub
 budgets (`app`, `installation:<id>`) and one for the webhook redelivery sweep's own backoff
 (`redelivery`): until when no process sends GitHub a request under the scope, judged against the
 database's `now()` as `embeddings_rate_limit`'s budget is, the strikes the sweep doubles its wait
@@ -998,7 +998,7 @@ rewritten, and the census answers `0`. The release before it neither reads nor w
 while both serve, its processes obey only the answers GitHub gives each of them, and its sweeps
 keep their backoff in the NATS KV bucket; rolling back past it is an image rollback alone.
 
-Migration `0132_delivery_run_warnings` creates `delivery_run_warnings`, one row per Delivery page
+Migration `0133_delivery_run_warnings` creates `delivery_run_warnings`, one row per Delivery page
 configuration warning logged: the deploy run (`repo`, `run_id`) and the configuration it was
 warned under (`job_names`, and `apply_step`, `''` for a run holding no production job), all four
 the primary key, so a changed configuration is warned about again. A read inserts the row before

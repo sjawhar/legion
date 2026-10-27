@@ -88,6 +88,10 @@ type bootConfig struct {
 	// for the server's own five seconds; only DISPATCH_TEST_ROUTE_ROSTER_TTL, under the test hooks,
 	// sets it.
 	RouteRosterTTL time.Duration
+	// EditNoticeQuiet is how long a document stays quiet after a person's last settled version
+	// before its edit notice goes, zero for the document service's own 30 s; only
+	// DISPATCH_TEST_EDIT_NOTICE_QUIET, under the test hooks, sets it.
+	EditNoticeQuiet time.Duration
 	// OIDCIssuer and OIDCAudience configure verification of projected
 	// service-account tokens. Both set or neither; empty means no verifier.
 	OIDCIssuer   string
@@ -280,11 +284,12 @@ func main() {
 
 	broker := events.NewBroker()
 	documentService := newDocumentService(boot, docs.Deps{
-		Store:     database,
-		Events:    broker,
-		Identity:  requestIdentity,
-		ServerURL: serverURL,
-		Settle:    boot.SettleDelay,
+		Store:           database,
+		Events:          broker,
+		Identity:        requestIdentity,
+		ServerURL:       serverURL,
+		Settle:          boot.SettleDelay,
+		EditNoticeQuiet: boot.EditNoticeQuiet,
 	})
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
 	// The seed appends events, so it runs after restoreDecidedWordings, which takes the copy lock:
@@ -348,9 +353,9 @@ func main() {
 	// started minutes apart almost never meet inside a pass, so the lease alone would exclude
 	// nothing. The leased loops are the document compaction (the outbox's), the
 	// suggestion-outcome sweep, the delivery resume, the reference-excerpt reconciliation, the
-	// block-index reconciliation, the webhook redelivery sweep, the architecture import, the
-	// delivery reconcile and the delivery intakes' consumer reconciliation; store.leasePoolSize
-	// counts their callers.
+	// edit-notice sweep, the block-index reconciliation, the webhook redelivery sweep, the
+	// architecture import, the delivery reconcile and the delivery intakes' consumer
+	// reconciliation; store.leasePoolSize counts their callers.
 	//
 	// Deliberately NOT leased, in three classes:
 	//   - already claims its own work, so two processes never do one unit of it twice: the
@@ -426,6 +431,10 @@ func main() {
 	// version write stored: every mention indexed before migration 0092, and each rebuild-refs
 	// inserts (LEGION-531).
 	go documentService.RunReferenceExcerptReconciliation(ctx, leases)
+	// Each document's edit notice goes once its quiet window after a person's last
+	// settled version ends, as one artifact.human_edited event; the window is a row, so a notice
+	// still pending when this process stops is sent by the next sweep of either process.
+	go documentService.RunEditNotices(ctx, leases)
 	// The block index: each document version no block-aware write indexed - every document at
 	// migration 0121, each version a build without the block index writes during a roll, and each
 	// rebuild-refs marks - and each comment, ask and issue message citing a block (`#b-`) that such
@@ -641,6 +650,7 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		{"DISPATCH_TEST_SETTLE_DELAY", &boot.SettleDelay},
 		{"DISPATCH_TEST_DELIVERY_RESUME_INTERVAL", &boot.DeliveryResumeInterval},
 		{"DISPATCH_TEST_ROUTE_ROSTER_TTL", &boot.RouteRosterTTL},
+		{"DISPATCH_TEST_EDIT_NOTICE_QUIET", &boot.EditNoticeQuiet},
 	} {
 		if err := testHookDuration(env, setting.name, boot.TestHooksEnabled, setting.target); err != nil {
 			return bootConfig{}, err
