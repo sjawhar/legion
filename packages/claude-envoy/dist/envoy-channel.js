@@ -40408,7 +40408,7 @@ As read at ${options.cachedAt}; Dispatch did not answer now.`;
     const block = renderSessionAnswerItem(item);
     const after = count - blocks.length - 1;
     const needed = length + 2 + block.length + (after === 0 ? 0 : 2 + leftOutLine(after).length);
-    if (needed > SESSION_ANSWERS_MAX_CHARS)
+    if (needed >= SESSION_ANSWERS_MAX_CHARS)
       break;
     blocks.push(block);
     length += 2 + block.length;

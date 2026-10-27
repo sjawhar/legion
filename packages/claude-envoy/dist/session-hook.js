@@ -16567,7 +16567,7 @@ As read at ${options.cachedAt}; Dispatch did not answer now.`;
     const block = renderSessionAnswerItem(item);
     const after = count - blocks.length - 1;
     const needed = length + 2 + block.length + (after === 0 ? 0 : 2 + leftOutLine(after).length);
-    if (needed > SESSION_ANSWERS_MAX_CHARS)
+    if (needed >= SESSION_ANSWERS_MAX_CHARS)
       break;
     blocks.push(block);
     length += 2 + block.length;
@@ -20450,7 +20450,8 @@ var DispatchFirstInput = exports_external.object({
 });
 var AnswersInput = exports_external.object({ session_id: exports_external.string().min(1), ...DispatchFirstInput.shape });
 var ANSWERS_BY_MS = SESSION_ANSWERS_DEADLINE_MS;
-var ANSWERS_SETTLED_BY_MS = ANSWERS_BY_MS + 50;
+var ANSWERS_LEAST_WAIT_MS = 150;
+var ANSWERS_SETTLE_MS = 50;
 var DISPATCH_HOST_LINE = "export DISPATCH_HOST=claude";
 function appendOnce(envFile, line) {
   let written = "";
@@ -20539,7 +20540,7 @@ function dispatchFirst(raw) {
 function remainingUntil(at) {
   return Math.max(0, Math.round(at - performance.now()));
 }
-async function answersDispatch(directory) {
+async function answersDispatch(directory, by) {
   const file2 = sessionConfigFile("claude", process.env);
   const kept = sessionDispatchSettings(file2, process.env, { cwd: directory, commands: "kept" });
   if (kept.dispatch.enabled || kept.dispatch.error === null)
@@ -20550,17 +20551,18 @@ async function answersDispatch(directory) {
       worker.once("message", resolve2);
       worker.once("error", (error48) => resolve2(offWithError(messageFor(error48))));
     }),
-    Bun.sleep(remainingUntil(ANSWERS_BY_MS)).then(() => {
+    Bun.sleep(remainingUntil(by)).then(() => {
       return;
     })
   ]);
-  return resolved ?? offWithError(`a "!" command in envoy.json had not finished ${ANSWERS_BY_MS} ms after the hook started`);
+  return resolved ?? offWithError(`a "!" command in envoy.json had not finished ${Math.round(by)} ms after the hook started`);
 }
 async function answers(text) {
+  const by = Math.max(ANSWERS_BY_MS, performance.now() + ANSWERS_LEAST_WAIT_MS);
   try {
     const input = AnswersInput.parse(JSON.parse(text));
     const directory = claudeProjectDirectory({ CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] }, input.cwd ?? process.cwd());
-    const dispatch = await answersDispatch(directory);
+    const dispatch = await answersDispatch(directory, by);
     let stateDirectory;
     try {
       stateDirectory = sessionDirectory(process.env, input.session_id);
@@ -20569,7 +20571,7 @@ async function answers(text) {
       session: input.session_id,
       dispatch,
       stateDirectory,
-      deadlineMs: remainingUntil(ANSWERS_BY_MS)
+      deadlineMs: remainingUntil(by)
     });
     if (read.text !== undefined) {
       await Bun.write(Bun.stdout, JSON.stringify({
@@ -20581,7 +20583,7 @@ async function answers(text) {
     }
     await Promise.race([
       sessionAnswersSettled(input.session_id),
-      Bun.sleep(remainingUntil(ANSWERS_SETTLED_BY_MS))
+      Bun.sleep(remainingUntil(by + ANSWERS_SETTLE_MS))
     ]);
   } catch (error48) {
     process.stderr.write(`envoy: people's answers were not added \u2014 ${messageFor(error48)}

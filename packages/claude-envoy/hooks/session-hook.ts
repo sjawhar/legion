@@ -37,13 +37,14 @@
 // `hookSpecificOutput.additionalContext` under the event that ran it: `readSessionAnswers`' list,
 // or its failure line when no list was ever read. The session is the hook input's `session_id`,
 // which at SubagentStart is the parent's, the session a subagent's `dispatch` command writes as.
-// The hook prints by `ANSWERS_BY_MS` after its process started (bun's start-up included), carrying
-// the last list read, from `answers.json` in the session's Dispatch state directory, when Dispatch
-// has not answered by then; it then gives a read still in flight until `ANSWERS_SETTLED_BY_MS` to
-// write that file for the next hook, and exits 0 whatever happened. Dispatch is resolved without
-// running a `!` token command first (`commands: "kept"`); a fresh process has kept none, so when
-// that resolution is off with an error the hook resolves again with commands run, in a worker
-// thread of this same bundle, and stops waiting for it at `ANSWERS_BY_MS`: the command's 10 s
+// The hook prints by `ANSWERS_BY_MS` after its process started (bun's start-up included), or
+// `ANSWERS_LEAST_WAIT_MS` after its code began when the start-up took longer, carrying the last
+// list read, from `answers.json` in the session's Dispatch state directory, when Dispatch has not
+// answered by then; it then gives a read still in flight `ANSWERS_SETTLE_MS` more to write that
+// file for the next hook, and exits 0 whatever happened. Dispatch is resolved without running a
+// `!` token command first (`commands: "kept"`); a fresh process has kept none, so when that
+// resolution is off with an error the hook resolves again with commands run, in a worker thread
+// of this same bundle, and stops waiting for it at that print deadline: the command's 10 s
 // synchronous run blocks the worker, never the hook. A command still running then is left to end
 // on its own, in the process group the shared config reader gave it.
 //
@@ -93,10 +94,15 @@ const AnswersInput = z.object({ session_id: z.string().min(1), ...DispatchFirstI
  *  bun's start-up and Dispatch's resolution inside it, so the session waits no longer on it than a
  *  model request on Oh My Pi waits on the same read. */
 const ANSWERS_BY_MS = SESSION_ANSWERS_DEADLINE_MS
-/** Until when, in ms after its process started, the answers hook lets a read that answered past
- *  `ANSWERS_BY_MS` write `answers.json` before it exits: 50 ms more, leaving the process's exit
- *  room under 1 s. */
-const ANSWERS_SETTLED_BY_MS = ANSWERS_BY_MS + 50
+/** The least the hook waits on Dispatch once its own code runs, whatever the start-up spent:
+ *  Claude Code starts every hook beside itself, so on a loaded host bun's start-up alone can pass
+ *  `ANSWERS_BY_MS`, and a budget already spent would carry the failure line or a stale list while
+ *  Dispatch answers at once. A read that answers in this time is carried; one that does not costs
+ *  the session at most this much past the start-up. */
+const ANSWERS_LEAST_WAIT_MS = 150
+/** How long after the hook's print deadline a read that answered past it may still write
+ *  `answers.json` for the next hook before the process exits. */
+const ANSWERS_SETTLE_MS = 50
 
 const DISPATCH_HOST_LINE = "export DISPATCH_HOST=claude"
 
@@ -197,17 +203,17 @@ function dispatchFirst(raw: unknown): void {
   )
 }
 
-/** The ms left until `at`, counted from this process's start (`performance.now()`'s origin), in
- *  whole ms because the failure line names the wait. */
+/** The ms left until `at`, a `performance.now()` reading, in whole ms because the failure line
+ *  names the wait. */
 function remainingUntil(at: number): number {
   return Math.max(0, Math.round(at - performance.now()))
 }
 
 /** Dispatch for the answers hook. Read first without running any `!` command; a fresh hook process
  *  has kept none, so a resolution that is off with an error is made again with commands run, in a
- *  worker running this bundle, waited on until `ANSWERS_BY_MS` at most. Off with an error saying so
- *  when it has not answered by then: the read then carries the cached list or the failure line. */
-async function answersDispatch(directory: string): Promise<DispatchConfigResolution> {
+ *  worker running this bundle, waited on until `by` at most. Off with an error saying so when it
+ *  has not answered by then: the read then carries the cached list or the failure line. */
+async function answersDispatch(directory: string, by: number): Promise<DispatchConfigResolution> {
   const file = sessionConfigFile("claude", process.env)
   const kept = sessionDispatchSettings(file, process.env, { cwd: directory, commands: "kept" })
   if (kept.dispatch.enabled || kept.dispatch.error === null) return kept.dispatch
@@ -217,25 +223,28 @@ async function answersDispatch(directory: string): Promise<DispatchConfigResolut
       worker.once("message", resolve)
       worker.once("error", (error) => resolve(offWithError(messageFor(error))))
     }),
-    Bun.sleep(remainingUntil(ANSWERS_BY_MS)).then(() => undefined),
+    Bun.sleep(remainingUntil(by)).then(() => undefined),
   ])
   return (
     resolved ??
     offWithError(
-      `a "!" command in envoy.json had not finished ${ANSWERS_BY_MS} ms after the hook started`,
+      `a "!" command in envoy.json had not finished ${Math.round(by)} ms after the hook started`,
     )
   )
 }
 
 /** The answers mode: never throws, and ends the process with status 0. */
 async function answers(text: string): Promise<never> {
+  // The print deadline: `ANSWERS_BY_MS` after the process started, or `ANSWERS_LEAST_WAIT_MS`
+  // from now when the start-up already spent that.
+  const by = Math.max(ANSWERS_BY_MS, performance.now() + ANSWERS_LEAST_WAIT_MS)
   try {
     const input = AnswersInput.parse(JSON.parse(text))
     const directory = claudeProjectDirectory(
       { CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] },
       input.cwd ?? process.cwd(),
     )
-    const dispatch = await answersDispatch(directory)
+    const dispatch = await answersDispatch(directory, by)
     let stateDirectory: string | undefined
     try {
       stateDirectory = sessionDirectory(process.env, input.session_id)
@@ -246,7 +255,7 @@ async function answers(text: string): Promise<never> {
       session: input.session_id,
       dispatch,
       stateDirectory,
-      deadlineMs: remainingUntil(ANSWERS_BY_MS),
+      deadlineMs: remainingUntil(by),
     })
     if (read.text !== undefined) {
       await Bun.write(
@@ -261,7 +270,7 @@ async function answers(text: string): Promise<never> {
     }
     await Promise.race([
       sessionAnswersSettled(input.session_id),
-      Bun.sleep(remainingUntil(ANSWERS_SETTLED_BY_MS)),
+      Bun.sleep(remainingUntil(by + ANSWERS_SETTLE_MS)),
     ])
   } catch (error) {
     process.stderr.write(`envoy: people's answers were not added — ${messageFor(error)}\n`)

@@ -50,12 +50,13 @@ events and sends them to the current Claude Code session as supported
   context, read from `GET /api/v1/agents/{session_id}/answers` for the hook input's `session_id`,
   which at `SubagentStart` is the parent's: the same list, under 8,000 characters, that every
   Oh My Pi model request carries (`@legion/envoy-client/session-answers`). It prints within 800 ms
-  of its start, Bun's start-up included, carrying the last list read (`answers.json` in the
-  session's Dispatch state directory) when Dispatch has not answered by then, or one line saying the
-  list could not be read and why when none ever was, and exits within 850 ms, always with status 0
-  and with no output when there is nothing to show; its `timeout` is 5 s. A `!` command in
-  envoy.json runs in a worker thread the hook stops waiting for at 800 ms, so a slow one costs the
-  list, never the bound. On every
+  of its start, Bun's start-up included, or 150 ms after its own code begins when the start-up alone
+  took longer, carrying the last list read (`answers.json` in the session's Dispatch state
+  directory) when Dispatch has not answered by then, or one line saying the list could not be read
+  and why when none ever was, and exits 50 ms after that, always with status 0 and with no output
+  when there is nothing to show; its `timeout` is 5 s. A `!` command in envoy.json runs in a worker
+  thread the hook stops waiting for at that same deadline, so a slow one costs the list, never the
+  bound. On every
   `UserPromptSubmit`, `dist/session-title-hook.js` records the name a person gave the session
   (below, "Session title"); its `timeout` is 5 s, and it is a bundle of its own because Claude
   Code holds the prompt until it returns.

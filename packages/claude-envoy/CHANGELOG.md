@@ -18,10 +18,12 @@
   `GET /api/v1/agents/{session_id}/answers` for the hook input's `session_id`, which at
   `SubagentStart` is the parent's. It is the list every Oh My Pi model request carries, under
   8,000 characters, newest first, with a line naming `dispatch answers` when older items are left
-  out. The hook prints within 800 ms of its start and exits by 850 ms, always with status 0: when
-  Dispatch has not answered it carries the last list read, kept in `answers.json` in the session's
-  Dispatch state directory, or one line saying the list could not be read and why. A `!` command in
-  envoy.json runs in a worker thread the hook stops waiting for at 800 ms. Against a Dispatch older
+  out. The hook prints within 800 ms of its start, or 150 ms after its code begins when Bun's
+  start-up alone took longer, so a slow start-up never costs a list Dispatch answers at once; it
+  exits 50 ms after that, always with status 0: when Dispatch has not answered it carries the last
+  list read, kept in `answers.json` in the session's Dispatch state directory, or one line saying
+  the list could not be read and why. A `!` command in envoy.json runs in a worker thread the hook
+  stops waiting for at that same deadline. Against a Dispatch older
   than this release, the line says that Dispatch has no answers route.
 - `tests/answers-claude.test.ts` runs the real Claude Code, the release the new repository-root
   `.claude-code-pin` pins (2.1.311), against a stand-in model and Dispatch, and shows the list on
