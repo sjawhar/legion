@@ -677,9 +677,13 @@ its state directory and renews it at two thirds of its life, but a new pod start
   metadata alone (`PartialObjectMetadata`), never its certificate key;
 - `cert-publish`'s loop, every 60 seconds, writes the pod's own cached certificate into the Secret
   when it ends later than the published one for the same name, so the next pod finds it. The
-  claim gate runs beside that loop in the same container, and a pass that finds the gate gone
-  ends the container with status 1, so the kubelet restarts both and the pod's restart count
-  shows it, rather than leaving the pod unready with nothing deciding.
+  claim gate runs beside that loop in the same container, and the first pass that finds the gate
+  gone, within about 60 seconds, ends the container with status 1, so the kubelet restarts both
+  and the pod's restart count shows it, rather than leaving the pod with nothing deciding. Until
+  `cert-publish` runs again (a repeated restart waits longer, under CrashLoopBackOff) the pod is
+  not ready, so it leaves the `<hostname>-tailnet` SOCKS5 Service's endpoints and the app's and
+  the listener's NATS connections move to the other pods, while its advertiser may still host the
+  Tailscale Service.
 
 A renewal is outside the claim budget: each pod's tailscaled renews its own cached certificate at
 two thirds of its life, and pods seeded from one certificate reach that point together, so
