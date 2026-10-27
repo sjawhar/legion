@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, jest, test } from "bun:test";
+import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
 
 import {
@@ -261,6 +261,7 @@ test("a query collected before its observer subscribed still gets its snapshot",
 
 test("a drop reconnects with backoff and resumes with seq and revs", async () => {
   jest.useFakeTimers();
+  const random = spyOn(Math, "random").mockReturnValue(0.25);
   const { unsubscribe } = observe();
   try {
     const { socket, sub } = await opened();
@@ -272,10 +273,11 @@ test("a drop reconnects with backoff and resumes with seq and revs", async () =>
     socket.drop(1006);
     expect(live.state().state).toBe("reconnecting");
     expect(sockets.sockets).toHaveLength(1);
-    // The first attempt waits a second, give or take its jitter, then opens a new socket.
+    // The first attempt waits its draw of the 2 s spread (0.25 of it here), then opens a new
+    // socket.
     jest.advanceTimersByTime(499);
     expect(sockets.sockets).toHaveLength(1);
-    jest.advanceTimersByTime(1_200);
+    jest.advanceTimersByTime(1);
     expect(sockets.sockets).toHaveLength(2);
 
     const again = sockets.latest();
@@ -294,45 +296,64 @@ test("a drop reconnects with backoff and resumes with seq and revs", async () =>
       },
     });
 
-    // A second drop before anything arrived waits twice as long.
+    // A second drop before anything arrived backs off: half of 2 s plus its draw of the other
+    // half, 1,250 ms.
     again.drop(1006);
-    jest.advanceTimersByTime(1_400);
+    jest.advanceTimersByTime(1_249);
     expect(sockets.sockets).toHaveLength(2);
-    jest.advanceTimersByTime(1_200);
+    jest.advanceTimersByTime(1);
     expect(sockets.sockets).toHaveLength(3);
   } finally {
+    random.mockRestore();
     unsubscribe();
   }
 });
 
 test("a connection error before open reconnects with backoff", async () => {
   jest.useFakeTimers();
+  const random = spyOn(Math, "random").mockReturnValue(0.75);
   const { unsubscribe } = observe();
   try {
     await settle();
     sockets.latest().fail();
 
     expect(live.state().state).toBe("reconnecting");
-    // The first attempt waits a second, give or take a quarter for its jitter: 750 to 1,250 ms.
-    jest.advanceTimersByTime(749);
+    // The first attempt waits its draw of the 2 s spread: 0.75 of it, 1,500 ms.
+    jest.advanceTimersByTime(1_499);
     expect(sockets.sockets).toHaveLength(1);
-    jest.advanceTimersByTime(502);
+    jest.advanceTimersByTime(1);
     expect(sockets.sockets).toHaveLength(2);
   } finally {
+    random.mockRestore();
     unsubscribe();
   }
 });
 
-test("close 1012 reconnects at once", async () => {
+test("close 1012 reconnects within the first attempt's spread, whatever backoff came before", async () => {
   jest.useFakeTimers();
+  const random = spyOn(Math, "random").mockReturnValue(0.25);
   const { unsubscribe } = observe();
   try {
     const { socket, sub } = await opened();
     socket.receive(snapshot(sub));
-    socket.drop(1012);
-    // No backoff timer: the new socket is already opening.
+    // A drop the page backs off from: a failure after it would wait the second attempt's delay.
+    socket.drop(1006);
+    jest.advanceTimersByTime(500);
     expect(sockets.sockets).toHaveLength(2);
+    const again = sockets.latest();
+    again.open();
+
+    // Dispatch restarts before this socket carried a frame. Every page gets that close at the
+    // same moment, so none opens at once: each waits its draw of the 2 s spread (500 ms here),
+    // not the second attempt's backoff (1,250 ms).
+    again.drop(1012);
+    expect(sockets.sockets).toHaveLength(2);
+    jest.advanceTimersByTime(499);
+    expect(sockets.sockets).toHaveLength(2);
+    jest.advanceTimersByTime(1);
+    expect(sockets.sockets).toHaveLength(3);
   } finally {
+    random.mockRestore();
     unsubscribe();
   }
 });

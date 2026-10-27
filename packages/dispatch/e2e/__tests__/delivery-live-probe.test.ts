@@ -10,6 +10,7 @@ import delta from "../../../contracts/fixtures/delivery-live/delta.json";
 import error from "../../../contracts/fixtures/delivery-live/error.json";
 import heartbeat from "../../../contracts/fixtures/delivery-live/heartbeat.json";
 import snapshot from "../../../contracts/fixtures/delivery-live/snapshot.json";
+import { RECONNECT_SPREAD_MS } from "../../web/src/api/live";
 import type {
   DeliveryLiveClientFrame,
   DeliveryLiveDelta,
@@ -438,7 +439,7 @@ test(
 );
 
 test(
-  "after a restart close the probe reconnects at once and resumes with the change and revisions it holds",
+  "after a restart close the probe reconnects within the spread and resumes with the change and revisions it holds",
   async () => {
     const dispatch = fakeDispatch({
       onSubscribe(socket, sub, count) {
@@ -464,6 +465,12 @@ test(
         return line.type;
       })
     ).toEqual(["open null", "snapshot", "delta", "close 1012", `open ${change.seq}`]);
+    // The page's first attempt after a restart close waits up to `RECONNECT_SPREAD_MS`; the
+    // probe, a process of its own, draws its own wait, so this holds the bound rather than the
+    // draw. A second of slack covers the loopback handshake on a shared box.
+    const closedAt = Date.parse(run.lines[3]?.at ?? "");
+    const reopenedAt = Date.parse(run.lines[4]?.at ?? "");
+    expect(reopenedAt - closedAt).toBeLessThan(RECONNECT_SPREAD_MS + 1_000);
   },
   PROCESS_TEST_MS
 );

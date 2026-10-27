@@ -29,7 +29,8 @@ import type {
  *  `heartbeat` included: a browser never shows the page the socket's own pings. */
 export const DELIVERY_LIVE_SILENT_MS = 30_000;
 
-/** Dispatch closes every socket with this code when it shuts down: the page reconnects at once. */
+/** Dispatch closes every socket with this code when it shuts down: the page reconnects within the
+ *  first attempt's spread (`reconnectDelayMs(0)`), whatever backoff earlier failures built. */
 const SERVICE_RESTART = 1012;
 /** The code the page closes a silent socket with before it opens another. */
 const REPLACED = 4000;
@@ -253,13 +254,13 @@ export function createDeliveryLive(queryClient: QueryClient): DeliveryLive {
     socket = null;
     isOpen = false;
     update({ since: current.since ?? Date.now(), state: "reconnecting" });
-    if (code === SERVICE_RESTART) {
-      open();
-      return;
-    }
-    const delay = reconnectDelayMs(attempt) * (0.75 + Math.random() * 0.5);
+    // Dispatch's restart close starts the backoff over: another process is already serving, or
+    // this one is coming back, so the page reconnects within the first attempt's spread. Every
+    // page the restart closed gets that close at the same moment; spread, they reach the next
+    // process over two seconds rather than in one burst.
+    if (code === SERVICE_RESTART) attempt = 0;
+    cancelReconnect = after(reconnectDelayMs(attempt), open);
     attempt += 1;
-    cancelReconnect = after(delay, open);
   };
 
   const onVisibility = () => {

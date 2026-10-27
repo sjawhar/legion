@@ -36,12 +36,26 @@ export function useConnectionState(): ConnectionState {
   return useSyncExternalStore(subscribe, getConnectionState);
 }
 
+/** The window the first reconnect after a dropped connection is spread over: uniformly in
+ *  [0, 2 s), a mean of 1 s, the fixed delay it replaced. A Dispatch restart or roll drops every
+ *  tab at the same moment; spread, their reconnects and the refreshes that follow each one reach
+ *  the new process over two seconds instead of in one burst. */
+export const RECONNECT_SPREAD_MS = 2_000;
 const BASE_RECONNECT_DELAY_MS = 1_000;
 const MAX_RECONNECT_DELAY_MS = 30_000;
 
-/** Exponential backoff for stream reconnect attempts, capped at 30s. */
-export function reconnectDelayMs(attempt: number): number {
-  return Math.min(BASE_RECONNECT_DELAY_MS * 2 ** attempt, MAX_RECONNECT_DELAY_MS);
+/**
+ * The wait before reconnect attempt `attempt` (0 for the first after a connection was lost).
+ * Attempt 0 is spread over `RECONNECT_SPREAD_MS`. Each later attempt backs off exponentially
+ * with equal jitter: half of `d = min(1 s × 2^attempt, 30 s)` plus a random share of the other
+ * half, so tabs whose first try failed together stay spread without any waiting less than d/2.
+ */
+export function reconnectDelayMs(attempt: number, random: () => number = Math.random): number {
+  if (attempt === 0) {
+    return random() * RECONNECT_SPREAD_MS;
+  }
+  const ceiling = Math.min(BASE_RECONNECT_DELAY_MS * 2 ** attempt, MAX_RECONNECT_DELAY_MS);
+  return ceiling / 2 + random() * (ceiling / 2);
 }
 
 /**

@@ -3,6 +3,7 @@ import { DOCUMENT_SCHEMA_CLOSE_CODE } from "@legion/contracts";
 import type { Awareness } from "y-protocols/awareness";
 import type { Doc } from "yjs";
 
+import { reconnectDelayMs } from "../../api/live";
 import { importWhenOnline } from "../shell/DeploymentResilience";
 import type { PendingState, PendingSync } from "./pending-sync";
 
@@ -129,7 +130,17 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
     const WebSocketPolyfill = class extends globalThis.WebSocket {
       constructor(url: string, protocols?: string | string[]) {
         super(url, protocols);
-        this.addEventListener("open", () => sync?.socketOpened());
+        this.addEventListener("open", () => {
+          // The provider waits `initialDelay` before the first try of every `connect()`, and
+          // calls `connect()` again whenever a socket the server had answered closes: the
+          // server's close (a restart or roll closes every tab's socket at the same moment) and
+          // the provider's own silent-socket check alike. So the page's first connect waits
+          // nothing, and once a socket has opened, the reconnect after it waits a fresh draw of
+          // the spread. The provider refuses a fractional delay. Tries that fail inside one
+          // `connect()` keep the provider's own jittered backoff.
+          websocket.setConfiguration({ initialDelay: Math.floor(reconnectDelayMs(0)) });
+          sync?.socketOpened();
+        });
       }
 
       override send(data: Parameters<WebSocket["send"]>[0]): void {

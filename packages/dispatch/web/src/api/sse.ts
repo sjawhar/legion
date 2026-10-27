@@ -765,7 +765,9 @@ export function useEventStream({
         // the one query that looks expensive to refresh, `["block-schema"]` with an infinite
         // `staleTime`, resolves from a module-level per-session cache (`features/doc/schema.ts`),
         // so its refetch issues no request. A genuine reconnect after a gap refreshes on the
-        // leading edge; `visibilitychange` reopening the stream repeatedly does not.
+        // leading edge; `visibilitychange` reopening the stream repeatedly does not. That edge is
+        // the reopen itself, which `reconnectDelayMs` already spreads after a dropped stream, so
+        // the refresh waits no further: tabs a restart dropped together refresh spread as well.
         refreshEverything();
         // The one query that refresh skips: a credential list held at `null` (no broker), which
         // a server restarted since with a broker configured would now answer with a list.

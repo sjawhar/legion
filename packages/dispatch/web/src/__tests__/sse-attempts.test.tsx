@@ -3,7 +3,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, renderHook, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 
-import { getConnectionState, setConnectionState, useConnectionState } from "../api/live";
+import {
+  getConnectionState,
+  RECONNECT_SPREAD_MS,
+  setConnectionState,
+  useConnectionState,
+} from "../api/live";
 import { useEventStream } from "../api/sse";
 import { countWholeCacheRefreshes, openStreamResponse } from "./sse-test-harness";
 
@@ -24,7 +29,7 @@ test("a stale reconnect timer never opens a second stream once online preempts i
       streamCalls.push(url);
       if (streamCalls.length === 1) {
         // The first connection attempt fails outright (a dropped connection), which
-        // schedules a reconnect on the normal 1s backoff timer.
+        // schedules a reconnect within the first attempt's spread (up to 2s).
         return new Response(null, { status: 503 });
       }
       // Every attempt after the first succeeds and stays open.
@@ -35,18 +40,18 @@ test("a stale reconnect timer never opens a second stream once online preempts i
 
     await waitFor(() => expect(streamCalls.length).toBe(1));
 
-    // The network recovers before the 1s backoff elapses — this must connect
+    // The network recovers before that reconnect's timer fires — this must connect
     // immediately instead of waiting out the pending timer.
     window.dispatchEvent(new Event("online"));
     await waitFor(() => expect(streamCalls.length).toBe(2));
 
-    // Real-clock wait past the first attempt's backoff deadline (reconnectDelayMs(0)
-    // = 1000ms): if the stale timer were not cleared when `online` preempted it, it
-    // would fire here and open a second, duplicate stream. This genuinely needs to
+    // Real-clock wait past the latest the first attempt's timer could fire
+    // (`RECONNECT_SPREAD_MS`): if the stale timer were not cleared when `online` preempted
+    // it, it would fire here and open a second, duplicate stream. This genuinely needs to
     // wait against the platform clock — there is no synchronous signal for "a timer
     // did not fire".
     const { promise: settled, resolve: settle } = Promise.withResolvers<void>();
-    setTimeout(settle, 1_300);
+    setTimeout(settle, RECONNECT_SPREAD_MS + 300);
     await settled;
     expect(streamCalls.length).toBe(2);
   } finally {
@@ -81,7 +86,9 @@ test("the watchdog reconnects a connection that opens and then goes silent witho
     unmount = renderHook(() => useEventStream({ watchdogMs: 50 }), { wrapper: Wrapper }).unmount;
 
     await waitFor(() => expect(streamCalls.length).toBe(1));
-    await waitFor(() => expect(streamCalls.length).toBeGreaterThanOrEqual(2), { timeout: 2_000 });
+    await waitFor(() => expect(streamCalls.length).toBeGreaterThanOrEqual(2), {
+      timeout: RECONNECT_SPREAD_MS + 1_000,
+    });
   } finally {
     unmount?.();
     globalThis.fetch = originalFetch;
@@ -119,7 +126,9 @@ test("the watchdog retries a request that never receives response headers", asyn
     unmount = renderHook(() => useEventStream({ watchdogMs: 50 }), { wrapper: Wrapper }).unmount;
 
     await waitFor(() => expect(streamCalls.length).toBe(1));
-    await waitFor(() => expect(streamCalls.length).toBe(2), { timeout: 2_000 });
+    await waitFor(() => expect(streamCalls.length).toBe(2), {
+      timeout: RECONNECT_SPREAD_MS + 1_000,
+    });
     await waitFor(() => expect(wholeCache.count()).toBe(1));
   } finally {
     unmount?.();
@@ -159,11 +168,11 @@ test("a 401 on the stream invalidates whoami and schedules no reconnect", async 
     await waitFor(() => expect(streamCalls.length).toBe(1));
     await waitFor(() => expect(invalidated).toContainEqual(["whoami"]));
 
-    // No reconnect on an auth failure: waiting past the normal 1s backoff window
-    // must not produce a second stream attempt — retrying can't succeed until the
+    // No reconnect on an auth failure: waiting past the latest a first reconnect could
+    // fire must not produce a second stream attempt — retrying can't succeed until the
     // user signs back in, so scheduling one would just spin forever.
     const { promise: settled, resolve: settle } = Promise.withResolvers<void>();
-    setTimeout(settle, 1_300);
+    setTimeout(settle, RECONNECT_SPREAD_MS + 300);
     await settled;
     expect(streamCalls.length).toBe(1);
   } finally {
@@ -224,7 +233,7 @@ test("a non-auth 4xx on the stream marks the connection unavailable and schedule
     expect(screen.getByRole("button", { name: "Reload" })).toBeTruthy();
 
     const { promise: settled, resolve: settle } = Promise.withResolvers<void>();
-    setTimeout(settle, 1_300);
+    setTimeout(settle, RECONNECT_SPREAD_MS + 300);
     await settled;
     expect(streamCalls.length).toBe(1);
     expect(invalidated).not.toContainEqual(["whoami"]);
@@ -271,7 +280,9 @@ test("a 429 on the stream keeps reconnecting instead of going terminal", async (
     unmount = renderHook(() => useEventStream(), { wrapper: Wrapper }).unmount;
 
     await waitFor(() => expect(streamCalls.length).toBe(1));
-    await waitFor(() => expect(streamCalls.length).toBe(2), { timeout: 2_000 });
+    await waitFor(() => expect(streamCalls.length).toBe(2), {
+      timeout: RECONNECT_SPREAD_MS + 1_000,
+    });
   } finally {
     unmount?.();
     globalThis.fetch = originalFetch;
