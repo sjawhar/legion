@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-521",
+  "completed": "2026-10-27T14:03:32Z",
+  "round": 4,
+  "decision": "approved",
+  "reviewedHead": "42256ccb3d5a9775a173c208dc5cda9ea99bc5af (code: retro's head); branch head above it carries only .legion/",
+  "context": "Returned to implementing at 12:16Z because the required `test` check was red at READY head 42256ccb. The implementer changed no code and re-ran the job, which passed on attempt 2. The test that failed on attempt 1 was the daemon Go test TestRunRecordsAnOperatorSuspensionWhoseProcessExitsWithinTheDrain (inflight_test.go:619), outside this diff. Since the approval at 1e4902d0 the only changes are retro's docs/solutions files (5 new) and .legion/.",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "verified": [
+    "Code diff 1e4902d0..ff875bc1: only 5 added docs/solutions/*INFRA-521.md files and .legion/ changes. No spec, config or dispatch doc changed.",
+    "Required checks at CI head 42256ccb: lint, typecheck, pr-title and test completed success (test on attempt 2). The dispatch job also succeeded: browser step 35.9 min against a base median of 45.3, iphone 223 passed. The compare from 42256ccb to ff875bc1 shows .legion/ only (2 files).",
+    "The retro docs repeat the true reason for the anchors, not the false one removed in round 2."
+  ],
+  "conflict": "GitHub reports the pull request CONFLICTING (mergeStateStatus DIRTY) against main. A jj merge probe of legion/INFRA-521@origin with main@origin conflicts in packages/dispatch/e2e/playwright.config.ts and packages/dispatch/e2e/theme.e2e.ts. The implementer resolves this with a forward merge (conflicts-and-rewrites.md); the reviewer then compares the unchanged-diff fingerprint against this approval.",
+  "thermo": "Not run: since the last approved code, the diff adds only docs/solutions files."
+}
