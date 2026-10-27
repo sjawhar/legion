@@ -82,11 +82,12 @@ for Dispatch's `Ctrl+Alt+M` (LEGION-680); the `block[]` attribute kind (INFRA-15
 writes and checks its values through `./block-pointers` — in `src/block-schema.ts`,
 `BlockAttributeKind` gaining `block[]`, `BlockAttributeSchema` gaining `targets`,
 `validateBlockSchema` refusing `targets` on any other kind as the server does, `parseAttribute`'s
-`block[]` case calling `parseBlockPointers` and `attributeText` joining the pointers with one
-space; in `src/typed-block-commands.ts`, `TypedBlockCommandContext.documentRef`, `validateValue`'s
-`block[]` case calling `blockPointerProblem`, and `insert`, `retype` and `setAttributes` building
-their transaction first and throwing `blockPointerRefusal`'s refusal before dispatching it, so a
-refused command leaves the document unchanged; in `src/lib.ts`,
+`block[]` case calling `parseBlockPointers` and `attributeText`, its one conditional expression
+written as statements, joining the pointers with one space; in `src/typed-block-commands.ts`,
+`TypedBlockCommandContext.documentRef`, `validateValue`'s `block[]` case calling
+`blockPointerProblem`, and `insert`, `retype` and `setAttributes` building their transaction first
+and handing it to `dispatchUnlessRefused`, which throws `blockPointerRefusal`'s refusal before
+dispatching it, so a refused command leaves the document unchanged; in `src/lib.ts`,
 `CreateProofEditorOptions.documentRef` passed to `createTypedBlockCommands`; and in
 `src/tests/block-schema.test.ts`, the imports of `DISPATCH_BLOCK_POINTER_VALUES`, `EditorState`
 and `createTypedBlockCommands` and the suite's three cases for it; and annotations, casts and

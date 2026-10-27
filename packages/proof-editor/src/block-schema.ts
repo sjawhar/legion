@@ -131,7 +131,9 @@ function directiveAttrs(type: BlockTypeSchema, attrs: Record<string, string> | u
 
 /** An attribute value as markdown and HTML carry it, the inverse of `parseAttribute`. */
 function attributeText(attribute: BlockAttributeSchema, value: unknown): string {
-  return attribute.kind === 'bool' ? String(value) : attribute.kind === 'string[]' ? JSON.stringify(value) : attribute.kind === 'block[]' ? (value as readonly string[]).join(' ') : String(value);
+  if (attribute.kind === 'string[]') return JSON.stringify(value);
+  if (attribute.kind === 'block[]') return (value as readonly string[]).join(' ');
+  return String(value);
 }
 
 function markdownAttrs(type: BlockTypeSchema, node: ProseMirrorNode): Record<string, string> {

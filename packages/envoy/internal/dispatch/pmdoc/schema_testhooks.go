@@ -2,33 +2,30 @@ package pmdoc
 
 import (
 	"encoding/json"
-	"testing"
+	"fmt"
 )
 
-// UseBlockSchemaForTest makes value the block schema for the rest of t, as if the server had been
-// built with it: every reader of this package, SchemaVersion, LinkKinds and the bytes SchemaJSON
-// serves. It fails t when value is not a valid schema. The schema in use before is restored by a
-// t.Cleanup, so a test calls this before it builds any server or service: cleanups run last in
-// first out, so the restore runs after the server's own cleanup has stopped its room and
-// settlement goroutines, which read the schema (a defer would restore it first and race them). A
-// test that calls it does not call t.Parallel.
-func UseBlockSchemaForTest(t testing.TB, value BlockSchema) {
-	t.Helper()
+// SetBlockSchemaForTest makes value the block schema, as if the server had been built with it:
+// every reader of this package, SchemaVersion, LinkKinds and the bytes SchemaJSON serves. It
+// refuses value when it is not a valid schema, and changes nothing then. restore puts back the
+// schema in use before. Tests reach it through pmdoctest.UseBlockSchema, which says when a test
+// may call it.
+func SetBlockSchemaForTest(value BlockSchema) (restore func(), err error) {
 	if err := normalizeSchemaDefaults(&value); err != nil {
-		t.Fatalf("normalize test block schema: %v", err)
+		return nil, fmt.Errorf("normalize test block schema: %w", err)
 	}
 	if err := validateBlockSchema(value); err != nil {
-		t.Fatalf("invalid test block schema: %v", err)
+		return nil, fmt.Errorf("invalid test block schema: %w", err)
 	}
 	encoded, err := json.Marshal(value)
 	if err != nil {
-		t.Fatalf("encode test block schema: %v", err)
+		return nil, fmt.Errorf("encode test block schema: %w", err)
 	}
 	previous, previousJSON := schema, blockSchemaJSON
 	installSchema(value)
 	blockSchemaJSON = encoded
-	t.Cleanup(func() {
+	return func() {
 		installSchema(previous)
 		blockSchemaJSON = previousJSON
-	})
+	}, nil
 }

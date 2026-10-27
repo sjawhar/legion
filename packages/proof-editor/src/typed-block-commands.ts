@@ -114,6 +114,20 @@ function selectedParagraph(state: EditorState): LocatedBlock | null {
   return null;
 }
 
+/** Dispatches `tr`, or throws `blockPointerRefusal`'s refusal of the block it leaves, unchanged. */
+function dispatchUnlessRefused(
+  context: TypedBlockCommandContext,
+  tr: Transaction,
+  type: BlockTypeSchema,
+  blockId: string | null,
+  attrs: Readonly<Record<string, unknown>>,
+  held: Readonly<Record<string, unknown>>,
+): void {
+  const refusal = blockPointerRefusal(tr.doc, type, blockId, attrs, held, context.documentRef);
+  if (refusal !== undefined) throw new Error(refusal);
+  context.dispatch(tr);
+}
+
 function insert(context: TypedBlockCommandContext, schema: BlockSchema, typeName: string, attrs?: TypedBlockAttributes): boolean {
   const state = context.getState();
   const type = findType(schema, typeName);
@@ -122,10 +136,7 @@ function insert(context: TypedBlockCommandContext, schema: BlockSchema, typeName
   if (paragraph === null) throw new Error('editor schema cannot create an empty paragraph');
   const block = typedNode.createAndFill(clientAttributes(type, attrs), paragraph);
   if (block === null) throw new Error(`typed block ${JSON.stringify(typeName)} cannot contain a paragraph body`);
-  const tr = state.tr.replaceSelectionWith(block);
-  const refusal = blockPointerRefusal(tr.doc, type, null, block.attrs, {}, context.documentRef);
-  if (refusal !== undefined) throw new Error(refusal);
-  context.dispatch(tr);
+  dispatchUnlessRefused(context, state.tr.replaceSelectionWith(block), type, null, block.attrs, {});
   return true;
 }
 
@@ -140,10 +151,7 @@ function retype(context: TypedBlockCommandContext, schema: BlockSchema, blockId:
     ...clientAttributes(type, attrs),
     [BLOCK_ID_ATTR]: blockId,
   }, body);
-  const tr = state.tr.replaceWith(source.pos, source.pos + source.node.nodeSize, replacement);
-  const refusal = blockPointerRefusal(tr.doc, type, blockId, replacement.attrs, source.node.attrs, context.documentRef);
-  if (refusal !== undefined) throw new Error(refusal);
-  context.dispatch(tr);
+  dispatchUnlessRefused(context, state.tr.replaceWith(source.pos, source.pos + source.node.nodeSize, replacement), type, blockId, replacement.attrs, source.node.attrs);
   return true;
 }
 
@@ -154,10 +162,7 @@ function setAttributes(context: TypedBlockCommandContext, schema: BlockSchema, b
   const type = findType(schema, located.node.type.name);
   const changes = clientAttributes(type, attrs);
   if (Object.keys(changes).length === 0) return true;
-  const tr = state.tr.setNodeMarkup(located.pos, undefined, { ...located.node.attrs, ...changes }, located.node.marks);
-  const refusal = blockPointerRefusal(tr.doc, type, blockId, changes, located.node.attrs, context.documentRef);
-  if (refusal !== undefined) throw new Error(refusal);
-  context.dispatch(tr);
+  dispatchUnlessRefused(context, state.tr.setNodeMarkup(located.pos, undefined, { ...located.node.attrs, ...changes }, located.node.marks), type, blockId, changes, located.node.attrs);
   return true;
 }
 

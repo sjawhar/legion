@@ -1,5 +1,6 @@
 import { hasControlCharacter } from "./dispatch-href";
 import { referenceTargetFits, utf8Bytes } from "./dispatch-text-rules";
+import { PROJECT_KEY_PATTERN } from "./dispatch-tools";
 
 const encoder = new TextEncoder();
 
@@ -114,9 +115,10 @@ export interface DispatchBlockReference {
   readonly pin?: string;
 }
 
-// Go's `text` grammars: an issue key, a project key and a document slug.
-const ISSUE_KEY = "[A-Z][A-Z0-9]{1,9}-[1-9][0-9]*";
-const PROJECT_KEY = "[A-Z][A-Z0-9]{1,9}";
+// Go's `text` grammars: a project key (PROJECT_KEY_PATTERN, unanchored), an issue key and a
+// document slug.
+const PROJECT_KEY = PROJECT_KEY_PATTERN.source.slice(1, -1);
+const ISSUE_KEY = `${PROJECT_KEY}-[1-9][0-9]*`;
 const DOCUMENT_SLUG = "[a-z0-9]+(?:-[a-z0-9]+)*";
 const ISSUE_KEY_ONLY = new RegExp(`^${ISSUE_KEY}$`);
 const BLOCK_REFERENCE = new RegExp(

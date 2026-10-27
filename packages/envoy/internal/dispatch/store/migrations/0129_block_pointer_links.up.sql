@@ -19,7 +19,8 @@ create function block_ref_listed(to_types text[], to_id text) returns boolean la
 $$;
 
 -- graph_edges re-stated: 0121's arms, the block_refs arm listing a link only while
--- block_ref_listed holds.
+-- block_ref_listed holds. A row with no limit is listed without the call, so only a pointer's row
+-- pays for the lookup.
 create or replace view graph_edges (from_kind, from_id, kind, to_kind, to_id, created_at, source_seq) as
   select from_kind, from_id, kind, to_kind, to_id, created_at, source_seq from refs
   union all
@@ -70,7 +71,7 @@ create or replace view graph_edges (from_kind, from_id, kind, to_kind, to_id, cr
   union all
   select 'block', from_node, kind, to_kind, to_id, created_at, source_seq
   from block_refs
-  where block_ref_listed(to_types, to_id)
+  where to_types is null or block_ref_listed(to_types, to_id)
   union all
   select 'block', d.node_id, 'part_of', 'artifact', a.ref_key, d.created_at, null
   from document_blocks d join artifacts a on a.id = d.artifact_id;

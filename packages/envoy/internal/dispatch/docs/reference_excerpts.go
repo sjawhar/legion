@@ -90,7 +90,7 @@ func (s *Service) indexRenderedVersion(ctx context.Context, tx pgx.Tx, artifactI
 // otherwise those of tree, or, with no tree, of markdown read back. A version whose markdown does
 // not read back is indexed with no pointers, as one the server cannot read is with no blocks.
 func blockPointers(artifactID, markdown string, blocks []model.ArtifactBlock, tree *pmdoc.Node) []refs.Pointer {
-	if len(blocks) == 0 || len(pmdoc.LinkKinds()) == 0 {
+	if len(blocks) == 0 || !pmdoc.HasLinkKinds() {
 		return nil
 	}
 	if tree == nil {

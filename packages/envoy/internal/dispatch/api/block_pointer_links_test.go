@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -10,6 +9,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc/pmdoctest"
 )
 
 // edgeSources is each edge as "<kind> <node kind> <node id>", sorted.
@@ -35,7 +35,7 @@ func requireEdgeSources(t *testing.T, stage string, edges []model.GraphEdge, wan
 // claim's block to the requirement, listed and queried by that name, and is the only link the
 // pointer makes: neither the claim nor its document lists a mentions edge beside it.
 func TestASavedBlockPointerIsALinkNamedByItsAttribute(t *testing.T) {
-	useBlockPointerSchema(t)
+	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(nil))
 	handler, database := blockIndexHandler(t)
 	issue, _ := pointerSpec(t, handler)
 	specRef := "dispatch://" + issue.Key + "/spec"
@@ -50,7 +50,7 @@ func TestASavedBlockPointerIsALinkNamedByItsAttribute(t *testing.T) {
 	requireEdgeSources(t, "links to r1", graphEdges(t, handler, url.Values{"to": {r1}}).Edges, "serves block "+c1)
 	requireEdgeSources(t, "serves links to r1", graphEdges(t, handler, url.Values{"to": {r1}, "kind": {"serves"}}).Edges, "serves block "+c1)
 	requireEdgeSources(t, "mentions of r1", graphEdges(t, handler, url.Values{"to": {r1}, "kind": {"mentions"}}).Edges)
-	requireRefused(t, "an unknown kind", graphRequest(t, handler, url.Values{"to": {r1}, "kind": {"nope"}}), "INVALID_KIND")
+	expectRefusal(t, "an unknown kind", graphRequest(t, handler, url.Values{"to": {r1}, "kind": {"nope"}}), http.StatusBadRequest, "INVALID_KIND")
 
 	atR1 := 0
 	for _, edge := range graphEdges(t, handler, url.Values{"to": {specRef}}).Edges {
@@ -83,18 +83,10 @@ func TestASavedBlockPointerIsALinkNamedByItsAttribute(t *testing.T) {
 // it: the claim's serves and answers edges from the claim, and the mention from the claim's
 // paragraph. Dropping the prose keeps the pointer's edge as it was first written.
 func TestAPointerAndAProseCitationOfOneTargetAreTwoEdges(t *testing.T) {
-	var schema pmdoc.BlockSchema
-	if err := json.Unmarshal(pmdoc.SchemaJSON(), &schema); err != nil {
-		t.Fatalf("decode the shipped block schema: %v", err)
-	}
-	schema.Types = append(schema.Types,
-		pmdoc.BlockTypeSchema{Name: "requirement", Content: pmdoc.BlockContentParagraphs, Render: "host", Attributes: map[string]pmdoc.BlockAttributeSchema{}},
-		pmdoc.BlockTypeSchema{Name: "claim", Content: pmdoc.BlockContentParagraphs, Render: "host", Attributes: map[string]pmdoc.BlockAttributeSchema{
-			"serves":  {Kind: "block[]", Targets: []string{"requirement"}},
-			"answers": {Kind: "block[]"},
-		}},
-	)
-	pmdoc.UseBlockSchemaForTest(t, schema)
+	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(map[string]pmdoc.BlockAttributeSchema{
+		"serves":  {Kind: "block[]", Targets: []string{"requirement"}},
+		"answers": {Kind: "block[]"},
+	}))
 	handler, database := blockIndexHandler(t)
 	issue, _ := pointerSpec(t, handler)
 	r1 := "dispatch://" + issue.Key + "/spec#b-r1"
@@ -142,7 +134,7 @@ func TestAPointerAndAProseCitationOfOneTargetAreTwoEdges(t *testing.T) {
 // citation whatever the target's type (D7). A target retyped back, or deleted and restored, is
 // listed again.
 func TestABlockPointerIsListedOnlyWhileItsTargetHasAnAllowedType(t *testing.T) {
-	useBlockPointerSchema(t)
+	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(nil))
 	handler, database := blockIndexHandler(t)
 	issue, _ := pointerSpec(t, handler)
 	specRef := "dispatch://" + issue.Key + "/spec"

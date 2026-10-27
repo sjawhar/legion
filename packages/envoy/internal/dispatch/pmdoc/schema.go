@@ -57,6 +57,10 @@ var schema BlockSchema
 var schemaTypes map[string]BlockTypeSchema
 var schemaLinkKinds []string
 
+// schemaPointerAttributes maps each typed block declaring a `block[]` attribute to those
+// attributes' names, sorted.
+var schemaPointerAttributes map[string][]string
+
 func init() {
 	if err := json.Unmarshal(blockSchemaJSON, &schema); err != nil {
 		panic(fmt.Sprintf("pmdoc: decode embedded block schema: %v", err))
@@ -74,13 +78,20 @@ func init() {
 func installSchema(value BlockSchema) {
 	schema = value
 	schemaTypes = make(map[string]BlockTypeSchema, len(value.Types))
+	schemaPointerAttributes = map[string][]string{}
 	kinds := map[string]struct{}{}
 	for _, typ := range value.Types {
 		schemaTypes[typ.Name] = typ
+		var names []string
 		for name, attr := range typ.Attributes {
 			if attr.Kind == "block[]" {
 				kinds[name] = struct{}{}
+				names = append(names, name)
 			}
+		}
+		if len(names) > 0 {
+			sort.Strings(names)
+			schemaPointerAttributes[typ.Name] = names
 		}
 	}
 	schemaLinkKinds = slices.Sorted(maps.Keys(kinds))
@@ -91,6 +102,12 @@ func installSchema(value BlockSchema) {
 // (model.GraphEdgeKinds).
 func LinkKinds() []string {
 	return slices.Clone(schemaLinkKinds)
+}
+
+// HasLinkKinds reports whether the schema declares any `block[]` attribute (LinkKinds is not
+// empty).
+func HasLinkKinds() bool {
+	return len(schemaLinkKinds) > 0
 }
 
 // SchemaJSON returns a copy of the canonical server-owned block schema JSON.
@@ -312,7 +329,7 @@ func validateAttributeValue(attr BlockAttributeSchema, value any) error {
 		if !ok {
 			return fmt.Errorf("must be an array of block references, got %T", value)
 		}
-		return checkBlockPointers(items)
+		return validateBlockPointerValues(items)
 	}
 	return nil
 }
@@ -331,15 +348,15 @@ func ParseBlockPointerValue(raw string) ([]string, error) {
 		return nil, fmt.Errorf("%q must be block references separated by exactly one space, with none leading or trailing", raw)
 	}
 	values := strings.Split(raw, " ")
-	if err := checkBlockPointers(values); err != nil {
+	if err := validateBlockPointerValues(values); err != nil {
 		return nil, err
 	}
 	return values, nil
 }
 
-// checkBlockPointers refuses a list of block pointers holding one that is not a canonical block
-// reference (text.CanonicalBlockRef), or holding one twice.
-func checkBlockPointers(values []string) error {
+// validateBlockPointerValues refuses a list of block pointers holding one that is not a canonical
+// block reference (text.CanonicalBlockRef), or holding one twice.
+func validateBlockPointerValues(values []string) error {
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
 		if _, ok := text.CanonicalBlockRef(value); !ok {

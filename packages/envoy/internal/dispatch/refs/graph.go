@@ -219,7 +219,7 @@ func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error
 			from graph_edges g where g.from_kind = $1 and g.from_id = $2 and not ` + heldByABlock("g") + `
 			union all
 			select b.kind, b.to_kind, b.to_id, b.created_at, b.source_seq, b.from_node
-			from block_refs b where b.artifact_id = $3::uuid and block_ref_listed(b.to_types, b.to_id)`
+			from block_refs b where b.artifact_id = $3::uuid and (b.to_types is null or block_ref_listed(b.to_types, b.to_id))`
 	case query.Direction == "out":
 		arms = `select g.kind, g.to_kind, g.to_id, g.created_at, g.source_seq, null::text
 			from graph_edges g where g.from_kind = $1 and g.from_id = $2`

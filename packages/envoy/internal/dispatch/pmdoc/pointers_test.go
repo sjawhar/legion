@@ -16,7 +16,7 @@ func TestCheckBlockPointersRefusesATargetOfADisallowedType(t *testing.T) {
 		"serves": {Kind: "string"},
 	}})
 	anyBlock := blockPointerTestSchema(map[string]BlockAttributeSchema{"serves": {Kind: "block[]"}})
-	UseBlockSchemaForTest(t, value)
+	useTestBlockSchema(t, value)
 	const (
 		requirement = "dispatch://CORE-1/spec#b-r1"
 		paragraph   = "dispatch://CORE-1/spec#b-p1"
@@ -79,7 +79,7 @@ func TestCheckBlockPointersRefusesATargetOfADisallowedType(t *testing.T) {
 		t.Fatalf("a target holding a requirement and a callout = %v, want refused", err)
 	}
 	// A pointer with no targets points at any block, so nothing is looked up for it.
-	UseBlockSchemaForTest(t, anyBlock)
+	useTestBlockSchema(t, anyBlock)
 	if err := CheckBlockPointers(claim(callout), nil, func(string) ([]string, error) {
 		return nil, errors.New("looked up a pointer with no targets")
 	}); err != nil {

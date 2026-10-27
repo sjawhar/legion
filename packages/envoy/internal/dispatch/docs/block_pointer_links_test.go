@@ -2,10 +2,8 @@ package docs
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"reflect"
-	"slices"
 	"sort"
 	"testing"
 	"time"
@@ -14,31 +12,10 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc/pmdoctest"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
-
-// useClaimSchema makes the block schema the shipped one with two test types: a requirement, and
-// a claim whose serves attribute points only at blocks of targets. Called again, it replaces the
-// two. A test calls it before it builds its service, and does not run in parallel
-// (pmdoc.UseBlockSchemaForTest).
-func useClaimSchema(t *testing.T, targets ...string) {
-	t.Helper()
-	var schema pmdoc.BlockSchema
-	if err := json.Unmarshal(pmdoc.SchemaJSON(), &schema); err != nil {
-		t.Fatalf("decode the block schema: %v", err)
-	}
-	schema.Types = slices.DeleteFunc(schema.Types, func(typ pmdoc.BlockTypeSchema) bool {
-		return typ.Name == "requirement" || typ.Name == "claim"
-	})
-	schema.Types = append(schema.Types,
-		pmdoc.BlockTypeSchema{Name: "requirement", Content: pmdoc.BlockContentParagraphs, Render: "host", Attributes: map[string]pmdoc.BlockAttributeSchema{}},
-		pmdoc.BlockTypeSchema{Name: "claim", Content: pmdoc.BlockContentParagraphs, Render: "host", Attributes: map[string]pmdoc.BlockAttributeSchema{
-			"serves": {Kind: "block[]", Targets: targets},
-		}},
-	)
-	pmdoc.UseBlockSchemaForTest(t, schema)
-}
 
 func claimPointing(id, serves, body string) string {
 	return ":::claim{#" + id + " serves=\"" + serves + "\"}\n" + body + "\n:::\n"
@@ -147,7 +124,7 @@ func pointerRowsOf(t *testing.T, database *store.Store, artifactID string) []poi
 // indexing: a version of the citing document that changes nothing about the pointer lists the edge
 // the new targets allow.
 func TestATargetsChangeReachesStoredPointersAtTheNextIndexing(t *testing.T) {
-	useClaimSchema(t, "requirement")
+	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(nil))
 	database, service := blockIndexService(t)
 	target := writeIndexedDocument(t, database, service, "target", ":::requirement{#r1}\nA requirement.\n:::\n")
 	checks := writeIndexedDocument(t, database, service, "checks", claimPointing("c1", "dispatch://CORE-1/artifact/target#b-r1", "It holds."))
@@ -159,7 +136,9 @@ func TestATargetsChangeReachesStoredPointersAtTheNextIndexing(t *testing.T) {
 	// No room reads the schema across the swap.
 	closeDocumentRoom(t, service, target)
 	closeDocumentRoom(t, service, checks)
-	useClaimSchema(t, "requirement", "callout")
+	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(map[string]pmdoc.BlockAttributeSchema{
+		"serves": {Kind: "block[]", Targets: []string{"requirement", "callout"}},
+	}))
 	requireLinksTo(t, database, "serves allowing callouts, checks.md not yet indexed", "CORE-1/target#r1")
 
 	editIndexedDocument(t, service, checks, model.EditOp{Op: "insert", After: "end", Markdown: "Unrelated.\n"})
@@ -171,7 +150,7 @@ func TestATargetsChangeReachesStoredPointersAtTheNextIndexing(t *testing.T) {
 // the attribute does not allow writes its version and stores the pointer, which the graph does not
 // list until its target has an allowed type.
 func TestABrowserWrittenPointerToADisallowedTypeIsStoredAndNotListed(t *testing.T) {
-	useClaimSchema(t, "requirement")
+	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(nil))
 	database, service := blockIndexService(t)
 	target := writeIndexedDocument(t, database, service, "target", ":::callout{#k1 kind=\"note\" title=\"\"}\nA callout.\n:::\n")
 	checks := writeIndexedDocument(t, database, service, "checks", "First.\n")
@@ -210,7 +189,7 @@ func TestABrowserWrittenPointerToADisallowedTypeIsStoredAndNotListed(t *testing.
 // The reconciliation indexes a document's pointers as its version write did: re-indexing the same
 // version leaves every block_refs row as it was, the pointer's targets included.
 func TestTheReconciliationIndexesTheSamePointersAsTheVersionWrite(t *testing.T) {
-	useClaimSchema(t, "requirement")
+	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(nil))
 	database, service := blockIndexService(t)
 	writeIndexedDocument(t, database, service, "target", ":::requirement{#r1}\nA requirement.\n:::\n")
 	const r1 = "dispatch://CORE-1/artifact/target#b-r1"

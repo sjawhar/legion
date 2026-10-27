@@ -687,7 +687,7 @@ func TestSchemaSupportsTypedBlockContentRules(t *testing.T) {
 
 // blockPointerTestSchema is the shipped schema (its callout included) with two test types: a
 // requirement, and a claim whose serves attribute is a block[] attribute pointing only at
-// requirements, or attributes when given. Call it before UseBlockSchemaForTest swaps the schema.
+// requirements, or attributes when given. Call it before useTestBlockSchema swaps the schema.
 func blockPointerTestSchema(attributes map[string]BlockAttributeSchema) BlockSchema {
 	if attributes == nil {
 		attributes = map[string]BlockAttributeSchema{"serves": {Kind: "block[]", Targets: []string{"requirement"}}}
@@ -696,6 +696,17 @@ func blockPointerTestSchema(attributes map[string]BlockAttributeSchema) BlockSch
 		BlockTypeSchema{Name: "requirement", Content: BlockContentParagraphs, Render: "host", Attributes: map[string]BlockAttributeSchema{}},
 		BlockTypeSchema{Name: "claim", Content: BlockContentParagraphs, Render: "host", Attributes: attributes},
 	)}
+}
+
+// useTestBlockSchema makes value the block schema for the rest of t, restoring the one before by
+// a t.Cleanup (pmdoctest.UseBlockSchema, which this package's tests cannot import).
+func useTestBlockSchema(t testing.TB, value BlockSchema) {
+	t.Helper()
+	restore, err := SetBlockSchemaForTest(value)
+	if err != nil {
+		t.Fatalf("use test block schema: %v", err)
+	}
+	t.Cleanup(restore)
 }
 
 // A block[] attribute's name is the kind of the links it makes, so it is one `?kind=` can name and
@@ -741,7 +752,7 @@ func TestABlockPointerSchemaDeclaresANameAndTargets(t *testing.T) {
 	twice.Types = append(twice.Types, BlockTypeSchema{Name: "proof", Content: BlockContentParagraphs, Render: "host", Attributes: map[string]BlockAttributeSchema{
 		"serves": pointer(), "note": {Kind: "string"},
 	}})
-	UseBlockSchemaForTest(t, twice)
+	useTestBlockSchema(t, twice)
 	if kinds := LinkKinds(); !slices.Equal(kinds, []string{"serves"}) {
 		t.Fatalf("link kinds of two types declaring serves = %v, want [serves]", kinds)
 	}
@@ -854,7 +865,7 @@ func TestBuiltInBlockTargetsAreTheBlocksTheBlockListHolds(t *testing.T) {
 // A claim's pointers are written in its opening line as markdown reads them, refused by name when
 // malformed, and kept through the browser's Yjs document.
 func TestABlockPointerAttributeRoundTripsThroughMarkdownAndYjs(t *testing.T) {
-	UseBlockSchemaForTest(t, blockPointerTestSchema(nil))
+	useTestBlockSchema(t, blockPointerTestSchema(nil))
 	const (
 		first  = "dispatch://CORE-1/spec#b-r1"
 		second = "dispatch://CORE/artifact/handbook-md#b-d%C3%A9cision%3A1@v3"

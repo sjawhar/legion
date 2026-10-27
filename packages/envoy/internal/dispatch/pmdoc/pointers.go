@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"sort"
 	"strings"
 )
 
@@ -33,17 +32,11 @@ func BlockPointers(tree *Node) []BlockPointer {
 	}
 	var pointers []BlockPointer
 	Walk(tree, func(node *Node) bool {
-		typ, ok := typedBlock(node.Type)
+		names, ok := schemaPointerAttributes[node.Type]
 		if !ok {
 			return true
 		}
-		names := make([]string, 0, len(typ.Attributes))
-		for name, attr := range typ.Attributes {
-			if attr.Kind == "block[]" {
-				names = append(names, name)
-			}
-		}
-		sort.Strings(names)
+		typ, _ := typedBlock(node.Type)
 		id, _ := node.Attrs[BlockIDAttr].(string)
 		for _, name := range names {
 			refs, _ := stringSlice(node.Attrs[name])

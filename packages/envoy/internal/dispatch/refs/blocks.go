@@ -326,7 +326,7 @@ func BlockLinks(ctx context.Context, q Queryer, fromArtifact, toArtifact string)
 		from block_refs r
 		join document_blocks f on f.artifact_id = r.artifact_id and f.block_id = r.block_id
 		join document_blocks t on t.node_id = r.to_id and t.artifact_id = $2::uuid
-		where r.artifact_id = $1::uuid and r.to_kind = 'block' and block_ref_listed(r.to_types, r.to_id)
+		where r.artifact_id = $1::uuid and r.to_kind = 'block' and (r.to_types is null or block_ref_listed(r.to_types, r.to_id))
 		order by r.created_at desc, r.from_node, r.to_id`, fromArtifact, toArtifact)
 	if err != nil {
 		return nil, fmt.Errorf("list the block links from %s to %s: %w", fromArtifact, toArtifact, err)

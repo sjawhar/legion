@@ -115,7 +115,7 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 		// latest version is checked. That version is read back only when the schema declares a
 		// pointer attribute; one that does not read back holds no pointer.
 		var prior *pmdoc.Node
-		if len(pmdoc.LinkKinds()) > 0 {
+		if pmdoc.HasLinkKinds() {
 			if latestTree, err := pmdoc.ParseRendering(latest.markdown); err == nil {
 				prior = latestTree
 			}

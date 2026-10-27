@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -10,28 +9,9 @@ import (
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc/pmdoctest"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
-
-// useBlockPointerSchema makes the server's block schema the shipped one (its callout included)
-// with two test types: a requirement, and a claim whose serves attribute points only at
-// requirements. A test calls it before it builds its server, and does not run in parallel
-// (pmdoc.UseBlockSchemaForTest).
-func useBlockPointerSchema(t *testing.T) {
-	t.Helper()
-	var schema pmdoc.BlockSchema
-	if err := json.Unmarshal(pmdoc.SchemaJSON(), &schema); err != nil {
-		t.Fatalf("decode the shipped block schema: %v", err)
-	}
-	schema.Types = append(schema.Types,
-		pmdoc.BlockTypeSchema{Name: "requirement", Content: pmdoc.BlockContentParagraphs, Render: "host", Attributes: map[string]pmdoc.BlockAttributeSchema{}},
-		pmdoc.BlockTypeSchema{Name: "claim", Content: pmdoc.BlockContentParagraphs, Render: "host", Attributes: map[string]pmdoc.BlockAttributeSchema{
-			"serves": {Kind: "block[]", Targets: []string{"requirement"}},
-		}},
-	)
-	pmdoc.UseBlockSchemaForTest(t, schema)
-}
 
 // pointerSpec is an issue whose spec holds a requirement r1, a callout k1 and a paragraph, and
 // the paragraph's block id, read from GET …/blocks.
@@ -58,23 +38,6 @@ func uploadChecks(t *testing.T, handler http.Handler, issueKey, content string) 
 	return dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issueKey+"/artifacts", map[string]any{
 		"name": "checks.md", "content": content,
 	}, "alice")
-}
-
-// requireRefused fails unless response is a 400 of code whose message names each of names.
-func requireRefused(t *testing.T, what string, response *httptest.ResponseRecorder, code string, names ...string) {
-	t.Helper()
-	body := decodeBody[struct {
-		Error string `json:"error"`
-		Code  string `json:"code"`
-	}](t, response)
-	if response.Code != http.StatusBadRequest || body.Code != code {
-		t.Fatalf("%s: status=%d body=%s, want 400 %s", what, response.Code, response.Body.String(), code)
-	}
-	for _, name := range names {
-		if !strings.Contains(body.Error, name) {
-			t.Fatalf("%s: %q, want it to name %s", what, body.Error, name)
-		}
-	}
 }
 
 // checksState is what a refused write must leave of checks.md: its artifact (absent: ""), its
@@ -108,15 +71,15 @@ func readChecks(t *testing.T, database *store.Store, issueKey string) checksStat
 // whether it creates the document, replaces it or edits it. A target the same write adds is read
 // as the write leaves it, and a target no document holds is accepted.
 func TestAWriteRefusesABlockPointerToADisallowedType(t *testing.T) {
-	useBlockPointerSchema(t)
+	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(nil))
 	handler, database := blockIndexHandler(t)
 	issue, paragraph := pointerSpec(t, handler)
 	spec := "dispatch://" + issue.Key + "/spec"
 	checks := "dispatch://" + issue.Key + "/artifact/checks-md"
 
-	requireRefused(t, "a new document pointing at a paragraph", uploadChecks(t, handler, issue.Key, claimMarkdown("c1", spec+"#b-"+paragraph)),
+	expectRefusal(t, "a new document pointing at a paragraph", uploadChecks(t, handler, issue.Key, claimMarkdown("c1", spec+"#b-"+paragraph)), http.StatusBadRequest,
 		"INVALID_MARKDOWN", `"serves"`, spec+"#b-"+paragraph, `"paragraph"`, "requirement")
-	requireRefused(t, "a new document pointing at a callout", uploadChecks(t, handler, issue.Key, claimMarkdown("c1", spec+"#b-k1")),
+	expectRefusal(t, "a new document pointing at a callout", uploadChecks(t, handler, issue.Key, claimMarkdown("c1", spec+"#b-k1")), http.StatusBadRequest,
 		"INVALID_MARKDOWN", `"serves"`, spec+"#b-k1", `"callout"`, "requirement")
 	if state := readChecks(t, database, issue.Key); state.ID != "" {
 		t.Fatalf("refused uploads left checks.md %+v, want no document", state)
@@ -130,12 +93,12 @@ func TestAWriteRefusesABlockPointerToADisallowedType(t *testing.T) {
 		t.Fatalf("checks.md after the accepted upload = %+v, want a version", saved)
 	}
 
-	requireRefused(t, "a replacement pointing at a paragraph", uploadChecks(t, handler, issue.Key, claimMarkdown("c1", spec+"#b-"+paragraph)),
+	expectRefusal(t, "a replacement pointing at a paragraph", uploadChecks(t, handler, issue.Key, claimMarkdown("c1", spec+"#b-"+paragraph)), http.StatusBadRequest,
 		"INVALID_MARKDOWN", `"serves"`, `"paragraph"`, "requirement")
 	inserted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+saved.ID+"/edits", map[string]any{
 		"ops": []map[string]any{{"op": "insert", "after": "end", "markdown": claimMarkdown("c2", spec+"#b-k1")}},
 	}, "alice")
-	requireRefused(t, "an inserted claim pointing at a callout", inserted, "INVALID_OP", `field "attributes"`, `"serves"`, `"callout"`, "requirement")
+	expectRefusal(t, "an inserted claim pointing at a callout", inserted, http.StatusBadRequest, "INVALID_OP", `field "attributes"`, `"serves"`, `"callout"`, "requirement")
 	if after := readChecks(t, database, issue.Key); !reflect.DeepEqual(after, saved) {
 		t.Fatalf("checks.md after refused writes = %+v, want %+v unchanged", after, saved)
 	}
@@ -145,12 +108,12 @@ func TestAWriteRefusesABlockPointerToADisallowedType(t *testing.T) {
 		t.Fatalf("a pointer to a requirement the same upload adds: status=%d body=%s, want 201", response.Code, response.Body.String())
 	}
 	saved = readChecks(t, database, issue.Key)
-	requireRefused(t, "a pointer to a callout the same upload adds",
+	expectRefusal(t, "a pointer to a callout the same upload adds",
 		uploadChecks(t, handler, issue.Key, ":::callout{#k2 kind=\"note\" title=\"\"}\nOurs.\n:::\n\n"+claimMarkdown("c1", checks+"#b-k2")),
-		"INVALID_MARKDOWN", `"serves"`, checks+"#b-k2", `"callout"`, "requirement")
-	requireRefused(t, "a pointer to a requirement the same upload makes a callout",
+		http.StatusBadRequest, "INVALID_MARKDOWN", `"serves"`, checks+"#b-k2", `"callout"`, "requirement")
+	expectRefusal(t, "a pointer to a requirement the same upload makes a callout",
 		uploadChecks(t, handler, issue.Key, ":::callout{#r2 kind=\"note\" title=\"\"}\nOurs.\n:::\n\n"+claimMarkdown("c3", checks+"#b-r2")),
-		"INVALID_MARKDOWN", `"serves"`, checks+"#b-r2", `"callout"`, "requirement")
+		http.StatusBadRequest, "INVALID_MARKDOWN", `"serves"`, checks+"#b-r2", `"callout"`, "requirement")
 	if after := readChecks(t, database, issue.Key); !reflect.DeepEqual(after, saved) {
 		t.Fatalf("checks.md after refused same-document writes = %+v, want %+v unchanged", after, saved)
 	}
@@ -160,7 +123,7 @@ func TestAWriteRefusesABlockPointerToADisallowedType(t *testing.T) {
 // the attribute does not allow blocks neither the retype nor an unrelated edit of the citing
 // document, while a new pointer to the retyped target is refused.
 func TestAnUnchangedPointerIsNotRefusedWhenItsTargetIsRetyped(t *testing.T) {
-	useBlockPointerSchema(t)
+	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(nil))
 	handler, _ := blockIndexHandler(t)
 	issue, _ := pointerSpec(t, handler)
 	r1 := "dispatch://" + issue.Key + "/spec#b-r1"
@@ -178,5 +141,5 @@ func TestAnUnchangedPointerIsNotRefusedWhenItsTargetIsRetyped(t *testing.T) {
 	inserted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts/checks-md/edits", map[string]any{
 		"ops": []map[string]any{{"op": "insert", "after": "end", "markdown": claimMarkdown("c2", r1)}},
 	}, "alice")
-	requireRefused(t, "a new pointer to the retyped target", inserted, "INVALID_OP", `"serves"`, `"callout"`, "requirement")
+	expectRefusal(t, "a new pointer to the retyped target", inserted, http.StatusBadRequest, "INVALID_OP", `"serves"`, `"callout"`, "requirement")
 }
