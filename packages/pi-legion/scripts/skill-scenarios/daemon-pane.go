@@ -57,12 +57,18 @@ func main() {
 	}
 }
 
+// handoffWords is the word of the handoff each handoff phase ends with. It is this program's own
+// copy rather than the daemon's phase table, since the rig runs it against each label's checkout of
+// the daemon module, whose table has had more than one name (phase.HandoffFile, phase.Handoff).
+var handoffWords = map[phase.Phase]string{
+	phase.Planning: "plan", phase.Implementing: "implement", phase.Testing: "test", phase.Reviewing: "review",
+}
+
 func printPhase(role claim.Role) error {
 	for _, p := range phase.All {
 		if workflow.RoleFor(p) == role {
-			word, _ := phase.HandoffFile(p)
 			fmt.Println(p)
-			fmt.Println(word)
+			fmt.Println(handoffWords[p])
 			return nil
 		}
 	}
