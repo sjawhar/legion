@@ -1,0 +1,139 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-521",
+  "completed": "2026-10-27T00:14:30Z",
+  "planDocument": "dispatch://INFRA-521/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: handoff, push, PR body (Dispatch: INFRA-521, E2E lines, proof objects), the CI re-run rules for T7, and references/tools.md before installing the pod harness's Postgres/pgvector",
+      "dispatch: upload the iphone-selection.md classification table as an issue artifact and link it",
+      "envoy: T0 message to dispatch://INFRA-523's live roles about the shared packages/dispatch/e2e files",
+      "asd-ste100: the T0 message to another agent"
+    ],
+    "test": [
+      "legion-worker: test handoff with proof objects; re-run T5 locally on the shared harness and re-read the T7 attempts by API rather than adding reruns",
+      "dispatch: read the iphone-selection.md artifact and sample its drop rows"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md for the approval; check the selection rule in AGENTS.md/README against the config and sample drop rows of the artifact against the code"
+    ]
+  },
+  "plan": {
+    "summary": "Tag every test that takes a phone-only path with the Playwright tag @phone (rules R1-R6), give the iphone project grep /(^|\\s)@phone(\\s|$)/, delete iphone-only skips that become dead, and document the rule; prove the selection with a per-test table built from a static reading (M1) and a step-diff run (M2), and measure the browser step's median over at least 5 successful dispatch-job attempts at base and head.",
+    "documentPath": "/legion/scratch/tmp/infra521/plan.md (uploaded as dispatch://INFRA-521/artifact/plan-md)",
+    "tasks": [
+      "T0 coordinate with dispatch://INFRA-523 roles over Envoy; read dispatch://INFRA-520's step name",
+      "T1 pod harness per docs/solutions/testing INFRA-43 and INFRA-92 under /legion/scratch/harness",
+      "T2 classify all 786 base iphone tests: M1 static reading by subagents with an AST idiom aid, M2 step-diff reporter (chromium x2, iphone x1) passed by --reporter, merge toward keep; upload iphone-selection.md",
+      "T3 playwright.config.ts phoneTagged grep on iphone; add { tag: \"@phone\" } to every phone row (describe-level only when all inner tests qualify; all of phone*.e2e.ts); delete test.skip whose only condition is project === iphone in untagged tests; no helper or branch rewritten",
+      "T4 docs: packages/dispatch/README.md:177-185, packages/dispatch/AGENTS.md Phone acceptance (rule, tag syntax, silent-drop caveat and --list check), dated note in docs/solutions/testing INFRA-92 doc",
+      "T5 local proof at head: --list counts per project (all unchanged but iphone), exact-set check iphone list == phone rows, pod runs of iphone and chromium whole, two negative controls",
+      "T6 PR on legion/INFRA-521 with method, counts, artifact link, stated coverage changes, evidence",
+      "T7 CI timing: base = main push run at the base commit (40416399682 at 1357b95c), head = PR run at final head; attempt 1 + gh run rerun --job until 5 successful dispatch attempts each; step times via actions API attempts/<n>/jobs; iphone counts from logs; pass = head median < base median and every base-passing @phone test passes at head"
+    ],
+    "acceptance": [
+      {
+        "criterion": "1. iphone runs every test that takes a phone-only path",
+        "surface": "Playwright CLI in packages/dispatch; CI dispatch job",
+        "check": "bunx playwright test --config e2e/playwright.config.ts --list --project iphone --reporter=json at head equals the table's phone rows by file > title path; pod --project iphone run green; CI head attempts' [iphone] lines"
+      },
+      {
+        "criterion": "2. every dropped test shown to take none; followable selection; PR says how",
+        "surface": "dispatch://INFRA-521 artifact iphone-selection.md; packages/dispatch/AGENTS.md and README.md; PR body",
+        "check": "each drop row has its reason with file:line and M2 result; negative controls (untag one -> count falls by 1; 'phone' in an untagged title -> count unchanged); doc diff"
+      },
+      {
+        "criterion": "3. browser step time before/after, median of >=5 each; phone tests still pass",
+        "surface": "GitHub Actions Legion Envoy and Contracts dispatch job, step Browser-test dispatch dashboard",
+        "check": "gh api repos/sjawhar/legion/actions/runs/<id>/attempts/<n>/jobs step started_at/completed_at; gh run view --attempt --log [iphone] lines"
+      },
+      {
+        "criterion": "Docs",
+        "surface": "repository prose",
+        "check": "README.md, AGENTS.md, config comment, INFRA-92 solution note updated"
+      }
+    ],
+    "productionCheck": "After the merge: the dispatch job of the Legion Envoy and Contracts push run on main at the merge commit lists only @phone tests under [iphone] and is green; quote its step time and iphone counts.",
+    "baseline": {
+      "run": "40398932895",
+      "job": "121851984419",
+      "browserStepMinutes": 46.0,
+      "iphoneMinutes": 18.8,
+      "iphonePassed": 647,
+      "iphoneSkipped": 132,
+      "chromiumMinutes": 20.8,
+      "listCounts": {
+        "chromium": 786,
+        "iphone": 786,
+        "webkit": 53,
+        "webkit-iphone": 11,
+        "firefox": 53,
+        "firefox-download-navigation": 1,
+        "chromium-plain-http": 4
+      },
+      "noIdiomFilesIphoneMinutes": 7.1
+    }
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "Unbranched assertions meaningful only at phone width (scrollWidth<=innerWidth checks, comments saying a describe runs on iphone for the 390 px layout) are missed by branch-only selection.",
+        "answer": "Rules R3 (window size reads and overflow checks, assertPageFits) and R6 (title or own comments name the phone layout) tag them."
+      },
+      {
+        "finding": "'The test or its file names the iphone project or the phone' reads as file-level or test-level.",
+        "answer": "Reading 1: the unit is the test; file-level code a test runs (hooks, file-local helpers, constants) and phone*.e2e.ts files count. Named to the architect in the summary."
+      },
+      {
+        "finding": "The app takes UA-driven paths under iphone (keymap.ts:75 IS_MAC on the iPhone UA; touch, isMobile) invisible to test-side methods.",
+        "answer": "Reading 3: UA-keyed Mac keymap is not a phone-only path (a Mac takes it; keymap.test.ts:82-99 covers it); keyboard-document.e2e.ts:117 stays by R5. Touch use is R4. The PR states the coverage change; phone-width rendering of dropped tests' pages is reading 4, as the parent's ask options stated."
+      },
+      {
+        "finding": "Step-diff rules: iphone-skipped tests, desktop-only blocks, invisible values, normalization, base-to-head mapping, reporter placement.",
+        "answer": "M2 rule is 'iphone has a step neither chromium run has'; skipped recorded as skipped (drop); values/page.evaluate left to M1; titles normalized (project names, digits, UUIDs, keys); rows keyed by file > title path; reporter passed by --reporter from $TMPDIR, config not edited."
+      },
+      {
+        "finding": "Draft's branch inventory incomplete (DOM-state branches and file-local helpers in conversation, mention-composer, threads, writes, document, deep-links, artifacts, search, margin-thread-reply); draft's runtime guard misses DOM branches.",
+        "answer": "All listed sites go into R1/R2 and the M1 idiom aid; no helper conversion or runtime guard: tagging alone, documented rule, reviewer cross-check (deployment rule: instruction before programmatic gate)."
+      },
+      {
+        "finding": "Converting === 'iphone' / === 'chromium' sites changes behaviour in webkit/firefox/webkit-iphone and conflicts with screenshot-name ternaries.",
+        "answer": "No site is converted (T3). Project name used only in file/attachment/seed names is explicitly not R1."
+      },
+      {
+        "finding": "webkit-iphone scope and Playwright grep pitfalls (title path holds 'iphone' and phone.e2e.ts).",
+        "answer": "No webkit-iphone change; anchored regex /(^|\\s)@phone(\\s|$)/ verified against playwright common/index.js:2837 and runner/index.js:2651; T5 checks webkit-iphone 11, firefox-download-navigation 1 and every other count unchanged; negative control with 'phone' in a title."
+      },
+      {
+        "finding": "Acceptance 3 feasibility: no workflow_dispatch, rerun cost vs the parent's rerun target, queueing, step may move under INFRA-520, no pass condition, failed attempts.",
+        "answer": "T7: base = main push run at the base commit, reruns by gh run rerun --job after each attempt completes, after the last code push; step read by name per run; reading 5 sets the pass condition and excludes and replaces failed attempts; cost named to the architect; reruns fall before the 7-day post-merge window."
+      },
+      {
+        "finding": "'Still passes under iphone' has no machine check.",
+        "answer": "T5 exact-set check and pod iphone run; T7 parses [iphone] lines per attempt and checks head pass set contains base-passing phone rows."
+      },
+      {
+        "finding": "touch.ts has no branch; approval does not use assertPageFits; replyInThread has no caller; pod can run chromium/iphone per INFRA-43/INFRA-92; no architecture component applies.",
+        "answer": "Plan classifies touch by call site (R4), corrects the caller list, ignores replyInThread, builds the pod harness (T1) and runs iphone and chromium locally; Docs clause's architecture part noted as not applicable."
+      },
+      {
+        "finding": "Docs outside the spec's list: AGENTS.md title-grep caveat, INFRA-92 solution doc, e2e:deployed.",
+        "answer": "T4 updates AGENTS.md Phone acceptance with the silent-drop caveat and --list check, adds a dated note to the INFRA-92 doc, and README covers e2e:deployed."
+      },
+      {
+        "finding": "Sibling conflicts with INFRA-520/INFRA-523.",
+        "answer": "T0 Envoy coordination; no branch conversion, so no flake-work overlap; merge forward only on a real conflict; T7 reads the step by name."
+      },
+      {
+        "finding": "Converting DOM-state branches makes tests stricter.",
+        "answer": "Not done: no branch is converted."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": []
+}
