@@ -1,0 +1,197 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-536",
+  "completed": "2026-10-27T01:31:38Z",
+  "planDocument": "dispatch://INFRA-536/artifact/plan-md (version 1)",
+  "base": "4bbb2a9c",
+  "summary": "Go's pmdoc decodes inline markdown with html.UnescapeString(util.UnescapePunctuations(v)) (parse.go:1016-1018): escapes removed first, then HTML rules, so `\\&amp;` reads `&`, and references without `;`, over-long numerics, control/noncharacter numerics and legacy prefixes (`&notit;`) read otherwise than the engine. One left-to-right CommonMark decoder replaces it at every caller and in refusals.go:54; the title and image-address writers escape an `&` that would open a reference; Go engine-agreement tests, a browser-suite test (doc.e2e.ts) failing at base and passing at head, and the pmdoc differential prove it.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: PR body, proof objects, simplify pass and the production check after the close (references/pr-body.md, references/merge-gate.md)",
+      "ce-simplify-code: the simplify pass over the settled decoder and writer changes",
+      "dispatch: the production drive writes a SMOKE project document with `dispatch artifact` and reads it with `dispatch doc-read`",
+      "asd-ste100: the PR body and any message to a teammate"
+    ],
+    "test": [
+      "legion-worker: the proof format and re-running the named commands at the head (references/pr-body.md#what-a-proof-is)",
+      "dispatch: reading `dispatch doc-read` output exactly, trailer excluded"
+    ],
+    "review": [
+      "legion-worker: review and approval of the head, review threads (references/merge-gate.md, references/review-threads.md)",
+      "ce-simplify-code: judging the decoder and writer changes for needless complexity"
+    ]
+  },
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "One CommonMark decoder",
+      "files": ["packages/envoy/internal/dispatch/pmdoc/references.go (new)", "packages/envoy/internal/dispatch/pmdoc/parse.go", "packages/envoy/internal/dispatch/pmdoc/refusals.go"],
+      "steps": [
+        "decodeMarkdownText(value []byte) string: one pass shaped like escapes() (elements.go:188-207); `\\` + ASCII punctuation (util.IsPunct) yields the character and nothing it yields opens a reference; an `&` where characterReferenceAt finds a reference yields its characters; else copy; fast path when no `\\` and no `&`.",
+        "characterReferenceAt(value, at): match characterReference (render.go:860); numeric code points replaced by U+FFFD exactly as micromark-util-decode-numeric-character-reference@2.0.2 (<9, 11, 14-31, 127-159, D800-DFFF, FDD0-FDEF, xFFFE/xFFFF of any plane, >10FFFF); named via html.UnescapeString(\"&\"+name+\";\") accepted only when changed and not ending in `;` unless name is `semi` (decode-named-character-reference@1.3.0 index.dom.js rule). Not goldmark's LookUpHTML5EntityByName (2,124 names, lacks Abreve).",
+        "Delete unescapeMarkdownText; callers at parse.go:663, 836, 989, 990, 1026, 1104 call decodeMarkdownText.",
+        "refusals.go:54 refuses when decodeMarkdownText(language) != string(language).",
+        "Stay linear; linear_test.go green."
+      ]
+    },
+    {
+      "id": "T2",
+      "title": "Title and image-address writers",
+      "files": ["packages/envoy/internal/dispatch/pmdoc/render.go", "packages/envoy/internal/dispatch/pmdoc/render_inline.go"],
+      "steps": [
+        "titleSuffix (render.go:791-798, used by marks.go:187 and render_inline.go:456): after doubling backslashes, write `\\&` before an `&` where characterReferenceAt finds a reference; `&foo;` and `AT&T` keep today's bytes.",
+        "Image address only (render_inline.go:456, not link href, which is INFRA-425's): outside a table double a backslash before ASCII punctuation (escapeTableLinkDestination already does it in a table; never twice); `\\&` before an `&` opening a reference; the angle form keeps working.",
+        "Text writer unchanged (keeps `&amp;`)."
+      ]
+    },
+    {
+      "id": "T3",
+      "title": "Go tests in render_readback_test.go using engineReadings",
+      "steps": [
+        "a: engine-agreement table at every decoded site (text, link title, image title, image address, alt, footnote label ref and definition, table cell) for every measured row plus boundaries (`\\\\&amp;`, `&#0000065;`, `&#x10FFFF;`, `&#x;`, `&#;`, `&;`, `&#1;`, `&#13;`, `&#159;`, `&#160;`, `&#xFDD0;`, `&#x1FFFE;`, `&semi;`, `&Abreve;`, `&AMP;`, `&Amp;`, `&ngE;`, `&foo;`); the issue row also asserts Go text exactly `Plain &amp; end.`. Fails at base.",
+        "b: 2,000 seeded (math/rand/v2 PCG) paragraphs of escape/reference pieces without linkify triggers agree with the engine. Fails at base.",
+        "c: guard: gen/entity-names.ts prints the names of the character-entities copy the engine loads (resolved remark-parse -> mdast-util-from-markdown -> micromark -> decode-named-character-reference -> character-entities from packages/proof-editor; checked: character-entities@2.0.2, 2,125 names); one paragraph of `&name;` each reads alike in Go and the engine.",
+        "d: render then read back in Go and the engine for text, link title, image title, image address, alt, footnote label holding `&amp;`, `&copy x`, `&#38 y`, `&#128;`, `a\\&amp;b`, `&#00000065;`, `&foo;`, in and out of a table cell, and an angle-form address; `[a](u \"\\&amp;\")` and `![a](u\\&amp;v)` parse, render and read back alike. Fails at base.",
+        "e: guard: `[a](u \"&foo;\")`, `![a](u&foo;)`, `[a](u \"AT&T\")`, `Plain &amp;amp; end.` render byte-identical."
+      ]
+    },
+    {
+      "id": "T4",
+      "title": "Dispatch browser-suite test",
+      "files": ["packages/dispatch/e2e/dispatch-cli.ts (new, runDispatch moved from cli-body-cap.e2e.ts)", "packages/dispatch/e2e/cli-body-cap.e2e.ts", "packages/dispatch/e2e/engine-text.ts (new)", "packages/dispatch/e2e/read-back.ts (engineParagraphs)", "packages/dispatch/e2e/doc.e2e.ts"],
+      "steps": [
+        "Test 'a backslash before a character reference reads as its text in a document, a comment and the command line': createIssue spec `Plain \\&amp; end.\\n`; live editor paragraph polls to `Plain &amp; end.` (base: `Plain & end.`); getArtifactText markdown equals `Plain &amp;amp; end.\\n` and engineParagraphs of it equals [`Plain &amp; end.`]; a comment of the same body shows `Plain &amp; end.` (control); chromium only: runDispatch doc-read --issue KEY --artifact spec prints exactly `Plain &amp;amp; end.` before the `Document token:` trailer.",
+        "goReadBack not used (reads back as itself at base).",
+        "Base run: jj new 4bbb2a9c; jj restore --from <head> the five e2e files; run; record; jj abandon @; jj edit <head change>. Quote base failure and head pass on the PR.",
+        "Command from packages/dispatch, in-pod stack per docs/solutions/testing/the-real-dispatch-stack-runs-inside-a-legion-pod-with-no-postgres-no-docker-and-no-root-INFRA-42.md and dispatch-playwright-harness-from-a-legion-pane-the-harness-owns-its-envoy-own-your-ports-database-and-paths.md, under $TMPDIR: bun run e2e doc.e2e.ts -g \"backslash before a character reference\""
+      ]
+    },
+    {
+      "id": "T5",
+      "title": "pmdoc differential",
+      "steps": [
+        "Commit gen/reference-corpus.ts shaped like gen/url-corpus.ts (fixed seed, `bun reference-corpus.ts <out.jsonl> [count]`): escapes and references in text, after a bare URL, in titles, image addresses, alts, footnote labels, table cells.",
+        "Stored corpus: production latest versions via INFRA-172's escaped-pipe-census.ts document (v2), under $TMPDIR, never committed.",
+        "bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base 4bbb2a9c --corpus $TMPDIR/infra536/stored.jsonl --corpus $TMPDIR/infra536/references.jsonl --out $TMPDIR/infra536/diff",
+        "Zero regressions, misreads, panics. Churn/lost fixed points only in two classes (image alt holding reference-shaped text the old decoder decoded, escape.go:799-866; `&` after a bare URL, textEscape escape.go:160-170), each hit checked and counted, stored-document counts on the PR; any other hit is a defect fixed here.",
+        "State on the PR: a stored tree whose link title holds reference-shaped text renders new bytes and mints a version on its next write; the differential cannot count it; those trees misread today."
+      ]
+    },
+    {
+      "id": "T6",
+      "title": "Documentation",
+      "steps": [
+        "packages/envoy/AGENTS.md pmdoc reading rules near line 1726: the one-pass CommonMark decode, the HTML-rule differences gone, typed-block attributes keep HTML attribute rules, title and image-address writers escape an `&` opening a reference.",
+        "packages/envoy/CHANGELOG.md [Unreleased] ### Fixed entry.",
+        ".dispatch/architecture/dispatch-pmdoc.md unchanged (holds no reading rule)."
+      ]
+    },
+    {
+      "id": "T7",
+      "title": "Pull request",
+      "steps": [
+        "Body: `Dispatch: INFRA-536`, both browser runs, differential counts, the doc-read reading of A1.",
+        "If the only red check is pi-envoy's skills-guard test (Dispatch skills over 2,000 words), it is main's red since #2273, fixed in INFRA-156's tree: wait, merge main, re-run (INFRA-138 architect, 2026-10-27 01:18Z)."
+      ]
+    }
+  ],
+  "acceptance": [
+    {
+      "criterion": "A1 Go: `Plain \\&amp; end.` reads as the literal text `&amp;` in Go",
+      "surface": "pmdoc Parse, the read path of every API and CLI document write",
+      "command": "cd packages/envoy && go test ./internal/dispatch/pmdoc/ -count=1 (bun on PATH)",
+      "passesWhen": "T3 a-e pass; T3a asserts Go text `Plain &amp; end.`"
+    },
+    {
+      "criterion": "A1 headless engine",
+      "surface": "the engine driven by gen/differential.ts; the browser's comment rendering",
+      "command": "the same Go test; T4 comment step",
+      "passesWhen": "Go's tree equals the engine's on every row"
+    },
+    {
+      "criterion": "A1 a document written through the API",
+      "surface": "live editor at /issues/<KEY>/spec, real server and production SPA bundle",
+      "command": "cd packages/dispatch && bun run e2e doc.e2e.ts -g \"backslash before a character reference\"",
+      "passesWhen": "editor shows `Plain &amp; end.` in chromium and iphone"
+    },
+    {
+      "criterion": "A1 dispatch doc-read",
+      "surface": "the real packages/envoy-client/bin/dispatch.ts against that server",
+      "command": "T4 chromium-only CLI step",
+      "passesWhen": "prints `Plain &amp;amp; end.` before the trailer, whose CommonMark reading (Go and engine) is `Plain &amp; end.`"
+    },
+    {
+      "criterion": "A1 negative control",
+      "surface": "the same browser test at 4bbb2a9c with the head's e2e files",
+      "command": "T4 base run",
+      "passesWhen": "fails: editor shows `Plain & end.`"
+    },
+    {
+      "criterion": "Stored documents keep their reading",
+      "surface": "pmdoc differential",
+      "command": "T5 command",
+      "passesWhen": "zero regressions, misreads, panics; churn only in the two named classes, counted"
+    },
+    {
+      "criterion": "After the deploy",
+      "surface": "production Dispatch",
+      "command": "gh api \"repos/theorem-labs/agent-infra/contents/legion/checks/dispatch-production-check.sh?ref=main\" -H \"Accept: application/vnd.github.raw\" | bash -s -- --commit <merged sha> --page /issues/INFRA-536/spec --route /api/v1/issues/INFRA-536/artifacts; then dispatch artifact --project SMOKE --name infra-536-character-reference-check.md --content 'Plain \\&amp; end.' and dispatch doc-read --project SMOKE --artifact infra-536-character-reference-check.md",
+      "passesWhen": "the check's output recorded on the PR; doc-read prints `Plain &amp;amp; end.` once the running build carries the merge (before: `Plain & end.`); a build without it is recorded and the check reports pending (INFRA-64)"
+    }
+  ],
+  "decisions": [
+    {
+      "decision": "Text writer keeps the `&amp;` spelling, so doc-read prints `Plain &amp;amp; end.`",
+      "reason": "Writing `\\&` would change stored bytes of every document holding reference-shaped text: churn in the differential gate and a minted version per document on its next write (escape.go:13-16). The printed markdown reads as `&amp;` in Go and the engine, which is how the plan reads A1's doc-read clause; the architect may decide otherwise."
+    },
+    {
+      "decision": "New writes and re-reads only; past writes are not repaired",
+      "reason": "A document's live content was built from Go's earlier reading and the author's markdown is not kept."
+    },
+    {
+      "decision": "Named references decoded with html.UnescapeString plus the browser build's trailing-`;` rule",
+      "reason": "goldmark's table lacks `Abreve` (measured: 2,124 names, 1 missing against character-entities@2.0.2); Go's html table decodes it alike (measured)."
+    },
+    {
+      "decision": "Image alt and post-URL `&` spelling churn accepted and counted",
+      "reason": "Both spellings read correctly; base chose a later spelling only because the old decoder misread the first. Keeping base bytes would mean reproducing the misread."
+    }
+  ],
+  "outOfScope": [
+    "Link href decoding: dispatch://INFRA-425 (its fix should call decodeMarkdownText).",
+    "A URL linked after `&` or `;`: dispatch://INFRA-531.",
+    "Typed-block attribute values (directive.go:343): measured agreeing with the engine under HTML attribute rules; a backslash inside one is a refusal, not a misread."
+  ],
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "Title/src writer escaping every characterReference match would churn `&foo;` titles that read back today.", "answer": "T2 escapes only where characterReferenceAt decodes; T3e pins `[a](u \"&foo;\")`, `![a](u&foo;)`, `[a](u \"AT&T\")` byte-identical."},
+      {"finding": "Image alt spelling churns: imageAlt keeps its first spelling once Parse reads it back, so alts with reference-shaped text change bytes.", "answer": "Accepted and counted in T5 as a named class; any other churn is a defect; decision recorded."},
+      {"finding": "Post-URL `&` spelling (textEscape) may shift; T3b excludes linkify triggers.", "answer": "T5's committed gen/reference-corpus.ts puts references after bare URLs and in alts; hits must fall in the named classes and are counted."},
+      {"finding": "e2e: goReadBack cannot fail at base; no paragraph engine helper; doc-read prints a trailer; CLI must be chromium-only; base-run method unstated.", "answer": "T4 drops goReadBack, adds engine-text.ts/engineParagraphs, asserts exact doc-read bytes before `Document token:`, skips non-chromium for the CLI, and spells the jj base-run procedure."},
+      {"finding": "A1's doc-read clause is ambiguous: printed `&amp;amp;` vs parsed `&amp;`.", "answer": "Plan states the parsed reading, keeps the `&amp;` spelling with its reason, names it on the PR and in the completion summary for the architect."},
+      {"finding": "Stored trees with reference-shaped link titles render new bytes and mint versions; the differential cannot see them; approval carry risk [inference].", "answer": "Accepted and stated on the PR: those trees misread today and can come only from a browser edit."},
+      {"finding": "Documents already written with `\\&amp;` keep `&`.", "answer": "Plan states new writes and re-reads only."},
+      {"finding": "Why T2 is needed should be stated.", "answer": "Plan states that with T1 alone `[a](u \"\\&amp;\")` and `![a](u\\&amp;v)` become read-back refusals; T3d covers both."},
+      {"finding": "Table src must not double backslashes twice; title `\\&` after backslash doubling; escape.go:251 is not a writer; add table and angle rows.", "answer": "T2 states each; escape.go:251 dropped; T3d has table-cell and angle-form rows."},
+      {"finding": "refusals.go:54 decodes with goldmark's table lacking Abreve.", "answer": "T1 routes it through decodeMarkdownText."},
+      {"finding": "T3c has no source for the engine's names.", "answer": "gen/entity-names.ts resolves the engine's own character-entities copy (verified: 2.0.2, 2,125 names); needs bun like engineReadings."},
+      {"finding": "Measurements came from deleted scratch tests; INFRA-425/531 ownership and SMOKE unverified; index.dom.js uses an <i> element, not a textarea.", "answer": "T3 turns every measured row into permanent tests; INFRA-425 and INFRA-531 read on Dispatch (dispatch search); SMOKE listed by `dispatch projects`; the census document confirmed on INFRA-172 (escaped-pipe-census.ts v2); the <i>-element detail does not change the rule."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": [
+    {
+      "spec": "Change: Go applies backslash escapes before entity decoding, so an escaped `&` never starts an entity.",
+      "plan": "Replace the whole decode with CommonMark's: also a reference without `;`, numeric references over 7 decimal or 6 hex digits, numeric references to controls and noncharacters (U+FFFD), and legacy names used as prefixes read as the engine reads them, at text, link and image titles, image addresses, footnote labels, and the code-block language refusal.",
+      "evidence": "Measured at 4bbb2a9c, Go Parse vs engineReadings: `AT&T &copy 2024` Go `©`; `x &amp y` Go `&`; `&#00000065;` Go `A`; `&#128;` Go `€` vs U+FFFD; `&notit;` Go `¬it;`; 1,689 of 1,762 disagreements in 4,000 generated paragraphs hold an `&`. Same function (parse.go:1016-1018), same symptom.",
+      "outcome": {"kind": "changed", "scope": "The decoder's fix covers every HTML-rule reading of character references, not only an escaped `&`; A1 unchanged, more test rows added."}
+    },
+    {
+      "spec": "Change: a stored document renders it back so that it reads the same (the spec names no writer change beyond that).",
+      "plan": "titleSuffix and a new image-address escape write `\\&` before an `&` that would open a reference, and the image address doubles a backslash before punctuation outside a table; the text writer is unchanged.",
+      "evidence": "Measured: a title `&amp;` is written `\"&amp;\"` and read back `&` by Go and the engine; image address `u&amp;` reads back `u&`; with the decoder fixed alone, `[a](u \"\\&amp;\")` and `![a](u\\&amp;v)` would be refused by RefuseMisreadDocument (readback.go:133).",
+      "outcome": {"kind": "changed", "scope": "Writer changes for link and image titles and image addresses, so they render back as they read."}
+    }
+  ]
+}
