@@ -8,13 +8,15 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Hub is a process's one shared LISTEN connection: every subsystem that learns of another
-// process's work through a NOTIFY channel registers that channel here, and one Listener carries
-// them all. A process that gave each such subsystem a Listener of its own would hold one
-// connection per subsystem for the life of the process, each one fewer for everything else on
-// the database; and the connection is also what other processes read to learn which processes
-// are listening (the caller names it through Dial), which only one connection per process can
-// answer.
+// Hub is a process's one shared LISTEN connection: a subsystem that learns of another process's
+// work through a NOTIFY channel registers that channel here, and one Listener carries every
+// channel registered. In envoy-dispatch the document rooms' room sync registers on it
+// (internal/dispatch/docs, RegisterRoomSync); the delivery hub and the event stream relay
+// (internal/dispatch/api) still hold a Listener of their own each. Every subsystem given a
+// Listener of its own holds one more connection for the life of the process, one fewer for
+// everything else on the database; and the hub's connection is also what other processes read to
+// learn which processes are listening (the caller names it through Dial), which only one
+// connection per process can answer.
 //
 // Every registration - Handle, Wake, OnConnected, OnDisconnected - happens before Run is called.
 // One made after Run has started panics: the channels a Listener names are fixed when it dials,

@@ -4,10 +4,10 @@
 // so what one process commits reaches the others only through the database, and a connection
 // waiting for a notification must outlive every failure between it and the server. Its three
 // Dispatch users are the delivery hub and the event stream relay (internal/dispatch/api) and the
-// document rooms' stale-room evictor (internal/dispatch/docs); the fourth is the broker's
-// cross-pod secret-reread fan-out (internal/broker/reread). Serving two programs is why the
-// package sits here rather than under internal/dispatch, as internal/pgmigrate does for the two
-// migration runners.
+// process's shared listener hub (Hub), on which the document rooms' room sync is registered
+// (internal/dispatch/docs); the fourth is the broker's cross-pod secret-reread fan-out
+// (internal/broker/reread). Serving two programs is why the package sits here rather than under
+// internal/dispatch, as internal/pgmigrate does for the two migration runners.
 package pglisten
 
 import (
@@ -37,9 +37,8 @@ const (
 )
 
 // Listener holds one LISTEN connection of its own (LEGION-690): it dials, listens on Channels,
-// reports each notification, pings the connection when it is idle, wakes a caller that asked to
-// be woken, and redials on any error. Run is the whole of it, and nothing is opened until it is
-// called.
+// reports each notification, pings the connection when it is idle, and redials on any error. Run
+// is the whole of it, and nothing is opened until it is called.
 type Listener struct {
 	// Owner names the subsystem this listener belongs to, and is the prefix of the one line a
 	// listener logs ("<owner>: a Postgres listener has no connection; redialing"). It is a field
@@ -71,38 +70,10 @@ type Listener struct {
 	// Dropping rather than refusing to run such a listener, because the only louder answer
 	// available this far down is the panic the unchecked call used to make, and a nil field of
 	// one caller's takes every listener in the process with it - the delivery hub's and the
-	// event stream relay's included, since they run in it. The same reading as the
-	// NextWake/OnWake pair below.
+	// event stream relay's included, since they run in it.
 	OnNotify func(channel, payload string)
 	// Backoff is the wait before the attempt-th redial in a row; nil is RedialBackoff.
 	Backoff func(attempt int) time.Duration
-	// NextWake and OnWake are a clock for a caller whose own work has to run on this listener's
-	// goroutine: the evictor of stale document rooms decides everything inside OnNotify, so it
-	// cannot put the work it defers on a time.AfterFunc, which would run it on a goroutine of its
-	// own, beside a notification being decided. NextWake is asked, each time round the wait loop,
-	// how long until that caller next wants waking; zero - or a nil field - is never. When that
-	// is sooner than the next ping is due the wait ends there and OnWake is called on this
-	// goroutine; a wake reaching past the ping is cut short at it (waitFor), because a wake is a
-	// timer on this goroutine and proves nothing about the socket. A notification that arrives
-	// first is reported as any other is, and the wake is asked again on the next round.
-	//
-	// A caller that leaves both nil - the delivery hub and the event stream relay - asks for no
-	// wake at all, so its last proven round trip is its last notification or ping and it waits
-	// and pings exactly as it did before there were wakes.
-	//
-	// listen holds the ping to the time of the last proven round trip rather than to the length
-	// of the wait that just ended, and that invariant lives here, with the connection, rather
-	// than in the caller that asks for the wakes: a caller's wake is the minimum over everything
-	// it has deferred, so items staggered inside one idle period hand the listener an unbroken
-	// run of short wakes however tightly each item's own re-arm is bounded, and a second NextWake
-	// caller could re-open that hole with one item each.
-	//
-	// The two go together or not at all: a NextWake with no OnWake is a wake nothing would run,
-	// so waitFor treats the pair as absent and the wait stays the idle period (ListenIdle), ping
-	// included. The other reading - wake, and do nothing - would cut that wait short every round
-	// for no work, and with it the ping that is the only thing that finds a half-open connection.
-	NextWake func() time.Duration
-	OnWake   func()
 }
 
 // Run blocks until ctx ends, then closes its connection and returns. Each time a connection
@@ -151,15 +122,14 @@ func (l *Listener) listen(ctx context.Context) (listened bool, err error) {
 		return false, fmt.Errorf("listen: %w", err)
 	}
 	// The last round trip this connection proved it could make: the LISTEN above, a notification
-	// it carried, a ping it answered. The ping in the loop below hangs on this stamp and not on
-	// what ended the wait, so no run of wakes - local timers, not round trips - can hold it off.
+	// it carried, a ping it answered. The ping in the loop below falls due one idle period after
+	// this stamp, so each wait runs only what is left of that period.
 	proven := time.Now()
 	if l.OnConnected != nil {
 		l.OnConnected()
 	}
 	for {
-		wait, waking := l.waitFor(proven)
-		waitCtx, cancel := context.WithTimeout(ctx, wait)
+		waitCtx, cancel := context.WithTimeout(ctx, l.idle()-time.Since(proven))
 		notification, err := conn.WaitForNotification(waitCtx)
 		reached := errors.Is(waitCtx.Err(), context.DeadlineExceeded)
 		cancel()
@@ -180,17 +150,9 @@ func (l *Listener) listen(ctx context.Context) (listened bool, err error) {
 		if !reached {
 			return true, fmt.Errorf("wait for a notification: %w", err)
 		}
-		if waking {
-			// The wake is this goroutine's own timer: it says the caller asked to be woken now,
-			// and nothing about the socket. So it runs here, and whether the connection is owed
-			// a ping is still the proven stamp's to answer.
-			l.OnWake()
-		}
-		if time.Since(proven) < l.idle() {
-			continue
-		}
-		// pgx keeps the connection open when a wait ends at its deadline, so the same connection
-		// answers the ping; one that has gone half-open fails it at pingTimeout.
+		// The wait ran out the idle period since the last proven round trip. pgx keeps the
+		// connection open when a wait ends at its deadline, so the same connection answers the
+		// ping; one that has gone half-open fails it at pingTimeout.
 		pingCtx, cancel := context.WithTimeout(ctx, l.pingWait())
 		err = conn.Ping(pingCtx)
 		cancel()
@@ -236,30 +198,6 @@ func (l *Listener) owner() string {
 		return "dispatch"
 	}
 	return l.Owner
-}
-
-// waitFor is how long the next wait for a notification runs, and whether its deadline is the
-// caller's wake rather than the ping that falls due once the connection has gone idle() without
-// a proven round trip: the sooner of the two, so a caller is woken on time however long
-// ListenIdle is, and no run of wakes can push the ping out - a wake that would reach past it is
-// cut short there, and listen pings at that point whatever ended the wait.
-//
-// A caller that set only one of the pair has asked for nothing this can give it: an OnWake
-// nothing asks for never runs, and a NextWake with no OnWake would end a wait at a wake the
-// listener cannot make. Both nil to listen's eye, so that caller waits the idle period out from
-// its last proven round trip - which is where the wait started, since it takes no wakes - and is
-// pinged on it.
-func (l *Listener) waitFor(proven time.Time) (time.Duration, bool) {
-	idle := l.idle()
-	if l.NextWake == nil || l.OnWake == nil {
-		return idle, false
-	}
-	untilPing := idle - time.Since(proven)
-	wake := l.NextWake()
-	if wake <= 0 || wake >= untilPing {
-		return untilPing, false
-	}
-	return wake, true
 }
 
 func (l *Listener) pingWait() time.Duration {
