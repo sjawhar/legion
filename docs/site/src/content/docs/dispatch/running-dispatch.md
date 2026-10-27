@@ -355,9 +355,10 @@ while the release rolls is refused. Stop the running server before it starts. A 
 that deploy shows **Live updates unavailable**, and its broadcasts are refused, until it is
 reloaded.
 
-From that release on, every change a page or the `dispatch` command makes carries an
+From that release on, every `POST` and `PATCH` a page or the `dispatch` command makes carries an
 `Idempotency-Key`, and Dispatch keeps each key's answer for 24 hours, so a change tried again after
-a lost answer, a timeout or an outage is made once. A page that has not heard back keeps trying
+a lost answer, a timeout or an outage is made once. A `PUT` and a `DELETE` carry none and go once,
+since asking again makes the same change. A page that has not heard back keeps trying
 and says so, and a script that calls the API itself can send a key of its own
 ([For agents](/legion/dispatch/for-agents/#the-http-api)).
 

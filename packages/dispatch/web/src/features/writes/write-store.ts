@@ -306,8 +306,13 @@ export class Writes {
    *  discard goes out after they confirmed it. */
   readonly #signingOut = new Set<string>();
   /** The logins whose sign-out another tab of this browser has out (`holdFor`), held the same way
-   *  until that tab says how it ended, goes, or stops saying it is out (`SignInChannel`). */
-  readonly #signingOutElsewhere = new Set<string>();
+   *  until that tab says how it ended, goes, or stops saying it is out (`SignInChannel`), each
+   *  under the mark its hold was taken with: a release names the hold it ends (`heldSignOut`), so
+   *  one taken since - another tab's sign-out of the same person, begun while an earlier release
+   *  was still deciding - is never lifted by it. */
+  readonly #signingOutElsewhere = new Map<string, number>();
+  /** The mark of the last hold taken, counted up for each (`holdFor`). */
+  #heldMark = 0;
   /** The logins whose sign-out in another tab ended without a word - that tab went - while
    *  Dispatch still named them (`releaseUnsettled`), each with the time until which a lapse of
    *  theirs is that sign-out landing late rather than a lapse. */
@@ -545,14 +550,26 @@ export class Writes {
    *  Signed out, they go (`dropLogin`); still signed in, or that tab gone or silent past its
    *  lease, they go on (`release`). */
   holdFor(login: string): void {
-    this.#signingOutElsewhere.add(login);
+    this.#heldMark += 1;
+    this.#signingOutElsewhere.set(login, this.#heldMark);
     this.#holdWritesOf(login);
     this.#markHeld();
   }
 
-  /** Lets `login`'s writes go on where they stood: no other tab's sign-out holds them now. */
-  release(login: string): void {
-    if (!this.#signingOutElsewhere.delete(login)) return;
+  /** The mark of the hold another tab's sign-out of `login` has on their writes here, or nothing
+   *  while none has: what a release that decides over time names, so it ends the hold it was
+   *  deciding about and no later one (`release`, `releaseUnsettled`). */
+  heldSignOut(login: string): number | undefined {
+    return this.#signingOutElsewhere.get(login);
+  }
+
+  /** Lets `login`'s writes go on where they stood: no other tab's sign-out holds them now. With
+   *  `held`, only the hold of that mark is ended: a sign-out of theirs that began since holds
+   *  them still, and nothing of theirs goes out while it is in flight. */
+  release(login: string, held?: number): void {
+    const mark = this.#signingOutElsewhere.get(login);
+    if (mark === undefined || (held !== undefined && mark !== held)) return;
+    this.#signingOutElsewhere.delete(login);
     this.#markHeld();
     this.#advanceEvery();
   }
@@ -562,10 +579,13 @@ export class Writes {
    *  still land: the closed tab's request can reach Dispatch after this tab's own read did. So a
    *  lapse of theirs within `KEYED_SEND_ATTEMPT_MS`, the longest the page waits on a silent
    *  request, is that sign-out landing late, and their writes go (`signedIn`); a lapse after that
-   *  is a lapse, and keeps them. */
-  releaseUnsettled(login: string): void {
+   *  is a lapse, and keeps them. A hold taken since `held` ends nothing and opens no window: that
+   *  sign-out is live, and its own end will decide. */
+  releaseUnsettled(login: string, held?: number): void {
+    const mark = this.#signingOutElsewhere.get(login);
+    if (mark === undefined || (held !== undefined && mark !== held)) return;
     this.#unsettledSignOuts.set(login, Date.now() + KEYED_SEND_ATTEMPT_MS);
-    this.release(login);
+    this.release(login, held);
   }
 
   /** Stops the trying of every write `login` pressed but a sign-out (`#hold`): a sign-out of

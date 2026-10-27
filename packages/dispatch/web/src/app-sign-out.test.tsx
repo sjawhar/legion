@@ -579,6 +579,39 @@ test("a 401 just after a gone tab's hold was let go discards the writes it held"
   }
 }, 15_000);
 
+// A release that decides over time ends the hold it was deciding about and no later one. The
+// first tab crashes, and while this tab reads who is signed in over `SIGN_OUT_SETTLE_MS` another
+// tab signs the same person out: that sign-out is live, so nothing of theirs goes out when the
+// read comes back, and it is that tab's to end.
+test("a sign-out begun while a gone tab's hold is being decided keeps the writes held", async () => {
+  const { app, attempts, signer } = await holdingForAnotherTab();
+  const second = otherTab("tab-3");
+  try {
+    const held = attempts.length;
+    signer.close();
+    await waitFor(() =>
+      expect(second.told).toContainEqual(expect.objectContaining({ here: true }))
+    );
+    second.say({ signingOut: "alice" });
+
+    // Well past the settle the first release would have ended at: the second sign-out holds.
+    await sleep(SIGN_OUT_SETTLE_MS + 1_500);
+    expect(attempts).toHaveLength(held);
+    expect(
+      screen.getByText("CORE-1 set to done — Waiting for a sign-out in another tab")
+    ).toBeTruthy();
+
+    // It ends as that tab says, and only then do the writes go on.
+    second.say({ stillSignedIn: "alice" });
+    await waitFor(() => expect(attempts.length).toBeGreaterThan(held), { timeout: 5_000 });
+    expect(screen.queryByText(/Waiting for a sign-out in another tab/)).toBeNull();
+  } finally {
+    second.close();
+    signer.close();
+    app.teardown();
+  }
+}, 15_000);
+
 // A lapse with no other tab's sign-out holding the writes is a lapse, as before: they are kept
 // for the person's next sign-in.
 test("a 401 with no other tab's sign-out holding the writes keeps them", async () => {

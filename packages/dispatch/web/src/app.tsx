@@ -894,6 +894,10 @@ export function signOutQuestion(unsent: readonly string[], unanswered = false): 
  *  refused `409 LOGIN_CHANGED` before it runs.
  */
 async function heldWritesOfGoneHolder(queryClient: QueryClient, login: string): Promise<void> {
+  const writes = writesOf(queryClient);
+  // The hold this read decides about. A sign-out of the same person that begins while it reads
+  // takes a hold of its own, which this release must not lift (`Writes.heldSignOut`).
+  const held = writes.heldSignOut(login);
   const signedInNow = async () =>
     api.whoAmI().then(
       (user) => user.login,
@@ -906,10 +910,9 @@ async function heldWritesOfGoneHolder(queryClient: QueryClient, login: string): 
     await settled.promise;
     who = await signedInNow();
   }
-  const writes = writesOf(queryClient);
   if (who === null) writes.dropLogin(login);
-  else if (who === login) writes.releaseUnsettled(login);
-  else writes.release(login);
+  else if (who === login) writes.releaseUnsettled(login, held);
+  else writes.release(login, held);
   if (who !== login) void queryClient.invalidateQueries({ queryKey: ["whoami"] });
 }
 
