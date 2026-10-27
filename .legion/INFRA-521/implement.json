@@ -1,0 +1,123 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-521",
+  "completed": "2026-10-27T05:03:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2313",
+  "headSha": "357138e78c6017644331c97328e101b2a291c14a",
+  "proof": [
+    {
+      "criterion": "1. iphone runs every test that takes a phone-only path",
+      "surface": "Playwright CLI in packages/dispatch (the projects CI's dispatch job runs)",
+      "command": "cd packages/dispatch && bunx playwright test --config e2e/playwright.config.ts --list --project iphone --reporter=json > $TMPDIR/infra521/head-iphone.json && bun $TMPDIR/infra521/check-iphone.ts $TMPDIR/infra521/head-iphone.json; bunx playwright test --config e2e/playwright.config.ts --list | per-project count",
+      "observed": "listed 222, expected 222 (the keep rows of dispatch://INFRA-521/artifact/iphone-selection-md, keyed file › title path), extra 0, missing 0; per project: chromium 786, iphone 222, webkit 53, webkit-iphone 11, firefox 53, firefox-download-navigation 1, chromium-plain-http 4 (base: iphone 786, all others the same)",
+      "headSha": "357138e78c6017644331c97328e101b2a291c14a",
+      "negativeControl": "In a scratch copy of the head tree: ' @phone' removed from the title of hover-preview.e2e.ts 'on a phone, tapping a reference follows it and never shows a card' -> iphone --list 221 tests in 52 files, no error; ' on a phone' and then a glued 'phone@phone' added to the untagged keyboard-palette.e2e.ts title 'stop-word searches show empty results without Retry' -> still 222 (the anchored grep matches only a whitespace-separated @phone); restored -> 222."
+    },
+    {
+      "criterion": "1. the kept phone tests still pass under iphone; 3. every base-passing phone test still passes",
+      "surface": "Real browser in an issue pod: the Go Dispatch server, Postgres 17 with pgvector, Chromium, the five harness fakes (harness /legion/scratch/harness, setup.sh + env.sh, lane implementer)",
+      "command": "LANE=implementer source /legion/scratch/harness/env.sh && cd packages/dispatch && bunx playwright test --config e2e/playwright.config.ts --project iphone (log $TMPDIR/infra521/t5-head-iphone.log), then the 5 failures alone: ... --project iphone artifacts.e2e.ts:58 board.e2e.ts:644 document.e2e.ts:114 inbox-stability.e2e.ts:447 threads.e2e.ts:379",
+      "observed": "whole project: 217 passed, 0 skipped, 5 failed (44.8 min) while two other whole-project runs shared the pod's 2 CPUs; the 5 alone: 5 passed (1.6 min). At base under the same load, board.e2e.ts:652 and document.e2e.ts:114 failed the same way under iphone. The head iphone run skipped nothing, so every tagged test ran.",
+      "headSha": "357138e78c6017644331c97328e101b2a291c14a",
+      "negativeControl": "The base tree's iphone run (no grep) under the same harness ran 786 tests (645 passed, 132 skipped, 9 failed under load), so the 222 is the grep's selection, not a harness that fails to load specs."
+    },
+    {
+      "criterion": "2. dropped tests and deleted skips break nothing on chromium",
+      "surface": "Real browser in an issue pod (same harness, lane implementer2)",
+      "command": "LANE=implementer2 source /legion/scratch/harness/env.sh && cd packages/dispatch && bunx playwright test --config e2e/playwright.config.ts --project chromium (log $TMPDIR/infra521/t5-head-chromium.log), then its 3 failures alone",
+      "observed": "758 passed, 25 skipped (base: 25), 3 failed under load (agents.e2e.ts:1209, ask-blocks.e2e.ts:459, doc.e2e.ts:612); the 3 alone: 3 passed. Every one of the 75 deleted test.skip(project === 'iphone') calls sat in a test chromium runs and passes.",
+      "headSha": "357138e78c6017644331c97328e101b2a291c14a",
+      "negativeControl": "ask-blocks.e2e.ts:459 hit its 30 s timeout under load at base in the iphone run and passed alone at base in 43.9 s with --timeout 120000, the same load-only failure shape seen at head."
+    },
+    {
+      "criterion": "2. every dropped test is shown to take no phone-only path",
+      "surface": "dispatch://INFRA-521/artifact/iphone-selection-md (one row per base iphone test)",
+      "command": "M1: 8 readers over all 87 spec files with a syntax-tree idiom aid ($TMPDIR/infra521/idioms.ts -> idioms.json); M2: the step reporter $TMPDIR/infra521/steps-reporter.ts passed by --reporter at base 1357b95c (chromium twice, iphone once), $TMPDIR/infra521/m2-analyze.ts",
+      "observed": "786 rows: 222 keep, 564 drop (132 skipped under iphone at base, 432 stop running there); M2 flagged 119 passing tests with an iphone-only step, every one a keep row; M2-phone/M1-drop disagreements: 0. Base iphone time of kept rows 6.6 min, dropped 9.4 min (run 40400116211).",
+      "headSha": "357138e78c6017644331c97328e101b2a291c14a",
+      "negativeControl": "Before excluding fixture steps with no source line, M2 flagged two drop rows (ask-blocks copy, board filter strip) on a 'Launch browser' step a worker restart adds; with source-located steps only, both show no iphone-only step, and the readers' reasons for them name no phone path."
+    },
+    {
+      "criterion": "3. the dispatch job's browser step time before and after; every base-passing phone test still passes under iphone",
+      "surface": "GitHub Actions, Legion Envoy and Contracts, job dispatch, step Browser-test dispatch dashboard",
+      "command": "gh api repos/sjawhar/legion/actions/runs/<id>/attempts/1/jobs (step started_at/completed_at) for the 10 newest successful main dispatch jobs before 1357b95c and for PR run 40441476622; gh run view 40441476622 --job 121995880276 --log | bun $TMPDIR/infra521/parse-log.ts",
+      "observed": "base median 45.3 min (37.2-47.9, 10 jobs, iphone 786 or 779 tests, 132 skipped, 16.0-19.7 min of iphone time); head run 40441476622: 35.8 min, iphone 222 passed 0 skipped 0 failed in 8.1 min; all 222 keep rows are among the passed iphone titles (0 missing). The after median is the production check's (spec v5).",
+      "headSha": "357138e78c6017644331c97328e101b2a291c14a",
+      "negativeControl": "Base run 40400116211 (main 2c66134f, the base's 786-test suite) under the same parser: iphone 654 passed + 132 skipped = 786 in 16.0 min, so the head's 222 is the grep, not a parser that misses lines."
+    }
+  ],
+  "timing": {
+    "step": "Browser-test dispatch dashboard (dispatch job, Legion Envoy and Contracts)",
+    "baseRule": "the 10 newest successful dispatch jobs on main push runs before the base commit 1357b95c, no re-runs (architect, spec v4/v5)",
+    "baseRuns": [
+      40400116211,
+      40385679640,
+      40385670451,
+      40384746005,
+      40367953586,
+      40357583289,
+      40351567927,
+      40351447890,
+      40321828250,
+      40305468657
+    ],
+    "baseMinutes": [
+      38.7,
+      45.7,
+      38.3,
+      37.2,
+      47.9,
+      45.7,
+      45,
+      45.6,
+      43.5,
+      46.6
+    ],
+    "baseMedianMinutes": 45.3,
+    "head": {
+      "run": 40441476622,
+      "job": 121995880276,
+      "headSha": "357138e78c6017644331c97328e101b2a291c14a",
+      "stepStart": "2026-10-27T04:20:41Z",
+      "stepEnd": "2026-10-27T04:56:26Z",
+      "minutes": 35.8,
+      "iphone": {
+        "passed": 222,
+        "skipped": 0,
+        "failed": 0,
+        "seconds": 486
+      },
+      "chromium": {
+        "passed": 764,
+        "skipped": 25,
+        "failed": 0,
+        "seconds": 1299
+      },
+      "everyKeepRowPassed": true,
+      "note": "One run, no re-runs (architect, spec v5). The same run's required test and lint checks (Tests workflow 40441476636) failed: test on main's own daemon Go failure (number of field descriptions must equal number of destinations, got 20 and 31; red on main 47e85fdd..7d889fce, main's baadccdc targets it), lint on the description as first posted (event payload). The PR was closed and reopened at 05:00Z at the same head so Tests reruns on a fresh merge ref (ce8d5826) and the current description; the reopen's duplicate Legion Envoy and Contracts and Docs runs were cancelled."
+    },
+    "after": "median of the first 5 successful dispatch jobs on main after the merge, in the production check (spec v5)"
+  },
+  "filesChanged": [
+    "packages/dispatch/e2e/playwright.config.ts (phoneTagged grep on the iphone project, comment)",
+    "packages/dispatch/e2e/*.e2e.ts (61 files: ' @phone' at the end of 195 test titles and one describe title in 53 files; 75 iphone-only test.skip calls deleted in untagged tests across 17 files; 4 comments corrected)",
+    "packages/dispatch/AGENTS.md (Phone acceptance: what iphone runs, R1-R6, tag syntax, silent-drop caveat and --list check; the grep-exception sentence)",
+    "packages/dispatch/README.md (the seven projects as the config defines them)",
+    "docs/solutions/testing/a-layout-change-is-proven-by-the-whole-project-...-INFRA-92.md (dated INFRA-521 note)"
+  ],
+  "trickyParts": [
+    "Playwright's project grep text also holds the project name 'iphone' and file paths like phone.e2e.ts, so the grep is anchored on whitespace: /(^|\\s)@phone(\\s|$)/.",
+    "M2's raw step list includes fixture steps without a source line (Launch browser, Create context) whose presence depends on worker restarts after a failure; only source-located pw:api/expect/test.step steps are compared.",
+    "The pod is about 3x slower than CI and three concurrent whole-project runs on 2 CPUs produce timeouts; every such failure was re-run alone and passed."
+  ],
+  "deviations": [
+    "Tag syntax: the plan named the details argument test(title, { tag: '@phone' }, fn). That form made Biome re-indent every tagged test body (62 files, +9255/-8963). The tag is written in the title instead (test('... @phone', fn)), which Playwright 1.63 reads as a tag (TestCase.tags, lib/common/index.js:2752-2760) and which the anchored grep matches; the diff is 65 files, +362/-415. AGENTS.md documents the title form and why.",
+    "T7: per the architect (spec v4 and v5), no re-runs. Base = the 10 newest successful dispatch jobs already run on main; head = this pull request's one CI run; the after median is the production check's (first 5 successful main dispatch jobs after the merge).",
+    "AGENTS.md's old Phone acceptance list named 'recipient-picker bottom sheets', which no test at base covered; the new text names only what tagged tests cover."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "The first version of the PR description carried the private Dispatch host in a link; it was replaced within 21 minutes. The person the work is for chose to leave the old revision in GitHub's edit history (dispatch://INFRA-521/ask/ec8e50ba-8f28-4c80-bacc-12f751bdec25)."
+  ]
+}
