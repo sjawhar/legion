@@ -58,7 +58,7 @@ EOF
 - Show a picture inline with `--image` on `message`, `comment` or `ask`, not `dispatch artifact`. Each adds about 60 characters that count toward the cap. A plain `dispatch://KEY/artifact/<slug>` link to an image shows a thumbnail.
 - `dispatch read` and `dispatch doc-read` write pictures to files and print `- picture: <path>`. Open each with your file-read tool. A session sees each picture once. `dispatch doc-read` shows it again, after compaction too.
 - Documents are CommonMark. Put Slack mrkdwn or other non-Markdown in a fenced code block.
-- In a table cell, write every `|` as `\|`, inside code and links too. A row wider than its table is refused.
+- In a table cell, write every `|` as `\|`, inside code and links too. A `|` after two backslashes (`\\|`) ends the cell. A row wider than its table is refused.
 
 ## Approval requests
 

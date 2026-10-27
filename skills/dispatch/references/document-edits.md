@@ -40,6 +40,7 @@ EOF
 
 - `delete_row` / `delete_column` take the table `block` and a zero-based `index`. Row 0 is the header. The last body row and a row's last column cannot go. Open asks or unresolved comments on the cells block it.
 - Inserting bare body rows (no header or delimiter) at a cell quote extends that table. A wider row is `TABLE_WIDTH`. A full table with a header pasted there becomes a second table.
+- A `replace` into a cell takes the cell's text: write a `|` in `with` bare, in code too. Code whose text has a backslash right before a `|` cannot be stored in a cell, so a `with` holding it is refused, naming the cell.
 
 ## Stale and concurrent edits
 
