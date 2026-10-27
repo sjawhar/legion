@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-559",
-  "completed": "2026-10-27T16:05:00Z",
-  "round": 2,
-  "reviewAnswered": "Changes requested at cdac1941: (1) forward-merge main and renumber with INFRA-555, (2) false 'A new version is available' under bun run dev (thread PRRT_kwDORFy7ds6wqNPo, fixed in ba1703c9, replied and resolved); plus the architect's request: GET /assets/foo%00.js answered 500 (fixed in 599232ec).",
+  "completed": "2026-10-27T16:45:00Z",
+  "round": 3,
+  "reviewAnswered": "Round 3, changes requested at e363358e: invalid-UTF-8 asset path reached the store and answered 502 (thread PRRT_kwDORFy7ds6wxsJM, fixed in fc316304, replied and resolved); stale workflow comment (thread PRRT_kwDORFy7ds6wxsJQ, fixed in 355331f0, replied and resolved). Round 2 (changes requested at cdac1941): forward merges and renumbering, the dev-server notice (ba1703c9), the NUL-byte 500 (599232ec), the abandoned-read hardening (801a4f26).",
   "proof": [
+    {
+      "criterion": "Round 3 finding: an asset path no Postgres text value can hold (invalid UTF-8 such as /assets/%ff.js, or a NUL byte) answers a plain 404, takes no reservation and logs no store failure",
+      "surface": "a running envoy-dispatch server built from the branch (run-server.sh on 127.0.0.1:18777 with the Postgres asset store, 45 assets published) via curl; dashboard.Store on real Postgres 17; routes staticHandler tests",
+      "command": "curl -s -w ' %{http_code}' http://127.0.0.1:18777/assets/%ff.js (and /assets/foo%00.js, /assets/nope.js); cd packages/envoy && go test -count=1 -run 'TestGetAssetOfAKeyNoTextCanHoldIsNotFound' ./internal/dispatch/dashboard/ && go test -count=1 -run 'TestStaticHandlerRetainedAssets$' ./internal/dispatch/routes/",
+      "observed": "all three answer 404 {\"error\":\"not found\"}; the server log has no `retained asset store failed` or ERROR line; both tests pass (18 router subtests, including a valid non-ASCII name /assets/caf%C3%A9.js that still reaches the store and answers 200); the two-builds browser spec still passes 5 of 5 at fc316304",
+      "headSha": "fc31630412fe4e1365d1a2298ec073d0b2802b80",
+      "negativeControl": "On the round-2 code: GetAsset(\"assets/\\xff.js\") fails with `invalid byte sequence for encoding \"UTF8\": 0xff (SQLSTATE 22021)`, and GET /assets/%ff.js answers 502 `retained asset store unavailable`."
+    },
     {
       "criterion": "Review finding 2: a page that names no entry chunk (Vite's dev server) is offered no 'A new version is available'",
       "surface": "DeploymentResilience in happy-dom with the document Vite's dev server serves (only /src/main.tsx) and GET /api/v1/dashboard/builds answering one live entry; the two-process browser rows for the notice",
@@ -26,8 +34,8 @@
       "criterion": "A1: Dispatch's browser suite, against two server processes running two builds, loads every page and lazily loaded route with no failed asset and no blank page; fails before, passes after",
       "surface": "Dispatch web app in Chromium through e2e/round-robin-proxy.ts in front of two real envoy-dispatch processes on one Postgres 17 + pgvector, A serving web/dist and B serving web/dist-b (another build id)",
       "command": "cd packages/dispatch && DATABASE_URL=<isolated db> bun run e2e:multiprocess -- two-builds.multiprocess.e2e.ts (after `go build -o ./dispatch-e2e ./cmd/dispatch` in packages/envoy)",
-      "observed": "5 passed (1.6m) at the code tree of 0abd535c (run at its main-merge parent 7b2f5e39, whose code is identical but for INFRA-555's scripts/e2e/verifiers-staging-token.sh), on main's #2229 harness: A and B on held OS-chosen ports behind the round-robin proxy; both cross-pinned route walks, every file of both builds 200 with its bytes from both processes, both notice rows. Same tree: `bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts shell.e2e.ts --project chromium` 18 passed",
-      "headSha": "0abd535cf74957ca47e9c54467ba81c1c57caa23",
+      "observed": "5 passed (1.4m) at fc316304 on main's #2229 harness: A and B on held OS-chosen ports behind the round-robin proxy; both cross-pinned route walks, every file of both builds 200 with its bytes from both processes, both notice rows. Same head: `go test ./cmd/dispatch/...` ok, `go test -tags multiprocess -run TestDashboard ./cmd/dispatch` ok, `bunx biome check .` clean. At 0abd535c's tree: `shell.e2e.ts` 18 passed",
+      "headSha": "fc31630412fe4e1365d1a2298ec073d0b2802b80",
       "negativeControl": "The same harness and spec at 47c3ba79d2e4 (server without the shared store): 3 of 3 failed, every page load `\"/assets/index-CNAstPYb.js from Dispatch B answered 404\"` then `net::ERR_ABORTED`, 60 files answered 404 from the process lacking them (re-run by the tester in round 1)."
     },
     {
