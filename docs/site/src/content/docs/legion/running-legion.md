@@ -334,6 +334,37 @@ What each part is for:
   `LEGION_BUN_PATH` (else `PATH`), and a built `packages/claude-envoy` from
   `LEGION_CLAUDE_PLUGIN_DIR`, and refuses to boot without any of them. The repository's
   `docs/deployment.md` ("Phase workers on Claude Code") covers the rest.
+- **`role_config_files`** (optional) gives one role Oh My Pi settings overlays no other role gets,
+  for example a model fallback chain for the roles whose output a machine checks:
+
+  ```yaml
+  role_config_files:
+    implementer: [/etc/legion-operator-roles/fallback.yml]
+    tester: [/etc/legion-operator-roles/fallback.yml]
+    merger: [/etc/legion-operator-roles/fallback.yml]
+  ```
+
+  Each key is a role (`architect`, `planner`, `implementer`, `tester`, `reviewer`, `merger`, or
+  `controller` under `controller: daemon`), each value a list of absolute paths. The role's
+  `PI_CONFIG_FILES` names them after the overlays every role names (`PI_CONFIG_FILES` in
+  `runtime.kubernetes.pod.env`, or `runtime.tmux.pi_config_files`), so each outranks those; a role
+  you leave out is told exactly what it is told without the key. The loader refuses an unknown
+  role, an empty list, a relative path, a path named twice or one every role already names, and a
+  role `worker_backends` puts on `claude`. Under Kubernetes each file must be in a mount of
+  `runtime.kubernetes.pod.volume_mounts` (`legion start --check-config` refuses one that is not),
+  and the image probe reads each named role's overlays in the pod's mounts at boot, so a file the
+  ConfigMap lacks, or one Oh My Pi cannot parse, stops the boot naming the role and the file, never
+  that role's start. Under tmux boot and `--check-config` refuse a file the host does not have, and
+  boot refuses one Oh My Pi cannot parse. The capability report's `model-fallback` row reads only
+  the overlays every role names, so a deployment that turns fallback on for some roles alone
+  records `capabilities.decided.model-fallback`. Only loading is per role: every role of a pod, and every pane
+  under tmux, can read every role's overlay file, so never put a secret in one. Adding the mount
+  to a running deployment replaces every affected issue pod at the restart: each of its running
+  roles, named or not, loses its turn and resumes its session uncharged in a new pod, and the old
+  pod's disk goes with it, unpushed work included (a pod with no role running is replaced at the
+  first launch into it). Add it when no role of an affected issue is mid-turn and every role has
+  pushed. The repository's `docs/kubernetes.md` ("Operator
+  configuration") shows the overlay and its mount.
 
 The loader refuses any key it does not know, naming it, and refuses `omp_invocation` and
 `omp_launch_prefix` under Kubernetes, since every pod runs the image's Oh My Pi.

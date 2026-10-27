@@ -57,7 +57,8 @@ says which), its first line exactly `Clear defect from <your role token>`. It pr
 `expects_reply: none`. It holds:
 
 - your role token, from your `Legion addressing` line
-- the defect, as its reader recognises it, and the issue it came from (`dispatch://<KEY>`)
+- the defect: what went wrong, where and to whom, with the numbers, and the issue it came from
+  (`dispatch://<KEY>`)
 - where the fix belongs: the repository and the component
 - the fix
 - the evidence comment, `dispatch://<REPORT KEY>/comment/<id>`
@@ -132,23 +133,26 @@ check's `Production:` line then names the finding as sent to the controller, or 
 
 ## What the ask says
 
-The question stands alone, since the ask view shows no comment. It holds at most 800 characters,
+The question stands alone, since the ask view shows no comment. It holds at most 2,000 characters,
 the `Ref: <reference>` line `--ref` appends included (about 75 characters for a comment's
 reference). Its first line names who asks: `Clear defect from <your role token>` for a clear
 defect no controller took, else `Finding from <your role token>`. The architect's acceptance and the
-controller's catch-up find a finding ask by that line. Then it carries:
+controller's catch-up find a finding ask by that line. Then it names the concrete case before any
+general statement of it:
 
-- the problem, as its reader recognises it, and the issue it came from (`dispatch://<KEY>`);
-- where the fix would belong: the repository or layer, and a plain statement that it is not
+- what went wrong, where and to whom: the issue it came from (`dispatch://<KEY>`), the machine,
+  file, command or session, and the numbers;
+- where the fix would belong: the repository and component, and a plain statement that it is not
   Legion's when it is not. A problem is not Legion's because you work in Legion: name the
   component that misbehaved;
-- the decision a person must make, and your recommendation and its reason. A clear defect no
-  controller took carries the fix instead, and its options ask where the work goes, with
-  `Hand it to the owning tree` first and recommended.
+- the decision a person must make, what happens to whom under each option, and your
+  recommendation and its reason. A clear defect no controller took carries the fix instead, and its
+  options ask where the work goes, with `Hand it to the owning tree` first and recommended.
 
-The evidence (the commands, their output and its time, the file and line, the pull request) does
-not fit. Post it first as a `dispatch comment` on the issue the ask goes on, which prints `Posted
-comment <id>`, and cite that comment with `--ref`, the one reference an ask takes. That issue,
+Evidence the decision does not need (full command output, logs, every file and line, the pull
+request) goes in a comment. Post it first as a `dispatch comment` on the issue the ask goes on,
+which prints `Posted comment <id>`, and cite that comment with `--ref`, the one reference an ask
+takes. That issue,
 `<ASK KEY>` below, is the report issue, except as [When no controller takes
 it](#when-no-controller-takes-it) says:
 
@@ -164,7 +168,7 @@ dispatch ask --issue <ASK KEY> --ref 'dispatch://<ASK KEY>/comment/<id>' --quest
   --option 'File it for Legion: Legion works it once it is filed' \
   --option 'Do not file: <what stays as it is>' <<'EOF'
 Finding from <your role token>
-<the problem and dispatch://<KEY> it came from; where the fix belongs, and that it is not Legion's when it is not; your recommendation and why>
+<what went wrong, where and to whom, with dispatch://<KEY> and the numbers; where the fix belongs, and that it is not Legion's when it is not; what each option does to whom; your recommendation and why>
 EOF
 ```
 

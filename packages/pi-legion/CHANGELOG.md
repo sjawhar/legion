@@ -208,6 +208,17 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- `legion-worker/references/findings.md`: a finding ask names what went wrong, where and to whom,
+  with the numbers, and what each option does to whom, in up to 2,000 characters; only evidence
+  the decision does not need goes to the cited comment.
+
+- `legion-architect/references/decomposition.md`: a child issue's spec is written as
+  `dispatch-writing-specs` says, scaled to the child (its outline, a proposed answer to each point,
+  terms explained, no item number from another document, no root text that does not apply to the
+  child), in place of the bare `<acceptance criteria, scope, and context>` placeholder, which never
+  pointed to that skill. Before `dispatch issue` creates each child, the architect has a fresh
+  `plan-gap-analyst` check its spec against `dispatch-writing-specs` and fixes what it flags.
+
 - The `legion` tool's description no longer names a `SIGNOFF_CHILD_IN_WORKFLOW` refusal: the daemon
   accepts an architect's `sign_off` of an issue whatever still runs beneath it, and keeps the tree's
   order at the root's close instead, where a root whose pull request merged waits in
