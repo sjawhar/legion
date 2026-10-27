@@ -4,7 +4,9 @@
 # holds no write scope and no secret, and a publish job, which holds the credentials and runs no
 # dependency code: only release-push.sh, git, gh, jq, sha256sum, npm view and npm publish and a
 # handful of pinned actions, with no cache restored and the deploy key in the env of the one or two
-# steps that push. This check pins that shape, so a later edit cannot undo it quietly:
+# steps that push. changelog-fold.yaml splits each fold of the changelog fragments the same way:
+# fold_build renders them with changie, fold_publish lands them with release-push.sh push-fold.
+# This check pins that shape, so a later edit cannot undo it quietly:
 #
 # 1. A credentialed job — one whose `permissions` grants contents, id-token, attestations or
 #    actions: write (the workflow's `permissions` when the job declares none, as GitHub gives it;
@@ -13,8 +15,9 @@
 #    `secrets['DEPLOY_KEY']`, in any casing (GitHub resolves `secrets.deploy_key` too) —
 #    (a) runs no dependency code, (b) uses only the actions on CREDENTIALED_USES below, (c) sets
 #    `cache-mode: none`, and (d) names the deploy key only as `DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}`
-#    (the dot form) in the step-level `env:` of a step whose `run:` calls `release-push.sh push-tag`
-#    or `push-main`; the workflow's `env:` reaches every job, so the key there is never allowed.
+#    (the dot form) in the step-level `env:` of a step whose `run:` calls `release-push.sh
+#    push-tag`, `push-main` or `push-fold`; the workflow's `env:` reaches every job, so the key
+#    there is never allowed.
 # 2. A build job — one that runs dependency code — holds none of those four write scopes and no
 #    `secrets` reference but `secrets.GITHUB_TOKEN`, in its own text or the workflow's `env:` (so
 #    no deploy key, by dot or by index, no other secret and no `toJSON(secrets)`), declares
@@ -50,6 +53,9 @@
 #    `needs.x.outputs`. This is what skipped legion_publish in the first run on the build/publish
 #    split: its `if:` read legion_build's outputs behind an implicit `success()` that
 #    envoy_plugin_publish, four jobs upstream, had already made false.
+# 7. changelog-fold.yaml runs in the workflow-level concurrency group `changelog-fold` with
+#    `cancel-in-progress: false` (the boolean): each run folds main's tip, and two runs at once
+#    would fold the same fragments twice.
 #
 # "Runs dependency code" is a tripwire over named patterns, not a proof that no other code runs: a
 # step runs dependency code when its `uses:` starts with one of DEPENDENCY_USES, when the shell its
@@ -92,10 +98,11 @@
 # variable in command position, `xargs`, `nohup`, an unlisted program, a `bun` behind `docker -Dl
 # debug run`) is accepted on that ground.
 #
-# Scope: exactly the three release workflows named in WORKFLOWS. Rules 1-3 read every job that has
-# `steps:`; a job that calls a reusable workflow (`uses:` and no steps, release.yaml's
-# worker_image) is out of their scope, since what it runs is that workflow's own jobs. Rules 4-5
-# read the jobs they name. Rule 6 reads every job's `if:`, steps or not.
+# Scope: exactly the four workflows named in WORKFLOWS, the three release workflows and
+# changelog-fold.yaml. Rules 1-3 read every job that has `steps:`; a job that calls a reusable
+# workflow (`uses:` and no steps, release.yaml's worker_image) is out of their scope, since what it
+# runs is that workflow's own jobs. Rules 4-5 read the jobs they name, rule 7 the fold workflow's
+# own `concurrency`. Rule 6 reads every job's `if:`, steps or not.
 #
 # Run from anywhere: .github/scripts/check-release-credentials.sh
 # CI runs it in the lint job of pr-and-main.yaml, and its tests in that workflow's test job.
@@ -135,7 +142,8 @@ LineLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapp
 RELEASE = Path(".github/workflows/release.yaml")
 LISTENER = Path(".github/workflows/release-envoy-listener.yaml")
 INFRA = Path(".github/workflows/release-envoy-infra.yaml")
-WORKFLOWS = [RELEASE, LISTENER, INFRA]
+FOLD = Path(".github/workflows/changelog-fold.yaml")
+WORKFLOWS = [RELEASE, LISTENER, INFRA, FOLD]
 
 # What makes a job credentialed: one of these scopes, or the deploy key's name anywhere in it, by
 # dot or by index (`secrets.DEPLOY_KEY`, `secrets['DEPLOY_KEY']`, `secrets["DEPLOY_KEY"]`), in any
@@ -148,7 +156,9 @@ DEPLOY_KEY_REF = re.compile(
 DEPLOY_KEY_VALUE = re.compile(r"\$\{\{\s*secrets\.DEPLOY_KEY\s*\}\}", re.IGNORECASE)
 RELEASE_PUSH = ".github/scripts/release-push.sh"
 TRIPWIRE = f"{RELEASE_PUSH} no-credential"
-PUSH_COMMANDS = ("release-push.sh push-tag", "release-push.sh push-main")
+PUSH_COMMANDS = (
+    "release-push.sh push-tag", "release-push.sh push-main", "release-push.sh push-fold",
+)
 # A secret other than GITHUB_TOKEN, which a build job must not hold: `secrets.X` or `secrets['X']`
 # for any X but GITHUB_TOKEN, `toJSON(secrets)` (the context and functions are case-insensitive,
 # as are secret names), or a bare `secrets` inside a `${{ … }}` expression (`${{ secrets }}`,
@@ -161,10 +171,10 @@ OTHER_SECRET = re.compile(
     re.IGNORECASE,
 )
 
-# What makes a step run dependency code.
+# What makes a step run dependency code. changie is a third-party binary, the fold's renderer.
 DEPENDENCY_COMMANDS = {
     "bun", "bunx", "go", "node", "npx", "pulumi", "mise", "make",
-    "python", "python3", "pip", "uv", "cargo", "sudo",
+    "python", "python3", "pip", "uv", "cargo", "sudo", "changie",
 }
 # npm runs a package's scripts under every subcommand (install, ci, exec, run, test, …) but these
 # two: view reads the registry, and publish of a tarball (the word right after `publish` ending in
@@ -603,7 +613,8 @@ def check_job(
                     path, line,
                     f"job '{name}' names secrets.DEPLOY_KEY at {describe_site(steps, key_path)}; "
                     f"the deploy key may appear only as 'DEPLOY_KEY: ${{{{ secrets.DEPLOY_KEY }}}}' "
-                    f"in the env of a step whose run calls release-push.sh push-tag or push-main",
+                    f"in the env of a step whose run calls release-push.sh push-tag, push-main or "
+                    f"push-fold",
                 )
 
     if dependency:
@@ -813,6 +824,22 @@ if LISTENER in loaded:
                 f"job 'release_publish' {must} (found concurrency: {json.dumps(concurrency)})",
             )
 
+# 7. The fold workflow folds main's tip one run at a time, so no two runs fold the same fragments.
+if FOLD in loaded:
+    path = FOLD
+    doc, _ = loaded[path]
+    concurrency = doc.get("concurrency")
+    group = concurrency.get("group") if isinstance(concurrency, Mapping) else None
+    cancel = concurrency.get("cancel-in-progress") if isinstance(concurrency, Mapping) else None
+    if group != "changelog-fold" or cancel is not False:
+        problem(
+            path, doc.lines.get("concurrency", 1),
+            f"the workflow must run in the workflow-level concurrency group 'changelog-fold' with "
+            f"'cancel-in-progress: false', the boolean: each run folds main's tip, and two runs at "
+            f"once would fold the same fragments twice (found concurrency: "
+            f"{json.dumps(concurrency)})",
+        )
+
 # 6. Every job-level `if:` either calls always() and tests the result of each job it reads, or
 # belongs to a job with no skippable ancestor, where GitHub's implicit success() can decide.
 for path, (_, jobs) in loaded.items():
@@ -826,7 +853,7 @@ if problems:
 
 print(
     f"check-release-credentials: {credentialed_jobs} credentialed job(s) and {build_jobs} build "
-    f"job(s) across {len(WORKFLOWS)} release workflows keep credentials out of jobs that run "
-    f"dependency code"
+    f"job(s) across {len(WORKFLOWS)} release and changelog-fold workflows keep credentials out of "
+    f"jobs that run dependency code"
 )
 PY

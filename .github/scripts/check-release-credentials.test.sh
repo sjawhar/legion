@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# Tests for `check-release-credentials.sh`: a job of the three release workflows that holds a
-# credential runs no dependency code, uses only allow-listed actions, restores no cache and holds
-# the deploy key only in the env of a step that pushes; a job that runs dependency code holds no
-# credential and ends in the no-credential tripwire; every checkout persists no credential; the
-# two release orderings (pi_legion_publish after pi_envoy_publish, release_publish in its
-# concurrency group) stay; and a job condition downstream of a skippable job calls `always()` and
-# tests the result of every job whose outputs it reads. The check is a tripwire over named
-# patterns (the commands, actions and paths its lists hold), not a proof that no other code runs,
-# and these cases exercise those patterns, on each side of each line.
+# Tests for `check-release-credentials.sh`: a job of the three release workflows or of
+# changelog-fold.yaml that holds a credential runs no dependency code, uses only allow-listed
+# actions, restores no cache and holds the deploy key only in the env of a step that pushes; a job
+# that runs dependency code holds no credential and ends in the no-credential tripwire; every
+# checkout persists no credential; the two release orderings (pi_legion_publish after
+# pi_envoy_publish, release_publish in its concurrency group) and the fold's concurrency group
+# stay; and a job condition downstream of a skippable job calls `always()` and tests the result of
+# every job whose outputs it reads. The check is a tripwire over named patterns (the commands,
+# actions and paths its lists hold), not a proof that no other code runs, and these cases exercise
+# those patterns, on each side of each line.
 #
 # Each case builds a miniature repository under a temporary directory, with the real script
-# symlinked into it and a green trio of release workflows written, and mutates one file.
+# symlinked into it and the four workflows written green, and mutates one file.
 #
 # Run from anywhere: .github/scripts/check-release-credentials.test.sh
 # CI runs it in the Tests workflow (pr-and-main.yaml, job test).
@@ -25,7 +26,8 @@ trap 'rm -rf "$work"' EXIT
 # shellcheck source=.github/scripts/test-lib.sh
 source "$script_dir/test-lib.sh"
 
-# fixture <name>: a tree with the script linked in and the green trio written. Echoes its root.
+# fixture <name>: a tree with the script linked in and the four green workflows written. Echoes its
+# root.
 fixture() {
   local root="$work/$1"
   if [ -e "$root" ]; then
@@ -76,15 +78,19 @@ SHA=3d3c42e5aac5ba805825da76410c181273ba90b1
 RELEASE=.github/workflows/release.yaml
 LISTENER=.github/workflows/release-envoy-listener.yaml
 INFRA=.github/workflows/release-envoy-infra.yaml
+FOLD=.github/workflows/changelog-fold.yaml
 
-# write_green <workflows dir>: the trio in its intended shape. release.yaml: a build job (install,
-# setup-bun, a `go build` behind `&&`, upload, tripwire) with an `if:` of its own, two credentialed
-# publish jobs (setup-node, `npm publish` of the handed tarball, the tag push, a GitHub release and
-# the bump push) whose `if:` calls `always()` and tests the result of the build whose outputs it
-# reads, a plain job that runs no dependency code and a reusable-workflow call with no steps and no
-# `if:`. The listener: a docker build job (`packages: write`, a build-push) and release_publish in
-# its concurrency group, with `docker buildx imagetools create`. Infra: a build job
-# (install-pulumi, `pulumi package get-schema`, tripwire) and a publish job.
+# write_green <workflows dir>: the four workflows in their intended shape. release.yaml: a build
+# job (install, setup-bun, a `go build` behind `&&`, upload, tripwire) with an `if:` of its own,
+# two credentialed publish jobs (setup-node, `npm publish` of the handed tarball, the tag push, a
+# GitHub release and the bump push) whose `if:` calls `always()` and tests the result of the build
+# whose outputs it reads, a plain job that runs no dependency code and a reusable-workflow call
+# with no steps and no `if:`. The listener: a docker build job (`packages: write`, a build-push)
+# and release_publish in its concurrency group, with `docker buildx imagetools create`. Infra: a
+# build job (install-pulumi, `pulumi package get-schema`, tripwire) and a publish job. The fold:
+# its workflow-level concurrency group, a build job (install-changie, fold-plan, fold-notes,
+# upload, tripwire) with no `if:`, and fold_publish (`actions: write`, the deploy key in the env of
+# its push-fold step) whose `if:` reads the build's outputs without `always()`.
 write_green() {
   local dir=$1
   cat > "$dir/release.yaml" <<'YAML'
@@ -348,6 +354,73 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: .github/scripts/release-push.sh release "$TAG" "envoy-infra v1" assets/*.tar.gz
 YAML
+  cat > "$dir/changelog-fold.yaml" <<'YAML'
+name: Fold Changelog Fragments
+on:
+  workflow_dispatch:
+permissions: {}
+concurrency:
+  group: changelog-fold
+  cancel-in-progress: false
+env:
+  CHANGELOG_PACKAGES: packages/pi-legion=pi-legion-v packages/contracts
+jobs:
+  fold_build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      base: ${{ steps.base.outputs.base }}
+      fold: ${{ steps.plan.outputs.fold }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Record the base
+        id: base
+        run: echo "base=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Plan the fold
+        id: plan
+        run: |
+          plan=$(.github/scripts/release-push.sh fold-plan $CHANGELOG_PACKAGES)
+          if [ -n "$plan" ]; then echo "fold=true"; else echo "fold=false"; fi >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/install-changie
+      - name: Render the fragments with changie
+        run: .github/scripts/release-push.sh fold-notes "$RUNNER_TEMP/changelog-notes" $CHANGELOG_PACKAGES
+      - uses: actions/upload-artifact@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          name: changelog-notes
+          path: ${{ runner.temp }}/changelog-notes
+          if-no-files-found: ignore
+      - name: Check this job holds no credential (tripwire)
+        run: .github/scripts/release-push.sh no-credential
+  fold_publish:
+    needs: fold_build
+    if: github.ref == 'refs/heads/main' && needs.fold_build.outputs.fold == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write
+    cache-mode: none
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.fold_build.outputs.base }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          name: changelog-notes
+          path: ${{ runner.temp }}/changelog-notes
+      - name: Fold and push
+        env:
+          BASE: ${{ needs.fold_build.outputs.base }}
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/release-push.sh push-fold "$BASE" "$RUNNER_TEMP/changelog-notes" $CHANGELOG_PACKAGES
+YAML
 }
 
 # add_publish_step <root> <step yaml lines>: a step before pi_envoy_publish's "Publish to npm".
@@ -362,12 +435,18 @@ add_push_tag_step() {
   add_publish_step "$1" "      - name: $2"$'\n        env:\n          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}\n          TAG: ${{ steps.handed.outputs.tag }}\n        run: |\n'"$3"$'          .github/scripts/release-push.sh push-tag "$TAG"\n'
 }
 
-echo "case: the trio in its intended shape"
+echo "case: the four workflows in their intended shape"
 root=$(fixture green)
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
 check "says what it covered" \
-  "$(contains "$out" 'check-release-credentials: 4 credentialed job(s) and 3 build job(s) across 3 release workflows keep credentials out of jobs that run dependency code')"
+  "$(contains "$out" 'check-release-credentials: 5 credentialed job(s) and 4 build job(s) across 4 release and changelog-fold workflows keep credentials out of jobs that run dependency code')"
+green_fold=$(cat "$root/$FOLD")
+check "the fold's publish job holds the deploy key in the env of its push-fold step" \
+  "$(contains "$green_fold" '^          DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}$')"
+check "the fold's publish job pushes with push-fold" "$(contains "$green_fold" 'run: .github/scripts/release-push.sh push-fold ')"
+check "the fold's publish job's if: calls no always(), its build having no if:" \
+  "$(contains "$green_fold" "^    if: github.ref == 'refs/heads/main' && needs.fold_build.outputs.fold == 'true'$")"
 green_release=$(cat "$root/$RELEASE")
 green_listener=$(cat "$root/$LISTENER")
 check "a credentialed job runs release-push.sh handed" "$(contains "$green_release" 'release-push.sh handed pi-envoy-v')"
@@ -526,7 +605,7 @@ mutate "$root/$RELEASE" $'          persist-credentials: false\n' $'          pe
 run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "names the site at its line" \
-  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" 'ssh-key:'): job 'pi_envoy_publish' names secrets.DEPLOY_KEY at step 'actions/checkout@$SHA' with.ssh-key; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-tag or push-main")"
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" 'ssh-key:'): job 'pi_envoy_publish' names secrets.DEPLOY_KEY at step 'actions/checkout@$SHA' with.ssh-key; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-tag, push-main or push-fold$")"
 
 echo "case: the deploy key in a job-level env"
 root=$(fixture job-env-key)
@@ -886,7 +965,7 @@ check "exits 1" "$(is "$status" 1)"
 check "names the workflow's env for the build job at its line" \
   "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^  DEPLOY_KEY:'): job 'pi_envoy_build' runs dependency code (.*), but its text names secrets.DEPLOY_KEY; a build job holds no secret but GITHUB_TOKEN")"
 check "names the workflow's env for a credentialed job at its line" \
-  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^  DEPLOY_KEY:'): job 'pi_envoy_publish' names secrets.DEPLOY_KEY at the workflow's env.DEPLOY_KEY; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-tag or push-main")"
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^  DEPLOY_KEY:'): job 'pi_envoy_publish' names secrets.DEPLOY_KEY at the workflow's env.DEPLOY_KEY; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-tag, push-main or push-fold$")"
 check "names the workflow's env for the other credentialed job too" \
   "$(contains "$out" "job 'pi_legion_publish' names secrets.DEPLOY_KEY at the workflow's env.DEPLOY_KEY;")"
 check "the plain job, credentialed through the workflow's env, must set cache-mode: none" \
@@ -1111,5 +1190,63 @@ add_push_tag_step "$root" 'Run the file' $'          out/x.txt\n'
 run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "names the path in command position" "$(contains "$out" "step 'Run the file' runs 'out/x.txt'")"
+
+echo "case: changie in the fold's publish job"
+root=$(fixture fold-publish-changie)
+mutate "$root/$FOLD" $'      - name: Fold and push\n' $'      - name: Check changie\n        run: changie --version\n      - name: Fold and push\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the job, the step and changie at the step's line" \
+  "$(contains "$out" "^::error::$FOLD:$(line_of "$root/$FOLD" '^      - name: Check changie$'): job 'fold_publish' holds a credential, but step 'Check changie' runs 'changie'; dependency code runs only in a job that holds none$")"
+check "and, the job now running dependency code, that it holds actions: write as a build job" \
+  "$(contains "$out" "job 'fold_publish' runs dependency code (step 'Check changie' runs 'changie'), but holds 'actions: write'$")"
+
+echo "case: changie in the fold's build job"
+root=$(fixture fold-build-changie)
+mutate "$root/$FOLD" $'      - name: Render the fragments with changie\n' $'      - name: Check changie\n        run: changie --version\n      - name: Render the fragments with changie\n'
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+
+echo "case: the deploy key in the fold's build job"
+root=$(fixture fold-build-deploy-key)
+mutate "$root/$FOLD" $'        run: .github/scripts/release-push.sh fold-notes ' $'        env:\n          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}\n        run: .github/scripts/release-push.sh fold-notes '
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the key in a job that runs dependency code, at its line" \
+  "$(contains "$out" "^::error::$FOLD:$(line_of "$root/$FOLD" '^          DEPLOY_KEY:'): job 'fold_build' runs dependency code (step './.github/actions/install-changie' uses './.github/actions/install-changie'), but its text names secrets.DEPLOY_KEY; a build job holds no secret but GITHUB_TOKEN$")"
+check "names the key outside a step that pushes" \
+  "$(contains "$out" "^::error::$FOLD:$(line_of "$root/$FOLD" '^          DEPLOY_KEY:'): job 'fold_build' names secrets.DEPLOY_KEY at step 'Render the fragments with changie' env.DEPLOY_KEY; ")"
+
+echo "case: the fold workflow without its concurrency group"
+root=$(fixture fold-no-concurrency)
+mutate "$root/$FOLD" $'concurrency:\n  group: changelog-fold\n  cancel-in-progress: false\n' ''
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the file and what it must carry" \
+  "$(contains "$out" "^::error::$FOLD:1: the workflow must run in the workflow-level concurrency group 'changelog-fold' with 'cancel-in-progress: false', the boolean: each run folds main's tip, and two runs at once would fold the same fragments twice (found concurrency: null)$")"
+check "reports that one problem only" "$(contains "$out" '^1 release credential problem(s)$')"
+
+echo "case: the fold workflow with cancel-in-progress: true"
+root=$(fixture fold-cancel-true)
+mutate "$root/$FOLD" $'  cancel-in-progress: false\n' $'  cancel-in-progress: true\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the concurrency at its line" \
+  "$(contains "$out" "^::error::$FOLD:$(line_of "$root/$FOLD" '^concurrency:$'): the workflow must run in the workflow-level concurrency group 'changelog-fold' .*(found concurrency: {\"group\": \"changelog-fold\", \"cancel-in-progress\": true})$")"
+
+echo "case: the fold workflow with cancel-in-progress: \"false\", a string"
+root=$(fixture fold-cancel-string)
+mutate "$root/$FOLD" $'  cancel-in-progress: false\n' $'  cancel-in-progress: "false"\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names what it found" "$(contains "$out" "(found concurrency: {\"group\": \"changelog-fold\", \"cancel-in-progress\": \"false\"})$")"
+
+echo "case: the fold workflow in another group"
+root=$(fixture fold-other-group)
+mutate "$root/$FOLD" $'  group: changelog-fold\n' $'  group: changelog-fold-${{ github.ref }}\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the group at the concurrency's line" \
+  "$(contains "$out" "^::error::$FOLD:$(line_of "$root/$FOLD" '^concurrency:$'): the workflow must run in the workflow-level concurrency group 'changelog-fold' .*(found concurrency: {\"group\": \"changelog-fold-\${{ github.ref }}\", \"cancel-in-progress\": false})$")"
 
 summary "check-release-credentials.sh"

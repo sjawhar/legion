@@ -1,0 +1,156 @@
+name: Fold Changelog Fragments
+
+# A pull request writes its changelog entry as a fragment, packages/<pkg>/.changes/unreleased/
+# <ISSUE KEY>-<slug>.yaml, never into CHANGELOG.md itself, so two pull requests never conflict
+# over the top of the same file. This workflow folds the fragments into each package's
+# CHANGELOG.md on main and removes them, in one commit, "chore: fold changelog fragments [skip
+# ci]". A fragment's entry lands under the version of the release that first shipped it: the
+# lowest <tag-prefix>X.Y.Z tag that contains the commit which added it, so a fragment no release
+# has shipped yet waits for a later run. claude-envoy, contracts and envoy-client have no release
+# of their own, so their fragments land under main@<the first 12 hex digits of main's tip>
+# (`release-push.sh fold-plan`'s header paragraph).
+#
+# It is a workflow of its own, serialized by the concurrency group below, and the release
+# workflows are untouched: it runs after each run of either release workflow on main (a new tag is
+# what makes a fragment foldable), once a day, and by hand. Every run folds everything foldable on
+# main's tip from the tags as they are then, so a lost push, a skipped run or a pending run GitHub
+# dropped for a newer one is redone by the next run. When main moves between the build and the
+# push, push-fold pushes nothing and starts a new run on main's new tip instead (land_on_main in
+# release-push.sh), which is the retry.
+#
+# The fold is split as the releases are (release.yaml's header says why). fold_build renders the
+# fragments with changie, which is dependency code, and so holds no write scope and no secret and
+# ends in the tripwire. fold_publish holds the deploy key and runs no dependency code: only
+# release-push.sh push-fold, which writes the build's notes into the CHANGELOG.md files and lands
+# the commit with git, jq and gh. check-release-credentials.sh pins this shape.
+on:
+  workflow_run:
+    workflows: ["Release Packages", "Release Envoy Listener"]
+    types: [completed]
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+# Each job declares its own permissions (fold_build, fold_publish below); nothing runs under this
+# workflow-level default.
+permissions: {}
+
+# One run at a time: each run folds main's tip, and two runs at once would fold the same fragments
+# twice. A pending run GitHub drops for a newer one loses nothing, since the newer one folds
+# everything the dropped one would have. check-release-credentials.sh rule 7 pins this group.
+concurrency:
+  group: changelog-fold
+  cancel-in-progress: false
+
+env:
+  # The packages whose fragments are folded, each <package-dir>[=<tag-prefix>]: a tag prefix is the
+  # one the package's release workflow passes to `release-push.sh version`; a package without one
+  # has no release, and its fragments fold under main@<12 hex>.
+  CHANGELOG_PACKAGES: >-
+    packages/pi-legion=pi-legion-v packages/pi-envoy=pi-envoy-v
+    packages/envoy-plugin=opencode-legion-envoy-v packages/envoy=legion-envoy-v
+    packages/claude-envoy packages/contracts packages/envoy-client
+
+jobs:
+  # Plans the fold and renders the planned fragments with changie into notes, one file per package
+  # and label, for fold_publish. It runs changie, a third-party binary, so it holds no write scope
+  # and no secret and ends in the tripwire.
+  fold_build:
+    runs-on: ubuntu-24.04
+    # contents: read is for the checkout; nothing here writes to the repository.
+    permissions:
+      contents: read
+    outputs:
+      base: ${{ steps.base.outputs.base }}
+      fold: ${{ steps.plan.outputs.fold }}
+    steps:
+      # main's tip with every tag, which the plan's labels are read from.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The commit this run folds; fold_publish checks it out and lands the fold over it only while
+      # main is still there.
+      - name: Record the base
+        id: base
+        run: echo "base=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      # First, before changie is installed: the plan reads only git.
+      - name: Plan the fold
+        id: plan
+        run: |
+          # shellcheck disable=SC2086 # $CHANGELOG_PACKAGES is the spec list, split on purpose
+          plan=$(.github/scripts/release-push.sh fold-plan $CHANGELOG_PACKAGES)
+          if [ -n "$plan" ]; then
+            printf '%s\n' "$plan"
+            echo "fold=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Nothing to fold"
+            echo "fold=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: ./.github/actions/install-changie
+
+      - name: Render the fragments with changie
+        run: |
+          # shellcheck disable=SC2086 # $CHANGELOG_PACKAGES is the spec list, split on purpose
+          .github/scripts/release-push.sh fold-notes "$RUNNER_TEMP/changelog-notes" $CHANGELOG_PACKAGES
+
+      # The notes, exactly as rendered, for fold_publish; an empty plan writes none.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: changelog-notes
+          path: ${{ runner.temp }}/changelog-notes
+          if-no-files-found: ignore
+          retention-days: 1
+
+      - name: Check this job holds no credential (tripwire)
+        run: .github/scripts/release-push.sh no-credential
+
+  # Writes fold_build's notes into the CHANGELOG.md files and lands the fold on main. It runs no
+  # changie, no bun and no go, only release-push.sh push-fold (git, jq and gh) and the pinned
+  # actions below, so the deploy key never meets the code fold_build runs. push-fold computes the
+  # plan again from git and takes from the notes only their text. Only main lands a fold: a
+  # workflow_dispatch from another branch builds and stops there. fold_build has no if: of its own,
+  # so this condition needs no always().
+  fold_publish:
+    needs: fold_build
+    if: github.ref == 'refs/heads/main' && needs.fold_build.outputs.fold == 'true'
+    runs-on: ubuntu-24.04
+    # contents: read is for the checkout; actions: write lets push-fold start a new run of this
+    # workflow on main when main moved since the base (`gh workflow run`). The push itself uses the
+    # deploy key over SSH, held only by the "Fold and push" step's env, not either scope.
+    permissions:
+      contents: read
+      actions: write
+    # No cache is restored in a job that holds a credential.
+    cache-mode: none
+    steps:
+      # The base fold_build built, with every tag. No credential is left in the checkout: the
+      # deploy key reaches the "Fold and push" step alone.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.fold_build.outputs.base }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Outside the checkout, so push-fold's clean-tree check and its commit never see the notes.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: changelog-notes
+          path: ${{ runner.temp }}/changelog-notes
+
+      # The only step that holds the deploy key. push-fold checks the notes against its own plan,
+      # writes them in, commits, and pushes over SSH to GitHub's pinned host keys when main is
+      # still at the base; when main moved, it starts a new run on main with GH_TOKEN and exits 0.
+      - name: Fold and push
+        env:
+          BASE: ${{ needs.fold_build.outputs.base }}
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # shellcheck disable=SC2086 # $CHANGELOG_PACKAGES is the spec list, split on purpose
+          .github/scripts/release-push.sh push-fold "$BASE" "$RUNNER_TEMP/changelog-notes" $CHANGELOG_PACKAGES
