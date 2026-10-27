@@ -426,19 +426,21 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		}
 	}
 	// A session a mention delivers this comment to hears it from the mention alone: the author
-	// routes skip it (suppressed_authors). A reply's author route reaches its thread's root
-	// author; a new comment's reaches the sessions that wrote its document, which the outbox reads
-	// when it publishes, so every session a mention resolved to is named, an author or not.
+	// routes skip it (suppressed_authors). Outside an ask's thread a comment's author routes reach
+	// the sessions that wrote its document, which the outbox reads when it publishes, and a reply's
+	// also reach its thread's root and parent authors, so every session a mention resolved to is
+	// named, an author or not. In an ask's thread the author route reaches the thread's root author
+	// alone, which is named when a mention reaches it.
 	suppressedAuthors := []string{}
 	switch {
+	case input.AskID == nil:
+		suppressedAuthors = slices.Sorted(maps.Keys(mentionedSessions))
 	case replyRoot != nil:
 		if replyRoot.Author.Kind == "session" {
 			if _, mentioned := mentionedSessions[replyRoot.Author.ID]; mentioned {
 				suppressedAuthors = append(suppressedAuthors, replyRoot.Author.ID)
 			}
 		}
-	case input.AskID == nil:
-		suppressedAuthors = slices.Sorted(maps.Keys(mentionedSessions))
 	}
 	turn := threadTarget.replyTurn(actor, input.Turn)
 	var rowID string

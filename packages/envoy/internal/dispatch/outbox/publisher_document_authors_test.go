@@ -63,6 +63,27 @@ func seedDocumentComment(t *testing.T, database *store.Store, artifactID string,
 	return id
 }
 
+// seedAnchoredComment inserts a comment author wrote on a passage of document, owned by issueKey's
+// issue, and returns its id.
+func seedAnchoredComment(t *testing.T, database *store.Store, issueKey, document string, author model.Actor) string {
+	t.Helper()
+	authorJSON, err := json.Marshal(author)
+	if err != nil {
+		t.Fatalf("encode comment author: %v", err)
+	}
+	anchorJSON, err := json.Marshal(anchorOn(document))
+	if err != nil {
+		t.Fatalf("encode comment anchor: %v", err)
+	}
+	var id string
+	if err := database.Pool.QueryRow(context.Background(), `
+		insert into comments (issue_key, author, body, anchor) values ($1, $2, 'On the passage.', $3) returning id::text
+	`, issueKey, authorJSON, anchorJSON).Scan(&id); err != nil {
+		t.Fatalf("create anchored comment: %v", err)
+	}
+	return id
+}
+
 // agentTopics is every notifications.agent.<id> topic among topics, in order.
 func agentTopics(topics []string) []string {
 	agents := []string{}
@@ -197,7 +218,7 @@ func TestACommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 			wantAgents: []string{"notifications.agent.session-editor"},
 		},
 		{
-			name: "a reply on a project document reaches its thread's author, not the document's",
+			name: "a reply on a project document reaches its thread's author, then the document's writer",
 			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
 				doc := seedDocument(t, database, nil, "plan", writer, []model.Actor{writer})
 				root := seedDocumentComment(t, database, doc, model.Actor{Kind: "session", ID: "session-root"})
@@ -205,7 +226,63 @@ func TestACommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 					"id": "00000000-0000-0000-0000-000000000008", "reply_to": root,
 				}}, "plan"
 			},
-			wantAgents: []string{"notifications.agent.session-root"},
+			wantAgents: []string{"notifications.agent.session-root", "notifications.agent.session-writer"},
+		},
+		{
+			name: "a person's reply under another person's comment on a project document reaches the session that wrote it",
+			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
+				doc := seedDocument(t, database, nil, "plan", writer, []model.Actor{writer})
+				root := seedDocumentComment(t, database, doc, bob)
+				return model.Event{ArtifactID: new(doc), Project: "TT", Type: "comment.created", Actor: alice, Payload: map[string]any{
+					"id": "00000000-0000-0000-0000-000000000015", "reply_to": root,
+				}}, "plan"
+			},
+			wantAgents: []string{"notifications.agent.session-writer"},
+		},
+		{
+			name: "a person's reply under another person's comment on a passage of an issue's document reaches every session that wrote it",
+			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
+				doc := seedDocument(t, database, new("T-1"), "notes", writer, []model.Actor{writer}, []model.Actor{editor})
+				root := seedAnchoredComment(t, database, "T-1", doc, bob)
+				return model.Event{IssueKey: new("T-1"), Type: "comment.created", Actor: alice, Payload: map[string]any{
+					"id": "00000000-0000-0000-0000-000000000016", "reply_to": root,
+				}}, ""
+			},
+			wantAgents: []string{"notifications.agent.session-writer", "notifications.agent.session-editor"},
+		},
+		{
+			name: "a person's edit of their reply in a thread on an issue's document reaches the session that wrote it",
+			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
+				doc := seedDocument(t, database, new("T-1"), "notes", writer, []model.Actor{writer})
+				root := seedAnchoredComment(t, database, "T-1", doc, bob)
+				return model.Event{IssueKey: new("T-1"), Type: "comment.edited", Actor: alice, Payload: map[string]any{
+					"id": "00000000-0000-0000-0000-000000000017", "reply_to": root, "suppressed_authors": nil,
+				}}, ""
+			},
+			wantAgents: []string{"notifications.agent.session-writer"},
+		},
+		{
+			name: "a reply in a thread on an issue's document whose writer its mention reaches is left to the mention",
+			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
+				doc := seedDocument(t, database, new("T-1"), "notes", writer, []model.Actor{writer, editor})
+				root := seedAnchoredComment(t, database, "T-1", doc, bob)
+				return model.Event{IssueKey: new("T-1"), Type: "comment.created", Actor: alice, Payload: map[string]any{
+					"id": "00000000-0000-0000-0000-000000000018", "reply_to": root,
+					"suppressed_authors": []any{"session-writer"},
+				}}, ""
+			},
+			wantAgents: []string{"notifications.agent.session-editor"},
+		},
+		{
+			name: "a person's reply on the issue's conversation, which names no document, reaches no document's writer",
+			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
+				seedDocument(t, database, new("T-1"), "spec", writer, []model.Actor{writer})
+				root := seedComment(t, database, "T-1", bob, "On the issue.", nil)
+				return model.Event{IssueKey: new("T-1"), Type: "comment.created", Actor: alice, Payload: map[string]any{
+					"id": "00000000-0000-0000-0000-000000000019", "reply_to": root,
+				}}, ""
+			},
+			wantAgents: []string{},
 		},
 		{
 			name: "a reply to an ask on a project document reaches the ask's followers, not the document's writer",
@@ -289,5 +366,61 @@ func TestPublishAuthorRoutesSkipsTheCommenterAmongTheDocumentsWriters(t *testing
 	}
 	if got := topicsOf(publisher.all()); !slices.Equal(got, []string{"notifications.agent.session-editor"}) {
 		t.Fatalf("author routes = %v, want the document's other writer alone", got)
+	}
+}
+
+// A session replying in a thread on a document it helped write is not told of its own reply, and
+// the document's other writer is.
+func TestPublishAuthorRoutesSkipsTheReplierAmongTheDocumentsWriters(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "T-1", nil)
+	writer := model.Actor{Kind: "session", ID: "session-writer"}
+	editor := model.Actor{Kind: "session", ID: "session-editor"}
+	doc := seedDocument(t, database, new("T-1"), "notes", writer, []model.Actor{writer, editor})
+	root := seedAnchoredComment(t, database, "T-1", doc, model.Actor{Kind: "user", ID: "alice"})
+	publisher := &recordingPublisher{}
+	event := model.Event{
+		IssueKey: new("T-1"),
+		Type:     "comment.created",
+		Actor:    writer,
+		Payload:  map[string]any{"id": "00000000-0000-0000-0000-000000000020", "reply_to": root},
+	}
+	item := contracts.Envelope{EventID: "dispatch-1", Topic: "notifications.dispatch.issue.T-1.comment.created"}
+	if err := publishAuthorRoutes(context.Background(), Deps{Store: database, Publisher: publisher}, 0, item, event, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
+		t.Fatalf("publish author routes: %v", err)
+	}
+	if got := topicsOf(publisher.all()); !slices.Equal(got, []string{"notifications.agent.session-editor"}) {
+		t.Fatalf("author routes = %v, want the document's other writer alone", got)
+	}
+}
+
+// A comment in an ask's thread reaches the ask's followers (publishFollowerRoutes), so the author
+// routes reach no document writer for it even when it also names a reply_to on the document.
+func TestPublishAuthorRoutesLeavesAReplyInAnAsksThreadToItsFollowers(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "T-1", nil)
+	writer := model.Actor{Kind: "session", ID: "session-writer"}
+	doc := seedDocument(t, database, new("T-1"), "notes", writer, []model.Actor{writer})
+	root := seedAnchoredComment(t, database, "T-1", doc, model.Actor{Kind: "user", ID: "bob"})
+	var askID string
+	if err := database.Pool.QueryRow(context.Background(), `
+		insert into asks (issue_key, author, question) values ('T-1', '{"kind":"session","id":"session-asker"}', 'Ship it?')
+		returning id::text
+	`).Scan(&askID); err != nil {
+		t.Fatalf("create ask: %v", err)
+	}
+	publisher := &recordingPublisher{}
+	event := model.Event{
+		IssueKey: new("T-1"),
+		Type:     "comment.created",
+		Actor:    model.Actor{Kind: "user", ID: "alice"},
+		Payload:  map[string]any{"id": "00000000-0000-0000-0000-000000000021", "reply_to": root, "ask_id": askID},
+	}
+	item := contracts.Envelope{EventID: "dispatch-1", Topic: "notifications.dispatch.issue.T-1.comment.created"}
+	if err := publishAuthorRoutes(context.Background(), Deps{Store: database, Publisher: publisher}, 0, item, event, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
+		t.Fatalf("publish author routes: %v", err)
+	}
+	if got := topicsOf(publisher.all()); len(got) != 0 {
+		t.Fatalf("author routes = %v, want none: the ask's thread is its followers'", got)
 	}
 }

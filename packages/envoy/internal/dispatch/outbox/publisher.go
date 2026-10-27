@@ -753,12 +753,14 @@ func publishFollowerRoutes(ctx context.Context, deps Deps, eventID int64, item c
 // document (which has no route at all). Without this, the agent that started the thread
 // or is the thread's own root author never learns about the human's reply, resolution,
 // reopening, or edit, and the agent that wrote a document never learns of a new comment on it.
-// A reply reaches its thread's root author and its direct parent's author; a new comment on a
+// A reply reaches its thread's root author and its direct parent's author, and a reply not in an
+// ask's thread on a document (the event's own project document, else its thread root's, by
+// loadThreadDocument) then also reaches every session that document credits; a new comment on a
 // document (no reply_to and no ask_id), and its edit, reach every session that document credits
-// (loadDocumentSessionAuthors); a comment on an issue's conversation names no document and reaches
-// no author. Ask threads are not walked here: their asker and repliers are the ask's followers
-// (publishFollowerRoutes). The event's own actor is skipped, and so is a session the comment's
-// mentions already reach (suppressed_authors).
+// (loadDocumentSessionAuthors); a comment or reply on an issue's conversation names no document and
+// reaches no document author. Ask threads are not walked here: their asker and repliers are the
+// ask's followers (publishFollowerRoutes). The event's own actor is skipped, and so is a session
+// the comment's mentions already reach (suppressed_authors).
 func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, a *attempt) error {
 	suppressedAuthors := payloadStringSet(event.Payload, "suppressed_authors")
 	seen := map[string]bool{}
@@ -783,6 +785,20 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 		consider(author, found)
 		return nil
 	}
+	considerDocument := func(document string) error {
+		if document == "" {
+			return nil
+		}
+		authors, err := loadDocumentSessionAuthors(ctx, deps, document)
+		if err != nil {
+			return err
+		}
+		for _, author := range authors {
+			consider(model.Actor{Kind: "session", ID: author}, true)
+		}
+		return nil
+	}
+	notAskComment := (event.Type == "comment.created" || event.Type == "comment.edited") && payloadString(event.Payload, "ask_id") == ""
 
 	var inReplyTo, commentID, messageInReplyTo string
 	switch event.Type {
@@ -810,20 +826,27 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 		if err := considerLoaded(loadCommentAuthor(ctx, deps, inReplyTo)); err != nil {
 			return err
 		}
+		if notAskComment {
+			// A reply carries no anchor: its document is its project document's, else its
+			// thread root's.
+			document := commentedDocument(event)
+			if document == "" {
+				var err error
+				if document, err = loadThreadDocument(ctx, deps, inReplyTo); err != nil {
+					return err
+				}
+			}
+			if err := considerDocument(document); err != nil {
+				return err
+			}
+		}
 	} else if commentID != "" && (event.Type == "comment.resolved" || event.Type == "comment.reopened") {
 		if err := considerLoaded(loadRootCommentAuthor(ctx, deps, commentID)); err != nil {
 			return err
 		}
-	} else if (event.Type == "comment.created" || event.Type == "comment.edited") && payloadString(event.Payload, "ask_id") == "" {
-		document := commentedDocument(event)
-		if document != "" {
-			authors, err := loadDocumentSessionAuthors(ctx, deps, document)
-			if err != nil {
-				return err
-			}
-			for _, author := range authors {
-				consider(model.Actor{Kind: "session", ID: author}, true)
-			}
+	} else if notAskComment {
+		if err := considerDocument(commentedDocument(event)); err != nil {
+			return err
 		}
 	}
 	if messageInReplyTo != "" {
@@ -857,9 +880,11 @@ func loadCommentAuthor(ctx context.Context, deps Deps, commentID string) (model.
 	return decodeAuthor(authorJSON, "comment", commentID)
 }
 
-// commentedDocument names the artifact a top-level comment is on: its anchor's for a comment on a
-// passage (of an issue's document or a project artifact), otherwise the event's own artifact for a
-// comment on a whole project artifact. The author lookup decides whether that artifact is a document.
+// commentedDocument names the artifact a comment's event places it on: its anchor's for a comment
+// on a passage (of an issue's document or a project artifact), otherwise the event's own artifact
+// for a comment or reply on a project artifact. A reply carries no anchor, so a reply on an issue's
+// document names none here (loadThreadDocument finds it). The author lookup decides whether that
+// artifact is a document.
 func commentedDocument(event model.Event) string {
 	document := ""
 	if values, ok := event.Payload.(map[string]any); ok {
@@ -930,6 +955,32 @@ func loadRootCommentAuthor(ctx context.Context, deps Deps, commentID string) (mo
 		return model.Actor{}, false, fmt.Errorf("load root comment author %q: %w", commentID, err)
 	}
 	return decodeAuthor(authorJSON, "comment", commentID)
+}
+
+// loadThreadDocument walks a comment's reply_to chain up to its thread root, as
+// loadRootCommentAuthor does and under the same maxCommentThreadDepth guard, and names the artifact
+// that root is on: its anchor's for a comment on a passage, otherwise its own for a comment on a
+// whole project artifact. It returns "" for a root on an issue's conversation, and for a chain that
+// finds no root. The author lookup decides whether that artifact is a document.
+func loadThreadDocument(ctx context.Context, deps Deps, commentID string) (string, error) {
+	var document string
+	if err := deps.Store.Pool.QueryRow(ctx, `
+		with recursive chain as (
+			select id, reply_to, coalesce(anchor->>'artifact_id', artifact_id::text, '') as document, 0 as depth
+			from comments where id = $1
+			union
+			select c.id, c.reply_to, coalesce(c.anchor->>'artifact_id', c.artifact_id::text, ''), h.depth + 1
+			from comments c join chain h on c.id = h.reply_to
+			where h.depth < $2
+		)
+		select document from chain where reply_to is null limit 1
+	`, commentID, maxCommentThreadDepth).Scan(&document); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("load thread document %q: %w", commentID, err)
+	}
+	return document, nil
 }
 
 func decodeAuthor(raw []byte, kind, id string) (model.Actor, bool, error) {

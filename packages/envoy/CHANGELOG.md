@@ -70,6 +70,17 @@
   through after publishing. Migrations `0129` (`events_person_words`, a partial index on a person's
   events of those four types by time) and `0130` (`comment_deliveries_session`) serve it; on
   1,000,000 events `0129` built in about a second and the route's query ran in 6-8 ms.
+- A person's reply in a comment thread on a document now also reaches every session the document
+  credits (its creator and every session a version lists), on its own
+  `notifications.agent.<session_id>` topic, after the thread's root author and the parent's
+  author, as a new comment on the document does, so the session that wrote a document lists such a
+  reply in `GET /api/v1/agents/{session_id}/answers` even when another person started the thread
+  (INFRA-148). A reply carries no anchor, so the outbox finds its document from its event (a
+  project document's) or else from its thread root's anchor or artifact. A reply in an ask's
+  thread still reaches the ask's followers alone, and a reply on an issue's conversation, which
+  names no document, no document author. A session such a reply @-mentions hears it once, from
+  the mention: outside an ask's thread a reply's `suppressed_authors` now names every session a
+  mention resolved to, as a new comment's does.
 - `envoy-infra:gcp:Dispatch` takes `pprofPort`, which sets `DISPATCH_PPROF_PORT` on the app
   Deployment's `envoy-dispatch` container alone, so a deployment turns on Dispatch's loopback-only
   profiler through the component rather than by editing the Deployment, which the next update
@@ -1858,12 +1869,12 @@
   session one of its versions credits, which includes an agent whose anchored comment credited it
   on a new version. Before, a new comment found no author to route to, so the agent heard of it
   only by subscribing to the issue's or document's own topic (LEGION-681). A document only people
-  wrote sends nothing new, since a person has no topic. A reply still reaches its thread's root
-  author and its parent's author alone, an ask reply its followers, and a comment on an issue's
-  conversation, which names no document, no author. An agent's comment still notifies nobody, so a
-  session commenting on a document it wrote is not told of its own comment. A writer the comment
-  @-mentions hears it once, from the mention: a new comment's `suppressed_authors` now names every
-  session a mention resolved to.
+  wrote sends nothing new, since a person has no topic. A reply reaches its thread's root author
+  and its parent's author, and since INFRA-148 the document's writers too, an ask reply its
+  followers, and a comment on an issue's conversation, which names no document, no author. An
+  agent's comment still notifies nobody, so a session commenting on a document it wrote is not
+  told of its own comment. A writer the comment @-mentions hears it once, from the mention: a new
+  comment's `suppressed_authors` now names every session a mention resolved to.
 - `scripts/dev-postgres.sh` reuses its `dispatch-pg` container rather than failing on the name: it
   starts a stopped one and serves a running one, when the container runs the pinned pgvector
   image. It refuses one on any other image, such as a `postgres:16` an older version of the script

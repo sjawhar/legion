@@ -328,6 +328,49 @@ func TestSessionAnswersListsACommentOnADocumentTheSessionWrote(t *testing.T) {
 	}
 }
 
+// A person's reply under another person's comment on a document the session wrote reaches the
+// session through the document's author route, so its list carries the reply. A reply carries
+// replied_in_a_comment_thread, which store.SessionAnswers ranks above commented_on_a_document.
+func TestSessionAnswersListsAPersonsReplyInAThreadOnADocumentTheSessionWrote(t *testing.T) {
+	f := newAnswersFixture(t)
+	uploaded := sessionRequest(t, f.handler, http.MethodPost, "/api/v1/projects/ANS/artifacts", map[string]any{
+		"name": "Rollout plan", "content": "# Rollout plan\n\nShip on Friday.\n", "actor": answersActor(answersSession),
+	})
+	if uploaded.Code != http.StatusCreated {
+		t.Fatalf("upload document: status=%d body=%s", uploaded.Code, uploaded.Body.String())
+	}
+	document := decodeBody[struct {
+		Artifact model.Artifact `json:"artifact"`
+	}](t, uploaded).Artifact
+	root := f.write(t, http.MethodPost, "/api/v1/artifacts/"+document.ID+"/comments", map[string]any{"body": "Friday is a freeze day."}, "bob")
+	reply := f.write(t, http.MethodPost, "/api/v1/artifacts/"+document.ID+"/comments", map[string]any{"body": "Then Monday.", "reply_to": root}, "alice")
+	f.publishOutbox(t)
+
+	if topics := f.destinations(t, "comment.created", reply); !slices.Contains(topics, contracts.AgentSubject(answersSession)) {
+		t.Fatalf("reply destinations = %v, want the session that wrote the document", topics)
+	}
+	listed := f.list(t, answersSession, "")
+	if listed.Total != 2 || len(listed.Items) != 2 {
+		t.Fatalf("answers = %+v, want bob's comment and alice's reply", listed)
+	}
+	item := listed.Items[0]
+	if item.ID != reply || item.Kind != model.SessionAnswerKindComment || item.Relation != model.SessionAnswerRelationRepliedInCommentThread ||
+		item.Author != answersAlice || item.Text != "Then Monday." || item.Ask != nil {
+		t.Fatalf("newest item = %+v, want alice's reply %s in the thread", item, reply)
+	}
+	if item.Owner == nil || item.Owner.Document == nil || item.Owner.Issue != nil ||
+		*item.Owner.Document != (model.OpenAskDocument{Project: "ANS", Slug: document.Slug, Name: document.Name}) {
+		t.Fatalf("item owner = %+v, want the project document %s", item.Owner, document.Slug)
+	}
+	if want := "dispatch://ANS/artifact/" + document.Slug + "/comment/" + reply; item.Ref == nil || *item.Ref != want {
+		t.Fatalf("item ref = %v, want %s", item.Ref, want)
+	}
+	if rootItem := listed.Items[1]; rootItem.ID != root || rootItem.Relation != model.SessionAnswerRelationCommentedOnDocument {
+		t.Fatalf("older item = %+v, want bob's comment %s on the document", rootItem, root)
+	}
+	f.empty(t, answersOther)
+}
+
 func TestSessionAnswersListsACommentOnAnIssueRoutedToTheSession(t *testing.T) {
 	f := newAnswersFixture(t)
 	f.route(t, "session:"+answersSession)
