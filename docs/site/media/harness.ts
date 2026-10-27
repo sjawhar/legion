@@ -1,12 +1,10 @@
-// The docs media tooling's shared harness: it boots Dispatch the way the e2e suite does
-// (`packages/dispatch/e2e/playwright.config.ts`: the fake Envoy, the fake GitHub, the fake secrets
-// broker, and `run-server.sh`, which signs a browser in at its dev sign-in route) on ports of its
-// own, seeds example data, opens a signed-in browser context at a docs viewport, and checks a page
-// is ready and clean before it is captured. `shots.ts` and `walkthrough.ts` both run on it, as does
-// any section's own media.
-import { type ChildProcess, spawn } from "node:child_process";
-import { createWriteStream, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { connect } from "node:net";
+// The docs media tooling's shared harness: it boots Dispatch the way the e2e suite does, through
+// `packages/dispatch/e2e/harness-start.ts` (the fake Envoy, the fake GitHub, the fake secrets
+// broker, `run-server.sh`, which signs a browser in at its dev sign-in route, and the plain-HTTP
+// proxy) on ports the OS chooses, seeds example data, opens a signed-in browser context at a docs
+// viewport, and checks a page is ready and clean before it is captured. `shots.ts` and
+// `walkthrough.ts` both run on it, as does any section's own media.
+import { existsSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 
 import {
@@ -17,24 +15,17 @@ import {
   type Page,
 } from "@playwright/test";
 
+import type {
+  Harness as E2eHarness,
+  HarnessProcess,
+} from "../../../packages/dispatch/e2e/harness-start";
 import type { SeededWorkspace } from "../../../packages/dispatch/e2e/workspace";
 
 export const REPO = resolve(import.meta.dir, "../../..");
-const E2E = join(REPO, "packages/dispatch/e2e");
 const WEB_DIST = join(REPO, "packages/dispatch/web/dist/index.html");
 /** Scratch output (server logs, raw recordings, narration cache); gitignored. */
 export const WORK = join(import.meta.dir, ".work");
 
-// The e2e suite's own port variables, because `run-server.sh` and `e2e/harness-ports.ts` read
-// them. The defaults differ from the suite's (8777, 9021, 9022, 9024) so a docs run and an e2e run
-// can share a machine; each still needs its own DATABASE_URL.
-const PORTS = {
-  DISPATCH_E2E_PORT: process.env.DISPATCH_E2E_PORT || "8786",
-  FAKE_BROKER_PORT: process.env.FAKE_BROKER_PORT || "9088",
-  FAKE_ENVOY_PORT: process.env.FAKE_ENVOY_PORT || "9086",
-  FAKE_GITHUB_PORT: process.env.FAKE_GITHUB_PORT || "9087",
-};
-const BOOT_TIMEOUT_MS = 600_000;
 /** The signed-in human every capture shows. `run-server.sh` allows alice and bob. */
 export const VIEWER = "alice";
 /** Playwright's assertions with the e2e suite's 15 s wait (`e2e/playwright.config.ts`). */
@@ -72,91 +63,23 @@ export interface Harness {
   reset(): Promise<void>;
 }
 
-function portTaken(port: number): Promise<boolean> {
-  const dial = (host: string) => {
-    const { promise, resolve } = Promise.withResolvers<boolean>();
-    const socket = connect(port, host)
-      .on("error", () => resolve(false))
-      .on("connect", () => {
-        socket.end();
-        resolve(true);
-      });
-    return promise;
-  };
-  return Promise.all([dial("127.0.0.1"), dial("::1")]).then((used) => used.some(Boolean));
-}
-
-interface Started {
-  readonly child: ChildProcess;
-  readonly log: string;
-  readonly name: string;
-  /** Settles once the process has closed its output and all of it is in `log`. */
-  readonly logged: Promise<void>;
-}
-
-function start(name: string, command: string, args: string[]): Started {
-  mkdirSync(join(WORK, "harness"), { recursive: true });
-  const log = join(WORK, "harness", `${name}.log`);
-  const out = createWriteStream(log);
-  // A process group of its own, so stopping it reaches `go run`'s compiled child too.
-  const child = spawn(command, args, {
-    cwd: REPO,
-    detached: true,
-    env: { ...process.env, ...PORTS },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  // Both streams write the one file, so it ends only once the process has closed both: ending it
-  // with whichever stream ends first loses what the other still had to write.
-  child.stdout?.pipe(out, { end: false });
-  child.stderr?.pipe(out, { end: false });
-  const logged = Promise.withResolvers<void>();
-  child.once("close", () => out.end(() => logged.resolve()));
-  return { child, log, logged: logged.promise, name };
-}
-
-async function ready(url: string, started: Started): Promise<void> {
-  const deadline = Date.now() + BOOT_TIMEOUT_MS;
-  for (;;) {
-    if (started.child.exitCode !== null) {
-      throw new Error(`${started.name} exited with ${started.child.exitCode}; see ${started.log}`);
-    }
-    try {
-      await fetch(url);
-      return;
-    } catch {
-      // not listening yet
-    }
-    if (Date.now() > deadline) {
-      throw new Error(`${started.name} was not ready within 600 s; see ${started.log}`);
-    }
-    await Bun.sleep(250);
-  }
-}
-
-async function stop(child: ChildProcess): Promise<void> {
-  const pid = child.pid;
-  if (pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
-  const exited = Promise.withResolvers<void>();
-  child.once("exit", () => exited.resolve());
-  process.kill(-pid, "SIGTERM");
-  const kill = setTimeout(() => process.kill(-pid, "SIGKILL"), 10_000);
-  await exited.promise;
-  clearTimeout(kill);
-}
-
 /** Prints the end of the Dispatch server's log, then has the server write every goroutine's stack
  *  to that log (Go's answer to SIGQUIT, which also ends the process) and names the file. */
-async function dumpGoroutines(dispatch: Started): Promise<void> {
+async function dumpGoroutines(dispatch: HarnessProcess): Promise<void> {
+  if (dispatch.log === undefined) return;
   const tail = readFileSync(dispatch.log, "utf8").split("\n").slice(-40).join("\n");
   console.error(`--- dispatch's last lines when the run stopped:\n${tail}`);
   const { child } = dispatch;
-  if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
+  if (child.exitCode !== null || child.signalCode !== null) return;
   process.kill(child.pid, "SIGQUIT");
-  await Promise.race([dispatch.logged, Bun.sleep(10_000)]);
+  await Promise.race([dispatch.drained, Bun.sleep(10_000)]);
   console.error(`--- dispatch's goroutines at that moment end ${relative(REPO, dispatch.log)}`);
 }
 
-/** Starts the harness, runs `body`, and stops every process it started. */
+/** Starts the harness, runs `body`, and stops every process it started. A port variable the
+ *  caller set (`DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`, `FAKE_GITHUB_PORT`, `FAKE_BROKER_PORT`,
+ *  `PLAIN_HTTP_PORT`) is used as given; unset, the OS chooses, so a docs run and an e2e run share a
+ *  machine without a port of their own, each with its own DATABASE_URL. */
 export async function withHarness<T>(body: (harness: Harness) => Promise<T>): Promise<T> {
   if (!process.env.DATABASE_URL) {
     throw new Error("DATABASE_URL must name a Postgres database this run may truncate and reseed.");
@@ -166,66 +89,61 @@ export async function withHarness<T>(body: (harness: Harness) => Promise<T>): Pr
       `${WEB_DIST} is missing: build the dashboard first (cd packages/dispatch && bun run build:web).`
     );
   }
-  const taken: string[] = [];
-  for (const [variable, port] of Object.entries(PORTS)) {
-    if (await portTaken(Number(port))) taken.push(`${port} (${variable})`);
-  }
-  if (taken.length > 0) {
-    throw new Error(
-      `The docs harness cannot start: ${taken.join(", ")} already in use. Stop whatever listens ` +
-        "there, or set those variables to free ports."
-    );
-  }
-  // `e2e/harness-ports.ts` reads these when the seeding modules are first imported. The docs show
-  // the credential feature on, against the fake broker this harness starts, whatever the shell's
-  // broker switch (`packages/dispatch/e2e/harness-broker.ts`) says; unset is that fake.
-  Object.assign(process.env, PORTS);
+  // The docs show the credential feature on, against the fake broker the harness starts, whatever
+  // the shell's broker switch (`packages/dispatch/e2e/harness-broker.ts`) says; unset is that fake.
+  // The e2e modules read the switch, and the ports, when they are first evaluated, so they are
+  // imported only once the environment holds what they must read.
   delete process.env.DISPATCH_E2E_AGENT_SECRETS_URL;
-  const baseURL = `http://127.0.0.1:${PORTS.DISPATCH_E2E_PORT}`;
-
-  const processes = [
-    start("fake-envoy", "bun", [join(E2E, "fake-envoy.ts")]),
-    start("fake-github", "bun", [join(E2E, "fake-github.ts")]),
-    start("fake-broker", "bun", [join(E2E, "fake-broker.ts")]),
-    start("dispatch", "bash", [join(E2E, "run-server.sh")]),
-  ];
-  const stopAll = () => Promise.all(processes.map((entry) => stop(entry.child)));
-  const onSignal = () => void stopAll().then(() => process.exit(130));
+  const { startHarness } = await import("../../../packages/dispatch/e2e/harness-start");
+  const interrupted = new AbortController();
+  const starting = startHarness({ logDir: join(WORK, "harness"), signal: interrupted.signal });
+  // A stop while the harness starts ends what has started; after, it ends the whole harness.
+  const onSignal = () => {
+    interrupted.abort();
+    void starting
+      .then(
+        (started) => started.stop(),
+        () => undefined
+      )
+      .then(() => process.exit(130));
+  };
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
-  const [envoy, github, broker, dispatch] = processes;
+  let started: E2eHarness | undefined;
   try {
-    await ready(`http://127.0.0.1:${PORTS.FAKE_ENVOY_PORT}/`, envoy);
-    await ready(`http://127.0.0.1:${PORTS.FAKE_GITHUB_PORT}/`, github);
-    await ready(`http://127.0.0.1:${PORTS.FAKE_BROKER_PORT}/`, broker);
-    await ready(`${baseURL}/healthz`, dispatch);
+    started = await starting;
+    Object.assign(process.env, started.env);
     const { resetDatabase } = await import("../../../packages/dispatch/e2e/seed");
     return await body({
-      baseURL,
+      baseURL: `http://127.0.0.1:${started.env.DISPATCH_E2E_PORT}`,
       reset: resetDatabase,
     });
   } catch (error) {
+    const processes = started?.processes ?? [];
+    const dispatch = processes.find((entry) => entry.listener.id === "dispatch");
     const hung = error instanceof HarnessHang;
-    if (hung) await dumpGoroutines(dispatch);
+    if (hung && dispatch !== undefined) await dumpGoroutines(dispatch);
     for (const entry of processes) {
-      if (hung && entry === dispatch) continue;
+      if ((hung && entry === dispatch) || entry.log === undefined) continue;
       if (entry.child.exitCode !== null && entry.child.exitCode !== 0) {
         const tail = readFileSync(entry.log, "utf8").split("\n").slice(-20).join("\n");
-        console.error(`--- ${entry.name} exited ${entry.child.exitCode}; last lines:\n${tail}`);
+        console.error(
+          `--- ${entry.listener.id} exited ${entry.child.exitCode}; last lines:\n${tail}`
+        );
       }
     }
     throw error;
   } finally {
     process.off("SIGINT", onSignal);
     process.off("SIGTERM", onSignal);
-    await stopAll();
+    await started?.stop();
   }
 }
 
-// The e2e suite's modules are imported when called, never at the top of a module:
-// `e2e/harness-ports.ts` reads the port variables when it is first evaluated, and `withHarness`
-// sets them only once it knows the ports are free. A seed reaches the suite's helpers through
-// these two.
+// The e2e suite's modules are imported when called, never at the top of a module: they read the
+// port variables when they are first evaluated, and `withHarness` sets them only once the
+// harness's listeners have reported their ports. A seed reaches the suite's helpers through these
+// two.
 
 /** The e2e suite's API client (`packages/dispatch/e2e/api.ts`): alice by her session cookie, or
  *  an agent by the harness's bearer. */
