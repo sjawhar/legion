@@ -782,14 +782,37 @@ func isAngleURLLink(node *Node, marks []Mark, escapePipes bool) bool {
 	return false
 }
 
+// escapeLinkDestination writes href as a link or image destination that both readers, which decode
+// a destination's backslash escapes, read back as href: a backslash before ASCII punctuation or
+// ending href, which would escape what follows it, is escaped, and so is a pipe in a table cell.
+// An href holding a space or a parenthesis is written between angle brackets, a `<` or `>` in it
+// escaped; any other is written bare, a `<` opening it escaped. Character references are written as
+// they are: Go keeps a link's as written, where the browser editor decodes them.
 func escapeLinkDestination(href string, escapePipes bool) string {
-	if escapePipes {
-		href = escapeTableLinkDestination(href)
+	angle := strings.ContainsAny(href, " ()")
+	if !angle && !strings.Contains(href, "\\") && !strings.HasPrefix(href, "<") && !(escapePipes && strings.Contains(href, "|")) {
+		return href
 	}
-	if strings.ContainsAny(href, " ()") {
-		return "<" + href + ">"
+	var written strings.Builder
+	written.Grow(len(href) + 4)
+	if angle {
+		written.WriteByte('<')
 	}
-	return href
+	for index := range len(href) {
+		char := href[index]
+		switch {
+		case char == '\\' && (index+1 == len(href) || isASCIIPunctuation(href[index+1])),
+			char == '|' && escapePipes,
+			char == '<' && (angle || index == 0),
+			char == '>' && angle:
+			written.WriteByte('\\')
+		}
+		written.WriteByte(char)
+	}
+	if angle {
+		written.WriteByte('>')
+	}
+	return written.String()
 }
 
 func titleSuffix(title string, escapePipes bool) string {
@@ -813,25 +836,6 @@ func escapeTableHTMLPipes(value string, escapePipes bool) string {
 		return value
 	}
 	return strings.ReplaceAll(value, "|", "&#124;")
-}
-
-func escapeTableLinkDestination(value string) string {
-	if !strings.ContainsAny(value, "\\|") {
-		return value
-	}
-	var rendered strings.Builder
-	rendered.Grow(len(value))
-	for index := range len(value) {
-		char := value[index]
-		if char == '\\' && index+1 < len(value) && isASCIIPunctuation(value[index+1]) {
-			rendered.WriteByte('\\')
-		}
-		if char == '|' {
-			rendered.WriteByte('\\')
-		}
-		rendered.WriteByte(char)
-	}
-	return rendered.String()
 }
 
 // escapeFootnoteLabel writes label so that the browser editor's parser, which decodes a label's
