@@ -5,7 +5,6 @@ import type {
   AutoRetryEndEvent,
   PiApi,
   SessionContext,
-  SessionSwitchEvent,
 } from "@legion/pi-shared/pi-types";
 
 /**
@@ -55,10 +54,17 @@ import type {
  * (`willContinue`): the continuation's loop reads it. The host can also drop a run with no
  * `agent_end` for extensions: a switch to a new or resumed session (`newSession`, ~10280-10282;
  * `switchSession`, ~11906-11907) and a manual or extension compaction (`session-maintenance.ts`
- * `compact`, ~1201-1202) disconnect from the agent before they abort it. Such a run ends at the
- * switch's `session_switch`, or at a `session_compact` outside an automatic compaction (from
- * `auto_compaction_start` to `auto_compaction_end`), which runs inside a live run; and any run
- * ends once the host is seen idle. The host emits the extension `agent_end` only at the end of
+ * `compact`, ~1201-1202) disconnect from the agent before they abort it. So a run also ends once
+ * the host is seen idle: by a card or a check, or at a `session_switch`, a `session_compact` or a
+ * typed input (the `input` event an RPC prompt, a terminal Enter and `sendUserInput` emit before
+ * they prompt: `rpc-mode.ts` ~1734-1735, `input-controller.ts` ~950, `send-user-input-handler.ts`
+ * ~90) that finds `isIdle` true. The abort before a switch or a manual compaction waits for the
+ * agent and resets the host's in-flight count (~10209-10227), so the host is idle at its event,
+ * and a prompt sent from idle is typed while the host is idle. An automatic compaction runs while
+ * the host is busy, between a run's steps (~2082-2093), in a prompt's setup (after ~8255) or in a
+ * run's post-run maintenance, which the prompt awaits (~3662, ~5168-5193), so it leaves the run
+ * going, whatever order its `session_compact` and `auto_compaction_end` reach this module in; an
+ * idle compaction finds the host idle. The host emits the extension `agent_end` only at the end of
  * the run's maintenance pass (~4467-4828, then `#settleAgentEnd`, ~5336-5362), after its
  * auto-compaction, a retry's backoff (awaited inside it) and the `session_stop` pass, so a card
  * that lands during that maintenance is the run's, and a fold under an earlier interrupt's latch
@@ -207,11 +213,9 @@ export class CardWake {
   /** Whether an interrupt the extension saw holds the wake back until the next run starts. */
   #interrupted = false;
   /** Whether a run is active as this extension sees it: from its `agent_start` to its `agent_end`,
-   *  or to the host dropping it unseen (`sessionSwitch`, `sessionCompact`) or being seen idle. A
-   *  host busy with none is setting a prompt up, or settling after one. */
+   *  or to the host being seen idle (a card, a check, `seenIdle`), which ends one the host dropped
+   *  unseen too. A host busy with none is setting a prompt up, or settling after one. */
   #runActive = false;
-  /** Automatic compactions started and not yet ended. */
-  #autoCompactions = 0;
   #startupPhase = true;
   /** Startup cards sent and not yet seen, with when each was sent. */
   readonly #unseenStartup = new Map<string, number>();
@@ -307,34 +311,16 @@ export class CardWake {
     }
   }
 
-  /** The host moved to a new or resumed session (`agent-session.ts` `newSession`, ~10280-10282;
-   *  `switchSession`, ~11906-11907), and before it emitted that it disconnected from the agent
-   *  and then aborted any run, whose `agent_end` so never reaches an extension. A fork (`fork`,
-   *  ~10494) does neither, and a run it finds goes on. */
-  sessionSwitch(event: SessionSwitchEvent): void {
-    if (event.reason === "new" || event.reason === "resume") this.#runActive = false;
-  }
-
-  /** An automatic compaction started. Each automatic path (`session-maintenance.ts`
-   *  `runAutoCompaction`, `#runExperimentalContextRollover`) emits its `session_compact` after
-   *  this and before its `auto_compaction_end`. A count rather than a flag: a compaction between
-   *  a run's steps hands its `auto_compaction_end` to extensions detached, which can reach this
-   *  module after the next compaction's start. */
-  autoCompactionStart(): void {
-    this.#autoCompactions += 1;
-  }
-
-  /** A compaction committed. Outside an automatic one it is a manual or an extension's
-   *  (`session-maintenance.ts` `compact`), which disconnected from the agent and then aborted any
-   *  run (~1201-1202), whose `agent_end` so never reaches an extension; a handoff, the other
-   *  manual one, is refused while a run streams. An automatic compaction runs inside a live run,
-   *  between its steps or in its post-run maintenance, and leaves it running. */
-  sessionCompact(): void {
-    if (this.#autoCompactions === 0) this.#runActive = false;
+  /** The host may be idle: at a `session_switch` (a switch to a new or resumed session aborted any
+   *  run unseen, `agent-session.ts` ~10280-10282, ~11906-11907), a `session_compact` (so did a
+   *  manual or an extension's compaction, `session-maintenance.ts` ~1201-1202) and a typed input.
+   *  If it is, no run is active. A busy host there runs a live run (a fork, an automatic
+   *  compaction), sets a prompt up or settles, which changes nothing. */
+  seenIdle(context: Pick<CardWakeContext, "isIdle">): void {
+    if (context.isIdle?.() === true) this.#runActive = false;
   }
 
   autoCompactionEnd(event: AutoCompactionEndEvent): void {
-    if (this.#autoCompactions > 0) this.#autoCompactions -= 1;
     if (event.aborted) this.#interrupted = true;
   }
 

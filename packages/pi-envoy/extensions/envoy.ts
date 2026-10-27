@@ -971,7 +971,10 @@ export default function envoyExtension(pi: PiApi): void {
   // A typed input's pictures, until the host's message carrying its Dispatch id starts
   // (`src/typed-pictures.ts`).
   const typedPictures = new TypedPictures();
-  pi.on("input", async (event) => {
+  pi.on("input", async (event, context) => {
+    // An input that finds the host idle is a prompt sent from idle: any run, one the host dropped
+    // with no `agent_end` included, is over (`../src/card-wake`).
+    cardWake.seenIdle(context);
     if (event.source !== "extension") return undefined;
     const images = typedPictures.handOver(event.text);
     return images === undefined ? undefined : { images: [...(event.images ?? []), ...images] };
@@ -1602,8 +1605,7 @@ export default function envoyExtension(pi: PiApi): void {
   });
   // The host asks whether any extension handles `session_before_compact`, which turns its
   // background compaction off, but never these two: handling them changes nothing it does.
-  pi.on("auto_compaction_start", async () => cardWake.autoCompactionStart());
-  pi.on("session_compact", async () => cardWake.sessionCompact());
+  pi.on("session_compact", async (_event, context) => cardWake.seenIdle(context));
   pi.on("auto_compaction_end", async (event) => cardWake.autoCompactionEnd(event));
   pi.on("auto_retry_end", async (event) => cardWake.autoRetryEnd(event));
 
@@ -2749,7 +2751,7 @@ export default function envoyExtension(pi: PiApi): void {
     await rebind(reason, context);
   };
   pi.on("session_switch", (event, context) => {
-    cardWake.sessionSwitch(event);
+    cardWake.seenIdle(context);
     return rebindDispatch(event.reason, context);
   });
   pi.on("session_branch", (_event, context) => rebindDispatch(undefined, context));

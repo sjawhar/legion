@@ -277,9 +277,6 @@ export interface PiEventContract {
     readonly event: RetryFallbackAppliedEvent;
     readonly result: undefined;
   };
-  /** An automatic compaction started, between a run's steps, after its last, before a prompt or
-   *  on an idle host; it carries nothing an extension reads here. */
-  readonly auto_compaction_start: { readonly event: unknown; readonly result: undefined };
   /** A compaction committed, automatic, manual or an extension's; it carries nothing an extension
    *  reads here. */
   readonly session_compact: { readonly event: unknown; readonly result: undefined };

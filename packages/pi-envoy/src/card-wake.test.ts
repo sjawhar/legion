@@ -140,6 +140,14 @@ function harness(
     /** A run starts, as the host emits `agent_start`. */
     run: () => wake.agentStart(),
     end: () => wake.agentEnd(context),
+    /** A `session_switch`, `session_compact` or `input` event, which finds the host idle or busy
+     *  as told and leaves it as it was. */
+    event: (idleThere: boolean) => {
+      const was = idle;
+      idle = idleThere;
+      wake.seenIdle(context);
+      idle = was;
+    },
   };
 }
 
@@ -636,17 +644,23 @@ describe("a card sent while the host sets up a prompt", () => {
   // A switch to a new or resumed session (`agent-session.ts` `newSession` ~10280-10282,
   // `switchSession` ~11906-11907) and a manual or extension compaction (`session-maintenance.ts`
   // ~1201-1202) disconnect the host from the agent before they abort a running run, so that run's
-  // `agent_end` never reaches an extension.
-  for (const [name, drop] of [
-    ["a switch to a new session", (wake) => wake.sessionSwitch({ reason: "new" })],
-    ["a switch to a resumed session", (wake) => wake.sessionSwitch({ reason: "resume" })],
-    ["a manual compaction", (wake) => wake.sessionCompact()],
-  ] as const satisfies readonly (readonly [string, (wake: CardWake) => void])[]) {
-    test(`gets no wake when sent after ${name} dropped the run`, async () => {
+  // `agent_end` never reaches an extension, and the abort leaves the host idle at the
+  // `session_switch` or `session_compact` after it (~10209-10227). A run the host drops with
+  // neither (a switch or a compaction that fails after its abort) is over by the next prompt sent
+  // from idle, whose `input` event finds the host idle. The extension tells the wake of each such
+  // event (`seenIdle`), and a host idle there has no run, whatever the switch's reason.
+  for (const name of [
+    "a switch to a new session",
+    "a switch to a resumed session",
+    "a fork",
+    "a manual compaction",
+    "a prompt typed after a run the host dropped unseen",
+  ]) {
+    test(`gets no wake when sent after ${name} found the host idle`, async () => {
       const host = harness();
       await host.endStartup();
       host.run();
-      drop(host.wake);
+      host.event(true);
       const card = host.card("after-drop");
       host.fold(card);
       await host.fire();
@@ -686,37 +700,37 @@ describe("a card sent while the host sets up a prompt", () => {
   });
 
   // A fork neither disconnects the agent nor aborts the run (`agent-session.ts` `fork`, ~10494),
-  // and an automatic compaction runs inside a live run (between steps, or in its post-run
-  // maintenance), emitting `session_compact` between its `auto_compaction_start` and
-  // `auto_compaction_end`: the run goes on, and its cards keep their wake.
+  // an automatic compaction runs while the host is busy with the run (between its steps, or in
+  // its post-run maintenance), and a steer typed into a running turn finds it busy too: the run
+  // goes on, and its cards keep their wake. A compaction between a run's steps hands its
+  // `session_compact` and its `auto_compaction_end` to extensions detached, so the end can reach
+  // the wake first.
   for (const [name, during] of [
-    ["a fork", (wake) => wake.sessionSwitch({ reason: "fork" })],
+    ["a fork", (event) => event(false)],
+    ["a steer typed into the run", (event) => event(false)],
     [
       "an automatic compaction",
-      (wake) => {
-        wake.autoCompactionStart();
-        wake.sessionCompact();
+      (event, wake) => {
+        event(false);
         wake.autoCompactionEnd({ aborted: false });
       },
     ],
-    // A mid-run compaction's `auto_compaction_end` goes to extensions detached, so it can reach
-    // this module after the next compaction's start.
     [
-      "an automatic compaction that started before the last one's end",
-      (wake) => {
-        wake.autoCompactionStart();
-        wake.autoCompactionStart();
+      "an automatic compaction whose end arrives first",
+      (event, wake) => {
         wake.autoCompactionEnd({ aborted: false });
-        wake.sessionCompact();
-        wake.autoCompactionEnd({ aborted: false });
+        event(false);
       },
     ],
-  ] as const satisfies readonly (readonly [string, (wake: CardWake) => void])[]) {
+  ] as const satisfies readonly (readonly [
+    string,
+    (event: (idle: boolean) => void, wake: CardWake) => void,
+  ])[]) {
     test(`leaves a card sent in a run after ${name} its wake`, async () => {
       const host = harness();
       await host.endStartup();
       host.run();
-      during(host.wake);
+      during(host.event, host.wake);
       const card = host.card("after-run-goes-on");
       host.message(host.reply());
       host.fold(card);

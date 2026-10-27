@@ -524,10 +524,11 @@ jobs:
     if: needs.changes.outputs.pi_envoy == 'true'
     runs-on: ubuntu-24.04
     # The NATS server extensions/card-delivery-omp.test.ts delivers Envoy cards and a person's Send
-    # through (LEGION_TEST_NATS_URL on the test step), on the image the envoy-client job pulls.
+    # through (LEGION_TEST_NATS_URL on the test step): the 2.10 image the envoy-client job pulls,
+    # pinned by digest as this file's other service images are.
     services:
       nats:
-        image: mirror.gcr.io/library/nats:2.10
+        image: mirror.gcr.io/library/nats:2.10@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
         ports: ["4222:4222"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

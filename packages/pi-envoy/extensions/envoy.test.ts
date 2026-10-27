@@ -9488,71 +9488,100 @@ describe("envoy OMP extension", () => {
   // tested) hears of runs, interrupts and the session's end only through this extension's own
   // handlers. Each row starts a run, sends one card while the host is busy, folds it (its
   // `message_end` with the host idle) and fires the row's host events, the send and the fold each
-  // before or after them; the check the fold arms waits on the host's timer until all of that is
+  // before or after them; an event the row marks "idle" finds the host idle, and any other finds
+  // it busy until the fold. The check the fold arms waits on the host's timer until all of that is
   // through, and the row says whether a wake follows.
   describe("the wake for a folded card, through the extension's handlers", () => {
     const busyCard = { deliverAs: "aside", triggerTurn: true };
     const wake = { deliverAs: "nextTurn", triggerTurn: true };
-    for (const [index, [name, events, sendAt, foldAt, wakes]] of (
+    type HostEvent = readonly [event: string, payload: unknown, host?: "idle"];
+    type FoldRow = readonly [
+      name: string,
+      events: readonly HostEvent[],
+      sendAt: "before" | "after",
+      foldAt: "before" | "after",
+      wakes: boolean,
+    ];
+    const rows: readonly FoldRow[] = [
+      ["no host event", [], "before", "before", true],
       [
-        ["no host event", [], "before", "before", true],
+        "an interrupted automatic compaction",
+        [["auto_compaction_end", { aborted: true }]],
+        "before",
+        "after",
+        false,
+      ],
+      [
+        "a retry an interrupt cancelled",
+        [["auto_retry_end", { success: false, finalError: "Retry cancelled" }]],
+        "before",
+        "after",
+        false,
+      ],
+      [
+        "an announced session switch",
+        [["session_before_switch", { reason: "resume" }]],
+        "before",
+        "before",
+        false,
+      ],
+      ["a session switch", [["session_switch", { reason: "resume" }]], "before", "before", false],
+      ["shutdown", [["session_shutdown", {}]], "before", "before", false],
+      // The host's dispose flushes the asides it still holds after shutdown.
+      ["shutdown", [["session_shutdown", {}]], "before", "after", false],
+      // The run is over, and a card sent while the host settles or sets the next prompt up gets
+      // none.
+      ["the run's end", [["agent_end", { messages: [] }]], "after", "after", false],
+      // A switch to a new session and a manual compaction abort the run with the agent
+      // disconnected, so no agent_end comes; the abort leaves the host idle at the event.
+      [
+        "a switch to a new session",
+        [["session_switch", { reason: "new" }, "idle"]],
+        "after",
+        "after",
+        false,
+      ],
+      ["a manual compaction", [["session_compact", {}, "idle"]], "after", "after", false],
+      // A prompt sent from idle: whatever run the host dropped unseen is over.
+      [
+        "a typed input on an idle host",
+        [["input", { text: "next", source: "rpc" }, "idle"]],
+        "after",
+        "after",
+        false,
+      ],
+      // These find the host busy with the run, which goes on, in whatever order an automatic
+      // compaction's events arrive.
+      ["a fork", [["session_switch", { reason: "fork" }]], "after", "after", true],
+      [
+        "an automatic compaction",
         [
-          "an interrupted automatic compaction",
-          [["auto_compaction_end", { aborted: true }]],
-          "before",
-          "after",
-          false,
+          ["session_compact", {}],
+          ["auto_compaction_end", { aborted: false }],
         ],
+        "after",
+        "after",
+        true,
+      ],
+      [
+        "an automatic compaction whose end arrives first",
         [
-          "a retry an interrupt cancelled",
-          [["auto_retry_end", { success: false, finalError: "Retry cancelled" }]],
-          "before",
-          "after",
-          false,
+          ["auto_compaction_end", { aborted: false }],
+          ["session_compact", {}],
         ],
-        [
-          "an announced session switch",
-          [["session_before_switch", { reason: "resume" }]],
-          "before",
-          "before",
-          false,
-        ],
-        ["a session switch", [["session_switch", { reason: "resume" }]], "before", "before", false],
-        ["shutdown", [["session_shutdown", {}]], "before", "before", false],
-        // The host's dispose flushes the asides it still holds after shutdown.
-        ["shutdown", [["session_shutdown", {}]], "before", "after", false],
-        // A switch to a new session aborts the run with the agent disconnected, so no agent_end
-        // comes, and a card sent while the next prompt is set up gets none.
-        [
-          "a switch to a new session",
-          [["session_switch", { reason: "new" }]],
-          "after",
-          "after",
-          false,
-        ],
-        ["a fork", [["session_switch", { reason: "fork" }]], "after", "after", true],
-        // A manual compaction aborts the run with the agent disconnected, as that switch does.
-        ["a manual compaction", [["session_compact", {}]], "after", "after", false],
-        // An automatic compaction runs inside the run, which goes on.
-        [
-          "an automatic compaction",
-          [
-            ["auto_compaction_start", {}],
-            ["session_compact", {}],
-            ["auto_compaction_end", { aborted: false }],
-          ],
-          "after",
-          "after",
-          true,
-        ],
-      ] as const satisfies readonly (readonly [
-        string,
-        readonly (readonly [string, unknown])[],
-        "before" | "after",
-        "before" | "after",
-        boolean,
-      ])[]
-    ).entries()) {
+        "after",
+        "after",
+        true,
+      ],
+      [
+        "a typed input on a busy host",
+        [["input", { text: "steer", source: "rpc" }]],
+        "after",
+        "after",
+        true,
+      ],
+    ];
+    for (const [index, [name, events, sendAt, foldAt, wakes]] of rows.entries()) {
       test(`${wakes ? "wakes" : "sends no wake"} for a card sent ${sendAt} and folded ${foldAt} ${name}`, async () => {
         let idle = false;
         const { context, delivered, fixture } = await bootDirectSession(`folded-card-${index}`, {
@@ -9585,8 +9614,12 @@ describe("envoy OMP extension", () => {
         await fixture.handlers.get("agent_start")?.({}, context);
         if (sendAt === "before") await send();
         if (foldAt === "before") await fold();
-        for (const [event, payload] of events)
+        for (const [event, payload, host] of events) {
+          const was = idle;
+          if (host === "idle") idle = true;
           await fixture.handlers.get(event)?.(payload, context);
+          idle = was;
+        }
         if (sendAt === "after") await send();
         if (foldAt === "after") await fold();
         for (const timer of timers.splice(0)) await timer();
