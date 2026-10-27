@@ -47,7 +47,7 @@ not reach them:
 | `src/read-only-directives.ts` | `remarkReadOnlyDirectives`, the headless engine's read-only stand-in for `remarkTypedBlocks`, built on `remarkDecideTypedBlocks`: a container directive the block schema refuses (or any, with no schema) is drawn in place, and the paragraph-line directive refusals are not applied, so a body only shown to a reader formats around a block Dispatch does not know instead of falling back whole to its raw source (INFRA-529). An accepted typed block whose content would break its content rule is drawn the same way; it is also biome-checked |
 | `src/tests/harness.ts` | The `bun test` registration the copied suites call instead of their own `test()` tally |
 
-Seventeen kinds of edit are allowed in the copied files, and no others: the import specifiers of
+Eighteen kinds of edit are allowed in the copied files, and no others: the import specifiers of
 upstream modules; `bun test` registration in the suites (`src/tests/harness.ts` replaces each
 file's own `test()` tally and its `process.exit` tail); `src/tests/headless-no-dom.test.ts`,
 whose entry named the fork's built `dist/headless.js` and now names `../lib-headless.js` — its
@@ -82,16 +82,19 @@ or stale range or a read-only view, with `src/lib.ts` exposing `commentOnSelecti
 for Dispatch's `Ctrl+Alt+M` (LEGION-680); `src/block-schema.ts` exporting `typedBlockRefusal`,
 the refusal `visit` throws, so the read-only transform decides with the same rule, and
 `src/lib-headless.ts`'s `readOnly` option installing `remarkReadOnlyDirectives` from
-`./read-only-directives` in place of `remarkTypedBlocks` (INFRA-529); `src/block-schema.ts`'s
+`./read-only-directives` in place of `remarkTypedBlocks` (INFRA-529); `src/lib-headless.ts`
+taking `renderBlock` and passing it to `blockSchemaPlugins`, as `src/lib.ts` does, and
+re-exporting `HostBlockRenderer`, with the case in `src/tests/block-schema.test.ts` that a host
+drawing keeps the block's copy attributes (INFRA-526); `src/block-schema.ts`'s
 `remarkTypedBlocks` reading its source through `markdownSource` from `./typed-block-drawing`,
 `src/lib-headless.ts`'s default branch installing `remarkUnfitTypedBlocks` after
 `remarkTypedBlocks`, and `src/lib.ts` installing `unfitTypedBlocksRemarkPlugin` after the mark
-plugins (INFRA-565); and annotations, casts and
-assertions that make a file type-check, each of which erases before runtime (below).
+plugins (INFRA-565); and annotations, casts and assertions that make a file type-check, each of
+which erases before runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
 24a5fc94 root:src/<file>`; every file in the copied-files table has that counterpart, and the
-only lines that differ should be the seventeen kinds.
+only lines that differ should be the eighteen kinds.
 
 `scripts/`, `tests/` and `upstream/` are legion's own. `scripts/` and `tests/` are linted and
 type-checked like any other package's; `upstream/` is generated, and Biome is off over it the

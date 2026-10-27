@@ -63,7 +63,7 @@ func recordCheck(s *Store, owner, repo, number, sha, checkName, checkRunID, url,
 		return err
 	}
 	return within(func() error {
-		return s.Record(contracts.CIObservation{
+		return s.Record(context.Background(), contracts.CIObservation{
 			Owner:      owner,
 			Repo:       repo,
 			Number:     number,
@@ -112,7 +112,7 @@ func maxCheckRunID(runs []CheckRunRef) uint64 {
 
 func recordSuite(s *Store, owner, repo, number, sha, suiteID, status, conclusion, appID, observedAt string) error {
 	return within(func() error {
-		return s.RecordSuite(contracts.CIObservation{
+		return s.RecordSuite(context.Background(), contracts.CIObservation{
 			Owner:      owner,
 			Repo:       repo,
 			Number:     number,
