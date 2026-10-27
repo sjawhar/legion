@@ -340,6 +340,17 @@ with or without brackets (`::1` or `[::1]`). A bad `DISPATCH_PORT` refuses the
 boot before anything connects, and an address the server cannot bind ends the
 process with exit status 1.
 
+A test harness that holds the port instead hands the server a listening TCP
+socket it opened on port 0, so no other program can take the port the kernel
+chose before the server serves on it: `DISPATCH_LISTEN_FD` is the descriptor
+number the server inherits it as. The server then binds nothing. It serves on
+that socket, and `DISPATCH_LISTEN_HOST` and `DISPATCH_PORT`, when set and not
+empty, must name the socket's address (`DISPATCH_PORT=0` never does). A
+descriptor that is not a listening TCP socket, or a setting that names another
+address, refuses the boot, and nothing is bound in its place. `DISPATCH_SERVER_URL`
+is not derived from the socket. Either way the server logs the address it serves
+on once it serves, as `dispatch: listening addr=<host:port>`.
+
 ### Profiling
 
 Set `DISPATCH_PPROF_PORT` to a port to serve the Go profiler (`net/http/pprof`) on
@@ -866,6 +877,50 @@ is written. Its own migration, so its transaction holds `comments` alone: the dr
 `ACCESS EXCLUSIVE`, and every read and write of a comment waits while the one index builds. It
 refuses and rewrites no row; its census answers `0`.
 
+Migration `0130_comments_written_version` adds `comments.written_version`, the version of its
+document current when a comment was written on it without an anchor (the comment's graph node's
+`parent_version`, [Reference graph](#reference-graph)), and a `before insert` trigger that sets
+it to the highest `artifact_versions.number` of the document on every comment with `artifact_id`
+set and `anchor` null whose insert names none, so the earlier release's inserts during the roll
+record it too. The column is nullable with no default, a catalog change that rewrites and scans no
+row; its own migration, so its transaction holds `comments` `ACCESS EXCLUSIVE` alone, for
+milliseconds. It refuses and rewrites no row; its census answers `0`.
+
+Migration `0131_asks_written_version` does the same for `asks`: its trigger sets an approval
+ask's `written_version` to `approval.version`, the version the request names when it opens, which
+stays while the row's `approval.version` moves with later versions, and that of an ask with
+`artifact_id` set, `anchor` null and `block_artifact_id` null to the highest version of its
+document. Its own migration, so its transaction holds `asks` `ACCESS EXCLUSIVE` alone, for
+milliseconds. It refuses and rewrites no row; its census answers `0`.
+
+Migration `0132_component_facts` creates `component_facts`, when each component was made and last
+changed and the digest of its own fields at its last recorded change, keyed `(project_key, id)`
+as `components` is, which every import keeps from then on (`packages/envoy/AGENTS.md`,
+"References form one graph"). Its foreign key to `projects` cascades, and it has none to
+`components`, whose rows every import deletes and inserts again. Its one insert seeds a row with
+all three null for each component already stored: when those were made or last changed was never
+recorded. It reads `components` under `ACCESS SHARE`, and the foreign key takes
+`SHARE ROW EXCLUSIVE` on `projects` for the catalog change. It refuses and rewrites no existing
+row; its census answers `0`.
+
+Migration `0133_comments_written_version_backfill` fills `written_version` on the comments with
+`artifact_id` set and `anchor` null stored before `0130`'s trigger: each takes the highest version
+of its document created at or before it, the only record those rows have, so a comment written
+while a version's transaction was still open can name that version. A comment the trigger
+recorded keeps its value, one on a document with no version that old keeps null, and no update
+trigger fires. It takes `comments` `EXCLUSIVE` before it writes a row, as `0089` takes `issues`,
+so no write that locks two of its rows in another order deadlocks with it: every read goes on,
+and every comment write waits until it commits. Its census answers `0`: it fills a column only
+this release reads and changes no value any reader had, and it cannot name the column, which does
+not exist when the census is taken.
+
+Migration `0134_asks_written_version_backfill` does the same for `asks`, holding `asks`
+`EXCLUSIVE`: an approval ask takes `approval.version` of its `ask.opened` event (the type list of
+`events_ask_payload_id`, `0030`, lets the lookup read that index), the version the request named
+when it opened, and keeps null without one; another ask with `artifact_id` set, `anchor` null and
+`block_artifact_id` null takes the highest version of its document created at or before it, as
+`0133` reads a comment's. Its census answers `0` for the same reasons.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
@@ -1108,6 +1163,23 @@ names the same artifact; a session id holding a `/`, `?`, `#` or whitespace name
 `graph_edges` has no structural edge for such a file (no `attached_to`, since it belongs to no
 issue): it appears in the graph through the mentions that cite it.
 
+Every node the graph reads carries six facts, whatever its kind: `made_by` and `made_at` (who made
+it and when), `changed_by` and `changed_at` (who last changed its own text or fields and when, its
+maker while nothing has changed it since), `parent` (`{kind, id, ref?}`, the node it belongs to,
+`id` that node's own id) and `parent_version` (the version of that parent it belongs to: for a
+block its changed version; for an ask or comment written on a document the version its anchor
+names, for a block ask the version that first held its block, for an approval request the version
+it named when it opened, else the version current when it was written). A fact Dispatch never
+recorded is `[]` for an actor list and `null` otherwise: a session has none, a component's makers
+are never recorded and its times only from this release on, and a block's maker, and a block
+ask's version, are known only when the block is in the document's first version or Dispatch
+indexed the version before the one that first held it (`packages/envoy/AGENTS.md`, "References
+form one graph", gives each kind's sources and what counts as a change). Migrations
+`0130`-`0134` (Database migrations above) add what the facts read: the version current when an
+unanchored comment or ask is written on a document, recorded at insert and filled for the rows
+already stored, and `component_facts`, which every import keeps. `dispatch read` prints the facts
+of the node it reads on a `Node:` line, before `Referenced by:`.
+
 ## Search
 
 Migration 0010 added stored generated `search` columns. Migrations `0057`–`0061` made them
@@ -1316,8 +1388,8 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/search?q=&project=&limit=&offset=` | GET | cookie, trusted header, or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; each kind ranked on its own and merged by reciprocal rank fusion (above), with `<mark>` snippets and SPA `href`s. One page `{results, total, reachable, limit, offset, took_ms}`: `limit` 1–50 (default 20), `offset` 0 or more (default 0), `total` every match, `reachable` the hits the pages can return (each kind's best 100). An under-two-character query returns `400 INVALID_QUERY`; a stop-word-only query returns `200` with no results; `400 CAP_EXCEEDED` over 1,000 characters (`contracts.SearchQueryMax`, UTF-16 units after trimming), since the query rides in the URL; `400 INVALID_PROJECT` for a project that is not a project key (none searches every project); `400 INVALID_LIMIT`; `400 INVALID_OFFSET`. Keyword search finds a text whose search vector would pass Postgres's limit on one vector by the words in its opening part only ([Search](#search)). |
 | `/api/v1/search/coverage` | GET | cookie, trusted header, or bearer | Meaning search's coverage, counted in one statement ([Search](#search)): `{identity, place, model, total, kinds}`, the configured embedder's identity, its place (`bedrock` or `azure`) and its model, all three null with no embedder; then, in `total` and for each kind in `kinds` (`issue`, `document`, `comment`, `ask`, `message`), `items` (the searchable ones, a text with nothing to embed left out), `current` (embedded at the item's current text by that identity), `failed` (dead and not current), `lacking` (the rest) and `oldest_lacking_seconds`, how long the longest-waiting lacking item has waited (null when none lacks). With no embedder nothing is current. |
 | `/api/v1/issues/{key}/references` | GET | cookie, trusted header, or bearer | Read the issue's eight-hop artifact reference closure; a reference to a block reaches the block's document while a current version holds the block. An `If-None-Match` value equal to the response ETag returns `304`. |
-| `/api/v1/references?to=\|from=&kind=&since=` | GET | cookie, trusted header, or bearer | Edges of one node in the reference graph, newest first and cross-project: exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference, read whatever its length (`text.ParseRef`); `kind` filters a csv of edge kinds; `since=<events.id>` keeps mentions introduced after it (structural edges excluded). A `since` read stops at the event log's safe horizon, and first waits up to 1 s for the horizon to pass every event committed before the read, so it answers every mention committed before it, the caller's own included; when an open transaction holds the horizon back past that wait, it answers the mentions at or below the horizon and a later read the rest. Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`. A mention a block of a document holds is listed from that block (`node.kind` `block`, `node.document` its document); a document's own read also lists the edges at its blocks, each naming the block as `block`, and leaves out their `part_of` edges unless `kind` names `part_of`. A block reference (`#b-<id>`) names a `block` node carrying its whole current `text`; pinned to a version (`#b-<id>@v<N>`) it also carries `pin` (`version`, `ref`, the block's `text` at that version, `state` `unchanged`, `changed` or `removed`, and `removed_version`), and a removed block answers no edges. `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`; `404` for a node that does not exist, a block no current version holds (unpinned) or whose id is past 256 bytes (no node), or a pinned version the document lacks, has no record of the blocks of, or did not hold the block at. |
-| `/api/v1/block-links?from=&to=` | GET | cookie, trusted header, or bearer | The links from blocks of the document `from` names to blocks of the document `to` names (an issue's spec or document, or a project's document; one document may be both), each reference read whatever its length: `{from, to, links}`, each link with its `kind`, both block nodes, and the `created_at` and `created_version` at which the source block first held it, newest first. A link is listed only while both blocks are current blocks of their documents. `400 INVALID_REFERENCE` when either is not a document reference; `404 NOT_FOUND` for a document that does not exist. |
+A `since` read stops at the event log's safe horizon, and first waits up to 1 s for the horizon to pass every event committed before the read, so it answers every mention committed before it, the caller's own included; when an open transaction holds the horizon back past that wait, it answers the mentions at or below the horizon and a later read the rest. | `/api/v1/references?to=\|from=&kind=&since=` | GET | cookie, trusted header, or bearer | Edges of one node in the reference graph, newest first and cross-project: exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference, read whatever its length (`text.ParseRef`); `kind` filters a csv of edge kinds; `since=<events.id>` keeps mentions introduced after it (structural edges excluded). The answer is `{node, edges}`, the node read and its edges. Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`. The node read, each edge's `node` and each edge's `block` carry the six facts of every node, `made_by`, `made_at`, `changed_by`, `changed_at`, `parent` and `parent_version` ([Reference graph](#reference-graph)). A mention a block of a document holds is listed from that block (`node.kind` `block`, `node.document` its document); a document's own read also lists the edges at its blocks, each naming the block as `block`, and leaves out their `part_of` edges unless `kind` names `part_of`. A block reference (`#b-<id>`) names a `block` node carrying its whole current `text`; pinned to a version (`#b-<id>@v<N>`) it also carries `pin` (`version`, `ref`, the block's `text` at that version, `state` `unchanged`, `changed` or `removed`, and `removed_version`), and a removed block answers no edges. `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`; `404` for a node that does not exist, a block no current version holds (unpinned) or whose id is past 256 bytes (no node), or a pinned version the document lacks, has no record of the blocks of, or did not hold the block at. |
+| `/api/v1/block-links?from=&to=` | GET | cookie, trusted header, or bearer | The links from blocks of the document `from` names to blocks of the document `to` names (an issue's spec or document, or a project's document; one document may be both), each reference read whatever its length: `{from, to, links}`, each link with its `kind`, both block nodes, and the `created_at` and `created_version` at which the source block first held it, newest first; `from`, `to` and every link's two blocks carry the six facts of every node ([Reference graph](#reference-graph)). A link is listed only while both blocks are current blocks of their documents. `400 INVALID_REFERENCE` when either is not a document reference; `404 NOT_FOUND` for a document that does not exist. |
 | `/api/v1/issues` | POST | cookie, trusted header, or bearer | Create an issue and its primary document. Omitting or leaving `spec` blank gives an empty primary document at version 1. `repo` (`owner/name`) is the issue's own repository and must be mapped to its project: `400 INVALID_ISSUE` when it is not `owner/name`, `400 REPO_NOT_MAPPED` when it is not mapped. A title over 1,000 characters (`contracts.IssueTitleMax`, UTF-16 units after trimming) is `400 CAP_EXCEEDED` before the duplicate check. Refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. A spec whose ask block breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`, and a spec whose markdown makes more than 65,536 elements (weighed as Element weights below lists) is `413 CAP_EXCEEDED`, naming the line that passes the limit; so is one whose markdown as stored (what `.../text` answers) would be longer than 1 MiB or make more than 65,536 elements. |
 | `/api/v1/issues/{key}` | PATCH | cookie, trusted header, or bearer | Update an issue's `title`, `status`, `priority`, `labels` (or `labels_add`, which adds to the labels the issue holds when the write commits; not with `labels`), `route`, `external_links`, `parent`, `rank`, `assignee`, `components` or `repo` (`null` clears it); `AGENTS.md` gives each field's rules. A title is trimmed, and one over 1,000 characters is `400 CAP_EXCEEDED`, as on creation. `expected_sequence` makes the write conditional: `409 ISSUE_CHANGED` when the issue's last event is no longer that sequence. |
 | `/api/v1/issues/{key}/asks` | POST | cookie, trusted header, or bearer | Create an optionally anchored ask. An anchor is exactly `{artifact, quote, occurrence?}` for a server-written quote mark or `{artifact, mark_id}` for a mark already written by a browser. A quote mark carries the ask's id and who asked, which no rendering shows and every load of the document builds: the marks a document's comments, suggestions and asks hold on its text carry at most 1 MiB of ids and authors, and a quote anchor that would leave them past it and carrying more is `413 CAP_EXCEEDED`, naming the bound and both sizes. |

@@ -2,9 +2,12 @@ package architecture
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -433,8 +436,9 @@ func heldElsewhere(ctx context.Context, tx pgx.Tx, source model.ArchitectureSour
 }
 
 // project writes the snapshot, replaces the source's own components and their
-// dependency edges, and updates the source row — one transaction, so a reader
-// never sees a half-projected model. Every other source's components stay.
+// dependency edges, records when each was made and last changed, and updates
+// the source row — one transaction, so a reader never sees a half-projected
+// model. Every other source's components stay.
 func (i *Importer) project(
 	ctx context.Context,
 	source model.ArchitectureSource,
@@ -524,6 +528,9 @@ func (i *Importer) project(
 	}); err != nil {
 		return model.ArchitectureSource{}, err
 	}
+	if err := recordComponentFacts(ctx, tx, source.Project, parsed); err != nil {
+		return model.ArchitectureSource{}, err
+	}
 
 	updated, err := ScanSource(tx.QueryRow(ctx, `
 		update architecture_sources
@@ -560,6 +567,70 @@ func (i *Importer) project(
 		i.events.Publish(event)
 	}
 	return updated, nil
+}
+
+// recordComponentFacts records, in the import's transaction, when each component of parsed was
+// made and last changed (component_facts), judged by its digest (componentDigest). A component with
+// no row is made now. A row with a null digest is a component stored before its times were
+// recorded: it gains the digest and keeps its unrecorded times. A row whose digest differs is
+// changed now. A row with the same digest stays as it is. Then every row of the project whose
+// component no source projects any more is deleted (DeleteOrphanComponentFacts), so a component
+// retired and imported again later is made again.
+func recordComponentFacts(ctx context.Context, tx pgx.Tx, project string, parsed Model) error {
+	facts := &pgx.Batch{}
+	for _, component := range parsed.Components {
+		facts.Queue(`
+			insert into component_facts (project_key, id, made_at, changed_at, digest)
+			values ($1, $2, now(), now(), $3)
+			on conflict (project_key, id) do update
+			set digest = excluded.digest,
+			    changed_at = case when component_facts.digest is null then component_facts.changed_at else excluded.changed_at end
+			where component_facts.digest is distinct from excluded.digest
+		`, project, component.ID, componentDigest(component))
+	}
+	if err := execBatch(ctx, tx, facts, func(index int) string {
+		return "record the facts of component " + parsed.Components[index].ID
+	}); err != nil {
+		return err
+	}
+	return DeleteOrphanComponentFacts(ctx, tx, project)
+}
+
+// DeleteOrphanComponentFacts deletes every component_facts row of project whose component no source
+// of the project projects any more. The importer runs it after replacing a source's components, and
+// the source delete route after the source's components went with it.
+func DeleteOrphanComponentFacts(ctx context.Context, tx pgx.Tx, project string) error {
+	if _, err := tx.Exec(ctx, `
+		delete from component_facts f
+		where f.project_key = $1
+		  and not exists (select 1 from components c where c.project_key = f.project_key and c.id = f.id)
+	`, project); err != nil {
+		return fmt.Errorf("delete the facts of retired components: %w", err)
+	}
+	return nil
+}
+
+// componentDigest is the hex SHA-256 of a canonical JSON of the component's own fields: title,
+// prose, parent, external, paths in the model's order, and depends_on sorted. An absent list and
+// an empty one digest alike.
+func componentDigest(component Component) string {
+	paths := component.Paths
+	if paths == nil {
+		paths = []string{}
+	}
+	dependsOn := append([]string{}, component.DependsOn...)
+	slices.Sort(dependsOn)
+	// Marshal cannot fail on strings, a bool and string slices.
+	encoded, _ := json.Marshal(struct {
+		Title     string   `json:"title"`
+		Prose     string   `json:"prose"`
+		Parent    string   `json:"parent"`
+		External  bool     `json:"external"`
+		Paths     []string `json:"paths"`
+		DependsOn []string `json:"depends_on"`
+	}{component.Title, component.Prose, component.Parent, component.External, paths, dependsOn})
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:])
 }
 
 // execBatch sends the queued statements in one round-trip and reads each result in queue

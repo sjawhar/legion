@@ -105,7 +105,8 @@ const (
 	busyBackoffFirst = 250 * time.Millisecond
 )
 
-// overrides are the parts of a daemon a test replaces; the zero value is the real daemon.
+// overrides are the parts of a daemon a test replaces, and the listener `legion start` inherited;
+// the zero value is the real daemon binding its own address.
 type overrides struct {
 	// runtime builds the runtime over the worker stream in place of the configured one; nil is the
 	// configured runtime.
@@ -141,7 +142,9 @@ type overrides struct {
 	// required-checks reads and its issue branches' creates); empty, in production, is
 	// https://api.github.com.
 	githubAPI string
-	// listen opens the API listener; nil is net.Listen.
+	// listen takes the API listener for cfg's bind and port; nil binds them with net.Listen. Run's
+	// serves the socket `legion start` inherited from LEGION_LISTEN_FD (handed); a test's hands
+	// over a listener it holds.
 	listen func(network, address string) (net.Listener, error)
 	// strandedReported runs once the boot's report of the claims nothing will wake has finished,
 	// whether it logged or not (reportStranded); nil, in production, is nothing. The report runs
@@ -196,8 +199,22 @@ type Build struct {
 //
 // build is the binary's own build (Build), which the boot compares against the open production
 // checks of the repository it is built from.
-func Run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger) error {
-	return run(ctx, cfg, build, log, overrides{})
+//
+// listener, when not nil, is the API listener the daemon serves on in place of binding cfg's bind
+// and port: the socket `legion start` inherited (LEGION_LISTEN_FD), which it checked names both.
+// Run closes it once it stops serving, as it closes a listener it binds; a refusal before the
+// listener is taken leaves it to the caller to close.
+func Run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, listener net.Listener) error {
+	return run(ctx, cfg, build, log, overrides{listen: handed(listener)})
+}
+
+// handed is the listen of a daemon handed listener: it takes listener, whatever address it is
+// asked for, and binds nothing. A nil listener hands nothing, and the daemon binds its own address.
+func handed(listener net.Listener) func(network, address string) (net.Listener, error) {
+	if listener == nil {
+		return nil
+	}
+	return func(string, string) (net.Listener, error) { return listener, nil }
 }
 
 func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, o overrides) error {
@@ -303,6 +320,7 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 			log.Info("legion workflow boot stage", "stage", "launcher")
 		}
 	}
+	// The API serves on the socket it was handed (Run's listener) or binds cfg's address here.
 	address := net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.Port))
 	listen := net.Listen
 	if o.listen != nil {
@@ -448,7 +466,7 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		case err == nil:
 			log.Info("legion daemon started",
 				"project", cfg.Project,
-				"address", address,
+				"address", listener.Addr().String(),
 				"workerStream", s.stream.Addr(),
 				"runtime", cfg.Runtime.Name,
 				"admissionCap", cfg.AdmissionCap,
