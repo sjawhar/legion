@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-521",
-  "completed": "2026-10-27T06:33:20Z",
+  "completed": "2026-10-27T06:59:46Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2313",
-  "headSha": "0fc4e40a721cfcee0257ee8a20b82a6d60c6a5a1",
+  "headSha": "96fcf1de75116291e1f8256684d911a88afd231c",
   "proof": [
+    {
+      "criterion": "Review round 2 (PR #2313 review 5663262302, scope narrowed by the architect): one copy of the rule, a defined width threshold, a true reason for keeping !== \"chromium\" skips, the margin comment",
+      "surface": "packages/dispatch/AGENTS.md, README.md, e2e/playwright.config.ts as a test author reads them; Playwright CLI in packages/dispatch",
+      "command": "bunx playwright test --config e2e/playwright.config.ts --list (per project) and --list --project iphone --reporter=json | bun $TMPDIR/infra521/check-iphone.ts; bunx biome check e2e; bun run typecheck",
+      "observed": "README.md and the config comment now point to AGENTS.md \"Phone acceptance\" instead of restating R1-R6. AGENTS.md defines a phone width as under 768 px (PHONE_VIEWPORT_QUERY \"(max-width: 767px)\", useDialog.ts:9) and a desktop width as 768 px or wider; says a !== \"chromium\" skip marks a test one project covers and keeps it out of the tag under the first exception; and scopes \"when unsure, tag it\" to after the exceptions. margin-thread-reply.e2e.ts:226 says desktop margin, not the sheet. iphone --list 223 = table v2 keep rows, 0 extra, 0 missing; every other project unchanged (786, 53, 11, 53, 1, 4); biome and typecheck clean.",
+      "headSha": "96fcf1de75116291e1f8256684d911a88afd231c",
+      "negativeControl": "keyboard-palette.e2e.ts:1039 sets 1024 px, which COMPACT_VIEWPORT_QUERY treats as compact. Under the round-3 text 'desktop width' was undefined, so a reader could take 1024 px for a phone-like width and tag the test. Under the new definition 1024 px is a desktop width, the second exception applies, and the test stays untagged as the table has it."
+    },
     {
       "criterion": "Tester round 2 failure (criterion 2): the documented rule gives the selection; issue.e2e.ts:1226 (iphone-only, sets 1920 then 390) stays tagged under it",
       "surface": "packages/dispatch/AGENTS.md \"Phone acceptance\" applied to the specs; Playwright CLI in packages/dispatch",
@@ -122,7 +130,8 @@
     "packages/dispatch/README.md (the seven projects as the config defines them)",
     "docs/solutions/testing/a-layout-change-is-proven-by-the-whole-project-...-INFRA-92.md (dated INFRA-521 note)",
     "Round 2: packages/dispatch/AGENTS.md (precondition before R1-R6; skip sentence narrowed to === \"iphone\" skips, !== \"chromium\" skips stay), e2e/issue.e2e.ts (:697 tagged), e2e/margin-thread-reply.e2e.ts (:226 passes \"chromium\"), e2e/agents-search.e2e.ts and e2e/inbox.e2e.ts (dead iphone width ternaries inlined to 1280), e2e/playwright.config.ts (anchor comment); AGENTS.md precondition also names a test that starts at the project width expecting a desktop one and narrows the window itself (mention-composer.e2e.ts:443)",
-    "Round 3: packages/dispatch/AGENTS.md (the desktop-viewport exception covers only a test that never reaches a phone width; a test that skips every project but iphone is always tagged)"
+    "Round 3: packages/dispatch/AGENTS.md (the desktop-viewport exception covers only a test that never reaches a phone width; a test that skips every project but iphone is always tagged)",
+    "Round 4: packages/dispatch/AGENTS.md (width threshold, skip reason, 'when unsure' scoped after the exceptions), README.md and e2e/playwright.config.ts (pointer to AGENTS.md instead of a copy of the rule), e2e/margin-thread-reply.e2e.ts (:226 comment)"
   ],
   "trickyParts": [
     "Playwright's project grep text also holds the project name 'iphone' and file paths like phone.e2e.ts, so the grep is anchored on whitespace: /(^|\\s)@phone(\\s|$)/.",
@@ -133,11 +142,12 @@
     "Tag syntax: the plan named the details argument test(title, { tag: '@phone' }, fn). That form made Biome re-indent every tagged test body (62 files, +9255/-8963). The tag is written in the title instead (test('... @phone', fn)), which Playwright 1.63 reads as a tag (TestCase.tags, lib/common/index.js:2752-2760) and which the anchored grep matches; the diff is 65 files, +362/-415. AGENTS.md documents the title form and why.",
     "T7: per the architect (spec v4 and v5), no re-runs. Base = the 10 newest successful dispatch jobs already run on main; head = this pull request's one CI run; the after median is the production check's (first 5 successful main dispatch jobs after the merge).",
     "AGENTS.md's old Phone acceptance list named 'recipient-picker bottom sheets', which no test at base covered; the new text names only what tagged tests cover.",
-    "Round 2: the reviewer offered deleting the 50 !== \"chromium\" skips; they stay, and the rule says why: each states the test is desktop-only by design and keeps it off any other project whose testMatch names its file. issue.e2e.ts:697 is added to the selection (223, was 222) because the precondition that removes the reviewer`s other eight would otherwise exclude it only by a rule (any fixed viewport) that would also drop two tests iphone ran at base (margin-composer-hold.e2e.ts on a phone, agent-view.e2e.ts on a phone live view)."
+    "Round 2: the reviewer offered deleting the 50 !== \"chromium\" skips; they stay, and the rule says why: each states the test is desktop-only by design and keeps it off any other project whose testMatch names its file. issue.e2e.ts:697 is added to the selection (223, was 222) because the precondition that removes the reviewer`s other eight would otherwise exclude it only by a rule (any fixed viewport) that would also drop two tests iphone ran at base (margin-composer-hold.e2e.ts on a phone, agent-view.e2e.ts on a phone live view).",
+    "Round 4: the optional mention-composer.e2e.ts:443 change (own start width, tagged, third exception removed) was not taken, as the architect directed after the review round cap."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
     "The first version of the PR description carried the private Dispatch host in a link; it was replaced within 21 minutes. The person the work is for chose to leave the old revision in GitHub's edit history (dispatch://INFRA-521/ask/ec8e50ba-8f28-4c80-bacc-12f751bdec25)."
   ],
-  "round": 3
+  "round": 4
 }
