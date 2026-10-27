@@ -734,3 +734,39 @@ func TestAListenerWithNoOnNotifyDropsItsNotificationsAndDoesNotPanic(t *testing.
 		t.Fatalf("the listener's last statement = %q, want its idle ping: a notification it has nowhere to report must leave it waiting on the same connection", query)
 	}
 }
+
+// OnNotification is called in OnNotify's place when both are set, and carries the PID of the
+// backend that sent the notification - how a caller tells its own process's writes from another's.
+func TestAListenerWithOnNotificationReportsTheSendersPIDInPlaceOfOnNotify(t *testing.T) {
+	database := storetest.Open(t)
+	probe := newListenerProbe()
+	listener := probe.listener(database.Pool.Listener)
+	notifications := make(chan Notification, 8)
+	listener.OnNotification = func(n Notification) { notifications <- n }
+	runListener(t, probe, listener)
+	probe.waitConnected(t, 5*time.Second, "first connection")
+
+	ctx := context.Background()
+	sender, err := database.Pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire the sender's connection: %v", err)
+	}
+	defer sender.Release()
+	if _, err := sender.Exec(ctx, `select pg_notify('dispatch_events', 'sent')`); err != nil {
+		t.Fatalf("notify: %v", err)
+	}
+	select {
+	case n := <-notifications:
+		want := Notification{PID: sender.Conn().PgConn().PID(), Channel: "dispatch_events", Payload: "sent"}
+		if n != want {
+			t.Fatalf("OnNotification got %+v, want %+v", n, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnNotification was not called within 5s of the NOTIFY")
+	}
+	select {
+	case note := <-probe.notes:
+		t.Fatalf("OnNotify was also called (%+v); OnNotification replaces it", note)
+	default:
+	}
+}

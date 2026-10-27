@@ -2,12 +2,13 @@
 // learns of another process's commits from the database runs. Two envoy-dispatch processes serve
 // one Postgres (INFRA-66), and the secrets broker now runs two pods over one database of its own,
 // so what one process commits reaches the others only through the database, and a connection
-// waiting for a notification must outlive every failure between it and the server. Its three
-// Dispatch users are the delivery hub and the event stream relay (internal/dispatch/api) and the
-// document rooms' stale-room evictor (internal/dispatch/docs); the fourth is the broker's
-// cross-pod secret-reread fan-out (internal/broker/reread). Serving two programs is why the
-// package sits here rather than under internal/dispatch, as internal/pgmigrate does for the two
-// migration runners.
+// waiting for a notification must outlive every failure between it and the server. Its Dispatch
+// users are the delivery hub and the event stream relay (internal/dispatch/api), the document
+// rooms' stale-room evictor (internal/dispatch/docs), and the Hub (hub.go) that shares one
+// listener among Dispatch's change-driven background loops; the other is the broker's cross-pod
+// secret-reread fan-out (internal/broker/reread). Serving two programs is why the package sits
+// here rather than under internal/dispatch, as internal/pgmigrate does for the two migration
+// runners.
 package pglisten
 
 import (
@@ -35,6 +36,15 @@ const (
 	backoffFirst = time.Second
 	backoffMax   = 30 * time.Second
 )
+
+// Notification is one NOTIFY a listener received: the channel and payload it was sent with, and
+// the process ID of the backend that sent it, which tells a caller whether the notification came
+// from its own process's connection or another's.
+type Notification struct {
+	PID     uint32
+	Channel string
+	Payload string
+}
 
 // Listener holds one LISTEN connection of its own (LEGION-690): it dials, listens on Channels,
 // reports each notification, pings the connection when it is idle, wakes a caller that asked to
@@ -64,6 +74,11 @@ type Listener struct {
 	// OnConnected runs after the LISTEN succeeds on a new connection, which is where a caller
 	// catches up what it missed while it had none. Nil for a caller with nothing to catch up.
 	OnConnected func()
+	// OnDisconnected runs when a connection whose LISTEN had succeeded is lost, before the
+	// backoff and the redial: from then until the next OnConnected, notifications are missed.
+	// It does not run when Run returns because its context ended. Nil for a caller that does not
+	// need to know.
+	OnDisconnected func()
 	// OnNotify is called once per notification, on the listener's goroutine, so a caller that
 	// does slow work in it delays the notifications behind it. Nil drops every notification:
 	// the listener keeps its connection, waits and pings on it and still runs OnConnected after
@@ -74,6 +89,9 @@ type Listener struct {
 	// event stream relay's included, since they run in it. The same reading as the
 	// NextWake/OnWake pair below.
 	OnNotify func(channel, payload string)
+	// OnNotification is OnNotify for a caller that also needs the sending backend's process ID,
+	// and is called in its place when set, on the same terms.
+	OnNotification func(Notification)
 	// Backoff is the wait before the attempt-th redial in a row; nil is RedialBackoff.
 	Backoff func(attempt int) time.Duration
 	// NextWake and OnWake are a clock for a caller whose own work has to run on this listener's
@@ -110,7 +128,7 @@ type Listener struct {
 // the number of failures in a row (a connection that got as far as its LISTEN starts the count
 // again), and dials again. A notification sent while it had no connection is not reported: a
 // caller that cannot afford that window catches up in OnConnected, which runs after every
-// successful LISTEN, the first one included.
+// successful LISTEN, the first one included, and may learn the window opened in OnDisconnected.
 func (l *Listener) Run(ctx context.Context) {
 	failures := 0
 	for {
@@ -120,6 +138,9 @@ func (l *Listener) Run(ctx context.Context) {
 		}
 		if listened {
 			failures = 0
+			if l.OnDisconnected != nil {
+				l.OnDisconnected()
+			}
 		}
 		failures++
 		wait := l.backoffFor(failures)
@@ -164,10 +185,14 @@ func (l *Listener) listen(ctx context.Context) (listened bool, err error) {
 		reached := errors.Is(waitCtx.Err(), context.DeadlineExceeded)
 		cancel()
 		if notification != nil {
-			// The connection carried it, which is a round trip of its own; stamped before
-			// OnNotify, whose work is the caller's and proves nothing further.
+			// The connection carried it, which is a round trip of its own; stamped before the
+			// caller's OnNotification or OnNotify, whose work is the caller's and proves nothing
+			// further.
 			proven = time.Now()
-			if l.OnNotify != nil {
+			switch {
+			case l.OnNotification != nil:
+				l.OnNotification(Notification{PID: notification.PID, Channel: notification.Channel, Payload: notification.Payload})
+			case l.OnNotify != nil:
 				l.OnNotify(notification.Channel, notification.Payload)
 			}
 		}
