@@ -431,6 +431,40 @@ func TestAnUnansweredMentionOfAnotherStringForTheRouteLeavesTwoCopies(t *testing
 	}
 }
 
+// A listener that answers no lookup at all delays a mentioned comment by at most
+// mentionLookupTimeout, also on an issue whose route is not one of the comment's mentions: the
+// route's own lookup runs beside the mentions' lookups, not after them, so the two timeouts do not
+// add up.
+func TestAListenerThatAnswersNoLookupDelaysARoutedCommentByOneTimeoutAtMost(t *testing.T) {
+	listener, state := newMentionListener(t)
+	letMentionAnswer := state.holdLookups("/v1/registry/s1")
+	defer letMentionAnswer()
+	letRouteAnswer := state.holdLookups("/v1/registry/s2")
+	defer letRouteAnswer()
+	handler, database, _ := newTestServer(t, testServerOptions{envoyURL: listener.URL})
+	issue := createInteractionIssue(t, handler, "TEST", "A silent listener", "before")
+	if patched := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
+		"route": "session:s2",
+	}, "alice"); patched.Code != http.StatusOK {
+		t.Fatalf("set the route: status=%d body=%s", patched.Code, patched.Body.String())
+	}
+
+	started := time.Now()
+	response := postMentionedComment(t, handler, issue.Key, map[string]any{
+		"body": "Is anyone there?", "mentions": []map[string]any{{"target": "session:s1"}},
+	})
+	answered := time.Since(started)
+	created := decodeMentionedComment(t, response)
+	if answered >= 2*mentionLookupTimeout {
+		t.Fatalf("the comment answered after %v with no lookup answered, want under %v: the route's lookup ran after the mention's",
+			answered, 2*mentionLookupTimeout)
+	}
+
+	letMentionAnswer()
+	letRouteAnswer()
+	settledCommentDeliveries(t, database, created.ID)
+}
+
 // A process that stops with mention sends still queued leaves their attempts pending with no
 // claim. The next process's recovery pass sends such an attempt once, and leaves alone one whose
 // claim is live, which another process's sender holds.
