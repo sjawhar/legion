@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -13,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -22,9 +20,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/nats-io/nats.go"
-
-	"github.com/sjawhar/envoy/internal/contracts"
 )
 
 // maxRequestsInFlight caps the request generator: above 600 req/s times the 30 s client
@@ -201,6 +196,9 @@ type summaryConfig struct {
 	GraceS       float64  `json:"grace_s"`
 	RNGSeed      uint64   `json:"rng_seed"`
 	NATSConns    int      `json:"nats_conns"`
+	// MarkerNonce is the run's marker nonce (markerTag): every marker the run wrote starts with it,
+	// and the run counts only the commit rows that carry it.
+	MarkerNonce string `json:"marker_nonce"`
 }
 
 type sessionsSummary struct {
@@ -219,9 +217,8 @@ type summary struct {
 	CommitOrderLock lockSummary       `json:"commit_order_lock"`
 	UngrantedLocks  ungrantedSummary  `json:"ungranted_locks"`
 	Sessions        sessionsSummary   `json:"sessions"`
-	// SSE is nil when read from a summary.json older than the SSE frame timing.
-	SSE      *sseSummary `json:"sse"`
-	SSEBytes int64       `json:"sse_bytes"`
+	SSE             sseSummary        `json:"sse"`
+	SSEBytes        int64             `json:"sse_bytes"`
 	// StackExits are the stack processes that exited during the step; such a step fails and its
 	// row does not measure the load.
 	StackExits []stackExit `json:"stack_exits,omitempty"`
@@ -250,9 +247,8 @@ type metaFile struct {
 	PGDirect             bool            `json:"pg_direct"`
 	AllowForeign         bool            `json:"allow_foreign"`
 	PIDs                 map[string]int  `json:"pids"`
+	MarkerNonce          string          `json:"marker_nonce"`
 }
-
-var markerPattern = regexp.MustCompile(`lgm[0-9]+x`)
 
 func execute(cfg runConfig, sf seedFile) error {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -263,384 +259,285 @@ func execute(cfg runConfig, sf seedFile) error {
 	}
 	defer logf.Close()
 	lg := log.New(io.MultiWriter(os.Stderr, logf), "", log.LstdFlags|log.Lmicroseconds)
-	lg.Printf("config: step=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f sse=%d rng-seed=%d",
-		cfg.name, cfg.sessions, cfg.events, cfg.requests, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.sse, cfg.rngSeed)
+	nonce := newMarkerNonce()
+	lg.Printf("config: step=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f sse=%d rng-seed=%d marker-nonce=%s",
+		cfg.name, cfg.sessions, cfg.events, cfg.requests, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.sse, cfg.rngSeed, formatNonce(nonce))
 
 	if err := checkStack(ctx, cfg.ep); err != nil {
 		return err
 	}
 	lg.Printf("guard: NATS, Dispatch and the listener are the stack's own (%s)", cfg.ep.stack)
 	meta := collectMeta(ctx, cfg, lg)
+	meta.MarkerNonce = formatNonce(nonce)
 	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, lg)
 	logSamplerStart(lg, cfg.ep)
-	a := newAPI(cfg.ep.dispatch, cfg.ep.token, 2048)
+	st := newStep(cfg, sf, lg, nonce)
 
-	// Topology: session i works on issue i (mod the issues in use) and watches four others, so
-	// it comments on other sessions' documents. The seed routed issue i to session i.
-	active := min(cfg.sessions, len(sf.Issues))
-	sessions := make([]session, cfg.sessions)
-	watchers := make([][]int, len(sf.Issues))
-	for i := range sessions {
-		s := session{id: sessionID(i), home: i % active}
+	ns, err := st.subscribeSessions()
+	defer ns.close()
+	if err != nil {
+		return err
+	}
+	reg := st.registerSessions(ctx)
+	st.startHeartbeat(ctx, reg)
+
+	st.openWindow(time.Now())
+	meta.Start, meta.WindowStart, meta.WindowEnd = st.start, st.winStart, st.winEnd
+	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, lg)
+	lg.Printf("window %s to %s", st.winStart.UTC().Format(time.RFC3339), st.winEnd.UTC().Format(time.RFC3339))
+
+	a := newAPI(cfg.ep.dispatch, cfg.ep.token, 2048)
+	sse := st.startSSE(ctx)
+	writes, eventsDone := st.runEvents(ctx, newWriter(a, sf, nonce, lg))
+	reqs, requestsDone := st.runRequests(ctx, a)
+	pr := st.startProbes(ctx)
+
+	<-eventsDone
+	<-requestsDone
+	lg.Printf("generators done at %s; grace %s", time.Since(st.start).Round(time.Second), cfg.grace)
+	time.Sleep(cfg.grace)
+	pr.wait()
+	cancel()
+	ns.close()
+	ns.envelopes.write(cfg.out, lg)
+
+	sum := st.buildSummary(ns, reg, writes, reqs, sse, pr)
+	writeJSONFile(filepath.Join(cfg.out, "summary.json"), sum, lg)
+	meta.End = time.Now()
+	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, lg)
+	lg.Printf("step %s done: events offered %d committed %d, receipts %d of %d, requests sent %d (%.1f/s of %g)",
+		cfg.name, sum.Events.Offered, sum.Events.Committed, sum.Events.IssueTopicReceipts, sum.Events.ExpectedIssueTopicReceipts,
+		sum.Requests.Sent, sum.Requests.SentPerS, cfg.requests)
+	if err := errStackExits(sum.StackExits); err != nil {
+		lg.Print(err)
+		return err
+	}
+	return nil
+}
+
+// step is what a run's phases share: the configuration, the seed, the log, the marker nonce, the
+// session topology and, once it opens, the window.
+type step struct {
+	cfg      runConfig
+	sf       seedFile
+	lg       *log.Logger
+	nonce    int64
+	active   int       // the issues in use: min(sessions, seeded issues)
+	sessions []session // by index
+	watchers [][]int   // by issue, the sessions that watch it
+	// start is when the generators start; the window runs from winStart to winEnd.
+	start, winStart, winEnd time.Time
+}
+
+// newStep lays out the sessions: session i works on issue i (mod the issues in use) and watches
+// four others, so it comments on other sessions' documents. The seed routed issue i to session i.
+func newStep(cfg runConfig, sf seedFile, lg *log.Logger, nonce int64) *step {
+	st := &step{cfg: cfg, sf: sf, lg: lg, nonce: nonce, active: min(cfg.sessions, len(sf.Issues)),
+		sessions: make([]session, cfg.sessions), watchers: make([][]int, len(sf.Issues))}
+	for i := range st.sessions {
+		s := session{id: sessionID(i), home: i % st.active}
 		s.watched = []int{s.home}
 		for k := 1; k <= 4; k++ {
-			s.watched = append(s.watched, (s.home+k*37)%active)
+			s.watched = append(s.watched, (s.home+k*37)%st.active)
 		}
 		for _, w := range s.watched {
-			watchers[w] = append(watchers[w], i)
+			st.watchers[w] = append(st.watchers[w], i)
 		}
-		sessions[i] = s
+		st.sessions[i] = s
 	}
+	return st
+}
 
-	// NATS: sessions share natsConns connections; each subscribes its own agent topic and its
-	// watched issues' topics, as the pi plugin's self-subscription does.
-	var recvMu sync.Mutex
-	receipts := make([]receipt, 0, 1<<16)
-	var sampleMu sync.Mutex
-	envelopes := map[string][]byte{}
-	marked := map[string]bool{} // whether each stored envelope carries a marker
-	var conns []*nats.Conn
-	defer func() {
-		for _, nc := range conns {
-			nc.Close()
-		}
-	}()
-	for i := range cfg.natsConns {
-		nc, err := nats.Connect(cfg.ep.nats, nats.Name(fmt.Sprintf("loadgen-%d", i)), nats.MaxReconnects(-1))
-		if err != nil {
-			return fmt.Errorf("nats connect: %w", err)
-		}
-		conns = append(conns, nc)
-	}
-	handler := func(agent bool) nats.MsgHandler {
-		return func(m *nats.Msg) {
-			now := time.Now().UnixNano()
-			var env contracts.Envelope
-			if json.Unmarshal(m.Data, &env) != nil {
-				return
-			}
-			var ev struct {
-				ID   int64  `json:"id"`
-				Type string `json:"type"`
-			}
-			if json.Unmarshal([]byte(env.Payload), &ev) != nil {
-				return
-			}
-			key := ev.Type
-			if agent {
-				key = "agent." + ev.Type
-			}
-			// Keep one envelope per type, preferring one whose payload carries a marker.
-			sampleMu.Lock()
-			if _, ok := envelopes[key]; !ok || (!marked[key] && markerPattern.MatchString(env.Payload)) {
-				data := append([]byte(nil), m.Data...)
-				envelopes[key] = data
-				marked[key] = markerPattern.Match(data)
-			}
-			sampleMu.Unlock()
-			recvMu.Lock()
-			receipts = append(receipts, receipt{EventID: ev.ID, Recv: now, Agent: agent})
-			recvMu.Unlock()
-		}
-	}
-	subs := 0
-	issueTopic := func(i int) string { return "notifications.dispatch.issue." + sf.Issues[i].Key + ".>" }
-	for i, s := range sessions {
-		nc := conns[i%len(conns)]
-		if _, err := nc.Subscribe(contracts.AgentSubject(s.id), handler(true)); err != nil {
-			return err
-		}
-		subs++
-		for _, w := range s.watched {
-			if _, err := nc.Subscribe(issueTopic(w), handler(false)); err != nil {
-				return err
-			}
-			subs++
-		}
-	}
-	for _, nc := range conns {
-		_ = nc.Flush()
-	}
-	lg.Printf("nats: %d subscriptions on %d connections", subs, len(conns))
+func (st *step) issueTopic(i int) string {
+	return "notifications.dispatch.issue." + st.sf.Issues[i].Key + ".>"
+}
 
-	// Listener registration as the pi plugin does it, and the 90 s heartbeat spread evenly
-	// (packages/envoy-client/src/envoy-settings.ts). Each session's body is the same every time.
-	lc := &http.Client{Timeout: 10 * time.Second}
-	regBodies := make([][]byte, len(sessions))
-	for i, s := range sessions {
-		topics := []string{}
-		for _, w := range s.watched {
-			topics = append(topics, issueTopic(w))
-		}
-		regBodies[i], _ = json.Marshal(map[string]any{"session_id": s.id, "dir": "/work/" + s.id, "title": "load " + s.id,
-			"topics": topics, "port": 0, "self_subscribed": true, "driving": false, "capabilities": []string{}})
-	}
-	register := func(body []byte) error {
-		req, _ := http.NewRequestWithContext(ctx, "POST", cfg.ep.listener+"/v1/interests/subscribe", bytes.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+cfg.ep.listenerToken)
-		resp, err := lc.Do(req)
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		b, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode/100 != 2 {
-			return fmt.Errorf("%d %s", resp.StatusCode, trunc(b))
-		}
-		return nil
-	}
-	var regOK, regErr atomic.Int64
-	{
-		var wg sync.WaitGroup
-		sem := make(chan struct{}, 16)
-		for i, s := range sessions {
-			wg.Add(1)
-			sem <- struct{}{}
-			go func() {
-				defer wg.Done()
-				defer func() { <-sem }()
-				if err := register(regBodies[i]); err != nil {
-					if regErr.Add(1) <= 5 {
-						lg.Printf("register %s: %v", s.id, err)
-					}
-					return
-				}
-				regOK.Add(1)
-			}()
-		}
-		wg.Wait()
-		lg.Printf("registered %d sessions (%d errors)", regOK.Load(), regErr.Load())
-	}
-	var hbErr atomic.Int64
-	go func() {
-		t := time.NewTicker(90 * time.Second / time.Duration(len(sessions)))
-		defer t.Stop()
-		for i := 0; ; i++ {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				go func(i int) {
-					if err := register(regBodies[i]); err != nil && ctx.Err() == nil {
-						if hbErr.Add(1) <= 5 {
-							lg.Printf("heartbeat %s: %v", sessions[i].id, err)
-						}
-					}
-				}(i % len(sessions))
-			}
-		}
-	}()
+// openWindow starts the generators' clock at start: the window opens after the warm-up.
+func (st *step) openWindow(start time.Time) {
+	st.start = start
+	st.winStart = start.Add(st.cfg.warmup)
+	st.winEnd = st.winStart.Add(st.cfg.duration)
+}
 
-	// The measured window.
-	start := time.Now()
-	winStart := start.Add(cfg.warmup)
-	winEnd := winStart.Add(cfg.duration)
-	inWindow := func(t time.Time) bool { return !t.Before(winStart) && t.Before(winEnd) }
-	meta.Start, meta.WindowStart, meta.WindowEnd = start, winStart, winEnd
-	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, lg)
-	lg.Printf("window %s to %s", winStart.UTC().Format(time.RFC3339), winEnd.UTC().Format(time.RFC3339))
+func (st *step) inWindow(t time.Time) bool { return inWindow(t, st.winStart, st.winEnd) }
 
-	// Dashboard SSE streams: every data frame is timed on arrival (readSSE), and the frames that
-	// arrive in the window are kept.
-	var sseBytes atomic.Int64
-	var sseMu sync.Mutex
-	sseFrames := make([]sseFrame, 0, 1<<14)
-	sseClient := &http.Client{}
-	for i := range cfg.sse {
+func inWindow(t, winStart, winEnd time.Time) bool { return !t.Before(winStart) && t.Before(winEnd) }
+
+// sseStreams is what the dashboard SSE streams read: their bytes and the frames that arrived in
+// the window.
+type sseStreams struct {
+	bytes  atomic.Int64
+	frames *collector[sseFrame]
+}
+
+// startSSE opens the dashboard SSE streams, each reconnecting a second after its stream ends,
+// until ctx ends. Every data frame is timed on arrival (readSSE).
+func (st *step) startSSE(ctx context.Context) *sseStreams {
+	ss := &sseStreams{frames: newCollector[sseFrame](1 << 14)}
+	client := &http.Client{}
+	for i := range st.cfg.sse {
 		go func() {
 			for ctx.Err() == nil {
-				req, _ := http.NewRequestWithContext(ctx, "GET", cfg.ep.dispatch+"/api/v1/events", nil)
+				req, _ := http.NewRequestWithContext(ctx, "GET", st.cfg.ep.dispatch+"/api/v1/events", nil)
 				req.Header.Set("X-Dispatch-User", fmt.Sprintf("viewer-%d", i))
 				req.Header.Set("Accept", "text/event-stream")
-				if resp, err := sseClient.Do(req); err == nil {
-					n, _ := readSSE(resp.Body, time.Now, func(f sseFrame) {
-						if !inWindow(time.Unix(0, f.at)) {
-							return
+				if resp, err := client.Do(req); err == nil {
+					n, _ := readSSE(resp.Body, st.nonce, time.Now, func(f sseFrame) {
+						if st.inWindow(time.Unix(0, f.at)) {
+							ss.frames.add(f)
 						}
-						sseMu.Lock()
-						sseFrames = append(sseFrames, f)
-						sseMu.Unlock()
 					})
-					sseBytes.Add(n)
+					ss.bytes.Add(n)
 					_ = resp.Body.Close()
 				}
 				sleepUntil(ctx, time.Now().Add(time.Second))
 			}
 		}()
 	}
+	return ss
+}
 
-	// Event generator: open-loop Poisson from its own deterministic stream.
-	var wmu sync.Mutex
-	writes := make([]writeRec, 0, 1<<14)
-	wr := newWriter(a, sf, lg)
-	genDone := make(chan struct{})
-	go func() {
-		defer close(genDone)
-		if cfg.events <= 0 {
+// openLoop is an open-loop Poisson schedule at rate per second, from stream `stream` of rngSeed:
+// it draws the next arrival from start until one is at or after winEnd, sleeps until it, and calls
+// fire with the stream and whether the arrival is in the window [winStart, winEnd). fire draws
+// what the arrival does from the same stream, so the draws alternate, an arrival then its plan,
+// and one seed gives one schedule. A rate of 0 or less fires nothing. It returns when the
+// schedule ends or ctx does.
+func openLoop(ctx context.Context, rngSeed, stream uint64, rate float64, start, winStart, winEnd time.Time, fire func(r *rand.Rand, in bool)) {
+	if rate <= 0 {
+		return
+	}
+	r := rand.New(rand.NewPCG(rngSeed, stream))
+	for next := start; ; {
+		next = next.Add(time.Duration(r.ExpFloat64() / rate * float64(time.Second)))
+		if !next.Before(winEnd) || !sleepUntil(ctx, next) {
 			return
 		}
-		r := rand.New(rand.NewPCG(cfg.rngSeed, 1))
-		next := start
-		var marker int64
+		fire(r, inWindow(next, winStart, winEnd))
+	}
+}
+
+// runEvents starts the event generator, open-loop on stream 1; done closes once every write it
+// sent has returned.
+func (st *step) runEvents(ctx context.Context, wr *writer) (writes *collector[writeRec], done <-chan struct{}) {
+	writes = newCollector[writeRec](1 << 14)
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
 		var wg sync.WaitGroup
 		defer wg.Wait()
-		for {
-			next = next.Add(time.Duration(r.ExpFloat64() / cfg.events * float64(time.Second)))
-			if !next.Before(winEnd) {
-				return
-			}
+		var marker int64
+		openLoop(ctx, st.cfg.rngSeed, 1, st.cfg.events, st.start, st.winStart, st.winEnd, func(r *rand.Rand, in bool) {
 			marker++
-			p := planEvent(r, cfg, sessions, sf, marker)
-			if !sleepUntil(ctx, next) {
-				return
-			}
-			in := inWindow(next)
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			p := planEvent(r, st.cfg, st.sessions, st.sf, marker)
+			wg.Go(func() {
 				rec := wr.do(ctx, p)
 				rec.InWindow = in
-				wmu.Lock()
-				writes = append(writes, rec)
-				wmu.Unlock()
-			}()
-		}
+				writes.add(rec)
+			})
+		})
 	}()
+	return writes, closed
+}
 
-	// Request generator: open-loop Poisson at the route mix, from its own deterministic stream.
-	var rmu sync.Mutex
-	reqs := make([]reqRec, 0, 1<<16)
-	var reqInflight, reqDropped atomic.Int64
-	reqDone := make(chan struct{})
+// requestLoad is what the request generator sent in the window, and what the in-flight cap
+// dropped.
+type requestLoad struct {
+	recs    *collector[reqRec]
+	dropped atomic.Int64
+}
+
+// runRequests starts the request generator at the route mix, open-loop on stream 2; done closes
+// once every request it sent has returned.
+func (st *step) runRequests(ctx context.Context, a *api) (load *requestLoad, done <-chan struct{}) {
+	load = &requestLoad{recs: newCollector[reqRec](1 << 16)}
+	closed := make(chan struct{})
 	go func() {
-		defer close(reqDone)
-		if cfg.requests <= 0 {
-			return
-		}
-		r := rand.New(rand.NewPCG(cfg.rngSeed, 2))
-		next := start
+		defer close(closed)
 		var wg sync.WaitGroup
 		defer wg.Wait()
-		for {
-			next = next.Add(time.Duration(r.ExpFloat64() / cfg.requests * float64(time.Second)))
-			if !next.Before(winEnd) {
-				return
-			}
-			rt := cfg.routes.pick(r.Float64())
-			path := rt.render(sf.Issues[r.IntN(active)], sf.Projects[r.IntN(len(sf.Projects))])
+		var inflight atomic.Int64
+		openLoop(ctx, st.cfg.rngSeed, 2, st.cfg.requests, st.start, st.winStart, st.winEnd, func(r *rand.Rand, in bool) {
+			rt := st.cfg.routes.pick(r.Float64())
+			path := rt.render(st.sf.Issues[r.IntN(st.active)], st.sf.Projects[r.IntN(len(st.sf.Projects))])
 			id := who{}
 			if rt.Person {
 				id.person = fmt.Sprintf("person-%d", r.IntN(7))
 			}
-			if !sleepUntil(ctx, next) {
+			if inflight.Load() >= maxRequestsInFlight {
+				if in {
+					load.dropped.Add(1)
+				}
 				return
 			}
-			in := inWindow(next)
-			if reqInflight.Load() >= maxRequestsInFlight {
-				if in {
-					reqDropped.Add(1)
-				}
-				continue
-			}
-			wg.Add(1)
-			reqInflight.Add(1)
-			go func() {
-				defer wg.Done()
-				defer reqInflight.Add(-1)
+			inflight.Add(1)
+			wg.Go(func() {
+				defer inflight.Add(-1)
 				res := a.call(ctx, "GET", path, id, nil)
 				if !in {
 					return
 				}
-				rec := reqRec{route: rt.Name, status: res.status, transport: res.err != nil, latency: time.Duration(res.end - res.arrival()), connWait: res.connWait}
-				rmu.Lock()
-				reqs = append(reqs, rec)
-				rmu.Unlock()
-			}()
-		}
+				load.recs.add(reqRec{route: rt.Name, status: res.status, transport: res.err != nil, latency: time.Duration(res.end - res.arrival()), connWait: res.connWait})
+			})
+		})
 	}()
+	return load, closed
+}
 
-	// Sampler, lock probe (20 ms), ungranted-lock sampler (1 s), transaction-id probe and profiles.
-	// The two lock samplers run from 20 s into the window to its end.
-	smp := newSampler(cfg.ep)
-	go smp.loop(ctx, winStart, winEnd)
-	lockFrom := winStart.Add(20 * time.Second)
-	if lockFrom.After(winEnd) {
-		lockFrom = winStart
-	}
-	lp := &lockProbe{}
-	lpDone := make(chan struct{})
-	go func() {
-		defer close(lpDone)
-		lp.loop(ctx, cfg.ep.pg, lockFrom, winEnd, lg)
-	}()
-	ls := &lockSampler{}
-	lsDone := make(chan struct{})
-	go func() {
-		defer close(lsDone)
-		ls.loop(ctx, cfg.ep.pg, lockFrom, winEnd, lg)
-	}()
-	var xidsPerS *float64
-	xidDone := make(chan struct{})
-	go func() {
-		defer close(xidDone)
-		xidsPerS = xidRate(ctx, cfg.ep.pg, winStart, winEnd, lg)
-	}()
-	profDone := make(chan struct{})
-	go func() {
-		// The CPU profile covers the whole window; the goroutine dump and the heap profile are
-		// taken once it has finished, outside it.
-		defer close(profDone)
-		if !sleepUntil(ctx, winStart) {
-			return
-		}
-		secs := int(math.Ceil(cfg.duration.Seconds()))
-		fetchTo(cfg.ep.pprof+"/debug/pprof/profile?seconds="+strconv.Itoa(secs), filepath.Join(cfg.out, "cpu.pprof"), cfg.duration+60*time.Second, lg)
-		fetchTo(cfg.ep.pprof+"/debug/pprof/goroutine?debug=2", filepath.Join(cfg.out, "goroutines.txt"), 120*time.Second, lg)
-		fetchTo(cfg.ep.pprof+"/debug/pprof/heap", filepath.Join(cfg.out, "heap.pprof"), 60*time.Second, lg)
-		fetchTo(cfg.ep.pprof+"/debug/pprof/heap?debug=1", filepath.Join(cfg.out, "heap.txt"), 60*time.Second, lg)
-	}()
+// probes are the 5 s sampler, the lock probe (20 ms), the ungranted-lock sampler (1 s), the
+// transaction-id probe and the profiles.
+type probes struct {
+	smp      *sampler
+	lp       *lockProbe
+	ls       *lockSampler
+	xidsPerS *float64
+	wg       sync.WaitGroup // every probe but the sampler, which runs until ctx ends
+}
 
-	<-genDone
-	<-reqDone
-	lg.Printf("generators done at %s; grace %s", time.Since(start).Round(time.Second), cfg.grace)
-	time.Sleep(cfg.grace)
-	smp.checkAlive(time.Now())
-	<-profDone
-	<-lpDone
-	<-lsDone
-	<-xidDone
-	cancel()
-	for _, nc := range conns {
-		nc.Close()
+// startProbes starts the probes. The two lock samplers run from 20 s into the window to its end.
+func (st *step) startProbes(ctx context.Context) *probes {
+	p := &probes{smp: newSampler(st.cfg.ep), lp: &lockProbe{}, ls: &lockSampler{}}
+	go p.smp.loop(ctx, st.winStart, st.winEnd)
+	lockFrom := st.winStart.Add(20 * time.Second)
+	if lockFrom.After(st.winEnd) {
+		lockFrom = st.winStart
 	}
+	pg := st.cfg.ep.pg
+	p.wg.Go(func() { p.lp.loop(ctx, pg, lockFrom, st.winEnd, st.lg) })
+	p.wg.Go(func() { p.ls.loop(ctx, pg, lockFrom, st.winEnd, st.lg) })
+	p.wg.Go(func() { p.xidsPerS = xidRate(ctx, pg, st.winStart, st.winEnd, st.lg) })
+	p.wg.Go(func() { st.profile(ctx) })
+	return p
+}
 
-	sampleMu.Lock()
-	for key, data := range envelopes {
-		name := "envelope-" + strings.Map(func(r rune) rune {
-			if r == '.' || r == '-' || r == '_' || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-				return r
-			}
-			return '_'
-		}, key) + ".json"
-		if err := os.WriteFile(filepath.Join(cfg.out, name), data, 0o644); err != nil {
-			lg.Printf("write %s: %v", name, err)
-		}
+// wait checks once more, after the grace, that every stack process is alive, then waits for the
+// probes and the profiles.
+func (p *probes) wait() {
+	p.smp.checkAlive(time.Now())
+	p.wg.Wait()
+}
+
+// profile fetches Dispatch's profiles. The CPU profile covers the whole window; the goroutine
+// dump and the heap profile are taken once it has finished, outside it.
+func (st *step) profile(ctx context.Context) {
+	if !sleepUntil(ctx, st.winStart) {
+		return
 	}
-	sampleMu.Unlock()
-	recvMu.Lock()
-	rc := append([]receipt(nil), receipts...)
-	recvMu.Unlock()
-	wmu.Lock()
-	ws := append([]writeRec(nil), writes...)
-	wmu.Unlock()
-	rmu.Lock()
-	rq := append([]reqRec(nil), reqs...)
-	rmu.Unlock()
-	sseMu.Lock()
-	frames := append([]sseFrame(nil), sseFrames...)
-	sseMu.Unlock()
-	ls.resolveRelations()
+	pprof, out := st.cfg.ep.pprof, st.cfg.out
+	secs := int(math.Ceil(st.cfg.duration.Seconds()))
+	fetchTo(pprof+"/debug/pprof/profile?seconds="+strconv.Itoa(secs), filepath.Join(out, "cpu.pprof"), st.cfg.duration+60*time.Second, st.lg)
+	fetchTo(pprof+"/debug/pprof/goroutine?debug=2", filepath.Join(out, "goroutines.txt"), 120*time.Second, st.lg)
+	fetchTo(pprof+"/debug/pprof/heap", filepath.Join(out, "heap.pprof"), 60*time.Second, st.lg)
+	fetchTo(pprof+"/debug/pprof/heap?debug=1", filepath.Join(out, "heap.txt"), 60*time.Second, st.lg)
+}
+
+// buildSummary joins what the phases recorded into summary.json, and writes samples.json. It
+// reads the run's commit rows and names the ungranted locks' relations, so it runs after the load.
+func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector[writeRec], reqs *requestLoad, sse *sseStreams, pr *probes) summary {
+	cfg := st.cfg
+	ws := writes.snapshot()
+	frames := sse.frames.snapshot()
+	pr.ls.resolveRelations(cfg.ep.pg)
 
 	var markers []int64
 	for _, w := range ws {
@@ -649,11 +546,11 @@ func execute(cfg runConfig, sf seedFile) error {
 		}
 	}
 	readCtx, readCancel := context.WithTimeout(context.Background(), time.Minute)
-	commits, commitsErr := readCommits(readCtx, cfg.ep.pg, markers)
+	commits, commitsErr := readCommits(readCtx, cfg.ep.pg, st.nonce, markers)
 	readCancel()
 	watcherCount := map[string]int{}
-	for i, subscribed := range watchers {
-		watcherCount[sf.Issues[i].Key] = len(subscribed)
+	for i, subscribed := range st.watchers {
+		watcherCount[st.sf.Issues[i].Key] = len(subscribed)
 	}
 	durS := cfg.duration.Seconds()
 	sum := summary{
@@ -661,75 +558,52 @@ func execute(cfg runConfig, sf seedFile) error {
 			Step: cfg.name, EventsPerS: cfg.events, Sessions: cfg.sessions, RequestsPerS: cfg.requests, SSE: cfg.sse,
 			EventMix: cfg.mix, RouteMix: cfg.routes.Source, Human: cfg.human, WarmupS: cfg.warmup.Seconds(),
 			DurationS: durS, GraceS: cfg.grace.Seconds(), RNGSeed: cfg.rngSeed, NATSConns: cfg.natsConns,
+			MarkerNonce: formatNonce(st.nonce),
 		},
-		Events:   joinDelivery(ws, commits, rc, watcherCount, durS),
-		Requests: summarizeRequests(rq, int(reqDropped.Load()), cfg.requests, durS),
+		Events:   joinDelivery(ws, commits, ns.receipts.snapshot(), watcherCount, durS),
+		Requests: summarizeRequests(reqs.recs.snapshot(), int(reqs.dropped.Load()), cfg.requests, durS),
 		Sessions: sessionsSummary{
-			Registered: int(regOK.Load()), RegisterErrors: int(regErr.Load()), HeartbeatErrors: hbErr.Load(),
-			NATSSubscriptions: subs, NATSConnections: len(conns),
+			Registered: int(reg.ok.Load()), RegisterErrors: int(reg.errs.Load()), HeartbeatErrors: reg.heartbeatErrs.Load(),
+			NATSSubscriptions: ns.subs, NATSConnections: len(ns.conns),
 		},
-		CommitOrderLock: summarizeLock(lp.samples),
-		UngrantedLocks:  summarizeUngranted(ls.samples),
-		SSE:             new(summarizeSSE(frames, ws, commits)),
-		SSEBytes:        sseBytes.Load(),
+		CommitOrderLock: summarizeLock(pr.lp.samples, pr.lp.errors),
+		UngrantedLocks:  summarizeUngranted(pr.ls.samples, pr.ls.errors),
+		SSE:             summarizeSSE(frames, ws, commits),
+		SSEBytes:        sse.bytes.Load(),
 	}
 	if commitsErr != nil {
 		sum.Events.CommitsError = commitsErr.Error()
-		lg.Printf("commits: %v", commitsErr)
+		st.lg.Printf("commits: %v", commitsErr)
 	}
-	ss := smp.all()
-	writeJSONFile(filepath.Join(cfg.out, "samples.json"), ss, lg)
+	ss := pr.smp.all()
+	writeJSONFile(filepath.Join(cfg.out, "samples.json"), ss, st.lg)
 	sum.Resources = summarizeResources(ss, sum.Events.Committed+sum.Requests.Sent, durS)
 	if sum.Resources != nil {
-		sum.Resources.XIDsPerS = xidsPerS
+		sum.Resources.XIDsPerS = pr.xidsPerS
 	}
-	sum.StackExits = smp.stackExits()
-	writeJSONFile(filepath.Join(cfg.out, "summary.json"), sum, lg)
-	meta.End = time.Now()
-	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, lg)
-	lg.Printf("step %s done: events offered %d committed %d, receipts %d of %d, requests sent %d (%.1f/s of %g)",
-		cfg.name, sum.Events.Offered, sum.Events.Committed, sum.Events.IssueTopicReceipts, sum.Events.ExpectedIssueTopicReceipts,
-		sum.Requests.Sent, sum.Requests.SentPerS, cfg.requests)
-	if err := stackExitsError(sum.StackExits); err != nil {
-		lg.Print(err)
-		return err
-	}
-	return nil
+	sum.StackExits = pr.smp.stackExits()
+	return sum
 }
 
-// stackExitsError is the step's failure when a stack process exited during it, nil otherwise.
-func stackExitsError(exits []stackExit) error {
+// stackExitsError fails a step in which stack processes exited.
+type stackExitsError struct {
+	Exits []stackExit
+}
+
+func (e *stackExitsError) Error() string {
+	gone := make([]string, len(e.Exits))
+	for i, x := range e.Exits {
+		gone[i] = fmt.Sprintf("%s (pid %d) exited during the step (first seen gone at %s)", x.Name, x.PID, x.FirstSeenGone.UTC().Format(time.RFC3339))
+	}
+	return strings.Join(gone, ", ") + "; this row does not measure the load"
+}
+
+// errStackExits is the step's failure when a stack process exited during it, nil otherwise.
+func errStackExits(exits []stackExit) error {
 	if len(exits) == 0 {
 		return nil
 	}
-	gone := make([]string, len(exits))
-	for i, x := range exits {
-		gone[i] = fmt.Sprintf("%s (pid %d) exited during the step (first seen gone at %s)", x.Name, x.PID, x.FirstSeenGone.UTC().Format(time.RFC3339))
-	}
-	return fmt.Errorf("%s; this row does not measure the load", strings.Join(gone, ", "))
-}
-
-// planEvent draws one write from the event stream: a session, one of its watched issues, a
-// person or the session as author, a kind, and the kind's quote or reply root.
-func planEvent(r *rand.Rand, cfg runConfig, sessions []session, sf seedFile, marker int64) eventPlan {
-	sIdx := r.IntN(len(sessions))
-	s := sessions[sIdx]
-	p := eventPlan{marker: marker, session: sIdx, issue: s.watched[r.IntN(len(s.watched))]}
-	p.human = r.Float64() < cfg.human
-	p.kind = cfg.mix.pick(r.Float64())
-	is := sf.Issues[p.issue]
-	switch p.kind {
-	case kindAnchored:
-		p.quote = is.Quotes[r.IntN(len(is.Quotes))]
-	case kindReply:
-		anchoredRoot := r.Float64() < replyAnchoredShare
-		roots := is.PlainCommentIDs
-		if (anchoredRoot && len(is.AnchoredCommentIDs) > 0) || len(roots) == 0 {
-			roots = is.AnchoredCommentIDs
-		}
-		p.replyTo = roots[r.IntN(len(roots))]
-	}
-	return p
+	return &stackExitsError{Exits: exits}
 }
 
 func summarizeRequests(reqs []reqRec, dropped int, target, durationS float64) requestsSummary {
@@ -768,58 +642,6 @@ func summarizeRequests(reqs []reqRec, dropped int, target, durationS float64) re
 	}
 	out.BelowTarget = target > 0 && out.SentPerS < 0.95*target
 	return out
-}
-
-// finite is false for NaN and the infinities.
-func finite(x float64) bool { return !math.IsNaN(x) && !math.IsInf(x, 0) }
-
-// sleepUntil waits for t; false when ctx ended first.
-func sleepUntil(ctx context.Context, t time.Time) bool {
-	d := time.Until(t)
-	if d <= 0 {
-		return ctx.Err() == nil
-	}
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return true
-	case <-ctx.Done():
-		return false
-	}
-}
-
-func fetchTo(url, path string, timeout time.Duration, lg *log.Logger) {
-	resp, err := (&http.Client{Timeout: timeout}).Get(url)
-	if err != nil {
-		lg.Printf("fetch %s: %v", url, err)
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		lg.Printf("fetch %s: %d %s", url, resp.StatusCode, trunc(b))
-		return
-	}
-	f, err := os.Create(path)
-	if err != nil {
-		lg.Printf("create %s: %v", path, err)
-		return
-	}
-	defer f.Close()
-	if _, err := io.Copy(f, resp.Body); err != nil {
-		lg.Printf("fetch %s: %v", url, err)
-	}
-}
-
-func writeJSONFile(path string, v any, lg *log.Logger) {
-	b, err := json.MarshalIndent(v, "", "  ")
-	if err == nil {
-		err = os.WriteFile(path, append(b, '\n'), 0o644)
-	}
-	if err != nil {
-		lg.Printf("write %s: %v", path, err)
-	}
 }
 
 // boxBusyBeforeWindow is the interval of the box-busy reading before a step, and

@@ -386,36 +386,27 @@ func natsVarz(mon string) map[string]float64 {
 }
 
 // xidRate reads the next transaction id to be assigned at from and at to, over a direct Postgres
-// connection, and returns the transaction ids assigned per second between the two reads; nil when
-// either read failed or ctx ended first. pg_current_snapshot assigns no transaction id, so the
-// probe does not count itself.
+// connection (pollPG), and returns the transaction ids assigned per second between the two reads;
+// nil when either read failed or ctx ended first. pg_current_snapshot assigns no transaction id,
+// so the probe does not count itself.
 func xidRate(ctx context.Context, url string, from, to time.Time, lg *log.Logger) *float64 {
-	conn, err := pgx.Connect(ctx, url)
-	if err != nil {
-		lg.Printf("xid probe: %v", err)
-		return nil
+	type read struct {
+		xid int64
+		at  time.Time
 	}
-	defer conn.Close(context.Background())
-	read := func(at time.Time) (int64, time.Time, bool) {
-		if !sleepUntil(ctx, at) {
-			return 0, time.Time{}, false
-		}
+	var reads []read
+	failed := pollPG(ctx, url, from, to, to.Sub(from), "xid probe", lg, func(ctx context.Context, conn *pgx.Conn) error {
 		var x int64
 		if err := conn.QueryRow(ctx, `select pg_snapshot_xmax(pg_current_snapshot())::text::bigint`).Scan(&x); err != nil {
-			lg.Printf("xid probe: %v", err)
-			return 0, time.Time{}, false
+			return err
 		}
-		return x, time.Now(), true
-	}
-	x0, t0, ok := read(from)
-	if !ok {
+		reads = append(reads, read{xid: x, at: time.Now()})
+		return nil
+	})
+	if failed > 0 || len(reads) != 2 || !reads[1].at.After(reads[0].at) {
 		return nil
 	}
-	x1, t1, ok := read(to)
-	if !ok || !t1.After(t0) {
-		return nil
-	}
-	r := float64(x1-x0) / t1.Sub(t0).Seconds()
+	r := float64(reads[1].xid-reads[0].xid) / reads[1].at.Sub(reads[0].at).Seconds()
 	return &r
 }
 

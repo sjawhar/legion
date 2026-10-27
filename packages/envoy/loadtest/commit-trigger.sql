@@ -2,11 +2,15 @@
 --
 -- events rows are updated by the outbox after insert (published_at), so an events row's xmin is
 -- not the transaction that inserted it. This trigger copies each new event that carries a load
--- marker (lgm<N>x, the first one in its payload) into loadtest.event_commits inside the inserting
+-- marker (the first lgm[0-9]+x in its payload) into loadtest.event_commits inside the inserting
 -- transaction, so pg_xact_commit_timestamp(xmin) of that row is the event's commit time
 -- (track_commit_timestamp = on). It runs inside the transaction, and the commit-order lock, that
 -- it measures: one small insert, no round trip. Events without a marker (the seed's, Dispatch's
 -- own) insert nothing.
+--
+-- A marker is lgm<nonce><counter>x (loadtest/marker.go): the run's 9-digit nonce, then the write's
+-- counter in the run. The pattern extracts the whole marker, nonce included, so each run reads
+-- back only its own rows, also from a database that earlier runs wrote to without a reset.
 --
 -- events: id bigserial, type text, payload jsonb
 -- (internal/dispatch/store/migrations/0001_init.up.sql).

@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -12,7 +10,7 @@ import (
 
 // writeRec is one write the event generator sent. Times are wall-clock Unix nanoseconds.
 type writeRec struct {
-	Marker int64
+	Marker int64 // the write's counter in the run (markerTag)
 	Kind   string
 	Issue  string
 	// Sent is when the client began the write's request (callResult.start; for an upload, the
@@ -28,13 +26,22 @@ type writeRec struct {
 	InWindow bool
 }
 
-// commitRow is one loadtest.event_commits row: an event that carries a marker, with the commit
-// time of its transaction (pg_xact_commit_timestamp(xmin)), 0 when Postgres has none.
+// commitRow is one loadtest.event_commits row of this run: an event that carries one of the run's
+// markers, with the marker's counter and the commit time of its transaction
+// (pg_xact_commit_timestamp(xmin)), 0 when Postgres has none.
 type commitRow struct {
 	EventID  int64
 	Type     string
 	Marker   int64
 	CommitNs int64
+}
+
+// commitTagRow is one loadtest.event_commits row as read: its marker as text.
+type commitTagRow struct {
+	EventID int64
+	Type    string
+	Tag     string
+	At      *time.Time
 }
 
 // receipt is one envelope a simulated session received, matched by the event id in its payload.
@@ -213,23 +220,10 @@ func primaryCommit(rows []commitRow, primaryType string) *commitRow {
 	return first
 }
 
-// parseMarker reads the counter of an "lgm<N>x" marker.
-func parseMarker(s string) (int64, bool) {
-	digits, ok := strings.CutPrefix(s, "lgm")
-	if !ok {
-		return 0, false
-	}
-	digits, ok = strings.CutSuffix(digits, "x")
-	if !ok {
-		return 0, false
-	}
-	n, err := strconv.ParseInt(digits, 10, 64)
-	return n, err == nil
-}
-
-// readCommits reads the commit rows of the given markers over a direct Postgres connection
-// (commit-trigger.sql installs the table; track_commit_timestamp gives the times).
-func readCommits(ctx context.Context, pgURL string, markers []int64) ([]commitRow, error) {
+// readCommits reads the commit rows of the given markers of the run with this nonce over a direct
+// Postgres connection (commit-trigger.sql installs the table; track_commit_timestamp gives the
+// times).
+func readCommits(ctx context.Context, pgURL string, nonce int64, markers []int64) ([]commitRow, error) {
 	conn, err := pgx.Connect(ctx, pgURL)
 	if err != nil {
 		return nil, err
@@ -237,7 +231,7 @@ func readCommits(ctx context.Context, pgURL string, markers []int64) ([]commitRo
 	defer conn.Close(context.Background())
 	tags := make([]string, len(markers))
 	for i, m := range markers {
-		tags[i] = markerTag(m)
+		tags[i] = markerTag(nonce, m)
 	}
 	rows, err := conn.Query(ctx, `
 		select event_id, type, marker, pg_xact_commit_timestamp(xmin)
@@ -246,19 +240,34 @@ func readCommits(ctx context.Context, pgURL string, markers []int64) ([]commitRo
 		return nil, fmt.Errorf("read loadtest.event_commits (is commit-trigger.sql installed?): %w", err)
 	}
 	defer rows.Close()
-	var out []commitRow
+	var read []commitTagRow
 	for rows.Next() {
-		var c commitRow
-		var tag string
-		var at *time.Time
-		if err := rows.Scan(&c.EventID, &c.Type, &tag, &at); err != nil {
+		var c commitTagRow
+		if err := rows.Scan(&c.EventID, &c.Type, &c.Tag, &c.At); err != nil {
 			return nil, err
 		}
-		c.Marker, _ = parseMarker(tag)
-		if at != nil {
-			c.CommitNs = at.UnixNano()
+		read = append(read, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return runCommits(read, nonce), nil
+}
+
+// runCommits keeps the rows whose marker is the run's with this nonce, with the marker's counter;
+// another run's rows, which can share every counter, are dropped.
+func runCommits(read []commitTagRow, nonce int64) []commitRow {
+	var out []commitRow
+	for _, r := range read {
+		counter, ok := parseMarker(r.Tag, nonce)
+		if !ok {
+			continue
+		}
+		c := commitRow{EventID: r.EventID, Type: r.Type, Marker: counter}
+		if r.At != nil {
+			c.CommitNs = r.At.UnixNano()
 		}
 		out = append(out, c)
 	}
-	return out, rows.Err()
+	return out
 }

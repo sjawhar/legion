@@ -47,15 +47,61 @@ func TestGuardTakesEndpointsFromTheStack(t *testing.T) {
 	}
 }
 
+// foreignFlags gives every endpoint flag a foreign value.
+func foreignFlags() endpointFlags {
+	return endpointFlags{
+		url: "http://dispatch.example:8080/", listener: "http://listener.example:9120", nats: "nats://nats.example:4222",
+		natsMon: "http://nats.example:8222", pprof: "http://dispatch.example:6061", pg: "postgres://postgres@db.example:5432/dispatch",
+		token: "cluster-agent-token", listenerToken: "cluster-listener-token", allowForeign: true,
+	}
+}
+
 func TestGuardAllowForeignUsesTheFlags(t *testing.T) {
-	e, err := resolveEndpoints(endpointFlags{url: "http://dispatch.example:8080", allowForeign: true}, testStack())
+	e, err := resolveEndpoints(foreignFlags(), testStack())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if e.dispatch != "http://dispatch.example:8080" || e.listener != "http://127.0.0.1:19120" {
-		t.Fatalf("endpoints %+v: want the flag's Dispatch and the stack's listener", e)
+	if e.dispatch != "http://dispatch.example:8080" || e.listener != "http://listener.example:9120" || e.pg != "postgres://postgres@db.example:5432/dispatch" ||
+		e.pprof != "http://dispatch.example:6061" || e.natsMon != "http://nats.example:8222" || e.token != "cluster-agent-token" {
+		t.Fatalf("endpoints %+v: want every one from the flags", e)
 	}
 	if len(e.pids) != 0 || e.natsServerName != "" {
 		t.Fatalf("a foreign target keeps pids %v and server name %q, want neither", e.pids, e.natsServerName)
+	}
+}
+
+func TestGuardAllowForeignRefusesAMissingFlag(t *testing.T) {
+	unsetters := map[string]func(*endpointFlags){
+		"-url":            func(f *endpointFlags) { f.url = "" },
+		"-listener":       func(f *endpointFlags) { f.listener = "" },
+		"-nats":           func(f *endpointFlags) { f.nats = "" },
+		"-nats-mon":       func(f *endpointFlags) { f.natsMon = "" },
+		"-pprof":          func(f *endpointFlags) { f.pprof = "" },
+		"-pg":             func(f *endpointFlags) { f.pg = "" },
+		"-token":          func(f *endpointFlags) { f.token = "" },
+		"-listener-token": func(f *endpointFlags) { f.listenerToken = "" },
+	}
+	if len(unsetters) != len(endpointFlagNames) {
+		t.Fatalf("the test covers %d flags, the guard checks %d", len(unsetters), len(endpointFlagNames))
+	}
+	for flag, unset := range unsetters {
+		for _, st := range []*stackFile{testStack(), nil} {
+			flags := foreignFlags()
+			unset(&flags)
+			_, err := resolveEndpoints(flags, st)
+			var missing *missingForeignFlagError
+			if !errors.As(err, &missing) {
+				t.Fatalf("%s left empty (stack.json present: %t): not refused as a missing flag: %v", flag, st != nil, err)
+			}
+			if missing.Flag != flag {
+				t.Errorf("refusal names %s, want %s", missing.Flag, flag)
+			}
+		}
+	}
+	// With -url and -token only, the refusal names the first flag left empty.
+	_, err := resolveEndpoints(endpointFlags{url: "http://127.0.0.1:18777", token: "x", allowForeign: true}, testStack())
+	var missing *missingForeignFlagError
+	if !errors.As(err, &missing) || missing.Flag != "-listener" {
+		t.Fatalf("refusal %v, want -listener named", err)
 	}
 }

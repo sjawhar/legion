@@ -137,7 +137,8 @@ func (m eventMix) pick(x float64) string {
 	return last
 }
 
-// eventPlan is one write, fully decided by the event generator's RNG before it is sent.
+// eventPlan is one write, fully decided by the event generator's RNG before it is sent. marker
+// is the write's counter in the run (markerTag).
 type eventPlan struct {
 	marker  int64
 	kind    string
@@ -148,7 +149,28 @@ type eventPlan struct {
 	replyTo string
 }
 
-func markerTag(marker int64) string { return fmt.Sprintf("lgm%dx", marker) }
+// planEvent draws one write from the event stream: a session, one of its watched issues, a
+// person or the session as author, a kind, and the kind's quote or reply root.
+func planEvent(r *rand.Rand, cfg runConfig, sessions []session, sf seedFile, marker int64) eventPlan {
+	sIdx := r.IntN(len(sessions))
+	s := sessions[sIdx]
+	p := eventPlan{marker: marker, session: sIdx, issue: s.watched[r.IntN(len(s.watched))]}
+	p.human = r.Float64() < cfg.human
+	p.kind = cfg.mix.pick(r.Float64())
+	is := sf.Issues[p.issue]
+	switch p.kind {
+	case kindAnchored:
+		p.quote = is.Quotes[r.IntN(len(is.Quotes))]
+	case kindReply:
+		anchoredRoot := r.Float64() < replyAnchoredShare
+		roots := is.PlainCommentIDs
+		if (anchoredRoot && len(is.AnchoredCommentIDs) > 0) || len(roots) == 0 {
+			roots = is.AnchoredCommentIDs
+		}
+		p.replyTo = roots[r.IntN(len(roots))]
+	}
+	return p
+}
 
 func revisionToken(n int) string { return fmt.Sprintf("Revision token r%d", n) }
 
@@ -168,19 +190,20 @@ func currentRevision(text string) (int, bool) {
 	return n, err == nil
 }
 
-// writer sends planned writes. Edits and uploads to one issue are serialized, and each issue's
-// revision token is tracked from r0 (the seed's), re-read from the document when a response was
-// lost.
+// writer sends planned writes, each with the run's marker nonce. Edits and uploads to one issue
+// are serialized, and each issue's revision token is tracked from r0 (the seed's), re-read from
+// the document when a response was lost.
 type writer struct {
 	a     *api
 	sf    seedFile
+	nonce int64
 	locks []sync.Mutex
 	revs  []int
 	lg    *log.Logger
 }
 
-func newWriter(a *api, sf seedFile, lg *log.Logger) *writer {
-	return &writer{a: a, sf: sf, locks: make([]sync.Mutex, len(sf.Issues)), revs: make([]int, len(sf.Issues)), lg: lg}
+func newWriter(a *api, sf seedFile, nonce int64, lg *log.Logger) *writer {
+	return &writer{a: a, sf: sf, nonce: nonce, locks: make([]sync.Mutex, len(sf.Issues)), revs: make([]int, len(sf.Issues)), lg: lg}
 }
 
 // do sends one write and returns its record.
@@ -191,7 +214,7 @@ func (w *writer) do(ctx context.Context, p eventPlan) writeRec {
 	if p.human {
 		id.person = fmt.Sprintf("person-%d", p.session%7)
 	}
-	tag := markerTag(p.marker)
+	tag := markerTag(w.nonce, p.marker)
 	r := rand.New(rand.NewPCG(uint64(p.marker), 7))
 	var path string
 	var body map[string]any

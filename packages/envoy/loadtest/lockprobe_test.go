@@ -26,7 +26,7 @@ func TestHoldSegmentation(t *testing.T) {
 	if got, want := holdDurations(samples), []float64{40, 40, 20, 20}; !slices.Equal(got, want) {
 		t.Fatalf("holds %v, want %v", got, want)
 	}
-	sum := summarizeLock(samples)
+	sum := summarizeLock(samples, 0)
 	if sum.HeldFraction != 0.7 || sum.HoldsObserved != 4 {
 		t.Fatalf("held fraction %g holds %d, want 0.7 and 4", sum.HeldFraction, sum.HoldsObserved)
 	}

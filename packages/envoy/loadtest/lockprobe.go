@@ -25,6 +25,7 @@ type lockSample struct {
 
 type lockProbe struct {
 	samples []lockSample
+	errors  int // failed reads (pollPG)
 }
 
 // The commit-order lock's advisory key, split as pg_locks shows it.
@@ -47,35 +48,19 @@ left join (
   where l.granted
   limit 1) h on true`
 
-// loop samples every 20 ms from from to to over a direct Postgres connection.
+// lockProbeInterval is how often the lock probe reads.
+const lockProbeInterval = 20 * time.Millisecond
+
+// loop samples every lockProbeInterval from from to to over a direct Postgres connection.
 func (p *lockProbe) loop(ctx context.Context, url string, from, to time.Time, lg *log.Logger) {
-	conn, err := pgx.Connect(ctx, url)
-	if err != nil {
-		lg.Printf("lockprobe: %v", err)
-		return
-	}
-	defer conn.Close(context.Background())
-	if !sleepUntil(ctx, from) {
-		return
-	}
-	t := time.NewTicker(20 * time.Millisecond)
-	defer t.Stop()
-	for time.Now().Before(to) {
-		var s lockSample
-		s.at = time.Now()
+	p.errors = pollPG(ctx, url, from, to, lockProbeInterval, "lockprobe", lg, func(ctx context.Context, conn *pgx.Conn) error {
+		s := lockSample{at: time.Now()}
 		if err := conn.QueryRow(ctx, lockProbeQuery, commitOrderLockClassID, commitOrderLockObjID).Scan(&s.pid, &s.xact, &s.state, &s.waitEv, &s.query, &s.waiters); err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-		} else {
-			p.samples = append(p.samples, s)
+			return err
 		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
-	}
+		p.samples = append(p.samples, s)
+		return nil
+	})
 }
 
 // holdDurations segments samples into holds: consecutive samples with one (pid, transaction
@@ -99,7 +84,9 @@ func holdDurations(samples []lockSample) []float64 {
 }
 
 type lockSummary struct {
-	Samples       int           `json:"samples"`
+	Samples int `json:"samples"`
+	// Errors counts the probe's failed reads, a failed connect included; samples miss them.
+	Errors        int           `json:"errors"`
 	HeldFraction  float64       `json:"held_fraction"`
 	Waiters       stat          `json:"waiters"`
 	HoldMs        stat          `json:"hold_ms"`
@@ -112,8 +99,9 @@ type holderDoing struct {
 	Share float64 `json:"share_of_held_samples"`
 }
 
-func summarizeLock(samples []lockSample) lockSummary {
-	out := lockSummary{Samples: len(samples), HolderDoing: []holderDoing{}}
+// summarizeLock reduces the probe's samples; failedReads is its failed reads.
+func summarizeLock(samples []lockSample, failedReads int) lockSummary {
+	out := lockSummary{Samples: len(samples), Errors: failedReads, HolderDoing: []holderDoing{}}
 	if len(samples) == 0 {
 		return out
 	}

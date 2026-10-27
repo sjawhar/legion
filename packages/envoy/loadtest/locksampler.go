@@ -31,8 +31,8 @@ type ungrantedSample struct {
 }
 
 type lockSampler struct {
-	url     string
 	samples []ungrantedSample
+	errors  int // failed reads (pollPG)
 }
 
 // ungrantedLockInterval is how often the sampler reads. Each read costs Postgres CPU on the box it
@@ -85,57 +85,32 @@ left join pg_stat_activity b on b.pid = w.blocker`
 
 // loop samples every ungrantedLockInterval from from to to over a direct Postgres connection.
 func (p *lockSampler) loop(ctx context.Context, url string, from, to time.Time, lg *log.Logger) {
-	p.url = url
-	conn, err := pgx.Connect(ctx, url)
-	if err != nil {
-		lg.Printf("locksampler: %v", err)
-		return
-	}
-	defer conn.Close(context.Background())
-	if !sleepUntil(ctx, from) {
-		return
-	}
-	t := time.NewTicker(ungrantedLockInterval)
-	defer t.Stop()
-	errs := 0
-	for time.Now().Before(to) {
-		var s ungrantedSample
+	p.errors = pollPG(ctx, url, from, to, ungrantedLockInterval, "locksampler", lg, func(ctx context.Context, conn *pgx.Conn) error {
 		rows, err := conn.Query(ctx, ungrantedLocksQuery, commitOrderLockClassID, commitOrderLockObjID)
-		if err == nil {
-			for rows.Next() {
-				var w lockWait
-				if err = rows.Scan(&w.locktype, &w.mode, &w.target, &w.relDB, &w.relOID, &w.query, &w.blockerQuery); err != nil {
-					break
-				}
-				s.waits = append(s.waits, w)
-			}
-			rows.Close()
-			if err == nil {
-				err = rows.Err()
-			}
-		}
 		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			if errs++; errs <= 3 {
-				lg.Printf("locksampler: %v", err)
-			}
-		} else {
-			p.samples = append(p.samples, s)
+			return err
 		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
+		defer rows.Close()
+		var s ungrantedSample
+		for rows.Next() {
+			var w lockWait
+			if err := rows.Scan(&w.locktype, &w.mode, &w.target, &w.relDB, &w.relOID, &w.query, &w.blockerQuery); err != nil {
+				return err
+			}
+			s.waits = append(s.waits, w)
 		}
-	}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		p.samples = append(p.samples, s)
+		return nil
+	})
 }
 
 // resolveRelations names the relations the sampling connection could not, because they live in
-// another database: one short connection per database, after the load has ended. A relation it
-// cannot name gets the target <database>:<oid>.
-func (p *lockSampler) resolveRelations() {
+// another database: one short connection per database of the Postgres server at url, after the
+// load has ended. A relation it cannot name gets the target <database>:<oid>.
+func (p *lockSampler) resolveRelations(url string) {
 	byDB := map[string]map[uint32]string{}
 	for _, s := range p.samples {
 		for _, w := range s.waits {
@@ -150,7 +125,7 @@ func (p *lockSampler) resolveRelations() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	for db, names := range byDB {
-		cfg, err := pgx.ParseConfig(p.url)
+		cfg, err := pgx.ParseConfig(url)
 		if err != nil {
 			continue
 		}
@@ -192,6 +167,8 @@ func (p *lockSampler) resolveRelations() {
 
 type ungrantedSummary struct {
 	Samples int `json:"samples"`
+	// Errors counts the sampler's failed reads, a failed connect included; samples miss them.
+	Errors int `json:"errors"`
 	// ShareWithAny is the share of samples that saw at least one ungranted lock.
 	ShareWithAny float64          `json:"share_of_samples_with_any_ungranted"`
 	Groups       []ungrantedGroup `json:"groups"`
@@ -218,9 +195,9 @@ type waitPair struct {
 }
 
 // summarizeUngranted groups the samples' waits by (lock type, target, mode), the group that has
-// waiters in the most samples first.
-func summarizeUngranted(samples []ungrantedSample) ungrantedSummary {
-	out := ungrantedSummary{Samples: len(samples), Groups: []ungrantedGroup{}}
+// waiters in the most samples first; failedReads is the sampler's failed reads.
+func summarizeUngranted(samples []ungrantedSample, failedReads int) ungrantedSummary {
+	out := ungrantedSummary{Samples: len(samples), Errors: failedReads, Groups: []ungrantedGroup{}}
 	if len(samples) == 0 {
 		return out
 	}

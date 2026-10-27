@@ -8,14 +8,16 @@ import (
 )
 
 func TestReadSSE(t *testing.T) {
+	const nonce = 42
 	stream := ": open\n\n" +
-		"id: 41\nevent: comment.created\ndata: {\"id\":41,\"type\":\"comment.created\",\"created_at\":\"2026-10-27T05:00:00.123456789Z\",\"payload\":{\"body\":\"lgm1234x hello\"}}\n\n" +
+		"id: 41\nevent: comment.created\ndata: {\"id\":41,\"type\":\"comment.created\",\"created_at\":\"2026-10-27T05:00:00.123456789Z\",\"payload\":{\"body\":\"" + markerTag(nonce, 1234) + " hello\"}}\n\n" +
 		": heartbeat\n\n" +
-		"id: 40\nevent: issue.updated\ndata: {\"id\":40,\"type\":\"issue.updated\",\"created_at\":\"2026-10-27T05:00:01Z\",\"payload\":{}}\n\n"
+		// Another run's marker, with the same counter: not this run's.
+		"id: 40\nevent: issue.updated\ndata: {\"id\":40,\"type\":\"issue.updated\",\"created_at\":\"2026-10-27T05:00:01Z\",\"payload\":{\"body\":\"" + markerTag(nonce+1, 1234) + "\"}}\n\n"
 	clock := time.Unix(1000, 0)
 	now := func() time.Time { clock = clock.Add(time.Millisecond); return clock }
 	var got []sseFrame
-	n, err := readSSE(strings.NewReader(stream), now, func(f sseFrame) { got = append(got, f) })
+	n, err := readSSE(strings.NewReader(stream), nonce, now, func(f sseFrame) { got = append(got, f) })
 	if err != io.EOF {
 		t.Fatalf("err = %v, want EOF", err)
 	}

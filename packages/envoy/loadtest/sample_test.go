@@ -1,9 +1,12 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -45,12 +48,15 @@ func TestSamplerRecordsAStackExitOnceAndFailsTheStep(t *testing.T) {
 	if len(exits) != 1 || exits[0].Name != "dispatch" || exits[0].PID != gone || !exits[0].FirstSeenGone.Equal(first) {
 		t.Fatalf("stack exits %+v, want dispatch once, first seen gone at %s", exits, first)
 	}
-	err := stackExitsError(exits)
-	want := "dispatch (pid " + strconv.Itoa(gone) + ") exited during the step (first seen gone at 2026-10-27T09:00:15Z); this row does not measure the load"
-	if err == nil || err.Error() != want {
-		t.Fatalf("error %v, want %q", err, want)
+	err := errStackExits(exits)
+	var exited *stackExitsError
+	if !errors.As(err, &exited) || !slices.Equal(exited.Exits, exits) {
+		t.Fatalf("error %v, want a stack-exit failure carrying %+v", err, exits)
 	}
-	if stackExitsError(nil) != nil {
+	if msg := err.Error(); !strings.Contains(msg, "dispatch") || !strings.Contains(msg, "pid "+strconv.Itoa(gone)) {
+		t.Fatalf("error %q does not name dispatch and pid %d", msg, gone)
+	}
+	if errStackExits(nil) != nil {
 		t.Fatal("a step with no stack exit fails")
 	}
 }

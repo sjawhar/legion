@@ -104,7 +104,8 @@ type endpoints struct {
 }
 
 // endpointFlags are the endpoint flags seed and run share. Each defaults empty, so the stack's
-// value applies; one that differs from it is refused unless allowForeign is set.
+// value applies; one that differs from it is refused unless allowForeign is set, and then every
+// one is required.
 type endpointFlags struct {
 	stack                                   string
 	url, listener, nats, natsMon, pprof, pg string
@@ -136,6 +137,20 @@ func (e *foreignFlagError) Error() string {
 	return fmt.Sprintf("%s differs from stack.json; it would target something other than the local stack, so it is refused (pass -allow-foreign to target another stack on purpose)", e.Flag)
 }
 
+// missingForeignFlagError refuses a run under -allow-foreign that leaves an endpoint flag empty:
+// it would fall back to the local stack's value, so the run would write to one stack and count,
+// sample or profile another.
+type missingForeignFlagError struct {
+	Flag string
+}
+
+func (e *missingForeignFlagError) Error() string {
+	return fmt.Sprintf("%s is required with -allow-foreign: a foreign run takes no endpoint or token from stack.json, so give every one of %s", e.Flag, strings.Join(endpointFlagNames, ", "))
+}
+
+// endpointFlagNames are the endpoint and token flags, in the order the guard checks them.
+var endpointFlagNames = []string{"-url", "-listener", "-nats", "-nats-mon", "-pprof", "-pg", "-token", "-listener-token"}
+
 // resolve reads stack.json and resolves the endpoints. It opens no connection.
 func (f endpointFlags) resolve() (endpoints, error) {
 	path := f.stack
@@ -154,7 +169,8 @@ func (f endpointFlags) resolve() (endpoints, error) {
 }
 
 // resolveEndpoints takes every endpoint from st, refusing a flag that differs from it, unless
-// f.allowForeign: then a given flag wins, an empty one falls back to st, and pids stay empty.
+// f.allowForeign: then every endpoint flag is required, none falls back to st, and pids stay
+// empty.
 func resolveEndpoints(f endpointFlags, st *stackFile) (endpoints, error) {
 	if st == nil && !f.allowForeign {
 		return endpoints{}, fmt.Errorf("no stack.json, and -allow-foreign is not set")
@@ -173,7 +189,7 @@ func resolveEndpoints(f endpointFlags, st *stackFile) (endpoints, error) {
 			"-token":          st.DispatchToken,
 			"-listener-token": st.ListenerToken,
 		}
-		e.pgDirect = st.PGDirect
+		e.pgDirect = st.PGDirect && !f.allowForeign
 	}
 	fields := []struct {
 		flag  string
@@ -192,15 +208,14 @@ func resolveEndpoints(f endpointFlags, st *stackFile) (endpoints, error) {
 	for _, field := range fields {
 		want := stackValue[field.flag]
 		switch {
+		case f.allowForeign && field.given == "":
+			return endpoints{}, &missingForeignFlagError{Flag: field.flag}
 		case !f.allowForeign && field.given != "" && field.given != want:
 			return endpoints{}, &foreignFlagError{Flag: field.flag}
 		case field.given != "":
 			*field.dst = field.given
 		default:
 			*field.dst = want
-		}
-		if *field.dst == "" {
-			return endpoints{}, fmt.Errorf("%s is required: stack.json does not supply it", field.flag)
 		}
 	}
 	if f.natsServerName != "" && !f.allowForeign {
