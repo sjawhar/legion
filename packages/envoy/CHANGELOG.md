@@ -1472,9 +1472,11 @@
 - A closed issue's document no longer tells a person who typed nothing that "1 edit saved in this
   browser can't be sent: this document is read-only" (INFRA-158). The editor stamps each heading's
   id from its text as it loads, and the dashboard stored that stamp as an unsent edit even on a
-  read-only document. A read-only document now stores none of the editor's own updates, and drops
-  a stored row an earlier read-only load left that changes nothing; an edit a person typed while
-  the document was writable is still kept and named.
+  read-only document. The dashboard now never counts or stores an update that changes only what
+  the editor derives (a heading's id, an ordered list item's label and list type), whatever the
+  order of a reconnect, a close and a reopen, and drops a stored row an earlier read-only load left
+  that changes nothing; an edit a person typed while the document was writable is still kept and
+  named.
 - Every `envoy-infra` component refuses a number in an integer input that is not a whole number
   within the 64-bit integer range, at any depth (an object type's property, an array element, a
   map value), naming the component and the input's path and never quoting a secret value, before
