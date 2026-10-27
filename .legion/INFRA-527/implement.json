@@ -2,11 +2,21 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-527",
-  "completed": "2026-10-27T05:20:00Z",
+  "completed": "2026-10-27T06:20:00Z",
   "pr": "https://github.com/sjawhar/legion/pull/2322",
-  "head": "146a10cdeffd229402365f01d5f9ca963e3f92d4",
+  "head": "5e832b77ad6174d51302a6790697f054f869b7b4",
   "base": "7f7edb8de3e32f2b65fd3b5600577ddddc420142",
+  "round": 3,
+  "reviewRound2Answered": "Thread PRRT_kwDORFy7ds6wj7qi fixed in 5e832b77 and resolved: expectTickedFilledUntickedEmpty measures each box against the background ring of its own padded clip (taken once two shots in a row match), ticked middle ink >= 0.25 (measured 0.500-0.626), unticked <= 0.05 (measured 0.000); sameSize dropped. Reviewer's fast-follow done: forced-colors row no longer scrolls or destructures ticked; openChecklistThread comment cut to its first clause. Round-1 threads PRRT_kwDORFy7ds6wi-zl and PRRT_kwDORFy7ds6wi-zu answered and resolved.",
   "proof": [
+    {
+      "criterion": "Review round 2, important: the forced-colors regression rows fail every time without the fix and pass every time with it, independent of where each box lands",
+      "surface": "Issue page, Conversation tab, expanded thread, light/dark and forced colors light/dark; Chromium (DPR 1) and iPhone 13 (DPR 3); real Go server, Postgres 17 + pgvector",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/dispatch\" && ( . /legion/scratch/harness-527/env.sh && DATABASE_URL=\"$DB_URL\" bun run e2e -- e2e/task-items.e2e.ts --repeat-each=5 --project=chromium --project=iphone )",
+      "observed": "50 passed (5 rows x 2 projects x 5 repeats). Ticked box middle ink 0.500-0.626, unticked 0.000, in every row and repeat.",
+      "headSha": "5e832b77ad6174d51302a6790697f054f869b7b4",
+      "negativeControl": "With only the @media (forced-colors: active) block cut from styles.css (restored byte for byte afterwards), the same command with -g \"forced colors\" gave 20 failed of 20, each at \"share of the ticked box's middle that is ink\", Received: 0."
+    },
     {
       "criterion": "Review round 1, important: under forced colors (Windows High Contrast) a ticked and an unticked box look different",
       "surface": "Issue page, Conversation tab, expanded thread, emulateMedia({ colorScheme, forcedColors: 'active' }) light and dark; Chromium and iPhone 13; real Go server, Postgres 17 + pgvector",
