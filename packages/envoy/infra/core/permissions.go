@@ -44,9 +44,10 @@ var listenerBuckets = []string{bus.InterestBucket, bus.RoleClaimBucket, bus.Sess
 //     account info. The stored-message get is the read /v1/replay makes to return the retained
 //     notifications a session missed while its subscription was down: it reads one stored message
 //     at a time and can create, change or delete nothing;
-//   - for each bucket of listenerBuckets in turn, the calls nats.go's KV makes: the bucket's stream
-//     info and create, direct and stream message gets, writes to its keys, its watchers' consumer
-//     create and delete, and their flow-control replies;
+//   - for each bucket of listenerBuckets in turn, the calls nats.go's KV makes and the raise a start
+//     sends (bucketPermissions): the bucket's stream info, create and update, direct and stream
+//     message gets, writes to its keys, its watchers' consumer create and delete, and their
+//     flow-control replies;
 //   - the purge of the interest bucket, which its delete-marker collection sends.
 //
 // Subscribe: reply inboxes, then the role lanes in the machine's queue group (bus.ListenerQueue).
@@ -75,12 +76,15 @@ func ListenerPermissions(machineID string) Permissions {
 
 // bucketPermissions are the calls nats.go's KV makes on one bucket, in the order the grants list
 // them: ListenerPermissions lists them for each of listenerBuckets, DispatchPermissions for the
-// redelivery bucket.
+// redelivery bucket. Beside them is the update of the bucket's stream: a start that finds the
+// bucket with fewer copies than the deployment's replica count (bus.ReplicasEnvVar) raises it with
+// a stream update (bus.EnsureKeyValue), and never lowers it.
 func bucketPermissions(bucket string) []string {
 	stream := kvStream + bucket
 	return []string{
 		jsAPI + "STREAM.INFO." + stream,
 		jsAPI + "STREAM.CREATE." + stream,
+		jsAPI + "STREAM.UPDATE." + stream,
 		jsAPI + "DIRECT.GET." + stream + ".>",
 		jsAPI + "STREAM.MSG.GET." + stream,
 		kvSubjects + bucket + ".>",

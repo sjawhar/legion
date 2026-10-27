@@ -1752,9 +1752,11 @@ as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space
   `ListenerPermissions`; `SessionPermissions` does not, so a session holding that set alone reads
   what it missed only through the listener;
 - for each key-value bucket, `envoy_interests`, `envoy_roles`, `envoy_sessions` and
-  `envoy_ci_state`, the calls nats.go's key-value store makes: the info and create of the bucket's
-  stream `KV_<bucket>`, its direct and stream message gets, `$KV.<bucket>.>`, and its watchers'
-  consumer create and delete and their flow-control replies;
+  `envoy_ci_state`, the calls nats.go's key-value store makes: the info, create and update of the
+  bucket's stream `KV_<bucket>`, its direct and stream message gets, `$KV.<bucket>.>`, and its
+  watchers' consumer create and delete and their flow-control replies. The update is the raise a
+  start sends when it finds a bucket with fewer copies than `ENVOY_NATS_REPLICAS`; a start never
+  lowers a bucket's copies;
 - `$JS.API.STREAM.PURGE.KV_envoy_interests`, which the interest bucket's delete-marker collection
   sends.
 

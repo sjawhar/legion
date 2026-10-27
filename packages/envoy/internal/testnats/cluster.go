@@ -33,6 +33,15 @@ type Cluster struct {
 // lone server's does.
 func StartCluster(t testing.TB, n int) *Cluster {
 	t.Helper()
+	return StartClusterConfig(t, n, "")
+}
+
+// StartClusterConfig is StartCluster with config added to the end of every member's configuration,
+// as an authorization block that every member enforces alike. AwaitReady connects to each member
+// with no credential and asks JetStream for its account info, so a config that declares users names
+// a no_auth_user whose account has JetStream.
+func StartClusterConfig(t testing.TB, n int, config string) *Cluster {
+	t.Helper()
 	if n < 2 {
 		t.Fatalf("a cluster needs at least 2 servers, not %d", n)
 	}
@@ -58,7 +67,7 @@ func StartCluster(t testing.TB, n int) *Cluster {
 	}
 	cluster := &Cluster{Servers: make([]*Server, n)}
 	for i := range n {
-		server := start(t, clusterConfig(i, routes), []string{"-js"})
+		server := start(t, clusterConfig(i, routes)+config, []string{"-js"})
 		server.name = memberName(i)
 		members[i].Store(server)
 		cluster.Servers[i] = server

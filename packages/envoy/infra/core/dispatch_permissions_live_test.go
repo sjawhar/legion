@@ -174,8 +174,8 @@ func startDispatchServer(t *testing.T, image string, grant core.Permissions) (st
 // lets it play a session (publish its frames, subscribe notifications and its control subject),
 // plus the exact calls its checks make, so it leans on nothing of Dispatch's grant: reply inboxes
 // for its JetStream requests, each Dispatch durable's consumer info, a JetStream publish into the
-// stream, and the redelivery bucket's reads, writes and watch — not the bucket's create, which is
-// Dispatch's to make.
+// stream, and the redelivery bucket's reads, writes and watch — not the bucket's create or the
+// update that raises its copies, which are Dispatch's to make.
 func testClientPermissions() core.Permissions {
 	session := core.SessionPermissions()
 	redelivery := "KV_" + bus.WebhookRedeliveryBucket

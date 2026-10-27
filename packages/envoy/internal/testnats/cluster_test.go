@@ -1,12 +1,33 @@
 package testnats
 
 import (
+	"errors"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
 )
+
+// StartClusterConfig gives every member the configuration it is passed: each admits a user its
+// authorization holds and refuses one it does not, and its no_auth_user lets the cluster start.
+func TestEveryClusterMemberTakesTheConfigItIsGiven(t *testing.T) {
+	seed, public := User(t)
+	stranger, _ := User(t)
+	_, fallback := User(t)
+	cluster := StartClusterConfig(t, 3, fmt.Sprintf("authorization {\n  users = [ {nkey: %q}, {nkey: %q} ]\n}\nno_auth_user: %q\n", public, fallback, fallback))
+	for i, uri := range cluster.URLs() {
+		conn, err := ConnectSeed(t, uri, seed)
+		if err != nil {
+			t.Fatalf("member %s refused a user its authorization holds: %v", cluster.Name(i), err)
+		}
+		conn.Close()
+		if _, err := ConnectSeed(t, uri, stranger); !errors.Is(err, natsgo.ErrAuthorization) {
+			t.Fatalf("member %s answered a user its authorization does not hold with %v, want an authorization violation", cluster.Name(i), err)
+		}
+	}
+}
 
 // A three-copy stream on the cluster keeps a leader and takes a publish with the member that led
 // it stopped, and that member, started again on its own store and URLs, rejoins and catches up.
