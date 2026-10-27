@@ -1,0 +1,127 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-530",
+  "completed": "2026-10-27T00:46:29Z",
+  "planDocument": "dispatch://INFRA-530/artifact/plan-md",
+  "summary": "Go's pmdoc Parse gives an email autolink (ast.AutoLinkEmail: a GFM literal a@b.test or a CommonMark <a@b.test>) the href 'mailto:' + address, as remark-gfm does. Render is unchanged: such a link is stored as [addr](mailto:addr), which main already writes for explicit mailto links and which Go and the browser engine read back alike, so no stored markdown changes bytes. Tests are written first and run red at main + tests: Go rows comparing Go to the engine, byte-stability rows, and a Playwright test asserting the stored markdown, the live-editor and past-version hrefs and what the editor's link opener passes to window.open.",
+  "baseCommit": "7f7edb8de",
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Go tests first (red at base)",
+      "files": [
+        "packages/envoy/internal/dispatch/pmdoc/linkify_test.go",
+        "packages/envoy/internal/dispatch/pmdoc/email_readback_test.go (new)",
+        "packages/envoy/internal/dispatch/pmdoc/escape_test.go"
+      ],
+      "detail": "linkify_test.go:25-27 wants become 'link mailto:alice@example.com', 'link mailto:bob@example.org', 'link mailto:a_a_a@b.c'. New email_readback_test.go (a new file so it does not conflict with INFRA-531's edits to render_readback_test.go): TestAnEmailAutolinkIsAMailLinkInGoAndTheEngine with rows 'Mail a@b.test now.\\n', 'Mail <a@b.test> now.\\n', '| h |\\n| --- |\\n| a@b.test |\\n', 'Mail *a@b.test* end\\n', 'Mail (a@b.test) end\\n', 'Mail A@B.TEST end\\n', 'Mail a.b-c+d@x-y.test. end\\n' — Go Parse equals engineReadings, href is 'mailto:'+text, Render(Parse(md)) holds [addr](mailto:addr) and reads back alike in both; TestEmailReadingsThatDifferAreRecorded in the shape of render_readback_test.go:351-402 with agree:false rows 'Mail mailto:a@b.test now.\\n', 'Mail xmpp:a@b.test now.\\n', 'x;a@b.test end\\n', 'www.a@b.test\\n', 'Mail a'b@c.test now.\\n', 'Mail a!b@c.test now.\\n', 'Mail a@b.test1 now.\\n' and agree:true rows 'Mail a@b.test_ end\\n', 'Mail a@b end\\n', its comment naming decision D1. escape_test.go TestRenderKeepsStoredMarkdownThatReadsBack (:854) gains 'Write to [a@b.test](a@b.test).\\n' and 'Write to [a@b.test](mailto:a@b.test).\\n'.",
+      "command": "cd -- \"$LEGION_WORKSPACE\"/packages/envoy && go test ./internal/dispatch/pmdoc -run 'TestLinkifyGuardLinksWhatGoldmarkLinks|TestAnEmailAutolinkIsAMailLinkInGoAndTheEngine|TestEmailReadingsThatDifferAreRecorded|TestRenderKeepsStoredMarkdownThatReadsBack' -count=1 -v",
+      "expectedAtBase": "linkify rows and TestAnEmailAutolinkIsAMailLinkInGoAndTheEngine fail naming Go href a@b.test against engine mailto:a@b.test; the other two pass. bun on PATH and 'bun install' at the repository root are required, or engineReadings skips (render_readback_test.go:16-20) and a skip is not a red run."
+    },
+    {
+      "id": "T2",
+      "title": "Browser test before the fix (red at base)",
+      "files": ["packages/dispatch/e2e/email-links.e2e.ts (new)"],
+      "detail": "Pattern of pictures.e2e.ts:200-263. createIssue CORE with spec '# Contacts\\n\\nWrite to first@b.test for access.\\n'; editArtifact insert 'Or write to second@b.test.\\n\\nBelow the contacts.' as an agent session; poll newest version > 1. Assert getIssueArtifactText(key,'spec').markdown holds [first@b.test](mailto:first@b.test) and [second@b.test](mailto:second@b.test). page.addInitScript replaces window.open with a recorder. Live editor (openSpec, documentEditor): both links' href is mailto:<addr>; click({modifiers:['ControlOrMeta']}) on second@b.test records mailto:second@b.test. Past version (Version combobox, getByTestId('version-view')): both hrefs mailto:<addr>; a plain click on first@b.test records mailto:first@b.test. Runs in chromium and iphone projects (packages/dispatch/e2e/playwright.config.ts:118-123); only the modifier click may be skipped on isMobile, with a comment, if the phone project cannot deliver it.",
+      "command": "cd -- \"$LEGION_WORKSPACE\"/packages/dispatch && bun run e2e -- email-links.e2e.ts",
+      "expectedAtBase": "stored markdown shows [first@b.test](first@b.test); quote the actual href and recorded window.open values the base build shows (not observed by the planner). Harness: docs/solutions/testing/a-browser-harness-in-an-issue-pod-lives-on-the-issue-volume-INFRA-43.md, everything on /legion/scratch, nothing in the workspace."
+    },
+    {
+      "id": "T3",
+      "title": "The fix",
+      "files": ["packages/envoy/internal/dispatch/pmdoc/parse.go"],
+      "detail": "case *ast.AutoLink (:957-958): href := string(current.URL(source)); if current.AutoLinkType == ast.AutoLinkEmail { href = \"mailto:\" + href }; use href in the link mark. Do not change Render, linkify.go, literalURL or literalLength (the renderer reads literalLength, render.go:707,731)."
+    },
+    {
+      "id": "T4",
+      "title": "Green runs and whole suites",
+      "detail": "T1 and T2 commands pass (T2 in both projects). 'go test ./internal/dispatch/...' and 'go vet ./internal/dispatch/pmdoc/' from packages/envoy; 'bun run lint && bun run typecheck' from packages/dispatch (tsconfig.json:16 includes e2e/**/*.ts). TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText, TestBareURLShapesParseAndRenderLinearly and TestUpdateIsLinearInTheBlockCount fail identically at base in a gVisor pod (getrusage granularity; dispatch://INFRA-49/comment/34105ee9-5c2b-4f61-8052-bf48a8b52df4, docs/solutions/testing/the-dispatch-servers-go-suites-in-an-issue-pod-run-api-and-docs-alone-with-a-timeout-and-read-the-c-collation-docker-and-bun-failures-as-the-environment-LEGION-752.md): GitHub's runners are their authoritative run."
+    },
+    {
+      "id": "T5",
+      "title": "CHANGELOG",
+      "files": ["packages/envoy/CHANGELOG.md"],
+      "detail": "[Unreleased] -> ### Fixed: a bare or angle-bracket email address written to a document through the API is stored and shown as a mailto: link, as a comment shows it; a document already holding [addr](addr) keeps that link's bare target until it is edited."
+    },
+    {
+      "id": "T6",
+      "title": "Pull request",
+      "detail": "One PR against main, body per skill://legion-worker/references/pr-body.md with 'Dispatch: INFRA-530', the T1 and T2 red runs (main + tests) and green runs (head) quoted, and the two E2E lines."
+    }
+  ],
+  "acceptance": [
+    {
+      "criterion": "A1 stores: a bare email written through the API is stored as a mailto: link",
+      "surface": "Dispatch API and stored markdown (Go pmdoc)",
+      "command": "T1 Go command; T2 getIssueArtifactText assertion",
+      "negativeControl": "at main + tests: Go href a@b.test vs engine mailto:a@b.test; stored [first@b.test](first@b.test)"
+    },
+    {
+      "criterion": "A1 renders: the live editor and the past version show a mailto: link",
+      "surface": "Dispatch spec page /issues/<KEY>/spec, live editor and version view",
+      "command": "cd packages/dispatch && bun run e2e -- email-links.e2e.ts",
+      "negativeControl": "same test at main + test: href is not mailto:"
+    },
+    {
+      "criterion": "A1 opens: the page's link opens a mail link",
+      "surface": "same page, the editor's link opener (proof-sdk markdown-link-click.ts, wired at packages/proof-editor/src/lib.ts:343)",
+      "command": "the window.open recorder in T2",
+      "negativeControl": "at main + test: the recorded URL is not mailto: (a schemeless href resolves against the page URL, markdown-link-click.ts:196-226)"
+    },
+    {
+      "criterion": "No stored markdown is restamped",
+      "surface": "pmdoc Render byte stability",
+      "command": "T1 TestRenderKeepsStoredMarkdownThatReadsBack rows",
+      "negativeControl": "writing mailto links bare or as <addr> fails these rows"
+    },
+    {
+      "criterion": "Production check after the deploy",
+      "surface": "production Dispatch",
+      "command": "gh api \"repos/theorem-labs/agent-infra/contents/legion/checks/dispatch-production-check.sh?ref=main\" -H \"Accept: application/vnd.github.raw\" | bash -s -- --commit <merged sha> --page /issues/INFRA-530/spec --route /api/v1/artifacts/<INFRA-530 spec artifact id>/text --route /api/v1/artifacts/<id>/versions/1; once the running build carries the merge: dispatch artifact --project INFRA --name infra-530-production-check.md --content 'Write to a@b.test.' then dispatch doc-read --project INFRA --artifact infra-530-production-check-md, expecting [a@b.test](mailto:a@b.test)",
+      "negativeControl": "a build before the merge stores [a@b.test](a@b.test)"
+    }
+  ],
+  "decisionsForArchitect": [
+    {
+      "id": "D1",
+      "decision": "Scope of the email-boundary divergences left after this fix",
+      "detail": "Seven shapes still read differently in Go and the editor: an email after punctuation (x;a@b.test, mailto:a@b.test, xmpp:a@b.test), www.a@b.test, a local part holding ' or !, a domain ending in a digit (a@b.test1). Fixing them needs Go to read email literals as micromark does, including after punctuation where goldmark asks no inline parser (linkify.go:40-49) — the mechanism INFRA-531 must build for web addresses in the same linkify.go.",
+      "recommendation": "Add them to INFRA-531's scope; this plan records them as agree:false rows in email_readback_test.go for INFRA-531 to flip."
+    },
+    {
+      "id": "D2",
+      "decision": "Documents already holding [addr](addr)",
+      "detail": "The fix does not touch an explicit link (parse.go:947-955) and live trees load from Yjs history, so existing documents such as dispatch://INFRA/artifact/goals-md keep the bare target.",
+      "recommendation": "No bulk rewrite: each rewrite mints a version, and on an approved spec closes its design gate. goals-md's owner fixes its one link with dispatch doc-edit after the deploy."
+    }
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase rules, pr-body.md (body, proofs, simplify pass), merge-gate.md (production check after the close), default-branch-check.md (push identity)",
+      "dispatch: the production check writes and reads a project document",
+      "ce-simplify-code: the simplify pass pr-body.md requires on the settled change"
+    ],
+    "test": [
+      "legion-worker: pr-body.md proof rules; re-run T1 and T2 at the head and at main + tests in the INFRA-43 pod harness"
+    ],
+    "review": [
+      "legion-worker: merge-gate.md and review-threads.md; confirm Render, linkify.go and stored bytes are unchanged and the recorded-divergence rows name D1"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "The adjacent shapes (mailto:/xmpp:/x; prefixes, www.a@b.test) must be decided; www.a@b.test is not a one-line fix and punctuation-preceded emails share INFRA-531's trigger problem in linkify.go.", "answer": "Out of this issue's spec; recorded as agree:false rows in a new email_readback_test.go (no conflict with INFRA-531's files); scope sent to the architect as D1 with the recommendation to add them to INFRA-531."},
+      {"finding": "'The issue page's link opens a mail link' is not machine-checkable as written.", "answer": "T2 asserts the anchor href in the live editor and the version view and records what the editor's link opener passes to a stubbed window.open on a Ctrl/Cmd-click (live) and a plain click (version view)."},
+      {"finding": "The negative control assumes the browser shows the bare address, which nothing in the repo shows.", "answer": "Read the opener: markdown-link-click.ts:196-226 resolves a schemeless href against the page URL. T2 asserts only equality with mailto: and the implementer quotes whatever the base build shows; the stored-markdown assertion carries the bare target."},
+      {"finding": "The production check is undefined and the browser suite cannot run against production.", "answer": "Named: the deployment's dispatch-production-check.sh on /issues/INFRA-530/spec with its artifact text and version routes, plus a real write of a bare email into an INFRA project document read back with dispatch doc-read once the running build carries the merge."},
+      {"finding": "'Go now equals the engine' holds only for probed shapes; goldmark's local part accepts characters the editor's does not.", "answer": "Probed a'b@c.test, a!b@c.test, a@b.test1: they differ. Recorded as agree:false rows; where an email starts and ends is out of scope (D1)."},
+      {"finding": "Engine-comparing Go tests skip silently without bun.", "answer": "T1 requires bun on PATH and bun install at the root and states a skip is not a red run; CI fails without bun."},
+      {"finding": "The CHANGELOG must say what does not change.", "answer": "T5's entry says existing [addr](addr) links keep the bare target."},
+      {"finding": "Spec claims about comments being mail links rest on repo comments only.", "answer": "Comments use the same headless engine (remark-gfm) the probe ran, which reads mailto:; the opener allows mailto: (markdown-link-click.ts:12)."},
+      {"finding": "Evidence about goals-md, the OSSV-142 document and INFRA-531's files was not readable by the analyst.", "answer": "goals-md read with dispatch doc-read (holds [**sami@theorem.dev**](sami@theorem.dev)); OSSV-142's mailto link seen in dispatch search; INFRA-531's spec (INFRA-172 draft 6) names linkify.go and render_readback_test.go."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": []
+}
