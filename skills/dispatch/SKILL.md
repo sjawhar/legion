@@ -45,7 +45,7 @@ The problem and why it matters. Recommendation: the option and its reason.
 
 Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, `done` with `--reason` once driven in production. An issue with the `legion` label, or under one: never write its status or route, and claim it only as a Legion role of its tree, even when its claim reads `· not running`, as a suspended architect's does: taking it takes the tree out of the workflow.
 
-Claiming an unrouted issue brings people's comments. Else `issue-update --route session:<your id>` (`--route ''` on release) or `envoy_subscribe notifications.dispatch.issue.<KEY>.>`.
+Claiming an unrouted issue brings people's comments. For other events: `issue-update --route session:<your id>` (`--route ''` on release) or `envoy_subscribe notifications.dispatch.issue.<KEY>.>`.
 
 ## Close what you opened
 
