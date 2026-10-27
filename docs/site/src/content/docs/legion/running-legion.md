@@ -40,14 +40,25 @@ is for the new default, whose workspace it does not have. While the project serv
 launches are refused and an adopted pane's gh keeps its last tokens until they expire.
 
 The daemon reads the mapping at boot and again whenever it changes in Dispatch. It serves each
-mapped repository both the implement and the review App are installed on, and leaves out one either
-App is missing from: the boot logs it, `legion state --json` lists it under `repositories.refused`
-with the App it lacks, and an issue on it is not admitted until the App is installed, when moving
-the issue to `todo` again admits it. A project with no repository mapped does not boot; one whose
-every repository lacks an App boots serving none and admits nothing until an App is installed. A
-Dispatch that does not answer the boot's read of the mapping delays the boot rather than ending it:
-the daemon reads it again, one second doubling to one minute between reads, for as long as Dispatch
-stays unreachable, logs each wait, and serves nothing until the read passes.
+mapped repository both the implement and the review App are installed on, and leaves out one
+either App is missing from or whose installation GitHub refused to read or did not answer: the
+boot logs it, `legion state` names it on its `repositories` line, and `legion state --json` lists
+it under `repositories.refused` with the reason — the App it lacks, or the App whose installation
+read failed and GitHub's answer. Every other repository is served meanwhile. An issue on a
+repository missing an App is not admitted until the App is installed, when moving the issue to
+`todo` again admits it. A repository whose read failed is read again whenever an issue of it comes
+up for admission, when the mapping changes in Dispatch, and at the next boot, and is served once
+GitHub answers that both Apps are installed there. Nobody has to ask for that read, though what
+made it fail, such as a wrong App key or a host clock off true time, may need fixing first.
+
+The mapping decides the boot three ways. A project with no repository mapped does not boot. One
+whose every repository lacks an App boots serving none and admits nothing until an App is
+installed. One where no repository is served and at least one could not be read does not boot,
+naming each failed read; a failure GitHub reports as its own trouble (a 5xx, a rate limit, no
+answer) is tried five times, over about two minutes, first. A Dispatch that does not answer the
+boot's read of the mapping delays the boot rather than ending it: the daemon reads it again, one
+second doubling to one minute between reads, for as long as Dispatch stays unreachable, logs each
+wait, and serves nothing until the read passes.
 
 ## The GitHub Apps
 
@@ -639,13 +650,24 @@ Closing the terminal leaves the project without one, and the daemon logs
 
   ```text
   legion WIDGETS on http://192.0.2.10:13370 — schema 12, boot 7 started 2026-10-03T09:12:40Z (first boot 2026-09-20T15:02:11Z)
+  repositories: 2 served — acme/widgets, acme/widgets-docs; 1 left out — acme/gadgets: the review App is not installed on acme/gadgets
   admission: 3 active, 1 waiting, cap 4; 9 issues
+  blocked on Dispatch links: none
   roots waiting on a person: 1, 0 answered and waiting for a slot — WIDGETS-9 waits on ask 7f3c2a10, unanswered
   open production checks: 1; the oldest, WIDGETS-12 #42 at 4b7d2a1, look 1 woken by merge at 2026-10-03T10:15:02Z, bound 2026-10-17T10:15:02Z
   pending Dispatch status writes: none
   held lifecycle rows: none
   claims nothing will wake: none
   ```
+
+  The `repositories` line names the repositories the daemon serves and every mapped repository it
+  leaves out with why: an App not installed on it, or an installation read GitHub refused or did
+  not answer ([The project's repositories](#the-projects-repositories)). A left-out repository
+  admits none of its issues, so the line says when the daemon serves less of the mapping than the
+  project maps (`none left out` when it serves it all).
+
+  The `blocked on Dispatch links` line counts the issues Legion waits to start behind a Dispatch
+  issue that is not done, and names each with what it waits on (`none` when nothing waits).
 
   The `roots waiting on a person` line counts the roots that gave their admission slot back to
   wait on a person (phase `awaiting_person`), how many have been answered — each first in line for

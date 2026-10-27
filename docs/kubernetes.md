@@ -5351,9 +5351,14 @@ issue's pod (every role of it alike) and the image probe's.
   daemon reads the mapping at boot and on Dispatch's `settings.repo_project.updated` of its
   project, and checks, per repository, that both GitHub Apps are installed on it (`GET
   /repos/{owner}/{repo}/installation` under each App's JWT): a repository either App is missing
-  from is left out, not refused, and `legion state --json` names it under `repositories.refused`
-  with the App it lacks; a project with no repository mapped does not boot, and one whose every
-  repository lacks an App boots serving none, admitting nothing until an App is installed. Every
+  from, or whose installation read GitHub refused or did not answer, is left out, not refused, and
+  `legion state --json` names it under `repositories.refused` with the App it lacks or the read's
+  failure, while every other repository is served. A repository left out for a failed read is read
+  again when an issue of it comes up for admission, on the next `settings.repo_project.updated`
+  and at the next boot. A project with no repository mapped does not boot; one whose every
+  repository lacks an App boots serving none, admitting nothing until an App is installed; and one
+  with no repository served and at least one whose read failed does not boot, after five attempts
+  when GitHub reports the failure as its own trouble. Every
   role's gh bundle holds a directory for each served repository's owner. An
   issue is recorded on the repository Dispatch resolves for it, with that repository's default
   branch as GitHub names it, when the daemon first records it, and keeps both. A claim on an issue

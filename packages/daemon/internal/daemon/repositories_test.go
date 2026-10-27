@@ -169,12 +169,11 @@ func TestTheMappingNamesEveryMissingAppAndLeavesOutAFailedRead(t *testing.T) {
 	}
 }
 
-// The incident of 2026-10-27: a 401 on one mapped repository's installation read held 343 agent
-// owners offline for about 28 minutes, because the daemon refused its whole boot rather than
-// serving the repositories it could read. Now a failed read leaves only that repository out,
-// naming the App, the repository and what GitHub answered, so it reaches legion state's
-// repositories.refused; the boot serves every other repository and continues; and the refused
-// repository's issues resolve to an unread refusal that recovers with no person on the next read.
+// One mapped repository's installation read answering 401 (the 2026-10-27 boot refusal's shape)
+// leaves only that repository out, naming the App, the repository and what GitHub answered, so it
+// reaches legion state's repositories.refused; the boot serves every other repository and
+// continues; and the refused repository's issues resolve to an unread refusal, which the next read
+// of the mapping GitHub answers serves, with nobody asking for that read.
 func TestAFailedInstallationReadRefusesOnlyThatRepository(t *testing.T) {
 	gone := errors.New(`read whether the implement App is installed on acme/gadgets failed (401): "'Expiration time' claim ('exp') is too far in the future"`)
 	w := &workflowRuntime{dispatch: &mappingDispatch{mappings: []dispatch.RepoProject{
@@ -200,8 +199,8 @@ func TestAFailedInstallationReadRefusesOnlyThatRepository(t *testing.T) {
 	if view := w.repositories.view(nil); len(view.Refused) != 1 || view.Refused[0].Repo != "acme/gadgets" || !strings.Contains(view.Refused[0].Reason, "401") {
 		t.Fatalf("state's repositories.refused = %#v, want acme/gadgets with GitHub's 401", view.Refused)
 	}
-	// An issue of acme/gadgets is not served; it resolves to the refusal, marked unread, which
-	// recovers with no person on the next read of the mapping.
+	// An issue of acme/gadgets is not served; it resolves to the refusal, marked unread, which the
+	// next read of the mapping GitHub answers serves.
 	res, err := (&workflowRuntime{repositories: w.repositories}).ResolveRepository("acme/gadgets")
 	if err != nil || !res.LeftOut || !res.Unread || !strings.Contains(res.Refusal, "401") {
 		t.Fatalf("ResolveRepository(acme/gadgets) = %#v, %v; want it left out as unread with GitHub's 401", res, err)
@@ -210,8 +209,9 @@ func TestAFailedInstallationReadRefusesOnlyThatRepository(t *testing.T) {
 
 // A mapping whose every repository fails its installation read refuses the boot: the daemon read
 // nothing it could serve, which is the one case a failed read is still fatal (a mapping whose
-// every repository is definitely missing an App boots serving none, kept by the empty-mapping
-// test). The refusal carries each failed read's own failure.
+// every repository is definitely missing an App boots serving none, kept by
+// TestTheBootRefusesAnEmptyMappingButBootsOneLackingApps). The refusal carries each failed read's
+// own failure.
 func TestTheBootIsRefusedWhenEveryRepositorysReadFails(t *testing.T) {
 	gadgets := errors.New("read whether the implement App is installed on acme/gadgets failed (401)")
 	tools := errors.New("read whether the review App is installed on zeta/tools failed (401)")
@@ -230,10 +230,11 @@ func TestTheBootIsRefusedWhenEveryRepositorysReadFails(t *testing.T) {
 	}
 }
 
-// The boot refuses only a project with no repository mapped. A mapping whose every repository
-// lacks an App boots serving none, each left out and reported; a mapping with one served
-// repository and one left out boots serving the one.
-func TestTheBootRefusesOnlyAnEmptyMapping(t *testing.T) {
+// The boot refuses a project with no repository mapped. A mapping whose every repository lacks an
+// App boots serving none, each left out and reported; a mapping with one served repository and one
+// left out boots serving the one. A mapping with nothing served and a read that failed refuses the
+// boot too (TestTheBootIsRefusedWhenEveryRepositorysReadFails).
+func TestTheBootRefusesAnEmptyMappingButBootsOneLackingApps(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
 		mappings        []dispatch.RepoProject
@@ -385,7 +386,10 @@ func TestTheMappingsViewCarriesTheRepositoryCaches(t *testing.T) {
 // An issue the workflow does not record, such as an operator's claim, works the project's default
 // repository, as Dispatch resolves an issue that names none, at its default branch as GitHub names
 // it: a pod provisions its workspace from it, and the claim's commit identity is minted for its
-// owner. A project serving no default repository refuses the launch, naming the fix.
+// owner. A project serving no default repository refuses the launch, naming the fix: set the
+// default to a repository both Apps are installed on, or, when the default is left out because
+// its installation read failed, the read's failure and when Legion reads it again, rather than an
+// install.
 func TestAnUnrecordedIssueWorksTheProjectsDefaultRepository(t *testing.T) {
 	ctx := context.Background()
 	github := newNamedGitHub(t, map[string]string{"acme/widgets": "Acme/Widgets@release/v7.1", "zeta/tools": "zeta/tools@main"})
@@ -395,10 +399,17 @@ func TestAnUnrecordedIssueWorksTheProjectsDefaultRepository(t *testing.T) {
 	if repo, branch, err := w.issueRepository(ctx, "LEGION-9"); err != nil || repo.String() != "Acme/Widgets" || branch != "release/v7.1" {
 		t.Fatalf("an unrecorded issue works %s@%s, %v; want the default Acme/Widgets@release/v7.1", repo, branch, err)
 	}
-	w.repositories.set([]mappedRepository{{Repo: ghrepo.MustParse("zeta/tools")}}, []refusedRepository{{Repo: "acme/widgets", Reason: "the review App is not installed on acme/widgets"}})
+	w.repositories.set([]mappedRepository{{Repo: ghrepo.MustParse("zeta/tools")}}, []refusedRepository{{Repo: "acme/widgets", Reason: "the review App is not installed on acme/widgets", Default: true}})
 	want := "LEGION-9 is not recorded, so it works the project's default repository, and project LEGION serves none: set the project's default repository in Dispatch (Settings → Repositories → Projects) to one both GitHub Apps are installed on"
 	if repo, _, err := w.issueRepository(ctx, "LEGION-9"); err == nil || err.Error() != want {
 		t.Fatalf("an unrecorded issue with no default served works %s, %v; want %q", repo, err, want)
+	}
+	unread := "the implement App's installation on acme/widgets could not be read: read whether the implement App is installed on acme/widgets failed (401)"
+	w.repositories.set([]mappedRepository{{Repo: ghrepo.MustParse("zeta/tools")}}, []refusedRepository{{Repo: "acme/widgets", Reason: unread, Default: true, Unread: true}})
+	want = "LEGION-9 is not recorded, so it works the project's default repository, and project LEGION leaves its default acme/widgets out: " + unread +
+		"; Legion reads that installation again whenever an issue of acme/widgets comes up for admission, when the repository mapping changes in Dispatch, and at its next boot"
+	if repo, _, err := w.issueRepository(ctx, "LEGION-9"); err == nil || err.Error() != want {
+		t.Fatalf("an unrecorded issue whose default's installation read failed works %s, %v; want %q", repo, err, want)
 	}
 }
 

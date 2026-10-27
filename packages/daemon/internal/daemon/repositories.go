@@ -27,11 +27,12 @@ import (
 
 // repositories is the project's repository mapping as the daemon serves it: Dispatch's mapping of
 // the project (Settings → Repositories → Projects), read at boot and on its
-// settings.repo_project.updated, each repository served once both GitHub Apps are installed on it
-// and every other one left out with the reason, for legion state. The mapping also files people's
-// issues, so it can name a repository that lacks one of Legion's Apps; leaving it out costs only its
-// issues' admission. Readers take the read lock; the readers of the mapping swap it whole under the
-// write lock.
+// settings.repo_project.updated, each repository served once GitHub answers that both GitHub Apps
+// are installed on it and every other one left out with the reason, for legion state. The mapping
+// also files people's issues, so it can name a repository that lacks one of Legion's Apps, and
+// GitHub can refuse one repository's installation read; leaving either out costs only its issues'
+// admission. Readers take the read lock; the readers of the mapping swap it whole under the write
+// lock.
 type repositories struct {
 	project string
 
@@ -47,13 +48,16 @@ type mappedRepository struct {
 	Default bool
 }
 
-// refusedRepository is a mapped repository Legion leaves out, as Dispatch maps it, and why.
-// Unread is one left out because its installation read failed rather than because an App is not
-// installed on it: Legion does not know what the Apps hold there, and reads it again (checkMapping).
+// refusedRepository is a mapped repository Legion leaves out, as Dispatch maps it, and why, and
+// whether it is the project's default in Dispatch, so a launch that works the default can say why
+// it is left out. Unread is one left out because its installation read failed rather than because
+// an App is not installed on it: Legion does not know what the Apps hold there, and reads it again
+// (checkMapping).
 type refusedRepository struct {
-	Repo   string
-	Reason string
-	Unread bool
+	Repo    string
+	Reason  string
+	Default bool
+	Unread  bool
 }
 
 func newRepositories(project string) *repositories {
@@ -277,7 +281,7 @@ func checkMapping(ctx context.Context, mappings []dispatch.RepoProject, project 
 	var unread []error
 	for _, m := range entries {
 		if m.parse != nil {
-			refused = append(refused, refusedRepository{Repo: m.mapping.Repo, Reason: m.parse.Error()})
+			refused = append(refused, refusedRepository{Repo: m.mapping.Repo, Reason: m.parse.Error(), Default: m.mapping.Default})
 			continue
 		}
 		var missing, unreadable []string
@@ -295,9 +299,9 @@ func checkMapping(ctx context.Context, mappings []dispatch.RepoProject, project 
 			if len(missing) > 0 {
 				unreadable = append(unreadable, missingApps(missing, m.repo))
 			}
-			refused = append(refused, refusedRepository{Repo: m.mapping.Repo, Reason: strings.Join(unreadable, "; "), Unread: true})
+			refused = append(refused, refusedRepository{Repo: m.mapping.Repo, Reason: strings.Join(unreadable, "; "), Default: m.mapping.Default, Unread: true})
 		case len(missing) > 0:
-			refused = append(refused, refusedRepository{Repo: m.mapping.Repo, Reason: missingApps(missing, m.repo)})
+			refused = append(refused, refusedRepository{Repo: m.mapping.Repo, Reason: missingApps(missing, m.repo), Default: m.mapping.Default})
 		default:
 			accepted = append(accepted, mappedRepository{Repo: m.repo, Default: m.mapping.Default})
 		}
@@ -353,20 +357,21 @@ func nameAccepted(ctx context.Context, accepted []mappedRepository, named *defau
 // (appauth.TransientError) on the App mint's schedule, and it fails only when no repository of
 // the mapping is serveable, so that retry is now the whole mapping's, never one repository's.
 //
-// A project with no repository mapped refuses the boot. One whose every mapped repository lacks
-// an App boots serving none, each left out and reported, and so does one whose every mapped
-// repository failed its installation read while at least one other is served: it admits nothing
-// on a left-out repository, saying why on each issue, until an App is installed, or GitHub
-// answers the read, and a read of the mapping finds it.
+// A project with no repository mapped refuses the boot, and so does one with no repository served
+// and at least one whose installation read failed (checkMapping). One whose every mapped
+// repository lacks an App boots serving none, each left out and reported. Any other boots serving
+// what it could read. A left-out repository admits nothing, saying why on each issue, until an App
+// is installed, or GitHub answers the read, and a read of the mapping finds it.
 //
-// A repository refused for this pass recovers with no person: the next read of the mapping serves
-// it. Three things ask for one, and the first needs nobody — an admission-bound todo event on
-// that repository (a Dispatch event of the issue, or release_children's child) is held back and
-// asks for the read itself (prepareUnrecorded → awaitMappingRead → requestMappingRead →
-// refreshOnMappingChange → refreshMapping), so the refusal is read again the moment it would cost
-// an admission; Dispatch's settings.repo_project.updated asks for the same read (mappingChange);
-// and the next boot reads the mapping afresh. Nothing else polls GitHub for it: a repository
-// nothing is waiting on costs nothing while it is left out.
+// A repository refused for this pass is served by the next read of the mapping GitHub answers, and
+// nobody has to ask for that read (what made it fail, such as a wrong App key or a clock off true
+// time, may still need fixing). Three things ask for one, and the first needs nobody — an
+// admission-bound todo event on that repository (a Dispatch event of the issue, or
+// release_children's child) is held back and asks for the read itself (prepareUnrecorded →
+// awaitMappingRead → requestMappingRead → refreshOnMappingChange → refreshMapping), so the refusal
+// is read again the moment it would cost an admission; Dispatch's settings.repo_project.updated
+// asks for the same read (mappingChange); and the next boot reads the mapping afresh. Nothing else
+// polls GitHub for it: a repository nothing is waiting on costs nothing while it is left out.
 // nameMapping, once the Apps' tokens are minted, reads GitHub's spelling.
 func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 	var mappings []dispatch.RepoProject
@@ -656,6 +661,12 @@ func (w *workflowRuntime) issueRepository(ctx context.Context, key string) (ghre
 					return ghrepo.Repository{}, "", fmt.Errorf("the default repository of project %s, which %s works since it is not recorded: %w", w.dispatchProject, key, err)
 				}
 				return read.Name, read.DefaultBranch, nil
+			}
+		}
+		for _, refused := range w.repositories.Refused() {
+			if refused.Default && refused.Unread {
+				return ghrepo.Repository{}, "", fmt.Errorf("%s is not recorded, so it works the project's default repository, and project %s leaves its default %s out: %s; Legion reads that installation again whenever an issue of %s comes up for admission, when the repository mapping changes in Dispatch, and at its next boot",
+					key, w.dispatchProject, refused.Repo, refused.Reason, refused.Repo)
 			}
 		}
 		return ghrepo.Repository{}, "", fmt.Errorf("%s is not recorded, so it works the project's default repository, and project %s serves none: set the project's default repository in Dispatch (Settings → Repositories → Projects) to one both GitHub Apps are installed on",

@@ -93,7 +93,11 @@ A project's repositories are Dispatch's mapping (Settings → Repositories → P
 the project's default; `legion.yaml` names none, and refuses `projects.<KEY>.repo`. The daemon
 reads the mapping at boot and on Dispatch's `settings.repo_project.updated`, serves each mapped
 repository both GitHub Apps are installed on, and leaves out, and reports in `legion state --json`
-(`repositories.refused`), one either App is missing from.
+(`repositories.refused`), one either App is missing from or whose installation read GitHub refused
+or did not answer, serving every other one. A repository left out for a failed read is read again
+when an issue of it comes up for admission, on the next mapping change and at the next boot. The
+boot is refused when no repository is mapped, or when none is served and at least one could not
+be read; a mapping whose every repository lacks an App boots serving none.
 
 ## Version Control
 

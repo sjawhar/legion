@@ -43,11 +43,24 @@ cluster and the image:
 
 - **No repository mapped.** `project <PROJECT> has no repository mapped in Dispatch (Settings →
   Repositories → Projects)`: map the project's repositories in Dispatch, one of them its default.
-- **A repository is left out.** A mapped repository missing either App does not stop the boot,
-  even when it is the project's only one: the log's `legion workflow boot stage` line with
-  `stage=repositories` lists it under `refused`, `legion state --json | jq .repositories.refused`
-  names it with the App it lacks, and its issues are not admitted, each saying so, until the App
-  is installed there and the issue moves to `todo` again.
+- **A repository is left out.** The log's `legion workflow boot stage` line with
+  `stage=repositories` lists it under `refused`, `legion state` names it on its `repositories`
+  line, `legion state --json | jq .repositories.refused` gives the reason, and its issues are not
+  admitted, each saying so. Every other repository is served. The reason names one of two causes:
+  - `the <role> App is not installed on <owner/name>`: install the App there and move the issue to
+    `todo` again. A missing App alone does not stop the boot, even on the project's only repository.
+  - `the <role> App's installation on <owner/name> could not be read: …`: GitHub refused or did not
+    answer the read, and the rest of the reason is its answer. The App may well be installed, so
+    read the answer rather than the installation: a `failed (401)` means GitHub refused the App's
+    JWT, so check the App's key and the host's clock against true time. The daemon reads the
+    installation again whenever an issue of that repository comes up for admission, when the
+    mapping changes in Dispatch, and at its next boot, and serves the repository once GitHub
+    answers that both Apps are installed there.
+- **No repository could be read.** When no mapped repository is served and at least one is left
+  out because its installation read failed, the boot is refused with each failed read, `check the
+  <role> App's installation on <owner/name>: …`. A failure GitHub reports as its own trouble (a
+  5xx, a rate limit, no answer) is tried five times, over about two minutes, before the boot is
+  refused. Read GitHub's answer as above.
 - **Records with no repository.** `<n> issue records have no repository and Dispatch resolves none
   for them (<KEY>, …): set the project's default repository in Dispatch …`: the first boot of this
   release records each issue it already runs on the repository Dispatch resolves for it, and these
@@ -216,11 +229,13 @@ Check, in order:
    `icebox` it does not run.
 3. **The project and its repository.** The issue's project must be the daemon's, under `projects`
    in `legion.yaml`, and its repository one the daemon serves. An issue whose repository resolves to
-   none, or to one not mapped to the project, or left out for a missing App, is not admitted: the
-   daemon says why on the issue (`Legion did not admit this issue: …`), once until the cause
-   changes. Set the issue's repository (the issue header's Repository picker, or
-   `dispatch issue-update --repo owner/name`), or install the missing App, and move the issue to
-   `todo` again. A child of a tree is told the same way, and its tree's architect gets a
+   none, or to one not mapped to the project, or left out (a missing App, or an installation read
+   that failed), is not admitted: the daemon says why on the issue (`Legion did not admit this
+   issue: …`), once until the cause changes. Set the issue's repository (the issue header's
+   Repository picker, or `dispatch issue-update --repo owner/name`), or install the missing App,
+   and move the issue to `todo` again; for a failed read the note says when the daemon reads the
+   installation again, and moving the issue to `todo` again admits it once the repository is
+   served. A child of a tree is told the same way, and its tree's architect gets a
    `child-not-recorded` notice.
 4. **The slots.** When every slot is taken the issue waits its turn:
 
@@ -684,8 +699,8 @@ The daemon owns a running tree's status. A status an agent session writes on a r
 back, and the tree's architect is told who wrote it. A person's move in the Dispatch dashboard, the
 controller's `set_status`, or `legion status` from an operator's shell, is what takes a tree out.
 
-When the daemon's own status writes to Dispatch are failing, `legion state` says so on its third
-line:
+When the daemon's own status writes to Dispatch are failing, `legion state` says so on its
+`pending Dispatch status writes` line:
 
 ```text
 pending Dispatch status writes: 2; the oldest, for WIDGETS-12, has failed 4 attempts, next at 2026-10-03T10:41:07Z: …
@@ -700,7 +715,7 @@ run one at a time, oldest due first, so a stop, suspension or later start of an 
 the row it names runs. Most often that row is a start whose pod is still launching
 ([A pod does not come up](/legion/legion/troubleshooting/#a-pod-does-not-come-up)). Other issues
 are not held, and the issue's own status writes, messages and notices run meanwhile.
-`legion state` says so on its fourth line, naming the row that has waited longest:
+`legion state` says so on its `held lifecycle rows` line, naming the row that has waited longest:
 
 ```text
 held lifecycle rows: 1; the longest waiting, supervise row 802 of WIDGETS-12, has waited 2m30s behind row 801
