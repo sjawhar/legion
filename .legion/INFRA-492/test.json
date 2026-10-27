@@ -2,54 +2,61 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-492",
-  "completed": "2026-10-27T09:32:00Z",
-  "round": 2,
-  "headTested": "762eac001c11e3ed74c8be2642cc442f124a2352 (code head d649b6400371ab7707e621f26683b4635cddf7a7)",
+  "completed": "2026-10-27T13:20:00Z",
+  "round": 3,
+  "scope": "Architect's ruling (Envoy, 09:32Z): spec acceptance lines 1 and 2, and the 4 round-2 defects only.",
+  "headTested": "9e324a38d287ccfcd94c74437ce6e8887e72e639 (code head 5873436a73aff98676ce3bc58cd11dd0e21276f4)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I rebuilt the SPA from the workspace at 762eac00 and ran, on my own database (dispatch_e2e_tester) and ports (18777/19021/19022/19023/19024): `bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/refresh-freshness.e2e.ts e2e/refetch-budget.e2e.ts`. Result: 24 passed (2.8m). On both projects the budget window had 0 GETs and 0 untouched-issue reads, the sidebar sent inbox 1, pinned 1, projects 1, the pin cost 1 pinned-list read, a stranger's reply cost 0 Replies reads, and the board cost 6 list reads. All 7 round-1 red browser tests pass, and they are unmodified since f454e5b1 (`jj diff --from c2cedff5 --to d649b640` on both red files is empty). `bun test web/src/api/query-refresh.test.ts` passes both round-1 scheduler tests. In the browser, a projects read answered 503 with Retry-After: 2 was retried 3771 ms later, and without the header 762 ms later (throwaway probe, deleted). Negative control: the same refetch-budget file in my git archive of base 16e4bb0f758e (chromium, -g 'budget:|sidebar:') fails on its counts: 1064 GETs (969 of them reads of untouched issues) against <= 5, and inbox 2, pinned 2, projects 2 against 1 each."
+    "how": "I rebuilt the SPA from the workspace at 9e324a38 and ran the implementer's browser files on my own database (dispatch_e2e_tester) and ports (18777/19021/19022/19023/19024). `bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/refresh-freshness.e2e.ts e2e/refetch-budget.e2e.ts` gave 30 passed (3.2m). `bun test web/src/api/query-client.test.ts web/src/api/query-refresh.test.ts` gave 16 pass, 0 fail. All of my red tests are unchanged since I wrote them: `jj diff --from a9d9f449 --to legion/INFRA-492@origin` on refresh-freshness.e2e.ts, query-refresh.test.ts and query-client.test.ts is empty."
   },
-  "failed": 4,
-  "failures": [
-    {
-      "criterion": "Spec item 1: a document's open Referenced by panel follows an edit of a comment on that document (main does this)",
-      "evidence": "Red test 'document panel: an edit of a comment on a project document shows its new text in the document's open Referenced by panel within 2 s' in packages/dispatch/e2e/refresh-freshness.e2e.ts (commit e183b08f238c). It fails at head on chromium and iphone: the panel still reads 'Owned item · CORE just now Original remark' after alice's own edit from another tab. It passes at main b08a56bc (the base this branch merged). Cause found by reading: event-refresh.ts appendDocumentPanel (226-235) handles ask.opened, ask.anchor_refreshed, comment.created, comment.answered and comment.anchor_refreshed, but not comment.edited or ask.edited. The server names no structural (owned_by or anchored_to) target in references_changed. Main refreshed every ['references'] panel on comment.edited and ask.edited. Command: cd packages/dispatch && DATABASE_URL=<own db> bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/refresh-freshness.e2e.ts -g 'edit of a comment'."
-    },
-    {
-      "criterion": "Spec item 1 (an event that changes nothing the page shows fetches nothing) and the issue's goal: a document version that cites more than 20 targets must not make every open tab re-read its issue detail, asks and Inbox",
-      "evidence": "Red test 'budget: a document in another project citing 25 documents reads no issue detail, Inbox or ask list for an open issue page' in refresh-freshness.e2e.ts (e183b08f238c). It fails at head on chromium and iphone. An issue page in CORE is open, and bob creates one document in OTHER whose single paragraph cites 25 OTHER documents. Within 2.5 s the page reads GET /api/v1/issues/CORE-1, /api/v1/issues/CORE-1/asks twice, and /api/v1/inbox. Cause found by reading: round 2 counts artifact and block entries toward the server's 20-target cap on references_changed (refs/refs.go), so such a write sets references_changed_truncated. On a truncated event, event-refresh.ts changedReferenceTargets refreshes ['issue'], ['asks'], ['ask-thread'], ['artifact'], the Inbox and every ['references','to'] in every tab. A spec or index whose one block lists 21 or more links, which agents rewrite often, then brings back the fan-out this issue removes. The same holds for 21 or more issue or ask links, as it did in round 1."
-    },
-    {
-      "criterion": "Plan decision 4 (user_state.updated must not broadcast which issue each person reads), applied to the new person-scoped snooze event that the architect's ruling asked for",
-      "evidence": "Red test 'snooze: another person's event stream carries nothing that names the ask alice snoozed' in refresh-freshness.e2e.ts (e183b08f238c). It fails at head on chromium and iphone: bob's own browser session replays GET /api/v1/events?since=0 and receives alice's user_state.updated frame, which carries her login, ask_id of the ask she snoozed, changed ['snoozed'], and her pinned, last_read_seq and dismissed state for that ask's issue. Every signed-in person and agent gets the frame: the stream has no per-viewer filter (api/events.go). ask_snooze.go askSnoozeEvent builds it. Either the payload must name no ask and no issue state (so the writer's tabs refresh the whole Inbox), or the stream must keep the frame from everyone but the writer. The architect decides which."
-    },
-    {
-      "criterion": "Architect's Retry-After addition: a retry that honours Retry-After must not leave a page read waiting without bound",
-      "evidence": "Red unit test 'a read refused with a Retry-After longer than a minute still retries within a minute' in packages/dispatch/web/src/api/query-client.test.ts (commit e173a17b4c88). It fails at head: queryRetryDelay returns 86400000 for Retry-After: 86400, where at most 60000 is expected. client.ts accepts any digits, and query-client.ts queryRetryDelay waits retryAfterMs plus up to as much again, with no ceiling. A proxy's long Retry-After would leave a first load spinning for days with no error and no Retry. A value over about 1,073,741 s goes past setTimeout's 2^31-1 ms limit; [inference] browsers then fire the timer at once. Command: cd packages/dispatch && bun test web/src/api/query-client.test.ts. The 60 s ceiling is my choice of a value a person would accept; the implementer may choose a lower one."
-    }
-  ],
+  "failed": 0,
+  "failures": [],
   "proof": [
     {
-      "criterion": "Round-1 defects 1-7 fixed, and spec acceptance 1 and 2 still hold at the round-2 head",
+      "criterion": "Spec acceptance 1 (budget and freshness) and acceptance 2 (the sidebar keeps its first responses)",
       "surface": "Dispatch in Chromium and iPhone (Playwright), production SPA bundle built from the workspace, against the branch's Go server, fake Envoy and a loopback Postgres 17 + pgvector",
-      "command": "cd packages/dispatch && bun run build:web && DISPATCH_E2E_PORT=18777 FAKE_ENVOY_PORT=19021 FAKE_GITHUB_PORT=19022 FAKE_BROKER_PORT=19024 PLAIN_HTTP_PORT=19023 DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_e2e_tester?sslmode=disable bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/refresh-freshness.e2e.ts e2e/refetch-budget.e2e.ts",
-      "observed": "24 passed (2.8m), round-1 file only. With round 2's tests added: 14 passed (the 7 round-1 tests on both projects) and 6 failed (the 3 new tests on both projects).",
-      "headSha": "762eac001c11e3ed74c8be2642cc442f124a2352",
-      "negativeControl": "refetch-budget at base 16e4bb0f758e (chromium): 1064 GETs against <= 5; sidebar inbox 2, pinned 2, projects 2. Round-1 tests at the previous head 24451453 failed (test round 1)."
+      "command": "cd packages/dispatch && bun run build:web && DISPATCH_E2E_PORT=18777 FAKE_ENVOY_PORT=19021 FAKE_GITHUB_PORT=19022 FAKE_BROKER_PORT=19024 PLAIN_HTTP_PORT=19023 DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_e2e_tester?sslmode=disable bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/refetch-budget.e2e.ts e2e/refresh-freshness.e2e.ts",
+      "observed": "30 passed (3.2m). REFETCH-BUDGET on chromium and iphone: 'GETs under /api/ in the window: 0; reads of an issue no write touched: 0', and the referenced title and the child's status each showed within 2 s. REFETCH-SIDEBAR on both: 'inbox 1, pinned 1, projects 1'.",
+      "headSha": "9e324a38d287ccfcd94c74437ce6e8887e72e639",
+      "negativeControl": "The same refetch-budget file (sha256 253c18d8...7290), run in my git archive of base 16e4bb0f758e on chromium with -g 'budget:|sidebar:', fails on its counts and not on setup: budget 'Received: 1008' against '<= 5' (918 reads of untouched issues); sidebar 'inbox 2, pinned 2, projects 2' against 1 each."
     },
     {
-      "criterion": "Architect's addition: a 503's retry waits its Retry-After",
-      "surface": "Dispatch in Chromium (Playwright) against the branch's Go server; the projects read answered 503 once through page.route",
-      "command": "Throwaway spec (deleted): the first GET /api/v1/projects answered 503 {code: OVERLOADED} with Retry-After: 2, then with no header; time between the refused request and its retry",
-      "observed": "Retry-After: 2 gives a retry 3771 ms later; no header gives 762 ms (the 500 ms wait plus rendering); the sidebar then rendered CORE both times.",
-      "headSha": "762eac001c11e3ed74c8be2642cc442f124a2352",
-      "negativeControl": "A Retry-After of 86400 waits 86,400,000 ms: the red unit test in e173a17b4c88, failure 4 above."
+      "criterion": "Round-2 defect 1: an edit of a comment on a document shows in that document's open Referenced by panel",
+      "surface": "Dispatch in Chromium and iPhone (Playwright), same rig",
+      "command": "same run: refresh-freshness.e2e.ts 'document panel: an edit of a comment on a project document shows its new text in the document's open Referenced by panel within 2 s'",
+      "observed": "Passed on both projects: the panel showed 'Edited remark' within 2 s of alice's own edit from another tab.",
+      "headSha": "9e324a38d287ccfcd94c74437ce6e8887e72e639",
+      "negativeControl": "At round-2 head 762eac00 the same, unmodified test failed: the panel still read 'Owned item · CORE just now Original remark'."
+    },
+    {
+      "criterion": "Round-2 defect 2: one document in another project citing many documents reads no issue detail, Inbox or ask list for an open issue page",
+      "surface": "Dispatch in Chromium and iPhone (Playwright), same rig, plus the event as Postgres records it",
+      "command": "same run: refresh-freshness.e2e.ts 'budget: a document in another project citing 25 documents ...'; then a throwaway copy (deleted) citing 101 documents, one more than the server's per-kind cap of 100, run on chromium, followed by `psql ... -c \"select type, payload->'references_changed_truncated', payload->'references_changed_truncated_kinds' from events where type like 'artifact.%' order by id desc limit 2\"`",
+      "observed": "25 citations: REFETCH-INDEX printed no GETs on either project. 101 citations: the event was recorded as artifact.created with references_changed_truncated true and references_changed_truncated_kinds [\"artifact\"], and the open CORE issue page sent no GET in the 2.5 s after it.",
+      "headSha": "9e324a38d287ccfcd94c74437ce6e8887e72e639",
+      "negativeControl": "At round-2 head 762eac00 the 25-citation test failed: the page read GET /api/v1/issues/CORE-1, /api/v1/issues/CORE-1/asks twice and /api/v1/inbox."
+    },
+    {
+      "criterion": "Round-2 defect 3 (with the architect's ruling): a snooze event names no ask and no issue state, and alice's other tab still moves the row to Later",
+      "surface": "Bob's browser session reading GET /api/v1/events?since=0 from the branch's Go server, and alice's Inbox in Chromium and iPhone",
+      "command": "same run: refresh-freshness.e2e.ts 'snooze: another person's event stream carries nothing that names the ask alice snoozed' and 'inbox: a snooze from alice's other tab moves the row to Later in this tab within 2 s'",
+      "observed": "Both passed on both projects. Bob's replay holds the ask id, from its ask.opened, but no user_state.updated frame of alice's that names it. Alice's other tab showed 'Later (1)' within 2 s and hid the row.",
+      "headSha": "9e324a38d287ccfcd94c74437ce6e8887e72e639",
+      "negativeControl": "At round-2 head 762eac00 the privacy test failed: bob's stream carried alice's ask_id and her pinned, last_read_seq and dismissed state."
+    },
+    {
+      "criterion": "Round-2 defect 4: a read's retry waits at most 60 s whatever Retry-After says, and still honours a short one",
+      "surface": "web unit suite with the real API client and DispatchQueryClient retry options, fake timers",
+      "command": "cd packages/dispatch && bun test web/src/api/query-client.test.ts web/src/api/query-refresh.test.ts",
+      "observed": "16 pass, 0 fail. These include 'a read refused with a Retry-After longer than a minute still retries within a minute' (86400 s and 4294968 s), 'a read refused with Retry-After: 2 is retried no sooner than 2 s later and before 4 s', and the 500 ms wait with no header.",
+      "headSha": "9e324a38d287ccfcd94c74437ce6e8887e72e639",
+      "negativeControl": "At round-2 head 762eac00, queryRetryDelay returned 86400000 for Retry-After: 86400 and the same test failed."
     }
   ],
-  "ciAtHead": "Read at 09:01Z and 09:30Z on d649b6400371 (762eac00 is handoff-only): build, changes, lint, test and typecheck all queued, none settled; pr-title cancelled once and queued again. Not waited on.",
+  "ciAtHead": "Read at 13:05Z on 5873436a (9e324a38 is handoff-only): build, changes, lint, test and typecheck queued, none settled; pr-title cancelled once and queued again. Not waited on.",
   "notes": [
-    "Dropped before commit: a test that a reply on an ask shows in the Inbox card's open Referenced by panel. It fails at main b08a56bc too, so it is not this change's regression.",
-    "Reported to the architect, not failed (each behaves the same at main, or I did not confirm it): a child's comment or claim does not move its active time in the parent's Children tab (only issue.* events refresh ancestors; same at base); a link to a deleted block keeps its old text after the 404 refetch (suspected); a snooze that lapses with no write leaves the row under Later until a refetch (suspected); a Replies fetchNextPage inside the 1 s wait may pay a pending retitle refresh with the new page only (suspected).",
-    "Rigs: my base export $TMPDIR/tester-base (16e4bb0f758e) and main export $TMPDIR/tester-main (b08a56bc), with databases dispatch_e2e_tester, dispatch_e2e_tester_base and dispatch_e2e_tester_main on the shared loopback Postgres."
+    "Per the architect's ruling, this round did not re-test the round-1 defects or the server probes beyond what the two files run. refresh-freshness.e2e.ts still runs every round-1 test, and all of them passed.",
+    "The Retry-After cap is proven by the unit test only. In round 2, a 503 with Retry-After: 2 was retried 3771 ms later in the browser at 762eac00, and round 3 did not change that code's short-value path."
   ]
 }
