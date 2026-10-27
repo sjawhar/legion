@@ -127,13 +127,15 @@ select t.total, t.reachable, r.kind, case when r.owner_artifact_id is null then 
   left join (page r left join artifacts ar on ar.id = r.artifact_id) on true
   -- Mirrors the kind arms in kinds above (issue/document/comment/ask/message -> table and text
   -- column); the two must stay in sync. issue reuses r.issue_title, already carried from the
-  -- same issues row by kinds, rather than re-reading it.
+  -- same issues row by kinds, rather than re-reading it. ask reads the text its search vector is
+  -- built from (asks_search: the question, then ask_search_suffix's option labels and
+  -- descriptions, answer text and selected labels), so its snippet shows what the query matched.
   left join lateral (
     select case r.kind
       when 'issue' then r.issue_title
       when 'document' then (select v.markdown from artifact_versions v where v.artifact_id = r.artifact_id order by v.number desc limit 1) -- re-resolves the latest version kinds already found once; accepted, bounded by the page size
       when 'comment' then (select c.body from comments c where c.id = r.id::uuid)
-      when 'ask' then (select k.question || ' ' || coalesce(k.options::text, '') || ' ' || coalesce(k.answer->>'text', '') from asks k where k.id = r.id::uuid)
+      when 'ask' then (select k.question || ' ' || ask_search_suffix(k.options, k.answer) from asks k where k.id = r.id::uuid)
       when 'message' then (select m.body from messages m where m.id = r.id::uuid)
     end as text
   ) txt on true
@@ -465,6 +467,9 @@ func (s *server) runFusedSearchQuery(ctx context.Context, q, project string, lim
 	if err != nil {
 		return model.SearchResponse{}, err
 	}
+	if err := s.attachAskStates(ctx, s.deps.Store.Pool, response.Results); err != nil {
+		return model.SearchResponse{}, err
+	}
 	response.TookMS = time.Since(started).Milliseconds()
 	return response, nil
 }
@@ -486,6 +491,9 @@ func (s *server) runMeaningSearch(ctx context.Context, q, project string, limit,
 
 	response, err := scanSearchRows(rows, q, limit, offset)
 	if err != nil {
+		return model.SearchResponse{}, err
+	}
+	if err := s.attachAskStates(ctx, s.deps.Store.Pool, response.Results); err != nil {
 		return model.SearchResponse{}, err
 	}
 	response.TookMS = time.Since(started).Milliseconds()
