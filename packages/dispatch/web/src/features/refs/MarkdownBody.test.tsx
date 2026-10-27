@@ -845,6 +845,41 @@ describe("Mermaid diagrams", () => {
     }
   });
 
+  // The worker draws one source at a time and a slow one holds it for the whole time limit. A
+  // source whose every body re-painted or unmounted before the worker reached it is shown by no
+  // one, so it is never sent: a reader who leaves a page of slow diagrams does not wait for them
+  // on the next page.
+  test("a source no body still waits for is never sent to the worker", async () => {
+    await warmMarkdownRenderer();
+    resetMermaidDiagrams(100);
+    const sent: string[] = [];
+    FakeWorker.answer = (request) => {
+      sent.push(request.source);
+      return request.source.includes("Stuck") ? undefined : answerMermaidRequest(request);
+    };
+    const left = render(
+      <MarkdownBody
+        markdown={`${fence("sequenceDiagram\n  Stuck->>Bob: Hi")}\n${fence("sequenceDiagram\n  Gone->>Bob: Hi")}`}
+      />
+    );
+    try {
+      await waitFor(() => expect(sent.some((source) => source.includes("Stuck"))).toBe(true));
+    } finally {
+      left.unmount();
+    }
+    const next = render(<MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: Next")} />);
+    try {
+      await waitFor(() =>
+        expect(diagramIn(figuresIn(next.container)[0] ?? next.container)?.textContent).toContain(
+          "Next"
+        )
+      );
+      expect(sent.some((source) => source.includes("Gone"))).toBe(false);
+    } finally {
+      next.unmount();
+    }
+  });
+
   test("a worker that fails to start leaves every block as code, logs once, and is tried again once the window is online", async () => {
     await warmMarkdownRenderer();
     FakeWorker.startFails = true;
