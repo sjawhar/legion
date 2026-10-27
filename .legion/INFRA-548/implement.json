@@ -2,39 +2,39 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-548",
-  "completed": "2026-10-27T05:24:22Z",
+  "completed": "2026-10-27T06:54:54Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2331",
-  "round": "Answers the tester's fail at 55ba8a69 (two red tests, commits a68f83db and 3b7ea79b): a NATS redial nats.js abandons at its dial timeout leaked its socket, so the Claude Code channel server never exited on SIGTERM after one hung redial.",
+  "round": "Answers review round 1 at d6dfed75 (code head 28355e2e): finding 1, a stale connection with unacknowledged data never redials (nats.js's stale close waits on a flush a dead path never acknowledges, and the stall proxy's discarding freeze could not reach it); finding 2, a patches/-only change ran none of the gates that test the patch; and the reviewer's cleanup list, taken in this round.",
   "proof": [
     {
-      "criterion": "A client behind a TCP proxy that stops forwarding without closing either side reconnects within 60 s (shared code path), and a redial nats.js gives up on leaves no socket open",
-      "surface": "envoy-client suite: real natsd built from packages/envoy, real nats.js (patches/nats@2.29.3.patch applied by bun install) dialled with natsConnectionOptions, the stall proxy freezing every open connection, and a server that accepts and never answers for the hung redial",
+      "criterion": "A client behind a TCP proxy that stops forwarding without closing either side reconnects within 60 s (shared code path), also when it wrote data the frozen path never acknowledged, and a redial nats.js gives up on leaves no socket open",
+      "surface": "envoy-client suite: real natsd built from packages/envoy, real nats.js (patches/nats@2.29.3.patch applied by bun install) dialled with natsConnectionOptions, the stall proxy (packages/envoy-client/test/stall-proxy.ts) whose freeze() pauses both sockets of every open connection and closes neither",
       "command": "cd packages/envoy-client && LEGION_E2E_ENVOY_STACK=1 bun test src/__tests__/nats-stall.test.ts",
-      "observed": "3 pass 0 fail at the merged head 28355e2e; row A: 'reconnect 30.0 s, first publish received 30.1 s after the freeze'; row B: 'reconnect 50.0 s, first publish received 50.3 s after the freeze'; the tester's red row: 'nats-stall hung redial: accepted 2.0 s after the drop, closed 20.0 s after it was accepted' (the same three at the pre-merge fix head 6838143c: 30.1 s, 50.2 s, closed after 20.0 s)",
-      "headSha": "28355e2e6dba95c8641c1c93eea895ec5afe5a54",
-      "negativeControl": "node_modules nats node_transport.js replaced by the unpatched copy from bun's cache: 'nats-stall hung redial: accepted 2.1 s after the drop, still open' and expect(hung[0]?.closedAt).toBeDefined() failed (Received: undefined); pingInterval set back to 120_000 (round 1, at 55ba8a69, the same nats-connection.ts): row A 'reconnect none' and failed at 60 s"
+      "observed": "3 pass 0 fail; row A 'reconnect 30.0 s, first publish received 30.1 s after the freeze'; row B 'reconnect 50.0 s, first publish received 50.3 s after the freeze' and 'hung redial: accepted 30.0 s after the freeze, closed 20.0 s after it was accepted'; row C (64 x 64 KiB written after the freeze) 'reconnect 30.0 s, first publish received 30.0 s after the freeze'",
+      "headSha": "0504cbfb7409c7388c700afeae891300a0bed6eb",
+      "negativeControl": "protocol.js disconnect() put back to this.transport.disconnect() in node_modules: row C 'reconnect none, first publish received never after the freeze', (fail) [60261.41ms]; node_transport.js replaced by the unpatched cached copy: row B 'hung redial: ... still open', expect(hung.closedAt).toBeDefined() failed; node_modules restored with bun install --frozen-lockfile and the patch re-checked"
     },
     {
       "criterion": "The Claude Code plugin's code path recovers from a frozen path, its registration carries the plugin version, and the channel server still exits on SIGTERM after a hung redial",
-      "surface": "claude-envoy suite: the real channel server process (bun bin/envoy-channel.ts) with its NATS URL at the stall proxy and its Envoy URL at the real listener; channel notifications read from stdout; SIGTERM sent as Claude Code stops it",
+      "surface": "claude-envoy suite: the real channel server process (bun bin/envoy-channel.ts) with NATS through the stall proxy (pausing freeze) and Envoy at the real listener; channel notifications read from stdout",
       "command": "cd packages/claude-envoy && LEGION_E2E_ENVOY_STACK=1 bun test tests/envoy-channel-stall.test.ts",
-      "observed": "2 pass 0 fail at 28355e2e; 'claude-envoy stall: resubscribed 29.8 s, missed message shown 29.8 s after the freeze' (plugin @sjawhar/claude-envoy, plugin_version source; frozen-window message once with the replay suffix); the tester's red row: 'claude-envoy stall exit: SIGTERM -> exited after 0.0 s'. bun run check-dist: 'dist/ and legion/ match a fresh build' (the committed bundle carries the patched transport)",
-      "headSha": "28355e2e6dba95c8641c1c93eea895ec5afe5a54",
-      "negativeControl": "at 55ba8a69, before the patch, the tester's red row printed Received \"running\" 15 s after SIGTERM; pre-freeze and post-reconnect messages are shown once without the replay suffix and the frozen-window message never arrives live"
+      "observed": "2 pass 0 fail; 'claude-envoy stall: resubscribed 29.8 s, missed message shown 29.9 s after the freeze' (plugin @sjawhar/claude-envoy, plugin_version source; frozen-window message once with the replay suffix); 'claude-envoy stall exit: SIGTERM -> exited after 0.0 s'; bun run check-dist: 'dist/ and legion/ match a fresh build'",
+      "headSha": "0504cbfb7409c7388c700afeae891300a0bed6eb",
+      "negativeControl": "pre-freeze and post-reconnect messages are shown once without the replay suffix and the frozen-window message never arrives live (runFreezeScenario); before round 2's patch the SIGTERM row printed Received \"running\" 15 s after SIGTERM"
     },
     {
       "criterion": "The same for the Oh My Pi plugin's code path, and a message published while cut off reaches it through the catch-up; its registration carries the plugin version",
-      "surface": "pi-envoy suite: the real extension under createPi with real nats.js and real fetch, against a real natsd and the real Envoy listener built from this tree, NATS through the stall proxy",
+      "surface": "pi-envoy suite: the real extension under createPi with real nats.js and real fetch, against a real natsd and the real Envoy listener, NATS through the stall proxy (pausing freeze)",
       "command": "cd packages/pi-envoy && LEGION_E2E_ENVOY_STACK=1 bun test extensions/envoy.test.ts -t \"NATS path freezes\"",
-      "observed": "1 pass 0 fail at 28355e2e; 'pi-envoy stall: resubscribed 30.0 s, missed message shown 30.0 s after the freeze'; GET /v1/registry/<id> and GET /v1/sessions show plugin @sjawhar/pi-envoy and plugin_version equal to package.json's; the frozen-window direct message shown once with the replay suffix",
-      "headSha": "28355e2e6dba95c8641c1c93eea895ec5afe5a54",
+      "observed": "1 pass 0 fail; 'pi-envoy stall: resubscribed 30.0 s, missed message shown 30.0 s after the freeze'; GET /v1/registry/<id> and GET /v1/sessions show plugin @sjawhar/pi-envoy and plugin_version equal to package.json's",
+      "headSha": "0504cbfb7409c7388c700afeae891300a0bed6eb",
       "negativeControl": "the message sent before the freeze and the one after the reconnect are each shown once WITHOUT the replay suffix, while the frozen-window message never arrives live; ENVOY_HEARTBEAT_MS=240000 rules out a heartbeat sweep as the trigger"
     },
     {
       "criterion": "A registered session's entry and the listener's session list carry the plugin version; an older plugin's session shows neither field",
       "surface": "Go listener subscribe handler, GET /v1/sessions, GET /v1/registry/<id> and the NATS KV session registry (real nats-server in-process)",
       "command": "cd packages/envoy && go test ./cmd/listener/ ./internal/session/ -run 'Subscribe|SessionEntry|Registry' -count=1",
-      "observed": "at 28355e2e: go build ./... ok; ok github.com/sjawhar/envoy/cmd/listener 19.132s; ok github.com/sjawhar/envoy/internal/session 6.924s",
+      "observed": "at 28355e2e: go build ./... ok; ok github.com/sjawhar/envoy/cmd/listener 19.132s; ok github.com/sjawhar/envoy/internal/session 6.924s (this round changes no Go file)",
       "headSha": "28355e2e6dba95c8641c1c93eea895ec5afe5a54",
       "negativeControl": "a subscribe body without plugin/plugin_version: the /v1/sessions row has neither key (TestSubscribeHandlerStoresAndListsThePluginAndItsVersion)"
     },
@@ -43,29 +43,30 @@
       "surface": "the architecture documents",
       "command": "grep -n 'plugin_version' .dispatch/architecture/{pi-envoy,envoy-client,claude-envoy-bridge,envoy-listener}.md; grep -n '10 s\\|10 seconds' .dispatch/architecture/{pi-envoy,envoy-client,claude-envoy-bridge}.md",
       "observed": "one line per file in each grep (line 7 of each)",
-      "headSha": "28355e2e6dba95c8641c1c93eea895ec5afe5a54",
+      "headSha": "0504cbfb7409c7388c700afeae891300a0bed6eb",
       "negativeControl": "the same greps on main@origin print nothing for those files"
     }
   ],
   "filesChanged": [
-    "This round: package.json (patchedDependencies nats@2.29.3), patches/nats@2.29.3.patch (new: NodeTransport.dial keeps the socket from creation; _closed on a transport that never connected destroys it), bun.lock (the one patchedDependencies line), packages/claude-envoy/dist/envoy-channel.js (rebuilt), README.md (patches/ row), packages/envoy-client/README.md, CHANGELOG.md of envoy-client, pi-envoy, claude-envoy",
-    "Round 1: packages/envoy-client (nats-connection.ts, transport.ts, testing/stall-proxy.ts, testing/envoy-stack.ts, nats-stall.test.ts, package.json), pi-envoy (extensions/envoy.ts and its test, tsconfig.json), claude-envoy (envoy-channel-server.ts, claude-channel.ts, dist, envoy-channel-stall.test.ts and other tests), envoy-plugin (server.ts, test, tsconfig.json), packages/envoy listener and session registry with tests, .github/workflows/envoy-and-contracts.yaml, docs and CHANGELOGs"
+    "eadcf8fe: patches/nats@2.29.3.patch (new protocol.js hunk: disconnect() calls transport.close(), no flush), packages/envoy-client/src/testing/stall-proxy.ts (freeze pauses both sockets), packages/envoy-client/src/__tests__/nats-stall.test.ts (row C), packages/claude-envoy/dist/envoy-channel.js, README and CHANGELOGs of envoy-client, pi-envoy, claude-envoy",
+    "0504cbfb: .github/workflows/envoy-and-contracts.yaml (patches/** in envoy_client, envoy_e2e_local, envoy_session_stall, claude_plugin, pi_envoy, pi_legion), .github/workflows/release.yaml (patches/** in the pi_envoy filter, patches/ in its Determine next version list as --patch-path); packages/envoy-client: test/stall-proxy.ts and test/envoy-stack.ts moved from src/testing (exports ./test/*, types+bun, as pi-shared), test/stall-scenario.ts (new runFreezeScenario), envoy-stack builds into its own work directory, ProxiedConnection.closedAt, row B holds the hung-redial close (separate blackhole row removed), src/replay.ts REPLAYED_SUFFIX, ./nats-auth removed from exports and build, package.json lint/tsconfig cover test/; packages/claude-envoy/tests/envoy-channel-stall.test.ts (one startChannelServer helper, runFreezeScenario), dist rebuilt; packages/pi-envoy/extensions/envoy.test.ts (runFreezeScenario, comments); packages/pi-legion test comments; AGENTS.md of pi-envoy and claude-envoy; envoy-client README and CHANGELOG"
   ],
   "trickyParts": [
-    "The patch does not removeAllListeners before destroying a never-connected socket, so dial()'s and peekInfo()'s close listeners still reject their pending promises; connect()'s catch then destroys an already destroyed socket (a no-op), and ProtocolHandler.dial's Promise.race already handles the rejection.",
-    "bun patch --commit rewrote unrelated parts of bun.lock (stale workspace versions, @types/bun latest); only the patchedDependencies line was kept, and bun install --frozen-lockfile accepts it and re-applies the patch.",
-    "Both plugin bundles inline nats (pi-envoy bundles everything but @oh-my-pi/*, claude-envoy commits its dist), and the worker and Envoy Dockerfiles COPY patches/ before their frozen install, so every shipped build carries the patch.",
-    "Bun ignores a patchedDependencies entry for a version that is not installed without a word: moving nats means carrying the patch (written in packages/envoy-client/README.md)."
+    "protocol.js disconnect() is reached only from the heartbeat's stale path and handleAuthError; reconnect() (client-initiated, live connection) keeps transport.disconnect() and its flush. transport.close() runs _closed(undefined, false): no flush, destroys the socket, resolves closed(), and protocol.js then runs disconnected(lastError) and the redial as before.",
+    "The pausing freeze makes stallNext connections the only ones that still read; they model a server that accepts and never answers, so the client's close of a hung redial is observable (closedAt records the FIN or close, since the proxy runs allowHalfOpen).",
+    "Row B's hung-redial check replaces the tester's separate blackhole row: the property checked is unchanged (a redial nats.js abandons has its socket closed) and its negative control still fails without the node_transport.js hunk."
   ],
   "deviations": [
-    "GitHub reported the PR CONFLICTING against main after the fix push, so this round merged forward: 28355e2e has three parents (the branch at 22811930, legion/INFRA-439 at 3ea454d3 since #2228 moved from 067a15af, and main at 448a4100). The one conflict, packages/claude-envoy/CHANGELOG.md, kept both sides; check-dist matched a fresh build with no rebuild. Fingerprint f8e070e4... -> 088081f4..., changed because the newer #2228 commits are in the diff until #2228 merges; posted as https://github.com/sjawhar/legion/pull/2331#issuecomment-6434491593."
+    "The tester's round-2 red row 'a redial that hangs is closed once nats.js gives up on it' was folded into row B at the reviewer's request (cleanup item: stallNext(1) plus freeze() already makes that connection); same assertion, negative control re-run.",
+    "Legion Claude Code panes load the plugin with --plugin-dir and register plugin_version source: left as the reviewer recorded it under Not proven / risk; the docs page says the move checks such sessions by hand.",
+    "No length cap on plugin/plugin_version (reviewer: hardening, same as title and dir): not added."
   ],
   "openQuestions": [
-    "Merge gate: #2228 (legion/INFRA-439) is still open; this PR merges only after it, once main's squash commit of #2228 is in the branch.",
-    "Rollout: the hub's session listener must run this PR's listener before INFRA-553's move can read versions; INFRA-14 owns that sequencing."
+    "Merge gate: #2228 (legion/INFRA-439) is still open at 3ea454d3; this PR merges only after it, once main's squash commit of #2228 is in the branch.",
+    "actionlint v1.7.7 reports five 'unexpected key \"cache-mode\" for \"job\" section' errors in release.yaml; the file before this round's change gives the same five, so none comes from this branch."
   ],
   "discoveredComplexity": [
-    "envoy-client src/__tests__/envoy-config.test.ts '! command ... still running after 10 s' failed on this pod this round (elapsed 30 s, run alone too) and passed alone in round 1; it exercises envoy-config.ts's ! command timeout with no nats involvement, and this branch does not change envoy-config.ts. CI is the reading for it.",
-    "INFRA-594's implementer is editing the listener's registration body (a new `delivery` object); told them our field names plugin and plugin_version; only textual conflicts expected."
+    "Two timing tests in files this branch does not touch failed in this pod's full-suite runs and pass alone or in the worker's runs: envoy-client envoy-config.test.ts '! command ... still running after 10 s' and claude-envoy session-title.test.ts 'queryTmux is bounded even by a tmux that ignores SIGTERM'.",
+    "actionlint reports five 'unexpected key cache-mode' errors in release.yaml that predate this branch (the setup-bun composite action's input used at job level is not something this change touches)."
   ]
 }
