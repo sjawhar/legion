@@ -53,7 +53,7 @@ once before the fix lands" is therefore two pushes, not a local run.
   one whose later steps print; the next head's run reused them and printed `CACHED`
   (docs/solutions/daemon/a-cached-image-layer-s-output-is-in-the-run-that-built-it-cite-both-runs-LEGION-764.md).
   Since 2026-10-27 (INFRA-520) a pull request's image build writes no cache: only builds on main
-  write the registry cache `ghcr.io/sjawhar/legion-worker:buildcache`. A later head of the same
+  write the Actions cache scope `worker-image`. A later head of the same
   pull request reuses only the layers main's builds cached, so it rebuilds the fix's layers and
   prints the same lines again. Cite the fix run, or the run of the head you rely on.
 

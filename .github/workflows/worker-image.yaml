@@ -162,15 +162,19 @@ jobs:
           platforms: linux/amd64
           provenance: false
           push: true
-          # The layer cache is a registry cache, $IMAGE:buildcache: a cache manifest, not an image,
-          # written with the ghcr.io login above (packages: write). A pull request's build reads the
-          # cache main's builds write and writes none: a newer head can cancel it in the middle of an
-          # export, and on 2026-10-27 the Actions cache held 10.80 GB of pull-request-scope buildkit
-          # entries. Only a build on main writes it (a workflow_dispatch on another branch writes
-          # none), and with ignore-error=true: the cache only saves time, so a failed export never
-          # fails the build that pushed the image a release pins.
-          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
-          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref={0}:buildcache,mode=max,ignore-error=true', env.IMAGE) || '' }}
+          # The layer cache is the GitHub Actions cache under the image's own scope, worker-image,
+          # so the Envoy listener's build (release-envoy-listener.yaml, the default scope) never
+          # replaces its index. Every build reads it; only a build on main writes it (release.yaml
+          # calls this workflow on main pushes; off main cache-to is empty, which passes no
+          # --cache-to). A pull request's build reads the entries main wrote and writes none, and
+          # GitHub never lets a main run restore a branch's entries, so a pull request cannot put a
+          # layer into the attested release build (no cache shared between trusted and untrusted
+          # builds, BuildKit advisory GHSA-f2v9-hprr-32q3). A newer head can cancel a pull request's
+          # build mid-export, and on 2026-10-27 the Actions cache held 10.80 GB of
+          # pull-request-scope buildkit entries. ignore-error=true: the cache only saves time, so a
+          # failed export never fails the build that pushed the image a release pins.
+          cache-from: type=gha,scope=worker-image
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max,scope=worker-image,ignore-error=true' || '' }}
           tags: ${{ steps.meta.outputs.tags }}
           # org.opencontainers.image.source is the Dockerfile's LABEL (the in-repo convention).
           labels: |

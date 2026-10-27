@@ -1722,8 +1722,8 @@ echo "case: the router's shape: a pull_request-only call behind a draft-skipped 
 # trigger, and ci.yaml calls it as the router does: triggered by pull_request (with
 # ready_for_review), push and merge_group, none filtered by path; a changes job skipped on a draft,
 # whose paths-filter step runs under the quantifier (default some); the calling job admitted on
-# pull_request only and gated on one filter. The build reads a registry cache and writes one only
-# on main, as worker-image.yaml does.
+# pull_request only and gated on one filter. The build reads the Actions cache under its own scope
+# and writes it only on main, as worker-image.yaml does.
 ci_router() {
   local root=$1 gate=$2 quantifier=${3:-some}
   cat > "$root/.github/workflows/image.yaml" <<'YAML'
@@ -1739,8 +1739,8 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile
-          cache-from: type=registry,ref=ghcr.io/sjawhar/legion-worker:buildcache
-          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=registry,ref=ghcr.io/sjawhar/legion-worker:buildcache,mode=max' || '' }}
+          cache-from: type=gha,scope=worker-image
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max,scope=worker-image,ignore-error=true' || '' }}
 YAML
   cat > "$root/.github/workflows/ci.yaml" <<YAML
 name: CI

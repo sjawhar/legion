@@ -455,8 +455,7 @@ PR head, never the ephemeral merge commit); `<legion version>` only on `main` wh
 job released that version in the same run. Runs from any other ref publish the `sha-` worker-image tag
 only and never touch a release. The package also currently holds `sha256-<image digest hex>` OCI
 referrer indexes from earlier proof runs; each holds an attestation, not a worker image, so
-inspecting one does not print a worker-image digest. Its `buildcache` tag is the layer cache's
-manifest ([How it is built](#how-it-is-built--and-the-iteration-rule)), not a worker image either.
+inspecting one does not print a worker-image digest.
 
 A tag does not say which run published it: a pull request run publishes the `sha-` tag of its head
 too, when two runs build one commit the tag names whichever pushed last, and a pull request can edit
@@ -500,10 +499,11 @@ The attestation is separate from the image's own BuildKit provenance, which the 
 
 `.github/workflows/worker-image.yaml` builds on the GitHub-hosted runner with `docker/setup-buildx-action`
 and `docker/build-push-action` (the pair `release-envoy-listener.yaml` uses). Its layer cache is the
-registry cache `ghcr.io/sjawhar/legion-worker:buildcache`, a cache manifest in the image's own package, not
-an image. Every build reads it (`cache-from: type=registry`), and only a build on `main` writes it
-(`cache-to: type=registry,…,mode=max`). A pull request's build reads it and writes none, because a newer
-head can cancel that build in the middle of a cache export. The image and the cache are pushed with the
+GitHub Actions cache under the image's own scope (`cache-from: type=gha,scope=worker-image`). Only a
+build on `main` writes it (`cache-to: type=gha,mode=max,scope=worker-image,ignore-error=true`); a pull
+request's build reads what main wrote and writes none, because a newer head can cancel that build in
+the middle of a cache export, and because GitHub never lets a `main` run restore a branch's entries, so
+no pull request can put a layer into the attested release build. The image is pushed with the
 workflow's own `GITHUB_TOKEN`: no third-party builder, no project variable, no extra credential. It runs
 (1) from `release.yaml` after
 the `legion_build` and `legion_publish` jobs on every `main` push that touches any file the image builds
