@@ -87,14 +87,11 @@ func TestHostPermissionsOnRealServers(t *testing.T) {
 				require.Equal(t, contracts.AgentSubject(liveSession), sent.Topic)
 				require.Equal(t, "example message", sent.PayloadSummary)
 
-				// A role message reaches its holder through the listener's queue subscription, and the
-				// session answers it with the receipt the listener waits for.
+				// A role message reaches its holder from the listener's publish route, which answers
+				// once the session returned the receipt the route waits for.
 				postListener(t, process, port, "/v1/roles/set", `{"session_id":"`+liveSession+`","role":"`+liveRole+`"}`)
-				postListener(t, process, port, "/v1/messages/publish", `{"topic":"`+contracts.RoleTopicPrefix+liveRole+`","message":"example role message"}`)
-				forwarded, msg := nextEnvelope(t, process, received)
+				forwarded := sendRoleMessage(t, process, port, received, `{"topic":"`+contracts.RoleTopicPrefix+liveRole+`","message":"example role message"}`)
 				require.Equal(t, contracts.RoleTopicPrefix+liveRole, forwarded.Topic)
-				require.NotEmpty(t, msg.Reply, "the role forward carries no subject for its receipt")
-				require.NoError(t, msg.Respond(nil))
 
 				// A topic outside every stream subject reaches the session subscribed to it.
 				adhoc, err := conn.SubscribeSync("notifications.team.>")
@@ -191,11 +188,8 @@ func TestListenerAndCredentialFreeSessionsOnRealServers(t *testing.T) {
 			require.Equal(t, "example message", sent.PayloadSummary)
 
 			postListener(t, process, port, "/v1/roles/set", `{"session_id":"`+liveSession+`","role":"`+liveRole+`"}`)
-			postListener(t, process, port, "/v1/messages/publish", `{"topic":"`+contracts.RoleTopicPrefix+liveRole+`","message":"example role message"}`)
-			forwarded, msg := nextEnvelope(t, process, received)
+			forwarded := sendRoleMessage(t, process, port, received, `{"topic":"`+contracts.RoleTopicPrefix+liveRole+`","message":"example role message"}`)
 			require.Equal(t, contracts.RoleTopicPrefix+liveRole, forwarded.Topic)
-			require.NotEmpty(t, msg.Reply, "the role forward carries no subject for its receipt")
-			require.NoError(t, msg.Respond(nil))
 
 			// A topic outside every stream subject, as an agent names one for its team, reaches the
 			// session subscribed to it: the listener publishes it over core NATS, under its grant.
@@ -461,6 +455,41 @@ func postListener(t *testing.T, process *cmdtest.Process, port int, path, body s
 	answer, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "POST %s: %s\n%s", path, answer, process.Output.String())
+}
+
+// sendRoleMessage publishes body, a role message, through the listener's publish route and answers
+// its forward as the holder's session does: the route answers only once the receipt arrived, so the
+// forward is read on received and receipted while the publish waits. It requires the 200 and
+// returns the forward.
+func sendRoleMessage(t *testing.T, process *cmdtest.Process, port int, received *natsgo.Subscription, body string) contracts.Envelope {
+	t.Helper()
+	type answer struct {
+		status int
+		body   string
+		err    error
+	}
+	answered := make(chan answer, 1)
+	go func() {
+		resp, err := http.Post("http://127.0.0.1:"+strconv.Itoa(port)+"/v1/messages/publish", "application/json", strings.NewReader(body))
+		if err != nil {
+			answered <- answer{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		text, err := io.ReadAll(resp.Body)
+		answered <- answer{status: resp.StatusCode, body: string(text), err: err}
+	}()
+	forwarded, msg := nextEnvelope(t, process, received)
+	require.NotEmpty(t, msg.Reply, "the role forward carries no subject for its receipt")
+	require.NoError(t, msg.Respond(nil))
+	select {
+	case got := <-answered:
+		require.NoError(t, got.err)
+		require.Equal(t, http.StatusOK, got.status, "POST /v1/messages/publish: %s\n%s", got.body, process.Output.String())
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the publish route did not answer within 10s after the receipt:\n%s", process.Output.String())
+	}
+	return forwarded
 }
 
 // postListenerHost posts body to one of the listener's routes over loopback under the request Host

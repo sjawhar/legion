@@ -48,6 +48,17 @@ type listenerDeps struct {
 	consumer   string
 	streamName string
 	streamInfo streamInfoLookup
+	// dedupeCache is the delivery handlers' own cache (listenerDeliveryHandlerConfig.dedupeCache),
+	// the same instance: the publish route skips a holder or recipient that already took a
+	// message's key, by the route or by the role lane, and records each one it confirms.
+	dedupeCache *dedupe.Cache
+	// forward sends an envelope to an agent subject and waits for its recipient's empty receipt, as
+	// the role lane's forwardRole does; main wires client.RequestCoreTo, and a test substitutes it.
+	forward func(subject string, item contracts.Envelope, timeout time.Duration) error
+	// logger and messagesDelivered are the delivery handlers' own, so the publish route's one line
+	// and its delivery_status count read as the role lane's do.
+	logger            *logging.Logger
+	messagesDelivered *metrics.Counter
 }
 
 // kvCache is what the listener asks of each KV-backed cache it keeps.
@@ -817,14 +828,18 @@ func main() {
 	defer stop()
 
 	ready := &listenerDeps{
-		client:     client,
-		live:       live,
-		registry:   registry,
-		sessions:   sessions,
-		ciStore:    ciStore,
-		caches:     caches,
-		consumer:   consumer,
-		streamName: bus.Stream,
+		client:            client,
+		live:              live,
+		registry:          registry,
+		sessions:          sessions,
+		ciStore:           ciStore,
+		caches:            caches,
+		consumer:          consumer,
+		streamName:        bus.Stream,
+		dedupeCache:       dedupeCache,
+		forward:           client.RequestCoreTo,
+		logger:            logger,
+		messagesDelivered: messagesDelivered,
 	}
 	openV1Routes(v1Gate, ready, cfg.MachineID, logger, listeningAt)
 

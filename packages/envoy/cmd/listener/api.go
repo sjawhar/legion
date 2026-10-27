@@ -381,13 +381,13 @@ const roleHolderResolutionAttempts = 2
 // releaseExpiredRoleClaim is the single point in the listener that
 // interprets store.ExpiredRoleClaimRelease's ExpiredRoleClaimSuperseded
 // outcome. Both resolveLiveRoleHolder (HTTP role lookups) and
-// resolveCoreRoleHolder (synchronous role-lane delivery, delivery.go) call
-// it instead of registry.ReleaseExpiredRoleClaim directly, so a claim that
-// raced a fresh SetRole before the conditional delete landed is reported as
-// "must re-resolve" in exactly one place. A second, drifted branch on
-// ExpiredRoleClaimSuperseded is exactly how a live replacement holder ends
-// up reported as this call's stale verdict — the defect this helper exists
-// to make structurally impossible.
+// resolveLaneRoleHolder (role delivery by the role lane and the publish route,
+// delivery.go) call it instead of registry.ReleaseExpiredRoleClaim directly,
+// so a claim that raced a fresh SetRole before the conditional delete landed
+// is reported as "must re-resolve" in exactly one place. A second, drifted
+// branch on ExpiredRoleClaimSuperseded is exactly how a live replacement
+// holder ends up reported as this call's stale verdict — the defect this
+// helper exists to make structurally impossible.
 func releaseExpiredRoleClaim(registry roleClaimResolver, role, sessionID string, sessionTTL time.Duration) (release store.ExpiredRoleClaimRelease, superseded bool, err error) {
 	release, err = registry.ReleaseExpiredRoleClaim(role, sessionID, sessionTTL)
 	if err != nil {
@@ -564,7 +564,11 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 }
 
 // publishHandler rejects agent-targeted topics (must use /v1/messages/send
-// instead) and publishes the envelope to NATS. An explicit dedupe_key is used
+// instead) and sends the envelope. A role topic is forwarded to its holder and
+// an ad-hoc topic confirmed with each self-subscribed recipient, both answered
+// once confirmed or when publishDeliveryWindow from the request's arrival has
+// passed (sendToRole, sendToTopic in confirmed.go); a topic the stream captures
+// is answered once the stream stored it. An explicit dedupe_key is used
 // verbatim (a re-send a receiver's own dedupe recognises); it is mutually
 // exclusive with idempotency_key, may not begin with roleForwardDedupePrefix,
 // the mark the role arbiter drops on sight, and may not ride a dispatch
@@ -576,6 +580,7 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 // /v1/messages/send, whose key is the listener's.
 func publishHandler(d *listenerDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		arrived := time.Now()
 		if r.Method != http.MethodPost {
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
@@ -632,25 +637,24 @@ func publishHandler(d *listenerDeps) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		result := roleHolderResult{state: roleHolderLive}
 		if role, ok := strings.CutPrefix(request.Topic, contracts.RoleTopicPrefix); ok {
-			var err error
-			result, err = resolveLiveRoleHolder(d.registry, d.sessions, role)
-			if err != nil {
-				writeNATSError(w, err, http.StatusInternalServerError, err.Error())
-				return
-			}
-			if result.state != roleHolderLive {
-				writeRoleHolderError(w, role, result)
-				return
-			}
+			ctx, cancel := context.WithDeadline(r.Context(), arrived.Add(publishDeliveryWindow))
+			defer cancel()
+			sendToRole(ctx, w, d, item, role, arrived)
+			return
+		}
+		if bus.UsesCoreTransport(request.Topic) {
+			ctx, cancel := context.WithDeadline(r.Context(), arrived.Add(publishDeliveryWindow))
+			defer cancel()
+			sendToTopic(ctx, w, d, item, arrived)
+			return
 		}
 		item.Sender = senderStamp(d.registry, d.sessions, item.SourceSession)
 		if err := d.client.Publish(item); err != nil {
 			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, publishResponse{Envelope: item, Holder: result.holder})
+		writeJSON(w, http.StatusOK, publishResponse{Envelope: item})
 	}
 }
 

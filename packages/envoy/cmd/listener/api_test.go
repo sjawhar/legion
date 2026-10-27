@@ -642,7 +642,7 @@ func TestRoleHolderNotFoundResponsesIdentifyState(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			client := setupPublishTestClient(t)
 			registry, sessions := setupSessionsTest(t, nil, nil)
-			handler := tc.handler(&listenerDeps{client: client, registry: registry, sessions: sessions})
+			handler := tc.handler(withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions}))
 
 			unclaimedRecorder := httptest.NewRecorder()
 			handler.ServeHTTP(unclaimedRecorder, tc.request())
@@ -1073,8 +1073,11 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 	if _, err := registry.SetRole("ses_holder", "test-machine", "reviewer", false); err != nil {
 		t.Fatalf("set holder: %v", err)
 	}
-	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	state := withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
 	handler := publishHandler(state)
+	// Each subtest is a test of its own to testnats.URL, with an account of its own, so the holder
+	// stand-in connects with the parent's.
+	uri := testnats.URL(t)
 
 	t.Run("unheld role returns 404 without publishing", func(t *testing.T) {
 		roleProbe, err := client.Conn.SubscribeSync("notifications.role.unheld")
@@ -1116,6 +1119,7 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 	})
 
 	t.Run("live holder is returned", func(t *testing.T) {
+		startStandIn(t, uri, "ses_holder", always)
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.role.reviewer","message":"please review"}`))
 		handler.ServeHTTP(recorder, request)
@@ -1966,7 +1970,7 @@ func TestV1RoutesAnswerAKeyNATSWouldRefuseWith4xx(t *testing.T) {
 		t.Fatalf("register ses_live: %v", err)
 	}
 	mux := http.NewServeMux()
-	registerV1Routes(mux, &listenerDeps{client: client, registry: registry, sessions: sessions}, "test-machine", logging.New("test"))
+	registerV1Routes(mux, withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions}), "test-machine", logging.New("test"))
 
 	long := strings.Repeat("s", 5000)
 	longRole := strings.Repeat("r", 4100)

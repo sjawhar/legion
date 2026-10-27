@@ -773,7 +773,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 	}
 }
 
-// usesCoreTransport reports whether topic travels over core NATS rather than JetStream: any
+// UsesCoreTransport reports whether topic travels over core NATS rather than JetStream: any
 // notification topic none of the stream's subjects captures. That holds the role lanes and their
 // exception lanes, which the stream must never retain and no stream subject captures
 // (TestStreamConfigExcludesRoleLanes), and every ad-hoc topic such as
@@ -785,8 +785,9 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 // before. The capture is judged on the subjects this binary compiles in, not the deployed stream's:
 // a topic under a subject only a newer build adds (which reconciliation keeps) goes over core NATS
 // from an older one, so the stream still stores it but without a MsgId, and the older listener's
-// durable never fans it out.
-func usesCoreTransport(topic string) bool {
+// durable never fans it out. The listener's publish route reads it too: such a topic is not
+// stored, so the route confirms it with each self-subscribed recipient itself.
+func UsesCoreTransport(topic string) bool {
 	return strings.HasPrefix(topic, NotificationTopicPrefix) && !StreamCaptures(topic)
 }
 
@@ -865,7 +866,7 @@ func (c *Client) refused(err error, size int) error {
 }
 
 // Publish routes role lanes, their delivery-exception lanes and every topic the stream does not
-// capture through core NATS (usesCoreTransport); every notification the stream captures retains
+// capture through core NATS (UsesCoreTransport); every notification the stream captures retains
 // JetStream durability. Its signature is an interface method in cistore, outbox and webhook, so a
 // caller that wants JetStream's duplicate verdict calls PublishReportingDuplicate instead.
 func (c *Client) Publish(item contracts.Envelope) error {
@@ -885,7 +886,7 @@ func (c *Client) Publish(item contracts.Envelope) error {
 // have landed, so the very publish that put the message on the subject can come
 // back a duplicate.
 func (c *Client) PublishReportingDuplicate(item contracts.Envelope) (bool, error) {
-	if usesCoreTransport(item.Topic) {
+	if UsesCoreTransport(item.Topic) {
 		return false, c.PublishCore(item)
 	}
 	return c.publishJetStream(item)

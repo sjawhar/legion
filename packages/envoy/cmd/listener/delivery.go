@@ -19,9 +19,11 @@ import (
 	"github.com/sjawhar/envoy/internal/store"
 )
 
-// roleForwardDedupePrefix marks an envelope already sent from the role arbiter
-// to its selected agent subject. The durable agent-stream replay must ACK it
-// without re-entering the arbiter.
+// roleForwardDedupePrefix marks an envelope already sent from the role arbiter, or the publish
+// route, to its selected agent subject. A role lane that takes one again (an operator re-publishing
+// a received frame) acknowledges it without re-entering the arbiter, and a session's dedupe reads
+// it as a forward. The durable acknowledges every stored forward copy by its subject instead
+// (listenerDeliveryHandler).
 const roleForwardDedupePrefix = "envoy.role.forward."
 
 const roleReceiptTimeout = 2 * time.Second
@@ -294,6 +296,17 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 			cfg.logger.Warn("listener live envelope names a topic other than its subject", slog.String("subject", message.msg.Subject), slog.String("topic", item.Topic), slog.String("event_id", item.EventID))
 			return
 		}
+		// The stream captures every agent subject, so it also stores each forward a sender made to
+		// a session's agent subject while keeping the envelope's own topic: a role message the
+		// lane or the publish route forwarded to its holder, an ad-hoc topic message the route
+		// forwarded to each self-subscribed recipient. The forward reached its session over core
+		// NATS, or its sender learned it did not; the stored copy is not a message for this
+		// listener to deliver again, to the role's holder or to the topic's serve-port sessions.
+		if message.mode == durableDelivery && strings.HasPrefix(message.msg.Subject, contracts.AgentTopicPrefix) && item.Topic != message.msg.Subject {
+			cfg.logger.DeliveryLog(slog.LevelDebug, "listener acknowledged a stored forward copy", strings.TrimPrefix(message.msg.Subject, contracts.AgentTopicPrefix), item.Topic, item.EventID, "forward_copy", slog.String("subject", message.msg.Subject))
+			message.finalize(false)
+			return
+		}
 		cfg.messagesReceived.Inc([2]string{"source", item.Source}, [2]string{"topic_prefix", metrics.TopicPrefix(item.Topic)})
 		cfg.logger.Info("listener received", slog.String("source", item.Source), slog.String("source_session", item.SourceSession), slog.String("topic", item.Topic), slog.String("event_id", item.EventID), slog.String("payload_summary", item.PayloadSummary))
 		switch {
@@ -307,79 +320,131 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 	}
 }
 
-// resolveCoreRoleHolder resolves the current live holder for a role-lane
-// delivery, applying the terminal no_holder/delivery_failed outcome itself
-// and reporting ok=false when there is nobody to deliver to. Delivery
-// distrusts a claim whose holder has not heartbeated within
-// session.ClaimStaleAfter even when its registry cache entry has not yet
+// laneHolderOutcome is how resolveLaneRoleHolder ended.
+type laneHolderOutcome uint8
+
+const (
+	// laneHolderLive: the claim's holder heartbeated within session.ClaimStaleAfter.
+	laneHolderLive laneHolderOutcome = iota
+	// laneHolderUnclaimed: no claim exists for the role.
+	laneHolderUnclaimed
+	// laneHolderNotLive: the claim's holder has no session entry that heartbeated within
+	// session.ClaimStaleAfter; release says what became of its claim.
+	laneHolderNotLive
+	// laneHolderClaimReadFailed: the role claim could not be read.
+	laneHolderClaimReadFailed
+	// laneHolderSessionReadFailed: the holder's session entry could not be read.
+	laneHolderSessionReadFailed
+	// laneHolderReleaseFailed: the not-live holder's claim could not be released.
+	laneHolderReleaseFailed
+	// laneHolderChurned: every release found the claim superseded by a fresher one, past
+	// roleHolderResolutionAttempts.
+	laneHolderChurned
+)
+
+// laneHolderResolution is one resolution of a role's holder by the role lane's rule. holder names
+// the claim's holder whenever one was read; entry is set only for laneHolderLive; release and
+// lastSeen only for laneHolderNotLive; err for the three read failures.
+type laneHolderResolution struct {
+	outcome  laneHolderOutcome
+	holder   string
+	entry    session.SessionEntry
+	release  store.ExpiredRoleClaimRelease
+	lastSeen int64
+	err      error
+}
+
+// resolveLaneRoleHolder resolves the current live holder of role by the rule a role delivery
+// applies, and only reports what it found: the role lane (resolveCoreRoleHolder) turns the outcome
+// into its delivery exception, and the publish route (confirmed.go) into its answer, so both
+// forward to the holder the same rule picks. Delivery distrusts a claim whose holder has not
+// heartbeated within session.ClaimStaleAfter even when its registry cache entry has not yet
 // expired (the plugin heartbeats every 90 seconds — DEFAULT_HEARTBEAT_MS,
-// packages/envoy-client/src/envoy-settings.ts — so three missed heartbeats
-// means the claiming process is very likely gone) — stricter
-// than resolveLiveRoleHolder's plain ErrKeyNotFound check, since a dropped
-// delivery is costlier here than an HTTP 404. Both that stricter check and
-// resolveLiveRoleHolder release an expired claim through the shared
-// releaseExpiredRoleClaim helper and retry, bounded to
-// roleHolderResolutionAttempts, whenever the release reports the claim it
-// tried to drop was already superseded by a fresh one — so a claim raced by
-// a live replacement is re-resolved to that replacement here exactly as it
-// is for GET /v1/roles/<role>, instead of reporting delivery_failed about a
-// session a fresh claim has already superseded.
-func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Envelope, role string) (string, session.SessionEntry, bool) {
+// packages/envoy-client/src/envoy-settings.ts — so three missed heartbeats means the claiming
+// process is very likely gone) — stricter than resolveLiveRoleHolder's plain ErrKeyNotFound check,
+// since a dropped delivery is costlier here than an HTTP 404. Both that stricter check and
+// resolveLiveRoleHolder release an expired claim through the shared releaseExpiredRoleClaim helper
+// and retry, bounded to roleHolderResolutionAttempts, whenever the release reports the claim it
+// tried to drop was already superseded by a fresh one — so a claim raced by a live replacement is
+// re-resolved to that replacement here exactly as it is for GET /v1/roles/<role>, instead of
+// reporting a session a fresh claim has already superseded.
+func resolveLaneRoleHolder(registry roleClaimResolver, sessions *session.SessionRegistry, role string) laneHolderResolution {
 	for range roleHolderResolutionAttempts {
-		sessionID, err := cfg.registry.RoleHolder(role)
+		claim, err := registry.RoleClaim(role)
 		if err != nil {
-			applyDeliveryOutcome(cfg, item, deliveryOutcome{
-				metricStatus: "failed",
-				log: func(logger *logging.Logger) {
-					logger.Error("listener role holder lookup failed", slog.String("role", role), slog.String("error", err.Error()))
-				},
-				exceptionReason: "delivery_failed",
-			})
-			return "", session.SessionEntry{}, false
+			return laneHolderResolution{outcome: laneHolderClaimReadFailed, err: err}
 		}
+		sessionID := claim.HolderSessionID
 		if sessionID == "" {
-			applyDeliveryOutcome(cfg, item, deliveryOutcome{
-				metricStatus: "skipped",
-				log: func(logger *logging.Logger) {
-					logger.DeliveryLog(slog.LevelWarn, "listener role has no holder", "", item.Topic, item.EventID, "skipped")
-				},
-				exceptionReason: "no_holder",
-			})
-			return "", session.SessionEntry{}, false
+			return laneHolderResolution{outcome: laneHolderUnclaimed}
 		}
 		now := time.Now().UnixMilli()
-		holder, holderErr := roleHolderSession(cfg.sessions, sessionID, func(holder session.SessionEntry) bool {
+		holder, holderErr := roleHolderSession(sessions, sessionID, func(holder session.SessionEntry) bool {
 			return holder.UpdatedAt > 0 && now-holder.UpdatedAt < int64(session.ClaimStaleAfter/time.Millisecond)
 		})
 		if holderErr == nil {
-			return sessionID, holder, true
+			return laneHolderResolution{outcome: laneHolderLive, holder: sessionID, entry: holder}
 		}
 		if !errors.Is(holderErr, nats.ErrKeyNotFound) {
-			applyDeliveryOutcome(cfg, item, deliveryOutcome{
-				sessionID:    sessionID,
-				metricStatus: "failed",
-				log: func(logger *logging.Logger) {
-					logger.Error("listener role holder session lookup failed", slog.String("role", role), slog.String("session_id", sessionID), slog.String("error", holderErr.Error()))
-				},
-				exceptionReason: "delivery_failed",
-			})
-			return "", session.SessionEntry{}, false
+			return laneHolderResolution{outcome: laneHolderSessionReadFailed, holder: sessionID, err: holderErr}
 		}
-		_, superseded, err := releaseExpiredRoleClaim(cfg.registry, role, sessionID, cfg.sessions.TTL())
+		lastSeen := sessions.LastSeen(sessionID)
+		release, superseded, err := releaseExpiredRoleClaim(registry, role, sessionID, sessions.TTL())
 		if err != nil {
-			applyDeliveryOutcome(cfg, item, deliveryOutcome{
-				sessionID:    sessionID,
-				metricStatus: "failed",
-				log: func(logger *logging.Logger) {
-					logger.Error("listener expired role claim cleanup failed", slog.String("role", role), slog.String("session_id", sessionID), slog.String("error", err.Error()))
-				},
-				exceptionReason: "delivery_failed",
-			})
-			return "", session.SessionEntry{}, false
+			return laneHolderResolution{outcome: laneHolderReleaseFailed, holder: sessionID, err: err}
 		}
 		if superseded {
 			continue
 		}
+		return laneHolderResolution{outcome: laneHolderNotLive, holder: sessionID, release: release, lastSeen: lastSeen}
+	}
+	return laneHolderResolution{outcome: laneHolderChurned}
+}
+
+// resolveCoreRoleHolder resolves the current live holder for a role-lane delivery by the lane's
+// rule (resolveLaneRoleHolder), applying the terminal no_holder/delivery_failed outcome itself and
+// reporting ok=false when there is nobody to deliver to.
+func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Envelope, role string) (string, session.SessionEntry, bool) {
+	resolved := resolveLaneRoleHolder(cfg.registry, cfg.sessions, role)
+	sessionID := resolved.holder
+	switch resolved.outcome {
+	case laneHolderLive:
+		return sessionID, resolved.entry, true
+	case laneHolderClaimReadFailed:
+		applyDeliveryOutcome(cfg, item, deliveryOutcome{
+			metricStatus: "failed",
+			log: func(logger *logging.Logger) {
+				logger.Error("listener role holder lookup failed", slog.String("role", role), slog.String("error", resolved.err.Error()))
+			},
+			exceptionReason: "delivery_failed",
+		})
+	case laneHolderUnclaimed:
+		applyDeliveryOutcome(cfg, item, deliveryOutcome{
+			metricStatus: "skipped",
+			log: func(logger *logging.Logger) {
+				logger.DeliveryLog(slog.LevelWarn, "listener role has no holder", "", item.Topic, item.EventID, "skipped")
+			},
+			exceptionReason: "no_holder",
+		})
+	case laneHolderSessionReadFailed:
+		applyDeliveryOutcome(cfg, item, deliveryOutcome{
+			sessionID:    sessionID,
+			metricStatus: "failed",
+			log: func(logger *logging.Logger) {
+				logger.Error("listener role holder session lookup failed", slog.String("role", role), slog.String("session_id", sessionID), slog.String("error", resolved.err.Error()))
+			},
+			exceptionReason: "delivery_failed",
+		})
+	case laneHolderReleaseFailed:
+		applyDeliveryOutcome(cfg, item, deliveryOutcome{
+			sessionID:    sessionID,
+			metricStatus: "failed",
+			log: func(logger *logging.Logger) {
+				logger.Error("listener expired role claim cleanup failed", slog.String("role", role), slog.String("session_id", sessionID), slog.String("error", resolved.err.Error()))
+			},
+			exceptionReason: "delivery_failed",
+		})
+	case laneHolderNotLive:
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID:    sessionID,
 			metricStatus: "failed",
@@ -388,15 +453,15 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 			},
 			exceptionReason: "delivery_failed",
 		})
-		return "", session.SessionEntry{}, false
+	default:
+		applyDeliveryOutcome(cfg, item, deliveryOutcome{
+			metricStatus: "failed",
+			log: func(logger *logging.Logger) {
+				logger.Error("listener role holder churned past resolution bound", slog.String("role", role))
+			},
+			exceptionReason: "delivery_failed",
+		})
 	}
-	applyDeliveryOutcome(cfg, item, deliveryOutcome{
-		metricStatus: "failed",
-		log: func(logger *logging.Logger) {
-			logger.Error("listener role holder churned past resolution bound", slog.String("role", role))
-		},
-		exceptionReason: "delivery_failed",
-	})
 	return "", session.SessionEntry{}, false
 }
 

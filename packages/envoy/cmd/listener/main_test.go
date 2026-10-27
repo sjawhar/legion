@@ -387,7 +387,7 @@ func TestPublishHandlerDeliversAnAdHocTopicToItsSubscriber(t *testing.T) {
 		t.Fatalf("flush the subscription: %v", err)
 	}
 
-	state := &listenerDeps{client: client, registry: harness.registry, sessions: harness.sessions}
+	state := harness.publishDeps()
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"deploy complete","source_session":"ses_publisher","idempotency_key":"adhoc-1"}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -440,7 +440,7 @@ func TestPublishHandlerRefusesATopicOutsideNotifications(t *testing.T) {
 	if err := client.Conn.Flush(); err != nil {
 		t.Fatalf("flush the subscriptions: %v", err)
 	}
-	state := &listenerDeps{client: client, registry: harness.registry, sessions: harness.sessions}
+	state := harness.publishDeps()
 	publish := func(topic string) *httptest.ResponseRecorder {
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"hello"}`))
@@ -549,14 +549,17 @@ func TestPublishHandlerReturnsWithinDeadline(t *testing.T) {
 	}
 }
 
-func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) {
+// A role message through the publish route goes to the role's current holder's agent subject, sent
+// by the route itself rather than published on the role lane, and the stream keeps one copy of each
+// forward.
+func TestPublishHandler_RoleMessageReachesTheCurrentHolderWithoutTheRoleLane(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	const role = "legion-delivery"
 	roleTopic := contracts.RoleTopicPrefix + role
 	if _, err := harness.registry.SetRole("ses_role_a", "test-machine", role, false); err != nil {
 		t.Fatalf("claim role for A: %v", err)
 	}
-	// Set B as the KV value that the core handler must resolve. This models a
+	// Set B as the KV value that the route must resolve. This models a
 	// publish that races the handover: the single listener chooses one current
 	// owner, rather than relying on two holders to observe the change first.
 	claimDeps := &listenerDeps{registry: harness.registry, sessions: harness.sessions}
@@ -593,11 +596,11 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 		t.Fatalf("subscribe B receipt responder: %v", err)
 	}
 	t.Cleanup(func() { _ = receiptResponder.Unsubscribe() })
-	coreSubscription, err := harness.client.Conn.Subscribe(contracts.RoleTopicPrefix+">", harness.coreHandler)
+	laneProbe, err := harness.client.Conn.SubscribeSync(contracts.RoleTopicPrefix + ">")
 	if err != nil {
-		t.Fatalf("subscribe to core role lane: %v", err)
+		t.Fatalf("subscribe to the role lane: %v", err)
 	}
-	t.Cleanup(func() { _ = coreSubscription.Unsubscribe() })
+	t.Cleanup(func() { _ = laneProbe.Unsubscribe() })
 	if err := harness.client.Conn.Flush(); err != nil {
 		t.Fatalf("flush role subscriptions: %v", err)
 	}
@@ -605,7 +608,7 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 		t.Fatal("role lane should not create a JetStream consumer")
 	}
 
-	state := &listenerDeps{client: harness.client, registry: harness.registry, sessions: harness.sessions}
+	state := harness.publishDeps()
 	handler := publishHandler(state)
 	publishRole := func(topic, source string) contracts.Envelope {
 		t.Helper()
@@ -687,9 +690,14 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 	if info.State.Msgs != 2 {
 		t.Fatalf("agent-subject role forwards were captured %d times, want two", info.State.Msgs)
 	}
+	if _, err := laneProbe.NextMsg(250 * time.Millisecond); !errors.Is(err, natsgo.ErrTimeout) {
+		t.Fatalf("the route published on the role lane: the probe answered %v, want a timeout", err)
+	}
 }
 
-func TestPublishHandler_RoleFreshDeafHolderEmitsReceiptTimeout(t *testing.T) {
+// A holder registered and holding the role with nothing subscribed to its agent subject leaves the
+// sender a 504 receipt_timeout, logged once, and no delivery exception: the sender has the answer.
+func TestPublishHandler_RoleFreshDeafHolderAnswersReceiptTimeout(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	role := "fresh-deaf-holder"
 	roleTopic := contracts.RoleTopicPrefix + role
@@ -708,50 +716,38 @@ func TestPublishHandler_RoleFreshDeafHolderEmitsReceiptTimeout(t *testing.T) {
 		t.Fatalf("claim deaf holder: status = %d, body = %s", claimRecorder.Code, claimRecorder.Body.String())
 	}
 
-	coreSubscription, err := harness.client.Conn.Subscribe(contracts.RoleTopicPrefix+">", harness.coreHandler)
-	if err != nil {
-		t.Fatalf("subscribe role arbiter: %v", err)
-	}
-	t.Cleanup(func() { _ = coreSubscription.Unsubscribe() })
-	exceptionProbe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + roleTopic)
-	if err != nil {
-		t.Fatalf("subscribe exception lane: %v", err)
-	}
-	t.Cleanup(func() { _ = exceptionProbe.Unsubscribe() })
-	if err := harness.client.Conn.Flush(); err != nil {
-		t.Fatalf("flush role subscriptions: %v", err)
-	}
+	probe := exceptionProbe(t, harness.client)
 
-	state := &listenerDeps{client: harness.client, registry: harness.registry, sessions: harness.sessions}
+	state := harness.publishDeps()
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+roleTopic+`","message":"deaf role event","payload":"{\"type\":\"worker-queued\"}","source":"agent"}`))
 	publishHandler(state).ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("publish role event: status = %d, body = %s", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusGatewayTimeout {
+		t.Fatalf("publish role event: status = %d, want 504; body = %s", recorder.Code, recorder.Body.String())
 	}
-	var published contracts.Envelope
-	if err := json.NewDecoder(recorder.Body).Decode(&published); err != nil {
-		t.Fatalf("decode published envelope: %v", err)
+	var failure roleSendFailure
+	if err := json.NewDecoder(recorder.Body).Decode(&failure); err != nil {
+		t.Fatalf("decode the answer: %v", err)
 	}
-	exception := assertDeliveryException(t, exceptionProbe, published, "receipt_timeout")
-	t.Logf("captured exception envelope payload: %s", exception.Payload)
-	if _, err := exceptionProbe.NextMsg(250 * time.Millisecond); !errors.Is(err, natsgo.ErrTimeout) {
-		t.Fatalf("one publish produced a second exception (or probe failed): %v", err)
+	if failure.Reason != "receipt_timeout" || failure.Holder != "ses_deaf" {
+		t.Fatalf("answer %+v, want receipt_timeout from ses_deaf", failure)
 	}
+	noException(t, probe)
 	logs := harness.logs.String()
-	line := ""
+	var lines []string
 	for _, candidate := range strings.Split(logs, "\n") {
-		if strings.Contains(candidate, `"msg":"listener role receipt timed out"`) {
-			line = candidate
-			break
+		if strings.Contains(candidate, `"msg":"listener publish role send"`) {
+			lines = append(lines, candidate)
 		}
 	}
-	if line == "" || !strings.Contains(line, `"delivery_status":"receipt_timeout"`) || !strings.Contains(line, `"event_id":"`+published.EventID+`"`) {
-		t.Fatalf("listener log does not name receipt_timeout for %s:\n%s", published.EventID, logs)
+	if len(lines) != 1 || !strings.Contains(lines[0], `"delivery_status":"receipt_timeout"`) || !strings.Contains(lines[0], `"event_id":"`+failure.EventID+`"`) {
+		t.Fatalf("listener log does not name receipt_timeout once for %s:\n%s", failure.EventID, logs)
 	}
-	t.Logf("listener log line: %s", line)
+	t.Logf("listener log line: %s", lines[0])
 }
 
+// A re-send under the key of a message its holder never confirmed is forwarded again, and one under
+// the key of a message it confirmed is not: the route answers each and publishes no exception.
 func TestPublishHandler_ExplicitDedupeKeyForwardsAgainAfterReceiptTimeoutOnly(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	const role = "slow-holder"
@@ -777,75 +773,59 @@ func TestPublishHandler_ExplicitDedupeKeyForwardsAgainAfterReceiptTimeoutOnly(t 
 		t.Fatalf("subscribe holder responder: %v", err)
 	}
 	t.Cleanup(func() { _ = responder.Unsubscribe() })
-	coreSubscription, err := harness.client.Conn.Subscribe(contracts.RoleTopicPrefix+">", harness.coreHandler)
-	if err != nil {
-		t.Fatalf("subscribe role arbiter: %v", err)
-	}
-	t.Cleanup(func() { _ = coreSubscription.Unsubscribe() })
-	exceptionProbe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + roleTopic)
-	if err != nil {
-		t.Fatalf("subscribe exception lane: %v", err)
-	}
-	t.Cleanup(func() { _ = exceptionProbe.Unsubscribe() })
-	if err := harness.client.Conn.Flush(); err != nil {
-		t.Fatalf("flush subscriptions: %v", err)
-	}
-	state := &listenerDeps{client: harness.client, registry: harness.registry, sessions: harness.sessions}
-	publish := func(what string) contracts.Envelope {
+	probe := exceptionProbe(t, harness.client)
+	state := harness.publishDeps()
+	publish := func(what string, want int) {
 		t.Helper()
 		recorder := httptest.NewRecorder()
 		publishHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+roleTopic+`","message":"re-sent role event","payload":"{\"type\":\"worker-queued\"}","source":"agent","dedupe_key":"publish.resend-1"}`)))
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("%s: status = %d, body = %s", what, recorder.Code, recorder.Body.String())
+		if recorder.Code != want {
+			t.Fatalf("%s: status = %d, want %d; body = %s", what, recorder.Code, want, recorder.Body.String())
 		}
-		var published contracts.Envelope
-		if err := json.NewDecoder(recorder.Body).Decode(&published); err != nil {
+		var answer struct {
+			DedupeKey string `json:"dedupe_key"`
+		}
+		if err := json.NewDecoder(recorder.Body).Decode(&answer); err != nil {
 			t.Fatalf("%s: decode: %v", what, err)
 		}
-		if published.DedupeKey != "publish.resend-1" {
-			t.Fatalf("%s: dedupe_key = %q, want publish.resend-1", what, published.DedupeKey)
+		if answer.DedupeKey != "publish.resend-1" {
+			t.Fatalf("%s: dedupe_key = %q, want publish.resend-1", what, answer.DedupeKey)
 		}
-		return published
 	}
-	expectForward := func(what string, want contracts.Envelope) {
+	expectForwards := func(what string, count int) {
 		t.Helper()
+		for range count {
+			select {
+			case forwarded := <-forwards:
+				if forwarded.DedupeKey != roleForwardDedupePrefix+"publish.resend-1" {
+					t.Fatalf("%s: holder received dedupe %q, want it with the forward prefix", what, forwarded.DedupeKey)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%s: holder received no forward", what)
+			}
+		}
 		select {
 		case forwarded := <-forwards:
-			if forwarded.EventID != want.EventID || forwarded.DedupeKey != roleForwardDedupePrefix+"publish.resend-1" {
-				t.Fatalf("%s: holder received event %q dedupe %q, want %q with the forward prefix", what, forwarded.EventID, forwarded.DedupeKey, want.EventID)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatalf("%s: holder received no forward", what)
-		}
-	}
-	expectNoException := func(what string) {
-		t.Helper()
-		if _, err := exceptionProbe.NextMsg(250 * time.Millisecond); !errors.Is(err, natsgo.ErrTimeout) {
-			t.Fatalf("%s: unexpected exception (or probe failed): %v", what, err)
+			t.Fatalf("%s: holder received another forward of %q", what, forwarded.EventID)
+		case <-time.After(250 * time.Millisecond):
 		}
 	}
 
-	// 1. The holder swallows the forward: receipt_timeout, attempt cache cleared.
-	first := publish("first publish")
-	expectForward("first publish", first)
-	assertDeliveryException(t, exceptionProbe, first, "receipt_timeout")
+	// 1. The holder swallows every forward: the route answers receipt_timeout after two of them.
+	publish("first publish", http.StatusGatewayTimeout)
+	expectForwards("first publish", 2)
 
 	// 2. Same dedupe_key after the timeout: forwarded again; the holder now acknowledges.
 	acknowledge.Store(true)
-	second := publish("re-publish after receipt_timeout")
-	expectForward("re-publish after receipt_timeout", second)
-	expectNoException("re-publish after receipt_timeout")
+	publish("re-publish after receipt_timeout", http.StatusOK)
+	expectForwards("re-publish after receipt_timeout", 1)
 
-	// 3. Same dedupe_key after a delivered forward: dedupe skip, nothing forwarded, no exception.
-	publish("re-publish after delivery")
-	select {
-	case forwarded := <-forwards:
-		t.Fatalf("re-publish after delivery: holder received %q; the listener must skip a delivered dedupe_key", forwarded.EventID)
-	case <-time.After(250 * time.Millisecond):
-	}
-	expectNoException("re-publish after delivery")
-	if !strings.Contains(harness.logs.String(), `"msg":"listener role dedupe skip"`) {
-		t.Fatalf("expected a dedupe skip log line:\n%s", harness.logs.String())
+	// 3. Same dedupe_key after a delivered forward: dedupe skip, nothing forwarded.
+	publish("re-publish after delivery", http.StatusOK)
+	expectForwards("re-publish after delivery", 0)
+	noException(t, probe)
+	if !strings.Contains(harness.logs.String(), `"delivery_status":"dedupe"`) {
+		t.Fatalf("expected a dedupe log line:\n%s", harness.logs.String())
 	}
 }
 

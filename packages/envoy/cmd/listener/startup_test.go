@@ -105,15 +105,16 @@ func TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 		t.Fatalf("the stream's last message for %s is event %q, want the sent %q", target, stored.EventID, sent.EventID)
 	}
 
-	// The role lane is open too: a role message reaches its holder through this listener's queue
-	// subscription before the durable binds.
+	// The role lane is open too: a role message published straight onto it, as an operator's or an
+	// earlier listener's would be, reaches its holder through this listener's queue subscription
+	// before the durable binds.
 	postListener(t, listener.port, "/v1/interests/subscribe", `{"session_id":"`+holderID+`","topics":[],"self_subscribed":true}`)
 	postListener(t, listener.port, "/v1/roles/set", `{"session_id":"`+holderID+`","role":"`+role+`"}`)
 	frames := receiveAsSession(t, client, holderID)
-	status, answer = callListener(t, listener.port, http.MethodPost, "/v1/messages/publish",
-		`{"topic":"`+contracts.RoleTopicPrefix+role+`","message":"role message while the durable is held","source_session":"ses_bind_window_sender"}`)
-	if status != http.StatusOK {
-		t.Fatalf("POST /v1/messages/publish to a role while another task holds the durable: status %d %q, want 200\n%s", status, answer, listener.Output.String())
+	onLane := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "publish.bind-window-role")
+	onLane.SourceSession = "ses_bind_window_sender"
+	if err := client.Publish(onLane); err != nil {
+		t.Fatalf("publish a role message onto the lane while another task holds the durable: %v", err)
 	}
 	select {
 	case forwarded := <-frames:
@@ -141,10 +142,12 @@ func TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 // Both tasks of one machine id run during a rolling deploy, and the replacement's role lane opens
 // before its durable binds, so both subscribe notifications.role.> at once. They are one core-NATS
 // queue group (envoy-listener-<machine id>), and NATS hands each message to one member of a group,
-// so a role message reaches its holder once whichever task takes it: no publish is forwarded by
-// both. A re-publish under the same dedupe key can land on the other task, whose dedupe cache has
-// not seen it, and is forwarded again; the holder's pump drops that copy by its dedupe key, as it
-// drops the copy each other machine's listener forwards today.
+// so a role message published on the lane reaches its holder once whichever task takes it: no
+// publish is forwarded by both. A re-publish under the same dedupe key can land on the other task,
+// whose dedupe cache has not seen it, and is forwarded again; the holder's pump drops that copy by
+// its dedupe key, as it drops the copy each other machine's listener forwards today. The messages
+// go straight onto the lane, as an operator's or an earlier listener's do: the publish route
+// forwards a role message itself.
 func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T) {
 	const (
 		machineID = "two-tasks"
@@ -180,20 +183,17 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T
 		t.Fatalf("the old task's lookup of %s right after the replacement accepted %s's claim: status %d %s, want 200", role, holderID, status, answer)
 	}
 
-	publish := func(body string) contracts.Envelope {
+	publish := func(dedupeKey string) contracts.Envelope {
 		t.Helper()
-		status, answer := callListener(t, old.port, http.MethodPost, "/v1/messages/publish", body)
-		if status != http.StatusOK {
-			t.Fatalf("POST /v1/messages/publish %s: status %d %q", body, status, answer)
+		item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, dedupeKey)
+		item.SourceSession = "ses_two_tasks_sender"
+		if err := client.Publish(item); err != nil {
+			t.Fatalf("publish %s onto the role lane: %v", dedupeKey, err)
 		}
-		var published contracts.Envelope
-		if err := json.Unmarshal([]byte(answer), &published); err != nil {
-			t.Fatalf("decode the publish answer %q: %v", answer, err)
-		}
-		return published
+		return item
 	}
 	for index := range messages {
-		publish(`{"topic":"` + contracts.RoleTopicPrefix + role + `","message":"two tasks message ` + strconv.Itoa(index) + `","source_session":"ses_two_tasks_sender"}`)
+		publish("publish.two-tasks-" + strconv.Itoa(index))
 	}
 	keys := map[string]int{}
 	for received := range messages {
@@ -234,7 +234,7 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T
 	const repeatKey = "two-tasks-repeat"
 	events := map[string]bool{}
 	for range 2 {
-		published := publish(`{"topic":"` + contracts.RoleTopicPrefix + role + `","message":"two tasks repeat","source_session":"ses_two_tasks_sender","dedupe_key":"` + repeatKey + `"}`)
+		published := publish(repeatKey)
 		events[published.EventID] = true
 	}
 	ofRepeat := func(record map[string]any) bool { return events[record["event_id"].(string)] }
