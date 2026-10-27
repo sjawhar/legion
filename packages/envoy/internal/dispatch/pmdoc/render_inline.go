@@ -118,10 +118,10 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 	fused := r.writeInlineRun(nodes, prefix, context, runSpelling{})
 	held := delimitersInText(nodes)
 	bareURL := writesBareURL(nodes, context.tableCell)
-	colons, ats := writesAddressSyntax(nodes)
+	colons, dots, ats := writesAddressSyntax(nodes)
 	flanking := delimiterBesidePunctuation(nodes, context.tableCell)
 	emails := writesBareEmail(nodes)
-	if r.err != nil || held == delimitersAsRuled && !bareURL && !colons && !ats && !fused && !flanking && !emails {
+	if r.err != nil || held == delimitersAsRuled && !bareURL && !colons && !dots && !ats && !fused && !flanking && !emails {
 		return
 	}
 	firstReadsBack := r.runReadsBack(from, prefix, nodes, inlineMarkdown)
@@ -129,11 +129,11 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 		return
 	}
 	written := string(r.b.Bytes()[from:])
-	spellings := runSpellings(held, bareURL, colons, ats, fused, flanking)
+	spellings := runSpellings(held, bareURL, colons, dots, ats, fused, flanking)
 	if emails {
 		// Last, each spelling again with every email link written as its address (bareEmails),
 		// whose `@` is text the ats spellings escape.
-		for _, spelling := range append([]runSpelling{{}}, runSpellings(held, bareURL, colons, true, fused, flanking)...) {
+		for _, spelling := range append([]runSpelling{{}}, runSpellings(held, bareURL, colons, dots, true, fused, flanking)...) {
 			spelling.bareEmails = true
 			spellings = append(spellings, spelling)
 		}
@@ -158,27 +158,27 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 // runSpelling is how writeInlineRun writes a run beyond the escape rules: the delimiters in its
 // text it escapes, whether it writes each bare URL (isBareURLLink) as an autolink (`<href>`, whose
 // text both readers read as written and whose `>` ends it), whether it escapes the colons of URL
-// schemes and the `@`s in text outside a link (escapeContext.schemeColons, ats), whether a mark the
-// next text still carries stays open around that text's other marks (keepingOpen), whether a
-// letter beside a delimiter run that punctuation stands inside is a character reference
-// (flanking), and whether it writes each email link as its address (isBareEmailLink), text outside
-// a link to the escapes.
+// schemes, the dots after `www` and the `@`s in text outside a link (escapeContext.schemeColons,
+// wwwDots, ats), whether a mark the next text still carries stays open around that text's other
+// marks (keepingOpen), whether a letter beside a delimiter run that punctuation stands inside is a
+// character reference (flanking), and whether it writes each email link as its address
+// (isBareEmailLink), text outside a link to the escapes.
 type runSpelling struct {
-	escapes                      delimiterEscapes
-	angleURLs, schemeColons, ats bool
-	keepOpen                     bool
-	flanking                     bool
-	bareEmails                   bool
+	escapes                               delimiterEscapes
+	angleURLs, schemeColons, wwwDots, ats bool
+	keepOpen                              bool
+	flanking                              bool
+	bareEmails                            bool
 }
 
 // runSpellings is every spelling inlineWithEscapes writes a run in after its first writing, email
 // links explicit: respellings, then where the first writing fused two delimiter runs, respellings
 // with open marks kept open, then where a delimiter run has punctuation inside it, each of these
 // with its letters beside one written as references (flanking).
-func runSpellings(held delimiterEscapes, bareURL, colons, ats, fused, flanking bool) []runSpelling {
-	spellings := respellings(held, bareURL, colons, ats, false)
+func runSpellings(held delimiterEscapes, bareURL, colons, dots, ats, fused, flanking bool) []runSpelling {
+	spellings := respellings(held, bareURL, colons, dots, ats, false)
 	if fused {
-		spellings = append(spellings, respellings(held, bareURL, colons, ats, true)...)
+		spellings = append(spellings, respellings(held, bareURL, colons, dots, ats, true)...)
 	}
 	if flanking {
 		flanked := []runSpelling{{flanking: true}}
@@ -197,7 +197,9 @@ func runSpellings(held delimiterEscapes, bareURL, colons, ats, fused, flanking b
 // colons of URL schemes escaped, or the `@`s, where its text holds them (colons, ats), then each
 // with two of these and last with all three, so a bare URL before plain text opening with an
 // address only the tokenizer reads (`http://localhost`) is written explicit with that colon escaped.
-func respellings(held delimiterEscapes, bareURL, colons, ats, keepOpen bool) []runSpelling {
+// Where its text holds a `www.` (dots), all of these come again with the dot after each `www`
+// escaped as well, after every spelling that leaves it alone.
+func respellings(held delimiterEscapes, bareURL, colons, dots, ats, keepOpen bool) []runSpelling {
 	escapes := []delimiterEscapes{delimitersAsRuled}
 	if held != delimitersAsRuled {
 		for next := held; next <= delimitersAll; next++ {
@@ -205,17 +207,23 @@ func respellings(held delimiterEscapes, bareURL, colons, ats, keepOpen bool) []r
 		}
 	}
 	var spellings []runSpelling
-	for _, url := range []runSpelling{{}, {angleURLs: true}, {schemeColons: true}, {ats: true},
-		{schemeColons: true, ats: true}, {angleURLs: true, schemeColons: true}, {angleURLs: true, ats: true},
-		{angleURLs: true, schemeColons: true, ats: true}} {
-		if url.angleURLs && !bareURL || url.schemeColons && !colons || url.ats && !ats {
-			continue
+	for _, dotted := range []bool{false, true} {
+		if dotted && !dots {
+			break
 		}
-		for _, delimiters := range escapes {
-			spelling := url
-			spelling.escapes, spelling.keepOpen = delimiters, keepOpen
-			if spelling != (runSpelling{}) {
-				spellings = append(spellings, spelling)
+		for _, url := range []runSpelling{{}, {angleURLs: true}, {schemeColons: true}, {ats: true},
+			{schemeColons: true, ats: true}, {angleURLs: true, schemeColons: true}, {angleURLs: true, ats: true},
+			{angleURLs: true, schemeColons: true, ats: true}} {
+			if url.angleURLs && !bareURL || url.schemeColons && !colons || url.ats && !ats {
+				continue
+			}
+			url.wwwDots = dotted
+			for _, delimiters := range escapes {
+				spelling := url
+				spelling.escapes, spelling.keepOpen = delimiters, keepOpen
+				if spelling != (runSpelling{}) {
+					spellings = append(spellings, spelling)
+				}
 			}
 		}
 	}
@@ -279,21 +287,23 @@ func spelledMarks(node *Node, escapePipes, wwwBare bool, spelling runSpelling) [
 }
 
 // writesAddressSyntax reports whether text outside a link or code among nodes holds a URL scheme's
-// colon (urlSchemeColon) and an `@`, where the readers may read an address from plain text.
-func writesAddressSyntax(nodes []*Node) (colons, ats bool) {
+// colon (urlSchemeColon), a dot after `www` (wwwDot) and an `@`, where the readers may read an
+// address from plain text.
+func writesAddressSyntax(nodes []*Node) (colons, dots, ats bool) {
 	for _, node := range nodes {
 		if node.Type != "text" || nodeHasMark(node, "inlineCode") || nodeHasMark(node, "link") {
 			continue
 		}
 		for offset := range len(node.Text) {
 			colons = colons || node.Text[offset] == ':' && urlSchemeColon(node.Text, offset)
+			dots = dots || node.Text[offset] == '.' && wwwDot(node.Text, offset)
 			ats = ats || node.Text[offset] == '@'
-			if colons && ats {
-				return colons, ats
+			if colons && dots && ats {
+				return colons, dots, ats
 			}
 		}
 	}
-	return colons, ats
+	return colons, dots, ats
 }
 
 // runReadsBack reports whether the inline markdown written since from reads back as nodes by
@@ -496,6 +506,7 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				footnoteLabels: r.footnoteLabels,
 				tableCell:      escapePipes,
 				schemeColons:   spelling.schemeColons && !hasLink,
+				wwwDots:        spelling.wwwDots && !hasLink,
 				ats:            spelling.ats && !hasLink,
 				label:          label,
 				followed:       index+1 < len(nodes) || len(next) > 0,

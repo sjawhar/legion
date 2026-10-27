@@ -196,6 +196,19 @@ func TestRenderReadsBackInBothParsersAsTheEditorShowsIt(t *testing.T) {
 		// as an autolink, whose text neither parser unescapes.
 		{"bare URL holding a backtick", bareURL("https://x.com/a`b"), "<https://x.com/a`b> b\n"},
 		{"bare URL holding a backtick and a reference", bareURL("https://x.com/a&amp;`b"), "<https://x.com/a&amp;`b> b\n"},
+		// 10. A link destination is written so that both parsers, which decode its backslash
+		// escapes, read back its href: `<` and `>` escaped between angle brackets, and a backslash
+		// escaped before ASCII punctuation or at its end.
+		{"link destination holding a parenthesis and `>`", bareURL("https://x.com/(a)>"), "[https://x.com/(a)>](<https://x.com/(a)\\>>) b\n"},
+		{"link destination ending in a backslash", bareURL("https://x.com/a>b\\"), "[https://x.com/a>b\\\\](https://x.com/a>b\\\\) b\n"},
+		{"link destination holding a backslash before punctuation", bareURL("https://x.com/a\\@b>"), "[https://x.com/a\\\\@b>](https://x.com/a\\\\@b>) b\n"},
+		{"link destinations holding escapes", parsed("[a](<x\\>y\\\\>) [b](x\\_y) [c](<\\<z>)\n"), "[a](x>y\\\\) [b](x_y) [c](\\<z)\n"},
+		// 11. Plain text whose www domain an underscore in its last two parts spoils reads as text,
+		// but the backslash the writer escapes that underscore with ends the domain before it,
+		// which then reads as a www URL; the dot after `www` is escaped as well, so neither reads one.
+		{"heading text with a www domain spoiled by underscores", texts("# a\n", "_www.1.2.3.4__;b"), "# \\_www.1.2.3.4__;b\n"},
+		{"paragraph text with a www domain spoiled by a trailing underscore", texts("a\n", "www.a.b_;x"), "www.a.b_;x\n"},
+		{"cell text with a www domain spoiled by an underscore before its last dot", cellText(table, "www.a_.b"), "| h |\n| --- |\n| www.a_.b |\n"},
 	}
 	rendered := make([]string, len(rows))
 	for index, row := range rows {
@@ -393,6 +406,8 @@ func TestURLReadingsAgreeWithTheEngine(t *testing.T) {
 		{"`www.e.test_\n", false},
 		// A www address inside a link label that never forms a link (INFRA-534's corpus).
 		{"y [.a www.a.com/x]\\(u) z\n", false},
+		// An explicit link's destination, its backslash escapes decoded (INFRA-531).
+		{"[a](<x\\>y\\\\>) [b](x\\_y) [c](<\\<z>) d\n", false},
 		// A name that is a character reference only with its `;` (`&copy`, `&amp`) is text to the
 		// engine, inside an address the transform reads as anywhere else (INFRA-531 testing).
 		{"see http\\://x.test/?a=1&copy=2 b\n", false},

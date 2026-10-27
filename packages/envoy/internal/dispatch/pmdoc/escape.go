@@ -33,13 +33,17 @@ type escapeContext struct {
 	textLineStart int
 	// tableCell reports whether pipes are cell syntax here.
 	tableCell bool
-	// schemeColons and ats report whether the colon after each `http` or `https`, in any case,
-	// and each `@` are escaped in text outside a link, because the run does not read back with them
-	// as written (inlineWithEscapes): an address only the tokenizer reads - a URL whose host has no
-	// dot, such as `http://localhost`, an email after a letter outside ASCII - or one an escape the
-	// rules write makes, as `a@b.test\_` ends its domain before the `\`, then reads as text to both
-	// readers.
-	schemeColons, ats bool
+	// schemeColons, wwwDots and ats report whether the colon after each `http` or `https`, in any
+	// case, the dot after each `www`, in any case, and each `@` are escaped in text outside a link,
+	// because the run does not read back with them as written (inlineWithEscapes): an address only
+	// the tokenizer reads - a URL whose host has no dot, such as `http://localhost`, an email after a
+	// letter outside ASCII - or one an escape the rules write makes, as `a@b.test\_` ends its domain
+	// before the `\`, then reads as text to both readers. The tokenizer reads a domain an underscore
+	// in its last two parts spoils (`www.a.b_;x`) as no address, but its domain ends at the
+	// backslash the rules write before that underscore (`www.a.b\_;x`), which leaves a correct one:
+	// with its `www\.` escaped, the tokenizer reads no www URL, and the transform, which reads the
+	// decoded text, finds the same spoiled domain.
+	schemeColons, wwwDots, ats bool
 	// label is the verdict on the brackets of the link label the text belongs to.
 	label labelBrackets
 	// followed reports whether something follows the text in its block, so that a trailing
@@ -131,7 +135,7 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 			offset == 0 && context.opener != 0 ||
 			offset+1 == len(value) && context.closer != 0
 	case '.', ')':
-		return orderedListMarkerPunctuation(value, offset, textLineStart)
+		return orderedListMarkerPunctuation(value, offset, textLineStart) || char == '.' && context.wwwDots && wwwDot(value, offset)
 	default:
 		return false
 	}
@@ -759,6 +763,11 @@ func entityReference(value string, offset int) bool {
 func urlSchemeColon(value string, offset int) bool {
 	return offset >= len("http") && strings.EqualFold(value[offset-len("http"):offset], "http") ||
 		offset >= len("https") && strings.EqualFold(value[offset-len("https"):offset], "https")
+}
+
+// wwwDot reports whether the dot at offset ends `www`, in any case.
+func wwwDot(value string, offset int) bool {
+	return offset >= len("www") && strings.EqualFold(value[offset-len("www"):offset], "www")
 }
 
 func isASCIIAlphaNumeric(value byte) bool {

@@ -1426,10 +1426,12 @@
   written and the one that reads the decoded text it leaves, so where the two end an address
   differently (`x;https://x.test/a_` leaves the `_` out, `see http\://x.test/a_` keeps it) each
   ends it as in the editor. The stored markdown no longer carries a backslash before such a URL's
-  colon (`http\://`): the server writes one, or one before an `@`, only where plain text would
-  otherwise come back as a link the editor does not show, such as `http://localhost`. Plain-text
-  addresses already stored read back as links on the next read, as the editor already shows them
-  (INFRA-531).
+  colon (`http\://`): the server writes one, or one before an `@` or after a `www`, only where plain
+  text would otherwise come back as a link the editor does not show, such as `http://localhost`.
+  Plain-text addresses already stored read back as links on the next read, as the editor already
+  shows them. A link's destination now has its backslash escapes decoded, as the editor reads it (a
+  stored `[a](x\_y)` links to `x_y`), and a destination holding `>` or ending in a backslash is
+  written so it reads back (INFRA-531).
 
 - A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
   such as a session's answer to a model switch, without waiting for the stream's heartbeat.
