@@ -73,6 +73,24 @@
   whatever the length of its target's key; only bare text it links is held to the index's
   bounds. A search hit for an ask links its typed block (`#b-<id>`) only while that block is a
   graph node, and otherwise `?ask=<id>`, so `dispatch read` of the hit reads the ask.
+- Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
+  and `parent_version`, and `dispatch read` prints them on a `Node:` line. They are on every node
+  `GET /api/v1/references` and `GET /api/v1/block-links` answer, whatever its kind, always
+  present: who made the node and when, who last changed its own text or fields and when (its
+  maker while nothing has changed it since; a claim, an answer or a resolution is no change), the
+  node it belongs to (`{kind, id, ref?}`) and the version of that parent it belongs to. A fact
+  Dispatch never recorded is `[]` for an actor list and `null` otherwise: a session has none, and
+  a block's maker is known only when the block is in its document's first version or Dispatch
+  indexed the version before the one that first held it. Migrations `0130` and `0131` add
+  `comments.written_version` and `asks.written_version`, the version current when a comment or
+  an ask was written on a document without an anchor (an approval request's, the version it names
+  when it opens), which a `before insert` trigger records for every build's insert, and `0133` and
+  `0134` fill them on the rows stored before, from the latest version created at or before each
+  item or, for an approval request, from its `ask.opened` event, holding `comments` and then
+  `asks` `EXCLUSIVE` while they write, which every write of that table waits behind. Migration
+  `0132` creates `component_facts`, which each import keeps from this release on: a component's
+  `made_at` and `changed_at`, judged by a digest of its own fields. A component stored before it
+  has no `made_at`, and no `changed_at` until an import changes it.
 - `envoy-infra:gcp:Dispatch` takes `pprofPort`, which sets `DISPATCH_PPROF_PORT` on the app
   Deployment's `envoy-dispatch` container alone, so a deployment turns on Dispatch's loopback-only
   profiler through the component rather than by editing the Deployment, which the next update
@@ -885,6 +903,11 @@
 
 ### Changed
 
+- A dead session's subscriptions now stay 5 minutes longer: the interest reaper deletes one only
+  15 minutes after its row's last write, where it was 10, because it now adds
+  `store.InterestRefreshAge` to its grace window. For that time the subscribers page and the
+  `envoy_active_interests` gauge still list them, and a message matching one logs a failed
+  delivery to that session; a paused session that comes back within it still has them.
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a
@@ -1736,6 +1759,16 @@
   first events of an issue reached the Legion daemon after later ones, which it drops as stale.
   The shared database pool every request reads through holds 64 connections, from 16: under heavy
   agent load the API held all sixteen and every other caller waited behind them.
+
+- Dispatch's server now reads a `|` after an even run of backslashes in a table row as the end of a
+  cell, as the browser editor reads it: `| a \\| b |` is the two cells `a \` and `b` on both, where
+  the server read one cell `a \| b`, so a document no longer showed one table in the live editor
+  and the command line and another in the past-version view. A `|` after an odd run (`\|`) is
+  still the cell's text. Code in a cell cannot hold a `|` right after an odd run of backslashes,
+  since no markdown of a cell writes it: an API replace, delete by quote or accepted suggestion
+  that adds such code is refused, naming the table, the cell and the header above it, also beside
+  such code a browser edit left, and a browser edit that holds one is stored with that `|` written
+  as text after the code (INFRA-172).
 
 - A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
   such as a session's answer to a model switch, without waiting for the stream's heartbeat.
