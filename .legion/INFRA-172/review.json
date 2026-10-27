@@ -2,39 +2,24 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-172",
-  "completed": "2026-10-27T03:36:00Z",
-  "decision": "changes_requested",
-  "round": 2,
-  "reviewedCodeHead": "cd211658b124bb73422a92a8e6009e2fb3a85123 (aef61f9e adds only .legion/); a new round, not a fingerprint confirmation: code changed (96976206, 20dedb36) and main was merged in (87fa023f)",
+  "completed": "2026-10-27T12:50:00Z",
+  "decision": "approved",
+  "round": 3,
+  "scope": "Narrowed by the INFRA-138 architect (2026-10-27T03:36Z) to the round-2 panic at pmdoc/table.go:422, the two Minors (dispatch-tools.ts:910, table.go:439) and acceptance lines A1-A7.",
+  "reviewedCodeHead": "1093471149ef8ea45f554986c38f122fe9d93b43 (9ff013ad adds only .legion/)",
   "critical": 0,
-  "important": 1,
-  "minor": 2,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/pmdoc/table.go:422",
-      "description": "New panic on untrusted markdown. splitAtEvenEscapedPipes adds a split-off cell with row.InsertAfter(row, cell, next). When cell is the row's last child, goldmark's InsertAfter calls InsertBefore(self, nil, ...), which adds 1 to childCount and then AppendChild adds 1 again (goldmark ast.go:376-384, 353-366), so row.ChildCount() exceeds the real cell count. keepEscapedClosingPipes' guard `written > row.ChildCount()` (table.go:652) then lets its loop walk past the last cell and dereference nil. Reproduced at aef61f9e with a throwaway test: Parse(\"| h | i |\\n| --- | --- |\\n| a | b \\\\\\\\| \\\\|\\n\") returns ErrPanic (logged at ERROR with a stack); the same row without the escaped closing pipe gets the ErrSchema wide-row refusal; the base b6d8fa2a parses it with no error. The deep review saw 27 panics in 4,000 random rows at the head, 0 at the base. Census item 2 says such rows are refused. Fix: AppendChild when cell.NextSibling() == nil, InsertBefore(row, cell.NextSibling(), next) otherwise (or count cells by walking siblings), and add the row as a regression case expecting the wide-row ErrSchema."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/contracts/src/dispatch-tools.ts:910",
-      "description": "The doc-edit help says code whose text has a backslash right before a | is INVALID_OP; only an odd run is refused, and code `a\\\\|b` is stored (edits_test.go:1561). Say an odd run of backslashes; regenerate claude-envoy dist."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/pmdoc/table.go:406,439",
-      "description": "The split flag and the TableCell.Alignment write are dead: pmdoc's parseTableRow takes each cell's alignment from the table's Alignments by index (parse.go:790, 809), and nothing reads TableCell.Alignment. The loop's one job is trimming the row to the table's width, by walking siblings (not ChildCount, given the finding above). Same loop as the fix, so fix it there."
-    }
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "verified": [
+    "Panic fixed in 21f5db10: a split at a row's last cell appends (AppendChild), elsewhere InsertBefore, so ChildCount is right; TestParseReadsASplitRowEndingInAnEscapedPipe covers refused and fitting rows. Deep review at d68a0506: 200,000 random documents, 0 ErrPanic; quality probe catches the old line when restored.",
+    "Dead split flag and TableCell.Alignment write removed (21f5db10); the width trim on every row changes nothing for rows goldmark already cut or padded to width.",
+    "doc-edit help names an odd run of backslashes (00428c9f), matching codePipesOutOfCode (run%2 == 1).",
+    "Merge 98892d9c: every hand-written file's added and removed lines are byte-identical to the reviewed d68a0506 diff; only the three claude-envoy dist bundles differ (4 changed lines each, the two tool descriptions); bun run --cwd packages/claude-envoy check-dist at 9ff013ad: dist/ and legion/ match a fresh build.",
+    "A1-A7: architecture-assessment.md and refactor-order.md byte-identical to the round-1 copies; Problem 1-7 and performance items 1-9 each have a section, 11 trace stages, large-file split sections, the escaped-pipe rule and count, 15 steps each marked (14 With, 1 After), schema decision recorded in dispatch://INFRA-172/comment/cc100a3e-27de-4445-b969-0873cd4e927e; no open comment, ask or ask block on INFRA-172."
   ],
-  "judgedNotDefects": [
-    "refuseCodePipeInTableCell's four positional strings: style, no behaviour.",
-    "codeSpanText groups a code span by writtenMarks while inlineCodeFence takes every adjacent code node: a drift risk only; both agents' probes of adjacent code under different marks and links read back correctly. Unifying it changes an older path's fences.",
-    "TableCodePipe's header on a full span budget: documented, differs only after earlier tables spend maxSpanCells; Unwrap used by a test only.",
-    "Tester observation: a refusal beside adjacent browser-left code quotes the merged span text; conservative and correct."
-  ],
-  "round1Threads": "PRRT_kwDORFy7ds6whGWi and PRRT_kwDORFy7ds6whGWn: the implementer's fixes in 96976206 verified (TableCodePipes multiset across changedBlocks on replace, delete, accept; header comment); both resolved by the implementer.",
-  "census": "Present. Re-ran the source-literal search at aef61f9e: 23 hits, equal to the body's list. Rollout immediate refusal naming the misread and data loss: accepted. Item 2 is false for the panic row until the fix.",
-  "ci": "Required set lint, typecheck, test, pr-title. CI head cd211658 (compare to aef61f9e: handoffsOnly true, 1 file); lint, typecheck, test, pr-title queued at 03:30Z; not read green. A REQUEST_CHANGES does not wait on it.",
-  "thermonuclear": "At aef61f9e: deep review CHANGES (the panic; Minor the help wording), code quality CHANGES (dead Alignment write and split flag, help wording, style items judged not defects). claude-envoy check-dist: dist matches a fresh build (both agents).",
-  "documents": "No open comments or asks on architecture-assessment.md or refactor-order.md; INFRA-172 has no open ask."
+  "threads": "All five threads I opened carry my reply (verified fixed, with commit) and are resolved by the implementer: PRRT_kwDORFy7ds6whGWi, PRRT_kwDORFy7ds6whGWn, PRRT_kwDORFy7ds6wigH5, PRRT_kwDORFy7ds6wigH7, PRRT_kwDORFy7ds6wigH_. No bot threads.",
+  "ci": "Required set (rulesets) lint, typecheck, test, pr-title: all completed success at CI head 10934711; compare 10934711...9ff013ad handoffsOnly true (1 file). Non-required envoy-go failed: internal/dispatch/api hit the 10-minute package timeout while TestDocumentEditAdviceCountsTheAskBlocksTheEditAdded was running (1 s in). Runner slowdown, not this diff: pmdoc, whose code is identical between 6483af7e and 10934711, took 117 s there and 187 s here; docs 326 s -> 477 s; api 478 s (pass) -> >600 s. Re-ran the failed job once (run 40480068111).",
+  "thermonuclear": "At d68a0506: deep review APPROVE, code quality APPROVE, no findings. The head since differs in the PR diff only by the regenerated bundles, verified with check-dist.",
+  "fastFollow": "none"
 }
