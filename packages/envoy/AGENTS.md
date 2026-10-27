@@ -1873,10 +1873,11 @@ footnote definition is refused there too, unless goldmark spreads every item a b
 A footnote definition is read where it is written, as that parser keeps it: inside another block,
 ahead of other blocks, in any order, and whether or not anything refers to it. One inside another
 footnote definition is refused, since that parser reads a line of `=` or `-` continuing the inner
-one's paragraph as a heading's underline, where CommonMark reads it as the paragraph's text, and so
-is one inside a typed block, which that parser's references reach only from inside a typed block or
-after it. A definition whose label holds whitespace is refused, which that parser reads as a
-paragraph. A label is stored as that parser reads it, its escapes and character references decoded
+one's paragraph as a heading's underline, where CommonMark reads it as the paragraph's text. One
+inside a typed block is read like one inside a quote: that parser reads a typed block as a
+container, so a reference anywhere in the document reaches it. A definition whose label holds
+whitespace is refused, which that parser reads as a paragraph. A label is stored as that parser
+reads it, its escapes and character references decoded
 (`[^a\*]` is `a*`, `[^f&amp;g]` is `f&g`), while a reference still finds its definition by the
 label as written; the writer escapes a bracket, a pipe, a backslash before punctuation or at the
 end, an ampersand opening a character reference, and white space as a numeric one, so each label

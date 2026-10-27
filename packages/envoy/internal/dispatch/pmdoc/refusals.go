@@ -79,9 +79,6 @@ func blockRefusal(node ast.Node, source []byte, firstLine int) error {
 		if _, nested := ancestor[*extensionast.Footnote](current); nested {
 			return refuse("a footnote definition inside another footnote definition, where the browser editor reads a line of = or - continuing the inner one's paragraph as a heading's underline")
 		}
-		if _, typed := ancestor[*typedDirective](current); typed {
-			return refuse("a footnote definition inside a typed block, which the browser editor refers to only from inside a typed block or after it")
-		}
 		if bytes.ContainsAny(current.Ref, " \t") {
 			return refuse("a footnote definition whose label holds whitespace, which the browser editor's parser reads as a paragraph")
 		}

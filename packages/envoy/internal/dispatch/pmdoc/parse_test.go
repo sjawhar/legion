@@ -77,15 +77,12 @@ func TestParseRejectsBlockHTML(t *testing.T) {
 
 // The browser editor's parser reads a line of `=` or `-` continuing the paragraph of a footnote
 // definition inside another as a setext underline, where CommonMark reads it as the paragraph's
-// text, and resolves a reference to a definition inside a typed block only from inside a typed
-// block or after it, so a definition inside either is refused.
-func TestParseRefusesAFootnoteDefinitionInsideAnotherOrATypedBlock(t *testing.T) {
+// text, so a definition inside another is refused.
+func TestParseRefusesAFootnoteDefinitionInsideAnother(t *testing.T) {
 	for _, test := range []struct{ markdown, reason string }{
 		{"Ref[^n].\n\n[^n]: a\n\n    [^1]: x\n", "a footnote definition inside another"},
 		{"Ref[^n].\n\n[^n]: a\n\n    [^1]: x\n    =\n", "a footnote definition inside another"},
 		{"Ref[^n].\n\n[^n]: > a\n    >\n    > [^1]: x\n", "a footnote definition inside another"},
-		{"Ref[^1].\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n[^1]: x\n:::\n", "a footnote definition inside a typed block"},
-		{":::callout{#c1 kind=\"note\" title=\"T\"}\n> [^1]: x\n:::\n\nRef[^1].\n", "a footnote definition inside a typed block"},
 	} {
 		_, err := Parse(test.markdown)
 		if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), test.reason) {

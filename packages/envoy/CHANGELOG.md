@@ -1500,9 +1500,11 @@
   a list: after a leading `---` that no later line closes, a `:::name{...}` line opens no typed
   block at the document's level and reads as text, as a list, a quote or a footnote definition
   there already did, and a document write reads it so too; and a footnote definition inside a
-  `:::` block also defines its footnote for a call in the text before the block. A rule opening a
-  document that holds a typed block at its level is now written `***`, so it no longer reads back
-  as an unclosed front-matter opener that turns the typed block into text (INFRA-581).
+  `:::` block also defines its footnote for a call in the text before the block, so a document
+  write no longer refuses a footnote definition inside a typed block and reads it where it is
+  written, as it reads one inside a quote. A rule opening a document that holds a typed block at
+  its level is now written `***`, so it no longer reads back as an unclosed front-matter opener
+  that turns the typed block into text (INFRA-581).
 
 - Every `envoy-infra` component refuses a number in an integer input that is not a whole number
   within the 64-bit integer range, at any depth (an object type's property, an array element, a
