@@ -328,18 +328,17 @@ func TestAStoredTopicStillReachesAServingPortOnce(t *testing.T) {
 	requireOneRoleMessage(t, received, contracts.RoleTopicPrefix+role, "a message for whoever holds the role", 2*time.Second)
 }
 
-// Two listeners of one machine, as a rolling deploy runs them, both with the live lane on: NATS
+// Two listeners of one machine, the active pod and a standby, both with the live lane on: NATS
 // hands each live message to one of them, so a session receives each event once, and the live
-// lane, in a queue group apart from the role lane's, takes no role message from its holder. The
-// second listener waits on the durable the first holds and never turns healthy, so its live lane
-// is open once it logs so.
+// lane, in a queue group apart from the role lane's, takes no role message from its holder.
 func TestTwoListenersOnOneMachineDeliverALiveTopicOnce(t *testing.T) {
 	uri := testnats.URL(t)
 	binary := cmdtest.Build(t, "envoy-listener")
-	first := startListenerProcess(t, binary, uri, "two-listeners", liveLaneEnv...)
+	first := startListenerProcess(t, binary, uri, "two-listeners", append([]string{"ENVOY_INSTANCE_ID=pod-first"}, liveLaneEnv...)...)
 	first.waitHealthy(t)
-	second := startListenerProcess(t, binary, uri, "two-listeners", liveLaneEnv...)
-	second.WaitForOutput(t, liveLaneLine, "subscribe failed, retrying")
+	second := startListenerProcess(t, binary, uri, "two-listeners", append([]string{"ENVOY_INSTANCE_ID=pod-second"}, liveLaneEnv...)...)
+	second.waitStandby(t, "pod-first")
+	second.WaitForOutput(t, liveLaneLine)
 	first.WaitForOutput(t, liveLaneLine)
 
 	topic := "notifications.team." + id.New()

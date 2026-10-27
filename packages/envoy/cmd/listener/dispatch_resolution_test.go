@@ -102,8 +102,8 @@ func listenerRigLogger(t *testing.T, name string) *logging.Logger {
 	return logging.NewWithWriter("test", lines)
 }
 
-// startListenerDelivery runs the listener's own delivery loop over d: the durable JetStream
-// subscription main binds, with a real HTTP deliverer. A frame Dispatch publishes through
+// startListenerDelivery runs the listener's own delivery loop over d: the durable's receive loop
+// main starts, holding the lease, with a real HTTP deliverer. A frame Dispatch publishes through
 // /v1/messages/send is then pushed to the session's endpoint exactly as the listener pushes it,
 // so a delivery is observed where the agent would receive it rather than in a log line.
 func startListenerDelivery(t *testing.T, d *listenerDeps) {
@@ -133,12 +133,8 @@ func startListenerDelivery(t *testing.T, d *listenerDeps) {
 		messagesNAKed:     met.NewCounter("rig_messages_naked", "test"),
 		deliveryDuration:  met.NewHistogram("rig_delivery_duration", "test", metrics.DefaultBuckets),
 	}
-	subscription, err := startListenerSubscription(
-		d.client, "listener-dispatch-"+id.New(), jetStreamDeliveryHandler(config))
-	if err != nil {
-		t.Fatalf("bind the listener's durable consumer: %v", err)
-	}
-	t.Cleanup(func() { _ = subscription.Unsubscribe() })
+	rig := startReceiverRig(t, d.client.Conn.ConnectedUrl(), "dispatch-"+id.New(), "pod-a", jetStreamDeliveryHandler(config), testReceiveTiming(), testLeaseTiming())
+	rig.awaitState(t, receiveActive, 10*time.Second)
 }
 
 // migratedDispatchDatabase opens an empty Postgres database of this test's own, carries every

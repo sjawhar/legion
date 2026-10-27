@@ -24,15 +24,14 @@ import (
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
-// During a rolling deploy the replacement listener cannot bind its durable consumer until the task
-// it replaces lets go of it, which takes the old task's deregistration and shutdown; the load
-// balancer and the private DNS name already send the replacement traffic by then. Neither a webhook
-// nor /v1 reads the durable, so the replacement serves both, and runs its role lane, while it waits:
+// During the first roll onto the delivery lease, the durable's push binding is a pre-lease build's
+// (nats.Bind) until that build stops, so the new pod that takes the lease waits it out; the load
+// balancer and the private DNS name already send the new pod traffic by then. Neither a webhook nor
+// /v1 reads the durable, so the new pod serves both, and runs its role lane, while it waits:
 // GitHub does not redeliver a refused delivery on its own, and a refused /v1 call is a failed
-// Dispatch delivery or a lost publish. /healthz stays 200 "starting" until the durable binds: a
-// healthy answer there would let ECS take the replacement for ready before it fans anything out,
-// and a 503 would keep ECS from ever stopping the task that holds the durable.
-func TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
+// Dispatch delivery or a lost publish. /healthz answers it 200 healthy as a standby that is
+// waiting to receive, and active once the old build lets go.
+func TestTheV1APIIsServedWhileAPreLeaseBuildHoldsTheDurable(t *testing.T) {
 	const (
 		machineID = "v1-bind-window"
 		secret    = "bind-window-secret"
@@ -51,7 +50,7 @@ func TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), client.Conn.ConnectedUrl(), machineID,
 		"ENVOY_WEBHOOKS=github", "ENVOY_GITHUB_WEBHOOK_SECRET="+secret, "ENVOY_REVIEWER_APP_ID=1")
-	listener.WaitForOutput(t, "subscribe failed, retrying")
+	listener.WaitForOutput(t, "durable is push-bound by a subscriber without the lease; waiting for its binding to end")
 
 	body := []byte(`{"ref":"refs/heads/main","after":"` + strings.Repeat("b", 40) + `","before":"` + strings.Repeat("a", 40) + `",` +
 		`"pusher":{"name":"example-author"},"sender":{"login":"example-author","type":"User"},` +
@@ -124,27 +123,28 @@ func TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 		t.Fatalf("the role holder received no forward while another task holds the durable:\n%s", listener.Output.String())
 	}
 
-	// Negative control: the replacement is neither healthy nor unhealthy while it waits. Healthy
-	// would let ECS stop the old task before this one fans anything out; a 503 would never let ECS
-	// stop it at all, and the container health check (curl -sf) would kill this one.
+	// The waiting pod is healthy, a standby until it receives: a 503 would have the runtime kill it
+	// while the old build still holds the durable.
 	status, answer = do(t, mustRequest(t, http.MethodGet, "http://127.0.0.1:"+strconv.Itoa(listener.port)+"/healthz"))
-	if status != http.StatusOK || !strings.Contains(answer, `"status":"starting"`) {
-		t.Fatalf("/healthz while another task holds the durable: status %d %q, want 200 starting", status, answer)
+	var health map[string]any
+	_ = json.Unmarshal([]byte(answer), &health)
+	if status != http.StatusOK || health["status"] != "healthy" || health["role"] != "standby" || health["receive"] != receiveAwaitingBinding.String() {
+		t.Fatalf("/healthz while the old build holds the durable: status %d %q, want 200 healthy, a standby waiting for the binding", status, answer)
 	}
 
-	// The old task exits, which releases its binding.
+	// The old build exits, which releases its binding.
 	old.Close()
 	listener.waitHealthy(t)
-	listener.WaitForOutput(t, "durable bound")
+	listener.WaitForOutput(t, "durable receiving")
 }
 
-// Both tasks of one machine id run during a rolling deploy, and the replacement's role lane opens
-// before its durable binds, so both subscribe notifications.role.> at once. They are one core-NATS
-// queue group (envoy-listener-<machine id>), and NATS hands each message to one member of a group,
-// so a role message reaches its holder once whichever task takes it: no publish is forwarded by
-// both. A re-publish under the same dedupe key can land on the other task, whose dedupe cache has
-// not seen it, and is forwarded again; the holder's pump drops that copy by its dedupe key, as it
-// drops the copy each other machine's listener forwards today.
+// Every pod of one machine id runs the role lane, the active pod and each standby alike, so both
+// subscribe notifications.role.> at once. They are one core-NATS queue group
+// (envoy-listener-<machine id>), and NATS hands each message to one member of a group, so a role
+// message reaches its holder once whichever pod takes it: no publish is forwarded by both. A
+// re-publish under the same dedupe key can land on the other pod, whose dedupe cache has not seen
+// it, and is forwarded again; the holder's pump drops that copy by its dedupe key, as it drops the
+// copy each other machine's listener forwards today.
 func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T) {
 	const (
 		machineID = "two-tasks"
@@ -159,10 +159,10 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T
 	t.Cleanup(client.Close)
 	binary := cmdtest.Build(t, "envoy-listener")
 	uri := client.Conn.ConnectedUrl()
-	old := startListenerProcess(t, binary, uri, machineID)
+	old := startListenerProcess(t, binary, uri, machineID, "ENVOY_INSTANCE_ID=task-old")
 	old.waitHealthy(t)
-	replacement := startListenerProcess(t, binary, uri, machineID)
-	replacement.WaitForOutput(t, "subscribe failed, retrying")
+	replacement := startListenerProcess(t, binary, uri, machineID, "ENVOY_INSTANCE_ID=task-new")
+	replacement.waitStandby(t, "task-old")
 	t.Cleanup(func() {
 		if t.Failed() {
 			t.Logf("old task:\n%s\nreplacement:\n%s", old.Output.String(), replacement.Output.String())
@@ -226,7 +226,7 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T
 	}
 	// NATS spreads a group's messages over its members; all 64 on one has probability 2^-63.
 	if byOld == 0 || byReplacement == 0 {
-		t.Fatalf("the old task forwarded %d and the replacement %d of %d: the replacement's role lane is not a member of the machine's queue group before its durable binds", byOld, byReplacement, messages)
+		t.Fatalf("the active pod forwarded %d and the standby %d of %d: the standby's role lane is not a member of the machine's queue group", byOld, byReplacement, messages)
 	}
 
 	// A re-publish under one dedupe key: either the task that forwarded the first copy skips it,
@@ -265,7 +265,7 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T
 	old.Terminate(t)
 	old.WaitExit(t, "SIGTERM")
 	replacement.waitHealthy(t)
-	replacement.WaitForOutput(t, "durable bound")
+	replacement.WaitForOutput(t, "durable receiving")
 }
 
 // receiveAsSession stands in for session sessionID's agent pump on its agent subject: it answers

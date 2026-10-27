@@ -144,9 +144,11 @@ func (r *listenerRelay) close() {
 	r.drop()
 }
 
-// During a deploy, a reconnect can interrupt the replacement's durable bind. The reconnect must
-// leave that bind to finish, keep the role lane forwarding, then make SIGTERM an ordered shutdown.
-func TestListenerReconnectWithBindInFlightShutsDownAfterForwardingRoles(t *testing.T) {
+// During the first roll onto the lease, a reconnect can interrupt the new pod's read of the durable
+// while it waits out a pre-lease build's binding. The reconnect must leave the wait to go on, keep
+// the role lane forwarding, log no error, and then a SIGTERM is an ordered shutdown that leaves the
+// old build's binding alone.
+func TestListenerReconnectWhileWaitingOutABindingShutsDownAfterForwardingRoles(t *testing.T) {
 	const (
 		machineID = "reconnect-bind-sigterm"
 		holderID  = "ses_reconnect_bind_sigterm_holder"
@@ -157,7 +159,7 @@ func TestListenerReconnectWithBindInFlightShutsDownAfterForwardingRoles(t *testi
 	relay := startListenerRelay(t, uri)
 	_, durable := durableHeldElsewhere(t, uri, "listener-"+machineID)
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), relay.relayed, machineID)
-	listener.WaitForOutput(t, "subscribe failed, retrying")
+	listener.WaitForOutput(t, "durable is push-bound by a subscriber without the lease; waiting for its binding to end")
 
 	holder, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
 	if err != nil {
@@ -172,26 +174,24 @@ func TestListenerReconnectWithBindInFlightShutsDownAfterForwardingRoles(t *testi
 	select {
 	case <-relay.swallowed:
 	case <-time.After(10 * time.Second):
-		t.Fatal("the listener's durable bind never reached the controlled relay")
+		t.Fatal("the listener's durable read never reached the controlled relay")
 	}
+	// One read is interrupted. Left armed, the relay would swallow the reconnected link too, as soon
+	// as the wait's once-a-second polls of the durable reached the count again, and with it the role
+	// lane's traffic.
+	relay.arm("", 0)
 	relay.drop()
-	waitFor(t, 10*time.Second, "the listener to reconnect", func() bool {
-		return strings.Contains(listener.Output.String(), "envoy nats reconnected")
-	})
-	waitFor(t, 10*time.Second, "the restore to report the bind in flight", func() bool {
-		output := listener.Output.String()
-		return strings.Contains(output, "envoy nats resubscribe left to the bind in flight") ||
-			strings.Contains(output, "envoy nats resubscribe failed")
+	// The lease's own connection goes through the relay too and logs its reconnect under
+	// "envoy-listener-lease"; the role lane rides the main client, whose reconnect line is this.
+	waitFor(t, 10*time.Second, "the listener's main client to reconnect", func() bool {
+		return strings.Contains(listener.Output.String(), `envoy nats reconnected name="envoy-listener `)
 	})
 	output := listener.Output.String()
-	if !strings.Contains(output, "envoy nats resubscribe left to the bind in flight") {
-		t.Fatalf("the restore did not report the bind in flight at INFO:\n%s", output)
-	}
 	if line := firstErrorLine(output); line != "" {
-		t.Fatalf("the reconnect with a bind in flight logged ERROR: %s", line)
+		t.Fatalf("the reconnect during the wait logged ERROR: %s", line)
 	}
-	if strings.Contains(output, "durable bound") {
-		t.Fatalf("the durable bound before the role messages proved the reconnect window:\n%s", output)
+	if strings.Contains(output, "durable receiving") {
+		t.Fatalf("the listener received the durable the old build holds:\n%s", output)
 	}
 
 	publisher := testnats.Connect(t, uri)
@@ -231,7 +231,7 @@ func TestListenerReconnectWithBindInFlightShutsDownAfterForwardingRoles(t *testi
 	}
 
 	listener.Terminate(t)
-	listener.WaitExit(t, "SIGTERM during the bind in flight")
+	listener.WaitExit(t, "SIGTERM during the wait for the binding")
 	output = listener.Output.String()
 	for _, line := range []string{"received signal, shutting down", "envoy-listener shutdown complete"} {
 		if !strings.Contains(output, line) {
@@ -242,7 +242,7 @@ func TestListenerReconnectWithBindInFlightShutsDownAfterForwardingRoles(t *testi
 		t.Fatalf("the ordered SIGTERM shutdown logged ERROR: %s", line)
 	}
 	if !durable.IsValid() {
-		t.Fatal("the old task's durable subscription was lost when the replacement stopped")
+		t.Fatal("the old build's durable subscription was lost when the new pod stopped")
 	}
 }
 

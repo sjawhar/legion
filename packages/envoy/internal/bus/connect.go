@@ -137,9 +137,9 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 			// Every consumer Envoy runs with idle heartbeats is a KV watcher's ordered consumer,
 			// which reports missed heartbeats only while the connection is not connected; once it
 			// is connected again, nats.go resets the consumer instead. The report restates the
-			// disconnect logged above, once per watcher. The listener's durable carries no heartbeat
-			// as long as cmd/listener's startListenerSubscription bound it, since that refuses one that
-			// does; a replaced connection binds the same durable again without that check.
+			// disconnect logged above, once per watcher. The listener's durable carries no heartbeat:
+			// cmd/listener's ensureListenerDurable refuses one that does before the lease holder
+			// subscribes to it.
 			level = slog.LevelWarn
 		}
 		if sub != nil {

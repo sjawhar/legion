@@ -455,6 +455,20 @@ func (l *lease) renew() time.Duration {
 	}
 	next, err := l.kv.Update(l.key, value, rev)
 	if errors.Is(err, nats.ErrKeyExists) {
+		own, mine, err := l.ownRevision()
+		if err != nil {
+			l.noteFailure("read after a conflict", err)
+			return l.cfg.renewEvery
+		}
+		if mine {
+			// An earlier renewal landed though its reply was lost: the record is this process's
+			// own write, so renew again at that revision. The validity is not extended until a
+			// renewal's reply arrives.
+			l.mu.Lock()
+			l.rev = own
+			l.mu.Unlock()
+			return 0
+		}
 		l.stepDown()
 		return 0
 	}
@@ -495,6 +509,24 @@ func (l *lease) stepDown() {
 	l.seenRev, l.lapseSignalled = 0, false
 	l.logger.Warn("listener lease lost: another listener holds it", slog.String("lease", l.key))
 	l.signal()
+}
+
+// ownRevision reads the record after a renewal's conflict and reports its revision and whether it
+// is this process's own unreleased write (its boot), which only a renewal whose reply was lost
+// leaves behind.
+func (l *lease) ownRevision() (uint64, bool, error) {
+	entry, err := l.kv.Get(l.key)
+	if errors.Is(err, nats.ErrKeyNotFound) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	record, err := decodeLeaseRecord(entry.Value())
+	if err != nil {
+		return 0, false, nil
+	}
+	return entry.Revision(), record.Boot == l.boot && !record.Released, nil
 }
 
 // poll reads the record as a standby and takes it when it is absent (Create), released (Update

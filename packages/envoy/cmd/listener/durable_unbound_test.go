@@ -16,21 +16,21 @@ import (
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
+	"github.com/sjawhar/envoy/internal/testnats"
 )
 
-// /healthz answers 503 unhealthy once the listener's durable consumer has been recreated
-// server-side, because a recreated durable delivers to a fresh inbox while this listener's
-// subscription still holds the old one: the listener receives nothing at all. Without this the
-// durable still exists, every health surface answers 200 healthy, and delivery to every session
-// stops with no signal anywhere that the listener has gone deaf.
+// /healthz on the pod receiving the durable answers 503 unhealthy once the durable has been
+// recreated server-side, because a recreated durable delivers to a fresh inbox while this pod's
+// subscription still holds the old one: the pod receives nothing at all. Without this the durable
+// still exists, every health surface answers 200 healthy, and delivery to every session stops
+// with no signal anywhere that the listener has gone deaf.
 func TestHealthzReportsARecreatedDurableUnhealthy(t *testing.T) {
-	consumer := "listener-unbound-health"
-	client, get := setupUnboundDurableFixture(t, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
-	if code, body := get(); code != http.StatusOK || body["status"] != "healthy" {
-		t.Fatalf("before the durable is recreated: /healthz = %d %v, want 200 healthy", code, body)
+	rig, get := setupUnboundDurableFixture(t, "unbound-health", func(_ context.Context, msg *natsgo.Msg) { _ = msg.Ack() })
+	if code, body := get(); code != http.StatusOK || body["status"] != "healthy" || body["role"] != "active" {
+		t.Fatalf("before the durable is recreated: /healthz = %d %v, want 200 healthy, role active", code, body)
 	}
 
-	recreateListenerDurable(t, client, consumer)
+	recreateListenerDurable(t, rig.client, rig.consumer)
 
 	code, body := get()
 	want := "durable consumer unavailable: not bound to this listener's subscription"
@@ -39,18 +39,15 @@ func TestHealthzReportsARecreatedDurableUnhealthy(t *testing.T) {
 	}
 }
 
-// setupUnboundDurableFixture is the listener a recreated durable is tested against: handler bound
-// to the durable, both registries open with their caches ready, and the listenerDeps /healthz
-// reads. It returns the client and a get() that serves one /healthz request, which is every piece
-// the tests in this file share.
-func setupUnboundDurableFixture(t *testing.T, consumer string, handler natsgo.MsgHandler) (*bus.Client, func() (int, map[string]any)) {
+// setupUnboundDurableFixture is the pod a recreated durable is tested against: machineID's lease
+// holder receiving the durable into handle, both registries open with their caches ready, and the
+// listenerDeps /healthz reads. It returns the rig and a get() that serves one /healthz request,
+// which is every piece the tests in this file share.
+func setupUnboundDurableFixture(t *testing.T, machineID string, handle durableHandler) (*receiverRig, func() (int, map[string]any)) {
 	t.Helper()
-	client := setupTestNATS(t)
-	sub, err := startListenerSubscription(client, consumer, handler)
-	if err != nil {
-		t.Fatalf("bind the durable: %v", err)
-	}
-	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	rig := startReceiverRig(t, testnats.URL(t), machineID, "pod-a", handle, testReceiveTiming(), testLeaseTiming())
+	rig.awaitState(t, receiveActive, 10*time.Second)
+	client := rig.client
 	registry, err := store.Open(client.Conn, store.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("open interest registry: %v", err)
@@ -70,7 +67,7 @@ func setupUnboundDurableFixture(t *testing.T, consumer string, handler natsgo.Ms
 		t.Fatalf("wait for session cache: %v", err)
 	}
 	state := &atomic.Pointer[listenerDeps]{}
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions, caches: []listenerCache{{name: "interest", cache: registry}, {name: "session", cache: sessions}}, consumer: consumer})
+	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions, caches: []listenerCache{{name: "interest", cache: registry}, {name: "session", cache: sessions}}, receiver: rig.receiver})
 	get := func() (int, map[string]any) {
 		recorder := httptest.NewRecorder()
 		healthzHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
@@ -78,18 +75,18 @@ func setupUnboundDurableFixture(t *testing.T, consumer string, handler natsgo.Ms
 		_ = json.Unmarshal(recorder.Body.Bytes(), &body)
 		return recorder.Code, body
 	}
-	return client, get
+	return rig, get
 }
 
-// startUnboundDurableMonitor runs the self-health monitor over client's durable the way the
-// listener does, with the probe and the rebuild both reading consumer. It returns the flag the
+// startUnboundDurableMonitor runs the self-health monitor over the rig's durable the way the
+// listener does, with the probe and the rebuild both the receive loop's. It returns the flag the
 // monitor's terminate callback sets and a stop function that ends the monitor and waits for it,
 // so each test keeps only its own logger, handler and assertions.
-func startUnboundDurableMonitor(t *testing.T, client *bus.Client, consumer string, logger *logging.Logger, handler natsgo.MsgHandler) (*atomic.Bool, func()) {
+func startUnboundDurableMonitor(t *testing.T, rig *receiverRig, logger *logging.Logger) (*atomic.Bool, func()) {
 	t.Helper()
 	caches := []listenerCache{}
 	ctx, cancel := context.WithCancel(context.Background())
-	probe := func() error { return durableProbe(ctx, client, consumer) }
+	probe := func() error { return rig.receiver.probe(ctx) }
 	terminated := &atomic.Bool{}
 	done := make(chan struct{})
 	go func() {
@@ -98,9 +95,11 @@ func startUnboundDurableMonitor(t *testing.T, client *bus.Client, consumer strin
 			ctx,
 			logger,
 			func() error { return checkSelfHealth(caches, probe) },
-			func(err error) bool { return isUnrecoverableSelfHealthFailure(err, client, caches) },
-			client.Connected,
-			func() error { return rebuildListenerDependencies(ctx, client, caches, probe, consumer, handler) },
+			func(err error) bool { return isUnrecoverableSelfHealthFailure(err, rig.client, caches) },
+			rig.client.Connected,
+			func() error {
+				return rebuildListenerDependencies(ctx, rig.client, caches, probe, rig.receiver.resubscribe)
+			},
 			func() { terminated.Store(true) },
 			50*time.Millisecond,
 			3,
@@ -133,57 +132,45 @@ func recreateListenerDurable(t *testing.T, client *bus.Client, consumer string) 
 	}
 }
 
-// The self-health monitor repairs a durable recreated under the listener: without the rebind, the
-// subscription stays attached to the deleted consumer's inbox and every message published after
-// the recreation is lost while the listener reports itself healthy.
-func TestTheSelfHealthMonitorRebindsARecreatedDurable(t *testing.T) {
-	consumer := "listener-unbound-rebind"
-	var delivered atomic.Int64
-	handler := func(msg *natsgo.Msg) {
-		delivered.Add(1)
-		_ = msg.Ack()
-	}
-	client, _ := setupUnboundDurableFixture(t, consumer, handler)
+// The self-health monitor repairs a durable recreated under the holder: without the resubscribe,
+// the subscription stays on the deleted consumer's inbox and every message published after the
+// recreation is lost while the listener reports itself healthy.
+func TestTheSelfHealthMonitorResubscribesARecreatedDurable(t *testing.T) {
+	handle, received := recordingHandler()
+	rig, _ := setupUnboundDurableFixture(t, "unbound-resubscribe", handle)
 
-	recreateListenerDurable(t, client, consumer)
-	if _, err := client.JS().Publish("notifications.github.acme.widgets.push.branch.main", []byte(`{}`)); err != nil {
-		t.Fatalf("publish after the recreation: %v", err)
-	}
+	recreateListenerDurable(t, rig.client, rig.consumer)
+	publishDurable(t, rig.client, "after the recreation")
 
-	terminated, stop := startUnboundDurableMonitor(t, client, consumer, logging.New("test"), handler)
+	terminated, stop := startUnboundDurableMonitor(t, rig, logging.New("test"))
 
 	// The probe's confirming read alone costs 250ms, so the repair takes several intervals.
-	deadline := time.Now().Add(10 * time.Second)
-	for delivered.Load() == 0 {
-		if time.Now().After(deadline) {
-			t.Fatalf("the message published after the recreation was never delivered")
-		}
-		time.Sleep(10 * time.Millisecond)
+	if message := awaitReceived(t, received, 10*time.Second, "the message published after the recreation"); message.data != "after the recreation" {
+		t.Fatalf("delivered %q", message.data)
 	}
 	if terminated.Load() {
-		t.Fatal("the monitor terminated the listener instead of rebinding its durable")
+		t.Fatal("the monitor terminated the listener instead of resubscribing its durable")
 	}
-	info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
+	info, err := rig.client.JS().ConsumerInfo(bus.Stream, rig.consumer)
 	if err != nil {
-		t.Fatalf("consumer info after the rebind: %v", err)
+		t.Fatalf("consumer info after the resubscribe: %v", err)
 	}
-	if !info.PushBound || info.Config.DeliverSubject != client.SubSubject() {
-		t.Fatalf("after the rebind the durable delivers to %q (push bound %v), want this listener's subscription subject %q", info.Config.DeliverSubject, info.PushBound, client.SubSubject())
+	if report := rig.receiver.report(); !report.SubscriptionValid || info.Config.DeliverSubject != report.Subject {
+		t.Fatalf("after the resubscribe the durable delivers to %q, want this listener's subscription subject %q (valid %v)", info.Config.DeliverSubject, report.Subject, report.SubscriptionValid)
 	}
 
 	stop()
 }
 
-// A durable that is bound never fails its own probe: the unbound check compares the consumer's
-// deliver subject against the live subscription's, so a mistake there would make every healthy
-// listener rebuild itself every interval and eventually terminate.
+// A durable that is received never fails its own probe: the check compares the consumer's deliver
+// subject against the live subscription's, so a mistake there would make every healthy holder
+// resubscribe every interval and eventually terminate.
 func TestABoundDurableNeverFailsItsProbe(t *testing.T) {
-	consumer := "listener-unbound-control"
-	client, get := setupUnboundDurableFixture(t, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
+	rig, get := setupUnboundDurableFixture(t, "unbound-control", func(_ context.Context, msg *natsgo.Msg) { _ = msg.Ack() })
 
 	// The monitor logs from its own goroutine, so the buffer the test reads back is guarded.
 	logs := &lockedBuffer{}
-	terminated, stop := startUnboundDurableMonitor(t, client, consumer, logging.NewWithWriter("test", logs), nil)
+	terminated, stop := startUnboundDurableMonitor(t, rig, logging.NewWithWriter("test", logs))
 
 	deadline := time.Now().Add(15 * 50 * time.Millisecond)
 	for time.Now().Before(deadline) {
@@ -196,9 +183,9 @@ func TestABoundDurableNeverFailsItsProbe(t *testing.T) {
 
 	captured := logs.String()
 	if strings.Contains(captured, "self-health probe failed") {
-		t.Fatalf("a bound durable failed its probe; the monitor logged: %s", captured)
+		t.Fatalf("a received durable failed its probe; the monitor logged: %s", captured)
 	}
 	if terminated.Load() {
-		t.Fatal("the monitor terminated a listener whose durable was bound throughout")
+		t.Fatal("the monitor terminated a listener whose durable was received throughout")
 	}
 }

@@ -546,7 +546,7 @@ func bindDurableConsumer(ctx context.Context, client *bus.Client, leases duty.Le
 // reconcileDurableConsumer brings a durable's configuration to wanted and reports whether it
 // could: it creates the durable when there is none, replaces one an earlier release left carrying
 // a filter-subject set, and corrects a filter or flow control in place. It checks ConsumerInfo
-// before AddConsumer, like cmd/listener/durable.go's startListenerSubscription: a durable's
+// before AddConsumer, like cmd/listener/durable.go's ensureListenerDurable: a durable's
 // DeliverSubject is a random inbox chosen once at creation, and calling AddConsumer again with a
 // freshly generated one on every restart would try to change a durable's config out from under
 // itself rather than resuming its cursor.

@@ -107,15 +107,18 @@ func TestListenerSIGTERMIsAnOrderedShutdown(t *testing.T) {
 	}
 }
 
-// A replacement that waits out the old task's durable serves /v1 while it waits, so a SIGTERM there
-// (a circuit-breaker rollback, a second deploy) is an ordered shutdown like any other: HTTP drains,
-// NATS drains, nothing on the path is an error, and the durable the old task holds is left alone.
-func TestASIGTERMWhileAnotherTaskHoldsTheDurableIsAnOrderedShutdown(t *testing.T) {
-	const machineID = "sigterm-during-bind"
-	old, holder := durableHeldElsewhere(t, testnats.URL(t), "listener-"+machineID)
+// A standby serves /v1 while another pod holds the lease, so a SIGTERM there (a circuit-breaker
+// rollback, a second deploy) is an ordered shutdown like any other: HTTP drains, NATS drains,
+// nothing on the path is an error, and the active pod's lease and subscription are left alone.
+func TestASIGTERMOnAStandbyIsAnOrderedShutdown(t *testing.T) {
+	const machineID = "sigterm-standby"
+	uri := testnats.URL(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	active := startListenerProcess(t, binary, uri, machineID, "ENVOY_INSTANCE_ID=pod-active")
+	active.waitHealthy(t)
 
-	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), old.Conn.ConnectedUrl(), machineID)
-	listener.WaitForOutput(t, "subscribe failed, retrying")
+	listener := startListenerProcess(t, binary, uri, machineID, "ENVOY_INSTANCE_ID=pod-standby")
+	listener.waitStandby(t, "pod-active")
 	listener.Terminate(t)
 	listener.WaitExit(t, "SIGTERM")
 	output := listener.Output.String()
@@ -129,11 +132,11 @@ func TestASIGTERMWhileAnotherTaskHoldsTheDurableIsAnOrderedShutdown(t *testing.T
 	}
 	for line := range strings.SplitSeq(output, "\n") {
 		if errorLine.MatchString(line) {
-			t.Fatalf("a SIGTERM during the durable's bind wait logged an error: %s", line)
+			t.Fatalf("a SIGTERM on a standby logged an error: %s", line)
 		}
 	}
-	if !holder.IsValid() {
-		t.Fatal("the old task's subscription to the durable is gone after the replacement's shutdown")
+	if role := active.health(t)["role"]; role != "active" {
+		t.Fatalf("the active pod's role after the standby stopped: %v, want active", role)
 	}
 }
 
@@ -218,28 +221,52 @@ func postListener(t *testing.T, port int, path, body string) {
 	}
 }
 
-// waitHealthy waits up to 30 s for /healthz to report "healthy", and kills the listener and fails
-// the test when it never does. /healthz answers 200 with "starting" from the moment the port is
-// bound, before NATS connects and before the listener installs its SIGTERM handler, and a SIGTERM
-// in that window kills the process without an ordered shutdown.
-func (p *listenerProcess) waitHealthy(t *testing.T) {
+// health reads the listener's /healthz body, whatever its status.
+func (p *listenerProcess) health(t *testing.T) map[string]any {
 	t.Helper()
-	url := "http://127.0.0.1:" + strconv.Itoa(p.port) + "/healthz"
+	response, err := http.Get("http://127.0.0.1:" + strconv.Itoa(p.port) + "/healthz")
+	if err != nil {
+		return nil
+	}
+	defer response.Body.Close()
+	var health map[string]any
+	if json.NewDecoder(response.Body).Decode(&health) != nil {
+		return nil
+	}
+	return health
+}
+
+// waitHealth waits up to 30 s for /healthz to report "healthy" with every field of want, and
+// kills the listener and fails the test when it never does. /healthz answers 200 with "starting"
+// from the moment the port is bound, before NATS connects and before the listener installs its
+// SIGTERM handler, and a SIGTERM in that window kills the process without an ordered shutdown.
+func (p *listenerProcess) waitHealth(t *testing.T, what string, want map[string]any) {
+	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		response, err := http.Get(url)
-		if err == nil {
-			var health struct {
-				Status string `json:"status"`
-			}
-			decodeErr := json.NewDecoder(response.Body).Decode(&health)
-			_ = response.Body.Close()
-			if decodeErr == nil && health.Status == "healthy" {
-				return
-			}
+		health := p.health(t)
+		matches := health["status"] == "healthy"
+		for field, value := range want {
+			matches = matches && health[field] == value
+		}
+		if matches {
+			return
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
 	_ = p.Cmd.Process.Kill()
-	t.Fatalf("the listener never became healthy:\n%s", p.Output.String())
+	t.Fatalf("the listener never became %s:\n%s", what, p.Output.String())
+}
+
+// waitHealthy waits for the listener to be healthy and the machine's active pod: it holds the
+// lease and receives the durable.
+func (p *listenerProcess) waitHealthy(t *testing.T) {
+	t.Helper()
+	p.waitHealth(t, "healthy and active", map[string]any{"role": "active"})
+}
+
+// waitStandby waits for the listener to be healthy as a standby of the pod named activeInstance.
+func (p *listenerProcess) waitStandby(t *testing.T, activeInstance string) {
+	t.Helper()
+	p.waitHealth(t, "a healthy standby of "+activeInstance, map[string]any{"role": "standby", "active_instance": activeInstance})
 }

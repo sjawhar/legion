@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -74,26 +75,54 @@ type deliveryMessage struct {
 	// msg is the NATS message: set for durableDelivery, which acknowledges it, and liveDelivery,
 	// which reads its subject.
 	msg *nats.Msg
+	// ctx is a durable message's handling context (durableReceiver): the receiver cancels it when
+	// a shutdown's in-flight grace runs out, which aborts a prompt in flight. Nil on the core lanes.
+	ctx context.Context
+}
+
+// cancelled reports whether the receiver cut this message's handling short. Whatever the
+// handling had reached is then a retryable failure: the next holder of the lease delivers it.
+func (message deliveryMessage) cancelled() bool {
+	return message.ctx != nil && message.ctx.Err() != nil
+}
+
+// deliverer is the deliverer for this message: cfg's, with its prompts under the message's
+// handling context when it has one, so cancelling that context aborts a prompt in flight.
+func (message deliveryMessage) deliverer(cfg listenerDeliveryHandlerConfig) *session.Deliverer {
+	if message.ctx == nil {
+		return cfg.deliverer
+	}
+	return cfg.deliverer.WithContext(message.ctx)
 }
 
 // finalize makes core delivery's loss-on-failure semantics explicit: only a
 // durable JetStream message receives an acknowledgement or retry request. A role-lane or live-lane
 // message is core NATS, sent once to whoever was subscribed, so nothing acknowledges or retries it.
+// A durable retry waits 30 s before redelivery, unless the receiver cancelled the message's
+// handling on a shutdown: that one is NAKed for redelivery at once, so the pod that takes the lease
+// next delivers it first rather than 30 s after the messages behind it.
 func (message deliveryMessage) finalize(retry bool) {
 	if message.mode != durableDelivery {
 		return
 	}
-	if retry {
+	switch {
+	case retry && message.cancelled():
+		_ = message.msg.Nak()
+	case retry:
 		_ = message.msg.NakWithDelay(30 * time.Second)
-		return
+	default:
+		_ = message.msg.Ack()
 	}
-	_ = message.msg.Ack()
 }
 
-func jetStreamDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler {
+// durableHandler handles one message of the listener's durable under ctx, the message's handling
+// context, and settles it: an ack, or a NAK for a retry.
+type durableHandler func(ctx context.Context, msg *nats.Msg)
+
+func jetStreamDeliveryHandler(cfg listenerDeliveryHandlerConfig) durableHandler {
 	handler := listenerDeliveryHandler(cfg)
-	return func(msg *nats.Msg) {
-		handler(deliveryMessage{data: msg.Data, mode: durableDelivery, msg: msg})
+	return func(ctx context.Context, msg *nats.Msg) {
+		handler(deliveryMessage{data: msg.Data, mode: durableDelivery, msg: msg, ctx: ctx})
 	}
 }
 
@@ -561,13 +590,23 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 	}
 	cfg.attemptCache.Record(item.DedupeKey, sessionID)
 	deliveryTimer := metrics.NewTimer()
-	result := session.HandleAgentMessage(item, sessionID, cfg.machineID, interestPtr, cfg.deliverer)
+	result := session.HandleAgentMessage(item, sessionID, cfg.machineID, interestPtr, message.deliverer(cfg))
 	if result.OwnedElsewhere {
 		// Every listener on the bus reads each inbox message from its own durable, and the owner
 		// delivers it from its copy: a no_holder exception here would report a delivered message
 		// as undeliverable, once per listener that does not own the session.
 		cfg.logger.DeliveryLog(slog.LevelDebug, "listener agent session owned by another listener", sessionID, item.Topic, item.EventID, "owned_elsewhere")
 		message.finalize(false)
+		return
+	}
+	if !result.Delivered && message.cancelled() {
+		// The receiver cut the prompt short on a shutdown: neither a failed delivery to report nor
+		// a session found nowhere (the path without a stored subscription reports any failed prompt
+		// as that), but a retry for whichever pod holds the lease next.
+		cfg.attemptCache.Clear(item.DedupeKey, sessionID)
+		cfg.logger.DeliveryLog(slog.LevelWarn, "listener agent delivery cancelled at shutdown", sessionID, item.Topic, item.EventID, "retry")
+		cfg.messagesNAKed.Inc()
+		message.finalize(true)
 		return
 	}
 	if result.Err != nil {
@@ -705,7 +744,15 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 		}
 		cfg.attemptCache.Record(item.DedupeKey, interest.SessionID)
 		deliveryTimer := metrics.NewTimer()
-		delivery, err := cfg.deliverer.DeliverWithResultForEntry(item, interest, target)
+		delivery, err := message.deliverer(cfg).DeliverWithResultForEntry(item, interest, target)
+		if err != nil && message.cancelled() {
+			// The receiver cut the prompt short on a shutdown: a retry for whichever pod holds the
+			// lease next, whatever the session's state, with no failure to report.
+			cfg.attemptCache.Clear(item.DedupeKey, interest.SessionID)
+			cfg.logger.DeliveryLog(slog.LevelWarn, "listener delivery cancelled at shutdown", interest.SessionID, item.Topic, item.EventID, "retry")
+			failed = true
+			continue
+		}
 		if err != nil {
 			retryable := shouldNAKFanoutDelivery(targetLive, err)
 			if !retryable {

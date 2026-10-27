@@ -241,6 +241,37 @@ func TestLeaseHolderStepsDownOnACASConflict(t *testing.T) {
 	}
 }
 
+// A renewal that landed on the server while its reply was lost leaves the record at a revision the
+// holder does not know. The holder's next renewal conflicts with its own write: it must keep the
+// lease, not step down and take it back as an expired record a TTL later.
+func TestLeaseRenewalWhoseReplyWasLostKeepsTheLease(t *testing.T) {
+	kv := leaseBucket(t)
+	clock := newFakeLeaseClock()
+	a := testLease(kv, "pod-a", productionLeaseConfig(), clock.now)
+	a.step()
+	drainChanges(a)
+	entry, err := kv.Get(a.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The lost renewal: the holder's own record written again, one revision past the holder's.
+	if _, err := kv.Update(a.key, entry.Value(), entry.Revision()); err != nil {
+		t.Fatal(err)
+	}
+	term := a.Status().Term
+	clock.advance(leaseRenewEvery)
+	if wait := a.step(); wait != 0 || !a.Holding() {
+		t.Fatalf("conflicting renewal waits %s holding %v, want an immediate renewal at the record's revision, still holding", wait, a.Holding())
+	}
+	a.step()
+	if status := a.Status(); !status.Holding || status.Term != term {
+		t.Fatalf("status after the lost reply = %+v, want the same term %d still held", status, term)
+	}
+	if drainChanges(a) {
+		t.Fatal("a renewal whose reply was lost signalled a change: the receive loop would drop and resubscribe")
+	}
+}
+
 // A graceful release marks the record released; a standby's next poll takes it at once, with no
 // TTL wait, reports it taken from a released record, and keeps the machine's service_since.
 func TestLeaseReleasedRecordIsTakenAtTheNextPollKeepingServiceSince(t *testing.T) {

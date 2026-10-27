@@ -2,6 +2,7 @@ package session
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,6 +34,16 @@ type Deliverer struct {
 	RequestLimit time.Duration
 	HTTPClient   *http.Client
 	Sessions     SessionLookup
+	// ctx carries every prompt's HTTP request (WithContext), so cancelling it aborts a prompt in
+	// flight; nil sends each under context.Background.
+	ctx context.Context
+}
+
+// WithContext returns a copy of d whose prompts run under ctx: cancelling ctx aborts a prompt in
+// flight, which then fails with ctx's error like any other failed request.
+func (d Deliverer) WithContext(ctx context.Context) *Deliverer {
+	d.ctx = ctx
+	return &d
 }
 
 // DeliveryResult describes a completed delivery attempt.
@@ -183,7 +194,11 @@ func (d Deliverer) prompt(entry SessionEntry, sessionID string, text string) err
 		return err
 	}
 	url := "http://" + net.JoinHostPort(d.hostFor(entry), strconv.Itoa(entry.Port)) + "/session/" + sessionID + "/prompt_async"
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	ctx := d.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
