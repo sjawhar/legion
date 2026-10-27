@@ -268,17 +268,17 @@ export function openDocumentSockets(page: Page): () => number {
   return () => open;
 }
 
-/** A Hocuspocus frame's message type, read without duplicating its wire constants. */
-function messageType(message: string | Buffer): number | undefined {
+/** Identifies a Hocuspocus server acknowledgement without duplicating its wire constants. */
+function isSyncStatusFrame(message: string | Buffer): boolean {
   if (typeof message === "string") {
-    return undefined;
+    return false;
   }
   try {
     const decoder = createDecoder(message);
     readField(decoder); // the document name
-    return readVarUint(decoder);
+    return readVarUint(decoder) === MessageType.SyncStatus;
   } catch {
-    return undefined;
+    return false;
   }
 }
 
@@ -290,18 +290,13 @@ function messageType(message: string | Buffer): number | undefined {
  * the top of the margin, which is the state the link's hold exists for, and a reconnect after
  * `sever()` waits. `release()` connects what is held and anything that arrives afterwards.
  * `holdServerFrames()` holds only tag-8 server acknowledgements on connected routes, while still
- * applying each client update to the server. After `admitWithoutSync()`, the next connection
- * passes only authentication frames either way and drops the rest: the page is admitted and
- * never syncs, and nothing it sends reaches the server, so the span between a socket's
- * authentication and its sync stays open until `sever()`. Install it before the page's first
- * navigation: only sockets opened afterwards are routed, and Playwright has no fallthrough for
- * WebSocket routes.
+ * applying each client update to the server. Install it before the page's first navigation: only
+ * sockets opened afterwards are routed, and Playwright has no fallthrough for WebSocket routes.
  */
 export async function documentTransport(
   page: Page,
   { holding = false }: { holding?: boolean } = {}
 ): Promise<{
-  admitWithoutSync: () => void;
   hold: () => void;
   holdServerFrames: () => void;
   release: () => Promise<void>;
@@ -312,25 +307,12 @@ export async function documentTransport(
   const heldServerFrames: { message: string | Buffer; route: WebSocketRoute }[] = [];
   const live: WebSocketRoute[] = [];
   let holdingServerFrames = false;
-  let unsyncedNext = false;
   let releasing = !holding;
   const connect = (route: WebSocketRoute): WebSocketRoute => {
     const server = route.connectToServer();
     live.push(route);
-    const unsynced = unsyncedNext;
-    unsyncedNext = false;
-    if (unsynced) {
-      route.onMessage((message) => {
-        if (messageType(message) === MessageType.Auth) {
-          server.send(message);
-        }
-      });
-    }
     server.onMessage((message) => {
-      if (unsynced && messageType(message) !== MessageType.Auth) {
-        return;
-      }
-      if (holdingServerFrames && messageType(message) === MessageType.SyncStatus) {
+      if (holdingServerFrames && isSyncStatusFrame(message)) {
         heldServerFrames.push({ message, route });
         return;
       }
@@ -362,9 +344,6 @@ export async function documentTransport(
     });
   });
   return {
-    admitWithoutSync: () => {
-      unsyncedNext = true;
-    },
     hold: () => {
       releasing = false;
     },

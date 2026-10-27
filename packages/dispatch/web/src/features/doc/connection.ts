@@ -119,13 +119,11 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
   return (artifactId, callbacks) => {
     const doc = new Doc();
     let destroyed = false;
-    // Whether the current socket's SyncStep2 has been applied and its admission authenticated. A
-    // close ends the socket's round, so both start over with the reconnect's.
-    let synced = false;
-    let authenticated = false;
-    // Whether the current socket's admission has been handed to the pending sync.
+    // Whether the current socket's admission has been handed to the pending sync. The provider
+    // tracks whether the socket has synced and authenticated, and resets both as it closes; it does
+    // not track this, so a close resets it here.
     let admitted = false;
-    // Whether any admission has: the first is the connection's first sync, the rest are later ones.
+    // Whether any admission has: the first one's restore ends in the host's `onSynced`.
     let announced = false;
     let provider: HocuspocusProvider;
     // `connect: false` below means this class cannot instantiate a socket until `sync` is assigned
@@ -150,52 +148,44 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
       parameters: { schema_version: callbacks.schemaVersion },
       url: wsUrl(artifactId),
     });
-    // Every admission's restore waits for its own socket's authentication and SyncStep2 alike. A
-    // writable one restores the rows other tabs stored, judging each against this document; before
-    // the reconnect's sync applies, the document lacks what the server took meanwhile, so a row
-    // that builds on it would look as if it were typed against a rebuilt history and be dropped.
+    // Every admission's restore waits for its own socket's authentication and SyncStep2 alike,
+    // whichever comes last; Dispatch's server queues its SyncStep2 before it reads the socket's
+    // token, so the authentication does. A writable admission restores the rows other tabs stored,
+    // judging each against this document; before the reconnect's sync applies, the document lacks
+    // what the server took meanwhile, so a row that builds on it would look as if it were typed
+    // against a rebuilt history and be dropped.
     const notifyAdmitted = () => {
-      if (!synced || !authenticated || admitted) {
+      if (!provider.isSynced || !provider.isAuthenticated || admitted) {
         return;
       }
       admitted = true;
-      const readOnly = isSchemaReadOnly(provider.authorizedScope);
+      const restoring = sync?.synced().catch((error: unknown) => {
+        console.error("Could not restore this document's pending browser edits", error);
+      });
       if (announced) {
-        // A reconnect's admission can differ from the last synced one (an issue reopened or closed
-        // since), and the pending sync decides from it what the stored rows need.
-        void sync?.admitted(readOnly).catch((error: unknown) => {
-          console.error("Could not take this document's new admission", error);
-        });
         return;
       }
       announced = true;
-      void sync
-        ?.firstSync(readOnly)
-        .catch((error: unknown) => {
-          console.error("Could not restore this document's pending browser edits", error);
-        })
-        .then(() => {
-          if (!destroyed) {
-            callbacks.onSynced();
-          }
-        });
+      void restoring?.then(() => {
+        if (!destroyed) {
+          callbacks.onSynced();
+        }
+      });
     };
     provider = new HocuspocusProvider({
       document: doc,
       name: artifactId,
       onAuthenticated: () => {
-        authenticated = true;
         const readOnly = isSchemaReadOnly(provider.authorizedScope);
-        // The editor takes or refuses typing from here on, before the socket's sync applies, so the
-        // pending sync stores what is typed from here on too; restoring the rows waits for the sync.
+        // Whether the admission is read-only decides from here on whether the editor takes typing
+        // and whether the pending sync stores a local update as a person's edit.
         sync?.authenticated(readOnly);
         callbacks.onAdmission(readOnly);
         notifyAdmitted();
       },
       onClose: ({ event }) => {
-        // A closed socket's admission is over; the reconnect authenticates and syncs anew, and its
-        // own admission waits for both (`synced` the provider resets through `onSynced`).
-        authenticated = false;
+        // A closed socket's admission is over; the reconnect's waits for its own sync and
+        // authentication.
         admitted = false;
         // Hocuspocus answers every other close by reconnecting. This one is the server's decision
         // about the stored document (`DOCUMENT_SCHEMA_CLOSE_CODE`), so the provider stops here and
@@ -211,12 +201,9 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
         }
       },
       onStatus: ({ status }) => callbacks.onStatus(status === "disconnected" ? "offline" : status),
-      onSynced: ({ state }) => {
-        // The provider reports `false` as a socket closes, before `onClose` above runs, and `true`
-        // once the socket's SyncStep2 has been applied to the document.
-        synced = state;
-        notifyAdmitted();
-      },
+      // The provider sets `isSynced` before it reports a change: `true` once the socket's
+      // SyncStep2 has been applied, `false` as the socket closes, before `onClose` above runs.
+      onSynced: notifyAdmitted,
       // Each document owns its socket. A transport's destroy closes this provider and then the
       // websocket itself, so its connection checker and reconnect attempt cannot outlive it.
       preserveConnection: false,

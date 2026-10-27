@@ -2,66 +2,43 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import { waitFor } from "@testing-library/react";
 import * as Y from "yjs";
 
-import { type DocumentConnection, loadDocumentTransport } from "./connection";
-import { openPendingEdits, type PendingEdits, type PendingKey } from "./pending-edits";
-import * as pendingSyncModule from "./pending-sync";
+import type { PendingEdits, PendingKey } from "./pending-edits";
+import {
+  artifactId,
+  closeStores,
+  frame,
+  NAME,
+  paragraphText,
+  rowsOf,
+  savedChanges,
+  savedEdit,
+  serverWith,
+  serverWithHeading,
+  stampHeadingId,
+  storeFor,
+  syncStatusFrame,
+  syncStep2Frame,
+  typeInto,
+  typeParagraph,
+  updateFrame,
+} from "./pending-fixture";
 import { type PendingState, type PendingSync, startPendingSync } from "./pending-sync";
-
-// The frames a Hocuspocus peer exchanges: the document name, a message tag, then the message.
-// Built by hand here so the expected bytes never come from the code under test.
-function varUint(value: number): number[] {
-  const bytes: number[] = [];
-  let rest = value;
-  while (rest >= 0x80) {
-    bytes.push((rest & 0x7f) | 0x80);
-    rest = Math.floor(rest / 0x80);
-  }
-  bytes.push(rest);
-  return bytes;
-}
-function varBytes(value: Uint8Array): number[] {
-  return [...varUint(value.length), ...value];
-}
-function frame(name: string, ...parts: number[][]): Uint8Array {
-  return Uint8Array.from([...varBytes(new TextEncoder().encode(name)), ...parts.flat()]);
-}
-const NAME = "the-document";
-const updateFrame = (update: Uint8Array) => frame(NAME, [0, 2], varBytes(update));
-const syncStep2Frame = (update: Uint8Array, name = NAME) => frame(name, [0, 1], varBytes(update));
-const syncStep1Frame = (stateVector: Uint8Array, name: string) =>
-  frame(name, [0, 0], varBytes(stateVector));
-const syncStatusFrame = (applied: boolean, name = NAME) => frame(name, [8, applied ? 1 : 0]);
-const authenticatedFrame = (scope: string, name: string) =>
-  frame(name, [2, 2], varBytes(new TextEncoder().encode(scope)));
 
 /** Stands in for the provider: updates it applies from the server carry it as their origin. */
 const SERVER = { server: true };
-
-let next = 0;
-function artifactId(): string {
-  next += 1;
-  return `pending-sync-test-${next}`;
-}
 
 const cleanups: (() => void)[] = [];
 afterEach(() => {
   for (const cleanup of cleanups.splice(0)) {
     cleanup();
   }
+  closeStores();
 });
 
-async function storeFor(artifact: string, clientId: number): Promise<PendingEdits> {
-  const store = await openPendingEdits(artifact, clientId);
-  if (store === undefined) {
-    throw new Error("fake-indexeddb refused to open");
-  }
-  cleanups.push(() => store.close());
-  return store;
-}
-
-/** The keys a document's rows hold, read through a store of a client that wrote none. */
-async function rowsOf(artifact: string): Promise<PendingKey[]> {
-  return (await (await storeFor(artifact, -1)).restoreRows()).map((row) => row.key);
+/** Takes an admission whose socket has synced and authenticated, as the transport hands it over. */
+async function admit(sync: PendingSync, readOnly: boolean): Promise<void> {
+  sync.authenticated(readOnly);
+  await sync.synced();
 }
 
 interface Scripted {
@@ -114,104 +91,6 @@ async function scripted(
       return emitted;
     },
   };
-}
-
-/**
- * A browser of an earlier page load: it applied `server`, made each of `changes` in turn, and kept
- * each as a row of its own, as the edits of one page load are kept.
- */
-async function savedChanges(
-  artifact: string,
-  server: Y.Doc,
-  ...changes: ((browser: Y.Doc) => void)[]
-): Promise<{ key: PendingKey; update: Uint8Array }[]> {
-  const browser = new Y.Doc();
-  Y.applyUpdate(browser, Y.encodeStateAsUpdate(server));
-  const store = await storeFor(artifact, browser.clientID);
-  const saved: { key: PendingKey; update: Uint8Array }[] = [];
-  for (const change of changes) {
-    let update: Uint8Array | undefined;
-    const capture = (emitted: Uint8Array) => {
-      update = emitted;
-    };
-    browser.on("update", capture);
-    change(browser);
-    browser.off("update", capture);
-    if (update === undefined) {
-      throw new Error("a local edit emits an update");
-    }
-    const row = store.record(update);
-    await row.written;
-    saved.push({ key: [artifact, browser.clientID, row.seq], update });
-  }
-  return saved;
-}
-
-/** A browser of an earlier page load: it applied `server`, typed `text`, and kept the edit. */
-async function savedEdit(artifact: string, server: Y.Doc, text: string): Promise<Uint8Array> {
-  const [saved] = await savedChanges(artifact, server, (browser) => typeInto(browser, text));
-  if (saved === undefined) {
-    throw new Error("one change saves one row");
-  }
-  return saved.update;
-}
-
-/** A server document holding one heading whose `id` is empty, as the server writes a heading. */
-function serverWithHeading(clientId: number): Y.Doc {
-  const server = new Y.Doc();
-  server.clientID = clientId;
-  const heading = new Y.XmlElement("heading");
-  heading.setAttribute("id", "");
-  heading.insert(0, [new Y.XmlText("Plan")]);
-  server.getXmlFragment("prosemirror").insert(0, [heading]);
-  return server;
-}
-
-/** Stamps the heading's id from its text, as the editor's heading-id plugin does on every load. */
-function stampHeadingId(doc: Y.Doc): void {
-  const heading = doc.getXmlFragment("prosemirror").get(0);
-  if (!(heading instanceof Y.XmlElement)) {
-    throw new Error("the document's first block is a heading");
-  }
-  heading.setAttribute("id", "plan");
-}
-
-/** Types a paragraph after the heading, as a person does in a writable document. */
-function typeParagraph(doc: Y.Doc): void {
-  const paragraph = new Y.XmlElement("paragraph");
-  paragraph.insert(0, [new Y.XmlText("Typed.")]);
-  doc.getXmlFragment("prosemirror").insert(1, [paragraph]);
-}
-
-/** The text of the document's first paragraph, where these tests type. */
-function paragraphText(doc: Y.Doc): Y.XmlText {
-  const paragraph = doc.getXmlFragment("prosemirror").get(0);
-  const text = paragraph instanceof Y.XmlElement ? paragraph.get(0) : undefined;
-  if (!(text instanceof Y.XmlText)) {
-    throw new Error("the document's first block is a paragraph of text");
-  }
-  return text;
-}
-
-/** Types `text` at the end of the first paragraph, opening one in an empty document. */
-function typeInto(doc: Y.Doc, text: string): void {
-  const fragment = doc.getXmlFragment("prosemirror");
-  if (fragment.length === 0) {
-    const paragraph = new Y.XmlElement("paragraph");
-    paragraph.insert(0, [new Y.XmlText(text)]);
-    fragment.insert(0, [paragraph]);
-    return;
-  }
-  const typed = paragraphText(doc);
-  typed.insert(typed.length, text);
-}
-
-/** A server document holding one paragraph of `text`. */
-function serverWith(text: string, clientId: number): Y.Doc {
-  const server = new Y.Doc();
-  server.clientID = clientId;
-  typeInto(server, text);
-  return server;
 }
 
 test("a local edit is recorded, and an acknowledgement of its frame clears that row only", async () => {
@@ -315,7 +194,7 @@ test("a read-only first sync applies nothing and keeps the saved edits", async (
   const { doc, states, sync } = await scripted(artifact, Y.encodeStateAsUpdate(server));
   const before = Y.encodeStateVector(doc);
 
-  await sync.firstSync(true);
+  await admit(sync, true);
 
   expect(paragraphText(doc).toString()).toBe("shared");
   expect(Y.encodeStateVector(doc)).toEqual(before);
@@ -329,7 +208,7 @@ test("a read-only admission stores none of the editor's own updates", async () =
     artifactId(),
     Y.encodeStateAsUpdate(server)
   );
-  await sync.firstSync(true);
+  await admit(sync, true);
 
   // The editor of a read-only document takes no typing, yet stamps each heading's id on load.
   stampHeadingId(doc);
@@ -348,7 +227,7 @@ test("a read-only load drops the heading id an earlier read-only load stored onc
   const { doc, states, sync } = await scripted(artifact, Y.encodeStateAsUpdate(server));
 
   // Before the editor exists, each row still changes what the document shows.
-  await sync.firstSync(true);
+  await admit(sync, true);
   expect((await rowsOf(artifact)).length).toBe(2);
   expect(states.at(-1)?.count).toBe(2);
 
@@ -375,7 +254,7 @@ test("a read-only load keeps an earlier row of a browser whose later rows build 
       return rows;
     },
   }));
-  await sync.firstSync(true);
+  await admit(sync, true);
 
   // The read-only load's editor derives the same stamp, which leaves the stamp's row alone
   // changing nothing; dropping it would leave the paragraph's row nothing to apply after.
@@ -385,7 +264,7 @@ test("a read-only load keeps an earlier row of a browser whose later rows build 
 
   // The issue reopens: the next, writable load restores the paragraph.
   const reopened = await scripted(artifact, Y.encodeStateAsUpdate(server));
-  await reopened.sync.firstSync(false);
+  await admit(reopened.sync, false);
   expect(reopened.doc.getXmlFragment("prosemirror").toString()).toContain("Typed.");
   expect(reopened.states.at(-1)?.rebuiltAt).toBeUndefined();
 });
@@ -398,7 +277,7 @@ test("a read-only first sync drops a saved row the server already holds", async 
   Y.applyUpdate(server, saved);
   const { states, sync } = await scripted(artifact, Y.encodeStateAsUpdate(server));
 
-  await sync.firstSync(true);
+  await admit(sync, true);
 
   expect(await rowsOf(artifact)).toEqual([]);
   expect(states.at(-1)).toEqual({ count: 0, readOnly: true, rebuiltAt: undefined, stored: true });
@@ -420,7 +299,7 @@ test("a read-only first sync keeps a saved row that changes an object attribute"
   });
   const { states, sync } = await scripted(artifact, Y.encodeStateAsUpdate(server));
 
-  await sync.firstSync(true);
+  await admit(sync, true);
 
   expect((await rowsOf(artifact)).length).toBe(1);
   expect(states.at(-1)).toEqual({ count: 1, readOnly: true, rebuiltAt: undefined, stored: true });
@@ -441,7 +320,7 @@ test("a read-only first sync drops a saved row that only splits the same text in
   });
   const { states, sync } = await scripted(artifact, Y.encodeStateAsUpdate(server));
 
-  await sync.firstSync(true);
+  await admit(sync, true);
 
   expect(await rowsOf(artifact)).toEqual([]);
   expect(states.at(-1)).toEqual({ count: 0, readOnly: true, rebuiltAt: undefined, stored: true });
@@ -459,7 +338,7 @@ test("a read-only first sync drops a saved row that inserts and deletes the same
   });
   const { states, sync } = await scripted(artifact, Y.encodeStateAsUpdate(server));
 
-  await sync.firstSync(true);
+  await admit(sync, true);
 
   expect(await rowsOf(artifact)).toEqual([]);
   expect(states.at(-1)).toEqual({ count: 0, readOnly: true, rebuiltAt: undefined, stored: true });
@@ -473,7 +352,7 @@ test("a read-only first sync keeps a saved row that writes a margin record", asy
   });
   const { states, sync } = await scripted(artifact, Y.encodeStateAsUpdate(server));
 
-  await sync.firstSync(true);
+  await admit(sync, true);
 
   expect((await rowsOf(artifact)).length).toBe(1);
   expect(states.at(-1)).toEqual({ count: 1, readOnly: true, rebuiltAt: undefined, stored: true });
@@ -487,7 +366,7 @@ test("a read-only first sync keeps a saved row that writes a root other than the
   });
   const { states, sync } = await scripted(artifact, Y.encodeStateAsUpdate(server));
 
-  await sync.firstSync(true);
+  await admit(sync, true);
 
   expect((await rowsOf(artifact)).length).toBe(1);
   expect(states.at(-1)).toEqual({ count: 1, readOnly: true, rebuiltAt: undefined, stored: true });
@@ -499,12 +378,12 @@ test("a connection first admitted read-only and later writable stores and counts
   // A person typed into the document in another page while it was writable.
   await savedEdit(artifact, server, " saved");
   const { doc, states, sync, type } = await scripted(artifact, Y.encodeStateAsUpdate(server));
-  await sync.firstSync(true);
+  await admit(sync, true);
   expect(paragraphText(doc).toString()).toBe("shared");
 
   // The issue reopens and the socket reconnects: the new admission is writable. The edit the
   // read-only first sync left is restored, and what the person types now is stored.
-  await sync.admitted(false);
+  await admit(sync, false);
   expect(paragraphText(doc).toString()).toBe("shared saved");
   type(" typed");
 
@@ -517,14 +396,14 @@ test("a connection first admitted read-only and later writable stores and counts
 test("a later writable admission keeps this tab's own unacknowledged rows", async () => {
   const artifact = artifactId();
   const { sync, type } = await scripted(artifact, Y.encodeStateAsUpdate(serverWith("shared", 100)));
-  await sync.firstSync(false);
+  await admit(sync, false);
   type(" mine");
   await waitFor(async () => expect((await rowsOf(artifact)).length).toBe(1));
   const mine = await rowsOf(artifact);
 
   // The issue closes and reopens while the server never acknowledged the edit.
-  await sync.admitted(true);
-  await sync.admitted(false);
+  await admit(sync, true);
+  await admit(sync, false);
 
   expect(await rowsOf(artifact)).toEqual(mine);
 });
@@ -539,7 +418,7 @@ test("a restore that parks on a scratch document is dropped, reported, and leave
   const { doc, states, sync } = await scripted(artifact, Y.encodeStateAsUpdate(rebuilt));
   const stateVector = Y.encodeStateVector(doc);
 
-  await sync.firstSync(false);
+  await admit(sync, false);
 
   expect(Y.encodeStateVector(doc)).toEqual(stateVector);
   expect(doc.store.pendingStructs).toBeNull();
@@ -561,7 +440,7 @@ test("a restore the server already holds fires no update and drops its rows", as
   const updates: Uint8Array[] = [];
   doc.on("update", (update: Uint8Array) => updates.push(update));
 
-  await sync.firstSync(false);
+  await admit(sync, false);
 
   expect(updates).toEqual([]);
   expect(paragraphText(doc).toString()).toBe("shared saved");
@@ -574,7 +453,7 @@ test("a restore that merges is recorded under the new client and the old rows ar
   await savedEdit(artifact, server, " saved");
   const { doc, states, sync } = await scripted(artifact, Y.encodeStateAsUpdate(server));
 
-  await sync.firstSync(false);
+  await admit(sync, false);
 
   expect(paragraphText(doc).toString()).toBe("shared saved");
   expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]]);
@@ -588,7 +467,7 @@ test("a stale saved row does not discard another row that still applies", async 
   await savedEdit(artifact, server, " valid");
   const { doc, states, sync } = await scripted(artifact, Y.encodeStateAsUpdate(server));
 
-  await sync.firstSync(false);
+  await admit(sync, false);
 
   expect(paragraphText(doc).toString()).toBe("shared valid");
   expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]]);
@@ -607,7 +486,7 @@ test("a stale row does not let a later row from the same lost history through", 
   await savedEdit(artifact, server, " valid");
   const { doc, states, sync } = await scripted(artifact, Y.encodeStateAsUpdate(server));
 
-  await sync.firstSync(false);
+  await admit(sync, false);
 
   expect(paragraphText(doc).toString()).toBe("shared valid");
   expect(doc.store.pendingStructs).toBeNull();
@@ -640,7 +519,7 @@ test("a first sync deletes every row it handled in one IndexedDB write", async (
   });
   cleanups.push(() => sync.destroy());
 
-  await sync.firstSync(false);
+  await admit(sync, false);
 
   expect(drops).toHaveLength(1);
   expect(drops[0]).toHaveLength(3);
@@ -748,401 +627,6 @@ test("an edit recorded while a SyncStep2 acknowledgement is clearing stays track
     expect(logged).not.toHaveBeenCalled();
     expect(await rowsOf(artifact)).toEqual([]);
   } finally {
-    logged.mockRestore();
-  }
-});
-
-/** A socket already open, as the browser's is once it connects; the test plays the server. */
-class OpenSocket extends EventTarget {
-  static opened: OpenSocket[] = [];
-  binaryType = "blob";
-  readonly readyState: number = 1;
-  readonly sent: Uint8Array[] = [];
-
-  constructor(readonly url: string) {
-    super();
-    OpenSocket.opened.push(this);
-    queueMicrotask(() => this.dispatchEvent(new Event("open")));
-  }
-
-  close(): void {}
-
-  send(data: Uint8Array): void {
-    this.sent.push(new Uint8Array(data));
-  }
-
-  receive(data: Uint8Array): void {
-    this.dispatchEvent(new MessageEvent("message", { data: data.slice().buffer }));
-  }
-
-  /** The server closes the socket, as a dropped connection does; the provider reconnects. */
-  drop(): void {
-    this.dispatchEvent(new CloseEvent("close", { code: 1006 }));
-  }
-}
-
-test("a real provider's edit typed on an open socket is cleared by its own acknowledgement", async () => {
-  const artifact = artifactId();
-  const realSocket = globalThis.WebSocket;
-  globalThis.WebSocket = OpenSocket as unknown as typeof WebSocket;
-  OpenSocket.opened = [];
-  let connection: DocumentConnection | undefined;
-  let synced = false;
-  try {
-    const connect = await loadDocumentTransport();
-    connection = connect(artifact, {
-      onAdmission() {},
-      onOutsideSchema() {},
-      onPending() {},
-      onStatus() {},
-      onSynced: () => {
-        synced = true;
-      },
-      schemaVersion: 1,
-    });
-    await waitFor(() => expect(OpenSocket.opened[0]?.sent.length).toBeGreaterThan(0));
-    const socket = OpenSocket.opened[0] as OpenSocket;
-    socket.receive(authenticatedFrame("read-write", artifact));
-    // The provider answers the server's SyncStep1 with a SyncStep2 of its own: the first frame on
-    // this socket the server acknowledges.
-    socket.receive(syncStep1Frame(Uint8Array.of(0), artifact));
-    socket.receive(syncStep2Frame(Y.encodeStateAsUpdate(new Y.Doc()), artifact));
-    await waitFor(() => expect(synced).toBe(true));
-    socket.receive(syncStatusFrame(true, artifact));
-
-    // On an open socket the provider writes each edit's frame inside the document's own update
-    // event, before any later listener has stored the edit.
-    typeInto(connection.doc, "first");
-    typeInto(connection.doc, " second");
-    socket.receive(syncStatusFrame(true, artifact));
-
-    const clientId = connection.doc.clientID;
-    await waitFor(async () => expect(await rowsOf(artifact)).toEqual([[artifact, clientId, 2]]));
-  } finally {
-    connection?.destroy();
-    globalThis.WebSocket = realSocket;
-  }
-});
-
-test("a reconnect's writable admission restores another tab's row only once that reconnect's sync has applied", async () => {
-  const artifact = artifactId();
-  const server = serverWith("shared", 100);
-  const firstState = Y.encodeStateAsUpdate(server);
-  // While this tab is admitted read-only, the issue reopens and a person types into the paragraph.
-  // Another tab types after that text and closes before its socket sends the edit, so its row is
-  // the edit's only copy, and it builds on an update this tab has not received yet.
-  const person = new Y.Doc();
-  person.clientID = 200;
-  Y.applyUpdate(person, firstState);
-  typeInto(person, " added");
-  Y.applyUpdate(server, Y.encodeStateAsUpdate(person));
-  await savedEdit(artifact, server, " typed");
-
-  // Each later admission the transport hands the pending sync, with whether the reconnect's
-  // SyncStep2 had reached the socket by then.
-  const admissions: { readOnly: boolean; afterSync: boolean }[] = [];
-  const running: Promise<void>[] = [];
-  let syncDelivered = false;
-  // The transport imports the pending sync itself, so its sync is wrapped where it is started.
-  const realStart = startPendingSync;
-  const started = spyOn(pendingSyncModule, "startPendingSync").mockImplementation((options) => {
-    const sync = realStart(options);
-    return {
-      ...sync,
-      admitted(readOnly) {
-        admissions.push({ afterSync: syncDelivered, readOnly });
-        const admitting = sync.admitted(readOnly);
-        running.push(admitting);
-        return admitting;
-      },
-    };
-  });
-  const realSocket = globalThis.WebSocket;
-  globalThis.WebSocket = OpenSocket as unknown as typeof WebSocket;
-  OpenSocket.opened = [];
-  let connection: DocumentConnection | undefined;
-  let synced = false;
-  const pending: PendingState[] = [];
-  try {
-    const connect = await loadDocumentTransport();
-    connection = connect(artifact, {
-      onAdmission() {},
-      onOutsideSchema() {},
-      onPending: (state) => pending.push(state),
-      onStatus() {},
-      onSynced: () => {
-        synced = true;
-      },
-      schemaVersion: 1,
-    });
-    await waitFor(() => expect(OpenSocket.opened[0]?.sent.length).toBeGreaterThan(0));
-    const first = OpenSocket.opened[0] as OpenSocket;
-    first.receive(authenticatedFrame("readonly", artifact));
-    first.receive(syncStep2Frame(firstState, artifact));
-    await waitFor(() => expect(synced).toBe(true));
-    await waitFor(() => expect(pending.at(-1)).toMatchObject({ count: 1, readOnly: true }));
-
-    first.drop();
-    await waitFor(() => expect(OpenSocket.opened[1]?.sent.length).toBeGreaterThan(0));
-    const second = OpenSocket.opened[1] as OpenSocket;
-    // The server authenticates the reconnect before its SyncStep2 arrives. Whatever the
-    // authentication starts runs to its end before the sync is delivered.
-    second.receive(authenticatedFrame("read-write", artifact));
-    await Promise.all(running);
-    syncDelivered = true;
-    second.receive(syncStep2Frame(Y.encodeStateAsUpdate(server), artifact));
-
-    const doc = connection.doc;
-    await waitFor(() => expect(paragraphText(doc).toString()).toBe("shared added typed"));
-    await Promise.all(running);
-    await waitFor(async () =>
-      expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]])
-    );
-    expect(pending.every((state) => state.rebuiltAt === undefined)).toBe(true);
-    expect(admissions).toEqual([{ afterSync: true, readOnly: false }]);
-  } finally {
-    connection?.destroy();
-    globalThis.WebSocket = realSocket;
-    started.mockRestore();
-  }
-});
-
-test("a reconnect's writable admission stores what is typed before its sync applies, and restores another tab's row after it", async () => {
-  const artifact = artifactId();
-  const server = serverWith("shared", 100);
-  const firstState = Y.encodeStateAsUpdate(server);
-  // As in the test above: while this tab is admitted read-only, the issue reopens, a person types
-  // into the paragraph, and another tab keeps an edit that builds on that typing.
-  const person = new Y.Doc();
-  person.clientID = 200;
-  Y.applyUpdate(person, firstState);
-  typeInto(person, " added");
-  Y.applyUpdate(server, Y.encodeStateAsUpdate(person));
-  await savedEdit(artifact, server, " typed");
-
-  const realSocket = globalThis.WebSocket;
-  globalThis.WebSocket = OpenSocket as unknown as typeof WebSocket;
-  OpenSocket.opened = [];
-  let connection: DocumentConnection | undefined;
-  let synced = false;
-  const admissions: boolean[] = [];
-  const pending: PendingState[] = [];
-  try {
-    const connect = await loadDocumentTransport();
-    connection = connect(artifact, {
-      onAdmission: (readOnly) => admissions.push(readOnly),
-      onOutsideSchema() {},
-      onPending: (state) => pending.push(state),
-      onStatus() {},
-      onSynced: () => {
-        synced = true;
-      },
-      schemaVersion: 1,
-    });
-    await waitFor(() => expect(OpenSocket.opened[0]?.sent.length).toBeGreaterThan(0));
-    const first = OpenSocket.opened[0] as OpenSocket;
-    first.receive(authenticatedFrame("readonly", artifact));
-    first.receive(syncStep2Frame(firstState, artifact));
-    await waitFor(() => expect(synced).toBe(true));
-    await waitFor(() => expect(pending.at(-1)).toMatchObject({ count: 1, readOnly: true }));
-
-    first.drop();
-    await waitFor(() => expect(OpenSocket.opened[1]?.sent.length).toBeGreaterThan(0));
-    const second = OpenSocket.opened[1] as OpenSocket;
-    // The editor takes typing from the reconnect's authentication on, before its SyncStep2.
-    second.receive(authenticatedFrame("read-write", artifact));
-    expect(admissions).toEqual([true, false]);
-    const doc = connection.doc;
-    typeInto(doc, " early");
-    second.receive(syncStep2Frame(Y.encodeStateAsUpdate(server), artifact));
-    await waitFor(() => expect(paragraphText(doc).toString()).toContain("added typed"));
-    typeInto(doc, " late");
-
-    // This tab's rows are the typing before the sync, the other tab's row the restore re-recorded,
-    // and the typing after: with the server's document they read as this tab's document does.
-    await waitFor(async () =>
-      expect(await rowsOf(artifact)).toEqual([1, 2, 3].map((seq) => [artifact, doc.clientID, seq]))
-    );
-    const fromRows = new Y.Doc();
-    Y.applyUpdate(fromRows, Y.encodeStateAsUpdate(server));
-    for (const row of await (await storeFor(artifact, -1)).restoreRows()) {
-      Y.applyUpdate(fromRows, row.update);
-    }
-    expect(paragraphText(fromRows).toString()).toBe(paragraphText(doc).toString());
-    expect(paragraphText(doc).toString()).toContain(" early");
-    expect(paragraphText(doc).toString()).toContain(" late");
-    await waitFor(() => expect(pending.at(-1)).toMatchObject({ count: 3, readOnly: false }));
-    expect(pending.every((state) => state.rebuiltAt === undefined)).toBe(true);
-  } finally {
-    connection?.destroy();
-    globalThis.WebSocket = realSocket;
-  }
-});
-
-/** Whether a frame a socket carried is a SyncStep2 or an Update, the frames a server acknowledges. */
-function acknowledgeable(written: Uint8Array, name: string): boolean {
-  return [1, 2].some((step) =>
-    frame(name, [0, step]).every((byte, index) => written[index] === byte)
-  );
-}
-
-test("a reopened issue's tab stores its read-only load's heading-id stamp ahead of the typing that builds on it, and its acknowledgement clears every row", async () => {
-  const artifact = artifactId();
-  const server = serverWithHeading(100);
-  const realSocket = globalThis.WebSocket;
-  globalThis.WebSocket = OpenSocket as unknown as typeof WebSocket;
-  OpenSocket.opened = [];
-  let connection: DocumentConnection | undefined;
-  let synced = false;
-  const pending: PendingState[] = [];
-  try {
-    const connect = await loadDocumentTransport();
-    connection = connect(artifact, {
-      onAdmission() {},
-      onOutsideSchema() {},
-      onPending: (state) => pending.push(state),
-      onStatus() {},
-      onSynced: () => {
-        synced = true;
-      },
-      schemaVersion: 1,
-    });
-    await waitFor(() => expect(OpenSocket.opened[0]?.sent.length).toBeGreaterThan(0));
-    const first = OpenSocket.opened[0] as OpenSocket;
-    first.receive(authenticatedFrame("readonly", artifact));
-    first.receive(syncStep2Frame(Y.encodeStateAsUpdate(server), artifact));
-    await waitFor(() => expect(synced).toBe(true));
-    const doc = connection.doc;
-
-    // The closed issue's editor stamps the heading's id as it loads; the server refuses it, and a
-    // page that only loads names no edit.
-    stampHeadingId(doc);
-    await waitFor(() => expect(pending.at(-1)).toMatchObject({ count: 0, readOnly: true }));
-    expect(await rowsOf(artifact)).toEqual([]);
-
-    // The issue reopens and the socket reconnects writable. What the person types continues this
-    // tab's client clock after the stamp, before and after the reconnect's sync applies.
-    first.drop();
-    await waitFor(() => expect(OpenSocket.opened[1]?.sent.length).toBeGreaterThan(0));
-    const second = OpenSocket.opened[1] as OpenSocket;
-    second.receive(authenticatedFrame("read-write", artifact));
-    typeParagraph(doc);
-    second.receive(syncStep2Frame(Y.encodeStateAsUpdate(server), artifact));
-    await waitFor(() => expect(pending.at(-1)).toMatchObject({ readOnly: false }));
-    // The server asks for what it lacks; the provider's SyncStep2 answer carries the stamp too.
-    second.receive(syncStep1Frame(Y.encodeStateVector(server), artifact));
-    const typed = doc.getXmlFragment("prosemirror").get(1);
-    const typedText = typed instanceof Y.XmlElement ? typed.get(0) : undefined;
-    if (!(typedText instanceof Y.XmlText)) {
-      throw new Error("the typed paragraph holds text");
-    }
-    typedText.insert(typedText.length, " More.");
-
-    // A reload before any acknowledgement restores every row on the server's document, in order,
-    // and none parks: the stamp's row comes first.
-    await waitFor(async () => expect((await rowsOf(artifact)).length).toBe(3));
-    const fromRows = new Y.Doc();
-    Y.applyUpdate(fromRows, Y.encodeStateAsUpdate(server));
-    for (const row of await (await storeFor(artifact, -1)).restoreRows()) {
-      Y.applyUpdate(fromRows, row.update);
-    }
-    expect(fromRows.store.pendingStructs).toBeNull();
-    expect(fromRows.store.pendingDs).toBeNull();
-    expect(fromRows.getXmlFragment("prosemirror").toString()).toBe(
-      doc.getXmlFragment("prosemirror").toString()
-    );
-    expect(fromRows.getXmlFragment("prosemirror").toString()).toContain('id="plan"');
-    expect(pending.every((state) => state.rebuiltAt === undefined)).toBe(true);
-
-    // The server acknowledges each SyncStep2 and Update frame the reconnected socket carried, the
-    // provider's SyncStep2 among them: every row of this tab is cleared, the stamp's too.
-    const carried = second.sent.filter((written) => acknowledgeable(written, artifact));
-    expect(carried.length).toBeGreaterThan(0);
-    for (let index = 0; index < carried.length; index += 1) {
-      second.receive(syncStatusFrame(true, artifact));
-    }
-    await waitFor(async () => expect(await rowsOf(artifact)).toEqual([]));
-    await waitFor(() => expect(pending.at(-1)).toMatchObject({ count: 0, readOnly: false }));
-  } finally {
-    connection?.destroy();
-    globalThis.WebSocket = realSocket;
-  }
-});
-
-test("a reconnect's read-only admission stores no local update made before its sync applies", async () => {
-  const artifact = artifactId();
-  const server = serverWith("shared", 100);
-  const realSocket = globalThis.WebSocket;
-  globalThis.WebSocket = OpenSocket as unknown as typeof WebSocket;
-  OpenSocket.opened = [];
-  let connection: DocumentConnection | undefined;
-  let synced = false;
-  const admissions: boolean[] = [];
-  const pending: PendingState[] = [];
-  try {
-    const connect = await loadDocumentTransport();
-    connection = connect(artifact, {
-      onAdmission: (readOnly) => admissions.push(readOnly),
-      onOutsideSchema() {},
-      onPending: (state) => pending.push(state),
-      onStatus() {},
-      onSynced: () => {
-        synced = true;
-      },
-      schemaVersion: 1,
-    });
-    await waitFor(() => expect(OpenSocket.opened[0]?.sent.length).toBeGreaterThan(0));
-    const first = OpenSocket.opened[0] as OpenSocket;
-    first.receive(authenticatedFrame("read-write", artifact));
-    first.receive(syncStep2Frame(Y.encodeStateAsUpdate(server), artifact));
-    await waitFor(() => expect(synced).toBe(true));
-
-    // The issue closes and the socket reconnects. The editor is read-only from the reconnect's
-    // authentication on, so a local update it makes before the sync is one it derived.
-    first.drop();
-    await waitFor(() => expect(OpenSocket.opened[1]?.sent.length).toBeGreaterThan(0));
-    const second = OpenSocket.opened[1] as OpenSocket;
-    second.receive(authenticatedFrame("readonly", artifact));
-    expect(admissions).toEqual([false, true]);
-    typeInto(connection.doc, " derived");
-    second.receive(syncStep2Frame(Y.encodeStateAsUpdate(server), artifact));
-
-    await waitFor(() => expect(pending.at(-1)).toMatchObject({ readOnly: true }));
-    expect(pending.at(-1)?.count).toBe(0);
-    expect(await rowsOf(artifact)).toEqual([]);
-  } finally {
-    connection?.destroy();
-    globalThis.WebSocket = realSocket;
-  }
-});
-
-test("a document whose browser keeps no edits says so, and still connects", async () => {
-  const realStorage = globalThis.indexedDB;
-  const realSocket = globalThis.WebSocket;
-  const logged = spyOn(console, "error").mockImplementation(() => {});
-  Object.defineProperty(globalThis, "indexedDB", { configurable: true, value: undefined });
-  globalThis.WebSocket = OpenSocket as unknown as typeof WebSocket;
-  OpenSocket.opened = [];
-  let connection: DocumentConnection | undefined;
-  const pending: PendingState[] = [];
-  try {
-    const connect = await loadDocumentTransport();
-    connection = connect(artifactId(), {
-      onAdmission() {},
-      onOutsideSchema() {},
-      onPending: (state) => pending.push(state),
-      onStatus() {},
-      onSynced() {},
-      schemaVersion: 1,
-    });
-    await waitFor(() => expect(OpenSocket.opened).toHaveLength(1));
-    await waitFor(() =>
-      expect(pending).toEqual([{ count: 0, readOnly: false, rebuiltAt: undefined, stored: false }])
-    );
-  } finally {
-    connection?.destroy();
-    globalThis.WebSocket = realSocket;
-    Object.defineProperty(globalThis, "indexedDB", { configurable: true, value: realStorage });
     logged.mockRestore();
   }
 });

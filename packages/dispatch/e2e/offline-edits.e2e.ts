@@ -193,16 +193,18 @@ test("read-only admission preserves edits until a later read-write reload", asyn
   }
 });
 
-test("an edit typed after a reopened issue's reconnect authenticates and before it syncs survives a reload", async ({
+test("a reopened issue's page names no unsent edit before typing, and an edit typed after its reconnect survives a reload", async ({
   browser,
 }) => {
   // The spec opens with a heading: the read-only page's editor stamps the heading's id as it loads,
-  // an update of this page's own client that the server refuses, and the typing that follows
-  // continues that client's clock, so its rows apply on a reload only after the stamp's.
+  // an update of this page's own client that the read-only server refuses. The reconnect after the
+  // reopen sends it in its SyncStep2, and what the person types later continues that client's
+  // clock, so its rows apply on a reload only because the server holds the stamp.
   const issue = await makeIssue();
   await patchIssue(issue.key, { status: "done" });
   const alice = await asUser(browser, "alice");
-  const paragraph = "typed before the reconnect syncs";
+  const paragraph = "typed after the reopened reconnect";
+  const unsentNotice = /saved in this browser/u;
   try {
     const page = await alice.newPage();
     const transport = await documentTransport(page);
@@ -210,19 +212,24 @@ test("an edit typed after a reopened issue's reconnect authenticates and before 
     await expect(connectedDot(page)).toHaveText("connected");
     const editor = documentEditor(page);
     await expect(editor).toHaveAttribute("contenteditable", "false");
+    await expect(page.getByRole("status", { name: unsentNotice })).toHaveCount(0);
+    expect(await pendingEditCount(page, issue.primary_artifact_id)).toBe(0);
 
     // The issue reopens while the page is open. Its socket stays admitted read-only until the
-    // connection drops; the reconnect is admitted writable and, held here, never syncs.
+    // connection drops; the reconnect syncs and is then admitted writable, as the server orders it.
     await patchIssue(issue.key, { status: "backlog" });
     await expect(page.getByText("This issue is closed. Its document is read-only.")).toBeHidden();
-    transport.admitWithoutSync();
     await transport.sever();
     await expect(editor).toHaveAttribute("contenteditable", "true");
-    await typeAtEnd(page, paragraph);
-    await waitForPersistedTyping(page, issue.primary_artifact_id, paragraph);
+    await expect(connectedDot(page)).toHaveText("connected");
+    await expect(page.getByRole("status", { name: unsentNotice })).toHaveCount(0);
+    expect(await pendingEditCount(page, issue.primary_artifact_id)).toBe(0);
 
+    // The typing waits in this browser: the connection is severed and its reconnect held.
     transport.hold();
     await transport.sever();
+    await typeAtEnd(page, paragraph);
+    await waitForPersistedTyping(page, issue.primary_artifact_id, paragraph);
     await page.reload();
     await expect(
       page.getByRole("status", { name: /edit(?:s)? saved in this browser, not sent yet/u })
@@ -231,6 +238,7 @@ test("an edit typed after a reopened issue's reconnect authenticates and before 
     await expect
       .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
       .toContain(paragraph);
+    await expect.poll(() => pendingEditCount(page, issue.primary_artifact_id)).toBe(0);
   } finally {
     await alice.close();
   }
