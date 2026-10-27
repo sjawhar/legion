@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-583",
+  "completed": "2026-10-27T08:06:30Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "AC2: read both scratch runs through the API myself. Run 40447824879 attempt 1 (scratch #2326, head 8bf58099, files packages/contracts/src/index.ts and skills/dispatch/SKILL.md): changes success, the five jobs skipped with no runner (attempt 2 was a re-run that was cancelled in the queue, so the check-runs list now shows 'cancelled'; attempt 1 holds the result). Run 40447830920 (scratch #2327, head fcdba9fa, packages/envoy/internal/pgmigrate/scan.go only): the five jobs ran on runners and ended success. The workflow at both scratch bases (b3e849ad) and at the PR head differs only in two comments. AC1: my own check (go list -e -deps -json per job command with its tags, every file under each package directory and its non-package subdirectories, embeds, module go.mod/go.sum, step inputs) matches the implementer's result. AC3: my own recompute over the implementer's fetched data gives the same table (24,659 -> 18,107 minutes; 25.0 -> 18.3 per run; 90 added job runs), the run count matches the API (987), and PR #2169's run 40163698062 re-read live gives 20+8+6+19 = 53 billed minutes."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "AC2: each job starts only on a change to a file it reads (per-job selectivity, which scratch #2326/#2327 do not show because they start all five or none)",
+      "surface": "GitHub Actions in sjawhar/legion: scratch draft pull request #2372, base legion/INFRA-583 at 2bd2a886, created through the Git Data API",
+      "command": "one comment line appended to packages/envoy/internal/broker/api/handlers_introspect.go (commit 8f1db363); gh api repos/sjawhar/legion/actions/runs/40462631071/jobs",
+      "observed": "run https://github.com/sjawhar/legion/actions/runs/40462631071: changes success (08:03:31-08:03:40Z); broker-multiprocess and envoy-go-race queued to run; dispatch-memory, dispatch-multiprocess and envoy-infra-go completed 'skipped'. The tester then cancelled the run to free runners, closed #2372 and deleted its branch.",
+      "headSha": "2bd2a8862ab9586ea212d611b347b49e475088e0",
+      "negativeControl": "the same matcher on main's workflow (b2f37e15) gates all five on `envoy`, which is true for this path and for contracts/src + skills/dispatch; scratch #2326's run shows the new filters skip all five on the latter"
+    },
+    {
+      "criterion": "AC1/AC2: dorny/paths-filter's own code, with the edited workflow's filters, sets each job's output only for files the job reads",
+      "surface": "dorny/paths-filter@ceb8a2b8 dist/index.js (the pinned action) run under node 24 with base HEAD on throwaway git repos whose only changes are the probe paths",
+      "command": "$TMPDIR/i583t/probe.sh <name> <paths...> (filters extracted from .github/workflows/envoy-and-contracts.yaml at 2bd2a886)",
+      "observed": "contracts/src/index.ts + skills/dispatch/SKILL.md: none of the five (envoy true); contracts/CHANGELOG.md + skills/dispatch-writing-specs: none; internal/broker/api: broker, race; internal/testnats/nats.go: multiprocess, race, infra (not memory, not broker); proof-editor/src, bun.lock, contracts/fixtures/delivery-live: race only; internal/pgmigrate, packages/daemon/go.mod, the workflow file: all five; docker/rds-global-bundle.pem: broker, race; infra/gcp/testdata/dispatch-pod.golden: memory, multiprocess, race, infra; cmd/listener: race, infra; packages/daemon/internal/api/state.go and packages/dispatch/web/src/main.tsx: none.",
+      "headSha": "2bd2a8862ab9586ea212d611b347b49e475088e0",
+      "negativeControl": "filters with the `&go_workspace` anchor removed: the action fails with `unidentified alias \"go_workspace\" (123:18)` and sets no output, so a broken anchor turns the changes job red rather than skipping the jobs"
+    },
+    {
+      "criterion": "AC1: each filter names every file its job reads",
+      "surface": "the edited workflow's filters matched with picomatch 2.3.1 {dot:true} (dorny's matcher and options) against go list of each job's command in the issue pod, after main's merge",
+      "command": "CGO_ENABLED=1 bun $TMPDIR/i583t/check.ts (memory/multiprocess/broker: go list -test -tags <tag> ./cmd/<x>; race: go list -test -race <its six patterns>; infra: go list -test ./... with and without -tags pulumilive,natslive in packages/envoy/infra, plus ./cmd/listener ./cmd/dispatch in packages/envoy); then a grep of the tested packages' Go files for relative paths",
+      "observed": "dispatch_memory 1032 files 0 unmatched; dispatch_multiprocess 1037/0; broker_multiprocess 214/0; envoy_go_race 1258/0; envoy_infra_go 1231/5, all five testdata files of internal/dispatch/text and internal/webhook, packages envoy-infra-go only compiles and whose tests it does not run (refs.go names them only in comments), so not read. Relative reads in the tested packages (pod golden, migrations, contracts fixtures, pmdoc testdata, moduleSources of packages/envoy, the RDS bundle) are all named. memory_profile_test.go:125-148 reads the four guides only after the DISPATCH_EDIT_PROFILE_OUT skip, and no workflow sets it.",
+      "headSha": "2bd2a8862ab9586ea212d611b347b49e475088e0",
+      "negativeControl": "the same check on a copy of the workflow with the `packages/envoy/internal/testnats/*` lines removed: dispatch_multiprocess 6 unmatched (the six testnats files), dispatch_memory still 0 (its closure has no testnats), exit 1"
+    }
+  ],
+  "ciAtHead": "read at 2bd2a886 at 08:05Z, not waited for: lint, typecheck, pr-title, Docs build success; test in progress; run 40462043367 changes success, the five jobs queued (not skipped: the workflow file changed), envoy-go/dispatch/envoy-smoke/envoy-e2e-local queued; Worker Image build in progress.",
+  "notes": [
+    "Drift: nothing fails when a test of one of the five jobs comes to import a package or read a file outside its filter; the job then stops running on changes to that file. The guides now say to add it to the filter. envoy-go still runs every untagged unit test on any packages/envoy change, which does not cover the memory and multiprocess tags. Not a defect of this change; a risk the reviewer may list.",
+    "A change to envoy-and-contracts.yaml alone sets `envoy` false (envoy-go does not run); this is main's behaviour, not changed here.",
+    "The implementer's handoff push (2bd2a886) has no skip-checks trailer, so CI runs on it; harmless here."
+  ]
+}
