@@ -170,6 +170,9 @@ func (d *postingDispatch) PostMessage(_ context.Context, key, body string) error
 func (d *postingDispatch) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
 	return nil, nil
 }
+func (d *postingDispatch) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
+	return nil, nil
+}
 func (d *postingDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
@@ -219,6 +222,9 @@ func (d *laneBoard) HandOver(context.Context, dispatch.Issue, string) error {
 }
 func (d *laneBoard) PostMessage(context.Context, string, string) error { return nil }
 func (d *laneBoard) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
+	return nil, nil
+}
+func (d *laneBoard) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
 	return nil, nil
 }
 func (d *laneBoard) Approval(context.Context, string) (dispatch.Approval, error) {
@@ -371,7 +377,7 @@ func startLaneTree(t *testing.T, log *slog.Logger) *laneTree {
 			tree.provisions.Add(1)
 			return workspace.Workspace{}, nil
 		},
-		remove: func(context.Context, workspace.Workspace) error { return nil },
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error { return nil },
 	}
 	tree.records = wakingRecords(tree.runner)
 	runLanes(t, tree.runner, tree.clock, tree.spawn.gate.open)
