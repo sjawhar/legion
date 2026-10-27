@@ -694,10 +694,11 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   instead of failing on the first refused connection: a connection refused, reset or closed before
   a response, or a 502 or 503 from a proxy (a body that is not the daemon's refusal), is retried
   with backoff from 0.5 s to 30 s for up to 10 minutes or until the agent aborts, each attempt with
-  a fresh grant, and the agent is told once, as a partial result, that the call is being retried.
-  The daemon applies each of the three at most once however often it arrives. Every answer the
-  daemon gives, a 4xx or 409 or its own coded 502/503, is passed on at once; after an attempt whose
-  connection dropped, that refusal says the dropped attempt may have been applied.
+  a fresh grant; an abort during a wait sends no further attempt. The retry notice goes out once as
+  a partial result, which Oh My Pi shows in its TUI and RPC event stream; the model sees only the
+  final result. The daemon applies each of the three at most once however often it arrives. Every
+  answer the daemon gives, a 4xx or 409 or its own coded 502/503, is passed on at once; after an
+  attempt whose connection dropped, that refusal says the dropped attempt may have been applied.
 
 - The `legion-architect` skill was 51,256 bytes, over Oh My Pi's 51,200-byte spill threshold, so it
   reached an architect with its middle cut out; its Wake routing table moves unchanged to

@@ -179,8 +179,9 @@ export function createLegionTool(deps: {
     parameters: toolSchema(pi),
     execute: async (_id, parameters, signal, onUpdate, context) => {
       // The three writes the daemon applies at most once however often they arrive
-      // (handoff_complete, sign_off, register_gate) wait out its restart until the agent's abort;
-      // the agent is told once, as a partial result, that the call is being retried.
+      // (handoff_complete, sign_off, register_gate) wait out its restart until the agent's abort.
+      // The retry notice goes out once as a partial result, which Oh My Pi shows in its TUI and
+      // RPC event stream; the model sees only the final result.
       const restart: DaemonRestartRetry = {
         ...restartClock,
         ...(signal === undefined ? {} : { signal }),
@@ -243,7 +244,8 @@ export function createLegionTool(deps: {
             const reference = requiredString(parameters, operation, "artifactId");
             const isId = LegionGateRegisterRequest.shape.artifactId.safeParse(reference).success;
             const artifactId = isId ? reference : await resolveDocument(issue, reference);
-            // The fact is keyed by the gate's issue, generation, document and version.
+            // The fact is keyed by the gate's issue, generation, document, version and Dispatch
+            // sequence; a repeat after the sequence moved is a re-registration the gate absorbs.
             await retryWhileDaemonRestarts(
               "register_gate",
               async () =>

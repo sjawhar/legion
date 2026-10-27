@@ -193,8 +193,9 @@ export async function callReadyWithRetry(label: string, call: () => Promise<void
 }
 
 /** What a call retried across a daemon restart is told: once, on its first connection failure,
- * the sentence to pass to the agent; the abort signal that ends the wait (the agent's Esc); and
- * the clock it waits on (a test's own). */
+ * the sentence for the host to show (Oh My Pi's `onUpdate` reaches its TUI and RPC client, not
+ * the model); the abort signal that ends the wait, checked before every attempt; and the clock it
+ * waits on (a test's own). */
 export interface DaemonRestartRetry {
   readonly onRetrying?: (message: string) => void;
   readonly signal?: AbortSignal;
@@ -231,13 +232,16 @@ export function daemonUnreachable(error: unknown): "refused" | "dropped" | undef
 /**
  * Runs `call` until it gets the daemon's answer, retrying with capped exponential backoff while
  * the daemon is unreachable (`daemonUnreachable`), for up to `DAEMON_RESTART_BUDGET_MS` or until
- * `signal` aborts. Only a call that the daemon applies at most once however often it arrives may
- * run through it: `handoff_complete` (a repeat is answered HANDOFF_ALREADY_RECORDED, or, once the
- * completion moved the issue, refused as no longer the role's phase), `sign_off` (a repeat finds
- * the issue out of accepting and changes nothing) and `register_gate` (its fact is keyed by the
- * gate's issue, document and version). `call` is the whole operation, grant mint included, since
- * grants live in the daemon's memory and do not survive its restart. `onRetrying` is told once.
- * A daemon refusal after a dropped attempt is told that the dropped one may have been applied.
+ * `signal` aborts; an abort during a wait sends no further attempt. Only a call that the daemon
+ * applies at most once however often it arrives may run through it: `handoff_complete` (a repeat
+ * is answered HANDOFF_ALREADY_RECORDED, or, once the completion moved the issue, refused as no
+ * longer the role's phase), `sign_off` (a repeat finds the issue out of accepting and changes
+ * nothing) and `register_gate` (its fact is keyed by the gate's issue, generation, document,
+ * version and Dispatch sequence; a repeat after the sequence moved is a new fact, which the gate
+ * takes as a re-registration of the same document and tells no one again). `call` is the whole
+ * operation, grant mint included, since grants live in the daemon's memory and do not survive
+ * its restart. `onRetrying` is told once. A daemon refusal after a dropped attempt is told that
+ * the dropped one may have been applied.
  */
 export async function retryWhileDaemonRestarts<T>(
   label: string,
@@ -265,7 +269,14 @@ export async function retryWhileDaemonRestarts<T>(
   let delay = DAEMON_RESTART_FIRST_DELAY_MS;
   let told = false;
   let dropped = false;
+  let lastFailure: unknown;
   for (;;) {
+    // An abort during the wait sends nothing more: a write the agent cancelled is never applied.
+    if (signal?.aborted && lastFailure !== undefined) {
+      throw new Error(
+        `${label}: the Legion daemon was unreachable (${messageFor(lastFailure)}) and the call was aborted${dropped ? "; an attempt lost its connection before the daemon answered and may have been applied, so read the record before calling again" : "; call it again once the daemon is back"}`
+      );
+    }
     try {
       return await call();
     } catch (error) {
@@ -276,20 +287,21 @@ export async function retryWhileDaemonRestarts<T>(
         }
         throw error;
       }
+      lastFailure = error;
       dropped ||= unreachable === "dropped";
       const remaining = deadline - now();
-      if (remaining <= 0 || signal?.aborted) {
+      if (remaining <= 0) {
         throw new Error(
-          `${label}: the Legion daemon was unreachable (${messageFor(error)}) and ${signal?.aborted ? "the call was aborted" : `stayed so for ${DAEMON_RESTART_BUDGET_MS / 60_000} minutes`}${dropped ? "; an attempt lost its connection before the daemon answered and may have been applied, so read the record before calling again" : "; call it again once the daemon is back"}`
+          `${label}: the Legion daemon was unreachable (${messageFor(error)}) and stayed so for ${DAEMON_RESTART_BUDGET_MS / 60_000} minutes${dropped ? "; an attempt lost its connection before the daemon answered and may have been applied, so read the record before calling again" : "; call it again once the daemon is back"}`
         );
       }
-      if (!told) {
+      if (!told && !signal?.aborted) {
         told = true;
-        const message = `The Legion daemon is unreachable, most likely restarting (${messageFor(error)}); ${label} is being retried for up to ${DAEMON_RESTART_BUDGET_MS / 60_000} minutes. Wait for this call to return; do not call it again.`;
+        const message = `The Legion daemon is unreachable, most likely restarting (${messageFor(error)}); ${label} is being retried for up to ${DAEMON_RESTART_BUDGET_MS / 60_000} minutes.`;
         console.error(`[legion] ${message}`);
         options.onRetrying?.(message);
       }
-      await sleep(Math.min(delay, remaining), signal);
+      if (!signal?.aborted) await sleep(Math.min(delay, remaining), signal);
       delay = Math.min(delay * 2, DAEMON_RESTART_MAX_DELAY_MS);
     }
   }

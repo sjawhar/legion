@@ -282,11 +282,13 @@ test("register_gate waits out a restarting daemon", async () => {
   expect(updates).toHaveLength(1);
 });
 
-test("an aborted call stops waiting for the daemon", async () => {
+test("an aborted call stops waiting and sends nothing more, even with the daemon back up", async () => {
+  // Three attempts are refused; the daemon is back for the fourth, and the agent aborts during
+  // the third wait, so the cancelled sign_off must never reach it.
   const live = liveDaemon();
   const clock = virtualClock();
   const abort = new AbortController();
-  const tool = toolFor("architect", restartingClient(live.url, refusingOrigin(), 1_000), {
+  const tool = toolFor("architect", restartingClient(live.url, refusingOrigin(), 3), {
     now: clock.now,
     sleep: async (ms) => {
       await clock.sleep(ms);

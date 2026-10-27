@@ -44796,7 +44796,11 @@ async function retryWhileDaemonRestarts(label, call, options = {}) {
   let delay = DAEMON_RESTART_FIRST_DELAY_MS;
   let told = false;
   let dropped = false;
+  let lastFailure;
   for (;; ) {
+    if (signal?.aborted && lastFailure !== undefined) {
+      throw new Error(`${label}: the Legion daemon was unreachable (${messageFor(lastFailure)}) and the call was aborted${dropped ? "; an attempt lost its connection before the daemon answered and may have been applied, so read the record before calling again" : "; call it again once the daemon is back"}`);
+    }
     try {
       return await call();
     } catch (error48) {
@@ -44807,18 +44811,20 @@ async function retryWhileDaemonRestarts(label, call, options = {}) {
         }
         throw error48;
       }
+      lastFailure = error48;
       dropped ||= unreachable === "dropped";
       const remaining = deadline - now();
-      if (remaining <= 0 || signal?.aborted) {
-        throw new Error(`${label}: the Legion daemon was unreachable (${messageFor(error48)}) and ${signal?.aborted ? "the call was aborted" : `stayed so for ${DAEMON_RESTART_BUDGET_MS / 60000} minutes`}${dropped ? "; an attempt lost its connection before the daemon answered and may have been applied, so read the record before calling again" : "; call it again once the daemon is back"}`);
+      if (remaining <= 0) {
+        throw new Error(`${label}: the Legion daemon was unreachable (${messageFor(error48)}) and stayed so for ${DAEMON_RESTART_BUDGET_MS / 60000} minutes${dropped ? "; an attempt lost its connection before the daemon answered and may have been applied, so read the record before calling again" : "; call it again once the daemon is back"}`);
       }
-      if (!told) {
+      if (!told && !signal?.aborted) {
         told = true;
-        const message = `The Legion daemon is unreachable, most likely restarting (${messageFor(error48)}); ${label} is being retried for up to ${DAEMON_RESTART_BUDGET_MS / 60000} minutes. Wait for this call to return; do not call it again.`;
+        const message = `The Legion daemon is unreachable, most likely restarting (${messageFor(error48)}); ${label} is being retried for up to ${DAEMON_RESTART_BUDGET_MS / 60000} minutes.`;
         console.error(`[legion] ${message}`);
         options.onRetrying?.(message);
       }
-      await sleep(Math.min(delay, remaining), signal);
+      if (!signal?.aborted)
+        await sleep(Math.min(delay, remaining), signal);
       delay = Math.min(delay * 2, DAEMON_RESTART_MAX_DELAY_MS);
     }
   }
@@ -48532,12 +48538,17 @@ function legionToolDefinition() {
     inputSchema: exports_external.toJSONSchema(exports_external.object({ op: exports_external.enum(PHASE_OPS), ...phaseOpParameters(exports_external) }))
   };
 }
-async function executeLegionTool(runtime, input) {
+async function executeLegionTool(runtime, input, signal) {
   const claim = runtime.claim();
   if (claim === undefined) {
     throw new Error("this session has no Legion claim yet: the pane registers with the daemon once its first turn starts");
   }
-  return executePhaseOp({ daemon: runtime.daemon, claim, handoffCommit: runtime.handoffCommit }, input);
+  return executePhaseOp({
+    daemon: runtime.daemon,
+    claim,
+    handoffCommit: runtime.handoffCommit,
+    ...signal === undefined ? {} : { restart: { signal } }
+  }, input);
 }
 
 // src/session-title.ts
@@ -49310,14 +49321,14 @@ async function runEnvoyChannelServer() {
     ...daemon === undefined ? [] : [legionToolDefinition()]
   ];
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolDefinitions }));
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     if (daemon !== undefined && request.params.name === LEGION_TOOL_NAME) {
       const legionRuntime = {
         daemon,
         claim: () => claim?.capability(),
         handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: process.env })
       };
-      return mcpResult(await executeLegionTool(legionRuntime, request.params.arguments));
+      return mcpResult(await executeLegionTool(legionRuntime, request.params.arguments, extra.signal));
     }
     if (runtime === undefined)
       throw new Error("Envoy channel server is still starting");
