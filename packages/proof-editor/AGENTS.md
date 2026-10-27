@@ -30,7 +30,7 @@ pin changes nothing in the table; it changes what `node_modules/proof-sdk-upstre
 | `src/lib.css` | The editor stylesheet |
 | `src/tests/*.test.ts` | The suites that came with those files |
 
-Eleven files under `src/` are legion's own rather than copies, so the file-by-file audit below does
+Twelve files under `src/` are legion's own rather than copies, so the file-by-file audit below does
 not reach them:
 
 | File | What it is |
@@ -43,11 +43,12 @@ not reach them:
 | `src/record-mark-history.ts` | The plugin that keeps the composer's own record-mark writes out of undo history in both undo managers, so neither undo nor redo writes one back: a write of `proofComment`, `proofSuggestion` or `dispatchAsk` steps that takes nothing from another record (it removes no span, as a creation over another record's mark does not since the three declare `excludes: ''`, or puts back what it removes, as upstream's suggestion restamp does), and `removeRecordMark`'s removal; any other removal of a record mark keeps its undo step (LEGION-363, LEGION-458); it is also biome-checked |
 | `src/record-mark-retype.ts` | Retyping a provisional record mark for the margin composer's Comment / Suggest / Ask switch, and the precise span-by-span removal behind the handle's `removeMark`, over text and inline atoms such as an image alike (LEGION-363); it is also biome-checked |
 | `src/record-mark-target.ts` | Which mark a click or a hover in the document names: of the mark spans around the target, the record mark whose range is the smallest, the innermost span's among marks the same size, since which of two overlapping record marks nests inside the other follows the order they were made in (LEGION-458); it is also biome-checked |
+| `src/read-only-directives.ts` | `remarkReadOnlyDirectives`, the headless engine's read-only stand-in for `remarkTypedBlocks`: a container directive the block schema refuses (or any, with no schema) is drawn in place as a paragraph of its opening line, its content formatted (the label paragraph dropped) and a paragraph of its closing fence when the source closes it, and the paragraph-line directive refusals are not applied, so a body only shown to a reader formats around a block Dispatch does not know instead of falling back whole to its raw source (INFRA-529). A typed block whose content would break its content rule, checked innermost first against the ProseMirror schema with `NodeType.createAndFill`, is drawn the same way, since Milkdown drops such a node and its text without throwing; it is also biome-checked |
 | `src/mermaid-svg.ts` | `@legion/proof-editor/mermaid`, the DOM half of a Mermaid diagram drawn outside the editor, for Dispatch's Markdown bodies (INFRA-528): `mermaidSvgElement` turns the markup `src/mermaid-render.ts` returns into an `<svg>` of the page's document with the editor's accessible name. It imports nothing from upstream, so a page imports it without beautiful-mermaid or ELK. `sanitizeMermaidSvg` is stricter than upstream's private `sanitizeSvg`, because a comment is written by any person or agent: markup that is not an SVG document throws `Invalid SVG output`; element names compare exactly, since XML names are case-sensitive, so an `<SVG>` root is refused and a `<RECT>` removed; only the elements beautiful-mermaid emits survive, every `on*` and `href` attribute goes (matched case-insensitively), every attribute but a `data-*` one that holds a CSS escape or a fetching function (`url(…)` other than a local `url(#id)`, `image-set(…)` and the like, which an author's `classDef` or `style` paint reaches) goes, and each `<style>` loses its Google Fonts `@import`; it is also biome-checked |
 | `src/mermaid-render.ts` | `@legion/proof-editor/mermaid-render`, the DOM-free half: `renderMermaidMarkup` calls upstream's `renderProofMermaidSvg`, so the validation, renderer, colours and spacing are the editor's, and returns the unsanitized markup, or throws upstream's reason for a source it refuses. It touches no DOM, so Dispatch runs it in a Web Worker, off the reader's main thread, where beautiful-mermaid's and ELK's cost grows without bound with the diagram; in a browser worker the caller hides `self` during the call, or ELK's bundled engine takes the worker for its own and refuses every flowchart (Dispatch's `features/refs/mermaid-render.worker.ts`); it is also biome-checked |
 | `src/tests/harness.ts` | The `bun test` registration the copied suites call instead of their own `test()` tally |
 
-Fifteen kinds of edit are allowed in the copied files, and no others: the import specifiers of
+Sixteen kinds of edit are allowed in the copied files, and no others: the import specifiers of
 upstream modules; `bun test` registration in the suites (`src/tests/harness.ts` replaces each
 file's own `test()` tally and its `process.exit` tail); `src/tests/headless-no-dom.test.ts`,
 whose entry named the fork's built `dist/headless.js` and now names `../lib-headless.js` — its
@@ -79,12 +80,15 @@ so a click on text two record marks cover opens the narrower one (LEGION-458);
 `src/dispatch-action-bar.ts`'s Comment / Suggest / Ask buttons and its exported
 `commentOnSelection` taking one path, `ActionBarController.act`, which marks nothing for an empty
 or stale range or a read-only view, with `src/lib.ts` exposing `commentOnSelection` on the handle
-for Dispatch's `Ctrl+Alt+M` (LEGION-680); and annotations, casts and assertions that make a file
-type-check, each of which erases before runtime (below).
+for Dispatch's `Ctrl+Alt+M` (LEGION-680); `src/block-schema.ts` exporting `typedBlockRefusal`,
+the refusal `visit` throws, so the read-only transform decides with the same rule, and
+`src/lib-headless.ts`'s `readOnly` option installing `remarkReadOnlyDirectives` from
+`./read-only-directives` in place of `remarkTypedBlocks` (INFRA-529); and annotations, casts and
+assertions that make a file type-check, each of which erases before runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
 24a5fc94 root:src/<file>`; every file in the copied-files table has that counterpart, and the
-only lines that differ should be the fifteen kinds.
+only lines that differ should be the sixteen kinds.
 
 `scripts/`, `tests/` and `upstream/` are legion's own. `scripts/` and `tests/` are linted and
 type-checked like any other package's; `upstream/` is generated, and Biome is off over it the
@@ -181,6 +185,6 @@ against the pinned commit stays readable. `assist` matters as much as the other 
 would reorder the copy's imports. `upstream/` is excluded the same way, for the same reason:
 it is tsc's output, not source. Anything legion writes here — `scripts/`, `tests/`,
 `src/collab-cursor-plugin.ts`, `src/editor-highlights.ts`, `src/editor/schema/uuid.ts`, `src/trailing-newline-input.ts`,
-`src/record-mark-history.ts`, `src/record-mark-retype.ts`, `src/record-mark-target.ts`, `src/mermaid-svg.ts`, `src/mermaid-render.ts`,
+`src/record-mark-history.ts`, `src/record-mark-retype.ts`, `src/record-mark-target.ts`, `src/read-only-directives.ts`, `src/mermaid-svg.ts`, `src/mermaid-render.ts`,
 `src/tests/harness.ts` — follow the
 repo's conventions and are checked.

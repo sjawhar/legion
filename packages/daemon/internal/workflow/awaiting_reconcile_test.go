@@ -73,12 +73,12 @@ func TestDecideAwaitsTable(t *testing.T) {
 		{"a person who already acted after the hand-back", func(v *awaitView) { v.Asks[0].PersonSeq = 7 }, actTellInPlace, "already acted"},
 		{"a person who acted before it", func(v *awaitView) { v.Asks[0].PersonSeq = 4 }, actEnter, "awaiting an answer"},
 		{"a person's answer of the gate's approval request after it", func(v *awaitView) {
-			v.GateArtifact = gateDoc
+			v.Gate = &record.DesignGate{Issue: "LEGION-208", ArtifactID: gateDoc, LatestVersion: 1}
 			v.Asks = append(v.Asks, record.RootAsk{Issue: "LEGION-208", Ask: "ask-approval", Kind: record.AskApproval, Artifact: gateDoc, Seq: 7,
 				WaitingOn: "human", WaitingOnSeq: 4, ClosedBy: record.ClosedByPerson, ClosedSeq: 7, PersonAnswerSeq: 7})
 		}, actEnter, "awaiting an answer"},
 		{"a person's answer of another document's approval request after it", func(v *awaitView) {
-			v.GateArtifact = gateDoc
+			v.Gate = &record.DesignGate{Issue: "LEGION-208", ArtifactID: gateDoc, LatestVersion: 1}
 			v.Asks = append(v.Asks, record.RootAsk{Issue: "LEGION-208", Ask: "ask-plan", Kind: record.AskApproval, Artifact: "artifact-plan", Seq: 7,
 				WaitingOn: "human", WaitingOnSeq: 4, ClosedBy: record.ClosedByPerson, ClosedSeq: 7, PersonAnswerSeq: 7})
 		}, actTellInPlace, "already acted"},
@@ -100,6 +100,56 @@ func TestDecideAwaitsTable(t *testing.T) {
 			}
 			if got.Act == actEnter && (got.Waiting.Since.Seq != view.Root.DeclaredSeq || !got.Waiting.Since.At.Equal(view.Root.DeclaredAt)) {
 				t.Fatalf("the wait begins at %+v, want the newest hand-back %d at %s", got.Waiting.Since, view.Root.DeclaredSeq, view.Root.DeclaredAt)
+			}
+		})
+	}
+}
+
+// A root waits on its design gate when the gate is registered, armed and closed and the approval
+// request it names is with the person: the wait is on the gate at its latest version, on its
+// document, ahead of any question, and begins at the newest hand-back. A person's act on the
+// request is told in place like any act; a review the gate holds is not an act told here (the
+// daemon's own notice told it, a handout), and an open gate, a gate off, or a request on the
+// agent's turn asks the person for nothing.
+func TestDecideAwaitsOnTheGate(t *testing.T) {
+	approved := 4
+	gateView := func() awaitView {
+		view := awaitRootView()
+		view.Asks = []record.RootAsk{{Issue: "LEGION-208", Ask: "ask-approval", Kind: record.AskApproval, Artifact: "artifact-208", Open: true, WaitingOn: "human", Seq: 5}}
+		view.Gate = &record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4}
+		view.Armed = true
+		return view
+	}
+	for _, tc := range []struct {
+		name string
+		view func(*awaitView)
+		want act
+		why  string
+	}{
+		{"the request with the person", func(*awaitView) {}, actEnter, "spec version 4 is awaiting a person's review"},
+		{"the request beside an older question", func(v *awaitView) {
+			v.Asks = append(v.Asks, record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, Open: true, WaitingOn: "human", ByTree: true, Seq: 3})
+		}, actEnter, "spec version 4"},
+		{"the request on the agent's turn", func(v *awaitView) { v.Asks[0].WaitingOn = "agent" }, actTakeIn, "still with the person"},
+		{"the request of a gate already open", func(v *awaitView) { v.Gate.ApprovedVersion = &approved }, actTakeIn, "still with the person"},
+		{"the request with the design gate off", func(v *awaitView) { v.Armed = false }, actTakeIn, "still with the person"},
+		{"an approval request of another document", func(v *awaitView) { v.Asks[0].Artifact = "artifact-other" }, actTakeIn, "still with the person"},
+		{"a person's reply on the request after the hand-back", func(v *awaitView) { v.Asks[0].PersonSeq = 7 }, actTellInPlace, "already acted"},
+		{"a changes request the gate already told after the hand-back", func(v *awaitView) {
+			reason := "say more"
+			v.Gate.ToldChangesVersion, v.Gate.ToldChangesReason, v.Gate.ToldChangesMark = &approved, reason, record.EventMark{Seq: 7}
+		}, actEnter, "spec version 4"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			view := gateView()
+			tc.view(&view)
+			got := decideAwait(view)
+			if got.Act != tc.want || !strings.Contains(got.Why, tc.why) {
+				t.Fatalf("decideAwait = %+v, want act %v because %q", got, tc.want, tc.why)
+			}
+			if got.Act == actEnter && (got.Waiting.GateVersion != 4 || got.Waiting.Artifact != "artifact-208" || got.Waiting.Ask != "" ||
+				got.Waiting.Since.Seq != view.Root.DeclaredSeq) {
+				t.Fatalf("the wait = %+v, want the gate at version 4 of artifact-208 from the newest hand-back %d", got.Waiting, view.Root.DeclaredSeq)
 			}
 		})
 	}
@@ -244,5 +294,57 @@ func TestTheResumeTaskUnderNoDesignGateAdvisesNoApproval(t *testing.T) {
 	task := resumeTask("LEGION-208", waiting, gate, nil, false)
 	if strings.Contains(task, "register_gate") {
 		t.Fatalf("resume task %q, want no approval advice with the design gate off", task)
+	}
+}
+
+// The task resuming a root that waited on its gate names a newer version that answered it, lists
+// the closed gate's approval request with the person or on the architect's turn, and advises a
+// hand-back — the request's own thread only while the request is open, re-requesting approval and
+// registering it otherwise.
+func TestTheResumeTaskOfAGateWait(t *testing.T) {
+	answered := time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
+	gate := &record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 5}
+	for _, tc := range []struct {
+		name    string
+		waiting record.Awaiting
+		asks    []record.RootAsk
+		want    []string
+		not     []string
+	}{
+		{
+			name:    "a newer version, the request on the architect's turn",
+			waiting: record.Awaiting{GateVersion: 5, Artifact: "artifact-208", AnsweredAt: &answered, AnsweredBy: record.AnsweredByVersion, AnsweredDetail: "version 5"},
+			asks:    []record.RootAsk{{Issue: "LEGION-208", Ask: "ask-approval", Kind: record.AskApproval, Artifact: "artifact-208", Open: true, WaitingOn: "agent", Seq: 9}},
+			want: []string{"A newer version of your spec on LEGION-208, version 5, handed the approval request back to you",
+				"Waiting on you: ask ask-approval", "register that version with register_gate", "or answer in the request's thread", "returns the slot"},
+		},
+		{
+			name:    "a person's answer of a question, the request still with the person",
+			waiting: record.Awaiting{Ask: "ask-q", AnsweredAt: &answered, AnsweredBy: record.AnsweredByAsk, AnsweredDetail: "ask-q"},
+			asks: []record.RootAsk{{Issue: "LEGION-208", Ask: "ask-approval", Kind: record.AskApproval, Artifact: "artifact-208", Open: true, WaitingOn: "human", Seq: 9},
+				{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, ByTree: true, Seq: 10}},
+			want: []string{"Still with the person: the approval request for spec version 5", "or request approval again and register that version with register_gate"},
+		},
+		{
+			name:    "a changes request that closed the request",
+			waiting: record.Awaiting{Ask: "ask-approval", AnsweredAt: &answered, AnsweredBy: record.AnsweredByChanges, AnsweredDetail: "version 5: \"say more\""},
+			asks:    []record.RootAsk{{Issue: "LEGION-208", Ask: "ask-approval", Kind: record.AskApproval, Artifact: "artifact-208", Seq: 11, ClosedSeq: 11, ClosedBy: record.ClosedByPerson}},
+			want:    []string{"requested changes", "request approval again and register that version with register_gate"},
+			not:     []string{"request's thread", "Still with the person"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			task := resumeTask("LEGION-208", tc.waiting, gate, tc.asks, true)
+			for _, want := range tc.want {
+				if !strings.Contains(task, want) {
+					t.Fatalf("resume task %q, want it to name %q", task, want)
+				}
+			}
+			for _, not := range tc.not {
+				if strings.Contains(task, not) {
+					t.Fatalf("resume task %q, want no %q", task, not)
+				}
+			}
+		})
 	}
 }

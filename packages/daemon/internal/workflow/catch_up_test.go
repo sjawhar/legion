@@ -126,10 +126,8 @@ func lastCatchUp(t *testing.T, pool *pgxpool.Pool) record.CatchUp {
 // An issue in accepting waits for its tree architect alone: no worker runs there, and the one
 // phase-finished notice that moved it there is ended undelivered when the architect's claim has
 // failed (the outbox's notice), so a retried architect was never told. Its catch-up is its only
-// wake, and it names every issue of the tree in accepting whose sign-off would be accepted now:
-// one with nothing beneath it still in the workflow. An issue with a child still running is not
-// named, since its sign-off is refused until that child leaves (signOff), and the child's close
-// tells the architect then.
+// wake, and it names every issue of the tree in accepting, a root whose children still run among
+// them: nothing beneath an issue holds its acceptance (signOff).
 func TestACatchUpNamesEveryIssueWaitingForTheArchitectsAcceptance(t *testing.T) {
 	const base = "the tree of LEGION-1 at generation 1 as the daemon records it now; start or resume it as your role says"
 	awaiting := func(keys string) string {
@@ -143,9 +141,9 @@ func TestACatchUpNamesEveryIssueWaitingForTheArchitectsAcceptance(t *testing.T) 
 	}{
 		{"the root accepting, its child done", phase.Accepting, phase.Done, "needs_review", "done", awaiting("LEGION-1")},
 		{"the root accepting, its child parked in backlog", phase.Accepting, phase.Done, "needs_review", "backlog", awaiting("LEGION-1")},
-		{"the root accepting, its child still implementing", phase.Accepting, phase.Implementing, "needs_review", "in_progress", base},
+		{"the root accepting, its child still implementing", phase.Accepting, phase.Implementing, "needs_review", "in_progress", awaiting("LEGION-1")},
 		{"a child accepting while the root implements", phase.Implementing, phase.Accepting, "in_progress", "needs_review", awaiting("LEGION-2")},
-		{"the root and its child both accepting", phase.Accepting, phase.Accepting, "needs_review", "needs_review", awaiting("LEGION-2")},
+		{"the root and its child both accepting", phase.Accepting, phase.Accepting, "needs_review", "needs_review", awaiting("LEGION-1, LEGION-2")},
 		{"the root awaiting its merge", phase.AwaitingMerge, phase.Done, "retro", "done", base},
 		{"nothing accepting", phase.Reviewing, phase.Testing, "needs_review", "testing", base},
 	} {

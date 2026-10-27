@@ -4,6 +4,14 @@
 
 ### Added
 
+- The `dispatch` command this plugin ships reads one block of a document:
+  `dispatch read --ref dispatch://KEY/spec#b-<id>` (or an issue's or a project's document with
+  `#b-<id>`, optionally pinned to a version with `@v<N>`) prints the block, the version its text
+  last changed in, its text, for a pinned reference its text at that version and whether it
+  changed or was removed since, and what cites it. `dispatch read --help` lists the block forms
+  and the id's percent-encoding, `dispatch ask --help` takes a block reference, and
+  `dispatch doc-edit --help` says a block id past 256 bytes is stored but its block is no graph
+  node.
 - The `dispatch` skill never claims an issue with the `legion` label unless the session is a
   Legion role of its tree, even when its claim reads `not running`: the Legion daemon suspends a
   root's architect while the root waits on a person, and taking that claim takes the tree out of
