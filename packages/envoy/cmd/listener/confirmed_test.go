@@ -125,7 +125,7 @@ func publishThrough(d *listenerDeps, body string) (*httptest.ResponseRecorder, t
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	started := time.Now()
-	publishHandler(d).ServeHTTP(recorder, request)
+	publishHandler(d, logging.New("test")).ServeHTTP(recorder, request)
 	return recorder, time.Since(started)
 }
 
@@ -230,9 +230,10 @@ func TestPublishRouteAnswersReceiptTimeoutWhenTheHolderNeverConfirms(t *testing.
 }
 
 // A role-claim read that cannot finish, the server having stopped answering under a live
-// connection, ends the send at its window with delivery_failed rather than holding the sender
-// past it.
-func TestPublishRouteAnswersDeliveryFailedWhenTheClaimReadStalls(t *testing.T) {
+// connection, ends the send's first resolution at sendRequestBudget with the answer GET
+// /v1/roles/<role> gives the same stalled read - the bus-unavailable 503 with Retry-After: 1,
+// naming the read - rather than holding the sender past its window.
+func TestPublishRouteAnswersBusUnavailableWhenTheClaimReadStalls(t *testing.T) {
 	srv, uri := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
 	if err != nil {
@@ -255,16 +256,18 @@ func TestPublishRouteAnswersDeliveryFailedWhenTheClaimReadStalls(t *testing.T) {
 	thaw := srv.Freeze(t)
 	t.Cleanup(thaw)
 	recorder, elapsed := publishThrough(deps, `{"topic":"`+contracts.RoleTopicPrefix+role+`","message":"through a frozen hub"}`)
-	if recorder.Code != http.StatusGatewayTimeout || elapsed > 4500*time.Millisecond {
-		t.Fatalf("status %d after %s, want 504 inside 4.5s; body %s", recorder.Code, elapsed, recorder.Body.String())
+	if recorder.Code != http.StatusServiceUnavailable || elapsed < sendRequestBudget || elapsed > 4500*time.Millisecond {
+		t.Fatalf("status %d after %s, want 503 at sendRequestBudget (%s) and inside 4.5s; body %s", recorder.Code, elapsed, sendRequestBudget, recorder.Body.String())
 	}
-	var failure roleSendFailure
-	if err := json.Unmarshal(recorder.Body.Bytes(), &failure); err != nil {
+	if got := recorder.Header().Get("Retry-After"); got != "1" {
+		t.Fatalf("Retry-After = %q, want 1", got)
+	}
+	var refusal apiError
+	if err := json.Unmarshal(recorder.Body.Bytes(), &refusal); err != nil {
 		t.Fatalf("decode the answer %s: %v", recorder.Body.String(), err)
 	}
-	if failure.Reason != "delivery_failed" || failure.Holder != "" || failure.Attempts != 0 || failure.EventID == "" ||
-		!strings.HasPrefix(failure.DedupeKey, "publish.") {
-		t.Fatalf("answer %s, want delivery_failed with no holder resolved and nothing forwarded", recorder.Body.String())
+	if !strings.HasPrefix(refusal.Error, busUnansweredPrefix) || !strings.Contains(refusal.Error, "read role "+role+"'s claim") {
+		t.Fatalf("answer %s, want it to begin %q and name the claim read", recorder.Body.String(), busUnansweredPrefix)
 	}
 }
 

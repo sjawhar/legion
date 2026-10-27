@@ -182,7 +182,7 @@ func replayHandler(d *listenerDeps) http.HandlerFunc {
 			Subjects: make([]replaySubjectResult, 0, len(body.Subjects)),
 		}
 
-		followed, err := d.replayFollowed(body.SessionID, body.Subjects)
+		followed, err := d.replayFollowed(ctx, body.SessionID, body.Subjects)
 		if err != nil {
 			writeNATSError(w, err, http.StatusServiceUnavailable, err.Error())
 			return
@@ -230,14 +230,15 @@ func replaySessionToken(id string) bool {
 // is, whatever the interest store holds, since /v1/interests/subscribe stores any topic but one
 // reaching a private stream subject (bus.ReachesPrivateStreamSubject), and an interest written
 // before or past that guard may name anything. The store is read only when some requested subject
-// could pass as an interest; a session it holds no record of follows only its agent subject.
-func (d *listenerDeps) replayFollowed(sessionID string, subjects []replaySubjectRequest) (func(string) bool, error) {
+// could pass as an interest, within ctx (store.Registry.Get); a session it holds no record of
+// follows only its agent subject.
+func (d *listenerDeps) replayFollowed(ctx context.Context, sessionID string, subjects []replaySubjectRequest) (func(string) bool, error) {
 	agentSubject := contracts.AgentSubject(sessionID)
 	var topics []string
 	if slices.ContainsFunc(subjects, func(requested replaySubjectRequest) bool {
 		return requested.Subject != agentSubject && bus.SharedStreamTopic(requested.Subject)
 	}) {
-		interest, err := d.registry.Get(sessionID)
+		interest, err := d.registry.Get(ctx, sessionID)
 		if err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
 			return nil, err
 		}

@@ -107,7 +107,9 @@ const (
 	sendDeliveryFailed sendOutcome = "delivery_failed"
 	// sendCapability is a role holder that cannot take the payload's delivery mode, answered 403.
 	sendCapability sendOutcome = "capability"
-	// sendFailed is a send refused as writeNATSError maps it, or a role-claim read that failed.
+	// sendFailed is a send refused as requestRecord.refuseBusUnavailable maps it (a forward or
+	// publish NATS refuses or the grant denies), or a role send whose first resolution of the
+	// holder failed, answered as GET /v1/roles/<role> answers it.
 	sendFailed sendOutcome = "failed"
 	// sendNotConfirmed is an ad-hoc topic send that published and that some recipient did not
 	// confirm.
@@ -131,36 +133,6 @@ func (o sendOutcome) deliveryStatus() string {
 	}
 }
 
-// readBefore runs read on its own goroutine and waits for its answer until ctx ends. The registry's
-// reads take no context (nats.go's KV read waits out the JetStream MaxWait, and roleHolderSession
-// gives its bucket read roleHolderReadTimeout), so a read a send's deadline cuts short is left to
-// finish on its own and its answer is dropped; what it changes meanwhile, such as a lapsed claim it
-// releases, is what the same read changes for any other caller. ended is ctx's error when ctx ended
-// first; otherwise value and err are the read's own answer, so a caller tells a read that failed
-// from a send that ran out of time.
-func readBefore[T any](ctx context.Context, read func() (T, error)) (value T, err error, ended error) {
-	if ended := ctx.Err(); ended != nil {
-		return value, nil, ended
-	}
-	answered := make(chan struct {
-		value T
-		err   error
-	}, 1)
-	go func() {
-		value, err := read()
-		answered <- struct {
-			value T
-			err   error
-		}{value, err}
-	}()
-	select {
-	case got := <-answered:
-		return got.value, got.err, nil
-	case <-ctx.Done():
-		return value, nil, ctx.Err()
-	}
-}
-
 // receiptWindow is the receipt wait of one forward: roleReceiptTimeout, or what is left of the send
 // when that is less.
 func receiptWindow(ctx context.Context) time.Duration {
@@ -176,8 +148,9 @@ func pauseBeforeRetry(ctx context.Context) bool {
 
 // forwardRefused reports whether a forward failed in a way another attempt repeats: NATS refuses
 // the envelope or subject however often it is sent (bus.ErrRefused), or the listener's grant does
-// not allow the subject (bus.ErrPublishDenied). A role send answers it at once, as writeNATSError
-// maps it; an ad-hoc topic send stops sending to that recipient (confirmTopicRecipient).
+// not allow the subject (bus.ErrPublishDenied). A role send answers it at once, as
+// requestRecord.refuseBusUnavailable maps it (413 or 400 for a refusal, 403 for a denial); an
+// ad-hoc topic send stops sending to that recipient (confirmTopicRecipient).
 func forwardRefused(err error) bool {
 	return errors.Is(err, bus.ErrRefused) || errors.Is(err, bus.ErrPublishDenied)
 }
@@ -205,9 +178,11 @@ func (d *listenerDeps) confirm(dedupeKey, sessionID string) {
 // lane: it forwards the envelope to the holder's agent subject itself and answers once the holder's
 // receipt arrived, or with the failure once publishDeliveryWindow from arrived has passed, so its
 // sender learns whether the message was taken. It publishes no delivery exception: the sender has
-// the answer.
+// the answer. Every answer goes through record, the route's one line per request
+// (request_record.go), and is then settled: counted, and logged on the send's own delivery line.
 type roleSend struct {
 	w        http.ResponseWriter
+	record   *requestRecord
 	d        *listenerDeps
 	item     contracts.Envelope
 	role     string
@@ -216,9 +191,9 @@ type roleSend struct {
 	attempts int
 }
 
-// settle counts and logs the send's outcome, the one line a send writes, once its answer is written.
-// It counts and logs as delivery_status the label the role lane gives the same outcome, and logs
-// the outcome itself as reason.
+// settle counts and logs the send's outcome, the one delivery line a send writes, once its answer
+// is written. It counts and logs as delivery_status the label the role lane gives the same outcome,
+// and logs the outcome itself as reason.
 func (s *roleSend) settle(outcome sendOutcome) {
 	s.d.delivery.messagesDelivered.Inc([2]string{"delivery_status", outcome.deliveryStatus()})
 	level := slog.LevelWarn
@@ -235,15 +210,16 @@ func (s *roleSend) settle(outcome sendOutcome) {
 
 // delivered answers 200 with the envelope and the holder that took it.
 func (s *roleSend) delivered(outcome sendOutcome) {
-	writeJSON(s.w, http.StatusOK, publishResponse{Envelope: s.item, Holder: s.holder})
+	s.record.holder = s.holder
+	s.record.accept(s.w, publishResponse{Envelope: s.item, Holder: s.holder})
 	s.settle(outcome)
 }
 
 // noHolder answers writeRoleHolderError's 404 (unclaimed or holder_lapsed) for a role with no live
-// claim, which the Legion daemon reads as notify.ErrNoHolder. The role lane counts an unclaimed
-// role skipped and a lapsed holder failed.
+// claim, which the Legion daemon reads as notify.ErrNoHolder, recorded role_unclaimed or
+// role_lapsed. The role lane counts an unclaimed role skipped and a lapsed holder failed.
 func (s *roleSend) noHolder(result roleHolderResult) {
-	writeRoleHolderError(s.w, s.role, result)
+	s.record.refuseRoleHolder(s.w, s.role, result)
 	outcome := sendHolderLapsed
 	if result.state == roleHolderUnclaimed {
 		outcome = sendUnclaimed
@@ -251,16 +227,42 @@ func (s *roleSend) noHolder(result roleHolderResult) {
 	s.settle(outcome)
 }
 
-// failed answers a failure that is not the window's end, as writeNATSError maps it.
-func (s *roleSend) failed(err error) {
-	writeNATSError(s.w, err, http.StatusInternalServerError, err.Error())
+// unresolved answers a first resolution of the holder that did not resolve, as GET
+// /v1/roles/<role> answers it: a claim that moved under the resolution (errRoleHolderChanged) is
+// the 503 that names the race, a claim record no read can decode (store.ErrMalformedRoleClaim) the
+// 500 that names it, and any other failure - a read that did not answer within its cap or
+// sendRequestBudget among them - the bus-unavailable 503, or the 413 or 400 a refused key gets.
+// Each is recorded under its own outcome.
+func (s *roleSend) unresolved(err error) {
+	switch {
+	case errors.Is(err, errRoleHolderChanged):
+		s.record.refuseRoleHolderChanged(s.w, s.role)
+	case errors.Is(err, store.ErrMalformedRoleClaim):
+		s.record.refuseRoleClaimUnreadable(s.w, s.role, err)
+	default:
+		s.record.refuseBusUnavailable(s.w, err)
+	}
 	s.settle(sendFailed)
 }
 
-// timedOut answers the 504 of a send whose window ended without a receipt.
+// refused answers a forward NATS refuses however often it is sent, or one the listener's grant
+// denies (forwardRefused), as requestRecord.refuseBusUnavailable maps it.
+func (s *roleSend) refused(err error) {
+	s.record.holder = s.holder
+	s.record.refuseBusUnavailable(s.w, err)
+	s.settle(sendFailed)
+}
+
+// timedOut answers the 504 of a send whose window ended without a receipt, recorded under its
+// reason.
 func (s *roleSend) timedOut(lastForward error) {
 	outcome := unconfirmedReason(lastForward)
-	writeJSON(s.w, http.StatusGatewayTimeout, roleSendFailure{
+	recorded := outcomeDeliveryFailed
+	if outcome == sendReceiptTimeout {
+		recorded = outcomeReceiptTimeout
+	}
+	s.record.holder = s.holder
+	s.record.refuseWith(s.w, http.StatusGatewayTimeout, recorded, roleSendFailure{
 		Error: fmt.Sprintf("role %s: event %s was not confirmed by its holder %s within %s (%s)",
 			s.role, s.item.EventID, cmp.Or(s.holder, "(none)"), publishDeliveryWindow, outcome),
 		Reason:    outcome,
@@ -276,7 +278,8 @@ func (s *roleSend) timedOut(lastForward error) {
 // entry is entry, by beforeForward, the rules the role lane applies before it forwards, and reports
 // whether it answered: an echo (the source session holds the role) or a holder that already
 // confirmed this dedupe key through the route, both answered 200 with nothing forwarded; a holder
-// that cannot take the payload's delivery mode, answered 403 with the refusal sendHandler gives.
+// that cannot take the payload's delivery mode, answered 403 with the refusal sendHandler gives,
+// recorded capability_refused as sendHandler records it.
 //
 // The dedupe check reads the route's own record (listenerDeps.confirmed), not the delivery
 // handlers' cache: agentSubjectDelivery and fanoutDelivery record a key there for a self-subscribed
@@ -292,7 +295,8 @@ func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
 	case forwardRepeat:
 		s.delivered(sendDedupe)
 	default:
-		writeJSON(s.w, http.StatusForbidden, capabilityRefusal{
+		s.record.holder = s.holder
+		s.record.refuseWith(s.w, http.StatusForbidden, outcomeCapabilityRefused, capabilityRefusal{
 			Error:  verdict.refusal,
 			Reason: sendCapability,
 			Holder: s.holder,
@@ -302,31 +306,29 @@ func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
 	return true
 }
 
-// sendToRole delivers a role message through the publish route. The first resolution reads the
-// holder as an HTTP lookup does (resolveRoleHolder with registered) and gives its answers: 404
-// unclaimed or holder_lapsed, a read error's 500, so a holder that exists but has not heartbeated
-// lately gets attempts rather than a 404. The first attempt forwards to that holder when its
-// session entry passes role delivery's freshness test (laneHolderFresh), without reading the claim
-// again; every other attempt resolves the holder again by role delivery's rule (resolveRoleHolder
-// with laneHolderFresh), so a holder that relaunched under a new session between attempts gets the
-// next one. On those attempts an unclaimed role, or a lapsed holder whose claim was released or
-// already absent, is answered 404 as the first resolution answers it; a lapsed holder whose claim
-// was retained, a read that failed and a claim that churned fail that attempt only. Each attempt
-// forwards the same envelope, under the role forward's dedupe key, with a receipt window of what is
-// left of the send, at most roleReceiptTimeout. Every forward carries the same Nats-Msg-Id
-// (bus.Client.RequestCoreTo), so the stream, which captures agent subjects, keeps one copy however
-// many attempts there are.
-func sendToRole(ctx context.Context, w http.ResponseWriter, d *listenerDeps, item contracts.Envelope, role string, arrived time.Time) {
-	send := &roleSend{w: w, d: d, item: item, role: role, arrived: arrived}
-	first, err, ended := readBefore(ctx, func() (roleHolderResult, error) {
-		return resolveRoleHolder(d.registry, d.sessions, role, registered)
-	})
-	if ended != nil {
-		send.timedOut(nil)
-		return
-	}
+// sendToRole delivers a role message through the publish route, answering through record. The
+// first resolution reads the holder as an HTTP lookup does (resolveRoleHolder with registered),
+// within sendRequestBudget of arrived as GET /v1/roles/<role> reads it, and gives its answers: 404
+// unclaimed or holder_lapsed, and for a resolution that failed the lookup's 503 or 500 (unresolved),
+// so a holder that exists but has not heartbeated lately gets attempts rather than a 404. The first
+// attempt forwards to that holder when its session entry passes role delivery's freshness test
+// (laneHolderFresh), without reading the claim again; every other attempt resolves the holder
+// again by role delivery's rule (resolveRoleHolder with laneHolderFresh), so a holder that
+// relaunched under a new session between attempts gets the next one. On those attempts an
+// unclaimed role, or a lapsed holder whose claim was released or already absent, is answered 404 as
+// the first resolution answers it; a lapsed holder whose claim was retained, a read that failed and
+// a claim that churned fail that attempt only. Each attempt forwards the same envelope, under the
+// role forward's dedupe key, with a receipt window of what is left of the send, at most
+// roleReceiptTimeout. Every forward carries the same Nats-Msg-Id (bus.Client.RequestCoreTo), so the
+// stream, which captures agent subjects, keeps one copy however many attempts there are. Every read
+// takes ctx, the send's window, so none outlasts it: a send whose window ends is answered 504.
+func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecord, d *listenerDeps, item contracts.Envelope, role string, arrived time.Time) {
+	send := &roleSend{w: w, record: record, d: d, item: item, role: role, arrived: arrived}
+	firstCtx, cancelFirst := context.WithDeadline(ctx, arrived.Add(sendRequestBudget))
+	first, err := resolveRoleHolder(firstCtx, d.registry, d.sessions, role, registered)
+	cancelFirst()
 	if err != nil {
-		send.failed(err)
+		send.unresolved(err)
 		return
 	}
 	if first.state != roleHolderLive {
@@ -334,14 +336,7 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, d *listenerDeps, ite
 		return
 	}
 	send.holder = first.holder
-	sender, _, ended := readBefore(ctx, func() (*contracts.EnvelopeSender, error) {
-		return senderStamp(d.registry, d.sessions, item.SourceSession), nil
-	})
-	if ended != nil {
-		send.timedOut(nil)
-		return
-	}
-	send.item.Sender = sender
+	send.item.Sender = senderStamp(ctx, d.registry, d.sessions, item.SourceSession)
 	if send.settledBeforeForward(first.entry) {
 		return
 	}
@@ -352,10 +347,9 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, d *listenerDeps, ite
 	resolved := first
 	for pass := 0; ; pass++ {
 		if pass > 0 || !laneHolderFresh(first.entry) {
-			resolved, err, ended = readBefore(ctx, func() (roleHolderResult, error) {
-				return resolveRoleHolder(d.registry, d.sessions, role, laneHolderFresh)
-			})
-			if ended != nil {
+			resolved, err = resolveRoleHolder(ctx, d.registry, d.sessions, role, laneHolderFresh)
+			if err != nil && ctx.Err() != nil {
+				// The window ended under the resolution: what it read says nothing more.
 				break
 			}
 		}
@@ -391,7 +385,7 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, d *listenerDeps, ite
 				return
 			}
 			if forwardRefused(err) {
-				send.failed(err)
+				send.refused(err)
 				return
 			}
 			lastForward = err
@@ -477,12 +471,13 @@ func confirmTopicRecipient(ctx context.Context, d *listenerDeps, item contracts.
 // copies drops the second by its event_id.
 //
 // A send whose own publish on the topic did not reach NATS answers 504 publish_failed, whether the
-// window ended first (the sender-stamp read or the publish's reconnect wait used it up) or the
-// publish failed at once on a connection that is down, so its status does not depend on how soon
-// the failure came; nothing was forwarded, and with no recipient the send is answered 200 only once
-// the topic was published. A publish NATS refuses however often it is sent (forwardRefused) is the
-// sender's input or the grant's, answered as writeNATSError maps it.
-func sendToTopic(ctx context.Context, w http.ResponseWriter, d *listenerDeps, item contracts.Envelope, arrived time.Time) {
+// window ended first (the publish's reconnect wait used it up) or the publish failed at once on a
+// connection that is down, so its status does not depend on how soon the failure came; nothing was
+// forwarded, and with no recipient the send is answered 200 only once the topic was published. A
+// publish NATS refuses however often it is sent (forwardRefused) is the sender's input or the
+// grant's, answered as requestRecord.refuseBusUnavailable maps it. Every answer goes through
+// record, the route's one line per request, under the outcome it answers.
+func sendToTopic(ctx context.Context, w http.ResponseWriter, record *requestRecord, d *listenerDeps, item contracts.Envelope, arrived time.Time) {
 	recipients := topicRecipients(d, item)
 	settle := func(outcome sendOutcome, delivered []string, undelivered []undeliveredRecipient, attrs ...slog.Attr) {
 		switch outcome {
@@ -507,33 +502,25 @@ func sendToTopic(ctx context.Context, w http.ResponseWriter, d *listenerDeps, it
 		}, attrs...)
 		d.delivery.logger.DeliveryLog(level, "listener publish topic send", "", item.Topic, item.EventID, outcome.deliveryStatus(), attrs...)
 	}
-	notPublished := func(cause error) {
-		writeJSON(w, http.StatusGatewayTimeout, topicPublishFailure{
-			Error:     fmt.Sprintf("%s was not published within %s: %v; no session was sent it", item.Topic, publishDeliveryWindow, cause),
-			Reason:    sendPublishFailed,
-			EventID:   item.EventID,
-			DedupeKey: item.DedupeKey,
-		})
-		settle(sendPublishFailed, nil, nil, slog.String("error", cause.Error()))
-	}
-	sender, _, ended := readBefore(ctx, func() (*contracts.EnvelopeSender, error) {
-		return senderStamp(d.registry, d.sessions, item.SourceSession), nil
-	})
-	if ended != nil {
-		notPublished(fmt.Errorf("reading the sender's session: %w", ended))
-		return
-	}
-	item.Sender = sender
+	// The sender stamp's read takes no more of the window than senderStampReadTimeout, and a read
+	// that does not answer only leaves the stamp short: the publish below meets the same bus.
+	item.Sender = senderStamp(ctx, d.registry, d.sessions, item.SourceSession)
 	// The topic's own core publish waits for a reconnecting connection as long as the send's window
 	// lasts and no longer, so a hub that is down is answered inside the window, never after the
 	// bus's own reconnect wait, which outlasts envoy-client's 5 s attempt.
 	if err := d.client.PublishCoreContext(ctx, item.Topic, item); err != nil {
 		if forwardRefused(err) {
-			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
+			record.refuseBusUnavailable(w, err)
 			settle(sendFailed, nil, nil, slog.String("error", err.Error()))
 			return
 		}
-		notPublished(err)
+		record.refuseWith(w, http.StatusGatewayTimeout, outcomePublishFailed, topicPublishFailure{
+			Error:     fmt.Sprintf("%s was not published within %s: %v; no session was sent it", item.Topic, publishDeliveryWindow, err),
+			Reason:    sendPublishFailed,
+			EventID:   item.EventID,
+			DedupeKey: item.DedupeKey,
+		})
+		settle(sendPublishFailed, nil, nil, slog.String("error", err.Error()))
 		return
 	}
 	outcomes := make([]sendOutcome, len(recipients))
@@ -560,7 +547,7 @@ func sendToTopic(ctx context.Context, w http.ResponseWriter, d *listenerDeps, it
 		for i, recipient := range undelivered {
 			named[i] = fmt.Sprintf("%s (%s)", recipient.SessionID, recipient.Reason)
 		}
-		writeJSON(w, http.StatusGatewayTimeout, topicSendFailure{
+		record.refuseWith(w, http.StatusGatewayTimeout, outcomeNotConfirmed, topicSendFailure{
 			Error: fmt.Sprintf("%d of %d sessions subscribed to %s did not confirm event %s within %s: %s",
 				len(undelivered), len(recipients), item.Topic, item.EventID, publishDeliveryWindow, strings.Join(named, ", ")),
 			Reason:      sendNotConfirmed,
@@ -572,6 +559,6 @@ func sendToTopic(ctx context.Context, w http.ResponseWriter, d *listenerDeps, it
 		settle(sendNotConfirmed, delivered, undelivered)
 		return
 	}
-	writeJSON(w, http.StatusOK, publishResponse{Envelope: item})
+	record.accept(w, publishResponse{Envelope: item})
 	settle(sendDelivered, delivered, undelivered)
 }

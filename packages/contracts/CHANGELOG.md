@@ -4,6 +4,10 @@
 
 ### Added
 
+- The event `artifact.human_edited` and its payload, `ArtifactHumanEditedEventPayload` and
+  `ArtifactHumanEditedEventPayloadSchema`: `artifact_id`, `name`, `from_version`, `to_version`,
+  `editors`, `diff` and `diff_truncated`. Dispatch sends it once a document has been quiet for 30
+  seconds after a person's last browser edit.
 - Blocks of a Dispatch document as graph nodes: `GraphNode.kind` gains `"block"`, whose node
   carries `block_id`, `document`, `changed_version` and `changed_at`, and, on the node a reference
   read names, `text` and, for a reference pinned to a version (`#b-<id>@v<N>`), `pin` (`BlockPin`:
@@ -26,6 +30,12 @@
   past them is its document, and one whose document or item is past them names nothing.
   `parseBlockFragment`'s `pin` is N's decimal digits as a string, so no pin past 2^53 is rounded.
   `DISPATCH_TEXT_REFERENCES` gains the block, pin and bound rows both readers of text are held to.
+- Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
+  and `parent_version`, and `dispatch read` prints them on a `Node:` line. `GraphNode` gains them,
+  optional because a server older than them omits them (`changed_at` was a block's alone and may
+  now be `null`), and `GraphNodeParent` (`kind`, `id`, `ref?`) is `parent`'s type: `id` is the
+  parent node's own id and `ref` is absent when the parent has no reference. An actor list the
+  server never recorded is `[]`, any other fact `null`.
 - Daemon API contract 40: `LEGION_WORKFLOW_PHASES` gains `awaiting_person`, after `admitted`, a
   root that gave its admission slot up while its architect waits on a person's answer, and the
   state issue view gains `waitingOn`, present only in that phase: `kind: "ask"` with the question's
@@ -35,7 +45,6 @@
   not always a person's) once the wait was answered, the two always together. `LEGION_PHASE_BACKWARD_TARGETS` is unchanged:
   no backward move reaches the new phase. A contract-39 reader refuses a state carrying either
   addition.
-
 - `dispatch doc-edit --help` says the spec, not every document, holds no progress or status, and that a record of open items or progress is a document of its own.
 
 - `actorAttribution(actor)`, the part of an actor's label after its name: ` (for <owner>)` for a
