@@ -15,13 +15,15 @@ export const SIGN_OUT_RENEW_MS = 2_000;
  *  lifts nothing. */
 export const SIGN_OUT_LEASE_MS = 6_000;
 
-/** The lock a tab takes for as long as its sign-out is out, named for the person it signs out.
- *  The browser releases it when that tab goes - closed, crashed or discarded - and holds it
- *  while the tab is frozen or its timers are throttled, which no lease of renewals can tell
- *  apart from a tab that died. A tab holding that person's writes is granted the lock only once
- *  the signing-out tab no longer holds it, which is what ends the hold (`holderGone`). */
-export function signOutLockName(login: string): string {
-  return `dispatch-sign-out:${login}`;
+/** The lock a tab takes for as long as its sign-out is out, named for the person it signs out
+ *  and for the tab signing them out - the `tab` its `{signingOut}` carries - so each sign-out
+ *  has a lock of its own and no tab ever waits on, or holds, another's. The browser releases it
+ *  when that tab goes - closed, crashed or discarded - and holds it while the tab is frozen or
+ *  its timers are throttled, which no lease of renewals can tell apart from a tab that died. A
+ *  tab holding the person's writes waits on the lock of every signing-out tab it has heard of,
+ *  and lets the writes go only once every one of those holds has ended (`holderGone`). */
+export function signOutLockName(login: string, tab: string): string {
+  return `dispatch-sign-out:${login}:${tab}`;
 }
 
 /** One write a sign-out would discard: its key, which a tab duplicated from another shares with
@@ -99,10 +101,12 @@ interface Hold {
  * - `{ signingOut: login, tab }`: the person confirmed a sign-out there, which is out, said again
  *   every `SIGN_OUT_RENEW_MS` while it is. Every tab holds their writes for it, so nothing they
  *   chose to discard goes out meanwhile (`Writes.holdFor`): a hold is that tab's, and it ends
- *   when the browser releases that tab's lock (`signOutLockName`), or - where the browser has no
- *   `navigator.locks` - when its lease lapses `SIGN_OUT_LEASE_MS` after the last renewal heard.
- *   Either way a tab that dies with its sign-out out holds nothing for good, and a tab the
- *   browser froze holds for as long as it lives (`holderGone`).
+ *   when the browser releases that tab's own lock (`signOutLockName`, named for the person and
+ *   the tab), or - where the browser has no `navigator.locks` - when its lease lapses
+ *   `SIGN_OUT_LEASE_MS` after the last renewal heard. Either way a tab that dies with its
+ *   sign-out out holds nothing for good, a tab the browser froze holds for as long as it lives,
+ *   and two tabs signing the same person out hold the writes until both are done
+ *   (`holderGone`).
  * - `{ signedOut: login, tab }`: Dispatch signed them out; every tab drops their writes
  *   (`Writes.dropLogin`) and reads who is signed in again.
  * - `{ stillSignedIn: login, tab }`: the sign-out did not go through, or the tab that asked for it
@@ -193,16 +197,16 @@ export class SignInChannel {
     this.#letGoOfLock();
   }
 
-  /** Takes `login`'s sign-out lock for as long as this tab's sign-out is out. A lock another tab
-   *  of this browser holds - it is signing the same person out - is queued for and taken when
-   *  that tab lets go; this tab's own renewals hold the person's writes meanwhile. */
+  /** Takes this tab's lock for `login`'s sign-out, held for as long as it is out. The name
+   *  carries this tab (`signOutLockName`), so it is this tab's alone: another tab signing the
+   *  same person out holds a lock of its own, and neither waits on the other. */
   #takeLock(login: string): void {
     this.#letGoOfLock();
     const locks = this.#locks;
     if (locks === undefined) return;
     const { promise, resolve } = Promise.withResolvers<void>();
     this.#releaseLock = resolve;
-    void locks.request(signOutLockName(login), () => promise).catch(() => {});
+    void locks.request(signOutLockName(login, this.#tab), () => promise).catch(() => {});
   }
 
   /** Lets go of this tab's sign-out lock, if it has one: its sign-out is over, or its page is. */
@@ -261,7 +265,9 @@ export class SignInChannel {
    *  unrenewed. */
   #hold(tab: string, login: string): void {
     const before = this.#holds.get(tab);
-    const locks = this.#locks;
+    // A tab of an older page names none (`tab` is ""), and takes no lock either: its hold lives
+    // on the lease, wherever the browser's locks are.
+    const locks = tab === "" ? undefined : this.#locks;
     // Where the browser has locks the hold ends with the signing-out tab's, so a renewal says
     // nothing this tab does not know; where it has none, each renewal is another lease.
     const lease =
@@ -279,12 +285,14 @@ export class SignInChannel {
     const waiting = locks === undefined ? undefined : new AbortController();
     this.#holds.set(tab, { lapse: lease, login, waiting });
     if (locks !== undefined && waiting !== undefined) {
-      // The signing-out tab holds this lock while its sign-out is out, so this request is granted
+      // That tab holds this lock, its own, while its sign-out is out, so this request is granted
       // only once the browser takes it back: that tab said how the sign-out ended (and lifted the
       // hold before this), or it closed, crashed or was discarded. A tab frozen or throttled with
-      // its sign-out out keeps the lock, and keeps the hold with it.
+      // its sign-out out keeps the lock, and keeps the hold with it. Another tab signing the same
+      // person out holds a lock of its own, waited on under its own hold, so the writes go on
+      // only once every one of those tabs has let go.
       void locks
-        .request(signOutLockName(login), { signal: waiting.signal }, () => {
+        .request(signOutLockName(login, tab), { signal: waiting.signal }, () => {
           this.#lift(tab, "vanished");
         })
         .catch(() => {

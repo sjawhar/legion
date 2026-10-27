@@ -30,10 +30,12 @@ function browser() {
 
 /** A browser's Web Locks, as `navigator.locks` grants them: one holder at a time per name, and
  *  every other request for that name queued in the order it was made, granted as the holder
- *  before it lets go. A request called off through its `signal` leaves the queue. */
-function browserLocks(): LockManager {
+ *  before it lets go. A request called off through its `signal` leaves the queue. `requested`
+ *  records every name asked for, in order. */
+function browserLocks(): { locks: LockManager; requested: string[] } {
   const queues = new Map<string, (() => void)[]>();
   const held = new Set<string>();
+  const requested: string[] = [];
   const grant = (name: string) => {
     if (held.has(name)) return;
     const next = queues.get(name)?.shift();
@@ -64,14 +66,18 @@ function browserLocks(): LockManager {
       queue.splice(at, 1);
       reject(new Error("the lock request was called off"));
     });
+    requested.push(name);
     queues.set(name, [...(queues.get(name) ?? []), run]);
     grant(name);
     return promise;
   };
   return {
-    query: () => Promise.resolve({ held: [], pending: [] }),
-    request,
-  } as unknown as LockManager;
+    locks: {
+      query: () => Promise.resolve({ held: [], pending: [] }),
+      request,
+    } as unknown as LockManager,
+    requested,
+  };
 }
 
 /** A tab on `open`'s browser: its channel, its page, and what its listener was told, each
@@ -152,7 +158,7 @@ test("with no lock manager a sign-out's hold lapses 6 s after its tab last said 
 test("with the browser's locks a hold outlives the lease, and ends when the lock is released", async () => {
   await onFakeClock(async () => {
     const open = browser();
-    const locks = browserLocks();
+    const { locks } = browserLocks();
     const signer = tab(open, [], locks);
     const holder = tab(open, [], locks);
 
@@ -170,6 +176,48 @@ test("with the browser's locks a hold outlives the lease, and ends when the lock
     // The browser takes the lock back, as it does when the tab goes: the hold ends, and what
     // became of the writes it held is the whoami read's to decide (`holderGone`).
     signer.leave();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(holder.heard).toEqual([
+      ["signingOut", "alice"],
+      ["holderGone", "alice"],
+    ]);
+  });
+});
+
+// W58. Each sign-out's lock is its own tab's (`dispatch-sign-out:<login>:<tab>`), so two tabs
+// signing the same person out in the same instant neither wait on nor hold each other's: the
+// third tab waits on both, and the person's writes go out in no tab until both of those
+// sign-outs are over. One tab dying with the other's still out must leave the hold exactly where
+// it was.
+test("two tabs signing the same person out hold a third tab's writes until both are gone", async () => {
+  await onFakeClock(async () => {
+    const open = browser();
+    const { locks, requested } = browserLocks();
+    const first = tab(open, [], locks);
+    const second = tab(open, [], locks);
+    const holder = tab(open, [], locks);
+
+    first.signIns.signingOut("alice");
+    second.signIns.signingOut("alice");
+    await Promise.resolve();
+    expect(holder.heard).toEqual([["signingOut", "alice"]]);
+    // Four requests, two names: each tab's own lock, taken by it and waited on by the holder.
+    expect(new Set(requested).size).toBe(2);
+    for (const name of requested) expect(name.startsWith("dispatch-sign-out:alice:")).toBe(true);
+
+    // The first tab dies without a word: the browser takes back its lock alone, and the second
+    // tab's sign-out still holds the writes here.
+    Object.assign(first.channel, { postMessage: () => {} });
+    first.leave();
+    jest.advanceTimersByTime(SIGN_OUT_LEASE_MS * 4);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(holder.heard).toEqual([["signingOut", "alice"]]);
+
+    // The second goes too: only now are the writes nobody's to hold.
+    Object.assign(second.channel, { postMessage: () => {} });
+    second.leave();
     await Promise.resolve();
     await Promise.resolve();
     expect(holder.heard).toEqual([
