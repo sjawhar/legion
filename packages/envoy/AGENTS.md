@@ -3379,7 +3379,11 @@ set, and not itself required at startup), `BROKER_LEASE_SECONDS` (default 900, m
 mints its credential for this long, and each refresh of its device login moves its expiry to this
 long from then; past it the machine logs in again, new key, new code, new human approval),
 `BROKER_SWEEP_SECONDS` (default 5, max 60 —
-`requests.Sweeper`'s tick interval, the poller's replacement), `BROKER_DRAIN_SECONDS` (default 5,
+`requests.Sweeper`'s tick interval, the poller's replacement, and also `enroll.ServingClock`'s beat
+interval, a gap of more than three beats counting as no broker serving; `config.Load` refuses
+`2*BROKER_LEASE_SECONDS <= 9*BROKER_SWEEP_SECONDS`, since a live session renews with at least two
+thirds of its lease left and a lease that ran out inside a three-sweep gap would be ended rather
+than given back), `BROKER_DRAIN_SECONDS` (default 5,
 min 0, max 120 — how long a stopping process goes on serving while `/healthz` answers 503; it is
 configuration rather than a constant because the right value is the cluster's EndpointSlice
 propagation time, which lives in the deployment's own repository, and 0 is for a local run), and
@@ -3580,8 +3584,12 @@ person's login with no `login_hint`, or `anyone`, a replayed `jti`) is `400 REQU
 before the token verifies (`refuseAddress`), whatever account the token claims, since a refused
 token signature makes the verifier fetch the issuer's keys again; a verified account then spends
 an `account:<subject>` bucket of the per-login limit (`refuseAccount`), the same address-then-key
-pair the device-code route spends. Behind a proxy, `BROKER_TRUSTED_PROXY_HEADER` keys the address
-bucket on the caller's own address. Read `routes()` for the current, authoritative route list.
+pair the device-code route spends. A token login the broker could not complete (5xx, such as the
+database being away) gives back what it spent of both buckets, since the daemon retries it every
+few seconds through an outage and the broker decided nothing about the token; a refused
+credential (any 4xx) keeps them spent. Behind a proxy, `BROKER_TRUSTED_PROXY_HEADER` keys the
+address bucket on the caller's own address. Read `routes()` for the current, authoritative route
+list.
 
 The RFC 8693 token exchange is the token endpoint's other grant (`POST /v1/oauth/token`,
 `oauth.Provider.exchangeGrant`): a caller presents the platform identity it already holds and
@@ -4017,11 +4025,44 @@ revoked and its pending requests cancelled and dropped from the approver's list,
 `enrollment.expired` audit row and one log line each; then it expires overdue pending
 `agent_secret` requests (waking each one's owner through the Envoy wake seam) and overdue pending
 machine logins. It reads fresh from Postgres every time, so a restart resumes exactly where the
-rows are. Lapsed means what proof lookup means by not live (`lease_expires_at` no later than
-Postgres's `now()`), so a session that keeps renewing is never ended, and rows a concurrent renew
+rows are. Lapsed means what proof lookup means by not live (`enrollment_lease_live`, below, is
+false), so a session that keeps renewing is never ended, and rows a concurrent renew
 or revoke holds are left to the next tick. Each ended enrollment's live grants are found through
 `grants_enrollment_live` (migration 0008), so a backlog of lapsed enrollments costs one index
 lookup each rather than a scan of `grants`.
+
+Time no broker was serving does not count against a lease. A session renews only through a
+broker, so while every broker process is down, or none can reach the database, no lease can be
+renewed. Migration 0019 adds `broker_serving`, one row per broker process (`process`, a random id
+the process draws, `last_serving_at`, `not_serving_after`), and the SQL function
+`enrollment_lease_live(lease)`, the one liveness test for a lease at every site that asks (proof
+lookup, `Renew`, `EndLapsed`, a grant's values): a lease is live while it has not run out, and also
+when the latest row (greatest `last_serving_at`) is further back than its `not_serving_after` and
+the lease was still running at that row's `last_serving_at`. It reads the rows without a lock.
+`enroll.ServingClock` (`internal/broker/enroll/serving.go`), started in `cmd/broker`'s `main` beside
+`srv.Serve`, so a boot that fails before it serves records no beat, beats on its own row every
+`BROKER_SWEEP_SECONDS` on every serving broker, with a threshold of three sweeps. Each beat is
+bounded by one sweep: a deadline, and `lock_timeout`, `statement_timeout` and
+`idle_in_transaction_session_timeout` set for its transaction, so a beat held up on its row fails
+and logs the WARN (`timed_out=true`) while the other brokers keep the latest row current. While a
+broker is serving one statement writes the beater's own row, locking only it. A beat that finds a
+longer gap takes an advisory lock, reads the latest row again, gives that gap back to every
+unrevoked lease that was still running at the latest beat, capped at now plus
+`BROKER_LEASE_SECONDS`, and logs INFO `broker: gave back the time no broker was serving ...`; a
+second broker that waited on the lock finds no gap, so two brokers beating at once give it back
+once. Until then such a lease stays live, so the sweeper never ends it. A beat deletes rows more
+than an hour behind the latest. A revoked enrollment, and one whose
+lease ran out while a broker was serving, stays ended, and a renewal with another pod's or service
+account's token is still refused 403 `POD_IDENTITY_MISMATCH` and moves the lease not at all. Its
+limits: a broker that runs but pods cannot reach (ingress, DNS, a NetworkPolicy, a stale
+`AGENT_SECRETS_URL`) still counts as serving, so leases still end then; grant lifetimes and
+pending requests still run on wall-clock time; the table starts empty, so the first
+deploy restores nothing; and a pod whose renewer already exited 76 stays without one until it is
+relaunched. `internal/broker/enroll/serving_test.go`,
+`internal/broker/api/renew_liveness_test.go`, `cmd/broker/serving_start_test.go` and
+`cmd/broker/outage_test.go`
+(`TestABrokerOutageLongerThanALease`, the real broker and `agent-secrets` binaries across an outage
+longer than a lease) test it.
 
 Tests: `cd packages/envoy && go vet ./... && go test ./internal/broker/... ./cmd/broker/...
 ./cmd/agent-secrets/... ./cmd/agent-secrets-devrelay/... ./cmd/dev-oidc-issuer/...`. The Postgres-backed tests skip, rather
