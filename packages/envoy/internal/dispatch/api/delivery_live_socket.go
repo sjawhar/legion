@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -285,12 +284,13 @@ func (s *server) deliverySocketFrame(socket *deliverySocket, data []byte) {
 	}
 }
 
-// decodeSocketClientFrame decodes one frame from the page into its struct, refusing a member the
-// struct does not declare, as decodeJSON refuses one in a body.
+// decodeSocketClientFrame decodes one frame from the page into its struct. A member the struct
+// does not declare is ignored, as decodeJSON ignores one in a body, since a page of a newer build
+// can reach this build while a release rolls out. A frame type or a view kind this build cannot
+// serve is still refused (deliverySocketFrame, the hub's view check), so that page reconnects
+// until it reaches a process that serves it.
 func decodeSocketClientFrame(data []byte, frame any) error {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	return decoder.Decode(frame)
+	return json.Unmarshal(data, frame)
 }
 
 // disconnectDeliverySockets closes every open GET /ws/delivery socket with 1012, as a restart does,

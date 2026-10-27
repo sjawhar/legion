@@ -125,10 +125,10 @@ function isJson(response: Response): boolean {
   return response.headers.get("content-type")?.includes("application/json") ?? false;
 }
 
-/** Whether `error` is a server's answer that it has no route for the request (`404 NOT_FOUND`,
- *  "no route for …"), as a server older than a route answers it; a `404 NOT_FOUND` for a
- *  resource the server does not know says "not found" instead. */
-function isNoRoute(error: unknown): boolean {
+/** Whether `error` is a Dispatch process's answer that it has no route for the request (`404
+ *  NOT_FOUND`, "no route for …"). A `404 NOT_FOUND` for a resource the server does not know says
+ *  "not found" instead. */
+function answersNoRoute(error: unknown): boolean {
   return (
     error instanceof DispatchServiceError &&
     error.status === 404 &&
@@ -136,6 +136,37 @@ function isNoRoute(error: unknown): boolean {
     error.message.startsWith("no route for ")
   );
 }
+
+/** The waits before each new attempt of a request a Dispatch process answered with no route. Each
+ *  wait is jittered by ±25 %, and each attempt may reach another process. */
+export const NO_ROUTE_RETRY_DELAYS_MS: readonly number[] = [1_000, 2_000, 4_000];
+
+/** What a request says when every attempt met a Dispatch process with no route for it. */
+export const NO_ROUTE_ROLLING_RELEASE_MESSAGE =
+  "The Dispatch process that answered does not offer this action yet, because a new release of " +
+  "Dispatch is in progress. Try again in one minute.";
+
+/**
+ * A request every attempt of which a Dispatch process answered with no route for it (`404
+ * NOT_FOUND`, "no route for …"). While a release rolls out, two builds of Dispatch answer, and
+ * the older one answers this way for a route only the newer one serves. A server older than a
+ * route answers it this way too, so a caller with an older route to fall back on catches this
+ * error and asks that route.
+ */
+export class DispatchNoRouteError extends DispatchServiceError {
+  constructor() {
+    super("NOT_FOUND", 404, NO_ROUTE_ROLLING_RELEASE_MESSAGE);
+  }
+}
+
+/** Waits `ms` milliseconds. The client takes one so that a test does not wait. */
+export type Sleep = (ms: number) => Promise<void>;
+
+const sleep: Sleep = (ms) => {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setTimeout(resolve, ms);
+  return promise;
+};
 
 export interface ListIssuesOptions {
   readonly project?: string;
@@ -359,15 +390,18 @@ export class DispatchClient {
   readonly #baseUrl: string;
   readonly #resolvedIssues = new Map<string, Promise<string>>();
   readonly #signal: AbortSignal;
+  readonly #sleep: Sleep;
 
   constructor(
     baseUrl: string,
     readonly token: string,
     readonly fetchImpl: typeof fetch = fetch,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    wait: Sleep = sleep
   ) {
     this.#baseUrl = baseUrl.replace(/\/+$/, "");
     this.#signal = requestSignal(signal);
+    this.#sleep = wait;
   }
 
   async issue(input: CreateIssueInput): Promise<Advised<Issue>> {
@@ -593,15 +627,16 @@ export class DispatchClient {
    *  per repository, in the order the project added them; `[]` when it has none.
    *
    *  The plugin and the server ship separately, so a rollout mixes versions (#1522). A server
-   *  older than this route has no route for it (`404 NOT_FOUND`, "no route for …"), so the client
-   *  asks its `GET /api/v1/projects/{key}/architecture-source` instead: `200 null` (or a pre-#1522
+   *  older than this route has no route for it (`404 NOT_FOUND`, "no route for …"). Once every
+   *  attempt met no route (`DispatchNoRouteError`), the client asks its
+   *  `GET /api/v1/projects/{key}/architecture-source` instead: `200 null` (or a pre-#1522
    *  `404 SOURCE_NOT_FOUND`) is `[]`, and a row is that one source. Any other answer throws, so a
    *  project the server does not know (`404 NOT_FOUND`, "not found") is still an error. */
   async listArchitectureSources(project: string): Promise<ArchitectureSource[]> {
     try {
       return await this.#json("GET", ["api", "v1", "projects", project, "architecture-sources"]);
     } catch (error) {
-      if (!isNoRoute(error)) throw error;
+      if (!(error instanceof DispatchNoRouteError)) throw error;
     }
     try {
       const source: ArchitectureSource | null = await this.#json("GET", [
@@ -630,11 +665,12 @@ export class DispatchClient {
    *  project has no source.
    *
    *  The plugin and the server ship separately, so a rollout mixes versions (#1522). A server
-   *  older than this route has no route for it (`404 NOT_FOUND`, "no route for …"), so the client
-   *  asks its `POST /api/v1/projects/{key}/architecture-source/sync` instead, which imports that
-   *  server's one source, and returns the row as a one-element array. Any other answer of either
-   *  call throws as is, so that server's `404 SOURCE_NOT_FOUND` for a project with no source is
-   *  still an error. */
+   *  older than this route has no route for it (`404 NOT_FOUND`, "no route for …"). Once every
+   *  attempt met no route (`DispatchNoRouteError`), the client asks its
+   *  `POST /api/v1/projects/{key}/architecture-source/sync` instead, which imports that server's
+   *  one source, and returns the row as a one-element array. Any other answer of either call
+   *  throws as is, so that server's `404 SOURCE_NOT_FOUND` for a project with no source is still
+   *  an error. */
   async syncArchitectureSources(project: string): Promise<ArchitectureSource[]> {
     try {
       return await this.#json("POST", [
@@ -646,7 +682,7 @@ export class DispatchClient {
         "sync",
       ]);
     } catch (error) {
-      if (!isNoRoute(error)) throw error;
+      if (!(error instanceof DispatchNoRouteError)) throw error;
     }
     const source: ArchitectureSource = await this.#json("POST", [
       "api",
@@ -877,16 +913,21 @@ export class DispatchClient {
    * answers a file with its bytes under its own MIME type, never a JSON envelope. */
   async fileVersion(id: string, version: number): Promise<ArtifactFileVersion> {
     const url = this.#url(["api", "v1", "artifacts", id, "versions", String(version)]);
-    const response = await this.fetchImpl(url, {
-      method: "GET",
-      headers: { Accept: "*/*", Authorization: `Bearer ${this.token}` },
-      signal: this.#signal,
-    });
-    if (!response.ok) return this.#response<never>("GET", url, response);
-    return {
-      mime: response.headers.get("Content-Type") ?? "application/octet-stream",
-      bytes: new Uint8Array(await response.arrayBuffer()),
-    };
+    return this.#send(
+      url,
+      {
+        method: "GET",
+        headers: { Accept: "*/*", Authorization: `Bearer ${this.token}` },
+        signal: this.#signal,
+      },
+      async (response) => {
+        if (!response.ok) return this.#response<never>("GET", url, response);
+        return {
+          mime: response.headers.get("Content-Type") ?? "application/octet-stream",
+          bytes: new Uint8Array(await response.arrayBuffer()),
+        };
+      }
+    );
   }
 
   async artifactBlocks(id: string): Promise<ArtifactBlock[]> {
@@ -998,13 +1039,44 @@ export class DispatchClient {
     };
     if (body !== undefined) headers["Content-Type"] = "application/json";
     const url = this.#url(path, query);
-    const response = await this.fetchImpl(url, {
-      method,
-      headers,
-      signal: this.#signal,
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
-    return { status: response.status, payload: await this.#response<T>(method, url, response) };
+    return this.#send(
+      url,
+      {
+        method,
+        headers,
+        signal: this.#signal,
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      },
+      async (response) => ({
+        status: response.status,
+        payload: await this.#response<T>(method, url, response),
+      })
+    );
+  }
+
+  /**
+   * `read`'s answer to `fetchImpl(url, init)`. An answer of no route for the request (`404
+   * NOT_FOUND`, "no route for …") is sent again with the same `init`, so the same body, after each
+   * of `NO_ROUTE_RETRY_DELAYS_MS`: while a release rolls out, two builds of Dispatch answer, and
+   * the next attempt may reach the build that serves the route. No handler ran, so this is safe
+   * for every method. After the last attempt it throws `DispatchNoRouteError`.
+   */
+  async #send<T>(
+    url: string,
+    init: RequestInit,
+    read: (response: Response) => Promise<T>
+  ): Promise<T> {
+    for (const delay of [...NO_ROUTE_RETRY_DELAYS_MS, undefined]) {
+      const response = await this.fetchImpl(url, init);
+      try {
+        return await read(response);
+      } catch (error) {
+        if (!answersNoRoute(error)) throw error;
+        if (delay === undefined) break;
+      }
+      await this.#sleep(delay * (0.75 + Math.random() * 0.5));
+    }
+    throw new DispatchNoRouteError();
   }
 
   /** An upload to an owner's artifact route: inline content as JSON, a file as multipart. */
@@ -1020,13 +1092,16 @@ export class DispatchClient {
 
   async #form<T>(method: string, path: readonly string[], body: FormData): Promise<T> {
     const url = this.#url(path);
-    const response = await this.fetchImpl(url, {
-      method,
-      headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
-      body,
-      signal: this.#signal,
-    });
-    return this.#response<T>(method, url, response);
+    return this.#send(
+      url,
+      {
+        method,
+        headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
+        body,
+        signal: this.#signal,
+      },
+      (response) => this.#response<T>(method, url, response)
+    );
   }
 
   #url(path: readonly string[], query?: object): string {

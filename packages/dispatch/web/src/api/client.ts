@@ -170,6 +170,39 @@ export function isDocumentUnloadable(error: unknown): boolean {
   return error instanceof ApiError && error.status === 409 && error.code === "DOCUMENT_UNLOADABLE";
 }
 
+// Whether `error` is a Dispatch process's answer that it has no route for the request (`404
+// NOT_FOUND`, "no route for …"). While a release rolls out, two builds of Dispatch answer the
+// page, and the older one answers this way for a route only the newer one serves. No handler ran,
+// so the request is safe to send again whatever its method. A `404 NOT_FOUND` for a resource the
+// server does not know says "not found" instead.
+export function isNoRoute(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.status === 404 &&
+    error.code === "NOT_FOUND" &&
+    error.message.startsWith("no route for ")
+  );
+}
+
+/** The waits before each new attempt of a request a Dispatch process answered with no route. Each
+ *  wait is jittered by ±25 %, so the attempts of many pages spread out, and each attempt may reach
+ *  another process. */
+export const NO_ROUTE_RETRY_DELAYS_MS: readonly number[] = [1_000, 2_000, 4_000];
+
+/** What the page shows when every attempt of a request met a process with no route for it. */
+export const NO_ROUTE_ROLLING_RELEASE_MESSAGE =
+  "The Dispatch process that answered does not offer this action yet, because a new release of " +
+  "Dispatch is in progress. Try again in one minute.";
+
+/** Waits `ms` milliseconds. The API client takes one so that a test does not wait. */
+export type Sleep = (ms: number) => Promise<void>;
+
+const sleep: Sleep = (ms) => {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setTimeout(resolve, ms);
+  return promise;
+};
+
 // The retry policy every query in the app shares: an auth outcome (401), a missing architecture
 // source, an unconfigured credential broker or delivery timeline, a stored document outside
 // Proof's schema, or a stored history that cannot load is definitive and retrying it changes
@@ -279,19 +312,24 @@ async function errorFrom(response: Response): Promise<ApiError> {
 }
 
 export class DispatchApiClient {
-  constructor(private readonly fetchImpl: FetchImplementation) {}
+  constructor(
+    private readonly fetchImpl: FetchImplementation,
+    private readonly sleep: Sleep
+  ) {}
 
+  // A no-route answer is sent again after each of NO_ROUTE_RETRY_DELAYS_MS, with the same init, so
+  // the same body. After the last attempt it throws NO_ROUTE_ROLLING_RELEASE_MESSAGE.
   private async response(path: string, init: RequestInit = {}): Promise<Response> {
-    const response = await this.fetchImpl(path, {
-      credentials: "same-origin",
-      ...init,
-    });
-
-    if (!response.ok) {
-      throw await errorFrom(response);
+    const request: RequestInit = { credentials: "same-origin", ...init };
+    for (const delay of [...NO_ROUTE_RETRY_DELAYS_MS, undefined]) {
+      const response = await this.fetchImpl(path, request);
+      if (response.ok) return response;
+      const error = await errorFrom(response);
+      if (!isNoRoute(error)) throw error;
+      if (delay === undefined) break;
+      await this.sleep(delay * (0.75 + Math.random() * 0.5));
     }
-
-    return response;
+    throw new ApiError(404, { code: "NOT_FOUND", error: NO_ROUTE_ROLLING_RELEASE_MESSAGE });
   }
 
   private async json<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -935,9 +973,10 @@ export class DispatchApiClient {
 }
 
 export function createApiClient(
-  fetchImpl: FetchImplementation = (...args) => fetch(...args)
+  fetchImpl: FetchImplementation = (...args) => fetch(...args),
+  wait: Sleep = sleep
 ): DispatchApiClient {
-  return new DispatchApiClient(fetchImpl);
+  return new DispatchApiClient(fetchImpl, wait);
 }
 
 export const api = createApiClient();

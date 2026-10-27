@@ -93,9 +93,10 @@ the Dispatch specs behind the `dispatch` command:
   nested object built strict (`z.object(shape, { strict: true })`): every key but `op` is optional,
   so a misspelled key would otherwise be stripped and the operation would run without it — a
   `replace` left with no `with` deletes the text it was meant to rewrite. `dispatchToolSchema`'s
-  own `strict` covers only the top level, and the Go server's `DisallowUnknownFields` never sees a
-  key the tool layer already stripped, so this is the boundary that catches it. An unknown key
-  nested anywhere is reported with that object's keys, not the tool's (`formatZodIssues`).
+  own `strict` covers only the top level, and the Go server ignores a member a route does not
+  declare (`decodeJSON`), so a misspelled key that reached it would be ignored there too: this is
+  the one boundary that catches it. An unknown key nested anywhere is reported with that
+  object's keys, not the tool's (`formatZodIssues`).
   An optional `precondition` selects exactly one whole-document token from `dispatch doc-read` or
   block `{id, token}` entries from `dispatch doc-read --blocks`; a block guard must cover every content block the
   batch changes, while untouched sections remain independent. Insert and move need the document

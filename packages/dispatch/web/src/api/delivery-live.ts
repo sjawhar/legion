@@ -31,7 +31,8 @@ export const DELIVERY_LIVE_SILENT_MS = 30_000;
 
 /** Dispatch closes every socket with this code when it shuts down: the page reconnects at once. */
 const SERVICE_RESTART = 1012;
-/** The code the page closes a silent socket with before it opens another. */
+/** The code the page closes a socket with before it opens another: a silent one, or one whose
+ *  process refused a frame of a subscription the page holds. */
 const REPLACED = 4000;
 
 /** The status the matching GET route answers each error frame's code with, so the page's error
@@ -187,25 +188,32 @@ export function createDeliveryLive(queryClient: QueryClient): DeliveryLive {
     if (sub.pending !== null) {
       sub.pending.reject(failure);
       sub.pending = null;
-      return;
+    } else {
+      // A subscription that already answered fails as a failed refetch does, keeping its data. It
+      // stays subscribed: Dispatch answers it again once it can (a configuration saved, say).
+      const query = cache.find({ exact: true, queryKey: sub.queryKey });
+      query?.setState({
+        ...query.state,
+        error: failure,
+        errorUpdateCount: query.state.errorUpdateCount + 1,
+        errorUpdatedAt: Date.now(),
+        fetchFailureReason: failure,
+        status: "error",
+      });
     }
-    // A subscription that already answered fails as a failed refetch does, keeping its data. It
-    // stays subscribed: Dispatch answers it again once it can (a configuration saved, say).
-    const query = cache.find({ exact: true, queryKey: sub.queryKey });
-    query?.setState({
-      ...query.state,
-      error: failure,
-      errorUpdateCount: query.state.errorUpdateCount + 1,
-      errorUpdatedAt: Date.now(),
-      fetchFailureReason: failure,
-      status: "error",
-    });
+    // While a release rolls out, the process this socket reached can be of an older build that
+    // cannot serve a frame this page sends (a frame type or a view kind it does not know). Each
+    // reconnect may reach another process, so the page closes the socket and reconnects through
+    // the lost socket's backoff, and the reconnect subscribes again.
+    if (frame.code === "INVALID_FRAME") reconnect();
   };
 
   const receive = (data: unknown) => {
     lastFrameAt = Date.now();
-    attempt = 0;
     const frame = JSON.parse(String(data)) as DeliveryLiveServerFrame;
+    // A frame the process refused does not show that this process serves the page, so the backoff
+    // keeps growing while each reconnect meets such a process.
+    if (frame.type !== "error" || frame.code !== "INVALID_FRAME") attempt = 0;
     switch (frame.type) {
       case "heartbeat":
         return;
@@ -260,6 +268,15 @@ export function createDeliveryLive(queryClient: QueryClient): DeliveryLive {
     const delay = reconnectDelayMs(attempt) * (0.75 + Math.random() * 0.5);
     attempt += 1;
     cancelReconnect = after(delay, open);
+  };
+
+  /** Closes the socket the page holds and reconnects as a lost socket does, with its backoff. */
+  const reconnect = () => {
+    const refused = socket;
+    socket = null;
+    isOpen = false;
+    refused?.close(REPLACED);
+    lost(REPLACED);
   };
 
   const onVisibility = () => {
