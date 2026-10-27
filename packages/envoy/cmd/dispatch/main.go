@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -39,6 +40,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/startup"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/listenfd"
 )
 
 const (
@@ -79,6 +81,10 @@ type bootConfig struct {
 	// SettleDelay is how long a document waits after a live change before it settles, zero for the
 	// document service's own default; only DISPATCH_TEST_SETTLE_DELAY, under the test hooks, sets it.
 	SettleDelay time.Duration
+	// EditNoticeQuiet is how long a document stays quiet after a person's last settled version
+	// before its edit notice goes, zero for the document service's own 30 s; only
+	// DISPATCH_TEST_EDIT_NOTICE_QUIET, under the test hooks, sets it.
+	EditNoticeQuiet time.Duration
 	// OIDCIssuer and OIDCAudience configure verification of projected
 	// service-account tokens. Both set or neither; empty means no verifier.
 	OIDCIssuer   string
@@ -93,9 +99,16 @@ type bootConfig struct {
 	// FileStoreBucket is DISPATCH_FILE_STORE_BUCKET: the bucket uploaded files are stored in.
 	// Empty keeps them in Postgres.
 	FileStoreBucket string
-	// ListenAddr is the address the server binds, from DISPATCH_LISTEN_HOST and DISPATCH_PORT
-	// (listenAddress). The dev sign-in fence checks this value, so what it checks is what binds.
+	// ListenAddr is the address the server serves on: the inherited socket's own address with
+	// DISPATCH_LISTEN_FD, else the one main binds, from DISPATCH_LISTEN_HOST and DISPATCH_PORT
+	// (listenAddress). The dev sign-in fence checks this value, so what it checks is what serves.
 	ListenAddr string
+	// ListenSocket is the listening socket DISPATCH_LISTEN_FD names, inspected but not yet
+	// adopted: main serves on it in place of binding ListenAddr. Nil when the variable is unset.
+	ListenSocket *listenfd.Socket
+	// PprofAddr is where the profiling listener binds, 127.0.0.1 and DISPATCH_PPROF_PORT
+	// (pprofAddress); empty, nothing listens.
+	PprofAddr string
 	// DevSignIn (DISPATCH_DEV_SIGNIN=1) mounts GET /auth/_dev/signin behind the dev sign-in
 	// fence; the signing key is then per process.
 	DevSignIn bool
@@ -164,6 +177,12 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	// The profiler binds first, before NATS, migrations and the rest of boot, so a slow or hung
+	// boot can be profiled and a port clash refuses the boot before anything connects.
+	if _, err := startPprof(ctx, boot.PprofAddr); err != nil {
+		slog.Error("dispatch: pprof", "error", err)
+		os.Exit(1)
+	}
 
 	var natsClient *bus.Client
 	if boot.NATSDisabled {
@@ -262,11 +281,12 @@ func main() {
 
 	broker := events.NewBroker()
 	documentService := newDocumentService(boot, docs.Deps{
-		Store:     database,
-		Events:    broker,
-		Identity:  requestIdentity,
-		ServerURL: serverURL,
-		Settle:    boot.SettleDelay,
+		Store:           database,
+		Events:          broker,
+		Identity:        requestIdentity,
+		ServerURL:       serverURL,
+		Settle:          boot.SettleDelay,
+		EditNoticeQuiet: boot.EditNoticeQuiet,
 	})
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
 	// The seed appends events, so it runs after restoreDecidedWordings, which takes the copy lock:
@@ -323,7 +343,7 @@ func main() {
 	// maintenance loop below either runs once overall or is deliberately per-process. The ones
 	// that must run once overall take a named lease on this pool for the length of their pass
 	// (duty.Exclusive): a lease is a session-level advisory lock on a connection of its own, so
-	// it needs a pool the shared one's sixteen request connections are not spent on. A boot that
+	// it needs a pool the shared one's request connections are not spent on. A boot that
 	// cannot open it is a boot whose loops would each run everywhere, so it ends here. Under that
 	// lease each pass is also recorded with its loop's own period (duty_passes, migration 0115),
 	// which is what makes a loop run once per period rather than once per process: two tickers
@@ -352,8 +372,13 @@ func main() {
 	}
 
 	if natsClient != nil {
+		outboxPool, err := database.Pool.Outbox()
+		if err != nil {
+			slog.Error("dispatch: open the events outbox's pool", "error", err)
+			os.Exit(1)
+		}
 		go outbox.Run(ctx, outbox.Deps{
-			Store:     database,
+			Store:     &store.Store{Pool: outboxPool},
 			Publisher: natsClient,
 			Broker:    broker,
 			Docs:      documentService,
@@ -394,6 +419,15 @@ func main() {
 	// version write stored: every mention indexed before migration 0092, and each rebuild-refs
 	// inserts (LEGION-531).
 	go documentService.RunReferenceExcerptReconciliation(ctx, leases)
+	// Each document's edit notice goes once its quiet window after a person's last
+	// settled version ends, as one artifact.human_edited event; the window is a row, so a notice
+	// still pending when this process stops is sent by the next sweep of either process.
+	go documentService.RunEditNotices(ctx, leases)
+	// The block index: each document version no block-aware write indexed - every document at
+	// migration 0121, each version a build without the block index writes during a roll, and each
+	// rebuild-refs marks - and each comment, ask and issue message citing a block (`#b-`) that such
+	// a build indexed without the block grammar.
+	go documentService.RunBlockIndexReconciliation(ctx, leases)
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
 	if err != nil {
@@ -447,14 +481,20 @@ func main() {
 		IdleTimeout:       idleTimeout,
 		// WriteTimeout remains zero because the event stream is long-lived.
 	}
-	// Bound before serving, so an address that cannot be taken ends the process with 1: a
-	// supervisor must not read a port clash as a clean stop.
-	listener, err := net.Listen("tcp", boot.ListenAddr)
+	// The server serves on the socket it inherited (DISPATCH_LISTEN_FD) or binds its address, and
+	// does either before serving, so a socket it cannot serve on or an address it cannot take ends
+	// the process with 1: a supervisor must not read a port clash as a clean stop.
+	var listener net.Listener
+	if boot.ListenSocket != nil {
+		listener, err = listenfd.Adopt(*boot.ListenSocket)
+	} else {
+		listener, err = net.Listen("tcp", boot.ListenAddr)
+	}
 	if err != nil {
 		slog.Error("dispatch: listen", "addr", boot.ListenAddr, "error", err)
 		os.Exit(1)
 	}
-	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool, waitDelivery); err != nil {
+	if err := serveUntilStopped(ctx, cancel, server, listener, documentService, database.Pool, waitDelivery); err != nil {
 		slog.Error("dispatch: serve", "error", err)
 		os.Exit(1)
 	}
@@ -586,11 +626,15 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		return bootConfig{}, fmt.Errorf("DISPATCH_AGENT_TOKEN %w", err)
 	}
 	boot.AgentTokens = tokens
-	listenAddr, err := listenAddress(env)
+	boot.ListenAddr, boot.ListenSocket, err = resolveListen(env)
 	if err != nil {
 		return bootConfig{}, err
 	}
-	boot.ListenAddr = listenAddr
+	pprofAddr, err := pprofAddress(env)
+	if err != nil {
+		return bootConfig{}, err
+	}
+	boot.PprofAddr = pprofAddr
 	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_SETTLE_DELAY")); raw != "" {
 		if !boot.TestHooksEnabled {
 			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_SETTLE_DELAY")
@@ -600,6 +644,16 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 			return bootConfig{}, fmt.Errorf("DISPATCH_TEST_SETTLE_DELAY=%q (expected a positive Go duration)", raw)
 		}
 		boot.SettleDelay = delay
+	}
+	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_EDIT_NOTICE_QUIET")); raw != "" {
+		if !boot.TestHooksEnabled {
+			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_EDIT_NOTICE_QUIET")
+		}
+		quiet, err := time.ParseDuration(raw)
+		if err != nil || quiet <= 0 {
+			return bootConfig{}, fmt.Errorf("DISPATCH_TEST_EDIT_NOTICE_QUIET=%q (expected a positive Go duration)", raw)
+		}
+		boot.EditNoticeQuiet = quiet
 	}
 	identityMode := strings.TrimSpace(env.get("DISPATCH_IDENTITY"))
 	if err := checkSignInSettings(boot, identityMode); err != nil {
@@ -688,6 +742,9 @@ func devSignInFence(boot bootConfig, env settingValues) error {
 		return errors.New("DISPATCH_DEV_SIGNIN=1 signs people in without the sign-in issuer, so DISPATCH_SIGNIN_* must be unset: a loopback server holds no sign-in client secret")
 	}
 	if !routes.LoopbackHostPort(boot.ListenAddr) {
+		if boot.ListenSocket != nil {
+			return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 is for a loopback server only: %s, must be on 127.0.0.1 or [::1]", boot.ListenSocket)
+		}
 		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 is for a loopback server only: DISPATCH_LISTEN_HOST=%q (listen address %q) must be 127.0.0.1 or [::1]", env.get("DISPATCH_LISTEN_HOST"), boot.ListenAddr)
 	}
 	if err := loopbackDatabase(boot.DatabaseURL); err != nil {
@@ -901,18 +958,14 @@ func validateDefaultProject(ctx context.Context, database *store.Store, project 
 	return nil
 }
 
-func parsePositiveInt(raw string) (int, error) {
-	n := 0
-	for _, r := range raw {
-		if r < '0' || r > '9' {
-			return 0, fmt.Errorf("not a positive integer: %q", raw)
-		}
-		n = n*10 + int(r-'0')
+// parsePort reads the port a setting names: decimal digits alone, 1-65535. The error names the
+// setting, so a refusal says which variable to fix.
+func parsePort(name, raw string) (int, error) {
+	port, err := strconv.Atoi(raw)
+	if err != nil || strings.TrimLeft(raw, "0123456789") != "" || port < 1 || port > 65535 {
+		return 0, fmt.Errorf("invalid %s %q: want a port number 1-65535", name, raw)
 	}
-	if n == 0 {
-		return 0, fmt.Errorf("not a positive integer: %q", raw)
-	}
-	return n, nil
+	return port, nil
 }
 
 // openFileStore is the uploaded-file store boot names, or nil when DISPATCH_FILE_STORE_BUCKET is
@@ -1018,6 +1071,33 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore fil
 	}
 }
 
+// resolveListen says where the server serves. With DISPATCH_LISTEN_FD it is the inherited socket
+// that names, at the socket's own address, and DISPATCH_LISTEN_HOST and DISPATCH_PORT, each only
+// when set, must name that address: no default stands in for one that is unset. An empty value
+// reads as unset: without the socket an empty one is its default, and the listener reads an empty
+// ENVOY_LISTEN_HOST or PORT as unset too. Without DISPATCH_LISTEN_FD, it is the address
+// listenAddress builds, for main to bind. It only inspects the socket; main adopts it, so nothing a
+// caller of resolveBootConfig gets owns a descriptor.
+func resolveListen(env settingValues) (string, *listenfd.Socket, error) {
+	descriptor, set := env.lookup("DISPATCH_LISTEN_FD")
+	if !set {
+		address, err := listenAddress(env)
+		return address, nil, err
+	}
+	socket, err := listenfd.Inspect("DISPATCH_LISTEN_FD", descriptor)
+	if err != nil {
+		return "", nil, err
+	}
+	setting := func(name string) listenfd.Setting {
+		value := strings.TrimSpace(env.get(name))
+		return listenfd.Setting{Name: name, Value: value, Set: value != ""}
+	}
+	if err := socket.CheckAgainst(setting("DISPATCH_LISTEN_HOST"), setting("DISPATCH_PORT")); err != nil {
+		return "", nil, err
+	}
+	return socket.Addr().String(), &socket, nil
+}
+
 // listenAddress builds the listen address from DISPATCH_LISTEN_HOST and DISPATCH_PORT
 // (defaultListenPort when unset). An empty host binds every interface (the containerized
 // production default); local compose deployments set 127.0.0.1. An IPv6 host may be written with
@@ -1030,14 +1110,8 @@ func listenAddress(env settingValues) (string, error) {
 	port := strings.TrimSpace(env.get("DISPATCH_PORT"))
 	if port == "" {
 		port = defaultListenPort
-	} else {
-		parsed, err := parsePositiveInt(port)
-		if err != nil {
-			return "", fmt.Errorf("invalid DISPATCH_PORT: %w", err)
-		}
-		if parsed > 65535 {
-			return "", fmt.Errorf("invalid DISPATCH_PORT: %q", port)
-		}
+	} else if _, err := parsePort("DISPATCH_PORT", port); err != nil {
+		return "", err
 	}
 	return net.JoinHostPort(host, port), nil
 }

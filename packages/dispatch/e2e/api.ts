@@ -50,8 +50,10 @@ import type {
 } from "../web/src/api/types";
 import { harnessPorts } from "./harness-ports";
 
+// The harness server's port, which e2e/run.ts exports from the server's report before anything
+// imports this module (e2e/harness-ports.ts).
 export const baseUrl =
-  process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${harnessPorts.dispatch.port}`;
+  process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${harnessPorts().dispatch.port}`;
 /** The origin the server compares every cookie-authenticated write against (enforceCookieOrigin). */
 export const dashboardOrigin = new URL(baseUrl).origin;
 // A deployed server has its own agent token; the local harness pins `e2e-token` in

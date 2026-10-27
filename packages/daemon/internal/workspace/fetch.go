@@ -149,7 +149,7 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 	if err != nil {
 		return FetchReport{}, err
 	}
-	github := gitHubSource{token: token, credentialDir: request.CredentialDir}
+	github := gitHubSource{token: func() (string, error) { return token, nil }, credentialDir: request.CredentialDir}
 	if err := github.check(request.Repo); err != nil {
 		return FetchReport{}, err
 	}

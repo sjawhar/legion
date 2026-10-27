@@ -86,6 +86,28 @@ func TestApplyFactDeduplicatesBeforeHandlers(t *testing.T) {
 	}
 }
 
+// Applied names, of the ids asked about, those ApplyFact applied from that source: an id applied
+// under another source, or not applied at all, is not named, and no ids reads nothing.
+func TestAppliedNamesOnlyTheFactsApplyFactAppliedFromTheSource(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	for _, event := range []struct{ source, id string }{{"supervise", "ready-1"}, {"supervise", "failed-2"}, {"dispatch", "ready-3"}} {
+		if _, err := ApplyFact(ctx, pool, event.source, event.id, DispatchIssue{Key: "LEGION-208"}); err != nil {
+			t.Fatalf("apply %s/%s: %v", event.source, event.id, err)
+		}
+	}
+	applied, err := Applied(ctx, pool, "supervise", []string{"ready-1", "failed-2", "ready-3", "never-4"})
+	if err != nil {
+		t.Fatalf("Applied: %v", err)
+	}
+	if want := map[string]bool{"ready-1": true, "failed-2": true}; !reflect.DeepEqual(applied, want) {
+		t.Fatalf("Applied = %v, want %v", applied, want)
+	}
+	if none, err := Applied(ctx, pool, "supervise", nil); err != nil || len(none) != 0 {
+		t.Fatalf("Applied of no ids = %v, %v; want none and no error", none, err)
+	}
+}
+
 func TestApplyFactRollsBackHandlerAndDeduplicationOnError(t *testing.T) {
 	pool := migratedPool(t)
 	createWrites(t, pool)
@@ -113,7 +135,8 @@ func TestApplyFactRollsBackHandlerAndDeduplicationOnError(t *testing.T) {
 // An Observed fact, Dispatch's view of an issue the workflow did not record when the fact was
 // prepared, reaches the handlers as a plain observation while the issue stays unrecorded, with
 // neither field of the view. Once the issue is recorded, the handlers get the event the view was
-// prepared in place of, or nothing for release_children's view, prepared in place of none.
+// prepared in place of, carrying the view's Ancestry and Reread, which the preparation read
+// for the view alone, or nothing for release_children's view, prepared in place of none.
 func TestApplyFactSettlesAViewByWhetherItsIssueIsRecorded(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
@@ -129,9 +152,11 @@ func TestApplyFactSettlesAViewByWhetherItsIssueIsRecorded(t *testing.T) {
 		}
 	}
 	event := DispatchIssue{Key: "LEGION-208", Seq: 5, Status: "todo", HandedOver: true, ActorSession: "session", ResolvedRepo: "acme/widgets"}
-	view := DispatchIssue{Key: "LEGION-208", Seq: 7, Status: "backlog", ResolvedRepo: "acme/widgets", Observed: true, Delivered: &event}
+	reread := map[string][]string{"LEGION-214": nil}
+	ancestry := []string{"LEGION-169", "LEGION-168"}
+	view := DispatchIssue{Key: "LEGION-208", Seq: 7, Status: "backlog", ResolvedRepo: "acme/widgets", Ancestry: ancestry, Reread: reread, Observed: true, Delivered: &event}
 	apply("unrecorded", view)
-	if want := (DispatchIssue{Key: "LEGION-208", Seq: 7, Status: "backlog", ResolvedRepo: "acme/widgets"}); len(seen) != 1 || !reflect.DeepEqual(seen[0], want) {
+	if want := (DispatchIssue{Key: "LEGION-208", Seq: 7, Status: "backlog", ResolvedRepo: "acme/widgets", Ancestry: ancestry, Reread: reread}); len(seen) != 1 || !reflect.DeepEqual(seen[0], want) {
 		t.Fatalf("the handlers saw %+v for an unrecorded issue's view, want only %+v", seen, want)
 	}
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
@@ -143,8 +168,10 @@ func TestApplyFactSettlesAViewByWhetherItsIssueIsRecorded(t *testing.T) {
 	seen = nil
 	apply("recorded", view)
 	apply("recorded-release", DispatchIssue{Key: "LEGION-208", Seq: 8, Status: "todo", HandedOver: true, ResolvedRepo: "acme/widgets", Observed: true})
-	if len(seen) != 1 || !reflect.DeepEqual(seen[0], event) {
-		t.Fatalf("the handlers saw %+v once the issue was recorded, want only the delivered event %+v", seen, event)
+	delivered := event
+	delivered.Ancestry, delivered.Reread = ancestry, reread
+	if len(seen) != 1 || !reflect.DeepEqual(seen[0], delivered) {
+		t.Fatalf("the handlers saw %+v once the issue was recorded, want only the delivered event %+v", seen, delivered)
 	}
 }
 

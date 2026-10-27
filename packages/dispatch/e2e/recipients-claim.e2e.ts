@@ -172,12 +172,17 @@ test("a role route held by the claimant is counted once, under the claim that na
     { session_id: asker.id, title: "Asker (e2e)" },
     { roles: ["e2e-reach-implementer"], session_id: claimant.id, title: "Claimant (e2e)" },
   ]);
-  const read = await getAsk(ask.id);
-  expect([read.claimant, read.route, read.route_holder]).toEqual([
-    claimant.id,
-    "role:e2e-reach-implementer",
-    claimant.id,
-  ]);
+  // The server keeps one listener roster for up to five seconds (routeRosterTTL), so an earlier
+  // read may still answer from the roster before these sessions went live.
+  await expect
+    .poll(
+      async () => {
+        const read = await getAsk(ask.id);
+        return [read.claimant, read.route, read.route_holder];
+      },
+      { timeout: 15_000 }
+    )
+    .toEqual([claimant.id, "role:e2e-reach-implementer", claimant.id]);
 
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
@@ -215,12 +220,17 @@ test("unfollowing a follower while a role route's holder is unknown says the rou
   // The asker holds the role: the very follower Dispatch cannot rule out once the listener is
   // silent.
   await setLiveSessions([{ roles: ["reviewer"], session_id: asker.id, title: "Asker (e2e)" }]);
-  const read = await getAsk(ask.id);
-  expect([read.route, read.route_status, read.route_holder]).toEqual([
-    "role:reviewer",
-    "live",
-    asker.id,
-  ]);
+  // The server keeps one listener roster for up to five seconds (routeRosterTTL), so an earlier
+  // read may still answer from the roster before the asker went live.
+  await expect
+    .poll(
+      async () => {
+        const read = await getAsk(ask.id);
+        return [read.route, read.route_status, read.route_holder];
+      },
+      { timeout: 15_000 }
+    )
+    .toEqual(["role:reviewer", "live", asker.id]);
 
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();

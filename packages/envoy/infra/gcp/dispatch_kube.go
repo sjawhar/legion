@@ -12,7 +12,9 @@ import (
 	corev1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/core/v1"
 	metav1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/meta/v1"
 	networkingv1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/networking/v1"
+	policyv1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/policy/v1"
 	rbacv1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/rbac/v1"
+	schedulingv1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/scheduling/v1"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
 	"github.com/sjawhar/envoy/infra/core"
@@ -490,7 +492,12 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 			ServiceAccountToken: &corev1.ServiceAccountTokenProjectionArgs{Audience: pulumi.String(s.azure.audience), ExpirationSeconds: pulumi.Int(3600), Path: pulumi.String("token")},
 		}}}})
 	}
-	if _, err := deployment(s.hostname, s.replicas, deploymentStrategy(s.strategy), corev1.PodSpecArgs{
+	if s.pprofPort != 0 {
+		// The profiler binds 127.0.0.1 inside the pod, so no Service or NetworkPolicy changes:
+		// an operator reaches it through kubectl port-forward.
+		appEnv = append(appEnv, valueEnv("DISPATCH_PPROF_PORT", strconv.Itoa(s.pprofPort)))
+	}
+	appPod := corev1.PodSpecArgs{
 		ServiceAccountName: pulumi.String(s.hostname), TerminationGracePeriodSeconds: pulumi.Int(35), EnableServiceLinks: pulumi.Bool(false),
 		InitContainers: corev1.ContainerArray{
 			corev1.ContainerArgs{Name: pulumi.String("cloud-sql-proxy"), Image: pulumi.String(s.images.proxy), RestartPolicy: pulumi.String("Always"), Args: pulumi.StringArray{pulumi.String("--private-ip"), pulumi.String("--structured-logs"), pulumi.String("--address=127.0.0.1"), pulumi.String("--port=5432"), cloud.instance.ConnectionName}, Resources: resources(dispatchProxyCPU, dispatchProxyMemory), SecurityContext: &corev1.SecurityContextArgs{RunAsNonRoot: pulumi.Bool(true)}},
@@ -499,11 +506,41 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 			corev1.ContainerArgs{Name: pulumi.String("envoy-dispatch"), Image: pulumi.String(s.images.envoy), Command: pulumi.StringArray{pulumi.String("/usr/local/bin/envoy-dispatch")}, Resources: resources(s.appCPU, s.appMemory), Env: appEnv, VolumeMounts: appMounts, Lifecycle: appPreStop, ReadinessProbe: &corev1.ProbeArgs{Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("curl"), pulumi.String("-fsS"), pulumi.String("http://127.0.0.1:8766/healthz")}}, PeriodSeconds: pulumi.Int(10), TimeoutSeconds: pulumi.Int(3), FailureThreshold: pulumi.Int(3), InitialDelaySeconds: pulumi.Int(5)}},
 		},
 		Volumes: appVolumes,
-	}, frontDoor, pulumi.DependsOn(appGrants)); err != nil {
+	}
+	// Unset, the pod names no priority class, so its template is the one it always had. Set, the
+	// class is read first and the Deployment waits on the read: Kubernetes refuses every pod naming
+	// a class that does not exist, and at one replica Recreate would already have stopped the old
+	// pod, so a missing class fails the preview or update instead of leaving Dispatch down.
+	appOpts := []pulumi.ResourceOption{frontDoor, pulumi.DependsOn(appGrants)}
+	if s.appPriorityClassName != "" {
+		class, err := schedulingv1.GetPriorityClass(ctx, s.hostname+"-priority-class", pulumi.ID(s.appPriorityClassName), nil, child...)
+		if err != nil {
+			return nil, err
+		}
+		appPod.PriorityClassName = pulumi.String(s.appPriorityClassName)
+		appOpts = append(appOpts, pulumi.DependsOn([]pulumi.Resource{class}))
+	}
+	if _, err := deployment(s.hostname, s.replicas, deploymentStrategy(s.strategy), appPod, appOpts...); err != nil {
 		return nil, err
 	}
 	if _, err := service(s.hostname, 8766); err != nil {
 		return nil, err
+	}
+	// The budget covers the app's pods alone, by the label its Deployment and Service select on. It
+	// keeps the default unhealthyPodEvictionPolicy (IfHealthyBudget), so it also holds a pod that
+	// is not ready while the budget is not met: envoy-dispatch reports not ready whenever NATS or
+	// Postgres is briefly unreachable, the front door's own eviction in the same drain among the
+	// causes, and evicting the app then would turn a blip into a cold restart.
+	if s.appPDBMinAvailable > 0 {
+		if _, err := policyv1.NewPodDisruptionBudget(ctx, s.hostname, &policyv1.PodDisruptionBudgetArgs{
+			Metadata: metadata(s.hostname),
+			Spec: &policyv1.PodDisruptionBudgetSpecArgs{
+				MinAvailable: pulumi.Int(s.appPDBMinAvailable),
+				Selector:     &metav1.LabelSelectorArgs{MatchLabels: pulumi.StringMap{"app": pulumi.String(s.hostname)}},
+			},
+		}, child...); err != nil {
+			return nil, err
+		}
 	}
 
 	podPeer := func(app string) networkingv1.NetworkPolicyPeerArgs {

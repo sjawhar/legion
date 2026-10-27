@@ -36,6 +36,8 @@ async function startNats(): Promise<void> {
     container,
     "--cpus",
     "0.5",
+    "--memory",
+    "512m",
     "-p",
     "127.0.0.1::4222",
     "mirror.gcr.io/library/nats:2.10",

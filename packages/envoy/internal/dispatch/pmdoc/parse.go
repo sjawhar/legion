@@ -117,9 +117,10 @@ func parseStampedAt(markdown string, at origin, budget *WriteBudget) (*Node, err
 // markdown names on two blocks is refused (ErrSchema) instead of repaired, since the repair would
 // silently give the id to whichever block comes first. live is the document the markdown replaces
 // whole, or nil for a fragment or a new document: a repeat live already carries is not refused
-// (RepeatedBlockID), and the repair keeps it for its first block, as settlement would. A document
-// whose rendering, the markdown it is stored as, reads back otherwise is refused
-// (RefuseMisreadDocument).
+// (RepeatedBlockID), and the repair keeps it for its first block, as settlement would. A block id
+// of any length is written; one longer than text.MaxBlockIDBytes is simply no graph node
+// (refs.IndexBlocks). A document whose rendering, the markdown it is stored as, reads back
+// otherwise is refused (RefuseMisreadDocument).
 func ParseForWrite(markdown string, live *Node) (*Node, error) {
 	doc, err := parseForWrite(markdown, live, true, NewWriteBudget())
 	if err != nil {
@@ -955,7 +956,13 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 			}
 			children = append(children, content...)
 		case *ast.AutoLink:
-			children = appendTextPiece(children, string(current.Label(source)), append(active, Mark{Type: "link", Attrs: Attrs{"href": string(current.URL(source)), "title": nil}}))
+			// goldmark gives an email autolink the bare address as its URL; the browser editor's
+			// engine, like a comment's renderer, links it to the address's mailto: URL.
+			href := string(current.URL(source))
+			if current.AutoLinkType == ast.AutoLinkEmail {
+				href = "mailto:" + href
+			}
+			children = appendTextPiece(children, string(current.Label(source)), append(active, Mark{Type: "link", Attrs: Attrs{"href": href, "title": nil}}))
 		case *extensionast.Strikethrough:
 			content, err := within(current, Mark{Type: "strike_through"})
 			if err != nil {

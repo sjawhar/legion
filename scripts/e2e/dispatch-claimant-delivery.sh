@@ -160,8 +160,7 @@ pass
 begin nats
 # The port is the kernel's pick (`-p -1`), read back from the line the server logs once it listens.
 start_process nats "$work/bin/natsd" -p -1 -store_dir "$work/nats-store"
-await_start nats "$nats_pid" 0 60 "natsd to be ready" grep -q 'Server is ready' "$work/logs/nats.log" ||
-  fail "natsd could not bind its port; see $work/logs/nats.log"
+await_start nats "$nats_pid" 60 "natsd to be ready" grep -q 'Server is ready' "$work/logs/nats.log"
 nats_port=$(sed -n 's/.*Listening for client connections on .*:\([0-9][0-9]*\)$/\1/p' "$work/logs/nats.log" | sed -n 1p)
 [ -n "$nats_port" ] || fail "natsd logged no client port; see $work/logs/nats.log"
 nats_url=nats://127.0.0.1:$nats_port
@@ -170,9 +169,8 @@ pass
 
 begin fake-envoy
 FAKE_ENVOY_PORT=$envoy_port start_process fake_envoy bun "$root/packages/dispatch/e2e/fake-envoy.ts"
-await_start fake_envoy "$fake_envoy_pid" 0 60 "the fake Envoy listener to answer /healthz" \
-  curl -fsS --max-time 2 "http://127.0.0.1:$envoy_port/healthz" ||
-  fail "another process bound 127.0.0.1:$envoy_port first; see $work/logs/fake_envoy.log"
+await_start fake_envoy "$fake_envoy_pid" 60 "the fake Envoy listener to answer /healthz" \
+  curl -fsS --max-time 2 "http://127.0.0.1:$envoy_port/healthz"
 note "fake Envoy listener on http://127.0.0.1:$envoy_port"
 pass
 
@@ -202,9 +200,8 @@ start_process dispatch env -i \
   ENVOY_URL="http://127.0.0.1:$envoy_port" \
   NATS_URLS="$nats_url" \
   "$dispatch_bin"
-await_start dispatch "$dispatch_pid" 0 60 "envoy-dispatch to answer /healthz" \
-  curl -fsS --max-time 2 "$dispatch_url/healthz" ||
-  fail "another process bound 127.0.0.1:$dispatch_port first; see $work/logs/dispatch.log"
+await_start dispatch "$dispatch_pid" 60 "envoy-dispatch to answer /healthz" \
+  curl -fsS --max-time 2 "$dispatch_url/healthz"
 note "envoy-dispatch on $dispatch_url, NATS on, outbox publishing to $nats_url"
 pass
 

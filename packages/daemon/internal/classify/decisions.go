@@ -8,12 +8,18 @@ import (
 
 // AdvancePullRequestHead applies the shipped resetPrHead fix-attempt decision to a new observed
 // head. A red prior verdict counts once, unless the red was planned (PlannedRed: the review App's
-// red tests) or the head's own push was handoff-only or the review App's. A code-changing head
-// decides the planned mark (the review App's sets it, anyone else's clears it); a handoff-only
-// head, or one whose push has not arrived (ApplyPush settles it), carries it. The recorded CI
-// settlement stays, as CheckedHead's: it is the new head's too once every push between them is
-// known to change only .legion/ (HeadVerdict), and a settlement for another head replaces it
-// (SettlementFor). The pushes it keeps are keptPushes'.
+// red tests) or the recorded pushes show the move spares the count (sparedMove): a chain of pushes
+// from the recorded head to the new one, each the review App's or an unforced handoff-only push
+// (sparesAttempt). The recorded CI settlement stays, as CheckedHead's: it is the new head's too
+// once every push between them is known to change only .legion/ (HeadVerdict), and a settlement
+// for another head replaces it (SettlementFor). The pushes it keeps are keptPushes'.
+//
+// The move's planned mark is its last push that may change code (arrivalPlan): the review App's
+// sets it, anyone else's clears it, and a move of handoffs alone carries it. The head records the
+// head it replaced (HeadArrivedFrom), so a chain whose pushes arrive after the head settles the
+// mark when it completes (ApplyPush), as it would have had they arrived first. Until a chain is
+// recorded, any push that left the head and may change code decides (headPush). The pushes it keeps
+// are keptPushes': a push that may be a link of a chain still to complete stays.
 //
 // HeadCounted names the head the count last counted, and the attempt it marks runs on through every
 // head pushed on top of it until one is pushed onto a green verdict, or onto a settled head whose
@@ -21,23 +27,37 @@ import (
 // back from either, so the push is a fresh start. A push onto a head CI has not judged yet, or onto
 // a red that counts nothing, is the same attempt, not a new one. Only a counted head is ever named, so
 // ApplyPush's take-back never undoes a count it did not make. A count keeps the mark it replaces
-// (HeadCountedBefore), which the take-back restores: a head whose push has not arrived is counted,
-// and when that push proves handoff-only or the review App's, the attempt is left as it would have
-// been had the push arrived first.
+// (HeadCountedBefore), which the take-back restores, and the head it moved from (HeadCountedFrom),
+// where the chain the take-back looks for starts: a head whose pushes have not all arrived is
+// counted, and when the pushes that arrive later complete a chain that spares the move, the attempt
+// is left as it would have been had they arrived first.
+//
+// The count and the planned mark of a move are the same in every order of its pushes and its
+// arrival while the move's head is still the recorded head when its last push arrives - also for a
+// head the daemon reached past heads it never recorded (a read of GitHub's head, a reopen). A head
+// that arrives on top of it first ends that: h2 red, the review App's red tests h2..h3 and a
+// handoff h3..h4, both synchronizes first and both pushes late, counts h3 and leaves h4 unplanned,
+// while the pushes first count nothing and plan h4. Judging h4's arrival reads h3's verdict, which
+// depends on h3's pushes, so only replaying the arrivals and settlements since the last head whose
+// chain was known would make that order agree. The code before the chain rule had the same gap.
 func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRequest {
-	pending := headPush(pr.Pushes, pr.HeadSHA, headSHA)
-	pr.Pushes = keptPushes(pr.Pushes, headSHA)
+	planned, decided, chained := arrivalPlan(pr.Pushes, pr.HeadSHA, headSHA)
+	if pending := headPush(pr.Pushes, pr.HeadSHA, headSHA); !chained && pending != nil && pending.MayChangeCode() {
+		planned, decided = pending.ByReviewApp, true
+	}
+	spared := sparedMove(pr.Pushes, pr.HeadSHA, headSHA)
+	pr.Pushes = keptPushes(pr.Pushes, pr.HeadSHA, headSHA, chained)
 	switch verdict := HeadVerdict(pr); {
-	case verdict == "red" && !pr.PlannedRed && (pending == nil || (!pending.HandoffOnly && !pending.ByReviewApp)):
+	case verdict == "red" && !pr.PlannedRed && !spared:
 		pr.FixAttempts++
-		pr.HeadCountedBefore, pr.HeadCounted = pr.HeadCounted, headSHA
+		pr.HeadCountedBefore, pr.HeadCounted, pr.HeadCountedFrom = pr.HeadCounted, headSHA, pr.HeadSHA
 	case verdict == "green" || nothingRequired(pr):
-		pr.HeadCounted, pr.HeadCountedBefore = "", ""
+		pr.HeadCounted, pr.HeadCountedBefore, pr.HeadCountedFrom = "", "", ""
 	}
-	if pending != nil && !pending.HandoffOnly {
-		pr.PlannedRed = pending.ByReviewApp
+	if decided {
+		pr.PlannedRed = planned
 	}
-	pr.HeadSHA = headSHA
+	pr.HeadArrivedFrom, pr.HeadSHA = pr.HeadSHA, headSHA
 	return pr
 }
 
@@ -104,18 +124,47 @@ func HeadPushKnown(pr record.PullRequest, head string) bool {
 	return headPush(pr.Pushes, pr.HeadSHA, head) != nil
 }
 
-// keptPushes is what a head's arrival keeps: every push that changed only .legion/, did not
-// rewrite history and said which head it replaced - a fact about two commits, true whenever it is
-// learned, which an approval is carried across - and the pushes still on their way from the new
-// head. Any other push is spent once its head arrives, or was late for a head already gone.
-func keptPushes(pushes []record.ClassifiedPush, head string) []record.ClassifiedPush {
+// keptPushes is what a head's arrival from previous keeps: every push that changed only .legion/,
+// did not rewrite history and said which head it replaced - a fact about two commits, true
+// whenever it is learned, which an approval is carried across - the pushes still on their way from
+// the new head, and every other push that said which head it replaced and is not yet spent: it may
+// be a link of a chain still to complete (ApplyPush), or of a later move whose first link is late.
+// A push is spent once it lies behind the head the new one replaced - reached walking back from it
+// through recorded pushes - since the moves it made are judged, and, once a chain of recorded
+// pushes leads from that head to the new one (chained), once it lies behind the new head. Until
+// then a push behind the new head is a link whose chain is still to complete. A push that did not
+// say which head it replaced is never a link, and is not kept.
+func keptPushes(pushes []record.ClassifiedPush, previous, head string, chained bool) []record.ClassifiedPush {
 	onPath := map[string]bool{}
 	for _, p := range pathFrom(pushes, head, false) {
 		onPath[p.SHA] = true
 	}
+	from := []string{previous}
+	if chained {
+		from = append(from, head)
+	}
+	reached := map[string]bool{}
+	for _, h := range from {
+		reached[h] = true
+	}
+	spent := map[int]bool{}
+	for frontier := from; len(frontier) > 0; {
+		current := frontier[0]
+		frontier = frontier[1:]
+		for i, p := range pushes {
+			if p.SHA != current || p.Before == "" || spent[i] {
+				continue
+			}
+			spent[i] = true
+			if !reached[p.Before] {
+				reached[p.Before] = true
+				frontier = append(frontier, p.Before)
+			}
+		}
+	}
 	var kept []record.ClassifiedPush
-	for _, p := range pushes {
-		if carriesApproval(p) || onPath[p.SHA] {
+	for i, p := range pushes {
+		if carriesApproval(p) || onPath[p.SHA] || (p.Before != "" && !spent[i]) {
 			kept = append(kept, p)
 		}
 	}
@@ -123,15 +172,80 @@ func keptPushes(pushes []record.ClassifiedPush, head string) []record.Classified
 }
 
 // carriesApproval is whether an approval of the head a push replaced also approves the head it
-// left: the push changed only .legion/, did not rewrite history, and said which head it replaced.
+// left: the push changed only the issue's own .legion/<issue>/ (HandoffPath), did not rewrite
+// history, and said which head it replaced.
 func carriesApproval(p record.ClassifiedPush) bool {
 	return !p.MayChangeCode() && p.Before != ""
 }
 
-// ApplyPush records a push and, for the current head, settles its planned mark and takes back
-// exactly its counted fix attempt when the late push is handoff-only or the review App's, restoring
-// the counted attempt's mark that count replaced (AdvancePullRequestHead). A push replaces an
-// earlier record of the same two heads, so a redelivered push is recorded once.
+// sparesAttempt is whether a push onto a red is no fix attempt: it said which head it replaced,
+// and it was the review App's (its red tests, a red it plans) - which who pushed it says, forced
+// or not - or it changed only the issue's own handoffs without rewriting history (a forced push's
+// paths do not describe what it did to that head, so it may change code).
+func sparesAttempt(p record.ClassifiedPush) bool {
+	return p.Before != "" && (p.ByReviewApp || (p.HandoffOnly && !p.Forced))
+}
+
+// sparedMove is whether the recorded pushes show the move from from to to is no fix attempt: a
+// chain of pushes leads from from to to, each sparing the attempt (sparesAttempt). Each such push is
+// a fact about two commits, true whenever it is learned, so once every push of the move is recorded
+// the answer does not depend on the order the pushes arrived in, or on whether the daemon recorded
+// the heads between from and to (AdvancePullRequestHead names the order it does not cover).
+func sparedMove(pushes []record.ClassifiedPush, from, to string) bool {
+	return from != "" && from != to && linkedBack(pushes, to, from, sparesAttempt)
+}
+
+// arrivalPlan reads the move from from to to off a chain of recorded pushes between them, each of
+// which said which head it replaced. chained is whether such a chain leads from from to to;
+// decided is whether a push on it may change code (MayChangeCode); planned is whether the last such
+// push - the one nearest to - was the review App's. A move of handoffs alone decides nothing, and
+// the planned mark is carried across it.
+func arrivalPlan(pushes []record.ClassifiedPush, from, to string) (planned, decided, chained bool) {
+	if from == "" || from == to {
+		return false, false, false
+	}
+	type reach struct {
+		head             string
+		decided, planned bool
+	}
+	reached := map[string]bool{to: true}
+	for frontier := []reach{{head: to}}; len(frontier) > 0; {
+		current := frontier[0]
+		frontier = frontier[1:]
+		for _, p := range pushes {
+			if p.SHA != current.head || p.Before == "" || reached[p.Before] {
+				continue
+			}
+			next := reach{head: p.Before, decided: current.decided, planned: current.planned}
+			if !next.decided && p.MayChangeCode() {
+				next.decided, next.planned = true, p.ByReviewApp
+			}
+			if p.Before == from {
+				return next.planned, next.decided, true
+			}
+			reached[p.Before] = true
+			frontier = append(frontier, next)
+		}
+	}
+	return false, false, false
+}
+
+// ApplyPush records a push and settles the current head's planned mark: once the recorded pushes
+// chain from the head it replaced (HeadArrivedFrom) to it, by that chain's last push that may
+// change code (arrivalPlan); until then, by the head's own push when it may change code (the
+// review App's sets it, anyone else's clears it). The push completing the chain can name a head
+// before the current one, so the mark is the same whichever of the pushes and the head arrives
+// first, while the head is still the recorded head (AdvancePullRequestHead).
+//
+// It then takes back exactly the counted fix attempt of the current head once the recorded pushes
+// show the counted move - from HeadCountedFrom to HeadCounted - spares it (sparedMove), restoring
+// the counted attempt's mark that count replaced (AdvancePullRequestHead). The push that completes
+// that chain can be the counted head's own or any push before it on the chain, so it can name a
+// head other than the current one. A push that reached the counted head from another head - the
+// required-checks pass's compare from an approved head - completes no chain from HeadCountedFrom,
+// and takes nothing back: the counted move can carry code that push does not. A push replaces an
+// earlier record of the same two heads, so a redelivered push is recorded once. The pushes it
+// keeps are boundedPushes'.
 func ApplyPush(pr record.PullRequest, push record.ClassifiedPush) record.PullRequest {
 	pushes := make([]record.ClassifiedPush, 0, len(pr.Pushes)+1)
 	for _, p := range pr.Pushes {
@@ -139,21 +253,70 @@ func ApplyPush(pr record.PullRequest, push record.ClassifiedPush) record.PullReq
 			pushes = append(pushes, p)
 		}
 	}
-	pr.Pushes = append(pushes, push)
-	if pr.HeadSHA != push.SHA {
-		return pr
-	}
-	if !push.HandoffOnly {
+	pr.Pushes = boundedPushes(append(pushes, push), pr.HeadSHA)
+	if planned, decided, chained := arrivalPlan(pr.Pushes, pr.HeadArrivedFrom, pr.HeadSHA); chained {
+		if decided {
+			pr.PlannedRed = planned
+		}
+	} else if pr.HeadSHA == push.SHA && push.MayChangeCode() {
 		pr.PlannedRed = push.ByReviewApp
 	}
-	if (push.HandoffOnly || push.ByReviewApp) && pr.HeadCounted == push.SHA {
+	if pr.HeadCounted != "" && pr.HeadCounted == pr.HeadSHA && sparedMove(pr.Pushes, pr.HeadCountedFrom, pr.HeadCounted) {
 		if pr.BlockedAttempts == pr.FixAttempts {
 			pr.BlockedAttempts = 0
 		}
 		pr.FixAttempts--
-		pr.HeadCounted, pr.HeadCountedBefore = pr.HeadCountedBefore, ""
+		pr.HeadCounted, pr.HeadCountedBefore, pr.HeadCountedFrom = pr.HeadCountedBefore, "", ""
 	}
 	return pr
+}
+
+// maxWaitingPushes bounds the pushes a pull request keeps that wait for a link (keptPushes): a push
+// that neither carries an approval across nor lies on the path forward from the head. A push behind
+// a webhook that never arrives is spent by no head's arrival, since the walk back from each head
+// stops at the gap; past the bound the oldest such push goes, and the move it would have linked
+// into is judged without it.
+const maxWaitingPushes = 16
+
+// boundedPushes is pushes with at most maxWaitingPushes waiting pushes, the oldest dropped first.
+func boundedPushes(pushes []record.ClassifiedPush, head string) []record.ClassifiedPush {
+	onPath := map[string]bool{}
+	for _, p := range pathFrom(pushes, head, false) {
+		onPath[p.SHA] = true
+	}
+	waiting := 0
+	for _, p := range pushes {
+		if !carriesApproval(p) && !onPath[p.SHA] {
+			waiting++
+		}
+	}
+	if waiting <= maxWaitingPushes {
+		return pushes
+	}
+	kept := make([]record.ClassifiedPush, 0, len(pushes))
+	for _, p := range pushes {
+		if waiting > maxWaitingPushes && !carriesApproval(p) && !onPath[p.SHA] {
+			waiting--
+			continue
+		}
+		kept = append(kept, p)
+	}
+	return kept
+}
+
+// DroppedPushes is the pushes before holds that after does not: what a fact let go of.
+func DroppedPushes(before, after []record.ClassifiedPush) []record.ClassifiedPush {
+	held := map[[2]string]bool{}
+	for _, p := range after {
+		held[[2]string{p.Before, p.SHA}] = true
+	}
+	var dropped []record.ClassifiedPush
+	for _, p := range before {
+		if !held[[2]string{p.Before, p.SHA}] {
+			dropped = append(dropped, p)
+		}
+	}
+	return dropped
 }
 
 // ApplySettlement applies a listener CI settlement only when ClassifySettlement says it is newer,
@@ -249,6 +412,12 @@ func CodeOnItsWay(pr record.PullRequest) bool {
 // approval across (carriesApproval) reaches it: every push between them changed only .legion/, so
 // the two heads' code is the same.
 func carriedBack(pushes []record.ClassifiedPush, head, earlier string) bool {
+	return linkedBack(pushes, head, earlier, carriesApproval)
+}
+
+// linkedBack is whether earlier is head, or walking back from head through pushes link accepts,
+// each from the head it left to the head it replaced, reaches it.
+func linkedBack(pushes []record.ClassifiedPush, head, earlier string, link func(record.ClassifiedPush) bool) bool {
 	if head == earlier {
 		return true
 	}
@@ -257,7 +426,7 @@ func carriedBack(pushes []record.ClassifiedPush, head, earlier string) bool {
 		current := frontier[0]
 		frontier = frontier[1:]
 		for _, p := range pushes {
-			if p.SHA != current || !carriesApproval(p) || reached[p.Before] {
+			if p.SHA != current || !link(p) || reached[p.Before] {
 				continue
 			}
 			if p.Before == earlier {
