@@ -2,15 +2,15 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-177",
-  "completed": "2026-10-27T14:22:47Z",
+  "completed": "2026-10-27T16:43:15Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2354",
   "proof": [
     {
       "criterion": "A9 / round 2: under the records' daemon the import does not push a held, merging or awaiting_merge branch, and re-reads the phase before each removal",
       "surface": "legion handoffs import (handoffimport.Run) against the GitHub REST and Dispatch stand-ins",
       "command": "cd packages/daemon && go test -count=1 -p 1 ./internal/handoffimport/",
-      "observed": "package ok, including TestUnderTheRecordsDaemonHeldAndMergingBranchesAreNotMoved, TestThePhaseIsReadAgainBeforeTheRemoval and TestUnderTheRecordsDaemonAnAwaitingMergeBranchIsNotMoved",
-      "headSha": "8c69e252a7311b79fd5589aa92f07031577b4a5a",
+      "observed": "package ok at 1783e41b (handoffimport tests incl. held/merging/awaiting_merge deferral and the phase re-read)",
+      "headSha": "1783e41b941505d5a1165b77788832b849f67146",
       "negativeControl": "with 4dbcd232's handoffimport.go: the held branch LEG-2 moved (c0005 -> c0021) and TestThePhaseIsReadAgainBeforeTheRemoval failed; with the merging guard removed, the merging branch LEG-3 was moved"
     },
     {
@@ -24,9 +24,9 @@
     {
       "criterion": "A6: a 40 KB handoff writes and reads back; two writes give versions 1 and 2",
       "surface": "the real `dispatch` CLI against the real Dispatch server, in scripts/e2e/handoff-records.sh",
-      "command": "source /legion/harness/env.sh && LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/legion_m3?sslmode=disable LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server bash scripts/e2e/handoff-records.sh",
-      "observed": "all checks ok at 8c69e252 after the merge with main #2229, PASS in 65s; the A10 restart came back on the same port (http://127.0.0.1:43251)",
-      "headSha": "8c69e252a7311b79fd5589aa92f07031577b4a5a",
+      "command": "source /legion/harness/env.sh && LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/legion_m5?sslmode=disable LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server bash scripts/e2e/handoff-records.sh",
+      "observed": "all checks ok at 1783e41b, PASS in 64s (evidence /legion/scratch/tmp/legion-e2e-handoff-records-evidence.aYnBKDcr)",
+      "headSha": "1783e41b941505d5a1165b77788832b849f67146",
       "negativeControl": "a 262145-byte body: the CLI refuses it before sending, and a raw POST is answered 413 CAP_EXCEEDED"
     },
     {
@@ -34,7 +34,7 @@
       "surface": "POST /legion/v1/handoff/complete on the whole daemon, with the record read from the real Dispatch server",
       "command": "bash scripts/e2e/handoff-records.sh (checks a3, a3-control)",
       "observed": "403 HANDOFF_SESSION_MISMATCH naming both sessions, and the issue stays in planning",
-      "headSha": "4496efab477a128372d7fde5328f2a1fa8179c85",
+      "headSha": "1783e41b941505d5a1165b77788832b849f67146",
       "negativeControl": "the planner's own record: 200, and the issue moves to implementing"
     },
     {
@@ -42,7 +42,7 @@
       "surface": "the real Dispatch process stopped and restarted under the whole daemon",
       "command": "bash scripts/e2e/handoff-records.sh (checks a10-*)",
       "observed": "with Dispatch stopped, the write exits 1 and the completion gets 502 DISPATCH_READ_FAILED with the phase unchanged; after the restart, the write (version 2) and the completion land, and the list route holds the record",
-      "headSha": "4496efab477a128372d7fde5328f2a1fa8179c85",
+      "headSha": "1783e41b941505d5a1165b77788832b849f67146",
       "negativeControl": "with Dispatch up, the first write succeeds"
     },
     {
@@ -50,15 +50,15 @@
       "surface": "legion handoffs import against the running daemon and the real Dispatch server, then the tester's completion",
       "command": "bash scripts/e2e/handoff-records.sh (check a7); go test ./internal/handoffimport/",
       "observed": "the import wrote plan/implement/test v1 under legion-daemon:<PROJECT> and printed 'removal deferred: … is in testing'; the completion naming the import's record was refused HANDOFF_SESSION_MISMATCH; the tester wrote it again (v2) and completed; the reviewer's task reads 'Handoff: test version 2 (dispatch handoff-read … --phase test --version 2)'",
-      "headSha": "4496efab477a128372d7fde5328f2a1fa8179c85",
+      "headSha": "1783e41b941505d5a1165b77788832b849f67146",
       "negativeControl": "a second import run writes and pushes nothing, and a worker's newest record is kept"
     },
     {
       "criterion": "A1: a handoff shows in Conversation as one entry with its fields",
       "surface": "the Dispatch dashboard in Chromium against the real Go server (packages/dispatch/e2e/handoffs.e2e.ts)",
       "command": "bash /legion/harness/dispatch-e2e.sh 'postgres://postgres@127.0.0.1:5433/dispatch_e2e?sslmode=disable' e2e/handoffs.e2e.ts (runs bun e2e/run.ts -- bunx playwright test …)",
-      "observed": "2 passed at 8c69e252 (through main's e2e/run.ts since #2229)",
-      "headSha": "8c69e252a7311b79fd5589aa92f07031577b4a5a",
+      "observed": "2 passed at 1783e41b",
+      "headSha": "1783e41b941505d5a1165b77788832b849f67146",
       "negativeControl": "the build of 8a4d97bf (the Activity commit, before the Conversation change): the Conversation test fails (Expected 2, Received 0 cards) and the Activity test passes"
     },
     {
@@ -84,6 +84,14 @@
       "observed": "one file: handoff_records_live_test.go, the assertion that the import's commit carries no skip-checks",
       "headSha": "4496efab477a128372d7fde5328f2a1fa8179c85",
       "negativeControl": "the same grep at main ad909178a matches 115 files"
+    },
+    {
+      "criterion": "Child adoption still works after the merges (main's #2226 live proof)",
+      "surface": "the whole daemon on its live harness (scripts/e2e/child-adoption.sh)",
+      "command": "bash scripts/e2e/child-adoption.sh",
+      "observed": "11 steps ok, PASS in 45s at 1783e41b",
+      "headSha": "1783e41b941505d5a1165b77788832b849f67146",
+      "negativeControl": "merged-root-waits.sh, its sibling live proof, fails on main itself in this pod (dispatch://INFRA-623), so it was not run"
     }
   ],
   "filesChanged": [
@@ -102,8 +110,9 @@
     "P7 asserts GitHub started the required gate run on each head, not that it finished: legion-smoke runs sat queued 20-40 minutes.",
     "Pod-only failures, which also fail on main in this pod: Docker testcontainers tests; TestTmuxBootRewritesEveryOlderClonesCredentialHelper; TestATerminalAttempt* (gVisor); the two launcher resume tests; TestNewRefusesLaunchersItCannotRun; the pi-legion judge-omp rig tests; claude-envoy's queryTmux timing flake; and, since main 448a4100, scripts/e2e/merged-root-waits.sh and the 8 check_wake_test.go wake tests. Those two clone acme/widgets from GitHub; filed by the controller as dispatch://INFRA-623.",
     "The harness's shared legion_test and dispatch_test databases were recreated after the renumbering. A database migrated by an earlier head holds the old numbers, so use a fresh one.",
-    "This round's numbers: contract 41, daemon migration 0060_handoff_records, Dispatch migration 0130_handoffs. A database an earlier head migrated holds the older numbers, so use a fresh one (legion_m3 / dispatch_m3 exist on the harness).",
-    "Since main #2229 the Dispatch browser suite runs through e2e/run.ts (held ports); /legion/harness/dispatch-e2e.sh does that now."
+    "This round's numbers: contract 41, daemon migration 0060_handoff_records, Dispatch migration 0130_handoffs. A database an earlier head migrated holds the older numbers, so use a fresh one (legion_m5 / dispatch_m5 exist on the harness).",
+    "Since main #2229 the Dispatch browser suite runs through e2e/run.ts (held ports); /legion/harness/dispatch-e2e.sh does that now.",
+    "This round's numbers: contract 41, daemon migration 0061_handoff_records, Dispatch migration 0135_handoffs; use a fresh database (legion_m5/dispatch_m5 exist)."
   ],
   "deviations": [
     "Spec departures 1-6 as the plan lists, accepted by the INFRA-138 architect (dispatch://INFRA-177/comment/e88a7bb0-a734-4f85-9108-d72280951be6).",
@@ -114,10 +123,12 @@
     "Main's #2287 (an approval stands across handoff-only commits) extended the machinery this issue removes. In the merge, its classification and carry code, its approval-carry pass and its fixtures were dropped. Kept: its CI flag change, and its round-ends-on-the-approved-head case as an adapted test."
   ],
   "openQuestions": [],
-  "round": 5,
-  "reviewFindingsAnswered": [
-    "1 held escapes the deferral: fixed in d45c1391. Under the records' daemon the removal is deferred for held (the state gives no hold origin), and the issue's phase is read again from the daemon just before each removal (deferred when it moved into a deferred phase or left the workflow). Tests TestUnderTheRecordsDaemonHeldAndMergingBranchesAreNotMoved and TestThePhaseIsReadAgainBeforeTheRemoval fail against 4dbcd232's import.",
-    "2 merging's reason: per the architect, merging stays deferred for its own reason (the merger builds READY at the head it read; a push past it makes the daemon refuse or void that READY, READY_HEAD_MOVED). Comment (deferredUnderRecords) and runbook corrected; the merging case fails when its guard is removed.",
-    "Main moved and conflicted again: forward merge 8c69e252 with main a5f0cf47 (#2229, held ports); the scratch Dispatch handle now uses a kernel-chosen held socket, and a restart re-binds the same port. PR is MERGEABLE."
+  "round": 6,
+  "mergeRound": [
+    "Forward merge 545816c7 with main 2df3353c (PR was CONFLICTING after approval at 2879eb82). Renumbered because main took them: daemon migration 0061_handoff_records (main has 0060_pull_request_head_move_starts), Dispatch migration 0135_handoffs (main has 0130-0134); recordsSchema = 61; contract 41 unchanged.",
+    "Main's #2365 kept with the chain links limited to ByReviewApp pushes (HeadCountedFrom/HeadArrivedFrom, migration 0060 and chain mechanics kept; handoff-only/forced cases dropped; daemon/approval_reads_test.go stays deleted). The push handler re-applies the CI rule also when the planned mark changes.",
+    "791ec4e4: skill-scenario daemon-pane.go still called phase.HandoffFile (renamed in round 1); it now keeps its own word table so it builds against every label's daemon module. pi-legion's daemon-pane tests pass again.",
+    "The skill/prompt split relayed at 16:14Z was withdrawn at 16:34Z: the text was moved to #2421 and brought back in 1783e41b; #2421 closed with a withdrawal comment and its branch deleted. 1783e41b's content equals 545816c7 plus 791ec4e4.",
+    "gh: #2354 MERGEABLE at 1783e41b. Fingerprint 2b079e96… → 418b227b… (changed), posted on the PR."
   ]
 }
