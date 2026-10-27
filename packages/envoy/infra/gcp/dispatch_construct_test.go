@@ -134,6 +134,26 @@ func TestConstructRefusesDispatchAppResourcesFromAnotherResource(t *testing.T) {
 	}
 }
 
+// appPriorityClassName is a plain string and appPdbMinAvailable a plain *int, each refused from
+// another resource's output as replicas is.
+func TestConstructRefusesDispatchAppDisruptionInputsFromAnotherResource(t *testing.T) {
+	for input, value := range map[string]property.Value{
+		"appPriorityClassName": property.New("example-priority"),
+		"appPdbMinAvailable":   property.New(1.0),
+	} {
+		t.Run(input, func(t *testing.T) {
+			inputs := dispatchConstructInputs()
+			inputs[input] = value.WithDependencies([]resource.URN{upstream})
+			for _, key := range []string{"tailnetAuthKey", "natsUrl", "natsSeedSecret", "signInClientSecret"} {
+				inputs[key] = property.New("example").WithDependencies([]resource.URN{upstream})
+			}
+			m, _, err := constructDispatch(t, inputs, false)
+			require.ErrorContains(t, err, input)
+			require.Empty(t, m.Types())
+		})
+	}
+}
+
 // tailnetAuthKey, signInClientSecret and natsSeedSecret are Inputs, which the component reads only
 // once they resolve: a value holding an nkey seed is refused then, naming the input and never the
 // value, so no child is registered with it, plainly or as a secret. Each arrives as another
