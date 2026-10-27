@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-172",
-  "completed": "2026-10-27T03:51:04Z",
+  "completed": "2026-10-27T04:02:30Z",
   "pinnedCommit": "ad909178a0cbc43e0deef1a528051bc499ce1fb0",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2272",
   "documents": [
@@ -146,5 +146,8 @@
     "Review finding (minor): the dead split flag and TableCell.Alignment write removed; the loop only trims rows to the table's width (21f5db10).",
     "Review finding (minor): the doc-edit help names an odd run of backslashes before a | (00428c9f); claude-envoy dist regenerated, check-dist passes.",
     "Per the architect, nothing else changed. All three threads answered and resolved individually."
+  ],
+  "round6": [
+    "GitHub reported #2272 CONFLICTING on packages/envoy/CHANGELOG.md against main's #2302: forward-merged main (ff9c859b), kept both entries, changed nothing else. Fingerprint 4c40c69a… → 4c40c69a…, unchanged; posted on the PR. claude-envoy check-dist passes at the merge. The proof entries' head 00428c9f stands: rebase re-check 00428c9f → ff9c859b, fingerprint unchanged, bare gates only."
   ]
 }
