@@ -796,6 +796,86 @@
 
 ### Changed
 
+- `envoy-listener` runs as an active pod and standbys for any machine id (INFRA-557): any number of
+  listeners may run with one `ENVOY_MACHINE_ID`, and only the holder of the machine's delivery
+  lease, the key `lease.listener-<machine id>` in the new KV bucket `envoy_listener` (created at
+  `ENVOY_NATS_REPLICAS`, 10 minute `MaxAge`), receives its durable consumer. The holder renews the
+  lease every second by compare-and-set and subscribes to the durable's deliver subject with a core
+  subscription of its own, never `nats.Bind`, handling a message only while it holds the lease; a
+  standby polls every 500 ms and takes an unreleased lease once it has not changed for 5 s, a
+  released one at once. Every pod serves `/v1`, the webhooks and the role lane; the interest and
+  role-claim reapers, the interest marker collector and the CI summary loop run on the holder
+  alone. A standby waits for as long as the active pod runs and never exits for it. A graceful
+  stop now ends receiving first (the holder-only loops stop, the subscription ends, the message in
+  hand gets 3 s before its prompt is cancelled, queued messages are NAKed, the lease is marked
+  released) and then stops HTTP, so a standby delivers within about 1 to 3 s and keeps each
+  session's order. A pod that takes the lease over a holder that was killed or lost its node
+  subscribes at once but holds what it receives for one ack wait and a second, then delivers it in
+  stream order, so a session's events stay in order there too; messages arrive about 12 s after
+  the dead holder's last renewal. A holder that finds the durable push-bound by a listener build
+  from before the lease waits for that binding to end and subscribes within a second of it; past
+  135 s it logs `lease holder cannot deliver from the durable` at ERROR, again every 5 minutes, and
+  never exits for it. `packages/envoy/cmd/listener/README.md` describes the run model.
+- The listener's durable consumer acks within 6 s (`AckWait`, was 60 s): the holder sends
+  `InProgress` every 2 s for every message it has received and not settled, so only a message
+  whose holder died or lost the lease waits the ack wait out. The durable's filter is `>`, every
+  subject the stream stores, instead of the build's own list of stream subjects, so two builds whose
+  stream subjects differ share one durable during a roll; `>` rather than an empty filter, since
+  nats-server 2.10 accepts an update that clears a push durable's filter and then delivers nothing.
+  Only the lease holder writes the policy. The live topics lane leaves to the durable every subject
+  the deployed stream's current subject list captures, read from the server at start, every 5 s and
+  after each reconnect, not the list the build compiles in.
+- **Breaking:** `/healthz` is every listener pod's readiness. It answers `503 {"status":"starting"}`
+  until the listener serves (NATS connected, the webhook and `/v1` gates open over warm caches,
+  the receive loop started and, with an OIDC issuer configured, its discovery succeeded), where it
+  answered 200 `starting` from the moment its port was bound; then `200` with `"role":"active"`
+  (with the durable's lag) or `"role":"standby"` (with `active_instance`, the holder). Every answer
+  comes within 5 s, past which it is `503`; the role lane's health is read from its core
+  subscription. A health check that passed on a 200 before NATS answered now waits for the
+  listener to serve: a readiness probe should give `curl -fsS /healthz` a timeout of 6 s or more, a
+  liveness probe should not fail on a 503 (`--max-time 8`, no `-f`), and a pod needs 30 s or more
+  to stop. A NATS that does not answer at start is waited for, every 2 s, where the start exited
+  after ten tries; so is a store or the listener state bucket whose open fails for want of NATS,
+  and an OIDC issuer whose discovery fails at start is retried in the background (1 s doubling to
+  30 s) where the start exited.
+- A listener's pods share their delivery state through `envoy_listener`, so a pod that takes over,
+  or a standby answering `/v1`, answers as the active pod would. The delivery ledger
+  (`internal/dedupe`, `delivery.<durable>.<hash>.<session>` keys) replaces the per-process attempt
+  and dedupe caches on the durable, role and live lanes: a pair another pod delivered is not
+  prompted again, one another pod attempted less than 35 s ago is retried later, and an older one
+  is taken over. A ledger that cannot be read NAKs the durable message for a retry, and the role
+  and live lanes deliver without it, logging `delivery ledger unavailable`. A session's last-seen
+  time is kept in `seen.<session>` records, and a role claim's grace counts from the machine's
+  service start (`service_since` in the lease record) rather than each process's start, so every
+  pod answers a lapsed holder alike.
+- A delivery exception's `event_id` and `dedupe_key` are derived from the source event id, the
+  recipient session and the reason instead of minted, so a redelivery that fails the same way, on
+  any pod, publishes the same exception and the stream stores it once.
+- Session registrations, interests and role claims are written by compare-and-set at the revision
+  the listener read, merged again over the bucket's value on a conflict, at most 5 attempts, then
+  `503` with `Retry-After: 1`; every read-modify-write keeps the JSON fields a build does not know.
+  `/v1/messages/send` and `/v1/roles/set` read the session bucket before answering that a session
+  their pod's cache has not seen is unknown.
+- A port registration records `accepted_host`, the host name of the listener pod that accepted it
+  (`ENVOY_POD_HOSTNAME` overrides it). A pod that would dial a pod-local address (a loopback
+  `ENVOY_HOST_BRIDGE`, or the `host.docker.internal` fallback) for a session another pod accepted
+  sends nothing and reports `delivery_failed`, logging `address not reachable from this listener
+  pod`, and does not retry it.
+- `envoy-infra`'s `ListenerPermissions`, `DispatchPermissions` and `HostPermissions` grant the
+  `envoy_listener` bucket's key-value calls. Deploy the grant before a second listener pod of a
+  machine id: a listener whose grant refuses the bucket does not exit but logs one ERROR, `listener
+  lease unavailable: the NATS user lacks the grant for KV bucket envoy_listener; delivering without
+  a lease`, delivers as the machine's only deliverer with its state in its own process, and says
+  so in `/healthz` (`"lease":"unavailable: missing NATS grant for KV bucket envoy_listener"`).
+- `aws:WebhookListener`'s `subscribe-exhausted` metric filter matches `lease holder cannot deliver
+  from the durable` at ERROR, and its alarm's description says so; the alarm and metric keep their
+  names.
+- Every JSON line the listener writes carries `instance`, the process's name among its machine's
+  listeners (`ENVOY_INSTANCE_ID`, else the host name, a pod's name in Kubernetes), and its NATS
+  clients are named `envoy-listener <instance>`, `envoy-live-topics <instance>` and
+  `envoy-listener-lease <instance>`. Go's text log lines carry no prefix, so the deployed text
+  metric filters still match.
+
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a
@@ -1426,6 +1506,20 @@
   because its `dispatch_search` refuses the same rules before any request.
 
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
+
+### Removed
+
+- The listener no longer exits when its durable stays bound elsewhere: the 135 s bind deadline and
+  its line `subscribe failed after max attempts, shutting down` are gone with the start-time bind,
+  and so are `subscribe failed, retrying`, `durable bound` and `durable bind failed, shutting
+  down`. The lease holder's `lease holder cannot deliver from the durable` replaces the first as
+  the `subscribe-exhausted` alarm's line.
+- The listener no longer logs `restored role claims` at start: `store.Open` takes no snapshot of
+  the role bucket, since a claim's grace counts from the machine's service start in its delivery
+  lease record.
+- The shutdown's `a KV bucket pass still running at shutdown` WARN is gone; a holder-only loop
+  still running when receiving ends logs `a holder-only loop was still running when receiving
+  ended`.
 
 ### Fixed
 

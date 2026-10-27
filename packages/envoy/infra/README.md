@@ -642,13 +642,14 @@ envoy-infra:gcp:Dispatch needs a "random" provider in its providers option
 
 By default the docker provider waits up to 90 seconds for the container's health check to pass,
 and `pulumi up` fails if it does not. The check passes once `/healthz` answers `200`, which it does
-from `starting` on, before the listener has connected to NATS. A listener is connected when
-`/healthz` answers `"status":"healthy"`. The answers are listed under
+once the listener serves: NATS connected, its caches loaded and `/v1` open, as its machine's
+active listener or as a standby (`"role"` in the body). Until then `/healthz` answers `503`
+`starting`. The answers are listed under
 [Health and readiness](https://sjawhar.github.io/legion/dispatch/envoy/#health-and-readiness).
 
 `waitForHealthy: false` creates the container without waiting on its health check. Use it for a
-listener that cannot reach its NATS server when the stack is applied: Docker restarts the listener
-until it connects.
+listener that cannot reach its NATS server when the stack is applied: the listener stays up and
+keeps trying to connect, answering `503` `starting` until it does.
 
 ### The watchdog
 
@@ -918,8 +919,11 @@ The log group, the Cloud Map service, the task definition, the service and the a
 `baseTags` and `service: <N>`; the policies and the filters carry none.
 
 The container, `envoy-listener`, runs `/usr/local/bin/envoy-listener` from `image` on port 9020.
-Its health check fetches `/healthz` on the task's own address, the one the target group probes. Its
-environment, in this order:
+Its health check fetches `/healthz` on the task's own address, the one the target group probes. A
+task passes it once it serves `/v1`, as its machine's active listener or as a standby, and answers
+`503` `starting` before that; so during a deployment ECS stops the old task only once the new one
+serves, and the new one takes over the old one's deliveries when the old one's stop releases the
+delivery lease (`packages/envoy/cmd/listener/README.md`). Its environment, in this order:
 
 | Variable | Value |
 | --- | --- |
@@ -943,11 +947,13 @@ missing data not breaching) and sends the OK transition there too, so the channe
 stop: `<N>-publish-failure` (a JetStream publish that did not complete), `<N>-webhook-refused` (a
 delivery NATS can never take, answered 422), `<N>-stream-subject-dropped` (a start that dropped
 another deployment's overlapping stream subject), `<N>-durable-refused` (a start that refused its
-durable consumer) and `<N>-subscribe-exhausted` (a start that gave up binding its durable
-subscription). Each description names `logGroupName` as the log to read, and assumes the wiring of
-the deployment the alarms were written for: that GitHub deliveries come from Dispatch's GitHub App
-(`legion-envoy`), whose redelivery sweep retries them, and that Slack retries an event three times.
-A listener fed otherwise pages the same way, with descriptions that overstate what is retried.
+durable consumer) and `<N>-subscribe-exhausted` (a listener holding its machine's delivery lease
+that has waited 135 s or more for a durable another subscriber holds push-bound, usually a build
+from before the lease still running). Each description names `logGroupName` as the log to read,
+and assumes the wiring of the deployment the alarms were written for: that GitHub deliveries come
+from Dispatch's GitHub App (`legion-envoy`), whose redelivery sweep retries them, and that Slack
+retries an event three times. A listener fed otherwise pages the same way, with descriptions that
+overstate what is retried.
 
 Its outputs are `serviceArn`, `serviceName`, `logGroupName`, `taskDefinitionArn` and
 `internalUrl`, `http://<cloudMapServiceName>.<cloudMapNamespaceName>:9020`.
@@ -1793,10 +1799,13 @@ as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space
 - the stream's `$JS.API.STREAM.INFO`, `CREATE` and `UPDATE`, its durable consumer
   `listener-<m>`'s `$JS.API.CONSUMER.INFO` and `CREATE`, the durable's acknowledgements
   `$JS.ACK.ENVOY_NOTIFICATIONS.listener-<m>.>`, and `$JS.API.INFO`;
-- for each key-value bucket, `envoy_interests`, `envoy_roles`, `envoy_sessions` and
-  `envoy_ci_state`, the calls nats.go's key-value store makes: the info and create of the bucket's
-  stream `KV_<bucket>`, its direct and stream message gets, `$KV.<bucket>.>`, and its watchers'
-  consumer create and delete and their flow-control replies;
+- for each key-value bucket, `envoy_interests`, `envoy_roles`, `envoy_sessions`,
+  `envoy_ci_state` and `envoy_listener` (the machine's delivery lease and the delivery state its
+  listeners share, `packages/envoy/cmd/listener/README.md`), the calls nats.go's key-value store
+  makes: the info and create of the bucket's stream `KV_<bucket>`, its direct and stream message
+  gets, `$KV.<bucket>.>`, and its watchers' consumer create and delete and their flow-control
+  replies; a listener whose grant lacks `envoy_listener` logs an ERROR naming it and delivers
+  without a lease, as its machine's only deliverer;
 - `$JS.API.STREAM.PURGE.KV_envoy_interests`, which the interest bucket's delete-marker collection
   sends.
 

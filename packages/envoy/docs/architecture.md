@@ -32,7 +32,7 @@ Agent messages  --/       |
 
 ## Runtime shape
 
-- one listener container per machine
+- one listener per machine id delivering at a time: further listeners of the same id (pods of one Deployment) are standbys, and the delivery lease `lease.listener-<machine id>` in the `envoy_listener` KV bucket says which one receives the machine's durable consumer (`cmd/listener/README.md`)
 - one GitHub receiver container on the public EC2 host
 - one Slack receiver container on the public EC2 host
 - NATS cluster across all machines via Tailscale mesh, with JetStream for durable notifications and core NATS for live role routing
@@ -40,6 +40,7 @@ Agent messages  --/       |
 - Role lanes and delivery-exception lanes for role topics use core NATS; they have no durable consumer, retention, or replay. Stream reconciliation excludes role subjects and purges any role message captured while that configuration is updated.
 - JetStream KV bucket `envoy_interests` with 3 replicas for session subscriptions
 - JetStream KV bucket `envoy_sessions` with 5m TTL for session port/host data
+- JetStream KV bucket `envoy_listener` with a 10m `MaxAge` for what a machine's listeners share: the delivery lease, the delivery ledger and each session's last-seen record
 
 ## Listener API
 
@@ -63,7 +64,7 @@ requires a bearer checks no `Host`.
 | `/v1/registry/{session_id}` | GET | The authoritative answer for one session — reads through the cache to the session bucket, so a session the cache has not refilled is still found, and returns the same body a `/v1/sessions` row carries. It refuses with 413 or 400 for an id NATS will not take as a key, `404 {"error":"no live session <id>"}` only for a key the bucket does not hold, and 503 with `Retry-After: 1` for a read that did not answer |
 | `/v1/messages/send` | POST | Send a direct agent-to-agent message |
 | `/v1/messages/publish` | POST | Publish an event. Required `message` becomes the human `payload_summary`; optional `payload` is distinct machine data in `payload`. Role topics and ad-hoc topics (any `notifications.` topic the stream does not capture, such as `notifications.team.deploy-squad`) use core NATS and reach the sessions subscribed at that moment; JetStream acknowledgement for every topic the stream captures is bounded to five seconds. |
-| `/healthz` | GET | Health check (always available, even during startup) |
+| `/healthz` | GET | Readiness: `503 {"status":"starting"}` until the listener serves, then `200` with `"role":"active"` or `"standby"`; `503` when a dependency is down (always available, even during startup) |
 
 ## Subscription visibility
 

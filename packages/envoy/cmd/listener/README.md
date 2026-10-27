@@ -1,0 +1,250 @@
+# envoy-listener
+
+The listener takes webhooks in, serves the `/v1` API, and delivers the events of one machine id
+(`ENVOY_MACHINE_ID`) to the sessions it owns. Any number of listener processes may run for one
+machine id, in Kubernetes as pods of one Deployment: one of them, the active pod, delivers what the
+machine's durable consumer `listener-<machine id>` carries; every other is a standby that serves
+everything else and takes over delivery when the active pod stops or is lost.
+`packages/envoy/AGENTS.md` holds the listener's wider rules; this file holds how its pods share one
+machine id.
+
+## Run model: an active pod and standbys
+
+Every pod of a machine id, active or standby:
+
+- serves `/v1`, `/healthz`, `/metrics` and the webhook routes;
+- is a member of the role lane's core-NATS queue group `envoy-listener-<machine id>`, and of the
+  live topics lane's `envoy-listener-live-<machine id>` when `ENVOY_SUBSCRIBE_ALL_TOPICS=1`; NATS
+  hands each message of a queue group to one member, so no role or live message is delivered by
+  two pods;
+- runs the self-health monitor over its caches.
+
+Only the pod holding the machine's **delivery lease** receives the durable consumer, writes its
+policy, and runs the loops one deliverer runs: the interest reaper, the role-claim reaper, the
+interest marker collector and, on a listener with the GitHub webhook route, the CI summary loop. A
+standby runs none of them, never creates or updates the durable, and registers no JetStream
+subscription, so a NATS restart leaves it nothing to re-subscribe.
+
+### The delivery lease
+
+The lease is the key `lease.<durable>` (`lease.listener-<machine id>`) in the KV bucket
+`envoy_listener` (`bus.ListenerStateBucket`), which the listener creates at `ENVOY_NATS_REPLICAS`
+replicas, file storage, one value per key and a 10 minute `MaxAge`. Its value is JSON: `holder`
+(the holding pod's instance), `boot` (random per process start), `deliver_subject`,
+`service_since`, `acquired_at` and `released`; a field this build does not know is kept across
+every rewrite.
+
+| Constant (`lease.go`) | Value | What it does |
+| --- | --- | --- |
+| `leaseRenewEvery` | 1 s | The holder renews the record with a compare-and-set at its last revision. |
+| `leaseTTL` | 5 s | A standby takes an unreleased record that has not changed for this long, measured on its own monotonic clock from when it first saw that revision. |
+| `leaseMargin` | 1 s | The holder counts itself the holder until the start of its last successful renewal plus `leaseTTL` minus this, so its term ends before any standby can take the record. |
+| `leaseStandbyPoll` | 500 ms | How often a standby reads the record. |
+
+A standby takes an absent record with a create, a released one at once, and an unreleased one
+only once the TTL has passed; no wall clocks are compared. A holder whose renewal finds its record
+taken (a compare-and-set conflict) steps down and unsubscribes. The holder receives with a core
+subscription on the durable's deliver subject, never `nats.Bind`, and handles a message only while
+it holds the lease: one received while it does not (the moment before an unsubscribe lands, or a
+subscription nats.go sent again after a reconnect in place) is dropped with no ack and no NAK, and
+the durable redelivers it to the holder after its ack wait.
+
+The durable's ack wait is 6 s (`consumerAckWait`). The holder sends `InProgress` every 2 s for
+every message it has received and not settled, queued or in hand, so a message waits out the ack
+wait only once the pod holding it has died or lost the lease.
+
+### Take-over
+
+- **Graceful stop** (SIGTERM on the active pod): a standby delivers within about 1 to 3 s, the
+  message in hand's grace and one standby poll. The tests bound it at 10 s. Per-session order is
+  kept: the stopping pod NAKs what it has not handled before it releases the lease, and the durable
+  redelivers those before newer messages.
+- **Hard stop** (SIGKILL, node or network loss): a standby takes the expired lease about 6 s after
+  the last renewal (the TTL, one poll and the subscribe). It subscribes at once but holds what it
+  receives for one ack wait and a second (`receiveHoldMargin`), 7 s, keeping it alive with
+  `InProgress`, then delivers the held batch in stream order before it goes on live. The messages
+  the dead pod had in hand, and those the server went on pushing to a lost node's connection, come
+  back within that ack wait, so a session keeps the order of its events. Messages reach their
+  sessions about 12 s after the last renewal; the tests bound it at 15 s. A durable still
+  push-bound when a pod takes an expired lease is counted as the dead holder's binding, and the
+  new holder receives beside it.
+
+The lines to read are `listener lease acquired` (with `from`: `absent`, `released` or `expired`),
+`listener lease taken over an expired holder; receiving at once and delivering in stream order
+after one ack wait`, `held messages delivered in stream order`, `durable receiving` (with
+`lease`, `waited_ms` and `hold_ms`), `listener lease lost: another listener holds it` and
+`listener lease released`.
+
+### Graceful stop order
+
+On SIGTERM or SIGINT, once `/v1` serves (`shutdownListener`):
+
+1. the self-health monitor stops;
+2. receiving stops, inside a 10 s budget the HTTP stop shares: the holder-only loops are told to
+   stop, the subscription ends, the message in hand gets 3 s (`inflightGrace`) before its prompt is
+   cancelled (a cancelled prompt is a retryable failure: its ledger attempt is cleared and the
+   message NAKed), every queued message is NAKed, and the lease is marked released;
+3. the HTTP server shuts down within what is left of the budget;
+4. the live topics lane drains (3 s), the cache watchers stop, and the NATS client drains (13 s).
+
+The process exits 1. A runtime must allow about 26 s after SIGTERM; give it 30 s. A lease left
+unreleased (the budget ran out) is taken by a standby once it expires, as after a hard stop.
+
+## Readiness: `/healthz`
+
+`/healthz` takes no credential and answers within 5 s (`healthzDeadline`): a check that has not
+answered by then makes the answer `503 {"status":"unhealthy"}`.
+
+| Answer | When |
+| --- | --- |
+| `503 {"status":"starting"}` | Until the pod can serve: NATS connected, the webhook and `/v1` gates open over warm caches, the receive loop started and, with an OIDC issuer configured, its discovery succeeded. A NATS or issuer that does not answer keeps the pod here, up and retrying; it never exits for that. |
+| `200 {"status":"healthy","role":"active",…}` | The pod receives the durable. The body carries the durable's lag, `num_pending` and `num_ack_pending`. |
+| `200 {"status":"healthy","role":"standby",…}` | The pod is ready and does not deliver. `active_instance` names the holder when the lease record names one; `receive` says what a pod that holds the lease but does not receive yet waits for (`preparing the durable`, or `waiting for another subscriber's push binding to end`). |
+| `200 {"status":"degraded",…}` | A transient KV failure the monitor and the NATS reconnect retry, or, on the active pod, a durable whose lag could not be read. |
+| `503 {"status":"unhealthy",…}` | A NATS flush failed (`nats unavailable`), the role lane's subscription is not valid (`role subscription inactive`), the live topics lane is disconnected or refused (`live subscription inactive`), a cache watcher stopped; on the active pod also its subscription is not valid, the durable is gone, or the durable delivers to another subject than its subscription's (`not bound to this listener's subscription`, which a durable deleted and created again under it leaves). |
+
+Every healthy answer also carries the body fields it always did (`live_topics`, `ci_cache`, the
+session registry's fields). A standby is ready: route traffic to it. A pod answers `503 starting`
+only while it cannot serve, so a readiness probe that sends traffic on `200` sends none too early.
+
+A probe contract that fits these answers:
+
+- readiness: an exec of `curl -fsS http://127.0.0.1:<port>/healthz`, `timeoutSeconds` 6 or more,
+  above the handler's 5 s deadline;
+- liveness: the same request without `-f`, with `--max-time 8`, so a `503` (starting, or a
+  dependency down) is no liveness failure and only a process that does not answer is restarted;
+- `terminationGracePeriodSeconds` 30 or more, for the graceful stop above.
+
+## State the pods share
+
+Every pod of a machine id reads and writes the same records, so a pod that takes over, or a
+standby answering `/v1`, answers as the active pod would:
+
+- **Delivery ledger** (`internal/dedupe`, `delivery.<durable>.<32 hex of sha256(dedupe key)>.<session>`
+  in `envoy_listener`): before it prompts a session or forwards a role-lane message, a pod records
+  the pair attempted, and once it lands, delivered. A pair another pod delivered is not prompted
+  again; one another pod attempted less than 35 s ago (the 30 s prompt limit and 5 s) is retried
+  later on the durable lane, and an older one is taken over, since its writer died. A ledger that
+  cannot be read NAKs the durable message for a retry; the role and live lanes then deliver
+  without it and log `delivery ledger unavailable`.
+- **Delivery exceptions** carry an id derived from the event id, the recipient session and the
+  reason, so a redelivery that fails the same way publishes an exception with the same id and
+  dedupe key, which the stream stores once.
+- **Last seen** (`seen.<session>` in `envoy_listener`): every session registration write records
+  when the session was last seen, so every pod answers a lapsed session's `last_seen` alike. It
+  lasts the bucket's 10 minute `MaxAge`.
+- **Role-claim grace** counts from the machine's service start, `service_since` in the lease
+  record: the server's time of the write that took the lease when no pod of the machine was
+  serving (no record, or one last written more than two TTLs before). A claim stored before
+  `service_since` keeps its grace for one session TTL after it; every pod answers a claim alike,
+  whenever it started.
+- **Registry writes** (session registrations, interests, role claims) are compare-and-set at the
+  revision the pod read, merged again over the bucket's value on a conflict, at most 5 attempts,
+  then `503` with `Retry-After: 1`. A pod whose cache has not seen a registration reads the bucket
+  before `/v1/messages/send` or `/v1/roles/set` answers that the session is unknown.
+
+## Two builds of the listener
+
+During a roll two builds run for one machine id, and each must deliver what the other expects:
+
+- **The durable takes every stored message.** Its filter is `>` (`consumerFilterAll`), not a
+  build's own list of stream subjects, so a build whose stream carries a subject the other does
+  not know still has it delivered. It is `>` and not empty because nats-server 2.10 accepts an
+  update that clears a push durable's filter and then delivers nothing published after it. The
+  holder writes the policy only once nothing but it receives.
+- **The live lane splits by the deployed stream.** It leaves to the durable every subject the
+  stream's current subject list captures, read from the server at start, every 5 s and after each
+  reconnect, not the list this build compiles in. Before its first read succeeds it uses the
+  compiled-in list. A stale list can only lack a subject added since, and the ledger keeps the
+  session from a second prompt for it.
+- **Fields a build does not know are kept.** Session registrations, interests, role claims and
+  the lease record keep every JSON field they carry across every read-modify-write.
+
+A build from before INFRA-557 binds the durable with `nats.Bind` and knows no lease. Run one beside
+this build only during a roll from the old build to this one: this build's lease holder, finding
+the durable push-bound by a subscriber without the lease, waits (`/healthz` 200 standby, `receive`
+`waiting for another subscriber's push binding to end`) and subscribes within a second of that
+binding's end. Past 135 s it logs `lease holder cannot deliver from the durable` at ERROR, and
+again every 5 min, which the AWS `subscribe-exhausted` alarm matches; it never exits for it.
+
+Rolling back to a build before this release works: that build corrects the durable's filter to its
+own list and binds once this build's pods have stopped. But a hard stop of this build's lease
+holder while a build from before the release is up and polling to bind can deliver messages twice:
+the old build binds as soon as the dead holder's connection is gone, and the standby that takes
+the expired lease counts that binding as the dead holder's and receives beside it. A rollback that
+stops every pod of this build before starting the old one carries no such risk.
+
+## Without the grant: no-lease mode
+
+The listener's NATS user needs the `envoy_listener` bucket in its grant (`infra/core`
+`ListenerPermissions`, `DispatchPermissions` and `HostPermissions` carry it from this release).
+A listener whose grant refuses the bucket does not exit: it logs one ERROR, `listener lease
+unavailable: the NATS user lacks the grant for KV bucket envoy_listener; delivering without a
+lease`, and delivers as the machine's one deliverer, receiving from the durable only while no other
+subscriber holds it push-bound and waiting for as long as one does. `/healthz` says so in `lease`:
+`"lease":"unavailable: missing NATS grant for KV bucket envoy_listener"`. The shared state above
+falls back to the pod's own: the ledger is in process, last-seen is in process, and the role-claim
+grace counts from the pod's own start. Run one pod per machine id in this mode: it has no fencing
+against a second deliverer after a reconnect in place.
+
+Deploy prerequisite: render and apply the NATS grant carrying `envoy_listener` (for a
+`gcp:NatsHub`, its users; for a host, its NATS authorization) before running a second pod of a
+machine id.
+
+## Port-session delivery addresses
+
+Every pod of a machine computes a session's address the same way (`session.Deliverer.hostFor`,
+from the registration and `ENVOY_HOST_BRIDGE`), and every answer reaches the session from any pod
+but two, which are local to the pod that dials them: a loopback bridge (`ENVOY_HOST_BRIDGE` such as
+`127.0.0.1`) and the `host.docker.internal` fallback. The subscribe handler stamps a port
+registration with `accepted_host`, the accepting pod's host name. A pod that would dial a
+pod-local address for a session another pod accepted sends nothing: it reports the delivery as
+`delivery_failed` (the log names `address not reachable from this listener pod`) and does not
+retry. A registration without `accepted_host` (written by an earlier build) is delivered as
+before, and pods that share a host name (host networking) deliver normally. A session on a serve
+port that needs every pod to reach it registers a host every pod reaches.
+
+## Environment
+
+The settings every listener reads are listed on the docs site's Envoy page ("Running the
+listener"). These concern the pods of one machine id:
+
+| Variable | What it is |
+| --- | --- |
+| `ENVOY_MACHINE_ID` | The machine id. Every pod with the same id shares one durable, one lease and one queue group; two machines whose ids collide silently become each other's standby. |
+| `ENVOY_INSTANCE_ID` | The pod's instance name: the lease record's `holder`, `/healthz`'s `active_instance`, the `instance` field of every JSON log line, and the NATS client names (`envoy-listener <instance>`, `envoy-live-topics <instance>`, `envoy-listener-lease <instance>`). Default: the host name, the pod's name in Kubernetes. Go's text log lines carry no instance prefix, since the deployed text metric filters match by position. |
+| `ENVOY_POD_HOSTNAME` | The host name stamped as `accepted_host` and compared against it. Default: the host name. Two processes on one host set it to stand for two pods (the tests). |
+| `ENVOY_NATS_REPLICAS` | Replicas of every bucket the listener creates, `envoy_listener` included. |
+
+## Recreating the durable
+
+Recreating `listener-<machine id>` (to drop a setting NATS cannot change in place, as `subscribe
+refused, shutting down` names) keeps its cursor only while no pod of the machine runs: stop every
+pod of the machine id first, active and standby. A lease holder that finds the durable missing
+creates it at deliver policy `all`, which replays every retained message, and a standby takes the
+lease and does the same when the active pod stops. Then recreate it as `packages/envoy/AGENTS.md`
+(Operational notes) shows and start the pods; the lease holder stamps the rest of the policy onto
+it and subscribes.
+
+## Tests
+
+The two-process and two-build tests start real listener binaries against one in-process NATS
+server, each behind a relay that can cut, freeze or delay its link. They carry the build tag
+`multiprocess`, and CI runs them in the `listener-multiprocess` job of
+`.github/workflows/envoy-and-contracts.yaml`:
+
+```bash
+cd packages/envoy
+go test -tags multiprocess -count=1 -timeout 20m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener
+```
+
+`TestTwoBuildsSkipOrDoubleNoMessage` also runs the first-roll direction against a build from before
+the lease when `ENVOY_LISTENER_OLD_BINARY` names one:
+
+```bash
+ENVOY_LISTENER_OLD_BINARY=<path to that build> \
+  go test -tags multiprocess -count=1 -timeout 20m -v -run '^TestTwoBuilds' ./cmd/listener
+```
+
+The lease, receive and ledger rows that need no second process (`lease_test.go`,
+`receive_test.go`, `ledger_test.go`) run with the package's other tests.
