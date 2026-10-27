@@ -1,0 +1,145 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-576",
+  "completed": "2026-10-27T03:23:35Z",
+  "planDocument": "dispatch://INFRA-576/artifact/plan-md",
+  "summary": "release.yaml goes from 10 sequential job stages to 3: four builds with no needs (the changes job deleted, each build deciding from tags); one credentialed publish job for all four packages beside the worker-image build (call 1 of worker-image.yaml); attest (call 2, gated on the plugin pair having published) beside the image version tag and release note. release-envoy-infra.yaml is already at its floor of 2. Replace-pending stays (architect's decision).",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the phase contracts, PR body and proof rules, and the production check after the close that delivers acceptance 1 and 4",
+      "ce-simplify-code: the simplify pass over the restructured release.yaml and worker-image.yaml before the proof"
+    ],
+    "test": [
+      "legion-worker: proof entries, re-running T9 and T6, and the test handoff"
+    ],
+    "review": [
+      "legion-worker: the merge-gate reference for approving the head and checking the PR body's proofs against the release credential rules"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "Verification: bump commits of two different packages rebase without conflict in push-main, but only when each bump is one commit on the run's commit (release-push.sh 533-569, 597-620); the serial-publish comments (release.yaml 809-813, 1005-1009) and credential rule 4 are wrong as written.",
+        "answer": "Decision 4: one publish job, each package's steps start with git checkout --detach $GITHUB_SHA; the wrong comments and rule 4 go (T1, T3)."
+      },
+      {
+        "finding": "Verification: legion_build needs only version strings from the plugin jobs (release.yaml 281-358), but the daemon installs the linked pair from npm on a stale-plugin relaunch (cmd/legion/main.go 60-67, 205-218).",
+        "answer": "Decision 3 (legion_build computes the pair) and decisions 4 and 6 (legion and the attested image only when the pair published or had nothing to release)."
+      },
+      {
+        "finding": "Verification: worker-image.yaml builds without legion_publish's outputs; legion_version only adds the :<version> tag and a label no one reads (worker-image.yaml 138-141, 196).",
+        "answer": "Decision 7: the version tag moves to worker_image_release after publish; T2 removes the dead workflow_call input."
+      },
+      {
+        "finding": "Verification: consumers that parse release.yaml: skills-partition.test.ts 73-123, check-release-credentials rule 4 and rule 6, check-image-trigger-paths, the production-check wake by step name.",
+        "answer": "T3, T4, T5 update the checks and test; the wake reads only agent-infra envoy.yaml step Apply (agent-infra legion/Pulumi.prod.yaml 544-547), so no release.yaml name is read."
+      },
+      {
+        "finding": "A1: in one publish job, tag/tagged/push-main need each package to start from $GITHUB_SHA and legion to tag $GITHUB_SHA explicitly; otherwise reruns and push-main break.",
+        "answer": "Decision 4 (detach per package, git tag \"$TAG\" \"$GITHUB_SHA\"); T6 tests the composition and a rerun, with a no-detach control; T9(c) probes it."
+      },
+      {
+        "finding": "A2: one job with fail-fast steps changes today's per-package failure semantics; behaviour when one build fails is undefined.",
+        "answer": "Decision 4: each plugin publishes independently (if: !cancelled() and its own build); legion only when pi-envoy and pi-legion each published or had nothing; T9(c) forces failures and shows which packages ship."
+      },
+      {
+        "finding": "A3: worker_image computing the pair in-job needs full history, --package-dir, a non-main rule and an equality check; AGENTS.md 144 says one version call per build job.",
+        "answer": "Changed design: the image build takes the pair from legion_build (call 1 needs legion_build), so worker-image.yaml computes nothing; off main the pair is empty (decision 8); AGENTS.md 144-145 updated (T7)."
+      },
+      {
+        "finding": "A4: check-image-trigger-paths refuses an inputs.* gate on worker-image.yaml's build job needed for an attest-only call.",
+        "answer": "T4 admits an input-vs-literal test on worker-image.yaml's jobs as neutral, with a passing case and a refusal control."
+      },
+      {
+        "finding": "A5: a shared version-args script under .github/scripts cannot run in a credentialed job (DEPENDENCY_PATH, check-release-credentials.sh 189).",
+        "answer": "Decision 2: the arguments live in the workflow env (release-envoy-listener.yaml LEGION_ENVOY_VERSION_ARGS precedent); checks in publish are inline shell; T5 reads the lists from the env."
+      },
+      {
+        "finding": "A6: attest gate undefined when publish is skipped; today attest runs on every non-PR run, branch dispatches included.",
+        "answer": "Decision 6: attest when call 1 succeeded and (off main or pair_ok); decision 8 keeps the branch-dispatch attest."
+      },
+      {
+        "finding": "A7: the release note and tag beside attest can name an unattested digest if attest fails.",
+        "answer": "Decision 7: accepted and stated on the PR: the consumers' gh attestation verify refuses an unattested digest, so it fails closed."
+      },
+      {
+        "finding": "A8: docker/setup-buildx-action is not on CREDENTIALED_USES; buildx availability unverified.",
+        "answer": "Decision 7 uses docker/login-action and the runner's own buildx, as release-envoy-listener.yaml release_publish does (its lines 153-175)."
+      },
+      {
+        "finding": "B1: spec Outcome and title (30 minutes, never cancelled) contradict acceptance v2 and the architect's decision.",
+        "answer": "Spec departure 2: the plan delivers the acceptance lines; the architect restates the Outcome and title."
+      },
+      {
+        "finding": "B2: acceptance 1 names changes diffing from the last successful run, which the design deletes.",
+        "answer": "Spec departure 1: the reason becomes tags alone."
+      },
+      {
+        "finding": "B3: acceptance 2 admits only credential reasons for a stage; stage 3 has others.",
+        "answer": "Stage 3 holds attest's id-token/attestations write apart from the job that ran the Dockerfile, and the image build needs stage-1 versions; the publish gate on attest costs no stage. Stage table states each reason."
+      },
+      {
+        "finding": "B4: stage and merge-to-published have no definition or command; 'about 6 h a run' is run duration, not merge-to-published; stage 1 now starts 4 builds and the image every run.",
+        "answer": "Plan defines stage; T8 measures merge-to-published per artifact (npm time, release publishedAt, attest completed_at) before and after with one script; decision 1 states the cost of starting builds and the image every run."
+      },
+      {
+        "finding": "B5: acceptance 1's window is undefined.",
+        "answer": "Acceptance table row 1: the 24 h after the merge, mapped by git tag --contains per package to the releasing run."
+      },
+      {
+        "finding": "B6: acceptances 1 and 4 need post-merge evidence; the PR's own merge may publish nothing.",
+        "answer": "Rows 1 and 4 go to the implementer's production check on the PR's Production: line, read from the first runs that publish after the merge."
+      },
+      {
+        "finding": "B7: nothing proves the publish job before merge; branch dispatch skips publish.",
+        "answer": "T9(c): a probe in sjawhar/legion-smoke (LEGION-779 precedent) with the exact graph and conditions, plus T6's local git test of the publish composition; T9(b) branch dispatch for the image calls."
+      },
+      {
+        "finding": "C1: docs list misses AGENTS.md 144-145, skills/AGENTS.md 25, pi-envoy and pi-legion READMEs, worker-image.yaml comments and inputs, docs/kubernetes.md rerun semantics.",
+        "answer": "T7 lists them all with a grep check; docs/solutions records stay as written."
+      },
+      {
+        "finding": "C2: open PRs #2305, #2219, #2186 and INFRA-520 touch the same files.",
+        "answer": "Coordination list in the plan; whichever lands second resolves the real conflict; the architect sequences."
+      },
+      {
+        "finding": "C3: the production-check wake matches step names of a deploy workflow.",
+        "answer": "Checked: INFRA's deploys names only theorem-labs/agent-infra .github/workflows/envoy.yaml step Apply."
+      },
+      {
+        "finding": "D: unverified claims: npm trusted publishing keyed to workflow not job; calling one reusable workflow twice.",
+        "answer": "npm docs (docs.npmjs.com/trusted-publishers): fields are owner, repository, workflow filename, optional environment; release.yaml uses no environment. GitHub docs: 50 unique reusable workflows per file, one file counted once."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 2
+  },
+  "specDepartures": [
+    {
+      "spec": "Acceptance 1: GitHub replacing a pending run loses no commit because `changes` diffs from the last successful run and versions come from tags.",
+      "plan": "Deletes the changes job; the no-loss reason is tags alone (each build releases every commit since its package's last tag).",
+      "evidence": "release-push.sh version (header lines 10-33) skips only when nothing since the tag; release-envoy-infra.yaml lines 25-33 already rely on tags alone; deleting changes removes one runner wait.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "1: the reason clause names tags alone instead of the changes job"
+        ]
+      }
+    },
+    {
+      "spec": "Outcome and title: a release job gets a runner within 30 minutes; no release run is cancelled or replaced while it waits.",
+      "plan": "Delivers acceptance 1-2 of version 2: replace-pending kept; the fewest stages (3) instead of a 30-minute runner wait.",
+      "evidence": "docs.github.com/en/actions/reference/limits: every standard runner label shares the account's one concurrent-job limit; larger runners only for organizations on Team/Enterprise; sjawhar is a User account. Architect's decision over Envoy 2026-10-27 02:55Z.",
+      "outcome": {
+        "kind": "changed",
+        "summary": [
+          "Outcome: 'on a runner within 30 minutes' and 'No release run is cancelled while it waits' are not delivered",
+          "Title: 'never wait behind pull-request CI or get replaced while pending' is not delivered"
+        ]
+      }
+    }
+  ]
+}
