@@ -1468,6 +1468,15 @@
 
 ### Fixed
 
+- An open document no longer closes its connection and syncs again every 33 s while nobody types
+  in it. The dashboard's document provider (`@hocuspocus/provider`) closes a socket that has
+  delivered no message for 30 s, and Dispatch's document socket (`/ws/doc`) sent a lone editor
+  nothing once its sync was done: a websocket ping reaches no page, and the room relays an
+  editor's awareness only to the others, never back to its sender as `@hocuspocus/server` does.
+  The socket now sends each editor a keep-alive every 15 s, as `/ws/live` sends its heartbeat: an
+  awareness update naming no client, which the provider counts as received and applies as no
+  change. It goes onto the connection only between two of the websocket writer's messages. A proxy
+  whose idle timeout is longer than 15 s no longer closes a quiet document socket either.
 - An issue's `updated_at` never moves backwards (INFRA-258). A `PATCH /api/v1/issues/{key}`, a
   claim and a release stamped it with `now()`, the moment their transaction began, before they
   took the issue's locks, so one that waited behind another write committing on the issue (an

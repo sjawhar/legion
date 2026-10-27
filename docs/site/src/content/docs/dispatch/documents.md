@@ -18,7 +18,9 @@ see each other's changes as they happen. There is no save button. Dispatch saves
 you go.
 
 A dot at the end of the tab row shows the document's connection: connecting, connected, offline,
-or failed. Point at it to read which.
+or failed. Point at it to read which. A document left open stays connected while nobody types in
+it: Dispatch sends the page a small message at least every 15 seconds, so neither the page nor a
+proxy in front of Dispatch takes the quiet connection for a dead one.
 
 ## Versions
 

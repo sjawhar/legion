@@ -262,6 +262,10 @@ reloaded. From a checkout of this repository with `bun install` run,
 exits 1 when it advertises extended CONNECT, 0 when it does not or speaks no HTTP/2, and 2 when it
 gets no answer. Run it after any change to the proxy.
 
+An open document keeps a second WebSocket, `GET /ws/doc/<id>`, for as long as it is open. Dispatch
+writes to each socket at least every 15 seconds however quiet the page is, so a proxy whose idle
+timeout is longer than 15 seconds never closes either one.
+
 ## Running more than one copy
 
 Dispatch runs as more than one server against one database, so a new version rolls out without
