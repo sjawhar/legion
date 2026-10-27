@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -248,14 +249,11 @@ type commentWrite struct {
 	route  commentRoute
 }
 
-// resolveCommentRoute reads the owner's delivery route and resolves it to a live session with
-// no transaction open, so the listener call costs no pooled connection. A route the comment
-// already mentions is resolved by that mention, so the ordinary mention comment makes no
-// second listener call at all.
-func (s *server) resolveCommentRoute(
-	ctx context.Context, owner owner, mentions []ResolvedMention,
-) (commentRoute, error) {
-	if owner.IssueKey == nil || len(mentions) == 0 {
+// readCommentRoute reads the owner's delivery route from the pool, with no transaction open, so
+// its session can be looked up beside the comment's mentions. A comment with no mentions, or on
+// a project document, consults no route.
+func (s *server) readCommentRoute(ctx context.Context, owner owner, mentioned bool) (commentRoute, error) {
+	if owner.IssueKey == nil || !mentioned {
 		return commentRoute{}, nil
 	}
 	if s.deps.Store == nil || s.deps.Store.Pool == nil {
@@ -274,8 +272,35 @@ func (s *server) resolveCommentRoute(
 	if stored != nil {
 		route.route = *stored
 	}
+	return route, nil
+}
+
+// resolveCommentLookups makes every Envoy listener lookup a comment needs, all at once and each
+// bounded by mentionLookupTimeout, so a listener that answers none delays the comment by one
+// timeout: each mention's, and the route's session. mentions, when non-nil, were resolved on an
+// earlier pass whose route then moved, and are kept; only the new route is resolved. A route the
+// comment mentions is resolved by that mention and makes no lookup of its own.
+func (s *server) resolveCommentLookups(
+	ctx context.Context, route commentRoute, targets []string, delivery string, mentions []ResolvedMention,
+) ([]ResolvedMention, commentRoute) {
+	lookUpRoute := route.route != "" && !slices.Contains(targets, route.route)
+	var routeLookup ResolvedMention
+	var lookups sync.WaitGroup
+	if lookUpRoute {
+		lookups.Go(func() {
+			routeLookup = s.resolveMentionTarget(ctx, route.route, "steer", mentionLookupTimeout)
+		})
+	}
+	if mentions == nil {
+		mentions = s.resolveMentionTargets(ctx, targets, delivery)
+	}
+	lookups.Wait()
+	if lookUpRoute {
+		route.sessionID = routeLookup.SessionID
+		return mentions, route
+	}
 	if route.route == "" {
-		return route, nil
+		return mentions, route
 	}
 	for index := range mentions {
 		if mentions[index].Target == route.route {
@@ -283,11 +308,10 @@ func (s *server) resolveCommentRoute(
 			// No pinned session and no resolve error is the shape of a lookup cut short by its
 			// timeout (resolveMentionTarget).
 			route.unanswered = route.sessionID == nil && mentions[index].ResolveError == ""
-			return route, nil
+			break
 		}
 	}
-	route.sessionID = s.resolveMentionTarget(ctx, route.route, "steer", mentionLookupTimeout).SessionID
-	return route, nil
+	return mentions, route
 }
 
 // beginCommentWrite opens the comment's transaction, locks its owner, and verifies that the
@@ -361,32 +385,26 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		return
 	}
 
-	// Every Envoy listener lookup this comment needs happens here, with no transaction and no
-	// pooled connection held: each mention, all at once, and the issue's delivery route when the
-	// comment mentions anyone, each bounded by mentionLookupTimeout. beginCommentWrite re-reads
-	// that route under the owner's lock and refuses a resolution the locked row no longer agrees
-	// with - and refuses, under that same lock, an owner this pooled read already found missing
-	// or closed, which is why a comment the write cannot accept pays for no lookup here.
+	// Every Envoy listener lookup this comment needs happens in resolveCommentLookups, with no
+	// transaction and no pooled connection held. beginCommentWrite re-reads the route under the
+	// owner's lock and refuses a resolution the locked row no longer agrees with - and refuses,
+	// under that same lock, an owner this pooled read already found missing or closed, which is
+	// why a comment the write cannot accept pays for no lookup here.
 	if len(mentionTargets) > 0 {
 		if err := s.refuseClosedOwnerBeforeResolving(r.Context(), owner); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
 	}
-	resolvedMentions := s.resolveMentionTargets(r.Context(), mentionTargets, delivery)
-	mentions := make([]model.Mention, 0, len(resolvedMentions))
-	mentionedSessions := make(map[string]struct{}, len(resolvedMentions))
-	for _, resolved := range resolvedMentions {
-		mentions = append(mentions, model.Mention{
-			Target: resolved.Target, Delivery: resolved.Delivery, SessionID: resolved.SessionID,
-		})
-		if resolved.SessionID != nil {
-			mentionedSessions[*resolved.SessionID] = struct{}{}
-		}
-	}
+	var resolvedMentions []ResolvedMention
 	start, err := resolveThenLock(r.Context(),
 		func(ctx context.Context) (commentRoute, error) {
-			return s.resolveCommentRoute(ctx, owner, resolvedMentions)
+			route, err := s.readCommentRoute(ctx, owner, len(mentionTargets) > 0)
+			if err != nil {
+				return commentRoute{}, err
+			}
+			resolvedMentions, route = s.resolveCommentLookups(ctx, route, mentionTargets, delivery, resolvedMentions)
+			return route, nil
 		},
 		func(ctx context.Context, resolved commentRoute) (commentWrite, error) {
 			return s.beginCommentWrite(ctx, owner, resolved)
@@ -397,6 +415,16 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
+	}
+	mentions := make([]model.Mention, 0, len(resolvedMentions))
+	mentionedSessions := make(map[string]struct{}, len(resolvedMentions))
+	for _, resolved := range resolvedMentions {
+		mentions = append(mentions, model.Mention{
+			Target: resolved.Target, Delivery: resolved.Delivery, SessionID: resolved.SessionID,
+		})
+		if resolved.SessionID != nil {
+			mentionedSessions[*resolved.SessionID] = struct{}{}
+		}
 	}
 	tx, status, route := start.tx, start.status, start.route
 	defer tx.Rollback(r.Context())
