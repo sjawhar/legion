@@ -44,8 +44,8 @@ machine's role lane.
   The interest reaper (`Registry.Reap`, `internal/store/kv.go`) is the one exception kept: it still
   deletes an interest on a cache miss. It checks liveness while holding the interest registry's
   lock, so a bucket read there would block every interest write behind it. It also deletes only an
-  interest whose own timestamp is more than 10 minutes old, so a session registered a moment ago is
-  never one it reaches.
+  interest whose own timestamp is more than 15 minutes old (`store.InterestReapGrace` plus
+  `store.InterestRefreshAge`), so a session registered a moment ago is never one it reaches.
 - **Don't fix it by making `SessionRegistry.Get` fall back to the bucket.** Fan-out checks the
   session of every matching interest on every message (`fanoutDelivery`, `cmd/listener/delivery.go`).
   A miss there is usually a dead session whose interest the reaper has not removed yet, so a

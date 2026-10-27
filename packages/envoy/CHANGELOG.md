@@ -73,6 +73,24 @@
   whatever the length of its target's key; only bare text it links is held to the index's
   bounds. A search hit for an ask links its typed block (`#b-<id>`) only while that block is a
   graph node, and otherwise `?ask=<id>`, so `dispatch read` of the hit reads the ask.
+- Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
+  and `parent_version`, and `dispatch read` prints them on a `Node:` line. They are on every node
+  `GET /api/v1/references` and `GET /api/v1/block-links` answer, whatever its kind, always
+  present: who made the node and when, who last changed its own text or fields and when (its
+  maker while nothing has changed it since; a claim, an answer or a resolution is no change), the
+  node it belongs to (`{kind, id, ref?}`) and the version of that parent it belongs to. A fact
+  Dispatch never recorded is `[]` for an actor list and `null` otherwise: a session has none, and
+  a block's maker is known only when the block is in its document's first version or Dispatch
+  indexed the version before the one that first held it. Migrations `0130` and `0131` add
+  `comments.written_version` and `asks.written_version`, the version current when a comment or
+  an ask was written on a document without an anchor (an approval request's, the version it names
+  when it opens), which a `before insert` trigger records for every build's insert, and `0133` and
+  `0134` fill them on the rows stored before, from the latest version created at or before each
+  item or, for an approval request, from its `ask.opened` event, holding `comments` and then
+  `asks` `EXCLUSIVE` while they write, which every write of that table waits behind. Migration
+  `0132` creates `component_facts`, which each import keeps from this release on: a component's
+  `made_at` and `changed_at`, judged by a digest of its own fields. A component stored before it
+  has no `made_at`, and no `changed_at` until an import changes it.
 - `envoy-infra:gcp:Dispatch` takes `pprofPort`, which sets `DISPATCH_PPROF_PORT` on the app
   Deployment's `envoy-dispatch` container alone, so a deployment turns on Dispatch's loopback-only
   profiler through the component rather than by editing the Deployment, which the next update
@@ -128,6 +146,26 @@
   exits 2 on a narrowing the broker would refuse `INVALID_NARROWING` before it sends any request,
   and runs its command only once the broker names the narrowing it applied, so deploy the broker
   before any caller passes `--github-owner`.
+- `envoy-dispatch` serves on an inherited listening TCP socket that `DISPATCH_LISTEN_FD` names by
+  its descriptor number, and binds nothing: a test harness opens the socket on port 0 and holds the
+  port the kernel chose until Dispatch serves on it, so no other program can take it in between.
+  `DISPATCH_LISTEN_HOST` and `DISPATCH_PORT`, when set and not empty, must name the socket's
+  address, and `DISPATCH_SERVER_URL` is not derived from it. A descriptor that is not a listening
+  TCP socket, or a setting that names another address, refuses startup naming the variable, with
+  nothing bound in its place, and `DISPATCH_DEV_SIGNIN=1` refuses a socket that is not on a
+  loopback address. The `dispatch: listening` line names the address the server is bound to, in
+  both modes: a server on every interface logs `addr=[::]:8766` where it logged `addr=:8766`.
+- `envoy-listener` serves on an inherited listening TCP socket that `ENVOY_LISTEN_FD` names by its
+  descriptor number, and binds nothing, for a process a test harness starts (not a container:
+  Docker cannot pass a host descriptor in). `ENVOY_LISTEN_HOST` and `PORT`, when set, must name the
+  socket's address, and `PORT=0` names none; a descriptor that is not a listening TCP socket, or a
+  setting that names another address, refuses startup naming the variable, with nothing bound in
+  its place. The API auth rule judges the socket's own address, so a socket on every interface
+  needs `ENVOY_API_TOKEN`, the OIDC pair or `ENVOY_API_ALLOW_UNAUTHENTICATED=1` as
+  `ENVOY_LISTEN_HOST=0.0.0.0` does, though an unset `ENVOY_LISTEN_HOST` means loopback. The
+  `envoy-listener listening` line's `addr` is the address the listener is bound to, in both modes:
+  `PORT=0` logs the port the kernel chose where it logged port 0, and a listener on every interface
+  logs `[::]:9020` where it logged `0.0.0.0:9020`.
 - Dispatch can serve the Go profiler: `DISPATCH_PPROF_PORT` set to a port serves
   `net/http/pprof` on `127.0.0.1:<port>` alone, on a mux of its own, so a CPU profile of a busy
   server is one `kubectl port-forward` and `go tool pprof` away. Unset or empty, nothing listens;
@@ -871,7 +909,7 @@
   so run it against a database this release's server has already migrated. Add `DATABASE_URL` to
   every script or job that runs the command before you deploy this release (INFRA-562).
 - GitHub's rate limits are shared by every Dispatch process. A limit one process meets is written
-  to the new table `github_rate_limits` (migration `0132`), under the App's scope (`app`: token
+  to the new table `github_rate_limits` (migration `0137`), under the App's scope (`app`: token
   mints, installation lookups, the webhook delivery endpoints) or one installation's
   (`installation:<id>`), for the wait GitHub asked, and until it passes by the database's clock no
   process sends GitHub a request under that scope. The webhook redelivery sweep's own doubling
@@ -900,6 +938,11 @@
   changes. Two test-only settings, accepted only with `DISPATCH_TEST_HOOKS=1`, shorten the new
   delivery resume loop's interval (`DISPATCH_TEST_DELIVERY_RESUME_INTERVAL`) and the stored route
   list's life (`DISPATCH_TEST_ROUTE_ROSTER_TTL`) (INFRA-562).
+- A dead session's subscriptions now stay 5 minutes longer: the interest reaper deletes one only
+  15 minutes after its row's last write, where it was 10, because it now adds
+  `store.InterestRefreshAge` to its grace window. For that time the subscribers page and the
+  `envoy_active_interests` gauge still list them, and a message matching one logs a failed
+  delivery to that session; a paused session that comes back within it still has them.
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a
@@ -907,7 +950,7 @@
   is not the App owner's to fix. The release's answer is unchanged, `502 MINT_FAILED`.
 - An issue read with a route no longer calls the Envoy listener and decodes the whole live-session
   list each time. Dispatch stores one copy of that list for every process, the `route_roster` row
-  (migration `0131`), at most 5 s old by the database's clock, and one listener call refreshes it
+  (migration `0136`), at most 5 s old by the database's clock, and one listener call refreshes it
   for every issue read on that process that asks while the call runs; an answer is never stored
   over one from a later call. A listener that fails or does not answer is stored too, and asked
   again only after 5 s, so the reads in that window, on every process, read
@@ -1721,7 +1764,7 @@
     attempt did before, since an instruction that old sent unasked could act on stale context. The
     first deploy therefore sends, at its first passes, any attempt stranded in the hour before it.
     A resumed direct message is more than a minute old, so its session shows it as a card
-    rather than as its user's own turn. Migration `0130` adds `message_deliveries.urgency`, so a
+    rather than as its user's own turn. Migration `0135` adds `message_deliveries.urgency`, so a
     resumed direct message keeps the urgency it was sent with, whether the loop or a person's
     same-mode Retry resumes it (an attempt a Retry opens carries none), and two partial indexes
     the loop reads pending attempts through. The loop takes one more connection in the lease
@@ -1768,18 +1811,23 @@
 - The two Delivery page configuration warnings (a successful run with no job matching
   `production_job_names`, and a production job with no step named `production_apply_step_name`)
   are logged once across every Dispatch process, not once in each: the process whose insert into
-  the new table `delivery_run_warnings` (migration `0133`) writes the run's row logs it. A
+  the new table `delivery_run_warnings` (migration `0138`) writes the run's row logs it. A
   database that cannot record the row leaves the process to log it anyway (INFRA-562).
 - An issue's claim time, an ask's answer time (the answer route's and a carried approval's) and
   the "snooze must be in the future" check use the database's clock, not the clock of the host
   that served the request, so two processes on hosts whose clocks disagree no longer order a
   claim or an answer against the other's times wrongly or refuse a snooze the other would take
   (INFRA-562).
-- Migrations `0130` to `0133` are additive (a nullable column, two indexes and three new tables),
+- Migrations `0135` to `0138` are additive (a nullable column, two indexes and three new tables),
   so the release before them keeps serving beside this one through a rolling update, and rolling
   back past them is an image rollback alone. While both releases serve, only this release's
   processes share the route list, the GitHub rate limits and the warnings, and resume stranded
   deliveries (INFRA-562).
+- A bare email address, or one written `<a@b.test>`, in Markdown written to a document through the
+  API is now stored and shown as a link to its `mailto:` URL, `[a@b.test](mailto:a@b.test)`, as a
+  comment and the browser editor show it (INFRA-530). Dispatch linked it to the bare address, which
+  the editor's link opener resolved as a page path under the document's own URL. A document that
+  already holds `[a@b.test](a@b.test)` keeps that link's bare target until it is edited.
 
 - A broker outage no longer ends the sessions whose leases ran out during it (INFRA-487). A session
   renews its lease through a broker, so while every broker process was down, or none could reach
@@ -1828,6 +1876,16 @@
   first events of an issue reached the Legion daemon after later ones, which it drops as stale.
   The shared database pool every request reads through holds 64 connections, from 16: under heavy
   agent load the API held all sixteen and every other caller waited behind them.
+
+- Dispatch's server now reads a `|` after an even run of backslashes in a table row as the end of a
+  cell, as the browser editor reads it: `| a \\| b |` is the two cells `a \` and `b` on both, where
+  the server read one cell `a \| b`, so a document no longer showed one table in the live editor
+  and the command line and another in the past-version view. A `|` after an odd run (`\|`) is
+  still the cell's text. Code in a cell cannot hold a `|` right after an odd run of backslashes,
+  since no markdown of a cell writes it: an API replace, delete by quote or accepted suggestion
+  that adds such code is refused, naming the table, the cell and the header above it, also beside
+  such code a browser edit left, and a browser edit that holds one is stored with that `|` written
+  as text after the code (INFRA-172).
 
 - A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
   such as a session's answer to a model switch, without waiting for the stream's heartbeat.

@@ -18,6 +18,15 @@ related_issues:
 
 # A port held in an issue pod is a sibling role's harness: move your run with the five port variables and your own database, and never stop the holder
 
+**Update (2026-10-26, INFRA-253): the harness has no fixed ports any more.** `bun run e2e`, CI's
+browser step, `bun run dispatch:local` and the docs media harness start every harness server
+through `packages/dispatch/e2e/harness-start.ts` on a port the OS chooses and holds until the
+server serves, and Playwright runs through `e2e/run.ts`, which exports those ports; the config's
+port probe and the defaults 8777 and 9021-9024 are gone. Two roles' harnesses in one pod no
+longer meet on a port, so the port moves below are unneeded. A port variable set by hand is
+still used as given and fails with `address already in use` when taken; the rule never to stop or
+reuse a sibling's server stands. What follows is the record as it was written.
+
 Extends `packages/dispatch/AGENTS.md` ("`e2e/harness-ports.ts` resolves …", the port-probe
 paragraphs), whose remedy for a taken harness port is "stop whatever listens there, or move a
 local run to free ports and its own `DATABASE_URL`". In a Legion issue pod only the second half
