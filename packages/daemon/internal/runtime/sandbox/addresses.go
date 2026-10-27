@@ -352,8 +352,9 @@ func (r *Runtime) movedSessionStore(pod *corev1.Pod) (movedAddress, bool) {
 }
 
 // sessionStoreInPod names the session store pod was created under, read back from the pod itself:
-// the providers volume's session item under postgres (providers), the session proxy's flags a role
-// container carries under cloudsql-iam (sessionProxyFlags), and neither under the volume store.
+// the providers volume's session item under postgres (providers), the session proxy's flags a
+// launcher container carries under cloudsql-iam (sessionProxyFlags), and neither under the volume
+// store.
 func sessionStoreInPod(pod *corev1.Pod) string {
 	for _, volume := range pod.Spec.Volumes {
 		if volume.Name != providersVolume || volume.Secret == nil {

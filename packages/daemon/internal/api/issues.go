@@ -28,7 +28,7 @@ func (s *server) issueStatus(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusForbidden, "CONTROLLER_REQUIRED", "issue status requires a controller grant")
 		return
 	}
-	if s.setDispatchStatus(w, r, req.Issue, req.Status) {
+	if _, ok := s.setDispatchStatus(w, r, req.Issue, req.Status); ok {
 		writeJSON(w, http.StatusOK, IssueStatusResponse{})
 	}
 }

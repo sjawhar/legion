@@ -15,7 +15,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { type IssueStatus, statusLabel } from "../project/board-model";
-import { actorLabel, shortSessionId } from "./actor";
+import { AgentName } from "./AgentName";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-preview-timing";
 import { artifactTextQuery, prefetchReference, useReferenceData } from "./reference-target";
@@ -292,12 +292,18 @@ function DocumentPreview({ route }: { route: DispatchReferenceRoute }): ReactNod
   if (artifact === undefined) {
     return <Heading>{shortForm(route)}</Heading>;
   }
+  // The card is a tooltip inside one link to the reference (never interactive), so an agent in
+  // it is named and marked by `AgentName` without a link of its own.
   const owner =
-    route.kind === "agent-artifact"
-      ? `agent ${shortSessionId(route.session)}`
-      : isProjectRoute(route)
-        ? route.project
-        : route.key;
+    route.kind === "agent-artifact" ? (
+      <>
+        agent <AgentName kind="static" sessionId={route.session} storedTitle={undefined} />
+      </>
+    ) : isProjectRoute(route) ? (
+      route.project
+    ) : (
+      route.key
+    );
   const latest = artifact.versions.at(-1)?.number;
   return (
     <>
@@ -339,7 +345,9 @@ function CommentPreview({ route }: { route: DispatchReferenceRoute }): ReactNode
   }
   return (
     <>
-      <Heading>{actorLabel(comment.comment.author)}</Heading>
+      <Heading>
+        <AgentName actor={comment.comment.author} kind="static" />
+      </Heading>
       <Body markdown={comment.comment.body} />
     </>
   );
@@ -352,7 +360,9 @@ function MessagePreview({ route }: { route: DispatchReferenceRoute }): ReactNode
   }
   return (
     <>
-      <Heading>{actorLabel(message.message.author)}</Heading>
+      <Heading>
+        <AgentName actor={message.message.author} kind="static" />
+      </Heading>
       <Body markdown={message.message.body} />
     </>
   );

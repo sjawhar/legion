@@ -15,7 +15,7 @@ import {
 import { AskCard } from "../inbox/AskCard";
 import { AskOptionList } from "../inbox/AskOptionList";
 import { URGENCY_LABELS } from "../inbox/ask-urgency";
-import { actorLabel } from "../refs/actor";
+import { AgentName } from "../refs/AgentName";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { buildReferencePath, itemRoute, parseDispatchReference, shortForm } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
@@ -57,9 +57,9 @@ export function AskBlockCard({
   const answered = facts.state === "answered";
   const hosted = !malformed && !readOnly && ask !== undefined;
   const pill = askBlockPill[facts.urgency];
-  // A block ask indexed without an actor (the server settled it with no pending author) still
-  // shows when it was asked; "asked by" waits for a name.
-  const asker = ask === undefined ? undefined : actorLabel(ask.author);
+  // A block ask indexed without an actor (the server settled it with no pending author, an
+  // empty login) still shows when it was asked; "asked by" waits for a name.
+  const named = ask !== undefined && (ask.author.kind === "session" || ask.author.id !== "");
   const reference = ask === undefined ? undefined : itemRoute("ask", ask, owner);
   return (
     <>
@@ -84,8 +84,16 @@ export function AskBlockCard({
             {hosted || ask === undefined ? null : (
               <span className="inline-flex items-center gap-x-2" data-dispatch-ask-asked="">
                 <span aria-hidden="true">·</span>
-                <span>{asker === "" ? "asked" : `asked by ${asker}`}</span>
-                {asker === "" ? null : <span aria-hidden="true">·</span>}
+                <span>
+                  {named ? (
+                    <>
+                      asked by <AgentName actor={ask.author} inline />
+                    </>
+                  ) : (
+                    "asked"
+                  )}
+                </span>
+                {named ? <span aria-hidden="true">·</span> : null}
                 <Timestamp at={ask.created_at} />
               </span>
             )}

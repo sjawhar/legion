@@ -22,7 +22,7 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { actorLabel } from "../refs/actor";
+import { AgentName } from "../refs/AgentName";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
 import { useDialog } from "../shell/useDialog";
@@ -87,7 +87,7 @@ function ReviewsDialog({
               {reviews.data.map((review) => (
                 <li key={review.id}>
                   <p className={`text-sm font-medium ${textPrimaryOnSurface}`}>
-                    {actorLabel(review.actor)}{" "}
+                    <AgentName actor={review.actor} inline />{" "}
                     {review.state === "approved" ? "approved" : "requested changes on"} v
                     {review.version} · <Timestamp at={review.created_at} />
                   </p>

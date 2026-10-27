@@ -199,16 +199,16 @@ human approval surface.
 ## Skills
 
 The plugin ships five skills, `claude-envoy:envoy`, `claude-envoy:dispatch`,
-`claude-envoy:dispatch-first`, `claude-envoy:dispatch-brainstorming` and `claude-envoy:asd-ste100`.
-The first four teach the Envoy tools and the `dispatch` command; `asd-ste100` gives the
+`claude-envoy:dispatch-first`, `claude-envoy:dispatch-writing-specs` and `claude-envoy:asd-ste100`.
+The first four teach the Envoy tools, the `dispatch` command and how to write a spec; `asd-ste100` gives the
 ASD-STE100 rules for text a person reads. `skills/` holds one relative symlink per skill into the repository-root `skills/`, which
 stays their only source; Claude Code copies each target into the plugin cache at install. With
 Dispatch configured, the `dispatch-first` hook also puts `dispatch-first` into the model's context
 on every `SessionStart` (startup, resume, clear, compact, fork) and `SubagentStart`, as the
-`hooks/hooks.json` bullet above describes; it sends a design conversation or a plan to
-`dispatch-brainstorming`, which the session loads by name.
+`hooks/hooks.json` bullet above describes; it sends a spec, or an ask, comment or message a person
+reads, to `dispatch-writing-specs`, which the session loads by name.
 
-`envoy`, `dispatch`, `dispatch-first`, `dispatch-brainstorming` and `asd-ste100` are the five a standalone Claude Code session uses. The other root skills
+`envoy`, `dispatch`, `dispatch-first`, `dispatch-writing-specs` and `asd-ste100` are the five a standalone Claude Code session uses. The other root skills
 stay out of this plugin: they belong to Legion's roles (the architect, controller, oracle and retro
 skills, and the phase workers' `legion-worker` and `ce-simplify-code`) and to the reviewer's
 `thermonuclear-*` pair (`skills/AGENTS.md`). A phase worker on Claude Code gets them from the

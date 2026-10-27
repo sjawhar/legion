@@ -67,6 +67,72 @@
       "assist": { "enabled": false },
       "formatter": { "enabled": false },
       "linter": { "enabled": false }
+    },
+    {
+      "includes": ["packages/dispatch/web/src/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "@legion/contracts": {
+                    "importNames": [
+                      "actorAttribution",
+                      "actorLabel",
+                      "actorName",
+                      "sessionLabel",
+                      "shortSessionId"
+                    ],
+                    "message": "An agent is shown only through features/refs/AgentName.tsx (AgentName, or useAgentText for an attribute or other plain string)."
+                  }
+                },
+                "patterns": [
+                  {
+                    "group": ["**/refs/routes", "./routes"],
+                    "importNamePattern": "AGENT_LIVE_PATH",
+                    "message": "A link to an agent's live conversation is AgentName's (features/refs/AgentName.tsx)."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["packages/dispatch/web/src/app.tsx"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "@legion/contracts": {
+                    "importNames": [
+                      "actorAttribution",
+                      "actorLabel",
+                      "actorName",
+                      "sessionLabel",
+                      "shortSessionId"
+                    ],
+                    "message": "An agent is shown only through features/refs/AgentName.tsx (AgentName, or useAgentText for an attribute or other plain string)."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "packages/dispatch/web/src/features/refs/AgentName.tsx",
+        "packages/dispatch/web/src/features/refs/routes.ts"
+      ],
+      "linter": { "rules": { "style": { "noRestrictedImports": "off" } } }
     }
   ]
 }

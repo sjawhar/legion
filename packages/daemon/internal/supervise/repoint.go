@@ -27,17 +27,19 @@ func (m *Machine) repoint(ctx context.Context, observation runtime.Observation) 
 	return m.replaceProcess(ctx, "the process at a stale address is replaced mid-turn")
 }
 
-// displaced is the claim's process found gone, or found to be some other process, because the
-// daemon itself replaced its pod while it ran, to launch another role there
-// (runtime.Observation.Displaced). The process did nothing wrong, so it is recovered as repoint
-// recovers a stale one: nothing is charged, neither a launch failure nor a death with work
-// outstanding, and the claim's session is relaunched at once into the new pod (replaceProcess). A
-// turn the process was in is lost, and its task goes back to waiting, sent again once the session
-// resumes; a held suspension ends in a suspension.
+// displaced is the claim's process found gone, or found to be some other process, through no
+// fault of its own (runtime.Observation.Displaced): the daemon itself replaced its pod while it ran,
+// to launch another role there, or it was another runtime's process — a Sandbox role process a
+// daemon running the project under kubernetes recorded — that this daemon takes over
+// (`runtime.tmux.take_over`) and cannot see. The observation's detail names which. The process did
+// nothing wrong, so it is recovered as repoint recovers a stale one: nothing is charged, neither a
+// launch failure nor a death with work outstanding, and the claim's session is relaunched at once
+// (replaceProcess). A turn the process was in is lost, and its task goes back to waiting, sent
+// again once the session resumes; a held suspension ends in a suspension.
 func (m *Machine) displaced(ctx context.Context, observation runtime.Observation) error {
-	m.log.Warn("supervise: the process ended with a pod the daemon replaced; relaunching it uncharged",
-		"incarnation", m.claim.Locator.Incarnation, "observed", string(observation.Kind), "detail", observation.Detail)
-	return m.replaceProcess(ctx, "the process ended mid-turn with a pod the daemon replaced")
+	m.log.Warn("supervise: the process was displaced through no fault of its own, its pod replaced by the daemon or it another runtime's process this daemon takes over; relaunching it uncharged",
+		"incarnation", m.claim.Locator.Incarnation, "process", m.claim.Locator.Label(), "observed", string(observation.Kind), "detail", observation.Detail)
+	return m.replaceProcess(ctx, "the process was displaced mid-turn, its pod replaced by the daemon or it another runtime's process this daemon takes over")
 }
 
 // replaceProcess is the recovery a process ended or found stale through no fault of its own

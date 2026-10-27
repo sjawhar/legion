@@ -4,8 +4,9 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { type ReactNode, useEffect, useRef } from "react";
 import { Link, MemoryRouter } from "react-router-dom";
 
+import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { api } from "../../api/client";
-import type { AskRead, IssueDetails } from "../../api/types";
+import type { AskRead, CommentRead, IssueDetails } from "../../api/types";
 import { closeRefPreview, RefPreviewHost, referenceTriggerProps } from "./RefPreview";
 import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-preview-timing";
 
@@ -593,6 +594,81 @@ test("an ask's card heads with its question formatted, not its source", async ()
   } finally {
     view.unmount();
     getAsk.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
+// INFRA-440 (exclusion E1). The card is a tooltip inside one link to the reference, so the
+// comment's agent is named by its current registry title and marked running, with no link of
+// its own: the reference link stays the card's only anchor.
+test("a comment card names its agent by its current title and state, without a second link", async () => {
+  const getIssue = mockIssues();
+  const commentRead: CommentRead = {
+    comment: {
+      id: "comment-1",
+      issue_key: "CORE-1",
+      author: { id: "ses-hover", kind: "session", origin: { session_title: "Stamped title" } },
+      body: "Looks good.",
+      anchor: null,
+      reply_to: null,
+      ask_id: null,
+      turn: null,
+      resolved: false,
+      resolved_by: null,
+      resolved_at: null,
+      edited_at: null,
+      suggestion: null,
+      created_at: "2026-09-09T00:00:00Z",
+      ...commentDeliveryFields(),
+    },
+    replies: [],
+  };
+  const getComment = spyOn(api, "getComment").mockResolvedValue(commentRead);
+  const listAgents = spyOn(api, "listAgents").mockResolvedValue([
+    {
+      capabilities: [],
+      dir: "/work",
+      host: "m1",
+      last_activity: null,
+      last_seen: Date.now(),
+      machine_id: "m1",
+      open_asks: 0,
+      roles: [],
+      session_id: "ses-hover",
+      title: "Current title",
+    },
+  ]);
+  jest.useFakeTimers();
+  const view = render(
+    <Harness>
+      <Link
+        to="/issues/CORE-1/comments/comment-1"
+        {...referenceTriggerProps({ id: "comment-1", key: "CORE-1", kind: "comment" })}
+      >
+        the comment
+      </Link>
+    </Harness>
+  );
+  try {
+    fireEvent.pointerOver(screen.getByRole("link", { name: "the comment" }), {
+      pointerType: "mouse",
+    });
+    act(() => {
+      jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS);
+    });
+    const card = screen.getByRole("tooltip");
+    jest.useRealTimers();
+    await waitFor(() =>
+      expect(card.querySelector('[data-agent-name="ses-hover"]')?.textContent).toBe("Current title")
+    );
+    const agent = card.querySelector('[data-agent-name="ses-hover"]');
+    expect(agent?.getAttribute("data-agent-state")).toBe("running");
+    expect(agent?.querySelector('[role="img"]')?.getAttribute("aria-label")).toBe("Running");
+    expect(card.querySelectorAll("a")).toHaveLength(1);
+  } finally {
+    view.unmount();
+    listAgents.mockRestore();
+    getComment.mockRestore();
     getIssue.mockRestore();
   }
 });

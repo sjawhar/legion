@@ -445,7 +445,7 @@ func TestTheRequiredChecksPassCatchesAHeadThatStartsConflictingWithItsBase(t *te
 }
 
 // The pull request's mergeability is applied before requiredFor ever runs (required_checks.go's
-// split of pullRequestMergeability from requiredFor), so a later failure reading what the base
+// split of readPullRequest from requiredFor), so a later failure reading what the base
 // requires - here the rulesets answer a 502 - never discards the conflict already decoded: the
 // issue still goes back to implementing on the conflict alone, with CONFLICTING recorded, even
 // though the required set is never read that pass.

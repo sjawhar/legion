@@ -338,7 +338,10 @@ test("a reply in a session-authored comment thread pre-fills a deletable agent m
     const card = turn(page, "Can this ship?");
     await card.getByRole("button", { name: "Reply" }).click();
     const composer = page.getByRole("form", { name: "Comment composer" });
-    await expect(composer.getByRole("link", { name: /Replying to planner/ })).toBeVisible();
+    // The author is the agent, drawn outside the quote's link, which holds the quoted body.
+    await expect(composer.getByText(/^Replying to planner — Can this ship\?$/)).toBeVisible();
+    await expect(composer.getByRole("link", { exact: true, name: "planner" })).toBeVisible();
+    await expect(composer.getByRole("link", { name: "— Can this ship?" })).toBeVisible();
     const field = composer.getByLabel("Comment");
     await expect(field).toHaveValue("@planner");
     await field.press("End");

@@ -284,7 +284,7 @@ func TestPublishAuthorRoutesSkipsTheCommenterAmongTheDocumentsWriters(t *testing
 		Payload:  map[string]any{"id": "00000000-0000-0000-0000-000000000012", "anchor": anchorOn(doc)},
 	}
 	item := contracts.Envelope{EventID: "dispatch-1", Topic: "notifications.dispatch.issue.T-1.comment.created"}
-	if err := publishAuthorRoutes(context.Background(), Deps{Store: database, Publisher: publisher}, 0, item, event, &attempt{delivered: map[string]struct{}{}}); err != nil {
+	if err := publishAuthorRoutes(context.Background(), Deps{Store: database, Publisher: publisher}, 0, item, event, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
 		t.Fatalf("publish author routes: %v", err)
 	}
 	if got := topicsOf(publisher.all()); !slices.Equal(got, []string{"notifications.agent.session-editor"}) {

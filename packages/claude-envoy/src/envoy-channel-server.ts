@@ -1204,7 +1204,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
     ...(daemon === undefined ? [] : [legionToolDefinition()]),
   ]
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolDefinitions }))
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     if (daemon !== undefined && request.params.name === LEGION_TOOL_NAME) {
       const legionRuntime: LegionToolRuntime = {
         daemon,
@@ -1213,7 +1213,11 @@ export async function runEnvoyChannelServer(): Promise<void> {
         // names, which the pane's `dispatch handoff-write` wrote the record to.
         handoffReport: paneHandoffReport(configFile, process.env, directory),
       }
-      return mcpResult(await executeLegionTool(legionRuntime, request.params.arguments))
+      // The request's signal aborts on the client's notifications/cancelled, which ends a wait
+      // for a restarting daemon.
+      return mcpResult(
+        await executeLegionTool(legionRuntime, request.params.arguments, extra.signal),
+      )
     }
     if (runtime === undefined) throw new Error("Envoy channel server is still starting")
     return mcpResult(await executeEnvoyTool(runtime, request.params.name, request.params.arguments))

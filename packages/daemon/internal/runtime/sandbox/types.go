@@ -153,18 +153,19 @@ type Options struct {
 	// launch expects any disk to hold a session. Under postgres that file is the providers Secret
 	// key the pod and the image probe mount at ProvidersDir/OMP_SESSION_SQL_DSN, which the shim,
 	// seeing the pointer, never exports; under cloudsql-iam no pod mounts a session key at all —
-	// each role container's launcher is told the instance, database and login (sessionProxyFlags),
-	// proxies a socket of its own to Cloud SQL as the pod itself, and writes the URL file in the
+	// each pod's launcher container (an issue pod's `roles`, the controller pod's `controller`)
+	// is told the instance, database and login once (sessionProxyFlags), proxies a socket of each
+	// generation's own to Cloud SQL as the pod itself, and writes the URL file in that
 	// generation's private directory.
 	SessionStore ompsessions.Store
 	// Agent is the command the shim wraps, before the Oh My Pi arguments the runtime appends
 	// (`--extension <envoy plugin> --extension <legion plugin>`, `--resume`, `--mode rpc`,
 	// `--append-system-prompt`); Oh My Pi itself when nil.
 	Agent []string
-	// Setup is the deployment's setup command (runtime.kubernetes.setup), an argv every role's
-	// container runs before each start of its Oh My Pi — after a stale-plugin relaunch's install,
-	// in the container's working directory and with the environment Oh My Pi gets — through the
-	// start wrapper (startArgv); Oh My Pi starts only once it exits 0. Nil runs none.
+	// Setup is the deployment's setup command (runtime.kubernetes.setup), an argv each role runs
+	// before each start of its Oh My Pi — after a stale-plugin relaunch's install, in the role's
+	// working directory and with the environment Oh My Pi gets — through the start wrapper
+	// (startArgv); Oh My Pi starts only once it exits 0. Nil runs none.
 	Setup []string
 	// BootTimeout bounds each wait of a relaunch, its wait for the API server to answer one of its
 	// requests other than overloaded included (resend), and is how long a pod may stay unscheduled

@@ -190,7 +190,7 @@ func (s *server) streamAgentConversation(w http.ResponseWriter, r *http.Request)
 			flusher.Flush()
 		case <-heartbeat.C:
 			// As the event stream does: a viewer whose session has ended stops watching.
-			if _, _, err := s.optionalActor(r); err != nil {
+			if _, _, err := s.optionalActor(heartbeatRequest(r)); err != nil {
 				return
 			}
 			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {

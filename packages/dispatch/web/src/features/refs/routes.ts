@@ -3,13 +3,13 @@ import {
   isSessionId,
   itemFromSearch,
   SESSION_ID_PATTERN,
+  shortSessionId,
 } from "@legion/contracts";
 import { matchPath } from "react-router-dom";
 
 import type { ArtifactOwner } from "../../api/client";
 import type { Artifact } from "../../api/types";
 import { EVERYONE_FILTER_VALUE } from "../inbox/sections";
-import { shortSessionId } from "./actor";
 
 export type IssueRoute =
   | { key: string; kind: "issue" }
@@ -576,6 +576,12 @@ export function isAgentArtifact<T extends Pick<Artifact, "session_id">>(
   artifact: T
 ): artifact is T & { readonly session_id: string } {
   return artifact.session_id !== undefined && artifact.session_id !== null;
+}
+
+/** The session id a `session:<id>` delivery address names, or undefined for any other address
+ *  (a `role:` address). */
+export function sessionOfAddress(address: string): string | undefined {
+  return address.startsWith("session:") ? address.slice("session:".length) : undefined;
 }
 
 /** The route a document is referenced and linked by: an issue's primary document is its `spec`,

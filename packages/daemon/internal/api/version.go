@@ -362,7 +362,18 @@ package api
 // main's, every site that names either included, among them the rollback's
 // `delete from schema_version where version = 54` in docs/kubernetes.md.)
 //
-// 40: INFRA-177 (sjawhar/legion) -- a phase's handoff is a record on its Dispatch issue, which the
+// 40: a root whose architect asked a person a question and handed the turn back gives its
+// admission slot up in the new phase `awaiting_person`, and its strict state issue view gains
+// `waitingOn`: `kind` `ask` with the question's `ask`, or `gate` with `gateVersion` and
+// `artifactId` (in the contract now, so the next release's gate waits need no plugin bump; no
+// daemon of this contract writes one), `since`, the hand-back the wait began at, and, once the
+// wait was answered, `answeredAt` and `answeredBy` (`answeredBy` names how, not always by a
+// person). A 39 plugin's strict reader refuses the phase
+// and the field, so the boot gate and `legion probe-image` refuse the mixed pair. (39 is INFRA-208,
+// on main before this change, so this change takes the number above it, as the collision note
+// says.)
+//
+// 41: INFRA-177 (sjawhar/legion) -- a phase's handoff is a record on its Dispatch issue, which the
 // worker writes with `dispatch handoff-write` under its own session, rather than a committed
 // `.legion/<KEY>/<phase>.json`. `api.HandoffCompleteRequest` gains `handoffId` and
 // `handoffVersion`, the record a file-backed phase's completion (planning, implementing, testing,
@@ -374,11 +385,13 @@ package api
 // record id in place of the commit. `commit` stays the implementer's (its pushed tip, and retro's
 // commit) and the merger's; the planner, tester and reviewer send none, and the daemon no longer
 // requires one of them. `api.PhaseView` gains `handoffRecord`, `{id, version}`, absent until the
-// worker's completion of its current file-backed phase names one; store migration 0055 keeps it
-// on the phase row. A 39 plugin posts a commit and no record, which this daemon refuses, and its
+// worker's completion of its current file-backed phase names one; store migration 0059 keeps it
+// on the phase row. A 40 plugin posts a commit and no record, which this daemon refuses, and its
 // strict reader refuses a state carrying `handoffRecord`, so the boot gate and `legion
-// probe-image` refuse the mixed pair. (Other open branches may declare 40 or a store migration
-// 0055 too: whichever merges after another takes the next free contract number and renumbers its
-// store migration past main's, every site that names either included, among them the rollback's
-// `delete from schema_version where version = 55` in docs/kubernetes.md.)
-const DaemonAPIVersion = 40
+// probe-image` refuse the mixed pair. (This branch took 40 and store migration 0055; main then
+// landed `awaiting_person` at 40 with store migrations 0055 to 0058, so this change takes 41 and
+// store migration 0059, as the collision note says. Other open branches may declare 41 or a store
+// migration 0059 too: whichever merges after another takes the next free contract number and
+// renumbers its store migration past main's, every site that names either included, among them
+// the rollback's `delete from schema_version where version = 59` in docs/kubernetes.md.)
+const DaemonAPIVersion = 41

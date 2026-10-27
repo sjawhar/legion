@@ -55,7 +55,7 @@ other change to the head voids it.
   Legion footer), and a `comments[]` array of `{path, line, side, body}`, one entry per
   finding — never one `pr review` call per finding (each submission fires a `pr-review` wake).
   A `COMMENT` decides nothing. After a
-  conflict-forced rebase, compute the fingerprint (*The unchanged-diff check* in
+  forward merge, compute the fingerprint (*The unchanged-diff check* in
   `skill://legion-worker/references/conflicts-and-rewrites.md`) at the
   `commit_id` of your last submitted review and at the new head. Equal and that review was
   `APPROVE`: submit one more `APPROVE` naming the new head by SHA, its body naming both SHAs
@@ -63,12 +63,32 @@ other change to the head voids it.
   that review was `COMMENT` or `REQUEST_CHANGES`: continue that round against the new head;
   nothing restarts. Different, or either run printed no fingerprint: a new round — thermo again,
   one review. A return whose task's `Reason:` names a READY refusal is never a confirmation, even
-  after a rebase, and a no-fix `REQUEST_CHANGES` that answered one is never continued: the round
+  after a forward merge, and a no-fix `REQUEST_CHANGES` that answered one is never continued: the round
   after it reviews the refused change in full from the last `APPROVE` (*Retro's commits do not
   void the reviewer's approval* below).
 - Answer every thread you opened, and every thread a bot opened that is none of Legion's role
   Apps, as `skill://legion-worker/references/review-threads.md` says; the same reference says
   when every thread is settled enough to approve, and resolving one never gates your approval.
+- **Fix a prose-only finding yourself** — wording, a count, a tense, a citation — in your own
+  commit on the pull request, and list it in your review. Send the work back only for a finding
+  that touches code or behaviour. Push the fix **before** you submit the round's review, and
+  review the head that push made. A push above the head you approved leaves the approval
+  standing for nothing, since any push may change code: the round goes stuck and your architect
+  is told (`ApprovalStands` in `packages/daemon/internal/classify/decisions.go`,
+  `stuckApprovedOtherCode` in `packages/daemon/internal/workflow/review.go`, and the cases "the
+  approval, then a push" and "a push, then the approval of the head before it" in
+  `packages/daemon/internal/workflow/review_test.go`). GitHub runs the branch's workflows on that
+  push, as on every push. Wait for that head's required checks to be
+  green, and approve only then. The daemon sends nothing back for a red at a head the review App
+  pushed (`PlannedRed` in `classify/decisions.go`), so your own read is the only one. A red you
+  approve over reaches nobody: the tree runs on to the merge, where GitHub holds the pull request
+  under the base branch's required checks until someone reads them. A red there is a
+  `REQUEST_CHANGES` when the code is at fault, and your own commit to fix when your prose broke
+  it. The architect reads your prose commits at its acceptance (*The architect's acceptance*,
+  below), and that read is no new round. A round after a READY refusal is the one exception. Its
+  approval needs the tester's `E2E` line to name the head, or an ancestor with only files under
+  `.legion/` removed since. So there you fix no prose yourself, and you name each prose finding in
+  a `REQUEST_CHANGES`.
 
 A reviewer's phase ends with its completion, not with its review. Every round records a handoff
 and takes this order: read CI as above; write the handoff and record it with
@@ -78,7 +98,9 @@ wait, since it stands whatever CI says and the issue leaves reviewing with it. T
 on nothing either: it ends the round whatever CI says at the head it names, since the round reads
 no CI verdict, and a red the daemon reads later — at that head or any above it — is the code's red
 and resumes the implementer from wherever the issue is (reviewing, retro or merging) without the
-reviewer. The daemon moves the issue once both are in — the decision GitHub reports and your
+reviewer. A head your own push changed is the exception. The daemon marks it a planned red and
+sends nothing back for it, so wait for its checks yourself (*Fix a prose-only finding yourself*,
+above). The daemon moves the issue once both are in — the decision GitHub reports and your
 completion, in either order — so a review posted without a completion leaves the issue in
 reviewing until you finish.
 
@@ -86,13 +108,18 @@ reviewing until you finish.
 
 - Between the reviewer's approval and retro the issue sits in `accepting` (Dispatch status
   `needs_review`), where no worker is started: the tree's architect reads the evidence (the
-  tester's handoff, the PR body's `E2E (implementer)` and `E2E (tester)` lines, the reviewer's
-  approval of the head by SHA, and for a parent that every child is done) and accepts with the
+  tester's handoff, the PR body's `E2E (implementer)` and `E2E (tester)` lines and the reviewer's
+  approval of the head by SHA; children still running do not hold it) and accepts with the
   `legion` tool's `sign_off`, which moves the issue to retro, or sends it back to `implementing`
   or `testing` with `request_backward_move` and a reason, which reaches the started worker's task
-  as its `Reason:` line and counts a review round. The acceptance asks no `Production:` line of
-  anyone: that line is written after the close (*The production check after the close*, below).
-  CI red at the head in `accepting` returns the issue to `implementing` as it does in review.
+  as its `Reason:` line and counts a review round. The architect also reads the reviewer's own
+  prose commits here, with the rest of the evidence, and that read is no new round. It does not
+  accept while the issue holds a finding ask no controller has taken (`findings.md`, "When no
+  controller takes it"). The acceptance asks no `Production:` line of anyone: that line is written
+  after the close (*The production check after the close*, below).
+  CI red at the head in `accepting` returns the issue to `implementing` as it does in review. A
+  head the review App pushed is the exception: the daemon marks it a planned red and acts on it
+  nowhere, and GitHub holds the merge under the base branch's own rules.
 
 ## Retro
 
@@ -232,11 +259,13 @@ reviewing until you finish.
     previous release, a daemon still running the previous commit, a deploy nobody has run): the
     summary names what is missing, and the `Production:` line stays at
     `pending deploy of <merge sha>`.
-  - `fail`, for a defect: open a `dispatch ask` for it on the controller's report issue, as
-    `skill://legion-worker/references/findings.md` says, publish its reference to the controller
-    topic, and file no issue. It names this issue, the pull request, the merge commit, what you
-    drove and what failed. Name the ask (`dispatch://<REPORT KEY>/ask/<id>`) in the `Production:`
-    line and in the summary.
+  - `fail`, for a defect: file no issue, and take the path
+    `skill://legion-worker/references/findings.md` gives it. A defect with a clear fix goes to the
+    controller topic, with its evidence comment on the controller's report issue. A defect that
+    needs a decision is a `dispatch ask` on the report issue, and you publish its reference to the
+    controller topic. Either names this issue, the pull request, the merge commit, what you drove
+    and what failed. Name the message or the ask (`dispatch://<REPORT KEY>/ask/<id>`) in the
+    `Production:` line and in the summary.
 - **Nothing waits in the session for a deploy.** A `pending` ends the look. Where no wake is
   queued yet, the daemon suspends your claim with its session kept, and the issue's Sandbox goes
   with its pod and disk; where a wake arrived while the look was open, the next look starts at once
@@ -264,8 +293,11 @@ reviewing until you finish.
   run because production did not carry the merge within the bound.
 - **The record lives on the pull request alone.** Dispatch refuses a message, a comment or an ask
   on a closed issue (`ISSUE_CLOSED`), so the deployment instructions' "on the pull request and the
-  issue" is the pull request for a closed issue, and a defect reaches Dispatch as the ask above.
-  The architect accepted the issue before the merge and is asked nothing after it. `pass` or
+  issue" is the pull request for a closed issue. A defect reaches Dispatch by the two paths above:
+  a clear defect as the message to the controller, which gives it to the tree that owns that code,
+  and any other as the ask on the
+  controller's report issue. The architect accepted the issue before the merge and is asked
+  nothing after it. `pass` or
   `fail` closes the check: your claim is retired and the issue's Sandbox goes with its pod and
   disk, for a root as for a child. Neither ending retires or suspends anything of an issue back in
   the workflow (a root reopened inside its linger): its claim and pod are the new run's.

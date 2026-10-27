@@ -77,8 +77,8 @@ jobs:
       # A pull request's title, body and commit messages reach main's squash commit, the
       # generated release notes and GitHub's pages, and its comments and reviews are public on its
       # page, so this required job checks them at every push. pr-title.yaml checks them again when
-      # the pull request is edited or a comment, review or review comment is posted, edited or
-      # deleted. A push to main or a merge-queue run carries no pull request.
+      # the pull request is opened, reopened or edited or a review is submitted or edited. A push
+      # to main or a merge-queue run carries no pull request.
       - name: Check the pull request's title, body, branch name, commits, comments and reviews name nothing private
         if: github.event_name == 'pull_request'
         env:

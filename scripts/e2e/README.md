@@ -6,8 +6,24 @@ coordinator — unit tests do not gate a stage, these do; others prove one capab
 against the world it will run in. A later stage's script lands beside these; `lib/` holds what
 the stage scripts share: standalone helpers they run, and the files they source
 ([`lib/rig.sh`](#librigsh), [`lib/workflow.sh`](#libworkflowsh), [`lib/github-apps.sh`](#libgithub-appssh),
-[`lib/namespace-rig.sh`](#libnamespace-rigsh), [`lib/kind-sandbox.sh`](#libkind-sandboxsh), [`lib/omp-home.sh`](#libomp-homesh)), which `shellcheck` follows from this directory
+[`lib/namespace-rig.sh`](#libnamespace-rigsh), [`lib/kind-sandbox.sh`](#libkind-sandboxsh), [`lib/omp-home.sh`](#libomp-homesh), [`lib/box-login.sh`](#libbox-loginsh)), which `shellcheck` follows from this directory
 through `scripts/e2e/.shellcheckrc`.
+
+Every `docker run` in these scripts sets a CPU and a memory limit inline, and its container is
+removed when the run ends (an `EXIT` trap's `docker rm -f -v`, or `--rm`): the proofs run on a
+shared devbox, where an unbounded container takes cores and memory from every other run there.
+Every scratch Postgres keeps its data directory on `tmpfs`, so no run leaves a volume behind, and
+tmpfs is charged to the container's memory. Every scratch Postgres gets `--cpus 2 --memory 2g`,
+except the session databases of Stage 4a and Stage 4b, which get `--cpus 2 --memory 4g`: they hold
+every pod's Oh My Pi session for the whole run, hours for Stage 4b. NATS gets `--cpus 1` (0.5 in `lib/nats-stream.test.ts`) `--memory
+512m`, enough for one run's JetStream streams. A kind proof's containers on the kind network get
+`--cpus 2 --memory 2g`: each runs one static binary from the work directory, a Go test driver that
+runs the daemon against the cluster or, in `share-volumes-kind.sh`'s probe, `legion probe-boot`.
+The one exception is kind's node container, which `kind create cluster` starts
+([`lib/kind-sandbox.sh`](#libkind-sandboxsh)): it has no limit, because the kubelet inside it
+reads the host's capacity, not a cgroup cap. `burstable-kind.sh`'s pods declare memory limits of
+19 Gi and 32 Gi, which the kubelet admits against the host's memory; a smaller cap on the node lets
+the kernel kill pod processes below their own limits, and the kubelet does not see why.
 
 | script | proves |
 | :--- | :--- |
@@ -22,7 +38,7 @@ through `scripts/e2e/.shellcheckrc`.
 | `burstable-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, an issue pod Legion's own loader, `sandboxOptions` and Sandbox runtime build from a `legion.yaml` giving the issue pod `issue: {memory: 32Gi, memory_request: 8Gi}` is admitted, scheduled and recorded `Burstable`, its `roles` container carrying exactly that request and limit, while one from a file with no `resources` block stays `Guaranteed`; `legion start --check-config` names the Burstable issue pod and refuses a request past its limit or that is no quantity, naming the key |
 | `controller-sweep-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, the project controller Legion's own loader, `sandboxOptions` and boot's Sandbox runtime factory launch from a `controller: daemon` `legion.yaml` over a real Postgres store keeps its Sandbox and volume through five orphan sweeps at grace 0 told claims read before its launch, because the store holds its claim unretired, and loses both to the first sweep once the claim is retired; the same launch and sweep on a driver whose sweep reads no claim (the sweep before the fix) deletes the launched controller's Sandbox |
 | `share-volumes-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, an issue pod Legion's own loader, `sandboxOptions` and Sandbox runtime build from a `legion.yaml` whose `runtime.kubernetes.pod` mounts an existing NFS share twice — through a PersistentVolumeClaim (read-only by default) and as an `nfs` export with `read_only: false` — reads the server's seed file through the claim, is refused a write there, and writes a file through the export that the server then holds; `legion start --check-config` refuses a volume naming two sources, and `legion probe-boot` mounts both shares and refuses a missing claim, a missing export and a server that never answers, each naming the volume and its share, and an image digest the registry does not have, naming the image |
-| `merged-root-waits.sh` | the daemon keeps a tree's order, driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own: a `sign_off` of a root with a child in the workflow is refused 409 `SIGNOFF_CHILD_IN_WORKFLOW` naming the child, and lands once that child is parked; the root's merge, as GitHub's own envelope, leaves it in `awaiting_merge` with its pull request `merged`, no Dispatch `done`, no suspension, its slot kept and its architect told once by a `pr-merged` notice naming the child; a restart there leaves the wait and tells nobody again; the child's implementer completes its phase in that wait, where a lingering tree refuses it 409 `TREE_LINGERING`; a pull request GitHub reports opened from the waiting root's branch leaves the merged one the root waits on recorded; and the child's own merge closes it and the root behind it, with the tree suspended, the slot freed and the root's production check open on the root's merged pull request |
+| `merged-root-waits.sh` | the daemon keeps a tree's order at the close, driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own: a `sign_off` of a root with a child in the workflow lands, the child untouched; the root's merge, as GitHub's own envelope, leaves it in `awaiting_merge` with its pull request `merged`, no Dispatch `done`, no suspension, its slot kept and its architect told once by a `pr-merged` notice naming the child; a restart there leaves the wait and tells nobody again; the child's implementer completes its phase in that wait, where a lingering tree refuses it 409 `TREE_LINGERING`; a pull request GitHub reports opened from the waiting root's branch leaves the merged one the root waits on recorded; and the child's own merge closes it and the root behind it, with the tree suspended, the slot freed and the root's production check open on the root's merged pull request |
 | `no-required-checks.sh` | a pull request whose base branch requires no check and no workflow has no CI verdict, driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own, with GitHub's settlements, push and synchronize as its own envelopes and what each base requires read by the daemon's own required-checks pass from a GitHub stand-in the driver switches: a failed check on a base that requires nothing leaves no `checksVerdict` key on `GET /legion/v1/state`, the issue in `testing` and no `checks-red`; the same failure once that base requires the check is `red`, sends the work to `implementing` and tells one `checks-red` naming it; a passing required check is `green`; and at an exhausted fix-attempt count a code push onto the held head once its base requires nothing leaves the counted attempt, `fixAttempts` unchanged, so the new head's red once the base requires the check again sends the work back with a `checks-red` rather than being held |
 | `handoff-records.sh` | a phase's handoff is a record on its Dispatch issue (INFRA-177), driven against the real Dispatch server this checkout builds, on a database of its own, and the whole daemon booted with `dispatch_url` at it, over a PostgreSQL the caller names and a `nats-server` of the run's own, through the real `dispatch` CLI and `POST /legion/v1/handoff/complete`: a 40 KB body reads back byte for byte and two writes are versions 1 and 2, a body one byte over the cap refused by the CLI and 413 `CAP_EXCEEDED` by Dispatch; a record another session wrote is refused `HANDOFF_SESSION_MISMATCH` and the planner's own moves the issue on; `legion handoffs import`'s record, under the daemon's session, is refused the tester, which rewrites it, and the reviewer's task names the rewrite; a round-1 record named in round 2 is refused `HANDOFF_NOT_NEW`; with Dispatch stopped the write fails and the completion is refused `DISPATCH_READ_FAILED`, and once it is back both land and the issue's handoff list holds the record. No GitHub, no cluster |
 | `handoff-cutover-github.sh` | on `sjawhar/legion-smoke`, as the implement App, what handoffs leaving git do to GitHub's required check `gate`: a `.legion/`-only commit with the `skip-checks: true` trailer, and the pull request opened on it, get no `gate` check run and no workflow run within 10 minutes (today's behaviour, the negative control); the commit `legion handoffs import` makes removing `.legion/` (the same Git Data API calls) gets one; and a pull request whose only commit is empty, with no trailer, is opened by GitHub and its head gets one (D13). Its scratch workflow runs are cancelled and its branches and pull requests closed and deleted on exit |
@@ -170,13 +186,14 @@ docker of its own there.
 ```sh
 LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic bash scripts/e2e/stage2-tmux-supervision.sh     # → "stage 2 e2e: PASS", exit 0, in about four minutes
 LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> bash scripts/e2e/stage2-tmux-supervision.sh           # the same, for a devbox with no Hawk gateway
+LEGION_E2E_MODEL_ROUTE=box-login bash scripts/e2e/stage2-tmux-supervision.sh                                                   # the same, on the operator's own Oh My Pi login
 ```
 
 **Devbox only.** It runs a real Oh My Pi that calls a real model, so it needs `go`, `docker`,
 `jq`, `curl`, `ss`, `tmux`, `socat`, `bun`, `mise` (with the pinned OMP build it installs if
 missing), the `secrets` CLI holding `GEMINI_API_KEY_TESTS` (agent tier: no YubiKey touch), and
-`LEGION_E2E_MODEL_ROUTE` (required, `gateway` or `key-file`), which picks how the agents reach
-Anthropic, independently of which devbox this runs on:
+`LEGION_E2E_MODEL_ROUTE` (required, `gateway`, `key-file` or `box-login`), which picks how the
+agents reach Anthropic, independently of which devbox this runs on:
 - `gateway`: the operator's model gateway access — `LEGION_E2E_MODEL_GATEWAY_URL` naming the
   gateway's Anthropic endpoint (required in this mode;
   [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh)), `hawk-token` on `PATH`, their
@@ -185,6 +202,20 @@ Anthropic, independently of which devbox this runs on:
 - `key-file`: `LEGION_E2E_ANTHROPIC_KEY_FILE` (required in this mode), a 0600 file holding a
   plaintext Anthropic key, for a devbox with no Hawk gateway at all
   ([`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh)).
+- `box-login`: nothing more, for a devbox whose operator lets Legion's test runs use their own
+  Oh My Pi login. The profile's `agent.db` is a symlink to the operator's `~/.omp/agent/agent.db`,
+  so the panes use the Anthropic login stored there; no key file, gateway or `hawk-token` is
+  involved, and nothing reads, prints or copies the credential
+  ([`lib/install-box-login-route.sh`](#libinstall-box-login-routesh)). The panes run the
+  operator's own Oh My Pi build, not `.omp-pin`: the operator's global mise pin for
+  `github:sjawhar/oh-my-pi`, refused unless it carries the refresh-race fix (the build the
+  operator's own sessions already run against that database); the plugin installs, the plugin
+  gate's `omp plugin` calls and every pane run that one build, and the run is refused while
+  `LEGION_OMP_PATH` is set, since the daemon would prefer that binary. One box-login proof runs at
+  a time on the box, Stage 2 or Stage 3: the script takes the lock ([`lib/box-login.sh`](#libbox-loginsh))
+  first, before it makes its work directory or starts anything. Its teardown gives each pane
+  SIGTERM and up to 10 s before any SIGKILL, then removes the profile's `agent.db` link (the link
+  alone) on every exit, so a kept workspace holds no live path to the operator's login.
 
 The `secrets` CLI named here and below is secretsd, shipped from `sjawhar/forward` (the old
 `sjawhar/secretsd` repository is archived): it reads its agent tier from local sops files and its
@@ -217,7 +248,8 @@ What it stands up, all of it the run's own:
   and the operator's `~/.omp/profiles` holds none of the run; `profile-stays-in-the-run` checks
   that last.
 - **OMP**: `omp_invocation: mise x <pin> -- omp`, the pin read from
-  `.omp-pin`. At boot the daemon asks `mise where <pin>` for the
+  `.omp-pin` (under `box-login`, the operator's own build that
+  [`lib/install-box-login-route.sh`](#libinstall-box-login-routesh) prints). At boot the daemon asks `mise where <pin>` for the
   configured tool's executable, then runs that absolute binary under `mise x <pin>` for every boot
   probe and pane. The script deliberately keeps the ordinary daemon `PATH`, where this devbox has
   `~/.dotfiles/shims/omp` first, and checks the boot log's resolved binary, the OMP child's
@@ -233,7 +265,10 @@ What it stands up, all of it the run's own:
   `<work>/model-gateway/hawk-token` (`gateway`) or `<work>/model-gateway-key/anthropic-key`
   (`key-file`), whose log records each call; no Anthropic key reaches a pane either way — only the
   key command, and only under `gateway` through the operator's hawk login or under `key-file` by
-  reading the file once per call.
+  reading the file once per call. Under `box-login` there is no key command and no call record:
+  the profile's `agent.db` links to the operator's login, and `<work>/model-gateway/box-login.route`
+  records the link and the build; `model-turn-through-the-route` still checks every reply came
+  from `anthropic`.
 - **The provider key**: `provider_keys: {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}`, which proves the
   provider-key path; no pane's model uses it, and the profile disables the Google provider. The
   daemon resolves the secret at boot and writes it as a daemon-held 0600 file; every pane's shim
@@ -279,7 +314,8 @@ Every wait is bounded and names what it waited for; a failed assertion prints
 run also [notes](#libmodel-gateway-unservedsh) each agent that could have failed that check for
 want of a model key, and still exits 1. The
 `EXIT` trap — on a pass, a failure, or an interrupt — stops both daemons (SIGKILL after 10 s),
-kills both private tmux servers, stops the listener, SIGKILLs any process still naming the work
+under `box-login` gives every process of the run SIGTERM and up to 10 s and removes the profile's
+`agent.db` link, kills both private tmux servers, stops the listener, SIGKILLs any process still naming the work
 directory in its command line or working directory, removes both containers and the OMP profile,
 and removes the work directory when the run passed (keeping it, with `transcript.log` (the whole
 run), `daemon.log`, `deadline.log`, `listener.log`, the model key command's log and each
@@ -304,6 +340,8 @@ LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic 
   bash scripts/e2e/stage3-devbox-workflow.sh     # → "stage 3 e2e: PASS", exit 0
 LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> SMOKE_UPSTREAM_NATS=nats://<host>.<tailnet>.ts.net:4222 \
   bash scripts/e2e/stage3-devbox-workflow.sh     # the same, for a devbox with no Hawk gateway
+LEGION_E2E_MODEL_ROUTE=box-login SMOKE_UPSTREAM_NATS=nats://<host>.<tailnet>.ts.net:4222 \
+  bash scripts/e2e/stage3-devbox-workflow.sh     # the same, on the operator's own Oh My Pi login
 ```
 
 **Devbox only; CI does not run this script.** It runs real Oh My Pi agents and real GitHub Apps,
@@ -314,7 +352,7 @@ hand.
 The run needs `go`, `docker`, `jq`, `curl`, `ss`, `tmux`, `bun`, `mise`, `gh`, `shellcheck`, the
 `secrets` CLI holding the two role App keys (the default pair unless the App inputs name
 another deployment's), and
-`LEGION_E2E_MODEL_ROUTE` (required, `gateway` or `key-file`), which picks how
+`LEGION_E2E_MODEL_ROUTE` (required, `gateway`, `key-file` or `box-login`), which picks how
 the agents reach Anthropic, independently of which devbox this runs on:
 - `gateway`: the operator's model gateway access — `LEGION_E2E_MODEL_GATEWAY_URL` naming the
   gateway's Anthropic endpoint (required in this mode;
@@ -324,6 +362,19 @@ the agents reach Anthropic, independently of which devbox this runs on:
 - `key-file`: `LEGION_E2E_ANTHROPIC_KEY_FILE` (required in this mode), a 0600 file holding a
   plaintext Anthropic key, for a devbox with no Hawk gateway at all
   ([`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh)).
+- `box-login`: nothing more, for a devbox whose operator lets Legion's test runs use their own
+  Oh My Pi login: the profile's `agent.db` is a symlink to the operator's, no key file, gateway or
+  `hawk-token` is involved, and nothing reads the credential
+  ([`lib/install-box-login-route.sh`](#libinstall-box-login-routesh)). The panes run the
+  operator's own Oh My Pi build (its global mise pin, refused unless it carries the refresh-race
+  fix) in place of `.omp-pin` for the plugin installs and every pane; the daemon runs without
+  `LEGION_OMP_PATH` under every route (it would outrank `omp_invocation`), each daemon start must
+  log that build's own `bin/omp` as its resolved binary, and a box-login run with
+  `LEGION_OMP_PATH` set is refused. The script takes the one-at-a-time lock
+  ([`lib/box-login.sh`](#libbox-loginsh)) first, before it makes its work or evidence directory or
+  starts anything, and its teardown (the `EXIT` trap and `services-stopped`) gives every pane
+  SIGTERM and up to 10 s before any SIGKILL, after the failure-path production audit, then removes
+  the profile's `agent.db` link before transcripts are kept.
 
 `SMOKE_UPSTREAM_NATS` (required) names the production Envoy
 NATS the GitHub bridge subscribes on by its fully-qualified name on the operator's tailnet, the
@@ -360,13 +411,15 @@ answer that id and the role's write permission) and read each App's bot login, t
 check that names an App compares with, before the run's first write anywhere. The agents'
 model is Anthropic through the configured route:
 [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) (`gateway`) or
-[`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh) (`key-file`) routes the
-isolated profile there in `prerequisites`, where either route's preflight refuses loudly before any
-pane exists (a locked keyring by name under `gateway`, an unreadable or empty key file under
-`key-file`), and the daemon is given
+[`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh) (`key-file`) or
+[`lib/install-box-login-route.sh`](#libinstall-box-login-routesh) (`box-login`) routes the
+isolated profile there in `prerequisites`, where the gateway and key-file routes' preflight refuses
+loudly before any pane exists (a locked keyring by name under `gateway`, an unreadable or empty key
+file under `key-file`), and the box-login route refuses a box with no operator login or an operator
+build without the refresh-race fix, and the daemon is given
 no `provider_keys` (the Google provider answered long workflow turns with empty responses, so the
-agents are not Gemini-backed). No YubiKey touch is required under `key-file`, and no key value
-enters the script's shell, a pane, an argv, or the transcript, under either route.
+agents are not Gemini-backed). No YubiKey touch is required under `key-file` or `box-login`, and no
+key value enters the script's shell, a pane, an argv, or the transcript, under any route.
 
 The proof human's `gh` has to stay authenticated for the whole run. A full run takes about 70
 minutes, longer than the one hour a GitHub App installation token lives. The devbox shim keeps it
@@ -416,19 +469,20 @@ configured, there is none to audit. The scratch Dispatch runs with `HOME` and `X
 the run's work directory, so it reads no envoy.json of the operator's.
 
 It proves admission order and slotless children — the child is parked to `backlog` as soon as it
-is seen slotless, which is all it was filed for, so it holds up no acceptance above it — then
+is seen slotless, which is all it was filed for, so it holds up no close above it — then
 drives a root from `todo` through an
 architect's spec and gate registration, which the architect does on its own (the proof never
 prompts it: its first turn is the daemon's `catch-up` notice, and the root's primary document is
-the proof's one-file smoke spec), the human approval, planner, implementer pull request,
+the proof's one-file smoke spec), the root's wait on the human at its gate (`awaiting_person`, no
+slot, the architect suspended), the human approval, the root's return to a slot, planner, implementer pull request,
 tester, reviewer, the architect's acceptance at `accepting`, retro, merger READY, the daemon's
 merge of the READY head, which closes the issue (`daemon-merge`), and the implementer's production
 check after the close, its first look and the bound's last look
 (`production-check-bound`). It also proves three changes-requested rounds, each posted by the reviewer
 pane and ended by that reviewer's completion — a review ends when its reviewer completes it, so
-the round returns to implementing only once the reviewer's handoff is recorded, authored and
-committed by the review App, and each review, like the final approval, names the issue branch's
-head at that round's reviewer completion, the head the reviewer's own handoff push made (the order the Go
+the round returns to implementing only once the reviewer's handoff is recorded on the Dispatch
+issue under the reviewer's claim session, and each review, like the final approval, names the issue
+branch's head at that round's reviewer completion, the implementer's last pushed head (the order the Go
 reviewer prompt gives; the proof names only the decision); in round one the proof human, a GitHub
 App and so a bot account like a CI bot and none of Legion's role Apps, also opens a file-level
 review thread (the run reads the thread's author back and stops, naming it, when the devbox `gh`
@@ -458,10 +512,13 @@ approval request is opened, and the proof writes no review through the reviews r
 refusal and the release), a held
 worker after its launch budget and the architect's retry relaunching it, a root whose human
 decides at the design gate that no change is needed (`architect-closes-a-no-change-root`: the
-architect ends its admitted tree with `close_root`, the daemon posts its reason on the issue before
+root waits on the person without a slot, the human's changes request answers it and the root
+takes a slot back at `admitted` with its architect's session resumed, which `close_root` requires;
+the architect then ends its tree with `close_root`, the daemon posts its reason on the issue before
 it writes `done`, every status write on the issue is the daemon's, the freed slot goes to the next
-waiting root, and the journal has the gate's changes request, the close, the linger, the slot
-release and the architect's suspension), restart during
+root, and the journal has the root's wait, the gate's changes request, two slot releases (the wait
+and the close) and two slot takes (its admission and its return), the close, the linger and the
+architect's suspension), restart during
 implementation, a pending status write while Dispatch is down, and the Go pane's
 credentials (`in-agent-credentials`): in one bash tool call of a real implementer pane, `gh` — the
 launcher directory's `legion gh` wrapper, over the daemon's PATH's real gh (`LEGION_GH_PATH`) —
@@ -592,7 +649,8 @@ Evidence survives every outcome in `STAGE3_EVIDENCE_DIR` (default a fresh
 transcript, the daemon, Dispatch, listener, and bridge logs, the model route's call record
 (`model-gateway/`: `hawk-token.{log,calls}` under `gateway`, `anthropic-key.{log,calls}` under
 `key-file` — never the key command itself, which under `key-file` lives under its own `--key-dir`,
-removed on every exit), state captures, negative-control outputs, the pane endpoint checks,
+removed on every exit — and `box-login.route` under `box-login`, which names the link, the
+database path and the build, never a credential), state captures, negative-control outputs, the pane endpoint checks,
 and the production audit. A passing run's last three checks stop every process, kill the private
 tmux server and remove both containers (`services-stopped`), check the model route
 (`model-turns-through-the-route`), and close every pull request the run still has open on the
@@ -670,9 +728,32 @@ so the script opens the transcript on fd 8 and calls `transcript_to /dev/fd/8`
 ## claude-backend-tmux.sh
 
 ```sh
-LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic \
+LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic \
   bash scripts/e2e/claude-backend-tmux.sh     # → "claude backend e2e: PASS", exit 0
+LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> \
+  bash scripts/e2e/claude-backend-tmux.sh     # the same, for a devbox with no Hawk gateway: one key file for both halves
 ```
+
+The key-file route's file may come from the agent-secrets broker, which serves
+`LEGION_ANTHROPIC_API_KEY` to a session without an approval wait. The key is written 0600, never
+printed and never in an argv, and the subshell's `EXIT` trap removes the file however the run ends
+(a failure, Ctrl-C, or a deadline that kills the shell), where a plain `rm` at the end would leave
+it behind:
+
+```sh
+(
+  key=$(mktemp)   # 0600 already
+  trap 'rm -f "$key"' EXIT
+  agent-secrets LEGION_ANTHROPIC_API_KEY -- sh -c 'umask 077; printf %s "$LEGION_ANTHROPIC_API_KEY" >"$1"' sh "$key" &&
+    LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_CLAUDE_KEY_FILE=$key LEGION_E2E_ANTHROPIC_KEY_FILE=$key \
+      bash scripts/e2e/claude-backend-tmux.sh
+)
+```
+
+Claude Code has no box-login route: Claude Code 2.1.309 writes `~/.claude/.credentials.json` by
+writing a temporary file and renaming it over the old one, without following a symlink, so a
+symlinked credentials file would be replaced on its first token refresh and the operator's own
+file would keep a refresh token that is already spent. This script keeps its key file and gateway.
 
 **Devbox only; CI does not run this script.** It proves `worker_backends` on the tmux runtime: a
 real Go daemon whose `legion.yaml` puts the implementer on Claude Code (`worker_backends:
@@ -708,18 +789,35 @@ pane. The checks:
 
 Inputs. The App inputs ([`lib/github-apps.sh`](#libgithub-appssh), optional) name another
 deployment's two role Apps; a run here sets none and takes the default pair.
-`LEGION_E2E_CLAUDE_KEY_FILE` (required) names a file holding the Anthropic API key the
-Claude Code implementer reaches its model with. `prerequisites` refuses a run without it, naming
-the variable, before it writes anything, and refuses a key Anthropic's `GET /v1/models` does not accept
+`LEGION_E2E_MODEL_ROUTE` (required, as Stage 2's and Stage 3's is) picks the Oh My Pi agents'
+route — the architect's and the planner's:
+
+- `gateway`: the Hawk model gateway, as in
+  [`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh), with `LEGION_E2E_MODEL_GATEWAY_URL`
+  (required in this mode) and `hawk-token` on `PATH`
+  ([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)).
+- `key-file`: `LEGION_E2E_ANTHROPIC_KEY_FILE` (required in this mode unless
+  `LEGION_E2E_CLAUDE_KEY_FILE` names the file), a 0600 file holding a plaintext Anthropic key, for
+  a devbox with no Hawk gateway at all
+  ([`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh)). `hawk-token` is
+  not required here.
+
+`prerequisites` refuses any other value, naming it, before it writes anything.
+
+`LEGION_E2E_CLAUDE_KEY_FILE` names a file holding the Anthropic API key the
+Claude Code implementer reaches its model with. It is required under `gateway`; under `key-file`,
+left unset, it falls back to `LEGION_E2E_ANTHROPIC_KEY_FILE`, so one key file serves both halves of
+the run, and naming both puts the Claude Code pane on `LEGION_E2E_CLAUDE_KEY_FILE` and the Oh My Pi
+agents on `LEGION_E2E_ANTHROPIC_KEY_FILE`, with both paths in the run's notes.
+`prerequisites` refuses a run with neither, naming the variables, before it writes anything, and
+refuses a key Anthropic's `GET /v1/models` does not accept
 (the key goes by a 0600 header file, never an argv). The run copies the key once into its work
 directory, 0600, and writes the implementer's claim directory (`<state>/claude/<claim token>`, which
 the daemon creates only when missing) before the claim exists: a `settings.json` whose
 `apiKeyHelper` is a command that prints that copy, and whose `model` is `claude-sonnet-5`. So no
 pane's environment carries `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_OAUTH_TOKEN`,
 `ANTHROPIC_FOUNDRY_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`, which the watcher checks for every agent
-process, and the key is in no argv and no transcript. `LEGION_E2E_MODEL_GATEWAY_URL` (required) is
-the Oh My Pi agents' route, as in [`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh)
-([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)). `CLAUDE_E2E_EVIDENCE_DIR` names
+process, and the key is in no argv and no transcript. `CLAUDE_E2E_EVIDENCE_DIR` names
 the evidence directory; by default it is a fresh one under `/tmp`.
 
 The rig is Stage 3's without the GitHub ingress bridge: scratch Postgres, NATS, Envoy listener and
@@ -1322,7 +1420,11 @@ changes; the revision raises a block; the human answers it; and the architect ha
 back, or requests approval again, which opens a new request since Request changes answered the old
 one. It keeps the issue's asks as `<issue>-asks.json`, approval events as
 `<issue>-events.json`, each requested version as `<issue>-spec-v<N>.json`, and the verdict as
-`<issue>-gate-verdict.json`.
+`<issue>-gate-verdict.json`. While tree 1 waits on the human (its question, or a closed gate it
+registered) it is in `awaiting_person` with no slot and its architect suspended; once the gate
+opens, `spec-posted` waits for the root to hold a slot again (`await_root_slot`, which tree 1, the
+run's one root under `admission_cap: 2`, takes at once) before it waits for planning, and notes how
+many times the daemon logged the root giving its slot back.
 
 `LEGION_E2E_POD_FILE` names a JSON file holding a deployment's own worker pod block, the
 `runtime.kubernetes.pod` value its configuration renders (`service_account`, `env`, `volumes`,
@@ -2138,7 +2240,7 @@ the `nats-server` `LEGION_E2E_NATS_BIN` names, or the pinned `v2.10.22` the scri
 | `prerequisites` | `LEGION_TEST_PG_DSN` is set (the DSN itself is not printed), `go` and `awk` are on PATH, and a `nats-server` is named or installed |
 | `broker` | that `nats-server`, with JetStream, listening on 127.0.0.1 and ready |
 | `driver` | a test binary of `TestAMergedRootsCloseWaitsForTheRestOfItsTreeLive` (`internal/daemon/merged_root_waits_live_test.go`, `-tags e2e`) |
-| `proof` | the seven steps below, each printing what it drove and what it read back between its own `== <name>` and `ok <name>` |
+| `proof` | the six steps below, each printing what it drove and what it read back between its own `== <name>` and `ok <name>` |
 
 The driver boots the whole daemon through `run`, the function `legion start` calls, over that
 PostgreSQL and that broker, and seeds one tree: a root in `accepting` on a reviewed, open pull
@@ -2150,13 +2252,11 @@ or published to the Envoy listener stand-in, or of what the fake worker runtime 
 launch and suspend. Step 7 also reads the store once, for the daemon's `processed_events` row of
 the envelope it drove, so that its window starts with that event applied; no route shows it, since
 the workflow only logs the event it leaves. The steps run in the order each one's state follows
-from the last, so the plan's step 6 is the control of its step 1 and runs beside it, and the
-restart runs where the wait it must not disturb stands:
+from the last, and the restart runs where the wait it must not disturb stands:
 
 | step | driven by | read back as |
 | :--- | :--- | :--- |
-| `step1-the-acceptance-waits-for-the-child` | the architect's `POST /legion/v1/signoff`, with a grant its registered session bought | 409 `SIGNOFF_CHILD_IN_WORKFLOW` naming the child and `park_child`; the root still in `accepting` |
-| `step6-the-acceptance-lands-once-the-child-is-out` | the child parked to `backlog` by its own Dispatch event, the way the refusal names, then the same sign-off | the park read back on the state, then 200 and the root in `retro` |
+| `step1-the-acceptance-lands-while-the-child-runs` | the architect's `POST /legion/v1/signoff`, with a grant its registered session bought, while the child implements | 200, the root in `retro` with the Dispatch stand-in's `retro` write, and the child still `implementing` |
 | `step2-the-merged-root-waits-for-its-child` | the root's merge, as a `notifications.github.…` envelope | the root still `awaiting_merge`, its `pullRequest.state` now `merged`, its Dispatch status not `done`, its slot still held, no production check, no suspension asked of the runtime, no status write taken by the Dispatch stand-in, and exactly one `pr-merged` notice on the architect's role topic naming the pull request and the child |
 | `step5-a-restart-leaves-the-wait-and-tells-no-one-again` | a restart of the daemon at that state | over three seconds, the root still `awaiting_merge` on its merged pull request and still exactly one `pr-merged` notice: the boot's sweep leaves the wait and repeats no notice |
 | `step3-the-waiting-roots-child-completes-its-phase` | the child's implementer completion over `POST /legion/v1/handoff/complete` | 200, the child in `testing`, and the root still waiting — where a lingering tree refuses the completion 409 `TREE_LINGERING` |
@@ -2500,8 +2600,9 @@ manifest=$(scripts/e2e/lib/install-plugin-profile.sh --package pi-legion --profi
 | `--profile <name>` | the OMP profile to install into (`OMP_PROFILE=<name>`). Refused when OMP would read it as its default profile — empty, all whitespace, or `default` — since that is the profile every plain `omp` uses. Any other name goes to OMP as given, and OMP refuses one it cannot use. |
 | `--home <dir>` | the `HOME` Oh My Pi runs under for the profile, which is then `<dir>/.omp/profiles/<name>`: the run's own home from [`make_omp_home`](#libomp-homesh). Refused when it is the caller's own `HOME`, when `HOME` is unset or empty (it could not be compared), and when `<dir>/.omp` does not exist. |
 | `--dest <dir>` | where the tarball is unpacked. `omp plugin install` links this directory into the profile rather than copying it, so it **is** the installed plugin and must outlive the run. Refused inside the checkout (jj would snapshot it, symlinks resolved first) and when it exists and is not an empty directory (an unpack over an earlier build would keep that build's stale files). |
+| `--omp <mise tool spec>` | optional: the Oh My Pi build steps 2 and 3 run (`github:sjawhar/oh-my-pi@<version>`), `.omp-pin`'s by default. Stage 2 and Stage 3 pass the build their daemon and panes run, so no other build opens the profile; under `LEGION_E2E_MODEL_ROUTE=box-login` that profile's `agent.db` is the operator's login database ([`lib/install-box-login-route.sh`](#libinstall-box-login-routesh)). Refused when empty. |
 
-All four flags are required; each refusal names its flag and exits 2. Stdout is exactly one line, the
+The first four flags are required; each refusal names its flag and exits 2. Stdout is exactly one line, the
 installed manifest's path as `HOME=<home> OMP_PROFILE=<name> omp plugin list --json` reports the plugin; for
 `pi-legion` that is the manifest the daemon's contract gate reads under the same profile
 (`pluginManifestPath`, `packages/daemon/internal/daemon/bootgate.go`). Every step's own output
@@ -2518,9 +2619,12 @@ strands no `.tgz` in the checkout). Then:
 3. `OMP_PROFILE=<name> omp plugin list --json` must show the package, by its npm name, at the
    tarball's version, enabled, and resolving to `<dir>`.
 
-Steps 2 and 3 run the Oh My Pi the daemon pins (`.omp-pin`, through `mise x <pin>`) under
-`HOME=<home>`, from `<dir>`, rather than the `omp` on the caller's `PATH`: an operator's wrapper
-there (the devbox's `~/.dotfiles/shims/omp`) reads its own files from `HOME`, which is the run's.
+Steps 2 and 3 run the Oh My Pi `--omp` names, else the one the daemon pins (`.omp-pin`), under
+`HOME=<home>`, from `<dir>`, as the daemon runs it: the build's own `bin/omp` by its absolute path
+(`mise where <pin>`) under `mise x <pin> --`, never an `omp` looked up on the caller's `PATH`. An
+operator's wrapper there (the devbox's `~/.dotfiles/shims/omp`) reads its own files from `HOME`,
+which is the run's, and its own setup could rewrite the profile, whose `agent.db` is the operator's
+login database under the box-login route.
 
 Each step cites its source by what it runs, never by line number: the lines move with every edit
 above them.
@@ -2739,6 +2843,98 @@ The script creates the profile's two directories, `<dest>` and `<key-dir>`, and 
 the caller does, with its work directory, `<key-dir>` unconditionally and `<dest>` only when it
 keeps no evidence.
 
+## lib/install-box-login-route.sh
+
+Routes a named OMP profile's model turns to Anthropic on the operator's own Oh My Pi login, the
+one the devbox's own sessions use: the box-login alternative to
+[`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) and
+[`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh), for a devbox whose
+operator lets Legion's test runs use that login. No key is minted, read or copied, and no gateway
+is involved.
+
+```sh
+scripts/e2e/lib/install-box-login-route.sh --profile <name> --home <dir> --dest <dir> --operator-home <dir>
+# → github:sjawhar/oh-my-pi@<the operator's version>
+```
+
+Oh My Pi keeps its stored logins in `<agentDir>/agent.db`, and a named profile's `agentDir` is
+`<home>/.omp/profiles/<name>/agent`, with no setting that moves the database. The script makes the
+profile's `agent.db` a symlink to `<operator-home>/.omp/agent/agent.db`; SQLite opens the database
+through the link and writes its `-wal` and `-shm` beside the real file, so every pane shares the
+operator's one database, never a copy. The script checks only that the operator's `agent.db` is a
+regular file, then links to it: it never opens, reads, copies or hashes it, and runs no `omp`
+command that touches a login. `--operator-home` is the operator's real home, which the stage proof
+captures before it runs anything under the run's own `HOME`; the script never takes it from its own
+`$HOME`.
+
+The profile's `agent/config.yml` is the key-file route's (every model role
+`anthropic/claude-opus-4-8`, `enabledModels` that one model, every other provider a pane could
+reach disabled) plus `memory.backend: "off"`, so the run writes no memory into the operator's
+database. No `models.yml` is written, so no `apiKey` or `X-Api-Key` overrides the stored login.
+
+**The operator's build.** Processes sharing one `agent.db` refresh its OAuth token safely only on a
+build with the refresh-race fix, first released as `18.12.2-sami.20261026-004924`; on a build
+without it one process can spend the shared refresh token while another still holds it, which
+disables the login for every session on the box. So the panes run the operator's own build, the one
+the operator's sessions already run against that database, not `.omp-pin` (which also feeds the
+worker image and CI and is not moved for this). The script reads it with
+`cd / && HOME=<operator-home> mise ls --global --json`: from the filesystem root, so neither this
+checkout's nor the caller's directory's mise config can answer in place of the operator's global
+one. It takes the one active `github:sjawhar/oh-my-pi` entry's `version` and prints the tool spec on
+stdout, which the stage proof writes into `omp_invocation`.
+
+Each refusal goes to stderr and writes nothing into the profile. Exit 2 (arguments): a missing
+flag or a flag with no value (`--<flag> needs a value: …`), OMP's default profile, a `--profile` that is not one plain path segment (`--profile '<name>'
+is not one plain name …`: a letter or digit, then letters, digits, `.`, `_` or `-`, and no `..`), an
+agent directory whose canonical path is not `<home>/.omp/profiles/<name>/agent` (`… resolves to <path>,
+outside …`: a symlinked directory on the way), `--home` equal to `HOME` or `--operator-home` or without `.omp`, an
+existing `agent/models.yml` or `agent/config.yml`, a profile `agent.db` that exists and is not the
+symlink it would make (`… exists and is not the symlink to <db>; this installs a fresh profile's
+model route only, and never replaces a profile's own database`), and a `--dest` that is not empty.
+Exit 1 (the box):
+
+- `<db> is not a regular file: the operator has no Oh My Pi login on this box to share (log in with the operator's own omp first)`, or `<db> is a symlink; …`;
+- `the operator's global mise config pins no single active github:sjawhar/oh-my-pi, …`;
+- `the operator's github:sjawhar/oh-my-pi is <v>, not <base>-sami.YYYYMMDD-HHMMSS, so it cannot be compared with the refresh-race fix (18.12.2-sami.20261026-004924)`;
+- `the operator's github:sjawhar/oh-my-pi is <v>, base <b>; only base 18.12.2 is known here, …`: another base version is refused, never guessed at;
+- `the operator's github:sjawhar/oh-my-pi is <v>, older than 18.12.2-sami.20261026-004924, the first build with the refresh-race fix; …`.
+
+It writes `<dest>/box-login.route`, the link, the database's path and the build, for the evidence;
+it holds no secret. Claude Code has no such route
+([`claude-backend-tmux.sh`](#claude-backend-tmuxsh) says why).
+
+## lib/box-login.sh
+
+What a `LEGION_E2E_MODEL_ROUTE=box-login` run needs beyond the route: one run at a time, a teardown
+that lets a pane finish a token refresh, and no link to the operator's login left behind. Sourced,
+never run; Stage 2 and Stage 3 source it first.
+
+```sh
+. "$root/scripts/e2e/lib/box-login.sh"
+take_box_login_lock || { echo "FAIL setup: another box-login proof is running on this box (the holder is named above)" >&2; exit 1; }
+…
+stop_box_login_processes $(run_processes)   # in the teardown
+unlink_box_login_db "$profile_agent"
+```
+
+`take_box_login_lock` takes a non-blocking `flock` on one fixed file per operator uid,
+`/tmp/legion-e2e-box-login.<uid>.lock` (`box_login_lock_file`), whatever `XDG_RUNTIME_DIR` or
+`TMPDIR` says, so every box-login run of that operator meets the same lock. The stages take it
+before they make a work or evidence directory. The lock stays on a file descriptor of the calling
+shell for its whole life, and of every process it starts that keeps the descriptor, so a pane a run
+leaves behind still holds it. A taken lock fails at once, naming the holder the file records:
+`another box-login proof holds <file>: pid <pid> (<command>); one box-login proof runs at a time`,
+or that the pid has exited and a process it started still holds the lock. Every pane of a box-login
+run shares the operator's login database; one run at a time keeps the load on that login bounded
+and each run's evidence its own.
+
+`stop_box_login_processes PID…` sends SIGTERM to every pid, waits at most `box_login_stop_grace`
+(10) seconds for all of them to exit, then SIGKILLs only those still alive, so a pane in the middle
+of a token refresh can write the rotated token back before it goes. `unlink_box_login_db
+AGENT_DIR` removes `AGENT_DIR/agent.db` when it is a symlink, the link itself and never what it
+names; the stages call it once the run's processes are gone, since a process that opened the
+database again after the link went would make a fresh database of its own in the profile.
+
 ## lib/model-gateway-unserved.sh
 
 Says whether the key command [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) or
@@ -2801,8 +2997,9 @@ included), and `--record` and `--notes` 1 on a record line they cannot read.
 Proves a tmux stage proof's agents reached the model only through its configured route: every
 agent turn the isolated OMP profile recorded, each subagent's included, was served by the
 `anthropic` provider, the one [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) (the
-Hawk gateway) or [`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh) (a
-local key file) routes and leaves enabled. Stage 2 runs it last, after `stop`. Stage 3 runs it once
+Hawk gateway), [`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh) (a
+local key file) or [`lib/install-box-login-route.sh`](#libinstall-box-login-routesh) (the
+operator's own login) routes and leaves enabled. Stage 2 runs it last, after `stop`. Stage 3 runs it once
 every agent process has stopped and before it copies the transcripts, then again over the copies,
 which must hold the same turns, sessions and subagents.
 
@@ -3106,6 +3303,21 @@ the phase's worker runs a whole loop and the caller passes its own bound: a corr
 retro, and planning, whose planner runs its gap analyst and up to three plan-review rounds before
 its handoff (Stage 4b's `plan_seconds`, 2700 s). `round_correction_pushed ROUND` accepts the round's
 line only as an addition in `smoke_file`'s patch, never in a notes file that quotes it.
+
+With the design gate armed (`gates.design: root-issues`), a root whose architect registers a closed
+gate while no worker of its tree runs waits on a person: `drive_gate ISSUE LABEL [SECONDS]` runs
+`architect_registers_gate`, then `await_gate_wait` (the root in `awaiting_person` with
+`waitingOn.kind` `gate` and no `answeredAt`, no `.slot` and absent from `admission.active`, then its
+architect `suspended` within `phase_seconds`), approves the registered version as the proof human,
+then `await_answered_slot`: the answer (`waitingOn.answeredAt`, or the root already holding a slot,
+since a slot free at the answer is taken in the same transaction) within 120 s, then
+`await_root_slot`, the root out of `awaiting_person` holding a slot in `admission.active`, within
+`SECONDS` (`phase_seconds` by default; Stage 3's first root passes 1800, since its slot comes back
+only when a root that took the slot it gave up registers its own gate in turn). A timeout in any of
+them prints the root's phase, slot, `waitingOn` and architect state and the admission state. Only
+then does it wait for planning. `wait_for_architect ISSUE` and so `architect_registers_gate` accept
+an architect already suspended in `awaiting_person`, whose pane the watcher checked at its launch,
+since a proof may look after the root's wait began.
 
 `request_changes_as_reviewer ISSUE ROUND BODY [NOTE]` is a scripted changes-requested round: it
 tells the reviewer pane its decision and the review's text, quoted, which the reviewer ends with

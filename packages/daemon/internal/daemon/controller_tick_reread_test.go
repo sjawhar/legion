@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -169,6 +170,42 @@ func TestThePeriodicTurnListsTheProjectOnceAboveTheSingleReadBound(t *testing.T)
 	})
 }
 
+// The turn's re-read carries the claim Dispatch shows on each issue it reads, by a single read
+// and by the listing alike, and the mirror writes it.
+func TestThePeriodicTurnsReReadMirrorsTheClaim(t *testing.T) {
+	t.Run("a single read", func(t *testing.T) {
+		pool := isolatedOutboxPool(t)
+		client := &tickDispatch{issues: map[string]dispatch.Issue{
+			"EXT-1": {Key: "EXT-1", Status: "in_progress", LastSeq: 7, Claim: &dispatch.Claim{Kind: "user", ID: "alice"}},
+		}}
+		w := tickRuntime(t, pool, client)
+		seedWaitingRoot(t, pool, "LEGION-BLOCKED", "A")
+		seedTickMirror(t, pool, "LEGION-BLOCKED", "todo", 1, "EXT-1")
+		seedTickMirror(t, pool, "EXT-1", "todo", 1)
+
+		w.applyControllerTick(context.Background(), time.Now())
+
+		if row := tickMirrored(t, pool)["EXT-1"]; row.ClaimedBy != "user:alice" || row.ClaimSeq != 7 {
+			t.Fatalf("the mirror holds EXT-1's claim as %q at %d, want the turn's reading (user:alice, 7)", row.ClaimedBy, row.ClaimSeq)
+		}
+	})
+	t.Run("the listing", func(t *testing.T) {
+		pool := isolatedOutboxPool(t)
+		client := &tickDispatch{}
+		for i := 1; i <= blockerReadFanout+1; i++ {
+			client.summaries = append(client.summaries, dispatch.IssueSummary{Key: fmt.Sprintf("EXT-%d", i), Status: "in_progress", LastSeq: 7, ClaimedBy: "user:alice"})
+		}
+		w := tickRuntime(t, pool, client)
+		seedBlockedRoots(t, pool, blockerReadFanout+1)
+
+		w.applyControllerTick(context.Background(), time.Now())
+
+		if row := tickMirrored(t, pool)["EXT-1"]; row.ClaimedBy != "user:alice" || row.ClaimSeq != 7 {
+			t.Fatalf("the mirror holds EXT-1's claim as %q at %d, want the listing's reading (user:alice, 7)", row.ClaimedBy, row.ClaimSeq)
+		}
+	})
+}
+
 // tickDispatch is Dispatch as the periodic turn reads it: it counts and records what the turn
 // asked for, answers each key from its own table — not-found for a key it does not hold, as
 // Dispatch answers for an issue it no longer serves — and fails every read while err is set.
@@ -219,12 +256,17 @@ func (d *tickDispatch) listings() int {
 	return d.lists
 }
 
-func (d *tickDispatch) SetStatus(context.Context, string, string) error   { return nil }
+func (d *tickDispatch) SetStatus(context.Context, string, string) (dispatch.Issue, error) {
+	return dispatch.Issue{}, nil
+}
 func (d *tickDispatch) PostMessage(context.Context, string, string) error { return nil }
 func (d *tickDispatch) HandOver(context.Context, dispatch.Issue, string) error {
 	return nil
 }
 func (d *tickDispatch) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
+	return nil, nil
+}
+func (d *tickDispatch) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
 	return nil, nil
 }
 func (d *tickDispatch) Approval(context.Context, string) (dispatch.Approval, error) {

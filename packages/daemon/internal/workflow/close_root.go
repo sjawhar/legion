@@ -27,7 +27,7 @@ func (e *Engine) closeRoot(ctx context.Context, tx pgx.Tx, fact intake.CloseRoot
 		return refused("ROOT_REQUIRED", fmt.Sprintf("%s is a child of %s; close_root ends a tree root, and a child leaves with park_child", root.Key, root.Tree)), nil
 	}
 	if root.Phase != phase.Admitted || root.Lingers() || record.OutOfWorkflow(root.Status) {
-		return refused("CLOSE_AFTER_PHASE_STARTED", fmt.Sprintf("%s is in phase %s with status %s; close_root ends a tree only while its root is admitted and no phase has started, and a tree past that ends through its workflow or a human", root.Key, root.Phase, root.Status)), nil
+		return refused("CLOSE_AFTER_PHASE_STARTED", fmt.Sprintf("%s is in phase %s with status %s; close_root ends a tree only while its root holds its slot at admitted and no phase has started, and a tree past that, one waiting on a person, or one already leaving, ends through its workflow or a human", root.Key, root.Phase, root.Status)), nil
 	}
 	if err := e.enqueue(ctx, tx, root.Key, record.StatusWrite{Status: "done", ObservedStatus: root.Status, Reason: fact.Message()}); err != nil {
 		return intake.Result{}, err

@@ -3,6 +3,7 @@ package gcp
 import (
 	"errors"
 	"fmt"
+	"math/big"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -40,6 +41,29 @@ const (
 	// defaultAzureFederationAudience is the audience of the keyless form's projected token when
 	// azureFederationAudience is unset: the one Entra's federated credentials expect by default.
 	defaultAzureFederationAudience = "api://AzureADTokenExchange"
+
+	// defaultDispatchAppCPU and defaultDispatchAppMemory size the app's envoy-dispatch container
+	// when appCpu and appMemory are unset.
+	defaultDispatchAppCPU    = "1"
+	defaultDispatchAppMemory = "4Gi"
+
+	// dispatchProxyCPU and dispatchProxyMemory size the app pod's cloud-sql-proxy sidecar, which
+	// Autopilot counts in the pod's request beside envoy-dispatch.
+	dispatchProxyCPU    = "200m"
+	dispatchProxyMemory = "256Mi"
+)
+
+// Autopilot's bounds for the app pod's total request, the general-purpose compute class's under the
+// safe-to-evict annotation (https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-resource-requests):
+// below the floor or outside the memory-per-CPU ratio Autopilot raises the pod's request, so the
+// container would not run at the size the component renders; above the ceiling it rejects the pod.
+var (
+	autopilotPodMinCPU    = big.NewRat(1, 2)
+	autopilotPodMaxCPU    = big.NewRat(30, 1)
+	autopilotPodMinMemory = new(big.Rat).SetInt64(512 << 20)
+	autopilotPodMaxMemory = new(big.Rat).SetInt64(110 << 30)
+	autopilotMinGiBPerCPU = big.NewRat(1, 1)
+	autopilotMaxGiBPerCPU = big.NewRat(13, 2)
 )
 
 var (
@@ -47,6 +71,9 @@ var (
 	signInDomainRule   = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
 	namespaceRule      = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 	secretKeyRule      = regexp.MustCompile(`^[-._a-zA-Z0-9]+$`)
+	// quantityRule is a Kubernetes resource quantity (k8s.io/apimachinery's resource.Quantity):
+	// a signed decimal, then a binary suffix, a decimal suffix or a decimal exponent.
+	quantityRule = regexp.MustCompile(`^([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))(Ki|Mi|Gi|Ti|Pi|Ei|n|u|m|k|M|G|T|P|E|[eE][+-]?[0-9]+)?$`)
 )
 
 // DispatchArgs are the inputs of an envoy-infra:gcp:Dispatch. Every field of a plain Go type is a
@@ -102,6 +129,30 @@ type DispatchArgs struct {
 	// Replicas is the app Deployment's replica count, 1 by default. Above 1 the Deployment rolls
 	// its pods instead of being recreated.
 	Replicas *int `pulumi:"replicas,optional"`
+
+	// AppCpu and appMemory size the app Deployment's envoy-dispatch container, as Kubernetes
+	// quantities set as both its request and its limit: 1 CPU and 4Gi by default. The pod's
+	// cloud-sql-proxy sidecar keeps its own 200m and 256Mi, and the front door and the listener
+	// are unchanged.
+	AppCpu    *string `pulumi:"appCpu,optional"`
+	AppMemory *string `pulumi:"appMemory,optional"`
+
+	// PprofPort turns on envoy-dispatch's Go profiler: DISPATCH_PPROF_PORT on its container alone,
+	// so it serves net/http/pprof on 127.0.0.1 at this port, reachable through kubectl
+	// port-forward and from nowhere outside the pod. Unset, nothing is rendered and no profiler
+	// listens.
+	PprofPort *int `pulumi:"pprofPort,optional"`
+
+	// AppPriorityClassName is the app pod's priorityClassName, the name of a PriorityClass that
+	// already exists in the cluster, which this component reads but never creates: a missing class
+	// fails the preview or update before the app Deployment changes, since Kubernetes refuses every
+	// pod naming one. Unset, the pod names none and runs at the cluster's default priority. The
+	// front door and the listener are unchanged.
+	AppPriorityClassName *string `pulumi:"appPriorityClassName,optional"`
+
+	// AppPdbMinAvailable turns on a PodDisruptionBudget, <hostname>, over the app's pods: its
+	// minAvailable, from 1 to replicas. Unset, the component creates no budget.
+	AppPdbMinAvailable *int `pulumi:"appPdbMinAvailable,optional"`
 
 	// AllowedNamespaces names the Kubernetes namespaces, in the Dispatch pod's own cluster, whose
 	// pods the app's NetworkPolicy admits on port 8766. Unset or empty admits no in-cluster
@@ -172,6 +223,15 @@ func dispatchSeededInput(args *DispatchArgs) (string, bool) {
 	if args.DatabaseTier != nil && bus.HoldsSeed(*args.DatabaseTier) {
 		return "databaseTier", true
 	}
+	if args.AppCpu != nil && bus.HoldsSeed(*args.AppCpu) {
+		return "appCpu", true
+	}
+	if args.AppMemory != nil && bus.HoldsSeed(*args.AppMemory) {
+		return "appMemory", true
+	}
+	if args.AppPriorityClassName != nil && bus.HoldsSeed(*args.AppPriorityClassName) {
+		return "appPriorityClassName", true
+	}
 	if args.Namespace != nil && bus.HoldsSeed(*args.Namespace) {
 		return "namespace", true
 	}
@@ -217,6 +277,10 @@ type dispatchSettings struct {
 	appKeySecretName, appKeySecretKey           string
 	deletionProtection, existingNamespace       bool
 	replicas                                    int
+	appCPU, appMemory                           string
+	pprofPort                                   int
+	appPriorityClassName                        string
+	appPDBMinAvailable                          int
 	strategy                                    dispatchStrategy
 	serveConfig                                 string
 	azure                                       dispatchAzure
@@ -469,6 +533,15 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 		s.replicas = *args.Replicas
 	}
 	s.strategy = dispatchStrategyFor(s.replicas)
+	if s.appCPU, s.appMemory, err = newDispatchAppResources(args); err != nil {
+		return dispatchSettings{}, err
+	}
+	if s.pprofPort, err = newDispatchPprofPort(args); err != nil {
+		return dispatchSettings{}, err
+	}
+	if s.appPriorityClassName, s.appPDBMinAvailable, err = newDispatchAppDisruption(args, s.replicas); err != nil {
+		return dispatchSettings{}, err
+	}
 	s.existingNamespace = args.ExistingNamespace != nil && *args.ExistingNamespace
 	if args.Namespace != nil {
 		if !dnsLabel(*args.Namespace) {
@@ -505,6 +578,190 @@ func dnsSubdomain(value string) bool {
 		}
 	}
 	return true
+}
+
+// newDispatchPprofPort resolves pprofPort, the port envoy-dispatch's profiler binds on the pod's
+// loopback: 0, rendering nothing, when it is unset. It refuses a value outside 1-65535, which
+// Dispatch would refuse at startup, and the two ports the app pod already binds on its loopback,
+// envoy-dispatch's own 8766 and the cloud-sql-proxy sidecar's 5432, where the bind would fail and
+// the pod would never start.
+func newDispatchPprofPort(args *DispatchArgs) (int, error) {
+	if args.PprofPort == nil {
+		return 0, nil
+	}
+	port := *args.PprofPort
+	switch {
+	case port < 1 || port > 65535:
+		return 0, fmt.Errorf("pprofPort %d must be a port number 1-65535; leave it unset for no profiler", port)
+	case port == 8766:
+		return 0, fmt.Errorf("pprofPort %d is envoy-dispatch's own port; choose another, such as 6060", port)
+	case port == 5432:
+		return 0, fmt.Errorf("pprofPort %d is the cloud-sql-proxy sidecar's port in the same pod; choose another, such as 6060", port)
+	}
+	return port, nil
+}
+
+// newDispatchAppDisruption resolves appPriorityClassName and appPdbMinAvailable, the app pod's
+// priority class and its PodDisruptionBudget's minAvailable: "" and 0, rendering nothing, when
+// unset. It refuses a class name that is empty or not a DNS subdomain, and one with the system-
+// prefix, which Kubernetes reserves for its own system-cluster-critical and system-node-critical
+// classes: those outrank every workload so the cluster's own components are scheduled first, and
+// an application pod holding one could preempt them. It refuses a budget below 1, which protects
+// no pod, and above replicas, which no number of ready pods can meet.
+func newDispatchAppDisruption(args *DispatchArgs, replicas int) (priorityClass string, pdbMinAvailable int, err error) {
+	if args.AppPriorityClassName != nil {
+		priorityClass = *args.AppPriorityClassName
+		switch {
+		case priorityClass == "":
+			return "", 0, errors.New("appPriorityClassName is empty; leave it unset for no priority class")
+		case !dnsSubdomain(priorityClass):
+			return "", 0, fmt.Errorf("appPriorityClassName %q must be a DNS subdomain, the shape of a PriorityClass's name", priorityClass)
+		case strings.HasPrefix(priorityClass, "system-"):
+			return "", 0, fmt.Errorf("appPriorityClassName %q is a class Kubernetes reserves for its own system components (the system- prefix); name a PriorityClass of your own", priorityClass)
+		}
+	}
+	if args.AppPdbMinAvailable != nil {
+		pdbMinAvailable = *args.AppPdbMinAvailable
+		if pdbMinAvailable < 1 || pdbMinAvailable > replicas {
+			return "", 0, fmt.Errorf("appPdbMinAvailable %d must be from 1 to replicas (%d); leave it unset for no PodDisruptionBudget", pdbMinAvailable, replicas)
+		}
+	}
+	return priorityClass, pdbMinAvailable, nil
+}
+
+// newDispatchAppResources resolves appCpu and appMemory, the envoy-dispatch container's request
+// and limit, and refuses a size at which Autopilot would not run the app pod as rendered: the
+// pod's total, with the cloud-sql-proxy sidecar's, below autopilotPodMinCPU or
+// autopilotPodMinMemory or outside the memory-per-CPU ratio (Autopilot raises it), or above
+// autopilotPodMaxCPU or autopilotPodMaxMemory (Autopilot rejects it).
+func newDispatchAppResources(args *DispatchArgs) (cpu, memory string, err error) {
+	cpu, memory = defaultDispatchAppCPU, defaultDispatchAppMemory
+	if args.AppCpu != nil {
+		if *args.AppCpu == "" {
+			return "", "", errors.New("appCpu is empty; leave it unset for " + defaultDispatchAppCPU)
+		}
+		cpu = *args.AppCpu
+	}
+	if args.AppMemory != nil {
+		if *args.AppMemory == "" {
+			return "", "", errors.New("appMemory is empty; leave it unset for " + defaultDispatchAppMemory)
+		}
+		memory = *args.AppMemory
+	}
+	appCPU, err := appQuantity("appCpu", cpu, "1, 1500m or 2")
+	if err != nil {
+		return "", "", err
+	}
+	appMemory, err := appQuantity("appMemory", memory, "4Gi or 6144Mi")
+	if err != nil {
+		return "", "", err
+	}
+	proxyCPU, _ := quantityValue(dispatchProxyCPU)
+	proxyMemory, _ := quantityValue(dispatchProxyMemory)
+	podCPU := new(big.Rat).Add(appCPU, proxyCPU)
+	podMemory := new(big.Rat).Add(appMemory, proxyMemory)
+	if podCPU.Cmp(autopilotPodMinCPU) < 0 {
+		return "", "", fmt.Errorf("appCpu %q must be at least %s: with cloud-sql-proxy's %s the app pod would request less than %s, below which Autopilot raises it",
+			cpu, milliCPU(new(big.Rat).Sub(autopilotPodMinCPU, proxyCPU)), dispatchProxyCPU, milliCPU(autopilotPodMinCPU))
+	}
+	if podCPU.Cmp(autopilotPodMaxCPU) > 0 {
+		return "", "", fmt.Errorf("appCpu %q must be at most %s: with cloud-sql-proxy's %s the app pod would request above %s CPU, and Autopilot rejects such a pod",
+			cpu, milliCPU(new(big.Rat).Sub(autopilotPodMaxCPU, proxyCPU)), dispatchProxyCPU, autopilotPodMaxCPU.RatString())
+	}
+	if podMemory.Cmp(autopilotPodMinMemory) < 0 {
+		return "", "", fmt.Errorf("appMemory %q must be at least %s: with cloud-sql-proxy's %s the app pod would request less than %s, below which Autopilot raises it",
+			memory, mebibytes(new(big.Rat).Sub(autopilotPodMinMemory, proxyMemory)), dispatchProxyMemory, mebibytes(autopilotPodMinMemory))
+	}
+	if podMemory.Cmp(autopilotPodMaxMemory) > 0 {
+		return "", "", fmt.Errorf("appMemory %q must be at most %s: with cloud-sql-proxy's %s the app pod would request above 110Gi, and Autopilot rejects such a pod",
+			memory, mebibytes(new(big.Rat).Sub(autopilotPodMaxMemory, proxyMemory)), dispatchProxyMemory)
+	}
+	gibPerCPU := new(big.Rat).Quo(podMemory, podCPU)
+	gibPerCPU.Quo(gibPerCPU, new(big.Rat).SetInt64(1<<30))
+	if gibPerCPU.Cmp(autopilotMinGiBPerCPU) < 0 || gibPerCPU.Cmp(autopilotMaxGiBPerCPU) > 0 {
+		return "", "", fmt.Errorf("appCpu %q and appMemory %q: with cloud-sql-proxy's %s and %s the app pod must hold between 1 and 6.5 GiB of memory per CPU, or Autopilot raises the smaller of the two",
+			cpu, memory, dispatchProxyCPU, dispatchProxyMemory)
+	}
+	return cpu, memory, nil
+}
+
+// appQuantity is the exact value of input's quantity, or a refusal naming input.
+func appQuantity(input, value, examples string) (*big.Rat, error) {
+	quantity, err := quantityValue(value)
+	switch {
+	case errors.Is(err, errQuantityExponent):
+		return nil, fmt.Errorf("%s %q has a decimal exponent outside e%d to e%d, the range of the suffixes n to E; write it with a suffix, such as %s", input, value, minQuantityExponent, maxQuantityExponent, examples)
+	case err != nil:
+		return nil, fmt.Errorf("%s %q is not a Kubernetes quantity, such as %s", input, value, examples)
+	}
+	return quantity, nil
+}
+
+var (
+	quantityBinarySuffixes  = map[string]uint{"Ki": 10, "Mi": 20, "Gi": 30, "Ti": 40, "Pi": 50, "Ei": 60}
+	quantityDecimalSuffixes = map[string]int{"n": -9, "u": -6, "m": -3, "": 0, "k": 3, "M": 6, "G": 9, "T": 12, "P": 15, "E": 18}
+
+	errNotQuantity      = errors.New("not a Kubernetes quantity")
+	errQuantityExponent = errors.New("decimal exponent out of range")
+)
+
+// minQuantityExponent and maxQuantityExponent bound a quantity's decimal exponent (the e<n> form)
+// to the range its suffixes cover, n to E. Every value inside it is computed exactly, whatever
+// its mantissa; one outside it is refused rather than computed, since 10^n costs time without
+// bound, and no size this component takes needs one.
+const (
+	minQuantityExponent = -9
+	maxQuantityExponent = 18
+)
+
+// quantityValue is the exact value of a Kubernetes quantity (CPU in cores, memory in bytes):
+// errNotQuantity when value is not one, errQuantityExponent when its decimal exponent is outside
+// minQuantityExponent to maxQuantityExponent.
+func quantityValue(value string) (*big.Rat, error) {
+	match := quantityRule.FindStringSubmatch(value)
+	if match == nil {
+		return nil, errNotQuantity
+	}
+	number, ok := new(big.Rat).SetString(match[1])
+	if !ok {
+		return nil, errNotQuantity
+	}
+	suffix := match[2]
+	if shift, ok := quantityBinarySuffixes[suffix]; ok {
+		return number.Mul(number, new(big.Rat).SetInt(new(big.Int).Lsh(big.NewInt(1), shift))), nil
+	}
+	exponent, ok := quantityDecimalSuffixes[suffix]
+	if !ok {
+		// A decimal exponent, whose digits quantityRule guarantees; Atoi fails only past int's
+		// range, which is outside the bounds too.
+		var err error
+		exponent, err = strconv.Atoi(suffix[1:])
+		if err != nil || exponent < minQuantityExponent || exponent > maxQuantityExponent {
+			return nil, errQuantityExponent
+		}
+	}
+	power := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(abs(exponent))), nil)
+	if exponent < 0 {
+		return number.Quo(number, new(big.Rat).SetInt(power)), nil
+	}
+	return number.Mul(number, new(big.Rat).SetInt(power)), nil
+}
+
+func abs(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
+// milliCPU writes a whole number of millicores as a quantity, such as 300m.
+func milliCPU(cores *big.Rat) string {
+	return new(big.Rat).Mul(cores, big.NewRat(1000, 1)).FloatString(0) + "m"
+}
+
+// mebibytes writes a whole number of mebibytes as a quantity, such as 256Mi.
+func mebibytes(bytes *big.Rat) string {
+	return new(big.Rat).Quo(bytes, new(big.Rat).SetInt64(1<<20)).FloatString(0) + "Mi"
 }
 
 // NewDispatch registers a Dispatch component after resolving all plain inputs and requiring the

@@ -18,7 +18,7 @@ import {
   textPrimaryOnCanvas,
 } from "../../theme/classes";
 import { AskOwnerLink } from "../inbox/AskOwnerLink";
-import { actorLabel } from "../refs/actor";
+import { AgentName } from "../refs/AgentName";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { Timestamp } from "../refs/Timestamp";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
@@ -47,9 +47,7 @@ function ReplyRow({ row }: { row: MyReplyRow }): ReactNode {
       data-replies-row={row.thread_id}
     >
       <div className={`flex flex-wrap items-center gap-x-2 gap-y-1 text-xs ${textMutedOnCanvas}`}>
-        <span className={`font-semibold ${textPrimaryOnCanvas}`}>
-          {actorLabel(row.reply.author)}
-        </span>
+        <AgentName actor={row.reply.author} className={`font-semibold ${textPrimaryOnCanvas}`} />
         {/* An answer someone else gave is the thread's newest write; its first line is the chosen
             options and the answer's text. */}
         {row.reply.kind === "answer" ? <span>answered</span> : null}

@@ -36,22 +36,22 @@ export function actorName(actor: Actor, titles?: ReadonlyMap<string, string>): s
   );
 }
 
-/** `actorName` followed by ` (for <owner>)` when a personal token attributed the write to a
- *  human, or ` (as <namespace>/<name>)` — the verified token's subject through
+/** What follows an actor's name in its label: ` (for <owner>)` when a personal token attributed
+ *  the write to a human, or ` (as <namespace>/<name>)` — the verified token's subject through
  *  `serviceSubjectLabel`, `system:serviceaccount:legion:legion-worker` reading as
- *  `legion/legion-worker` — when a service token did. The namespace stays because every
- *  namespace has a `default` service account. */
-export function actorLabel(actor: Actor, titles?: ReadonlyMap<string, string>): string {
-  const name = actorName(actor, titles);
+ *  `legion/legion-worker` — when a service token did, else `""` (always for a user or system).
+ *  The namespace stays because every namespace has a `default` service account. */
+export function actorAttribution(actor: Actor): string {
   if (actor.kind !== "session") {
-    return name;
+    return "";
   }
   if (actor.owner !== undefined) {
-    return `${name} (for ${actor.owner})`;
+    return ` (for ${actor.owner})`;
   }
-  const service = actor.service;
-  if (service === undefined) {
-    return name;
-  }
-  return `${name} (as ${serviceSubjectLabel(service)})`;
+  return actor.service === undefined ? "" : ` (as ${serviceSubjectLabel(actor.service)})`;
+}
+
+/** An actor's whole label: `actorName` followed by `actorAttribution`. */
+export function actorLabel(actor: Actor, titles?: ReadonlyMap<string, string>): string {
+  return `${actorName(actor, titles)}${actorAttribution(actor)}`;
 }

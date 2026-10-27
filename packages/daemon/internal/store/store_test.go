@@ -31,7 +31,7 @@ func testDSN(t *testing.T) string {
 	dsn := os.Getenv("LEGION_TEST_PG_DSN")
 	if dsn == "" {
 		t.Skip("LEGION_TEST_PG_DSN is unset, so there is no Postgres to test against. Start one and set it:\n" +
-			"  docker run -d --name legion-pg -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 postgres:16\n" +
+			"  docker run -d --name legion-pg --cpus 2 --memory 2g -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 postgres:16\n" +
 			"  port=$(docker port legion-pg 5432/tcp | head -1 | sed 's/.*://')\n" +
 			"  LEGION_TEST_PG_DSN=postgres://legion:legion@127.0.0.1:$port/legion go test ./internal/store/")
 	}
@@ -922,7 +922,7 @@ func TestTheUpgradeQueuesTheMergeOfAREADYAlreadyAwaitingIt(t *testing.T) {
 					continue
 				}
 				// So is the merger's row: the record store's has columns later migrations add
-				// (0055's handoff_record and handoff_version).
+				// (0059's handoff_record and handoff_version).
 				if _, err := tx.Exec(ctx, `insert into phases (issue, role, claim, handoff_commit, rounds, verdict, merge_note)
 					values ($1, $2, 'merge-claim', 'ready-head', 0, '', $3)`, seeded.issue.Key, string(claim.RoleMerger), seeded.mergeNote); err != nil {
 					return err

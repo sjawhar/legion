@@ -6,8 +6,9 @@
 # its lifecycle belongs to this run.
 #
 # Run it as `bash scripts/e2e/stage3-devbox-workflow.sh` with three required inputs:
-# LEGION_E2E_MODEL_ROUTE (`gateway` or `key-file`), SMOKE_UPSTREAM_NATS (the production Envoy NATS
-# the GitHub bridge subscribes on, by its fully-qualified name), and, depending on the route:
+# LEGION_E2E_MODEL_ROUTE (`gateway`, `key-file` or `box-login`), SMOKE_UPSTREAM_NATS (the production
+# Envoy NATS the GitHub bridge subscribes on, by its fully-qualified name), and, depending on the
+# route:
 #   - `gateway`: LEGION_E2E_MODEL_GATEWAY_URL, the model gateway's Anthropic endpoint. It needs
 #     agent-tier secrets and the operator's own hawk login, with the keyring holding it unlocked:
 #     the agents' model is Anthropic through the Hawk model gateway
@@ -16,6 +17,13 @@
 #     a devbox with no Hawk gateway at all (lib/install-key-file-model-route.sh). No Anthropic key
 #     reaches a pane here either — only the key command, baked in at install time, ever reads the
 #     file.
+#   - `box-login`: nothing more. The operator's own stored Oh My Pi login, for a devbox whose
+#     operator lets Legion's test runs use it (lib/install-box-login-route.sh): the profile's
+#     agent.db is a symlink to the operator's, no key or gateway is involved, and nothing reads the
+#     credential. The panes run the operator's own Oh My Pi build (its global mise pin, refused
+#     unless it carries the refresh-race fix) instead of .omp-pin, and one box-login proof runs at
+#     a time on the box (lib/box-login.sh); its teardown stops panes with SIGTERM and a grace before
+#     any SIGKILL and removes the profile's link to the operator's database on every exit.
 # The proof human's reviews and merge are the devbox's ordinary gh (the dotfiles shim, acting as the
 # sjawhar-agent App), never a Legion App, so run the script from the operator's own Oh My Pi
 # session, not a Legion pane, with no personal GH_TOKEN in its environment: `prerequisites` refuses
@@ -31,6 +39,31 @@
 set -Eeuo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
+# The model route first, and under box-login the one-at-a-time lock (lib/box-login.sh), before the
+# run makes its work or evidence directory or anything else: a run the lock refuses leaves nothing
+# behind.
+# shellcheck source-path=SCRIPTDIR source=lib/box-login.sh
+. "$root/scripts/e2e/lib/box-login.sh"
+model_route=${LEGION_E2E_MODEL_ROUTE:-}
+case "$model_route" in
+gateway | key-file | box-login) ;;
+*)
+  echo "FAIL setup: LEGION_E2E_MODEL_ROUTE must be gateway, key-file or box-login, not '$model_route'" >&2
+  exit 1
+  ;;
+esac
+# The daemon prefers LEGION_OMP_PATH to omp_invocation (packages/daemon/internal/omplaunch). The
+# daemon here runs without it (start_daemon), and under box-login a caller that sets it is refused
+# outright: a build named there could lack the refresh-race fix and still open the operator's
+# login database.
+if [ "$model_route" = box-login ] && [ -n "${LEGION_OMP_PATH:-}" ]; then
+  echo "FAIL setup: LEGION_OMP_PATH is set ($LEGION_OMP_PATH); under LEGION_E2E_MODEL_ROUTE=box-login the panes run the operator's own Oh My Pi build alone, so unset LEGION_OMP_PATH" >&2
+  exit 1
+fi
+if [ "$model_route" = box-login ] && ! take_box_login_lock; then
+  echo "FAIL setup: another box-login proof is running on this box (the holder is named above)" >&2
+  exit 1
+fi
 work=$(mktemp -d "/tmp/legion-e2e3.$$.XXXXXXXX")
 # Evidence survives every outcome: logs, captured state, negative controls, the production audit,
 # and every agent transcript. Cleanup stops processes; removes containers, sockets, and profiles; and
@@ -61,6 +94,9 @@ state="$work/state"
 # (make_omp_home, lib/omp-home.sh).
 omp_home="$work/omp-home"
 profile_agent="$omp_home/.omp/profiles/$profile/agent"
+# The operator's real home, captured before any command runs under the run's own: the box-login
+# route links to the login under it (lib/install-box-login-route.sh --operator-home).
+operator_home=$HOME
 repo="sjawhar/legion-smoke"
 # Anthropic through the configured route: the Google provider answered long workflow turns with
 # empty responses (finishReason STOP with no content), so no Gemini-backed implementer could finish.
@@ -120,6 +156,11 @@ collect_transcripts() {
 
 cleanup() {
   local status=$? p audit_failed=
+  # A second Ctrl-C, TERM or HUP must not end the teardown part way: its own signal traps would
+  # exit from inside this one, leaving panes running and, under box-login, the profile's link to
+  # the operator's login in a kept workspace. Every wait below is bounded, so ignoring them costs
+  # at most those bounds (lib/teardown.sh and stage4b-sandbox-tree.sh do the same).
+  trap '' HUP INT TERM
   set +e
   # Teardown is best effort, and errexit off does not turn the ERR trap off: a command that fails
   # here is a warning about the teardown, never a check's FAIL line, and the run's exit status is
@@ -140,9 +181,20 @@ cleanup() {
   stop_pid "$dispatch_pid"
   stop_pid "$listener_pid"
   stop_pid "$bridge_pid"
+  # Under box-login the panes share the operator's login database: each gets SIGTERM and up to
+  # box_login_stop_grace seconds to finish a token refresh before anything is killed, and the
+  # profile's link to that database goes (the link alone) once they are gone, before transcripts
+  # are kept, so a kept workspace holds no live path to the login (lib/box-login.sh). The panes
+  # stay up through the production audit above, which reads their sessions on production Envoy.
+  # The other routes keep the SIGKILL below.
+  if [ "$model_route" = box-login ]; then
+    # shellcheck disable=SC2046 # one pid per word
+    stop_box_login_processes $(run_processes)
+    unlink_box_login_db "$profile_agent"
+  fi
   TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1 || true
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
-  docker rm -f "$pg_container" "$nats_container" >/dev/null 2>&1 || true
+  docker rm -f -v "$pg_container" "$nats_container" >/dev/null 2>&1 || true
   collect_transcripts
   close_unpassed_run_pull_requests
   rm -rf "$work/model-gateway-cache" || true
@@ -273,18 +325,37 @@ start_daemon() {
     # Every pane's gh and jj are the daemon's PATH's (the pane inherits it, environment.go's
     # paneEnvAllowList), so the real binaries' directory goes first, ahead of this box's own
     # shims for both (prerequisites, real_bin_path).
-    HOME="$omp_home" OMP_PROFILE="$profile" PATH="$realbin:$PATH" env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE \
+    # LEGION_OMP_PATH would outrank omp_invocation's build (packages/daemon/internal/omplaunch), so
+    # the daemon runs without it, as Stage 2's does, and daemon_runs_the_pinned_omp checks the
+    # binary it resolved.
+    HOME="$omp_home" OMP_PROFILE="$profile" PATH="$realbin:$PATH" env -u LEGION_OMP_PATH -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE \
       -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" \
       "$work/legion" start --config "$work/legion.yaml" >>"$evidence/logs/daemon.log" 2>&1 &
     daemon_pid=$!
     result=0
     await_start daemon "$daemon_pid" "$offset" 180 "the Go daemon to answer /healthz" \
       curl -fsS "http://127.0.0.1:$port_daemon/healthz" || result=$?
-    [ "$result" != 0 ] || return 0
+    if [ "$result" = 0 ]; then
+      daemon_runs_the_pinned_omp "$offset"
+      return 0
+    fi
     [ -z "$keep" ] || fail "the restarted Go daemon lost port $port_daemon or $port_worker_stream to another process"
     note "the Go daemon lost port $port_daemon or $port_worker_stream to another process (attempt $attempt); picking again"
   done
   fail "the Go daemon lost a picked port five times"
+}
+
+# daemon_runs_the_pinned_omp OFFSET fails the current check unless the daemon start whose log
+# begins at byte OFFSET resolved its boot probes and panes to $pin's own bin/omp: the one build the
+# plugin installs ran, and under box-login the operator's own build, never one LEGION_OMP_PATH or a
+# wrapper on PATH put in its place (Stage 2 checks the same).
+daemon_runs_the_pinned_omp() {
+  local expected
+  expected=$(readlink -f "$(mise where "$pin")/bin/omp")
+  tail -c +"$(($1 + 1))" "$evidence/logs/daemon.log" | jq -R -e --arg binary "$expected" '
+    fromjson? | select(.msg == "legion daemon resolved OMP invocation for boot probes and panes" and (.invocation | contains($binary)))
+  ' >/dev/null || fail "the daemon did not log $expected, $pin's own omp, as the binary for its boot probes and panes ($evidence/logs/daemon.log)"
+  note "the daemon resolved $pin's own omp, $expected, for its boot probes and panes"
 }
 
 stop_dispatch() {
@@ -543,7 +614,7 @@ spec_event_in() {
   ' >/dev/null
 }
 # The decision block the proof inserts into the spec as an architect would (skills/dispatch/
-# references/documents.md, "Typed blocks"), and its question, by which the ask settlement indexes
+# SKILL.md, "Asks and ask blocks"), and its question, by which the ask settlement indexes
 # from it is found.
 carry_question='Stage 3 proof question: keep or drop the smoke paragraph?'
 carry_block=$(printf ':::ask{urgency="high" multiple="false"}\n%s\n\n- Keep: the paragraph stays.\n- Drop: the paragraph goes.\n:::\n' "$carry_question")
@@ -585,11 +656,6 @@ case "$until" in
   *) fail "STAGE3_UNTIL must be prerequisites or rework, not $until" ;;
 esac
 [ -z "$from" ] || [ -z "$until" ] || fail "set STAGE3_FROM or STAGE3_UNTIL, not both"
-model_route=${LEGION_E2E_MODEL_ROUTE:-}
-case "$model_route" in
-gateway | key-file) ;;
-*) fail "LEGION_E2E_MODEL_ROUTE must be gateway or key-file, not '$model_route'" ;;
-esac
 [ "$model_route" != gateway ] || command -v hawk-token >/dev/null || fail "hawk-token is required under LEGION_E2E_MODEL_ROUTE=gateway"
 # The bridge dials the production Envoy NATS by the operator's fully-qualified name for it, never
 # a bare alias a resolver's search domain would complete. The value is never printed.
@@ -623,7 +689,11 @@ make_omp_home "$omp_home"
 # it, but is installed the same way, here, for one setup step regardless of route). The gateway
 # route's first mint is its preflight: a locked keyring stops the run here, by name. The key-file
 # route's own preflight read stops the run here just as loudly if the file cannot be read. The key
-# command's log is evidence either way.
+# command's log is evidence either way. The box-login route has no key command: it links the
+# profile to the operator's login database, names the operator's own Oh My Pi build (which the
+# panes then run instead of .omp-pin), and records both in $evidence/model-gateway/box-login.route.
+key_command=
+box_pin=
 case "$model_route" in
 gateway)
   key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
@@ -635,15 +705,23 @@ key-file)
   key_command=$(bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --key-dir "$work/model-gateway-key" --key-file "$key_file") ||
     fail "the agents' model route through the key file could not be installed (the reason is above)"
   ;;
+box-login)
+  box_pin=$(bash "$root/scripts/e2e/lib/install-box-login-route.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --operator-home "$operator_home") ||
+    fail "the agents' model route on the operator's own Oh My Pi login could not be installed (the reason is above)"
+  ;;
 esac
 # The call record (.log/.calls) always sits under $evidence/model-gateway, beside $key_command
 # itself for the gateway route; the key-file route's own $key_command lives under its own
 # --key-dir instead, under $work, which cleanup removes unconditionally, so the record is
-# addressed separately.
-key_record="$evidence/model-gateway/$(basename "$key_command")"
+# addressed separately. The box-login route keeps no call record.
+key_record=${key_command:+$evidence/model-gateway/$(basename "$key_command")}
 pinned=$(sed -n 's/^  default: //p' "$profile_agent/config.yml")
 [ -n "$pinned" ] || fail "the profile's config.yml names no default model role: $profile_agent/config.yml"
-note "the agents' model route: $pinned through $model_route, keyed by $key_command"
+if [ -n "$key_command" ]; then
+  note "the agents' model route: $pinned through $model_route, keyed by $key_command"
+else
+  note "the agents' model route: $pinned through $model_route, the operator's own stored Oh My Pi login (no key), on $box_pin"
+fi
 export XDG_STATE_HOME="$work/xdg"
 export TMUX_TMPDIR="$work/tmux"
 pass
@@ -668,14 +746,14 @@ built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion" "$work
 while IFS= read -r line; do note "$line"; done <<<"$built"
 docker ps >/dev/null
 # Docker assigns the containers' host ports when it binds them, so neither can lose a race.
-docker run -d --name "$pg_container" --mount type=tmpfs,destination=/var/lib/postgresql/data \
+docker run -d --name "$pg_container" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql/data \
   -e POSTGRES_USER=legion -e POSTGRES_PASSWORD="$(cat "$work/postgres-password")" -e POSTGRES_DB=dispatch \
   -p "127.0.0.1::5432" pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a >/dev/null
 port_pg=$(docker port "$pg_container" 5432/tcp | sed -n '1s/.*://p')
 [ -n "$port_pg" ] || fail "docker assigned Postgres no host port"
 until_true 60 "Postgres to accept TCP connections" docker exec "$pg_container" pg_isready -h 127.0.0.1 -p 5432 -U legion -d dispatch
 docker exec "$pg_container" createdb -U legion legion
-docker run -d --name "$nats_container" -p "127.0.0.1::4222" nats:2.10 -js >/dev/null
+docker run -d --name "$nats_container" --cpus 1 --memory 512m -p "127.0.0.1::4222" nats:2.10 -js >/dev/null
 port_nats=$(docker port "$nats_container" 4222/tcp | sed -n '1s/.*://p')
 [ -n "$port_nats" ] || fail "docker assigned NATS no host port"
 until_true 60 "NATS to be ready" sh -c "docker logs '$nats_container' 2>&1 | grep -q 'Server is ready'"
@@ -691,10 +769,14 @@ SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://127.0.0.1:$port_nats" \
     bun run "$root/scripts/e2e/lib/envoy-bridge.ts"
 until_true 90 "the GitHub ingress bridge to report ready" grep -q 'BRIDGE READY' "$evidence/logs/bridge.log"
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
-envoy_manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-envoy --profile "$profile" --home "$omp_home" --dest "$work/pi-envoy")
-manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$omp_home" --dest "$work/pi-legion")
-pin=$(<"$root/.omp-pin")
+# The repository's pin, or under box-login the operator's own build: panes sharing the operator's
+# login must refresh it with the refresh-race fix (lib/install-box-login-route.sh). Resolved before
+# the plugin installs, which run the same build as the daemon and panes, never .omp-pin behind its
+# back: under box-login the profile's agent.db is the operator's login database.
+pin=${box_pin:-$(<"$root/.omp-pin")}
 mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
+envoy_manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-envoy --profile "$profile" --home "$omp_home" --dest "$work/pi-envoy" --omp "$pin")
+manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$omp_home" --dest "$work/pi-legion" --omp "$pin")
 cat >"$work/instructions.md" <<'EOF'
 # Stage 3 proof instructions
 
@@ -741,8 +823,8 @@ timeout_hook=
 state_file admission
 note "active roots: $(jq -c .admission.active "$evidence/admission.json"); waiting: $(jq -c .admission.waiting "$evidence/admission.json"); child $child_issue remains slotless under $root_issue"
 # The slotless check is everything this child was filed for, so the proof human takes it out of
-# the workflow at once: a child still in the workflow refuses its root's sign_off
-# (SIGNOFF_CHILD_IN_WORKFLOW), and the first root is accepted below, in retro-handoff.
+# the workflow at once: a child still in the workflow would keep the first root's close waiting
+# after its merge, and the first root is accepted below, in retro-handoff.
 set_status "$child_issue" backlog
 until_true 300 "$child_issue to leave the workflow" issue_phase "$child_issue" "done"
 note "the proof human parked $child_issue (backlog): it takes no further turns and holds no issue above it"
@@ -751,9 +833,10 @@ pass
 begin panes-pinned-to-the-rig-before-any-agent-turn
 # The two admitted architects are the only panes before any phase worker: each takes its first turn
 # from the daemon's catch-up notice, not from the proof. Every later pane is checked when it
-# registers and again before each instruction.
-wait_for_worker "$root_issue" architect
-wait_for_worker "$held_issue" architect
+# registers and again before each instruction. An architect whose root already waits on a person
+# (it registered its closed gate and was suspended) was checked by the pane watcher at its launch.
+wait_for_architect "$root_issue"
+wait_for_architect "$held_issue"
 note "$(wc -l <"$evidence/pane-endpoints-checked.txt") pane checks: DISPATCH_URL=http://127.0.0.1:$port_dispatch, DISPATCH_TOKEN_FILE=$state/secrets/dispatch-token, ENVOY_URL=http://127.0.0.1:$port_listener, ENVOY_NATS_URL=nats://127.0.0.1:$port_nats"
 pass
 
@@ -762,9 +845,15 @@ pass
 # close, through the bound's last look.
 primary_issue() {
   begin primary-architect-posts-and-registers-spec
-  drive_gate "$root_issue" "Stage 3 proof gate operation"
+  # Every root's architect registers a closed gate on its own and gives its slot back, so the slot
+  # the root left at registration went to a waiting root (no-change, restart), and the approved root
+  # takes one back only once one of those registers its own gate in turn: the bound is twice
+  # architect_registers_gate's 900 s for that registration. admission_cap stays 2: admission order
+  # and the slotless child above are proved against it, and every root of the run gives its slot
+  # back at its registration, so the slot always comes back within that bound.
+  drive_gate "$root_issue" "Stage 3 proof gate operation" 1800
   artifact_id=$gate_artifact
-  note "architect registered $artifact_id version $gate_version; human approval advanced the daemon to planning"
+  note "architect registered $artifact_id version $gate_version and $root_issue waited on the person without a slot; the human's approval answered it, the root took a slot back, and the daemon moved it to planning"
   pass
 
   begin primary-planner-handoff
@@ -1094,7 +1183,9 @@ held_worker() {
   # The second admitted root is driven just far enough to own a real implementer pane. A launch that
   # never becomes ready spends the claim's launch budget (three) and a ready agent resets it, so the
   # first kill takes the ready implementer and every later kill takes the relaunch as soon as the pane
-  # watcher has checked it, until the claim fails and the issue is held.
+  # watcher has checked it, until the claim fails and the issue is held. Its architect registered its
+  # closed gate early in the run, so the root has waited on a person since, without a slot; the first
+  # root's close freed one, which it takes back once the human approves.
   drive_gate "$held_issue" "Stage 3 held-worker proof"
   send_agent "$held_issue" planner "Stage 3 held-worker proof: write a minimal plan handoff and complete planning."
   wait_for_phase "$held_issue" implementing
@@ -1151,21 +1242,27 @@ else
   pass
 fi
 
-# no_change_close: a root whose human decides at the design gate that no change is needed. Closing
-# the first root freed its slot, so this root, first in the waiting line, is admitted; its architect
-# registers its spec, the human requests changes saying no change is needed, and the architect ends
-# the tree itself (close_root) while the root is still admitted. The daemon posts the architect's
-# reason on the issue before it writes done, and the freed slot goes to the next waiting root with
-# no human status write. Each step of the tree's close is one journal line.
+# no_change_close: a root whose human decides at the design gate that no change is needed. The
+# no-change root took the slot the first or held root gave back at its registration early in the
+# run, its architect registered its own closed gate, and it has waited on a person since, without a
+# slot and with its architect suspended. The human requests changes saying no change is needed: that
+# answers the wait, and the root takes a slot back at admitted (the held root holds the other one),
+# its architect's session resumed with a task naming the changes request. close_root is refused
+# while a root is not at admitted holding its slot, so the proof waits for both before it tells the
+# architect to end the tree itself. The daemon posts the architect's reason on the issue before it
+# writes done, and the freed slot goes to the next answered or waiting root with no human status
+# write. Each step of the tree's close is one journal line.
 no_change_close() {
   begin architect-closes-a-no-change-root
   local artifact reason token
-  until_true 240 "the no-change root to take the first root's freed admission slot" sh -c \
-    "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$nochange_issue' '.issues[\$issue].slot != null'"
   architect_registers_gate "$nochange_issue" "Stage 3 no-change proof"
+  await_gate_wait "$nochange_issue" "Stage 3 no-change proof"
   artifact=$(daemon_state | jq -er --arg issue "$nochange_issue" '.issues[$issue].designGate.artifactId')
   reason="No change is needed: $repo already has what this issue asks for. Close this issue without a change."
   dispatch_human POST "artifacts/$artifact/reviews" "$(jq -cn --arg reason "$reason" '{state: "changes_requested", reason: $reason}')" >/dev/null
+  await_answered_slot "$nochange_issue" "Stage 3 no-change proof"
+  wait_for_phase "$nochange_issue" admitted 60
+  until_true 300 "the no-change architect's session to resume once its root holds its slot" issue_worker_live "$nochange_issue" architect
   send_agent "$nochange_issue" architect "Stage 3 no-change proof: the human reviewing your spec requested changes: \"$reason\" End your tree as your role says, and change nothing else."
   until_true 600 "the no-change root to be done in Dispatch" dispatch_status_is "$nochange_issue" "done"
   dispatch_events "$nochange_issue" >"$evidence/nochange-events.json"
@@ -1180,17 +1277,24 @@ no_change_close() {
   token=$(claim_token "$nochange_issue" architect)
   await_tree_suspended "$nochange_issue" "the no-change tree's architect to be suspended"
   # daemon.log carries the daemon's stderr too, so each line is parsed on its own, as every other
-  # reader of it does: one line that is not JSON must not end the run.
+  # reader of it does: one line that is not JSON must not end the run. The root gives its slot back
+  # twice: once when it waits on the person at its gate, once at its close.
   jq -R -c --arg issue "$nochange_issue" --arg token "$token" 'fromjson? | select(
-      (.msg == "workflow: design gate changes requested" and .issue == $issue)
+      (.msg == "workflow: root waits on a person and returns its admission slot" and .issue == $issue)
+      or (.msg == "workflow: design gate changes requested" and .issue == $issue)
       or (.msg == "workflow: issue left the workflow" and .issue == $issue)
       or (.msg == "workflow: tree lingers" and .tree == $issue)
       or (.msg == "admission: slot released" and .issue == $issue)
+      or (.msg == "admission: slot taken" and .issue == $issue)
       or (.msg == "supervise: suspended" and .claim == $token))
     | {msg, issue, tree, status, reason, slots, cap}' "$evidence/logs/daemon.log" >"$evidence/nochange-journal.txt"
-  for line in "design gate changes requested" "issue left the workflow" "tree lingers" "admission: slot released" "supervise: suspended"; do
+  for line in "root waits on a person and returns its admission slot" "design gate changes requested" "issue left the workflow" "tree lingers" "admission: slot released" "supervise: suspended"; do
     grep -qF "$line\"" "$evidence/nochange-journal.txt" || fail "the journal has no \"$line\" line for $nochange_issue; see $evidence/nochange-journal.txt"
   done
+  [ "$(grep -cF '"admission: slot released"' "$evidence/nochange-journal.txt")" -ge 2 ] ||
+    fail "the journal of $nochange_issue lacks a slot release at the wait and another at the close; see $evidence/nochange-journal.txt"
+  [ "$(grep -cF '"admission: slot taken"' "$evidence/nochange-journal.txt")" -ge 2 ] ||
+    fail "the journal of $nochange_issue lacks its first admission and its return after the person's answer; see $evidence/nochange-journal.txt"
   grep -F '"workflow: issue left the workflow"' "$evidence/nochange-journal.txt" | grep -qF '"status":"done"' ||
     fail "the close line of $nochange_issue does not name done"
   grep -F '"supervise: suspended"' "$evidence/nochange-journal.txt" | grep -qF "\"reason\":\"the tree of $nochange_issue lingers\"" ||
@@ -1203,11 +1307,10 @@ no_change_close() {
 # write, all on the fourth root.
 restart_scenarios() {
   begin restart-mid-implementer
-  # The fourth root was waiting behind the no-change root. That root's close freed the slot, so it
-  # must now be admitted in rank order, with no human status write; this validates promotion before
-  # exercising the mid-phase restart.
-  until_true 240 "the waiting root to take the freed admission slot" sh -c \
-    "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$restart_issue' '.issues[\$issue].slot != null'"
+  # The fourth root took a slot another root gave back early in the run, its architect registered
+  # its closed gate, and it has waited on a person since, without a slot. The no-change root's close
+  # freed a slot, so once the human approves, it takes that slot back with no human status write;
+  # this validates the answered root's return before exercising the mid-phase restart.
   drive_gate "$restart_issue" "Stage 3 restart proof"
   send_agent "$restart_issue" planner "Stage 3 restart proof: write the minimal planner handoff and complete planning."
   wait_for_phase "$restart_issue" implementing
@@ -1268,8 +1371,8 @@ restart_scenarios() {
   for dir in "$cred_root" "$cred_dir"; do
     [ "$(stat -c %a "$dir")" = 700 ] || fail "$dir is mode $(stat -c %a "$dir"), want 700"
   done
-  [ "$(ls -A "$cred_root" | tr '\n' ' ')" = "$owner " ] || fail "$cred_root holds $(ls -A "$cred_root" | tr '\n' ' '), want $owner's directory alone"
-  [ "$(ls -A "$cred_dir" | sort | tr '\n' ' ')" = "config.yml hosts.yml " ] || fail "$cred_dir holds $(ls -A "$cred_dir" | tr '\n' ' '), want config.yml and hosts.yml alone"
+  [ "$(find "$cred_root" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ' ')" = "$owner " ] || fail "$cred_root holds $(find "$cred_root" -mindepth 1 -maxdepth 1 -printf '%f\n' | tr '\n' ' '), want $owner's directory alone"
+  [ "$(find "$cred_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ' ')" = "config.yml hosts.yml " ] || fail "$cred_dir holds $(find "$cred_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | tr '\n' ' '), want config.yml and hosts.yml alone"
   [ "$(stat -c %a "$cred_dir/hosts.yml")" = 600 ] || fail "$cred_dir/hosts.yml is mode $(stat -c %a "$cred_dir/hosts.yml"), want 600"
   jq -R -s -e '[split("\n")[] | fromjson? | select(.msg == "tmux runtime: github credential written" and .role == "implementer")] | length > 0' <"$evidence/logs/daemon.log" >/dev/null ||
     fail "the daemon log has no 'github credential written' line for an implementer pane"
@@ -1282,7 +1385,7 @@ restart_scenarios() {
   # Negative control: a directory with no gh files is no credential — the same gh with it set is
   # refused by gh itself, naming GH_TOKEN, so the pane's identity comes from the daemon's files and
   # nothing else on this box.
-  if GH_CONFIG_DIR="$work/empty-gh" GH_TOKEN= GITHUB_TOKEN= GH_HOST= "$real_gh" api graphql -f query='{viewer{login}}' >/dev/null 2>"$evidence/cred-negative.txt"; then
+  if GH_CONFIG_DIR="$work/empty-gh" GH_TOKEN='' GITHUB_TOKEN='' GH_HOST='' "$real_gh" api graphql -f query='{viewer{login}}' >/dev/null 2>"$evidence/cred-negative.txt"; then
     fail "gh with an empty GH_CONFIG_DIR and no token still answered"
   fi
   grep -q GH_TOKEN "$evidence/cred-negative.txt" || fail "gh with an empty GH_CONFIG_DIR failed without naming GH_TOKEN: $(cat "$evidence/cred-negative.txt")"
@@ -1369,8 +1472,15 @@ stop_pid "$daemon_pid"; daemon_pid=
 stop_dispatch
 stop_pid "$listener_pid"; listener_pid=
 stop_pid "$bridge_pid"; bridge_pid=
+# Under box-login the panes get SIGTERM and a bounded grace before the kills below, as cleanup
+# gives them (lib/box-login.sh); the profile's link to the operator's database goes with them.
+if [ "$model_route" = box-login ]; then
+  # shellcheck disable=SC2046 # one pid per word
+  stop_box_login_processes $(run_processes)
+  unlink_box_login_db "$profile_agent"
+fi
 TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1 || true
-docker rm -f "$pg_container" "$nats_container" >/dev/null 2>&1 || true
+docker rm -f -v "$pg_container" "$nats_container" >/dev/null 2>&1 || true
 for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
 [ "$(docker ps -aq --filter "name=^/$pg_container$" --filter "name=^/$nats_container$")" = "" ] || fail "a proof container remains"
 TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" has-session 2>/dev/null && fail "the proof tmux server remains"
@@ -1386,7 +1496,11 @@ begin model-turns-through-the-route
 route=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$profile_agent/sessions" \
   --control "$evidence/model-route-control") || fail "an agent turn left the configured route, or the check proved nothing (the reason is above)"
 note "$route"
-note "the key command ran $(grep -c ' invoked by pid ' "$key_record.log" || true) times and served $(grep -c $'\tserved\t' "$key_record.calls" || true) ($key_record.log, $key_record.calls)"
+if [ -n "$key_command" ]; then
+  note "the key command ran $(grep -c ' invoked by pid ' "$key_record.log" || true) times and served $(grep -c $'\tserved\t' "$key_record.calls" || true) ($key_record.log, $key_record.calls)"
+else
+  note "the route is the operator's own Oh My Pi login, no key command ($evidence/model-gateway/box-login.route)"
+fi
 # The kept transcripts must hold exactly the turns, sessions and subagents the check read, so a turn
 # taken after the read, or a session the copy lost, fails here rather than passing unseen.
 collect_transcripts

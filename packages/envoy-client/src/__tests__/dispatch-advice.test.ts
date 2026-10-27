@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import * as path from "node:path";
 import type { WriteAdvice } from "@legion/contracts";
 import type { ExecFn } from "../dispatch-cwd";
 import { executeDispatchTool, resetAdviceMemory } from "../dispatch-execute";
@@ -230,7 +232,7 @@ beforeEach(() => resetAdviceMemory());
 
 describe("Dispatch write advice", () => {
   const zeroBlocks =
-    'This spec holds no ask blocks, so nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".';
+    "This spec holds no ask blocks. A person does not watch your chat. They see that you need them only through an open ask or a spec that waits for their approval. If the design needs a person's choice, add an ask block. If it does not, request approval with `dispatch request-approval`.";
 
   test.each([
     ["dispatch_issue", { project: "DSP", title: "Created issue", spec: "# Spec\n" }],
@@ -303,7 +305,7 @@ describe("Dispatch write advice", () => {
     const result = await executeWrite(tool, args, rawAdvice);
 
     const openers =
-      '4 typed-block openings in this document are text, not blocks: "Intro 27::::ask{urgency=\\"med\\"}", "…unmeasured. 57::::ask{urgency=\\"low\\"}". An opening like `:::ask{…}` makes a block only as a line of its own, so as text it asks nobody. Mentioning the syntax on purpose? Put it in code. See the `dispatch` skill, "Decision blocks".';
+      '4 typed-block openings in this document are text, not blocks: "Intro 27::::ask{urgency=\\"med\\"}", "…unmeasured. 57::::ask{urgency=\\"low\\"}". An opening like `:::ask{…}` makes a block only as a line of its own, so as text it asks nobody. Mentioning the syntax on purpose? Put it in code. See the `dispatch-writing-specs` skill, "Questions".';
     expect(result.text).toContain(openers);
     if (primary) {
       expect(result.text).toEndWith(`${openers}\n${zeroBlocks}`);
@@ -673,4 +675,24 @@ describe("Dispatch write advice", () => {
     );
     expect(result.details.advice).toEqual(rawAdvice);
   });
+});
+
+// A notice that cites a skill section sends the agent to read it, so each cited section must be a
+// `## ` heading of that skill's SKILL.md, read as dispatch-tools.test.ts reads the Dispatch skill's.
+test("every skill section a notice cites is a heading of that skill", () => {
+  const repoRoot = path.resolve(import.meta.dir, "../../../..");
+  const source = readFileSync(path.resolve(import.meta.dir, "../dispatch-execute.ts"), "utf8");
+  const citations = [...source.matchAll(/the \\?`([a-z0-9-]+)\\?` skill, "([^"]+)"/gu)].map(
+    ([, skill, section]) => ({ skill, section })
+  );
+  expect(citations.length).toBeGreaterThan(0);
+  for (const { skill, section } of citations) {
+    const headings = readFileSync(path.join(repoRoot, "skills", skill, "SKILL.md"), "utf8")
+      .split("\n")
+      .flatMap((line) => {
+        const match = line.match(/^## (.+)$/u);
+        return match === null ? [] : [match[1]];
+      });
+    expect(headings, `${skill} "${section}"`).toContain(section);
+  }
 });

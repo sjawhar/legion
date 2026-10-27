@@ -39,10 +39,13 @@ export interface LegionToolRuntime {
   readonly handoffReport: (phase: LegionPhase, role: LegionRole) => Promise<HandoffReport>
 }
 
-/** Runs one call of the `legion` tool and answers its JSON result; a refusal throws its reason. */
+/** Runs one call of the `legion` tool and answers its JSON result; a refusal throws its reason.
+ * `signal`, the MCP request's cancellation, ends a `handoff_complete` waiting out a daemon
+ * restart. */
 export async function executeLegionTool(
   runtime: LegionToolRuntime,
   input: unknown,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   const claim = runtime.claim()
   if (claim === undefined) {
@@ -51,7 +54,12 @@ export async function executeLegionTool(
     )
   }
   return executePhaseOp(
-    { daemon: runtime.daemon, claim, handoffReport: runtime.handoffReport },
+    {
+      daemon: runtime.daemon,
+      claim,
+      handoffReport: runtime.handoffReport,
+      ...(signal === undefined ? {} : { restart: { signal } }),
+    },
     input,
   )
 }
