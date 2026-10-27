@@ -2,34 +2,39 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-549",
-  "completed": "2026-10-27T08:16:30Z",
-  "round": 1,
-  "reviewedCodeHead": "e0040d229bba89bf903069f8f4b12ff12f04779f",
+  "completed": "2026-10-27T09:16:00Z",
+  "round": 2,
+  "reviewedCodeHead": "22e1c3aef576556ee672cb14e2c97539495ca0f6",
   "decision": "changes_requested",
   "critical": 0,
   "important": 3,
   "minor": 0,
+  "roundOneThreads": {
+    "PRRT_kwDORFy7ds6wmI-h": "accepted: fixed in 90d28d94626a (max-file-store annotation rolls the pods)",
+    "PRRT_kwDORFy7ds6wmI-o": "accepted: fixed in 8bf4bfe7451e (trap and nap; busybox PID-1 run by the tester)",
+    "PRRT_kwDORFy7ds6wmI-t": "accepted: fixed in 22e1c3aef576 (INFRA-557 prerequisite in README and nats-hub.md)"
+  },
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/infra/gcp/clusteredhub_kube.go",
-      "description": "A lower maxFileStoreGb (explicit, unset after a larger explicit value, or a smaller streamMaxBytes with diskSizeGb explicit) changes only nats.conf. nats-server v2.15.1 refuses a reload that decreases max_file_store (server/reload.go:1884) and compares every later reload with the running options, so every later users change (a user removal included) is refused too, while pulumi up succeeds and no pod rolls. Fix: roll the pods when the store limit changes (a pod-template annotation beside no-auth-user), pin it with a unit test, and correct README/nats-hub.md."
+      "file": "packages/envoy/infra/README.md",
+      "description": "Since 90d28d94 the disk-growth steps restart every hub pod when maxFileStoreGb follows diskSizeGb by default (no streamMaxBytes, no explicit maxFileStoreGb). The max-file-store annotation changes with diskSizeGb, so the StatefulSet created in step 5 has a new template revision, and its controller rolls the three orphaned pods. Step 5 (and the intro at :327-328) still says no pod is replaced and that 'the reloader applies' the new limit. The pod-template list at :322-323 also omits the store limit. Say what happens, or how to keep the pods (pin maxFileStoreGb to its current value during the growth)."
     },
     {
       "severity": "important",
-      "file": "packages/envoy/infra/gcp/clusteredhub_tailnet.go",
-      "description": "The advertiser container is /bin/sh -c <script> as PID 1 with no SIGTERM trap (tailnet_service.go:358-541), so the kernel drops the kubelet's SIGTERM and every tailnet host pod takes the full 60 s grace to stop. Fix: trap TERM in tailnetAdvertiserBody (keep the INFRA-560 copy identical) and pin it in the script test."
+      "file": "packages/envoy/infra/gcp/clusteredhub_kube.go",
+      "description": "The depends-on rationale at :248-253 and docs/nats-hub.md:783-787 still names only the session user and auth.conf. The max-file-store roll needs the same order (a pod restarted on the old nats.conf would hold the higher limit, and the later reload of the lower one is refused and blocks every reload after it). State the rule for both annotations, so no one makes the annotation conditional on the session user."
     },
     {
       "severity": "important",
       "file": "packages/envoy/infra/README.md",
-      "description": "The component runs at least two listener hosts as one machine id, but neither README nor nats-hub.md says the listener image must carry INFRA-557's single-deliverer take-over; with today's listener two pods can both deliver from listener-<machine id> (INFRA-557 spec, item 1). State the prerequisite where tailnet.listener.image and the consumer's prerequisites are described."
+      "description": "The earlier-build text (README:304-308, nats-hub.md:840-844) leaves out that today's listener answers /healthz 200 'starting' from process start until its durable binds (cmd/listener/main.go:340-358). So the advertiser advertises the second host and marks it ready for most of each 135 s wait, the rollout and budget count it as serving, and the host then leaves the Service when its listener exits. Also, CHANGELOG.md:18-25 does not name the INFRA-557 prerequisite."
     }
   ],
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at e0040d22 (H1 max_file_store reload lock-out; M1 advertiser SIGTERM; M2 chart fetched by version, hardening)",
-    "codeQuality": "Verdict: CHANGES at b8687b33, cleanup only: authorizationRefusal reads core's error labels (declined: clusteredhub_refusals_test.go:165,186-187 pin every mapped input, so a wording change fails tests); shared helpers placed in dispatch*.go (declined: placement within one package, and the same files are open in INFRA-560's #2368); 1222-line live test (declined: the plan's five phases, proof unaffected)"
+    "deepReview": "Verdict: CHANGES at 22e1c3ae (Medium: README disk-growth step 5 contradicted by the store annotation; minors: earlier-build healthz text, CHANGELOG prerequisite, stale PR body lines). Trap/nap correct, also under busybox 1.35 ash; store annotation covers the only input-derived value in nats.conf that nats-server cannot reload; tailnet_service.go byte-identical to legion/INFRA-560@origin.",
+    "codeQuality": "Verdict: CHANGES at 22e1c3ae, cleanup only: depends-on rationale names only the session user (requested here as finding 2); no correctness finding."
   },
-  "ci": "At e0040d22 every pull_request run (Tests, Legion Envoy and Contracts, Docs, PR Title) was still queued at 08:15Z; legion/INFRA-546 requires no check (no ruleset, no protection). A request for changes does not wait on CI.",
-  "verifiedLocally": "gofmt clean, go vet -tags pulumilive,natslive ./gcp/ ./core/ ./provider/ ok, go test ./core/ ./provider/ ok, go test -run 'Clustered|NatsHub|Dispatch|Tailnet' ./gcp/ ok at e0040d22; tailnet_service.go and its test byte-identical to legion/INFRA-560@origin (sha256)."
+  "ci": "At 22e1c3ae every pull_request run (Tests, Legion Envoy and Contracts, Docs, PR Title) was queued at 09:10Z; e0040d22's runs were cancelled without running. legion/INFRA-546 requires no check. A request for changes does not wait on CI.",
+  "verifiedLocally": "gofmt clean, go vet -tags pulumilive,natslive ./gcp/ ok, go test -run 'TestTailnetService|TestClusteredNatsHub' ./gcp/ ok (dash) at 22e1c3ae; tailnet_service.go and its test byte-identical to legion/INFRA-560@origin."
 }
