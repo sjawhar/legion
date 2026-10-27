@@ -962,11 +962,20 @@ func waitForBlockAsk(t *testing.T, p *dispatchProcess, issueKey, blockID string)
 	}
 }
 
-// referencesMarkdown is a body holding every reference form of a build's text/testdata: each body
-// of its text table, and each link of its href table as the dashboard writes it and as its
-// dispatch:// form, a paragraph each. A text row that names an origin of its own is left out: its
-// links are references only to a server at that origin, and both builds serve
-// referenceServerURL here.
+// referencesMarkdown is a body holding every reference form of a build's text/testdata that stands
+// alone as a document body: each body of its text table, and each link of its href table as the
+// dashboard writes it and as its dispatch:// form, a paragraph each. Two kinds of text row are left
+// out, each logged:
+//   - A row that names an origin of its own: its links are references only to a server at that
+//     origin, and both builds serve referenceServerURL here.
+//   - A row that opens a typed block (a line that starts with `:::`): the table holds the opening
+//     line alone, so the text reader is tested on an attribute's value. A document must close
+//     the block, and the writer's manifest must declare the attribute. The row carries neither,
+//     so the writer refuses it as a document (`typed block "callout" is unclosed at document
+//     level`).
+//
+// Every other row must stand alone. A writer that refuses one fails the row, so a refused row is
+// never dropped without a trace.
 func referencesMarkdown(t *testing.T, fixtures string) string {
 	t.Helper()
 	var texts []struct {
@@ -988,15 +997,29 @@ func referencesMarkdown(t *testing.T, fixtures string) string {
 	}
 	paragraphs := []string{"# Every reference form"}
 	for _, row := range texts {
-		if row.Origin != "" && row.Origin != referenceServerURL {
-			continue
+		switch {
+		case row.Origin != "" && row.Origin != referenceServerURL:
+			t.Logf("left out the text row %q: it names the origin %s", row.Body, row.Origin)
+		case opensTypedBlock(row.Body):
+			t.Logf("left out the text row %q: it opens a typed block it does not close", row.Body)
+		default:
+			paragraphs = append(paragraphs, row.Body)
 		}
-		paragraphs = append(paragraphs, row.Body)
 	}
 	for _, row := range hrefs {
 		paragraphs = append(paragraphs, referenceServerURL+row.Href, row.Ref)
 	}
 	return strings.Join(paragraphs, "\n\n") + "\n"
+}
+
+// opensTypedBlock reports whether a line of body starts with the `:::` of a typed block's fence.
+func opensTypedBlock(body string) bool {
+	for line := range strings.Lines(body) {
+		if strings.HasPrefix(line, ":::") {
+			return true
+		}
+	}
+	return false
 }
 
 // documentRefs is every refs row the document is the source of, as `kind id`, sorted.
@@ -1030,6 +1053,9 @@ func documentRefs(t *testing.T, builds *twoBuilds, artifactID string) []string {
 // after the edit has rewritten it too.
 const referencesSettle = 4 * time.Second
 
+// requireReferencesKeptAcrossBuilds creates the body holding every reference form of X's
+// text/testdata on X, appends a paragraph on Y, and checks the refs rows after the rewrite and
+// after it settled (requireRefsKept).
 func requireReferencesKeptAcrossBuilds(t *testing.T, builds *twoBuilds, writer, reader documentSide, project string) {
 	_, artifactID := createDocument(t, writer.process, project, "Every reference form", referencesMarkdown(t, writer.fixtures))
 	written := documentRefs(t, builds, artifactID)
@@ -1037,14 +1063,52 @@ func requireReferencesKeptAcrossBuilds(t *testing.T, builds *twoBuilds, writer, 
 		t.Fatalf("the %s wrote no refs rows for the body holding every reference form of its text/testdata", writer.name)
 	}
 	appendParagraph(t, reader.process, artifactID, "Rewritten on the "+reader.name+".")
-	if rewritten := documentRefs(t, builds, artifactID); !slices.Equal(rewritten, written) {
-		t.Fatalf("after the %s rewrote the body, its refs rows are\n%v\nwant the %d the %s wrote\n%v", reader.name, rewritten, len(written), writer.name, written)
-	}
+	requireRefsKept(t, documentRefs(t, builds, artifactID), written, "after the "+reader.name+" rewrote the body", writer.name)
 	time.Sleep(referencesSettle)
-	if settled := documentRefs(t, builds, artifactID); !slices.Equal(settled, written) {
-		t.Fatalf("after the %s's rewrite settled, the body's refs rows are\n%v\nwant the %d the %s wrote\n%v", reader.name, settled, len(written), writer.name, written)
-	}
+	requireRefsKept(t, documentRefs(t, builds, artifactID), written, "after the "+reader.name+"'s rewrite settled", writer.name)
 	t.Logf("the %d refs rows the %s wrote survived the %s's rewrite", len(written), writer.name, reader.name)
+}
+
+// requireRefsKept fails unless got holds every row of written: Y keeps each edge X wrote, and an
+// edge of a kind Y does not know survives Y's rewrite. Y may add rows, but only of a kind that
+// written holds no row of: a kind Y extracts and X does not, such as `block` from a `#b-` link
+// when X is a build before the block graph. A row Y adds of a kind X wrote means the two builds
+// read one reference form as different targets.
+func requireRefsKept(t *testing.T, got, written []string, when, writerName string) {
+	t.Helper()
+	kinds := map[string]bool{}
+	for _, row := range written {
+		kind, _, _ := strings.Cut(row, " ")
+		kinds[kind] = true
+	}
+	var lost, added []string
+	for _, row := range written {
+		if !slices.Contains(got, row) {
+			lost = append(lost, row)
+		}
+	}
+	for _, row := range got {
+		if kind, _, _ := strings.Cut(row, " "); kinds[kind] && !slices.Contains(written, row) {
+			added = append(added, row)
+		}
+	}
+	if len(lost) > 0 || len(added) > 0 {
+		t.Fatalf("%s, the body's refs rows lack %d of the %d the %s wrote\n%s\nand hold %d rows of kinds the %s wrote that it did not write\n%s\nall rows now:\n%s",
+			when, len(lost), len(written), writerName, refRowsText(lost), len(added), writerName, refRowsText(added), refRowsText(got))
+	}
+}
+
+// refRowsText is rows one per line, each row longer than 120 bytes cut to its first 120 and its
+// length: the text tables hold target ids of about 2 KB.
+func refRowsText(rows []string) string {
+	var text strings.Builder
+	for _, row := range rows {
+		if len(row) > 120 {
+			row = fmt.Sprintf("%s… (%d bytes)", row[:120], len(row))
+		}
+		text.WriteString("\t" + row + "\n")
+	}
+	return text.String()
 }
 
 // ───── messages and subscription settings ───────────────────────────────────
