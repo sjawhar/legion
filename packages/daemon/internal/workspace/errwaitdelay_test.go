@@ -41,10 +41,11 @@ func TestRunCheckedSucceedsWhenACommandExitsZeroWithAChildStillHoldingItsOutputO
 
 // A command that exits on its own inside its Timeout did not time out, however long
 // procgroup.WaitDelay then holds Run open for a child still holding its output pipe. The Timeout
-// here is half of WaitDelay, so every such run returns past its deadline: a Run that read
-// TimedOut from the deadline having passed would report this git's own exit 128 as a timeout, and
-// a clone that failed transiently inside the last WaitDelay of its budget, git-remote-https
-// still holding the pipe, would read as timed out, which transientCloneFailure never retries.
+// here is 100 ms short of WaitDelay, so every such run returns past its deadline, while git still
+// has 900 ms to exit under load: a Run that read TimedOut from the deadline having passed would
+// report this git's own exit 128 as a timeout, and a clone that failed transiently inside the
+// last WaitDelay of its budget, git-remote-https still holding the pipe, would read as timed out,
+// which transientCloneFailure never retries.
 func TestRunReportsTheCommandsOwnFailureNotATimeoutWhenAChildHoldsItsOutputPastTheDeadline(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "sleep.pid")
@@ -54,7 +55,7 @@ func TestRunReportsTheCommandsOwnFailureNotATimeoutWhenAChildHoldsItsOutputPastT
 		t.Fatalf("write the fake git: %v", err)
 	}
 	t.Cleanup(func() { killPIDFile(t, pidFile) })
-	timeout := procgroup.WaitDelay / 2
+	timeout := procgroup.WaitDelay - 100*time.Millisecond
 	run := NewRunner(timeout, map[string]string{"git": fakeGit})
 
 	started := time.Now()
@@ -69,6 +70,44 @@ func TestRunReportsTheCommandsOwnFailureNotATimeoutWhenAChildHoldsItsOutputPastT
 	}
 	if result.TimedOut || result.ExitCode != 128 {
 		t.Errorf("Run = exit %d, TimedOut %t after %s; want exit 128, not timed out: git failed on its own inside its %s Timeout", result.ExitCode, result.TimedOut, elapsed, timeout)
+	}
+}
+
+// A command its caller's context ended was not cut off by its own Timeout: TimedOut is the
+// Timeout's kill alone. A Run that read a timeout from the kill alone would call a clone its
+// caller stopped a timeout, which transientCloneFailure never retries.
+func TestRunDoesNotReportACommandItsCallerStoppedAsTimedOut(t *testing.T) {
+	dir := t.TempDir()
+	started := filepath.Join(dir, "started")
+	fakeGit := filepath.Join(dir, "git")
+	script := "#!/bin/sh\n: >" + started + "\nexec sleep 30\n"
+	if err := os.WriteFile(fakeGit, []byte(script), 0o700); err != nil {
+		t.Fatalf("write the fake git: %v", err)
+	}
+	run := NewRunner(time.Minute, map[string]string{"git": fakeGit})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go cancelOnceExists(ctx, cancel, started)
+
+	result, err := run.Run(ctx, Command{Argv: []string{"git"}, Timeout: time.Minute})
+
+	if err != nil {
+		t.Fatalf("Run = %v, want the killed command's own exit", err)
+	}
+	if result.TimedOut {
+		t.Errorf("Run = exit %d, TimedOut true; want not timed out: the caller's context ended the command inside its minute", result.ExitCode)
+	}
+}
+
+// cancelOnceExists calls cancel once path exists, which the command under test creates once it
+// runs, so the cancel lands on a running command and never on one not yet started.
+func cancelOnceExists(ctx context.Context, cancel context.CancelFunc, path string) {
+	for ctx.Err() == nil {
+		if _, err := os.Stat(path); err == nil {
+			cancel()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

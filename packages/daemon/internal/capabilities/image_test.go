@@ -451,14 +451,15 @@ func TestCheckImageStopsWithItsContext(t *testing.T) {
 
 // A command that exits on its own inside its budget did not time out, however long
 // procgroup.WaitDelay then holds the run open for a child still holding its output pipe. The
-// budget here is half of WaitDelay, so every such run returns past its deadline: a run that read
-// a timeout from the deadline having passed would report "timed out" for a check whose command
-// answered inside the last WaitDelay of commandTimeout, in place of what it answered.
+// budget here is 100 ms short of WaitDelay, so every such run returns past its deadline, while the
+// command still has 900 ms to exit under load: a run that read a timeout from the deadline having
+// passed would report "timed out" for a check whose command answered inside the last WaitDelay of
+// commandTimeout, in place of what it answered.
 func TestRunReportsTheCommandsOwnExitWhenAChildHoldsItsOutputPastTheBudget(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "lingering.pid")
 	t.Cleanup(func() { killPIDFile(t, pidFile) })
 	img := Image{Env: []string{"PATH=" + os.Getenv("PATH")}, WorkDir: t.TempDir()}
-	budget := procgroup.WaitDelay / 2
+	budget := procgroup.WaitDelay - 100*time.Millisecond
 
 	started := time.Now()
 	r := img.runWithin(context.Background(), budget, "sh", "-c", `echo 1.2.3; sleep 30 & echo $! >"$1"; exit 0`, "sh", pidFile)
@@ -470,6 +471,43 @@ func TestRunReportsTheCommandsOwnExitWhenAChildHoldsItsOutputPastTheBudget(t *te
 	if r.err != nil || r.exit != 0 || strings.TrimSpace(r.stdout) != "1.2.3" {
 		t.Errorf("run = exit %d, error %v, stdout %q after %s; want exit 0, no error, and the answer: the command exited on its own inside its %s budget",
 			r.exit, r.err, r.stdout, elapsed, budget)
+	}
+}
+
+// A command its budget cuts off is a run that timed out, named with that budget, never an exit of
+// its own.
+func TestRunReportsACommandItsBudgetCutOffAsTimedOut(t *testing.T) {
+	img := Image{Env: []string{"PATH=" + os.Getenv("PATH")}, WorkDir: t.TempDir()}
+
+	r := img.runWithin(context.Background(), time.Second, "sh", "-c", "exec sleep 30")
+
+	if r.err == nil || r.err.Error() != "timed out after 1s" {
+		t.Errorf("run = exit %d, error %v; want the error \"timed out after 1s\": the budget cut the command off", r.exit, r.err)
+	}
+}
+
+// A command its caller's context ended was not cut off by its budget: the run is no timeout, and
+// the check reports the caller's stop (TestCheckImageStopsWithItsContext) rather than a hanging
+// command. The cancel lands once the command runs, never on one not yet started.
+func TestRunDoesNotReportACommandItsCallerStoppedAsTimedOut(t *testing.T) {
+	started := filepath.Join(t.TempDir(), "started")
+	img := Image{Env: []string{"PATH=" + os.Getenv("PATH")}, WorkDir: t.TempDir()}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		for ctx.Err() == nil {
+			if _, err := os.Stat(started); err == nil {
+				cancel()
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	r := img.runWithin(ctx, time.Minute, "sh", "-c", `: >"$1"; exec sleep 30`, "sh", started)
+
+	if r.err != nil || r.exit != -1 {
+		t.Errorf("run = exit %d, error %v; want exit -1 and no error: the caller's context ended the command inside its minute", r.exit, r.err)
 	}
 }
 

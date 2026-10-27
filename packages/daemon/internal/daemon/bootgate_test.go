@@ -554,14 +554,15 @@ func TestTheLoadProbePassesOnTheFirstAttemptEvenWhenALingeringChildHoldsTheOutpu
 
 // A probe that exits on its own inside its budget was not cut off by it, however long
 // procgroup.WaitDelay then holds the run open for a child the probe left holding its output pipe.
-// The budget here is half of WaitDelay, so every such run returns past its deadline: a run that
-// read "timed out" from the deadline having passed would call this answer a budget kill, and a load
-// probe whose Oh My Pi answered yes inside the last WaitDelay of slow_command_timeout_seconds would
-// be retried, and refused once its retries ran out.
+// The budget here is 100 ms short of WaitDelay, so every such run returns past its deadline, while
+// the probe still has 900 ms to exit under load: a run that read "timed out" from the deadline
+// having passed would call this answer a budget kill, and a load probe whose Oh My Pi answered yes
+// inside the last WaitDelay of slow_command_timeout_seconds would be retried, and refused once its
+// retries ran out.
 func TestAProbeThatExitsWithinItsBudgetIsNotCutOffByAChildHoldingItsPipePastIt(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "lingering.pid")
 	t.Cleanup(func() { killPIDFile(t, pidFile) })
-	gate := pluginGate{env: map[string]string{"PATH": os.Getenv("PATH")}, workDir: t.TempDir(), timeout: procgroup.WaitDelay / 2}
+	gate := pluginGate{env: map[string]string{"PATH": os.Getenv("PATH")}, workDir: t.TempDir(), timeout: procgroup.WaitDelay - 100*time.Millisecond}
 
 	r, err := gate.run(context.Background(), `echo answered >&2; sleep 30 & echo $! >"$1"; exit 0`, pidFile)
 

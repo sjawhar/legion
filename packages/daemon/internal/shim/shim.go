@@ -30,6 +30,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/procgroup"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
@@ -66,7 +67,8 @@ const (
 	// `worker_stop_timeout_seconds` under `runtime: kubernetes` at configuration load
 	// (internal/config).
 	MinStopGrace = DefaultGrace + DrainTimeout + MinWarmUpDrain
-	// adoptionWaitDelay bounds the wait for jj's stderr once jj has been killed at its budget.
+	// adoptionWaitDelay bounds the wait for jj's output once jj has exited or been killed at its
+	// budget, for a child of jj's still holding the pipes.
 	adoptionWaitDelay = time.Second
 )
 
@@ -650,23 +652,31 @@ func (s *shim) runAdoption(request shimwire.AdoptWorkingCopy) error {
 
 // runAdoptionCommand runs one adoption command within the adoption's budget and returns its
 // trimmed standard output. A failure's report ends with a note on each stale git lock it names
-// (staleGitLockNote).
+// (staleGitLockNote). The command timed out only when the budget ended it: once jj has exited on
+// its own, adoptionWaitDelay can hold Run open past the budget for a child still holding jj's
+// pipes, and jj's exit is then its answer. A command that never started because an earlier one
+// spent the budget timed out too.
 func runAdoptionCommand(ctx context.Context, budget time.Duration, started time.Time, env, args []string) (string, error) {
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Env = env
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	cmd.WaitDelay = adoptionWaitDelay
+	killed := procgroup.KilledByContext(cmd)
 	err := cmd.Run()
-	if err == nil {
+	command := strings.Join(args, " ")
+	timedOut := killed() || (cmd.Process == nil && errors.Is(err, context.DeadlineExceeded))
+	if runErr := procgroup.Err(err); runErr != nil && !timedOut {
+		return "", fmt.Errorf("run %s: %w", command, runErr)
+	}
+	if !timedOut && cmd.ProcessState.ExitCode() == 0 {
 		return strings.TrimSpace(stdout.String()), nil
 	}
-	command := strings.Join(args, " ")
 	report := strings.TrimSpace(stderr.String())
 	if note := staleGitLockNote(report, time.Now()); note != "" {
 		report += "\n" + note
 	}
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	if timedOut {
 		message := fmt.Sprintf("Command timed out after %s s (ran %.1f s): %s",
 			strconv.FormatFloat(budget.Seconds(), 'f', -1, 64), time.Since(started).Seconds(), command)
 		if report != "" {
@@ -674,11 +684,7 @@ func runAdoptionCommand(ctx context.Context, budget time.Duration, started time.
 		}
 		return "", errors.New(message)
 	}
-	var exit *exec.ExitError
-	if errors.As(err, &exit) {
-		return "", fmt.Errorf("Command failed (exit %d): %s\n%s", exit.ExitCode(), command, report)
-	}
-	return "", fmt.Errorf("run %s: %w", command, err)
+	return "", fmt.Errorf("Command failed (exit %d): %s\n%s", cmd.ProcessState.ExitCode(), command, report)
 }
 
 // envValue is name's value in env, the last assignment winning as it does for a process started
