@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-511",
+  "completed": "2026-10-27T05:38:12Z",
+  "decision": "changes_requested",
+  "reviewedHead": "49a82477f8b8dab4c7428d945e79200fd3c1f85d",
+  "codeHead": "b507c98c40d305040ab4f36fa76aaf867684e0b8",
+  "critical": 0,
+  "important": 3,
+  "minor": 5,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/pi-legion/src/controller-session.ts:315",
+      "description": "After a failure past the send (role claim or controller-topic subscribe), the warning says /legion-claim-controller 'sends the start message once the claim succeeds', but startMessageSent blocks any second send; the start turn ran while the legion tool refused (controllerSessionID unset) and is never re-run. legion.test.ts:2838 pins the false text and :2856 asserts the retry sends nothing. The PR widened this: the send moved before claimEnvoyRole."
+    },
+    {
+      "severity": "important",
+      "file": "packages/pi-legion/src/controller-session.ts:225",
+      "description": "startupTurn is not cleared in the follow-up case: the operator's run already fired agent_start before markStartupTurnSent, and Oh My Pi consumes a followUp inside the same run (agent-loop.ts:648 agent_start once per run, :1823-1827 follow-ups drained in-run; agent-session.ts:9426 followUp only queues). The mark stays set after the start turn ran, contrary to pi-legion AGENTS.md:388-390, startup-turn.ts:3-5 and interface.ts:45-46. A /new during the claim marks the old session id. This mark is the spec's deliverable for pi-envoy."
+    },
+    {
+      "severity": "important",
+      "file": "PR body",
+      "description": "No `## Contract change census`, though the PR adds a refusal (non-terminal stdin, controller.go:126), bumps the daemon API contract 40->41 (skewed CLI/plugin refused) and the plugin interface 3->4 (pi-envoy/pi-legion pair)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/pi-shared/src/interface.ts:49",
+      "description": "startupTurn's type admits a marked-but-unsent state nothing produces; pi-shared AGENTS.md:46 ('undefined until sent') and interface.ts:43 ('/legion-controller-start sets both', but any claim that sends does) describe the earlier design. Fix before interface 4 ships, since a later shape change needs another lockstep bump."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/pi-legion/src/controller-session.ts:233",
+      "description": "The start turn now starts before claimEnvoyRole and the subscription; controllerSessionID/mintControllerGrant are set only after them (:261-263), so a slow listener makes the start procedure's first legion call refused."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/pi-legion/src/controller-session.ts:133",
+      "description": "A claim that hangs (daemon-client sets no timeout) now silently blocks /legion-claim-controller and a re-run of the command; tell the operator it waits for the claim in flight."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/pi-legion/src/controller-session.ts:313",
+      "description": "console.error now runs while the TUI is up (no console interception in the pinned Oh My Pi); use the logger."
+    },
+    {
+      "severity": "minor",
+      "file": "skills/legion-controller/references/session.md:87",
+      "description": "Still says a LEGION_CONTROLLER=1 session claims at startup as the launched controller; the operator-launched controller now claims from /legion-controller-start (also the claude-envoy generated copy)."
+    }
+  ],
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. CI head f1606838 (only .legion/ changed since, compare handoffsOnly true, 1 file): every required check queued at 05:37Z; not waited on, since the review requests changes.",
+  "thermo": "thermonuclear-deep-review: CHANGES (findings 1, 2, 5-7); thermonuclear-code-quality: CHANGES (findings 2, 4, 8 plus cleanup), both at 49a82477.",
+  "fastFollow": "controller-session and test cleanup: claimInFlight as one promise chain, isIdle required, one operator-controller predicate, the command word shared from @legion/contracts, onRequest in place of the fetch wrapper, controller-start-omp.test.ts duplicate case and START_MESSAGE_JSON, legion.test.ts:4030 toEqual of every log line."
+}
