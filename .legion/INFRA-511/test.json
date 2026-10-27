@@ -2,50 +2,50 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-511",
-  "completed": "2026-10-27T05:19:00Z",
+  "completed": "2026-10-27T06:20:00Z",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 2 at PR head f1606838 (code b507c98c). Re-ran the implementer's real-binary command `cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test ./extensions/controller-start-omp.test.ts`: 6 pass, 0 fail (61.2 s). Drove the round-2 fix on the real binary with my own probe (/legion/scratch/tmp/i511t/probe-r2.test.ts, built on the head's rig), not the implementer's adapted copy; and re-ran my independent CLI smoke with both plugins re-packed and re-installed from this head. Checked that the round-1 red test (5dffc26f) is unchanged: the implementer's diff only adds a new test after it."
+    "how": "Round 3 at PR head 0d05551e (code 05af9dbe), after the review's changes request. I re-ran the implementer's real-binary command `cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test ./extensions/controller-start-omp.test.ts`: 6 pass, 0 fail (59.3 s). I drove the review fixes on the real binary with my own probe (/legion/scratch/tmp/i511t/probe-r3.test.ts), not the implementer's unit cases. I re-packed and re-installed both plugins from this head for my CLI smoke. My round-1 red test (5dffc26f) has the same text at this head (sha256 of the test block equal at 5dffc26f and 0d05551e) and passes."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Round 1's failure is fixed: /legion-controller-start or /legion-claim-controller typed while the start command's claim is in flight makes no overlapping registration, the start message goes out once, and the session's controller grants use the secret the daemon issued last",
-      "surface": "real interactive Oh My Pi 18.12.2 under a pseudo-terminal, both plugins of this head, stand-in that gives each registration its own secret and refuses a grant with any other (as packages/daemon/internal/api/controller.go registerController does), the first role claim answered 2 s late, real NATS",
-      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test ./extensions/zz-tester-probe-r2.test.ts (copy of /legion/scratch/tmp/i511t/probe-r2.test.ts, removed after the run), cases R2-P6",
-      "observed": "5 pass. /legion-controller-start typed during the held claim: registrations while held 1, total 1, most in flight 1, grant secret secret-1 = current, set_status written (statusWrites=1), 1 start message. /legion-claim-controller typed during the held claim: registrations while held 1, total 2 (the second only after the first ended), most in flight 1, grant secret secret-2 = current, set_status written, 1 start message.",
-      "headSha": "f1606838d749178a27a23c338b7fb4fb03ca43f9",
-      "negativeControl": "The same probe on round 1's plugin code (d3f73ec4): /legion-controller-start typed again gave 2 registrations while held, the session kept secret-1 while the daemon held secret-2, and set_status failed with 'POST /legion/v1/grants failed with 403: invalid controller secret' (statusWrites=0)."
+      "criterion": "Review finding 1: a claim refused after the start message tells the truth and leaves a working controller. The warning says the start message was sent. The start turn's legion tool works with the registration. Re-running /legion-controller-start claims nothing and names /legion-claim-controller. /legion-claim-controller then claims the role and sends no second start message.",
+      "surface": "real interactive Oh My Pi 18.12.2 under a pseudo-terminal, both plugins of this head, a stand-in that gives each registration its own secret and refuses grants with any other (as packages/daemon/internal/api/controller.go does) and refuses the first controller role claim with 403, real NATS",
+      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test ./extensions/zz-tester-probe-r3.test.ts (copy of /legion/scratch/tmp/i511t/probe-r3.test.ts, removed after), case R3-A",
+      "observed": "On screen: 'Warning: legion: the controller claim failed after the start message was sent: role refused by the stand-in. The start turn has the controller's registration; run /legion-claim-controller to claim the controller role and its wakes again.' Below it, the start message and Working…. The start turn's set_status tool call returned {} with is_error false, using grant secret-1, which was current (statusWrites=1). /legion-controller-start typed after that showed 'this process already sent the start message, but its controller claim did not finish; run /legion-claim-controller …' and made no registration (1 → 1). /legion-claim-controller then registered and claimed the role (registrations 2, role claims 2) with no new turn. /legion-controller-start then said 'nothing to do'. In total: 1 start message, 2 turns, and no raw '[legion] …' console line on the screen (the plugin now writes through the logger).",
+      "headSha": "0d05551e77d58a69ada76678777d961c66476fdf",
+      "negativeControl": "The 403 role claim is itself the broken input. The refusal path before the send (R3-P5, a 403 registration) still shows the other wording, 'Run /legion-claim-controller to claim again', and the queued command's retry then sends the start message once."
     },
     {
-      "criterion": "Claims run one at a time without breaking the other start-command paths: text typed during the claim, a refused claim with the command queued behind it, and a claim that never answers",
-      "surface": "same rig as above",
-      "command": "same file, cases R2-P1, R2-P5, R2-P7",
-      "observed": "R2-P1: text entered while the registration is held becomes the first turn; the start message follows it as the second request; 1 start message, 1 registration. R2-P5: the first registration refused (403) with /legion-controller-start typed while it was held: 1 registration while held; the warning naming the refusal and /legion-claim-controller is shown; the queued command then claims again (registration 2) and the start message runs as the first turn, once. R2-P7: a registration that never answers for 20 s: the /legion-claim-controller typed behind it makes no request (registrations 1) and shows nothing; an ordinary prompt still starts a turn; once the registration is answered the queued claim registers (registrations 2).",
-      "headSha": "f1606838d749178a27a23c338b7fb4fb03ca43f9",
-      "negativeControl": "R2-P5's refused first registration is itself the broken input: the refusal is shown as one warning, and the next claim recovers."
+      "criterion": "Review finding 5: when the listener's role claim is slow, the start turn's read_state and set_status still work while the role claim is outstanding",
+      "surface": "same rig; the first controller role claim is held until the turn ends",
+      "command": "same file, case R3-B (re-run alone with the read_state assertion corrected to read the whole tool result: /legion/scratch/tmp/i511t/probe-r3b.test.ts)",
+      "observed": "1 pass. While /v1/roles/set was held (roleSets 1, unanswered): read_state returned the daemon state ({\"daemon\":{\"project\":\"legion\",…}}, is_error false), and set_status returned {} with statusWrites=1. The first R3 run failed this case only because my assertion cut the read_state result at 260 characters; that output already showed the daemon state.",
+      "headSha": "0d05551e77d58a69ada76678777d961c66476fdf",
+      "negativeControl": "Before this round, controllerSessionID and mintControllerGrant were set only after the role claim and subscription (review finding 5, controller-session.ts:261-263 at 49a82477). The tool then answered 'legion is available only to this session's registered claim' until they finished; legion.test.ts asserts that pre-registration refusal."
     },
     {
-      "criterion": "A2-A5 and the card/notice and refusal cases still hold after round 2",
-      "surface": "real interactive Oh My Pi 18.12.2 under a pseudo-terminal, both plugins, stand-ins, real NATS",
-      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test ./extensions/controller-start-omp.test.ts",
-      "observed": "6 pass, 0 fail, 18 expect() calls",
-      "headSha": "f1606838d749178a27a23c338b7fb4fb03ca43f9",
-      "negativeControl": "Its refused-claim case: claims/register answers 403, the warning is on screen, 0 Messages requests in 3 s."
+      "criterion": "Round 2's serialisation still holds after the chain rewrite, and a claim that waits now says so (review finding 6)",
+      "surface": "same rig",
+      "command": "same file, cases R3-P6 (both commands), R3-P5, R3-P7, R3-P1",
+      "observed": "R3-P6 /legion-controller-start typed during the held claim: 1 registration while held and in total, at most 1 in flight, grant secret-1 = current, set_status written, 1 start message. R3-P6 /legion-claim-controller: 1 while held, 2 in total one after the other, at most 1 in flight, grant secret-2 = current, set_status written, 1 start message. R3-P7, a registration that hangs: /legion-claim-controller typed behind it shows 'legion: waiting for the controller claim already running to finish.' and makes no request; after release it registers. R3-P1: text typed during the held claim is the first turn, and the start message follows it once. R3-P5: covered above.",
+      "headSha": "0d05551e77d58a69ada76678777d961c66476fdf",
+      "negativeControl": "The round-1 probe at d3f73ec4: 2 overlapping registrations, and set_status failed with 403 'invalid controller secret'."
     },
     {
-      "criterion": "A12: the built `legion controller start` launches the controller whose first turn is the start message after startup",
-      "surface": "legion built from the workspace (Go is unchanged since round 1), both plugins re-packed and installed from this head by scripts/e2e/lib/install-plugin-profile.sh into a new profile, my own stand-in and Bun.Terminal driver, real NATS",
-      "command": "env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/legion bun /legion/scratch/tmp/i511t/drive.ts pos",
-      "observed": "SMOKE PASS: omp argv ends --append-system-prompt <2507 chars> /legion-controller-start, no --resume/--mode; register before role claim before first turn; pluginContract 41; start message and Working… on screen while held; /legion-controller-start again shows 'legion: nothing to do', 1 registration, 1 turn; the next typed prompt is turn 2; the start message appears once; no request carries the word",
-      "headSha": "f1606838d749178a27a23c338b7fb4fb03ca43f9",
-      "negativeControl": "Round 1 at d1ccba65, same CLI binary (no Go change since): stdin a pipe or /dev/null → exit 1, 'stdin is not a terminal', 0 daemon requests; pi-legion declaring contract 40 or 42 → refused before POST /legion/v1/controller/secret."
+      "criterion": "Contract change census 1-3 and A12: the built `legion controller start` refuses a non-terminal stdin, a skewed daemon API contract and a skewed plugin interface before the mint, and on a matching pair its first turn is the start message",
+      "surface": "legion built from the workspace (Go code unchanged since round 1), both plugins re-packed and installed from this head with scripts/e2e/lib/install-plugin-profile.sh, my Bun.Terminal driver and stand-in, real NATS",
+      "command": "env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/legion bun /legion/scratch/tmp/i511t/drive.ts pos; then the same with the installed pi-envoy's dist/envoy.js set to ENVOY_PLUGIN_INTERFACE_VERSION = 3 (restored to 4 after)",
+      "observed": "Matching pair: SMOKE PASS. The Oh My Pi argv ends with --append-system-prompt <2507 chars> /legion-controller-start. Order: register, then role claim, then the first turn. pluginContract is 41. The start message and Working… are on screen while the turn is held. /legion-controller-start again shows 'nothing to do' with 1 registration and 1 turn. The next prompt is turn 2, and the start message appears once. Interface skew: exit 1, 'publishes plugin interface 3, and a pi-legion that speaks 4. Install both releases built from this daemon's commit…', and the stand-in saw only GET /legion/v1/state, no POST /legion/v1/controller/secret.",
+      "headSha": "0d05551e77d58a69ada76678777d961c66476fdf",
+      "negativeControl": "Same CLI binary in round 1 (no Go change since): stdin a pipe or /dev/null gave exit 1, 'stdin is not a terminal', 0 daemon requests. A 0644 token file with stdin /dev/null got the token-file refusal first, which keeps scripts/e2e/controller-start-tmux.sh:271's asserted refusal. A pi-legion declaring contract 40 or 42 was refused before POST /legion/v1/controller/secret."
     }
   ],
   "observations": [
-    "Round 1's red test (commit 5dffc26f, packages/pi-legion/extensions/legion.test.ts) is unchanged at this head; the implementer added a separate test for /legion-claim-controller.",
-    "R2-P7: when a registration hangs, a /legion-claim-controller typed behind it now waits without showing anything. Before this round it ran its own registration at the same time. pi-shared/src/daemon-client.ts sets no request timeout, so the wait lasts as long as that request. The terminal stays usable, and restarting `legion controller start` clears it. This is not a failure, because the overlapping claim was the defect.",
-    "CI at PR head f1606838: build, changes, lint, typecheck, test and pr-title were queued or pending when read at 2026-10-27T05:18Z; not waited on."
+    "Review finding 2 (no startupTurn mark for a start message queued behind the operator's turn, and the mark naming the session current at the send) is in-process state that nothing outside the plugin reads yet. On the real binary I can see only its effect on turns: R3-P1 is correct. The mark itself is covered by the unit tests the implementer added, which are CI's to read.",
+    "Census entries 2 and 3 also name the daemon's boot gate and `legion probe-image` as refusers. Neither can run in this pod (no tmux, no cluster). Only the constant they compare changed. I drove the same contract and interface comparisons through `legion controller start`'s probe above.",
+    "CI at code head 05af9dbe: build, changes, lint, typecheck, test and pr-title queued or pending when read at 2026-10-27T06:17Z. PR head 0d05551e is handoff-only and has no runs. Not waited on."
   ]
 }
