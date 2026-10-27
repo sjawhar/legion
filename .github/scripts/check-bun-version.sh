@@ -28,9 +28,11 @@
 #   6. an `env:` naming an `INPUT_*` variable at workflow, job, `container:` or step level — an
 #      action reads its inputs from `INPUT_*`, either way,
 #   7. a job `container:` or `services:` image on `oven/bun` whose tag is not the pinned one,
-#   8. that wrapper missing, or not holding exactly one setup-bun step whose only input is
-#      `bun-version-file: .bun-version` — it is checked for what it is, not only for what other
-#      files are not,
+#   8. that wrapper missing, or not holding exactly one setup-bun step whose only inputs are
+#      `bun-version-file: .bun-version` and, optionally, `no-cache` with exactly the value
+#      `${{ github.ref != 'refs/heads/main' }}` (only a run on main writes the Bun cache) — any
+#      other `no-cache` value or any other input fails; it is checked for what it is, not only
+#      for what other files are not,
 #   9. a `FROM oven/bun` (case-insensitive) whose tag does not come from `${BUN_VERSION}`, an
 #      `ARG BUN_VERSION` default that disagrees with the pin, or a Dockerfile `RUN` (backslash
 #      continuations joined) that installs Bun,
@@ -90,6 +92,8 @@ LineLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapp
 
 PIN_FILE = ".bun-version"
 SETUP_ACTION = Path(".github/actions/setup-bun/action.yml")
+# The one `no-cache` value the wrapper may pass: only a run on main saves setup-bun's cache.
+NO_CACHE_OFF_MAIN = "${{ github.ref != 'refs/heads/main' }}"
 SKIP_DIRS = {".git", ".jj", "node_modules", ".venv", "vendor"}
 MISE_FILES = {
     "mise.toml",
@@ -357,7 +361,7 @@ else:
     line, step = wrapper_setup_steps[0]
     uses = str(step.get("uses"))
     options = step.get("with") if isinstance(step.get("with"), dict) else {}
-    extra = sorted(key for key in options if key != "bun-version-file")
+    extra = sorted(key for key in options if key not in ("bun-version-file", "no-cache"))
     if not uses.lower().startswith("oven-sh/setup-bun@"):
         problems.append(
             f"{SETUP_ACTION}:{line}: the wrapper runs {one_line(uses)}, not oven-sh/setup-bun@<ref>"
@@ -366,6 +370,14 @@ else:
         problems.append(
             f"{SETUP_ACTION}:{line}: the wrapper must pass bun-version-file: {PIN_FILE}, not "
             f"{one_line(options.get('bun-version-file'))}"
+        )
+    if "no-cache" in options and options["no-cache"] != NO_CACHE_OFF_MAIN:
+        no_cache = options["no-cache"]
+        # YAML spells a boolean in lower case; Python's str() would not.
+        shown = str(no_cache).lower() if isinstance(no_cache, bool) else one_line(no_cache)
+        problems.append(
+            f"{SETUP_ACTION}:{line}: the wrapper passes no-cache: {shown} — the one value it may "
+            f"pass is {NO_CACHE_OFF_MAIN}, so only a run on main writes the Bun cache"
         )
     if extra:
         problems.append(

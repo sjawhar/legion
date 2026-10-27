@@ -753,6 +753,37 @@ PYEOF
 run_check "$root"
 check "an action known to build nothing passes" "$(is "$status" 0)"
 
+# The cache's restore and save halves are separate actions, so the list names each one.
+root=$(fixture uses-cache-halves)
+python3 - "$root/.github/workflows/image.yaml" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+sha = "0123456789abcdef0123456789abcdef01234567"
+open(path, "w").write(text.replace(
+    "      - uses: docker/build-push-action@v6\n",
+    f"      - uses: actions/cache/restore@{sha}\n        with:\n          path: x\n          key: k\n"
+    f"      - uses: docker/build-push-action@v6\n",
+) + f"      - uses: actions/cache/save@{sha}\n        with:\n          path: x\n          key: k\n")
+PYEOF
+run_check "$root"
+check "actions/cache/restore and actions/cache/save beside a build pass" "$(is "$status" 0)"
+
+root=$(fixture uses-cache-other)
+python3 - "$root/.github/workflows/image.yaml" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+open(path, "w").write(text.replace(
+    "      - uses: docker/build-push-action@v6\n",
+    "      - uses: actions/cache/other@0123456789abcdef0123456789abcdef01234567\n"
+    "      - uses: docker/build-push-action@v6\n",
+))
+PYEOF
+run_check "$root"
+check "another path under actions/cache is still refused" "$(is "$status" 1)"
+check "  and names the list to add it to" "$(contains "$out" 'add this action to NON_BUILDING_ACTIONS')"
+
 root=$(fixture tripwire-not-a-build)
 run_step "$root" 'docker pull debian:trixie-slim'
 run_check "$root"
