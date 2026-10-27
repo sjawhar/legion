@@ -7,12 +7,14 @@
 #
 # The repository holds copies of this checkout's packages/pi-legion/.changie.yaml and
 # packages/pi-legion/CHANGELOG.md, taken when the test runs, and fragments written by hand (one
-# per kind, a body whose second line is indented two spaces, one without `time:`) and one written
-# by `changie new`, all shipped by a bump-shaped release tag (on a child of the built commit, as
-# the npm releases tag it). push-fold reaches a bare origin as release-push.test.sh's push-main
-# cases do: through a deploy key, with the GitHub URL rewritten to the local origin by
-# GIT_CONFIG_*, and a stub `gh` that logs each call. A last case gives fold-notes a fragment of
-# an unknown kind, which changie refuses without naming the file, and checks fold-notes names it.
+# per kind, a body written as a plain `|-` block whose second paragraph follows a blank line, one
+# without `time:`) and one written by `changie new`, all shipped by a bump-shaped release tag (on
+# a child of the built commit, as the npm releases tag it); the fold indents that body's
+# continuation lines two spaces under the bullet and leaves its blank line empty. push-fold
+# reaches a bare origin as release-push.test.sh's push-main cases do: through a deploy key, with
+# the GitHub URL rewritten to the local origin by GIT_CONFIG_*, and a stub `gh` that logs each
+# call. A last case gives fold-notes a fragment of an unknown kind, which changie refuses without
+# naming the file, and checks fold-notes names it.
 #
 # Needs changie v1.26.0 on PATH (.github/actions/install-changie installs it) and exits 1 without
 # it: the test never passes by skipping.
@@ -68,7 +70,9 @@ cat > "$unreleased/INFRA-11-changed.yaml" <<'YAML'
 kind: Changed
 body: |-
   a change whose entry runs
-    onto a second line
+  onto a second line
+
+  and a second paragraph
 time: 2026-05-02T10:00:00Z
 YAML
 cat > "$unreleased/INFRA-12-removed.yaml" <<'YAML'
@@ -145,6 +149,8 @@ block='## [1.2.3] - 2026-07-01
 
 - a change whose entry runs
   onto a second line
+
+  and a second paragraph
 
 ### Removed
 

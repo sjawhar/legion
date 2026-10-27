@@ -11,7 +11,10 @@ changelogPath: CHANGELOG.md
 versionExt: md
 versionFormat: ''
 kindFormat: '### {{.Kind}}'
-changeFormat: '- {{.Body}}'
+# changie strips a body's YAML indentation, so this puts two spaces before each body line after
+# the first that is not empty: the lines stay under the bullet. A blank line stays empty, so a
+# second paragraph stays in the bullet too.
+changeFormat: '- {{ regexReplaceAll "\n(.)" .Body "\n  ${1}" }}'
 # A blank line before and after each kind's heading, none between bullets: the layout of
 # CHANGELOG.md's existing sections.
 newlines:
