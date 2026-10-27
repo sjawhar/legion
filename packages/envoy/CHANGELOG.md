@@ -1418,6 +1418,13 @@
 
 ### Fixed
 
+- A Mermaid code block in a Dispatch comment, reply, message or ask draws as a diagram, as it
+  already did in a document, with its source behind a `Mermaid source` disclosure; a source the
+  renderer refuses shows `Unable to render Mermaid diagram: <reason>` above its source. Before,
+  every such block showed as its source code. The diagram's styles stay inside it, no reader's
+  browser fetches Google Fonts or any address an author writes into the diagram, and a page with
+  no document open loads the renderer only once a body holds a diagram (INFRA-528).
+
 - A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
   such as a session's answer to a model switch, without waiting for the stream's heartbeat.
   Firefox opened the stream only once its first byte arrived, and a stream with no backlog and no
