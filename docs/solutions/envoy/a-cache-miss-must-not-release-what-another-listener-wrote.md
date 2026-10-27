@@ -47,8 +47,8 @@ machine's role lane.
   releases it, then re-checks each candidate and deletes it only at the revision it checked, so a
   write to that interest that lands during the pass keeps it. A bucket read there would cost one KV
   round trip per candidate on every pass. It also deletes only an
-  interest whose own timestamp is more than 10 minutes old, so a session registered a moment ago is
-  never one it reaches.
+  interest whose own timestamp is more than 15 minutes old (`store.InterestReapGrace` plus
+  `store.InterestRefreshAge`), so a session registered a moment ago is never one it reaches.
 - **Don't fix it by making `SessionRegistry.Get` fall back to the bucket.** Fan-out checks the
   session of every matching interest on every message (`fanoutDelivery`, `cmd/listener/delivery.go`).
   A miss there is usually a dead session whose interest the reaper has not removed yet, so a
