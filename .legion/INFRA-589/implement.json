@@ -2,79 +2,55 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-589",
-  "completed": "2026-10-27T16:05:00Z",
-  "round": 3,
-  "answersReview": "review.json round 1 at code head 7675a7ac: 4 important and 12 minor findings, all fixed; 16 threads answered and resolved individually.",
+  "completed": "2026-10-27T17:50:00Z",
+  "round": 4,
+  "answersReview": "review.json round 2 at code head a30d1f50: 3 important and 6 minor findings, all fixed in 5ad8c796, within the architect's round cap (meta.json holds no token and is mode 600; the refusal says the lock is held by a process this namespace cannot see; the sampler records failed reads as failed); 9 threads answered and resolved individually.",
   "proof": [
     {
-      "criterion": "Review finding 1: a series' step holds the run lock, so a run started after the series parent is killed is refused while that step runs",
-      "surface": "packages/envoy/loadtest CLI on this 2-vCPU gVisor Legion pod, LOADTEST_ROOT=/legion/scratch/tmp/dispatch-loadtest; and packages/envoy/loadtest/common.test.sh",
-      "command": "cd packages/envoy && bash loadtest/common.test.sh; live: run-series.sh in the background, kill -TERM <its pid> during step-0.25x, then run-step.sh other-r8 --events 1 --sessions 5 --requests 1 --duration 5s; wait for the orphan step; run-step.sh after-orphan ...",
-      "observed": "common.test.sh 3 PASS (cases a, b, c failed 3 of 3 on the old lock.sh); live refusal 'LOADTEST_ROOT ... is in use by another run: pid 53353 (bash .../run-step.sh step-0.25x ...), pid 53734 (... stack.sh loadgen run -name step-0.25x ...), ... holds its lock; the run that took it (pid 53088 ...) has exited', exit 1, no runs/other-r8; the orphan step finished with 177/177 committed at build a30d1f50; after-orphan exit 0",
-      "headSha": "a30d1f50ae85c667452867f9a30bebf52b8e95cd",
-      "negativeControl": "common.test.sh case c: a caller with the holder's token but without the inherited fd 9 is refused"
+      "criterion": "Review finding 1: a refused caller whose holder it cannot see retries flock, takes the lock if free, and otherwise says the holder is not visible from this PID namespace and that the lock file must not be removed",
+      "surface": "packages/envoy/loadtest CLI on this 2-vCPU gVisor Legion pod, LOADTEST_ROOT=/legion/scratch/tmp/dispatch-loadtest; and loadtest/common.test.sh",
+      "command": "a helper holds $LOADTEST_ROOT/.run.lock on fd 7 with a record naming pid 999999; run-step.sh other-r10 --events 1 --sessions 5 --requests 1 --duration 5s; stack.sh reset; then after the helper ends, run-step.sh after-hidden ...; cd packages/envoy && bash loadtest/common.test.sh",
+      "observed": "both refused exit 1: 'LOADTEST_ROOT ... is locked by a process that is not visible in this PID namespace ...; the lock file names that run as pid 999999 ... Do not remove .../.run.lock: that run still holds it ...'; no step dir; after the helper ended, after-hidden exit 0; common.test.sh 5 PASS (case d failed on the old common.sh)",
+      "headSha": "5ad8c7966fadcfba9bfb5bddb659c8886fc2cdb4",
+      "negativeControl": "with the record still naming dead pid 999999 and no holder, the next run takes the lock (common.test.sh case e; after-hidden exit 0)"
     },
     {
-      "criterion": "Review finding 2: -allow-foreign requires every endpoint and token flag",
+      "criterion": "Review finding 2: meta.json keeps no token value and is owner-only",
       "surface": "same pod and CLI",
-      "command": "packages/envoy/loadtest/stack.sh loadgen run -allow-foreign -url http://127.0.0.1:18777 -token x -name f -out <dir> -events 1 -sessions 1 -requests 1",
-      "observed": "'loadgen run: -listener is required with -allow-foreign: a foreign run takes no endpoint or token from stack.json, so give every one of -url, -listener, -nats, -nats-mon, -pprof, -pg, -token, -listener-token', exit 1, output dir never created",
-      "headSha": "a30d1f50ae85c667452867f9a30bebf52b8e95cd",
-      "negativeControl": "TestGuardAllowForeignRefusesAMissingFlag refuses each of the eight flags by name, with and without stack.json"
+      "command": "stack.sh loadgen run -allow-foreign with every endpoint flag, -token <stack dispatch token>, --listener-token=<stack listener token>, -pg postgres://postgres@127.0.0.1:1/dispatch ...; grep -cF each token in meta.json, run.log, summary.json, samples.json and stderr; stat -c %a meta.json",
+      "observed": "every count 0; meta.json mode 600; args hold '<redacted>' and '--listener-token=<redacted>'; smoke-r10's meta.json also mode 600",
+      "headSha": "5ad8c7966fadcfba9bfb5bddb659c8886fc2cdb4",
+      "negativeControl": "TestAForeignRunsMetaHoldsNoToken: all four flag spellings redacted, and '-name -token' (where -token is the value of -name) left unchanged"
     },
     {
-      "criterion": "Review finding 3: a run counts only its own commit rows, without a reset",
+      "criterion": "Review finding 3: a step whose sampler reads fail shows '-' and a failed-reads mark, not 0",
       "surface": "same pod and CLI",
-      "command": "stack.sh reset; stack.sh loadgen run -name twice-1 ... -events 2 -sessions 20 -requests 2 -duration 30s -warmup 5s -grace 5s; then the same as twice-2 on the same database",
-      "observed": "twice-1 nonce 017158338: 52 offered, 52 committed, 260/260 receipts; twice-2 nonce 807518668: 52 offered, 48 committed, 4 non-2xx (edits whose revision tokens twice-1 had moved), 240/240 receipts; each counts only its own rows",
-      "headSha": "a30d1f50ae85c667452867f9a30bebf52b8e95cd",
-      "negativeControl": "TestARunCountsOnlyItsOwnCommitRows: another run's rows with the same counters are not counted"
+      "command": "the same foreign run (-pg unreachable), then loadgen tables on its directory",
+      "observed": "resources.pg_read_errors 5; Resources row 'foreign-pg (5 failed reads)' with '-' in Postgres connections max and connections waiting on a lock; note under the table names resources.pg_read_errors and resources.pprof_read_errors; run.log 'sampler: postgres: failed to connect ...'",
+      "headSha": "5ad8c7966fadcfba9bfb5bddb659c8886fc2cdb4",
+      "negativeControl": "smoke-r10 on the reachable stack: pg_read_errors 0, pprof_read_errors 0, Postgres connections max 26, goroutines p50 136, no mark"
     },
     {
-      "criterion": "Review finding 4: a lock probe whose reads fail logs and counts them, and the table marks the row",
+      "criterion": "Smoke and unchanged behaviour at the head after the cleanup items (xidRate, flag list, plain stack-exit error, property tests, shared die/usage)",
       "surface": "same pod and CLI",
-      "command": "run-step.sh probe-fail --events 1 --sessions 10 --requests 2 --duration 40s --warmup 5s --grace 5s; Postgres stopped (SIGINT to its stack.json pid) 30 s into the window",
-      "observed": "summary commit_order_lock.errors 710, ungranted_locks.errors 15; TABLES.md row 'probe-fail (postgres exited) (710 failed reads)' with the note under the table; run.log 'locksampler: FATAL: terminating connection due to administrator command' and 'locksampler: 15 reads failed in all'; step exit 1 naming postgres",
-      "headSha": "a30d1f50ae85c667452867f9a30bebf52b8e95cd",
-      "negativeControl": "smoke-r8 and step-1x-r8a/b/c: errors 0 for both probes"
-    },
-    {
-      "criterion": "Review minor: a series runs one build (setup once), and the A2 series still runs end to end",
-      "surface": "same pod and CLI",
-      "command": "packages/envoy/loadtest/run-series.sh",
-      "observed": "series-20261027T152539Z: one 'building envoy-dispatch' line in its log; all six steps' meta.json build_commit a30d1f50, build_dirty false; each with summary.json, TABLES.md, cpu.pprof, heap.pprof; exit 0; 0.25x 0.98/0.98 committed, 1x lock held 100% waiters p50 45, 2x-10x pool collapse as before",
-      "headSha": "a30d1f50ae85c667452867f9a30bebf52b8e95cd",
-      "negativeControl": "a stray LOADTEST_SERIES_BUILD outside a series is ignored (the ShellFixes live check: the step rebuilt and recorded its own build, not the stray value)"
-    },
-    {
-      "criterion": "A1/A3/A4 and the killed-Dispatch failure at the refactored head (execute split, openLoop, tables per function)",
-      "surface": "same pod and CLI",
-      "command": "run-step.sh smoke-r8 --events 2 --sessions 50 --requests 10 --duration 90s --event-mix comment=20,anchored=20,reply=20,edit=20,upload=20; run-step.sh step-1x-r8a/b/c --events 4 --sessions 400 --requests 60; run-step.sh killed-r8 ... with Dispatch SIGKILLed in the window",
-      "observed": "smoke: 29/29, 30/30, 30/30, 50/50, 34/34 committed, 865/865 receipts, 300 subscriptions, 50 registered 0 errors, delivery p50 367 ms from arrival and 38 ms from commit, clock_anomalies 0; 1x: lock held 100% in each, waiters p50 28/43/45, committed 0.41/1.22/1.94 of 3.99; killed-r8 exit 1, stack_exits dispatch, row marked",
-      "headSha": "a30d1f50ae85c667452867f9a30bebf52b8e95cd",
-      "negativeControl": "run-step.test.sh 4 PASS unmodified; TestOpenLoopKeepsTheSchedule compares openLoop with the old scheduler's arrivals for a fixed seed"
+      "command": "run-step.sh smoke-r10 --events 2 --sessions 50 --requests 10 --duration 60s --event-mix comment=20,anchored=20,reply=20,edit=20,upload=20; cd packages/envoy && go test -count=1 ./loadtest && bash loadtest/run-step.test.sh",
+      "observed": "exit 0; committed/offered 16/16, 22/22, 20/20, 35/35, 23/23; receipts 580/580; clock_anomalies 0; go test ok; run-step.test.sh 4 PASS, unmodified",
+      "headSha": "5ad8c7966fadcfba9bfb5bddb659c8886fc2cdb4",
+      "negativeControl": "a second run-step.sh on a held root is refused (run-step.test.sh and the hidden-holder case above)"
     }
   ],
   "filesChanged": [
-    "packages/envoy/loadtest/common.sh (new; replaces lock.sh), common.test.sh (new)",
-    "packages/envoy/loadtest/run-step.sh, run-series.sh, stack.sh",
-    "packages/envoy/loadtest/marker.go, pgpoll.go, util.go, sessions.go (new); marker_test.go, pgpoll_test.go, run_test.go (new)",
-    "packages/envoy/loadtest/run.go, events.go, delivery.go, sse.go, guard.go, lockprobe.go, locksampler.go, sample.go, tables.go and their tests",
-    "packages/envoy/loadtest/README.md, commit-trigger.sql (comment)",
-    "packages/envoy/CHANGELOG.md",
-    ".github/workflows/envoy-and-contracts.yaml (one more step: bash loadtest/common.test.sh)"
+    "packages/envoy/loadtest/common.sh, common.test.sh, run-step.sh, run-series.sh, stack.sh",
+    "packages/envoy/loadtest/guard.go, guard_test.go, marker.go, marker_test.go, pgpoll.go, pgpoll_test.go, run.go, run_test.go, sample.go, sample_test.go, tables.go, tables_test.go, util.go",
+    "packages/envoy/loadtest/README.md"
   ],
   "trickyParts": [
-    "A holder's child is admitted only with the matching token AND an inherited fd 9 open on the lock file on which flock -n succeeds; it keeps fd 9, so a series step and its loadgen hold the lock; stack daemons still start with fd 9 closed.",
-    "Markers are lgm<9-digit nonce><counter>x so the trigger already installed in existing seeds (lgm[0-9]+x) extracts them whole; no reseed is needed."
+    "The lock record now holds the holder's PID namespace (readlink /proc/self/ns/pid); its pid is trusted only in the same namespace, so a holder in another role's namespace is reported as not visible rather than as gone.",
+    "The 5 s sampler's failed reads are counted per in-window sample and kept out of every statistic, so a column with no successful read renders '-'."
   ],
   "deviations": [
-    "The test of finding 1 is a new file, loadtest/common.test.sh, not a new case in run-step.test.sh: run-step.test.sh is the tester's red test, which the implementer does not modify. It runs in CI beside it.",
-    "lock.sh is renamed common.sh because it now also holds the root resolution and the setup/start/seed sequence the reviewer asked to share."
+    "meta.json keeps the redacted argument list ('<redacted>' in place of each token value) rather than naming a token file: loadgen takes tokens as flag values, not files."
   ],
   "openQuestions": [],
-  "discoveredComplexity": [
-    "1x committed rate on one build and seed keeps spreading (0.41-1.94 events/s this round, with the lock held 100% and box_busy_before at most 3%); the README asks for five or more runs per side and medians.",
-    "Two other trees build on this package: INFRA-639 (its LINUX replay as a second request source; told the new runRequests/openLoop shape and marker format) and INFRA-594 (told to take this round's head before editing run.go, sample.go, tables.go)."
-  ]
+  "discoveredComplexity": []
 }
