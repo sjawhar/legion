@@ -2,61 +2,70 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-610",
-  "completed": "2026-10-27T07:13:23Z",
-  "testedHead": "12da3a9bf2805bc5a1821e4a418e7e7af2ccb3cb",
-  "prHead": "e67a6caa4c9bcd00fbf8a3513b3eccfff427c2a2",
+  "completed": "2026-10-27T09:11:30Z",
+  "round": 2,
+  "testedHead": "aad325eaca53275b6951992874006dca6e1dec8a",
+  "prHead": "0da2ee0421ee02db173a54d5faf1a8b6b082c569",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran A1's command at 12da3a9bf280 (ok both packages) and its negative control (dropping + InterestRefreshAge.Milliseconds() fails TestReaperGraceWindow 'got 3'). Re-drove A2 independently: built the head and base listeners myself, fetched reap-probe.sh from dispatch://INFRA-610/artifact/reap-probe-sh (cmp: byte-identical to the implementer's copy), started the probe 90 s after listener start instead of 240 s; head read 'new rule' twice, base 'old rule' twice, matching the implementer's results at a different reaper-tick phase. A3: the kv.go diff touches only the const block, Reap's allowance and comments. A5 greps reproduce (four hits, no 'ten-minute')."
+    "how": "Round 2 proof (comments only): grep -v '^\\s*//' over kv.go at 12da3a9bf280 and at aad325eaca53, diffed: identical; the kv_test.go change is the comment at :942-943, and its claim holds (TestInterestReaper's ses_dead row is 600_000 ms old, above InterestRefreshAge, and Reap(…, 0) reaps it). Re-ran its test command at aad325eaca53: ok both packages. The round-1 proofs it carries forward were reproduced again on the live listener below at aad325eaca53."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
+      "criterion": "Round 2: the two reworded comments change no behaviour.",
+      "surface": "source, packages/envoy/internal/store",
+      "command": "diff <(grep -v '^\\s*//' kv.go@12da3a9bf280) <(grep -v '^\\s*//' kv.go@aad325eaca53); jj diff -r aad325eaca53 --git",
+      "observed": "No non-comment line differs in kv.go; aad325eaca53 changes kv.go:772-775 (InterestRefreshAge doc) and kv_test.go:942-943 (TestInterestReaper comment) only.",
+      "headSha": "aad325eaca53275b6951992874006dca6e1dec8a",
+      "negativeControl": "Binaries built with -trimpath -buildvcs=false from the two kv.go versions differ (sha256 3dd46211… vs c118586b…), because the shorter comment shifts line numbers in the pc-line table; that is why the check is on source lines, and why the live probe was re-run at this head."
+    },
+    {
       "criterion": "A1: A dead session's row 14 or 15 minutes old is kept and one 16 minutes old is deleted at the grace the listener passes.",
       "surface": "Go tests, packages/envoy (store on a real NATS JetStream KV; integration package)",
       "command": "cd packages/envoy && CGO_ENABLED=1 go test -race -count=1 -run 'Reap|Reaper' -v ./internal/store/ ./internal/integration/",
-      "observed": "PASS TestInterestReaper, TestReapKeepsRoleClaimsForSessionRecovery, TestReapRoleClaimsDropsDeadHolderAfterTTL, TestReaperGraceWindow, TestARegistryOverKeysAnEarlierListenerStoredOpensAndReapsThem; ok internal/store 2.416s; PASS TestE2E_InterestReaperCleanup, ok internal/integration 1.999s. Mutation check of the tests: '<=' changed to '<' in Reap's condition (a row exactly 15:00 old reaped) -> TestReaperGraceWindow FAIL kv_test.go:1158 'expected 1 reaped (only the 16-minute row), got 2'; restored, file tag back to the original.",
-      "headSha": "12da3a9bf2805bc5a1821e4a418e7e7af2ccb3cb",
-      "negativeControl": "Uncommitted: allowanceMs := graceWindow.Milliseconds() (refresh allowance dropped) -> TestReaperGraceWindow FAIL kv_test.go:1158 'got 3'; restored, jj status clean."
+      "observed": "PASS TestInterestReaper, TestReapKeepsRoleClaimsForSessionRecovery, TestReapRoleClaimsDropsDeadHolderAfterTTL, TestReaperGraceWindow, TestARegistryOverKeysAnEarlierListenerStoredOpensAndReapsThem; ok internal/store 3.053s; PASS TestE2E_InterestReaperCleanup, ok internal/integration 2.472s. Round 1 at 12da3a9bf280: '<=' mutated to '<' fails TestReaperGraceWindow 'got 2'; Reap's code is unchanged since.",
+      "headSha": "aad325eaca53275b6951992874006dca6e1dec8a",
+      "negativeControl": "Round 1, Reap's code unchanged since: allowanceMs := graceWindow.Milliseconds() (allowance dropped) -> TestReaperGraceWindow FAIL kv_test.go:1158 'got 3'; restored."
     },
     {
       "criterion": "A2: The real listener binary applies the rule through its /v1 API (portless never-registered sessions, the plan's probe).",
-      "surface": "envoy-listener binary built from the workspace at 12da3a9bf280 on its own natsd (internal/testnats/cmd/natsd -p 25301), env as packages/envoy/scripts/e2e-local.sh, PORT=29301",
-      "command": "$TMPDIR/infra-610-test/run.sh head <workspace> 25301 29301: builds listener+natsd, runs reap-probe.sh http://127.0.0.1:29301 90 s after listener start (listener started 2026-10-27T06:52:51Z)",
-      "observed": "infra610-probe-1793084061-a: A_last_200 18:25.0, B_first_404 18:30.0, new rule; -b: A 15:55.0, B 16:00.0, new rule; 223 and 193 polls, 0 unknown, skew 9-10 ms. Listener log: reaper cycle 07:07:51Z reaped 0 (row -a age 13:30, -b 11:00), 07:12:51Z reaped 3.",
-      "headSha": "12da3a9bf2805bc5a1821e4a418e7e7af2ccb3cb",
-      "negativeControl": "Same harness and probe concurrently against a listener built from base 448a41003a17 (main@origin), natsd 25302, PORT=29302: -a A 13:24.9 B 13:30.0 old rule; -b A 10:55.0 B 11:00.0 old rule; base reaper cycle 07:07:48Z reaped 3."
+      "surface": "envoy-listener binary built from the workspace at aad325eaca53 on its own natsd (-p 25301), env as packages/envoy/scripts/e2e-local.sh, PORT=29301",
+      "command": "$TMPDIR/infra-610-test/run.sh head <workspace> 25301 29301 (listener started 2026-10-27T08:49:55Z; reap-probe.sh from dispatch://INFRA-610/artifact/reap-probe-sh started 90 s later)",
+      "observed": "infra610-probe-1793091085-a: A_last_200 18:25.0, B_first_404 18:30.0, new rule; -b: A 15:55.0, B 16:00.0, new rule; 223 and 193 polls, 0 unknown, skew 8-9 ms. Listener log: reaper cycle 09:04:55Z reaped 0, 09:09:55Z reaped 3.",
+      "headSha": "aad325eaca53275b6951992874006dca6e1dec8a",
+      "negativeControl": "Same harness and probe concurrently against a listener built from base 448a41003a17 (main@origin), PORT=29302: -a A 13:25.0 B 13:30.0 old rule; -b A 10:55.0 B 11:00.0 old rule; base reaper cycle 09:04:53Z reaped 3."
     },
     {
       "criterion": "Issue title: a paused session's row is kept 5 minutes longer (a session that registered and heartbeated, then paused).",
-      "surface": "same head listener (PORT=29301) through /v1/interests/subscribe (self_subscribed=true, so the session registry holds it), /v1/registry/<id> and /v1/interests/<id>",
-      "command": "$TMPDIR/infra-610-test/paused-probe.sh http://127.0.0.1:29301, started 120 s after listener start: three subscribes 30 s apart (heartbeats), then paused; polls every 5 s",
-      "observed": "infra610-paused-1793084091: last write 1793084151237; session registry entry 404 at row age 5:04; interest row last 200 at 16:56.3, first 404 at 17:01.3 (reaped at the 07:12:51Z tick, kept at the 07:07:51Z tick at row age ~12:00).",
-      "headSha": "12da3a9bf2805bc5a1821e4a418e7e7af2ccb3cb",
-      "negativeControl": "Same probe against the base listener (PORT=29302): session entry 404 at 5:04, interest row gone at row age 12:01.1 (reaped at the 07:07:48Z tick)."
+      "surface": "same head listener (PORT=29301) through /v1/interests/subscribe (self_subscribed=true), /v1/registry/<id> and /v1/interests/<id>",
+      "command": "$TMPDIR/infra-610-test/paused-probe.sh http://127.0.0.1:29301, started 120 s after listener start: three subscribes 30 s apart, then paused; polls every 5 s",
+      "observed": "infra610-paused-1793091115: last write 1793091175418; session registry entry 404 at row age 5:04; interest row last 200 at 16:56.7, first 404 at 17:01.8.",
+      "headSha": "aad325eaca53275b6951992874006dca6e1dec8a",
+      "negativeControl": "Same probe against the base listener (PORT=29302): session entry 404 at 5:04, interest row gone at row age 12:01.3."
     },
     {
       "criterion": "A3: Heartbeat writes are unchanged.",
-      "surface": "diff, packages/envoy/internal/store/kv.go",
-      "command": "jj diff --from c83dad796979 --to 12da3a9bf280 --git -- packages/envoy/internal/store/kv.go",
-      "observed": "Only the new InterestReapGrace/InterestRefreshAge const block, Reap's doc comment, allowanceMs and the comparison comment change; Upsert, mergeForUpsert, deleteInterest and locking untouched. On the live listener every subscribe (heartbeat) answered 200 with a fresh updated_at (1793084091098, ...121179, ...151237, 30 s apart).",
-      "headSha": "12da3a9bf2805bc5a1821e4a418e7e7af2ccb3cb",
-      "negativeControl": "A broken write path would show no 200 before the first 404 and no advancing updated_at; the paused probe saw three advancing updated_at values and 200 for 16:56 after the last."
+      "surface": "diff, packages/envoy/internal/store/kv.go, and the live listener",
+      "command": "jj diff --from 448a41003a17 --to aad325eaca53 --git -- packages/envoy/internal/store/kv.go",
+      "observed": "Only the const block, Reap's doc comment, allowanceMs and the comparison comment change; Upsert, mergeForUpsert, deleteInterest and locking untouched. On the live listener each heartbeat answered 200 with an advancing updated_at (1793091115260, …145346, …175418).",
+      "headSha": "aad325eaca53275b6951992874006dca6e1dec8a",
+      "negativeControl": "A broken write path would show no advancing updated_at and no 200 before the first 404; the probe saw three advancing values and 200 for 16:56 after the last."
     },
     {
       "criterion": "A5: The docs say what is now true.",
       "surface": "files",
-      "command": "grep -n InterestRefreshAge .dispatch/architecture/envoy-listener.md packages/envoy/AGENTS.md docs/solutions/envoy/a-cache-miss-must-not-release-what-another-listener-wrote.md packages/envoy/CHANGELOG.md; grep -n ten-minute packages/pi-envoy/extensions/envoy.ts; rg -i '(10|ten)[- ]minute.{0,80}(interest|reap|subscri)' (repo-wide)",
-      "observed": "Hits at envoy-listener.md:9, AGENTS.md:1965, solutions doc:48, CHANGELOG.md:801; 'ten-minute' no match (exit 1). Repo-wide only docs/plans/2026-09-12-heartbeat-role-reassertion.md:158 and docs/solutions/envoy/heartbeat-role-reassertion-and-regain-hooks.md:50 mention a 10-minute interest staleness, both describing the old image historically; docs/site, skills and claude-envoy state no reaper timing.",
-      "headSha": "12da3a9bf2805bc5a1821e4a418e7e7af2ccb3cb",
-      "negativeControl": "At base 448a41003a17 (the implementer's control, not re-run) the first grep finds nothing and envoy.ts:2092 says 'ten-minute stale-interest'."
+      "command": "grep -n InterestRefreshAge .dispatch/architecture/envoy-listener.md packages/envoy/AGENTS.md docs/solutions/envoy/a-cache-miss-must-not-release-what-another-listener-wrote.md packages/envoy/CHANGELOG.md; grep -n ten-minute packages/pi-envoy/extensions/envoy.ts",
+      "observed": "Round 1 (docs untouched since): hits in all four files, no 'ten-minute'. Round 2's reworded InterestRefreshAge doc states the rule (the most UpdatedAt may lag the last heartbeat; a writer may skip an unchanged row younger than it and must rewrite at it) and no longer says 'today'.",
+      "headSha": "aad325eaca53275b6951992874006dca6e1dec8a",
+      "negativeControl": "At base 448a41003a17 the first grep finds nothing and envoy.ts:2092 says 'ten-minute stale-interest'."
     }
   ],
-  "ci": "Read on GitHub at 12da3a9bf280 at 07:12Z: build x2, changes, lint, pr-title, test, typecheck all 'queued' (not yet run); recorded as running, not waited on.",
+  "ci": "Read on GitHub at 0da2ee04 (the round's push, no skip-checks trailer since it carries aad325eaca53) at 09:10Z: build x2, changes, lint, pr-title, test, typecheck 'queued' (one earlier pr-title cancelled); aad325eaca53 itself has no runs. Recorded as running, not waited on.",
   "notCovered": [
     "A4 (whole suites, lint) is CI's, not re-run here.",
     "A6 is the production check after the merge.",
-    "main.go's StartReaper wiring is reached by no unit test; the live-listener probes above are what prove it."
+    "main.go's StartReaper wiring is reached by no unit test; the live-listener probes are what prove it."
   ]
 }
