@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -123,39 +124,62 @@ func logRefusal() {
 		"error", ErrNestedAcquire, "stack", string(debug.Stack()))
 }
 
-// Pool is the shared Dispatch connection pool. Every way it hands out a connection refuses one
-// asked for while the caller already holds one; see ErrNestedAcquire. The pgx pool is private
-// so no caller can reach past the refusal.
+// Pool is a Dispatch connection pool: the shared request pool store.Open opens, or one of the
+// pools of its own that wraps (Outbox, Background, Live, Settlements). Every way it hands out a
+// connection refuses one asked for while the caller already holds one; see ErrNestedAcquire. The
+// pgx pool is private so no caller can reach past the refusal.
 type Pool struct {
 	pool *pgxpool.Pool
+	// name is the pool's name (RequestsPool for the shared pool), and acquire the tracer that
+	// bounds and counts its acquires, nil for a pool opened without one (configurePool).
+	name    string
+	acquire *acquireTracer
 	// mu guards each separate pool's creation against this pool's close: one lock, so a
 	// caller that loses the race is told the pool is closed rather than opening one nothing
 	// will ever close.
-	mu     sync.Mutex
-	rooms  *pgxpool.Pool
-	health *pgxpool.Pool
-	listen *pgxpool.Pool
-	leases *pgxpool.Pool
-	outbox *pgxpool.Pool
-	closed bool
+	mu        sync.Mutex
+	separates map[string]openedPool
+	closed    bool
+	// acquireBounds replaces defaultAcquireBound for the separate pools it names, read as each
+	// one opens: a test shortens a bound with it, so a full pool refuses in milliseconds.
+	acquireBounds map[string]time.Duration
 }
 
-// NewPool wraps an open pgx pool.
+// openedPool is one pgx pool a Pool has open, under its name, with its acquire tracer.
+type openedPool struct {
+	name    string
+	pool    *pgxpool.Pool
+	acquire *acquireTracer
+}
+
+// NewPool wraps an open pgx pool. Its name and acquire tracer are the ones configurePool set on
+// the pool's configuration; a pool opened without them is the request pool, unbounded.
 func NewPool(pool *pgxpool.Pool) *Pool {
-	return &Pool{pool: pool}
+	acquire := acquireTracerOf(pool.Config().ConnConfig.Tracer)
+	name := RequestsPool
+	if acquire != nil {
+		name = acquire.name
+	}
+	return &Pool{pool: pool, name: name, acquire: acquire}
 }
 
-// sharedPoolSize bounds the shared pool, deliberately and in code. pgx's default,
-// max(4, NumCPU), is four on production's one Fargate task at cpu="512", and a connection per
-// blocked writer is all it takes to starve everything else: with four writers parked on one
-// issue's row lock, a read of an unrelated issue waited the whole seventeen seconds the lock
-// was held, where sixteen connections served 3,853 such reads at a four-millisecond median.
-// The ceiling is picked here rather than derived from the task's CPU allotment or read out of
-// the DSN another repository's URL builder writes. It is 64, from 16, since 2026-10-27: a
-// request takes a connection per statement one after another (an issue read is about eleven),
-// so under ~240 agent requests a minute the API held all sixteen and every other request waited
-// seconds for one; the database (16 vCPU) has hundreds of connections spare.
-const sharedPoolSize = 64
+// sharedPoolSize bounds the shared pool - the request pool - deliberately and in code. pgx's
+// default, max(4, NumCPU), is four on production's one Fargate task at cpu="512", and a
+// connection per blocked writer is all it takes to starve everything else: with four writers
+// parked on one issue's row lock, a read of an unrelated issue waited the whole seventeen seconds
+// the lock was held, where sixteen connections served 3,853 such reads at a four-millisecond
+// median. The ceiling is picked here rather than derived from the task's CPU allotment or read
+// out of the DSN another repository's URL builder writes.
+//
+// It is 48 of one connection budget of 82 that every pool of a process shares, partitioned rather
+// than grown: requests 48, background 6 (Background), live 4 (Live), settlements 4 (Settlements),
+// rooms 4, health 1, listen 1 with the three connections it hands over, leases leasePoolSize (10)
+// and outbox 1. A request takes a connection per statement one after another (an issue read is
+// about eleven), so under load the API holds every connection of this pool; the background loops,
+// the live-update readers and the settlements wait on pools of their own, so neither side can
+// starve the other, and an acquire here waits at most requestAcquireBound before it is refused
+// with ErrPoolBusy rather than queueing without end.
+const sharedPoolSize = 48
 
 // roomsPoolSize bounds the connections document loads use. Loading takes no lock and always
 // finishes, so one is enough for the pool to be deadlock-free; a few let cold rooms load
@@ -196,9 +220,11 @@ var ErrPoolClosed = errors.New("connection pool is closed")
 // transaction, because the loaded room outlives the request and must not roll back with it. A
 // second connection from the shared pool is exactly what deadlocks it (ErrNestedAcquire), so
 // the loads have their own, opened on demand and closed with this pool: one per store, not one
-// per caller who wants to read a document.
+// per caller who wants to read a document. Its acquires are bounded at requestAcquireBound like
+// the request pool's; a caller of this raw pgx pool sees the bound as context.DeadlineExceeded
+// with its own context still live.
 func (p *Pool) Rooms() (*pgxpool.Pool, error) {
-	return p.separate(&p.rooms, roomsPoolSize, "document rooms")
+	return p.separate(RoomsPool, roomsPoolSize)
 }
 
 // Healthy reports the highest schema migration Postgres has applied, read within
@@ -212,7 +238,7 @@ func (p *Pool) Rooms() (*pgxpool.Pool, error) {
 // process's own Migrate, so it reports what the database holds: a deploy check compares it with
 // the highest migration in the commit the image was built from.
 func (p *Pool) Healthy(ctx context.Context) (int, error) {
-	health, err := p.separate(&p.health, healthPoolSize, "health probe")
+	health, err := p.separate(HealthPool, healthPoolSize)
 	if err != nil {
 		return 0, err
 	}
@@ -242,44 +268,52 @@ const listenerPoolSize = 1
 // and the document rooms' stale-room evictor (docs/stale_room.go) each hold one for as long as
 // they wait for notifications, which is the life of the process: a connection of the shared pool
 // held that long would be one fewer for every request, and a LISTEN on a pooled connection would
-// end when the pool recycled it.
+// end when the pool recycled it. A dial that does not get the pool's connection within
+// listenAcquireBound is refused with ErrPoolBusy.
 func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
-	listen, err := p.separate(&p.listen, listenerPoolSize, "listener")
+	listen, err := p.separate(ListenPool, listenerPoolSize)
 	if err != nil {
 		return nil, err
 	}
 	conn, err := listen.Acquire(ctx)
 	if err != nil {
-		return nil, err
+		return nil, poolBusy(ctx, ListenPool, err)
 	}
 	return conn.Hijack(), nil
 }
 
+// leaseNameCount is how many lease names duty.Exclusive accepts: the names of duty's lease list,
+// counted here because store cannot import duty, and held to that list by a test.
+const leaseNameCount = 8
+
 // leasePoolSize bounds the pool a periodic maintenance loop takes its once-overall lease on
-// (duty.Exclusive). One connection per caller that can be inside Exclusive at the same moment is
-// the whole requirement, and it is a caller and not a lease that needs one: Exclusive takes its
-// connection before it learns whether the lease is held, so a pass that skips because the other
-// process holds the lease holds a connection for that round trip too. INFRA-66 leases eight names
-// - the document compaction, the suggestion-outcome sweep, the reference-excerpt reconciliation,
-// the GitHub webhook redelivery sweep, the architecture import, the delivery reconcile and one
-// per delivery durable for the consumers' reconciliation (delivery.consumerLease, a name each for
-// delivery-events and delivery-jobs) - taken by eight callers, since each delivery intake takes
-// its own durable's name from a bind poll of its own, so eight callers can be inside Exclusive at
-// once. Eight connections are exactly those eight: the headroom is zero, not one, and the next
-// leased loop added here makes a ninth caller that waits for a connection rather than failing,
-// for as long as the longest pass then holding one. They cannot come from the shared pool:
-// a lease is held for the whole pass, which is minutes for the compaction, and the shared pool's
-// sharedPoolSize connections are what every request reads through.
-const leasePoolSize = 8
+// (duty.Exclusive): a connection for every lease name on duty's list, and two spare. A caller and
+// not a lease needs the connection - Exclusive takes it before it learns whether the lease is
+// held, so a pass that skips because another process holds the lease holds one for that round
+// trip too - and every listed name has one caller, since each delivery intake takes its own
+// durable's consumer lease from a bind poll of its own, so every name can be inside Exclusive at
+// once. Exclusive refuses a name that is not on the list, so a loop added to the list adds its
+// connection here rather than taking one another loop counted on.
+//
+// The two spare connections are for what holds one without being a listed lease's pass: pgxpool's
+// own health check and lifetime expiry take an idle connection while they ping or replace it, and
+// a pass whose unlock failed holds its connection until the close that ends its session
+// (duty.freeLeaseOn, teardownTimeout). Without them the next pass waits on those (review BG-5);
+// with them a wait at all is a fault, and an acquire that waits leaseAcquireBound makes Exclusive
+// skip the pass rather than queue. They cannot come from the request pool: a lease is held for the
+// whole pass, which is minutes for the compaction, and the request pool's connections are what
+// every request reads through.
+const leasePoolSize = leaseNameCount + 2
 
 // Leases is where a periodic maintenance loop takes the connection it holds its lease on, so that
 // only one process runs each pass (duty.Exclusive). The lease is a session-level advisory lock, so
 // it lives on one connection for the length of the pass and dies with it; a connection of the
 // shared pool held that long would be one fewer for every request, and a pass that then read
 // through the shared pool - which is what a pass does - would be a caller holding two of its
-// connections (ErrNestedAcquire).
+// connections (ErrNestedAcquire). Its acquires are bounded at leaseAcquireBound, which a caller of
+// this raw pgx pool sees as context.DeadlineExceeded with its own context still live.
 func (p *Pool) Leases() (*pgxpool.Pool, error) {
-	return p.separate(&p.leases, leasePoolSize, "loop leases")
+	return p.separate(LeasesPool, leasePoolSize)
 }
 
 // outboxPoolSize bounds the pool the events outbox reads and records events through. The outbox
@@ -292,43 +326,92 @@ const outboxPoolSize = 1
 // pool's connections, and an outbox statement queued behind them holds back every event behind
 // it; on a pool of its own it waits for none of them, and holds no connection a request could use.
 func (p *Pool) Outbox() (*Pool, error) {
-	opened, err := p.separate(&p.outbox, outboxPoolSize, "events outbox")
+	return p.wrapped(OutboxPool, outboxPoolSize)
+}
+
+// backgroundPoolSize bounds the pool for work no request waits on: background loops such as the
+// embedding queue and its coverage pass, the suggestion sweep, the delivery reconcile and intakes,
+// the architecture importer and the webhook redelivery sweep. Six is the background's share of the
+// budget sharedPoolSize describes; nobody waits on these loops, so they wait for each other here
+// (up to backgroundAcquireBound) instead of for the requests' connections.
+const backgroundPoolSize = 6
+
+// Background is the pool for background loops, so that under load a request never queues behind a
+// loop's statement for a connection, nor a loop behind the requests.
+func (p *Pool) Background() (*Pool, error) {
+	return p.wrapped(BackgroundPool, backgroundPoolSize)
+}
+
+// livePoolSize bounds the pool for the live-update readers: the event stream relay and the
+// delivery hub, each reading what a notification announced and handing it to every open stream.
+// Four is their share of the budget sharedPoolSize describes.
+const livePoolSize = 4
+
+// Live is the pool for the live-update readers, so an event reaches the open streams while the
+// requests hold every connection of theirs; its acquires are bounded at requestAcquireBound, since
+// a stream is waiting on each one.
+func (p *Pool) Live() (*Pool, error) {
+	return p.wrapped(LivePool, livePoolSize)
+}
+
+// settlementsPoolSize bounds the pool for document settlements. Four is the settlements' share of
+// the budget sharedPoolSize describes.
+const settlementsPoolSize = 4
+
+// Settlements is the pool for document settlements, so a burst of settlements - every room a
+// shutdown or a timer settles - neither waits for the requests' connections nor takes them.
+func (p *Pool) Settlements() (*Pool, error) {
+	return p.wrapped(SettlementsPool, settlementsPoolSize)
+}
+
+// wrapped is the separate pool name, wrapped so the nested-acquire guard and the ErrPoolBusy
+// mapping apply to it as they do to the request pool.
+func (p *Pool) wrapped(name string, size int32) (*Pool, error) {
+	opened, err := p.separate(name, size)
 	if err != nil {
 		return nil, err
 	}
 	return NewPool(opened), nil
 }
 
-// separate opens the pool held at field on demand, sized at size and copied from the shared
-// pool's configuration, and closes it with the shared pool. Each caller holds mu for the whole
-// check-and-open so two of them cannot open two pools, and one opened after Close would be a
-// pool nobody closes.
-func (p *Pool) separate(field **pgxpool.Pool, size int32, name string) (*pgxpool.Pool, error) {
+// separate opens the pool named name on demand, sized at size, copied from this pool's
+// configuration and configured as its own (configurePool: its application_name and its acquire
+// bound, acquireBounds' or defaultAcquireBound's), and closes it with this pool. Each caller holds
+// mu for the whole check-and-open so two of them cannot open two pools, and one opened after Close
+// would be a pool nobody closes.
+func (p *Pool) separate(name string, size int32) (*pgxpool.Pool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
 		return nil, ErrPoolClosed
 	}
-	if *field != nil {
-		return *field, nil
+	if opened, ok := p.separates[name]; ok {
+		return opened.pool, nil
 	}
-	config := p.pool.Config().Copy()
+	config := p.pool.Config()
 	config.MaxConns = size
 	// Both minimums, not just MinConns: a floor inherited from the shared pool's DSN would be
 	// a target these pools cannot reach - pool_min_idle_conns=2 on a one-connection health
 	// pool - which pgxpool re-attempts, and puddle refuses as full, every health-check period.
 	config.MinConns = 0
 	config.MinIdleConns = 0
+	bound, ok := p.acquireBounds[name]
+	if !ok {
+		bound = defaultAcquireBound(name)
+	}
+	acquire := configurePool(config, name, bound)
 	opened, err := pgxpool.NewWithConfig(context.Background(), config)
 	if err != nil {
 		return nil, fmt.Errorf("open %s pool: %w", name, err)
 	}
-	*field = opened
+	if p.separates == nil {
+		p.separates = make(map[string]openedPool, len(poolNames))
+	}
+	p.separates[name] = openedPool{name: name, pool: opened, acquire: acquire}
 	return opened, nil
 }
 
-// Close releases every connection the pool holds, the document rooms and the health probe
-// included.
+// Close releases every connection the pool holds, every separate pool's included.
 func (p *Pool) Close() {
 	p.mu.Lock()
 	if p.closed {
@@ -336,13 +419,11 @@ func (p *Pool) Close() {
 		return
 	}
 	p.closed = true
-	rooms, health, listen, leases, outbox := p.rooms, p.health, p.listen, p.leases, p.outbox
-	p.rooms, p.health, p.listen, p.leases, p.outbox = nil, nil, nil, nil, nil
+	separates := p.separates
+	p.separates = nil
 	p.mu.Unlock()
-	for _, separate := range []*pgxpool.Pool{rooms, health, listen, leases, outbox} {
-		if separate != nil {
-			separate.Close()
-		}
+	for _, separate := range separates {
+		separate.pool.Close()
 	}
 	p.pool.Close()
 }
@@ -353,30 +434,60 @@ func (p *Pool) Config() *pgxpool.Config { return p.pool.Config() }
 // Stat reports the pool's current connection counts.
 func (p *Pool) Stat() *pgxpool.Stat { return p.pool.Stat() }
 
-// ConnectionUse is how many connections of the shared and document-rooms pools are in use, and
-// how many those two pools have taken back since they opened, whether returned or discarded. The
-// health probe's pool is left out: it is how a caller asks whether the database answers.
+// opened lists this pool and every separate pool it has opened, in poolNames order.
+func (p *Pool) opened() []openedPool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	opened := make([]openedPool, 1, 1+len(p.separates))
+	opened[0] = openedPool{name: p.name, pool: p.pool, acquire: p.acquire}
+	for _, name := range poolNames {
+		if separate, ok := p.separates[name]; ok {
+			opened = append(opened, separate)
+		}
+	}
+	return opened
+}
+
+// Stats reports, for this pool and every separate pool it has opened, the pool's connection
+// counts and what its acquire tracer has counted: what the metrics a scrape reads are made of.
+func (p *Pool) Stats() []PoolStats {
+	opened := p.opened()
+	stats := make([]PoolStats, len(opened))
+	for i, pool := range opened {
+		stats[i] = PoolStats{Name: pool.name, Stat: pool.pool.Stat()}
+		if pool.acquire != nil {
+			stats[i].Acquire = pool.acquire.stats()
+		}
+	}
+	return stats
+}
+
+// ConnectionUse is how many connections of a set of pools are in use, and how many those pools
+// have taken back since they opened, whether returned or discarded.
 type ConnectionUse struct {
 	InUse    int32
 	Returned int64
 }
 
-// Use reports the shared and document-rooms pools' ConnectionUse.
-func (p *Pool) Use() ConnectionUse {
-	p.mu.Lock()
-	rooms := p.rooms
-	p.mu.Unlock()
+// Use reports the ConnectionUse of the pools named, of those this pool has opened, or of every
+// pool it has opened when no name is given. A caller asking whether work in flight has finished
+// names the pools that work runs on and leaves the health probe's out: the probe is how a caller
+// asks whether the database answers, and its connection taken back says nothing about the work.
+func (p *Pool) Use(names ...string) ConnectionUse {
 	var use ConnectionUse
-	for _, pool := range []*pgxpool.Pool{p.pool, rooms} {
-		if pool == nil {
+	for _, pool := range p.opened() {
+		if len(names) > 0 && !slices.Contains(names, pool.name) {
 			continue
 		}
-		stat := pool.Stat()
+		stat := pool.pool.Stat()
 		use.InUse += stat.AcquiredConns()
 		use.Returned += stat.AcquireCount() - int64(stat.AcquiredConns())
 	}
 	return use
 }
+
+// busy maps an acquire that ran out this pool's bound to ErrPoolBusy (poolBusy).
+func (p *Pool) busy(ctx context.Context, err error) error { return poolBusy(ctx, p.name, err) }
 
 func (p *Pool) guard(ctx context.Context) error {
 	if !holdsConnection(ctx) {
@@ -392,13 +503,16 @@ func (p *Pool) guard(ctx context.Context) error {
 // with Acquire (the durable append's withRoomLock, marked with HoldsConnection) - and work
 // done inside the loop - a publish, a follower lookup, a write per row - is exactly the shape
 // that wedges the pool.
+//
+// Every method below that takes a connection returns ErrPoolBusy for an acquire that ran out the
+// pool's bound (acquireTracer), however it reports its errors.
 func (p *Pool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
 	if err := p.guard(ctx); err != nil {
 		return nil, err
 	}
 	rows, err := p.pool.Query(ctx, sql, args...)
 	if err != nil {
-		return nil, err
+		return nil, p.busy(ctx, err)
 	}
 	release := hold(ctx)
 	if release == nil {
@@ -444,12 +558,13 @@ func (r *trackedRows) Values() ([]any, error) {
 	return values, err
 }
 
-// QueryRow runs a single-row query on a pooled connection.
+// QueryRow runs a single-row query on a pooled connection. pgxpool defers an acquire's error to
+// the row's Scan, so the row maps it there.
 func (p *Pool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
 	if err := p.guard(ctx); err != nil {
 		return errRow{err: err}
 	}
-	return p.pool.QueryRow(ctx, sql, args...)
+	return busyRow{Row: p.pool.QueryRow(ctx, sql, args...), ctx: ctx, pool: p.name}
 }
 
 // Exec runs a statement on a pooled connection.
@@ -457,7 +572,8 @@ func (p *Pool) Exec(ctx context.Context, sql string, args ...any) (pgconn.Comman
 	if err := p.guard(ctx); err != nil {
 		return pgconn.CommandTag{}, err
 	}
-	return p.pool.Exec(ctx, sql, args...)
+	tag, err := p.pool.Exec(ctx, sql, args...)
+	return tag, p.busy(ctx, err)
 }
 
 // Acquire takes a pooled connection the caller holds until it releases it.
@@ -465,15 +581,22 @@ func (p *Pool) Acquire(ctx context.Context) (*pgxpool.Conn, error) {
 	if err := p.guard(ctx); err != nil {
 		return nil, err
 	}
-	return p.pool.Acquire(ctx)
+	conn, err := p.pool.Acquire(ctx)
+	return conn, p.busy(ctx, err)
 }
 
-// AcquireFunc runs fn with a pooled connection.
+// AcquireFunc runs fn with a pooled connection. Only the acquire's error is mapped: fn's own is
+// returned as fn returned it.
 func (p *Pool) AcquireFunc(ctx context.Context, fn func(*pgxpool.Conn) error) error {
 	if err := p.guard(ctx); err != nil {
 		return err
 	}
-	return p.pool.AcquireFunc(ctx, fn)
+	conn, err := p.pool.Acquire(ctx)
+	if err != nil {
+		return p.busy(ctx, err)
+	}
+	defer conn.Release()
+	return fn(conn)
 }
 
 // AcquireAllIdle takes every idle connection the pool holds.
@@ -494,15 +617,17 @@ func (p *Pool) CopyFrom(
 	if err := p.guard(ctx); err != nil {
 		return 0, err
 	}
-	return p.pool.CopyFrom(ctx, table, columns, source)
+	copied, err := p.pool.CopyFrom(ctx, table, columns, source)
+	return copied, p.busy(ctx, err)
 }
 
-// SendBatch runs a batch on a pooled connection.
+// SendBatch runs a batch on a pooled connection. pgxpool defers an acquire's error to the
+// results, so the results map it there.
 func (p *Pool) SendBatch(ctx context.Context, batch *pgx.Batch) pgx.BatchResults {
 	if err := p.guard(ctx); err != nil {
 		return errBatchResults{err: err}
 	}
-	return p.pool.SendBatch(ctx, batch)
+	return busyBatchResults{BatchResults: p.pool.SendBatch(ctx, batch), ctx: ctx, pool: p.name}
 }
 
 // Begin opens a transaction and marks the request as holding one.
@@ -528,7 +653,7 @@ func (p *Pool) BeginTx(ctx context.Context, options pgx.TxOptions) (pgx.Tx, erro
 func (p *Pool) begin(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error) {
 	tx, err := p.pool.BeginTx(ctx, options)
 	if err != nil {
-		return nil, err
+		return nil, p.busy(ctx, err)
 	}
 	release := hold(ctx)
 	if release == nil {
@@ -570,3 +695,35 @@ func (b errBatchResults) Exec() (pgconn.CommandTag, error) { return pgconn.Comma
 func (b errBatchResults) Query() (pgx.Rows, error)         { return nil, b.err }
 func (b errBatchResults) QueryRow() pgx.Row                { return errRow{err: b.err} }
 func (b errBatchResults) Close() error                     { return b.err }
+
+// busyRow maps a deferred acquire error to ErrPoolBusy when the row is scanned.
+type busyRow struct {
+	pgx.Row
+	ctx  context.Context
+	pool string
+}
+
+func (r busyRow) Scan(dest ...any) error { return poolBusy(r.ctx, r.pool, r.Row.Scan(dest...)) }
+
+// busyBatchResults maps a deferred acquire error to ErrPoolBusy in every result the caller reads.
+type busyBatchResults struct {
+	pgx.BatchResults
+	ctx  context.Context
+	pool string
+}
+
+func (b busyBatchResults) Exec() (pgconn.CommandTag, error) {
+	tag, err := b.BatchResults.Exec()
+	return tag, poolBusy(b.ctx, b.pool, err)
+}
+
+func (b busyBatchResults) Query() (pgx.Rows, error) {
+	rows, err := b.BatchResults.Query()
+	return rows, poolBusy(b.ctx, b.pool, err)
+}
+
+func (b busyBatchResults) QueryRow() pgx.Row {
+	return busyRow{Row: b.BatchResults.QueryRow(), ctx: b.ctx, pool: b.pool}
+}
+
+func (b busyBatchResults) Close() error { return poolBusy(b.ctx, b.pool, b.BatchResults.Close()) }

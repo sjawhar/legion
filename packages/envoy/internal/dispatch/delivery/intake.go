@@ -368,6 +368,10 @@ const standbyLogEvery = 30 * time.Second
 // could only get in during the milliseconds between those holds: in CI's run of that row it never
 // did, and the row failed with "consumer delivery-jobs was not push-bound within 20s". A lease per
 // durable keeps a stuck reconciliation to the durable it is stuck on.
+//
+// Every name this builds is spelled out on duty's lease list (duty.LeaseNames), which the lease
+// pool is sized from, and duty.Exclusive refuses a name that is not: a durable added to the
+// intakes adds its consumer lease there, or its reconciliation never runs.
 func consumerLease(durable string) string { return "delivery-consumer-" + durable }
 
 // bindOutcome is what one attempt at a durable did, which is three things rather than two: a

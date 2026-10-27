@@ -40,11 +40,20 @@ const documentShutdownTimeout = docs.ShutdownDrainBudget + 5*time.Second
 const httpDrainBeforeDocuments = stopGrace - 5*time.Second - documentShutdownTimeout
 
 // silentProbes is how many health probes (store.Pool.Healthy, two seconds each) in a row must fail,
-// with no connection of the shared or document-rooms pool taken back meanwhile, before Dispatch
-// counts the database as having stopped answering. A probe that answers, or a connection taken
-// back while it ran, starts the count again: a slow database that is still finishing work is
+// with no connection of the pools that carry writes (writePools) taken back meanwhile, before
+// Dispatch counts the database as having stopped answering. A probe that answers, or a connection
+// taken back while it ran, starts the count again: a slow database that is still finishing work is
 // answering. Three is the count the load balancer waits for before it replaces the task.
 const silentProbes = 3
+
+// writePools are the pools whose connections carry work a client or a document is owed: the
+// request pool, the document rooms' and the settlements'. The drain waits for every one of their
+// connections to come back before it closes the pools, so a write in flight commits and is
+// answered. The other pools carry no write anyone is waiting on - the background loops and the
+// leased passes end with the process context and run again at their next tick, the live readers
+// only read, the listener's connections are hijacked, and the outbox's work stays in the outbox
+// for the next process - so none of them holds the drain up.
+var writePools = []string{store.RequestsPool, store.RoomsPool, store.SettlementsPool}
 
 // drainPollInterval is how often the last phase asks whether the requests in flight and the
 // connections in use are done, and how often waitUntilIdle's loop pauses between the health
@@ -78,12 +87,11 @@ func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *h
 // first, with no deadline of its own. The document service settles the documents owed within
 // documentShutdownTimeout once those requests are done, or httpDrainBeforeDocuments after the
 // signal with some still running. Hijacked delivery sockets and the delivery hub then finish their
-// Lifetime-driven shutdown. The database pool closes once every request has answered and no
-// connection of the shared or document-rooms pool is in use. While the database answers, nothing
-// but the runtime's kill bounds that wait, so a write in flight commits and is answered if it
-// finishes before the kill. A database that has stopped answering (silentProbes) holds its
-// connections forever, so Dispatch exits without them, and the database rolls back whatever they
-// held open.
+// Lifetime-driven shutdown. The database pools close once every request has answered and no
+// connection of writePools is in use. While the database answers, nothing but the runtime's kill
+// bounds that wait, so a write in flight commits and is answered if it finishes before the kill. A
+// database that has stopped answering (silentProbes) holds its connections forever, so Dispatch
+// exits without them, and the database rolls back whatever they held open.
 func shutdown(server *http.Server, documentService *docs.Service, pool *store.Pool, waitDelivery func()) {
 	drained := make(chan struct{})
 	go func() {
@@ -108,13 +116,13 @@ func shutdown(server *http.Server, documentService *docs.Service, pool *store.Po
 	}
 }
 
-// waitUntilIdle waits until HTTP has drained and no connection of the shared or document-rooms pool
-// is in use, and reports whether that happened. It gives up only once the database has stopped
-// answering, when the connections in use never come back: closing the pool would wait on them.
+// waitUntilIdle waits until HTTP has drained and no connection of writePools is in use, and
+// reports whether that happened. It gives up only once the database has stopped answering, when
+// the connections in use never come back: closing the pools would wait on them.
 func waitUntilIdle(drained <-chan struct{}, pool *store.Pool) bool {
 	failed := 0
 	for {
-		before := pool.Use()
+		before := pool.Use(writePools...)
 		select {
 		case <-drained:
 			if before.InUse == 0 {
@@ -123,7 +131,7 @@ func waitUntilIdle(drained <-chan struct{}, pool *store.Pool) bool {
 		default:
 		}
 		_, err := pool.Healthy(context.Background())
-		after := pool.Use()
+		after := pool.Use(writePools...)
 		if err == nil || after.Returned > before.Returned {
 			failed = 0
 		} else if failed++; failed >= silentProbes {

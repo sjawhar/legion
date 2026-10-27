@@ -4,10 +4,43 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// leaseNames is every lease Exclusive takes, each spelled out, and Exclusive refuses any other:
+// the lease pool has a connection for each of these and two spare (store.leasePoolSize, held to
+// this list's length by a test), so a lease taken under a name not counted here would take a
+// connection a listed lease counted on. A loop that leases a new name - or holds a connection of
+// the lease pool for any other reason - adds it here, and store's count with it.
+var leaseNames = [...]string{
+	// outbox.compactDocuments: the daily document compaction.
+	"document-compaction",
+	// api's suggestion-outcome sweep.
+	"suggestion-outcomes",
+	// docs.RunReferenceExcerptReconciliation.
+	"reference-excerpts",
+	// redeliver's GitHub webhook redelivery sweep.
+	"webhook-redelivery",
+	// architecture's import ticker.
+	"architecture-import",
+	// delivery.Reconcile.
+	"delivery-reconcile",
+	// delivery.consumerLease of each delivery durable (bus.DispatchDeliveryDurable and
+	// bus.DispatchJobDurable): one per durable, each taken by its intake's bind poll. The names
+	// are built at runtime there and written out here, since delivery imports duty and not the
+	// other way about.
+	"delivery-consumer-delivery-events",
+	"delivery-consumer-delivery-jobs",
+}
+
+// LeaseNames is every lease name Exclusive accepts.
+func LeaseNames() []string { return slices.Clone(leaseNames[:]) }
+
+// errUnlistedLease is Exclusive refusing a lease name that is not on leaseNames.
+var errUnlistedLease = errors.New("the lease is not on duty's lease list, which the lease pool is sized from")
 
 // Leases is the slice of a connection pool a lease needs, named here so this package depends on no
 // store: *pgxpool.Pool satisfies it, and the one the server passes is store.Pool.Leases, a pool of
@@ -143,9 +176,25 @@ var errLeaseNotHeld = errors.New("the unlock reports this session did not hold t
 // process killed in the middle of a pass - a task replaced by a deploy, an out-of-memory kill -
 // leaves no lease behind, and the surviving process takes it on its next tick. A lease row in a
 // table would instead have to be waited out.
+//
+// name must be on leaseNames: any other is refused with an ERROR line, and its pass does not run,
+// because the lease pool has no connection counted for it. A connection the pool does not hand
+// over within its acquire bound (store.leaseAcquireBound, which a raw pool reports as a deadline
+// exceeded with ctx still live) is a skip too, and not a queue: every listed lease has a
+// connection and two are spare, so a pool with none free is held by something else, and the next
+// tick tries again. That skip logs a WARN line rather than an ERROR, once per tick it costs.
 func Exclusive(ctx context.Context, leases Leases, name string, period time.Duration, pass func(context.Context)) bool {
+	if !slices.Contains(leaseNames[:], name) {
+		slog.Error("dispatch duty: lease refused", "lease", name, "error", errUnlistedLease)
+		return false
+	}
 	conn, err := leases.Acquire(ctx)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			slog.Warn("dispatch duty: leased pass skipped", "lease", name,
+				"reason", "no connection of the lease pool came free within its acquire bound", "error", err)
+			return false
+		}
 		reportFailure(name, "dispatch duty: take the lease", err)
 		return false
 	}
@@ -249,8 +298,9 @@ func recordPassOn(conn *pgxpool.Conn, name string, boundary time.Time, period ti
 // shutdown. errors.Is already keeps the two apart - a context that reaches its deadline wraps
 // DeadlineExceeded and never Canceled - so the check below logs a deadline rather than swallowing
 // it, and the two are not to be tidied into one condition. The three calls teardownTimeout bounds
-// log their own failures directly rather than through here; what reaches this function is the
-// pass's own context, which carries a deadline whenever its caller gave it one.
+// log their own failures directly rather than through here, and so does the lease pool's acquire
+// bound, which Exclusive reports as a skip; what reaches this function is the pass's own context,
+// which carries a deadline whenever its caller gave it one.
 func reportFailure(name, message string, err error) {
 	if errors.Is(err, context.Canceled) {
 		return
