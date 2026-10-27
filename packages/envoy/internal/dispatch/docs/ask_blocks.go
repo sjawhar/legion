@@ -111,6 +111,15 @@ func (r *settlementReconciliation) repairAsk(node *pmdoc.Node, blockID string, a
 	return true
 }
 
+// changedTree reports whether reconcileAskBlocks changed the tree it reconciled. Every change it
+// makes in place is recorded in repairs - by repair, by repairAsk, and by its own write of a
+// decided ask's wording - and repairAsk records its change in rewrites too. withholdAnswers drops
+// a repair only for an entry of rewrites, which never shrinks, so changedTree is true whenever the
+// tree was touched.
+func (r *settlementReconciliation) changedTree() bool {
+	return len(r.repairs) > 0 || len(r.rewrites) > 0
+}
+
 // repairLive makes the reconciliation's repairs on live, the document as it stands when settlement
 // writes them, which a peer may have edited since settlement read the tree it reconciled, and
 // reports whether any changed it. A repair lands on the first block carrying its id - the holder

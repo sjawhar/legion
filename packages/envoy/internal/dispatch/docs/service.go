@@ -1424,8 +1424,9 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// and a repair that renders the document exactly as it was changed none. A row that claimed
 	// otherwise would sit past every later version's cursor, since no version follows it to move
 	// the cursor, and the first settlement after a renderer change would version a document
-	// nobody had touched.
-	beforeMarkdown, beforeRenderErr := renderTree(read)
+	// nobody had touched. The version reuses this rendering, offsets included, when it is rendered
+	// from this same tree unchanged (below).
+	beforeMarkdown, beforeOffsets, beforeRenderErr := renderTreeWithOffsets(read)
 	if s.afterSettleRead != nil {
 		s.afterSettleRead(room)
 	}
@@ -1591,7 +1592,14 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			s.afterSettleVersionRead(room)
 		}
 	}
-	markdown, offsets, err := renderTreeWithOffsets(versioned)
+	// read is the settlement's private copy of the document (readSettlementTree, liveTree), and
+	// nothing but reconcileAskBlocks changes it in place, which records each change it makes
+	// (changedTree). versioned is another tree once a stamp replaced the read or a write read the
+	// document again. So the version takes the rendering of the read when it is that tree, unchanged.
+	markdown, offsets, err := beforeMarkdown, beforeOffsets, beforeRenderErr
+	if versioned != read || reconciliation.changedTree() {
+		markdown, offsets, err = renderTreeWithOffsets(versioned)
+	}
 	if err != nil {
 		if len(slots) == 0 && errors.Is(err, ErrDocSchema) {
 			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
