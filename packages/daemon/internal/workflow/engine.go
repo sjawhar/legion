@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -984,25 +985,33 @@ func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record
 // report exists to remove.
 //
 // Its caller is admission's promoteHolds, which holds both the issues and the mirror rows already,
-// so every fact, tick, hold release and boot reconcile is a look at every held child. Each tree's
-// gate is read once, not once per child: a wide tree of held children is one read, not one each.
+// so every fact, tick, hold release and boot reconcile is a look at every held child. What the
+// trees of those children are read with is one read each, not one per tree: a project whose trees
+// each hold such a child would otherwise cost a root, a slot list, a record list and a gate per
+// tree on every fact, under the one fact lock (intake.ApplyFact). The roots come from issues,
+// which the caller read; the slots are read once (their own read, since promotion has just
+// written to them); and the gates of the candidate trees come in one read (record.Store.Gates).
 func (e *Engine) StartUnblockedChildren(ctx context.Context, tx pgx.Tx, issues []record.Issue, rows map[string]blockers.Row) error {
-	starts := make(map[string]bool)
+	var candidates []record.Issue
+	trees := map[string]struct{}{}
 	for _, issue := range issues {
 		// Startable: holdable, with nothing it waits on unfinished. blockers.Holds cannot gate
 		// this, since it is nil for an issue that is not holdable too.
 		if !blockers.Holdable(issue) || len(blockers.Unfinished(rows, issue.Key)) > 0 {
 			continue
 		}
-		open, read := starts[issue.Tree]
-		if !read {
-			var err error
-			if open, err = e.treeStartsChildren(ctx, tx, issue.Tree); err != nil {
-				return err
-			}
-			starts[issue.Tree] = open
-		}
-		if !open {
+		candidates = append(candidates, issue)
+		trees[issue.Tree] = struct{}{}
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	starts, err := e.treesStartingChildren(ctx, tx, issues, slices.Sorted(maps.Keys(trees)))
+	if err != nil {
+		return err
+	}
+	for _, issue := range candidates {
+		if !starts[issue.Tree] {
 			continue
 		}
 		if err := e.gateOpened(ctx, tx, issue); err != nil {
@@ -1023,23 +1032,43 @@ func (e *Engine) StartUnblockedChildren(ctx context.Context, tx pgx.Tx, issues [
 	return nil
 }
 
-// treeStartsChildren says whether tree starts a child of its own now: its root is recorded, the
-// tree is live, and its design gate is open — the two conditions enterChild and
-// advanceAdmittedTree between them stand for.
-func (e *Engine) treeStartsChildren(ctx context.Context, tx pgx.Tx, tree string) (bool, error) {
-	root, err := e.store.Issue(ctx, tx, tree)
-	if err != nil || root == nil {
-		return false, err
+// treesStartingChildren says, for each tree of trees, whether it starts a child of its own now:
+// its root is among issues, the tree is live, and its design gate is open — the two conditions
+// enterChild and advanceAdmittedTree between them stand for. issues is the caller's read of the
+// project's records, which holds every root of those trees; a tree whose root it does not hold
+// starts nothing, as one with no record does.
+func (e *Engine) treesStartingChildren(ctx context.Context, tx pgx.Tx, issues []record.Issue, trees []string) (map[string]bool, error) {
+	slots, err := e.store.Slots(ctx, tx)
+	if err != nil {
+		return nil, fmt.Errorf("list admission slots: %w", err)
 	}
-	live, err := record.TreeLive(ctx, e.store, tx, *root)
-	if err != nil || !live {
-		return false, err
+	live := map[string]bool{}
+	for _, slot := range slots {
+		live[slot.Issue] = true
 	}
-	gate, err := e.store.Gate(ctx, tx, tree)
-	if err != nil || gate == nil {
-		return false, err
+	for _, waiting := range record.Waiting(issues, slots) {
+		live[waiting.Key] = true
 	}
-	return classify.DesignGateOpen(*gate), nil
+	lingers := map[string]bool{}
+	for _, issue := range issues {
+		lingers[issue.Key] = issue.Lingers()
+	}
+	open := make([]string, 0, len(trees))
+	for _, tree := range trees {
+		if recorded, ok := lingers[tree]; ok && !recorded && live[tree] {
+			open = append(open, tree)
+		}
+	}
+	gates, err := e.store.Gates(ctx, tx, open)
+	if err != nil {
+		return nil, err
+	}
+	starts := make(map[string]bool, len(trees))
+	for _, tree := range open {
+		gate, held := gates[tree]
+		starts[tree] = held && classify.DesignGateOpen(gate)
+	}
+	return starts, nil
 }
 
 // gateOpened moves an admitted member of a tree whose gate is open into planning, behind a row
