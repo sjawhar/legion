@@ -44,7 +44,19 @@ type ListenerConfig struct {
 	// as it does for ListenerPermissions and DispatchPermissions. The component cannot read the
 	// user's grant, so the operator who knows it opts in; false renders nothing.
 	SubscribeAllTopics bool
+	// NATSReplicas is the copies JetStream keeps of every stream and bucket the listener creates,
+	// ENVOY_NATS_REPLICAS, at most MaxNATSReplicas. 0 leaves the variable unset, and the listener
+	// then keeps one copy (internal/config/config.go).
+	NATSReplicas int
+	// StreamMaxBytes is the byte limit of the notification stream the listener owns
+	// (bus.ConnectOwningStream), ENVOY_STREAM_MAX_BYTES. 0 leaves the variable unset, and the
+	// listener keeps its own default.
+	StreamMaxBytes int
 }
+
+// MaxNATSReplicas is the most copies NATS keeps of a stream, and so the highest NATSReplicas Check
+// accepts.
+const MaxNATSReplicas = 5
 
 // TailnetHostName is the address a client reaches the listener of the tailnet machine hostname by,
 // a tailnet's MagicDNS giving every machine a name under its tailnet's DNS name, and so the entry
@@ -125,7 +137,9 @@ func CheckAllowedHosts(input string, hosts []string) error {
 // that runs as root on the host, where a line break would end the heredoc and run what follows it.
 // Nor may one hold an nkey seed (bus.HoldsSeed), which the environment would carry, in the
 // container's inputs and the watchdog's env file; that refusal names the field and never quotes
-// the value, and comes before any other refusal of that field.
+// the value, and comes before any other refusal of that field. NATSReplicas and StreamMaxBytes
+// are refused below 0, which is no count, and NATSReplicas above MaxNATSReplicas, which NATS
+// refuses when the listener creates its stream.
 func (c ListenerConfig) Check() error {
 	if bus.HoldsSeed(c.MachineID) {
 		return InputErrorf("machineId", "%w", SeedRefusal("machineId"))
@@ -159,6 +173,12 @@ func (c ListenerConfig) Check() error {
 			return InputErrorf("socks5Proxy", "%s %w", bus.SOCKS5ProxyEnvVar, err)
 		}
 	}
+	if c.NATSReplicas < 0 || c.NATSReplicas > MaxNATSReplicas {
+		return InputErrorf("natsReplicas", "natsReplicas %d is outside 0-%d", c.NATSReplicas, MaxNATSReplicas)
+	}
+	if c.StreamMaxBytes < 0 {
+		return InputErrorf("streamMaxBytes", "streamMaxBytes %d is below 0", c.StreamMaxBytes)
+	}
 	return nil
 }
 
@@ -174,9 +194,12 @@ func (c ListenerConfig) Check() error {
 // the URL. ENVOY_ALLOW_REMOTE_NATS=1 is set exactly when a URL names a server bus.LocalNATSURL
 // does not vouch for, since the listener refuses such a server without it. ENVOY_ALLOWED_HOSTS
 // follows the ENVOY_LISTEN_HOST block, and only when the config lists a host, so a listener
-// without one renders what it always rendered. ENVOY_SUBSCRIBE_ALL_TOPICS=1 comes last, and only
-// when SubscribeAllTopics is set, for the same reason: every rendering made before the opt-in
-// existed, the hub's cloud-config and Dispatch's container among them, stays byte for byte.
+// without one renders what it always rendered. ENVOY_SUBSCRIBE_ALL_TOPICS=1 follows the
+// ENVOY_HOST_BRIDGE block, and only when SubscribeAllTopics is set, for the same reason: every
+// rendering made before the opt-in existed, the hub's cloud-config and Dispatch's container among
+// them, stays byte for byte. ENVOY_NATS_REPLICAS then ENVOY_STREAM_MAX_BYTES come last, each only
+// when its field is above 0, for that reason too; ENVOY_NATS_REPLICAS there is where
+// aws/rendering's ListenerEnv writes its own, after Env's variables.
 func (c ListenerConfig) Env(natsURLs []string) ([]string, error) {
 	if err := c.Check(); err != nil {
 		return nil, err
@@ -227,6 +250,12 @@ func (c ListenerConfig) Env(natsURLs []string) ([]string, error) {
 	}
 	if c.SubscribeAllTopics {
 		env = append(env, "ENVOY_SUBSCRIBE_ALL_TOPICS=1")
+	}
+	if c.NATSReplicas > 0 {
+		env = append(env, "ENVOY_NATS_REPLICAS="+strconv.Itoa(c.NATSReplicas))
+	}
+	if c.StreamMaxBytes > 0 {
+		env = append(env, "ENVOY_STREAM_MAX_BYTES="+strconv.Itoa(c.StreamMaxBytes))
 	}
 	return env, nil
 }
