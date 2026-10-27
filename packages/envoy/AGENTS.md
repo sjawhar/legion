@@ -60,7 +60,8 @@ Each item below names a task and where its code is, then notes on it.
   every bus connection's nkey user: `NATS_NKEY_SEED_FILE` (wins) or `NATS_NKEY_SEED`; unusable refuses, neither set connects without one.
   `Connect` and `ConnectOwningStream` read these, `ENVOY_ALLOW_REMOTE_NATS` and `ENVOY_NATS_SOCKS5_PROXY` (a SOCKS5 proxy's `host:port` every connection goes through, reconnects and recovery included, each server's host name handed to it unresolved;
   a value that is not `host:port`, or that holds an nkey seed, refuses without printing it, and a set proxy is remote reach, refused without `ENVOY_ALLOW_REMOTE_NATS=1`) from the process environment, or from the lookup `bus.WithEnvironment` hands them;
-  `Dial` from the lookup its caller passes. envoy-dispatch hands both its settings table
+  `Dial` from the lookup its caller passes.
+  envoy-dispatch hands both its settings table
 
 - **Stream definition**: `internal/bus/stream.go`
 
@@ -488,18 +489,20 @@ A helper that walks the room inside `Server.Apply` outside a transaction, as an 
 
 Every decode of document bytes takes the pending queue `maxUpdateItems`, whose comment (`internal/dispatch/docs/persistence.go`) states the rule and its reason:
 whether the service builds the decoder (`newDocumentCopy`:
-the copy, a write's fork, every decode of the stored history, including `stateThrough`'s fold and read-back, and the store's check of each update it appends) or ygo builds it for the service (`Server.MaxPendingItems`, set in `New`:
-the rooms). ygo's check of each update the service broadcasts (`Server.BroadcastUpdate`) takes no pending queue, since the room has already applied the update (reearth/ygo#268, in the pinned fork).
+the copy, a write's fork, every decode of the stored history, including `stateThrough`'s fold and read-back, and the store's check of each update it appends) or ygo builds it for the service (`Server.MaxPendingItems`, set in `New`: the rooms).
+ygo's check of each update the service broadcasts (`Server.BroadcastUpdate`) takes no pending queue, since the room has already applied the update (reearth/ygo#268, in the pinned fork).
 In a room, which keeps what it parks across updates, the queue is also the most the room's peers can park, about ten times ygo's default.
 `TestTheStoreTakesOneBrowserUpdateItsRoomTook` and `TestASettlementStampsMoreBlocksThanYgosDefaultQueue` are updates a check at ygo's default queue refuses, which fails the room;
 `TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel`, `TestACopyHoldsEveryItemOneClientWroteAheadOfItsParent` and `TestAStoredHistoryLoadsEveryItemOneClientWroteAheadOfItsParent` check that a document whose peer deleted a chain of 200,000 nested blocks, or whose lower-numbered client wrote 150,000 items ahead of a block the server wrote, is copied, read, opened and kept from a rebuild whole.
 
-A room whose last peer leaves, or that only the service's `Server.Apply` touches - an agent's edit, a read outside any transaction - stays resident until it has been idle for a minute (`roomIdleTimeout`), when ygo's idle sweeper evicts it. ygo's default, eager eviction, evicts a room the moment its last peer leaves even while a `Server.Apply` is inside its callback on it (sjawhar/ygo v1.51.3-sami.1, `provider/websocket/peer.go` checks only the peers):
+A room whose last peer leaves, or that only the service's `Server.Apply` touches - an agent's edit, a read outside any transaction - stays resident until it has been idle for a minute (`roomIdleTimeout`), when ygo's idle sweeper evicts it.
+ygo's default, eager eviction, evicts a room the moment its last peer leaves even while a `Server.Apply` is inside its callback on it (sjawhar/ygo v1.51.3-sami.1, `provider/websocket/peer.go` checks only the peers):
 the callback's write then lands on the evicted room and reaches the store only through its retiring persistence worker, while the next access has already loaded the store without it and serves, and takes, the next write on a document missing the first.
 Two such writes, each a diff of the same document, merge into a document neither wrote, and into one holding no block at all once each kept a block the other replaced:
 the healthy-room probe met it as a socket closed with `DOC_SCHEMA`.
 The idle sweeper evicts a room only while no Apply holds it, counts its idle minute from its last peer leaving or the last Apply on it returning, and flushes it before it evicts it (`provider/websocket/idle_sweep.go`), so every write a room the sweeper evicts has taken is durable before another instance of it loads, and a peer that returns within the minute rejoins the warm room.
-`TestAHealthyRoomUnderWritesIsNeverRefused` checks every load of a room against the writes its earlier instances took, and `TestARoomOnlyTheAPITouchesLeavesWithinTheIdleTimeout` that a room only the API touches is evicted and reads back what the API wrote. ygo's `CloseRoom` checks only the peers as well, and the service still calls it to close an issue's rooms (`SetIssueClosed`), for a room with an editor at `Shutdown`, to evict one (`evictRoom`), and to close a room behind the durable head (`roomServer.closeInstance`):
+`TestAHealthyRoomUnderWritesIsNeverRefused` checks every load of a room against the writes its earlier instances took, and `TestARoomOnlyTheAPITouchesLeavesWithinTheIdleTimeout` that a room only the API touches is evicted and reads back what the API wrote.
+ygo's `CloseRoom` checks only the peers as well, and the service still calls it to close an issue's rooms (`SetIssueClosed`), for a room with an editor at `Shutdown`, to evict one (`evictRoom`), and to close a room behind the durable head (`roomServer.closeInstance`):
 a write that commits on a room it has retired reaches the store through ygo's stranded persistence, on the committing goroutine (`provider/websocket/persistence.go`).
 A committed write's publish (`publishLiveUpdate`) is already durable and suppresses that append;
 the room's own update observer finishes its suppression slot before ygo's persistence observer runs (`onLoadDocument`), so the stranded append never waits on the publish it runs inside, and the publish, its request and the document's writer slot are released (`TestAPublishSurvivesItsRoomsWorkerRetiringUnderIt`, `TestAWriteSurvivesItsIssueClosingAsItPublishes`).
@@ -826,7 +829,8 @@ the refusal on every guarded method, concurrent reads each holding one connectio
 **Every pool's size is set in code.**
 `store.Open` fixes `MaxConns` at `store.sharedPoolSize` (64, from 16 since 2026-10-27), so neither the task's CPU allotment nor the DSN another repository's URL builder writes decides it, and a `DATABASE_URL` that carries `pool_max_conns` is **refused at open** rather than silently overridden
 — the parameter is read from `pgx.ParseConfig`'s `RuntimeParams`, because `pgxpool.ParseConfig` is the layer that folds it into `MaxConns` and deletes it, so pgxpool's own parse cannot answer the question and a raw-string scan answers a different one.
-The other pool parameters are not refused, because the shared pool keeps whatever minimums the connection string sets. pgx's default, `max(4, NumCPU)`, is four on production's one Fargate task at `cpu="512"`, and four is a connection per blocked writer:
+The other pool parameters are not refused, because the shared pool keeps whatever minimums the connection string sets.
+pgx's default, `max(4, NumCPU)`, is four on production's one Fargate task at `cpu="512"`, and four is a connection per blocked writer:
 with four writers parked on one issue's row lock, a read of an unrelated issue waits for as long as the lock is held.
 Sixteen ran out too: under heavy agent load the API held all sixteen and every other caller, the events outbox included, waited behind them.
 The database has hundreds of connections spare, so 64 is deliberate headroom.
@@ -3000,9 +3004,11 @@ a person's is an account named by a plain email the broker accepts as a person o
 `policy.ValidPersonOwner`), never a `.gserviceaccount.com` one or a workload or workforce identity federation login, which gcloud names by a `principal://` identifier;
 it takes the one `CLOUDSDK_CORE_ACCOUNT` names when that is one of them, else the only one, refusing none (naming `gcloud auth login`) or several (naming each, and `CLOUDSDK_CORE_ACCOUNT`).
 Its tokens are `gcloudTokenArgs`, `gcloud auth print-access-token --format=value[private](token) --impersonate-service-account= --access-token-file= --credential-file-override= <account>`, behind `oauth2.ReuseTokenSource`, each taken to last `gcloudTokenLife` (5 minutes:
-gcloud prints no expiry, and refreshes a token within 300 s of its expiry before printing it). gcloud prints a command's output through its logger, whose file handler keeps a copy in `logs/` under gcloud's configuration directory, so the `private` format attribute writes the token to the console stream alone, and every gcloud run has `CLOUDSDK_CORE_DISABLE_FILE_LOGGING=1` and `CLOUDSDK_CORE_DISABLE_PROMPTS=1`.
+gcloud prints no expiry, and refreshes a token within 300 s of its expiry before printing it).
+gcloud prints a command's output through its logger, whose file handler keeps a copy in `logs/` under gcloud's configuration directory, so the `private` format attribute writes the token to the console stream alone, and every gcloud run has `CLOUDSDK_CORE_DISABLE_FILE_LOGGING=1` and `CLOUDSDK_CORE_DISABLE_PROMPTS=1`.
 The empty flags clear impersonation, an access token file and a credential file override, whichever of the environment and the configuration file sets them (a flag outranks both, and an empty value turns the property off), and `gcloudEnv` drops `gcloudIdentityOverrides` (`CLOUDSDK_AUTH_ACCESS_TOKEN`, which gcloud reads directly, and the three properties' variables);
-a write still refuses a token whose userinfo `email` is not the chosen account, compared case-insensitively. gcloud reads `/dev/null`, never the CLI's standard input (a secret's value), and no error carries its token.
+a write still refuses a token whose userinfo `email` is not the chosen account, compared case-insensitively.
+gcloud reads `/dev/null`, never the CLI's standard input (a secret's value), and no error carries its token.
 A refusal names what it found (`gcpCredsFound`:
 the credentials' `type` or the metadata server, never a file path) and never advises `gcloud auth application-default login`, which replaces a machine's own ADC for every program that uses it.
 `--owner me` is the Google userinfo endpoint's `email` for the sign-in the write runs under, lowercased.

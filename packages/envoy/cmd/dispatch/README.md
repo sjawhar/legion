@@ -311,7 +311,7 @@ Do not use it on an HTTPS deployment.
 
 `DISPATCH_DEV_SIGNIN=1` adds a second way to get the cookie on a local instance:
 `GET /auth/_dev/signin?login=<email>` records the lowercased person and issues the session cookie an issuer sign-in does, with no issuer exchange and no group check.
-The route serves only a loopback peer whose request carries no forwarding header, logs every mint at WARN, and boots only behind the fence the configuration table lists.
+The route serves only a loopback peer whose request carries no forwarding header, logs every mint at WARN, and boots only behind the fence its Required configuration item lists.
 A request that reaches the process looking local (`ssh -L`, `socat`, a proxy that rewrites `Host` and adds nothing) is indistinguishable from one that is.
 The per-process key bounds the cookie, not every credential a dev session can write:
 a `dsp_` token it mints, and the session and token rows its sign-out changes, live in the database, and every server that reads that database acts on them.
