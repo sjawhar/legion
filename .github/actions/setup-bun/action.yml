@@ -10,10 +10,10 @@ description: >-
   in 60 runs against 2 in 60 on the pinned version, same tree, four cores). Raising Bun means
   editing .bun-version and the two Dockerfile ARG BUN_VERSION defaults together.
 
-  setup-bun caches the Bun binary, and only a run on main saves that cache: a pull request's
-  entry is readable by no other pull request, and those entries pushed main's own out.
-  setup-bun's only cache input, no-cache, also skips the restore, so a run off main downloads
-  Bun (about 34 MB) instead of restoring it.
+  setup-bun caches the Bun binary and saves only when no entry holds its Bun (a pull request
+  that changes .bun-version, or after main's entry is evicted), and that entry is readable by no
+  other pull request, so only a run on main saves. setup-bun's only cache input, no-cache, also
+  skips the restore, so a run off main downloads Bun (about 34 MB) instead of restoring it.
 
 runs:
   using: composite

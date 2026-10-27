@@ -607,8 +607,9 @@ jobs:
       # The Go module and build caches are restored on every run and saved at the end of the job
       # only by a run on main: an entry a pull request writes is readable by no other pull request,
       # and those entries pushed main's own out. setup-go's own cache has no restore-only input, so
-      # it is off. A changed go.sum restores main's newest entry for this Go by prefix.
-      # envoy-infra-go and envoy-e2e-local do the same.
+      # it is off. Only a run off main falls back, when go.sum changed, to main's newest entry for
+      # this Go by prefix; a run on main restores by the exact key only, so the entry it saves holds
+      # no modules an older go.sum needed.
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: go_cache
         with:
@@ -616,7 +617,7 @@ jobs:
             ~/go/pkg/mod
             ~/.cache/go-build
           key: go-daemon-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-${{ hashFiles('packages/daemon/go.sum') }}
-          restore-keys: go-daemon-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-daemon-{0}-{1}-', runner.os, steps.setup_go.outputs.go-version) || '' }}
       - run: bun install --frozen-lockfile
       - name: Build contracts for pi-legion
         run: bun run build
@@ -940,7 +941,7 @@ jobs:
             ~/go/pkg/mod
             ~/.cache/go-build
           key: go-envoy-infra-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-${{ hashFiles('packages/envoy/infra/go.sum') }}
-          restore-keys: go-envoy-infra-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-infra-{0}-{1}-', runner.os, steps.setup_go.outputs.go-version) || '' }}
       - name: Pull the NATS and Postgres test container images
         uses: ./.github/actions/pull-test-images
         with:
@@ -1284,7 +1285,7 @@ jobs:
             ~/go/pkg/mod
             ~/.cache/go-build
           key: go-envoy-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-${{ hashFiles('packages/envoy/go.sum') }}
-          restore-keys: go-envoy-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-{1}-', runner.os, steps.setup_go.outputs.go-version) || '' }}
       # scripts/e2e-local.test.sh drives the driver's refusals, which the acceptance run below
       # never reaches: an unknown option, --help, and a NATS already holding the port, where the
       # driver must refuse rather than run the acceptance against a server it did not start. It

@@ -85,9 +85,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: .github/scripts/check-pr-text.sh
 
-      # No Go cache here: gofmt needs none. The typecheck and test jobs share the daemon's Go
-      # cache key (family `daemon`), which their own restore and save steps hold, and only a run
-      # on main saves it.
+      # No Go cache here: gofmt needs none.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/daemon/go.mod
@@ -138,9 +136,11 @@ jobs:
               - '.github/workflows/pr-and-main.yaml'
 
       # The notices step below builds go-licenses and loads every release binary's modules, kept
-      # under a key of their own. Every run that runs the step restores them, by the exact key or
-      # else main's newest entry by prefix; only a run on main saves them, after the step, because
-      # an entry a pull request writes is readable by no other pull request.
+      # under a key of their own. Every run that runs the step restores them by the exact key, and
+      # only a run off main falls back to main's newest entry by prefix: a run on main restores by
+      # the exact key only, so the entry it saves holds no modules an older go.sum needed. Only a
+      # run on main saves them, after the step, because an entry a pull request writes is readable
+      # by no other pull request.
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: notices_cache
         if: github.event_name != 'pull_request' || steps.notices_inputs.outputs.go_notices == 'true'
@@ -150,7 +150,7 @@ jobs:
             ~/.cache/go-build
             ~/.cache/legion
           key: go-notices-${{ runner.os }}-${{ hashFiles('go.work.sum', 'packages/daemon/go.sum', 'packages/envoy/go.sum', 'packages/envoy/infra/go.sum', 'scripts/go-third-party-notices.sh') }}
-          restore-keys: go-notices-${{ runner.os }}-
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-notices-{0}-', runner.os) || '' }}
 
       # Every Go archive a release ships carries THIRD_PARTY_NOTICES, written at build time with
       # the build's own GOOS, GOARCH and CGO_ENABLED (release.yaml's legion_build job and
@@ -225,7 +225,9 @@ jobs:
       # The Go module and build caches are restored on every run and saved at the end of the job
       # only by a run on main: an entry a pull request writes is readable by no other pull request,
       # and those entries pushed main's own out. setup-go's own cache has no restore-only input, so
-      # it is off. A changed go.sum restores main's newest entry for this Go by prefix.
+      # it is off. Only a run off main falls back, when go.sum changed, to main's newest entry for
+      # this Go by prefix; a run on main restores by the exact key only, so the entry it saves holds
+      # no modules an older go.sum needed.
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: go_cache
         with:
@@ -233,7 +235,7 @@ jobs:
             ~/go/pkg/mod
             ~/.cache/go-build
           key: go-daemon-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-${{ hashFiles('packages/daemon/go.sum') }}
-          restore-keys: go-daemon-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-daemon-{0}-{1}-', runner.os, steps.setup_go.outputs.go-version) || '' }}
 
       # With the e2e tag, vet also compiles the live proofs behind it (the Stage 4a harness,
       # sandbox/live*_test.go), which run on the devbox against a real cluster.
@@ -366,7 +368,7 @@ jobs:
             ~/go/pkg/mod
             ~/.cache/go-build
           key: go-daemon-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-${{ hashFiles('packages/daemon/go.sum') }}
-          restore-keys: go-daemon-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-daemon-{0}-{1}-', runner.os, steps.setup_go.outputs.go-version) || '' }}
 
       # The tmux runtime's tests drive a real tmux server and skip without one, and the daemon
       # supervises under tmux and refuses to start without it.

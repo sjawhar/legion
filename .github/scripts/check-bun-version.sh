@@ -371,8 +371,8 @@ else:
             f"{SETUP_ACTION}:{line}: the wrapper must pass bun-version-file: {PIN_FILE}, not "
             f"{one_line(options.get('bun-version-file'))}"
         )
-    if "no-cache" in options and options["no-cache"] != NO_CACHE_OFF_MAIN:
-        no_cache = options["no-cache"]
+    no_cache = options.get("no-cache", NO_CACHE_OFF_MAIN)
+    if no_cache != NO_CACHE_OFF_MAIN:
         # YAML spells a boolean in lower case; Python's str() would not.
         shown = str(no_cache).lower() if isinstance(no_cache, bool) else one_line(no_cache)
         problems.append(

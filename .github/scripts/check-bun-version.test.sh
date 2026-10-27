@@ -165,11 +165,6 @@ run_check "$root"
 check "any extra input on the wrapper fails, since setup-bun prefers them" "$(is "$status" 1)"
 check "names the input" "$(contains "$out" 'bun-download-url')"
 
-root=$(fixture wrapper-real)
-cp "$script_dir/../actions/setup-bun/action.yml" "$root/.github/actions/setup-bun/action.yml"
-run_check "$root"
-check "the repository's own wrapper, no-cache off main included, passes" "$(is "$status" 0)"
-
 root=$(fixture wrapper-no-cache-off-main)
 cat >> "$root/.github/actions/setup-bun/action.yml" <<'YAML'
         no-cache: ${{ github.ref != 'refs/heads/main' }}

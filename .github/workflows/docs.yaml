@@ -69,7 +69,9 @@ jobs:
       # The Go module and build caches are restored on every run and saved at the end of the job
       # only by a run on main: an entry a pull request writes is readable by no other pull request,
       # and those entries pushed main's own out. setup-go's own cache has no restore-only input, so
-      # it is off. A changed go.sum restores main's newest entry for this Go by prefix.
+      # it is off. Only a run off main falls back, when go.sum changed, to main's newest entry for
+      # this Go by prefix; a run on main restores by the exact key only, so the entry it saves holds
+      # no modules an older go.sum needed.
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: go_cache
         with:
@@ -77,7 +79,7 @@ jobs:
             ~/go/pkg/mod
             ~/.cache/go-build
           key: go-docs-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-${{ hashFiles('packages/daemon/go.sum', 'packages/envoy/go.sum') }}
-          restore-keys: go-docs-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-docs-{0}-{1}-', runner.os, steps.setup_go.outputs.go-version) || '' }}
       - run: bun install --frozen-lockfile
       - name: Lint the docs site
         run: bun run lint

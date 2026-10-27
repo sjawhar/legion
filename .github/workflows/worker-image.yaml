@@ -189,10 +189,10 @@ jobs:
           push: true
           # The layer cache is read by every build and written only by a build on main
           # (release.yaml calls this workflow on main pushes, so github.ref there is
-          # refs/heads/main): a pull request's entries were readable by no other pull request. Off
-          # main cache-to is empty, which passes no --cache-to at all: BuildKit's gha exporter fails
-          # a build that cannot write, so the flag is left out rather than kept and refused. The
-          # scope is the worker image's own, so the Envoy listener's build
+          # refs/heads/main): an entry a pull request writes is readable by no other pull request.
+          # Off main cache-to is empty, which passes no --cache-to at all: BuildKit's gha exporter
+          # fails a build that cannot write, so the flag is left out rather than kept and refused.
+          # The scope is the worker image's own, so the Envoy listener's build
           # (release-envoy-listener.yaml, the default scope) does not replace its index.
           cache-from: type=gha,scope=worker-image
           cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max,scope=worker-image' || '' }}
