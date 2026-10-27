@@ -270,6 +270,127 @@ else
   fi
 fi
 
+# The checks the refusal prints between the restore and `docker rm -v` are what a person reads to
+# decide the move worked before that removal deletes the only other copy of the data. A dump that
+# fails (the printed redirect then leaves an empty file) restores nothing and psql reports no error,
+# so those checks must print something different after an empty restore than after a whole one;
+# otherwise they pass a move that lost every row. The printed lines are replayed as printed on two
+# real PostgreSQL clusters, a fake docker mapping `dispatch-pg` to the old cluster until the rename
+# and to the new one, which holds the database POSTGRES_DB names, from `docker run` on. Skipped,
+# saying so, where no PostgreSQL server binaries are found (GitHub's ubuntu runners ship them under
+# /usr/lib/postgresql).
+pg_bindir=""
+if command -v initdb >/dev/null 2>&1; then
+  pg_bindir="$(dirname "$(command -v initdb)")"
+else
+  for candidate in $(ls -d /usr/lib/postgresql/*/bin 2>/dev/null | sort -V -r); do
+    if [ -x "${candidate}/initdb" ]; then
+      pg_bindir="$candidate"
+      break
+    fi
+  done
+fi
+if [ -z "$pg_bindir" ]; then
+  printf 'SKIP: an empty dump is told apart from a whole one before the old container is removed (no PostgreSQL server binaries)\n'
+else
+  mkdir -p "${temporary_dir}/bin-pg"
+  cat >"${temporary_dir}/bin-pg/docker" <<'EOF'
+#!/usr/bin/env bash
+set -u
+rig="${RIG:?}"
+bin="${PG_BINDIR:?}"
+cluster_of() { cat "${rig}/names/$1" 2>/dev/null; }
+start_cluster() {
+  "${bin}/pg_ctl" -D "${rig}/$1/data" -l "${rig}/$1/log" -w -o "-k ${rig}/$1 -c listen_addresses=" start >/dev/null
+}
+case "$1" in
+  exec)
+    shift
+    stdin=false
+    if [ "$1" = -i ]; then stdin=true; shift; fi
+    cluster="$(cluster_of "$1")" || { echo "Error: No such container: $1" >&2; exit 1; }
+    shift
+    command="$1"
+    shift
+    args=()
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = -h ]; then shift 2; continue; fi
+      args+=("$1")
+      shift
+    done
+    if [ "$command" = pg_dumpall ] && [ "${FAKE_DUMP_FAILS:-false}" = true ]; then
+      echo "pg_dumpall: error: connection to server failed" >&2
+      exit 1
+    fi
+    if "$stdin"; then
+      exec "${bin}/${command}" -h "${rig}/${cluster}" "${args[@]}"
+    fi
+    exec "${bin}/${command}" -h "${rig}/${cluster}" "${args[@]}" </dev/null
+    ;;
+  stop) "${bin}/pg_ctl" -D "${rig}/$(cluster_of "$2")/data" -m fast -w stop >/dev/null && echo "$2" ;;
+  rename) mv "${rig}/names/$2" "${rig}/names/$3" ;;
+  run)
+    name=""
+    database=""
+    previous=""
+    for arg in "$@"; do
+      if [ "$previous" = --name ]; then name="$arg"; fi
+      case "$arg" in POSTGRES_DB=*) database="${arg#POSTGRES_DB=}" ;; esac
+      previous="$arg"
+    done
+    "${bin}/initdb" -D "${rig}/new/data" -U postgres -A trust -E UTF8 --locale=C >/dev/null
+    start_cluster new
+    "${bin}/psql" -h "${rig}/new" -U postgres -qc "create database ${database}"
+    echo new >"${rig}/names/${name}"
+    echo fake-container-id
+    ;;
+  start) start_cluster "$(cluster_of "$2")" && echo "$2" ;;
+  *) echo "fake docker: unexpected command: $*" >&2; exit 2 ;;
+esac
+EOF
+  chmod +x "${temporary_dir}/bin-pg/docker"
+
+  # Builds the old cluster (a dispatch database holding 25 rows), prints the refusal, replays its
+  # lines up to the old container's removal and prints what the lines after the restore printed.
+  replay_move() {
+    local rig="${temporary_dir}/move-$1" line after_restore=false
+    mkdir -p "${rig}/old" "${rig}/new" "${rig}/names"
+    "${pg_bindir}/initdb" -D "${rig}/old/data" -U postgres -A trust -E UTF8 --locale=C >/dev/null
+    "${pg_bindir}/pg_ctl" -D "${rig}/old/data" -l "${rig}/old/log" -w -o "-k ${rig}/old -c listen_addresses=" start >/dev/null
+    "${pg_bindir}/psql" -h "${rig}/old" -U postgres -qc "create database dispatch"
+    "${pg_bindir}/psql" -h "${rig}/old" -U postgres -d dispatch -qc \
+      "create table issues (key text primary key); insert into issues select 'DEV-' || g from generate_series(1, 25) g"
+    echo old >"${rig}/names/dispatch-pg"
+    run_case TMPDIR="$rig" FAKE_IMAGE_ID="$old_pin_id" FAKE_CONFIG_IMAGE="$old_pin"
+    while IFS= read -r line; do
+      case "$line" in "docker rm -v "*) break ;; esac
+      output="$(env PATH="${temporary_dir}/bin-pg:${PATH}" RIG="$rig" PG_BINDIR="$pg_bindir" \
+        FAKE_DUMP_FAILS="$2" bash -c "$line" 2>&1 </dev/null || true)"
+      if "$after_restore"; then printf '%s\n' "$output"; fi
+      case "$line" in *"psql -h 127.0.0.1 -U postgres -q -f -"*) after_restore=true ;; esac
+    done < <(sed -n 's/^dev-postgres:   //p' "$err")
+    "${pg_bindir}/psql" -h "${rig}/new" -U postgres -d dispatch -Atc 'select count(*) from issues' \
+      >"${temporary_dir}/move-$1.rows" 2>/dev/null || echo none >"${temporary_dir}/move-$1.rows"
+    for cluster in old new; do
+      "${pg_bindir}/pg_ctl" -D "${rig}/${cluster}/data" -m immediate -w stop >/dev/null 2>&1 || true
+    done
+  }
+  checks_whole="$(replay_move whole false)"
+  rows_whole="$(cat "${temporary_dir}/move-whole.rows")"
+  checks_empty="$(replay_move empty true)"
+  rows_empty="$(cat "${temporary_dir}/move-empty.rows")"
+  if [ "$rows_whole" != 25 ] || [ "$rows_empty" = 25 ]; then
+    printf 'FAIL: the move replay did not restore 25 rows from a whole dump and none from an empty one (whole: %s, empty: %s)\n' "$rows_whole" "$rows_empty"
+    failures=$((failures + 1))
+  elif [ "$checks_whole" = "$checks_empty" ]; then
+    printf 'FAIL: the checks printed before `docker rm -v` print the same after a restore of an empty dump as after a whole one, so a move that lost every row passes them\n'
+    printf '%s\n' "$checks_empty" | sed 's/^/  /'
+    failures=$((failures + 1))
+  else
+    printf 'PASS: the checks printed before `docker rm -v` tell a restore of an empty dump from a whole one\n'
+  fi
+fi
+
 if [ "$failures" -ne 0 ]; then
   printf '%d case(s) failed\n' "$failures"
   exit 1
