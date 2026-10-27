@@ -25,20 +25,27 @@ func TestBodiesAreCappedOnEveryWriteRoute(t *testing.T) {
 	for name, route := range map[string]struct {
 		accepted int
 		send     func(body string) *httptest.ResponseRecorder
+		// settle waits out whatever the accepted write left running, so the test's teardown
+		// never cuts it off; nil when the write finished inside its request.
+		settle func(t *testing.T, accepted *httptest.ResponseRecorder)
 	}{
-		"comment create": {http.StatusCreated, func(body string) *httptest.ResponseRecorder {
+		"comment create": {accepted: http.StatusCreated, send: func(body string) *httptest.ResponseRecorder {
 			return dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{"body": body}, "alice")
 		}},
-		"comment edit": {http.StatusOK, func(body string) *httptest.ResponseRecorder {
+		"comment edit": {accepted: http.StatusOK, send: func(body string) *httptest.ResponseRecorder {
 			return dispatchRequest(t, handler, http.MethodPatch, "/api/v1/comments/"+edited.ID, map[string]any{"body": body}, "alice")
 		}},
-		"message create": {http.StatusCreated, func(body string) *httptest.ResponseRecorder {
+		"message create": {accepted: http.StatusCreated, send: func(body string) *httptest.ResponseRecorder {
 			return dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{"body": body}, "alice")
 		}},
-		"broadcast create": {http.StatusCreated, func(body string) *httptest.ResponseRecorder {
+		"broadcast create": {accepted: http.StatusCreated, send: func(body string) *httptest.ResponseRecorder {
 			return postBroadcast(t, handler, map[string]any{
 				"body": body, "delivery": "btw", "session_ids": []string{"planner"},
 			}, "alice")
+		}, settle: func(t *testing.T, accepted *httptest.ResponseRecorder) {
+			// The send delivers behind its 201; a delivery still writing its body to the fake
+			// listener when the listener closes fails the test.
+			awaitBroadcastDeliveries(t, handler, decodeBody[broadcastResponse](t, accepted).ID)
 		}},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -51,6 +58,9 @@ func TestBodiesAreCappedOnEveryWriteRoute(t *testing.T) {
 			}](t, accepted).Body
 			if written != atCap {
 				t.Fatalf("the body written back is %d units, want the %d sent", len16(written), contracts.DispatchBodyMax)
+			}
+			if route.settle != nil {
+				route.settle(t, accepted)
 			}
 			for caseName, test := range overCap {
 				t.Run(caseName, func(t *testing.T) {

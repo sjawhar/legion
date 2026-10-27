@@ -564,6 +564,9 @@ func TestBroadcastRoutesRefuseBearerCallers(t *testing.T) {
 	created := decodeBody[broadcastResponse](t, postBroadcast(t, handler, map[string]any{
 		"body": "Status?", "delivery": "btw", "session_ids": []string{"planner"},
 	}, "alice"))
+	// The send delivers behind its 201: settled before the test ends, it is never cut off
+	// mid-send by the listener closing.
+	awaitBroadcastDeliveries(t, handler, created.ID)
 
 	for name, request := range map[string]struct {
 		method string
@@ -641,11 +644,13 @@ func TestBroadcastRejectsMalformedInput(t *testing.T) {
 			}
 		}
 	})
-	if accepted := postBroadcast(t, handler, map[string]any{
+	accepted := postBroadcast(t, handler, map[string]any{
 		"body": "hi", "delivery": "btw", "session_ids": []string{"planner"}, "idempotency_key": "A1._:-z",
-	}, "alice"); accepted.Code != http.StatusCreated {
+	}, "alice")
+	if accepted.Code != http.StatusCreated {
 		t.Fatalf("a key using every allowed class: status=%d body=%s", accepted.Code, accepted.Body.String())
 	}
+	awaitBroadcastDeliveries(t, handler, decodeBody[broadcastResponse](t, accepted).ID)
 
 	missing := dispatchRequest(t, handler, http.MethodGet, "/api/v1/broadcasts/5a660655-04ad-4ce0-8a9b-93dd03c412b7", nil, "alice")
 	if missing.Code != http.StatusNotFound || !strings.Contains(missing.Body.String(), `"code":"BROADCAST_NOT_FOUND"`) {

@@ -199,7 +199,8 @@ func TestBroadcastKeysAreScopedToTheSender(t *testing.T) {
 	if bobs.Code != http.StatusCreated {
 		t.Fatalf("bob's send under alice's key: status=%d body=%s, want a broadcast of his own", bobs.Code, bobs.Body.String())
 	}
-	if got := decodeBody[broadcastResponse](t, bobs).ID; got == original {
+	theirs := decodeBody[broadcastResponse](t, bobs).ID
+	if theirs == original {
 		t.Fatalf("bob's send answered alice's broadcast %s", original)
 	}
 	again := send("Alice")
@@ -209,6 +210,10 @@ func TestBroadcastKeysAreScopedToTheSender(t *testing.T) {
 	if got := decodeBody[broadcastResponse](t, again).ID; got != original {
 		t.Fatalf("Alice's repeat answered %s, want alice's broadcast %s", got, original)
 	}
+	// Both sends deliver behind their 201s: settled before the test ends, neither is cut off
+	// mid-send by the listener closing.
+	awaitBroadcastDeliveries(t, handler, original)
+	awaitBroadcastDeliveries(t, handler, theirs)
 }
 
 // A retry racing its original: two requests carrying one key, both past the replay check before
