@@ -1608,7 +1608,7 @@ func TestApplyOperationRefusesCodeWithAPipeAfterABackslashInATableCell(t *testin
 func TestSettlementVersionsCodeWithAPipeAfterABackslashInATableCellWithThePipeAfterTheCode(t *testing.T) {
 	for _, test := range []struct{ name, code, row string }{
 		{"one backslash", "a\\|b", "| run | `a\\`\\|`b` |"},
-		{"the production row's code", "git log --oneline X..origin/main \\| wc -l", "| run | `git log --oneline X..origin/main \\`\\|` wc -l` |"},
+		{"a grep alternation's code", "grep -n 'one\\|two' notes.txt", "| run | `grep -n 'one\\`\\|`two' notes.txt` |"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			service, artifactID := newTestService(t)
