@@ -435,3 +435,44 @@ test("read-only draws a directive inside a mark span inside a refused directive 
     ["paragraph", ":::"],
   ]);
 });
+
+test("read-only reads a kept typed block's server attributes at their schema defaults", async () => {
+  const doc = await readOnlyServerParse(
+    ':::ask{#a1 urgency="high" state="answered" answered_by="sami" ' +
+      'answered_at="2026-01-01T00:00:00Z" selected=\'["A"]\' answer="done" invalid="x" ' +
+      'copied_from="ask-9" copied_from_document="dispatch://CORE-1"}\nWhich?\n\n- A: a\n:::\n'
+  );
+  expect(blocks(doc).map(([type]) => type)).toEqual(["ask"]);
+  const ask = doc.child(0);
+  expect(ask.attrs.blockId).toBe("a1");
+  expect(ask.attrs.urgency).toBe("high");
+  expect(ask.attrs.state).toBe("open");
+  const server = Object.entries(
+    serverBlockSchema.types.find((type) => type.name === "ask")?.attributes ?? {}
+  ).filter(([, attribute]) => attribute.server);
+  // The source above forges every server attribute the schema declares.
+  expect(server.map(([name]) => name)).toEqual([
+    "state",
+    "answered_by",
+    "answered_at",
+    "selected",
+    "answer",
+    "invalid",
+    "copied_from",
+    "copied_from_document",
+  ]);
+  for (const [name, attribute] of server) {
+    expect([name, ask.attrs[name]]).toEqual([name, attribute.default]);
+  }
+});
+
+test("read-only still draws a typed block whose forged server attribute the schema refuses", async () => {
+  for (const opening of [':::ask{state="bogus"}', ":::ask{selected='nope'}"]) {
+    const doc = await readOnlyServerParse(`${opening}\nWhich?\n:::\n`);
+    expect(blocks(doc)).toEqual([
+      ["paragraph", opening],
+      ["paragraph", "Which?"],
+      ["paragraph", ":::"],
+    ]);
+  }
+});
