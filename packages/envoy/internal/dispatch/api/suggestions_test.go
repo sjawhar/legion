@@ -24,14 +24,20 @@ type testSuggestionItem struct {
 	ID         string              `json:"id"`
 	Href       string              `json:"href"`
 	Owner      testSuggestionOwner `json:"owner"`
+	Ask        *model.SearchAsk    `json:"ask"`
 	AnsweredBy string              `json:"answered_by"`
 	AnsweredAt *string             `json:"answered_at"`
 }
 
 type testSuggestions struct {
-	Related  []testSuggestionItem `json:"related"`
-	Decision *testSuggestionItem  `json:"decision"`
-	Missing  string               `json:"missing"`
+	Outcome      string                     `json:"outcome"`
+	Search       string                     `json:"search"`
+	SearchNote   string                     `json:"search_note"`
+	SearchQuery  string                     `json:"search_query"`
+	Related      []testSuggestionItem       `json:"related"`
+	Decision     *testSuggestionItem        `json:"decision"`
+	Missing      string                     `json:"missing"`
+	TitleMatches []model.DuplicateCandidate `json:"title_matches"`
 }
 
 type testAdvisedSuggestions struct {
@@ -92,20 +98,25 @@ func TestCreateIssueSuggestsSimilarOpenIssue(t *testing.T) {
 		t.Fatalf("advice.suggestions missing from %+v", created)
 	}
 	suggestions := created.Advice.Suggestions
-	found := false
+	if suggestions.Outcome != "found" {
+		t.Fatalf("suggestions outcome = %q, want found: %+v", suggestions.Outcome, suggestions)
+	}
+	// One item per owner: the existing issue appears once, through its title or its spec,
+	// whichever ranked better.
+	found := 0
 	for _, item := range suggestions.Related {
-		if item.Kind == "issue" && item.ID == existingIssue.Key {
-			found = true
-			if item.Owner.Status != "triage" || item.Owner.Key != existingIssue.Key || item.Href == "" {
+		if item.Owner.Kind == "issue" && item.Owner.Key == existingIssue.Key {
+			found++
+			if item.Owner.Status != "triage" || item.Href == "" {
 				t.Fatalf("suggested item = %+v, want status, key and href for %s", item, existingIssue.Key)
 			}
 		}
-		if item.ID == created.Key {
+		if item.ID == created.Key || item.Owner.Key == created.Key {
 			t.Fatalf("suggestions include the issue that was just filed: %+v", suggestions.Related)
 		}
 	}
-	if !found {
-		t.Fatalf("related suggestions = %+v, want %s among them", suggestions.Related, existingIssue.Key)
+	if found != 1 {
+		t.Fatalf("related suggestions = %+v, want %s among them once", suggestions.Related, existingIssue.Key)
 	}
 }
 
@@ -165,12 +176,11 @@ func TestCreateAskSuggestsAnsweredPastDecision(t *testing.T) {
 	}
 }
 
-// TestComputeSuggestionsReportsMissingWhenSearchTimesOut is LEGION-550's latency acceptance
-// line: the write succeeds and returns as fast as today when search is slow or down, and the
-// suggestions say they are missing and why. computeSuggestions runs after the write already
-// committed, so this calls it directly with an already-expired context rather than contriving a
-// genuinely slow query.
-func TestComputeSuggestionsReportsMissingWhenSearchTimesOut(t *testing.T) {
+// TestRelatedCheckReportsNotMadeWhenItsContextIsDone: the write succeeds whatever its check does,
+// and a check that could not search says it was not made and why. The check runs after the
+// write already committed, so this calls it directly with an already-expired context rather than
+// contriving a genuinely slow query.
+func TestRelatedCheckReportsNotMadeWhenItsContextIsDone(t *testing.T) {
 	_, _, deps := newTestServer(t, testServerOptions{})
 	srv := directServer(deps)
 
@@ -178,10 +188,12 @@ func TestComputeSuggestionsReportsMissingWhenSearchTimesOut(t *testing.T) {
 	defer cancel()
 	<-expired.Done()
 
-	suggestions := srv.computeSuggestions(expired, "ANY", "a title that would otherwise search",
-		suggestionSource{kind: "issue", issueKey: "ANY-1"})
-	if suggestions == nil || suggestions.Missing == "" {
-		t.Fatalf("suggestions = %+v, want Missing set when the search context is already done", suggestions)
+	suggestions := srv.relatedCheck(expired, relatedInput{
+		project: "ANY", text: "a title that would otherwise search",
+		source: suggestionSource{kind: "issue", issueKey: "ANY-1"},
+	})
+	if suggestions.Outcome != "not_made" || suggestions.Missing != "the search behind it did not answer within 5s" || suggestions.Search != "" {
+		t.Fatalf("suggestions = %+v, want not_made with the timeout as missing and no search when the context is already done", suggestions)
 	}
 	if len(suggestions.Related) != 0 || suggestions.Decision != nil {
 		t.Fatalf("suggestions = %+v, want nothing related or decided when search could not run", suggestions)
@@ -198,6 +210,9 @@ func TestComputeSuggestionsReportsMissingWhenSearchTimesOut(t *testing.T) {
 	}
 	if string(decoded["related"]) != "[]" {
 		t.Fatalf(`suggestions JSON related = %s, want "[]" not "null"`, decoded["related"])
+	}
+	if string(decoded["outcome"]) != `"not_made"` {
+		t.Fatalf(`suggestions JSON outcome = %s, want "not_made"`, decoded["outcome"])
 	}
 }
 
@@ -253,20 +268,21 @@ func TestSuggestionsDecisionIsNotReorderedByOwnerStatus(t *testing.T) {
 }
 
 // lockedSuggestionAllowance bounds only the time from the call's start to its query queuing
-// behind the test's lock: the project lookup's first statement, or one table-free numnode round
-// trip before the search. The worst whole filing on record under load was 737 ms (INFRA-56).
+// behind the test's lock: the project lookup's first statement, or the term picker's statement.
+// The worst whole filing on record under load was 737 ms (INFRA-56).
 const lockedSuggestionAllowance = 5 * time.Second
 
-// suggestionsBehindLock locks table in ACCESS EXCLUSIVE mode, runs computeAndPersistSuggestions on
-// a server whose suggestion allowance is lockedSuggestionAllowance, and answers what it returned.
-// The call runs on a one-connection store of its own, so the backend the poll watches in pg_locks
-// is the call's and no other. Counting every backend queued behind the lock is not enough: the
-// issue create the tests seed schedules the spec's settlement, which queues behind the same locks
-// on the shared pool, so that count passed a call that never waited (sjawhar/legion#2217 review).
-// It fails at once when the call answers before its own backend has queued behind that lock, so a
+// suggestionsBehindLock locks table in ACCESS EXCLUSIVE mode, runs the related-item check on a
+// server whose allowance is lockedSuggestionAllowance, and answers what it returned. The call
+// runs on a one-connection store of its own, so the backend the poll watches in pg_locks is the
+// call's and no other. Counting every backend queued behind the lock is not enough: the issue
+// create the tests seed schedules the spec's settlement, which queues behind the same locks on the
+// shared pool, so that count passed a call that never waited (sjawhar/legion#2217 review). It
+// fails at once when the call answers before its own backend has queued behind that lock, so a
 // passing caller's answer is one the allowance ended while the query waited there. Nothing here
-// times the call: a step run outside the allowance waits behind the lock until go test's
-// -timeout ends the run, naming the test.
+// times the call: a step run outside the allowance waits behind the lock until go test's -timeout
+// ends the run, naming the test. The check records nothing: its records are not what these tests
+// are about.
 func suggestionsBehindLock(
 	t *testing.T, deps Deps, table, project, text string, source suggestionSource,
 ) *model.Suggestions {
@@ -308,12 +324,12 @@ func suggestionsBehindLock(
 
 	answered := make(chan *model.Suggestions, 1)
 	go func() {
-		answered <- srv.computeAndPersistSuggestions(context.Background(), project, text, source)
+		answered <- srv.relatedCheck(context.Background(), relatedInput{project: project, text: text, source: source})
 	}()
 	for {
 		select {
 		case s := <-answered:
-			t.Fatalf("computeAndPersistSuggestions answered %+v before its query waited behind the lock on %s, want the %s allowance to end while it waits", s, table, lockedSuggestionAllowance)
+			t.Fatalf("the related-item check answered %+v before its query waited behind the lock on %s, want the %s allowance to end while it waits", s, table, lockedSuggestionAllowance)
 		default:
 		}
 		var waiting bool
@@ -333,13 +349,12 @@ func suggestionsBehindLock(
 	return <-answered
 }
 
-// TestComputeAndPersistSuggestionsRespectsDeadlineUnderLock: a reviewer once measured the decision
-// lookup alone blocking ~1.2s behind a table lock when it ran on the request's unbounded context,
-// so computeAndPersistSuggestions now derives one allowance covering the search, the decision
-// lookup and persistence together. The fused search reads `asks`, so with `asks` locked the search
-// waits behind the lock, and the allowance, not the lock's hold time, ends it and reports the
-// suggestions missing. The decision lookup is not reachable under this lock (sjawhar/legion#2158).
-func TestComputeAndPersistSuggestionsRespectsDeadlineUnderLock(t *testing.T) {
+// TestRelatedCheckRespectsDeadlineUnderLock: a reviewer once measured the decision lookup alone
+// blocking ~1.2s behind a table lock when it ran on the request's unbounded context, so the check
+// derives one allowance covering every read it makes. Its term picker reads `asks` (the source's
+// own items), so with `asks` locked the keyword stage waits behind the lock, and the allowance,
+// not the lock's hold time, ends it and reports the check not made for time (sjawhar/legion#2158).
+func TestRelatedCheckRespectsDeadlineUnderLock(t *testing.T) {
 	handler, _, deps := newTestServer(t, testServerOptions{})
 	createSuggestionProject(t, handler, "DEADLINE")
 	issue := createSuggestionIssue(t, handler, map[string]any{
@@ -348,18 +363,18 @@ func TestComputeAndPersistSuggestionsRespectsDeadlineUnderLock(t *testing.T) {
 
 	source := suggestionSource{kind: "ask", issueKey: issue, askID: "locked-probe", actor: model.Actor{Kind: "user", ID: "alice"}}
 	suggestions := suggestionsBehindLock(t, deps, "asks", "DEADLINE", "Should the service use REST or GraphQL for its public API?", source)
-	if suggestions == nil || suggestions.Missing == "" {
-		t.Fatalf("suggestions = %+v, want Missing set: the allowance ended while the search waited behind the lock on asks", suggestions)
+	if suggestions.Outcome != "not_made" || suggestions.Missing != "the search behind it did not answer within 5s" {
+		t.Fatalf("suggestions = %+v, want not made for time: the allowance ended while the search waited behind the lock on asks", suggestions)
 	}
 }
 
-// TestComputeAndPersistSuggestionsRespectsDeadlineWhenProjectLookupIsLocked: round 3's fix bounded
-// the search and the decision lookup, but asks.go's own project-key lookup still ran before the
-// call, on the request's unbounded context — a reviewer measured it blocking ~2s behind an
-// ACCESS EXCLUSIVE lock on `issues`. computeAndPersistSuggestions now resolves the project itself
-// when the caller passes "", reading `issues` first under the allowance, so with `issues` locked
-// the allowance ends the lookup while it waits and reports the suggestions missing.
-func TestComputeAndPersistSuggestionsRespectsDeadlineWhenProjectLookupIsLocked(t *testing.T) {
+// TestRelatedCheckRespectsDeadlineWhenProjectLookupIsLocked: round 3's fix bounded the search and
+// the decision lookup, but asks.go's own project-key lookup still ran before the call, on the
+// request's unbounded context — a reviewer measured it blocking ~2s behind an ACCESS EXCLUSIVE
+// lock on `issues`. The check resolves the project itself when the caller names none, reading
+// `issues` first under the allowance, so with `issues` locked the allowance ends the lookup while
+// it waits and reports the check not made for time.
+func TestRelatedCheckRespectsDeadlineWhenProjectLookupIsLocked(t *testing.T) {
 	handler, _, deps := newTestServer(t, testServerOptions{})
 	createSuggestionProject(t, handler, "LOCKEDPROJ")
 	issue := createSuggestionIssue(t, handler, map[string]any{
@@ -368,18 +383,17 @@ func TestComputeAndPersistSuggestionsRespectsDeadlineWhenProjectLookupIsLocked(t
 
 	source := suggestionSource{kind: "ask", issueKey: issue, askID: "locked-project-probe", actor: model.Actor{Kind: "user", ID: "alice"}}
 	suggestions := suggestionsBehindLock(t, deps, "issues", "", "Should the service use REST or GraphQL for its public API?", source)
-	if suggestions == nil || suggestions.Missing == "" {
-		t.Fatalf("suggestions = %+v, want Missing set: the allowance ended while the project lookup waited behind the lock on issues", suggestions)
+	if suggestions.Outcome != "not_made" || suggestions.Missing != "the project lookup behind it did not answer within 5s" {
+		t.Fatalf("suggestions = %+v, want not made for time: the allowance ended while the project lookup waited behind the lock on issues", suggestions)
 	}
 }
 
 // TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails: an issue-owned ask whose write-advice
-// query itself fails must not drop the suggestions that were separately computed and persisted —
-// advice == nil means either "document owner" or "the advice query failed", and only the first
-// has no suggestions to offer. Both cases file the same ask over the same corpus with the same
-// write-advice query failing and differ only in the allowance the suggestion step runs under
-// (server.suggestionAllowance), so each case's outcome is its own choice rather than its
-// machine's speed.
+// query itself fails must not drop the check's result that was separately computed and persisted
+// — advice == nil means either "document owner" or "the advice query failed", and both carry the
+// result. Both cases file the same ask over the same corpus with the same write-advice query
+// failing and differ only in the allowance the check runs under (server.relatedAllowance), so
+// each case's outcome is its own choice rather than its machine's speed.
 func TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails(t *testing.T) {
 	// fileAsk seeds the corpus — an answered ask that settles the question, plus a separate
 	// target issue — and files the ask on the target through the real route with the
@@ -454,8 +468,8 @@ func TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails(t *testing.T) {
 		}
 		// Only that missing is set is asserted, never its text: it interpolates the allowance and
 		// here reads "did not answer within 1ns".
-		if filed.advice.Suggestions.Missing == "" {
-			t.Fatalf("advice.suggestions.missing = %q, want a reason the suggestions are absent: envelope = %+v", filed.advice.Suggestions.Missing, filed.advice.Suggestions)
+		if filed.advice.Suggestions.Outcome != "not_made" || filed.advice.Suggestions.Missing == "" {
+			t.Fatalf("advice.suggestions = %+v, want not_made with a reason the check was not made", filed.advice.Suggestions)
 		}
 		if filed.advice.Suggestions.Decision != nil {
 			t.Fatalf("advice.suggestions.decision = %+v, want none under an allowance no database can meet", filed.advice.Suggestions.Decision)
@@ -467,8 +481,8 @@ func TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails(t *testing.T) {
 		if filed.advice.Suggestions == nil {
 			t.Fatalf("advice.suggestions = null, want the decision ask %s despite the failed write-advice query: advice = %+v", filed.decisionAskID, filed.advice)
 		}
-		if filed.advice.Suggestions.Decision == nil {
-			t.Fatalf("advice.suggestions.decision = null, want the answered ask %s: envelope = %+v", filed.decisionAskID, filed.advice.Suggestions)
+		if filed.advice.Suggestions.Outcome != "found" || filed.advice.Suggestions.Decision == nil {
+			t.Fatalf("advice.suggestions = %+v, want found with the answered ask %s as its decision", filed.advice.Suggestions, filed.decisionAskID)
 		}
 		if filed.advice.Suggestions.Decision.ID != filed.decisionAskID {
 			t.Fatalf("advice.suggestions.decision.id = %q, want the answered ask %q", filed.advice.Suggestions.Decision.ID, filed.decisionAskID)
@@ -485,16 +499,15 @@ func TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails(t *testing.T) {
 	})
 }
 
-// The deployment's own allowance is the documented one: cmd/dispatch/README.md and CHANGELOG.md
-// promise a filed issue or ask waits at most 300 ms on its suggestions, and the literal, not the
-// constant, is the pin. It reads the server register mounts, which is the only one a deployment
-// ever runs: a server built here by hand would still carry the zero value after register had been
-// given a suggestionTimeout of its own, and that drift — measured at 5 s, where filing an ask
-// took 5.046 s and no test in the package reddened — is what the field this change added makes
+// The deployment's own allowance is the documented one: the issue and ask routes' descriptions
+// promise a filed issue or ask waits at most 5 seconds on its related-item check, and the literal,
+// not the constant, is the pin. It reads the server register mounts, which is the only one a
+// deployment ever runs: a server built here by hand would still carry the zero value after
+// register had been given a suggestionTimeout of its own, and that drift is what the field makes
 // possible (INFRA-56).
-func TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound(t *testing.T) {
-	if got := register(http.NewServeMux(), Deps{}).suggestionAllowance(); got != 300*time.Millisecond {
-		t.Fatalf("the server a deployment runs allows %s for its suggestions, want 300ms as cmd/dispatch/README.md and CHANGELOG.md promise", got)
+func TestTheDeploymentsRelatedCheckAllowanceIsTheDocumentedBound(t *testing.T) {
+	if got := register(http.NewServeMux(), Deps{}).relatedAllowance(); got != 5*time.Second {
+		t.Fatalf("the server a deployment runs allows %s for its related-item check, want 5s as the route descriptions promise", got)
 	}
 }
 
@@ -507,9 +520,11 @@ func createSuggestionIssue(t *testing.T, handler http.Handler, body map[string]a
 	return decodeBody[testIssueWithSuggestions](t, response).Key
 }
 
+// relatedIndex is where the item of issueKey's owner stands in related: the issue itself, or the
+// spec, ask, comment or message that stood for it, since each owner keeps one item.
 func relatedIndex(related []testSuggestionItem, issueKey string) int {
 	for i, item := range related {
-		if item.Kind == "issue" && item.ID == issueKey {
+		if (item.Kind == "issue" && item.ID == issueKey) || (item.Owner.Kind == "issue" && item.Owner.Key == issueKey) {
 			return i
 		}
 	}
@@ -546,14 +561,21 @@ func TestCreateIssueSuggestsTheOpenSurvivorAboveAClosedDuplicate(t *testing.T) {
 }
 
 // TestCreateAskExcludesItsOwnIssue: an ask's own issue, and everything it owns, is never among the
-// ask's suggestions, so a reply on that issue can never be counted as acting on one.
+// ask's suggestions, so a reply on that issue can never be counted as acting on one. Another
+// issue shares one of the question's words with the own issue, so the search runs and matches
+// the own issue and its spec too; only the other may be listed. The term statistics are refreshed
+// once both issues exist, as the periodic refresh would have.
 func TestCreateAskExcludesItsOwnIssue(t *testing.T) {
-	handler := newTestHandler(t)
+	handler, database := newTestHandlerWithStore(t)
 	createSuggestionProject(t, handler, "OWN")
 	own := createSuggestionIssue(t, handler, map[string]any{
 		"project": "OWN", "title": "Choose a transport for the billing service public API",
 		"spec": "The billing service public API needs a transport: REST or GraphQL.",
 	})
+	other := createSuggestionIssue(t, handler, map[string]any{
+		"project": "OWN", "title": "Billing invoices render slowly", "force": true,
+	})
+	refreshTermStats(t, database, "OWN")
 	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+own+"/asks", map[string]any{
 		"question": "Should the billing service public API use REST or GraphQL?",
 	}, "alice")
@@ -568,6 +590,9 @@ func TestCreateAskExcludesItsOwnIssue(t *testing.T) {
 		if item.ID == own || item.Owner.Key == own {
 			t.Fatalf("related = %+v, want nothing owned by the ask's own issue %s", created.Advice.Suggestions.Related, own)
 		}
+	}
+	if relatedIndex(created.Advice.Suggestions.Related, other) < 0 {
+		t.Fatalf("related = %+v, want %s, which shares a word with the question", created.Advice.Suggestions.Related, other)
 	}
 }
 

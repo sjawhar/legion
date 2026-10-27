@@ -37,14 +37,15 @@ type writeAdvice struct {
 	*documentBlocks
 	// editBlocks is set by a document edit; nil omits its field.
 	*editBlocks
-	// Suggestions is LEGION-550's write-time feedback, set only on an issue or ask creation;
-	// nil (omitted) everywhere else.
+	// Suggestions is the related-item check's result (INFRA-568), set only on an issue or ask
+	// creation; nil (omitted) everywhere else.
 	Suggestions *model.Suggestions `json:"suggestions,omitempty"`
 }
 
 // suggestionsOnlyAdvice is the advice of a write with no issue state to report: an ask on an
 // unlinked project document, which has no issue status, no writes-since-human count and no
-// issue-scoped open-ask list, but does get LEGION-550's suggestions.
+// issue-scoped open-ask list, or an issue or ask write whose write-advice read failed. It still
+// carries the related-item check's result (withSuggestions).
 type suggestionsOnlyAdvice struct {
 	Suggestions *model.Suggestions `json:"suggestions"`
 }

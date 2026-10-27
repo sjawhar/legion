@@ -156,9 +156,8 @@ select t.total, t.reachable, r.kind, case when r.owner_artifact_id is null then 
 // and fused carry no row's text, so the union, the window and the fused score cost nothing per
 // kind's full body; only the page's own rows pay for one lateral fetch of their text and, after
 // that, a snippet. totals is joined outside the page, so a page past the end still answers how
-// many rows the query matches. This is the keyword-only fallback (LEGION-549 degraded mode) and
-// the query runFusedSearch runs for LEGION-550's write-time suggestions, which never calls the
-// embedder at all.
+// many rows the query matches. This is the keyword-only fallback (LEGION-549 degraded mode); the
+// related-item check runs its body over its own q (relatedQOpener).
 //
 // Parameters: $1 q, $2 project (empty for every project), $3 limit, $4 firstTerm,
 // $5 headlineOptions, $6 offset, $7 contracts.SearchKindDepth, $8 searchFusionK.
@@ -397,17 +396,13 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, response)
 }
 
-// runSearch is the search handler's own entry point (unlike runFusedSearch, LEGION-550's
-// write-time suggestions never call this - suggestions never try meaning search, so they never
-// pay for an embedder call or its timeout). The numnode check runs here, before anything else -
-// including before the one model-service call this function ever makes - so a stopword-only or
-// operator-only query (the same shape runFusedSearch's and runMeaningSearch's own checks catch)
-// never pays for an embedding it would throw away; runFusedSearch repeats the same check for its
-// other caller, LEGION-550's write-time suggestions, which never reaches this function at all.
-// It tries meaning search first when an embedder is configured, falling back to keyword-only
-// (runFusedSearch) only when the query's own embedding could not be had - never when the meaning
-// query itself then fails, which is a real error the caller should see as a 500, not something to
-// paper over as a degraded answer.
+// runSearch is the search handler's own entry point. The numnode check runs here, before anything
+// else - including before the one model-service call this function ever makes - so a
+// stopword-only or operator-only query never pays for an embedding it would throw away. It tries
+// meaning search first when an embedder is configured, falling back to keyword-only
+// (runFusedSearchQuery) only when the query's own embedding could not be had - never when the
+// meaning query itself then fails, which is a real error the caller should see as a 500, not
+// something to paper over as a degraded answer.
 func (s *server) runSearch(ctx context.Context, q, project string, limit, offset int) (model.SearchResponse, error) {
 	var nodes int
 	if err := s.deps.Store.Pool.QueryRow(ctx, "select numnode(websearch_to_tsquery('english', $1))", q).Scan(&nodes); err != nil {
@@ -429,10 +424,8 @@ func (s *server) runSearch(ctx context.Context, q, project string, limit, offset
 
 // runKeywordOnlyDegraded runs the keyword-only fallback and stamps the response Degraded on
 // success: the one thing both of runSearch's fallback branches (no embedder configured, or the
-// query's own embedding failing) do identically. It calls runFusedSearchQuery directly, not
-// runFusedSearch, because runSearch has already run the numnode check before ever reaching
-// here - repeating it would cost a second identical Postgres round trip on every degraded
-// request for no reason.
+// query's own embedding failing) do identically. runSearch has already run the numnode check
+// before ever reaching here.
 func (s *server) runKeywordOnlyDegraded(ctx context.Context, q, project string, limit, offset int) (model.SearchResponse, error) {
 	response, err := s.runFusedSearchQuery(ctx, q, project, limit, offset)
 	if err == nil {
@@ -441,27 +434,9 @@ func (s *server) runKeywordOnlyDegraded(ctx context.Context, q, project string, 
 	return response, err
 }
 
-// runFusedSearch is the search handler's query, SQL and row-scanning shared with LEGION-550's
-// write-time suggestions (suggestions.go): both read the same fused ranking
-// (sjawhar/legion#1764), the handler bound by its request context and the suggestions call bound
-// by writeSuggestionTimeout instead. q is assumed already validated (length, non-empty after
-// trimming); project empty searches every project. Suggestions is the only caller that still
-// needs this function's own numnode check - runSearch's fallback (runKeywordOnlyDegraded) skips
-// straight to runFusedSearchQuery, since runSearch has already run that check itself.
-func (s *server) runFusedSearch(ctx context.Context, q, project string, limit, offset int) (model.SearchResponse, error) {
-	var nodes int
-	if err := s.deps.Store.Pool.QueryRow(ctx, "select numnode(websearch_to_tsquery('english', $1))", q).Scan(&nodes); err != nil {
-		return model.SearchResponse{}, err
-	}
-	if nodes == 0 {
-		return model.SearchResponse{Results: []model.SearchResult{}, Limit: limit, Offset: offset}, nil
-	}
-	return s.runFusedSearchQuery(ctx, q, project, limit, offset)
-}
-
-// runFusedSearchQuery is runFusedSearch's query itself, assuming nodes > 0 already - the one
-// thing every caller (runFusedSearch, after its own check; runKeywordOnlyDegraded, after
-// runSearch's) must have established first.
+// runFusedSearchQuery runs searchQuery, assuming nodes > 0 already, which its caller
+// (runKeywordOnlyDegraded, after runSearch's check) must have established first. q is assumed
+// already validated (length, non-empty after trimming); project empty searches every project.
 func (s *server) runFusedSearchQuery(ctx context.Context, q, project string, limit, offset int) (model.SearchResponse, error) {
 	started := time.Now()
 	rows, err := s.deps.Store.Pool.Query(ctx, searchQuery, q, project, limit, firstTerm(q), headlineOptions,
@@ -479,11 +454,10 @@ func (s *server) runFusedSearchQuery(ctx context.Context, q, project string, lim
 	return response, nil
 }
 
-// runMeaningSearch is runFusedSearch's counterpart once a query embedding exists: same row
+// runMeaningSearch is runFusedSearchQuery's counterpart once a query embedding exists: same row
 // shape, searchQueryMeaning in place of searchQuery. Its only caller, runSearch, has already run
 // the numnode check before ever reaching here (so it never pays for an embedding it would throw
-// away); this function assumes nodes > 0, unlike runFusedSearch, which repeats that check for
-// its other caller, LEGION-550's write-time suggestions.
+// away); this function assumes nodes > 0.
 func (s *server) runMeaningSearch(ctx context.Context, q, project string, limit, offset int, vector []float32) (model.SearchResponse, error) {
 
 	started := time.Now()

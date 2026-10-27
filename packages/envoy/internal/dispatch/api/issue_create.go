@@ -1,11 +1,14 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -132,7 +135,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 				)
 				return
 			}
-			s.respondWithExistingExternalIssue(w, r, existingKey, actor)
+			s.respondWithExistingExternalIssue(w, r, existingKey, project, actor)
 			return
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
@@ -183,6 +186,21 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
+	}
+	// The title-overlap refusal, and under force the same overlaps named in the result instead
+	// (INFRA-568): a forced create is told what it forced past, but a slow or failing overlap read
+	// must not refuse a create its caller already insisted on, so it is bounded on its own and its
+	// failure only logged.
+	var titleMatches []model.DuplicateCandidate
+	if input.External == "" && input.Force {
+		matchCtx, cancel := context.WithTimeout(r.Context(), forcedTitleMatchTimeout)
+		candidates, err := s.duplicateCandidates(matchCtx, s.deps.Store.Pool, input.Project, input.Title, parentKey)
+		cancel()
+		if err != nil {
+			slog.Warn("dispatch: forced issue create names no title overlaps", "project", input.Project, "error", err)
+		} else {
+			titleMatches = candidates
+		}
 	}
 	if input.External == "" && !input.Force {
 		candidates, err := s.duplicateCandidates(r.Context(), s.deps.Store.Pool, input.Project, input.Title, parentKey)
@@ -321,7 +339,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 				s.writeHandlerError(w, err)
 				return
 			}
-			s.respondWithExistingExternalIssue(w, r, existingKey, actor)
+			s.respondWithExistingExternalIssue(w, r, existingKey, input.Project, actor)
 			return
 		}
 	}
@@ -403,22 +421,31 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	if advice != nil && input.Spec != nil && strings.TrimSpace(*input.Spec) != "" {
 		advice.documentBlocks = readDocumentBlocks(markdown)
 	}
-	// LEGION-550: offered after the write committed and bounded by writeSuggestionTimeout, so a
-	// slow or down search never holds up an issue creation that already succeeded. Tied to
-	// advice's own success since both ride the same response field; a write-advice failure is
-	// already rare and logged, and losing suggestions alongside it is an accepted trade (see the
-	// PR's hardening ledger).
-	if advice != nil {
-		source := suggestionSource{kind: "issue", issueKey: key, actor: actor}
-		advice.Suggestions = s.computeAndPersistSuggestions(r.Context(), input.Project, input.Title+"\n"+markdown, source)
-	}
-	WriteJSON(w, http.StatusCreated, withAdvice(issue, advice))
+	// INFRA-568: the related-item check runs after the write committed, whatever writeAdvice
+	// answered, and waits at most relatedAllowance; its result rides the advice, or advice of its
+	// own when the write-advice read failed.
+	suggestions := s.relatedCheck(r.Context(), relatedInput{
+		project: input.Project,
+		text:    input.Title + "\n" + markdown,
+		source:  suggestionSource{kind: "issue", issueKey: key, actor: actor},
+		record:  true,
+	})
+	suggestions.TitleMatches = titleMatches
+	WriteJSON(w, http.StatusCreated, withSuggestions(issue, advice, suggestions))
 }
 
+// forcedTitleMatchTimeout bounds the title-overlap read a forced issue create runs only to name
+// what it forced past: the create is not refused on it, so it must not wait long on it either.
+const forcedTitleMatchTimeout = time.Second
+
+// respondWithExistingExternalIssue answers a create naming a GitHub issue Dispatch already holds
+// with that issue. Nothing was created, so no related-item check is made, and the result says so
+// (and the check is recorded as not made, reason already_exists).
 func (s *server) respondWithExistingExternalIssue(
 	w http.ResponseWriter,
 	r *http.Request,
 	existingKey string,
+	project string,
 	actor model.Actor,
 ) {
 	adviceReadTx, err := s.begin(r.Context())
@@ -446,7 +473,12 @@ func (s *server) respondWithExistingExternalIssue(
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, withAdvice(existing, advice))
+	suggestions := s.relatedCheckNotRun(r.Context(), relatedInput{
+		project: project,
+		source:  suggestionSource{kind: "issue", issueKey: existingKey, actor: actor},
+		record:  true,
+	}, relatedReasonAlreadyExists, "Dispatch already holds this issue; nothing was created")
+	WriteJSON(w, http.StatusOK, withSuggestions(existing, advice, suggestions))
 }
 
 func isUniqueViolation(err error) bool {

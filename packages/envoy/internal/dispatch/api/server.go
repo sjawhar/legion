@@ -245,10 +245,10 @@ type server struct {
 	deps            Deps
 	routeIndex      []routeIndexEntry
 	adviceQueryHook func(context.Context, pgx.Tx, string) error
-	// suggestionTimeout overrides the allowance the suggestion step runs under; zero, which every
-	// server the deployment builds leaves it, means writeSuggestionTimeout. Only tests set it
-	// (newFailingAdviceHandler, and suggestionsBehindLock for the two lock tests), so a case's
-	// outcome is its own choice rather than its machine's speed (INFRA-56).
+	// suggestionTimeout overrides the allowance the related-item check runs under; zero, which
+	// every server the deployment builds leaves it, means relatedCheckAllowance. Only tests set it
+	// (newFailingAdviceHandler, and the check's bound tests), so a case's outcome is its own choice
+	// rather than its machine's speed (INFRA-56).
 	suggestionTimeout time.Duration
 	// broadcastResolveBudget overrides the budget a broadcast's recipient resolution runs under;
 	// zero, which every server the deployment builds leaves it, means broadcastResolveTimeout.

@@ -10,69 +10,126 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// writeSuggestionTimeout bounds how long a write waits on the fused search LEGION-550 runs
-// after a new issue or ask commits, so a slow or down search never holds up a write that has
-// already succeeded. search.go's own corpus latency gate (sjawhar/legion#1764) keeps an
-// ordinary query's p95 near 150ms; twice that still treats a slow search as exceptional rather
-// than ordinary, while bounding the worst case any single write waits.
-const writeSuggestionTimeout = 300 * time.Millisecond
+const (
+	// relatedCheckAllowance is the most a write waits on its related-item check (INFRA-568): the
+	// meaning search's relatedMeaningAllowance and the time the keyword search may still need
+	// after it. At its end only the keyword search can still be running, and the check answers
+	// that it was not made rather than hold the write longer.
+	relatedCheckAllowance = 5 * time.Second
+	// relatedMeaningAllowance is the time from the check's start that the meaning search, the
+	// text's embedding and then the meaning query, has to answer. Past it the check answers its
+	// keyword search's result and says it searched by keywords only. searchEmbedTimeout bounds
+	// the embedding alone at the same three seconds, so a slow model service costs a check no
+	// more than it costs a search.
+	relatedMeaningAllowance = 3 * time.Second
+	// relatedRecordTimeout bounds the check's records (write_suggestions and related_checks). It
+	// runs on a context of its own, not the check's, so a check that ran out of time is still
+	// recorded, and a record that cannot be written in a second is only logged.
+	relatedRecordTimeout = time.Second
+	// suggestionRelatedCount is "the three items most like what was just filed" (LEGION-550's spec).
+	suggestionRelatedCount = 3
+	// suggestionSearchDepth widens the search past suggestionRelatedCount so an answered ask a few
+	// ranks behind the top issues can still surface as Suggestions.Decision, and so three distinct
+	// owners remain once an issue and its spec collapse into one item.
+	suggestionSearchDepth = 10
+	// relatedSearchQueryTerms is how many of the chosen terms Suggestions.SearchQuery holds: enough
+	// for a reader's own dispatch search to find what the check found, few enough that search's
+	// AND of them still matches something.
+	relatedSearchQueryTerms = 3
+)
 
-// suggestionAllowance is the deadline the suggestion step runs under: writeSuggestionTimeout on
-// every server the deployment builds, since register sets no suggestionTimeout, and whatever a
-// test set otherwise.
-func (s *server) suggestionAllowance() time.Duration {
-	return cmp.Or(s.suggestionTimeout, writeSuggestionTimeout)
+// relatedEFSearch sets hnsw.ef_search for the meaning query's transaction: how many nearest
+// vectors the HNSW index hands back before the project, kind and model filters run. pgvector's
+// default, 40, can be spent entirely on other projects' vectors, leaving out the project's own
+// nearest items; 400 keeps them at the cost of a wider index walk, paid once per check.
+const relatedEFSearch = `set local hnsw.ef_search = 400`
+
+var (
+	// relatedKeywordQuery is the check's stage 1: search's keyword query (searchQueryBody) over the
+	// chosen lexemes (relatedQOpener), so it ranks exactly as search does.
+	relatedKeywordQuery = relatedQOpener + searchQueryBody
+	// relatedMeaningQuery is the check's stage 2: search's meaning query, which fuses the same
+	// keyword arms with the meaning arms, over the same lexemes and the text's embedding.
+	relatedMeaningQuery = relatedQOpener + searchQueryMeaningBody
+)
+
+// The check's outcomes and search modes, as Suggestions and related_checks hold them.
+const (
+	relatedFound   = "found"
+	relatedNone    = "none"
+	relatedNotMade = "not_made"
+
+	relatedMeaningAndKeywords = "meaning_and_keywords"
+	relatedKeywordsOnly       = "keywords_only"
+)
+
+// The reasons a check was not made, or searched by keywords alone: related_checks.reason's values
+// (0121_related_checks).
+const (
+	relatedReasonBlankText         = "blank_text"
+	relatedReasonTimeout           = "timeout"
+	relatedReasonSearchFailed      = "search_failed"
+	relatedReasonAlreadyExists     = "already_exists"
+	relatedReasonProjectUnresolved = "project_unresolved"
+	relatedReasonNoEmbedder        = "no_embedder"
+	relatedReasonMeaningTimeout    = "meaning_timeout"
+	relatedReasonEmbedFailed       = "embed_failed"
+	relatedReasonMeaningFailed     = "meaning_failed"
+	relatedReasonKeywordsRequested = "keywords_only_requested"
+)
+
+// What a reader is told for the reasons more than one step of the check can reach.
+const (
+	relatedBlankTextMissing    = "the text holds no word to search for"
+	relatedSearchFailedMissing = "the search behind it failed"
+)
+
+// relatedAllowance is the deadline the whole check runs under: relatedCheckAllowance on every
+// server the deployment builds, since register sets no suggestionTimeout, and whatever a test set
+// otherwise.
+func (s *server) relatedAllowance() time.Duration {
+	return cmp.Or(s.suggestionTimeout, relatedCheckAllowance)
 }
 
-// suggestionRelatedCount is "the three items most like what was just filed" (LEGION-550's spec).
-const suggestionRelatedCount = 3
-
-// suggestionSearchDepth widens the fused search past suggestionRelatedCount so an answered ask
-// a few ranks behind the top issues can still surface as Suggestions.Decision: the tuning
-// favours catching a duplicate or a settled decision over precision.
-const suggestionSearchDepth = 10
-
-// suggestionQueryWordLimit bounds how many of a title or spec's distinct words feed
-// suggestionQuery, so a long spec still produces one bounded query rather than an
-// unboundedly large one.
-const suggestionQueryWordLimit = 40
-
-// suggestionQuery turns free-form text (a title, a spec, a question) into a query that favours
-// recall: websearch_to_tsquery (search.go's runFusedSearch) ANDs plain unquoted words together,
-// which a whole title-plus-spec would almost never satisfy against another issue's own words.
-// Joining its distinct significant words with the literal operator "OR" instead asks
-// websearch_to_tsquery for anything sharing even one of them, and ts_rank_cd still ranks a
-// candidate sharing more of them higher — "the tuning favours catching a duplicate over
-// precision" (LEGION-550's spec). The literal words "or" and "and" are dropped since re-joining
-// them with the OR operator would read as a stray, empty disjunct.
-func suggestionQuery(text string) string {
-	seen := map[string]bool{}
-	terms := make([]string, 0, suggestionQueryWordLimit)
-	for _, word := range strings.Fields(text) {
-		word = strings.ToLower(strings.Trim(word, ".,!?;:\"'()[]{}*_`"))
-		if word == "" || word == "or" || word == "and" || seen[word] {
-			continue
-		}
-		seen[word] = true
-		terms = append(terms, word)
-		if len(terms) >= suggestionQueryWordLimit {
-			break
-		}
+// relatedCheckNotRun answers, and records unless input.record is false, a check its route decided
+// not to make (reason and text say why), so that write's result still says no check was made.
+func (s *server) relatedCheckNotRun(ctx context.Context, input relatedInput, reason, text string) *model.Suggestions {
+	suggestions := &model.Suggestions{Outcome: relatedNotMade, Related: []model.WriteSuggestion{}, Missing: text}
+	if input.record {
+		s.recordRelatedCheck(ctx, input, suggestions, relatedRecord{
+			project: input.project, outcome: relatedNotMade, reason: reason, terms: []string{},
+		})
 	}
-	return strings.Join(terms, " OR ")
+	return suggestions
 }
 
-// suggestionSource identifies what a set of suggestions was offered for: a newly created issue,
-// or a newly created ask on an issue or on an unlinked project document. Exactly one of issueKey
-// and artifactID is set.
+// withSuggestions wraps a write's payload with its advice carrying the check's result, or, when
+// writeAdvice answered nil (a project document has no issue state, or the write-advice read
+// failed), with suggestionsOnlyAdvice: every issue and ask write answers its check.
+func withSuggestions(payload any, advice *writeAdvice, suggestions *model.Suggestions) any {
+	if advice != nil {
+		advice.Suggestions = suggestions
+		return withAdvice(payload, advice)
+	}
+	return withRawAdvice(payload, suggestionsOnlyAdvice{Suggestions: suggestions})
+}
+
+// suggestionSource identifies what a check was run for: a newly created issue, a newly created
+// ask on an issue or on an unlinked project document, or a decision block a document edit added.
+// At most one of issueKey and artifactID is set: the issue, or the project document the ask or
+// block sits on. A check run for no source (the no-write route) sets neither.
 type suggestionSource struct {
-	kind       string // "issue" or "ask"
+	kind       string // "issue", "ask" or "decision_block"
 	issueKey   string
-	artifactID string // an ask on an unlinked project document
-	askID      string // empty for an issue source
+	artifactID string // an ask or decision block on an unlinked project document
+	askID      string // set for an ask source alone
+	blockID    string // set for a decision block source alone
 	actor      model.Actor
 }
 
@@ -86,67 +143,428 @@ func (source suggestionSource) owns(result model.SearchResult) bool {
 		return true
 	}
 	if source.issueKey != "" {
-		return (result.Kind == "issue" && result.ID == source.issueKey) ||
-			(result.Owner.Kind == "issue" && result.Owner.Key == source.issueKey)
+		return ownedByIssue(result, source.issueKey)
 	}
-	return (result.Kind == "document" && result.ID == source.artifactID) ||
-		(result.Owner.Kind == "document" && result.Owner.ArtifactID == source.artifactID)
+	if source.artifactID != "" {
+		return (result.Kind == "document" && result.ID == source.artifactID) ||
+			(result.Owner.Kind == "document" && result.Owner.ArtifactID == source.artifactID)
+	}
+	return false
 }
 
-// closedOwner reports whether result belongs to an issue that is done. Keyword search ranks an
-// issue already closed as a duplicate above the open issue it was closed into whenever its words
-// are closer to the new filing's, which they often are (a duplicate restates the bug the way the
-// next duplicate will); the open issue is the one an agent can act on.
-func closedOwner(result model.SearchResult) bool {
-	return result.Owner.Kind == "issue" && result.Owner.Status == "done"
+// ownedByIssue reports whether result is the issue key or anything that issue owns.
+func ownedByIssue(result model.SearchResult, key string) bool {
+	return (result.Kind == "issue" && result.ID == key) || (result.Owner.Kind == "issue" && result.Owner.Key == key)
 }
 
-// computeAndPersistSuggestions runs LEGION-550's write-time feedback — resolving project when
-// the caller does not already know it, the fused search (sjawhar/legion#1764), the decision
-// lookup, and persisting every row the sweep later reads — all under one writeSuggestionTimeout
-// deadline derived once here, so nothing downstream of the write's own commit can hold the
-// response past that single bound. Two earlier rounds each bounded one more step and left
-// another on the request's unbounded context: round 2 bounded the search and missed the decision
-// lookup (measured blocking ~1.2s behind a table lock); this round folds the ask route's
-// project-key lookup in too (measured blocking ~2s behind a lock on `issues`), since it ran
-// between the write's commit and this call on the same unbounded context. project is empty for
-// an ask, whose owning issue or project document `source` already names; an issue creation
-// already knows its project and passes it directly, needing no lookup. It never returns an
-// error: a slow or failed search, or a slow or failed project lookup, is reported as
-// Suggestions.Missing instead, since nothing here may hold or fail a write that already
-// committed. A blank text (an issue filed with no title, which the create route already refuses,
-// or an ask with a blank question) returns nil rather than searching for nothing.
-func (s *server) computeAndPersistSuggestions(
-	ctx context.Context, project, text string, source suggestionSource,
-) *model.Suggestions {
-	searchText := suggestionQuery(text)
-	if searchText == "" {
-		return nil
+// relatedInput is one related-item check's question.
+type relatedInput struct {
+	// project is the project to search; empty resolves it from source's owner.
+	project string
+	// text is what is checked: a new issue's title and spec, an ask's or decision block's question,
+	// or the no-write route's title and text.
+	text   string
+	source suggestionSource
+	// excludeIssue leaves that issue and everything it owns out of the results and out of the
+	// terms' document frequencies, as an issue source's own issue is (the no-write route's
+	// exclude_issue).
+	excludeIssue string
+	// keywordsOnly skips the meaning search.
+	keywordsOnly bool
+	// record writes the check's records: write_suggestions rows for an issue or ask source and one
+	// related_checks row. The no-write route leaves it false.
+	record bool
+}
+
+// excludes reports whether result is left out of the check's items: the source's own, or the
+// excluded issue's.
+func (input relatedInput) excludes(result model.SearchResult) bool {
+	return input.source.owns(result) || (input.excludeIssue != "" && ownedByIssue(result, input.excludeIssue))
+}
+
+// relatedRecord is what the related_checks row of one check holds besides its source.
+type relatedRecord struct {
+	project   string
+	outcome   string
+	search    string
+	reason    string
+	terms     []string
+	keywordMS *int
+	meaningMS *int
+	totalMS   int
+	related   int
+}
+
+// relatedStage is one search stage's answer and how long it took from the stages' start (stage 1
+// starts with the term selection, stage 2 with the embedding, both at once).
+type relatedStage struct {
+	response model.SearchResponse
+	err      error
+	reason   string // stage 2's reason for keywords only when it did not answer
+	took     time.Duration
+}
+
+// relatedPick is stage 1's term selection as the check and stage 2 both read it: ready is closed
+// once terms and err are set, and neither is written after.
+type relatedPick struct {
+	ready chan struct{}
+	terms relatedTerms
+	err   error
+}
+
+// relatedCheck is the related-item check every issue create, ask and new decision block runs
+// (INFRA-568), and the no-write related route. It never fails and never returns nil: what it did
+// not do, it says in the result. It waits at most relatedAllowance.
+//
+// It resolves the project when the input does not name it, then starts two things at once: stage
+// 1, which picks the text's rarest words (pickRelatedTerms) and runs search's keyword query over
+// them, and, when an embedder is configured and keywords alone were not asked for, the text's
+// embedding followed by stage 2, search's meaning query, which fuses the same keyword arms with
+// the nearest vectors. Stage 2's answer within relatedMeaningAllowance is the result, searched by
+// meaning and keywords; otherwise stage 1's is, searched by keywords only, with the reason. If
+// stage 1 has not answered when the allowance ends, the check was not made.
+//
+// The source's own items are left out, each owner keeps its best-ranked item, open owners come
+// before done issues, and the best three are Related; the decision is the first answered ask in
+// the search's own order. Unless record is false it then records what it offered and how it went
+// (recordRelatedCheck).
+func (s *server) relatedCheck(ctx context.Context, input relatedInput) *model.Suggestions {
+	started := time.Now()
+	suggestions, record := s.runRelatedCheck(ctx, input, started)
+	record.totalMS = int(time.Since(started).Milliseconds())
+	if input.record {
+		s.recordRelatedCheck(ctx, input, suggestions, record)
 	}
-	allowance := s.suggestionAllowance()
-	bounded, cancel := context.WithTimeout(ctx, allowance)
-	defer cancel()
-	if project == "" {
-		resolved, err := s.resolveSuggestionProject(bounded, source)
-		if err != nil {
-			reason := "the project behind it could not be resolved"
-			if bounded.Err() != nil {
-				reason = "the project lookup behind it did not answer within " + allowance.String()
-			}
-			slog.Warn("dispatch: write suggestions omitted", "error", err)
-			return &model.Suggestions{Related: []model.WriteSuggestion{}, Missing: reason}
-		}
-		project = resolved
-	}
-	suggestions := s.computeSuggestions(bounded, project, searchText, source)
-	s.persistSuggestions(bounded, source, suggestions)
 	return suggestions
 }
 
-// resolveSuggestionProject reads the project a source's own owner belongs to, on ctx: the same
-// bounded deadline computeAndPersistSuggestions derives for everything else, so this lookup can
-// no longer block a write past that bound the way it did when it ran before computing suggestions
-// at all, on the request's own unbounded context.
+// runRelatedCheck is relatedCheck up to its records: the result and the related_checks row's
+// fields, all but the total time.
+func (s *server) runRelatedCheck(
+	ctx context.Context, input relatedInput, started time.Time,
+) (*model.Suggestions, relatedRecord) {
+	allowance := s.relatedAllowance()
+	bounded, cancel := context.WithTimeout(ctx, allowance)
+	defer cancel()
+	record := relatedRecord{project: input.project, terms: []string{}}
+	suggestions := &model.Suggestions{Related: []model.WriteSuggestion{}}
+	notMade := func(reason, text string) (*model.Suggestions, relatedRecord) {
+		suggestions.Outcome, suggestions.Missing = relatedNotMade, text
+		record.outcome, record.reason = relatedNotMade, reason
+		return suggestions, record
+	}
+	timedOut := "the search behind it did not answer within " + allowance.String()
+
+	if record.project == "" {
+		project, err := s.resolveSuggestionProject(bounded, input.source)
+		switch {
+		case err != nil && bounded.Err() != nil:
+			slog.Warn("dispatch: related-item check not made", "error", err)
+			return notMade(relatedReasonTimeout, "the project lookup behind it did not answer within "+allowance.String())
+		case err != nil:
+			slog.Warn("dispatch: related-item check not made", "error", err)
+			return notMade(relatedReasonProjectUnresolved, "the project behind it could not be resolved")
+		case project == "":
+			// A document no project holds (a conversation's file): the terms' statistics and the
+			// search are both per project, and searching every project would weigh words against
+			// none of them.
+			return notMade(relatedReasonProjectUnresolved, "the item it sits on belongs to no project")
+		}
+		record.project = project
+	}
+	project := record.project
+	// A blank text has nothing to pick terms from; the same answer for stopwords alone comes from
+	// the picker, which tokenizes as stored vectors are built.
+	if strings.TrimSpace(input.text) == "" {
+		return notMade(relatedReasonBlankText, relatedBlankTextMissing)
+	}
+
+	keywordCtx, err := store.ForConcurrentRead(bounded)
+	if err != nil {
+		slog.Warn("dispatch: related-item check not made", "error", err)
+		return notMade(relatedReasonSearchFailed, relatedSearchFailedMissing)
+	}
+	exclusion := relatedExclusion{issueKey: cmp.Or(input.source.issueKey, input.excludeIssue), artifactID: input.source.artifactID}
+	stagesStarted := time.Now()
+	pick := &relatedPick{ready: make(chan struct{})}
+	keyword := make(chan relatedStage, 1)
+	go func() {
+		pick.terms, pick.err = s.pickRelatedTerms(keywordCtx, s.deps.Store.Pool, project, input.text, exclusion)
+		close(pick.ready)
+		stage := relatedStage{err: pick.err}
+		switch {
+		case pick.err != nil || pick.terms.NoLexemes:
+		case len(pick.terms.Terms) == 0:
+			// Every lexeme was dropped (too common, noise, or held by the source alone): no
+			// keyword matches anything, so there is no query to run.
+			stage.response = model.SearchResponse{Results: []model.SearchResult{}, Limit: suggestionSearchDepth}
+		default:
+			stage.response, stage.err = s.relatedSearch(keywordCtx, s.deps.Store.Pool, relatedKeywordQuery, project, pick.terms)
+		}
+		stage.took = time.Since(stagesStarted)
+		keyword <- stage
+	}()
+
+	// Stage 2 runs on a context of its own ending at relatedMeaningAllowance from the check's
+	// start, so the embedding and the meaning query both stop there and leave the rest of the
+	// allowance to stage 1.
+	meaningAllowance := min(relatedMeaningAllowance, allowance)
+	var meaning chan relatedStage
+	var meaningDone <-chan struct{}
+	reason := ""
+	switch {
+	case input.keywordsOnly:
+		reason = relatedReasonKeywordsRequested
+	case s.deps.Embedder == nil:
+		reason = relatedReasonNoEmbedder
+	default:
+		meaningCtx, cancelMeaning := context.WithDeadline(bounded, started.Add(meaningAllowance))
+		defer cancelMeaning()
+		meaningRead, err := store.ForConcurrentRead(meaningCtx)
+		if err != nil {
+			reason = relatedReasonMeaningFailed
+			break
+		}
+		meaningDone = meaningCtx.Done()
+		meaning = make(chan relatedStage, 1)
+		go func() {
+			stage := s.relatedMeaningStage(meaningRead, project, input.text, pick)
+			stage.took = time.Since(stagesStarted)
+			meaning <- stage
+		}()
+	}
+
+	select {
+	case <-pick.ready:
+	case <-bounded.Done():
+		return notMade(relatedReasonTimeout, timedOut)
+	}
+	if pick.err != nil {
+		slog.Warn("dispatch: related-item check not made", "error", pick.err)
+		if bounded.Err() != nil {
+			return notMade(relatedReasonTimeout, timedOut)
+		}
+		return notMade(relatedReasonSearchFailed, relatedSearchFailedMissing)
+	}
+	if pick.terms.NoLexemes {
+		return notMade(relatedReasonBlankText, relatedBlankTextMissing)
+	}
+	for _, term := range pick.terms.Terms {
+		record.terms = append(record.terms, term.Lexeme)
+	}
+	suggestions.SearchQuery = relatedSearchQuery(pick.terms.Terms)
+
+	var answer relatedStage
+	answered := false
+	if meaning != nil {
+		select {
+		case stage := <-meaning:
+			record.meaningMS = milliseconds(stage.took)
+			if stage.reason == "" {
+				answer, answered = stage, true
+			} else {
+				reason = stage.reason
+			}
+		case <-meaningDone:
+			record.meaningMS = milliseconds(time.Since(stagesStarted))
+			reason = relatedReasonMeaningTimeout
+		}
+	}
+	if answered {
+		suggestions.Search = relatedMeaningAndKeywords
+		// Stage 1's time is recorded when it has answered by now; it is not waited for.
+		select {
+		case stage := <-keyword:
+			record.keywordMS = milliseconds(stage.took)
+		default:
+		}
+	} else {
+		select {
+		case stage := <-keyword:
+			record.keywordMS = milliseconds(stage.took)
+			if stage.err != nil {
+				slog.Warn("dispatch: related-item check not made", "error", stage.err)
+				if bounded.Err() != nil {
+					return notMade(relatedReasonTimeout, timedOut)
+				}
+				return notMade(relatedReasonSearchFailed, relatedSearchFailedMissing)
+			}
+			answer = stage
+		case <-bounded.Done():
+			return notMade(relatedReasonTimeout, timedOut)
+		}
+		suggestions.Search = relatedKeywordsOnly
+		suggestions.SearchNote = relatedKeywordsOnlyNote(reason, meaningAllowance)
+		record.reason = reason
+	}
+	record.search = suggestions.Search
+
+	s.fillRelatedItems(bounded, input, answer.response.Results, suggestions)
+	record.related = len(suggestions.Related)
+	record.outcome = relatedNone
+	if len(suggestions.Related) > 0 {
+		record.outcome = relatedFound
+	}
+	suggestions.Outcome = record.outcome
+	return suggestions, record
+}
+
+// relatedMeaningStage is stage 2: the text's embedding, started at once, then, once stage 1 has
+// picked the terms, the meaning query over them. Its reason is empty when it answered and names
+// why it did not otherwise; ctx ends at the meaning allowance.
+func (s *server) relatedMeaningStage(ctx context.Context, project, text string, pick *relatedPick) relatedStage {
+	failed := func(reason string, err error) relatedStage {
+		if ctx.Err() != nil {
+			reason = relatedReasonMeaningTimeout
+		}
+		if err != nil {
+			slog.Warn("dispatch: related-item check searches by keywords only", "reason", reason, "error", err)
+		}
+		return relatedStage{reason: reason, err: err}
+	}
+	vector, err := s.embedQuery(ctx, text)
+	if err != nil {
+		return failed(relatedReasonEmbedFailed, err)
+	}
+	select {
+	case <-pick.ready:
+	case <-ctx.Done():
+		return failed(relatedReasonMeaningTimeout, nil)
+	}
+	if pick.err != nil || pick.terms.NoLexemes {
+		// The check answers not made without reading this.
+		return failed(relatedReasonMeaningFailed, nil)
+	}
+	response, err := s.relatedMeaningSearch(ctx, project, pick.terms, vector)
+	if err != nil {
+		return failed(relatedReasonMeaningFailed, err)
+	}
+	return relatedStage{response: response}
+}
+
+// relatedMeaningSearch runs relatedMeaningQuery in a read transaction of its own, the one place
+// relatedEFSearch applies.
+func (s *server) relatedMeaningSearch(
+	ctx context.Context, project string, picked relatedTerms, vector []float32,
+) (model.SearchResponse, error) {
+	tx, err := s.deps.Store.Pool.Begin(ctx)
+	if err != nil {
+		return model.SearchResponse{}, err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	if _, err := tx.Exec(ctx, relatedEFSearch); err != nil {
+		return model.SearchResponse{}, err
+	}
+	return s.relatedSearch(ctx, tx, relatedMeaningQuery, project, picked, embed.Literal(vector),
+		searchMeaningFloor, s.deps.Embedder.Identity())
+}
+
+// relatedSearch runs one of the check's two queries with the parameters search passes its own
+// ($1 the chosen lexemes as a tsquery, $4 the first term for the snippet window); meaning is the
+// meaning query's further three ($9 the vector, $10 searchMeaningFloor, $11 the embedder's
+// identity), none for the keyword query. An empty tsquery (no term chosen) matches nothing, so the
+// meaning query then ranks by meaning alone.
+func (s *server) relatedSearch(
+	ctx context.Context, q queryer, query, project string, picked relatedTerms, meaning ...any,
+) (model.SearchResponse, error) {
+	snippetTerm := ""
+	if len(picked.Terms) > 0 {
+		snippetTerm = cmp.Or(picked.Terms[0].Surface, picked.Terms[0].Lexeme)
+	}
+	args := append([]any{picked.TSQuery, project, suggestionSearchDepth, snippetTerm, headlineOptions,
+		0, contracts.SearchKindDepth, searchFusionK}, meaning...)
+	rows, err := q.Query(ctx, query, args...)
+	if err != nil {
+		return model.SearchResponse{}, err
+	}
+	defer rows.Close()
+	// A document hit's link opens the document with these words highlighted.
+	return scanSearchRows(rows, relatedSearchQuery(picked.Terms), suggestionSearchDepth, 0)
+}
+
+// relatedSearchQuery is Suggestions.SearchQuery: the best relatedSearchQueryTerms chosen terms,
+// each as the text spells it where one word of the text yields it, else its lexeme.
+func relatedSearchQuery(terms []relatedTerm) string {
+	words := make([]string, 0, relatedSearchQueryTerms)
+	for _, term := range terms[:min(len(terms), relatedSearchQueryTerms)] {
+		words = append(words, cmp.Or(term.Surface, term.Lexeme))
+	}
+	return strings.Join(words, " ")
+}
+
+// relatedKeywordsOnlyNote is Suggestions.SearchNote: why the check searched by keywords alone.
+func relatedKeywordsOnlyNote(reason string, meaningAllowance time.Duration) string {
+	switch reason {
+	case relatedReasonNoEmbedder:
+		return "meaning search is off on this server"
+	case relatedReasonMeaningTimeout:
+		return "meaning search did not answer within " + meaningAllowance.String()
+	case relatedReasonEmbedFailed:
+		return "the text could not be embedded for meaning search"
+	case relatedReasonMeaningFailed:
+		return "meaning search failed"
+	case relatedReasonKeywordsRequested:
+		return "keywords only was asked for"
+	}
+	return ""
+}
+
+func milliseconds(d time.Duration) *int {
+	ms := int(d.Milliseconds())
+	return &ms
+}
+
+// fillRelatedItems turns the search's results into Related and Decision. Everything the input
+// excludes is left out first; the rest carry their ask state (attachAskStates), which a failure
+// to read leaves nil rather than failing the check. Each owner (an issue, or a project document)
+// keeps only its best-ranked item, so an issue matched through its title, its spec and a comment
+// fills one place, not three. Related then takes the best suggestionRelatedCount with every item
+// on an open owner ahead of every item on a done issue, keeping the search's order within each;
+// Decision is the first answered ask in the search's own order, deliberately not reordered by
+// owner status: an answered question stays the best match for the question asked whether or not
+// its issue has since closed.
+func (s *server) fillRelatedItems(
+	ctx context.Context, input relatedInput, results []model.SearchResult, suggestions *model.Suggestions,
+) {
+	candidates := make([]model.SearchResult, 0, len(results))
+	for _, result := range results {
+		if !input.excludes(result) {
+			candidates = append(candidates, result)
+		}
+	}
+	if err := s.attachAskStates(ctx, s.deps.Store.Pool, candidates); err != nil {
+		slog.Warn("dispatch: related items carry no ask state", "error", err)
+	}
+
+	seen := map[string]bool{}
+	related := make([]model.SearchResult, 0, len(candidates))
+	for _, result := range candidates {
+		owner := result.Owner.Kind + ":" + cmp.Or(result.Owner.Key, result.Owner.ArtifactID)
+		if !seen[owner] {
+			seen[owner] = true
+			related = append(related, result)
+		}
+	}
+	slices.SortStableFunc(related, func(a, b model.SearchResult) int {
+		return cmp.Compare(boolRank(closedOwner(a)), boolRank(closedOwner(b)))
+	})
+	for _, result := range related[:min(len(related), suggestionRelatedCount)] {
+		suggestions.Related = append(suggestions.Related, suggestionFromResult(result))
+	}
+	for _, result := range candidates {
+		if result.Ask == nil || result.Ask.State != "answered" || result.Ask.Answer == nil {
+			continue
+		}
+		item := suggestionFromResult(result)
+		at := result.Ask.Answer.At
+		item.AnsweredBy, item.AnsweredAt = result.Ask.Answer.User, &at
+		suggestions.Decision = &item
+		break
+	}
+}
+
+// resolveSuggestionProject reads the project a source's own owner belongs to, on ctx: the check's
+// own bounded deadline, so this lookup cannot hold a write past it.
 func (s *server) resolveSuggestionProject(ctx context.Context, source suggestionSource) (string, error) {
 	var project string
 	var err error
@@ -159,59 +577,12 @@ func (s *server) resolveSuggestionProject(ctx context.Context, source suggestion
 	return project, err
 }
 
-// computeSuggestions runs the fused search and the decision lookup under ctx, which the caller
-// has already bounded. Everything source owns is left out (suggestionSource.owns). Related takes
-// the best suggestionRelatedCount of the rest with every hit on an open owner ahead of every hit
-// on a done issue, keeping the search's order within each; Decision is the first answered ask in
-// the search's own order, deliberately not reordered by owner status — an answered question
-// stays the best match for the question asked whether or not its issue has since closed, so
-// exempting it from the open-before-done rule (unlike reviewed Round 2's claim that Decision was
-// simply "unaffected" by construction, which was true only because no test had two decision
-// candidates split across open and done owners).
-func (s *server) computeSuggestions(
-	ctx context.Context, project, searchText string, source suggestionSource,
-) *model.Suggestions {
-	response, err := s.runFusedSearch(ctx, searchText, project, suggestionSearchDepth, 0)
-	if err != nil {
-		reason := "the search behind it failed"
-		if ctx.Err() != nil {
-			reason = "the search behind it did not answer within " + s.suggestionAllowance().String()
-		}
-		slog.Warn("dispatch: write suggestions omitted", "error", err)
-		return &model.Suggestions{Related: []model.WriteSuggestion{}, Missing: reason}
-	}
-
-	var candidates []model.SearchResult
-	var askIDs []string
-	for _, result := range response.Results {
-		if source.owns(result) {
-			continue
-		}
-		candidates = append(candidates, result)
-		if result.Kind == "ask" {
-			askIDs = append(askIDs, result.ID)
-		}
-	}
-
-	related := append([]model.SearchResult(nil), candidates...)
-	slices.SortStableFunc(related, func(a, b model.SearchResult) int {
-		return cmp.Compare(boolRank(closedOwner(a)), boolRank(closedOwner(b)))
-	})
-	suggestions := &model.Suggestions{Related: []model.WriteSuggestion{}}
-	for _, result := range related[:min(len(related), suggestionRelatedCount)] {
-		suggestions.Related = append(suggestions.Related, suggestionFromResult(result))
-	}
-	if len(askIDs) > 0 {
-		// candidates, not related: the decision is the best-ranked answered ask in the search's
-		// own order, never reordered by whether its issue is open or done.
-		decision, err := s.firstAnsweredAsk(ctx, askIDs, candidates)
-		if err != nil {
-			slog.Warn("dispatch: decision suggestion omitted", "error", err)
-		} else {
-			suggestions.Decision = decision
-		}
-	}
-	return suggestions
+// closedOwner reports whether result belongs to an issue that is done. Keyword search ranks an
+// issue already closed as a duplicate above the open issue it was closed into whenever its words
+// are closer to the new filing's, which they often are (a duplicate restates the bug the way the
+// next duplicate will); the open issue is the one an agent can act on.
+func closedOwner(result model.SearchResult) bool {
+	return result.Owner.Kind == "issue" && result.Owner.Status == "done"
 }
 
 func boolRank(b bool) int {
@@ -229,54 +600,8 @@ func suggestionFromResult(result model.SearchResult) model.WriteSuggestion {
 		ID:       result.ID,
 		Snippet:  result.Snippet,
 		Href:     result.Href,
+		Ask:      result.Ask,
 	}
-}
-
-// firstAnsweredAsk returns the best-ranked askIDs entry that already has a human answer,
-// enriched with who answered and when — "any past decision that matches" (LEGION-550's spec) —
-// or nil if none of them does.
-func (s *server) firstAnsweredAsk(
-	ctx context.Context, askIDs []string, results []model.SearchResult,
-) (*model.WriteSuggestion, error) {
-	rows, err := s.deps.Store.Pool.Query(ctx, `
-		select id::text, answer->>'user', (answer->>'at')::timestamptz
-		  from asks where id = any($1::uuid[]) and answer is not null
-	`, askIDs)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	type answered struct {
-		by string
-		at time.Time
-	}
-	byID := map[string]answered{}
-	for rows.Next() {
-		var id, by string
-		var at time.Time
-		if err := rows.Scan(&id, &by, &at); err != nil {
-			return nil, err
-		}
-		byID[id] = answered{by: by, at: at}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	for _, result := range results {
-		if result.Kind != "ask" {
-			continue
-		}
-		found, ok := byID[result.ID]
-		if !ok {
-			continue
-		}
-		item := suggestionFromResult(result)
-		at := found.at
-		item.AnsweredBy = found.by
-		item.AnsweredAt = &at
-		return &item, nil
-	}
-	return nil, nil
 }
 
 // suggestedIssueKey is the issue a suggested item's activity would show up on: the item's own
@@ -293,16 +618,58 @@ func suggestedIssueKey(item model.WriteSuggestion) *string {
 	return nil
 }
 
-// persistSuggestions records every item a set of suggestions offered, so the outcome sweep has
-// something to resolve and a later count has something to count. Runs on ctx, the same bounded
-// deadline computeAndPersistSuggestions derived for the search and decision lookup: a write that
-// already succeeded is never failed by this, so a row that cannot be inserted — deadline
-// exceeded included — is only logged. One round trip (store.Pool.SendBatch), not one per row:
-// up to four rows (three related plus one decision) previously cost up to four.
-func (s *server) persistSuggestions(ctx context.Context, source suggestionSource, suggestions *model.Suggestions) {
-	if suggestions == nil {
+// nullableText is value, or SQL null for an empty one.
+func nullableText(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+// recordRelatedCheck writes what a check offered and how it went, on a context of its own taken
+// from context.WithoutCancel(ctx) and bounded by relatedRecordTimeout: a check that ran out of its
+// allowance is recorded too, and a write that already succeeded is never failed by its records,
+// so a row that cannot be written is only logged.
+//
+// An issue or ask source gets its write_suggestions rows, which the outcome sweep resolves
+// (persistSuggestions). Every source with a project and an owner gets one related_checks row: its
+// outcome, search mode, reason, the lexemes it searched for, the stages' and the whole check's
+// times and how many items it listed. A check whose project could not be resolved has no row to
+// write, since the row belongs to a project.
+func (s *server) recordRelatedCheck(
+	ctx context.Context, input relatedInput, suggestions *model.Suggestions, record relatedRecord,
+) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), relatedRecordTimeout)
+	defer cancel()
+	source := input.source
+	if source.kind == "issue" || source.kind == "ask" {
+		s.persistSuggestions(ctx, source, suggestions)
+	}
+	if record.project == "" || (source.issueKey == "" && source.artifactID == "") {
 		return
 	}
+	artifactID := source.artifactID
+	if source.issueKey != "" {
+		artifactID = ""
+	}
+	if _, err := s.deps.Store.Pool.Exec(ctx, `
+		insert into related_checks
+			(project_key, source_kind, source_issue_key, source_artifact_id, source_ask_id, source_block_id,
+			 actor_kind, actor_id, outcome, search, reason, terms, keyword_ms, meaning_ms, total_ms, related_count)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+	`,
+		record.project, source.kind, nullableText(source.issueKey), nullableText(artifactID), nullableText(source.askID),
+		nullableText(source.blockID), source.actor.Kind, source.actor.ID, record.outcome, nullableText(record.search),
+		nullableText(record.reason), record.terms, record.keywordMS, record.meaningMS, record.totalMS, record.related,
+	); err != nil {
+		slog.Warn("dispatch: related-item check not recorded", "error", err)
+	}
+}
+
+// persistSuggestions records every item a check offered, so the outcome sweep has something to
+// resolve and a later count has something to count, in one round trip (store.Pool.SendBatch):
+// up to four rows, three related plus one decision. A row that cannot be inserted is only logged.
+func (s *server) persistSuggestions(ctx context.Context, source suggestionSource, suggestions *model.Suggestions) {
 	type row struct {
 		role string
 		rank int
@@ -318,12 +685,6 @@ func (s *server) persistSuggestions(ctx context.Context, source suggestionSource
 	if len(rows) == 0 {
 		return
 	}
-	nullable := func(value string) any {
-		if value == "" {
-			return nil
-		}
-		return value
-	}
 	batch := &pgx.Batch{}
 	for _, r := range rows {
 		batch.Queue(`
@@ -332,7 +693,7 @@ func (s *server) persistSuggestions(ctx context.Context, source suggestionSource
 				 role, rank, suggested_kind, suggested_id, suggested_issue_key)
 			values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		`,
-			source.kind, nullable(source.issueKey), nullable(source.artifactID), nullable(source.askID),
+			source.kind, nullableText(source.issueKey), nullableText(source.artifactID), nullableText(source.askID),
 			source.actor.Kind, source.actor.ID, r.role, r.rank, r.item.Kind, r.item.ID, suggestedIssueKey(r.item),
 		)
 	}

@@ -39,15 +39,26 @@ type fakeEmbedder struct {
 	// before a test's concurrent goroutines start and never mutated after, so they need no lock;
 	// callsMu guards calls, the one field tests mutate concurrently.
 	errFor map[embed.InputType]error
+	// delay holds every call that long before it answers; a call whose context ends first answers
+	// the context's error then. It models a model service slower than its caller allows (the
+	// related-item check's meaning allowance).
+	delay time.Duration
 
 	callsMu sync.Mutex
 	calls   int
 }
 
-func (f *fakeEmbedder) Embed(_ context.Context, texts []string, inputType embed.InputType) ([][]float32, error) {
+func (f *fakeEmbedder) Embed(ctx context.Context, texts []string, inputType embed.InputType) ([][]float32, error) {
 	f.callsMu.Lock()
 	f.calls++
 	f.callsMu.Unlock()
+	if f.delay > 0 {
+		select {
+		case <-time.After(f.delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	err := f.err
 	if e, ok := f.errFor[inputType]; ok {
 		err = e
@@ -245,11 +256,16 @@ func TestSearchMeaningFloorExcludesWeakMatches(t *testing.T) {
 
 // TestSearchAnswersKeywordOnlyWhenTheEmbedderFails is the acceptance criterion "with the embedder
 // down, search answers with keyword results and says it did": a request whose query embedding
-// fails still returns the ordinary keyword hit, with Degraded naming why.
+// fails still returns the ordinary keyword hit, with Degraded naming why. The issue create's
+// related-item check tries the embedder too, so only calls made after it answered are the
+// search's.
 func TestSearchAnswersKeywordOnlyWhenTheEmbedderFails(t *testing.T) {
 	embedder := &fakeEmbedder{err: errors.New("bedrock: simulated outage")}
 	handler, _, _ := newTestServer(t, testServerOptions{embedder: embedder})
 	issue := createInteractionIssue(t, handler, "DEGR", "Astrolabe calibration guide", "Keyword body text.")
+	embedder.callsMu.Lock()
+	before := embedder.calls
+	embedder.callsMu.Unlock()
 
 	response := searchResponse(t, handler, "q=astrolabe")
 	if response.Degraded != contracts.SearchDegradedEmbedderUnavailable {
@@ -258,8 +274,10 @@ func TestSearchAnswersKeywordOnlyWhenTheEmbedderFails(t *testing.T) {
 	if len(response.Results) != 1 || response.Results[0].ID != issue.Key {
 		t.Fatalf("Results = %+v, want the one keyword match for %q", response.Results, issue.Key)
 	}
-	if embedder.calls == 0 {
-		t.Error("the embedder was never called; the fallback path should still try the query's embedding")
+	embedder.callsMu.Lock()
+	defer embedder.callsMu.Unlock()
+	if embedder.calls == before {
+		t.Error("the search never called the embedder; the fallback path should still try the query's embedding")
 	}
 }
 
@@ -283,11 +301,15 @@ func TestSearchAnswersKeywordOnlyWithNoEmbedderConfigured(t *testing.T) {
 // TestSearchSkipsTheEmbedderForAStopWordOnlyQuery proves runSearch's numnode check runs before
 // the one model-service call it ever makes: a query whose websearch_to_tsquery is empty (pure
 // stopwords) answers with no results without ever paying for a query embedding, configured
-// embedder and all.
+// embedder and all. The issue create's related-item check embeds its own text, so only calls
+// made after it answered are the search's.
 func TestSearchSkipsTheEmbedderForAStopWordOnlyQuery(t *testing.T) {
 	embedder := &fakeEmbedder{}
 	handler, _, _ := newTestServer(t, testServerOptions{embedder: embedder})
 	createInteractionIssue(t, handler, "SKIP", "Astrolabe calibration guide", "Keyword body text.")
+	embedder.callsMu.Lock()
+	before := embedder.calls
+	embedder.callsMu.Unlock()
 
 	response := searchResponse(t, handler, "q=the")
 	if len(response.Results) != 0 {
@@ -296,8 +318,10 @@ func TestSearchSkipsTheEmbedderForAStopWordOnlyQuery(t *testing.T) {
 	if response.Degraded != "" {
 		t.Fatalf("Degraded = %q, want empty - a stopword-only query never reaches the embedder at all", response.Degraded)
 	}
-	if embedder.calls != 0 {
-		t.Errorf("embedder.calls = %d, want 0 - the numnode check must short-circuit before embedQuery", embedder.calls)
+	embedder.callsMu.Lock()
+	defer embedder.callsMu.Unlock()
+	if searchCalls := embedder.calls - before; searchCalls != 0 {
+		t.Errorf("embedder calls by the search = %d, want 0 - the numnode check must short-circuit before embedQuery", searchCalls)
 	}
 }
 

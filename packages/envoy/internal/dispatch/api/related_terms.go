@@ -271,8 +271,10 @@ type relatedTerms struct {
 // before it, the refresh statement's start), and of a document the latest version created by
 // then, which is the version the refresh read. Issues, comments, asks and messages keep no
 // history, so their current vector stands in for the one counted; a word one gained since is
-// subtracted though it was not counted, which only lowers df (never below zero), and a source's
-// word lowered to zero is the word only the source holds.
+// subtracted though it was not counted, which only lowers df (never below zero). A df lowered to
+// zero is not taken as final (pickRelatedTerms probes it): an own item whose transaction began
+// before refreshed_at but committed after it is subtracted though the refresh never saw it, and an
+// item written since may hold a word only the source held then.
 //
 // Parameters: $1 project, $2 text, $3 excluded issue key (empty for none), $4 excluded document
 // artifact id (null for none).
@@ -344,7 +346,9 @@ select l.lexeme, l.tf, quote_literal(l.lexeme),
 // the excluded owner's items. Issues, comments, asks and messages each probe their search index
 // with an exists; documents have no index on their versions' vectors (0010_search), so they are
 // read once for all the lexemes: each document's latest version, as search reads it, tested
-// against the lexemes ORed, and only a version that matches is unnested.
+// against the lexemes ORed, and only a version that matches is unnested. An item on no document
+// (an issue's comment or ask) is never the excluded document's, so the document test applies only
+// when $4 names one: `is distinct from` a null $4 would leave out every such item.
 //
 // Parameters: $1 project, $2 lexemes, $3 excluded issue key (empty for none), $4 excluded document
 // artifact id (null for none).
@@ -372,13 +376,13 @@ select p.lexeme from probe p
                  left join issues i on i.key = c.issue_key
                  left join artifacts a on a.id = c.artifact_id
                 where c.search @@ p.tq and coalesce(i.project_key, a.project_key) = $1
-                  and c.issue_key is distinct from $3 and c.artifact_id is distinct from $4::uuid)
+                  and c.issue_key is distinct from $3 and ($4::uuid is null or c.artifact_id is distinct from $4::uuid))
     or exists (select 1 from asks k
                  left join issues i on i.key = k.issue_key
                  left join artifacts a on a.id = coalesce(k.artifact_id, k.block_artifact_id)
                 where k.search @@ p.tq and coalesce(i.project_key, a.project_key) = $1
                   and k.issue_key is distinct from $3
-                  and coalesce(k.artifact_id, k.block_artifact_id) is distinct from $4::uuid)
+                  and ($4::uuid is null or coalesce(k.artifact_id, k.block_artifact_id) is distinct from $4::uuid))
     or exists (select 1 from messages m join issues i on i.key = m.issue_key
                 where m.search @@ p.tq and i.project_key = $1 and m.issue_key <> $3)`
 
@@ -415,10 +419,11 @@ type relatedCandidate struct {
 // relatedCommonFloor), and numbers and hashes (relatedNoise); it stops adding once the summed df
 // would pass relatedMatchBudget. The excluded owner's items count toward no df.
 //
-// df comes from the project's statistics (refreshSearchTermStats). A lexeme they do not hold is
-// probed live, the relatedProbeLimit most frequent in the text, and a hit counts as df 1. A
-// project with no statistics starts their refresh (ensureSearchTermStats) and is picked in probe
-// mode, every lexeme probed and N taken as 0.
+// df comes from the project's statistics (refreshSearchTermStats). A lexeme they do not hold, or
+// whose df the excluded owner's items bring to zero, is probed live, the relatedProbeLimit most
+// frequent in the text, and a hit counts as df 1. A project with no statistics starts their
+// refresh (ensureSearchTermStats) and is picked in probe mode, every lexeme probed and N taken as
+// 0.
 func (s *server) pickRelatedTerms(ctx context.Context, q queryer, project, text string, exclude relatedExclusion) (relatedTerms, error) {
 	var artifactID *string
 	if exclude.artifactID != "" {
@@ -437,7 +442,7 @@ func (s *server) pickRelatedTerms(ctx context.Context, q queryer, project, text 
 			rows.Close()
 			return relatedTerms{}, err
 		}
-		if df != nil {
+		if df != nil && *df > 0 {
 			candidate.DF, candidate.known = *df, true
 		}
 		candidates = append(candidates, candidate)
