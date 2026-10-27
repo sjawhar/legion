@@ -44,12 +44,13 @@ type WaveReleaseRequest struct {
 }
 
 // WaveReleaseResponse answers release_children. A release is accepted whatever the children's
-// links say, so released is every issue the request named, unchanged: no child of a wave is lost,
-// and the architect is never asked to send the request again. started and held then say what the
-// release did with each of them: started compares each child's record read before the request's
-// writes with its record read after them (startedByRelease), and held is judged from the blockers
-// Dispatch showed the request, against the mirror (blockers.UnfinishedOf) — the same list the
-// child's own todo event carries — not from the child's record.
+// links say, so released is every issue the request named, each once, in the order the request
+// first named it: no child of a wave is lost, and the architect is never asked to send the request
+// again. started and held then say what the release did with each of them: started compares each
+// child's record read before the request's writes with its record read after them
+// (startedByRelease), and held is judged from the blockers Dispatch showed the request, against
+// the mirror (blockers.UnfinishedOf) — the same list the child's own todo event carries — not from
+// the child's record.
 //
 // started names the children whose first phase this request started, and held each child the
 // request did not start because it waits on an unfinished issue, with the issues it waits on. A
@@ -585,8 +586,9 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 		req.Issues = []string{}
 	}
 	// A wave that names a child twice releases it once, at its first place: a second write would
-	// make Dispatch append another todo event for the same move, and the answer would name the child
-	// twice.
+	// make Dispatch append another todo event for the same move, the answer would name the child
+	// twice, and releaseOrder would add up the child's depth once per naming, so it could sort the
+	// child after a child of its own, which would then be applied before its parent is recorded.
 	named := make(map[string]bool, len(req.Issues))
 	req.Issues = slices.DeleteFunc(req.Issues, func(key string) bool {
 		twice := named[key]
