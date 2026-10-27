@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -524,6 +526,36 @@ func TestANoticeTheHolderRefusesFinishesUndelivered(t *testing.T) {
 	if published, rows := publisher.publishes(), outboxRows(t, pool); len(published) != 1 || rows != 0 || len(lines) != 1 ||
 		!strings.Contains(lines[0], "does not advertise the delivery mode") || !strings.Contains(lines[0], "issue=LEGION-2") || !strings.Contains(lines[0], "holder=ses_live") {
 		t.Fatalf("published %d times, %d rows left, log %q; want one publish, the row finished with no copy, and one line naming LEGION-2 and the holder", len(published), rows, logged.String())
+	}
+}
+
+// A forward the listener's own NATS grant denies is answered 403 publish_denied (the listener's
+// writeBusUnavailable, packages/envoy/cmd/listener/api.go). The denial repeats on every attempt
+// until an operator changes the grant, just as a holder that does not advertise the delivery mode
+// refuses every attempt until another session holds the role. So the row finishes undelivered
+// rather than being retried on its backoff, and holds no later notice to the architect behind the
+// fence. The publisher is the daemon's own HTTPPublisher, answered with the body the publish route
+// writes for the denial.
+func TestANoticeTheListenerIsDeniedToForwardFinishesUndelivered(t *testing.T) {
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":"envoy: the message bus denied the publish under this listener's own permissions: bus: NATS denied the publish to \"notifications.agent.ses_live\": nats: permissions violation: Permissions Violation for Publish to \"notifications.agent.ses_live\""}`))
+	}))
+	t.Cleanup(listener.Close)
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, false)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	architectClaimOn(t, sup, "LEGION-1", supervise.StateWorking, "ses_live")
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: notify.New(listener.URL, ""), supervisor: sup, project: "legion", now: time.Now}
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: "max_fix_attempts"}, time.Now()))
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if rows := outboxRows(t, pool); rows != 0 {
+		t.Fatalf("%d rows left after the listener answered 403 publish_denied, want the row finished undelivered: the denial repeats until an operator changes the grant", rows)
 	}
 }
 
