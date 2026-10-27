@@ -1,7 +1,7 @@
-import { expect, type Locator, test } from "@playwright/test";
+import { type Browser, expect, type Locator, type Page, test } from "@playwright/test";
 
 import { answerAsk, createComment, createIssue, createProject } from "./api";
-import { documentEditor, indexedBlockAsk } from "./editor";
+import { conversationThreadScope, documentEditor, indexedBlockAsk } from "./editor";
 import { resetDatabase } from "./seed";
 import { centerOf } from "./touch";
 import { asUser } from "./users";
@@ -60,56 +60,119 @@ async function expectBoxOnTextLine(item: Locator): Promise<void> {
   expect(line.top).toBeLessThan(box.bottom);
 }
 
+/** Asserts `scope` shows exactly two task checkboxes, both read-only, the one on the item holding
+ *  `tickedText` ticked and the one on the item holding `untickedText` not, each item with no
+ *  bullet. Returns the two items and their boxes. */
+async function expectTaskBoxes(scope: Locator, tickedText: string, untickedText: string) {
+  await expect(scope.getByRole("checkbox")).toHaveCount(2);
+  const ticked = itemWith(scope, tickedText);
+  const unticked = itemWith(scope, untickedText);
+  const tickedBox = ticked.getByRole("checkbox");
+  const untickedBox = unticked.getByRole("checkbox");
+  await expect(tickedBox).toBeChecked();
+  await expect(tickedBox).toBeDisabled();
+  await expect(untickedBox).not.toBeChecked();
+  await expect(untickedBox).toBeDisabled();
+  await expect(ticked).toHaveCSS("list-style-type", "none");
+  await expect(unticked).toHaveCSS("list-style-type", "none");
+  return { ticked, tickedBox, unticked, untickedBox };
+}
+
+/** Asserts a reader can tell the two boxes apart, however they are drawn: at least a tenth of the
+ *  pixels of the two boxes' shots differ by half a colour channel's range or more. A byte compare
+ *  is not enough: two boxes drawn alike still differ by a few faint antialiased edge pixels. */
+async function expectBoxesLookDifferent(tickedBox: Locator, untickedBox: Locator): Promise<void> {
+  const tickedShot = await tickedBox.screenshot({ animations: "disabled" });
+  const untickedShot = await untickedBox.screenshot({ animations: "disabled" });
+  // The page decodes the two PNGs; a Blob read by `createImageBitmap` is no fetch the page's CSP
+  // could refuse.
+  const { pixels, sameSize, strong } = await tickedBox.page().evaluate(
+    async (shots) => {
+      const [a, b] = await Promise.all(
+        shots.map(async (base64) => {
+          const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+          const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
+          const context = new OffscreenCanvas(bitmap.width, bitmap.height).getContext("2d");
+          if (!context) throw new Error("no 2d context to decode a box's shot");
+          context.drawImage(bitmap, 0, 0);
+          return context.getImageData(0, 0, bitmap.width, bitmap.height);
+        })
+      );
+      let strong = 0;
+      for (let i = 0; i < a.data.length; i += 4) {
+        const channels = [0, 1, 2].map((c) => Math.abs(a.data[i + c] - b.data[i + c]));
+        if (Math.max(...channels) >= 128) strong++;
+      }
+      return {
+        pixels: a.width * a.height,
+        sameSize: a.width === b.width && a.height === b.height,
+        strong,
+      };
+    },
+    [tickedShot.toString("base64"), untickedShot.toString("base64")]
+  );
+  expect(sameSize, "the ticked and unticked boxes are the same size").toBe(true);
+  expect(strong, "pixels that tell the ticked box from the unticked one").toBeGreaterThanOrEqual(
+    pixels / 10
+  );
+}
+
+/** Seeds an issue with an agent comment holding a ticked and an unticked task item. */
+async function seedChecklist(): Promise<{ commentId: string; issueKey: string }> {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Release checklist" });
+  const comment = await createComment(
+    issue.key,
+    { body: "Release checklist:\n\n- [x] Tag the build\n- [ ] Publish the notes\n" },
+    { as: "agent" }
+  );
+  return { commentId: comment.id, issueKey: issue.key };
+}
+
+/** Opens the issue's Conversation, expands the comment's thread and returns where it shows. */
+async function openChecklistThread(
+  page: Page,
+  project: string,
+  { commentId, issueKey }: { commentId: string; issueKey: string }
+): Promise<Locator> {
+  await page.goto(`/issues/${issueKey}/conversation`);
+  const turn = page.locator(`[data-turn="comment:${commentId}"]`);
+  // The comment has loaded, so any failure after this is about the checkboxes.
+  await expect(turn.getByText("Tag the build")).toBeVisible();
+  // A comment's turn shows a one-line preview until the reader expands its thread: in place
+  // above the phone breakpoint, as a full-screen Thread dialog below it.
+  await turn.getByRole("button", { name: "Expand thread" }).click();
+  return conversationThreadScope(page, project, turn);
+}
+
+async function withAlice(browser: Browser, run: (page: Page) => Promise<void>): Promise<void> {
+  const alice = await asUser(browser, "alice");
+  try {
+    await run(await alice.newPage());
+  } finally {
+    await alice.close();
+  }
+}
+
 for (const colorScheme of ["light", "dark"] as const) {
   test(`a comment's ticked and unticked task items show a ticked and an unticked checkbox (${colorScheme})`, async ({
     browser,
   }, testInfo) => {
-    await createProject({ key: "CORE", name: "Core" });
-    const issue = await createIssue({ project: "CORE", title: "Release checklist" });
-    const comment = await createComment(
-      issue.key,
-      { body: "Release checklist:\n\n- [x] Tag the build\n- [ ] Publish the notes\n" },
-      { as: "agent" }
-    );
-    const alice = await asUser(browser, "alice");
-    try {
-      const page = await alice.newPage();
+    const checklist = await seedChecklist();
+    await withAlice(browser, async (page) => {
       await page.emulateMedia({ colorScheme });
-      await page.goto(`/issues/${issue.key}/conversation`);
-      const turn = page.locator(`[data-turn="comment:${comment.id}"]`);
-
-      // The comment has loaded, so any failure below is about the checkboxes.
-      await expect(turn.getByText("Tag the build")).toBeVisible();
-      // A comment's turn shows a one-line preview until the reader expands its thread: in place
-      // above the phone breakpoint, as a full-screen Thread dialog below it.
-      await turn.getByRole("button", { name: "Expand thread" }).click();
-      const thread =
-        testInfo.project.name === "iphone" ? page.getByRole("dialog", { name: "Thread" }) : turn;
-      await expect(thread.getByRole("checkbox")).toHaveCount(2);
-
-      const ticked = itemWith(thread, "Tag the build");
-      const unticked = itemWith(thread, "Publish the notes");
-      const tickedBox = ticked.getByRole("checkbox");
-      const untickedBox = unticked.getByRole("checkbox");
-      await expect(tickedBox).toBeChecked();
-      await expect(tickedBox).toBeDisabled();
-      await expect(untickedBox).not.toBeChecked();
-      await expect(untickedBox).toBeDisabled();
-
-      // The two boxes look different at a glance: the ticked one is filled, the unticked one not.
-      const tickedFill = await tickedBox.evaluate((box) => getComputedStyle(box).backgroundColor);
-      const untickedFill = await untickedBox.evaluate(
-        (box) => getComputedStyle(box).backgroundColor
+      const thread = await openChecklistThread(page, testInfo.project.name, checklist);
+      const { ticked, tickedBox, unticked, untickedBox } = await expectTaskBoxes(
+        thread,
+        "Tag the build",
+        "Publish the notes"
       );
-      expect(tickedFill).not.toBe(untickedFill);
-      expect(tickedFill).not.toBe("rgba(0, 0, 0, 0)");
 
       // Each box stands on its item's first line, in place of the bullet.
       await ticked.scrollIntoViewIfNeeded();
       await expectBoxOnTextLine(ticked);
       await expectBoxOnTextLine(unticked);
-      await expect(ticked).toHaveCSS("list-style-type", "none");
-      await expect(unticked).toHaveCSS("list-style-type", "none");
+      await expectBoxesLookDifferent(tickedBox, untickedBox);
 
       // A click on a box changes nothing: the boxes are read-only.
       const { x, y } = await centerOf(tickedBox);
@@ -118,15 +181,37 @@ for (const colorScheme of ["light", "dark"] as const) {
       await expect(untickedBox).not.toBeChecked();
 
       await thread.screenshot({ path: testInfo.outputPath(`task-items-${colorScheme}.png`) });
-    } finally {
-      await alice.close();
-    }
+    });
+  });
+
+  // Windows High Contrast forces every fill and border to the system colours, so a box drawn by
+  // the page alone could lose what tells a ticked one from an unticked one.
+  test(`under forced colors a comment's ticked and unticked task items still look different (${colorScheme})`, async ({
+    browser,
+  }, testInfo) => {
+    const checklist = await seedChecklist();
+    await withAlice(browser, async (page) => {
+      await page.emulateMedia({ colorScheme, forcedColors: "active" });
+      const thread = await openChecklistThread(page, testInfo.project.name, checklist);
+      const { ticked, tickedBox, untickedBox } = await expectTaskBoxes(
+        thread,
+        "Tag the build",
+        "Publish the notes"
+      );
+
+      await ticked.scrollIntoViewIfNeeded();
+      await expectBoxesLookDifferent(tickedBox, untickedBox);
+
+      await thread.screenshot({
+        path: testInfo.outputPath(`task-items-forced-${colorScheme}.png`),
+      });
+    });
   });
 }
 
 test("a reply under a decision inside a document shows the checkboxes with no bullet", async ({
   browser,
-}) => {
+}, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -145,24 +230,13 @@ test("a reply under a decision inside a document shows the checkboxes with no bu
     { as: "agent" }
   );
 
-  const alice = await asUser(browser, "alice");
-  try {
-    const page = await alice.newPage();
+  await withAlice(browser, async (page) => {
     await page.goto(`/issues/${issue.key}`);
     const block = documentEditor(page).locator('[data-dispatch-ask-block="naming"]');
     const thread = block.getByTestId(`thread-${blockAsk.id}`);
     await expect(thread.getByText("alias added")).toBeVisible();
-    await expect(thread.getByRole("checkbox")).toHaveCount(2);
+    await expectTaskBoxes(thread, "alias added", "docs updated");
 
-    const ticked = itemWith(thread, "alias added");
-    const unticked = itemWith(thread, "docs updated");
-    await expect(ticked.getByRole("checkbox")).toBeChecked();
-    await expect(ticked.getByRole("checkbox")).toBeDisabled();
-    await expect(unticked.getByRole("checkbox")).not.toBeChecked();
-    await expect(unticked.getByRole("checkbox")).toBeDisabled();
-    await expect(ticked).toHaveCSS("list-style-type", "none");
-    await expect(unticked).toHaveCSS("list-style-type", "none");
-  } finally {
-    await alice.close();
-  }
+    await thread.screenshot({ path: testInfo.outputPath("task-items-ask-footer.png") });
+  });
 });

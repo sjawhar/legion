@@ -214,6 +214,12 @@ export function threadCard(page: Page, rootId: string): Locator {
   return page.locator(`[data-turn="comment:${rootId}"]`).locator(`[data-margin-item="${rootId}"]`);
 }
 
+/** Where a Conversation turn's thread shows once the reader expands it: in place, in the turn,
+ *  above the phone breakpoint; in the full-screen Thread dialog on the phone layout. */
+export function conversationThreadScope(page: Page, project: string, turn: Locator): Locator {
+  return project === "iphone" ? page.getByRole("dialog", { name: "Thread" }) : turn;
+}
+
 /** The Conversation's All / Open / Closed control, the one filter over its cards. It starts on
  *  All every visit and is not persisted. */
 export function conversationFilter(page: Page, label: "All" | "Closed" | "Open"): Locator {

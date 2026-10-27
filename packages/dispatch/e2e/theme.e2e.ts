@@ -4,6 +4,7 @@ import * as C from "../web/src/theme/classes";
 import { oklchToSrgb8 } from "../web/src/theme/contrast";
 import type { Swatch } from "../web/src/theme/palette";
 import { createAsk, createComment, createIssue, createProject } from "./api";
+import { conversationThreadScope } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -195,8 +196,7 @@ test("a link in a comment's Markdown body renders the app's link blue in dark mo
     await expectTextColor(previewLink, C.LINK.dark);
 
     await turn.getByRole("button", { name: "Expand thread" }).click();
-    const thread =
-      testInfo.project.name === "iphone" ? page.getByRole("dialog", { name: "Thread" }) : turn;
+    const thread = conversationThreadScope(page, testInfo.project.name, turn);
     const bodyLink = thread.locator(".dispatch-markdown").getByRole("link", { name: "the plan" });
     await expect(bodyLink).toBeVisible();
     await expectTextColor(bodyLink, C.LINK.dark);

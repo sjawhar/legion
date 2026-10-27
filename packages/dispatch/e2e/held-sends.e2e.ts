@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { agentRow, openAgents, plannerSession, seedAgents } from "./agents";
 import { createComment, createIssue, createProject } from "./api";
+import { conversationThreadScope } from "./editor";
 import { resetDatabase } from "./seed";
 import { answeredPost, navigateInApp, refusePosts } from "./sends";
 import { asUser } from "./users";
@@ -157,7 +158,7 @@ test("a thread's own reply refused after the reader left it past the deadline is
     await page.clock.install();
     await page.goto(`/issues/${issue.key}/conversation`);
     const turn = page.locator(`[data-turn="comment:${earlier.id}"]`);
-    const thread = phone ? page.getByRole("dialog", { name: "Thread" }) : turn;
+    const thread = conversationThreadScope(page, testInfo.project.name, turn);
     const openThread = async () => {
       await turn.getByRole("button", { name: "Expand thread" }).click();
       await expect(
