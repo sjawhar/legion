@@ -37,7 +37,9 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   probe refuses an image whose Envoy plugin does. A human debugging inside a pod with a bare `omp` has
   the CodeGraph tool and the repository's extensions but no Legion or Envoy tools unless it passes
   `--extension /opt/legion/pi-envoy --extension /opt/legion/pi-legion`;
-- `@bopstack/pi-codegraph` (from npm, pinned), the one plugin linked into the OMP profile `legion`
+- `@bopstack/pi-codegraph`, installed at `/opt/omp-plugins` from the committed lockfile at
+  `packages/daemon/docker/omp-plugins` (its `package.json` is the pin; the build resolves nothing from
+  npm), the one plugin linked into the OMP profile `legion`
   (`OMP_PROFILE=legion`; plugins resolve to `/home/legion/.omp/profiles/legion/plugins/node_modules`),
   backed by the CodeGraph CLI (`@colbymchenry/codegraph`, pinned) at `/opt/codegraph/bin` (`PATH`) — the
   `codegraph` tool a tester queries for `affected` tests and a reviewer for `impact`/`callers` blast
@@ -179,9 +181,9 @@ the OMP fork release has no linux/arm64 build. One commit ⇒ one image, with on
 fresh pod still loads the image's own copies of `@sjawhar/pi-envoy` and `@sjawhar/pi-legion`, from
 the commit, never from an npm release, but a role relaunched onto a newer plugin contract in a
 kept pod loads the release's published pair, installed from npm under the generation directory
-("Contract discipline" below) — what the image does take from npm (the CodeGraph plugin and
-CLI, TypeScript and the two npm language servers) is pinned by the `ARG`s at the top of
-`worker.Dockerfile`.
+("Contract discipline" below) — what the image does take from npm is pinned: the CodeGraph CLI by an
+`ARG` at the top of `worker.Dockerfile`, and the CodeGraph plugin, TypeScript and the two npm language
+servers by the committed lockfiles under `packages/daemon/docker/` (`omp-plugins`, `language-servers`).
 
 ### The tools a role's own work needs
 
