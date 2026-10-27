@@ -937,8 +937,18 @@ func (c *Client) PublishCore(item contracts.Envelope) error {
 // (publishConfirmed), so a nil error means it did: a publish NATS denies (a permissions violation
 // of a per-client grant), a flush that fails and a publish the server cannot be shown to have
 // accepted all return an error. The subject can differ from item.Topic when an authoritative
-// router forwards an envelope while retaining its original topic for the recipient.
+// router forwards an envelope while retaining its original topic for the recipient. It waits at
+// most 5 s, a reconnect included.
 func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return c.PublishCoreContext(ctx, subject, item)
+}
+
+// PublishCoreContext is PublishCoreTo bounded by ctx rather than by 5 s: the reconnect it waits
+// for and the server's confirmation both end with ctx, so a caller answering inside a deadline of
+// its own (the listener's confirmed publish) is never held past it.
+func (c *Client) PublishCoreContext(ctx context.Context, subject string, item contracts.Envelope) error {
 	if err := checkSubject(subject); err != nil {
 		return err
 	}
@@ -946,12 +956,13 @@ func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return err
 	}
-	deadline, _ := ctx.Deadline()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		deadline = time.Now().Add(5 * time.Second)
+	}
 	conn := c.Conn
 	return c.publishConfirmed(conn, &nats.Msg{Subject: subject, Data: data}, deadline, conn.PublishMsg)
 }

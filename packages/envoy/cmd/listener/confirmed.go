@@ -430,20 +430,31 @@ func sendToTopic(ctx context.Context, w http.ResponseWriter, d *listenerDeps, it
 		})
 		settle("not_confirmed", delivered, undelivered)
 	}
-	sender, err := readBefore(ctx, func() *contracts.EnvelopeSender {
-		return senderStamp(d.registry, d.sessions, item.SourceSession)
-	})
-	if err != nil {
-		// Nothing was published: every recipient is undelivered, and so is a send that had none.
+	// noneDelivered answers a send whose window ended before anything was forwarded: every
+	// recipient is undelivered, and so is a send that had none.
+	noneDelivered := func() {
 		undelivered := make([]undeliveredRecipient, 0, len(recipients))
 		for _, sessionID := range recipients {
 			undelivered = append(undelivered, undeliveredRecipient{SessionID: sessionID, Reason: "delivery_failed"})
 		}
 		notConfirmed([]string{}, undelivered)
+	}
+	sender, err := readBefore(ctx, func() *contracts.EnvelopeSender {
+		return senderStamp(d.registry, d.sessions, item.SourceSession)
+	})
+	if err != nil {
+		noneDelivered()
 		return
 	}
 	item.Sender = sender
-	if err := d.client.Publish(item); err != nil {
+	// The topic's own core publish waits for a reconnecting connection as long as the send's window
+	// lasts and no longer, so a hub that is down is answered inside the window, never after the
+	// bus's own reconnect wait, which outlasts envoy-client's 5 s attempt.
+	if err := d.client.PublishCoreContext(ctx, item.Topic, item); err != nil {
+		if ctx.Err() != nil {
+			noneDelivered()
+			return
+		}
 		writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 		settle("failed", nil, nil)
 		return
