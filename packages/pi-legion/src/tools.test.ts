@@ -557,13 +557,14 @@ const STANDING = "c0de0000000000000000000000000000000000ff";
 /** The newest handoff record the pane's Dispatch holds for the phase. */
 const RECORD = { id: "5b1f0c2e-9d7a-4c3b-8e61-2f4a9d0c7b13", version: 2 };
 
-/** A jj whose `@-` is on `legion/LEGION-208@origin`, whose tip is `TIP`, unless `pushed` is empty. */
-function paneJj(pushed = STANDING): JjRunner {
+/** A jj whose `@-` is on `legion/LEGION-208@origin`, whose tip is `TIP`, unless `pushed` is false. */
+function paneJj(pushed = true): JjRunner {
   return async (args) => {
     const revision = args[2] ?? "";
     if (revision === "@-") return STANDING;
-    if (revision.startsWith(`${STANDING} & ::remote_bookmarks(`)) return pushed;
-    if (revision.startsWith("remote_bookmarks(")) return TIP;
+    if (revision.startsWith("remote_bookmarks(") && revision.endsWith(` & ${STANDING}::`)) {
+      return pushed ? TIP : "";
+    }
     throw new Error(`unexpected jj ${args.join(" ")}`);
   };
 }
@@ -740,7 +741,7 @@ test("handoff_complete finds the phase's handoff record and the pushed tip, post
       "handoff_complete could not read LEGION-208's newest implement handoff from Dispatch: 503 UNAVAILABLE: database is starting; complete again once Dispatch answers",
     ],
     [
-      paneJj(""),
+      paneJj(false),
       paneDispatch(),
       `the commit this workspace stands on, ${STANDING}, is not on legion/LEGION-208@origin: push it with \`jj bookmark set legion/LEGION-208 -r @- && jj git push --bookmark legion/LEGION-208\`, then complete again`,
     ],

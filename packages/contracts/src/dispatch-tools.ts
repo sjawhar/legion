@@ -287,11 +287,16 @@ export const DISPATCH_BODY_MAX = 32000;
 export const DISPATCH_HANDOFF_BODY_MAX = 262144;
 
 /** A handoff's phase, the `{phase}` segment of the handoff routes: a lowercase slug. Legion writes
- *  `plan`, `implement`, `test` and `review`. The server holds the same rule (`handoffs.phase`). */
-const HANDOFF_PHASE_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
+ *  `plan`, `implement`, `test` and `review`. Generated into Go as `contracts.HandoffPhasePattern`,
+ *  which the server compiles; the `handoffs.phase` check constraint holds the same rule. */
+export const HANDOFF_PHASE_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
 
-const HANDOFF_PHASE_RULE =
-  "phase is not a handoff phase: a lowercase letter, then up to 31 lowercase letters, digits or hyphens, such as implement";
+/** HANDOFF_PHASE_PATTERN's rule in words. Every refusal of a phase that is not a handoff phase
+ *  gives it, the tool's and the server's alike: generated into Go as `contracts.HandoffPhaseRule`. */
+export const HANDOFF_PHASE_RULE_WORDS =
+  "a lowercase letter, then up to 31 lowercase letters, digits or hyphens, such as implement";
+
+const HANDOFF_PHASE_RULE = `phase is not a handoff phase: ${HANDOFF_PHASE_RULE_WORDS}`;
 
 /** Whether text is exactly one JSON object, the only body a handoff holds. */
 function isJsonObjectText(text: string): boolean {

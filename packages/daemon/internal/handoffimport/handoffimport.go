@@ -111,6 +111,9 @@ type result struct {
 	text    string
 }
 
+// failure is the failed line for err: `failed: <err>`.
+func failure(err error) result { return result{failed, "failed: " + err.Error()} }
+
 // runner is one run: its options, and the count of each outcome printed so far.
 type runner struct {
 	Options
@@ -214,7 +217,7 @@ func (r *runner) readState(ctx context.Context) ([]workflowIssue, error) {
 func (r *runner) issue(ctx context.Context, issue workflowIssue) error {
 	repo, err := ghrepo.Parse("the daemon's repository of "+issue.key, issue.repo)
 	if err != nil {
-		r.print(issue.key, "", result{failed, "failed: " + err.Error()})
+		r.print(issue.key, "", failure(err))
 		return nil
 	}
 	lease, err := r.Tokens.Token(ctx, appauth.Implement, repo.Owner())
@@ -255,14 +258,14 @@ func (r *runner) issue(ctx context.Context, issue workflowIssue) error {
 func (r *runner) attempt(ctx context.Context, b branch, phases map[string]result) (last result, moved bool, err error) {
 	head, found, err := b.head(ctx)
 	if err != nil {
-		return result{failed, "failed: " + err.Error()}, false, nil
+		return failure(err), false, nil
 	}
 	if !found {
 		return result{noBranch, "no branch"}, false, nil
 	}
 	top, err := b.list(ctx, handoffDir, head)
 	if err != nil {
-		return result{failed, "failed: " + err.Error()}, false, nil
+		return failure(err), false, nil
 	}
 	if len(top) == 0 {
 		return result{unchanged, "unchanged"}, false, nil
@@ -271,7 +274,7 @@ func (r *runner) attempt(ctx context.Context, b branch, phases map[string]result
 	if slices.ContainsFunc(top, func(e contentEntry) bool { return e.Name == b.key && e.Type == "dir" }) {
 		files, err := b.list(ctx, handoffDir+"/"+b.key, head)
 		if err != nil {
-			return result{failed, "failed: " + err.Error()}, false, nil
+			return failure(err), false, nil
 		}
 		for _, word := range phaseWords {
 			name := word + ".json"
@@ -305,7 +308,7 @@ func (r *runner) phase(ctx context.Context, b branch, head, word string) (result
 	path := handoffDir + "/" + b.key + "/" + word + ".json"
 	text, err := b.file(ctx, path, head)
 	if err != nil {
-		return result{failed, "failed: " + err.Error()}, nil
+		return failure(err), nil
 	}
 	latest, found, err := r.Dispatch.LatestHandoff(ctx, b.key, word)
 	if dispatch.Missing(err) {
@@ -314,8 +317,7 @@ func (r *runner) phase(ctx context.Context, b branch, head, word string) (result
 	if err != nil {
 		return result{failed, fmt.Sprintf("failed: read the newest %s handoff of %s from Dispatch: %v", word, b.key, err)}, nil
 	}
-	session := dispatch.DaemonSession(b.key)
-	if found && (latest.Author.Kind != "session" || latest.Author.ID != session) {
+	if found && !latest.Author.IsSession(dispatch.DaemonSession(b.key)) {
 		return result{keptWorker, fmt.Sprintf("kept worker record v%d", latest.Version)}, nil
 	}
 	if found && latest.Body == text {
@@ -344,7 +346,7 @@ func noRoute(route string, err error) error {
 func (r *runner) remove(ctx context.Context, b branch, head string) (last result, moved bool, err error) {
 	rootTree, deletions, err := b.removalSet(ctx, head)
 	if err != nil {
-		return result{failed, "failed: " + err.Error()}, false, nil
+		return failure(err), false, nil
 	}
 	if r.DryRun {
 		paths := fmt.Sprintf("%d paths", len(deletions))
@@ -355,11 +357,11 @@ func (r *runner) remove(ctx context.Context, b branch, head string) (last result
 	}
 	commit, err := b.removalCommit(ctx, head, rootTree, deletions)
 	if err != nil {
-		return result{failed, "failed: " + err.Error()}, false, nil
+		return failure(err), false, nil
 	}
 	moved, err = b.move(ctx, commit)
 	if err != nil {
-		return result{failed, "failed: " + err.Error()}, false, nil
+		return failure(err), false, nil
 	}
 	if moved {
 		return result{}, true, nil

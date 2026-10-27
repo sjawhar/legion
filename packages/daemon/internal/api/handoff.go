@@ -265,10 +265,10 @@ func (s *server) handoffRecord(w http.ResponseWriter, r *http.Request, session s
 			req.HandoffID, handoff.Version, handoff.IssueKey, handoff.Phase, issue.Key, word, req.HandoffVersion, read))
 		return false
 	}
-	if handoff.Author.Kind == "session" && handoff.Author.ID == session {
+	if handoff.Author.IsSession(session) {
 		return true
 	}
-	if handoff.Author.Kind == "session" && handoff.Author.ID == dispatch.DaemonSession(issue.Key) {
+	if handoff.Author.IsSession(dispatch.DaemonSession(issue.Key)) {
 		writeFailure(w, http.StatusForbidden, "HANDOFF_SESSION_MISMATCH", fmt.Sprintf(
 			"handoff record %s (%s version %d) was written by the daemon's own session %s, which imported the handoff file committed before handoffs moved to Dispatch, not by this claim's session %s: read it with %s, write it again with %s from this session, then complete naming the new record; this completion changed nothing",
 			req.HandoffID, word, handoff.Version, handoff.Author.ID, session, read, write))

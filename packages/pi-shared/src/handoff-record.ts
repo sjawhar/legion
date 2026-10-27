@@ -117,6 +117,18 @@ export function paneLatestHandoff(
   };
 }
 
+/** What a completion of `phase` by `role` reports in the pane (`findHandoffReport` with the pane's
+ * environment `env` and its Dispatch, `paneLatestHandoff(file, env, cwd)`), as each harness's
+ * `legion` tool asks it. */
+export function paneHandoffReport(
+  file: SessionConfigFile,
+  env: NodeJS.ProcessEnv,
+  cwd: string
+): (phase: LegionPhase, role: LegionRole) => Promise<HandoffReport> {
+  return (phase, role) =>
+    findHandoffReport({ phase, role, env, latestHandoff: paneLatestHandoff(file, env, cwd) });
+}
+
 function requiredVariable(env: NodeJS.ProcessEnv, name: string): string {
   const value = env[name];
   if (value === undefined || value === "") {
@@ -174,15 +186,15 @@ export async function findHandoffReport(input: HandoffReportInput): Promise<Hand
   const bookmark = `legion/${issue}`;
   const remote = `remote_bookmarks(exact:${JSON.stringify(bookmark)}, exact:"origin")`;
   const stands = await jj(STANDING, workspace);
-  const pushed = await jj(
-    ["log", "-r", `${stands} & ::${remote}`, "--no-graph", "-T", "commit_id"],
+  // The branch's tip at origin when `@-` is on it, and nothing when it is not.
+  const tip = await jj(
+    ["log", "-r", `${remote} & ${stands}::`, "--no-graph", "-T", "commit_id"],
     workspace
   );
-  if (pushed === "") {
+  if (tip === "") {
     throw new Error(
       `the commit this workspace stands on, ${stands}, is not on ${bookmark}@origin: push it with \`jj bookmark set ${bookmark} -r @- && jj git push --bookmark ${bookmark}\`, then complete again`
     );
   }
-  const tip = await jj(["log", "-r", remote, "--no-graph", "-T", "commit_id"], workspace);
   return { commit: tip, ...report };
 }

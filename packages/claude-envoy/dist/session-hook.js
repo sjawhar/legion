@@ -14063,7 +14063,8 @@ var ASK_QUESTION_MAX = 800;
 var DISPATCH_BODY_MAX = 32000;
 var DISPATCH_HANDOFF_BODY_MAX = 262144;
 var HANDOFF_PHASE_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
-var HANDOFF_PHASE_RULE = "phase is not a handoff phase: a lowercase letter, then up to 31 lowercase letters, digits or hyphens, such as implement";
+var HANDOFF_PHASE_RULE_WORDS = "a lowercase letter, then up to 31 lowercase letters, digits or hyphens, such as implement";
+var HANDOFF_PHASE_RULE = `phase is not a handoff phase: ${HANDOFF_PHASE_RULE_WORDS}`;
 function isJsonObjectText(text) {
   try {
     const parsed = JSON.parse(text);

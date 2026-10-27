@@ -36709,7 +36709,8 @@ var ASK_QUESTION_MAX = 800;
 var DISPATCH_BODY_MAX = 32000;
 var DISPATCH_HANDOFF_BODY_MAX = 262144;
 var HANDOFF_PHASE_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
-var HANDOFF_PHASE_RULE = "phase is not a handoff phase: a lowercase letter, then up to 31 lowercase letters, digits or hyphens, such as implement";
+var HANDOFF_PHASE_RULE_WORDS = "a lowercase letter, then up to 31 lowercase letters, digits or hyphens, such as implement";
+var HANDOFF_PHASE_RULE = `phase is not a handoff phase: ${HANDOFF_PHASE_RULE_WORDS}`;
 function isJsonObjectText(text) {
   try {
     const parsed = JSON.parse(text);
@@ -45043,6 +45044,9 @@ function paneLatestHandoff(file2, env, cwd, fetchImpl = fetch) {
     return new DispatchClient(dispatch.url, dispatch.token, fetchImpl).latestHandoff(issue2, word);
   };
 }
+function paneHandoffReport(file2, env, cwd) {
+  return (phase, role) => findHandoffReport({ phase, role, env, latestHandoff: paneLatestHandoff(file2, env, cwd) });
+}
 function requiredVariable(env, name) {
   const value = env[name];
   if (value === undefined || value === "") {
@@ -45079,11 +45083,10 @@ async function findHandoffReport(input) {
   const bookmark = `legion/${issue2}`;
   const remote = `remote_bookmarks(exact:${JSON.stringify(bookmark)}, exact:"origin")`;
   const stands = await jj(STANDING, workspace);
-  const pushed = await jj(["log", "-r", `${stands} & ::${remote}`, "--no-graph", "-T", "commit_id"], workspace);
-  if (pushed === "") {
+  const tip = await jj(["log", "-r", `${remote} & ${stands}::`, "--no-graph", "-T", "commit_id"], workspace);
+  if (tip === "") {
     throw new Error(`the commit this workspace stands on, ${stands}, is not on ${bookmark}@origin: push it with \`jj bookmark set ${bookmark} -r @- && jj git push --bookmark ${bookmark}\`, then complete again`);
   }
-  const tip = await jj(["log", "-r", remote, "--no-graph", "-T", "commit_id"], workspace);
   return { commit: tip, ...report };
 }
 // ../../node_modules/.bun/@modelcontextprotocol+sdk@1.30.0/node_modules/@modelcontextprotocol/sdk/dist/esm/server/zod-compat.js
@@ -49383,12 +49386,7 @@ async function runEnvoyChannelServer() {
       const legionRuntime = {
         daemon,
         claim: () => claim?.capability(),
-        handoffReport: (phase, role) => findHandoffReport({
-          phase,
-          role,
-          env: process.env,
-          latestHandoff: paneLatestHandoff(configFile, process.env, directory)
-        })
+        handoffReport: paneHandoffReport(configFile, process.env, directory)
       };
       return mcpResult(await executeLegionTool(legionRuntime, request.params.arguments));
     }

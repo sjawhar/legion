@@ -232,10 +232,13 @@ export async function runDispatchCli(
       parsed.tool
     );
   }
-  const sessionId = host === "claude" ? claudeSession : env.DISPATCH_SESSION_ID;
+  const [sessionId, sessionVariable] =
+    host === "claude"
+      ? [claudeSession, "ENVOY_SESSION_ID or CLAUDE_CODE_SESSION_ID"]
+      : [env.DISPATCH_SESSION_ID, "DISPATCH_SESSION_ID"];
   if (sessionId === undefined) {
     return refuse(
-      `dispatch: ${host === "claude" ? "ENVOY_SESSION_ID or CLAUDE_CODE_SESSION_ID" : "DISPATCH_SESSION_ID"} is not set, so this call has no session to act as. The host plugin sets it in an agent's shell.`,
+      `dispatch: ${sessionVariable} is not set, so this call has no session to act as. The host plugin sets it in an agent's shell.`,
       USAGE,
       parsed.tool
     );

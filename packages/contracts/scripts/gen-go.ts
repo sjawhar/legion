@@ -18,6 +18,8 @@ import {
 import {
   DISPATCH_BODY_MAX,
   DISPATCH_HANDOFF_BODY_MAX,
+  HANDOFF_PHASE_PATTERN,
+  HANDOFF_PHASE_RULE_WORDS,
   PROJECT_KEY_PATTERN,
   PROJECT_KEY_RULE,
   SEARCH_KIND_DEPTH,
@@ -171,6 +173,17 @@ const DispatchBodyMax = ${DISPATCH_BODY_MAX}
 // packages/contracts so the server's 413 and the \`dispatch handoff-write\` command's pre-send
 // refusal cannot drift apart.
 const DispatchHandoffBodyMax = ${DISPATCH_HANDOFF_BODY_MAX}
+
+// HandoffPhaseRule says the handoff-phase pattern's rule in words; every refusal of a phase that is
+// not a handoff phase gives it. Generated from HANDOFF_PHASE_RULE_WORDS in packages/contracts so
+// the server and the tool word it once.
+const HandoffPhaseRule = ${JSON.stringify(HANDOFF_PHASE_RULE_WORDS)}
+
+// HandoffPhasePattern is a handoff's phase, the {phase} segment of the handoff routes, which the
+// handoffs.phase check constraint holds too. Generated from HANDOFF_PHASE_PATTERN in
+// packages/contracts, which the dispatch command checks a phase against, so the two accept the
+// same phases.
+const HandoffPhasePattern = ${JSON.stringify(HANDOFF_PHASE_PATTERN.source)}
 
 // ProjectNameMax is the longest project name, in UTF-16 units, that POST /api/v1/projects
 // accepts. Generated from PROJECT_NAME_MAX in packages/contracts so the server's refusal, the

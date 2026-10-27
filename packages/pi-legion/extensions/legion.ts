@@ -10,7 +10,7 @@ import {
 import { messageFor } from "@legion/envoy-client/errors";
 import { sessionConfigFile, sessionDispatchSettings } from "@legion/envoy-client/session-settings";
 import { createLegionDaemonClient, type LegionDaemonClient } from "@legion/pi-shared/daemon-client";
-import { findHandoffReport, paneLatestHandoff } from "@legion/pi-shared/handoff-record";
+import { paneHandoffReport } from "@legion/pi-shared/handoff-record";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
   ENVOY_PLUGIN_INTERFACE_VERSION,
@@ -361,16 +361,11 @@ export default function legionExtension(pi: PiApi): void {
         // and the Dispatch pi-envoy's session reads (Oh My Pi's rule, in the same process), which
         // the pane's `dispatch handoff-write` wrote the record to.
         handoffReport: (phase, role) =>
-          findHandoffReport({
-            phase,
-            role,
-            env: process.env,
-            latestHandoff: paneLatestHandoff(
-              sessionConfigFile("omp", process.env),
-              process.env,
-              process.cwd()
-            ),
-          }),
+          paneHandoffReport(
+            sessionConfigFile("omp", process.env),
+            process.env,
+            process.cwd()
+          )(phase, role),
         resolveDocument: async (issue, reference) => {
           // The file pi-envoy's session reads: Oh My Pi's rule, in the same process.
           const config = activeDispatchSettings(

@@ -413,6 +413,10 @@ function HandoffFields({ handoffId, id }: { handoffId: string; id: string }): Re
     queryFn: () => api.getHandoff(handoffId),
     staleTime: Number.POSITIVE_INFINITY,
   });
+  const fields = useMemo(
+    () => (handoff.data === undefined ? undefined : handoffFields(handoff.data.body)),
+    [handoff.data]
+  );
   if (handoff.isPending) {
     return (
       <p className={`mt-2 text-sm ${textMutedOnSurface}`} id={id}>
@@ -427,7 +431,6 @@ function HandoffFields({ handoffId, id }: { handoffId: string; id: string }): Re
       </p>
     );
   }
-  const fields = handoffFields(handoff.data.body);
   if (fields === undefined) {
     return (
       <pre className={handoffPre} data-handoff-raw id={id}>

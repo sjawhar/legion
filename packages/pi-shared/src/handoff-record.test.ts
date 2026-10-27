@@ -19,17 +19,16 @@ const RECORD = { id: "5b1f0c2e-9d7a-4c3b-8e61-2f4a9d0c7b13", version: 3 };
 
 const env = { LEGION_WORKSPACE: "/workspaces/LEGION-208", LEGION_ISSUE: ISSUE };
 
-/** A jj that answers the report's commands, `@-` on the branch unless `pushed` is empty, and
+/** A jj that answers the report's commands, `@-` on the branch unless `pushed` is false, and
  * records each call's args. */
-function fakeJj(pushed = STANDING): { jj: JjRunner; calls: string[][] } {
+function fakeJj(pushed = true): { jj: JjRunner; calls: string[][] } {
   const calls: string[][] = [];
   const jj: JjRunner = async (args, cwd) => {
     expect(cwd).toBe(env.LEGION_WORKSPACE);
     calls.push([...args]);
     const revision = args[2];
     if (revision === "@-") return STANDING;
-    if (revision === `${STANDING} & ::${REMOTE}`) return pushed;
-    if (revision === REMOTE) return TIP;
+    if (revision === `${REMOTE} & ${STANDING}::`) return pushed ? TIP : "";
     throw new Error(`unexpected jj ${args.join(" ")}`);
   };
   return { jj, calls };
@@ -52,11 +51,10 @@ test("the implementer's round reports the newest implement record and the pushed
     findHandoffReport({ phase: "implementing", role: "implementer", env, jj, latestHandoff })
   ).resolves.toEqual({ commit: TIP, handoffId: RECORD.id, handoffVersion: RECORD.version });
   expect(reads).toEqual(["LEGION-208 implement"]);
-  // The commit it stands on, that commit on legion/<issue>@origin, and the commit the branch names.
+  // The commit it stands on, then the commit the branch names at origin when that one is on it.
   expect(calls).toEqual([
     ["log", "-r", "@-", "--no-graph", "-T", "commit_id"],
-    ["log", "-r", `${STANDING} & ::${REMOTE}`, "--no-graph", "-T", "commit_id"],
-    ["log", "-r", REMOTE, "--no-graph", "-T", "commit_id"],
+    ["log", "-r", `${REMOTE} & ${STANDING}::`, "--no-graph", "-T", "commit_id"],
   ]);
 });
 
@@ -127,7 +125,7 @@ test("no record, or a Dispatch that does not answer, is refused naming what to d
 });
 
 test("an implementer whose @- is not on its branch at origin is refused naming the push", async () => {
-  const { jj } = fakeJj("");
+  const { jj } = fakeJj(false);
   const { latestHandoff } = fakeDispatch();
   await expect(
     findHandoffReport({ phase: "implementing", role: "implementer", env, jj, latestHandoff })

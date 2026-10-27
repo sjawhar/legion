@@ -261,15 +261,16 @@ func unreviewedChange(ctx context.Context, github githubrest.Client, issue strin
 		return unreviewed("%s answered no file list, so what changed above the approved head is unknown", compared)
 	}
 	files := *compare.Files
-	var outside []string
+	kept := make([]changedFile, 0, len(files))
 	for _, file := range files {
-		if file.Status == "removed" && strings.HasPrefix(file.Filename, ".legion/") {
-			continue
+		if file.Status != "removed" || !strings.HasPrefix(file.Filename, ".legion/") {
+			kept = append(kept, file)
 		}
-		for _, path := range [...]string{file.Filename, file.PreviousFilename} {
-			if path != "" && !strings.HasPrefix(path, "docs/solutions/") {
-				outside = append(outside, path)
-			}
+	}
+	var outside []string
+	for _, path := range changedPaths(kept) {
+		if path != "" && !strings.HasPrefix(path, "docs/solutions/") {
+			outside = append(outside, path)
 		}
 	}
 	if len(outside) > 0 {

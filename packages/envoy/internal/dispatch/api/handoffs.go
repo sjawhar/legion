@@ -16,8 +16,9 @@ import (
 )
 
 // handoffPhasePattern is a handoff's phase, the routes' {phase}: a lowercase slug. Legion writes
-// plan, implement, test and review. The handoffs.phase check (migration 0120) holds the same rule.
-var handoffPhasePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+// plan, implement, test and review. The handoffs.phase check (migration 0120) holds the same rule,
+// generated from contracts' HANDOFF_PHASE_PATTERN, which the dispatch command checks too.
+var handoffPhasePattern = regexp.MustCompile(contracts.HandoffPhasePattern)
 
 // handoffRequestLimit is the most a handoff write's request may hold. The body travels as a JSON
 // string, whose escaping can make each byte of the object up to six on the wire (a client that
@@ -145,17 +146,10 @@ func (s *server) listHandoffs(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	defer rows.Close()
-	handoffs := []model.HandoffSummary{}
-	for rows.Next() {
-		handoff, err := scanHandoff(rows)
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		handoffs = append(handoffs, handoff)
-	}
-	if err := rows.Err(); err != nil {
+	handoffs, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (model.HandoffSummary, error) {
+		return scanHandoff(row)
+	})
+	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -213,9 +207,11 @@ func (s *server) writeHandoff(w http.ResponseWriter, r *http.Request, missing, q
 	WriteJSON(w, http.StatusOK, handoff)
 }
 
+// writeHandoffPhaseError refuses a phase that is not a handoff phase with the rule, worded once in
+// contracts (HANDOFF_PHASE_RULE_WORDS) so the dispatch command and the server say the same thing.
 func writeHandoffPhaseError(w http.ResponseWriter, phase string) {
 	writeError(w, "HANDOFF_INPUT", http.StatusBadRequest,
-		fmt.Sprintf("%q is not a handoff phase: a lowercase letter, then up to 31 lowercase letters, digits or hyphens, such as implement", phase))
+		fmt.Sprintf("%q is not a handoff phase: %s", phase, contracts.HandoffPhaseRule))
 }
 
 // scanHandoff decodes one handoffColumns row; extra receives any columns selected after them.

@@ -14059,7 +14059,8 @@ var ASK_QUESTION_MAX = 800;
 var DISPATCH_BODY_MAX = 32000;
 var DISPATCH_HANDOFF_BODY_MAX = 262144;
 var HANDOFF_PHASE_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
-var HANDOFF_PHASE_RULE = "phase is not a handoff phase: a lowercase letter, then up to 31 lowercase letters, digits or hyphens, such as implement";
+var HANDOFF_PHASE_RULE_WORDS = "a lowercase letter, then up to 31 lowercase letters, digits or hyphens, such as implement";
+var HANDOFF_PHASE_RULE = `phase is not a handoff phase: ${HANDOFF_PHASE_RULE_WORDS}`;
 function isJsonObjectText(text) {
   try {
     const parsed = JSON.parse(text);
@@ -20279,9 +20280,9 @@ async function runDispatchCli(argv, rawEnv, io) {
   if (host === undefined) {
     return refuse(hostName === undefined ? "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell; to run dispatch by hand, set DISPATCH_HOST and DISPATCH_SESSION_ID yourself." : `dispatch: DISPATCH_HOST is ${JSON.stringify(hostName)}, not omp, claude or opencode.`, USAGE, parsed.tool);
   }
-  const sessionId = host === "claude" ? claudeSession : env.DISPATCH_SESSION_ID;
+  const [sessionId, sessionVariable] = host === "claude" ? [claudeSession, "ENVOY_SESSION_ID or CLAUDE_CODE_SESSION_ID"] : [env.DISPATCH_SESSION_ID, "DISPATCH_SESSION_ID"];
   if (sessionId === undefined) {
-    return refuse(`dispatch: ${host === "claude" ? "ENVOY_SESSION_ID or CLAUDE_CODE_SESSION_ID" : "DISPATCH_SESSION_ID"} is not set, so this call has no session to act as. The host plugin sets it in an agent's shell.`, USAGE, parsed.tool);
+    return refuse(`dispatch: ${sessionVariable} is not set, so this call has no session to act as. The host plugin sets it in an agent's shell.`, USAGE, parsed.tool);
   }
   let dir;
   try {

@@ -144,6 +144,9 @@ type HandoffAuthor struct {
 	ID   string
 }
 
+// IsSession says whether the record's author is the session id.
+func (a HandoffAuthor) IsSession(id string) bool { return a.Kind == "session" && a.ID == id }
+
 // Error is a non-success response from Dispatch. Code is empty only when the response did not
 // carry Dispatch's normal error body.
 type Error struct {
