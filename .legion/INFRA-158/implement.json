@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-158",
-  "completed": "2026-10-27T12:57:20Z",
+  "completed": "2026-10-27T14:14:52Z",
   "proof": [
+    {
+      "criterion": "Review round 11: a live-ahead document listed with its issue closed is never cached or reused, so a reopen between the unlocked listing and the lock, then a re-close with no new mark, still has the next tick index it",
+      "surface": "real Postgres with the block-index tick, its live-ahead map and a test hook between the listing and the lock",
+      "command": "go test -count=1 -run TestBlockIndexRemembersNoLiveAheadDocumentItListedClosed ./internal/dispatch/docs/ ; go test -count=1 ./internal/dispatch/docs/ ; go test ./cmd/dispatch/ ; bun test web/src ; bun run e2e -- close-withdraws-asks.e2e.ts offline-edits.e2e.ts --project chromium",
+      "observed": "The test passes: first tick skips the document and remembers nothing; after the re-close the next tick reads Documents:1 LiveAhead:0 OwedDocuments:0. docs (763 s), cmd/dispatch, web (2512) and the two browser specs (10/10) pass at the seventeenth merge",
+      "headSha": "ef8afb2f1aa00493f3dae45bd5dce59a97c90909",
+      "negativeControl": "With the two conditions reverted: the loop remembers the entry with open:false and the second tick reads Documents:0 LiveAhead:1 OwedDocuments:1"
+    },
     {
       "criterion": "Review round 10: an unsettled paste keeping its source's id gives no id to two version blocks, so no block a version holds is recorded deleted; an open document the live-ahead cache held is indexed once its issue closes; one method enforces one id per block and one block per id",
       "surface": "the closed-document matcher as a pure function, and real Postgres with the block-index tick, its live-ahead cache map, settlement and refs resolution",
@@ -62,6 +70,7 @@
     }
   ],
   "filesChanged": [
+    "round 16 (review round 11): docs/block_index.go (cache only open listings), docs/service.go (afterBlockIndexListed hook), docs/block_index_test.go, docs/closed_version_blocks.go (leftovers()), packages/envoy/AGENTS.md; seventeenth forward merge ef8afb2f (packages/envoy/CHANGELOG.md; web AskBlockCard.tsx TextAskBlockCard rowResolution)",
     "round 15 (review round 10): docs/closed_version_blocks.go (new: matcher with take, first-holder rule), docs/closed_version_blocks_test.go, docs/block_index.go (cache open flag, one live-ahead condition), docs/block_index_test.go, refs/blocks.go (BlockTextSum), packages/envoy/AGENTS.md",
     "round 14: docs/block_index.go (repeated text paired only on equal counts), packages/envoy/AGENTS.md; sixteenth forward merge b3855fb2 (store/pool.go leasePoolSize 11, cmd/dispatch/README.md nine loops, cmd/dispatch/multiprocess_test.go nine leases, docs/service.go main's settle code to settleOutcome, docs/ask_lifecycle_test.go settlementAuthors' new argument), docs/solutions lease learning (sixteenth merge)",
     "round 13: docs/block_index.go (rows claim first: stage A, stored-row claim, gap text alignment, unique-text pass), docs/block_index_test.go (crossing test), packages/envoy/AGENTS.md; fifteenth forward merge 6c7b9483 (packages/envoy/CHANGELOG.md, both kept)",
