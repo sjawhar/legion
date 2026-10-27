@@ -2,22 +2,17 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-581",
-  "completed": "2026-10-27T14:20:00Z",
-  "headTested": "1075e8a32a3c7811b8968ed1f25b62ee2b108207",
+  "completed": "2026-10-27T14:36:00Z",
+  "headTested": "8c392590d7342cf852aa97534522bda00ddf0747",
   "implementerProof": {
     "verdict": "verified",
     "how": "Full round (the diff changed: ca82ad63 removes the footnote refusal, 1075e8a3 merges a5f0cf47). After bun run build:web, re-ran the implementer's e2e through the new harness runner on the tester lane: `LEGION_ROLE=tester source /legion/harness/env.sh && cd packages/dispatch && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts nested-directive.e2e.ts unknown-directive.e2e.ts text-typed-blocks.e2e.ts typed-blocks.e2e.ts --project=chromium --project=iphone`: all 24 suite rows passed. pmdoc/gen `bun run check`: fixtures up to date (88 documents, 43 splice cases). `differential.sh --base a5f0cf479ba6 --head 1075e8a32a3c`: every gate 0, PASS. Go `-run 'Footnote|Nested|Typed|Corpus|ReadBack|MatchesMilkdown' ./internal/dispatch/pmdoc/`: ok; the tester's red test TestParseReadsAFootnoteDefinitionInsideATypedBlockAsTheBrowserDoes passes and is unchanged since b5d904f9 (the fix removes only the two obsolete rows of the old refusal test)."
   },
-  "failures": [
-    {
-      "criterion": "CI green at the tested head (the bare gate every head must pass before review)",
-      "evidence": "GitHub ran no CI at 1075e8a3 or 44c5edd6: `gh api repos/sjawhar/legion/actions/runs?head_sha=1075e8a32a3c7811b8968ed1f25b62ee2b108207` total_count 0, and check-runs at 44c5edd6 total_count 0. `gh api repos/sjawhar/legion/pulls/2403` answers mergeable false, mergeable_state dirty. The merge commit 1075e8a3 brought in a5f0cf47, but main@origin had already moved to aaf24e34 (13:55 UTC: #2307 'store an email address written into a document as a mailto: link' and #2322 'draw a read-only checkbox for a task item'). Since a5f0cf47 both sides change packages/envoy/CHANGELOG.md, packages/envoy/internal/dispatch/pmdoc/escape_test.go and packages/envoy/internal/dispatch/pmdoc/parse.go. GitHub runs no checks on a conflicting head, so lint, types and every suite are still unread: run `jj git fetch` before the merge, then merge main@origin."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "roundOneFailures": {
     "footnoteRefusal": "fixed in ca82ad63: refusals.go no longer refuses a footnote definition inside a typed block; the red test passes; on the real surface a document `Ref[^1] before.` + a callout holding `[^1]: the note text` is stored and the editor draws the call as a superscript reference with the definition inside the callout",
-    "noCI": "still open, now against main@aaf24e34"
+    "noCI": "resolved: 8c392590 merges main@ae36683e, GitHub reports the pull request mergeable and CI is running at that head"
   },
   "proof": [
     {
@@ -52,5 +47,13 @@
       "headSha": "1075e8a32a3c7811b8968ed1f25b62ee2b108207",
       "negativeControl": "round 1: with the footnote refusal removed, TestParseMatchesMilkdownForFixtures still passed, so the corpus alone does not hold this shape; the red test does"
     }
-  ]
+  ],
+  "rebaseRecheck": {
+    "from": "1075e8a32a3c7811b8968ed1f25b62ee2b108207",
+    "to": "8c392590d7342cf852aa97534522bda00ddf0747",
+    "fingerprint": "218b7824668f9f8f973d87d214c7c38cbf64a93089b7206a5e430f2452c3c397 at both heads (skill conflicts-and-rewrites unchanged-diff check, base main, fileset ~(.legion | docs/solutions))",
+    "verdict": "fingerprint unchanged, bare gates only",
+    "smoke": "LEGION_ROLE=tester source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts nested-directive.e2e.ts --project=chromium: 3 passed (3.1 s, 3.1 s, 570 ms) at 8c392590",
+    "ci": "Read at 8c392590 on GitHub, not waited on: Tests, Legion Envoy and Contracts, Worker Image, Docs and PR Title runs queued (build, changes, lint, test, typecheck, pr-title queued); no lane red. The handoff head 1e7ca6c6 carries skip-checks: true. GitHub reports PR #2403 mergeable true, mergeable_state blocked (review pending)."
+  }
 }
