@@ -13,3 +13,5 @@ runs:
         echo "903cafeaa9f6327e4bf53a8b7b99ae660f26198acfa804a2f982bf5de3f1de0b  $tarball" | sha256sum -c -
         tar -xzf "$tarball" -C "$RUNNER_TEMP"
         echo "$RUNNER_TEMP/pulumi" >> "$GITHUB_PATH"
+
+# scratch INFRA-520 envoy-smoke
