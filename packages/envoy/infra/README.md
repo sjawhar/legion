@@ -451,7 +451,8 @@ for 35 seconds: the five of the wait added to the thirty
 `envoy-dispatch`'s own shutdown is built for (`stopGrace` in
 `packages/envoy/cmd/dispatch/shutdown.go`) rather than taken out of them. Whoever tunes either
 number moves both, since a wait the grace period does not cover is paid for out of the server's
-drain, which spends its document service's reserve and kills a slow write mid-commit. Whether five
+shutdown, which loses first the margin its one deadline keeps for its last log lines and exit, then
+a slow write killed mid-commit. Whether five
 seconds is enough to lose no request across a real release is unmeasured; the consuming stack's
 release measures it, with a poll every 250 milliseconds. A rolling update also runs the new image's
 migrations while the previous build is still serving, which bounds what a migration may change:

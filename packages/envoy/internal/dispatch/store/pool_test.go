@@ -640,6 +640,58 @@ func TestEveryPoolMethodGivesItsConnectionBack(t *testing.T) {
 	}
 }
 
+// A connection counts as finished (ConnectionUse.Finished) only when its caller hands it back open
+// and idle, on a pool whose configuration carried no tracer and on one that carried a tracer of its
+// own. One whose statement its context cut off is taken back and discarded, and finished nothing:
+// the shutdown's wait for the pools to come back counts a database that has stopped answering by
+// probes that fail with no connection finishing, and a discard must not read as work done.
+func TestOnlyAConnectionHandedBackOpenCountsAsFinished(t *testing.T) {
+	ctx := context.Background()
+	config, err := pgxpool.ParseConfig(testDatabaseURL(t))
+	if err != nil {
+		t.Fatalf("parse the test database URL: %v", err)
+	}
+	config.MaxConns = 1
+	config.ConnConfig.Tracer = &countingTracer{}
+	configurePool(config, RequestsPool, testAcquireBound)
+	opened, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("open the pool: %v", err)
+	}
+	traced := NewPool(opened)
+	t.Cleanup(traced.Close)
+
+	for name, pool := range map[string]*Pool{"plain": smallRequestPool(t, 1, testAcquireBound), "traced": traced} {
+		before := pool.Use()
+		var one int
+		if err := pool.QueryRow(ctx, "select 1").Scan(&one); err != nil {
+			t.Fatalf("%s pool: query: %v", name, err)
+		}
+		if after := pool.Use(); after.Returned != before.Returned+1 || after.Finished != before.Finished+1 {
+			t.Errorf("%s pool: a query that answered moved Returned %d->%d and Finished %d->%d, want each up by one",
+				name, before.Returned, after.Returned, before.Finished, after.Finished)
+		}
+
+		before = pool.Use()
+		cut, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		_, err := pool.Exec(cut, "select pg_sleep(10)")
+		cancel()
+		if err == nil {
+			t.Fatalf("%s pool: a ten-second statement answered within its 100 ms context", name)
+		}
+		// pgxpool discards a closed connection on a goroutine of its own, so the pool takes it back
+		// a moment after the statement returns.
+		after := pool.Use()
+		for deadline := time.Now().Add(5 * time.Second); after.InUse != 0 && time.Now().Before(deadline); after = pool.Use() {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if after.Returned != before.Returned+1 || after.Finished != before.Finished || after.InUse != 0 {
+			t.Errorf("%s pool: a statement its context cut off moved Returned %d->%d, Finished %d->%d and left %d in use, want Returned up by one, Finished unchanged and none in use",
+				name, before.Returned, after.Returned, before.Finished, after.Finished, after.InUse)
+		}
+	}
+}
+
 // The separate pools refuse a full pool's acquire with ErrPoolBusy too: a wrapped one through its
 // methods, the listener's through Listener.
 func TestSeparatePoolsAnswerErrPoolBusyWhenFull(t *testing.T) {

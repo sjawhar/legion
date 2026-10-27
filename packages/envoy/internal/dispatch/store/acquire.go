@@ -167,7 +167,8 @@ type PoolStats struct {
 // context it returns, and every way the pool hands out a connection - Query, QueryRow, Exec,
 // BeginTx, SendBatch, CopyFrom, AcquireFunc - goes through Acquire. So the bound covers every
 // caller of the pool, the store.Pool wrappers and the raw pgxpool users alike, while the statement
-// still runs on the caller's own context.
+// still runs on the caller's own context. It counts the connections handed back open too
+// (TraceRelease), which pgxpool reports to a configuration's Tracer the same way.
 type acquireTracer struct {
 	// name makes the application_name, and inner is the tracer the configuration had before this
 	// one was composed with it: kept so a pool opened from this pool's configuration composes its
@@ -181,6 +182,8 @@ type acquireTracer struct {
 	count    atomic.Uint64
 	waited   atomic.Int64 // nanoseconds
 	buckets  [AcquireBucketCount]atomic.Uint64
+	// finished counts the connections handed back open and idle (TraceRelease).
+	finished atomic.Uint64
 }
 
 // errAcquireBound is the cause of an acquire context the bound ended, which is how
@@ -231,8 +234,20 @@ func (t *acquireTracer) TraceAcquireEnd(ctx context.Context, _ *pgxpool.Pool, da
 	}
 }
 
+// TraceRelease counts a connection its caller hands back open and idle, which pgxpool keeps for its
+// next caller: the work on it has finished. One pgxpool discards instead - closed by a statement
+// whose context ended, or handed back mid-statement or inside a transaction - finished nothing, and
+// neither did one pgxpool discards inside Acquire because its ping went unanswered, which no caller
+// ever held, so it is never released.
+func (t *acquireTracer) TraceRelease(_ *pgxpool.Pool, data pgxpool.TraceReleaseData) {
+	if data.Conn.IsClosed() || data.Conn.PgConn().IsBusy() || data.Conn.PgConn().TxStatus() != 'I' {
+		return
+	}
+	t.finished.Add(1)
+}
+
 // TraceQueryStart and TraceQueryEnd do nothing: a connection configuration's Tracer must be a
-// pgx.QueryTracer, and this one traces acquires only.
+// pgx.QueryTracer, and this one traces acquires and releases only.
 func (*acquireTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
 	return ctx
 }
@@ -295,6 +310,7 @@ func configurePool(config *pgxpool.Config, name string, bound time.Duration) *ac
 	}
 	composed := multitracer.New(inner)
 	composed.PoolAcquireTracers = append([]pgxpool.AcquireTracer{tracer}, composed.PoolAcquireTracers...)
+	composed.PoolReleaseTracers = append([]pgxpool.ReleaseTracer{tracer}, composed.PoolReleaseTracers...)
 	config.ConnConfig.Tracer = &composedTracer{Tracer: composed, acquire: tracer}
 	return tracer
 }

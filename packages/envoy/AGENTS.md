@@ -174,27 +174,34 @@ owed one. A 1 MiB `a_b*` document's settlement took 4.5-6.8 s at load 90-170 on 
 machine, inside the 9 s drain budget, though a slower load or a bigger burst could still leave it
 to resume.
 
-`cmd/dispatch/shutdown.go` orders the process's shutdown inside `stopGrace` (30 s: ECS's default
-stop timeout, which Dispatch's task definition leaves unset, `stop_grace_period` in
-`deploy/compose/dispatch.compose.yml`, and the pod `infra`'s `gcp:Dispatch` renders, whose
-`terminationGracePeriodSeconds` is this value plus its five-second pre-stop wait, which the
-kubelet spends inside the same period - `cmd/dispatch/pod_grace_period_test.go` fails when the
-pod's budget stops covering it). Every open event stream ends at the signal through
-`api.Deps.Lifetime`, so HTTP shutdown waits only for the requests in flight, and it waits for them
-first, with no deadline of its own. The document service starts when they are done, or 11 s after
-the signal with some still running (`httpDrainBeforeDocuments`, `dispatch: settle documents with
-requests still in flight`), and gets `documentShutdownTimeout`, 5 s more than its drain budget
-(14 s total - the reserve outlasting a settlement still committing when the budget ends, not only
-reading back what did), so it is done 5 s before the runtime's kill. The database pool closes once
-every request has answered and no connection of the shared or document-rooms pool is in use.
-While the database answers, nothing but the runtime's kill bounds that wait, as with the deferred
-close of the pool this replaced: a write still waiting on a lock commits and is answered if it
-finishes before the kill. The database has stopped answering once three health probes in a row
+`cmd/dispatch/shutdown.go` orders the process's shutdown inside one deadline, made at the signal
+(`shutdownContext`): `stopGrace` (30 s: ECS's default stop timeout, which Dispatch's task definition
+leaves unset, `stop_grace_period` in `deploy/compose/dispatch.compose.yml`, and the pod `infra`'s
+`gcp:Dispatch` renders, whose `terminationGracePeriodSeconds` is this value plus its five-second
+pre-stop wait, which the kubelet spends inside the same period - `cmd/dispatch/pod_grace_period_test.go`
+fails when the pod's budget stops covering it) less `shutdownMargin` (3 s, for closing the pools,
+main's deferred stops, the final log flush and the exit), so 27 s after the signal. Every stage
+spends what is left of that deadline, not a budget of its own. Every open event stream ends at the
+signal through `api.Deps.Lifetime`, so HTTP shutdown waits only for the requests in flight, and it
+waits for them first. The document service starts when they are done, or with some still running
+once only its reserve and the probes' are left (`documentReserve`, 14 s: 5 s more than its drain
+budget - the reserve outlasting a settlement still committing when the budget ends, not only reading
+back what did - and `silentProbeReserve`, 7 s), 6 s after the signal (`dispatch: settle documents
+with requests still in flight`). It has until 7 s before the deadline. Hijacked delivery sockets and
+the delivery hub then finish their Lifetime-driven shutdown. The database pools close once every
+request has answered and no connection of the request, document-rooms or settlements pool is in
+use; while the database answers, only the deadline bounds that wait, so a write still waiting on a
+lock commits and is answered if it finishes before the deadline. Writes carry no server deadline of
+their own, so one still in flight at the deadline is cut off with the process (`dispatch: exit at
+the shutdown deadline with requests or database connections still in use`), as the runtime's kill
+would cut it moments later. The database has stopped answering once three health probes in a row
 (`silentProbes`, each `store.Pool.Healthy`'s two seconds) have failed with no connection of those
-two pools taken back while they ran; a probe that answers, or a connection taken back, starts the
-count again. Then Dispatch exits without the connections waiting on it (`dispatch: exit with
-database connections still in use once the database stopped answering`), and the database rolls
-back what they held open; with nothing in flight over HTTP that is about 21 s after the signal.
+pools handed back finished while they ran (`store.ConnectionUse.Finished`: handed back open and
+idle; a connection discarded because its statement or its acquire's ping went unanswered finished
+nothing); a probe that answers, or a connection handed back finished, starts the count again. Then
+Dispatch exits without the connections waiting on it (`dispatch: exit with database connections
+still in use once the database stopped answering`), and the database rolls back what they held
+open; even with a write and a settlement stuck on it that is before the deadline.
 
 An issue's task counts (`issues.tasks_done`, `tasks_total`, `tasks_version`, added by the
 `issue_task_progress` migration; LEGION-542) are the `- [ ]` / `- [x]` items of its primary

@@ -87,7 +87,7 @@ func TestDispatchPodGracePeriodCoversStopGrace(t *testing.T) {
 	}
 
 	if time.Duration(grace-wait)*time.Second < stopGrace {
-		t.Fatalf("%s asks for %d seconds of termination grace and spends %d of them on %s's pre-stop sleep, leaving its shutdown %d seconds where stopGrace in packages/envoy/cmd/dispatch/shutdown.go builds it for %s: the pod asks for less than the server's shutdown needs, so the kubelet kills %s mid-shutdown, past its document service's five-second reserve, with a write still waiting on a lock killed mid-commit. Whoever moves one of the two moves the other.",
+		t.Fatalf("%s asks for %d seconds of termination grace and spends %d of them on %s's pre-stop sleep, leaving its shutdown %d seconds where stopGrace in packages/envoy/cmd/dispatch/shutdown.go builds it for %s: the pod asks for less than the server's shutdown needs, so the kubelet kills %s mid-shutdown, in the margin its one deadline keeps for the last log lines and the exit, or before that deadline, with a write still waiting on a lock killed mid-commit. Whoever moves one of the two moves the other.",
 			dispatchPodGoldenPath, grace, wait, dispatchPodContainer, grace-wait, stopGrace, dispatchPodContainer)
 	}
 }

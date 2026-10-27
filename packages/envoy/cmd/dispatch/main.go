@@ -54,7 +54,7 @@ const (
 	// logFlushTimeout bounds each exit's wait for the log lines still buffered (logging.Handler's
 	// Flush). A destination that takes writes takes a few thousand lines in milliseconds; the bound
 	// matters only once stderr has stopped taking them, and then the process exits without those
-	// lines rather than spending its stop grace (stopGrace) on them.
+	// lines rather than outlasting the margin its shutdown leaves inside stopGrace (shutdownMargin).
 	logFlushTimeout = 2 * time.Second
 )
 
@@ -503,8 +503,14 @@ func main() {
 	}); err != nil {
 		fatal("dispatch: metrics", "error", err)
 	}
-	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool, waitDelivery); err != nil {
-		fatal("dispatch: serve", "error", err)
+	serveErr := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr)
+	// The shutdown's one deadline starts here, at the signal: every stage of shutdown spends what is
+	// left of it, and so does any stop main runs after it.
+	stopping, stopped := shutdownContext()
+	defer stopped()
+	shutdown(stopping, server, documentService, database.Pool, waitDelivery)
+	if serveErr != nil {
+		fatal("dispatch: serve", "error", serveErr)
 	}
 }
 

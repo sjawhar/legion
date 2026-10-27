@@ -491,17 +491,22 @@ func (p *Pool) Stats() []PoolStats {
 	return stats
 }
 
-// ConnectionUse is how many connections of a set of pools are in use, and how many those pools
-// have taken back since they opened, whether returned or discarded.
+// ConnectionUse is how many connections of a set of pools are in use, how many those pools have
+// taken back since they opened, whether returned or discarded, and how many of those came back
+// finished: handed back open and idle, so the work on them ended (acquireTracer.TraceRelease). A
+// connection discarded because the database stopped answering - its statement cut off by its
+// context, or its ping on acquire unanswered - counts in Returned and not in Finished.
 type ConnectionUse struct {
 	InUse    int32
 	Returned int64
+	Finished int64
 }
 
 // Use reports the ConnectionUse of the pools named, of those this pool has opened, or of every
 // pool it has opened when no name is given. A caller asking whether work in flight has finished
 // names the pools that work runs on and leaves the health probe's out: the probe is how a caller
-// asks whether the database answers, and its connection taken back says nothing about the work.
+// asks whether the database answers, and its connection taken back says nothing about the work. A
+// pool opened without the acquire tracer counts no connection finished.
 func (p *Pool) Use(names ...string) ConnectionUse {
 	var use ConnectionUse
 	for _, pool := range p.opened() {
@@ -511,6 +516,9 @@ func (p *Pool) Use(names ...string) ConnectionUse {
 		stat := pool.pool.Stat()
 		use.InUse += stat.AcquiredConns()
 		use.Returned += stat.AcquireCount() - int64(stat.AcquiredConns())
+		if pool.acquire != nil {
+			use.Finished += int64(pool.acquire.finished.Load())
+		}
 	}
 	return use
 }

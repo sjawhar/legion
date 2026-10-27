@@ -17,34 +17,47 @@ import (
 // stop_grace_period, and the pod the gcp:Dispatch component renders, whose
 // terminationGracePeriodSeconds is this value plus its pre-stop wait, since the kubelet spends
 // that wait inside the same period (pod_grace_period_test.go fails when the pod's budget stops
-// covering it).
+// covering it). The shutdown's one deadline (shutdownContext) ends shutdownMargin inside it.
 const stopGrace = 30 * time.Second
 
-// documentShutdownTimeout is the document service's own budget: docs.Service.Shutdown spends up to
-// its drain budget waiting for durable appends and running settlements, sized so a burst of writes
-// still landing when shutdown begins has room to finish, not only the ones already queued - and
-// keeps a 5 s reserve past it. That reserve is not just time to read back which settlements
-// committed: docs.Service.Shutdown's own wait for its per-room workers (service.go's waitGroup)
-// runs under this whole timeout, not the drain budget alone, because a settlement the budget cut
-// short may still be mid-render or mid-commit, which no context interrupts once the database has
-// taken the query. service_test.go's own measured example - a 1 MiB document's settlement took
-// 4.5 s at load 90 against a 5 s budget, a 3.4 s overrun past it - is what the reserve is sized to
-// outlast; a worker still running once this whole timeout ends makes Shutdown return the
-// settlements-unconfirmed error instead of reading back what committed.
-const documentShutdownTimeout = docs.ShutdownDrainBudget + 5*time.Second
+// shutdownMargin is what the shutdown's deadline leaves of stopGrace for the steps that run once
+// the ordered shutdown is over: closing the pools once nothing is in use (milliseconds), the stops
+// main defers, writing the log lines still buffered (logs.Flush, bounded by logFlushTimeout, 2 s)
+// and the process's exit. A process that gives up at the deadline still says why and exits on its
+// own, rather than being killed mid-line.
+const shutdownMargin = 3 * time.Second
 
-// httpDrainBeforeDocuments is how long the document service waits for the requests in flight to
-// finish before it settles the documents owed with requests still running, so that its budget ends
-// 5 s inside stopGrace. An open event stream holds none of it, since every stream ends with the
-// process context (api.Deps.Lifetime), which is cancelled before shutdown starts.
-const httpDrainBeforeDocuments = stopGrace - 5*time.Second - documentShutdownTimeout
+// documentReserve is the least of the shutdown's deadline the document service gets: the HTTP drain
+// stops holding it up this long, and silentProbeReserve, before the deadline. docs.Service.Shutdown
+// spends up to its drain budget (docs.ShutdownDrainBudget) waiting for durable appends and running
+// settlements, sized so a burst of writes still landing when shutdown begins has room to finish, not
+// only the ones already queued - and this keeps a 5 s reserve past it. That reserve is not just time
+// to read back which settlements committed: docs.Service.Shutdown's own wait for its per-room
+// workers (service.go's waitGroup) runs until the deadline it is given, not the drain budget alone,
+// because a settlement the budget cut short may still be mid-render or mid-commit, which no context
+// interrupts once the database has taken the query. service_test.go's own measured example - a
+// 1 MiB document's settlement took 4.5 s at load 90 against a 5 s budget, a 3.4 s overrun past it -
+// is what the reserve is sized to outlast; a worker still running at that deadline makes Shutdown
+// return the settlements-unconfirmed error instead of reading back what committed.
+const documentReserve = docs.ShutdownDrainBudget + 5*time.Second
 
 // silentProbes is how many health probes (store.Pool.Healthy, two seconds each) in a row must fail,
-// with no connection of the pools that carry writes (writePools) taken back meanwhile, before
-// Dispatch counts the database as having stopped answering. A probe that answers, or a connection
-// taken back while it ran, starts the count again: a slow database that is still finishing work is
-// answering. Three is the count the load balancer waits for before it replaces the task.
+// with no connection of the pools that carry writes (writePools) handed back finished meanwhile
+// (store.ConnectionUse.Finished), before Dispatch counts the database as having stopped answering.
+// A probe that answers, or a connection handed back finished while it ran, starts the count again:
+// a slow database that is still finishing work is answering. A connection discarded because it
+// went unanswered finishes nothing, so it does not. Three is the count the load balancer waits for
+// before it replaces the task.
 const silentProbes = 3
+
+// silentProbeReserve is the end of the shutdown's deadline kept for the wait for writePools to come
+// back: the document service's share ends this long before the deadline, so a database that has
+// stopped answering still fails silentProbes probes in a row - each store.Pool.Healthy's two
+// seconds, with a poll interval between them, 6.5 s - and Dispatch says so before the deadline. Two
+// poll intervals more absorb the document service's and delivery's own returns and a loaded
+// machine's late timers: 7 s. With the 27 s deadline and documentReserve's 14 s, the HTTP drain
+// holds the document service up for at most the first 6 s after the signal.
+const silentProbeReserve = silentProbes*2*time.Second + (silentProbes+1)*drainPollInterval
 
 // writePools are the pools whose connections carry work a client or a document is owed: the
 // request pool, the document rooms' and the settlements'. The drain waits for every one of their
@@ -55,15 +68,20 @@ const silentProbes = 3
 // for the next process - so none of them holds the drain up.
 var writePools = []string{store.RequestsPool, store.RoomsPool, store.SettlementsPool}
 
-// drainPollInterval is how often the last phase asks whether the requests in flight and the
-// connections in use are done, and how often waitUntilIdle's loop pauses between the health
-// probes it runs every pass.
+// drainPollInterval is how often waitUntilIdle's loop pauses between the health probes it runs
+// every pass, asking each time whether the requests in flight and the connections in use are done.
 const drainPollInterval = 250 * time.Millisecond
 
-// serveUntilStopped serves on listener until ctx ends, then stops Dispatch (shutdown). It returns
-// the error that ended serving when serving failed, which cancels ctx.
-func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *http.Server, listener net.Listener,
-	addr string, documentService *docs.Service, pool *store.Pool, waitDelivery func()) error {
+// shutdownContext carries the shutdown's one deadline, stopGrace less shutdownMargin from now: main
+// makes it as the signal ends the process context, and every stage of shutdown, and every stop
+// main runs after it, spends what is left of it rather than a budget of its own.
+func shutdownContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), stopGrace-shutdownMargin)
+}
+
+// serveUntilStopped serves on listener until ctx ends, and returns then, with the error that ended
+// serving when serving failed, which cancels ctx. Stopping is the caller's (shutdown).
+func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *http.Server, listener net.Listener, addr string) error {
 	serveErr := make(chan error, 1)
 	go func() {
 		slog.Info("dispatch: listening", "addr", addr)
@@ -74,7 +92,6 @@ func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *h
 	}()
 	<-ctx.Done()
 	slog.Info("dispatch: shutting down")
-	shutdown(server, documentService, pool, waitDelivery)
 	select {
 	case err := <-serveErr:
 		return err
@@ -83,62 +100,103 @@ func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *h
 	}
 }
 
-// shutdown stops Dispatch once its process context is cancelled. HTTP drains the requests in flight
-// first, with no deadline of its own. The document service settles the documents owed within
-// documentShutdownTimeout once those requests are done, or httpDrainBeforeDocuments after the
-// signal with some still running. Hijacked delivery sockets and the delivery hub then finish their
-// Lifetime-driven shutdown. The database pools close once every request has answered and no
-// connection of writePools is in use. While the database answers, nothing but the runtime's kill
-// bounds that wait, so a write in flight commits and is answered if it finishes before the kill. A
-// database that has stopped answering (silentProbes) holds its connections forever, so Dispatch
-// exits without them, and the database rolls back whatever they held open.
-func shutdown(server *http.Server, documentService *docs.Service, pool *store.Pool, waitDelivery func()) {
+// shutdown stops Dispatch once its process context is cancelled, every stage inside ctx's deadline
+// (shutdownContext), which ctx must carry:
+//
+//  1. HTTP drains the requests in flight until every one has answered, or until the document
+//     service has to start for its reserve and the probes' to fit before the deadline (documentReserve,
+//     silentProbeReserve), when it logs that it settles documents with requests still in flight.
+//  2. The document service settles the documents owed until silentProbeReserve before the deadline.
+//  3. Hijacked delivery sockets and the delivery hub finish their Lifetime-driven shutdown.
+//  4. (INFRA-555's process registry deregisters here.)
+//  5. It waits until every request has answered and no connection of writePools is in use.
+//  6. It closes the database pools; main then writes the buffered log lines last.
+//
+// While the database answers, only the deadline bounds the wait of stage 5, so a write in flight
+// commits and is answered if it finishes before it. A database that has stopped answering
+// (silentProbes) holds its connections forever, so Dispatch exits without them, and the database
+// rolls back whatever they held open. Writes carry no deadline of their own, so a write still in
+// flight at the deadline is cut off with the process, as the runtime's kill would cut it moments
+// later.
+func shutdown(ctx context.Context, server *http.Server, documentService *docs.Service, pool *store.Pool, waitDelivery func()) {
+	deadline, _ := ctx.Deadline()
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
+		// Only the requests end this wait, so drained means every one has answered; the stages
+		// below stop waiting for it at their own points of the deadline.
 		if err := server.Shutdown(context.Background()); err != nil {
 			slog.Warn("dispatch: shutdown", "error", err)
 		}
 	}()
 	select {
 	case <-drained:
-	case <-time.After(httpDrainBeforeDocuments):
+	case <-time.After(time.Until(deadline.Add(-silentProbeReserve - documentReserve))):
 		slog.Warn("dispatch: settle documents with requests still in flight")
 	}
-	documentCtx, cancelDocuments := context.WithTimeout(context.Background(), documentShutdownTimeout)
+	documentCtx, cancelDocuments := context.WithDeadline(ctx, deadline.Add(-silentProbeReserve))
 	defer cancelDocuments()
 	if err := documentService.Shutdown(documentCtx); err != nil {
 		slog.Warn("dispatch: shutdown document service", "error", err)
 	}
-	waitDelivery()
-	if waitUntilIdle(drained, pool) {
+	delivered := make(chan struct{})
+	go func() {
+		defer close(delivered)
+		waitDelivery()
+	}()
+	select {
+	case <-delivered:
+	case <-ctx.Done():
+		slog.Warn("dispatch: exit with delivery work still running at the shutdown deadline")
+		return
+	}
+	// INFRA-555's processes.Deregister goes here, bounded by context.WithTimeout(ctx, 5 s) rather
+	// than the whole deadline, so a silent database leaves the pool wait below its time: the process
+	// leaves the registry once the HTTP drain and its own delivery work have ended and before its
+	// pools close (agreed with INFRA-555's implementer).
+	if waitUntilIdle(ctx, drained, pool) {
 		pool.Close()
 	}
 }
 
 // waitUntilIdle waits until HTTP has drained and no connection of writePools is in use, and
-// reports whether that happened. It gives up only once the database has stopped answering, when
-// the connections in use never come back: closing the pools would wait on them.
-func waitUntilIdle(drained <-chan struct{}, pool *store.Pool) bool {
+// reports whether that happened. It gives up once the database has stopped answering, when the
+// connections in use never come back: closing the pools would wait on them. It gives up at ctx's
+// deadline too, with requests or connections still in use: the process exits without them.
+func waitUntilIdle(ctx context.Context, drained <-chan struct{}, pool *store.Pool) bool {
 	failed := 0
 	for {
 		before := pool.Use(writePools...)
+		answered := false
 		select {
 		case <-drained:
 			if before.InUse == 0 {
 				return true
 			}
+			answered = true
 		default:
 		}
-		_, err := pool.Healthy(context.Background())
+		if ctx.Err() != nil {
+			slog.Warn("dispatch: exit at the shutdown deadline with requests or database connections still in use",
+				"in_use", before.InUse, "requests_answered", answered)
+			return false
+		}
+		_, err := pool.Healthy(ctx)
+		if ctx.Err() != nil {
+			// A probe the deadline cut short says nothing about the database.
+			continue
+		}
 		after := pool.Use(writePools...)
-		if err == nil || after.Returned > before.Returned {
+		if err == nil || after.Finished > before.Finished {
 			failed = 0
 		} else if failed++; failed >= silentProbes {
 			slog.Warn("dispatch: exit with database connections still in use once the database stopped answering",
 				"in_use", after.InUse, "failed_probes", failed, "error", err)
 			return false
 		}
-		time.Sleep(drainPollInterval)
+		select {
+		case <-time.After(drainPollInterval):
+		case <-ctx.Done():
+		}
 	}
 }

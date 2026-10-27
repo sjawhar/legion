@@ -426,8 +426,8 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	// server's shutdown unless the pod's budget covers both: the 35 s below is these 5 s of
 	// routing window plus the 30 s cmd/dispatch/shutdown.go builds its shutdown for
 	// (stopGrace = 30 * time.Second). The two values are coupled and neither may be raised alone; a
-	// wait the grace period does not cover spends the document service's five-second reserve and
-	// kills a write still waiting on a lock mid-commit.
+	// wait the grace period does not cover spends the margin the server's one shutdown deadline
+	// keeps for its last log lines and exit, then kills a write still waiting on a lock mid-commit.
 	// Only the app's container waits: the front door and the listener are single-replica Recreate
 	// workloads with no second pod to route to, so a wait there would only lengthen their outage,
 	// and neither sets a grace period.
