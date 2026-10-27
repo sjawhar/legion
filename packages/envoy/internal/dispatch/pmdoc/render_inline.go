@@ -114,8 +114,9 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 	if r.err != nil || held == delimitersAsRuled && !bareURL && !fused && !flanking {
 		return
 	}
-	firstReadsBack := r.runReadsBack(from, prefix, nodes, inlineMarkdown)
-	if firstReadsBack && r.runReadsBack(from, prefix, nodes, flankingOnlyMarkdown) {
+	signature, labels := inlineSignature(nodes), referencedLabels(nodes)
+	firstReadsBack, bothReadBack := r.runReadsBack(from, prefix, signature, labels, true)
+	if bothReadBack {
 		return
 	}
 	written := string(r.b.Bytes()[from:])
@@ -138,9 +139,10 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 		for _, spelling := range spellings {
 			r.b.Truncate(from)
 			fusedAgain := r.writeInlineRun(nodes, prefix, context, spelling)
-			if r.err == nil && !(spelling.keepOpen && fusedAgain) && r.runReadsBack(from, prefix, nodes, inlineMarkdown) &&
-				(!flankingToo || r.runReadsBack(from, prefix, nodes, flankingOnlyMarkdown)) {
-				return
+			if r.err == nil && !(spelling.keepOpen && fusedAgain) {
+				if _, readsBack := r.runReadsBack(from, prefix, signature, labels, flankingToo); readsBack {
+					return
+				}
 			}
 		}
 	}
@@ -236,17 +238,26 @@ func followsBareURL(nodes []*Node, index int, escapePipes bool) bool {
 		literalLength(previous.Text) == 0
 }
 
-// runReadsBack reports whether the inline markdown written since from reads back as nodes by
-// reader: the run's own lines, with the prefix its later lines are written behind taken off, read
-// after a definition for each footnote label it refers to, since a reference reads as one only
-// then.
-func (r *renderer) runReadsBack(from int, prefix string, nodes []*Node, reader inlineReader) bool {
+// runReadsBack reports whether the inline markdown written since from reads back by inlineMarkdown
+// as the nodes whose inlineSignature is signature (first), and whether it reads back so by every
+// reader asked (readsBack): inlineMarkdown, and when flankingToo flankingOnlyMarkdown as well. The
+// run's own lines are read, with the prefix its later lines are written behind taken off, after a
+// definition for each of labels, the footnote labels the nodes refer to, since a reference reads
+// as one only then. flankingOnlyMarkdown reads the run only where inlineMarkdown read it back
+// with a delimiter run judged otherwise than by the flanking rules alone: elsewhere it reads the
+// run as inlineMarkdown did (parseInlineWithDefinitions).
+func (r *renderer) runReadsBack(from int, prefix string, signature, labels []string, flankingToo bool) (first, readsBack bool) {
 	source := string(r.b.Bytes()[from:])
 	if prefix != "" {
 		source = strings.ReplaceAll(source, "\n"+prefix, "\n")
 	}
-	parsed, err := parseInlineWithDefinitions(source, referencedLabels(nodes), reader)
-	return err == nil && slices.Equal(inlineSignature(parsed), inlineSignature(nodes))
+	parsed, diverged, err := parseInlineWithDefinitions(source, labels, inlineMarkdown)
+	first = err == nil && slices.Equal(inlineSignature(parsed), signature)
+	if !first || !flankingToo || !diverged {
+		return first, first
+	}
+	parsed, _, err = parseInlineWithDefinitions(source, labels, flankingOnlyMarkdown)
+	return true, err == nil && slices.Equal(inlineSignature(parsed), signature)
 }
 
 // delimiterBesidePunctuation reports whether nodes write a delimiter run (a strong, emphasis or

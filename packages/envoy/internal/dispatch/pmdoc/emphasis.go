@@ -44,10 +44,18 @@ func inlineParsers(emphasis emphasisParser) []util.PrioritizedValue {
 // read as strong struck `d`, reads to goldmark as two strong `~~` around `d`.
 //
 // flankingOnly reads by CommonMark's flanking rules alone, as goldmark does; the renderer prefers
-// a spelling that reads back under both (runReadsBack).
+// a spelling that reads back under both (runReadsBack). A parse by the editor's rules sets
+// flankingDivergenceKey in its context wherever a run can open or close otherwise than by the
+// flanking rules alone; a parse that never sets it read every run as those rules do, so the
+// flankingOnly parse of the same markdown is the same parse.
 type emphasisParser struct {
 	flankingOnly bool
 }
+
+// flankingDivergenceKey marks a parse by the editor's rules (emphasisParser) in which a delimiter
+// run can open or close otherwise than it can by CommonMark's flanking rules alone. It is set only
+// in the context of the parse it describes, and read only by parseInlineWithDefinitions.
+var flankingDivergenceKey = parser.NewContextKey()
 
 func (emphasisParser) Trigger() []byte {
 	return []byte{'*', '_'}
@@ -67,14 +75,16 @@ func (p emphasisParser) Parse(_ ast.Node, block text.Reader, pc parser.Context) 
 	}
 	beforeIsSpace, beforeIsPunct := util.IsSpaceRune(before), util.IsPunctRune(before)
 	afterIsSpace, afterIsPunct := util.IsSpaceRune(after), util.IsPunctRune(after)
-	canOpen := !afterIsSpace && (!afterIsPunct || beforeIsSpace || beforeIsPunct)
-	canClose := !beforeIsSpace && (!beforeIsPunct || afterIsSpace || afterIsPunct)
+	neutralBefore, neutralAfter := beforeIsSpace || beforeIsPunct, afterIsSpace || afterIsPunct
+	flankingOpen := !afterIsSpace && (!afterIsPunct || neutralBefore)
+	flankingClose := !beforeIsSpace && (!beforeIsPunct || neutralAfter)
+	canOpen, canClose := underscoreRun(char, flankingOpen, flankingClose, neutralBefore, neutralAfter)
 	if !p.flankingOnly {
-		canOpen = canOpen || after == '*' || after == '_'
-		canClose = canClose || before == '*' || before == '_'
-	}
-	if char == '_' {
-		canOpen, canClose = canOpen && (beforeIsSpace || beforeIsPunct || !canClose), canClose && (afterIsSpace || afterIsPunct || !canOpen)
+		opens, closes := underscoreRun(char, flankingOpen || after == '*' || after == '_', flankingClose || before == '*' || before == '_', neutralBefore, neutralAfter)
+		if opens != canOpen || closes != canClose {
+			pc.Set(flankingDivergenceKey, true)
+			canOpen, canClose = opens, closes
+		}
 	}
 	if !canOpen && !canClose {
 		// A run that can neither open nor close pairs with nothing. goldmark's ProcessDelimiters
@@ -90,6 +100,17 @@ func (p emphasisParser) Parse(_ ast.Node, block text.Reader, pc parser.Context) 
 	block.Advance(node.OriginalLength)
 	pc.PushDelimiter(node)
 	return node
+}
+
+// underscoreRun is whether a run of char can open and close, given whether it can by the flanking
+// rules (canOpen, canClose) and whether whitespace or punctuation stands just before and after it:
+// an `_` run that could do both opens only after such a character and closes only before one, so
+// it neither opens nor closes inside a word.
+func underscoreRun(char byte, canOpen, canClose, neutralBefore, neutralAfter bool) (bool, bool) {
+	if char != '_' {
+		return canOpen, canClose
+	}
+	return canOpen && (neutralBefore || !canClose), canClose && (neutralAfter || !canOpen)
 }
 
 // strikethrough is Goldmark's GFM parser with a guard for delimiter runs it already refuses.
