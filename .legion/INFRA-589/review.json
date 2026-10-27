@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-589",
+  "completed": "2026-10-27T14:14:18Z",
+  "round": 1,
+  "decision": "changes_requested",
+  "reviewedCodeHead": "7675a7ac20fc568b2c5fb69ee8a0b2427323fcb8",
+  "ci": "Required set (rulesets: lint, typecheck, test, pr-title) completed success at code head 7675a7ac; compare 7675a7ac...8e0ab461 is .legion/ only (2 files). envoy-go, envoy-go-race, envoy-e2e-local, envoy-smoke, envoy-infra-go still queued (not required; envoy-go runs the new run-step.test.sh step).",
+  "thermonuclear": "deep-review: CHANGES at 8e0ab461 (1 Medium: series lock; Minors). code-quality: CHANGES at 8e0ab461 (execute 442 lines, duplicated scheduler and Postgres poll loop, renderTables, dead old-summary path, wording-pinned test).",
+  "critical": 0,
+  "important": 4,
+  "minor": 12,
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/loadtest/lock.sh", "description": "lock.sh:22 re-opens fd 9 in a series' run-step.sh child, which then fails flock, closes fd 9 and passes on the token; neither that step nor its loadgen holds the lock, so killing run-series.sh frees the root while its step still runs, and a second run-step.sh is admitted and resets the stack under it. Reproduced by the deep review with lock.sh alone. Fix: return before re-opening when LOADTEST_LOCK_TOKEN equals the file's token; add a run-step.test.sh case."},
+    {"severity": "important", "file": "packages/envoy/loadtest/guard.go", "description": "guard.go:197-201: under -allow-foreign an empty -pg, -pprof, -nats-mon (or -listener/-nats) falls back to the local stack.json, so a cluster run that names only -url counts commits and samples the local stack while writes go to the remote one, silently. Require every endpoint flag under -allow-foreign."},
+    {"severity": "important", "file": "packages/envoy/loadtest/run.go", "description": "run.go:485,493 restarts markers at lgm1x every run and delivery.go:128,206-214 joins loadtest.event_commits by marker, so a `stack.sh loadgen run` (documented as taking no lock and needing no reset) after an earlier run counts the old run's rows as this run's commits. Make markers unique per run (nonce) or bound commit rows to this run."},
+    {"severity": "important", "file": "packages/envoy/loadtest/lockprobe.go", "description": "lockprobe.go:66-69 discards a failed commit-order-lock query without a log line (locksampler.go:121-123 logs the first three); the same poll loop is written twice. One shared poll helper with one logging policy."},
+    {"severity": "minor", "file": "packages/envoy/loadtest/README.md", "description": "Architect-directed (dispatch://INFRA-589/comment/eb4c1a97-24ef-4148-93e2-588a7e916bad): seed time given as about 17 minutes / 1,025 s at README.md:137,254 and stack.sh:11,527; the round-2 seed with the block-index wait took 1,600 s."},
+    {"severity": "minor", "file": "packages/envoy/loadtest/README.md", "description": "README.md:207-208 says setup and seed run once per series; run-step.sh:89 rebuilds before every step, so a checkout change mid-series mixes builds in one series TABLES.md with no build column."},
+    {"severity": "minor", "file": "packages/envoy/loadtest/lock.sh", "description": "lock.sh:33-39 can name the previous (dead) holder: the waiter reads a stale complete record before the new holder rewrites it."},
+    {"severity": "minor", "file": "packages/envoy/CHANGELOG.md", "description": "CHANGELOG.md:22-23 and the PR body say any stack command is refused; stack.sh status, build-info and loadgen take no lock (stack.sh:631-642, README.md:172-173 is right)."},
+    {"severity": "minor", "file": "packages/envoy/loadtest/run.go", "description": "run.go:257-698 execute is 442 lines holding every phase of a step and five mutex+slice pairs; split it into its phases with one collector type."},
+    {"severity": "minor", "file": "packages/envoy/loadtest/run.go", "description": "run.go:478-509 and 516-561 copy the open-loop Poisson scheduler; extract one."},
+    {"severity": "minor", "file": "packages/envoy/loadtest/tables.go", "description": "tables.go:234 finds a column by header text with slices.Index (-1 panics on a rename); fill-with-dash loop copied three times while emptyRow exists; inline | escapes beside mdCell; renderTables is 257 lines."},
+    {"severity": "minor", "file": "packages/envoy/loadtest/run.go", "description": "run.go:222-223 nullable SSE for summaries older than this new package, with its tables.go branch and test; remove."},
+    {"severity": "minor", "file": "packages/envoy/loadtest/events.go", "description": "Marker format defined in events.go:151, delivery.go:216-228 and run.go:255 (used by sse.go:42); keep it in one place."},
+    {"severity": "minor", "file": "packages/envoy/loadtest/locksampler.go", "description": "locksampler.go:34,88,153: url set as a side effect of loop and read by resolveRelations; pass it in."},
+    {"severity": "minor", "file": "packages/envoy/loadtest/run-step.sh", "description": "Root resolution copied in stack.sh:44-46, run-step.sh:29-31, run-series.sh:30-32; the stack-exit failure text rebuilt at run-step.sh:127-129 beside loadgen's own."},
+    {"severity": "minor", "file": "packages/envoy/loadtest/sample_test.go", "description": "sample_test.go:49 pins the whole error sentence; assert the process name and pid (AGENTS/test rules: no wording tests)."}
+  ]
+}
