@@ -215,7 +215,8 @@ jobs:
             # (infra/core/dispatch_permissions_live_test.go:51, through
             # infra/core/permissions_live_test.go:298-299). packages/envoy/listenfd: added by
             # #2229 (cmd/dispatch, cmd/listener, internal/config and infra/host/heldportwrapper
-            # import it).
+            # import it). internal/dispatch/dashboard and internal/dispatch/processes: cmd/dispatch
+            # imports them (INFRA-559, INFRA-555).
             dispatch_server: &dispatch_server
               - 'packages/envoy/cmd/dispatch/*'
               - 'packages/envoy/internal/bus/*'
@@ -228,6 +229,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/asks/*'
               - 'packages/envoy/internal/dispatch/auth/*'
               - 'packages/envoy/internal/dispatch/config/*'
+              - 'packages/envoy/internal/dispatch/dashboard/*'
               - 'packages/envoy/internal/dispatch/delivery/**'
               - 'packages/envoy/internal/dispatch/docs/*'
               - 'packages/envoy/internal/dispatch/duty/*'
@@ -241,6 +243,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/identity/*'
               - 'packages/envoy/internal/dispatch/model/*'
               - 'packages/envoy/internal/dispatch/outbox/*'
+              - 'packages/envoy/internal/dispatch/processes/*'
               - 'packages/envoy/internal/dispatch/pmdoc/**'
               - 'packages/envoy/internal/dispatch/rank/*'
               - 'packages/envoy/internal/dispatch/redeliver/*'
