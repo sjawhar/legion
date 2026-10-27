@@ -10,12 +10,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
-// askThreadLogins is an ask event's thread_logins: the logins with a Replies row on the ask's own
-// thread (0096's user_threads_ask), read once the ask's insert or answer is in tx.
-func askThreadLogins(ctx context.Context, tx pgx.Tx, askID string) ([]string, error) {
-	return events.ThreadLogins(ctx, tx, askID)
-}
-
 // issueThreadLogins is the thread_logins of an issue event whose status moved: whose Replies count
 // the move can change. Only a close or a reopen (closedMoved) changes one, for the logins with a
 // Replies row on the issue's open asks (events.IssueThreadLogins); any other status move names

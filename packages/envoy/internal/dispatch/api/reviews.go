@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
@@ -492,8 +493,7 @@ func (s *server) openApprovalAsk(
 	if err != nil {
 		return nil, model.Event{}, err
 	}
-	payload := model.NewAskEventPayload(ask, askChanges)
-	payload.ThreadLogins, err = askThreadLogins(ctx, tx, ask.ID)
+	payload, err := events.AskEventPayload(ctx, tx, ask, askChanges)
 	if err != nil {
 		return nil, model.Event{}, err
 	}

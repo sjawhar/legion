@@ -429,8 +429,7 @@ func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, as
 	}
 	ask.State = "answered"
 	ask.Answer = &answer
-	payload := model.NewAskEventPayload(*ask, model.ReferenceChanges{})
-	payload.ThreadLogins, err = events.ThreadLogins(ctx, tx, ask.ID)
+	payload, err := events.AskEventPayload(ctx, tx, *ask, model.ReferenceChanges{})
 	if err != nil {
 		return model.Event{}, err
 	}

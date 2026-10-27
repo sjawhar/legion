@@ -3,7 +3,21 @@ package events
 import (
 	"context"
 	"fmt"
+
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
+
+// AskEventPayload is the payload of an ask.opened, ask.answered or ask.resolved, carrying the
+// ask's thread_logins read in q after the write that moved it.
+func AskEventPayload(ctx context.Context, q Queryer, ask model.Ask, changes model.ReferenceChanges) (model.AskEventPayload, error) {
+	payload := model.NewAskEventPayload(ask, changes)
+	logins, err := ThreadLogins(ctx, q, ask.ID)
+	if err != nil {
+		return model.AskEventPayload{}, err
+	}
+	payload.ThreadLogins = logins
+	return payload, nil
+}
 
 // ThreadLogins is the thread_logins an event names: every login with a Replies row
 // (user_threads, migrations 0095-0097) on threadID, sorted. The rows are kept by triggers on the

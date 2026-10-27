@@ -428,7 +428,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if statusChanged {
-		payload.ThreadLogins, err = issueThreadLogins(r.Context(), tx, key, (before.ClosedAt == nil) != (after.ClosedAt == nil))
+		payload.ThreadLogins, err = issueThreadLogins(r.Context(), tx, key, slices.Contains(changedFields, "closed_at"))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return

@@ -140,12 +140,11 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	// A resuming connection whose since is at or below the head is replayed every event after it
 	// below, so it missed nothing while it was away, and says so in eventReplayHeader: a client
 	// may then skip the whole refresh it owes a gap. A cold connect asked for no backlog and a
-	// since above the head names an id of a log this one replaced; neither was replayed what it
-	// missed, so neither carries the header.
+	// since above the head can only be an id of a log this one replaced; neither was replayed what
+	// it missed, so neither carries the header, and both start at the head this connection just
+	// read.
 	replayComplete := sinceProvided && since <= head
-	// A cold client asked for no backlog, and a since above the head can only be an id of a log
-	// this one replaced; both start at the head this connection just read.
-	if !sinceProvided || since > head {
+	if !replayComplete {
 		since = head
 	}
 	w.Header().Set("Content-Type", "text/event-stream")

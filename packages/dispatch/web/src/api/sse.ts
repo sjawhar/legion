@@ -177,6 +177,27 @@ function markAskThreadsSeededByAnInFlightInbox(
 }
 
 /**
+ * The batch without the repeats of a target that has no `when`: events on one issue each push
+ * the same targets, and every copy past the first is one more full-cache `findAll` at the flush
+ * that reaches nothing the first did not. A target with a `when` always stays, since its
+ * predicate cannot be compared by key. First-seen order is kept.
+ */
+function dedupeRefreshTargets(targets: readonly RefreshTarget[]): RefreshTarget[] {
+  const seen = new Set<string>();
+  return targets.filter((target) => {
+    if (target.when !== undefined) {
+      return true;
+    }
+    const key = `${target.exact === true} ${JSON.stringify(target.queryKey)}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+/**
  * `watchdogMs` overrides the attempt watchdog's window (`WATCHDOG_MS`) and `wholeCacheRefreshMs`
  * the whole-cache refresh throttle; the only callers that set either are tests that would
  * otherwise have to wait out the real 45 s and 5 s windows. Production calls this with no
@@ -262,7 +283,7 @@ export function useEventStream({
       }
       flush = window.setTimeout(() => {
         flush = undefined;
-        const targets = pendingAll ? undefined : pending;
+        const targets = pendingAll ? undefined : dedupeRefreshTargets(pending);
         pendingAll = false;
         pending = [];
         refreshQueries(queryClient, targets);

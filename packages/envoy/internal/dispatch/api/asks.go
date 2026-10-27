@@ -241,17 +241,16 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		s.writeHandlerError(w, err)
 		return
 	}
-	events := []model.Event{}
+	appended := []model.Event{}
 	if snapshot != nil {
 		snapshotEvent, err := s.commitArtifactVersionEvent(r.Context(), tx, owner, actor, anchor.ArtifactID, artifactName, *snapshot, nil)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		events = append(events, snapshotEvent)
+		appended = append(appended, snapshotEvent)
 	}
-	openedPayload := model.NewAskEventPayload(ask, askChanges)
-	openedPayload.ThreadLogins, err = askThreadLogins(r.Context(), tx, ask.ID)
+	openedPayload, err := events.AskEventPayload(r.Context(), tx, ask, askChanges)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -266,7 +265,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		return
 	}
 	ask.OpenedEventID = &event.ID
-	events = append(events, event)
+	appended = append(appended, event)
 	var advice *writeAdvice
 	if owner.IssueKey != nil && status != nil {
 		advice = s.writeAdvice(
@@ -277,7 +276,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(events...)
+	s.publish(appended...)
 	// LEGION-550. An ask on an issue searches that issue's project and, normally, rides its
 	// suggestions on the issue's own advice; one on an unlinked project document searches the
 	// document's and has no issue state to report, so its advice carries the suggestions alone.

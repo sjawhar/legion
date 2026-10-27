@@ -109,13 +109,7 @@ function schedulerFor(queryClient: QueryClient): SchedulerState {
     // A query that owes a refresh settled: drive it, outside this notification, since the cache
     // is still dispatching the action that settled it.
     if (query.state.fetchStatus === "idle" && state.owed.has(hash) && !state.timers.has(hash)) {
-      state.timers.set(
-        hash,
-        window.setTimeout(() => {
-          state.timers.delete(hash);
-          drive(state, queryClient, hash);
-        }, 0)
-      );
+      driveAfter(state, queryClient, hash, 0);
     }
   });
   return state;
@@ -167,13 +161,7 @@ function drive(state: SchedulerState, queryClient: QueryClient, hash: string): v
           Math.max(0, started + MIN_REFETCH_INTERVAL_MS - Date.now())
         );
   if (wait > 0) {
-    state.timers.set(
-      hash,
-      window.setTimeout(() => {
-        state.timers.delete(hash);
-        drive(state, queryClient, hash);
-      }, wait)
-    );
+    driveAfter(state, queryClient, hash, wait);
     return;
   }
   state.owed.delete(hash);
@@ -182,6 +170,22 @@ function drive(state: SchedulerState, queryClient: QueryClient, hash: string): v
     return;
   }
   void query.fetch(undefined, { cancelRefetch: false }).catch(() => undefined);
+}
+
+/** Schedules `drive` for a query `ms` from now, holding its timer until then. */
+function driveAfter(
+  state: SchedulerState,
+  queryClient: QueryClient,
+  hash: string,
+  ms: number
+): void {
+  state.timers.set(
+    hash,
+    window.setTimeout(() => {
+      state.timers.delete(hash);
+      drive(state, queryClient, hash);
+    }, ms)
+  );
 }
 
 /**

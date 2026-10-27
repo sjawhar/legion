@@ -171,25 +171,13 @@ func (r *settlementReconciliation) nameVersion(
 		if err != nil {
 			return fmt.Errorf("retract deleted ask block: %w", err)
 		}
-		payload, err := askEventPayloadWithLogins(ctx, tx, retracted, model.ReferenceChanges{})
+		payload, err := events.AskEventPayload(ctx, tx, retracted, model.ReferenceChanges{})
 		if err != nil {
 			return err
 		}
 		r.events = append(r.events, documentAskEvent(owner, artifactID, "ask.resolved", SettlementActor, payload))
 	}
 	return nil
-}
-
-// askEventPayloadWithLogins is the payload of an ask.opened, ask.answered or ask.resolved that
-// settlement appends, carrying the ask's thread_logins read in tx after the write that moved it.
-func askEventPayloadWithLogins(ctx context.Context, tx pgx.Tx, ask model.Ask, changes model.ReferenceChanges) (model.AskEventPayload, error) {
-	payload := model.NewAskEventPayload(ask, changes)
-	logins, err := events.ThreadLogins(ctx, tx, ask.ID)
-	if err != nil {
-		return model.AskEventPayload{}, err
-	}
-	payload.ThreadLogins = logins
-	return payload, nil
 }
 
 // ErrInvalidAskBlock refuses a write that would leave an ask it writes or changes unreadable: an
@@ -312,7 +300,7 @@ func (s *Service) reconcileAskBlocks(
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index new ask block: %w", err)
 			}
-			payload, err := askEventPayloadWithLogins(ctx, tx, ask, changes)
+			payload, err := events.AskEventPayload(ctx, tx, ask, changes)
 			if err != nil {
 				return settlementReconciliation{}, err
 			}
@@ -332,7 +320,7 @@ func (s *Service) reconcileAskBlocks(
 			if ask.State == "answered" {
 				eventType = "ask.answered"
 			}
-			payload, err := askEventPayloadWithLogins(ctx, tx, ask, model.ReferenceChanges{})
+			payload, err := events.AskEventPayload(ctx, tx, ask, model.ReferenceChanges{})
 			if err != nil {
 				return settlementReconciliation{}, err
 			}

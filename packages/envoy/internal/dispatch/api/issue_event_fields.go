@@ -59,10 +59,15 @@ func issueComponentsEqual(left, right model.IssueComponents) bool {
 		stringPointersEqual(left.InheritedFrom, right.InheritedFrom)
 }
 
-// issueAncestors is an issue event's ancestors: key's parent chain, parent first up to the root,
-// [] for a root. The walk stops at parentDepthCap, as every recursive issue walk does.
-func issueAncestors(ctx context.Context, q queryer, key string) ([]string, error) {
+// issueAncestors is an issue event's ancestors: issue's parent chain, parent first up to the
+// root, [] for a root, which it answers without a query. The walk stops at parentDepthCap, as
+// every recursive issue walk does. issue is as loadIssue read it in q, so a nil Parent is a null
+// parent_key.
+func issueAncestors(ctx context.Context, q queryer, issue model.Issue) ([]string, error) {
 	ancestors := []string{}
+	if issue.Parent == nil {
+		return ancestors, nil
+	}
 	if err := q.QueryRow(ctx, `
 		with recursive ancestors as (
 			select p.key, p.parent_key, 1 as depth
@@ -73,8 +78,8 @@ func issueAncestors(ctx context.Context, q queryer, key string) ([]string, error
 			where a.depth < $2
 		)
 		select coalesce(array_agg(key order by depth), '{}') from ancestors
-	`, key, parentDepthCap).Scan(&ancestors); err != nil {
-		return nil, fmt.Errorf("read the ancestors of %s: %w", key, err)
+	`, issue.Key, parentDepthCap).Scan(&ancestors); err != nil {
+		return nil, fmt.Errorf("read the ancestors of %s: %w", issue.Key, err)
 	}
 	return ancestors, nil
 }
@@ -83,7 +88,7 @@ func issueAncestors(ctx context.Context, q queryer, key string) ([]string, error
 // issue after the write, what it moved in the reference graph, the fields it changed, and the
 // issue's ancestors read in tx. The caller adds thread_logins when the status moved.
 func newIssueEventPayload(ctx context.Context, tx pgx.Tx, issue model.Issue, changes model.ReferenceChanges, changed []string) (model.IssueEventPayload, error) {
-	ancestors, err := issueAncestors(ctx, tx, issue.Key)
+	ancestors, err := issueAncestors(ctx, tx, issue)
 	if err != nil {
 		return model.IssueEventPayload{}, err
 	}

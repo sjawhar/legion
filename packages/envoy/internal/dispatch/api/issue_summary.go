@@ -70,17 +70,10 @@ func (s *server) getIssueSummary(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	summary.Documents, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (issueSummaryDocument, error) {
-		var document issueSummaryDocument
-		err := row.Scan(&document.ID, &document.Slug, &document.Name, &document.Kind, &document.LatestVersion)
-		return document, err
-	})
+	summary.Documents, err = pgx.CollectRows(rows, pgx.RowToStructByPos[issueSummaryDocument])
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
-	}
-	if summary.Documents == nil {
-		summary.Documents = []issueSummaryDocument{}
 	}
 	WriteJSON(w, http.StatusOK, summary)
 }

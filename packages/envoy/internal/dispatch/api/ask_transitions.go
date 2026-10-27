@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
@@ -338,8 +339,7 @@ func (s *server) closeAskTx(ctx context.Context, tx pgx.Tx, id string, actor mod
 	}
 	// A transition writes no question text, so it moves no references and says so. The answer
 	// it may have written is in tx, so the ask's Replies rows are read after it.
-	base := model.NewAskEventPayload(ask, model.ReferenceChanges{})
-	base.ThreadLogins, err = askThreadLogins(ctx, tx, ask.ID)
+	base, err := events.AskEventPayload(ctx, tx, ask, model.ReferenceChanges{})
 	if err != nil {
 		return model.Ask{}, nil, err
 	}
