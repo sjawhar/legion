@@ -349,6 +349,80 @@ func TestRelatedCheckBoundsPastTheAllowanceIsNotMadeAndRecorded(t *testing.T) {
 	}
 }
 
+// A migration's lock on asks holds the check past its allowance and then holds its record too,
+// since related_checks' insert locks every table its foreign keys name even where the key is null.
+// When the record's second runs out, pgx cancels its statement, so the row is lost unless it is
+// tried again: it is written once the lock is released.
+func TestRelatedCheckRecordBlockedPastItsSecondIsWrittenOnceTheLockIsReleased(t *testing.T) {
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	createSuggestionProject(t, handler, "MIGR")
+	createSearchIssue(t, handler, "MIGR", "Quarterly zymurgy ledger drifts", "")
+	source := createSearchIssue(t, handler, "MIGR", "Zymurgy ledger totals drift", "")
+	srv := directServer(deps)
+	srv.suggestionTimeout = 500 * time.Millisecond
+
+	lockTx, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin lock tx: %v", err)
+	}
+	t.Cleanup(func() { _ = lockTx.Rollback(context.Background()) })
+	if _, err := lockTx.Exec(context.Background(), "lock table asks in access exclusive mode"); err != nil {
+		t.Fatalf("lock asks: %v", err)
+	}
+	suggestions := srv.relatedCheck(context.Background(), relatedInput{
+		project: "MIGR", text: "Zymurgy ledger totals drift",
+		source: suggestionSource{kind: "issue", issueKey: source, actor: model.Actor{Kind: "user", ID: "alice"}},
+		record: true,
+	})
+	if suggestions.Outcome != "not_made" || suggestions.Missing != "the search behind it did not answer within 500ms" {
+		t.Fatalf("suggestions = %+v, want not made, the search not having answered within the allowance", suggestions)
+	}
+
+	// Hold the lock until the cancel pgx sends after the record's first attempt has landed: that
+	// attempt started its insert relatedRecordTimeout before the check answered, any retry's
+	// only once it had failed, so an insert started more than half that before is the first.
+	poll := func(what string, done func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for !done() {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: not within 5s", what)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	var answered time.Time
+	if err := database.Pool.QueryRow(context.Background(), "select clock_timestamp()").Scan(&answered); err != nil {
+		t.Fatalf("read the database's clock: %v", err)
+	}
+	poll("the first attempt's insert cancelled", func() bool {
+		var waiting bool
+		if err := database.Pool.QueryRow(context.Background(), `
+			select exists (select from pg_stat_activity
+			 where datname = current_database() and state = 'active' and pid <> pg_backend_pid()
+			   and query like '%insert into related_checks%' and query_start < $1)
+		`, answered.Add(-relatedRecordTimeout/2)).Scan(&waiting); err != nil {
+			t.Fatalf("read the waiting inserts: %v", err)
+		}
+		return !waiting
+	})
+	if err := lockTx.Rollback(context.Background()); err != nil {
+		t.Fatalf("release the lock: %v", err)
+	}
+
+	var rows []relatedCheckRow
+	poll("the check's related_checks row written after the lock's release", func() bool {
+		rows = readRelatedCheckRows(t, database, "source_issue_key = $1 and outcome = 'not_made'", source)
+		return len(rows) > 0
+	})
+	if len(rows) != 1 {
+		t.Fatalf("not-made related_checks rows for %s = %+v, want one", source, rows)
+	}
+	if row := rows[0]; deref(row.Reason) != "timeout" || row.SourceKind != "issue" || row.ActorID != "alice" {
+		t.Fatalf("related_checks row = %+v (reason %q), want the timeout check of the issue", row, deref(row.Reason))
+	}
+}
+
 // A text with no word to search for, blank or stopwords alone, answers that no check was made
 // and why, never nothing.
 func TestRelatedCheckBoundsBlankTextIsNotMade(t *testing.T) {

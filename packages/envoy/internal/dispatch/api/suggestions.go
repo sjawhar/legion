@@ -3,6 +3,7 @@ package api
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -10,7 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
@@ -33,8 +36,16 @@ const (
 	relatedMeaningAllowance = 3 * time.Second
 	// relatedRecordTimeout bounds the check's records (write_suggestions and related_checks). It
 	// runs on a context of its own, not the check's, so a check that ran out of time is still
-	// recorded, and a record that cannot be written in a second is only logged.
+	// recorded; write_suggestions rows that cannot be written in a second are only logged, and a
+	// related_checks row is retried once (relatedRecordRetryTimeout).
 	relatedRecordTimeout = time.Second
+	// relatedRecordRetryTimeout bounds the one retry of a related_checks row the first attempt
+	// could not write in relatedRecordTimeout. The insert locks every table its foreign keys name
+	// (asks, artifacts, issues), so a migration's ACCESS EXCLUSIVE lock on one of them holds it
+	// up - just when the check, held up by the same lock, ran out of time and is the one the
+	// records exist to count. Thirty seconds is well past the five a migration waits for a lock
+	// (pgmigrate.LockTimeout), and the retry runs in the background, so no write waits on it.
+	relatedRecordRetryTimeout = 30 * time.Second
 	// suggestionRelatedCount is "the three items most like what was just filed" (LEGION-550's spec).
 	suggestionRelatedCount = 3
 	// suggestionSearchDepth widens the search past suggestionRelatedCount so an answered ask a few
@@ -732,7 +743,13 @@ func nullableText(value string) any {
 // (persistSuggestions). Every source with a project and an owner gets one related_checks row: its
 // outcome, search mode, reason, the lexemes it searched for, the stages' and the whole check's
 // times and how many items it listed. A check whose project could not be resolved has no row to
-// write, since the row belongs to a project.
+// write, since the row belongs to a project. A related_checks row the first attempt could not
+// write for a reason a retry can cure (relatedRecordRetryable) is tried once more in the
+// background, on the server's lifetime bounded by relatedRecordRetryTimeout, and waitBackground
+// waits it out. The row's id is chosen here and the insert does nothing where it exists, since
+// the first attempt's statement may still land after its context gave up on it: pgx cancels a
+// statement whose context ends only by a cancel request it sends afterwards, and a lock released
+// before that request arrives lets the statement run.
 func (s *server) recordRelatedCheck(
 	ctx context.Context, input relatedInput, suggestions *model.Suggestions, record relatedRecord,
 ) {
@@ -749,18 +766,48 @@ func (s *server) recordRelatedCheck(
 	if source.issueKey != "" {
 		artifactID = ""
 	}
-	if _, err := s.deps.Store.Pool.Exec(ctx, `
-		insert into related_checks
-			(project_key, source_kind, source_issue_key, source_artifact_id, source_ask_id, source_block_id,
-			 actor_kind, actor_id, outcome, search, reason, terms, keyword_ms, meaning_ms, total_ms, related_count)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-	`,
-		record.project, source.kind, nullableText(source.issueKey), nullableText(artifactID), nullableText(source.askID),
-		nullableText(source.blockID), source.actor.Kind, source.actor.ID, record.outcome, nullableText(record.search),
-		nullableText(record.reason), record.terms, record.keywordMS, record.meaningMS, record.totalMS, record.related,
-	); err != nil {
-		slog.Warn("dispatch: related-item check not recorded", "error", err)
+	id := uuid.New()
+	insert := func(ctx context.Context) error {
+		_, err := s.deps.Store.Pool.Exec(ctx, `
+			insert into related_checks
+				(id, project_key, source_kind, source_issue_key, source_artifact_id, source_ask_id, source_block_id,
+				 actor_kind, actor_id, outcome, search, reason, terms, keyword_ms, meaning_ms, total_ms, related_count)
+			values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+			on conflict (id) do nothing
+		`,
+			id, record.project, source.kind, nullableText(source.issueKey), nullableText(artifactID), nullableText(source.askID),
+			nullableText(source.blockID), source.actor.Kind, source.actor.ID, record.outcome, nullableText(record.search),
+			nullableText(record.reason), record.terms, record.keywordMS, record.meaningMS, record.totalMS, record.related,
+		)
+		return err
 	}
+	err := insert(ctx)
+	if err == nil {
+		return
+	}
+	if !relatedRecordRetryable(err) {
+		slog.Warn("dispatch: related-item check not recorded", "error", err)
+		return
+	}
+	s.relatedRecordRetries.Go(func() {
+		ctx, cancel := context.WithTimeout(s.lifetime(), relatedRecordRetryTimeout)
+		defer cancel()
+		if err := insert(ctx); err != nil {
+			slog.Warn("dispatch: related-item check not recorded", "error", err)
+		}
+	})
+}
+
+// relatedRecordRetryable says whether a related_checks insert that failed may succeed when tried
+// again: one that ran out of time, waiting on a lock, or that Postgres refused for a lock or a
+// serialization conflict (SQLSTATE classes 55 and 40). Any other refusal, such as a constraint
+// the row breaks (class 23), would only be refused again.
+func relatedRecordRetryable(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	var pgError *pgconn.PgError
+	return errors.As(err, &pgError) && (strings.HasPrefix(pgError.Code, "40") || strings.HasPrefix(pgError.Code, "55"))
 }
 
 // persistSuggestions records every item a check offered, so the outcome sweep has something to

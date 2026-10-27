@@ -275,6 +275,9 @@ type server struct {
 	// termStats is the per-project term-statistics refreshes a related-item check started
 	// (ensureSearchTermStats), so a project's many checks start one.
 	termStats searchTermRefreshes
+	// relatedRecordRetries is the related_checks rows being retried in the background
+	// (recordRelatedCheck), which waitBackground waits out before the pool closes under them.
+	relatedRecordRetries sync.WaitGroup
 }
 
 // warnedProductionRun keys server.warnedUnmatchedRuns: one deploy run under one configured set of
@@ -310,7 +313,8 @@ type queryer interface {
 // document websocket, under the same wrappers; a server without one (a test's) has neither, so
 // nothing outlives the test. Every server holds the event stream relay (INFRA-66), which every
 // open SSE connection reads and which starts its own listening connection on the first of them,
-// also on Lifetime. The returned wait blocks until the hub, every delivery socket and the relay
+// also on Lifetime. The returned wait blocks until the hub, every delivery socket, the relay and
+// every related-item check record still being retried (recordRelatedCheck, bounded by Lifetime)
 // have ended. Call it only after Lifetime has been cancelled and before the database pool closes.
 //
 // That wait is for a server given a Deps.Lifetime: it returns once that context is cancelled,
@@ -324,13 +328,15 @@ func Register(mux *http.ServeMux, deps Deps) func() {
 	return s.waitBackground
 }
 
-// waitBackground waits for every delivery socket, then for the hub's goroutines and the relay's.
+// waitBackground waits for every delivery socket, then for the hub's goroutines and the relay's,
+// and for the related-item check records being retried.
 func (s *server) waitBackground() {
 	if s.deliveryHub != nil {
 		s.deliverySockets.wait()
 		s.deliveryHub.wait()
 	}
 	s.eventRelay.wait()
+	s.relatedRecordRetries.Wait()
 }
 
 // register is Register, answering the server it mounted, whose delivery hub and event stream
