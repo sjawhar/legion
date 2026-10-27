@@ -95,11 +95,12 @@ func queryIssues(ctx context.Context, tx pgx.Tx, query string, args ...any) ([]I
 // finished with (admit's releaseSlots), on every fact and under the one fact lock. The slots table
 // is shared by every project's daemon, so another project's slot is left out here rather than by
 // the caller, and no issue of another project, and no issue holding no slot, is read at all. It
-// reads issueColumns itself, which no column of slots (issue, index, admitted_at) shares a name
-// with, so every record reads the columns every other read of an issue does.
+// selects issueColumns itself, so it reads every column scanIssue scans: the slots join is a
+// derived table whose columns are renamed, so no column of issueColumns is ambiguous.
 func (s *Postgres) SlottedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error) {
-	rows, err := tx.Query(ctx, `select `+issueColumns+` from slots s join issues i on i.key = s.issue
-		where i.project = $1 order by s.index, s.issue`, project)
+	rows, err := tx.Query(ctx, `select `+issueColumns+` from issues
+		join (select index, issue from slots) slot (slot_index, slot_issue) on slot.slot_issue = issues.key
+		where issues.project = $1 order by slot.slot_index, slot.slot_issue`, project)
 	if err != nil {
 		return nil, fmt.Errorf("list the slotted issues of project %s: %w", project, err)
 	}
