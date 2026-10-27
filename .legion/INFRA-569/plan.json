@@ -1,0 +1,132 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-569",
+  "completed": "2026-10-27T02:45:30Z",
+  "planDocument": "dispatch://INFRA-569/artifact/plan-md",
+  "summary": "Every ask hit of GET /api/v1/search carries `ask` (model.SearchAsk: state open|answered|resolved, the latest answer, the resolution), filled by a new helper attachAskStates (api/search_ask.go) that runFusedSearchQuery and runMeaningSearch call after scanSearchRows; `dispatch search` prints that state under each ask hit with the full answer text; the web palette shows a status line (Answered/Closed, no answer/Closed after an answer/Open) under each ask hit's excerpt; the excerpt's ask text becomes question || ask_search_suffix(options, answer) instead of raw options JSON.",
+  "design": {
+    "server": [
+      "model/model.go: type SearchAsk {State string `json:\"state\"`; Answer *AskAnswer `json:\"answer,omitempty\"`; Resolution *AskResolution `json:\"resolution,omitempty\"`}; SearchResult.Ask *SearchAsk `json:\"ask,omitempty\"`, set on every ask hit, nil on other kinds. Answer.Selected never null on the wire.",
+      "api/search_ask.go: func (s *server) attachAskStates(ctx, q queryer, results []model.SearchResult) error: one query `select id::text, state, answer, resolution from asks where id = any($1::uuid[])` for ask hits; only when a resolved ask hit is present, s.loadAskAnswersByAsk for those ids and take the last answer (legacy rows retracted while answered keep the answer only in events, ask_answer_change_test.go:188-202). Called by runFusedSearchQuery and runMeaningSearch after scanSearchRows, inside TookMS; an error propagates like a search-query error. An ask deleted between the reads keeps Ask nil.",
+      "api/search.go:136: the txt lateral's ask arm becomes k.question || ' ' || ask_search_suffix(k.options, k.answer) (the indexed text, 0019/0060), replacing options::text JSON. The only SQL change.",
+      "suggestions.go and WriteSuggestion are untouched: dispatch://INFRA-568 copies result.Ask into its related items."
+    ],
+    "contracts": "packages/contracts/src/dispatch-api.ts: export type SearchAsk = {state:\"open\"} | {state:\"answered\"; answer: AskAnswer} | {state:\"resolved\"; resolution: AskResolution; answer?: AskAnswer}; SearchResult.ask?: SearchAsk. dispatch-tools.ts dispatch_search description gains one sentence on ask hits.",
+    "cli": "packages/envoy-client/src/search-answer.ts: the hit line is unchanged; an ask hit adds `  Answered by <user> at <at> · options chosen: <labels|none>` and `  Answer text: <text|none>` (later lines of the text indented four spaces); `  Closed with no answer: <kind> by <actor> at <at>: <reason>`; `  Closed after an answer: …` then `  Last answer by …` and `  Answer text: …`; `  Open: no answer yet.`; an ask hit with no `ask`: `  Answer state not reported by this Dispatch; open the link to read the ask.` actorText moves out of dispatch-execute.ts into a shared module (no copy).",
+    "web": "packages/dispatch/web/src/features/search/SearchPalette.tsx ResultOption: a status line under the excerpt when result.ask is set: badge Answered + user · Timestamp + `· Chose <labels>` or `· No option chosen` + answer text MarkdownPreview clamped to 3 lines; badge `Closed, no answer` + AskResolutionLine · Timestamp; badge `Closed after an answer` + resolution + last answer; badge Open. The kind badge stays first (accessible name still starts `ask `)."
+  },
+  "tasks": [
+    "1. Rootless Postgres 17 + pgvector harness and caches under $TMPDIR, per docs/solutions/testing/the-real-dispatch-stack-runs-inside-a-legion-pod-with-no-postgres-no-docker-and-no-root-INFRA-42.md, a-browser-harness-in-an-issue-pod-lives-on-the-issue-volume-INFRA-43.md and the-shared-harness-script-starts-postgres-only-when-its-port-is-silent-and-no-spec-changes-while-a-run-loads-INFRA-304.md; one sourced env file, lanes by LEGION_ROLE.",
+    "2. Red Go tests at base: api/search_ask_test.go TestSearchAskHitsCarryTheirAnswerState (asks: answered then changed with expected_answer_at to selected [] + text; answered with an option and no text; resolved; legacy resolved-with-answer-only-in-events seeded as ask_answer_change_test.go:190-202; open; plus an issue and a comment hit) asserting state, latest answer user/at/text, raw \"selected\":[], resolution, no `ask` key on non-ask hits, no \"label\" JSON in the ask snippet; TestSuggestionsSearchCarriesAskStates via s.runFusedSearch; a fake-embedder case in search_meaning_test.go proving searchQueryMeaning hits carry ask state.",
+    "3. Server: model.SearchAsk, SearchResult.Ask, api/search_ask.go attachAskStates wired into runFusedSearchQuery and runMeaningSearch; the snippet expression at search.go:136.",
+    "4. Contracts: SearchAsk, SearchResult.ask, the dispatch_search description sentence.",
+    "5. CLI rendering + packages/envoy-client/src/__tests__/search-answer.test.ts cases: answered no option, answered with options and multi-line text, empty text, resolved, resolved with last answer, open, ask hit without `ask`, non-ask hit unchanged.",
+    "6. Web status line + packages/dispatch/e2e/search.e2e.ts test 'an ask hit says whether it is answered, and an answered one shows its latest answer, who gave it and the options chosen' (A answered [Brass] 'Keep the brass one.' then changed to [] 'Keep the steel one after all.'; B resolved 'Settled in the spec.'; C open) asserting Answered, alice, No option chosen, latest text present and the first absent, Closed, no answer + Resolved by, Open; extend the phone overflow test's fixture with an answered ask of 60+ words; run every spec asserting an ask option's name or text (docs/solutions/testing/a-change-to-shown-text-or-a-title-runs-every-dispatch-e2e-spec-that-asserts-the-old-value-INFRA-440.md).",
+    "7. cd packages/claude-envoy && bun run build (pinned Bun) in the same commit as the envoy-client/contracts source; bun run check-dist.",
+    "8. Docs: .dispatch/architecture/{dispatch-api,dispatch-model,contracts,envoy-client,dispatch-web,claude-envoy-bridge}.md one clause each; packages/contracts/AGENTS.md SearchResult row (~123); packages/envoy/cmd/dispatch/README.md /api/v1/search row (1219) and Search section (1023); packages/dispatch/AGENTS.md palette bullet (250); [Unreleased] CHANGELOG entries in contracts, envoy, envoy-client, claude-envoy, and pi-envoy if its changelog records shipped envoy-client behaviour.",
+    "9. Simplify pass (skill://ce-simplify-code) at head; re-run every proof at the head that merges.",
+    "10. PR titled `feat(dispatch): a search hit for an ask shows whether it is answered and its latest answer` (feat cuts the plugin release), body starting `Dispatch: INFRA-569`, two E2E lines, both browser-test runs and the CLI proof quoted."
+  ],
+  "proofs": [
+    {
+      "criterion": "A dispatch search hit for an ask whose answer replaced an earlier one prints the latest answer, who gave it, when, and the options chosen; no option chosen says so; closed with no answer says so; open says open.",
+      "surface": "the dispatch command against a real Dispatch server and Postgres: bun run dispatch:local at the head on the rootless harness",
+      "command": "DISPATCH_URL=<printed origin> DISPATCH_TOKEN=e2e-token bun packages/envoy-client/bin/dispatch.ts ask … (five asks); answer as alice via POST /api/v1/asks/<id>/answer with the devSignInPath(\"alice\") cookie, change one with expected_answer_at to selected []; dispatch resolve-ask one; then bun packages/envoy-client/bin/dispatch.ts search --query '<term>'",
+      "expected": "`Answered by alice@… at <second at> · options chosen: none` + `Answer text: <second text>` and no line with the first text; `options chosen: <label>`; `Closed with no answer: resolved by …`; `Open: no answer yet.`",
+      "negativeControl": "the base commit's dispatch against the same server prints none of these lines; the unit case for an ask hit with no `ask` prints `Answer state not reported…`"
+    },
+    {
+      "criterion": "A browser-suite test shows the search panel marking an answered ask with its answer; fails before, passes at head; both runs quoted.",
+      "surface": "Dispatch's browser suite (packages/dispatch/e2e)",
+      "command": "cd packages/contracts && bun run build; cd packages/dispatch && bun run e2e -- search.e2e.ts -g 'an ask hit says whether it is answered' (harness env sourced)",
+      "expected": "passes at head on every project the spec runs",
+      "negativeControl": "the base commit's packages/dispatch/web with the head's e2e/search.e2e.ts fails on the Answered assertion"
+    },
+    {
+      "criterion": ".dispatch/architecture/<id>.md updated for each component whose code changes.",
+      "surface": "the pull request diff",
+      "command": "jj diff --stat -r 'main..@'",
+      "expected": "for every changed code or test file (excluding CHANGELOG.md, README.md, AGENTS.md, .legion/), the longest-prefix owning component doc is in the diff: dispatch-api, dispatch-model, contracts, envoy-client, dispatch-web, claude-envoy-bridge",
+      "negativeControl": "removing one of the six from the diff makes the check name it"
+    },
+    {
+      "criterion": "Production: dispatch search --query 'few more whys' lists dispatch://INFRA-323/ask/b392b950-e150-4bf9-89b4-eb91af2042d1 with Sami's latest answer, its time, and no option chosen.",
+      "surface": "production Dispatch via dispatch, once the server build carrying the merge and the plugin release carrying envoy-client both run (spec148 line 52)",
+      "command": "dispatch search --query 'few more whys'; GET /api/v1/asks/b392b950-e150-4bf9-89b4-eb91af2042d1 (newest answers[].at); GET /api/v1/search?q=few+more+whys",
+      "expected": "`Answered by sami@theorem.dev at <T> · options chosen: none` and `Answer text: I think we need to ask a few more whys. …`, T equal to the ask route's newest answer at; the API hit has ask.state answered, ask.answer.selected [] and the same at",
+      "negativeControl": "before the deploy (2026-10-27 run) the hit shows only an excerpt with option JSON and no state line"
+    },
+    {
+      "criterion": "Production: the deployment's Dispatch production check for the web change.",
+      "surface": "production Dispatch",
+      "command": "gh api \"repos/theorem-labs/agent-infra/contents/legion/checks/dispatch-production-check.sh?ref=main\" -H \"Accept: application/vnd.github.raw\" | bash -s -- --commit <merged sha> --page / --route /api/v1/search",
+      "expected": "output on the PR and the issue; when the running build lacks the commit, record which build runs (INFRA-64 is the deploy gap)",
+      "negativeControl": "--route with a path outside /api/ is refused by the script"
+    }
+  ],
+  "gateCommands": [
+    "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<harness url> go test ./internal/dispatch/api -run 'TestSearch|TestSuggestions|TestAsk' -count=1 -timeout 20m; then whole ./internal/dispatch/api and ./internal/dispatch/docs with a timeout (docs/solutions/testing/the-dispatch-servers-go-suites-in-an-issue-pod-run-api-and-docs-alone-with-a-timeout-and-read-the-c-collation-docker-and-bun-failures-as-the-environment-LEGION-752.md)",
+    "bunx tsc --noEmit in packages/contracts, packages/envoy-client, packages/dispatch, packages/claude-envoy; bun test in packages/envoy-client and packages/contracts; bun run test in packages/dispatch",
+    "bunx biome check packages/contracts packages/envoy-client packages/dispatch packages/claude-envoy; gofmt -l and go vet ./internal/dispatch/... in packages/envoy",
+    "cd packages/claude-envoy && bun run check-dist",
+    ".github/scripts/check-private-names.sh"
+  ],
+  "decisions": [
+    {"decision": "Production check --page is /", "reason": "the palette has no route of its own and opens over every page; the browser test drives it from /"},
+    {"decision": "Full answer text in the CLI, 3 lines in the palette", "reason": "an excerpt brings back the misread in the CLI agents read; the palette row links to the full ask"},
+    {"decision": "A resolved ask whose answer survives in its events shows that last answer", "reason": "'closed with no answer' would be false for those legacy rows; cost is one batched events query only when a resolved ask hit is on the page; production count unmeasured (no route counts them)"},
+    {"decision": "The excerpt's ask text uses ask_search_suffix instead of options::text", "reason": "discovered scope in the line the spec names as the cause: production shows raw option JSON in an ask excerpt; one SQL expression, pinned by the Go test; the architect may drop it"},
+    {"decision": "Ask state attached by a Go helper, not SQL columns in the shared tail", "reason": "reusable by INFRA-568 whatever SQL its rebuilt check runs; avoids an r.id::uuid cast on issue-key rows; one PK lookup only when the page holds an ask hit"},
+    {"decision": "An open ask shows only that it is open", "reason": "the spec asks for nothing more"}
+  ],
+  "coordination": [
+    "INFRA-568: shape and helper sent to notifications.role.legion-infra-infra-568-planner (message faa7c17abed2cadf6041ec14388cee69, holder 01a17b2d-e1d4-768d-b5f9-538dd93e2d76, 2026-10-27); both PRs edit model/model.go, api/search.go and contracts/src/dispatch-api.ts; whichever merges second rebases; if INFRA-568 lands the same names first, this issue uses them.",
+    "INFRA-573 proves the parent's acceptance after all children close; its 'dispatch search hit … latest answer' line is this issue's line 1."
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the phase rules, proof shape (references/pr-body.md), push and handoff",
+      "ce-simplify-code: the simplify pass at the head before the final proofs",
+      "envoy: coordinating the shared SearchAsk shape with the INFRA-568 implementer",
+      "dispatch: posting the production-check record on the issue after the merge"
+    ],
+    "test": [
+      "legion-worker: re-running each named proof at the head with its negative control (references/pr-body.md, merge-gate.md)",
+      "dispatch: reading the production ask and its answer time for the production line"
+    ],
+    "review": [
+      "legion-worker: review rules and the merge gate (references/merge-gate.md, review-threads.md)",
+      "ce-simplify-code: judging whether the change is as simple as it can be"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "A resolved ask can hold a person's answer only in events (legacy settlement retraction); 'closed with no answer' would be false for it.", "answer": "attachAskStates loads the last real answer via loadAskAnswersByAsk for resolved ask hits; CLI and web say 'Closed after an answer' and show it; Go test seeds that row."},
+      {"finding": "INFRA-568 reusing SearchResult.Ask is an assumption; its rebuilt check may not reach searchPageAndTailSQL; both edit model.go, search.go, dispatch-api.ts.", "answer": "Design switched to a SQL-independent helper attachAskStates over any []SearchResult; shape, names, ownership and merge order sent to INFRA-568's planner over Envoy and recorded."},
+      {"finding": "The CLI production line needs a plugin release carrying envoy-client, which the child spec omits.", "answer": "Recorded as a spec departure; PR title type feat; claude-envoy dist rebuilt; production run from a session with the released plugin."},
+      {"finding": "The web production check needs a page path but the palette has no route; no pass criterion.", "answer": "--page / --route /api/v1/search; plus an API check that the INFRA-323 ask hit carries ask.state answered, selected [] and the ask route's newest answer at."},
+      {"finding": "The expected answer time cannot be read from dispatch read.", "answer": "Production proof reads the newest answers[].at from GET /api/v1/asks/<id>; ranking verified today (second hit)."},
+      {"finding": "'The answer's text' is ambiguous: full text or excerpt; empty text is valid.", "answer": "Full text in the CLI (continuation lines indented), 3 lines in the palette; null or empty text reads as none."},
+      {"finding": "The snippet change to ask_search_suffix is beyond the spec and duplicates selected labels.", "answer": "Kept as discovered scope with its reason (raw JSON in production excerpts) and a Go test; flagged so the architect can drop it."},
+      {"finding": "Architecture docs: at least six components change and 'updated' is not checkable; contracts AGENTS.md documents SearchResult.", "answer": "Six docs (longest-prefix owner of each changed code/test file) with a machine check; contracts AGENTS.md SearchResult row updated; recorded as a spec departure."},
+      {"finding": "'Latest' must be proven server-side on both query paths; fail-before needs the base app; pod has no Postgres; Playwright needs built contracts.", "answer": "Go tests on searchQuery and searchQueryMeaning with a changed answer; base app + head spec run; rootless harness task; contracts build step."},
+      {"finding": "Unverified: the misread count, the production check's flags, the 568 topic holder, legacy row count.", "answer": "568 topic holder confirmed live by the publish; production check flags taken from the deployment instructions; legacy count stated as unmeasured; misread claim is the spec's, cited from INFRA-323's reply."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 2},
+  "specDepartures": [
+    {
+      "spec": "Acceptance: `.dispatch/architecture/<id>.md` for each component whose code changes (dispatch-api, envoy-client, dispatch-web) is updated.",
+      "plan": "Updates six docs: also dispatch-model (model/model.go), contracts (dispatch-api.ts) and claude-envoy-bridge (rebuilt dist), each the longest-prefix owner of a changed code or test file.",
+      "evidence": ".dispatch/architecture/dispatch-model.md paths packages/envoy/internal/dispatch/model; contracts.md paths packages/contracts; claude-envoy-bridge.md paths packages/claude-envoy; the spec's own rule is 'each component whose code changes'.",
+      "outcome": {"kind": "changed", "scope": "acceptance: the parenthesised component list of the architecture-doc line grows from three to six"}
+    },
+    {
+      "spec": "Acceptance, on production: `dispatch search --query 'few more whys'` lists the INFRA-323 ask with Sami's latest answer, its time, and that no option was chosen (no deploy condition stated).",
+      "plan": "The check runs once both the Dispatch server build carrying the merge and the plugin release carrying envoy-client are running, from a session that loaded that release.",
+      "evidence": "The rendering lives in packages/envoy-client/src/search-answer.ts, shipped in the plugin bundles (packages/claude-envoy/dist, pi-envoy release); the parent spec's production acceptance applies 'once both the Dispatch server and the plugin release that carry the change are running' (dispatch://INFRA-148/spec).",
+      "outcome": {"kind": "changed", "scope": "acceptance: the production line gains the parent spec's condition that the plugin release is running too"}
+    }
+  ]
+}
