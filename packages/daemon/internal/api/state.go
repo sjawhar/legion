@@ -295,8 +295,8 @@ type Issue struct {
 
 // WaitingOnView is what a root in awaiting_person waits on from a person (record.Awaiting). Kind
 // is `ask` with Ask, the id of the oldest question of its tree still with the person, or `gate`
-// with GateVersion and ArtifactID, the spec version a person has not reviewed (no daemon of this
-// contract writes a gate wait yet). Since is Dispatch's time of the hand-back the wait began at,
+// with GateVersion and ArtifactID, the spec version of its registered document a person has not
+// reviewed. Since is Dispatch's time of the hand-back the wait began at,
 // absent when unknown. AnsweredAt and AnsweredBy are absent until a person's act answers the wait;
 // the root then waits at the front of admission's waiting line for its slot.
 type WaitingOnView struct {

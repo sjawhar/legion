@@ -1,14 +1,15 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useLayoutEffect, useState } from "react";
 
 import { borderDefault } from "../../theme/classes";
-import { useReferenceTarget } from "./reference-target";
+import { referenceSpans } from "./reference-spans";
+import { useReferencePath, useReferenceTarget } from "./reference-target";
 import {
   buildDispatchReference,
   buildReferencePath,
   type DispatchReferenceRoute,
+  nodeRouteFromHref,
   parseDispatchReference,
   referenceRouteFromHref,
-  referenceSpans,
   shortForm,
 } from "./routes";
 
@@ -31,9 +32,23 @@ export const pictureThumbnailClassName = `not-prose inline-block h-10 w-10 shrin
  * `useReferenceTarget` has it, the ref's short form until then, and beside it the picture's
  * thumbnail when the reference names an image artifact. A thumbnail the browser cannot draw (a
  * pinned version the server does not serve) is dropped, leaving the title alone, so a stale or
- * hand-written reference never shows a broken-image glyph. */
-export function RefLink({ route }: { route: DispatchReferenceRoute }): ReactNode {
+ * hand-written reference never shows a broken-image glyph. When the element it renders into is a
+ * link, its href follows `useReferencePath`, which a pinned block of a spec resolves only once its
+ * issue is read. */
+export function RefLink({
+  anchor,
+  route,
+}: {
+  anchor?: HTMLElement;
+  route: DispatchReferenceRoute;
+}): ReactNode {
   const { picture, title } = useReferenceTarget(route);
+  const path = useReferencePath(route);
+  useLayoutEffect(() => {
+    if (anchor instanceof HTMLAnchorElement) {
+      anchor.setAttribute("href", path);
+    }
+  }, [anchor, path]);
   // The address that failed, not a flag: a plain reference names the latest version, so a version
   // uploaded since gets its own load instead of inheriting the last one's failure.
   const [failedPicture, setFailedPicture] = useState<string>();
@@ -116,13 +131,33 @@ export function linkifyDispatchRefs(root: HTMLElement): void {
 }
 
 /**
+ * Whether an anchor's target is a URL its author left as text: what GFM autolinks, a bare
+ * `https://…` (a bare `www.…`, whose target gains `http://`) or one in angle brackets
+ * (`<dispatch://…>` too), and the anchor `linkifyDispatchRefs` wraps around a bare
+ * `dispatch://…`, all show their target as their words. A Markdown link whose words are its own
+ * target (`[dispatch://X](dispatch://X)`, the form a document stores an autolink in) reads the
+ * same, and is the same text to the server. `target` is the anchor's own target: Proof's
+ * serializer moves a `dispatch://` target into `data-dispatch-href` and empties `href`.
+ */
+function isTextUrl(target: string, text: string): boolean {
+  return target === text || target === `http://${text}`;
+}
+
+/**
  * Finds every already-rendered `<a>` in root whose href is a dispatch:// reference or a
  * same-origin dashboard path — a link `linkifyDispatchRefs` just inserted, an ordinary Markdown
  * link a user wrote by hand, or a bare `http(s)://` URL remark-gfm autolinked — rewrites its href
  * to the SPA route via `buildReferencePath`, and clears its text so the caller can
- * portal a `RefLink` in to render the resolved title. An external link, or an href that fails to
- * parse as a reference, is left untouched, and so is a picture's link (`data-dispatch-picture`,
- * the engine's `pictureSerializer`), whose content is a `DispatchPicture` rather than a title.
+ * portal a `RefLink` in to render the resolved title. A URL its author left as text
+ * (`isTextUrl`) is read as the server's `text.Extract` reads text (`referenceRouteFromHref`): one
+ * whose block is past the bounds the index keys names its document, as the server cites it; an
+ * `http(s)://` one past them stays the link it is; and a `dispatch://` one that names nothing
+ * becomes its words as plain text, as a bare one already renders, with no link to click and no
+ * hover trigger. A link its author wrote names its target explicitly, and drawing or opening it
+ * is a read, so its href is read as the server reads a request (`nodeRouteFromHref`), whatever the
+ * length of its names. An external link, or an author's href that fails to parse as a reference,
+ * is left untouched, and so is a picture's link (`data-dispatch-picture`, the engine's
+ * `pictureSerializer`), whose content is a `DispatchPicture` rather than a title.
  *
  * `@legion/proof-editor`'s Markdown link serializer sanitizes a `dispatch://` href to `""`
  * (Milkdown's link sanitizer only allows http/https/mailto/tel/ftp — a document strangers can
@@ -142,14 +177,24 @@ export function collectReferenceAnchors(
     if (href === null) {
       continue;
     }
-    const route = referenceRouteFromHref(href, appOrigin);
+    const text = anchor.textContent ?? "";
+    const textUrl = isTextUrl(href, text);
+    const route = textUrl
+      ? referenceRouteFromHref(href, appOrigin)
+      : nodeRouteFromHref(href, appOrigin);
     if (route === undefined) {
+      // A `dispatch://` URL left as text that cites nothing - past the bounds the index keys -
+      // is the text it is, as a bare one past them already renders (`linkifyDispatchRefs`):
+      // Proof's serializer left it `href=""` and `data-dispatch-href`, which would click to the
+      // current page and open a hover card for a reference the server never recorded.
+      if (textUrl && href.startsWith("dispatch://")) {
+        anchor.replaceWith(document.createTextNode(text));
+      }
       continue;
     }
     anchor.setAttribute("href", buildReferencePath(route));
     const reference = buildDispatchReference(route);
     anchor.setAttribute("data-dispatch-ref", reference);
-    const text = anchor.textContent ?? "";
     anchor.replaceChildren();
     targets.push({ anchor, key: `${reference}:${index}`, route, text });
     index += 1;

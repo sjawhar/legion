@@ -142,6 +142,39 @@ func (c *HTTPClient) PostMessage(ctx context.Context, key, body string) error {
 	}, nil)
 }
 
+// EventsAfter reads the issue's Dispatch event log after sequence after, oldest first, through GET
+// /api/v1/issues/{key}/events?after=…, every page of it: each event as Dispatch serves it, which is
+// the shape its durable stream carries, so the boot catch-up applies each through the live
+// decoder, with its own sequence.
+func (c *HTTPClient) EventsAfter(ctx context.Context, key string, after int64) ([]json.RawMessage, error) {
+	events := []json.RawMessage{}
+	for {
+		query := url.Values{}
+		query.Set("after", fmt.Sprint(after))
+		query.Set("limit", fmt.Sprint(eventPageLimit))
+		var page []json.RawMessage
+		if err := c.request(ctx, http.MethodGet, "/api/v1/issues/"+url.PathEscape(key)+"/events?"+query.Encode(), nil, &page); err != nil {
+			return nil, err
+		}
+		for _, raw := range page {
+			var event struct {
+				Seq int64 `json:"seq"`
+			}
+			if err := json.Unmarshal(raw, &event); err != nil {
+				return nil, fmt.Errorf("page issue events for %s: %w", key, err)
+			}
+			if event.Seq <= after {
+				return nil, fmt.Errorf("page issue events for %s: non-ascending sequence %d after %d", key, event.Seq, after)
+			}
+			after = event.Seq
+			events = append(events, raw)
+		}
+		if len(page) < eventPageLimit {
+			return events, nil
+		}
+	}
+}
+
 const eventPageLimit = 200
 
 // MessageBodiesSince reads newest-first issue events until the bounded outbox recovery window.

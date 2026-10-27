@@ -95,18 +95,73 @@ func TestGraphEdgesUnionsMentionsWithEveryStructuralRelation(t *testing.T) {
 	// serve an arm, so a plan free of them proves every arm of the view has the index 0032
 	// gives it for the predicates the read API pushes down.
 	for name, query := range map[string]string{
-		"to artifact":  `select * from graph_edges where to_kind = 'artifact' and to_id = 'CORE-1/spec'`,
-		"to issue":     `select * from graph_edges where to_kind = 'issue' and to_id = 'CORE-1'`,
-		"to component": `select * from graph_edges where to_kind = 'component' and to_id = 'CORE/web'`,
-		"from ask":     `select * from graph_edges where from_kind = 'ask' and from_id = '` + ids.PlainAsk + `'`,
-		"from issue":   `select * from graph_edges where from_kind = 'issue' and from_id = 'CORE-2'`,
+		"to artifact":            `select * from graph_edges where to_kind = 'artifact' and to_id = 'CORE-1/spec'`,
+		"to issue":               `select * from graph_edges where to_kind = 'issue' and to_id = 'CORE-1'`,
+		"to component":           `select * from graph_edges where to_kind = 'component' and to_id = 'CORE/web'`,
+		"from ask":               `select * from graph_edges where from_kind = 'ask' and from_id = '` + ids.PlainAsk + `'`,
+		"from issue":             `select * from graph_edges where from_kind = 'issue' and from_id = 'CORE-2'`,
+		"from block":             `select * from graph_edges where from_kind = 'block' and from_id = 'CORE-1/spec#b1'`,
+		"to a document's blocks": `select * from graph_edges where to_kind = 'block' and to_id in (select node_id from document_blocks where artifact_id = '` + ids.Spec + `')`,
 	} {
 		plan := explainWithoutSeqScan(t, store, query)
-		for _, table := range []string{"refs", "artifacts", "asks", "comments", "messages", "issues", "issue_links", "ask_followers", "issue_component_members", "issue_components"} {
+		for _, table := range []string{"refs", "artifacts", "asks", "comments", "messages", "issues", "issue_links", "ask_followers", "issue_component_members", "issue_components", "document_blocks", "block_refs", "document_block_versions"} {
 			if strings.Contains(plan, "Seq Scan on "+table) {
 				t.Errorf("%s: plan scans %s sequentially:\n%s", name, table, plan)
 			}
 		}
+	}
+}
+
+// A block of a document is a node of the graph: each link it holds is an edge out of it, two
+// links from one block to one target under different names are two edges, and the block is
+// part_of its document. A block's edges keep their source_seq; its part_of edge, being
+// structural, carries none.
+func TestGraphEdgesCarryBlockMentionsAndPartOf(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := store.Pool.Exec(ctx, `
+		with p as (insert into projects (key, name) values ('CORE', 'Core') returning key),
+		issue as (insert into issues (key, project_key, number, title, created_by, rank) select 'CORE-1', key, 1, 'One', '{"kind":"user","id":"alice"}', 'A' from p returning key),
+		target as (insert into issues (key, project_key, number, title, created_by, rank) select 'CORE-2', 'CORE', 2, 'Two', '{"kind":"user","id":"alice"}', 'B' from issue returning key),
+		spec as (insert into artifacts (issue_key, project_key, slug, name, kind, is_primary, created_by) select key, 'CORE', 'spec', 'spec.md', 'doc', true, '{"kind":"user","id":"alice"}' from issue returning id),
+		block as (insert into document_blocks (artifact_id, block_id, node_id, type, text_sha256, excerpt, changed_version, changed_at) select id, 'b1', 'CORE-1/spec#b1', 'paragraph', 'x', 'x', 1, now() from spec returning artifact_id)
+		insert into block_refs (artifact_id, block_id, from_node, to_kind, to_id, kind, created_version, source_seq)
+		select artifact_id, 'b1', 'CORE-1/spec#b1', 'issue', 'CORE-2', link.kind, 1, 7
+		from block, target, (values ('mentions'), ('depends_on')) as link (kind)
+	`); err != nil {
+		t.Fatalf("seed block: %v", err)
+	}
+
+	rows, err := store.Pool.Query(ctx, `
+		select from_kind, from_id, kind, to_kind, to_id, source_seq is not null from graph_edges
+		where from_kind = 'block'`)
+	if err != nil {
+		t.Fatalf("read graph_edges: %v", err)
+	}
+	defer rows.Close()
+	var got []graphEdgeRow
+	for rows.Next() {
+		var row graphEdgeRow
+		if err := rows.Scan(&row.FromKind, &row.FromID, &row.Kind, &row.ToKind, &row.ToID, &row.HasSourceSeq); err != nil {
+			t.Fatalf("scan graph edge: %v", err)
+		}
+		got = append(got, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate graph_edges: %v", err)
+	}
+	want := []graphEdgeRow{
+		{"block", "CORE-1/spec#b1", "mentions", "issue", "CORE-2", true},
+		{"block", "CORE-1/spec#b1", "depends_on", "issue", "CORE-2", true},
+		{"block", "CORE-1/spec#b1", "part_of", "artifact", "CORE-1/spec", false},
+	}
+	sortGraphEdges(got)
+	sortGraphEdges(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("block edges = %#v\nwant %#v", got, want)
 	}
 }
 
