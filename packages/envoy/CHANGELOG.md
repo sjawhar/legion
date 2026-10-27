@@ -1418,6 +1418,19 @@
 
 ### Fixed
 
+- A bare web address or email in a Dispatch document written through the API (`dispatch doc-edit`,
+  an uploaded version) is now a link wherever a comment and the browser editor link it: after
+  punctuation (`x;https://…`, `"a@b.test"`), a letter outside ASCII, an escape or a character
+  reference, a URL after a digit too, or at a line or table cell opening with punctuation. The
+  server reads an address with both of the editor's readers, the one that reads the markdown as
+  written and the one that reads the decoded text it leaves, so where the two end an address
+  differently (`x;https://x.test/a_` leaves the `_` out, `see http\://x.test/a_` keeps it) each
+  ends it as in the editor. The stored markdown no longer carries a backslash before such a URL's
+  colon (`http\://`): the server writes one, or one before an `@`, only where plain text would
+  otherwise come back as a link the editor does not show, such as `http://localhost`. Plain-text
+  addresses already stored read back as links on the next read, as the editor already shows them
+  (INFRA-531).
+
 - A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
   such as a session's answer to a model switch, without waiting for the stream's heartbeat.
   Firefox opened the stream only once its first byte arrived, and a stream with no backlog and no
@@ -1638,6 +1651,8 @@
   any case, a domain with an underscore in either of its last two parts is text, and `ftp://` is
   text. A URL the editor links after a letter and punctuation (`x;https://…`), after an escape or a
   character reference, or at a line or cell opening with punctuation is still text on the server.
+  (Superseded by the Fixed entry on a bare web address or email after punctuation, INFRA-531: the
+  server now links each of those as the editor does.)
   A bare URL the editor's rules read whole, its scheme in any case and a `www.` one included, is
   written as its own bytes, or, where the text around it would change what is linked, as `<url>`
   (a www link as `[www…](http://www…)`).

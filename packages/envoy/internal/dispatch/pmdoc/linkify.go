@@ -1048,8 +1048,9 @@ func decodedOffsets(raw []byte) []int32 {
 
 // referenceLength is how much of value, which opens with `&`, html.UnescapeString reads as one
 // character reference, whether or not it names one: `&#` and decimal digits, or `&#x` and
-// hexadecimal ones, at least one, or `&` and letters and digits, each with a `;` after them if
-// there is one; or 1 where there is no such reference.
+// hexadecimal ones, with a `;` after them if there is one, two characters at least after the `&#`;
+// or `&` and letters and digits, with a `;` after them if there is one; or 1 where there is no
+// such reference.
 func referenceLength(value []byte) int {
 	at := 1
 	if len(value) > 1 && value[1] == '#' {

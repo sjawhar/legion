@@ -1632,10 +1632,30 @@ that leaves two lists side by side (deleting or emptying what stood between them
 accepting a list beside one) therefore stores the two lists it made, and a `replace` refusal that
 names a list item's marker names the one it is written with (`BlockMarker.Other`).
 
-The renderer writes a run of inline text so that it reads back as written. A bare URL ends where
-linkify stops, so where a run does not read back because linkify would continue a URL into the
-character after it, that character is written behind a backslash (`endsBareURL`) - a backslash even
-for `&` and `~`, whose other escapes are character references, which linkify runs through. Marks are
+A bare web address or email is read as the browser editor's engine, remark-gfm, reads it, by both of
+its readers (`linkify.go`, INFRA-531). Its tokenizer reads the markdown as written, before emphasis,
+code or links form: `linkifyGuard`, asked at every ASCII punctuation character, whitespace and head
+after every other inline parser declines, reads from there to the next character goldmark asks at
+(`readLiteralAddress`), and `underscoreEmail` reads an email at `_` before emphasis. Asking at a
+character no other parser triggers on ends goldmark's text there, so the guard gives the split text
+back (`linkifyBlock.settle`), and a markdown holding no address is counted and weighed as without
+it. Its transform reads, at block close, each run of text nodes between other nodes, decoded, its
+URL pattern first and its email pattern over what that leaves (`linkTextAddresses`); the two end
+an address differently (`x;https://x.test/a_ b` leaves the `_` out, `see http\://x.test/a_ b`
+keeps it), each as the engine does. So an address is a link after any punctuation, a letter
+outside ASCII, `]`, `|`, `!`, a character reference or an escape, a URL after a digit too, and at
+a line or table cell opening with punctuation, as in a comment and the browser editor. An email's
+href is its bare address (`emailHref`) until INFRA-530 makes it `mailto:`.
+
+The renderer writes a run of inline text so that it reads back as written. A bare URL is written as
+its bytes where the readers read it back whole (`isBareAutolink`, `isBareWWWLink`); where the run
+then reads back otherwise, because what follows runs on into it, it is written again as `<url>`, a
+www link as `[www…](http://www…)` (`runSpelling.angleURLs`). Plain text is written as it is: a
+scheme's colon or an `@` is escaped only as a respelling, where the run would otherwise read back
+holding an address only the tokenizer reads, such as `http://localhost` or an email after a letter
+outside ASCII (`schemeColons`, `ats`, alone or with `angleURLs`). Plain text the transform reads
+(`see https://x.test`) has no plain spelling, since the transform reads the decoded text, so it is
+written as it is and reads back as a link, as the engine reads it. Marks are
 written in one order - link, strong, emphasis - so where a text still carries a mark the text
 before it opened, and the order puts that mark after the text's other marks, the mark is closed and
 opened again; where that puts two runs of one delimiter character side by side (bold inside italic:
