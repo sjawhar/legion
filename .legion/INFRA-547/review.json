@@ -2,18 +2,34 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-547",
-  "completed": "2026-10-27T11:05:54Z",
-  "round": 3,
-  "reviewedHead": "4802c4c5e8357006d030e80caf32d8df2a1dbefe",
-  "codeHead": "4e0e3379680be775b8d979408c68ae5e12bd7bd4",
-  "decision": "approved",
+  "completed": "2026-10-27T18:34:18Z",
+  "round": 4,
+  "reviewedHead": "5994ac0177aa295c806c0cb97c5b9fad7471c9c3",
+  "codeHead": "a16d4af727ffc9eaccbbb47c3e3314ec098e0012",
+  "decision": "changes_requested",
   "critical": 0,
-  "important": 0,
-  "minor": 0,
-  "ci": "Required set on main (rulesets): lint, typecheck, test, pr-title; no branch protection. CI head 4e0e3379, the newest pull_request run; compare 4e0e3379...4802c4c5 is handoffsOnly true (2 files). At 11:05Z on 4e0e3379: lint, typecheck, test and pr-title all completed success, as did build and changes. Not required and still queued: envoy-go, envoy-go-race, envoy-e2e-local, listener-server-change and the other package jobs.",
-  "threads": "10 threads, all opened by the reviewer, all resolved by the implementer. Each carries my acceptance reply. Round 2: PRRT_kwDORFy7ds6wnXod, PRRT_kwDORFy7ds6wnXok, PRRT_kwDORFy7ds6wnXot, PRRT_kwDORFy7ds6wnXoy (all fixed in 4e0e3379). Round 1: PRRT_kwDORFy7ds6wlkAK, PRRT_kwDORFy7ds6wlkAP, PRRT_kwDORFy7ds6wlkAR, PRRT_kwDORFy7ds6wlkAa, PRRT_kwDORFy7ds6wlkAc, PRRT_kwDORFy7ds6wlkAe.",
-  "e2eLines": "E2E (implementer) and E2E (tester) are both present. The tester's round 4 verified the implementer's soak at 4e0e3379: lane off, role 268/268 and ad-hoc 268/268; lane on, 247/247 each; errored 0.",
-  "thermo": "thermonuclear-deep-review: APPROVE at 4e0e3379, with one Minor (a defensive branch that cannot run, delivery.go:346-348), which I judged not a defect: its comment says it is deliberately defensive. thermonuclear-code-quality: CHANGES at 4e0e3379, with cleanup only. I judged its suggestions not defects: (1) count publish_failed through a closure rather than settle's outcome switch; every current path counts correctly, and the round adds a test pinning the counts. (2) Move the delivery_status/reason log rule into a sendOutcome method; the rule is applied consistently at all three sites. (3) A test setup duplicated in confirmed_test.go. None changes behaviour, hides an error or breaks a gate.",
-  "keyFindings": [],
-  "stack": "The head still carries sjawhar/legion#2228 at its old tip 3ea454d3. #2228 is open; it was approved at a817758f, and its head has since moved to 77ff022b. READY checks only .legion/INFRA-547/, so the architect must not sign off until #2228 merges and main is merged forward into this branch, which needs a new review round. This is recorded under the PR body's Not proven / risk and was told to the architect in rounds 1 and 2."
+  "important": 1,
+  "minor": 2,
+  "ci": "Required set on main (rulesets): lint, typecheck, test, pr-title. CI head a16d4af7; compare to 5994ac01 is handoffsOnly true (2 files). At 18:33Z every check-run on a16d4af7 was still queued. Every required and Envoy job had passed on the pre-merge head 4e0e3379 (envoy-go, envoy-go-race, envoy-e2e-local, listener-server-change, the dispatch jobs, the plugin jobs). This round does not need CI to request changes.",
+  "threads": "10 threads, all mine from rounds 1-2, all resolved and each carrying my acceptance; no new thread was opened since.",
+  "e2eLines": "Both present. The tester's round 7 verified the implementer's proof and drove the daemon's 403 publish_denied path at a16d4af7.",
+  "thermo": "thermonuclear-deep-review: APPROVE at a16d4af7. It found that the merge keeps main's role-holder module, request records and tests intact (no test deleted or weakened), and that the confirmed send is intact; it rated the 403 mapping Minor because no documented deployment puts a proxy before the listener. thermonuclear-code-quality: CHANGES at a16d4af7: the 403 mapping, the request_record comment, stale wording, RoleHolder left with only test callers, and the holder copied into the record by hand. I judged the last not a defect.",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/notify/notify.go:192",
+      "description": "Every JSON 403 without reason capability is mapped to ErrPublishDenied, and outbox.notice then finishes the row undelivered. The listener's own denial always opens with publishDeniedPrefix (api.go:232, already in main's listeners), but any other JSON 403 — something in front of the listener — now drops an architect notice that used to be retried. The doc at :84 ('A 403 whose body is not that JSON stays a plain refusal') and the test row {\"error\":\"forbidden\"} -> ErrPublishDenied disagree with it. Fix: match the listener's denial by its prefix (rollout-safe with main's listeners), or by an explicit reason field the listener adds, kept beside the prefix match for listeners already deployed. Restore {\"error\":\"forbidden\"} to a plain refusal, and add a row with the listener's real body."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/cmd/listener/request_record.go:42-51",
+      "description": "The comment says a role send's forward takes the core path because UsesCoreTransport finds its topic outside streamSubjects, and that an agent subject is never denied this way. In fact the forward goes to the captured notifications.agent.<holder>, and it can be denied because RequestCoreTo always publishes over core NATS (the tester's round-6 denial names notifications.agent.ses_mq). The comment contradicts the code."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/store/kv.go:997-1006",
+      "description": "After the merge, Registry.RoleHolder's doc ('for a caller that answers no request') names a production caller that no longer exists; only tests call it. delivery.go:345 cites it as the model. Main's term 'role-lane publish' for the publish route's role send also survives at role_holder.go:196, publish_refusal_answers_test.go:100 and :176, and role_claim_unreadable_test.go:85, though the route no longer publishes on the role lane."
+    }
+  ],
+  "stack": "sjawhar/legion#2228 is still open (head 1b8a106e); the branch carries its old tip 3ea454d3. No sign-off until #2228 merges and main is merged forward."
 }
