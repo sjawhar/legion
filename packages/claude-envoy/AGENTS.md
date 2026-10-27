@@ -122,3 +122,5 @@ Dispatch asks stay on Dispatch.
 ## Topic reminder
 
 - Direct Claude session: `notifications.agent.<session_id>`
+
+<!-- scratch INFRA-520 claude-envoy -->
