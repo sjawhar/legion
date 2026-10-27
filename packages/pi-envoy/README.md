@@ -357,6 +357,8 @@ explicitly: `OMP_ASKGATE=block`, or, with no such variable, an `experiments` ent
 AskGate ignores any other value of `OMP_ASKGATE`, `off` included, and the first review shows one
 notice that names `askgate.enabled` as the switch. The gate writes the checks' mode into its store
 at each main-agent `bash` or `eval` call, where the CLI reads it, and a store with no mode is warn.
+pi-envoy also writes `OMP_ASKGATE=block` into the store with the session's record, so a session
+that chose block stays at block when its gate does not load.
 Two refusals follow neither mode: no model role and a gate that did not load refuse in both modes,
 since neither can review anything, and a gate that cannot review is no off switch.
 

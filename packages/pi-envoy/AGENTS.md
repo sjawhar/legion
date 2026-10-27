@@ -251,7 +251,9 @@ store with no mode is warn), apart from the verdict's mode (`sessionMode`, block
 `envoy.ts` turns each write the CLI logged as unmarked into an `unmarked` entry, and the gate
 appends a cause note (`nonLiteralCause`, `causeNote`) to the result of a call outside the literal
 form that the CLI refused. A gate that did not load mints nothing and writes no mode, so the CLI
-posts such a write with its warning, while `loadFailureGate` refuses each literal call. Precision
+posts such a write with its warning, unless the session set `OMP_ASKGATE=block`, which
+`bindDispatchSession` writes into the store before the record; `loadFailureGate` refuses each
+literal call either way. Precision
 comes first: the gate refuses no call that holds no Dispatch write.
 Every other way a write passes
 unreviewed records its outcome and tells the agent so (`renderUnreviewed`), and each one runs the

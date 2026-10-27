@@ -22,6 +22,7 @@ import {
   dropAskgateRecord,
   openStore,
   selfOwner,
+  setStoreMode,
   writeAskgateRecord,
 } from "@legion/envoy-client/askgate-marker";
 import {
@@ -944,6 +945,10 @@ export default function envoyExtension(pi: PiApi): void {
       const dir = dispatchSessionDirectory(process.env, id);
       try {
         openStore(askgateOwner.store);
+        // A session that chose block keeps the CLI's checks at block when its gate does not load
+        // and so records no mode itself; written before the record, so the CLI never reads a live
+        // record without it.
+        if (process.env.OMP_ASKGATE?.trim() === "block") setStoreMode(askgateOwner.store, "block");
         writeAskgateRecord(dir, askgateOwner);
         askgateRecords.add(dir);
       } catch (error) {

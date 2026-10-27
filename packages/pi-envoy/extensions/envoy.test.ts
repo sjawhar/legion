@@ -16,6 +16,7 @@ import { hostname, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { dispatchIssueSubject } from "@legion/contracts";
 import { askgateState } from "@legion/envoy-client/askgate-marker";
+import { runDispatchCli } from "@legion/envoy-client/dispatch-cli";
 import { shownPictures } from "@legion/envoy-client/dispatch-picture-tools";
 import {
   appendResult,
@@ -4427,6 +4428,49 @@ console.log(JSON.stringify(args));
           },
         ]);
       } finally {
+        delete process.env.OMP_ASKGATE_TIMEOUT_MS;
+      }
+    });
+
+    test("a session that chose OMP_ASKGATE=block keeps the CLI's checks at block when its gate does not load", async () => {
+      const file = process.env.ENVOY_CONFIG_FILE ?? "";
+      writeFileSync(file, "{}\n");
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      process.env.OMP_ASKGATE = "block";
+      process.env.OMP_ASKGATE_TIMEOUT_MS = "soon";
+      try {
+        standInHost();
+        const { default: envoyExtension } = await import("./envoy.ts?askgate-load-fails-block");
+        const fixture = createPi();
+        envoyExtension(fixture.pi);
+        await fixture.handlers.get("session_start")?.({}, gateContext([]));
+        // The gate did not load, so it records no mode; the record carries the session's choice,
+        // and a gated write the gate never saw is refused by the CLI, not posted with a warning.
+        const sent: string[] = [];
+        let stdout = "";
+        const code = await runDispatchCli(
+          ["comment", "--issue", "DSP-1", "--body", "hi"],
+          { ...process.env, DISPATCH_HOST: "omp" },
+          {
+            stdout: (text) => {
+              stdout += text;
+            },
+            stderr: () => {},
+            readText: (path) => readFileSync(path, "utf8"),
+            cwd: process.cwd(),
+            fetchImpl: (async (url: string | URL | Request) => {
+              sent.push(String(url));
+              return Response.json({});
+            }) as typeof fetch,
+          }
+        );
+        expect(stdout).toContain("dispatch comment was not called: AskGate is on for this session");
+        expect(code).toBe(1);
+        expect(sent).toEqual([]);
+        await fixture.handlers.get("session_shutdown")?.({}, gateContext([]));
+      } finally {
+        delete process.env.OMP_ASKGATE;
         delete process.env.OMP_ASKGATE_TIMEOUT_MS;
       }
     });
