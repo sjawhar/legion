@@ -201,6 +201,11 @@ type Service struct {
 	// closes the room (evictFailed). Nil outside tests; tests use it to close and reload the room
 	// another way first.
 	beforeFailedEviction func(room string)
+	// settlementWoke runs at each wake of a wait for a room's appends: each poll of
+	// waitForPendingUpdates and waitForDurableAppends - a settlement's waits, and Shutdown's drain,
+	// which waits through the second - and each re-arm retrySettleSoon makes for a settlement whose
+	// wait ran out. Nil outside tests; tests count the wake-ups a room whose appends lag costs.
+	settlementWoke func(room string)
 	// inServiceTransaction runs first in every transaction a service mutation makes through
 	// Server.Apply (serviceTransact). Nil outside tests; tests use it to change the live document
 	// between the mutation's read of it and its write, where a peer's update can land: Apply runs
@@ -1044,6 +1049,9 @@ func (s *Service) scheduleSettleAfterAppend(room string) {
 func (s *Service) retrySettleSoon(room string) {
 	if s.stopping.Load() || s.shuttingDown(room) {
 		return
+	}
+	if s.settlementWoke != nil {
+		s.settlementWoke(room)
 	}
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
@@ -2528,6 +2536,9 @@ func (s *Service) waitForPendingUpdates(ctx context.Context, room string) error 
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(time.Millisecond):
+			if s.settlementWoke != nil {
+				s.settlementWoke(room)
+			}
 		}
 	}
 	return nil
@@ -2539,6 +2550,9 @@ func (s *Service) waitForDurableAppends(ctx context.Context, room string) error 
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(time.Millisecond):
+			if s.settlementWoke != nil {
+				s.settlementWoke(room)
+			}
 		}
 	}
 	return nil

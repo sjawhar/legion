@@ -97,6 +97,14 @@ type staleRoomEvictor struct {
 	// reaches nobody, and reads handled to know that notification was decided, and how.
 	listening func()
 	handled   func(artifactID string, evicted bool)
+	// delivering runs first on each notification the listener reports, whatever its channel, before
+	// anything is decided on it; readingHead runs before each read of a document's head the evictor
+	// makes for a room it is deciding on, the unlocked read and the confirmation under the
+	// document's lock alike. Nil outside tests: a test holds a notification back in delivering, or
+	// learns from it that every notification sent before one of its own has been decided, and
+	// counts the database reads the decisions cost in readingHead.
+	delivering  func(channel, payload string)
+	readingHead func(artifactID string)
 
 	mu sync.Mutex
 	// evicted is when each room was last evicted, holding only the rooms evicted within the
@@ -210,7 +218,10 @@ func (e *staleRoomEvictor) woke(ctx context.Context) func() {
 // notified is the listener's OnNotify: each notification's artifact id, decided on the
 // listener's own goroutine.
 func (e *staleRoomEvictor) notified(ctx context.Context) func(channel, artifactID string) {
-	return func(_, artifactID string) {
+	return func(channel, artifactID string) {
+		if e.delivering != nil {
+			e.delivering(channel, artifactID)
+		}
 		evicted := e.documentChanged(ctx, artifactID)
 		if e.handled != nil {
 			e.handled(artifactID, evicted)
@@ -312,6 +323,9 @@ func (e *staleRoomEvictor) documentChanged(ctx context.Context, artifactID strin
 		e.armRetry(artifactID)
 		return false
 	}
+	if e.readingHead != nil {
+		e.readingHead(artifactID)
+	}
 	head, err := currentUpdateCursor(ctx, service.store.Pool, artifactID)
 	if err != nil {
 		if ctx.Err() == nil {
@@ -323,6 +337,9 @@ func (e *staleRoomEvictor) documentChanged(ctx context.Context, artifactID strin
 	if cursor.heldThrough() == head {
 		e.reachedVerdict(artifactID)
 		return false
+	}
+	if e.readingHead != nil {
+		e.readingHead(artifactID)
 	}
 	through, head, err := service.roomBehindDurableHead(ctx, artifactID, cursor)
 	if err != nil {
