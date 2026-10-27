@@ -407,6 +407,52 @@ func TestBlockIndexIndexesAClosedDocumentWhoseAskStatesAreAheadOfItsVersion(t *t
 	}
 }
 
+// A closed issue's document can also be live ahead of its latest version by a real edit: one the
+// close could not settle (the close goes on when its settlement fails), or one a build older than
+// the pre-close settlement left unsettled when it closed the issue. No settlement runs while the
+// issue is closed, so the block index must not wait for one: the document is indexed at its latest
+// version, nothing stays owed, and a block whose text that version holds resolves by its #b-
+// reference under the id the live document gives it.
+func TestBlockIndexIndexesAClosedDocumentWithAnUnsettledEdit(t *testing.T) {
+	database, service := blockIndexService(t)
+	ctx := context.Background()
+	stored := "Ship it after dispatch://CORE-2.\n"
+	spec := createOwedDocument(t, database, service, "", "spec", stored+"\nUnsettled typed line.\n", stored)
+	if _, err := database.Pool.Exec(ctx, `update issues set closed_at = now() where key = 'CORE-1'`); err != nil {
+		t.Fatalf("close CORE-1: %v", err)
+	}
+	closeDocumentRoom(t, service, spec)
+	live, _, err := service.TextWithBlocks(ctx, spec)
+	if err != nil {
+		t.Fatalf("read the live document: %v", err)
+	}
+	if !strings.Contains(live, "Unsettled typed line.") {
+		t.Fatalf("live text %q, want the unsettled edit ahead of version 1 %q", live, stored)
+	}
+
+	tick := reconcileBlockIndex(t, service, "")
+	if tick.Documents != 1 || tick.OwedDocuments != 0 {
+		t.Fatalf("tick = %#v, want the closed document indexed and nothing owed", tick)
+	}
+	if version := blockIndexAt(t, database, spec); version == nil || *version != 1 {
+		t.Fatalf("blocks indexed at %v, want version 1", version)
+	}
+	document, found, err := refs.Node(ctx, database.Pool, "artifact", spec, false)
+	if err != nil || !found {
+		t.Fatalf("resolve the spec: found %v (%v)", found, err)
+	}
+	holder := holderOf(t, service, spec, "dispatch://CORE-2")
+	reference := refs.BlockRef(document.Ref, holder)
+	ref, ok := text.ParseRef(reference, "https://dispatch.example")
+	if !ok {
+		t.Fatalf("%s is no reference", reference)
+	}
+	node, found, err := refs.Node(ctx, database.Pool, "block", text.TargetID(ref), true)
+	if err != nil || !found || node.BlockID != holder {
+		t.Fatalf("%s resolves to %#v, found %v (%v), want block %s", reference, node, found, err, holder)
+	}
+}
+
 // Twenty-five documents whose ids sort first are skipped as live ahead on a closed issue, which
 // never settles them. The keyset moves past them, so the document that sorts last is indexed in
 // the second batch rather than waiting behind them for good; they stay owed, and the next tick
