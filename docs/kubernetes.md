@@ -339,7 +339,9 @@ image build's own run passes no `--role-namespaces`, since a build's container m
 namespaces. The runtime requires
 `capabilities=checked` too: an image whose `legion` predates the capability check prints no such mark and
 is refused naming that (`Succeeded without checking the capability list (its legion CLI predates the
-check): build the image from this daemon's commit`), and a probe pod that exits 1 on a missing capability
+check): build the image from this daemon's commit`), a line that carries `capabilities=browser-skipped`
+(a probe run with `--skip-browser`, which the daemon's probe never passes) is refused naming that mark,
+and a probe pod that exits 1 on a missing capability
 is refused with its log tail, which names it (`capability <name> is missing: <detail>` under the table's
 `missing` row; the stage 4a harness's `image-probe-capability-negative` check drives that with an operator
 pod env `PUPPETEER_EXECUTABLE_PATH=/nonexistent/chromium`). An image the kubelet cannot use refuses
@@ -407,6 +409,12 @@ mark for the deployment's capability report ([The deployment's capability report
 `docker run --rm ghcr.io/sjawhar/legion-worker@sha256:… probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models`
 (both roots are required: the Legion and Envoy plugin roots a Sandbox pod loads the plugins from, so the probe loads them the same way; without
 `--skip-agent-models` it also resolves each agent's model, which needs the operator's model roles).
+`--skip-browser` leaves the browser row unchecked, for the build of an image meant for a deployment
+that turns Oh My Pi's browser off (`browser.enabled: false`) and so carries no Chromium: that row
+reads `unchecked`, and the OK line carries `capabilities=browser-skipped` in place of
+`capabilities=checked`. The daemon's probe never passes the flag and refuses that line, so such an
+image runs only where no probe runs, under `runtime: tmux`. Oh My Pi downloads Chrome for Testing
+on first use when it finds no browser, so the deployment's own overlay must turn the browser off.
 A step of its own, before that final one, runs every toolchain command listed above as `legion`, from
 the image `PATH` — the language servers (`gopls version`, `typescript-language-server --version`,
 `tsc --version`, and `pyright --version` for `pyright-langserver`, which takes no `--version`), `go
@@ -5680,12 +5688,20 @@ bind: <devbox VPC IP>
 worker_stream_port: <worker stream port>
 ```
 
+The reverse, a project moved from pods onto one tmux host, keeps its store: the Go tmux daemon takes
+over the Kubernetes daemon's claims once every pod of the project is gone and its `legion.yaml`
+sets `runtime.tmux.take_over: kubernetes` (docs/deployment.md, "Moving a project onto tmux").
+
 **`--resume` keeps the same-agent invariant, and the table is what keeps it.** The tmux runtime
-`stat`s the recorded session file on the daemon host and refuses to spawn when it is missing (a
-silent fresh agent would lose the session), and Oh My Pi itself does not refuse: verified against
+looks for the recorded session file on the daemon host, in the other folders of the same sessions
+directory and of the pane's own sessions directory too, and refuses to spawn when it is found
+nowhere (a silent fresh agent would lose the session), the launch charged and the session kept.
+The one exception is a claim this daemon takes over from a pod under `take_over`, whose session
+may never have been carried: it starts a fresh agent that registers its own, logged and charged
+nothing. Oh My Pi itself does not refuse: verified against
 the pinned build (`omp --resume=<missing path> --mode rpc`), it exits 0, answers `ready`, and runs
 as a fresh agent, with no error frame and no mention of the file. Under Kubernetes there is no
-file to `stat` and no init container that looks for one: every session is a row in the session
+file to look for and no init container that looks for one: every session is a row in the session
 database, and the pod's disk, which dies with the pod, never holds a transcript. The role's own
 launcher makes the check instead, inside the pod and before it starts the child: it looks the
 recorded session up in the table through the mounted URL file and refuses the start when the table
@@ -5865,9 +5881,10 @@ A 403 fails the spawn (or stop) naming the verb and resource, e.g. `create secre
 The controller is the one Legion session a person talks to. `controller` in `legion.yaml` says who
 launches it: `operator` (the default), a person running `legion controller start` on a machine of
 theirs ([Operator-launched controller](#operator-launched-controller)), or `daemon`, the daemon
-itself, as an Agent Sandbox pod it supervises ([Daemon-launched controller](#daemon-launched-controller)).
-`controller: daemon` needs `runtime: kubernetes`; the loader refuses it under tmux (`controller:
-daemon needs runtime: kubernetes, …`) and refuses any value but the two.
+itself, as an Agent Sandbox pod it supervises ([Daemon-launched controller](#daemon-launched-controller)),
+or under `runtime: tmux` as a pane in a window of its own (docs/deployment.md, "The `runtime.tmux`
+block"). `controller: daemon` needs `dispatch_url` (`controller: daemon needs dispatch_url: …`), and
+the loader refuses any value but the two.
 
 Under either mode a controller reads its daemon's resolved settings — `max_fix_attempts`,
 `worker_boot_timeout_seconds`, `admission_cap` and the rest of `legion.yaml`, with every credential,
