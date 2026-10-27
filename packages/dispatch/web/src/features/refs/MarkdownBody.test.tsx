@@ -1002,6 +1002,21 @@ describe("Mermaid diagrams", () => {
     }
   });
 
+  // A code block keeps its source's lone CRs and the renderer splits lines at LF alone, so the
+  // source reaches the worker with its line ends read as LF, and the diagram draws, not refused.
+  test("a mermaid block of a body with lone-CR line ends draws its diagram", async () => {
+    const view = render(
+      <MarkdownBody markdown={"Lead\r```mermaid\rsequenceDiagram\r  Alice->>Bob: Hi\r```\r"} />
+    );
+    try {
+      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
+      expect(diagramIn(figuresIn(view.container)[0])?.textContent).toContain("Alice");
+      expect(view.container.querySelector('[role="status"]')).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
   // A body's `:::` directive is parsed read-only, so a fence inside one follows the same rule: open
   // it stays code, and closed it draws.
   test("a mermaid fence inside a directive keeps it as code while open and draws once closed", async () => {

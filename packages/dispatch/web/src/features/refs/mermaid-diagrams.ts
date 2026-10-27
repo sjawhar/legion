@@ -333,16 +333,21 @@ export function drawMermaidDiagrams(
     (pre) => isMermaidLanguage(pre.getAttribute("data-language"))
   );
   if (blocks.length > 0 && endsInOpenMermaidFence(parsed, markdown, reparse)) blocks.pop();
+  // A code block keeps its source's line ends, and the renderer splits lines at LF alone, so a
+  // source written with lone CRs reaches it as LF; CRLF too, so one diagram is one cache entry.
+  const sources = new Map(
+    blocks.map((pre) => [pre, (pre.textContent ?? "").replace(/\r\n?/g, "\n")])
+  );
   const late: HTMLPreElement[] = [];
   for (const pre of blocks) {
-    const drawn = drawings.get(pre.textContent ?? "");
+    const drawn = drawings.get(sources.get(pre) ?? "");
     if (drawn === undefined) late.push(pre);
     else drawBlock(pre, drawn);
   }
   if (late.length === 0 || failed) return noop;
   const waiting: [string, LateDraw][] = [];
   for (const pre of late) {
-    const source = pre.textContent ?? "";
+    const source = sources.get(pre) ?? "";
     const draw: LateDraw = (drawn) => drawBlock(pre, drawn);
     waiting.push([source, draw]);
     const draws = requests.get(source);
