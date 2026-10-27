@@ -38,6 +38,8 @@ import { logger } from "@oh-my-pi/pi-utils";
 import pkg from "../package.json";
 import { type CapabilityHost, ENVOY_TOOL_NAMES } from "../src/capability-report";
 import { classifySession } from "../src/classify";
+import { resetRunRecordStateForTests } from "../src/run-record";
+import { fakeRunRecordBuilder, flagValue } from "../test/run-record-builder";
 
 const natsConnections: {
   readonly name: string;
@@ -182,6 +184,11 @@ const environmentKeys = [
   "ENVOY_CONFIG_FILE",
   "OMP_PROFILE",
   "PI_CODING_AGENT_DIR",
+  "RUN_RECORD_DIR",
+  "RUN_RECORD_BUILDER",
+  "RUN_RECORD_PYTHON",
+  "RUN_RECORD_CACHE_DIR",
+  "RUN_RECORD_HOST",
 ] as const;
 // The suite's baseline is "not a Legion pane": every key above except HOME starts unset and is
 // reset to unset after each test, and `beforeEach` hands on the Envoy entry's file again as
@@ -247,6 +254,7 @@ afterEach(async () => {
   natsConnectGates.clear();
   setLegionBootstrapExitForTests((code) => process.exit(code) as never);
   delete (globalThis as Record<symbol, unknown>)[LEGACY_LEGION_LOADED_KEY];
+  resetRunRecordStateForTests();
   testAgentRoster().splice(0);
   for (const key of environmentKeys) {
     const value = baselineEnvironment[key];
@@ -1534,6 +1542,7 @@ describe("Legion OMP extension", () => {
       readonly role?: LegionRole;
       readonly issue?: IssueKey;
       readonly branch?: readonly unknown[];
+      readonly sessionFile?: string;
       /** The daemon's answer to `POST /legion/v1/handoff/complete`: success unless given. */
       readonly complete?: () => Response;
     }) => {
@@ -1579,6 +1588,7 @@ describe("Legion OMP extension", () => {
         sessionId: "ses_stall",
         workspace,
         branch: options.branch,
+        sessionFile: options.sessionFile,
         extraRoutes: (url) => {
           if (url.pathname === "/legion/v1/state") return Response.json(state);
           if (url.pathname === "/legion/v1/grants") {
@@ -1747,6 +1757,101 @@ describe("Legion OMP extension", () => {
 
       await worker.arrives(assignment);
       expect(await worker.settles("Round 2 pushed.")).toEqual(followUp("handoff_complete"));
+    });
+
+    // A pane whose deployment sets RUN_RECORD_DIR records each run through the deployment's
+    // record builder (src/run-record.ts), here a stand-in that records its arguments.
+    test("a worker's run record carries the phase and commit of its successful handoff_complete, and a task subagent's run names that run", async () => {
+      const records = await mkdtemp(path.join(os.tmpdir(), "legion-run-records-"));
+      temporaryPaths.push(records);
+      const builder = await fakeRunRecordBuilder(records);
+      process.env.RUN_RECORD_DIR = path.join(records, "spool");
+      process.env.RUN_RECORD_BUILDER = builder.script;
+      process.env.RUN_RECORD_PYTHON = builder.interpreter;
+      process.env.RUN_RECORD_HOST = "example-host-a";
+      const { parentFile, childFile } = await createSubagentTranscriptPaths();
+      const worker = await bootStalling({ sessionFile: parentFile });
+      await hook(worker.handlers, "agent_start")({}, worker.context);
+      await worker.arrives(assignment);
+      await worker.completes();
+
+      // The worker's `task` subagent: its own instance of both entries in the worker's process,
+      // which leaves session_start at the subagent check and claims nothing.
+      const subagent = await claimPane({
+        role: "implementer",
+        sessionId: "ses_stall_sub",
+        sessionFile: childFile,
+      });
+      await subagent.start();
+      expect(daemonRequests(subagent.requests)).toEqual([]);
+      await hook(subagent.handlers, "agent_start")({}, subagent.context);
+      await hook(subagent.handlers, "agent_end")({ messages: [] }, subagent.context);
+      await hook(worker.handlers, "agent_end")(
+        { messages: [{ role: "assistant", responseId: "msg_last" }] },
+        worker.context
+      );
+
+      const calls = await builder.calls(4);
+      const workerRun = flagValue(calls[0]?.argv ?? [], "--run-id");
+      expect(
+        calls.map(({ argv }) => ({
+          command: argv[0],
+          session: flagValue(argv, "--session-id"),
+          run: flagValue(argv, "--run-id") === workerRun ? "worker" : "subagent",
+          parent: flagValue(argv, "--parent-run-id") === workerRun ? "worker" : undefined,
+          handoff: [flagValue(argv, "--handoff-phase"), flagValue(argv, "--handoff-commit")],
+        }))
+      ).toEqual([
+        {
+          command: "start",
+          session: "ses_stall",
+          run: "worker",
+          parent: undefined,
+          handoff: [undefined, undefined],
+        },
+        {
+          command: "start",
+          session: "ses_stall_sub",
+          run: "subagent",
+          parent: "worker",
+          handoff: [undefined, undefined],
+        },
+        {
+          command: "end",
+          session: "ses_stall_sub",
+          run: "subagent",
+          parent: "worker",
+          handoff: [undefined, undefined],
+        },
+        {
+          command: "end",
+          session: "ses_stall",
+          run: "worker",
+          parent: undefined,
+          handoff: ["retro", ROOT_COMMIT],
+        },
+      ]);
+      // The pane's identity, from the daemon's variables.
+      const workerEnd = calls[3]?.argv ?? [];
+      expect(
+        [
+          "--host",
+          "--project",
+          "--tree",
+          "--issue",
+          "--role",
+          "--workspace",
+          "--last-response-id",
+        ].map((flag) => flagValue(workerEnd, flag))
+      ).toEqual([
+        "example-host-a",
+        "omp",
+        "REPO-42",
+        "REPO-43",
+        "implementer",
+        worker.context.cwd,
+        "msg_last",
+      ]);
     });
 
     // A person's Send or Aside from Dispatch's Agents page reaches the session as its own user

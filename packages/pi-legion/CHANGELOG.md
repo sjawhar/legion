@@ -7,6 +7,16 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- Run records, off unless a deployment sets `RUN_RECORD_DIR` in its panes: at each agent run's
+  start and end, a `task` subagent's included, the plugin starts the deployment's record builder
+  (`RUN_RECORD_BUILDER`) detached and never waits for it, passing the run's UUIDv7 id, its times,
+  the pane's identity, the transcript's offset, the parent run of a subagent, the last response id
+  and the phase and commit of a `handoff_complete` that succeeded in the run; when the builder
+  cannot start or exits non-zero, the plugin appends the line to the spool itself.
+  `scripts/run_record_upload.py`, run as root on the host, copies each complete spool line to the
+  operator's bucket as a write-once object, reading the spool as its owner (README.md, "Run
+  records").
+
 - Daemon API contract 40: a root whose architect asked a person a question and handed the turn
   back gives its admission slot up in the new phase `awaiting_person`, its architect suspended with
   its session kept, and the person's answer, or the spec's design gate standing open, puts it at

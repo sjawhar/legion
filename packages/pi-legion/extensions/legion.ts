@@ -39,9 +39,10 @@ import {
   restorePhaseStall,
   stepPhaseStall,
 } from "../src/phase-stall";
+import { registerRunRecordHook } from "../src/run-record";
 import { applySessionTitle, legionSessionTitle } from "../src/session-title";
 import { daemonLaunchedController } from "../src/slack-channels";
-import { createLegionTool } from "../src/tools";
+import { createLegionTool, type PhaseHandoff } from "../src/tools";
 import {
   branchHoldsWorkspaceRecreatedNotice,
   type WorkspaceRecreatedNotice,
@@ -117,6 +118,10 @@ export default function legionExtension(pi: PiApi): void {
     from: import.meta.url,
     envoyInterface: ENVOY_PLUGIN_INTERFACE_VERSION,
   };
+  // The run record hook (src/run-record.ts), registered here, outside session_start: a `task`
+  // subagent's instance leaves session_start at its subagent check below, and records its runs
+  // all the same, naming its parent's open run. Off unless RUN_RECORD_DIR is set.
+  const runRecord = registerRunRecordHook(pi);
   // Whether this is the daemon-launched controller, whose Slack subscriptions its role owns: the
   // Envoy entry's recovery of a resumed session's registered interests then drops every Slack
   // topic before it restores the rest. Set here, at load, because that recovery runs in the Envoy
@@ -323,7 +328,8 @@ export default function legionExtension(pi: PiApi): void {
     return followUp === undefined ? undefined : { continue: true, additionalContext: followUp };
   });
 
-  const onPhaseCompleted = (context: SessionContext): void => {
+  const onPhaseCompleted = (context: SessionContext, handoff: PhaseHandoff | undefined): void => {
+    if (handoff !== undefined) runRecord.handoffCompleted(handoff);
     if (phaseWorkerSession(context)) advancePhaseStall({ kind: "handoff-complete" });
   };
 

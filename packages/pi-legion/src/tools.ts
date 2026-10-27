@@ -39,6 +39,13 @@ export interface LegionControllerToolSession {
 
 export type LegionToolSession = LegionClaimToolSession | LegionControllerToolSession;
 
+/** What a phase completion reported: the issue's phase it completed and the commit carrying its
+ * handoff. A production check report completes no phase and reports none. */
+export interface PhaseHandoff {
+  readonly phase: LegionPhase;
+  readonly commit: string;
+}
+
 /** Each session kind's operations, in the order the tool's `op` enum lists them. The phase ops
  * (`@legion/pi-shared/legion-phase-ops`) are an architect's too. */
 const OPERATIONS: Readonly<Record<LegionToolRole, readonly string[]>> = {
@@ -135,8 +142,9 @@ export function createLegionTool(deps: {
   readonly session: (context: SessionContext) => LegionToolSession;
   /** Mints the controller's grant, authenticated by its registration's secret. */
   readonly controllerGrant: (sessionId: string) => Promise<LegionGrant>;
-  /** Told of each `handoff_complete` that succeeded: the session's phase is complete. */
-  readonly onPhaseCompleted: (context: SessionContext) => void;
+  /** Told of each `handoff_complete` that succeeded: the session's phase is complete, with the
+   * phase and commit it reported (none for a production check report). */
+  readonly onPhaseCompleted: (context: SessionContext, handoff: PhaseHandoff | undefined) => void;
   /** The commit a completion of `phase` by `role` reports: for a file-backed phase the role
    * works, the pushed commit carrying `.legion/<issue>/<phase>.json`, found with the pane's jj
    * (`findHandoffCommit`); otherwise the commit the workspace stands on. Throws naming the remedy
@@ -198,11 +206,23 @@ export function createLegionTool(deps: {
           throw new Error(`${operation} is not available to a ${active.kind} session`);
         }
         if (active.kind !== "controller" && isPhaseOp(operation)) {
+          // The phase and commit a completion reports, as its last attempt found them; a check
+          // report looks up no commit and leaves it undefined.
+          let reported: PhaseHandoff | undefined;
           const answer = await executePhaseOp(
-            { daemon: daemon(), claim: active, handoffCommit, restart },
+            {
+              daemon: daemon(),
+              claim: active,
+              handoffCommit: async (phase, role) => {
+                const commit = await handoffCommit(phase, role);
+                reported = { phase, commit };
+                return commit;
+              },
+              restart,
+            },
             parameters
           );
-          if (operation === "handoff_complete") onPhaseCompleted(context);
+          if (operation === "handoff_complete") onPhaseCompleted(context, reported);
           return jsonSuccess(answer);
         }
         assertOperationInput(parameters, operation);

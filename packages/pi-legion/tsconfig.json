@@ -29,6 +29,7 @@
     "../pi-shared/src/omp-host.d.ts",
     "scripts/skill-scenarios/*.ts",
     "scripts/*.ts",
-    "src/**/*.ts"
+    "src/**/*.ts",
+    "test/*.ts"
   ]
 }

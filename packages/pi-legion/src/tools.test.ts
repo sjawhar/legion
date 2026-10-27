@@ -586,7 +586,7 @@ const stateAt = (phase: LegionPhase) => ({
 });
 
 test("handoff_complete finds the pushed commit carrying the handoff, posts it with a fresh grant, closes the phase on success, and answers the daemon's note", async () => {
-  const completed: string[] = [];
+  const completed: unknown[] = [];
   const { calls, daemon } = recordingDaemon({
     state: stateAt("implementing"),
     answers: {
@@ -604,7 +604,9 @@ test("handoff_complete finds the pushed commit carrying the handoff, posts it wi
       pi,
       daemon,
       controllerGrant: noControllerGrant,
-      onPhaseCompleted: (ctx) => completed.push(ctx.sessionManager.getSessionId()),
+      // Each completion closes the phase with the phase and commit it reported.
+      onPhaseCompleted: (ctx, handoff) =>
+        completed.push([ctx.sessionManager.getSessionId(), handoff]),
       handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: paneEnv, jj }),
       resolveDocument: noDocumentLookup,
       session: () => session,
@@ -637,7 +639,7 @@ test("handoff_complete finds the pushed commit carrying the handoff, posts it wi
       { grantId: "grant-208", summary: "Done.", verdict: "", ready: false, commit: CARRYING },
     ],
   ]);
-  expect(completed).toEqual(["ses_208"]);
+  expect(completed).toEqual([["ses_208", { phase: "implementing", commit: CARRYING }]]);
 
   // A role that does not work the issue's phase reports the commit the workspace stands on, and
   // the daemon refuses it naming whose phase it is: the tester at implementing, the merger's
@@ -666,7 +668,14 @@ test("handoff_complete finds the pushed commit carrying the handoff, posts it wi
       commit: STANDING,
     },
   ]);
-  expect(completed).toEqual(["ses_208", "ses_208", "ses_208", "ses_208"]);
+  // Each phase as the record shows it for the claim's issue: the sub-architect's LEGION-209 is
+  // at admitted.
+  expect(completed).toEqual([
+    ["ses_208", { phase: "implementing", commit: CARRYING }],
+    ["ses_208", { phase: "implementing", commit: STANDING }],
+    ["ses_208", { phase: "implementing", commit: STANDING }],
+    ["ses_208", { phase: "admitted", commit: STANDING }],
+  ]);
 
   // Refused before any daemon call: a root architect, which runs no phase; a missing summary; a
   // verdict or a ready of the wrong shape; and a phase, which the daemon knows from the grant.
@@ -762,7 +771,7 @@ const openCheck = {
 };
 
 test("the implementer's report on its closed issue's production check carries a verdict and no commit", async () => {
-  const completed: string[] = [];
+  const completed: unknown[] = [];
   const { calls, daemon } = recordingDaemon({
     state: {
       issues: {
@@ -775,7 +784,9 @@ test("the implementer's report on its closed issue's production check carries a 
       pi,
       daemon,
       controllerGrant: noControllerGrant,
-      onPhaseCompleted: (ctx) => completed.push(ctx.sessionManager.getSessionId()),
+      // A check report completes no phase: it closes the turn with no phase or commit reported.
+      onPhaseCompleted: (ctx, handoff) =>
+        completed.push([ctx.sessionManager.getSessionId(), handoff]),
       // A check report resolves no commit: the lookup is never asked.
       handoffCommit: noHandoffCommit,
       resolveDocument: noDocumentLookup,
@@ -804,7 +815,11 @@ test("the implementer's report on its closed issue's production check carries a 
       ],
     ]);
   }
-  expect(completed).toEqual(["ses_208", "ses_208", "ses_208"]);
+  expect(completed).toEqual([
+    ["ses_208", undefined],
+    ["ses_208", undefined],
+    ["ses_208", undefined],
+  ]);
 
   // Refused after the record is read, with nothing minted or posted: a report with no verdict,
   // and one sent as READY.

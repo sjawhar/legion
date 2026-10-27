@@ -9,7 +9,10 @@ staged into `dist/skills` by `scripts/pi-plugin-prepack.sh` at the repository ro
 beside `@sjawhar/pi-envoy` (`packages/pi-envoy`), which every session loads for Envoy messaging and
 the Dispatch tools; the Legion daemon installs both into its Oh My Pi profile and a worker image
 carries both. `extensions/legion.ts` is inert without `LEGION_TREE`/`LEGION_ROLE`/`LEGION_CONTROLLER`
-in the environment: a person's own session gets no tool, no title and no daemon call from it.
+in the environment: a person's own session gets no tool, no title and no daemon call from it. Its
+run record hook (`src/run-record.ts`, README.md "Run records") answers to `RUN_RECORD_DIR` alone: it
+registers nothing without it, and with it records every run of the session, a `task` subagent's
+included.
 
 ## What this plugin needs from pi-envoy
 
@@ -66,10 +69,12 @@ The plugin speaks to the Legion daemon (`packages/daemon`) through the daemon cl
 `legion.daemonApiVersion`: the claim, grant, workflow, controller, and state
 shapes that client parses, and the pane's environment — the identity variables
 `LEGION_TREE`/`LEGION_ISSUE`/`LEGION_ROLE`/`LEGION_CONTROLLER`/`LEGION_PROJECT` (read by
-`src/classify.ts`, `extensions/legion.ts` and the two session modules), `LEGION_STATE_DIR`
+`src/classify.ts`, `extensions/legion.ts` and the two session modules, and copied into run records
+by `src/run-record.ts`), `LEGION_STATE_DIR`
 (where the claim session writes its jj attribution overlay), `LEGION_WORKSPACE` (the issue
-workspace, the pane's cwd; read by nothing here), `LEGION_GENERATION` (set by the daemon, read by
-nothing here), `LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL`, the GitHub
+workspace, the pane's cwd; copied into run records, read by nothing else here), `LEGION_GENERATION`
+(set by the daemon; copied into run records, read by nothing else here; neither is required, a
+record leaves an unset one out), `LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL`, the GitHub
 variables (`LEGION_GH_OWNERS_DIR`, the role's gh bundle of one directory per GitHub owner;
 `GH_CONFIG_DIR`, its issue's owner's directory; `LEGION_GH_PATH`, the real gh the pane's `gh`
 wrapper runs; with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` set empty: read by the pane's `gh` and
@@ -460,6 +465,7 @@ which hands both plugin entries to the Oh My Pi child by path.
 | Daemon contract pin | `src/daemon-api-version.test.ts` | Pins `legion.daemonApiVersion` to `packages/contracts/fixtures/daemon-api/version.json`, which the daemon's golden test writes |
 | Capability report | `src/capability-report.ts`, `src/capability-report.test.ts` | The six live capability checks a claim session runs at boot and sends with `claims/ready` (see Daemon contract): `measureCapabilities` over a `CapabilityHost` that wraps every Oh My Pi import and the two child commands (`dispatch read --issue <issue>`, `gh api graphql {viewer{login}}`), with the budgets (8 s a check, 10 s the report) and each row's detail strings; `ompCapabilityHost` is the production host, string-literal `import()` only. The test fakes the host; `extensions/legion.test.ts` substitutes one through `setLegionCapabilityHostForTests` |
 | Skills partition and its guard | `src/skills-guard.test.ts`, `scripts/pi-plugin-prepack.sh` (repository root) | The partition this package ships, staged as its prepack stages it, held to the size, name and link rules in `@legion/pi-shared/test/skills-guard`, with the daemon's prompts as linking roots and every `legion-worker` reference linked from somewhere |
+| Run records | `src/run-record.ts`, `src/run-record.test.ts`, `test/run-record-builder.ts`, `scripts/run_record_upload.py`, `scripts/run_record_upload_test.py` | The hook that starts the deployment's record builder at each run's start and end, detached and never awaited, and appends the line itself when the builder cannot start or exits non-zero; the uploader that copies the spool to the operator's bucket as write-once objects (README.md "Run records"). The hook's tests drive a stand-in builder that records its arguments; `scripts/run-record-upload.test.ts` runs the uploader's unittest file under `bun test` |
 | No import of the sibling | `src/no-cross-import.test.ts` | Fails on a shipped source under `extensions/` or `src/` whose relative import resolves into `packages/pi-envoy` |
 | Rigs | `scripts/skill-scenarios/` | The skill-scenario rig replays skill scenarios on real agents (`../pi-envoy/scripts/README.md`, its last section); its tester-proof scenario boots a real phase worker through this extension against a stand-in daemon (`daemon-standin.ts`), with the pane built by the daemon's own functions (`daemon-pane.go`, `daemon-pane.test.ts`: no inherited key, no grant file reaches the pane). The grant rig that proved the per-command grant mint went with the mint (LEGION-631) |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
@@ -468,7 +474,7 @@ which hands both plugin entries to the Oh My Pi child by path.
 
 - Register every schema through the injected `pi.zod` (`toolSchema` in `src/tools.ts`). Every field counts, not just the outer object: OMP's converter reads internals (`.ir`) only its own Zod produces, and a field from another Zod instance fails the whole extension load.
 - Nothing under `extensions/` or `src/` imports `packages/pi-envoy`: what both plugins need lives in `@legion/pi-shared`, and this entry reaches the Envoy plugin through the interface alone (`src/no-cross-import.test.ts`). The tests may load the sibling's entry by path.
-- A `task` subagent's session shares its parent's identity (`subagentSessionCheck` in `@legion/pi-shared/subagent-session`): in a Legion process it claims no role, calls no daemon route, gets no `legion` tool, and never exits (`extensions/legion.ts`). The check asks the host's own roster first (`AgentRegistry.global()` from `@oh-my-pi/pi-coding-agent`) and falls back to the transcript; the process-local signal it reads is the transcript path the claim session's boot and a launched controller's claim record on the shared interface (`bootstrappedSession`), so a later `session_start` in the same process with a different transcript path is a subagent even under `OMP_SESSION_STORAGE=sql`. The full account is the subagent convention in `packages/pi-envoy/AGENTS.md`.
+- A `task` subagent's session shares its parent's identity (`subagentSessionCheck` in `@legion/pi-shared/subagent-session`): in a Legion process it claims no role, calls no daemon route, gets no `legion` tool, and never exits (`extensions/legion.ts`). The run record hook is the one part that does run in it, since `extensions/legion.ts` registers it before `session_start`'s subagent check: its runs are recorded naming the run its parent's session has open (`src/run-record.ts`). The check asks the host's own roster first (`AgentRegistry.global()` from `@oh-my-pi/pi-coding-agent`) and falls back to the transcript; the process-local signal it reads is the transcript path the claim session's boot and a launched controller's claim record on the shared interface (`bootstrappedSession`), so a later `session_start` in the same process with a different transcript path is a subagent even under `OMP_SESSION_STORAGE=sql`. The full account is the subagent convention in `packages/pi-envoy/AGENTS.md`.
 - `claim-session.ts` registers the heartbeat's regain listener on the shared interface's `roleClaim.regained` slot (`@legion/pi-shared/interface`) only once it holds a Legion identity — `bootLegionClaim` sets it after the first `claims/ready` — since a `task` subagent's re-bound instance shares the process and would otherwise replace it; the regain re-runs `claims/ready` with bounded retries, and the controller re-runs nothing.
 - A daemon refusal of the boot registration itself — `/legion/v1/claims/register` — ends the process (`bootLegionClaim`'s `stop`, which `src/claim-session.ts` makes `exitProcess(1)`, after one log line naming the route, the status, and the daemon's sentence) for every 4xx: a 400 or 404 (a request or a route the daemon does not have), a 403 (the boot token is stale, consumed, or unknown), and a 409 (the same-agent rule, `Worker respawn must resume the same agent session`: this session is not the one the resumed claim recorded; under a database session store that is Oh My Pi having started a fresh session at a path whose row is gone). None changes on retry, and a process that stayed up unregistered would sit alive under the daemon's registration deadline with nothing ever retiring it; exiting hands the outcome to the daemon, which counts the launch failure. Every other error there — a 5xx, a transport failure — propagates out of `session_start` without exiting (LEGION-81; `extensions/legion.test.ts` pins 400, 403, 404 and 409, and 500/503 as the negative control). The Envoy-plugin refusals above take the same exit.
 - Do not alter `~/.omp` from this package. The README documents the development install.

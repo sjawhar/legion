@@ -144,6 +144,8 @@ export interface AgentEndMessage {
   /** How an assistant reply ended: `stop` settled normally, `aborted` was an interrupt, `error` a
    * provider failure, `length` a truncation. */
   readonly stopReason?: string;
+  /** The provider's id of an assistant reply, when its API gives one. */
+  readonly responseId?: string;
 }
 
 export interface AgentEndEvent {
