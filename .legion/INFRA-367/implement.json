@@ -2,50 +2,41 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-367",
-  "completed": "2026-10-27T10:41:00Z",
-  "round": "review round 1 (changes requested at d4f01c2a)",
+  "completed": "2026-10-27T11:16:10Z",
+  "round": "review round 2 (changes requested at 27cab638)",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2389",
   "proof": [
     {
-      "criterion": "R12/A11 for every node kind, as the node asked for and as the other end of an edge; dispatch read prints the facts (re-run at the round's head)",
-      "surface": "Local Dispatch harness (bun run dispatch:local): the real Go server built from this head on Postgres 17 + pgvector with every migration, its fake GitHub, the HTTP API and the real dispatch CLI",
-      "command": "DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9022 bash packages/dispatch/e2e/acceptance/block-graph.sh",
-      "observed": "exit 0, 67 PASS lines, 29 of them R12. Output: https://github.com/sjawhar/legion/pull/2389#issuecomment-6439804524",
-      "headSha": "69d138bb0ea1b36b1f30a5e498f654b9f4a30535",
-      "negativeControl": "COMPONENT_SOURCE=bogus is refused with exit 2 and the usage ('COMPONENT_SOURCE is bogus; want fixture, existing or none'); the first round's base control stands: the driver against a server built at b69f636f fails at 'FAIL: R12 CORE-9 carries its facts'"
+      "criterion": "R12/A11 for every node kind after main is merged in and the migrations are renumbered after main's 0129_document_edit_notices; a fresh database applies 0129 (main's) and this PR's 0130-0134",
+      "surface": "Local Dispatch harness (bun run dispatch:local) built from the merged head on a freshly created Postgres database, the HTTP API and the real dispatch CLI",
+      "command": "DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9022 bash packages/dispatch/e2e/acceptance/block-graph.sh; and the same with COMPONENT_SOURCE unset",
+      "observed": "schema_migrations holds 129 through 134; fixture: exit 0, 67 PASS lines, 29 of them R12; unset: exit 0, 64 PASS lines and the one 'SKIP: R12 component: COMPONENT_SOURCE is unset, …' line",
+      "headSha": "7bbf6b715c7b8d8feb15fcb812c04018f01ad7bb",
+      "negativeControl": "The harness's earlier database, which had recorded this PR's old 0129_comments_written_version as version 129, refused to seed after the renumber: main's 0129_document_edit_notices was skipped as already applied, and POST /api/v1/issues answered 500 (column \"last_person\" of relation \"doc_settlements_pending\" does not exist). Only a database that ran this branch before the renumber is affected; production never ran it"
     },
     {
-      "criterion": "Census finding: the driver keeps working for callers that set only DISPATCH_URL, DISPATCH_TOKEN and PROJECT (the INFRA-156 tree plan, #2394, INFRA-371)",
-      "surface": "The same harness and driver",
-      "command": "DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE bash packages/dispatch/e2e/acceptance/block-graph.sh",
-      "observed": "exit 0, 64 PASS lines (26 R12) and exactly one other line: 'SKIP: R12 component: COMPONENT_SOURCE is unset, so no component node is read; set it to fixture (with FAKE_GITHUB_PORT), existing or none to read one'",
-      "headSha": "69d138bb0ea1b36b1f30a5e498f654b9f4a30535",
-      "negativeControl": "Before this round the same command exited 2 with 'required environment variable COMPONENT_SOURCE is unset'; COMPONENT_SOURCE=bogus is still refused with exit 2"
-    },
-    {
-      "criterion": "storedActors finding: an actor column that does not decode fails the read instead of reading as nobody recorded; SQL NULL and JSON null stay nobody recorded",
-      "surface": "The same harness's HTTP API, and the Go API tests on real Postgres",
-      "command": "curl -H 'Authorization: Bearer e2e-token' 'http://127.0.0.1:8777/api/v1/references?to=dispatch://CORE-3/comment/<id>' before and after `update comments set author = '[1]'::jsonb where id = '<id>'` and after restoring it; cd packages/envoy && go test ./internal/dispatch/refs/ ./internal/dispatch/api/ -run 'TestEveryNodeKind|TestTheFactsOf|TestAChangeMoves|TestABlockSeenFirst|TestAPinnedBlockCarries|TestABlockAskBelongs|TestReferences|TestArtifactReferences|TestIssueReferences|TestBlockLinks|Pin|TestAnActor|TestALaterVersion' -count=1 -v",
-      "observed": "200, then 500 {\"code\":\"INTERNAL\",\"error\":\"internal server error\"}, then 200; every named Go test PASS with no SKIP, TestAnActorThatDoesNotDecodeFailsTheRead (JSON null created_by reads made_by []; a comment author of \"not an actor\", [1] or a list, and version authors that are an object or [1], each answer 500) and the tester's TestALaterVersionMovesNoUnanchoredItemsVersion among them",
-      "headSha": "69d138bb0ea1b36b1f30a5e498f654b9f4a30535",
-      "negativeControl": "The deliberately broken input is the corrupted author ([1] on a single-actor column): the read is refused with 500, and the same read with the author restored answers 200"
+      "criterion": "The renumbered migration set is 1 to N with no gap, the census pair holds, and the trigger, backfill and component_facts tests pass at the new numbers",
+      "surface": "Go store tests on real Postgres 17",
+      "command": "cd packages/envoy && go test ./internal/dispatch/store/ ./internal/dispatch/api/ ./internal/dispatch/architecture/ -run 'TestTheWrittenVersion|TestComponentFacts|TestMigrationSet|TestEveryMigrationFile|TestTheCensusPair|TestEveryShippedCensus|TestEveryNodeKind|TestTheFactsOf|TestAChangeMoves|TestABlockSeenFirst|TestAPinnedBlockCarries|TestABlockAskBelongs|TestReferences|TestBlockLinks|Pin|TestAnActor|TestALaterVersion|TestArchitectureSource|TestGraphEdgesCarriesTheComponentArms|DocumentEditNotice' -count=1 -v",
+      "observed": "ok store, ok api, ok architecture; no FAIL, no SKIP",
+      "headSha": "7bbf6b715c7b8d8feb15fcb812c04018f01ad7bb",
+      "negativeControl": "TestMigrationSetIsNumberedOneToN refuses two files at one version; before the renumber the merged tree held 0129_document_edit_notices beside 0129_comments_written_version"
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/refs/graph.go (storedActor/storedActors strict, setMadeAndChanged returns errors, comment join)",
-    "packages/envoy/internal/dispatch/refs/blocks.go (blockFirst.maker returns errors, RemovedBlockFacts returns the facts)",
-    "packages/envoy/internal/dispatch/api/references.go (removed-pin node built from RemovedBlockFacts)",
-    "packages/envoy/internal/dispatch/api/node_facts_test.go (TestAnActorThatDoesNotDecodeFailsTheRead)",
-    "packages/envoy/AGENTS.md (the decoding sentence)",
-    "packages/dispatch/e2e/acceptance/block-graph.sh (COMPONENT_SOURCE optional, one SKIP line)",
-    "packages/dispatch/README.md (COMPONENT_SOURCE optional)"
+    "merge of main@origin (2e8c68cd) into legion/INFRA-367; conflict resolved in packages/envoy-client/CHANGELOG.md (both Added entries kept)",
+    "packages/envoy/internal/dispatch/store/migrations/0130_comments_written_version, 0131_asks_written_version, 0132_component_facts, 0133_comments_written_version_backfill, 0134_asks_written_version_backfill (.up.sql, .census.sql): renamed from 0129-0133, cross-references updated",
+    "packages/envoy/internal/dispatch/store/node_facts_migration_test.go (beforeNodeFacts 129, writtenVersionTriggers 131)",
+    "packages/envoy/AGENTS.md, packages/envoy/CHANGELOG.md, packages/envoy/cmd/dispatch/AGENTS.md, packages/envoy/cmd/dispatch/README.md (migration numbers; RemovedBlockNode)",
+    "packages/envoy/internal/dispatch/refs/blocks.go, api/references.go (RemovedBlockNode builds the whole removed block node)",
+    "packages/dispatch/e2e/acceptance/block-graph.sh (component_node function; one branch on COMPONENT_SOURCE)"
   ],
   "trickyParts": [
-    "issues.created_by can hold JSON null (model.Issue.CreatedBy is *Actor), so JSON null and SQL NULL both read as nobody recorded; every other value must decode as its column's shape or the load returns the error, which the API answers 500."
+    "A database that applied this branch's migrations before the renumber has version 129 recorded for the old 0129_comments_written_version, so main's 0129_document_edit_notices never applies there; such a development database must be recreated. Production and main never ran the old numbers.",
+    "#2394 (INFRA-156) also takes 0130; by the Envoy agreement, whichever pull request merges second renumbers again."
   ],
   "deviations": [
-    "The two fast-follow cleanups the reviewer listed are fixed in this round, as the tree's architect asked; the body's Fast-follow line stays none.",
-    "The census finding is answered with the census and with a change to the driver: COMPONENT_SOURCE is optional (warn-first, one SKIP line), as the tree's architect asked, so callers that do not set it keep working."
+    "The two round-2 fast-follow tidy-ups (RemovedBlockNode, one component-node function in the driver) are done in this round; the body's Fast-follow line stays none."
   ],
   "openQuestions": [],
   "discoveredComplexity": []
