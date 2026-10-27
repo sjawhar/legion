@@ -1,7 +1,7 @@
 import { expect, jest, spyOn, test } from "bun:test";
 import { QueryObserver } from "@tanstack/react-query";
 
-import { createApiClient, isRetryableQueryError } from "./client";
+import { ApiError, createApiClient, isRetryableQueryError } from "./client";
 import { DispatchQueryClient, queryRetryDelay } from "./query-client";
 
 /**
@@ -163,4 +163,17 @@ test("a read refused without Retry-After is retried at 500 ms", async () => {
   const starts = await refusedReadStarts({}, 700);
   expect(starts[1]).toBeGreaterThanOrEqual(500);
   expect(starts[1]).toBeLessThan(510);
+});
+
+test("a read refused with a Retry-After longer than a minute still retries within a minute", () => {
+  // A proxy in front of Dispatch may answer a day, or more than setTimeout can hold; a page read
+  // that waits that long shows its spinner with no error and no Retry for days.
+  for (const seconds of [86_400, 4_294_968]) {
+    const refusal = new ApiError(503, { code: "OVERLOADED", error: "busy" }, seconds * 1_000);
+    for (const draw of [0, 0.9999]) {
+      const wait = queryRetryDelay(0, refusal, () => draw);
+      expect(wait).toBeGreaterThan(0);
+      expect(wait).toBeLessThanOrEqual(60_000);
+    }
+  }
 });
