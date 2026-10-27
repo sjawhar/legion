@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-367",
+  "completed": "2026-10-27T09:38:40Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2389",
+  "proof": [
+    {
+      "criterion": "R12/A11 for issue, artifact (document, file, image), document block, ask, comment, message, component and session, as the node asked for and as the other end of an edge (edges[].block and block-links included); dispatch read prints the facts",
+      "surface": "Local Dispatch harness (bun run dispatch:local): the real Go server built from this head on Postgres 17 + pgvector with every migration, its fake GitHub, the HTTP API and the real dispatch CLI",
+      "command": "DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9022 bash packages/dispatch/e2e/acceptance/block-graph.sh",
+      "observed": "exit 0, 67 PASS lines, 29 of them R12: every kind's six facts by its own reference, changed_at later than made_at after the retitle and the ask rewording, blocks P and R of changes.md, the removed pin, replies_to / followed_by session / edges[].block / block-links ends equal to the node's own read, component web made at the import and part of platform, and the three CLI Node: lines. Output posted at https://github.com/sjawhar/legion/pull/2389#issuecomment-6437914513",
+      "headSha": "4586fb1f2a6801881e2ada41f1d1903fd92403b4",
+      "negativeControl": "The same driver from this head against a server built at the base b69f636f (git archive into /legion/scratch/tmp/infra367-base, port 8787, database dispatch_base): every earlier section PASS, then 'FAIL: R12 CORE-9 carries its facts: ... Cannot iterate over null' (the base node has no made_by), exit 1; dispatch read --issue CORE-2 against that server prints no Node: line"
+    },
+    {
+      "criterion": "An unanchored document comment's and ask's version, an approval ask's version, older rows backfilled, the earlier build's inserts recorded; component_facts seeded",
+      "surface": "Go store tests on real Postgres 17 (127.0.0.1:55432)",
+      "command": "cd packages/envoy && go test ./internal/dispatch/store/ -run 'TestTheWrittenVersion|TestComponentFacts|TestEveryShippedCensus|TestTheCensusPair|TestMigrationSet|TestEveryMigrationFile|TestTouchedTables|TestEveryMigrationFromTheCensus' -count=1 -v",
+      "observed": "12 PASS, no SKIP; the whole store package also passed (ok 175s)",
+      "headSha": "4586fb1f2a6801881e2ada41f1d1903fd92403b4",
+      "negativeControl": "At the base the new tests do not compile (comments.written_version and component_facts are absent); the backfill test seeds an ask.edited event naming version 2 that the backfill must ignore, and a comment written before version 1 that must stay null"
+    },
+    {
+      "criterion": "Per-kind facts, a block's maker when it predates indexing, pinned blocks, a block ask's version, what a change moves; component times across imports",
+      "surface": "Go API and importer tests on real Postgres 17",
+      "command": "cd packages/envoy && go test ./internal/dispatch/refs/ ./internal/dispatch/api/ ./internal/dispatch/architecture/ -run 'TestEveryNodeKind|TestTheFactsOf|TestAChangeMoves|TestABlockSeenFirst|TestAPinnedBlockCarries|TestABlockAskBelongs|TestReferences|TestArtifactReferences|TestIssueReferences|TestBlockLinks|TestComponentFacts|TestGraphEdgesCarriesTheComponentArms|TestArchitectureSource|Pin' -count=1 -v",
+      "observed": "78 PASS, 0 FAIL, 0 SKIP; refs and architecture packages pass whole",
+      "headSha": "4586fb1f2a6801881e2ada41f1d1903fd92403b4",
+      "negativeControl": "TestABlockSeenFirstAtItsDocumentsFirstIndexingHasNoMaker expects made_by [] for blocks first seen at a reconciliation indexing (F alone would name v3's author); TestAChangeMovesOnlyTheChangedNode answers and resolves asks and resolves a comment and asserts changed_* stay"
+    },
+    {
+      "criterion": "dispatch read prints the Node: line; an older server prints none",
+      "surface": "envoy-client Bun tests and the real CLI on the harness",
+      "command": "cd packages/envoy-client && bun test src/__tests__/dispatch-execute.test.ts",
+      "observed": "271 pass, 0 fail; on the harness: 'Node: issue dispatch://CORE-2 · made by user alice at 2026-10-27T09:02:54.022863Z · changed by user alice at 2026-10-27T09:02:54.022863Z · part of dispatch://CORE-1'",
+      "headSha": "4586fb1f2a6801881e2ada41f1d1903fd92403b4",
+      "negativeControl": "Against the base server (no made_by key) dispatch read prints no Node: line; the Bun test 'a server older than the facts prints no Node line' locks it"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/store/migrations/0129_comments_written_version.{up,census}.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0130_asks_written_version.{up,census}.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0131_component_facts.{up,census}.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0132_comments_written_version_backfill.{up,census}.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0133_asks_written_version_backfill.{up,census}.sql",
+    "packages/envoy/internal/dispatch/store/node_facts_migration_test.go",
+    "packages/envoy/internal/dispatch/model/model.go",
+    "packages/envoy/internal/dispatch/refs/graph.go",
+    "packages/envoy/internal/dispatch/refs/blocks.go",
+    "packages/envoy/internal/dispatch/api/references.go",
+    "packages/envoy/internal/dispatch/api/architecture_source.go",
+    "packages/envoy/internal/dispatch/api/node_facts_test.go",
+    "packages/envoy/internal/dispatch/api/references_test.go",
+    "packages/envoy/internal/dispatch/api/block_references_test.go",
+    "packages/envoy/internal/dispatch/api/architecture_source_test.go",
+    "packages/envoy/internal/dispatch/architecture/importer.go",
+    "packages/envoy/internal/dispatch/architecture/importer_test.go",
+    "packages/contracts/src/dispatch-api.ts",
+    "packages/envoy-client/src/dispatch-execute.ts",
+    "packages/envoy-client/src/__tests__/dispatch-execute.test.ts",
+    "packages/claude-envoy/dist/{dispatch,envoy-channel,session-hook}.js",
+    "packages/dispatch/e2e/acceptance/block-graph.sh",
+    "packages/dispatch/README.md",
+    "packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md, packages/envoy/cmd/dispatch/AGENTS.md, packages/contracts/AGENTS.md",
+    "CHANGELOG.md of packages/envoy, contracts, envoy-client, claude-envoy, pi-envoy"
+  ],
+  "trickyParts": [
+    "A block's maker is known only when its first recorded version F is 1 or version F-1 was indexed by a block-aware build (refs.blockFirstVersion, one SQL fragment shared by the block loader, the ask loader and refs.RemovedBlockFacts); otherwise made_by [] and made_at null.",
+    "The ask edit lookup repeats events_ask_payload_id's type list so the planner uses the partial index. EXPLAIN on 3000 issues / 96000 events / 3000 asks: issue statement 'Index Scan Backward using events_issue_key_seq_key on events e, Index Cond: (issue_key = i.key), Filter: type = ANY(issue.created, issue.updated, issue.closed)' under a Limit 1; ask statement 'Bitmap Index Scan on events_ask_payload_id, Index Cond: ((payload ->> id) = k.id::text)', Filter type = ask.edited, under Limit 1. No sequential scan of events.",
+    "written_version is set by before-insert triggers so the earlier build's inserts during the roll are recorded; an insert that names a value keeps it; an approval ask records approval.version at opening, which the row's own approval.version later moves past.",
+    "component_facts has no foreign key to components (every import deletes and re-inserts them); the importer upserts by digest and deletes orphans, and the source delete route runs the same orphan delete."
+  ],
+  "deviations": [
+    "The plan's two migrations (<N>_node_facts, <N+1>_written_version_backfill) are five (0129-0133): each migration locks one table, following 0123/0124 and 0075/0076 and the README's lock rules.",
+    "Migration numbers: the root issue's pull request (INFRA-156) also takes 0129; agreed over Envoy that whichever merges second renumbers its own migrations.",
+    "skills/dispatch is unchanged: its SKILL.md never describes what dispatch read prints, and the three Dispatch skills sit at 1,999 of the 2,000-word cap packages/pi-envoy/src/skills-guard.test.ts enforces. packages/dispatch/AGENTS.md is unchanged: the dashboard reads none of the facts.",
+    "The driver's architecture-source PUT and DELETE send actor {kind: session} (bearer callers must name one); its CLI Node: line checks leave room for a '(as <service>)' label after the session id."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "Whole-package Go runs on this pod: store, refs and architecture pass; api and docs exceed go test's default 10-minute timeout on 2 CPUs, so they ran with -timeout 90m -p 1: docs ok (734s), api had one failure, TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, which refuses a byte-ordered test database (the pod's initdb --locale=C). With template1 recreated under ICU (docs/solutions/testing/recreate-template1-under-the-icu-provider-and-the-pods-postgres-runs-the-collation-test-too-INFRA-56.md) it passes. /legion/scratch/harness/pg.sh now does that on a fresh cluster."
+  ]
+}
