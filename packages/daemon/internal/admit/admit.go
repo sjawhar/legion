@@ -772,36 +772,41 @@ func (a *Admission) releaseInactiveSlots(ctx context.Context, tx pgx.Tx) ([]stri
 // it, and reports those issues in slot order; which describes such an issue in an error. Each
 // release is logged once the fact commits.
 //
-// It reads the project's records in one query, as promote does, never one query per slot: every
-// fact applies this under the one fact lock (intake.ApplyFact), twice for a Dispatch issue event,
-// so a read per slot made every fact of every consumer, the API and the boot's replay cost a round
-// trip to the database for each slot the project holds. A slot whose issue the project's records
-// do not show is another project's (ownSlots).
+// It reads the slots once and, while any is held, the records once, as promoteHolds does, never a
+// record per slot: every fact applies this under the one fact lock (intake.ApplyFact), twice for a
+// Dispatch issue event, so a read per slot would cost every fact of every consumer, the API and the
+// boot's replay a round trip to the database for each slot of the shared table. It indexes the
+// slots rather than the records, which hold every issue ever recorded, so a call keeps one pointer
+// per slot, not a copy of every record. A slot of another project's issue is that project's
+// daemon's to release (ownSlots).
 func (a *Admission) releaseSlots(ctx context.Context, tx pgx.Tx, which string, release func(record.Issue) bool) ([]string, error) {
-	issues, err := a.store.Issues(ctx, tx)
-	if err != nil {
-		return nil, fmt.Errorf("list admission issues: %w", err)
-	}
 	slots, err := a.store.Slots(ctx, tx)
 	if err != nil {
 		return nil, fmt.Errorf("list admission slots: %w", err)
 	}
-	ours := make(map[string]record.Issue, len(issues))
-	for _, issue := range issues {
-		if issue.Project == a.project {
-			ours[issue.Key] = issue
+	if len(slots) == 0 {
+		return nil, nil
+	}
+	issues, err := a.store.Issues(ctx, tx)
+	if err != nil {
+		return nil, fmt.Errorf("list admission issues: %w", err)
+	}
+	position := make(map[string]int, len(slots))
+	for i, slot := range slots {
+		position[slot.Issue] = i
+	}
+	// held is the project's slotted records in slot order; another project's slot stays nil.
+	held := make([]*record.Issue, len(slots))
+	inUse := 0
+	for i := range issues {
+		if at, ok := position[issues[i].Key]; ok && issues[i].Project == a.project {
+			held[at] = &issues[i]
+			inUse++
 		}
 	}
-	own := make([]record.Issue, 0, len(slots))
-	for _, slot := range slots {
-		if issue, ok := ours[slot.Issue]; ok {
-			own = append(own, issue)
-		}
-	}
-	inUse := len(own)
 	var released []string
-	for _, issue := range own {
-		if !release(issue) {
+	for _, issue := range held {
+		if issue == nil || !release(*issue) {
 			continue
 		}
 		if err := a.store.ReleaseSlot(ctx, tx, issue.Key); err != nil {

@@ -1,10 +1,13 @@
 package admit
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -47,8 +50,8 @@ func slottedKey(i int) string { return fmt.Sprintf("LEGION-%d", 1000+i) }
 // is paid by every fact. It asks the same number of statements however many slots the project
 // holds: a statement per slotted issue cost a project running hundreds of trees hundreds of round
 // trips on each fact, and the Dispatch consumer, whose events are mostly facts of recorded
-// issues, fell behind. Releasing a finished tree's slot still reads every slot: another project's
-// slot in the shared table is left as it is.
+// issues, fell behind. Finished trees' slots are still released in slot order, whatever order the
+// records come in, and another project's slot in the shared table is neither released nor counted.
 func TestAFactAsksAsManyStatementsWhateverNumberOfSlotsIsHeld(t *testing.T) {
 	facts := []struct {
 		name string
@@ -60,56 +63,78 @@ func TestAFactAsksAsManyStatementsWhateverNumberOfSlotsIsHeld(t *testing.T) {
 		{"an observation of an issue Legion does not record", intake.DispatchIssue{Key: "LEGION-9", Seq: 5, Type: "issue.updated", Status: "backlog",
 			Title: "someone else's", Rank: "Z", ResolvedRepo: "acme/widgets"}},
 	}
-	run := func(t *testing.T, slots int) (map[string]int64, *pgxpool.Pool, []intake.Handler) {
+	run := func(t *testing.T, held int) ([]int64, *pgxpool.Pool) {
 		t.Helper()
 		pool := migratedPool(t)
-		for i := range slots {
+		for i := range held {
 			seedSlotted(t, pool, slottedKey(i), fmt.Sprintf("A%04d", i))
 		}
 		counter := &statementCounter{}
 		counted := countedPool(t, pool, counter)
-		admission := newAdmission(t, 2*slots+2, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		admission := newAdmission(t, 2*held+2, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		handlers := []intake.Handler{blockers.NewMirror(record.NewStore(), testProject), admission.engine, admission}
-		sent := map[string]int64{}
-		for _, tc := range facts {
+		sent := make([]int64, len(facts))
+		for i, tc := range facts {
 			counter.sent.Store(0)
 			if _, err := intake.ApplyFact(context.Background(), counted, "dispatch", tc.name, tc.fact, handlers...); err != nil {
-				t.Fatalf("apply %s with %d slots held: %v", tc.name, slots, err)
+				t.Fatalf("apply %s with %d slots held: %v", tc.name, held, err)
 			}
-			sent[tc.name] = counter.sent.Load()
+			if sent[i] = counter.sent.Load(); sent[i] == 0 {
+				t.Fatalf("apply %s with %d slots held: the counted pool saw no statement", tc.name, held)
+			}
 		}
-		return sent, pool, handlers
+		return sent, pool
 	}
 
-	few, _, _ := run(t, 1)
-	many, pool, handlers := run(t, 40)
-	for _, tc := range facts {
-		if many[tc.name] != few[tc.name] {
-			t.Errorf("%s: %d statements with 40 slots held, %d with 1; want as many", tc.name, many[tc.name], few[tc.name])
+	const slotsHeld = 40
+	few, _ := run(t, 1)
+	many, pool := run(t, slotsHeld)
+	for i, tc := range facts {
+		if many[i] != few[i] {
+			t.Errorf("%s: %d statements with %d slots held, %d with 1; want as many", tc.name, many[i], slotsHeld, few[i])
 		}
 	}
 
-	finished := issue(t, pool, slottedKey(7))
-	finished.Phase, finished.Status = phase.Done, "done"
-	putIssue(t, pool, finished)
+	// LEGION-100 sorts before every other slotted key but holds the project's last slot, so the two
+	// releases come in slot order only if releaseSlots keeps it rather than the records' key order.
+	seedSlotted(t, pool, "LEGION-100", "B")
+	for _, key := range []string{slottedKey(7), "LEGION-100"} {
+		finished := issue(t, pool, key)
+		finished.Phase, finished.Status = phase.Done, "done"
+		putIssue(t, pool, finished)
+	}
+	putIssue(t, pool, record.Issue{Key: "OTHER-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+		Project: "OTHER", Title: "OTHER-1", Tree: "OTHER-1", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", HandedOver: true})
+	others := record.Slot{Issue: "OTHER-1", Index: 100, AdmittedAt: fixedNow}
 	inTx(t, pool, func(tx pgx.Tx) {
-		records := record.NewStore()
-		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: "OTHER-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
-			Project: "OTHER", Title: "OTHER-1", Tree: "OTHER-1", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", HandedOver: true}); err != nil {
-			t.Fatalf("put another project's root: %v", err)
-		}
-		if err := records.PutSlot(context.Background(), tx, record.Slot{Issue: "OTHER-1", Index: 100, AdmittedAt: fixedNow}); err != nil {
+		if err := record.NewStore().PutSlot(context.Background(), tx, others); err != nil {
 			t.Fatalf("put another project's slot: %v", err)
 		}
 	})
-	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "after-the-close", facts[0].fact, handlers...); err != nil {
-		t.Fatalf("apply a fact after %s finished: %v", slottedKey(7), err)
+	var logged bytes.Buffer
+	admission := newAdmission(t, 2*slotsHeld+2, slog.New(slog.NewTextHandler(&logged, nil)))
+	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "after-the-close", facts[0].fact,
+		blockers.NewMirror(record.NewStore(), testProject), admission.engine, admission); err != nil {
+		t.Fatalf("apply a fact after %s and LEGION-100 finished: %v", slottedKey(7), err)
 	}
-	want := []record.Slot{}
-	for i := range 40 {
+	var want []record.Slot
+	for i := range slotsHeld {
 		if i != 7 {
 			want = append(want, record.Slot{Issue: slottedKey(i), Index: i, AdmittedAt: fixedNow})
 		}
 	}
-	assertSlots(t, pool, append(want, record.Slot{Issue: "OTHER-1", Index: 100, AdmittedAt: fixedNow}))
+	assertSlots(t, pool, append(want, others))
+	var released []string
+	for _, line := range strings.Split(strings.TrimSpace(logged.String()), "\n") {
+		if strings.Contains(line, `msg="admission: slot released"`) {
+			released = append(released, line[strings.Index(line, "issue="):])
+		}
+	}
+	wantReleased := []string{
+		fmt.Sprintf("issue=%s slots=%d cap=%d", slottedKey(7), slotsHeld, 2*slotsHeld+2),
+		fmt.Sprintf("issue=LEGION-100 slots=%d cap=%d", slotsHeld-1, 2*slotsHeld+2),
+	}
+	if !slices.Equal(released, wantReleased) {
+		t.Fatalf("released %q, want %q: slot order, counting this project's slots alone", released, wantReleased)
+	}
 }
