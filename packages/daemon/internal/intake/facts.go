@@ -71,6 +71,14 @@ type DispatchIssue struct {
 	// Delivered is the event an Observed fact was prepared in place of, as it was delivered; nil for
 	// release_children's view, prepared in place of no event.
 	Delivered *DispatchIssue
+	// StatusMove is a status Dispatch confirmed the daemon wrote: the fact an API route applies for
+	// its own write (OwnStatusWrite), at the sequence Dispatch answered it with. The workflow takes
+	// its status as a move even when the record already shows Dispatch at that status: the record
+	// can be behind events the consumer has not delivered (a session's status and the daemon's
+	// re-assert of its own), so Dispatch's status at the event before this one is not known, and
+	// the edit test (a status equal to the one Dispatch showed before) does not hold for it. Never
+	// set by a decoded event.
+	StatusMove bool
 }
 
 // ObservedIssue is issue as Dispatch's detail shows it now, as an Observed fact at the sequence
@@ -95,7 +103,7 @@ func ObservedIssue(issue dispatch.Issue) DispatchIssue {
 // later than this one, then finds its fence.
 func OwnStatusWrite(written dispatch.Issue) DispatchIssue {
 	event := ObservedIssue(written)
-	event.Observed, event.DaemonActor, event.Type = false, true, "issue.updated"
+	event.Observed, event.DaemonActor, event.StatusMove, event.Type = false, true, true, "issue.updated"
 	if written.Status == "done" {
 		event.Type = "issue.closed"
 	}

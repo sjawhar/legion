@@ -203,3 +203,66 @@ func TestControllerStatusParksTheRecordWithoutWaitingForItsDispatchEvent(t *test
 
 	assertEchoChangesNothing(t, h, handlers, statusEcho(5, "backlog"))
 }
+
+// park_child applied ahead of events the consumer has not delivered still parks. A session of the
+// tree wrote backlog on the child at sequence 5, which the workflow kept its own status over (the
+// record shows Dispatch at backlog, in_progress kept), and the daemon's re-assert of in_progress
+// landed in Dispatch at 6, behind the lagging consumer. The architect's park writes backlog at 7:
+// the record's last view of Dispatch is backlog too, but the route's write is a status Dispatch
+// confirmed the daemon wrote, so it parks the child rather than passing for an edit that changed no
+// status, which would leave it running with 6 and 7 both fenced.
+func TestParkChildParksAheadOfAnUndeliveredReassert(t *testing.T) {
+	h, handlers, statuses := statusHarness(t)
+	setIssue(t, h, statusChild, func(issue *record.Issue) { issue.DispatchStatus, issue.LastDispatchSeq = "backlog", 5 })
+	reasserted := statuses.issues[statusChild]
+	reasserted.LastSeq = 6
+	statuses.issues[statusChild] = reasserted
+	architect := newLiveClaim(t, h, statusRoot, claim.RoleArchitect)
+
+	if recorder := h.request(http.MethodPost, "/legion/v1/children/park", map[string]any{"grantId": architect.grant(t), "issue": statusChild}, nil); recorder.Code != http.StatusOK {
+		t.Fatalf("park = %d %s, want 200", recorder.Code, recorder.Body)
+	}
+	parked := recordedChild(t, h, statusChild)
+	if parked == nil || parked.Phase != phase.Done || parked.Status != "backlog" || parked.LastDispatchSeq != 7 {
+		t.Fatalf("the child's record once park_child answered = %#v, want it parked at its write's sequence 7", parked)
+	}
+	if got := superviseRows(t, h, "suspend", claim.RolePlanner); got != 1 {
+		t.Fatalf("planner suspend rows = %d, want the park to stop the planner once", got)
+	}
+	reassert := statusEcho(6, "in_progress")
+	before, rows := recordedChild(t, h, statusChild), outboxRows(t, h, statusChild)
+	if _, err := intake.ApplyFact(context.Background(), h.store.Pool(), "dispatch", "reassert", reassert, handlers...); err != nil {
+		t.Fatalf("apply the undelivered re-assert: %v", err)
+	}
+	if after := recordedChild(t, h, statusChild); !reflect.DeepEqual(after, before) {
+		t.Fatalf("the child after the late re-assert = %#v, want it as the park left it, %#v", after, before)
+	}
+	if after := outboxRows(t, h, statusChild); !reflect.DeepEqual(after, rows) {
+		t.Fatalf("the child's outbox rows after the late re-assert = %v, want the %v the park left", after, rows)
+	}
+	assertEchoChangesNothing(t, h, handlers, statusEcho(7, "backlog"))
+}
+
+// The controller's set_status can name an issue of another Dispatch project, whose events the
+// consumer drops: the route's own write of it records nothing either, so the daemon never admits a
+// foreign issue.
+func TestControllerStatusOnAnotherProjectsIssueRecordsNothing(t *testing.T) {
+	h, _, statuses := statusHarness(t)
+	const foreign = "OTHER-12"
+	statuses.issues[foreign] = dispatch.Issue{Key: foreign, ResolvedRepo: "acme/widgets", Title: foreign, Status: "backlog", Labels: []string{"legion"}, HandedOver: true, LastSeq: 7}
+	grant := controllerGrant(t, h)
+
+	recorder := h.request(http.MethodPost, "/legion/v1/issues/status", IssueStatusRequest{GrantID: grant.GrantID, Issue: foreign, Status: "todo"}, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("set_status = %d %s, want 200", recorder.Code, recorder.Body)
+	}
+	if len(statuses.writes) != 1 || statuses.writes[0] != (statusWrite{issue: foreign, status: "todo"}) {
+		t.Fatalf("Dispatch writes = %#v, want the foreign issue's todo", statuses.writes)
+	}
+	if got := recordedChild(t, h, foreign); got != nil {
+		t.Fatalf("the record of %s = %#v, want none: it is another Dispatch project's", foreign, got)
+	}
+	if got := outboxRows(t, h, foreign); len(got) != 0 {
+		t.Fatalf("outbox rows of %s = %v, want none", foreign, got)
+	}
+}
