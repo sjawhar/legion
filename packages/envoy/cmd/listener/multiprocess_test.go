@@ -1921,3 +1921,38 @@ func TestTwoPodsGracefulStopDuringAHardTakeoversHoldKeepsOrder(t *testing.T) {
 	serving.requireOrder(t, messages)
 	mpWaitActive(t, other, time.Second)
 }
+
+// A graceful stop of the active pod while messages are on the wire to it: its link delivers
+// 300 ms late, so when it unsubscribes the server has already pushed it the messages of the last
+// 300 ms. Per-session order must still hold across the hand-over (README "Take-over": the stopping
+// pod NAKs what it has not handled, and the durable redelivers those before newer messages). At
+// 2e592cc8 (the INFRA-557 tester's round-2 finding) the stopping pod drops what reaches it after
+// its unsubscribe without a NAK, the standby delivers newer messages at once, and the dropped ones
+// come back one ack wait (6 s) later, behind them. Without the delay the same happens under load:
+// at a message every 2 ms one message in about three stops arrived 6 s late and out of order.
+func TestTwoPodsGracefulStopWithMessagesOnTheWireKeepsOrder(t *testing.T) {
+	uri := testnats.URL(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	a, b := mpStartPair(t, binary, uri)
+	serving := mpStartServingPort(t)
+	sessions := []string{"ses_mp_wirestop_one", "ses_mp_wirestop_two"}
+	for _, sessionID := range sessions {
+		a.registerPort(t, serving, sessionID)
+	}
+	a.relay.delay(300 * time.Millisecond)
+	publisher := mpConnectPublisher(t, uri)
+
+	stop := publisher.every(50*time.Millisecond, sessions...)
+	time.Sleep(3 * time.Second)
+	a.Terminate(t)
+	a.WaitExit(t, "SIGTERM")
+	time.Sleep(4 * time.Second) // publish on past the hand-over
+	stop()
+
+	messages := publisher.all()
+	serving.awaitAll(t, messages, mpGracefulBound+5*time.Second)
+	serving.requireKnown(t, messages)
+	serving.requireWithin(t, messages, mpGracefulBound, time.Time{})
+	serving.requireOrder(t, messages)
+	mpWaitActive(t, b, time.Second)
+}
