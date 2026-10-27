@@ -14,6 +14,11 @@
       "bun": "./src/lib-headless.ts",
       "default": "./src/lib-headless.ts"
     },
+    "./mermaid": {
+      "types": "./src/mermaid-svg.ts",
+      "bun": "./src/mermaid-svg.ts",
+      "default": "./src/mermaid-svg.ts"
+    },
     "./style.css": "./src/lib.css"
   },
   "main": "src/lib.ts",
