@@ -277,6 +277,10 @@ type server struct {
 	// eventRelay is the live feed every open SSE connection reads (INFRA-66), on every server
 	// register mounts: it starts its listening connection on the first connection to subscribe.
 	eventRelay *eventStreamRelay
+	// testHooks carries every test hook to every process serving the database
+	// (test_hooks_fanout.go); nil without Deps.TestHooksEnabled, and on a server with no Store,
+	// which shares nothing with another process and runs a hook on itself.
+	testHooks *testHookFanout
 	// warnedUnmatchedRuns holds a warnedProductionRun for each deploy run productionApplies has
 	// warned holds no production job or no configured apply step, so a read that judges a run again
 	// does not warn about it again. Nothing evicts an entry: the map holds one per configured job
@@ -318,34 +322,43 @@ type queryer interface {
 // document websocket, under the same wrappers; a server without one (a test's) has neither, so
 // nothing outlives the test. Every server holds the event stream relay (INFRA-66), which every
 // open SSE connection reads and which starts its own listening connection on the first of them,
-// also on Lifetime. The returned wait blocks until the hub, every delivery socket and the relay
-// have ended. Call it only after Lifetime has been cancelled and before the database pool closes.
+// also on Lifetime. With Deps.TestHooksEnabled and a Store, the server also holds the test hooks'
+// listening connection (test_hooks_fanout.go), started here, also on Lifetime. The returned wait
+// blocks until the hub, every delivery socket, the relay and the test hooks' listener have ended.
+// Call it only after Lifetime has been cancelled and before the database pool closes.
 //
 // That wait is for a server given a Deps.Lifetime: it returns once that context is cancelled,
 // which is what ends the relay's goroutines and the hub's. A server built without a Deps.Lifetime
-// runs its relay on context.Background() instead, so nothing ever ends that relay, and the wait
-// this returns blocks for ever once an SSE connection has started it. The delivery hub sets no
-// such trap, since it is built only with a Deps.Lifetime. Give the server a Deps.Lifetime where
-// it is built, or do not call the wait.
+// runs its relay and its test hooks' listener on context.Background() instead, so nothing ever
+// ends them, and the wait this returns blocks for ever once an SSE connection has started the
+// relay, or at once under the test hooks. The delivery hub sets no such trap, since it is built
+// only with a Deps.Lifetime. Give the server a Deps.Lifetime where it is built, or do not call
+// the wait.
 func Register(mux *http.ServeMux, deps Deps) func() {
 	s := register(mux, deps)
 	return s.waitBackground
 }
 
-// waitBackground waits for every delivery socket, then for the hub's goroutines and the relay's.
+// waitBackground waits for every delivery socket, then for the hub's goroutines, the relay's and
+// the test hooks' listener.
 func (s *server) waitBackground() {
 	if s.deliveryHub != nil {
 		s.deliverySockets.wait()
 		s.deliveryHub.wait()
 	}
 	s.eventRelay.wait()
+	if s.testHooks != nil {
+		s.testHooks.wait()
+	}
 }
 
 // register is Register, answering the server it mounted, whose delivery hub and event stream
 // relay a test waits out before its database closes. It is also called with a zero Deps, as
 // TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound does, so it must stay cheap and
 // must not dial or read the nil Store: whatever reaches the database or the network starts
-// later, from a handler or the relay's first subscriber.
+// later, from a handler or the relay's first subscriber. The one exception is the test hooks'
+// listener, which needs Deps.TestHooksEnabled and a Store and dials on a goroutine of its own:
+// a process has to be listening before another process calls a hook.
 func register(mux *http.ServeMux, deps Deps) *server {
 	s := &server{deps: deps, rosters: rosterCache{
 		ttl: cmp.Or(deps.RouteRosterTTL, routeRosterTTL), silenceTTL: routeRosterSilenceTTL,
@@ -353,6 +366,9 @@ func register(mux *http.ServeMux, deps Deps) *server {
 	s.eventRelay = newEventStreamRelay(s, s.lifetime())
 	if deps.Lifetime != nil {
 		s.deliveryHub = newDeliveryHub(s, deps.Lifetime, deliveryHubClock{})
+	}
+	if deps.TestHooksEnabled && deps.Store != nil {
+		s.testHooks = startTestHookFanout(s, s.lifetime())
 	}
 	routes := s.routes()
 	s.routeIndex = routeIndexEntries(routes)

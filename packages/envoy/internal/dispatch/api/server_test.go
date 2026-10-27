@@ -199,6 +199,9 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		t.Cleanup(served.deliveryHub.wait)
 		t.Cleanup(served.deliverySockets.wait)
 	}
+	if served.testHooks != nil {
+		t.Cleanup(served.testHooks.wait)
+	}
 	return mux, database, deps, served
 }
 

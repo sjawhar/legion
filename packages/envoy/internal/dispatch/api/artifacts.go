@@ -1355,17 +1355,15 @@ func (s *server) nextArtifactSlug(ctx context.Context, q queryer, target artifac
 	}
 }
 
-// quiesceDocuments closes every live document, flushing each through the store, and waits for
-// the settlements in flight. Test-only: mounted by routes() only when Deps.TestHooksEnabled is
-// set, so a browser-test harness can truncate its database between scenarios with no document
-// the previous scenario had open still writing to it.
+// quiesceDocuments closes every live document on every process, flushing each through the store,
+// and waits for the settlements in flight. Test-only: mounted by routes() only when
+// Deps.TestHooksEnabled is set, so a browser-test harness can truncate its database between
+// scenarios with no document the previous scenario had open still writing to it. It answers only
+// once every process has closed its documents (runTestHookEverywhere): a room still open on
+// another process would write to the tables the harness truncates next.
 func (s *server) quiesceDocuments(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	if err := s.deps.Docs.Quiesce(r.Context()); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	s.runTestHookEverywhere(w, r, testHookCall{Hook: hookQuiesceDocuments})
 }

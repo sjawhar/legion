@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -229,15 +230,17 @@ func responderEvent(responding bool) []byte {
 	return []byte(`{"v":1,"responding":false}`)
 }
 
-// publishAgentStreamFrame injects one frame into a session's viewers. Mounted only with
-// Deps.TestHooksEnabled: the e2e harness runs Dispatch with NATS disabled, so a browser test of
-// the conversation view has no session and no bus to take frames from.
+// publishAgentStreamFrame injects one frame into a session's viewers on every process. Mounted
+// only with Deps.TestHooksEnabled: the e2e harness runs Dispatch with NATS disabled, so a browser
+// test of the conversation view has no session and no bus to take frames from, and each process
+// serves its viewers from an in-process source of its own (runTestHookEverywhere carries the
+// frame to each). Whether this deployment's relay takes frames from a test hook at all is judged
+// here, on the process the call reached.
 func (s *server) publishAgentStreamFrame(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireHuman(w, r); !ok {
 		return
 	}
-	memory, ok := s.deps.AgentStream.(*agentstream.Memory)
-	if !ok {
+	if _, ok := s.deps.AgentStream.(*agentstream.Memory); !ok {
 		writeError(w, "STREAM_UNAVAILABLE", http.StatusServiceUnavailable,
 			"this deployment's relay takes frames from sessions, not from a test hook")
 		return
@@ -247,18 +250,25 @@ func (s *server) publishAgentStreamFrame(w http.ResponseWriter, r *http.Request)
 		writeError(w, "FRAME_INPUT", http.StatusBadRequest, "could not read the frame")
 		return
 	}
+	// A frame is JSON text, and a notification carries text: a byte sequence that is not UTF-8
+	// would reach the other processes altered rather than as it was sent.
+	if !utf8.Valid(frame) {
+		writeError(w, "FRAME_INPUT", http.StatusBadRequest, "a frame is UTF-8 text")
+		return
+	}
 	sessionID, valid := agentStreamSessionID(w, r)
 	if !valid {
 		return
 	}
-	switch r.URL.Query().Get("as") {
+	call := testHookCall{Hook: hookPublishFrame, Session: sessionID}
+	switch as := r.URL.Query().Get("as"); as {
 	case "replay":
-		memory.SetReplay(sessionID, frame)
+		call.As, call.Frame = as, string(frame)
 	case "drop":
 		// Ends every open viewer stream for this session, as a lost connection does. The live
 		// stream is not resumable, so the browser's reconnect asks the session for its replay
 		// again and rebuilds the whole transcript from whatever `as=replay` set by then.
-		memory.Drop(sessionID)
+		call.As = as
 	case "responder":
 		// Whether anyone is on the session's control subject, with no history behind it: a live
 		// session that has produced nothing, or one whose plugin cannot stream at all.
@@ -269,11 +279,11 @@ func (s *server) publishAgentStreamFrame(w http.ResponseWriter, r *http.Request)
 			writeError(w, "FRAME_INPUT", http.StatusBadRequest, "responder takes {\"responding\": bool}")
 			return
 		}
-		memory.SetResponder(sessionID, body.Responding)
+		call.As, call.Responding = as, body.Responding
 	default:
-		memory.Publish(sessionID, frame)
+		call.Frame = string(frame)
 	}
-	WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	s.runTestHookEverywhere(w, r, call)
 }
 
 // writeStreamEvent writes one SSE event whose data is a frame this server never reads into. A

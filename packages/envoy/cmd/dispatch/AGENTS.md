@@ -153,7 +153,17 @@ sets what the next connection to that session is answered with, `?as=responder` 
 anyone answers on its control subject, and `?as=drop` ends every open viewer stream for the
 session, as a lost connection does, so the page's own reconnect rebuilds its transcript from the
 replay set by then — the only way a test reaches the rebuild path, since the stream carries no
-cursor and nothing else ends an established one.
+cursor and nothing else ends an established one. The disconnect, quiesce and publish hooks act on
+every process serving the database, not only the one the call reached, so a browser suite against
+two processes reaches the page's process whichever one its request lands on: each process with the
+hooks on listens on `dispatch_test_hooks` on a connection of its own, holding a session-level
+advisory lock on it (namespace `HOOK`, keyed by that connection's backend pid); a call notifies
+every process, each acts on itself and acknowledges on `dispatch_test_hook_acks`, and the call
+answers once every process that held a lock when it was sent has acknowledged or lost its lock,
+with the first error any reported, or `504 TEST_HOOK_TIMEOUT` after ten seconds naming the keys that
+did not answer (`internal/dispatch/api/test_hooks_fanout.go`). `STREAM_UNAVAILABLE` is still judged
+on the process the publish reached. The flag costs one Postgres connection per process outside
+`pool_max_conns`.
 
 With NATS configured and the GitHub App private key loaded, startup also runs the webhook
 redelivery sweep (`internal/dispatch/redeliver`, wired in `cmd/dispatch/redeliver.go`). Every
@@ -533,10 +543,10 @@ the table says human only.
 | `/api/v1/me/agents/state` | GET | identity | Read the user's per-agent conversation state: `{[session_id]: {cleared_before?, read_through?, unread_replies}}`, where `unread_replies` counts the session's replies to the user's direct messages newer than both the Clear and the read mark and not read by id. |
 | `/api/v1/me/agents/{session_id}/state` | PUT | identity | Clear an agent's conversation (`cleared_before`), mark it read (`read_through`, which only moves forward and covers every reply up to it), and/or mark some of its replies read by id (`read_replies`, messages the path's session wrote, covering those alone, each in any form `uuid.Parse` reads) for this user: at least one; 400 `INVALID_STATE` when none is given, a cutoff is malformed or more than a minute ahead of the server clock, or a `read_replies` id is not a uuid or not a message that session wrote (nothing is written then); an accepted cutoff is stored no later than the server's now. Appends `user_agent_state.updated` (`{login, session_id}`) for the viewer's other devices, except for a request naming only replies already read by id or passed by the read mark, which changes nothing (a reply the Clear hides but the read mark has not passed is neither: the first request naming it writes its row and appends the event), and answers the session's state. |
 | `/api/v1/events` | GET | identity | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |
-| `/api/v1/artifacts/_test/quiesce` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every live document and wait for the settlements in flight; not mounted otherwise. |
-| `/api/v1/events/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open SSE connection; not mounted otherwise. |
-| `/api/v1/delivery/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open `/ws/delivery` socket; not mounted otherwise. |
-| `/api/v1/agents/{session_id}/stream/_test/publish` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Feed the in-memory agent relay: one frame, `?as=replay` what the next connection is answered with, `?as=responder` whether anyone answers on the control subject, `?as=drop` end every open viewer stream so the page's reconnect rebuilds from that replay; not mounted otherwise. |
+| `/api/v1/artifacts/_test/quiesce` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every live document on every process and wait for the settlements in flight, answering once every process has; not mounted otherwise. |
+| `/api/v1/events/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open SSE connection on every process; not mounted otherwise. |
+| `/api/v1/delivery/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open `/ws/delivery` socket on every process; not mounted otherwise. |
+| `/api/v1/agents/{session_id}/stream/_test/publish` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Feed every process's in-memory agent relay: one frame, `?as=replay` what the next connection is answered with, `?as=responder` whether anyone answers on the control subject, `?as=drop` end every open viewer stream so the page's reconnect rebuilds from that replay; not mounted otherwise. |
 | `/ws/doc/{room}` | GET | user or bearer | Join the Hocuspocus document room. A room whose stored tree is outside the Proof schema admits no connection, a provider's reconnect included: the upgrade completes and closes with code `4409` (reason `DOC_SCHEMA`; `DOCUMENT_SCHEMA_CLOSE_CODE` and `DOCUMENT_SCHEMA_CLOSE_REASON` in `packages/contracts`) before any sync, and the dashboard reads that close as the repair state. The check reads a copy of a resident room taken under its lock, as `/text` reads it, so a healthy room under writes is never refused. An open socket resolves its caller again on every 15 s heartbeat, as `/api/v1/events` does, and closes once they no longer resolve (a sign-out, a membership the sign-in issuer no longer confirms), so their editor stops receiving and sending the document's edits. |
 | `/ws/delivery` | GET | user or bearer | The Delivery and Pipeline pages' live updates: a subscribe frame names a view; Dispatch answers a snapshot, then only what changed, and a resume with the page's revisions answers what changed since (packages/contracts DeliveryLive*). A `heartbeat` frame goes out every `StreamHeartbeat` (15 s), so a client tells a quiet socket from a dead one. |
 

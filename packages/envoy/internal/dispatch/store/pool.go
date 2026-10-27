@@ -226,20 +226,22 @@ func (p *Pool) Healthy(ctx context.Context) (int, error) {
 
 // listenerPoolSize bounds the pool Listener takes its connections from. Three permanent
 // listeners dial through it - the delivery hub, the event stream relay and the stale-room
-// evictor - and each connection is hijacked as soon as it is opened, so it leaves with its
-// caller and the pool holds none between dials: what one bounds is dials in flight, not
-// connections held. A listener redialling while another dials waits that dial out, which is
-// what a loop that dials and then waits for notifications for the life of the process can
-// afford.
+// evictor - and a fourth, the test hooks' (api/test_hooks_fanout.go), under DISPATCH_TEST_HOOKS
+// alone, which production never sets. Each connection is hijacked as soon as it is opened, so it
+// leaves with its caller and the pool holds none between dials: what one bounds is dials in
+// flight, not connections held. A listener redialling while another dials waits that dial out,
+// which is what a loop that dials and then waits for notifications for the life of the process
+// can afford.
 const listenerPoolSize = 1
 
 // Listener returns one connection of its own for LISTEN, from a one-connection pool opened from the
 // shared pool's configuration and hijacked, so it holds no shared connection. The caller closes it.
-// The delivery hub (api/delivery_live_hub.go), the event stream relay (api/event_stream_relay.go)
-// and the document rooms' stale-room evictor (docs/stale_room.go) each hold one for as long as
-// they wait for notifications, which is the life of the process: a connection of the shared pool
-// held that long would be one fewer for every request, and a LISTEN on a pooled connection would
-// end when the pool recycled it.
+// The delivery hub (api/delivery_live_hub.go), the event stream relay (api/event_stream_relay.go),
+// the document rooms' stale-room evictor (docs/stale_room.go) and, under the test hooks, their
+// fan-out (api/test_hooks_fanout.go) each hold one for as long as they wait for notifications,
+// which is the life of the process: a connection of the shared pool held that long would be one
+// fewer for every request, and a LISTEN on a pooled connection would end when the pool recycled
+// it.
 func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 	listen, err := p.separate(&p.listen, listenerPoolSize, "listener")
 	if err != nil {

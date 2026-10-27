@@ -293,17 +293,14 @@ func decodeSocketClientFrame(data []byte, frame any) error {
 	return decoder.Decode(frame)
 }
 
-// disconnectDeliverySockets closes every open GET /ws/delivery socket with 1012, as a restart does,
-// so a test can drive the page's reconnect and resume. Test-only: mounted only under
-// Deps.TestHooksEnabled.
+// disconnectDeliverySockets closes every open GET /ws/delivery socket on every process with 1012,
+// as a restart does, so a test can drive the page's reconnect and resume, and answers once every
+// process has (runTestHookEverywhere). Test-only: mounted only under Deps.TestHooksEnabled.
 func (s *server) disconnectDeliverySockets(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	for _, socket := range s.deliverySockets.all() {
-		socket.drop()
-	}
-	WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	s.runTestHookEverywhere(w, r, testHookCall{Hook: hookDisconnectSockets})
 }
 
 // deliverySocketSet is every open GET /ws/delivery socket: the test hook drops them, and a test

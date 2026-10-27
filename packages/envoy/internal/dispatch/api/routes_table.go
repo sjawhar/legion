@@ -188,13 +188,15 @@ func (s *server) routes() []apiRoute {
 		{http.MethodGet, "/api/v1/machine-logins", authHuman, "List the machine logins the caller may revoke that can still reach a secret: the secrets broker's launcher credentials for every service's login, whoever approved it, and for the caller's own machines, unexpired or expired with a session still running, each naming who approved it.", s.listMachineLogins},
 		{http.MethodPost, "/api/v1/machine-logins/{id}/revoke", authHuman, "Revoke a machine login, expired or not, ending every session it enrolled, a service's pods included: anyone signed in revokes a service's login, and only the person who approved a person's machine login revokes that one.", s.revokeMachineLogin},
 	}
+	// The first four hooks act on every process serving the database, answering once each has
+	// (test_hooks_fanout.go); outside-schema writes the stored history, which every process reads.
 	if s.deps.TestHooksEnabled {
 		routes = append(routes,
-			apiRoute{http.MethodPost, "/api/v1/events/_test/disconnect", authAny, "Test hook: drop every open event stream.", s.disconnectAllStreams},
-			apiRoute{http.MethodPost, "/api/v1/delivery/_test/disconnect", authAny, "Test hook: close every open delivery socket with 1012, as a restart does.", s.disconnectDeliverySockets},
-			apiRoute{http.MethodPost, "/api/v1/artifacts/_test/quiesce", authAny, "Test hook: close every live document and finish the settlements in flight.", s.quiesceDocuments},
+			apiRoute{http.MethodPost, "/api/v1/events/_test/disconnect", authAny, "Test hook: drop every open event stream on every process.", s.disconnectAllStreams},
+			apiRoute{http.MethodPost, "/api/v1/delivery/_test/disconnect", authAny, "Test hook: close every open delivery socket on every process with 1012, as a restart does.", s.disconnectDeliverySockets},
+			apiRoute{http.MethodPost, "/api/v1/artifacts/_test/quiesce", authAny, "Test hook: close every live document on every process and finish the settlements in flight.", s.quiesceDocuments},
 			apiRoute{http.MethodPost, "/api/v1/artifacts/{id}/_test/outside-schema", authAny, "Test hook: write a crafted tree outside the Proof schema.", s.injectArtifactSchemaFailure},
-			apiRoute{http.MethodPost, "/api/v1/agents/{session_id}/stream/_test/publish", authHuman, "Test hook: publish one frame to a session's conversation viewers.", s.publishAgentStreamFrame},
+			apiRoute{http.MethodPost, "/api/v1/agents/{session_id}/stream/_test/publish", authHuman, "Test hook: publish one frame to a session's conversation viewers on every process.", s.publishAgentStreamFrame},
 		)
 	}
 	return routes

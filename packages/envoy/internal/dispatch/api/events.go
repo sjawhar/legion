@@ -239,18 +239,18 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// disconnectAllStreams closes every currently open SSE connection, forcing each
+// disconnectAllStreams closes every currently open SSE connection on every process, forcing each
 // client through its reconnect-from-lastId path. Test-only: mounted by Register
 // only when Deps.TestHooksEnabled is set, so e2e suites can prove reconnect
-// behavior without seeding thousands of events to trip the replay cap. It closes the relay's
-// subscribers, which is what an open connection holds; the broker's are the outbox and the
-// delivery hub, which no reconnect test is about.
+// behavior without seeding thousands of events to trip the replay cap. Each process closes its
+// relay's subscribers, which is what an open connection holds; the broker's are the outbox and
+// the delivery hub, which no reconnect test is about. It answers once every process has
+// (runTestHookEverywhere).
 func (s *server) disconnectAllStreams(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	s.eventRelay.stream.CloseAll()
-	WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	s.runTestHookEverywhere(w, r, testHookCall{Hook: hookDisconnectStreams})
 }
 
 type eventListOptions struct {
