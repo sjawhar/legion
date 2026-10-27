@@ -6790,7 +6790,7 @@ var require_protocol = __commonJS((exports) => {
     }
     disconnect() {
       this.dispatchStatus({ type: core_1.DebugEvents.StaleConnection, data: "" });
-      this.transport.disconnect();
+      this.transport.close();
     }
     reconnect() {
       if (this.connected) {

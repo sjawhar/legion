@@ -20,16 +20,24 @@ describe.skipIf(!envoyStackEnabled)("a NATS connection whose path freezes", () =
     await stack?.stop();
   }, 60_000);
 
-  for (const { row, slug, stalledRedials } of [
+  for (const { row, slug, stalledRedials, unackedBytes } of [
     {
       row: "A: with natsConnectionOptions it reconnects and receives again within 60 s of the freeze",
       slug: "a",
       stalledRedials: 0,
+      unackedBytes: 0,
     },
     {
       row: "B: with natsConnectionOptions it reconnects and receives again within 60 s of the freeze when its first redial also hangs",
       slug: "b",
       stalledRedials: 1,
+      unackedBytes: 0,
+    },
+    {
+      row: "C: with natsConnectionOptions it reconnects and receives again within 60 s of the freeze when it wrote data the frozen path never acknowledged",
+      slug: "c",
+      stalledRedials: 0,
+      unackedBytes: 4 * 1024 * 1024,
     },
   ]) {
     test(row, async () => {
@@ -64,6 +72,13 @@ describe.skipIf(!envoyStackEnabled)("a NATS connection whose path freezes", () =
         })();
         proxy.stallNext(stalledRedials);
         const frozenAt = proxy.freeze();
+        // The client's own writes after the freeze, in chunks below natsd's max_payload: more than
+        // the frozen path's kernel buffers take, so they stay queued in its socket. Nothing awaits
+        // a flush of them, which cannot complete.
+        const chunk = new Uint8Array(64 * 1024);
+        for (let sent = 0; sent < unackedBytes; sent += chunk.length) {
+          client.publish(`${subject}.unacked`, chunk);
+        }
         // What is measured is nats.js's own wall-clock ping and dial timers, so the wait is real
         // time. A publish reaches the client only once it has subscribed again on a path that
         // answers, and each one before that goes to the frozen connection and is lost, so one

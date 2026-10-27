@@ -1,3 +1,18 @@
+diff --git a/lib/nats-base-client/protocol.js b/lib/nats-base-client/protocol.js
+index 63fac09631b888081e0b2b2ab4dd24854a6ae286..fba2d5c9634eb558daa9251db39040a7002f7d0a 100644
+--- a/lib/nats-base-client/protocol.js
++++ b/lib/nats-base-client/protocol.js
+@@ -363,7 +363,9 @@ class ProtocolHandler {
+     }
+     disconnect() {
+         this.dispatchStatus({ type: core_1.DebugEvents.StaleConnection, data: "" });
+-        this.transport.disconnect();
++        // close, not disconnect: disconnect flushes first, and a flush behind data a dead path
++        // never acknowledged never completes, so the transport never closes and nothing redials.
++        this.transport.close();
+     }
+     reconnect() {
+         if (this.connected) {
 diff --git a/lib/src/node_transport.js b/lib/src/node_transport.js
 index 64752b9ff22603b70421170613e7cdac2b50cce2..1081995218c8a360361dbb55ae89a1465f7cf4c8 100644
 --- a/lib/src/node_transport.js

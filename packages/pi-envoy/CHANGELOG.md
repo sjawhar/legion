@@ -110,7 +110,10 @@
 - A NATS redial that hangs (its TCP connect, or a server that never sends `INFO`) is closed once
   nats.js gives up on it at its 20 s dial timeout, instead of keeping its socket open for the
   process's life: the bundle carries `patches/nats@2.29.3.patch`, which makes nats.js destroy the
-  socket of a transport that never finished connecting (INFRA-548).
+  socket of a transport that never finished connecting. The patch also makes nats.js close a stale
+  connection without flushing it first, so a session that published agent-stream frames after its
+  path froze still reconnects: the flush never completed behind data the dead path never
+  acknowledged, and the session never redialed (INFRA-548).
 
 - A live view held open while its session is relaunched with `--resume` now shows the resumed
   process's model, thinking level and command changes. Two things stopped it. Every process

@@ -120,8 +120,10 @@
 - A channel server whose NATS redial once hung (its TCP connect, or a server that never sends
   `INFO`) still exits on SIGTERM: nats.js gave up on that redial at its 20 s dial timeout but left
   its socket open, which held the process alive. The bundle carries `patches/nats@2.29.3.patch`,
-  which makes nats.js destroy the socket of a transport that never finished connecting. `dist/`
-  was rebuilt (INFRA-548).
+  which makes nats.js destroy the socket of a transport that never finished connecting. The patch
+  also makes nats.js close a stale connection without flushing it first, so a channel server whose
+  connection holds data the frozen path never acknowledged still reconnects: the flush never
+  completed behind that data, and the server never redialed. `dist/` was rebuilt (INFRA-548).
 
 - The `legion-worker` skill: `HANDOFF_STALE_GENERATION` is no longer one of the refusals the
   daemon records. The daemon now refuses a completion of a run the issue has left before it applies

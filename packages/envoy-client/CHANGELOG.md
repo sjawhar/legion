@@ -54,9 +54,10 @@
   two unanswered pings (`NATS_MAX_PINGS_OUT`), so a path that freezes without closing is left
   within 30 s, where nats.js's default 120 s interval left it for up to 6 minutes. Bun-only test
   helpers `@legion/envoy-client/testing/stall-proxy` (a TCP proxy whose `freeze()` stops
-  forwarding without closing either side) and `@legion/envoy-client/testing/envoy-stack` (a real
-  natsd and listener built with `go build` from `packages/envoy`, for tests gated on
-  `LEGION_E2E_ENVOY_STACK=1`) back `src/__tests__/nats-stall.test.ts` and the plugins' stall tests
+  forwarding and reading without closing either side) and
+  `@legion/envoy-client/testing/envoy-stack` (a real natsd and listener built with `go build` from
+  `packages/envoy`, for tests gated on `LEGION_E2E_ENVOY_STACK=1`) back
+  `src/__tests__/nats-stall.test.ts` and the plugins' stall tests
   (INFRA-548).
 
 - `@legion/envoy-client/replay`: `createReplayEngine` shows a session, once, each message the
@@ -150,7 +151,11 @@
   only a transport that had finished connecting, so the abandoned socket held the process alive.
   `patches/nats@2.29.3.patch`, which bun applies at install, makes nats.js's `NodeTransport` keep
   the socket from the moment it dials and destroy it when a transport that never connected is
-  closed. `src/__tests__/nats-stall.test.ts` checks the hung redial is closed (INFRA-548).
+  closed. The patch also makes nats.js close a stale connection (two unanswered pings) without
+  flushing it first: behind data the dead path never acknowledged that flush never completed, so
+  the transport never closed and a session that had published since the path froze never
+  redialed. `src/__tests__/nats-stall.test.ts` checks the hung redial is closed, and that a client
+  that wrote 4 MiB the frozen path never read reconnects within 60 s (INFRA-548).
 
 - The `dispatch` command logs a refusal it makes before the call reaches Dispatch (an unknown
   flag or command, a missing or unknown host, a session it cannot name a directory for, a file

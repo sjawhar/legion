@@ -11,7 +11,7 @@ export interface ProxiedConnection {
 
 /**
  * A loopback TCP proxy to one upstream that can freeze a path the way a dead network route does:
- * packets stop, and neither side is closed.
+ * packets stop, nothing is acknowledged, and neither side is closed.
  */
 export interface StallProxy {
   /** `nats://127.0.0.1:<port>`, the address clients dial. */
@@ -19,14 +19,15 @@ export interface StallProxy {
   /** Every connection accepted so far, oldest first. */
   readonly connections: readonly ProxiedConnection[];
   /**
-   * Every connection open now stops forwarding in both directions. Each keeps reading and
-   * discarding what arrives on both of its sockets, so no sender ever blocks on a full buffer, and
-   * the proxy closes neither side. Connections opened later forward normally. Returns the time of
-   * the freeze (`Date.now()`).
+   * Every connection open now stops forwarding and stops reading both of its sockets, and the
+   * proxy closes neither side. What a peer sends from then on is never read, so once the kernel
+   * buffers fill its writes stay queued in its own socket, as behind a route that drops packets.
+   * Connections opened later forward normally. Returns the time of the freeze (`Date.now()`).
    */
   freeze(): number;
-  /** The next `count` connections behave frozen from their first byte: read, discarded, never
-   *  forwarded, never closed. */
+  /** The next `count` connections behave as a server that accepts and never answers: what arrives
+   *  is read and discarded, never forwarded, and the proxy never closes them, so the client's own
+   *  close of one is observable. */
   stallNext(count: number): void;
   /** Destroys every socket and stops listening. */
   close(): Promise<void>;
@@ -38,7 +39,7 @@ export async function startStallProxy(upstream: string): Promise<StallProxy> {
   const host = upstream.slice(0, separator);
   const port = Number(upstream.slice(separator + 1));
   const connections: { acceptedAt: number; subscribedAt: number | undefined }[] = [];
-  const open: { frozen: boolean }[] = [];
+  const open: { frozen: boolean; client: Socket; target: Socket }[] = [];
   const sockets = new Set<Socket>();
   let stalls = 0;
 
@@ -61,9 +62,9 @@ export async function startStallProxy(upstream: string): Promise<StallProxy> {
       client.on("data", () => undefined);
       return;
     }
-    const path = { frozen: false };
-    open.push(path);
     const target = track(createConnection({ host, port, allowHalfOpen: true }));
+    const path = { frozen: false, client, target };
+    open.push(path);
     client.on("data", (chunk: Buffer) => {
       if (path.frozen) return;
       if (record.subscribedAt === undefined && /(^|\n)SUB /.test(chunk.toString("latin1"))) {
@@ -97,7 +98,11 @@ export async function startStallProxy(upstream: string): Promise<StallProxy> {
     url: `nats://127.0.0.1:${address.port}`,
     connections,
     freeze() {
-      for (const path of open.splice(0)) path.frozen = true;
+      for (const path of open.splice(0)) {
+        path.frozen = true;
+        path.client.pause();
+        path.target.pause();
+      }
       return Date.now();
     },
     stallNext(count) {

@@ -120,18 +120,23 @@ default 120 s interval left a frozen path for up to 6 minutes.
 nats.js 2.29.3, the last 2.x release, leaves a redial's socket open when it gives up on that dial
 at its 20 s timeout (a TCP connect that hangs, or a server that never sends `INFO`): it closes
 only a transport that finished connecting, so the socket keeps the process alive and a channel
-server never exits on SIGTERM. `patches/nats@2.29.3.patch` (root `package.json`'s
-`patchedDependencies`, applied by bun at install and so carried by both plugins' bundles) makes
-`NodeTransport` keep the socket from the moment it dials and destroy it when a transport that never
-connected is closed; `src/__tests__/nats-stall.test.ts` fails without it. Bun ignores a
-`patchedDependencies` entry for a version that is not installed without a word, so moving nats
-means carrying the patch to the new version.
+server never exits on SIGTERM. Its stale-connection close (two unanswered pings) flushes the
+transport before it destroys the socket, and behind data a dead path never acknowledged that flush
+never completes, so the transport never closes and a client that wrote since the path froze never
+redials. `patches/nats@2.29.3.patch` (root `package.json`'s `patchedDependencies`, applied by bun
+at install and so carried by both plugins' bundles) makes `NodeTransport` keep the socket from the
+moment it dials and destroy it when a transport that never connected is closed, and makes the
+stale-connection close skip the flush (`transport.close()` in place of `transport.disconnect()`
+in `ProtocolHandler.disconnect()`; a client-initiated `reconnect()` still flushes);
+`src/__tests__/nats-stall.test.ts` fails without either. Bun ignores a `patchedDependencies` entry
+for a version that is not installed without a word, so moving nats means carrying the patch to
+the new version.
 
 `@legion/envoy-client/testing/stall-proxy` and `@legion/envoy-client/testing/envoy-stack` (Bun
-only, not built) are what the stall tests run: a TCP proxy whose `freeze()` stops forwarding on
-the connections open at that moment without closing either side, and a real natsd and listener
-built with `go build` from `packages/envoy`. A test that uses the stack runs only with
-`LEGION_E2E_ENVOY_STACK=1`.
+only, not built) are what the stall tests run: a TCP proxy whose `freeze()` stops forwarding on,
+and stops reading, the connections open at that moment without closing either side, and a real
+natsd and listener built with `go build` from `packages/envoy`. A test that uses the stack runs
+only with `LEGION_E2E_ENVOY_STACK=1`.
 
 ## HTTP transport
 
