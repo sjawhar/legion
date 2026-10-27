@@ -2,40 +2,47 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-220",
-  "completed": "2026-10-27T14:06:00Z",
-  "round": 9,
-  "testedHead": "3ac0f1f0ca6e7c0e682f246e03f274128c19ce29 (code head: a forward merge of main after #2304; 90f84e6d above it changes only .legion/)",
+  "completed": "2026-10-27T16:07:00Z",
+  "round": 10,
+  "testedHead": "2ec1b811b8ff4c63d42183d1e17b1b0a9f9d3880 (the implementer's handoff commit, run by CI and the image; same code as merge 86b9ecce0c, plus .legion/)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 9 entry: I re-ran `cd scripts/e2e/lib && bun test claude-backend-key-runner.test.ts app-logins.test.ts` at 3ac0f1f0 -> 34 pass, 0 fail. I sourced lib/github-apps.sh and printed app_key_command: with the runner unset, `agent-secrets <KEY> --reason=legion-live-proof-github-app-key -- sh -c …`; with agent-secrets, the same; with secrets, no --reason. Ids are 5341240/5341243 in all three. The live-proof entries are superseded by the 3ac0f1f0 devbox runs below."
+    "how": "The round 10 merge changed lib/bridge-tunnel.sh (main's #2229 held-port mechanism with this branch's six-port bridge and bridge_down) and the tmux tool list (python3). The devbox runs below cover this head. I drove the merged watchdog myself (proof 3)."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "N1/N3 at the final code head: a Claude Code implementer under tmux registers, is reminded by the Stop hook while its phase is open, completes through the legion MCP tool, and resumes the same session after its pane is killed",
-      "surface": "devbox (Proofs220d lane): real Go daemon with the tmux runtime, real Claude Code, real Envoy/Dispatch/NATS, sjawhar/legion-smoke, role Apps 5341240/5341243",
-      "command": "agent-secrets register --exec -- env LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> LEGION_E2E_CLAUDE_KEY_FILE=<same> LEGION_E2E_APP_KEY_RUNNER=$(mise which agent-secrets) LEGION_E2E_IMPLEMENT_APP_ID=5341240 LEGION_E2E_REVIEW_APP_ID=5341243 bash scripts/e2e/claude-backend-tmux.sh (08:04:58-08:27:33Z)",
-      "observed": "exit 0, 'claude backend e2e: PASS', 10/10 checks ok (prerequisites, rig, admission, architect-registers-the-gate, planner-handoff, claude-implementer-registers, stop-hook-reminds-the-open-phase, claude-implementer-handoff, kill-resumes-the-same-claude-session, every-launch-endpoint-checked). GET /app answered legion-implementer[bot] and legion-reviewer[bot]. legion, envoy-listener and envoy-dispatch stamped 3ac0f1f0 modified=false. I read the transcript: dispatch://INFRA-220/artifact/infra220-3ac0f1f0-tmux-transcript-log",
-      "headSha": "3ac0f1f0ca6e7c0e682f246e03f274128c19ce29",
-      "negativeControl": "lib/github-apps.sh at 3ac0f1f0 with LEGION_E2E_APP_KEY_RUNNER=secrets: the key command carries no --reason (the broker-only flag does not reach another store). At 52602649 the script's refusals were checked with stand-ins and that code is unchanged here: a missing runner -> 'FAIL prerequisites: <runner>, the App key runner LEGION_E2E_APP_KEY_RUNNER names, is required'"
+      "criterion": "N1/N3 at the final head: a Claude Code implementer under tmux registers, is reminded by the Stop hook while its phase is open, completes through the legion MCP tool, and resumes the same session after its pane is killed",
+      "surface": "devbox (INFRA lead's lane on sami-rocqperf): real Go daemon with the tmux runtime, real Claude Code, real Envoy/Dispatch/NATS, sjawhar/legion-smoke, role Apps 5341240/5341243",
+      "command": "agent-secrets register --exec -- env LEGION_E2E_APP_KEY_RUNNER=agent-secrets LEGION_E2E_IMPLEMENT_APP_ID=5341240 LEGION_E2E_REVIEW_APP_ID=5341243 LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> LEGION_E2E_CLAUDE_KEY_FILE=<same> bash scripts/e2e/claude-backend-tmux.sh (14:48:50-15:01:41Z)",
+      "observed": "exit 0, 'claude backend e2e: PASS', 10/10 checks ok (prerequisites, rig, admission, architect-registers-the-gate, planner-handoff, claude-implementer-registers, stop-hook-reminds-the-open-phase, claude-implementer-handoff, kill-resumes-the-same-claude-session, every-launch-endpoint-checked). GET /app answered legion-implementer[bot] and legion-reviewer[bot]. legion, envoy-listener and envoy-dispatch stamped 2ec1b811 modified=false. I read the transcript: dispatch://INFRA-220/artifact/infra220-2ec1b811-tmux-transcript-log",
+      "headSha": "2ec1b811b8ff4c63d42183d1e17b1b0a9f9d3880",
+      "negativeControl": "In the bridge rig (proof 3), a chisel client that exits after teardown began leaves no TERM and no bridge-failed. For the tmux script the round 8 refusals still apply, and that code is unchanged: a missing key runner -> 'FAIL prerequisites: <runner>, the App key runner LEGION_E2E_APP_KEY_RUNNER names, is required'"
     },
     {
-      "criterion": "N2/N4 at the final code head: a Claude Code implementer under the Kubernetes runtime runs the bridge in its issue pod, is reminded by the Stop hook, completes, and a replacement pod resumes the same Claude Code session from the session table",
-      "surface": "sami-leanperf (operator session 01a16962) daemon with bridge reachability against the production GKE cluster, namespace legion. Worker image ghcr.io/sjawhar/legion-worker@sha256:277e3193629c1c764b1f6894ab9609796a5cc8f7b4d1bc469356115f986654ff (Worker Image run 40470632169; I read org.opencontainers.image.revision=3ac0f1f0ca6e7c0e682f246e03f274128c19ce29 from its config blob). Scratch Postgres session store, no priority class.",
-      "command": "agent-secrets register --exec -- env LEGION_E2E_POD_REACHABILITY=bridge LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_STORAGE_CLASS=standard-rwo LEGION_E2E_CLAUDE_MODEL=claude-sonnet-5 LEGION_E2E_CLAUDE_KEY_FILE=<0600 tmpfs file> LEGION_E2E_RUNTIME_KUBECONFIG=<ADC kubeconfig copy> GOOGLE_APPLICATION_CREDENTIALS=<ADC copy> LEGION_E2E_APP_KEY_RUNNER=<0700 wrapper named agent-secrets adding --ttl 12h> LEGION_E2E_IMPLEMENT_APP_ID=5341240 LEGION_E2E_REVIEW_APP_ID=5341243 LEGION_E2E_IMAGE=<digest above> ports 18611-18616 bash scripts/e2e/claude-backend-sandbox.sh (13:27:55-14:01:59Z)",
-      "observed": "exit 0, 'claude backend sandbox e2e: PASS', 15/15 ok: prerequisites, rig, snapshot, bridge, operator-route, daemon, admission, architect-registers-the-gate, planner-handoff, claude-implementer-registers, claude-pod-runs-the-bridge, stop-hook-reminds-the-open-phase, claude-implementer-handoff, pod-deleted-resumes-the-same-claude-session, namespace-clean. legion, envoy-listener and envoy-dispatch stamped 3ac0f1f0 modified=false. I read the transcript: dispatch://INFRA-220/artifact/infra220-3ac0f1f0-sandbox-transcript-log (namespace snapshots -namespace-before-txt and -namespace-after-txt differ only in other projects' objects and ages)",
-      "headSha": "3ac0f1f0ca6e7c0e682f246e03f274128c19ce29",
-      "negativeControl": "SIGINT after 'ok prerequisites' (set -m, 14:02:36Z), same head and image: exit 130, 'claude backend sandbox e2e: FAIL (check rig)', no 'FAIL cleanup', `ls -d $XDG_RUNTIME_DIR/legion-e2eccs-app-keys.*` finds nothing, no object with project label ccs5353827 left (dispatch://INFRA-220/artifact/infra220-3ac0f1f0-sandbox-sigint-transcript-log)"
+      "criterion": "N2/N4 at the final head: a Claude Code implementer under the Kubernetes runtime runs the bridge in its issue pod, is reminded by the Stop hook, completes, and a replacement pod resumes the same Claude Code session from the session table",
+      "surface": "devbox daemon with bridge reachability (merged held-port bridge) against the production GKE cluster, namespace legion. Worker image ghcr.io/sjawhar/legion-worker@sha256:ac7e9e34a96da7c3795abcde7443bd4931a20d586021e10808d010ec422c09fa (Worker Image run 40521619614; I read org.opencontainers.image.revision=2ec1b811b8ff4c63d42183d1e17b1b0a9f9d3880 from its config blob). Scratch Postgres session store, no priority class.",
+      "command": "agent-secrets register --exec -- env LEGION_E2E_POD_REACHABILITY=bridge LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_STORAGE_CLASS=standard-rwo LEGION_E2E_CLAUDE_MODEL=claude-sonnet-5 LEGION_E2E_RUNTIME_KUBECONFIG=<0600 copy> LEGION_E2E_APP_KEY_RUNNER=agent-secrets LEGION_E2E_IMPLEMENT_APP_ID=5341240 LEGION_E2E_REVIEW_APP_ID=5341243 LEGION_E2E_IMAGE=<digest above> ports 13380-13385 bash scripts/e2e/claude-backend-sandbox.sh (15:26:25-16:01:30Z)",
+      "observed": "exit 0, 'claude backend sandbox e2e: PASS', 15/15 ok: prerequisites, rig, snapshot, bridge, operator-route, daemon, admission, architect-registers-the-gate, planner-handoff, claude-implementer-registers, claude-pod-runs-the-bridge, stop-hook-reminds-the-open-phase, claude-implementer-handoff, pod-deleted-resumes-the-same-claude-session, namespace-clean (0 of the run's objects before and after). No BRIDGE TUNNEL DOWN line. legion, envoy-listener and envoy-dispatch stamped 2ec1b811 modified=false. I read the transcript: dispatch://INFRA-220/artifact/infra220-2ec1b811-sandbox-transcript-log",
+      "headSha": "2ec1b811b8ff4c63d42183d1e17b1b0a9f9d3880",
+      "negativeControl": "SIGINT after 'ok prerequisites' (job control on, 16:02:05Z), same head and image: exit 130, 'claude backend sandbox e2e: FAIL (check rig)', no 'FAIL cleanup', `ls -d $XDG_RUNTIME_DIR/legion-e2eccs-app-keys.*` finds nothing (dispatch://INFRA-220/artifact/infra220-2ec1b811-sandbox-sigint-transcript-log)"
+    },
+    {
+      "criterion": "The merged bridge watchdog still ends the run at once when the bridge is really down, and recovers a dropped port-forward",
+      "surface": "scripts/e2e/lib/bridge-tunnel.sh at 86b9ecce, sourced by a bash driver under `set -Eeuo pipefail` in this issue pod, with bridge_start's real code and stand-ins for kubectl (port-forward printing 'Forwarding from 127.0.0.1:<port>'), op, go and the chisel client",
+      "command": "bridge_start 13380 13381, then four cases: kill the chisel client; kill the port-forward once (restart allowed); kill the port-forward with every restart failing; write $work/bridge-stopping, then kill the client",
+      "observed": "Client exit: 'BRIDGE TUNNEL DOWN: the chisel client exited … ending the run'. kill_harness was called, bridge-failed holds the reason and the pod's events, and the script got TERM 6 s after the client died. One drop: 'recovered after 2s on local port 40002; chisel client restarted against it'. The second client dialed http://127.0.0.1:40002 and the run went on. Every restart failing: 'could not be restarted within 60s; ending the run', TERM at +68 s, exit 143, 12 port-forward attempts. Stopping flag: no TERM in 12 s and no bridge-failed.",
+      "headSha": "86b9ecce0c",
+      "negativeControl": "The teardown case: once bridge-stopping exists, a dead client neither TERMs the run nor writes bridge-failed"
     }
   ],
-  "deviations": [
-    "The sandbox and SIGINT runs ran on sami-leanperf (operator session 01a16962), because the INFRA lead's box sami-rocqperf went down after the tmux run. On that lane the key runner is a 0700 wrapper named agent-secrets that adds `--ttl 12h`, so the broker reuses Sami's 13:21Z grant of request 1d4bcb20. The command shape the script builds (`<runner> NAME --reason=… -- sh -c …`) is unchanged. The kubeconfig calls gke-gcloud-auth-plugin by absolute path with --use_application_default_credentials.",
+  "observations": [
+    "The TERM lands when the shell's foreground command returns: bash runs a trap only between commands. With the script's 2 s polling sleeps that is at most a few seconds. A long foreground command defers it, and kill_harness, which stops the daemon, is what ends such a command."
+  ],
+  "ci": "Read at 16:05Z for 2ec1b811: Tests 40521619423 (lint, typecheck, test) success, Docs 40521619636 success, PR Title 40521619706 success, Worker Image 40521619614 success. Legion Envoy and Contracts 40521619432 still queued.",
+  "notTested": [
     "The sandbox runtime identity is ADC (the operator's identity), not the daemon's restricted identity (the implementer's recorded deviation)."
   ],
-  "observations": [
-    "The interrupted run left its scratch directory /tmp/legion-e2eccs.<pid>.<random> on the box, and the transcript names it. claude-backend-sandbox.sh cleanup() removes $work only when the run passed (lines 1114-1117), and the tmux script follows the same rule. It keeps a failed run's directory for diagnosis. Not a defect."
-  ],
-  "ci": "Read at 11:49Z for 3ac0f1f0: Tests 40470632121 (lint, typecheck, test) success, Docs 40470632210 success, PR Title 40470788179 success, Worker Image 40470632169 success, Legion Envoy and Contracts 40470631999 success.",
   "risks": []
 }
