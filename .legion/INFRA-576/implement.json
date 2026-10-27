@@ -2,51 +2,43 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-576",
-  "completed": "2026-10-27T14:19:11Z",
+  "completed": "2026-10-27T18:24:26Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2358",
   "proof": [
     {
-      "criterion": "Round 1 finding 2 / acceptance 2: a released worker image keeps the legion version as its org.opencontainers.image.version label while the 3-stage graph is unchanged",
-      "surface": "GitHub Actions on sjawhar/legion-smoke: this head's release.yaml/worker-image.yaml job graph, conditions and outputs, with the real 'Compute tags' and pair steps, other step bodies stubbed",
-      "command": "gen.py at 91ec4a79 pushed to probe/infra-576-r2-120148; run 40500596037 https://github.com/sjawhar/legion-smoke/actions/runs/40500596037",
-      "observed": "success. worker_image / build: version_label=15.1.0 (legion_build's version), tags=ghcr.io/sjawhar/legion-worker:sha-03dc810638ec only, skip_attest=true, pair 11.2.0/11.2.0; worker_image_attest / attest attested sha256:651e2194... = call 1's digest; worker_image_release success; worker_image / attest and worker_image_attest / build skipped; stages unchanged (builds; publish + worker_image/build; attest + worker_image_release).",
-      "headSha": "91ec4a799d02",
-      "negativeControl": "The same 'Compute tags' body run locally with GITHUB_REF=refs/heads/legion/X LEGION_VERSION=15.1.0 -> version_label=sha-3658796672b9; with GITHUB_REF=refs/heads/main and an empty version -> version_label=sha-3658796672b9."
+      "criterion": "The conflict with main is resolved and both of release.yaml's worker-image.yaml calls still work under main's workflow-level image concurrency group and main-only cache writes",
+      "surface": "GitHub Actions on sjawhar/legion: workflow_dispatch of the branch's release.yaml at the merged head",
+      "command": "gh workflow run release.yaml --ref legion/INFRA-576 -R sjawhar/legion -> run 40538213611 https://github.com/sjawhar/legion/actions/runs/40538213611; gh api repos/sjawhar/legion/attestations/sha256:436ee68731742c9d01db7256a92f6de104818790c5948fac13832683d2919244",
+      "observed": "success. Builds and publish skipped (off main); worker_image / build 16:48-16:54Z pushed ghcr.io/sjawhar/legion-worker:sha-5c0f095316f4 only, label sha-5c0f095316f4, digest sha256:436ee687..., with --cache-from type=gha,scope=worker-image and no --cache-to (main's rule off main); worker_image_attest / attest (same worker-image-<sha> group) ran 18:11Z after it and succeeded; the attestation certificate SAN is https://github.com/sjawhar/legion/.github/workflows/worker-image.yaml@refs/heads/legion/INFRA-576, invocation run 40538213611.",
+      "headSha": "5c0f095316f422275801c91519bac2ea4c155a17",
+      "negativeControl": "worker_image / attest (skip_attest) and worker_image_attest / build (attest_digest set) skipped; worker_image_release skipped (no legion release off main); GitHub's attestations API answers 404 for an unbuilt digest (sha256:000...0, round 1)."
     },
     {
-      "criterion": "Round 1 cleanup: the pair step's single pair_member keeps legion and the attestation off when a plugin did not publish",
-      "surface": "GitHub Actions on sjawhar/legion-smoke, the same generated probe",
-      "command": "run 40500596188 https://github.com/sjawhar/legion-smoke/actions/runs/40500596188 (forced failure of 'pi-envoy: Publish to npm')",
-      "observed": "pair step warned '@sjawhar/pi-envoy had a release in this run that did not publish...' and gave ok=false; all 6 legion steps, worker_image_attest / attest and worker_image_release skipped; pi-legion's and envoy-plugin's steps succeeded.",
-      "headSha": "91ec4a799d02",
-      "negativeControl": "Run 40500596037 (no failure) gave ok=true and released legion, attested and ran worker_image_release."
-    },
-    {
-      "criterion": "Round 1 finding 1: check-image-trigger-paths.sh admits only a call mode true while its input is unset",
-      "surface": "check-image-trigger-paths.sh run on fixture workflows (the repository's real-process test harness) and on the real files",
-      "command": "bash .github/scripts/check-image-trigger-paths.test.sh; bash .github/scripts/check-image-trigger-paths.sh",
-      "observed": "Results: 840 passed, 0 failed; real files: 'every image trigger covers every input its build reads (4 image build(s))'. Build job gated on inputs.mode == '' -> exit 0, != 'attest' -> exit 0.",
-      "headSha": "91ec4a799d02",
-      "negativeControl": "inputs.mode == 'attest' -> exit 1, inputs.mode != '' -> exit 1 (each quoting the term and saying it is false while the input is unset), if: false -> exit 1."
+      "criterion": "The merged checks and tests stay green with both sides' rules (main's draft/closed terms and this branch's call mode)",
+      "surface": "the repository's real-process check harnesses on the merged tree",
+      "command": "bash .github/scripts/check-image-trigger-paths.test.sh; bash .github/scripts/check-release-credentials.test.sh; bash .github/scripts/release-push.test.sh; check-image-trigger-paths.sh, check-release-credentials.sh, check-action-pins.sh, check-private-names.sh, check-plugin-names.sh; actionlint v1.7.12; bun test packages/pi-shared/test/skills-partition.test.ts",
+      "observed": "878 passed / 223 passed / 362 passed, 0 failed each; the five checks exit 0 ('every image trigger covers every input its build reads (5 image build(s))'); actionlint exit 0; partition 7 pass.",
+      "headSha": "5c0f095316f422275801c91519bac2ea4c155a17",
+      "negativeControl": "Case call-mode-beside-event-terms-unready: the merged build-job gate on an image workflow whose pull_request trigger lacks ready_for_review is refused, naming the trigger; inputs.mode == 'attest' and != '' still refused."
     }
   ],
   "filesChanged": [
-    ".github/workflows/release.yaml",
-    ".github/workflows/worker-image.yaml",
-    ".github/scripts/check-release-credentials.sh",
-    ".github/scripts/check-release-credentials.test.sh",
+    ".dockerignore",
     ".github/scripts/check-image-trigger-paths.sh",
     ".github/scripts/check-image-trigger-paths.test.sh",
+    ".github/scripts/check-release-credentials.sh",
+    ".github/scripts/check-release-credentials.test.sh",
     ".github/scripts/release-push.test.sh",
-    "packages/pi-shared/test/skills-partition.test.ts",
-    "skills/AGENTS.md",
+    ".github/workflows/release.yaml",
+    ".github/workflows/worker-image.yaml",
     "AGENTS.md",
     "docs/kubernetes.md",
     "docs/site/src/content/docs/legion/running-legion.md",
-    ".dockerignore",
+    "packages/daemon/docker/worker.Dockerfile",
     "packages/pi-envoy/README.md",
     "packages/pi-legion/README.md",
-    "packages/daemon/docker/worker.Dockerfile"
+    "packages/pi-shared/test/skills-partition.test.ts",
+    "skills/AGENTS.md"
   ],
   "trickyParts": [
     "A caller of a reusable workflow must grant every scope the called file's permissions blocks declare, so both worker-image.yaml calls carry contents read, packages/id-token/attestations write; only the jobs inside differ.",
@@ -62,19 +54,21 @@
     "The legion_version workflow_dispatch input is removed too: nothing documented it and the version tag moved to release.yaml's worker_image_release.",
     "actionlint 1.7.12 reports only GitHub's newer cache-mode job key (and queue: max in the untouched listener workflow); those findings are ignored with -ignore.",
     "legion_version is back on worker-image.yaml's workflow_call (label only); it stays off workflow_dispatch, recorded in the PR's contract census.",
-    "legion_build's plugin version calls still print their ::notice in the log; only the step-summary lines are suppressed."
+    "legion_build's plugin version calls still print their ::notice in the log; only the step-summary lines are suppressed.",
+    "Forward merge of main at 5c0f0953 (fingerprint 81a3fd2b... -> 832bfb25..., changed: conflict resolution in worker-image.yaml, check-image-trigger-paths.sh, docs/kubernetes.md; comment https://github.com/sjawhar/legion/pull/2358#issuecomment-6447074179)."
   ],
   "openQuestions": [
     "Acceptance 1 and 4 and the 'after' merge-to-published numbers are read after the merge by the production check (measurement script posted on the PR: https://github.com/sjawhar/legion/pull/2358#issuecomment-6434025628).",
     "sjawhar/legion#2316 (INFRA-520) edits legion_build's setup-go and adds a cache restore step; whichever merges second carries the other's change."
   ],
-  "round": 2,
-  "answersReview": "Round 1 REQUEST_CHANGES at 7c17cea7d866 (code of 3658796672b9)",
+  "round": 3,
+  "answersReview": "Tester round 2 fail at bf87bd3990ae: PR #2358 CONFLICTING with main, so no CI ran at the code head",
   "reviewThreads": [
     "PRRT_kwDORFy7ds6wqmU3 fixed in 4507cb60",
     "PRRT_kwDORFy7ds6wqmU9 fixed in 91ec4a79",
     "PRRT_kwDORFy7ds6wqmVF fixed in 4507cb60",
     "PRRT_kwDORFy7ds6wqmVL fixed in 91ec4a79",
     "PRRT_kwDORFy7ds6wqmVO fixed in 91ec4a79"
-  ]
+  ],
+  "headAtCompletion": "235e89096447 (tree identical to 5c0f0953; skills/AGENTS.md removed in e6feb0f4 and restored in 235e8909 on the architect's word)"
 }
