@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-527",
+  "completed": "2026-10-27T00:29:37Z",
+  "plan": "dispatch://INFRA-527/artifact/plan-md (version 1) is the whole plan; this file records its checks and the summary each later role needs.",
+  "base": "7f7edb8de3e32f2b65fd3b5600577ddddc420142",
+  "summary": {
+    "cause": "MarkdownBody's block painter (packages/dispatch/web/src/features/refs/MarkdownBody.tsx paintBlock) serializes task items with Milkdown's toDOM, which writes li[data-item-type=task][data-checked] and no box; styles.css draws nothing for it, so prose shows the same disc bullet for ticked and unticked items. Probed at 7f7edb8d with bun test + happy-dom: no input element.",
+    "change": [
+      "New packages/dispatch/web/src/features/refs/task-checkboxes.ts: drawTaskCheckboxes(root) inserts <input type=checkbox disabled data-markdown-task-checkbox> (checked attribute and property set from data-checked) as the first child of each task item's first <p>.",
+      "MarkdownBody.tsx paintBlock calls drawTaskCheckboxes(element) after replaceChildren and before the tight-list unwrap (the unwrap condition still holds, so the box moves into the li with the text). Doc comment updated.",
+      "styles.css: one block under .dispatch-markdown: task li list-style none; the box sized in em, aligned to the first line, standing where the bullet stood, pointer-events none; same declarations under the ask-footer selector if the footer's (0,4,1) li rule wins any property.",
+      "packages/dispatch/AGENTS.md line 291: task items in the block variant draw a disabled checkbox; inline variant and MarkdownPreview draw no list and so no box."
+    ],
+    "decisions": [
+      "Post-paint pass in paintBlock, not a serializer override: a node function cannot reach the child paragraph and ProseMirror refuses a content hole beside a sibling; a separate module keeps off the lines siblings INFRA-526/528/529 edit and also reaches task lists inside callouts.",
+      "Native disabled checkbox, no aria-label, own data attribute (never the editor's proof-task-checkbox class or data-task-checkbox, which the unlayered lib.css and Proof's plugin act on).",
+      "No bullet or number on a task item, as the document editor (lib.css:92-94); a plain item in the same list keeps its bullet.",
+      "Out of scope: the inline variant (paintInline) and MarkdownPreview (paintOneLine) serialize only textblock contents and draw no list at all, and sit inside buttons, links and labels where an input is invalid HTML."
+    ]
+  },
+  "acceptance": [
+    {"criterion": "A1 (spec): a comment with one ticked and one unticked task item shows a ticked and an unticked checkbox", "surface": "Issue page, Conversation tab (/issues/<KEY>/conversation), Chromium", "check": "packages/dispatch/e2e/task-items.e2e.ts row A1: green at head; red at the fork point (0 checkboxes after the text assertion passed); light and dark; same-line overlap; list-style-type none; mouse click leaves states unchanged"},
+    {"criterion": "A2 (plan): same for a reply under a decision inside a document", "surface": "Issue page, document ask block thread (thread-<ask id>)", "check": "task-items.e2e.ts row A2, green at head, red at the fork point"},
+    {"criterion": "A3 (plan): tight, loose, ordered, nested and mixed lists each give every task item exactly one disabled box ticked as its source, and a plain item none", "surface": "MarkdownBody in the unit DOM", "check": "new test in packages/dispatch/web/src/features/refs/MarkdownBody.test.tsx"},
+    {"criterion": "A4 (plan): the box cannot be toggled and is not a tab stop", "surface": "Conversation tab", "check": "row A1 toBeDisabled and the mouse click"},
+    {"criterion": "Production record", "surface": "production Dispatch", "check": "gh api \"repos/theorem-labs/agent-infra/contents/legion/checks/dispatch-production-check.sh?ref=main\" -H \"Accept: application/vnd.github.raw\" | bash -s -- --commit <merged sha> --page /issues/INFRA-527/conversation (no --route: no API route changes); output on the PR and the issue; it proves the build and page shell only"}
+  ],
+  "commands": {
+    "harness": "/legion/scratch/harness-527/setup.sh (idempotent; Postgres 17 + pgvector from Debian packages on 127.0.0.1:55432 guarded by pg_isready; per-role databases dispatch_527_<role> and dispatch_527_<role>_base; chromium into PLAYWRIGHT_BROWSERS_PATH; Go server pre-built) and /legion/scratch/harness-527/env.sh (per-LEGION_ROLE five ports, DB_URL, DB_BASE_URL, caches under /legion/scratch). Recipes: docs/solutions/testing/*INFRA-42.md, *INFRA-43.md, *INFRA-95.md.",
+    "green": "cd -- \"$LEGION_WORKSPACE/packages/dispatch\" && . /legion/scratch/harness-527/env.sh && DATABASE_URL=\"$DB_URL\" bun run e2e -- e2e/task-items.e2e.ts",
+    "red": "base=$(jj -R \"$LEGION_WORKSPACE\" log -r 'fork_point(main@origin | legion/INFRA-527@origin)' --no-graph -T commit_id); rm -rf /legion/scratch/infra-527-base && mkdir -p /legion/scratch/infra-527-base && git -C \"$LEGION_WORKSPACE\" archive \"$base\" | tar -x -C /legion/scratch/infra-527-base && cp \"$LEGION_WORKSPACE/packages/dispatch/e2e/task-items.e2e.ts\" /legion/scratch/infra-527-base/packages/dispatch/e2e/ && cd /legion/scratch/infra-527-base && bun install && cd packages/dispatch && . /legion/scratch/harness-527/env.sh && DATABASE_URL=\"$DB_BASE_URL\" bun run e2e -- e2e/task-items.e2e.ts",
+    "unit": "cd -- \"$LEGION_WORKSPACE/packages/dispatch\" && bun test web/src/features/refs/ && bun run lint && bun run typecheck",
+    "suite": "whole browser suite in the pod for chromium and iphone; CI's dispatch job for WebKit and Firefox"
+  },
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: pr-body.md for the proof entries, the both-runs quote and the simplify pass; tools.md before installing the harness's Postgres and Chromium; conflicts-and-rewrites.md if a sibling's merge to the renderer conflicts",
+      "ce-simplify-code: the simplify pass over the settled diff before the proof at the head that merges"
+    ],
+    "test": [
+      "legion-worker: pr-body.md#what-a-proof-is for re-running the red and green browser runs and recording each proof with its negative control"
+    ],
+    "review": [
+      "legion-worker: merge-gate.md for approving the head by SHA and review-threads.md for threads",
+      "asd-ste100: review comments and thread replies go to teammates in ASD-STE100"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "H1: an input placed in the li stops paintBlock's tight-list unwrap, so the box sits on its own line; a serializer cannot put a sibling beside a content hole.", "answer": "D1/D6: post-paint pass inserts the box inside the item's first <p>, before the unwrap; the unwrap condition still holds. Unit test A3 asserts the tight shape; row A1 asserts same-line overlap."},
+      {"finding": "H2: inline variant and MarkdownPreview never produce an li, and sit inside buttons, links and labels.", "answer": "D5: out of scope with the reason recorded (no list is drawn there at all, and an input is invalid there); the architect is told in the completion summary."},
+      {"finding": "H3: reusing the editor's proof-task-checkbox class or data-task-checkbox couples to unlayered lib.css and Proof's plugin; an unscoped li rule would hit documents.", "answer": "D3: own data-markdown-task-checkbox attribute; every rule under .dispatch-markdown."},
+      {"finding": "H4: replies in the ask footer inside a document have their own (0,4,1) list rules.", "answer": "D4 adds footer-scoped declarations if needed; row A2 checks a reply inside a document."},
+      {"finding": "H5: clicks inside clickable cards and focus/keyboard shortcuts.", "answer": "D2/D4: disabled (no tab stop, no shortcut swallowed) and pointer-events none, so a click on the box acts as a click on the item's text; row A1 clicks it."},
+      {"finding": "H6: docs and comments to update.", "answer": "Task 6: packages/dispatch/AGENTS.md:291; MarkdownBody doc comment; styles.css block comment. docs/site has no Markdown page."},
+      {"finding": "A1: element vs CSS-only; disabled vs ARIA; accessible name.", "answer": "D2: native disabled checkbox, checked attribute and property, no aria-label (the item's words follow it; a label would be spoken twice)."},
+      {"finding": "A2: bullets and numbers on task items; ordered and mixed lists.", "answer": "D4: list-style none on task items as the editor does; plain items keep their bullet; unit test covers ordered and mixed."},
+      {"finding": "A3: 12px reasoning turns in the live view.", "answer": "D4: the box is sized in em."},
+      {"finding": "C1: A1 names no assertions.", "answer": "Task 5 row A1 lists them: text first, count 2, checked/unchecked, disabled, same line, list-style none, click leaves state."},
+      {"finding": "C2: nested, loose, ordered, mixed, ask-footer, live view and dark mode have no criterion.", "answer": "A3 unit test for the shapes; A2 for the footer; row A1 runs light and dark with screenshots; DOM state plus computed style stands in for pixels."},
+      {"finding": "C3: how the commit-before run is produced without touching the shared workspace.", "answer": "git archive of the fork point into /legion/scratch/infra-527-base, bun install there, copy the new spec, own database DB_BASE_URL; re-run at a new fork point after a rebase onto a sibling's merge."},
+      {"finding": "C4: production check page path and what it decides.", "answer": "Read the script: it judges build descent and page shell only. Page /issues/INFRA-527/conversation, no --route; the browser test is A1's proof; output recorded even when the build lacks the merge."},
+      {"finding": "S1: the spec's citation markdown-engine.ts:68-69 is stale at main; lib.css range is 87-104.", "answer": "Recorded in plan.md 'What is wrong, verified'; the behaviour holds (probe). No spec change needed."},
+      {"finding": "S2: checkboxAccent is a color utility, not accent-color.", "answer": "D4 adds no accent-color; the disabled native box follows color-scheme: light dark."},
+      {"finding": "S3: sibling conflict risk with INFRA-526/528/529 is unverified.", "answer": "D1 keeps the change to a new module, one call, one CSS block and one docs sentence; merge order is the architect's; red/green re-run at the new fork point after a rebase."},
+      {"finding": "S4: the editor's checkbox is focusable and labelled as an action.", "answer": "D2 does not copy either."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": []
+}
