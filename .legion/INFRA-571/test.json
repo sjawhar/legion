@@ -2,56 +2,19 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-571",
-  "completed": "2026-10-27T06:09:00Z",
-  "testedHead": "95693430d97d (code head: forward merge of main 448a4100 into e8df9ab0); branch head f843fd907f0c adds only .legion/",
-  "round": "2, a full round: the merge changed the diff (it brings in #2270's --cpus/--memory and corrects testpg.go's merged tmpfs from /var/lib/postgresql/data to /var/lib/postgresql)",
+  "completed": "2026-10-27T06:56:00Z",
+  "testedHead": "e365a3b4fc81 (code head after review round 1); branch head d053164ec610 adds only .legion/",
+  "round": "3: tests the review-round fix e365a3b4 (broker and daemon Go suites on the 16 image until INFRA-572; dev-postgres.sh's move waits for a started container, lists databases before and after, removes volumes)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran P5 (pg-upgrade-run.sh, W redirected) with main 7c1290a4 and a server I built at this head (vcs.revision f843fd90): same results as the implementer's. Re-ran P3 with that server, P2 (dev-postgres/dev-broker tests) and P1 with its negative control on a copy of the module. Drove P4 with Jobs of my own. The implementer's P7 entry proves mergeability only (MERGEABLE); CI itself was queued at this head when read."
+    "how": "The proof for e365a3b4 (broker store and daemon store packages on PGDG 16.15, actionlint) covers the new CI lanes; the lanes themselves run on GitHub, where they were queued at 06:53Z. No Go file changed between 95693430 and e365a3b4 (git diff --name-only -- '*.go' prints none), so round 2's re-runs of P1, P3 and P5 with a server built at f843fd90 still stand. dev-postgres.test.sh's existing cases pass at e365a3b4. The failure below is in behaviour this round added, which the implementer's fake-docker tests cannot reach."
   },
-  "failures": [],
-  "failed": 0,
-  "ci": "At 95693430 (2026-10-27T06:06Z) every check run and workflow (Tests, Legion Envoy and Contracts, Docs, Worker Image, build, lint, typecheck, test) was queued. The tester reads it as queued and does not wait. The reviewer reads the Postgres service version step (1806xx|0.8.7) and the Go suite on GitHub before approving. testpg's container path (tmpfs at /var/lib/postgresql, 2 CPU/2 GiB), as the merge resolved it, runs only in CI's envoy-infra-go; the pod has no Docker.",
-  "proof": [
+  "failures": [
     {
-      "criterion": "A run that migrates a Postgres 16 database, upgrades it to 18 with pg_upgrade, then starts the server and runs a search and an issue creation, passes (spec acceptance 3, P5)",
-      "surface": "Dispatch server and dispatch CLI on local PGDG PostgreSQL 16.15 / 18.6 clusters with pgvector 0.8.7",
-      "command": "go build ./cmd/dispatch at this head -> $TMPDIR/infra571-test/dispatch-head2 (and at 7c1290a4 -> dispatch-old); OLD=dispatch-old NEW=dispatch-head2 bash $TMPDIR/infra571-test/p5.sh (log p5-run2.log)",
-      "observed": "16 160015, old server schema_version 99, seed via CLI exit 0, 200 vectors; pg_upgrade --check 0, pg_upgrade 0; 18 180006, vector 0.8.7; vacuumdb/REINDEX clean; head server schema_version 120 with 21 rows 100..120 applied by its boot; dispatch search 'heron ledger' lists PGUP-1; dispatch issue without --force names PGUP-1 as a duplicate, with --force creates PGUP-4; top-5 by <=> equal on 16 and 18; plan on 18 Index Scan using embeddings_cosine",
-      "headSha": "95693430d97d",
-      "negativeControl": "pg_upgrade --check against a checksummed 18: exit 1 'old cluster does not use data checksums but the new one does'; against 18 without pgvector: exit 1, could not load library \"$libdir/vector\""
-    },
-    {
-      "criterion": "The component test expects POSTGRES_18 when databaseVersion is unset, and the given value when it is set (spec acceptance 1, P1)",
-      "surface": "envoy-infra gcp:Dispatch unit tests on Pulumi mocks",
-      "command": "cd packages/envoy/infra && go test ./gcp/ -count=1 -run 'TestDispatchSettingsApplyDefaults|TestDispatchInstanceRunsTheDatabaseVersion' -v",
-      "observed": "TestDispatchSettingsApplyDefaults, TestDispatchInstanceRunsTheDatabaseVersion/unset and /POSTGRES_16 PASS",
-      "headSha": "95693430d97d",
-      "negativeControl": "copy of the module (replace -> this head's packages/envoy) with defaultDispatchDatabaseVersion = \"POSTGRES_16\": both tests FAIL 'expected: \"POSTGRES_18\" actual: \"POSTGRES_16\"'"
-    },
-    {
-      "criterion": "Dispatch's dev Postgres runs pgvector on 18 and its printed dump-and-restore moves a migrated 16 Dispatch database onto 18 (spec bullet 2, P2/P3)",
-      "surface": "dev-postgres.sh against its fake docker; the SQL half on PGDG 16 and 18 clusters with this head's server",
-      "command": "cd packages/envoy && bash scripts/dev-postgres.test.sh && bash scripts/dev-broker.test.sh; NEW=dispatch-head2 bash $TMPDIR/infra571-test/p3.sh (log p3-run2.log)",
-      "observed": "8/8 dev-postgres cases PASS with the merged run flags (--cpus 2 --memory 2g) in the created container and the printed sequence; every dev-broker case PASS; 16 pg_dumpall restored into 18 with only 'current user cannot be dropped' and 'role \"postgres\" already exists', 120 migrations, head boot on 18 applied 0, dispatch read PTHREE-1 returns its title. Round 1 ran the printed in-container commands across the two real images in one pod; those commands are unchanged by the merge",
-      "headSha": "95693430d97d",
-      "negativeControl": "the same dump restored into 18 without pgvector: 'extension \"vector\" is not available', no vector extension, no embeddings table"
-    },
-    {
-      "criterion": "The pinned pgvector-on-18 image starts with its data mount at /var/lib/postgresql and refuses /var/lib/postgresql/data (CI service, testpg's tmpfs and every moved mount, P4)",
-      "surface": "Kubernetes Jobs in the builds namespace (gVisor, emptyDir medium Memory), image mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11",
-      "command": "kubectl create -f $TMPDIR/infra571-test/p4/job2-positive.yaml / job2-negative.yaml; kubectl logs; kubectl delete jobs -l infra571-tester-run=<run>",
-      "observed": "positive Succeeded: PostgreSQL 18.6, 180006|0.8.7, create extension vector 0.8.7, data directory /var/lib/postgresql/18/docker; both Jobs deleted",
-      "headSha": "95693430d97d",
-      "negativeControl": "mount at /var/lib/postgresql/data: 'Error: in 18+, these Docker images are configured to store database data in a … /var/lib/postgresql/data (unused mount/volume)', entrypoint exit 1, pod Failed"
-    },
-    {
-      "criterion": "pgmigrate reads SQL as Postgres 18 does (vertical tab as space)",
-      "surface": "real PGDG 16.15/18.6 through psql; pgmigrate's readers",
-      "command": "round 1 at 0fa111cd: printf 'select\\v1…' into psql 16 and 18, and each of the three edits reverted in turn; round 2: go test ./internal/pgmigrate/ -count=1 at this head (git diff e8df9ab0..95693430 touches no pgmigrate file)",
-      "observed": "16 syntax error, 18 returns 1 and 'ab'; each revert fails its named test; at this head the package is ok",
-      "headSha": "95693430d97d",
-      "negativeControl": "isSQLSpace without \\v fails TestTouchedTablesReadsVerticalTabAsSpace and TestLoadReadsAVerticalTabInACensusAsSpace; quoteContinues on [ \\t\\f] fails the vertical-tab continuation case"
+      "criterion": "dev-postgres.sh's printed move lets a person verify the restore before `docker rm -v` deletes the old container and its data (review round 1 minor finding dev-postgres.sh:71,83-84: 'make one check read the restored data before the removal steps'; spec bullet 2's dev Postgres)",
+      "evidence": "The added check compares the database listing (select datname from pg_database where not datistemplate). The new container's run flags set POSTGRES_DB=dispatch, so it already lists dispatch and postgres, which is exactly what a dispatch-pg made by every earlier version of the script holds. Real surface: Kubernetes Job (gVisor, builds namespace). Init container: old pgvector-on-16 image with POSTGRES_DB=dispatch and 25 rows in dispatch.issues; the printed listing prints dispatch/postgres; the printed redirect around a dump that fails (pg_dumpall -h /nonexistent-socket-dir: 'connection to server ... failed', exit 1) leaves 0 bytes. Main container: pinned 18 image with POSTGRES_DB=dispatch; the printed restore of that file runs with no error; the printed listing prints dispatch/postgres, identical; the printed checks print 1 and 180006; the restored dispatch holds 0 public tables. The sequence's next line is `docker rm -v dispatch-pg-<id>`. Positive control: the same Job with a whole dump gives identical listings and 1 public table. Red test: packages/envoy/scripts/dev-postgres.test.sh at commit 4cbf4534, case 'the checks printed before `docker rm -v` tell a restore of an empty dump from a whole one'. It replays the printed lines through a fake docker on two real PostgreSQL clusters, with the dump failing in one replay. Run: cd packages/envoy && (PostgreSQL server binaries on PATH, or under /usr/lib/postgresql/*/bin as on GitHub's ubuntu runners) bash scripts/dev-postgres.test.sh -> 'FAIL: the checks printed before `docker rm -v` print the same after a restore of an empty dump as after a whole one' with 'dispatch postgres 1 180006' both times, after the sanity check that the whole dump restored 25 rows and the empty one none. Adding one printed check that reads dispatch's tables (select count(*) from pg_class where relkind = 'r' and relnamespace = 'public'::regnamespace, run with -d dispatch) turns it PASS, tried locally and reverted. Without server binaries the case prints SKIP. [INFERENCE] GitHub's ubuntu-24.04 image ships /usr/lib/postgresql/16/bin/initdb, so envoy-go runs the case; confirm on the run."
     }
-  ]
+  ],
+  "failed": 1,
+  "ci": "At e365a3b4 (2026-10-27T06:53Z) build, lint, typecheck, test, changes and 'Daemon Go suite on production's Postgres 16 (until INFRA-572)' were queued; not waited for. CI at 95693430 was cancelled when the next push arrived. The CI acceptance (service 1806xx|0.8.7, the Go suite green, and now the three Postgres 16 lanes) is still to be read on GitHub at the next code head."
 }
