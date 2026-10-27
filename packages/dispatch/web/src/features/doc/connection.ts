@@ -150,10 +150,10 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
       parameters: { schema_version: callbacks.schemaVersion },
       url: wsUrl(artifactId),
     });
-    // Every admission waits for its own socket's authentication and SyncStep2 alike. A writable
-    // one restores the rows other tabs stored, judging each against this document; before the
-    // reconnect's sync applies, the document lacks what the server took meanwhile, so a row that
-    // builds on it would look as if it were typed against a rebuilt history and be dropped.
+    // Every admission's restore waits for its own socket's authentication and SyncStep2 alike. A
+    // writable one restores the rows other tabs stored, judging each against this document; before
+    // the reconnect's sync applies, the document lacks what the server took meanwhile, so a row
+    // that builds on it would look as if it were typed against a rebuilt history and be dropped.
     const notifyAdmitted = () => {
       if (!synced || !authenticated || admitted) {
         return;
@@ -161,8 +161,8 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
       admitted = true;
       const readOnly = isSchemaReadOnly(provider.authorizedScope);
       if (announced) {
-        // A reconnect's admission can differ from the first one (an issue reopened or closed
-        // since), and the pending sync decides from it whether a local update is an edit to keep.
+        // A reconnect's admission can differ from the last synced one (an issue reopened or closed
+        // since), and the pending sync decides from it what the stored rows need.
         void sync?.admitted(readOnly).catch((error: unknown) => {
           console.error("Could not take this document's new admission", error);
         });
@@ -185,7 +185,11 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
       name: artifactId,
       onAuthenticated: () => {
         authenticated = true;
-        callbacks.onAdmission(isSchemaReadOnly(provider.authorizedScope));
+        const readOnly = isSchemaReadOnly(provider.authorizedScope);
+        // The editor takes or refuses typing from here on, before the socket's sync applies, so the
+        // pending sync stores what is typed from here on too; restoring the rows waits for the sync.
+        sync?.authenticated(readOnly);
+        callbacks.onAdmission(readOnly);
         notifyAdmitted();
       },
       onClose: ({ event }) => {

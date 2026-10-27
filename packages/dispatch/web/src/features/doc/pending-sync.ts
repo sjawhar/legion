@@ -26,16 +26,25 @@ export interface PendingSync {
   /** Pairs an incoming SyncStatus frame with the next counted sent frame. */
   frameReceived(frame: Uint8Array): Promise<void>;
   /**
+   * Takes a socket's admission as it authenticates, before its sync applies: the editor takes or
+   * refuses typing from then on, so whether it is read-only decides from then on whether a local
+   * update is a person's edit to store. One that makes a read-only connection writable stores the
+   * local updates the read-only admission held back, ahead of what is typed next. Restoring and
+   * pruning the stored rows waits for the sync.
+   */
+  authenticated(readOnly: boolean): void;
+  /**
    * Restores prior-page rows after this admission's initial sync. A read-only admission restores
-   * none, records no local update and drops the stored rows that change nothing.
+   * none, stores no local update, keeping each in memory only until a writable admission, and
+   * drops the stored rows that change nothing.
    */
   firstSync(readOnly: boolean): Promise<void>;
   /**
-   * Takes a later admission of the same connection, once the reconnect's sync has applied: whether
-   * it is read-only decides from then on whether a local update is a person's edit to store. One
+   * Takes a later admission of the same connection, once the reconnect's sync has applied. One
    * that makes a read-only connection writable restores the stored rows as a writable first sync
    * does, since the first sync left them for a writable admission to send; it judges each row
-   * against this document, so a row that builds on what the server took meanwhile applies.
+   * against this document, so a row that builds on what the server took meanwhile applies. One
+   * that makes a writable connection read-only drops the stored rows that change nothing.
    */
   admitted(readOnly: boolean): Promise<void>;
   destroy(): void;
@@ -223,7 +232,19 @@ export function startPendingSync({
   store,
 }: PendingSyncOptions): PendingSync {
   let destroyed = false;
+  // Whether the current socket's admission is read-only, from its authentication on.
   let readOnly = false;
+  // The local updates this tab's editor made while its admission was read-only, in order. None is a
+  // person's edit, so none is stored while the admission stays read-only and a page that only
+  // loads names no unsent edit. Each is a struct of this tab's client the server refused, though,
+  // and once the admission turns writable what the person types continues that client's clock and
+  // builds on them: they are stored then, ahead of the typing, so a restore applies every row of
+  // this client in order instead of parking the typing for want of the first ones.
+  let heldWhileReadOnly: Uint8Array[] = [];
+  // Whether the last admission whose sync applied was read-only: the stored rows were restored or
+  // pruned for it. The authentication of a later socket sets `readOnly` before its sync applies,
+  // so only this says whether that later admission changes what the stored rows need.
+  let syncedReadOnly: boolean | undefined;
   let rebuiltAt: number | undefined;
   let lastState: PendingState | undefined;
   let nextOrdinal = 0;
@@ -244,6 +265,7 @@ export function startPendingSync({
       if (!storageAvailable) {
         recorded = [];
         sent = [];
+        heldWhileReadOnly = [];
       }
       return edits;
     });
@@ -380,15 +402,31 @@ export function startPendingSync({
     // A read-only admission's editor takes no typing, so a local update it makes is one the editor
     // derives from the document as loaded - Milkdown stamps each heading's id from its text, for
     // one - which the server refuses and the next load derives again: no edit of a person's to
-    // keep. What it derived can make a row an earlier load stored the same way change nothing, so
-    // the stored rows are judged again.
+    // store unless this admission turns writable (heldWhileReadOnly). What it derived can make a
+    // row an earlier load stored the same way change nothing, so the stored rows are judged again.
     if (readOnly) {
+      heldWhileReadOnly.push(update);
       void dropRedundantRows();
       return;
     }
     record(update);
   };
   doc.on("update", onUpdate);
+
+  // Takes whether the admission is read-only. Turning writable stores the held updates before any
+  // typing, and before the socket's SyncStep2 is written, so that frame's acknowledgement, which
+  // covers every row recorded before it, clears them: that SyncStep2 is what carries them to the
+  // server.
+  const takeAdmission = (nextReadOnly: boolean): void => {
+    if (readOnly && !nextReadOnly) {
+      const held = heldWhileReadOnly;
+      heldWhileReadOnly = [];
+      for (const update of held) {
+        record(update);
+      }
+    }
+    readOnly = nextReadOnly;
+  };
 
   const clearUpdate = async (frame: SentFrame & { kind: "update" }): Promise<void> => {
     const edits = await ready;
@@ -446,11 +484,12 @@ export function startPendingSync({
 
   void report();
 
-  // An admission of this connection, first or later: it decides whether a local update is a
-  // person's edit to store (onUpdate), and a writable one restores the rows other tabs and earlier
-  // pages left.
+  // An admission of this connection, first or later, once its sync has applied: it decides whether
+  // a local update is a person's edit to store (onUpdate), as the socket's authentication already
+  // did, and a writable one restores the rows other tabs and earlier pages left.
   const admit = async (nextReadOnly: boolean): Promise<void> => {
-    readOnly = nextReadOnly;
+    takeAdmission(nextReadOnly);
+    syncedReadOnly = nextReadOnly;
     const edits = await ready;
     if (destroyed || edits === undefined) {
       await report();
@@ -571,9 +610,10 @@ export function startPendingSync({
         console.error("Could not clear an acknowledged pending document edit", error);
       }
     },
+    authenticated: takeAdmission,
     firstSync: admit,
     async admitted(nextReadOnly) {
-      if (nextReadOnly !== readOnly) {
+      if (nextReadOnly !== syncedReadOnly) {
         await admit(nextReadOnly);
       }
     },
@@ -582,6 +622,7 @@ export function startPendingSync({
         return;
       }
       destroyed = true;
+      heldWhileReadOnly = [];
       doc.off("update", onUpdate);
       void ready.then((edits) => edits?.close());
     },

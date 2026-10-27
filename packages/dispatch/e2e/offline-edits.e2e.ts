@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { createIssue, createProject, getArtifactText, patchIssue } from "./api";
-import { connectedDot, documentTransport, typeAtEnd } from "./editor";
+import { connectedDot, documentEditor, documentTransport, typeAtEnd } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -185,6 +185,49 @@ test("read-only admission preserves edits until a later read-write reload", asyn
 
     await patchIssue(issue.key, { status: "backlog" });
     await page.reload();
+    await expect
+      .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+      .toContain(paragraph);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("an edit typed after a reopened issue's reconnect authenticates and before it syncs survives a reload", async ({
+  browser,
+}) => {
+  // The spec opens with a heading: the read-only page's editor stamps the heading's id as it loads,
+  // an update of this page's own client that the server refuses, and the typing that follows
+  // continues that client's clock, so its rows apply on a reload only after the stamp's.
+  const issue = await makeIssue();
+  await patchIssue(issue.key, { status: "done" });
+  const alice = await asUser(browser, "alice");
+  const paragraph = "typed before the reconnect syncs";
+  try {
+    const page = await alice.newPage();
+    const transport = await documentTransport(page);
+    await page.goto(`/issues/${issue.key}/spec`);
+    await expect(connectedDot(page)).toHaveText("connected");
+    const editor = documentEditor(page);
+    await expect(editor).toHaveAttribute("contenteditable", "false");
+
+    // The issue reopens while the page is open. Its socket stays admitted read-only until the
+    // connection drops; the reconnect is admitted writable and, held here, never syncs.
+    await patchIssue(issue.key, { status: "backlog" });
+    await expect(page.getByText("This issue is closed. Its document is read-only.")).toBeHidden();
+    transport.admitWithoutSync();
+    await transport.sever();
+    await expect(editor).toHaveAttribute("contenteditable", "true");
+    await typeAtEnd(page, paragraph);
+    await waitForPersistedTyping(page, issue.primary_artifact_id, paragraph);
+
+    transport.hold();
+    await transport.sever();
+    await page.reload();
+    await expect(
+      page.getByRole("status", { name: /edit(?:s)? saved in this browser, not sent yet/u })
+    ).toBeVisible();
+    await transport.release();
     await expect
       .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
       .toContain(paragraph);
