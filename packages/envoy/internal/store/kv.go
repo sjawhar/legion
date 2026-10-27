@@ -552,10 +552,10 @@ func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {
 // without writing when the merge changes nothing but UpdatedAt and the row is younger than
 // InterestRefreshAge. An unchanged row is thus rewritten once per InterestRefreshAge, its UpdatedAt
 // lags the session's last heartbeat by less than that, and Reap adds InterestRefreshAge to its grace
-// window, so a paused session keeps its interests as long as it did when every heartbeat wrote the
-// row. A changed row, or one whose read failed, is handled as before: written, or refused. The
-// session row (session.SessionRegistry.Put) is still written on every heartbeat: its bucket's
-// MaxAge is the liveness clock, and NATS connect notices ($SYS) are not available to replace it.
+// window, so that lag never shortens a paused session's grace. A changed row is written, and so is
+// a record it cannot decode; any other failed read refuses the write (mergeForUpsert). The session
+// row (session.SessionRegistry.Put) is written on every heartbeat: its bucket's MaxAge is the
+// liveness clock, and NATS connect notices ($SYS) are not available to replace it.
 func (r *Registry) UpsertWithin(ctx context.Context, item Interest, topics []string) (Interest, error) {
 	cur, getErr := r.Get(ctx, item.SessionID)
 	now := r.now().UnixMilli()
@@ -1126,10 +1126,9 @@ const (
 	InterestRefreshAge = 5 * time.Minute
 )
 
-// reapCandidate is one cached interest as Reap's snapshot saw it.
+// reapCandidate is one cached interest past the allowance as Reap's snapshot saw it.
 type reapCandidate struct {
 	sessionID string
-	updatedAt int64
 	revision  uint64
 }
 
@@ -1141,21 +1140,24 @@ type reapCandidate struct {
 // listener restart, and the role delivery path drops it if that holder never
 // becomes live again.
 //
-// It copies every cached interest's session id, UpdatedAt and cache revision under
-// the read lock and then releases it, so isAlive and the grace check run with no
-// interest lock held and a heartbeat's Upsert never waits on a pass. Before it deletes
-// a candidate it reads it again and skips it when its revision changed or it is now
-// within grace, and it deletes at exactly the revision it checked, so a write that
-// lands after that check is kept: the delete fails with JetStream's wrong last
+// Under the read lock it copies the session id and cache revision of every cached
+// interest past that allowance, and then releases it, so isAlive runs with no interest
+// lock held and a heartbeat's Upsert never waits on a pass. Before it deletes a
+// candidate it reads it again and skips it when its revision changed or it is now
+// within the allowance, and it deletes at exactly the revision it checked, so a write
+// that lands after that check is kept: the delete fails with JetStream's wrong last
 // sequence (10071, nats.ErrKeyExists), and the candidate counts as skipped.
 func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (int, error) {
 	now := r.now().UnixMilli()
 	allowanceMs := graceWindow.Milliseconds() + InterestRefreshAge.Milliseconds()
 
 	r.mu.RLock()
-	candidates := make([]reapCandidate, 0, len(r.cache))
+	var candidates []reapCandidate
 	for sid, item := range r.cache {
-		candidates = append(candidates, reapCandidate{sessionID: sid, updatedAt: item.UpdatedAt, revision: r.cacheRevisions[sid]})
+		if now-item.UpdatedAt <= allowanceMs {
+			continue // within grace window plus refresh age
+		}
+		candidates = append(candidates, reapCandidate{sessionID: sid, revision: r.cacheRevisions[sid]})
 	}
 	r.mu.RUnlock()
 
@@ -1164,9 +1166,6 @@ func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (i
 		sid := candidate.sessionID
 		if isAlive(sid) {
 			continue // session still alive
-		}
-		if now-candidate.updatedAt <= allowanceMs {
-			continue // within grace window plus refresh age
 		}
 		r.mu.RLock()
 		item, cached := r.cache[sid]

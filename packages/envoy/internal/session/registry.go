@@ -178,7 +178,6 @@ func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*Se
 // still alive. It uses kv.Status() (one round-trip) so /healthz and the
 // self-health monitor stay fast — they must never iterate keys. A dead watcher
 // is reported so /healthz exposes the stale cache while NATS reconnects.
-// Expired last-seen timestamps leave at their own deadlines (expireDue), not here.
 func (r *SessionRegistry) Ping() error {
 	if err := r.watcher.Check(); err != nil {
 		return err
@@ -399,8 +398,8 @@ func (r *SessionRegistry) LastSeen(sessionID string) int64 {
 		if !cs.expired(now) {
 			return 0
 		}
-		if r.ttl > 0 && cs.entry.UpdatedAt > 0 && now.Before(cs.expiresAt.Add(r.ttl)) {
-			return cs.entry.UpdatedAt
+		if seen, ok := r.lastSeenRecord(cs.entry.UpdatedAt, cs.expiresAt); ok && !seen.expired(now) {
+			return seen.lastSeen
 		}
 	}
 	seen, ok := r.lastSeen[sessionID]
@@ -533,14 +532,23 @@ func (r *SessionRegistry) evictCachedSessionLocked(sessionID string, revision ui
 // retainLastSeenLocked records lastSeen as sessionID's final heartbeat until one TTL after left,
 // the time the session left the cache. Callers must hold r.mu for writing.
 func (r *SessionRegistry) retainLastSeenLocked(sessionID string, lastSeen int64, left time.Time) {
-	if r.ttl <= 0 || lastSeen <= 0 {
+	seen, ok := r.lastSeenRecord(lastSeen, left)
+	if !ok {
 		return
 	}
 	if r.lastSeen == nil {
 		r.lastSeen = map[string]lastSeenSession{}
 	}
-	r.lastSeen[sessionID] = lastSeenSession{
-		lastSeen:  lastSeen,
-		expiresAt: left.Add(r.ttl),
+	r.lastSeen[sessionID] = seen
+}
+
+// lastSeenRecord is the record a session whose final heartbeat was lastSeen keeps for one TTL
+// after it left the cache at left, or false when none is kept (no TTL, or no heartbeat time).
+// LastSeen answers an expired entry still in the cache from the same record, so it answers the
+// same before and after the entry's removal.
+func (r *SessionRegistry) lastSeenRecord(lastSeen int64, left time.Time) (lastSeenSession, bool) {
+	if r.ttl <= 0 || lastSeen <= 0 {
+		return lastSeenSession{}, false
 	}
+	return lastSeenSession{lastSeen: lastSeen, expiresAt: left.Add(r.ttl)}, true
 }

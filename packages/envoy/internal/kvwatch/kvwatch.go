@@ -42,7 +42,7 @@ type Watcher struct {
 
 	// The point a Rewatch resumes from (resumeFrom), each written only under applyMu and read
 	// without it, so a watch reads them while an apply is still running (it waits for applyMu only
-	// at its switch, as before). hw is the largest revision the current generation's watcher
+	// at its switch). hw is the largest revision the current generation's watcher
 	// applied, delete and purge markers included; the revisions the stores' own writes return
 	// never reach it, since those go to the cache without passing through here. A resumed
 	// generation starts from the previous one's hw, and a full read from 0, so it is the largest
@@ -513,7 +513,7 @@ func (w *Watcher) watch(kv bus.KeyValue, conn *nats.Conn, replacing uint64) erro
 		w.applyMu.Lock()
 		w.mu.Lock()
 		if w.stopped {
-			// Stop ran while WatchAll was starting. Stopping this watcher here would be a server
+			// Stop ran while its watcher was starting. Stopping this watcher here would be a server
 			// request outside the drain's deadline, so it is kept for End, which runs within it;
 			// until then it is read and dropped, since a drain waits for every pending message to
 			// be delivered. Once End has taken the retired watchers, which it does only after this
