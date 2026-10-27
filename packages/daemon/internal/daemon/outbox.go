@@ -1261,13 +1261,17 @@ func (r *outbox) seedGate(ctx context.Context, row record.OutboxRow, payload rec
 	// there, the gate opens at it; changes requested on it, the gate closes with the reason, which
 	// tells the architect unless the gate already records that review as told; otherwise a later
 	// version still moves the gate to it, closed. A review carries its place in the issue's Dispatch
-	// event log (Seq, At), which identifies it in the told record and names it in the fact's id, so a
-	// second registration of one version in one generation, whose seed reads a newer review, is not
-	// dropped as the first seed's. A document Dispatch shows below the version the seed was queued
-	// at has a gate above any version Dispatch wrote (a daemon that registered the caller's version
-	// unchecked could record one), so the seed resets the gate to Dispatch's version with what it
-	// read there (intake.GateAboveDispatch).
-	fact := intake.DispatchArtifact{Key: row.Issue, ArtifactID: payload.ArtifactID, Kind: intake.DispatchArtifactVersion, Version: approval.LatestVersion}
+	// event log (Seq, At), which identifies it in the told record, places it against a root's wait,
+	// and names it in the fact's id, so a second registration of one version in one generation,
+	// whose seed reads a newer review, is not dropped as the first seed's. A version carries no
+	// place; it says instead whether the read showed the approval request waiting on the agent
+	// (RequestWaitsOnAgent), as a newer version leaves it, which is what lets it answer a root
+	// waiting on its gate. A document Dispatch shows below the version the seed was queued at has a
+	// gate above any version Dispatch wrote (a daemon that registered the caller's version unchecked
+	// could record one), so the seed resets the gate to Dispatch's version with what it read there
+	// (intake.GateAboveDispatch).
+	fact := intake.DispatchArtifact{Key: row.Issue, ArtifactID: payload.ArtifactID, Kind: intake.DispatchArtifactVersion, Version: approval.LatestVersion,
+		RequestWaitsOnAgent: approval.AskID != "" && approval.WaitingOn == "agent"}
 	review := record.EventMark{Seq: approval.Seq, At: approval.At}
 	changes, reason := approval.ChangesRequestedLatest()
 	switch {
@@ -1286,6 +1290,12 @@ func (r *outbox) seedGate(ctx context.Context, row record.OutboxRow, payload rec
 		return nil
 	}
 	id := fmt.Sprintf("gate-seed:%s:%d:%s:%s:%d:%d", row.Issue, payload.Generation, payload.ArtifactID, fact.Kind, fact.Version, fact.Mark.ID())
+	// A version fact carries no mark, so its id also says whether the read showed the request with
+	// the agent: a later seed of the same version that finds it moved there is another fact, not a
+	// duplicate of one that answered nothing.
+	if fact.Kind == intake.DispatchArtifactVersion && fact.RequestWaitsOnAgent {
+		id += ":with-agent"
+	}
 	_, err = intake.ApplyFact(ctx, r.pool, "outbox", id, fact, r.handlers...)
 	if err != nil {
 		return fmt.Errorf("apply approved gate seed for %s: %w", row.Issue, err)
