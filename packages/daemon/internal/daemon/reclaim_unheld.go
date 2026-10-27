@@ -26,21 +26,35 @@ const (
 	// held messages retry on the outbox backoff and reach a slot once the stagger and the cap allow it.
 	// At this interval ~212 claims start over ~50 minutes, steadily, rather than at once.
 	reclaimMinInterval = 15 * time.Second
-	// maxReclaimAttempts bounds how many times the daemon relaunches one claim to re-claim its role
-	// before it gives up and logs once. A role another live session holds makes a soft boot claim (the
-	// claude backend's) throw on boot, so relaunching forever would burn the death budget invisibly;
-	// after the bound the role stays unheld until the pane claims it itself or an operator retries, and
-	// the give-up names the claim so the stuck role is diagnosable.
+	// maxReclaimAttempts bounds how many times the daemon relaunches one claim within one incident
+	// before it gives up and logs once. A pane that boots but still cannot take its messages — a role
+	// another live session holds makes a soft boot claim (the claude backend's) throw, and a registered
+	// session whose process drops its forwards keeps failing them — would otherwise be relaunched for
+	// every notice; after the bound the role stays unheld until the pane is seen taking its messages
+	// again (reclaimHealedAfter) or an operator retries it, and the give-up names the claim.
 	maxReclaimAttempts = 3
+	// reclaimHealedAfter is how long a claim must take accepted publishes with no failed forward
+	// reported before the daemon counts the pane healed and forgets its reclaim history, so a later,
+	// independent loss starts with fresh attempts. An accepted publish alone proves nothing: the
+	// listener accepts a publish for a session that is still registered and forwards it, and only after
+	// its receipt window (about two seconds, longer while forwards queue on the role lane) reports
+	// whether the pane took it (notice_exceptions.go) — the delivery-exception lane exists because a
+	// deaf pane's stale registration keeps accepting. A minute of accepted publishes with no failed
+	// forward is evidence the pane itself takes its messages.
+	reclaimHealedAfter = time.Minute
 )
 
-// reclaimTry is one claim's reclaim history in the limiter: how many times it has been relaunched,
-// the earliest its next relaunch may start (its own backoff), and whether the daemon has given up on
-// it and logged so.
+// reclaimTry is one claim's reclaim history in the limiter, for the incident in progress: how many
+// times it has been relaunched, the earliest its next relaunch may start (its own backoff), whether
+// the daemon has given up on it and logged so, and deliveredAt — the first publish to it the listener
+// accepted since its last reclaim or failed forward, once its relaunch was done, zero when there has
+// been none. A failed forward zeroes deliveredAt; deliveredAt standing for reclaimHealedAfter ends the
+// incident (pruneReclaimLocked).
 type reclaimTry struct {
-	count  int
-	nextAt time.Time
-	gaveUp bool
+	count       int
+	nextAt      time.Time
+	gaveUp      bool
+	deliveredAt time.Time
 }
 
 // reclaimBackoff spaces one claim's bounded relaunches, longer each time, so a claim that keeps
@@ -105,9 +119,10 @@ func reclaimBooting(state supervise.ClaimState) bool {
 // worker roles must add a real holder check first; it is architect-only until then.
 //
 // The relaunch runs synchronously under the claim's machine, so the row can outlive its lease and be
-// re-run by the sweep; the in-flight and backoff accounting covers the whole relaunch so that cannot
-// double-relaunch — while it runs the claim is booting (this switch's default no-op), and once it
-// returns to ready the per-claim backoff rejects a re-trigger until the backoff elapses (admitReclaim).
+// re-run by the sweep; the limiter's accounting covers the whole relaunch so that cannot
+// double-relaunch — the claim holds its in-flight reservation from admission until its relaunch has
+// booted, a second reclaim of a claim already in flight is refused, and once it is back to ready the
+// per-claim backoff rejects a re-trigger until it elapses (admitReclaim).
 //
 // Both callers only reach it with "no live holder" already established for the pane they name, so it
 // never relaunches into a healthy holder: the publish path is in its ErrNoHolder branch (the listener
@@ -136,11 +151,7 @@ func (r *outbox) reclaimUnheldRunning(ctx context.Context, token claim.Token, tr
 		if !r.admitReclaim(token) {
 			return
 		}
-		if err := machine.Handle(ctx, supervise.RoleUnheld{Claim: token, Trigger: trigger}); err != nil {
-			r.releaseReclaim(token)
-			r.log.Warn("outbox could not relaunch a running-but-unheld pane to re-claim its role",
-				"claim", token, "trigger", trigger, "error", err)
-		}
+		r.relaunchUnheld(ctx, machine, token, trigger, view.Generation)
 	// case supervise.StateSuspended: an idle-suspended worker is resumed by rule (RequestRuleResume)
 	// here — another lane adds that branch.
 	default:
@@ -149,16 +160,45 @@ func (r *outbox) reclaimUnheldRunning(ctx context.Context, token claim.Token, tr
 	}
 }
 
+// relaunchUnheld hands an admitted reclaim to the claim's machine and settles its reservation by what
+// the machine did, read from the claim's generation, which every launch moves. A relaunch that started
+// keeps its slot, attempt and stagger, and its slot frees once the claim leaves the booting states
+// (pruneReclaimLocked). A reclaim that launched nothing is refunded as though it was never admitted
+// (releaseReclaim): the launch path refused it (a reserved tree cleanup, a store error), the table
+// ignored it because the claim left ready or idle after its view was read, or the claim still held a
+// suspension its runtime had refused at its turn's end, which the reclaim completes instead of
+// relaunching (replaceProcess's endHeld). A panic launches nothing as far as the limiter knows and is
+// refunded too, so it cannot strand a slot.
+func (r *outbox) relaunchUnheld(ctx context.Context, machine *supervise.Machine, token claim.Token, trigger string, before uint64) {
+	launched := false
+	defer func() { r.settleReclaim(token, launched) }()
+	err := machine.Handle(ctx, supervise.RoleUnheld{Claim: token, Trigger: trigger})
+	after := machine.View()
+	launched = after.Generation != before
+	switch {
+	case err != nil:
+		r.log.Warn("outbox could not relaunch a running-but-unheld pane to re-claim its role",
+			"claim", token, "trigger", trigger, "launched", launched, "error", err)
+	case !launched:
+		r.log.Info("outbox reclaim of a running-but-unheld pane launched nothing; its attempt is refunded",
+			"claim", token, "trigger", trigger, "state", after.State)
+	}
+}
+
 // admitReclaim decides whether to relaunch token now and, when it does, reserves an in-flight slot,
-// counts the attempt, and holds the fleet-wide stagger. It returns false — relaunch nothing — when
-// this claim's reclaim attempts are spent (logged once, so a role another live session holds is
-// visible instead of relaunched forever), when its own backoff or the fleet-wide stagger has not
-// elapsed, or when the daemon-wide in-flight cap is reached. A false is never a drop: the held message
-// retries on the outbox backoff and reaches a slot once one frees.
+// counts the attempt, starts a new incident clock (deliveredAt), and holds the fleet-wide stagger. It
+// returns false — relaunch nothing — when a relaunch of this claim is already reserved or booting,
+// when this claim's attempts for the incident are spent (logged once, so a pane that cannot take its
+// messages is visible instead of relaunched forever), when its own backoff or the fleet-wide stagger
+// has not elapsed, or when the daemon-wide in-flight cap is reached. A false is never a drop: the held
+// message retries on the outbox backoff and reaches a slot once one frees.
 func (r *outbox) admitReclaim(token claim.Token) bool {
 	r.reclaimMu.Lock()
 	defer r.reclaimMu.Unlock()
 	r.pruneReclaimLocked()
+	if _, inFlight := r.reclaimInFlight[token]; inFlight {
+		return false
+	}
 	try := r.reclaimTries[token]
 	if try.gaveUp {
 		return false
@@ -166,7 +206,7 @@ func (r *outbox) admitReclaim(token claim.Token) bool {
 	if try.count >= cmp.Or(r.reclaimTryCap, maxReclaimAttempts) {
 		try.gaveUp = true
 		r.setReclaimTryLocked(token, try)
-		r.log.Warn("outbox gave up relaunching a pane to re-claim its role; the role stays unheld until the pane claims it itself or an operator retries the claim",
+		r.log.Warn("outbox gave up relaunching a pane to re-claim its role; the role stays unheld until the pane is seen taking its messages again or an operator retries the claim",
 			"claim", token, "attempts", try.count)
 		return false
 	}
@@ -178,21 +218,35 @@ func (r *outbox) admitReclaim(token claim.Token) bool {
 		return false
 	}
 	if r.reclaimInFlight == nil {
-		r.reclaimInFlight = map[claim.Token]struct{}{}
+		r.reclaimInFlight = map[claim.Token]bool{}
 	}
-	r.reclaimInFlight[token] = struct{}{}
+	r.reclaimInFlight[token] = false
 	try.count++
 	try.nextAt = now.Add(reclaimBackoff(try.count))
+	try.deliveredAt = time.Time{}
 	r.setReclaimTryLocked(token, try)
 	r.reclaimNextAt = now.Add(cmp.Or(r.reclaimInterval, reclaimMinInterval))
 	return true
 }
 
-// releaseReclaim undoes an admitted reclaim whose relaunch the machine refused (a reserved tree
-// cleanup, a store error): the slot frees, the attempt is not counted — the relaunch never started —
-// the claim's backoff is cleared so its held message's next retry asks again at once, and the
-// fleet-wide stagger it reserved is rolled back so a relaunch that never started does not delay the
-// next, different claim by an interval.
+// settleReclaim records what an admitted reclaim did: one that launched hands its reservation to the
+// prune, which frees it once the claim has booted; one that launched nothing is refunded.
+func (r *outbox) settleReclaim(token claim.Token, launched bool) {
+	if !launched {
+		r.releaseReclaim(token)
+		return
+	}
+	r.reclaimMu.Lock()
+	defer r.reclaimMu.Unlock()
+	if _, ok := r.reclaimInFlight[token]; ok {
+		r.reclaimInFlight[token] = true
+	}
+}
+
+// releaseReclaim undoes an admitted reclaim that launched nothing: the slot frees, the attempt is not
+// counted, the claim's backoff is cleared so its held message's next retry asks again at once, and
+// the fleet-wide stagger it reserved is rolled back so a relaunch that never started does not delay
+// the next, different claim by an interval.
 func (r *outbox) releaseReclaim(token claim.Token) {
 	r.reclaimMu.Lock()
 	defer r.reclaimMu.Unlock()
@@ -213,32 +267,72 @@ func (r *outbox) setReclaimTryLocked(token claim.Token, try reclaimTry) {
 	r.reclaimTries[token] = try
 }
 
-// clearReclaim forgets a claim's reclaim history — its attempt count, backoff, and give-up — and
-// drops its in-flight slot. The notice executor calls it when a publish to the architect succeeds:
-// the role is held again, so this incident is over and a later, independent loss starts fresh.
-// Without it, separate fully-recovered incidents over a long-lived claim's life would accumulate
-// into a permanent give-up — the very recurrence this change exists to heal — and the map would grow
-// by one entry per claim ever reclaimed.
-func (r *outbox) clearReclaim(token claim.Token) {
+// noteReclaimDelivered records that the listener accepted a publish to token's architect. For a claim
+// in a reclaim incident whose relaunch is done (it has taken its role, and holds no in-flight
+// reservation), the first such publish starts the healing clock (deliveredAt). It forgets nothing by
+// itself and never frees a slot: a publish accepted while a relaunch still boots may have gone to the
+// stopped session's registration, and one accepted for a pane that drops its forwards is followed by a
+// failed-forward report (noteReclaimException). The history is forgotten only once deliveredAt has
+// stood for reclaimHealedAfter (pruneReclaimLocked).
+func (r *outbox) noteReclaimDelivered(token claim.Token) {
 	r.reclaimMu.Lock()
 	defer r.reclaimMu.Unlock()
-	delete(r.reclaimTries, token)
-	delete(r.reclaimInFlight, token)
+	if _, ok := r.reclaimTries[token]; !ok {
+		return
+	}
+	r.pruneReclaimLocked()
+	try, ok := r.reclaimTries[token]
+	if !ok || !try.deliveredAt.IsZero() {
+		return
+	}
+	if _, inFlight := r.reclaimInFlight[token]; inFlight || !claimTookRole(r.claimState(token)) {
+		return
+	}
+	try.deliveredAt = r.now()
+	r.reclaimTries[token] = try
 }
 
-// pruneReclaimLocked frees every in-flight claim whose relaunch has finished — it is prompted again,
-// or has failed, retired, or suspended — and forgets the reclaim history of a claim this daemon no
-// longer supervises or that has failed or retired, so the map stays bounded by the claims currently
-// in a reclaim cycle. View never waits on a decision in flight, so a claim mid-relaunch is read
-// without blocking (supervisedClaim).
+// noteReclaimException records that the listener reported a failed forward to token's architect: the
+// publishes it accepted before did not reach a pane that takes its messages, so the healing clock
+// stops and the incident goes on.
+func (r *outbox) noteReclaimException(token claim.Token) {
+	r.reclaimMu.Lock()
+	defer r.reclaimMu.Unlock()
+	try, ok := r.reclaimTries[token]
+	if !ok {
+		return
+	}
+	try.deliveredAt = time.Time{}
+	r.reclaimTries[token] = try
+}
+
+// pruneReclaimLocked frees every in-flight reservation whose relaunch has been handed to the machine
+// and has finished booting — the claim is prompted again, or has failed, retired, or suspended — and
+// forgets the reclaim history of a claim this daemon no longer supervises, has failed or retired, or
+// has healed (deliveredAt standing for reclaimHealedAfter with no reservation), so the map holds only
+// claims whose incident is still going on. A reservation whose relaunch has not yet been handed over
+// is kept whatever its claim reads: until the machine moves it to launching it still reads ready, and
+// freeing it then would let another reclaim past the cap. View never waits on a decision in flight,
+// so a claim mid-relaunch is read without blocking (supervisedClaim).
 func (r *outbox) pruneReclaimLocked() {
-	for token := range r.reclaimInFlight {
-		if !reclaimBooting(r.claimState(token)) {
+	for token, handed := range r.reclaimInFlight {
+		if handed && !reclaimBooting(r.claimState(token)) {
 			delete(r.reclaimInFlight, token)
 		}
 	}
-	for token := range r.reclaimTries {
+	if len(r.reclaimTries) == 0 {
+		return
+	}
+	now := r.now()
+	for token, try := range r.reclaimTries {
 		if claimEnded(r.claimState(token)) {
+			delete(r.reclaimTries, token)
+			continue
+		}
+		if _, inFlight := r.reclaimInFlight[token]; inFlight {
+			continue
+		}
+		if !try.deliveredAt.IsZero() && !now.Before(try.deliveredAt.Add(reclaimHealedAfter)) {
 			delete(r.reclaimTries, token)
 		}
 	}

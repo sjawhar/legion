@@ -64,12 +64,15 @@ func (m *Machine) replaceProcess(ctx context.Context, interruption string) error
 // pane's role topic has no Envoy holder (RoleUnheld), so the pane is relaunched on its session and
 // its claim boot re-claims the role. It is the uncharged relaunch repoint and refreshPlugin share
 // (replaceProcess): the pane did nothing wrong, its listener-side role claim was dropped under it.
-// The table reaches it only for a ready or idle claim, which holds no suspension (m.held nil) and
-// runs no turn, so replaceProcess goes straight to launch — a Resume of the recorded session; a
-// launch the tree lifecycle refuses (checkLaunch) leaves the claim as it is and is charged nothing
-// (launchAfter's relaunchRefused), and the caller logs it, so the held message's retry asks again.
+// The table reaches it only for a ready or idle claim, which runs no turn, so the turn's recovery
+// (interrupted) has nothing to do; replaceProcess then launches — a Resume of the recorded session —
+// unless the claim still holds a suspension, which an idle claim can when its runtime refused the
+// stop at its turn's end (turnEnded): that suspension is completed instead (endHeld) and nothing is
+// launched. A launch the tree lifecycle refuses (checkLaunch) leaves the claim as it is and is
+// charged nothing (launchAfter's relaunchRefused). The daemon's limiter reads the claim's generation
+// afterwards and refunds a reclaim that launched nothing (relaunchUnheld, internal/daemon).
 func reclaimRole(m *Machine, ctx context.Context, ev Event) error {
 	m.log.Warn("supervise: the pane's Envoy role has no holder; relaunching it on its session so its claim boot re-claims",
-		"trigger", ev.(RoleUnheld).Trigger, "state", m.claim.State, "session", m.claim.Session)
+		"trigger", ev.(RoleUnheld).Trigger, "state", m.claim.State, "session", m.claim.Session, "suspensionHeld", m.held != nil)
 	return m.replaceProcess(ctx, "the pane's lost Envoy role is re-claimed by relaunching it on its session")
 }

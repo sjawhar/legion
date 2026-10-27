@@ -137,6 +137,11 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	default:
 		return fmt.Errorf("%w: exception %s names reason %q", errNoticeException, envelope.EventID, exception.Reason)
 	}
+	// A failed forward to the architect means the publishes the listener accepted for it did not
+	// reach a pane that takes its messages, so any reclaim incident it is in goes on: its healing
+	// clock stops (reclaim_unheld.go, noteReclaimException). Recorded for every report, before the
+	// reclaim gate below, so an accepted copy that a failed forward follows never ends an incident.
+	r.noteReclaimException(reported.architect)
 	held := r.supervisedClaim(reported.architect)
 	if !holdsRole(held) {
 		lingers, err := r.issueTreeLingers(ctx, issue)

@@ -119,14 +119,15 @@ type outbox struct {
 	limitsMu sync.Mutex
 	limits   map[githubrest.Budget]rateLimit
 	// The running-but-unheld reclaim limiter (reclaim_unheld.go), guarded by reclaimMu: reclaimInFlight
-	// is each claim relaunched to re-claim a lost Envoy role that has not come back to a prompted
-	// state, reclaimTries is each claim's reclaim count, backoff and give-up, and reclaimNextAt is the
+	// is each claim admitted for a relaunch to re-claim a lost Envoy role that has not finished booting,
+	// true once the relaunch was handed to its machine; reclaimTries is each claim's history for the
+	// incident in progress (count, backoff, give-up, and the healing clock); and reclaimNextAt is the
 	// earliest the next relaunch of any claim may start (the fleet-wide stagger). reclaimCap bounds how
-	// many relaunch at once, reclaimTryCap how many times one claim is relaunched, and reclaimInterval
-	// the stagger; each zero takes its maxReclaimsInFlight/maxReclaimAttempts/reclaimMinInterval
-	// default, so a test can set small ones.
+	// many relaunch at once, reclaimTryCap how many times one claim is relaunched per incident, and
+	// reclaimInterval the stagger; each zero takes its maxReclaimsInFlight/maxReclaimAttempts/
+	// reclaimMinInterval default, so a test can set small ones.
 	reclaimMu       sync.Mutex
-	reclaimInFlight map[claim.Token]struct{}
+	reclaimInFlight map[claim.Token]bool
 	reclaimTries    map[claim.Token]reclaimTry
 	reclaimNextAt   time.Time
 	reclaimCap      int
@@ -699,10 +700,10 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	published := r.notices.Publish(ctx, notify.RoleTopicPrefix+string(architect), noticeSummary(payload.Kind, row.Issue), notice, key)
 	switch {
 	case published == nil:
-		// The role is held again, so any reclaim incident for this architect is over: forget its
-		// reclaim history, so a later independent loss starts with fresh attempts rather than
-		// accumulating toward a permanent give-up (reclaim_unheld.go, clearReclaim).
-		r.clearReclaim(architect)
+		// The listener accepted the publish, which starts the architect's healing clock if it is in
+		// a reclaim incident; accepted is not taken, so the incident ends only once no failed forward
+		// follows for reclaimHealedAfter (reclaim_unheld.go, noteReclaimDelivered).
+		r.noteReclaimDelivered(architect)
 		return nil
 	case !errors.Is(published, notify.ErrNoHolder):
 		return fmt.Errorf("publish notice for %s to its architect %s: %w", row.Issue, architect, published)
