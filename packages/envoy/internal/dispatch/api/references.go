@@ -31,12 +31,14 @@ func (s *server) replaceReferences(
 // getReferences reads one node's edges in the reference graph: ?to= lists every edge pointing
 // at the node (backlinks), ?from= every edge it writes; exactly one is required. ?kind= narrows
 // edge types and ?since= keeps mentions introduced after an events.id, which excludes
-// structural edges. Cross-project by design: no project filter.
+// structural edges. Cross-project by design: no project filter. A ?kind= this build does not
+// emit - a newer build's, during a release - has no edges here, and the answer lists it in
+// unknown_kinds rather than refusing the read.
 func (s *server) getReferences(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	query, ref, err := parseReferencesQuery(r, s.deps.ServerURL)
+	query, ref, unknownKinds, err := parseReferencesQuery(r, s.deps.ServerURL)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -60,10 +62,15 @@ func (s *server) getReferences(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, errorf(http.StatusNotFound, "NOT_FOUND", "no %s at %s", query.Kind, query.ID))
 		return
 	}
-	edges, err := refs.Edges(r.Context(), s.deps.Store.Pool, query)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
+	// When this build knows none of the kinds the caller named, no edge is of them; refs.Edges
+	// with no Kinds would read every kind.
+	edges := []model.GraphEdge{}
+	if len(query.Kinds) > 0 || len(unknownKinds) == 0 {
+		edges, err = refs.Edges(r.Context(), s.deps.Store.Pool, query)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
 	if query.Direction == "in" {
 		if err := s.documentMentionExcerpts(r.Context(), query, edges); err != nil {
@@ -71,17 +78,18 @@ func (s *server) getReferences(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	WriteJSON(w, http.StatusOK, model.GraphReferences{Node: node, Edges: edges})
+	WriteJSON(w, http.StatusOK, model.GraphReferences{Node: node, Edges: edges, UnknownKinds: unknownKinds})
 }
 
 // parseReferencesQuery turns ?to=|?from=, ?kind=, and ?since= into an edge query addressed the
 // way graph_edges stores the node: ToID for the to side (ref_key for artifacts), the item id
-// for the from side (the caller swaps an artifact's ref_key for its uuid).
-func parseReferencesQuery(r *http.Request, serverURL string) (refs.Query, text.Ref, error) {
+// for the from side (the caller swaps an artifact's ref_key for its uuid). It returns apart the
+// ?kind= values that are no edge kind of this build.
+func parseReferencesQuery(r *http.Request, serverURL string) (refs.Query, text.Ref, []string, error) {
 	values := r.URL.Query()
 	to, from := strings.TrimSpace(values.Get("to")), strings.TrimSpace(values.Get("from"))
 	if (to == "") == (from == "") {
-		return refs.Query{}, text.Ref{}, errorf(http.StatusBadRequest, "INVALID_REFERENCE", "exactly one of to or from is required")
+		return refs.Query{}, text.Ref{}, nil, errorf(http.StatusBadRequest, "INVALID_REFERENCE", "exactly one of to or from is required")
 	}
 	raw, direction := to, "in"
 	if from != "" {
@@ -89,15 +97,17 @@ func parseReferencesQuery(r *http.Request, serverURL string) (refs.Query, text.R
 	}
 	located := text.ExtractAt(raw, serverURL)
 	if len(located) != 1 || located[0].Offset != 0 || located[0].Kind == "url" {
-		return refs.Query{}, text.Ref{}, errorf(http.StatusBadRequest, "INVALID_REFERENCE", "%q is not a dispatch:// reference to an issue, document, ask, comment, message, or component", raw)
+		return refs.Query{}, text.Ref{}, nil, errorf(http.StatusBadRequest, "INVALID_REFERENCE", "%q is not a dispatch:// reference to an issue, document, ask, comment, message, or component", raw)
 	}
 	ref := located[0].Ref
 	query := refs.Query{Direction: direction, Kind: ref.Kind, ID: refs.ToID(ref)}
+	var unknownKinds []string
 	if kinds := strings.TrimSpace(values.Get("kind")); kinds != "" {
 		for _, kind := range strings.Split(kinds, ",") {
 			kind = strings.TrimSpace(kind)
 			if !refs.KnownKind(kind) {
-				return refs.Query{}, text.Ref{}, errorf(http.StatusBadRequest, "INVALID_KIND", "kind %q is not one of %s", kind, strings.Join(refs.Kinds, ", "))
+				unknownKinds = append(unknownKinds, kind)
+				continue
 			}
 			query.Kinds = append(query.Kinds, kind)
 		}
@@ -111,11 +121,11 @@ func parseReferencesQuery(r *http.Request, serverURL string) (refs.Query, text.R
 	if since := strings.TrimSpace(values.Get("since")); since != "" {
 		value, err := strconv.ParseInt(since, 10, 64)
 		if err != nil || value < 0 {
-			return refs.Query{}, text.Ref{}, errorf(http.StatusBadRequest, "INVALID_SINCE", "since must be an event id")
+			return refs.Query{}, text.Ref{}, nil, errorf(http.StatusBadRequest, "INVALID_SINCE", "since must be an event id")
 		}
 		query.Since = &value
 	}
-	return query, ref, nil
+	return query, ref, unknownKinds, nil
 }
 
 // documentMentionExcerpts replaces the excerpt of every mention written by a document with the

@@ -1394,10 +1394,13 @@ type GraphEdge struct {
 	SourceSeq *int64        `json:"source_seq"`
 }
 
-// GraphReferences is the read of one node's edges, newest first.
+// GraphReferences is the read of one node's edges, newest first. UnknownKinds lists the edge kinds
+// the read named that this build does not emit (a newer build's, during a release); it has no
+// edges of them.
 type GraphReferences struct {
-	Node  GraphNode   `json:"node"`
-	Edges []GraphEdge `json:"edges"`
+	Node         GraphNode   `json:"node"`
+	Edges        []GraphEdge `json:"edges"`
+	UnknownKinds []string    `json:"unknown_kinds,omitempty"`
 }
 
 // Event is the immutable event-log record for a Dispatch mutation.

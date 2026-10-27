@@ -320,13 +320,14 @@ reports to the agent, with the upload route weighed by the same rule.
 `pmdoc.Render` renders a document without its anchor marks, so an escape is decided over a whole run
 and `snake_case` never becomes `snake\_case` because a mark starts inside it; an anchored comment's
 or ask's `SnapshotVersion` compares that same rendering with the latest version's markdown, so
-marking a quote writes no version either - except at most once per document whose latest version an
-earlier server stored with markdown this server would render differently - an escape an anchor had
-split, whether one it did not need (`user\_id`) or one it was missing (`see [x](y)`, which parses
-back as a link), and, since #1326, a block marker in a paragraph line that now takes an escape
-(`## not a heading` renders `\## not a heading`), with or without an anchor in the document. The
-next snapshot of such a document writes today's rendering of that text, and when the stored version
-was approved it leaves the approval stale until a human approves the new one. A browser is credited
+marking a quote writes no version either. A latest version that another build stored with markdown
+this build renders differently - an escape an anchor had split, whether one it did not need
+(`user\_id`) or one it was missing, or, since #1326, a block marker in a paragraph line that now
+takes an escape (`## not a heading` renders `\## not a heading`) - writes no version either while
+no update since it changed the content and this build reads its markdown as the live rendering
+(`readsAs`), as settlement's `contentChangedSinceVersion` guard does (INFRA-558). The first version
+a content change writes holds today's rendering, and when the stored version was approved it
+leaves the approval stale until a human approves the new one. A browser is credited
 as a version's author only for browser edits made while it is connected (`creditContentChange`),
 another browser's as well as its own, since a browser edit cannot be pinned on one connected peer;
 opening a document or an agent's edit credits it nothing, so a reader whose editor changes nothing

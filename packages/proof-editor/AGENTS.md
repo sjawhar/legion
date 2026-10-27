@@ -45,7 +45,7 @@ not reach them:
 | `src/record-mark-target.ts` | Which mark a click or a hover in the document names: of the mark spans around the target, the record mark whose range is the smallest, the innermost span's among marks the same size, since which of two overlapping record marks nests inside the other follows the order they were made in (LEGION-458); it is also biome-checked |
 | `src/tests/harness.ts` | The `bun test` registration the copied suites call instead of their own `test()` tally |
 
-Fifteen kinds of edit are allowed in the copied files, and no others: the import specifiers of
+Sixteen kinds of edit are allowed in the copied files, and no others: the import specifiers of
 upstream modules; `bun test` registration in the suites (`src/tests/harness.ts` replaces each
 file's own `test()` tally and its `process.exit` tail); `src/tests/headless-no-dom.test.ts`,
 whose entry named the fork's built `dist/headless.js` and now names `../lib-headless.js` — its
@@ -77,12 +77,18 @@ so a click on text two record marks cover opens the narrower one (LEGION-458);
 `src/dispatch-action-bar.ts`'s Comment / Suggest / Ask buttons and its exported
 `commentOnSelection` taking one path, `ActionBarController.act`, which marks nothing for an empty
 or stale range or a read-only view, with `src/lib.ts` exposing `commentOnSelection` on the handle
-for Dispatch's `Ctrl+Alt+M` (LEGION-680); and annotations, casts and assertions that make a file
-type-check, each of which erases before runtime (below).
+for Dispatch's `Ctrl+Alt+M` (LEGION-680); `src/block-schema.ts` and
+`src/typed-block-commands.ts` reading the manifest's `since` and `creatable_since` (INFRA-558):
+the `BlockSchema` types name the manifest's nodes and marks and each element's numbers, a block
+the editor makes takes no default of an attribute that the editor may not create yet
+(`typedBlockSpec`'s `version`), and the commands offer, insert, retype into and write only the
+typed blocks, attributes and enum values the editor may create (`creatable`, `creatableValue`);
+and annotations, casts and assertions that make a file type-check, each of which erases before
+runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
 24a5fc94 root:src/<file>`; every file in the copied-files table has that counterpart, and the
-only lines that differ should be the fifteen kinds.
+only lines that differ should be the sixteen kinds.
 
 `scripts/`, `tests/` and `upstream/` are legion's own. `scripts/` and `tests/` are linted and
 type-checked like any other package's; `upstream/` is generated, and Biome is off over it the

@@ -688,8 +688,8 @@ func modelBlockPath(path pmdoc.BlockPath) model.BlockPath {
 	return out
 }
 
-// SnapshotVersion returns the current immutable version, adding an unnamed
-// version only when the live text has diverged since the previous one.
+// SnapshotVersion returns the current immutable version, adding an unnamed version only when the
+// live content has changed since the previous one.
 func (s *Service) SnapshotVersion(ctx context.Context, artifactID string, actor model.Actor) (VersionResult, error) {
 	tx, joined := txFromContext(ctx)
 	if !joined {
@@ -706,6 +706,18 @@ func (s *Service) SnapshotVersion(ctx context.Context, artifactID string, actor 
 	if latest.markdown == rendered.markdown {
 		return VersionResult{Version: latest.Version}, nil
 	}
+	// Another build may have rendered the latest version: during a release two builds serve one
+	// database, and their renderers can write one document differently. As settlement does, a
+	// snapshot writes no version when no update since the latest one changed the content
+	// (contentChangedSinceVersion). An edit the room holds that its persistence has not stored yet
+	// is in no update row, so the latest version's markdown must also read as this rendering.
+	changed, err := contentChangedSinceVersion(ctx, tx, artifactID, latest.docUpdateVersion)
+	if err != nil {
+		return VersionResult{}, err
+	}
+	if !changed && readsAs(latest.markdown, rendered.markdown) {
+		return VersionResult{Version: latest.Version}, nil
+	}
 	capture.authors[actorKey(actor)] = actor
 	result, err := s.writeVersionTx(ctx, tx, artifactID, rendered, actor, &versionWrite{
 		authors: actorSlice(capture.authors),
@@ -715,6 +727,17 @@ func (s *Service) SnapshotVersion(ctx context.Context, artifactID string, actor 
 		return VersionResult{}, err
 	}
 	return VersionResult{Version: result.version, Wrote: true, Changes: result.changes}, nil
+}
+
+// readsAs reports whether stored, a version's markdown that any build may have rendered, reads as
+// the document whose rendering is markdown: this build parses it and renders it as markdown.
+func readsAs(stored, markdown string) bool {
+	tree, err := pmdoc.ParseRendering(stored)
+	if err != nil {
+		return false
+	}
+	again, err := documentMarkdown(tree)
+	return err == nil && again == markdown
 }
 
 // prevalidateLiveOperations performs database-backed table-anchor checks

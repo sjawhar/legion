@@ -71,18 +71,20 @@ func ReplaceCounted(
 // longer mentioned are deleted, new ones inserted, and an edge that persists keeps its
 // created_at and source_seq. It returns the targets whose inbound edges moved — deleted or
 // inserted, oldest state first — so ReplaceCounted can resolve the ones whose readers carry a
-// batched backlink count.
+// batched backlink count. Only targets of a node kind this build knows (nodeKinds) are deleted:
+// during a release a newer build writes the same sources, and an edge to a node kind it added is
+// one this build cannot read out of the body, so it keeps that edge.
 func replace(ctx context.Context, tx pgx.Tx, fromKind, fromID, body, serverURL string) ([]Target, error) {
 	kinds, ids := targets(body, serverURL)
 	changed, err := scanTargets(tx.Query(ctx, `
 		delete from refs
-		where from_kind = $1 and from_id = $2
+		where from_kind = $1 and from_id = $2 and to_kind = any($5)
 		  and not exists (
 		    select 1 from unnest($3::text[], $4::text[]) as target(kind, id)
 		    where target.kind = refs.to_kind and target.id = refs.to_id
 		  )
 		returning to_kind, to_id
-	`, fromKind, fromID, kinds, ids))
+	`, fromKind, fromID, kinds, ids, nodeKinds))
 	if err != nil {
 		return nil, fmt.Errorf("clear references: %w", err)
 	}

@@ -33,20 +33,6 @@ var ErrSchema = errors.New("outside Proof schema")
 // inline HTML only.
 var ErrBlockHTML = fmt.Errorf("%w: block HTML is not accepted by Proof", ErrSchema)
 
-var nodeTypes = map[string]bool{
-	"doc": true, "paragraph": true, "heading": true, "blockquote": true, "bullet_list": true,
-	"ordered_list": true, "list_item": true, "code_block": true, "hr": true, "hardbreak": true,
-	"image": true, "html": true, "table": true, "table_header_row": true, "table_row": true,
-	"table_cell": true, "table_header": true, "footnote_definition": true,
-	"footnote_reference": true, "frontmatter": true, "text": true,
-}
-
-var markTypes = map[string]bool{
-	"strong": true, "emphasis": true, "inlineCode": true, "link": true, "strike_through": true,
-	"proofSuggestion": true, "proofComment": true, "proofFlagged": true, "proofApproved": true,
-	"proofAuthored": true, "dispatchAsk": true,
-}
-
 var yattrMarkSuffix = regexp.MustCompile(`^(.*)--[a-zA-Z0-9+/=]{8}$`)
 
 // sortMarks puts marks in one order whatever order they arrive in: by type, then, for two marks of
@@ -257,14 +243,8 @@ func validateTypedBlock(n *Node, typ BlockTypeSchema) error {
 			return fmt.Errorf("%w: typed block %q attribute %q: %v", ErrSchema, n.Type, name, err)
 		}
 	}
-	for name, definition := range typ.Attributes {
-		if definition.Default == nil {
-			continue
-		}
-		if _, present := n.Attrs[name]; !present {
-			return fmt.Errorf("%w: typed block %q is missing attribute %q", ErrSchema, n.Type, name)
-		}
-	}
+	// A block an earlier build wrote may lack an attribute added since: it reads with the
+	// attribute's default (writtenDefault), so the attribute is not required here.
 	return nil
 }
 

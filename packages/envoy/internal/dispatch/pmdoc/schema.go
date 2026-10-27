@@ -13,10 +13,24 @@ import (
 //go:embed schema/blocks.json
 var blockSchemaJSON []byte
 
-// BlockSchema describes the typed document nodes that every Dispatch client supports.
+// BlockSchema is the document schema manifest, schema/blocks.json, which this build embeds and GET
+// /api/v1/schema/blocks serves byte for byte: the nodes and marks of the Proof schema and the typed
+// blocks Dispatch adds to it. Every element of it - a node, a mark, a typed block, a typed block's
+// attribute, an enum attribute's choice - may say from which schema version a build reads it
+// (since) and from which a build may create it (creatable_since); both are 1 when it says neither
+// (ElementVersions). This build reads every element its manifest declares and creates those whose
+// creatable_since is at most Version (SchemaVersion).
 type BlockSchema struct {
 	Version int               `json:"version"`
+	Nodes   []ElementSchema   `json:"nodes"`
+	Marks   []ElementSchema   `json:"marks"`
 	Types   []BlockTypeSchema `json:"types"`
+}
+
+// ElementSchema is one node or mark of the Proof schema.
+type ElementSchema struct {
+	Name string `json:"name"`
+	ElementVersions
 }
 
 // BlockContentRule describes the block children a typed node may contain.
@@ -34,43 +48,24 @@ type BlockTypeSchema struct {
 	Content    BlockContentRule                `json:"content"`
 	Render     string                          `json:"render"`
 	Attributes map[string]BlockAttributeSchema `json:"attributes"`
+	ElementVersions
 }
 
-// BlockAttributeSchema describes a typed block attribute.
+// BlockAttributeSchema describes a typed block attribute. An enum's choices stay plain strings,
+// since the editors of earlier builds compare a value against them; ChoiceVersions holds a choice's
+// since and creatable_since, by choice, for each choice that has numbers other than 1.
 type BlockAttributeSchema struct {
-	Kind    string   `json:"kind"`
-	Choices []string `json:"choices,omitempty"`
-	Default any      `json:"default,omitempty"`
-	Server  bool     `json:"server,omitempty"`
-}
-
-var schema BlockSchema
-var schemaTypes map[string]BlockTypeSchema
-
-func init() {
-	if err := json.Unmarshal(blockSchemaJSON, &schema); err != nil {
-		panic(fmt.Sprintf("pmdoc: decode embedded block schema: %v", err))
-	}
-	if err := normalizeSchemaDefaults(&schema); err != nil {
-		panic(fmt.Sprintf("pmdoc: normalize embedded block schema: %v", err))
-	}
-	if err := validateBlockSchema(schema); err != nil {
-		panic(fmt.Sprintf("pmdoc: invalid embedded block schema: %v", err))
-	}
-	schemaTypes = make(map[string]BlockTypeSchema, len(schema.Types))
-	for _, typ := range schema.Types {
-		schemaTypes[typ.Name] = typ
-	}
+	Kind           string                     `json:"kind"`
+	Choices        []string                   `json:"choices,omitempty"`
+	Default        any                        `json:"default,omitempty"`
+	Server         bool                       `json:"server,omitempty"`
+	ChoiceVersions map[string]ElementVersions `json:"choice_versions,omitempty"`
+	ElementVersions
 }
 
 // SchemaJSON returns a copy of the canonical server-owned block schema JSON.
 func SchemaJSON() []byte {
 	return append([]byte(nil), blockSchemaJSON...)
-}
-
-// SchemaVersion returns the current schema version clients present during document admission.
-func SchemaVersion() int {
-	return schema.Version
 }
 
 // IsTypedBlock reports whether name is a typed block the schema declares.
@@ -272,11 +267,42 @@ func parseTypedAttributeValue(attr BlockAttributeSchema, raw any) (any, error) {
 	}
 }
 
+// defaultAttributes is the attributes a block of typ holds before it names any of its own: each
+// attribute's written default (writtenDefault).
 func defaultAttributes(typ BlockTypeSchema) Attrs {
 	attrs := make(Attrs, len(typ.Attributes))
 	for name, attr := range typ.Attributes {
-		if attr.Default != nil {
-			attrs[name] = cloneSchemaValue(attr.Default)
+		if value, ok := writtenDefault(typ, name, attr); ok {
+			attrs[name] = value
+		}
+	}
+	return attrs
+}
+
+// writtenDefault is the value of typ's attribute name, attr, for a block that does not hold it: its
+// default, and false when it has none or when this build may not create the attribute yet. A
+// block an earlier build wrote, before the attribute existed, reads with that default (readElement,
+// renderTypedAttributes), as the browser editor reads it. An attribute this build cannot create is
+// left out, so that no write of this build adds it.
+func writtenDefault(typ BlockTypeSchema, name string, attr BlockAttributeSchema) (any, bool) {
+	if attr.Default == nil || !creatable(Element{Kind: AttributeElement, Block: typ.Name, Name: name}) {
+		return nil, false
+	}
+	return cloneSchemaValue(attr.Default), true
+}
+
+// withWrittenDefaults is attrs, a typed block's attributes as a stored tree holds them, with the
+// written default of each attribute of typ that it does not hold. It adds to attrs in place.
+func withWrittenDefaults(typ BlockTypeSchema, attrs Attrs) Attrs {
+	for name, attr := range typ.Attributes {
+		if _, present := attrs[name]; present {
+			continue
+		}
+		if value, ok := writtenDefault(typ, name, attr); ok {
+			if attrs == nil {
+				attrs = make(Attrs, len(typ.Attributes))
+			}
+			attrs[name] = value
 		}
 	}
 	return attrs
@@ -304,11 +330,11 @@ func renderTypedAttributes(n *Node, typ BlockTypeSchema) (string, error) {
 			continue
 		}
 		value, present := n.Attrs[name]
+		if !present {
+			value, present = writtenDefault(typ, name, definition)
+		}
 		if !present || (value == nil && definition.Default == nil) {
-			if definition.Default == nil {
-				continue
-			}
-			return "", fmt.Errorf("%w: typed block %q is missing attribute %q", ErrSchema, n.Type, name)
+			continue
 		}
 		var encoded string
 		switch definition.Kind {

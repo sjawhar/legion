@@ -7,23 +7,55 @@ import { withDomAttributes } from './editor/schema/dom-attributes.js';
 
 export type BlockAttributeKind = 'string' | 'bool' | 'enum' | 'string[]' | 'actor' | 'timestamp';
 
-export interface BlockAttributeSchema {
+/**
+ * From which schema version an editor reads an element of the manifest (`since`) and from which
+ * it may create one (`creatable_since`); each is 1 when the manifest names none. An editor built
+ * from a schema reads every element the schema declares and creates the ones whose
+ * `creatable_since` is at most the schema's `version` (`creatable`).
+ */
+export interface BlockElementVersions {
+  since?: number;
+  creatable_since?: number;
+}
+
+export interface BlockAttributeSchema extends BlockElementVersions {
   kind: BlockAttributeKind;
   choices?: readonly string[];
   default?: string | boolean | readonly string[];
   server?: boolean;
+  /** The numbers of each choice that has some, by choice: the choices stay plain strings. */
+  choice_versions?: Readonly<Record<string, BlockElementVersions>>;
 }
 
-export interface BlockTypeSchema {
+export interface BlockTypeSchema extends BlockElementVersions {
   name: string;
   content: string;
   render: 'host';
   attributes: Readonly<Record<string, BlockAttributeSchema>>;
 }
 
+/** A node or a mark of the Proof schema, as the manifest names it. */
+export interface BlockSchemaElement extends BlockElementVersions {
+  name: string;
+}
+
 export interface BlockSchema {
   version: number;
+  /** The Proof schema's nodes and marks; a document service older than the manifest names none. */
+  nodes?: readonly BlockSchemaElement[];
+  marks?: readonly BlockSchemaElement[];
   types: readonly BlockTypeSchema[];
+}
+
+/** Whether an editor of schema version `version` may create `element`. */
+export function creatable(version: number, element: BlockElementVersions | undefined): boolean {
+  return (element?.creatable_since ?? 1) <= version;
+}
+
+/** Whether an editor of schema version `version` may write `value` into `attribute`. */
+export function creatableValue(version: number, attribute: BlockAttributeSchema, value: unknown): boolean {
+  if (!creatable(version, attribute)) return false;
+  return attribute.kind !== 'enum' || typeof value !== 'string' || creatable(version, attribute.choice_versions?.[value]);
 }
 
 export type HostBlockRenderer = (node: ProseMirrorNode, type: BlockTypeSchema) => DOMOutputSpec;
@@ -99,15 +131,20 @@ function parseAttribute(typeName: string, name: string, attribute: BlockAttribut
   }
 }
 
-function schemaAttrs(type: BlockTypeSchema): Record<string, { default?: string | boolean | readonly string[] }> {
-  return Object.fromEntries(Object.entries(type.attributes).map(([name, attribute]) => [name, { default: attribute.default }]));
+/**
+ * A block that names no value for an attribute holds its default, unless an editor of schema
+ * version `version` may not create the attribute yet: that one is left out, so the editor never
+ * writes it.
+ */
+function schemaAttrs(type: BlockTypeSchema, version: number): Record<string, { default?: string | boolean | readonly string[] }> {
+  return Object.fromEntries(Object.entries(type.attributes).map(([name, attribute]) => [name, { default: creatable(version, attribute) ? attribute.default : undefined }]));
 }
 
-function directiveAttrs(type: BlockTypeSchema, attrs: Record<string, string> | undefined): Record<string, string | boolean | readonly string[] | undefined> {
+function directiveAttrs(type: BlockTypeSchema, attrs: Record<string, string> | undefined, version: number): Record<string, string | boolean | readonly string[] | undefined> {
   const parsed: Record<string, string | boolean | readonly string[] | undefined> = {};
   for (const [name, attribute] of Object.entries(type.attributes)) {
     const value = attrs?.[name];
-    parsed[name] = value === undefined ? attribute.default : parseAttribute(type.name, name, attribute, value);
+    parsed[name] = value === undefined ? (creatable(version, attribute) ? attribute.default : undefined) : parseAttribute(type.name, name, attribute, value);
   }
   for (const name of Object.keys(attrs ?? {})) {
     if (name !== 'id' && name !== 'className' && !(name in type.attributes)) {
@@ -179,10 +216,13 @@ function parsedDomAttrs(type: BlockTypeSchema, dom: HTMLElement): Record<string,
   return attributes;
 }
 
-/** The ProseMirror node spec of the typed block `type`, drawn by `renderBlock` when given. */
-export function typedBlockSpec(type: BlockTypeSchema, renderBlock?: HostBlockRenderer): NodeSchema {
+/**
+ * The ProseMirror node spec of the typed block `type`, drawn by `renderBlock` when given, for an
+ * editor of schema version `version`: a block it makes holds no attribute it may not create yet.
+ */
+export function typedBlockSpec(type: BlockTypeSchema, renderBlock?: HostBlockRenderer, version = Number.POSITIVE_INFINITY): NodeSchema {
   return withBlockIdSpec({
-    attrs: schemaAttrs(type),
+    attrs: schemaAttrs(type, version),
     content: type.content,
     group: 'block',
     defining: true,
@@ -204,7 +244,7 @@ export function typedBlockSpec(type: BlockTypeSchema, renderBlock?: HostBlockRen
       match: (node) => (node as MarkdownNode).type === 'containerDirective' && (node as MarkdownNode).name === type.name,
       runner: (state, node, nodeType) => {
         const directive = node as MarkdownNode;
-        state.openNode(nodeType, directiveAttrs(type, directive.attributes));
+        state.openNode(nodeType, directiveAttrs(type, directive.attributes, version));
         state.next(directive.children as unknown as ParsedMarkdownNode[]);
         state.closeNode();
       },
@@ -225,7 +265,7 @@ export function typedBlockSpec(type: BlockTypeSchema, renderBlock?: HostBlockRen
 
 export function blockSchemaPlugins(schema: BlockSchema, renderBlock?: HostBlockRenderer) {
   validateBlockSchema(schema);
-  return schema.types.map((type) => $nodeSchema(type.name, () => typedBlockSpec(type, renderBlock)));
+  return schema.types.map((type) => $nodeSchema(type.name, () => typedBlockSpec(type, renderBlock, schema.version)));
 }
 
 function visit(node: MarkdownNode, schema: BlockSchema): void {
@@ -233,7 +273,7 @@ function visit(node: MarkdownNode, schema: BlockSchema): void {
     const name = node.name ?? '';
     const type = schema.types.find((candidate) => candidate.name === name);
     if (!type) throw new Error(`unknown typed block ${JSON.stringify(name)} (known types: ${knownNames(schema)})`);
-    directiveAttrs(type, node.attributes);
+    directiveAttrs(type, node.attributes, schema.version);
   }
   for (const child of node.children ?? []) visit(child, schema);
 }

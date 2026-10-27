@@ -36,6 +36,21 @@ const STRUCTURAL_LABELS: Partial<Record<GraphEdge["kind"], string>> = {
   replies_to: "Reply",
 };
 
+/** Every edge kind the page renders: all the ones `GraphEdgeKind` names. */
+const RENDERED_EDGE_KINDS: Record<GraphEdge["kind"], true> = {
+  affects: true,
+  anchored_to: true,
+  attached_to: true,
+  blocked_by: true,
+  child_of: true,
+  depends_on: true,
+  followed_by: true,
+  mentions: true,
+  owned_by: true,
+  part_of: true,
+  replies_to: true,
+};
+
 /** Beyond this the row clamps the excerpt and offers to expand it. The real clamp is CSS, so
  *  this is the text shape that makes a clamp likely rather than a measurement. */
 const CLAMP_LINES = 3;
@@ -181,13 +196,20 @@ export function ReferencedBy({
   toggle?: { id: string };
 }): ReactNode {
   const query = useQuery(referencedByQuery(reference));
-  const groups = groupBySource(query.data?.edges ?? []);
+  // During a release a newer Dispatch can answer with an edge kind, or a node kind at the other
+  // end, that this page does not know; the page leaves such an edge out rather than draw it under
+  // another edge's label.
+  const edges = query.data?.edges.filter(
+    (edge) =>
+      Object.hasOwn(RENDERED_EDGE_KINDS, edge.kind) && Object.hasOwn(NODE_LABELS, edge.node.kind)
+  );
+  const groups = groupBySource(edges ?? []);
 
   return (
     <section aria-label="Referenced by" className={`space-y-2 ${className ?? ""}`} id={toggle?.id}>
       {toggle === undefined ? (
         <h3 className={`text-sm font-semibold ${textSecondaryOnSurface}`}>
-          Referenced by{query.data === undefined ? "" : ` (${query.data.edges.length})`}
+          Referenced by{edges === undefined ? "" : ` (${edges.length})`}
         </h3>
       ) : null}
       {query.isPending ? (
@@ -206,7 +228,7 @@ export function ReferencedBy({
           </button>
         </p>
       ) : null}
-      {query.data?.edges.length === 0 ? (
+      {edges?.length === 0 ? (
         <p className={`text-sm ${textMutedOnSurface}`}>Nothing references this yet.</p>
       ) : null}
       {groups.length === 0 ? null : (

@@ -148,6 +148,10 @@ func parseForWrite(markdown string, live *Node, readFrontmatter bool, budget *Wr
 	if err := RepeatedBlockID(live, doc, doc); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrSchema, err)
 	}
+	// A write may keep an element live holds that this build cannot create, never add one.
+	if err := refuseUncreatable([]*Node{doc}, func() *Node { return live }); err != nil {
+		return nil, err
+	}
 	EnsureBlockIDs(doc)
 	return doc, nil
 }
@@ -327,7 +331,13 @@ func referencedLabels(nodes []*Node) []string {
 // budget, its caller write's, on the elements it makes. Markdown that forms more than one
 // paragraph, or holds text after its paragraph's last line, is ErrSchema.
 func ParseInline(markdown string, budget *WriteBudget) (nodes []*Node, err error) {
-	return readInline(markdown, inlineMarkdown.run, budget)
+	if nodes, err = readInline(markdown, inlineMarkdown.run, budget); err != nil {
+		return nil, err
+	}
+	if err := refuseUncreatable(nodes, nil); err != nil {
+		return nil, err
+	}
+	return nodes, nil
 }
 
 // readInline is ParseInline read with inline, one of an inlineReader's parsers, counting the

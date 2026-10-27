@@ -62,22 +62,40 @@ export type BlockAttributeKind = "string" | "bool" | "enum" | "string[]" | "acto
 
 export type BlockContentRule = "paragraph+" | "block+" | "paragraph+ bullet_list?";
 
-export interface BlockAttributeSchema {
+/** From which schema version a build reads a manifest element (`since`) and from which it may
+ *  create one (`creatable_since`); each is 1 when the manifest names none. */
+export interface BlockElementVersions {
+  readonly since?: number;
+  readonly creatable_since?: number;
+}
+
+export interface BlockAttributeSchema extends BlockElementVersions {
   readonly kind: BlockAttributeKind;
   readonly choices?: readonly string[];
   readonly default?: string | boolean | readonly string[];
   readonly server?: boolean;
+  /** The numbers of each choice that has some, by choice: the choices stay plain strings. */
+  readonly choice_versions?: Readonly<Record<string, BlockElementVersions>>;
 }
 
-export interface BlockTypeSchema {
+export interface BlockTypeSchema extends BlockElementVersions {
   readonly name: string;
   readonly content: BlockContentRule;
   readonly render: "host";
   readonly attributes: Readonly<Record<string, BlockAttributeSchema>>;
 }
 
+/** A node or a mark of the Proof schema, as the manifest names it. */
+export interface BlockSchemaElement extends BlockElementVersions {
+  readonly name: string;
+}
+
+/** GET /api/v1/schema/blocks: the document schema manifest, `pmdoc/schema/blocks.json`. A server
+ *  older than INFRA-558 names no `nodes` or `marks`. */
 export interface BlockSchema {
   readonly version: number;
+  readonly nodes?: readonly BlockSchemaElement[];
+  readonly marks?: readonly BlockSchemaElement[];
   readonly types: readonly BlockTypeSchema[];
 }
 
@@ -1675,9 +1693,12 @@ export interface GraphEdge {
 }
 
 // GraphReferences is GET /api/v1/references: the queried node and its edges, newest first.
+// `unknown_kinds` lists the `?kind=` values the answering server does not emit (a newer build's,
+// during a release); it answers no edges of them, and leaves the field out when there are none.
 export interface GraphReferences {
   readonly node: GraphNode;
   readonly edges: GraphEdge[];
+  readonly unknown_kinds?: readonly string[];
 }
 
 export interface ArtifactCreatedEventPayload extends ReferenceChangesPayload {

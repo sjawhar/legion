@@ -85,6 +85,11 @@ func readElement(e *crdt.YXmlElement, readDelta textDeltaReader, depth int, copy
 		}
 		n.Attrs = treeAttrs(e.NodeName, attrs)
 	}
+	// A typed block an earlier build wrote may lack an attribute added since; it reads with the
+	// attribute's default, as the browser editor reads it.
+	if typ, typed := typedBlock(e.NodeName); typed {
+		n.Attrs = withWrittenDefaults(typ, n.Attrs)
+	}
 	children, err := readChildren(&e.YXmlFragment, readDelta, depth+1, copyAttrs)
 	if err != nil {
 		return nil, err
