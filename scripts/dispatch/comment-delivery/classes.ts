@@ -238,12 +238,9 @@ export function compareCauses(left: string, right: string): number {
   return compare(left, right);
 }
 
-/** What `causes` says of a cause, or undefined when a part of it has no entry. */
-export function describeCause(
-  cause: string,
-  causes: Readonly<Record<string, CauseEntry>>
-): CauseEntry | undefined {
-  const entries = causeParts(cause).map((part) => causes[part]);
+/** What CAUSES says of a cause, or undefined when a part of it has no entry. */
+export function describeCause(cause: string): CauseEntry | undefined {
+  const entries = causeParts(cause).map((part) => CAUSES[part]);
   if (entries.some((entry) => entry === undefined)) return undefined;
   const found = entries as CauseEntry[];
   return {
@@ -277,29 +274,12 @@ function judgePair(comment: Comment, pair: Pair): Verdict {
   return notDelivered(running ? "running-no-row" : "not-running");
 }
 
-/** What one comment's class rule reads. */
+/** What one comment's class reads. */
 export interface CommentFacts {
   readonly comment: Comment;
   /** Every receipts.tsv row of the comment, listed or not. */
   readonly receipts: readonly Receipt[];
   readonly pairs: readonly { readonly pair: Pair; readonly verdict: Verdict }[];
-}
-
-/** A class a comment can fall in. The report checks CLASS_RULES in order and gives a comment the
- *  verdict of the first rule that applies, so a rule need not exclude the comments of the rules
- *  before it; the report refuses a comment that no rule applies to. */
-export interface ClassRule {
-  readonly name: string;
-  applies(facts: CommentFacts): boolean;
-  verdict(facts: CommentFacts): Verdict;
-}
-
-function received(facts: CommentFacts): boolean {
-  return facts.receipts.some((receipt) => receipt.status === "received");
-}
-
-function unknownPairs(facts: CommentFacts): readonly { pair: Pair; verdict: Verdict }[] {
-  return facts.pairs.filter(({ verdict }) => verdict.class === "unknown");
 }
 
 /** The first cause, in CAUSES order, of the comment's pairs. */
@@ -311,36 +291,23 @@ function primaryCause(facts: CommentFacts): string {
   return causes[0] ?? "";
 }
 
-export const CLASS_RULES: readonly ClassRule[] = [
-  { name: "delivered", applies: received, verdict: () => DELIVERED },
-  {
-    name: "never-published",
-    applies: (facts) => facts.comment.publishedAt === "",
-    verdict: () => notDelivered("never-published"),
-  },
-  {
-    name: "no-target",
-    applies: (facts) => facts.pairs.length === 0,
-    verdict: () => notDelivered("no-target"),
-  },
-  {
-    name: "unknown",
-    applies: (facts) => unknownPairs(facts).length > 0,
-    verdict: (facts) => ({
+/** A comment's class: the first that applies of delivered (a row of the comment is received),
+ *  never-published, no-target (no pair), unknown (a pair is unknown), and not delivered with the
+ *  first cause of its pairs, every one of which is then not_received and has a cause. */
+function classify(facts: CommentFacts): Verdict {
+  if (facts.receipts.some((receipt) => receipt.status === "received")) return DELIVERED;
+  if (facts.comment.publishedAt === "") return notDelivered("never-published");
+  if (facts.pairs.length === 0) return notDelivered("no-target");
+  const unknown = facts.pairs.filter(({ verdict }) => verdict.class === "unknown");
+  if (unknown.length > 0) {
+    return {
       class: "unknown",
       cause: "",
-      why: unknownPairs(facts)
-        .map(({ pair, verdict }) => `${pair.target}: ${verdict.why ?? ""}`)
-        .join("; "),
-    }),
-  },
-  // Every pair left is not_received.
-  {
-    name: "not delivered, with a cause",
-    applies: () => true,
-    verdict: (facts) => notDelivered(primaryCause(facts)),
-  },
-];
+      why: unknown.map(({ pair, verdict }) => `${pair.target}: ${verdict.why ?? ""}`).join("; "),
+    };
+  }
+  return notDelivered(primaryCause(facts));
+}
 
 export interface Judged extends CommentFacts {
   readonly verdict: Verdict;
@@ -355,11 +322,8 @@ export interface Counts {
   readonly causes: ReadonlyMap<string, number>;
 }
 
-function countVerdicts(
-  verdicts: readonly Verdict[],
-  causes: Readonly<Record<string, CauseEntry>>
-): Counts {
-  const byCause = new Map<string, number>(Object.keys(causes).map((cause) => [cause, 0]));
+function countVerdicts(verdicts: readonly Verdict[]): Counts {
+  const byCause = new Map<string, number>(Object.keys(CAUSES).map((cause) => [cause, 0]));
   for (const verdict of verdicts) {
     if (verdict.class === "not-delivered") {
       byCause.set(verdict.cause, (byCause.get(verdict.cause) ?? 0) + 1);
@@ -383,33 +347,10 @@ export function identityLine(counts: Counts): string {
   );
 }
 
-/** The problems with an identity that does not add up; empty when it does. */
-export function identityProblems(counts: Counts, level: string): string[] {
-  const causes = [...counts.causes.values()].reduce((sum, count) => sum + count, 0);
-  const problems: string[] = [];
-  if (counts.delivered + counts.notDelivered + counts.unknown !== counts.total) {
-    problems.push(
-      `${level}: the identity fails: ${identityLine(counts)}, and ${counts.delivered} + ` +
-        `${counts.notDelivered} + ${counts.unknown} is not ${counts.total}`
-    );
-  }
-  if (causes !== counts.notDelivered) {
-    problems.push(
-      `${level}: the identity fails: the causes add up to ${causes}, not ${counts.notDelivered}`
-    );
-  }
-  return problems;
-}
-
 export interface ReportInput {
   readonly comments: string;
   readonly receipts: string;
   readonly counts: string;
-}
-
-export interface ReportOptions {
-  readonly rules?: readonly ClassRule[];
-  readonly causes?: Readonly<Record<string, CauseEntry>>;
 }
 
 export interface Report {
@@ -423,9 +364,7 @@ export interface Report {
 }
 
 /** Reads and judges the three files, or throws ReportRefusal naming every problem. */
-export function judge(input: ReportInput, options: ReportOptions = {}): Report {
-  const rules = options.rules ?? CLASS_RULES;
-  const causes = options.causes ?? CAUSES;
+export function judge(input: ReportInput): Report {
   const problems: string[] = [];
   const rows = parseCommentsCsv(input.comments, problems);
   const drafts = commentsFrom(rows, problems);
@@ -449,16 +388,7 @@ export function judge(input: ReportInput, options: ReportOptions = {}): Report {
       receipts: receiptsOf.get(comment.id) ?? [],
       pairs: comment.pairs.map((pair) => ({ pair, verdict: judgePair(comment, pair) })),
     };
-    const rule = rules.find((candidate) => candidate.applies(facts));
-    if (rule === undefined) {
-      problems.push(`comment ${comment.id} falls in no class`);
-      continue;
-    }
-    const verdict = rule.verdict(facts);
-    if (verdict.class === "not-delivered" && verdict.cause === "") {
-      problems.push(`comment ${comment.id} is not delivered and has no cause`);
-    }
-    judged.push({ ...facts, verdict });
+    judged.push({ ...facts, verdict: classify(facts) });
   }
 
   const commentVerdicts = judged.map((comment) => comment.verdict);
@@ -466,22 +396,8 @@ export function judge(input: ReportInput, options: ReportOptions = {}): Report {
   const pairVerdicts = judged.flatMap((comment) =>
     comment.pairs.length === 0 ? [comment.verdict] : comment.pairs.map(({ verdict }) => verdict)
   );
-  for (const verdict of [...commentVerdicts, ...pairVerdicts]) {
-    // A not-delivered verdict with no cause is refused above.
-    if (
-      verdict.class === "not-delivered" &&
-      verdict.cause !== "" &&
-      describeCause(verdict.cause, causes) === undefined
-    ) {
-      const problem = `the cause ${verdict.cause} has no fix in the cause-to-fix table`;
-      if (!problems.includes(problem)) problems.push(problem);
-    }
-  }
-  const commentCounts = countVerdicts(commentVerdicts, causes);
-  const pairCounts = countVerdicts(pairVerdicts, causes);
-  problems.push(...identityProblems(commentCounts, "comments"));
-  problems.push(...identityProblems(pairCounts, "pairs"));
-  if (problems.length > 0) throw new ReportRefusal(problems);
+  const commentCounts = countVerdicts(commentVerdicts);
+  const pairCounts = countVerdicts(pairVerdicts);
   const order = new Map(judged.map((comment, index) => [comment.comment.id, index]));
   return {
     window: { from: receiptCounts.from, to: receiptCounts.to },

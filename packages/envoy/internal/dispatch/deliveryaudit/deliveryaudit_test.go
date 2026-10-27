@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -258,7 +260,7 @@ func (r *rig) query(t *testing.T, statement string, args ...any) ([]string, []ma
 
 func (r *rig) audit(t *testing.T, from, to time.Time) []map[string]string {
 	t.Helper()
-	statement, err := deliveryaudit.Bind(deliveryaudit.CommentsSQL, "from", "to")
+	statement, err := bind(deliveryaudit.CommentsSQL, "from", "to")
 	if err != nil {
 		t.Fatalf("bind comments.sql: %v", err)
 	}
@@ -629,12 +631,12 @@ func TestCommentsSQLReadsWhomEachPersonsCommentWasOwedAndWhomItReached(t *testin
 	})
 
 	t.Run("trace.sql shows the reply's transaction, mentions, issue state and thread", func(t *testing.T) {
-		script, err := deliveryaudit.Bind(deliveryaudit.TraceSQL, "comment")
+		script, err := bind(deliveryaudit.TraceSQL, "comment")
 		if err != nil {
 			t.Fatalf("bind trace.sql: %v", err)
 		}
 		sections := map[string][]map[string]string{}
-		statements := deliveryaudit.Statements(script)
+		statements := splitStatements(script)
 		if len(statements) != 5 {
 			t.Fatalf("trace.sql has %d statements, want 5", len(statements))
 		}
@@ -670,18 +672,61 @@ func TestCommentsSQLReadsWhomEachPersonsCommentWasOwedAndWhomItReached(t *testin
 	})
 }
 
-func TestBindNamesEachVariableOnce(t *testing.T) {
-	bound, err := deliveryaudit.Bind(`select :'from'::timestamptz, 'session:' || x, :'to', :'from'`, "from", "to")
-	if err != nil {
-		t.Fatalf("Bind: %v", err)
+// psqlVariable matches psql's quoted interpolation of a variable, :'name'.
+var psqlVariable = regexp.MustCompile(`:'([A-Za-z_][A-Za-z0-9_]*)'`)
+
+// bind rewrites script's psql variables (:'name') as positional parameters, the first of names as
+// $1 and so on, so the statement psql runs is the statement a driver runs. A variable script uses
+// that names lacks, or a name script never uses, is an error.
+func bind(script string, names ...string) (string, error) {
+	used := map[string]bool{}
+	var missing []string
+	bound := psqlVariable.ReplaceAllStringFunc(script, func(match string) string {
+		name := psqlVariable.FindStringSubmatch(match)[1]
+		index := slices.Index(names, name)
+		if index < 0 {
+			if !slices.Contains(missing, name) {
+				missing = append(missing, name)
+			}
+			return match
+		}
+		used[name] = true
+		return "$" + strconv.Itoa(index+1)
+	})
+	if len(missing) > 0 {
+		return "", fmt.Errorf("script uses psql variables %v that are not bound", missing)
 	}
-	if want := `select $1::timestamptz, 'session:' || x, $2, $1`; bound != want {
-		t.Errorf("Bind = %q, want %q", bound, want)
+	for _, name := range names {
+		if !used[name] {
+			return "", fmt.Errorf("script never uses psql variable %q", name)
+		}
 	}
-	if _, err := deliveryaudit.Bind(`select :'from'`, "from", "to"); err == nil {
-		t.Error("Bind accepted a name the script never uses")
+	return bound, nil
+}
+
+// splitStatements splits script into its statements: each ends with a semicolon that ends its
+// line, which is how both scripts are written. A piece holding only comments and blank lines is
+// dropped.
+func splitStatements(script string) []string {
+	var statements []string
+	var current strings.Builder
+	code := false
+	for line := range strings.Lines(script) {
+		current.WriteString(line)
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" && !strings.HasPrefix(trimmed, "--") {
+			code = true
+		}
+		if strings.HasSuffix(trimmed, ";") && !strings.HasPrefix(trimmed, "--") {
+			if code {
+				statements = append(statements, current.String())
+			}
+			current.Reset()
+			code = false
+		}
 	}
-	if _, err := deliveryaudit.Bind(`select :'from', :'other'`, "from"); err == nil {
-		t.Error("Bind accepted a variable it was not given")
+	if code {
+		statements = append(statements, current.String())
 	}
+	return statements
 }

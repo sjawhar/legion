@@ -11,7 +11,7 @@ sessions they were owed to (INFRA-596):
 
 Neither script writes. Run both in a read-only transaction anyway, so a mistake cannot write. The
 package's test (`deliveryaudit_test.go`) runs the same embedded bytes through pgx, binding each psql
-variable as a parameter (`Bind`), over records the real API handlers and outbox wrote.
+variable as a parameter (`bind`), over records the real API handlers and outbox wrote.
 
 ## Running
 

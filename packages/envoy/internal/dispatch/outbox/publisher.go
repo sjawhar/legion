@@ -847,6 +847,19 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 		consider(author, found)
 		return nil
 	}
+	considerDocument := func(document string) error {
+		if document == "" {
+			return nil
+		}
+		authors, err := loadDocumentSessionAuthors(ctx, deps, document)
+		if err != nil {
+			return err
+		}
+		for _, author := range authors {
+			consider(model.Actor{Kind: "session", ID: author}, true)
+		}
+		return nil
+	}
 
 	switch event.Type {
 	case "comment.created", "comment.edited":
@@ -861,14 +874,8 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 				consider(model.Actor{Kind: "session", ID: sessionID}, true)
 			}
 		default:
-			if document := commentedDocument(event); document != "" {
-				authors, err := loadDocumentSessionAuthors(ctx, deps, document)
-				if err != nil {
-					return err
-				}
-				for _, author := range authors {
-					consider(model.Actor{Kind: "session", ID: author}, true)
-				}
+			if err := considerDocument(commentedDocument(event)); err != nil {
+				return err
 			}
 		}
 	case "comment.resolved", "comment.reopened":
@@ -892,14 +899,8 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 			consider(model.Actor{Kind: "session", ID: sessionID}, true)
 		}
 	case "artifact.human_edited":
-		if document := editedDocument(event); document != "" {
-			authors, err := loadDocumentSessionAuthors(ctx, deps, document)
-			if err != nil {
-				return err
-			}
-			for _, author := range authors {
-				consider(model.Actor{Kind: "session", ID: author}, true)
-			}
+		if err := considerDocument(payloadString(event.Payload, "artifact_id")); err != nil {
+			return err
 		}
 	default:
 		return nil
@@ -931,15 +932,6 @@ func commentedDocument(event model.Event) string {
 		document = *event.ArtifactID
 	}
 	return document
-}
-
-// editedDocument names the document a person's artifact.human_edited is about, its payload's
-// artifact_id, or "" for every other event.
-func editedDocument(event model.Event) string {
-	if event.Type != "artifact.human_edited" {
-		return ""
-	}
-	return payloadString(event.Payload, "artifact_id")
 }
 
 // loadDocumentSessionAuthors lists, in one query, the sessions a document credits

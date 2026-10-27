@@ -1,5 +1,4 @@
 import {
-  CAUSES,
   compareCauses,
   describeCause,
   identityLine,
@@ -222,7 +221,7 @@ export function renderReport(
     compareCauses
   );
   for (const cause of allCauses) {
-    const entry = describeCause(cause, CAUSES);
+    const entry = describeCause(cause);
     out.push(
       `| ${cellCode(cause)} | ${counts.causes.get(cause) ?? 0} | ${pairCounts.causes.get(cause) ?? 0} | ` +
         `${cell(entry?.meaning ?? "")} | ${cell(entry?.fix ?? "")} |`

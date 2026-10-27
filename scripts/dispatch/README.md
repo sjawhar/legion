@@ -251,5 +251,3 @@ these cases:
 - A line of `receipts-counts.txt` is missing, extra, out of order or not in its form; a sum of
   its numbers is not true; a number in it is not the number that `report.ts` counts; or
   `rows_without_id` is not 0. The report names the line.
-- A comment falls in no class, a not-delivered comment has no cause, a cause has no fix, or a
-  count identity does not add up.

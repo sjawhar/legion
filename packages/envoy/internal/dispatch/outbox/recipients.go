@@ -95,25 +95,18 @@ const commentRecipientsQuery = `
 `
 
 // loadCommentRecipients reads, in one query for a whole batch, the sessions a person's reply under
-// each comment of commentIDs reaches on their own topics, keyed by that comment's id. They are
-// every session that wrote a comment in the comment's thread (its root first, then each reply in
-// the order it was written), then every session the thread's document credits (documentCreditsSQL;
-// none when the thread is on no document), each once. People are left out, since a person has no
-// Envoy topic. A comment that is not a uuid, or that has no row, has no entry. The actor and the
-// sessions the reply's mentions reach are skipped by the caller (publishAuthorRoutes).
+// each comment of commentIDs reaches on their own topics, keyed by that comment's id. commentIDs are
+// canonical uuids (resolveThreadSessions parses each). They are every session that wrote a comment
+// in the comment's thread (its root first, then each reply in the order it was written), then every
+// session the thread's document credits (documentCreditsSQL; none when the thread is on no
+// document), each once. People are left out, since a person has no Envoy topic. A comment that has
+// no row has no entry. The actor and the sessions the reply's mentions reach are skipped by the
+// caller (publishAuthorRoutes).
 func loadCommentRecipients(ctx context.Context, deps Deps, commentIDs []string) (map[string][]string, error) {
-	ids := make([]string, 0, len(commentIDs))
-	for _, commentID := range commentIDs {
-		parsed, err := uuid.Parse(commentID)
-		if err != nil {
-			continue
-		}
-		ids = append(ids, parsed.String())
-	}
-	if len(ids) == 0 {
+	if len(commentIDs) == 0 {
 		return map[string][]string{}, nil
 	}
-	return loadKeyedSessions(ctx, deps, "load comment recipients", commentRecipientsQuery, ids, maxCommentThreadDepth)
+	return loadKeyedSessions(ctx, deps, "load comment recipients", commentRecipientsQuery, commentIDs, maxCommentThreadDepth)
 }
 
 // threadReplyOf names the comment a person's reply event replies under, the key of its

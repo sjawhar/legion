@@ -433,8 +433,8 @@ func TestLoadPrimaryDocumentAuthorsReadsEveryIssueOfABatchInOneQuery(t *testing.
 
 // One query reads the recipients of a whole batch's replies, keyed by the comment each replies
 // under: two threads give two entries, a legacy nested reply finds its thread's root, a comment
-// with no row and one that is not a uuid give none, and a cyclic reply_to chain ends at the depth
-// bound rather than spinning, with the authors of the comments the walk visited.
+// with no row gives none, and a cyclic reply_to chain ends at the depth bound rather than
+// spinning, with the authors of the comments the walk visited.
 func TestLoadCommentRecipientsReadsEveryThreadOfABatchInOneQuery(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
@@ -460,7 +460,7 @@ func TestLoadCommentRecipientsReadsEveryThreadOfABatchInOneQuery(t *testing.T) {
 	go func() {
 		defer close(done)
 		recipients, err = loadCommentRecipients(context.Background(), Deps{Store: database},
-			[]string{first, nested, cyclic, "00000000-0000-0000-0000-000000000099", "not-a-uuid"})
+			[]string{first, nested, cyclic, "00000000-0000-0000-0000-000000000099"})
 	}()
 	select {
 	case <-done:

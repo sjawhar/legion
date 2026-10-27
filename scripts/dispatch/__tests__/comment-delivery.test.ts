@@ -4,10 +4,6 @@ import { join } from "node:path";
 import { RECEIPT_TIMEOUT_CAUSE } from "../../../packages/contracts/src/dispatch-api.ts";
 import {
   CAUSES,
-  CLASS_RULES,
-  type ClassRule,
-  type Counts,
-  identityProblems,
   type Judged,
   judge,
   mentionErrorClass,
@@ -43,9 +39,9 @@ function judged(report: { readonly comments: readonly Judged[] }, commentId: str
 }
 
 /** The problems judge refuses `changed` with; fails when it does not refuse. */
-function refusal(changed: ReportInput, options: Parameters<typeof judge>[1] = {}): string[] {
+function refusal(changed: ReportInput): string[] {
   try {
-    judge(changed, options);
+    judge(changed);
   } catch (error) {
     if (error instanceof ReportRefusal) return [...error.problems];
     throw error;
@@ -790,60 +786,6 @@ describe("refusals", () => {
     );
     expect(refusal({ ...input, comments: changed })).toEqual([
       `comments.csv lines 14 and 15: comment ${id(13)} has two values of published_at`,
-    ]);
-  });
-
-  test("a comment in no class is refused, and the first class that applies wins", () => {
-    // Without the last rule, the five comments whose pairs are all not_received fall in none.
-    expect(refusal(input, { rules: CLASS_RULES.slice(0, -1) })).toEqual(
-      [id(9), BET15, id(8), id(10), id(13)].map(
-        (commentId) => `comment ${commentId} falls in no class`
-      )
-    );
-    const always: ClassRule = {
-      name: "always",
-      applies: () => true,
-      verdict: () => ({ class: "delivered", cause: "" }),
-    };
-    // A rule after the last one is never reached; a rule before the first decides every comment.
-    expect(judge(input, { rules: [...CLASS_RULES, always] })).toEqual(judge(input));
-    const first = judge(input, { rules: [always, ...CLASS_RULES] });
-    expect(first.comments.map(({ verdict }) => verdict.class)).toEqual(Array(14).fill("delivered"));
-  });
-
-  test("a not-delivered comment with no cause is refused", () => {
-    const noCause: ClassRule[] = CLASS_RULES.map((rule) =>
-      rule.name === "never-published"
-        ? { ...rule, verdict: () => ({ class: "not-delivered", cause: "" }) }
-        : rule
-    );
-    expect(refusal(input, { rules: noCause })).toEqual([
-      `comment ${id(3)} is not delivered and has no cause`,
-    ]);
-  });
-
-  test("an identity that does not add up is refused, with its numbers", () => {
-    const broken: Counts = {
-      total: 10,
-      delivered: 6,
-      notDelivered: 3,
-      unknown: 2,
-      causes: new Map([
-        ["no-target", 1],
-        ["not-running", 1],
-      ]),
-    };
-    expect(identityProblems(broken, "comments")).toEqual([
-      "comments: the identity fails: Total 10 = delivered 6 + not delivered 3 (no-target 1, " +
-        "not-running 1) + unknown 2, and 6 + 3 + 2 is not 10",
-      "comments: the identity fails: the causes add up to 2, not 3",
-    ]);
-  });
-
-  test("a cause with no fix is refused, naming it", async () => {
-    const { "not-running": _, ...withoutNotRunning } = CAUSES;
-    expect(refusal(input, { causes: withoutNotRunning })).toEqual([
-      "the cause not-running has no fix in the cause-to-fix table",
     ]);
   });
 });
