@@ -2,49 +2,50 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-549",
-  "completed": "2026-10-27T07:16:39Z",
-  "headSha": "d134e60d30295dc8c03543c24db254fb6e54e81e",
-  "codeHeadSha": "c8a0205b358f516a0e0a7dd31bc8b59a50028002",
-  "evidence": "https://github.com/sjawhar/legion/pull/2371#issuecomment-6436052083",
+  "completed": "2026-10-27T07:55:33Z",
+  "round": 2,
+  "headSha": "52057bba45e9a7abf5c87e0bff501a81d01e083d",
+  "codeHeadSha": "e0040d229bba89bf903069f8f4b12ff12f04779f",
+  "evidence": [
+    "https://github.com/sjawhar/legion/pull/2371#issuecomment-6436632084",
+    "https://github.com/sjawhar/legion/pull/2371#issuecomment-6436052083"
+  ],
+  "ci": "Read on GitHub at e0040d22 when this was written: build, changes, lint, test, typecheck queued (one superseded pr-title run cancelled). Read as queued, not as a pass. The PR is MERGEABLE/CLEAN, and the head merges cleanly with the newest legion/INFRA-546@origin 1ecd5dc8 (git merge-tree exit 0).",
+  "rebaseCheck": "Not a fingerprint-only round: since round 1 the diff gained e0040d22 (the StatefulSet ordered after the ConfigMap) beside the forward merge of 5fbe7ca5, so this round re-ran every real surface.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's command at the head: cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)' -v -timeout 30m ./gcp/ -> ok 43.185s. It reproduced every observation: helm v3.20.2 render of the vendored chart (sha256 checked); cluster formed in 230 ms; SIGKILL of the R3 leader at 206/1000 acks, new leader in 5.051 s, 1000 messages exactly once; the restarted server was current in 2.065 s; exporter 3/2/1 series; add/remove of a user reloaded with cid 40 and 0 reconnects and unchanged PIDs; no_auth_user reload refused, restart takes it. The schema row was re-run on a plugin built at the head and gives the same inputs, required set, secrets and outputs."
+    "how": "Re-ran the implementer's command at e0040d22: cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)' -v -timeout 30m ./gcp/ -> ok 46.663s. The new render assertion (the StatefulSet's config.kubernetes.io/depends-on names the ConfigMap holding auth.conf) passes. Kill of the R3 leader at 204/1000 acks, a new leader in 6.622 s, 1000 messages exactly once, restarted copy current in 1.647 s, add/remove of a user with cid 20 and 0 reconnects, no_auth_user reload refused. Independently, the round-2 proof's ordering claim was driven against a real kube-apiserver with a fault injected (proof[0])."
   },
-  "failures": [
-    {
-      "criterion": "The pull request can be merged into its base, and CI runs at the head under test (lint, types, the envoy-infra unit and natslive lanes are CI's work and are read on GitHub, not run again by the tester).",
-      "evidence": "gh pr view 2371 -R sjawhar/legion --json mergeable,mergeStateStatus -> {\"mergeable\":\"CONFLICTING\",\"mergeStateStatus\":\"DIRTY\"}, base legion/INFRA-546 at 5fbe7ca51666 (it moved at 06:00Z when it merged legion/INFRA-439 and main). gh api repos/sjawhar/legion/commits/d134e60d30295dc8c03543c24db254fb6e54e81e/check-runs -> total_count 0. gh run list --branch legion/INFRA-549 -> no runs. A local git merge-tree --write-tree d134e60d 5fbe7ca5 is clean (merge bases 0681b121, caa05c1a), so the forward merge (skill://legion-worker/references/conflicts-and-rewrites.md, Reintegrating the base) probably needs no hand resolution. Remedy: the implementer merges legion/INFRA-546@origin into legion/INFRA-549 and pushes. After that, the tester compares the unchanged-diff fingerprint and reads CI at the new head. No behaviour defect was found, so no red test was written."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "proof": [
+    {
+      "criterion": "A change of the no-credential session user rolls the pods onto the new session user: the StatefulSet is applied only after the ConfigMap holding auth.conf, so a failed or slow ConfigMap update never rolls pods onto the old session user.",
+      "surface": "The built plugin (go build ./cmd/pulumi-resource-envoy-infra at e0040d22) run by the Pulumi CLI v3.268.0 on the README's YAML program against a real kube-apiserver v1.33.0 + etcd (envtest binaries, RBAC on), with a ValidatingWebhookConfiguration that refuses UPDATE of ConfigMap envoy-nats-config after 10 s",
+      "command": "pulumi up (initial apply); kubectl apply -f vwc.yaml (slow-deny webhook); change sessionUser.nkey; pulumi up on the head stack (namespace envoy) and on a control stack built from c8a0205b (namespace envoy-old); kubectl get sts envoy-nats -o jsonpath annotations/generation at t+8 s and t+30 s; delete the webhook; pulumi up again",
+      "observed": "In Pulumi state the StatefulSet's dependencies are [envoy-nats:envoy/envoy-nats-config] at the head ([] in the control). Under the slow refusal: the head's StatefulSet stayed at session UDVUJLUD and generation 1, and the up failed on the ConfigMap alone. After the webhook was removed, the up updated the ConfigMap (0.07 s) and then the StatefulSet (annotation UCAQA5Z7, generation 2, auth.conf holds the new session user).",
+      "headSha": "e0040d229bba89bf903069f8f4b12ff12f04779f",
+      "negativeControl": "The control plugin (c8a0205b, no depends-on), under the same refused ConfigMap update, rolled its StatefulSet onto session UCAQA5Z7 (generation 2) within 8 s while auth.conf still named UDVUJLUD. This is the failure the fix removes."
+    },
     {
       "criterion": "The rendered NATS configuration is run by three local nats-server processes: they form a cluster, a stream created at three copies survives one server's kill with a leader and no lost publish, and a user added and removed through the rendered auth file reloads with no restart and no client reconnect.",
       "surface": "Three local nats-server v2.15.1 processes with the real nats-server-config-reloader v0.24.0 and prometheus-nats-exporter v0.20.2, on the nats.conf and auth.conf that helm v3.20.2 renders from the component's chart values (vendored chart nats-2.15.1.tgz)",
       "command": "cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)' -v -timeout 30m ./gcp/",
-      "observed": "ok 43.185s. Cluster envoy-nats formed in 230 ms with meta leader envoy-nats-0. SIGKILL of R3 leader envoy-nats-2 after 206 of 1000 acks; envoy-nats-0 led 5.051 s later; 1000 acknowledged messages stored exactly once (8 retries); the restarted server was current at seq 1000 in 2.065 s. A user was added then removed through a renamed auth.conf: every server logged 'Reloaded server configuration' and admitted, then refused, the user. The client kept server_id and cid 40 with 0 reconnects and 0 disconnects, and the PIDs did not change.",
-      "headSha": "c8a0205b358f516a0e0a7dd31bc8b59a50028002",
-      "negativeControl": "A no_auth_user change written the same way: each server refused the reload ('config reload not supported for NoAuthUser') and kept the old session user, so the pod roll is necessary."
+      "observed": "ok 46.663s. SIGKILL of R3 leader envoy-nats-0 after 204 of 1000 acks; envoy-nats-2 led 6.622 s later; 1000 acknowledged messages stored exactly once (10 retries); the restarted copy was current at seq 1000 in 1.647 s. A user was added then removed through a renamed auth.conf: every server reloaded, and the client kept cid 20 with 0 reconnects and 0 disconnects; the PIDs did not change.",
+      "headSha": "e0040d229bba89bf903069f8f4b12ff12f04779f",
+      "negativeControl": "A no_auth_user change written the same way: each server refused the reload ('config reload not supported for NoAuthUser') and kept the old session user."
     },
     {
-      "criterion": "Users rendered by core.Authorization.Render, applied by the reloader with no pod restart; a change of the no-credential session user rolls the pods; the StatefulSet is protected; every child is on the component's own Kubernetes provider (unit tests on Pulumi mocks pin these, here driven for real).",
-      "surface": "The built plugin binary (go build ./cmd/pulumi-resource-envoy-infra at the head) run by the Pulumi CLI v3.268.0 on the README's YAML program, against a real kube-apiserver v1.33.0 + etcd (envtest binaries, RBAC on) with a PriorityClass, a PodMonitoring CRD and the listener seed Secret",
-      "command": "pulumi up --yes --skip-preview, then pulumi preview --json after: adding one user; changing sessionUser.nkey; setting diskSizeGb: 60; and the README's growth steps 3-5 (kubectl delete statefulset envoy-nats --cascade=orphan, pulumi state unprotect, pulumi state delete, preview)",
-      "observed": "The API server accepted all 16 objects (StatefulSet, 2 Services, 2 ConfigMaps, 2 PDBs maxUnavailable 1, NetworkPolicy, PodMonitoring, Secret, ServiceAccount, Deployment). Only the StatefulSet has protect=true, and every child uses the envoy-nats-kubernetes provider. Add a user -> only 'envoy-nats-config data[\"auth.conf\"]=update' (in place, StatefulSet unchanged). Session user change -> auth.conf update plus 'StatefulSet spec.template.metadata.annotations[\"envoy-infra.sjawhar.dev/no-auth-user\"]=update'. Growth steps -> exactly one create, of the StatefulSet: protected, 60Gi.",
-      "headSha": "c8a0205b358f516a0e0a7dd31bc8b59a50028002",
-      "negativeControl": "diskSizeGb: 60 on the live state -> preview fails: 'unable to replace resource ...StatefulSet::envoy-nats:envoy/envoy-nats as it is currently marked for protection'. 19 bad inputs (tailnetAuthKey without tailnet, missing PriorityClass, tag-pinned image, natsReplicas 4, tailnet.replicas 1, natsMemory 4Gi under the floor, maxFileStoreGb 46 < 46.1, diskSizeGb = store, seeds in storageClassName/users[0].machineId/tailnetAuthKey, 45-byte name, blank kubeconfig, duplicate/empty clientNamespaces, durable collision, streamMaxBytes 0/2^63-1/10^12) -> each preview exits 1 and names its input; the seed appears in no output."
-    },
-    {
-      "criterion": "The tailnet entry's session listener: ENVOY_ALLOWED_HOSTS names the Service's address, it serves without a credential only on loopback, it takes the replica count and the byte limit, and the hub's grants include INFRA-546's bucket update grant.",
-      "surface": "envoy-listener built from this branch, run with the exact environment of the tailnet Deployment's listener container as the engine rendered it (only NATS_URLS and the seed path changed), on three nats-server v2.15.1 that use the engine-rendered nats.conf and auth.conf with nkeys whose seeds the tester holds",
-      "command": "run.sh servers; run.sh listener 1; restart with ENVOY_NATS_REPLICAS=3; curl -H 'Host: <h>' http://127.0.0.1:9020/v1/sessions; curl localhost:1822{0,1,2}/jsz?streams=true&config=true",
-      "observed": "Listening on 127.0.0.1:9020 with 'listener API hosts: loopback, envoy-hub.example-tailnet.ts.net'. /healthz 200. /v1/sessions: 200 for envoy-hub.example-tailnet.ts.net:9020, 421 for evil.example.com and envoy-nats.example-tailnet.ts.net. ENVOY_NOTIFICATIONS at R3 with max_bytes 44023414784. KV_envoy_interests/sessions/roles were created at R1 and raised to R3, and each of the three servers holds a copy. A second listener with the same machine id answers /healthz 200 'starting', and binds the durable and goes healthy when the first is killed.",
-      "headSha": "c8a0205b358f516a0e0a7dd31bc8b59a50028002",
-      "negativeControl": "The rendered auth.conf with $JS.API.STREAM.UPDATE.KV_envoy_interests removed from the listener user -> server log 'Publish Violation - Subject \"$JS.API.STREAM.UPDATE.KV_envoy_interests\"'. The buckets stay at R1 and the listener exits (healthz 000)."
+      "criterion": "Users change by reload alone; the StatefulSet is protected; the tailnet session listener takes the replica count and byte limit and the hub's grants include INFRA-546's bucket update grant.",
+      "surface": "The same real Pulumi engine and kube-apiserver (head stack), and envoy-listener rebuilt at e0040d22 (carrying 5fbe7ca5's INFRA-546 code) on three nats-server v2.15.1 that use the nats.conf/auth.conf the head renders (byte-identical to round 1), with the tailnet Deployment's exact listener environment",
+      "command": "pulumi preview --json after adding one user (state's session key matched); pulumi preview with diskSizeGb: 60; run.sh servers; run.sh listener 1; run.sh listener 3; curl localhost:1822{0,1,2}/jsz?streams=true&config=true; curl -H 'Host: <h>' http://127.0.0.1:9020/v1/sessions",
+      "observed": "User add -> only 'envoy-nats-config data[\"auth.conf\"]=update'. ENVOY_NOTIFICATIONS at R3/max_bytes 44023414784 and KV_envoy_interests/sessions/roles at R3 on each of the three servers after the R1 start and the R3 restart, with no permission violation in any log. /healthz 200; /v1/sessions 200 for envoy-hub.example-tailnet.ts.net:9020.",
+      "headSha": "e0040d229bba89bf903069f8f4b12ff12f04779f",
+      "negativeControl": "diskSizeGb: 60 -> preview fails 'unable to replace resource ...StatefulSet::envoy-nats:envoy/envoy-nats ... marked for protection'. Host evil.example.com -> 421. In round 1, the listener user without $JS.API.STREAM.UPDATE.KV_envoy_interests gave 'Publish Violation' with the buckets left at R1."
     }
   ],
   "observations": [
-    "Chart children carry no ordering: in Pulumi state the StatefulSet's dependencies are []. On a session-user change the -config ConfigMap and the StatefulSet update in parallel. If the ConfigMap update fails while the StatefulSet roll succeeds, the pods restart on the old no_auth_user. A later up updates only the ConfigMap, the servers refuse that reload (NoAuthUser), and the old session user stays with a clean preview. This was not driven to failure; it is a risk for the reviewer to weigh.",
-    "The tailnet advertiser was not driven against a real tailscaled (no tailnet auth key on this surface); its behaviour is pinned by the shared tailnet_service_test.go stubs (INFRA-560's code byte for byte). The README PromQL and the GKE-only pieces (GMP collection, Dataplane V2 enforcement, Autopilot scheduling) are INFRA-551's live proof."
+    "A refusal that fails at once (a ValidatingAdmissionPolicy) stopped both the head and the control before their StatefulSet steps, because the chart's Construct failed first. Only a slow failure (the 10 s webhook) shows the race. So the round-1 risk was real, and the fix closes it.",
+    "Not reachable on this surface, unchanged from round 1: the advertiser against a real tailscaled, the README PromQL, and GKE-only behaviour (GMP collection, Dataplane V2 enforcement, Autopilot scheduling) belong to INFRA-551's live proof."
   ]
 }
