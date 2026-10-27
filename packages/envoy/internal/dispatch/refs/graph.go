@@ -27,7 +27,8 @@ const excerptRunes = 240
 // Query selects one node's edges. Direction "in" reads edges pointing at the node (Kind, ID
 // are its to_kind, to_id: ref_key for artifacts); "out" reads edges it writes (from_kind,
 // from_id: the uuid for artifacts). Kinds narrows edge types; Since keeps mentions whose
-// source_seq is greater, which excludes every structural edge.
+// source_seq is greater, and Through those whose source_seq is at or below it; either excludes
+// every structural edge.
 type Query struct {
 	Direction string
 	Kind      string
@@ -37,6 +38,11 @@ type Query struct {
 	// inbound `replies_to` edges are its own clarification thread, which its card renders.
 	ExcludeKinds []string
 	Since        *int64
+	// Through bounds a Since read at a safe horizon of the event log (events.Horizon), at or
+	// below which every event is final: event ids are not commit order, so a caller that moved
+	// its since past a returned edge's source_seq would never be shown an edge whose event
+	// drew a lower id and committed later.
+	Through *int64
 }
 
 // AskBacklinkExclusions is what "referenced by" never means for an ask: its own clarification
@@ -167,6 +173,10 @@ func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error
 	if query.Since != nil {
 		args = append(args, *query.Since)
 		sql.WriteString(" and source_seq > $" + strconv.Itoa(len(args)))
+	}
+	if query.Through != nil {
+		args = append(args, *query.Through)
+		sql.WriteString(" and source_seq <= $" + strconv.Itoa(len(args)))
 	}
 	sql.WriteString(" order by created_at desc, kind, from_kind, from_id, to_kind, to_id")
 	rows, err := q.Query(ctx, sql.String(), args...)

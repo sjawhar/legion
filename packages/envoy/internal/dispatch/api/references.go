@@ -32,6 +32,15 @@ func (s *server) replaceReferences(
 // at the node (backlinks), ?from= every edge it writes; exactly one is required. ?kind= narrows
 // edge types and ?since= keeps mentions introduced after an events.id, which excludes
 // structural edges. Cross-project by design: no project filter.
+//
+// A since read keeps only mentions whose event is at or below the safe horizon
+// (events.Horizon), at or below which every event is final. A poller passes the highest
+// source_seq it was shown as its next since, and event ids are not commit order: a mention whose
+// event drew a lower id and committed after a higher one was read would otherwise fall below
+// that since and never be shown. So a mention whose event has just committed, the caller's own
+// included, can be missing from one read and appear on a later one, once the horizon passes it:
+// each observation proves the one before it, so it takes a later observation (this server's
+// event stream relay or the next since read), typically milliseconds.
 func (s *server) getReferences(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -59,6 +68,14 @@ func (s *server) getReferences(w http.ResponseWriter, r *http.Request) {
 	if !found {
 		s.writeHandlerError(w, errorf(http.StatusNotFound, "NOT_FOUND", "no %s at %s", query.Kind, query.ID))
 		return
+	}
+	if query.Since != nil {
+		safe, err := s.horizon().Safe(r.Context())
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		query.Through = &safe
 	}
 	edges, err := refs.Edges(r.Context(), s.deps.Store.Pool, query)
 	if err != nil {

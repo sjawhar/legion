@@ -6,9 +6,13 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -280,7 +284,9 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 	if since := graphEdges(t, handler, url.Values{"to": {askRef}, "since": {strconv.FormatInt(messageEventID, 10)}}); len(since.Edges) != 0 {
 		t.Fatalf("since the introducing event kept %#v; want no edges", since.Edges)
 	}
-	if since := graphEdges(t, handler, url.Values{"to": {askRef}, "since": {strconv.FormatInt(messageEventID-1, 10)}}); len(since.Edges) != 1 {
+	// The message's own event is final once it commits, but the since read stops at the safe
+	// horizon, which a later observation moves past it.
+	if since := awaitGraphEdges(t, handler, url.Values{"to": {askRef}, "since": {strconv.FormatInt(messageEventID-1, 10)}}, 1); since.Edges[0].SourceSeq == nil || *since.Edges[0].SourceSeq != messageEventID {
 		t.Fatalf("since the prior event = %#v; want the backlink", since.Edges)
 	}
 
@@ -301,6 +307,111 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 		if response.Code != tc.status || !strings.Contains(response.Body.String(), `"code":"`+tc.code+`"`) {
 			t.Errorf("%s: status=%d body=%s; want %d %s", name, response.Code, response.Body.String(), tc.status, tc.code)
 		}
+	}
+}
+
+// awaitGraphEdges reads query until it answers want edges. A since read stops at the event log's
+// safe horizon, so an edge whose event just committed can be missing from one read and appear on a
+// later one; the wait is generous, since an open write anywhere on the test cluster holds the
+// horizon back.
+func awaitGraphEdges(t *testing.T, handler http.Handler, query url.Values, want int) model.GraphReferences {
+	t.Helper()
+	deadline := time.Now().Add(sseFrameWait)
+	for {
+		read := graphEdges(t, handler, query)
+		if len(read.Edges) == want {
+			return read
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("GET /api/v1/references?%s = %#v after %s; want %d edges", query.Encode(), read.Edges, sseFrameWait, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// T7. A poller reads ?since=<the highest source_seq it was shown>. Event ids are not commit order:
+// a comment edit that drew event a can still be open after one that drew b > a has committed. A
+// read that answered b's mention would move the poller's since to b, and a's mention, committing
+// later below it, would never be shown. The since read stops at the safe horizon, which a's open
+// transaction holds below a, so it answers neither mention while a is open, and both once it
+// commits. Each edit indexes its comment's body as a comment write does (refs.ReplaceCounted,
+// then refs.Stamp with the edit's event).
+func TestReferencesSinceWithholdsEveryMentionAboveAnOpenLowerEvent(t *testing.T) {
+	handler, database, broker := newTestHandlerWithBroker(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	issue := func(title string) model.Issue {
+		t.Helper()
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{"project": "CORE", "title": title}, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create issue %q: status=%d body=%s", title, response.Code, response.Body.String())
+		}
+		return decodeBody[model.Issue](t, response)
+	}
+	target := issue("Ship the widget launch")
+	firstIssue := issue("Rotate the database credentials")
+	secondIssue := issue("Repaint the office lobby")
+	first := createReferenceAPIComment(t, handler, firstIssue.Key, "No reference yet.")
+	second := createReferenceAPIComment(t, handler, secondIssue.Key, "No reference yet.")
+	targetRef := "dispatch://" + target.Key
+
+	ctx := t.Context()
+	mention := func(tx pgx.Tx, issueKey, commentID string) int64 {
+		t.Helper()
+		if _, err := refs.ReplaceCounted(ctx, tx, "comment", commentID, "Now see "+targetRef, ""); err != nil {
+			t.Fatalf("index comment %s: %v", commentID, err)
+		}
+		event, err := broker.Append(ctx, tx, model.Event{
+			IssueKey: new(issueKey), Type: "comment.updated", Actor: model.Actor{Kind: "user", ID: "alice"},
+			Payload: map[string]any{"comment_id": commentID},
+		})
+		if err != nil {
+			t.Fatalf("append comment %s's event: %v", commentID, err)
+		}
+		if err := refs.Stamp(ctx, tx, "comment", commentID, event.ID); err != nil {
+			t.Fatalf("stamp comment %s's mention: %v", commentID, err)
+		}
+		return event.ID
+	}
+	open, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the lower event's transaction: %v", err)
+	}
+	t.Cleanup(func() { _ = open.Rollback(context.Background()) })
+	low := mention(open, firstIssue.Key, first.ID)
+	committed, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the higher event's transaction: %v", err)
+	}
+	defer func() { _ = committed.Rollback(context.Background()) }()
+	high := mention(committed, secondIssue.Key, second.ID)
+	if err := committed.Commit(ctx); err != nil {
+		t.Fatalf("commit the higher event: %v", err)
+	}
+	if high <= low {
+		t.Fatalf("event ids %d (open) and %d (committed) are not out of commit order, so this test proves nothing", low, high)
+	}
+
+	query := url.Values{"to": {targetRef}, "since": {strconv.FormatInt(low-1, 10)}}
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		if read := graphEdges(t, handler, query); len(read.Edges) != 0 {
+			t.Fatalf("since %d while event %d is open = %#v; want no mention, not even the committed event %d's", low-1, low, read.Edges, high)
+		}
+	}
+
+	if err := open.Commit(ctx); err != nil {
+		t.Fatalf("commit the lower event: %v", err)
+	}
+	read := awaitGraphEdges(t, handler, query, 2)
+	var seqs []int64
+	for _, edge := range read.Edges {
+		if edge.Kind != "mentions" || edge.SourceSeq == nil {
+			t.Fatalf("edge %#v; want a mention with its source_seq", edge)
+		}
+		seqs = append(seqs, *edge.SourceSeq)
+	}
+	slices.Sort(seqs)
+	if !slices.Equal(seqs, []int64{low, high}) {
+		t.Fatalf("since %d after both commits answers mentions of events %v; want %d and %d", low-1, seqs, low, high)
 	}
 }
 
