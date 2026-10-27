@@ -423,6 +423,18 @@ reconnects, re-syncs and shows the current text. A reader sees a brief reconnect
 text they can act on. Cross-process live co-editing of one document — two rooms with text
 streaming between them — is a follow-up issue, out of scope here.
 
+**A connection is closed after its next response once it is 60 seconds old** (`maxConnAge`,
+`cmd/dispatch/conn_age.go`): the server stamps each connection's accept time and answers the first
+request it reads at that age or later with `Connection: close`, and a request carrying an `Upgrade`
+header, a websocket handshake, keeps its connection. kube-proxy and the front door spread load per
+connection, not per request, so while callers reuse their keep-alive connections a process that
+has just rolled in gets little traffic; a closed connection makes the client open a new one, which
+kube-proxy spreads across every ready process. Shutdown needs none of this: once
+`Server.Shutdown` begins, Go's server already writes every response with `Connection: close` and
+closes the connection after it. One race remains: a client can write a request onto an idle pooled
+connection at the instant the server closes it. Clients retry an idempotent request on a new
+connection, but a proxied `POST` can come back as a `502`.
+
 ## Database migrations
 
 Boot applies `internal/dispatch/store/migrations/*.up.sql` in version order and records each

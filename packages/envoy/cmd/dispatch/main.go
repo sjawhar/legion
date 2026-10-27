@@ -451,12 +451,7 @@ func main() {
 
 	routesHandler, waitDelivery := routes.New(appCtx)
 	handler := dispatchHandler(routesHandler, database, natsClient, fileStore, buildCommit)
-	server := &http.Server{
-		Handler:           handler,
-		ReadHeaderTimeout: readHeaderTimeout,
-		IdleTimeout:       idleTimeout,
-		// WriteTimeout remains zero because the event stream is long-lived.
-	}
+	server := newHTTPServer(handler, time.Now)
 	// Bound before serving, so an address that cannot be taken ends the process with 1: a
 	// supervisor must not read a port clash as a clean stop.
 	listener, err := net.Listen("tcp", boot.ListenAddr)
