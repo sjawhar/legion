@@ -107,6 +107,7 @@ jobs:
           # named by every filter that needs it through its anchor, which dorny/paths-filter
           # flattens into the list that names it.
           filters: |
+            scratch_broken: [unclosed
             # A frozen Bun install and the Bun it runs: `bun install --frozen-lockfile` reads the
             # root manifest, the lockfile, the patches package.json:45-49 applies, and the manifest
             # of every workspace package.json:19-31 lists; .github/actions/setup-bun installs the
