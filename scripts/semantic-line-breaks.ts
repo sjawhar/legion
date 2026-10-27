@@ -415,12 +415,16 @@ function wrapLongLine(line: string, indent: string): string[] {
   return cutLine(line, cuts).map((piece, n) => (n === 0 ? piece : indent + piece));
 }
 
-/** The lines of a paragraph joined into logical lines, kept apart at hard breaks and HTML lines. */
+/**
+ * The lines of a paragraph joined into logical lines, kept apart at hard breaks. A line that starts
+ * with `<` inside a paragraph is text, not an HTML block (the scanner ends the paragraph before
+ * one), and is joined like any other: it may continue a code span the line before opened.
+ */
 function joinParagraph(source: readonly string[]): string[] {
   const logical: string[] = [];
   for (const line of source) {
     const previous = logical.at(-1);
-    if (previous === undefined || HARD_BREAK.test(previous) || line[indentLength(line)] === "<") {
+    if (previous === undefined || HARD_BREAK.test(previous)) {
       logical.push(line);
     } else {
       logical[logical.length - 1] =
@@ -492,8 +496,21 @@ function check(text: string): Finding[] {
   for (const [index, line] of lines.entries()) {
     const info = blocks.lines[index];
     if (info === undefined || info.kind === "fence" || info.kind === "code") continue;
-    for (const space of sentenceBreaks(line)) {
-      findings.push({ line: index, rule: 1, message: excerpt(line, space) });
+    // R1 reads a paragraph whole, so a code span a line break cuts in two still masks its text.
+    const paragraph = info.paragraph;
+    if (paragraph === undefined) {
+      for (const space of sentenceBreaks(line)) {
+        findings.push({ line: index, rule: 1, message: excerpt(line, space) });
+      }
+    } else if (paragraph.first === index) {
+      const source = lines.slice(paragraph.first, paragraph.last + 1);
+      const joined = source.join("\n");
+      for (const space of sentenceBreaks(joined)) {
+        const offset = joined.slice(0, space).split("\n").length - 1;
+        const column = space - (joined.lastIndexOf("\n", space) + 1);
+        const message = excerpt(source[offset] ?? "", column);
+        findings.push({ line: paragraph.first + offset, rule: 1, message });
+      }
     }
     if (needsBlankBefore(lines, info, index)) {
       findings.push({ line: index, rule: 2, message: excerpt(line, 0) });
