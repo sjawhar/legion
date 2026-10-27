@@ -9,7 +9,7 @@ import (
 )
 
 // An answer given before a request's body is read reaches some clients as a failed connection
-// rather than as the answer (INFRA-258, FinalReview4 L2). An HTTP/1.1 client that sends its whole
+// rather than as the answer (INFRA-258). An HTTP/1.1 client that sends its whole
 // body before it reads the answer - WebKit and Firefox uploading a file - is still sending when
 // net/http, finding the body unread, writes the answer and closes the connection; the close resets
 // it, and the client drops the answer with it. So every layer's early answer - the keyed layer's

@@ -124,7 +124,7 @@ func createClosedIssue(t *testing.T, handler http.Handler) model.Issue {
 	return closed
 }
 
-// INFRA-258 (FinalReview4 L2, gate-fixes S20). An answer given before an upload's body is read -
+// INFRA-258. An answer given before an upload's body is read -
 // 409 KEY_IN_FLIGHT to a repeat whose first upload still runs, 409 ISSUE_CLOSED to an upload to a
 // closed issue - reaches the client as that answer over a real connection: a client that sends its
 // whole multi-megabyte body before it reads, as WebKit and Firefox do, and net/http's own client,
@@ -231,7 +231,7 @@ func (b repeatedByte) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// INFRA-258 (gate-fixes S20). An early answer drains at most the route's own limit and one byte
+// INFRA-258. An early answer drains at most the route's own limit and one byte
 // more (routeBodyLimit): a body that runs past it is answered as the limit answers it, 413 with the
 // route's refusal and none of the early answer's headers, and the rest is never read. A body inside
 // the limit is read to its end and the early answer stands, whichever layer gave it: the keyed
@@ -372,7 +372,7 @@ type keyedAnswered struct {
 	err    error
 }
 
-// INFRA-258 (FinalReview5 L3, gate-fixes S21). A repeat whose key a first request still holds when
+// INFRA-258. A repeat whose key a first request still holds when
 // it arrives is judged once its body has arrived, by that body's digest, as a fresh repeat is - not
 // by what the key held before the body came, which a slow upload outlives. A first request that
 // answered while the repeat's body arrived is replayed that answer; a request whose body differs
@@ -609,7 +609,7 @@ func TestADrainStopsWaitingForABodyThatStalls(t *testing.T) {
 	}
 }
 
-// INFRA-258 (FinalReview5 L5, gate-fixes S22). A client that asks to be told to continue before it
+// INFRA-258. A client that asks to be told to continue before it
 // sends its body (Expect: 100-continue) and is refused early gets the refusal with none of its body
 // sent and no 100 Continue ahead of it, and the connection closes after it. Nothing of Dispatch
 // reads such a body: the drain leaves it (drainBeforeAnswer), and the keyed layer answers a repeat

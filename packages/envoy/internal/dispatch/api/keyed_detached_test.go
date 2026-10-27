@@ -318,7 +318,7 @@ func (b *countingBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// INFRA-258 (FinalReview5 L3, gate-fixes S21). A repeat of a keyed write whose first request still
+// INFRA-258. A repeat of a keyed write whose first request still
 // runs is never spooled: the key is looked up by its login and key before the body is read, so a
 // slow upload's repeats - the page asks again about once a second - are never written to disk again
 // only to be told to wait. Its body is read to its end, discarded and written only to the digest it

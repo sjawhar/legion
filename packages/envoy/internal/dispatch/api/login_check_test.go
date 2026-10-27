@@ -107,7 +107,7 @@ func TestAWriteRunsOnlyAsThePersonWhoPressedIt(t *testing.T) {
 	}
 }
 
-// INFRA-258 (ProofRun3 D1). The Conversation's read mark is a PUT, and runs only as the person who
+// INFRA-258. The Conversation's read mark is a PUT, and runs only as the person who
 // pressed it, as every write does: a mark pressed by bob that goes out on alice's session - another
 // tab signed her in in place - is refused 409 LOGIN_CHANGED and writes nothing into her state, so an
 // issue never reads as read for someone who never opened it. Pressed by alice, it is written.

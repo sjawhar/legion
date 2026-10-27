@@ -2125,7 +2125,7 @@ from a reuse:
   body is read and discarded, never spooled, at most `routeBodyLimit` and one byte more. An
   HTTP/1.1 client that sends a whole body before it reads the answer - WebKit and Firefox uploading
   a file - otherwise met net/http's close of a connection with its body unread as a reset, and
-  dropped the answer with it (FinalReview4 L2; the browser suite's 20 MB in-flight upload row).
+  dropped the answer with it (the browser suite's 20 MB in-flight upload row).
   Both reads, the drain's and the layer's, are bounded at `bodyDrainLimit` (a minute), a read
   deadline through `http.ResponseController.SetReadDeadline` lifted only once the body has reached
   its end: a body that stops arriving gets its answer as it stood, with `Connection: close`, and

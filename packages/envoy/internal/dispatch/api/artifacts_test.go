@@ -628,7 +628,7 @@ func issueArtifactCount(t *testing.T, database *store.Store, issueKey string) in
 	return count
 }
 
-// INFRA-258 (ProofRun3 D3). An upload to a closed issue is refused 409 ISSUE_CLOSED before any of
+// INFRA-258. An upload to a closed issue is refused 409 ISSUE_CLOSED before any of
 // its body is spooled, keyed or not: the keyed layer spools a body whole before its handler runs,
 // and the multipart parser spools one whole before the handler reaches its issue, so a closed
 // issue's 20 MB upload was written out in full only to be refused. The body is read off the
@@ -655,7 +655,7 @@ func TestAnUploadToAClosedIssueIsRefusedBeforeItsBodyIsSpooled(t *testing.T) {
 	}
 }
 
-// INFRA-258 (FinalReview4 N2). A repeat of an upload that landed is answered what that upload was,
+// INFRA-258. A repeat of an upload that landed is answered what that upload was,
 // whatever its issue's state now. Its answer was lost - a dropped connection, a reload that resumed
 // the write - and the issue closed before the repeat, as Legion's merge closes one: the upload is
 // stored, so the closed-issue refusal must not answer it. The key holds the answer, and the keyed
@@ -696,7 +696,7 @@ func (s *heldFileStore) Put(ctx context.Context, sha, mime string, body []byte) 
 	return s.Memory.Put(ctx, sha, mime, body)
 }
 
-// INFRA-258 (FinalReview4 N2). A repeat of an upload whose first request is still running when its
+// INFRA-258. A repeat of an upload whose first request is still running when its
 // issue closes is told 409 KEY_IN_FLIGHT, unspooled, and not ISSUE_CLOSED: the first request
 // decides, under the issue's lock, whether the upload lands, and once it has answered the repeat is
 // given that answer. Here the first request reaches the issue after the close, so its answer, and
@@ -749,7 +749,7 @@ func TestARepeatOfAnUploadStillRunningWaitsForItsAnswerAfterTheIssueCloses(t *te
 	}
 }
 
-// INFRA-258 (FinalReview4 N2). The closed-issue refusal runs before the body is spooled only where
+// INFRA-258. The closed-issue refusal runs before the body is spooled only where
 // the upload's handler would run: a key no row holds
 // (TestAnUploadToAClosedIssueIsRefusedBeforeItsBodyIsSpooled), one past its window, and one whose
 // holder died with nothing committed, which the next attempt takes over. Every key the keyed layer
