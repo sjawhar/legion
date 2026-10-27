@@ -2127,15 +2127,14 @@ func TestSSESendsNoReplayWhoseFramesExceedTheByteBound(t *testing.T) {
 	}
 }
 
-// holdFirstLiveWrite makes the first live frame any connection on the relay writes wait until
+// holdFirstLiveWrite makes the first live frame any connection on served writes wait until
 // release is called, so the connection takes one event off its subscription and reads nothing
 // more while the relay publishes. release is idempotent. It is set before the test's httptest
 // server starts, which the handler's read of it then follows.
-func holdFirstLiveWrite(relay *eventStreamRelay) (release func()) {
+func holdFirstLiveWrite(served *server) (release func()) {
 	released := make(chan struct{})
-	var hold, done sync.Once
-	relay.beforeLiveWrite = func() { hold.Do(func() { <-released }) }
-	return func() { done.Do(func() { close(released) }) }
+	served.beforeLiveWrite = sync.OnceFunc(func() { <-released })
+	return sync.OnceFunc(func() { close(released) })
 }
 
 // waitForRelayOverflow waits for the relay to publish through the event through, then fails
@@ -2194,7 +2193,7 @@ func readFrameIDsToEnd(t *testing.T, scanner *bufio.Scanner) []int64 {
 func TestSSECatchesUpAConnectionWhoseSubscriptionOverflowed(t *testing.T) {
 	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{})
 	key := createStreamIssue(t, handler)
-	release := holdFirstLiveWrite(served.eventRelay)
+	release := holdFirstLiveWrite(served)
 	httpServer := httptest.NewServer(handler)
 	t.Cleanup(httpServer.Close)
 	t.Cleanup(release)
@@ -2221,7 +2220,7 @@ func TestSSECatchesUpAConnectionWhoseSubscriptionOverflowed(t *testing.T) {
 func TestSSEEndsAConnectionWhoseOverflowIsPastTheBound(t *testing.T) {
 	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{})
 	key := createStreamIssue(t, handler)
-	release := holdFirstLiveWrite(served.eventRelay)
+	release := holdFirstLiveWrite(served)
 	httpServer := httptest.NewServer(handler)
 	t.Cleanup(httpServer.Close)
 	t.Cleanup(release)

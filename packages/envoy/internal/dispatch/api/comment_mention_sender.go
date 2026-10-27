@@ -66,7 +66,7 @@ type mentionSender struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	send     func(context.Context, mentionSend)
-	stranded func(context.Context) ([]mentionSend, error)
+	stranded func(ctx context.Context, limit int) ([]mentionSend, error)
 	// capacity is maxQueuedMentionSends; only a test lowers it.
 	capacity int
 
@@ -90,18 +90,10 @@ type mentionSender struct {
 func newMentionSender(
 	lifetime context.Context,
 	send func(context.Context, mentionSend),
-	stranded func(context.Context) ([]mentionSend, error),
+	stranded func(ctx context.Context, limit int) ([]mentionSend, error),
 ) *mentionSender {
 	ctx, cancel := context.WithCancel(context.WithoutCancel(lifetime))
-	context.AfterFunc(lifetime, func() {
-		drain := time.NewTimer(mentionDrainTimeout)
-		defer drain.Stop()
-		select {
-		case <-drain.C:
-			cancel()
-		case <-ctx.Done():
-		}
-	})
+	context.AfterFunc(lifetime, func() { time.AfterFunc(mentionDrainTimeout, cancel) })
 	return &mentionSender{
 		lifetime: lifetime, ctx: ctx, cancel: cancel, send: send, stranded: stranded,
 		capacity: maxQueuedMentionSends, lanes: map[string][]mentionSend{},
@@ -190,12 +182,13 @@ func (m *mentionSender) next(lane string) (mentionSend, string, bool) {
 		lane, m.ready = m.ready[0], m.ready[1:]
 	}
 	item := m.lanes[lane][0]
+	m.lanes[lane][0] = mentionSend{}
 	m.lanes[lane] = m.lanes[lane][1:]
 	m.queued--
 	return item, lane, true
 }
 
-// recoverStranded runs the recovery pass: it queues every stranded attempt
+// recoverStranded runs the recovery pass: it queues the stranded attempts
 // (strandedCommentMentions), each sent through the claim protocol, so an attempt another sender
 // holds is not sent twice.
 func (m *mentionSender) recoverStranded() {
@@ -206,15 +199,28 @@ func (m *mentionSender) recoverStranded() {
 	}
 }
 
+// recoverStrandedLocked reads one stranded attempt past the queue's free room, so when more are
+// stranded than fit, at least one is refused for the bound and the pass runs again once the queue
+// drains (queueLocked).
 func (m *mentionSender) recoverStrandedLocked() {
+	limit := max(m.capacity-m.queued, 0) + 1
 	m.done.Go(func() {
-		stranded, err := m.stranded(m.ctx)
+		stranded, err := m.stranded(m.ctx, limit)
 		if err != nil {
 			slog.Error("dispatch: read stranded comment mentions", "error", err)
 			return
 		}
+		refused := 0
+		m.mu.Lock()
 		for _, item := range stranded {
-			m.enqueue(item)
+			if m.queueLocked(item) {
+				refused++
+			}
+		}
+		m.mu.Unlock()
+		if refused > 0 {
+			slog.Warn("dispatch: comment mention queue full; stranded attempts stay pending until the queue drains",
+				"attempts", refused)
 		}
 	})
 }
@@ -242,11 +248,12 @@ func (s *server) sendCommentMention(ctx context.Context, item mentionSend) {
 	}
 }
 
-// strandedCommentMentions reads the attempts the recovery pass resumes: pending, with a claim
-// that lapsed or was never taken (claimLapsed), created within strandedMentionWindow, oldest
-// first. Each is sent as its comment's author, the actor its comment.created event names; an
-// attempt whose event cannot be read is logged and left for its author's retry.
-func (s *server) strandedCommentMentions(ctx context.Context) ([]mentionSend, error) {
+// strandedCommentMentions reads at most limit of the attempts the recovery pass resumes: pending,
+// with a claim that lapsed or was never taken (claimLapsed), created within strandedMentionWindow,
+// oldest first. Each is sent as its comment's author, the actor its comment.created event names,
+// read once per comment; an attempt whose event cannot be read is logged and left for its
+// author's retry.
+func (s *server) strandedCommentMentions(ctx context.Context, limit int) ([]mentionSend, error) {
 	ctx = store.WithTransactionTracking(ctx)
 	rows, err := s.deps.Store.Pool.Query(ctx, `
 		select d.comment_id::text, c.issue_key, c.artifact_id::text, d.target, d.delivery, d.session_id
@@ -255,7 +262,8 @@ func (s *server) strandedCommentMentions(ctx context.Context) ([]mentionSend, er
 		where d.state = 'pending' and `+claimLapsed+`
 		  and d.created_at > now() - interval '`+strandedMentionWindow+`'
 		order by d.created_at, d.comment_id, d.target, d.attempt
-	`)
+		limit $1
+	`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -270,14 +278,24 @@ func (s *server) strandedCommentMentions(ctx context.Context) ([]mentionSend, er
 	if err != nil {
 		return nil, err
 	}
+	type createdEvent struct {
+		event model.Event
+		err   error
+	}
+	events := make(map[string]createdEvent)
 	stranded := make([]mentionSend, 0, len(found))
 	for _, item := range found {
-		if item.created, err = s.loadCommentCreatedEvent(ctx, s.deps.Store.Pool, item.comment); err != nil {
+		created, read := events[item.comment.ID]
+		if !read {
+			created.event, created.err = s.loadCommentCreatedEvent(ctx, s.deps.Store.Pool, item.comment)
+			events[item.comment.ID] = created
+		}
+		if created.err != nil {
 			slog.Error("dispatch: read the comment.created event of a stranded comment mention",
-				"comment", item.comment.ID, "target", item.mention.Target, "error", err)
+				"comment", item.comment.ID, "target", item.mention.Target, "error", created.err)
 			continue
 		}
-		item.actor = item.created.Actor
+		item.created, item.actor = created.event, created.event.Actor
 		stranded = append(stranded, item)
 	}
 	return stranded, nil

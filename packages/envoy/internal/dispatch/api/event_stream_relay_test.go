@@ -80,9 +80,6 @@ func TestEventCommittedOnAnotherProcessReachesAnOpenStream(t *testing.T) {
 	}
 }
 
-// relayTestBuffer is the channel size a relay test subscribes with.
-const relayTestBuffer = 64
-
 // newCountedRelay is a relay of its own on deps' database, on a lifetime the test ends and waits
 // out, whose every page read is reported on reads, after it returns, with the id it read after.
 func newCountedRelay(t *testing.T, deps Deps) (*eventStreamRelay, chan int64) {
@@ -106,29 +103,12 @@ func newCountedRelay(t *testing.T, deps Deps) (*eventStreamRelay, chan int64) {
 // subscribeRelay subscribes to the relay, cancelled when the test ends if not before.
 func subscribeRelay(t *testing.T, relay *eventStreamRelay) (<-chan relayedEvent, func(), int64) {
 	t.Helper()
-	subscription, err := relay.subscribe(context.Background(), relayTestBuffer)
+	subscription, err := relay.subscribe(context.Background(), eventStreamBuffer)
 	if err != nil {
 		t.Fatalf("subscribe to the relay: %v", err)
 	}
 	t.Cleanup(subscription.cancel)
 	return subscription.events, subscription.cancel, subscription.head
-}
-
-// insertRelayEvent commits one event on the issue in one statement, so one notification, and
-// answers its id.
-func insertRelayEvent(t *testing.T, database *store.Store, issueKey string) int64 {
-	t.Helper()
-	var id int64
-	if err := database.Pool.QueryRow(context.Background(), `
-		with bumped as (update issues set last_seq = last_seq + 1 where key = $1 returning last_seq)
-		insert into events (issue_key, seq, type, actor, payload, notify)
-		select $1, last_seq, 'test.relayed', jsonb_build_object('kind', 'session', 'id', 'seed'), '{}'::jsonb, false
-		from bumped
-		returning id
-	`, issueKey).Scan(&id); err != nil {
-		t.Fatalf("insert an event: %v", err)
-	}
-	return id
 }
 
 // receiveRelayed is the subscription's next event.
@@ -169,36 +149,10 @@ func waitRelayRead(t *testing.T, reads <-chan int64) {
 	}
 }
 
-// relayListenBackends counts the database's backends whose last statement is the relay's LISTEN.
-// The delivery hub listens on its two channels in one statement, so its backend is not counted.
-func relayListenBackends(t *testing.T, database *store.Store) int {
-	t.Helper()
-	var count int
-	if err := database.Pool.QueryRow(context.Background(), `
-		select count(*) from pg_stat_activity where datname = current_database() and query = $1
-	`, "listen "+dispatchEventsChannel).Scan(&count); err != nil {
-		t.Fatalf("count the relay's LISTEN backends: %v", err)
-	}
-	return count
-}
-
-// waitForRelayListenBackends waits for the count of the relay's LISTEN backends to reach want: a
-// stopped generation closes its connection from its own goroutine, and the backend leaves
-// pg_stat_activity once it has exited.
-func waitForRelayListenBackends(t *testing.T, database *store.Store, want int) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		got := relayListenBackends(t, database)
-		if got == want {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%d LISTEN %s backends after 5s, want %d", got, dispatchEventsChannel, want)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
+// relayListenBackend selects, in pg_stat_activity, the backends whose last statement is the
+// relay's LISTEN. The delivery hub listens on its two channels in one statement, so its backend
+// is not selected.
+const relayListenBackend = `datname = current_database() and query = 'listen ` + dispatchEventsChannel + `'`
 
 // TestEventStreamRelayReadsNothingWithoutASubscriber: a process nobody streams from holds no
 // LISTEN connection for the event log and reads none of it, before its first stream and after its
@@ -211,7 +165,7 @@ func TestEventStreamRelayReadsNothingWithoutASubscriber(t *testing.T) {
 	commit := func() {
 		t.Helper()
 		for range 3 {
-			insertRelayEvent(t, database, key)
+			seedStreamEvents(t, database, key, 1, 0)
 		}
 	}
 	idle := func(when string) {
@@ -220,7 +174,7 @@ func TestEventStreamRelayReadsNothingWithoutASubscriber(t *testing.T) {
 		if count := len(reads); count != 0 {
 			t.Fatalf("the relay read the event log %d times %s", count, when)
 		}
-		if count := relayListenBackends(t, database); count != 0 {
+		if count := countBackends(t, database, relayListenBackend); count != 0 {
 			t.Fatalf("%d relay LISTEN backends %s, want none", count, when)
 		}
 	}
@@ -229,13 +183,13 @@ func TestEventStreamRelayReadsNothingWithoutASubscriber(t *testing.T) {
 
 	subscription, cancel, head := subscribeRelay(t, relay)
 	waitRelayRead(t, reads)
-	if count := relayListenBackends(t, database); count != 1 {
+	if count := countBackends(t, database, relayListenBackend); count != 1 {
 		t.Fatalf("%d relay LISTEN backends with one subscriber, want 1", count)
 	}
-	last := insertRelayEvent(t, database, key)
+	last := seedStreamEvents(t, database, key, 1, 0)
 	receiveRelayedThrough(t, subscription, head, last)
 	cancel()
-	waitForRelayListenBackends(t, database, 0)
+	waitForBackends(t, database, 0, relayListenBackend)
 	for len(reads) > 0 {
 		<-reads
 	}
@@ -258,7 +212,7 @@ func TestEventStreamRelayReadsEachCommitOnceForEverySubscriber(t *testing.T) {
 	// The generation's catch-up after its LISTEN, which finds nothing new.
 	waitRelayRead(t, reads)
 
-	committed := insertRelayEvent(t, database, key)
+	committed := seedStreamEvents(t, database, key, 1, 0)
 	frames := make([][]byte, subscribers)
 	for index, subscription := range subscriptions {
 		event := receiveRelayed(t, subscription)
@@ -293,7 +247,7 @@ func TestEventStreamRelaySubscribeRacingTheLastCancelReceivesTheNextEvent(t *tes
 		}()
 		subscription, cancelSecond, head := subscribeRelay(t, relay)
 		<-cancelled
-		committed := insertRelayEvent(t, database, key)
+		committed := seedStreamEvents(t, database, key, 1, 0)
 		receiveRelayedThrough(t, subscription, head, committed)
 		cancelSecond()
 	}
@@ -325,7 +279,7 @@ func TestEventStreamRelayCatchesUpWhenItsListenerReconnects(t *testing.T) {
 	subscription, _, opened := subscribeRelay(t, relay)
 
 	// Committed while the relay has no connection: its notification reaches nobody.
-	committed := insertRelayEvent(t, database, key)
+	committed := seedStreamEvents(t, database, key, 1, 0)
 	select {
 	case event := <-subscription:
 		t.Fatalf("the relay published event %d with no listening connection", event.Event.ID)
@@ -339,9 +293,9 @@ func TestEventStreamRelayCatchesUpWhenItsListenerReconnects(t *testing.T) {
 	var terminated int
 	if err := database.Pool.QueryRow(context.Background(), `
 		select count(*) from (
-			select pg_terminate_backend(pid) from pg_stat_activity where datname = current_database() and query = $1
+			select pg_terminate_backend(pid) from pg_stat_activity where `+relayListenBackend+`
 		) as terminated
-	`, "listen "+dispatchEventsChannel).Scan(&terminated); err != nil || terminated != 1 {
+	`).Scan(&terminated); err != nil || terminated != 1 {
 		t.Fatalf("terminate the relay's LISTEN backend: terminated %d (%v), want 1", terminated, err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -351,7 +305,7 @@ func TestEventStreamRelayCatchesUpWhenItsListenerReconnects(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	next := insertRelayEvent(t, database, key)
+	next := seedStreamEvents(t, database, key, 1, 0)
 	receiveRelayedThrough(t, subscription, committed, next)
 }
 
@@ -370,7 +324,7 @@ func TestEventStreamRelayRecoversWhenTheEventLogIsReset(t *testing.T) {
 	subscription, _, opened := subscribeRelay(t, relay)
 
 	// A cursor well above the ids the reset log will hand out.
-	committed := insertRelayEvent(t, database, key)
+	committed := seedStreamEvents(t, database, key, 1, 0)
 	receiveRelayedThrough(t, subscription, opened, committed)
 
 	if _, err := database.Pool.Exec(t.Context(), `truncate events restart identity cascade`); err != nil {
@@ -378,7 +332,7 @@ func TestEventStreamRelayRecoversWhenTheEventLogIsReset(t *testing.T) {
 	}
 	// TRUNCATE notifies nobody: it is the refill's own insert that fires migration 0107's trigger
 	// and wakes the relay onto a log that restarts at id 1.
-	refilled := insertRelayEvent(t, database, key)
+	refilled := seedStreamEvents(t, database, key, 1, 0)
 	if refilled >= committed {
 		t.Fatalf("event %d committed after the reset is not below the pre-reset %d: the reset reused no id, so this test proves nothing", refilled, committed)
 	}
@@ -399,14 +353,14 @@ func TestEventStreamRelayRecoversWhenTheEventLogIsReset(t *testing.T) {
 	}
 	// The reset ended the generation: its LISTEN connection closes though its subscriber has not
 	// cancelled.
-	waitForRelayListenBackends(t, database, 0)
+	waitForBackends(t, database, 0, relayListenBackend)
 
 	// And the next subscription starts on the new log.
 	reopened, _, head := subscribeRelay(t, relay)
 	if head != refilled {
 		t.Fatalf("a subscription after the reset has head %d, want the new log's %d", head, refilled)
 	}
-	next := insertRelayEvent(t, database, key)
+	next := seedStreamEvents(t, database, key, 1, 0)
 	receiveRelayedThrough(t, reopened, head, next)
 }
 
@@ -465,4 +419,98 @@ func readSSEFrameOfType(t *testing.T, scanner *bufio.Scanner, eventType string) 
 	}
 	t.Fatalf("no %s frame arrived", eventType)
 	return nil
+}
+
+// liveEventSeed is one event a test writes directly, oldest first.
+type liveEventSeed struct {
+	kind    string
+	actor   string
+	payload string
+	at      time.Time
+}
+
+// seedLiveEvents writes each event on issue LIVE-1, oldest first, and returns the ids they took.
+func seedLiveEvents(t *testing.T, database *store.Store, seeds []liveEventSeed) []int64 {
+	t.Helper()
+	ctx := context.Background()
+	for _, statement := range []string{
+		`insert into projects (key, name) values ('LIVE', 'Live') on conflict do nothing`,
+		`insert into issues (key, project_key, number, title, created_by, rank) values ('LIVE-1', 'LIVE', 1, 'x', '{"kind":"user","id":"alice"}', 'U') on conflict do nothing`,
+	} {
+		if _, err := database.Pool.Exec(ctx, statement); err != nil {
+			t.Fatalf("%s: %v", statement, err)
+		}
+	}
+	ids := make([]int64, 0, len(seeds))
+	for _, seed := range seeds {
+		var id int64
+		if err := database.Pool.QueryRow(ctx, `
+			insert into events (issue_key, seq, type, actor, payload, notify, created_at)
+			select 'LIVE-1', coalesce(max(seq), 0) + 1, $1, $2::jsonb, $3::jsonb, false, $4
+			from events where issue_key = 'LIVE-1'
+			returning id
+		`, seed.kind, seed.actor, seed.payload, seed.at).Scan(&id); err != nil {
+			t.Fatalf("insert %s event: %v", seed.kind, err)
+		}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// liveUser is the actor of the events a test writes.
+const liveUser = `{"kind":"user","id":"alice"}`
+
+// eventCursorCheck reads the newest event's id and time, and the time of the event at the cursor;
+// once the cursor's row is gone (a reset of the log), cursorAt is nil.
+func TestEventCursorCheckReadsTheNewestEventAndTheCursorsRow(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+
+	maxID, maxAt, cursorAt, err := eventCursorCheck(ctx, database.Pool, 0)
+	if err != nil {
+		t.Fatalf("eventCursorCheck on an empty log: %v", err)
+	}
+	if maxID != 0 || !maxAt.IsZero() || cursorAt != nil {
+		t.Fatalf("an empty log = %d, %v, %v; want 0, zero, nil", maxID, maxAt, cursorAt)
+	}
+
+	base := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
+	ids := seedLiveEvents(t, database, []liveEventSeed{
+		{kind: "issue.created", actor: liveUser, payload: `{}`, at: base},
+		{kind: "artifact.version", actor: liveUser, payload: `{}`, at: base.Add(time.Minute)},
+		{kind: "issue.updated", actor: liveUser, payload: `{}`, at: base.Add(2 * time.Minute)},
+	})
+	maxID, maxAt, cursorAt, err = eventCursorCheck(ctx, database.Pool, ids[1])
+	if err != nil {
+		t.Fatalf("eventCursorCheck: %v", err)
+	}
+	if maxID != ids[2] || !maxAt.Equal(base.Add(2*time.Minute)) {
+		t.Fatalf("newest event = %d at %v, want %d at %v", maxID, maxAt, ids[2], base.Add(2*time.Minute))
+	}
+	if cursorAt == nil || !cursorAt.Equal(base.Add(time.Minute)) {
+		t.Fatalf("the cursor's row time = %v, want %v", cursorAt, base.Add(time.Minute))
+	}
+
+	if _, err := database.Pool.Exec(ctx, `delete from events where id = $1`, ids[1]); err != nil {
+		t.Fatalf("delete the cursor's row: %v", err)
+	}
+	maxID, maxAt, cursorAt, err = eventCursorCheck(ctx, database.Pool, ids[1])
+	if err != nil {
+		t.Fatalf("eventCursorCheck once the cursor's row is gone: %v", err)
+	}
+	if maxID != ids[2] || !maxAt.Equal(base.Add(2*time.Minute)) || cursorAt != nil {
+		t.Fatalf("with the cursor's row gone = %d, %v, %v; want %d, %v, nil", maxID, maxAt, cursorAt, ids[2], base.Add(2*time.Minute))
+	}
+
+	if _, err := database.Pool.Exec(ctx, `truncate events restart identity cascade`); err != nil {
+		t.Fatalf("reset the event log: %v", err)
+	}
+	reset := seedLiveEvents(t, database, []liveEventSeed{{kind: "issue.created", actor: liveUser, payload: `{}`, at: base.Add(time.Hour)}})
+	maxID, _, cursorAt, err = eventCursorCheck(ctx, database.Pool, ids[2])
+	if err != nil {
+		t.Fatalf("eventCursorCheck after a reset: %v", err)
+	}
+	if maxID != reset[0] || maxID >= ids[2] || cursorAt != nil {
+		t.Fatalf("after a reset = %d, %v; want the new newest id %d below the cursor %d, and nil", maxID, cursorAt, reset[0], ids[2])
+	}
 }

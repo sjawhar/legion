@@ -218,7 +218,7 @@ func (h *deliveryHub) receive(g *hubGeneration, event model.Event) {
 		h.applyEventLocked(g, event, now)
 	}
 	h.mu.Unlock()
-	h.note(deliveryHubNote{what: "event", through: event.ID})
+	h.note(deliveryHubNote{what: "event", eventID: event.ID})
 }
 
 // applyEventLocked marks the views one event can touch: an issue write or claim the views whose
@@ -229,16 +229,14 @@ func (h *deliveryHub) receive(g *hubGeneration, event model.Event) {
 // writer, PATCH /api/v1/issues/{key}, whose event is issue.updated or issue.closed). The event is
 // the relay's, shared with every other subscriber, and is only read.
 //
-// Each of those events also marks every view being recomputed. Its issues, ancestors and sessions
-// are still its last answer's (none before its first) while its read runs outside the lock, so an
-// event for something the new answer shows can miss them, and the read may have passed the row
-// before the event committed; the mark makes another recompute follow the one in flight.
+// A view whose read is under way (reading) still holds its last answer's issues, ancestors and
+// sessions (none before its first), so an issue or session event also records on it what the
+// event touched, for recompute to check against the answer its read gives (recheckHeardLocked).
 func (h *deliveryHub) applyEventLocked(g *hubGeneration, event model.Event, now time.Time) {
 	var issueKey string
 	if event.IssueKey != nil {
 		issueKey = *event.IssueKey
 	}
-	touches := true
 	switch event.Type {
 	case "issue.created", "issue.updated", "issue.closed":
 		var issue struct {
@@ -247,10 +245,7 @@ func (h *deliveryHub) applyEventLocked(g *hubGeneration, event model.Event, now 
 			Priority *int   `json:"priority"`
 		}
 		// An issue event's payload is the JSON the log holds (readEventRows).
-		payload, ok := event.Payload.(json.RawMessage)
-		if !ok {
-			payload, _ = json.Marshal(event.Payload)
-		}
+		payload, _ := event.Payload.(json.RawMessage)
 		key := issueKey
 		if err := json.Unmarshal(payload, &issue); err == nil && issue.Key != "" {
 			key = issue.Key
@@ -269,11 +264,8 @@ func (h *deliveryHub) applyEventLocked(g *hubGeneration, event model.Event, now 
 		h.dirtyIssueLocked(g, issueKey, p0, now)
 	case "architecture.synced":
 		h.dirtyAllLocked(g, now)
-	default:
-		touches = false
 	}
 	if event.Actor.Kind == "session" && event.Actor.ID != "" {
-		touches = true
 		// The title delivery.ResolveSessionTitles reads: the newest event's, or the id when it
 		// carries none.
 		title := event.Actor.ID
@@ -281,15 +273,14 @@ func (h *deliveryHub) applyEventLocked(g *hubGeneration, event model.Event, now 
 			title = origin.SessionTitle
 		}
 		for _, view := range h.views {
-			if shown, ok := view.sessions[event.Actor.ID]; ok && shown != title {
+			if view.showsSessionRetitled(event.Actor.ID, title) {
 				h.markDirtyLocked(g, view, now, deliveryCauseChange)
 			}
-		}
-	}
-	if touches {
-		for _, view := range h.views {
-			if view.computing {
-				h.markDirtyLocked(g, view, now, deliveryCauseChange)
+			if view.reading {
+				if view.heardSessions == nil {
+					view.heardSessions = map[string]string{}
+				}
+				view.heardSessions[event.Actor.ID] = title
 			}
 		}
 	}
@@ -297,12 +288,49 @@ func (h *deliveryHub) applyEventLocked(g *hubGeneration, event model.Event, now 
 
 func (h *deliveryHub) dirtyIssueLocked(g *hubGeneration, key string, p0 bool, now time.Time) {
 	for _, view := range h.views {
-		_, named := view.issues[key]
-		_, ancestor := view.ancestors[key]
-		if named || ancestor || (p0 && view.spec.kind != deliveryLivePipeline) {
+		if view.showsIssue(key, p0) {
 			h.markDirtyLocked(g, view, now, deliveryCauseChange)
 		}
+		if view.reading {
+			if view.heardIssues == nil {
+				view.heardIssues = map[string]bool{}
+			}
+			view.heardIssues[key] = view.heardIssues[key] || p0
+		}
 	}
+}
+
+// recheckHeardLocked marks view dirty when an event heard during its read touches the answer
+// recompute has just installed, by the rules applyEventLocked marks with, and clears the record.
+func (h *deliveryHub) recheckHeardLocked(g *hubGeneration, view *deliveryView, now time.Time) {
+	for key, p0 := range view.heardIssues {
+		if view.showsIssue(key, p0) {
+			h.markDirtyLocked(g, view, now, deliveryCauseChange)
+			break
+		}
+	}
+	for session, title := range view.heardSessions {
+		if view.showsSessionRetitled(session, title) {
+			h.markDirtyLocked(g, view, now, deliveryCauseChange)
+			break
+		}
+	}
+	view.reading, view.heardIssues, view.heardSessions = false, nil, nil
+}
+
+// showsIssue is whether a write to the issue key, a P0 before or after it when p0, can move the
+// view's answer: the view's issues or their ancestors hold it, or it is a timeline or measures
+// view and the issue is a P0.
+func (view *deliveryView) showsIssue(key string, p0 bool) bool {
+	_, named := view.issues[key]
+	_, ancestor := view.ancestors[key]
+	return named || ancestor || (p0 && view.spec.kind != deliveryLivePipeline)
+}
+
+// showsSessionRetitled is whether the view shows session under another title than title.
+func (view *deliveryView) showsSessionRetitled(session, title string) bool {
+	shown, ok := view.sessions[session]
+	return ok && shown != title
 }
 
 func (h *deliveryHub) dirtyAllLocked(g *hubGeneration, now time.Time) {

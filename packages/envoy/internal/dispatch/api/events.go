@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -151,10 +152,8 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	if _, err := fmt.Fprint(w, ": open\n\n"); err != nil {
 		return
 	}
-	for _, frame := range replay.frames {
-		if _, err := w.Write(frame); err != nil {
-			return
-		}
+	if writeSSEFrames(w, replay.frames) != nil {
+		return
 	}
 	flusher.Flush()
 	// The live loop skips an event at or below after, the highest id this connection holds: it
@@ -192,7 +191,7 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 				if event.Event.ID <= after {
 					continue
 				}
-				if hook := s.eventRelay.beforeLiveWrite; hook != nil {
+				if hook := s.beforeLiveWrite; hook != nil {
 					hook()
 				}
 				if _, err := w.Write(event.Frame); err != nil {
@@ -215,10 +214,8 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 			}
 			subscription.cancel()
 			subscription = next
-			for _, frame := range caughtUp.frames {
-				if _, err := w.Write(frame); err != nil {
-					return
-				}
+			if writeSSEFrames(w, caughtUp.frames) != nil {
+				return
 			}
 			flusher.Flush()
 			after = caughtUp.after
@@ -234,6 +231,16 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// writeSSEFrames writes each encoded frame to w in order, stopping at the first write that fails.
+func writeSSEFrames(w io.Writer, frames [][]byte) error {
+	for _, frame := range frames {
+		if _, err := w.Write(frame); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // resumeAfterOverflow answers a connection whose subscription overflowed, holding every event

@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
@@ -44,32 +44,25 @@ const mentionLookupConcurrency = 8
 // resolveMentionTargets performs the only registry lookup for a comment's original deliveries.
 // The result is persisted in the comment-created event and handed to the post-commit sender, so a
 // role transition cannot change the target after routing suppression has been decided. It
-// resolves up to mentionLookupConcurrency targets at once and answers them in input order.
-// timeout, when positive, bounds each lookup (resolveMentionTarget says what one cut short
-// yields); zero leaves each bounded by the listener client's own window.
-func (s *server) resolveMentionTargets(
-	ctx context.Context, targets []string, delivery string, timeout time.Duration,
-) []ResolvedMention {
+// resolves up to mentionLookupConcurrency targets at once, each bounded by mentionLookupTimeout,
+// and answers them in input order.
+func (s *server) resolveMentionTargets(ctx context.Context, targets []string, delivery string) []ResolvedMention {
 	resolved := make([]ResolvedMention, len(targets))
-	if len(targets) == 1 {
-		resolved[0] = s.resolveMentionTarget(ctx, targets[0], delivery, timeout)
-		return resolved
-	}
-	slots := make(chan struct{}, mentionLookupConcurrency)
-	var lookups sync.WaitGroup
+	var lookups errgroup.Group
+	lookups.SetLimit(mentionLookupConcurrency)
 	for index, target := range targets {
-		slots <- struct{}{}
-		lookups.Go(func() {
-			defer func() { <-slots }()
-			resolved[index] = s.resolveMentionTarget(ctx, target, delivery, timeout)
+		lookups.Go(func() error {
+			resolved[index] = s.resolveMentionTarget(ctx, target, delivery, mentionLookupTimeout)
+			return nil
 		})
 	}
-	lookups.Wait()
+	_ = lookups.Wait()
 	return resolved
 }
 
-// resolveMentionTarget resolves one mention target. A lookup that timeout cut short, while ctx
-// itself is still live, yields the target with no pinned session and no resolve error: the
+// resolveMentionTarget resolves one mention target. timeout, when positive, bounds the lookup;
+// zero leaves it bounded by the listener client's own window. A lookup that timeout cut short,
+// while ctx itself is still live, yields the target with no pinned session and no resolve error: the
 // listener has not answered, so nothing is known to refuse and no session is known to suppress
 // (createCommentFor still suppresses an issue route whose string is this target). Its attempt row
 // records neither, which is the shape of an attempt stranded before anything was resolved, so
@@ -366,14 +359,14 @@ func (s *server) completeCommentDelivery(
 // mention sender's send of a fresh comment or a much later retry, and a session's
 // advertised capabilities and liveness are live state that changes on every registration. So
 // both callers recheck, not just retries - only whether that pinned session can still receive
-// this delivery mode right now, through the same resolveMentionTargets/resolveDeliveryTarget
+// this delivery mode right now, through the same resolveMentionTarget/resolveDeliveryTarget
 // every other send uses, resolving it as a direct session target so no role lookup (and no
 // chance of re-picking a different holder) is involved.
 func (s *server) mentionResolutionFor(
 	ctx context.Context, target ResolvedMention, pending *model.CommentDelivery,
 ) (ResolvedMention, *string) {
 	if pending == nil || (pending.SessionID == nil && pending.ResolveError == nil) {
-		resolved := s.resolveMentionTargets(ctx, []string{target.Target}, target.Delivery, 0)[0]
+		resolved := s.resolveMentionTarget(ctx, target.Target, target.Delivery, 0)
 		if resolved.ResolveError == "" {
 			return resolved, nil
 		}
@@ -384,7 +377,7 @@ func (s *server) mentionResolutionFor(
 		resumed.ResolveError = *pending.ResolveError
 	}
 	if pending.SessionID != nil {
-		recheck := s.resolveMentionTargets(ctx, []string{"session:" + *pending.SessionID}, pending.Delivery, 0)[0]
+		recheck := s.resolveMentionTarget(ctx, "session:"+*pending.SessionID, pending.Delivery, 0)
 		resumed.SessionID = recheck.SessionID
 		resumed.ResolveError = recheck.ResolveError
 		resumed.attemptSessionID = recheck.attemptSessionID
@@ -477,15 +470,7 @@ func (s *server) deliverResolvedCommentMention(
 	// The key is scoped to the mention's target and mode, stable across every attempt of that
 	// triple, so a retry of a send that already landed repeats its dedupe key and is recognised as
 	// the repeat it is (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts says by what).
-	//
-	// The issue route's copy of comment.created is suppressed for this send (createCommentFor)
-	// when the route resolved to the session a mention lookup pinned before the commit, and when
-	// the route string equals this target and its lookup went unanswered: equal strings name one
-	// session. A route string that differs from this target yet names the same session - role:X
-	// and session:<holder of X>, with a lookup that went unanswered - is not suppressed, and that
-	// session receives the comment twice: the route copy goes out under dispatch-<event id>
-	// (outbox.envelope) and this send under the key below, and a host drops a repeat only on an
-	// equal dedupe key or envelope id.
+	// When the issue route's copy is suppressed for this send: model.CommentEventPayload.SuppressRoute.
 	envelopeID, duplicate, deliveryError := s.sendResolvedDelivery(
 		ctx, target, stored.Body, stored.ID+":"+target.Target+":"+target.Delivery, nil, frame,
 	)
@@ -496,7 +481,8 @@ func (s *server) deliverResolvedCommentMention(
 
 // loadCommentCreatedEvent reads comment's comment.created event within the comment's owner, so
 // the read walks that owner's events by its (issue_key, seq) or (artifact_id, seq) index instead
-// of matching the payload id across the whole log.
+// of matching the payload id across the whole log. A comment has one comment.created event, and
+// both callers ask about recent comments, so the walk starts from the owner's newest event.
 func (s *server) loadCommentCreatedEvent(ctx context.Context, q queryer, comment model.Comment) (model.Event, error) {
 	ownerColumn, ownerID := "issue_key", ""
 	switch {
@@ -511,7 +497,7 @@ func (s *server) loadCommentCreatedEvent(ctx context.Context, q queryer, comment
 		select id, issue_key, artifact_id::text, coalesce(project_key, ''), seq, type, actor, notify, created_at, payload
 		from events
 		where `+ownerColumn+` = $1 and type = 'comment.created' and payload ->> 'id' = $2
-		order by seq
+		order by seq desc
 		limit 1
 	`, ownerID, comment.ID).Scan(
 		&event.ID, &event.IssueKey, &event.ArtifactID, &event.Project, &event.Seq, &event.Type,

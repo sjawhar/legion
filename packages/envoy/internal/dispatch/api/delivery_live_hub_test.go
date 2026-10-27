@@ -751,15 +751,17 @@ func TestAReconnectCatchesUpWhatTheListenerMissed(t *testing.T) {
 	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, snapshot.Body, delta, "")
 }
 
-// terminateListener ends every backend of this test's database that holds a LISTEN, whose last
-// statement was the listener's LISTEN or its idle ping.
+// listenBackend selects, in pg_stat_activity, this test database's other backends that hold a
+// LISTEN: those whose last statement was a listener's LISTEN or its idle ping (pglisten.Listener).
+const listenBackend = `datname = current_database() and (query like 'listen %' or query = '-- ping') and pid <> pg_backend_pid()`
+
+// terminateListener ends every backend of this test's database that holds a LISTEN.
 func terminateListener(t *testing.T, database *store.Store) {
 	t.Helper()
 	var ended int
 	if err := database.Pool.QueryRow(context.Background(), `
 		select count(*) from (
-			select pg_terminate_backend(pid) from pg_stat_activity
-			where datname = current_database() and (query like 'listen %' or query = '-- ping') and pid <> pg_backend_pid()
+			select pg_terminate_backend(pid) from pg_stat_activity where `+listenBackend+`
 		) ended
 	`).Scan(&ended); err != nil || ended == 0 {
 		t.Fatalf("terminate the listener's backend: ended %d, err %v", ended, err)
@@ -910,7 +912,7 @@ func TestTheHubRecomputesAViewAgainAfterAnEventDuringItsRead(t *testing.T) {
 		t.Fatalf("read the newest event: %v", err)
 	}
 	rig.waitFor(t, start, 3*time.Second, "the retitle on the hub's feed", func(note deliveryHubNote) bool {
-		return note.what == "event" && note.through == newest
+		return note.what == "event" && note.eventID == newest
 	})
 	releaseOnce()
 
@@ -929,6 +931,61 @@ func TestTheHubRecomputesAViewAgainAfterAnEventDuringItsRead(t *testing.T) {
 		t.Fatalf("the delta's issue_titles = %v, want %s retitled", got, key)
 	}
 	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, snapshot.Body, delta, "")
+}
+
+// TestASessionWriteDuringAViewsReadThatItsAnswerDoesNotShowRecomputesNothing: a session's event
+// reaches the hub while a view's first recompute holds its read, and that read's answer shows no
+// such session, so the view is not recomputed again.
+func TestASessionWriteDuringAViewsReadThatItsAnswerDoesNotShowRecomputesNothing(t *testing.T) {
+	reading := make(chan struct{})
+	release := make(chan struct{})
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	var held atomic.Bool
+	rig := newHubRig(t, func(hub *deliveryHub) {
+		observe := hub.observe
+		hub.observe = func(note deliveryHubNote) {
+			observe(note)
+			if note.what == "recompute read" && held.CompareAndSwap(false, true) {
+				close(reading)
+				<-release
+			}
+		}
+	})
+	// Registered after the rig's, so it runs first: a failed test never leaves the hub held.
+	t.Cleanup(releaseOnce)
+	seedHubSettings(t, rig.database)
+	key := createHubIssue(t, rig.handler, map[string]any{"title": "Ship widgets"})
+	upsertPR(t, rig.database, prNaming(1, time.Now().UTC().Add(-3*time.Hour), key))
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
+	select {
+	case <-reading:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the view's first recompute never finished its read")
+	}
+
+	start := rig.mark()
+	written := appendHubEvent(t, rig, projectOwner("HUB").event("user_state.updated",
+		model.Actor{Kind: "session", ID: "session-not-shown"}, map[string]any{}))
+	rig.waitFor(t, start, 3*time.Second, "the session's event on the hub's feed", func(note deliveryHubNote) bool {
+		return note.what == "event" && note.eventID == written.ID
+	})
+	releaseOnce()
+
+	snapshot := conn.snapshot(t, 5*time.Second, "t")
+	var read struct {
+		SessionTitles map[string]string `json:"session_titles"`
+	}
+	if err := json.Unmarshal(snapshot.Body, &read); err != nil {
+		t.Fatalf("decode the snapshot: %v", err)
+	}
+	if _, shown := read.SessionTitles["session-not-shown"]; shown {
+		t.Fatalf("the snapshot's session_titles = %v, want the writing session not shown", read.SessionTitles)
+	}
+	conn.none(t, time.Second, "a session write the view's answer does not show")
+	if n := rig.count(start, recomputeBegin("")); n != 0 {
+		t.Fatalf("the session write during the read recomputed the view %d times more, want none", n)
+	}
 }
 
 // unownedP0Fields is the unowned_p0 and status a body of kind shows, decoded: a measures body's
@@ -1122,7 +1179,7 @@ func TestEventsNoViewReadsRecomputeNothing(t *testing.T) {
 		t.Fatalf("read the newest event: %v", err)
 	}
 	rig.waitFor(t, start, 3*time.Second, "the newest event on the hub's feed", func(note deliveryHubNote) bool {
-		return note.what == "event" && note.through == newest
+		return note.what == "event" && note.eventID == newest
 	})
 	if n := rig.count(start, func(note deliveryHubNote) bool { return note.what == "event" }); n != 500 {
 		t.Fatalf("the hub received %d events, want each of the 500 once", n)
@@ -1198,32 +1255,29 @@ func TestAClosedFeedReloadsTheOpenP0sAndRecomputesEveryView(t *testing.T) {
 	requireEveryViewShowsTheUnownedP0s("the reloaded P0 lowered to P1")
 }
 
-// listenBackends counts this test database's backends that hold a LISTEN: those whose last
-// statement was a listener's LISTEN or its idle ping (pglisten.Listener).
-func listenBackends(t *testing.T, database *store.Store) int {
+// countBackends counts the backends the pg_stat_activity condition where selects.
+func countBackends(t *testing.T, database *store.Store, where string) int {
 	t.Helper()
 	var count int
-	if err := database.Pool.QueryRow(context.Background(), `
-		select count(*) from pg_stat_activity
-		where datname = current_database() and (query like 'listen %' or query = '-- ping') and pid <> pg_backend_pid()
-	`).Scan(&count); err != nil {
-		t.Fatalf("count the LISTEN backends: %v", err)
+	if err := database.Pool.QueryRow(context.Background(), `select count(*) from pg_stat_activity where `+where).Scan(&count); err != nil {
+		t.Fatalf("count the backends where %s: %v", where, err)
 	}
 	return count
 }
 
-// waitForListenBackends waits for the count of LISTEN backends to reach want: a listener dials
-// from its own goroutine, and a closed one's backend leaves pg_stat_activity once it has exited.
-func waitForListenBackends(t *testing.T, database *store.Store, want int) {
+// waitForBackends waits for the count of the backends where selects to reach want: a listener
+// dials from its own goroutine, and a closed one's backend leaves pg_stat_activity once it has
+// exited.
+func waitForBackends(t *testing.T, database *store.Store, want int, where string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		got := listenBackends(t, database)
+		got := countBackends(t, database, where)
 		if got == want {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("%d LISTEN backends after 5s, want %d", got, want)
+			t.Fatalf("%d backends where %s after 5s, want %d", got, where, want)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -1245,7 +1299,7 @@ func TestAHubWithNoViewReadsNothingAndHoldsNoListener(t *testing.T) {
 	merges := 1
 	idle := func(when string) {
 		t.Helper()
-		waitForListenBackends(t, database, 0)
+		waitForBackends(t, database, 0, listenBackend)
 		before := acquires(deps.Store)
 		patchHubIssue(t, handler, key, map[string]any{"title": "Retitled " + when})
 		merges++
@@ -1256,7 +1310,7 @@ func TestAHubWithNoViewReadsNothingAndHoldsNoListener(t *testing.T) {
 		if got := acquires(deps.Store); got != before {
 			t.Fatalf("the hub and its relay took %d connections %s, want none", got-before, when)
 		}
-		if n := listenBackends(t, database); n != 0 {
+		if n := countBackends(t, database, listenBackend); n != 0 {
 			t.Fatalf("%d LISTEN backends %s, want none", n, when)
 		}
 	}
@@ -1267,7 +1321,7 @@ func TestAHubWithNoViewReadsNothingAndHoldsNoListener(t *testing.T) {
 	rig.hub.Subscribe(first, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
 	first.snapshot(t, 5*time.Second, "t")
 	// The hub's listener and the relay's.
-	waitForListenBackends(t, database, 2)
+	waitForBackends(t, database, 2, listenBackend)
 	rig.hub.Close(first)
 
 	idle("after the last view's drop")

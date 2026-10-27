@@ -526,7 +526,7 @@ func TestPendingUnresolvedMentionRetryKeepsTheOriginalError(t *testing.T) {
 // A listener that cannot answer whether a session lives is not a listener saying that session
 // ended. The per-session read answers 503 here, as it does while the message bus is silent, and
 // what the attempt records must be the listener's own reason: "no live session " is the prefix a
-// mention's session pin is kept or dropped by (resolveMentionTargets in comment_delivery.go) and
+// mention's session pin is kept or dropped by (resolveMentionTarget in comment_delivery.go) and
 // the text the dashboard prints, so wording an unanswered read that way would un-name a
 // recipient that never went anywhere and tell a person to stop waiting on it.
 func TestMentionDuringAnUnanswerableRegistryReadIsNotRecordedAsNoLiveSession(t *testing.T) {

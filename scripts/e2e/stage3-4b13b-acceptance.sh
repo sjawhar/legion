@@ -377,32 +377,12 @@ report_unchecked_launches() { note "launched panes never endpoint-checked: $(unc
 rig_sessions_json() {
   jq -R -s -c 'split("\n") | map(fromjson? | select(.msg == "api: claim registered") | .session) | unique' "$evidence/logs/daemon.log"
 }
-# production_issue_events HEADER OUT writes to OUT, one per line, every event above prod_baseline on
-# the production Dispatch issues updated since prod_since, and prints how many issues that listing
-# named, or fails when a read fails. Each issue's log is paged newest first down to the baseline.
-production_issue_events() {
-  local header=$1 out=$2 keys key page before count=0
-  : >"$out"
-  keys=$(curl -fsS --max-time 20 -H "@$header" "$prod_dispatch_url/api/v1/issues?updated_since=$prod_since" | jq -r '.[].key') || return 1
-  for key in $keys; do
-    count=$((count + 1)) before=
-    while :; do
-      page=$(curl -fsS --max-time 20 -H "@$header" "$prod_dispatch_url/api/v1/issues/$key/events?order=desc&limit=200${before:+&before=$before}") || return 1
-      jq -c --argjson baseline "$prod_baseline" '.[] | select(.id > $baseline)' <<<"$page" >>"$out" || return 1
-      jq -e --argjson baseline "$prod_baseline" 'length == 200 and .[-1].id > $baseline' <<<"$page" >/dev/null || break
-      before=$(jq '.[-1].seq' <<<"$page")
-    done
-  done
-  printf '%s\n' "$count"
-}
-# production_audit reads production Dispatch's events above the baseline on every issue updated since
-# the run's start, and its projects, and fails on any event a rig session authored or that names the
-# rig's project key, on a production project naming that key, and on any rig session on the
-# production Envoy listener. A read that fails, or a listing of updated issues none of whose events is
-# above the baseline (the control that the read reached the run's window), leaves the audit unable to
-# vouch for production.
+# production_audit fails on any rig session on the production Envoy listener and, through
+# production_dispatch_audit, on any production Dispatch event a rig session authored or that names
+# the rig's project key, on a production project naming that key, or on an audit that cannot vouch
+# for production.
 production_audit() {
-  local sessions header issues projects events envoy found=0
+  local sessions envoy found=0
   audited=1
   sessions=$(rig_sessions_json)
   printf '%s\n' "$sessions" >"$evidence/rig-sessions.json"
@@ -411,27 +391,7 @@ production_audit() {
   printf '%s\n' "$envoy" >"$evidence/production-envoy-rig-sessions.json"
   if [ "$envoy" != "[]" ]; then printf 'production Envoy listener holds rig sessions: %s\n' "$envoy"; found=1; fi
   if [ "$prod_baseline" = none ]; then printf 'no user-level Dispatch configuration\n'; return "$found"; fi
-  header=$(prod_header_file)
-  if ! issues=$(production_issue_events "$header" "$work/production-events.jsonl") ||
-    ! projects=$(curl -fsS --max-time 20 -H "@$header" "$prod_dispatch_url/api/v1/projects"); then
-    rm -f "$header"
-    printf 'production Dispatch could not be read for the audit\n'
-    return 1
-  fi
-  rm -f "$header"
-  events=$(jq -s -c --argjson ids "$sessions" --arg project "$project" --argjson issues "$issues" --argjson projects "$projects" '
-    {issues: $issues, count: length,
-     rig: [.[] | select((.actor.id as $a | $ids | index($a)) or (tostring | contains($project))) | {id, issue_key, type, actor: .actor.id, created_at}],
-     projects: [$projects[] | select(tostring | contains($project))]}' "$work/production-events.jsonl")
-  printf '%s\n' "$events" >"$evidence/production-dispatch-audit.json"
-  if jq -e '.issues > 0 and .count == 0' >/dev/null <<<"$events"; then
-    printf 'production Dispatch listed %s issues updated since %s, and none of their events is above the baseline event %s\n' "$issues" "$prod_since" "$prod_baseline"
-    return 1
-  fi
-  if ! jq -e '.rig == []' >/dev/null <<<"$events"; then printf 'production Dispatch has rig-authored events: %s\n' "$(jq -c .rig <<<"$events")"; found=1; fi
-  if ! jq -e '.projects == []' >/dev/null <<<"$events"; then printf 'production Dispatch holds the rig project: %s\n' "$(jq -c .projects <<<"$events")"; found=1; fi
-  printf 'production audit: %s events above %s on %s issues updated since %s, rig events %s, rig projects %s, rig Envoy sessions %s\n' \
-    "$(jq -r .count <<<"$events")" "$prod_baseline" "$issues" "$prod_since" "$(jq -c .rig <<<"$events")" "$(jq -c .projects <<<"$events")" "$envoy"
+  production_dispatch_audit "$sessions" "$envoy" || found=1
   return "$found"
 }
 
@@ -716,9 +676,6 @@ start_daemon
 note "project $project, profile $profile, plugins $(jq -r '.name + "@" + .version' "$envoy_manifest") and $(jq -r '.name + "@" + .version' "$manifest"), ports NATS $port_nats Dispatch $port_dispatch daemon $port_daemon listener $port_listener"
 pane_watcher &
 watcher_pid=$!
-# The time baseline is taken before the event baseline is read, so an issue holding an event above
-# that event was updated since it.
-TZ=UTC printf -v prod_since '%(%FT%TZ)T' -1
 production_baseline
 note "production Dispatch audit baseline: event ${prod_baseline}, issues updated since $prod_since"
 pass

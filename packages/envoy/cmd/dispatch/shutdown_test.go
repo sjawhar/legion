@@ -260,8 +260,7 @@ func TestSIGTERMSettlesTheMentionSendInFlightAndLeavesTheQueuedOnePending(t *tes
 	var sends atomic.Int32
 	arrived := make(chan struct{}, 2)
 	answer := make(chan struct{})
-	var answerOnce sync.Once
-	letAnswer := func() { answerOnce.Do(func() { close(answer) }) }
+	letAnswer := sync.OnceFunc(func() { close(answer) })
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":

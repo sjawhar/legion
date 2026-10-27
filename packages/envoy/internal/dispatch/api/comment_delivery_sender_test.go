@@ -24,12 +24,14 @@ const senderTestSessions = `[{"session_id":"s1","title":"planner","capabilities"
 
 // mentionListener is a stand-in Envoy listener for the mention sender's tests. It answers for
 // senderTestSessions, resolves role:reviewer to s1, records every send in the order the sends
-// arrive, and holds a send to a held session until the test releases it.
+// arrive, holds a send to a held session until the test releases it, and holds a lookup of a held
+// path the same way.
 type mentionListener struct {
-	mu      sync.Mutex
-	sends   []mentionListenerSend
-	held    map[string]chan struct{}
-	arrived chan string
+	mu          sync.Mutex
+	sends       []mentionListenerSend
+	held        map[string]chan struct{}
+	heldLookups map[string]chan struct{}
+	arrived     chan string
 }
 
 type mentionListenerSend struct {
@@ -38,8 +40,22 @@ type mentionListenerSend struct {
 
 func newMentionListener(t *testing.T) (*httptest.Server, *mentionListener) {
 	t.Helper()
-	state := &mentionListener{held: map[string]chan struct{}{}, arrived: make(chan string, 64)}
+	state := &mentionListener{
+		held: map[string]chan struct{}{}, heldLookups: map[string]chan struct{}{}, arrived: make(chan string, 64),
+	}
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			state.mu.Lock()
+			gate := state.heldLookups[r.URL.Path]
+			state.mu.Unlock()
+			if gate != nil {
+				select {
+				case <-gate:
+				case <-r.Context().Done():
+					return
+				}
+			}
+		}
 		switch {
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/registry/"):
 			writeSessionRecord(t, w, senderTestSessions, strings.TrimPrefix(r.URL.Path, "/v1/registry/"))
@@ -85,8 +101,17 @@ func (l *mentionListener) hold(sessions ...string) func() {
 		l.held[session] = gate
 	}
 	l.mu.Unlock()
-	var once sync.Once
-	return func() { once.Do(func() { close(gate) }) }
+	return sync.OnceFunc(func() { close(gate) })
+}
+
+// holdLookups makes every GET of path wait until the returned release is called; release may be
+// called more than once.
+func (l *mentionListener) holdLookups(path string) func() {
+	gate := make(chan struct{})
+	l.mu.Lock()
+	l.heldLookups[path] = gate
+	l.mu.Unlock()
+	return sync.OnceFunc(func() { close(gate) })
 }
 
 // awaitSend waits for the next send to arrive and returns the session it is for.
@@ -305,43 +330,8 @@ type unansweredLookupComment struct {
 // session of senderTestSessions, and role:reviewer to s1.
 func commentWithAnUnansweredLookup(t *testing.T, route, mention, hungPath string) unansweredLookupComment {
 	t.Helper()
-	answer := make(chan struct{})
-	var answerOnce sync.Once
-	letAnswer := func() { answerOnce.Do(func() { close(answer) }) }
-	var mu sync.Mutex
-	var sends []mentionListenerSend
-	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == hungPath {
-			select {
-			case <-answer:
-			case <-r.Context().Done():
-				return
-			}
-		}
-		switch {
-		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/registry/"):
-			writeSessionRecord(t, w, senderTestSessions, strings.TrimPrefix(r.URL.Path, "/v1/registry/"))
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/roles/reviewer":
-			_, _ = w.Write([]byte(`{"role":"reviewer","holder":"s1","title":"planner","capabilities":["steer"]}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(senderTestSessions))
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
-			var request struct {
-				TargetSession string `json:"target_session"`
-				Message       string `json:"message"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-				t.Errorf("decode mention send: %v", err)
-			}
-			mu.Lock()
-			sends = append(sends, mentionListenerSend{request.TargetSession, request.Message})
-			mu.Unlock()
-			_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"` + request.TargetSession + `"}`))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer listener.Close()
+	listener, state := newMentionListener(t)
+	letAnswer := state.holdLookups(hungPath)
 	defer letAnswer()
 	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.URL})
 	issue := createInteractionIssue(t, handler, "TEST", "An unanswered lookup", "before")
@@ -398,9 +388,7 @@ func commentWithAnUnansweredLookup(t *testing.T, route, mention, hungPath string
 	if len(published) != 1 {
 		t.Fatalf("comment.created deliveries = %#v, want the one event's", published)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	return unansweredLookupComment{payload: *payload, sends: slices.Clone(sends), destinations: published[0].Destinations}
+	return unansweredLookupComment{payload: *payload, sends: state.sent(), destinations: published[0].Destinations}
 }
 
 // A listener whose mention lookup never answers delays the comment by at most

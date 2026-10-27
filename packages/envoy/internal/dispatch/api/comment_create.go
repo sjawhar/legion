@@ -286,7 +286,7 @@ func (s *server) resolveCommentRoute(
 			return route, nil
 		}
 	}
-	route.sessionID = s.resolveMentionTargets(ctx, []string{route.route}, "steer", mentionLookupTimeout)[0].SessionID
+	route.sessionID = s.resolveMentionTarget(ctx, route.route, "steer", mentionLookupTimeout).SessionID
 	return route, nil
 }
 
@@ -373,7 +373,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			return
 		}
 	}
-	resolvedMentions := s.resolveMentionTargets(r.Context(), mentionTargets, delivery, mentionLookupTimeout)
+	resolvedMentions := s.resolveMentionTargets(r.Context(), mentionTargets, delivery)
 	mentions := make([]model.Mention, 0, len(resolvedMentions))
 	mentionedSessions := make(map[string]struct{}, len(resolvedMentions))
 	for _, resolved := range resolvedMentions {

@@ -255,6 +255,10 @@ type server struct {
 	// Only a test sets it, so a budget that ends before every selected session is read is the
 	// test's choice rather than a race against five seconds of wall clock (INFRA-249).
 	broadcastResolveBudget time.Duration
+	// beforeLiveWrite runs before an SSE connection writes a live frame (streamEvents); nil in
+	// every server the deployment builds. A test blocks it to hold a reader still while the relay
+	// publishes past its buffer.
+	beforeLiveWrite func()
 	// rosters is the process's copy of the listener's live-session list that issue reads judge
 	// routes against (issue_route_status.go). Only register gives it non-zero TTLs.
 	rosters rosterCache

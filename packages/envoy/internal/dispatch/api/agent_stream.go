@@ -210,7 +210,9 @@ type agentStreamQueue struct {
 
 	mu     sync.Mutex
 	frames []agentstream.Frame
-	// size is the bytes of the queued frames plus those taken and not yet released.
+	// queued is the bytes of the queued frames; size is those plus the bytes taken and not yet
+	// released.
+	queued     int
 	size       int
 	overflowed bool
 }
@@ -230,11 +232,12 @@ func (q *agentStreamQueue) push(frame agentstream.Frame) {
 	}
 	if q.size+len(frame) > agentStreamBufferBytes {
 		q.overflowed = true
-		q.frames = nil
+		q.frames, q.queued = nil, 0
 		close(q.overflow)
 		return
 	}
 	q.frames = append(q.frames, frame)
+	q.queued += len(frame)
 	q.size += len(frame)
 	select {
 	case q.wake <- struct{}{}:
@@ -248,12 +251,8 @@ func (q *agentStreamQueue) push(frame agentstream.Frame) {
 func (q *agentStreamQueue) take() ([]agentstream.Frame, int) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	frames := q.frames
-	q.frames = nil
-	size := 0
-	for _, frame := range frames {
-		size += len(frame)
-	}
+	frames, size := q.frames, q.queued
+	q.frames, q.queued = nil, 0
 	return frames, size
 }
 

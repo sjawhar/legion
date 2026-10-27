@@ -152,15 +152,12 @@ func (h *deliveryHub) leaveLocked(sub *deliverySub) {
 	}
 }
 
-// The channels the delivery hub listens on, and the event stream relay's. delivery_changes carries
-// no payload and is notified as a delivery_changes row commits (migration 0100); delivery_freshness
-// carries the settings row's freshness columns as JSON (0100). dispatch_events carries no payload
-// and is notified as an event commits (0107); the relay alone listens on it (event_stream_relay.go),
-// and the hub takes the events from the relay's feed.
+// The channels the delivery hub listens on. delivery_changes carries no payload and is notified as
+// a delivery_changes row commits (migration 0100); delivery_freshness carries the settings row's
+// freshness columns as JSON (0100).
 const (
 	deliveryChangesChannel   = "delivery_changes"
 	deliveryFreshnessChannel = "delivery_freshness"
-	dispatchEventsChannel    = "dispatch_events"
 )
 
 // deliveryHubFeedBuffer is the hub's slots on the relay's feed: more than one relay page
@@ -271,6 +268,15 @@ type deliveryView struct {
 	notBefore             time.Time
 	cause                 string
 	computing             bool
+	// reading is set while recompute's population read runs, outside the lock, and until it
+	// installs that read's answer. heardIssues and heardSessions record what the events applied
+	// meanwhile acted on (applyEventLocked): each issue with whether it was a P0 before or after
+	// one of them, and each writing session with its newest title. The read may have passed a row
+	// before its event committed, so recompute checks them against the answer it installs
+	// (recheckHeardLocked).
+	reading       bool
+	heardIssues   map[string]bool
+	heardSessions map[string]string
 	// settings, pop and pipe are as of the last read, and readFrom the window start pop was read
 	// for: an expiry narrows them without a read.
 	settings delivery.DeliverySettings
@@ -340,7 +346,7 @@ type deliveryHubNote struct {
 	view    string // the view's key
 	cause   string
 	sent    int
-	through int64 // an event's id
+	eventID int64
 }
 
 const (

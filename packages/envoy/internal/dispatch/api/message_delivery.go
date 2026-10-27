@@ -621,7 +621,7 @@ func (s *server) deliverMessageResuming(
 			if err != nil {
 				return ResolvedMention{}, err
 			}
-			return s.resolveMentionTargets(ctx, []string{route}, delivery, 0)[0], nil
+			return s.resolveMentionTarget(ctx, route, delivery, 0), nil
 		},
 		func(ctx context.Context, resolved ResolvedMention) (pendingMessageDelivery, error) {
 			return s.recordPendingMessageDelivery(ctx, message, actor, resolved, replyThread, resumeAttempt)

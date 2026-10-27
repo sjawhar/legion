@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -34,6 +35,10 @@ const (
 	// than a page is published in pages, all of it.
 	eventRelayPage = 1000
 )
+
+// dispatchEventsChannel carries no payload and is notified as an event commits (migration 0107);
+// the relay alone listens on it, and the delivery hub takes the events from the relay's feed.
+const dispatchEventsChannel = "dispatch_events"
 
 // relayedEvent is one committed event as the relay publishes it: the event and its whole SSE
 // frame, encoded once for every subscriber (encodeSSEFrame). Every subscriber receives the same
@@ -74,10 +79,6 @@ type eventStreamRelay struct {
 	// readAfter reads one page of the committed events after an id, in id order; nil is
 	// readEventsAfterID.
 	readAfter func(ctx context.Context, after int64) ([]model.Event, error)
-	// beforeLiveWrite runs before an SSE connection writes a live frame (streamEvents); nil in
-	// every server the deployment builds. A test blocks it to hold a reader still while the relay
-	// publishes past its buffer.
-	beforeLiveWrite func()
 
 	// running counts every generation's goroutines. Add runs under mu and only while closed is
 	// false, so no Add can follow the Wait in wait.
@@ -169,19 +170,16 @@ func (r *eventStreamRelay) subscribe(ctx context.Context, buffer int) (relaySubs
 	}
 	feed, unsubscribe := g.stream.Subscribe(buffer)
 	g.subscribers++
-	var once sync.Once
-	cancel := func() {
-		once.Do(func() {
-			r.mu.Lock()
-			defer r.mu.Unlock()
-			unsubscribe()
-			g.subscribers--
-			if g.subscribers == 0 && r.generation == g {
-				r.generation = nil
-				g.stop()
-			}
-		})
-	}
+	cancel := sync.OnceFunc(func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		unsubscribe()
+		g.subscribers--
+		if g.subscribers == 0 && r.generation == g {
+			r.generation = nil
+			g.stop()
+		}
+	})
 	return relaySubscription{events: feed, ended: g.ended, head: g.cursor, cancel: cancel}, nil
 }
 
@@ -399,6 +397,28 @@ func (r *eventStreamRelay) window() time.Duration {
 		return eventRelayCoalesce
 	}
 	return r.coalesce
+}
+
+// eventCursorCheck reads the newest event's id and created_at (0 and zero when the log is empty),
+// and the created_at of the event at cursor (nil when no row holds it): the relay starts a
+// generation's cursor from the first two, and compares them with what it read for its cursor to
+// tell an event log that was reset (resetCursor).
+func eventCursorCheck(ctx context.Context, q queryer, cursor int64) (maxID int64, maxAt time.Time, cursorAt *time.Time, err error) {
+	var newestAt *time.Time
+	if err := q.QueryRow(ctx, `select id, created_at from events order by id desc limit 1`).Scan(&maxID, &newestAt); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return 0, time.Time{}, nil, err
+	}
+	if newestAt != nil {
+		maxAt = *newestAt
+	}
+	var rowAt time.Time
+	switch err := q.QueryRow(ctx, `select created_at from events where id = $1`, cursor).Scan(&rowAt); {
+	case errors.Is(err, pgx.ErrNoRows):
+		return maxID, maxAt, nil, nil
+	case err != nil:
+		return 0, time.Time{}, nil, err
+	}
+	return maxID, maxAt, &rowAt, nil
 }
 
 // readEventsAfterID reads the next page of committed events after an id, ask fields attached.

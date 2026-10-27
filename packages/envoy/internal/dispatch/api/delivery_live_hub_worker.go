@@ -158,7 +158,7 @@ type deliveryViewRead struct {
 func (h *deliveryHub) recompute(g *hubGeneration, view *deliveryView, cause string) {
 	started := time.Now()
 	h.mu.Lock()
-	view.dirty, view.immediate, view.computing = false, false, true
+	view.dirty, view.immediate, view.computing, view.reading = false, false, true, true
 	spec, epoch := view.spec, g.epoch
 	h.mu.Unlock()
 	h.note(deliveryHubNote{what: "recompute begin", view: spec.key, cause: cause})
@@ -214,6 +214,9 @@ func (h *deliveryHub) recompute(g *hubGeneration, view *deliveryView, cause stri
 			h.judgeLocked(g, now)
 		}
 	}
+	// What the events applied during the read touched is checked against the answer it installed,
+	// or the last one when it installed none.
+	h.recheckHeardLocked(g, view, now)
 	subscribers := len(view.subs)
 	h.mu.Unlock()
 	h.finishRecompute(spec, cause, started, read.prs, read.runs, subscribers, sent)
