@@ -44,7 +44,10 @@ mapped repository both the implement and the review App are installed on, and le
 App is missing from: the boot logs it, `legion state --json` lists it under `repositories.refused`
 with the App it lacks, and an issue on it is not admitted until the App is installed, when moving
 the issue to `todo` again admits it. A project with no repository mapped does not boot; one whose
-every repository lacks an App boots serving none and admits nothing until an App is installed.
+every repository lacks an App boots serving none and admits nothing until an App is installed. A
+Dispatch that does not answer the boot's read of the mapping delays the boot rather than ending it:
+the daemon reads it again, one second doubling to one minute between reads, for as long as Dispatch
+stays unreachable, logs each wait, and serves nothing until the read passes.
 
 ## The GitHub Apps
 
