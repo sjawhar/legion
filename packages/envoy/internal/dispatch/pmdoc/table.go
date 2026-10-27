@@ -403,7 +403,6 @@ func markRows(table *extensionast.Table, starts, lazy []int, lines []gmtext.Segm
 func splitAtEvenEscapedPipes(table *extensionast.Table, source []byte) {
 	width := len(table.Alignments)
 	for row := table.FirstChild(); row != nil; row = row.NextSibling() {
-		split := false
 		for cell := row.FirstChild(); cell != nil; cell = cell.NextSibling() {
 			if cell.Lines().Len() == 0 {
 				continue
@@ -419,24 +418,26 @@ func splitAtEvenEscapedPipes(table *extensionast.Table, source []byte) {
 				next := extensionast.NewTableCell()
 				next.SetPos(segment.Start + index + 1)
 				next.Lines().Append(gmtext.Segment{})
-				row.InsertAfter(row, cell, next)
-				cell, start, split = next, segment.Start+index+1, true
+				// Goldmark's InsertAfter of a last child counts it twice in ChildCount (it calls
+				// InsertBefore with a nil sibling, which counts it, then AppendChild, which counts it
+				// again), and keepEscapedClosingPipes trusts ChildCount, so a last cell is appended.
+				if after := cell.NextSibling(); after != nil {
+					row.InsertBefore(row, after, next)
+				} else {
+					row.AppendChild(row, next)
+				}
+				cell, start = next, segment.Start+index+1
 			}
 			// A cell it did not split keeps the segment goldmark trimmed it to (parseRow).
 			if start != segment.Start {
 				cell.Lines().Set(0, tableCellSegment(start, segment.Stop, source))
 			}
 		}
-		if !split {
-			continue
-		}
 		column := 0
 		for cell := row.FirstChild(); cell != nil; column++ {
 			next := cell.NextSibling()
 			if column >= width {
 				row.RemoveChild(row, cell)
-			} else if cell.Lines().Len() > 0 {
-				cell.(*extensionast.TableCell).Alignment = table.Alignments[column]
 			}
 			cell = next
 		}

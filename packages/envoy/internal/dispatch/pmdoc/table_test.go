@@ -301,6 +301,42 @@ func TestParseKeepsAnEscapedClosingPipeInTheLastCell(t *testing.T) {
 	}
 }
 
+// A `|` after two backslashes splits a cell, and the row's escaped closing pipe then belongs to
+// the last cell the split made. A split at the row's last cell once counted that cell twice, so
+// keepEscapedClosingPipes walked past the row and Parse panicked on untrusted markdown: a row
+// the split widens past its table is the wide-row refusal, and one that fits reads its cells.
+func TestParseReadsASplitRowEndingInAnEscapedPipe(t *testing.T) {
+	for _, markdown := range []string{
+		"| h | i |\n| --- | --- |\n| a | b \\\\| \\|\n",
+		"| h | i |\n| --- | --- |\n| a | b \\\\| c \\\\| \\|\n",
+		"| h | i |\n| --- | --- |\n| a \\\\| b \\\\| \\|\n",
+	} {
+		_, err := Parse(markdown)
+		if errors.Is(err, ErrPanic) || !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "where its table has 2") {
+			t.Errorf("Parse(%q) = %v, want the wide-row refusal", markdown, err)
+		}
+	}
+	for markdown, want := range map[string][]string{
+		"| h | i |\n| --- | --- |\n| a \\\\| \\|\n":               {"a \\", "|"},
+		"| h | i |\n| --- | --- |\n| a \\\\| b \\|\n":             {"a \\", "b |"},
+		"| h | i |\n| --- | --- |\n| \\\\| \\|\n":                 {"\\", "|"},
+		"| h | i | j |\n| --- | --- | --- |\n| a | b \\\\| \\|\n": {"a", "b \\", "|"},
+	} {
+		doc, err := Parse(markdown)
+		if err != nil {
+			t.Errorf("Parse(%q) = %v, want the row read", markdown, err)
+			continue
+		}
+		var got []string
+		for _, cell := range doc.Children[0].Children[1].Children {
+			got = append(got, TextContent(cell))
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("Parse(%q) body cells = %q, want %q", markdown, got, want)
+		}
+	}
+}
+
 // The browser editor's parser pairs backslashes before a `|` in a table row, so a `|` after an even
 // run of them, two or more, ends the cell and one after an odd run is the cell's text, where
 // goldmark ends a cell only at a `|` with no backslash right before it. Parse reads each row's
