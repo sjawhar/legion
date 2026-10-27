@@ -142,10 +142,10 @@ describe("summarise", () => {
 
   test("fix states give per-file before/transition/after and zeros for an unmatched spec", async () => {
     const states = new Map<string, Map<string, FixState>>([
-      ["m1", new Map([[X_CHANGELOG, "before"]])],
-      ["m2", new Map([[X_CHANGELOG, "transition"]])],
-      ["m5", new Map([[X_CHANGELOG, "after"]])],
-      ["m7", new Map([[Y_CHANGELOG, "after"]])],
+      ["m1", new Map([["packages/*/CHANGELOG.md", "before"]])],
+      ["m2", new Map([["packages/*/CHANGELOG.md", "transition"]])],
+      ["m5", new Map([["packages/*/CHANGELOG.md", "after"]])],
+      ["m7", new Map([["packages/*/CHANGELOG.md", "after"]])],
     ]);
     const specs = [
       { glob: "packages/*/CHANGELOG.md", commit: "c1" },
@@ -216,14 +216,8 @@ describe("summarise", () => {
 
     test("counts a merge on two matched files once, with its state, and PRs distinct", () => {
       const states = new Map<string, Map<string, FixState>>([
-        [
-          "k1",
-          new Map<string, FixState>([
-            ["gen/a.js", "after"],
-            ["gen/b.js", "after"],
-          ]),
-        ],
-        ["k2", new Map<string, FixState>([["gen/a.js", "before"]])],
+        ["k1", new Map<string, FixState>([["gen/**", "after"]])],
+        ["k2", new Map<string, FixState>([["gen/**", "before"]])],
       ]);
       const summary = summarise(run, { prefix: "legion/", fixes: { specs, states } });
       expect(summary.fixes).toEqual([
@@ -248,20 +242,6 @@ describe("summarise", () => {
         { glob: "gen/**", commit: "c", merges: 2, prs: 2, states: null },
       ]);
       expect(summary.combined.tables.files.every((row) => row.fix === undefined)).toBe(true);
-    });
-
-    test("two states for one merge under one spec is an error", () => {
-      const states = new Map<string, Map<string, FixState>>([
-        [
-          "k1",
-          new Map<string, FixState>([
-            ["gen/a.js", "after"],
-            ["gen/b.js", "before"],
-          ]),
-        ],
-        ["k2", new Map<string, FixState>([["gen/a.js", "before"]])],
-      ]);
-      expect(() => summarise(run, { prefix: "legion/", fixes: { specs, states } })).toThrow(Error);
     });
   });
 });
@@ -332,9 +312,9 @@ describe("compare", () => {
       fixes: { specs },
     });
     const states = new Map<string, Map<string, FixState>>([
-      ["n1", new Map<string, FixState>([[X_CHANGELOG, "after"]])],
+      ["n1", new Map<string, FixState>([["packages/*/CHANGELOG.md", "after"]])],
       ["n2", new Map<string, FixState>([["README.md", "before"]])],
-      ["n4", new Map<string, FixState>([[X_CHANGELOG, "transition"]])],
+      ["n4", new Map<string, FixState>([["packages/*/CHANGELOG.md", "transition"]])],
     ]);
     const after = summarise(await fixture("after.json"), {
       prefix: "legion/",

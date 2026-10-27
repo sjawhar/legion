@@ -4,6 +4,7 @@ import {
   type FixState,
   type FixStates,
   type ForcePushRecord,
+  fixMatcher,
   type GraphPullRequest,
   type MergeRecord,
   type PullRequestRecord,
@@ -44,7 +45,7 @@ export async function analysePullRequest(
     const b = branch[0];
     const u = outside[0];
     const onMain = await git.isAncestor(u, ORIGIN_MAIN);
-    const onBase = await git.isAncestor(u, upstreamRef);
+    const onBase = upstreamRef === ORIGIN_MAIN ? onMain : await git.isAncestor(u, upstreamRef);
     const rec: MergeRecord = {
       ...commit,
       branch_parent: b,
@@ -98,7 +99,7 @@ export async function analysePullRequest(
     const head = pr.headRefOid;
     if (await git.fetchOid(head)) {
       out.open_conflicts_now = await git.mergeTree(head, upstreamRef);
-      out.open_behind_base = !(await git.isAncestor(await git.revParse(upstreamRef), head));
+      out.open_behind_base = !(await git.isAncestor(upstreamRef, head));
     } else {
       out.open_conflicts_now = null;
     }
@@ -109,7 +110,7 @@ export async function analysePullRequest(
 /** The pull request's base branch on origin, or origin/main when the base was deleted since. */
 export async function upstreamRefFor(git: GitRepo, baseRefName: string): Promise<string> {
   const ref = `refs/remotes/origin/${baseRefName}`;
-  return (await git.verify(ref)) ? ref : ORIGIN_MAIN;
+  return (await git.resolveCommit(ref)) !== null ? ref : ORIGIN_MAIN;
 }
 
 /** Resolves each `--fixed` commit to a full oid; refuses one git cannot resolve or not on main. */
@@ -130,34 +131,31 @@ export async function resolveFixes(
 }
 
 /**
- * Where each merge stood against the fix of each conflicted path a spec's glob matches (first
- * matching spec wins): `before` when the upstream parent lacks the fix, `transition` when the
- * upstream parent has it and the branch parent does not, `after` when both have it.
+ * Where each merge stood against each fix whose glob matches one of its conflicted paths (first
+ * matching spec wins per path), keyed by the spec's glob: `before` when the upstream parent lacks
+ * the fix, `transition` when the upstream parent has it and the branch parent does not, `after`
+ * when both have it.
  */
 export async function classifyFixes(
   git: GitRepo,
   events: Array<Pick<MergeRecord, "oid" | "branch_parent" | "upstream_parent" | "conflicts">>,
   fixes: FixSpec[]
 ): Promise<FixStates> {
-  const globs = fixes.map((fix) => ({ fix, glob: new Bun.Glob(fix.glob) }));
+  const match = fixMatcher(fixes);
   const states: FixStates = new Map();
   for (const { oid, branch_parent, upstream_parent, conflicts } of events) {
     if (!branch_parent || !upstream_parent || !conflicts) continue;
-    const byFix = new Map<FixSpec, FixState>();
-    const byPath = new Map<string, FixState>();
+    const byGlob = new Map<string, FixState>();
     for (const path of conflicts) {
-      const fix = globs.find(({ glob }) => glob.match(path))?.fix;
-      if (!fix) continue;
-      let state = byFix.get(fix);
-      if (!state) {
-        if (!(await git.isAncestor(fix.commit, upstream_parent))) state = "before";
-        else if (!(await git.isAncestor(fix.commit, branch_parent))) state = "transition";
-        else state = "after";
-        byFix.set(fix, state);
-      }
-      byPath.set(path, state);
+      const fix = match(path);
+      if (!fix || byGlob.has(fix.glob)) continue;
+      let state: FixState;
+      if (!(await git.isAncestor(fix.commit, upstream_parent))) state = "before";
+      else if (!(await git.isAncestor(fix.commit, branch_parent))) state = "transition";
+      else state = "after";
+      byGlob.set(fix.glob, state);
     }
-    if (byPath.size > 0) states.set(oid, byPath);
+    if (byGlob.size > 0) states.set(oid, byGlob);
   }
   return states;
 }

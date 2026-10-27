@@ -8,7 +8,7 @@ interface Exit {
 }
 
 /** Runs `cmd`; throws naming the command, exit code and stderr when `accept` refuses the code. */
-async function run(cmd: string[], accept: (code: number) => boolean): Promise<Exit> {
+export async function run(cmd: string[], accept: (code: number) => boolean): Promise<Exit> {
   const proc = Bun.spawn(cmd, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr, code] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -19,7 +19,7 @@ async function run(cmd: string[], accept: (code: number) => boolean): Promise<Ex
   return { code, stdout };
 }
 
-const success = (code: number) => code === 0;
+export const success = (code: number) => code === 0;
 const anyExit = () => true;
 
 /** A local clone of the measured repository, every call `git --git-dir <gitDir> …`. */
@@ -85,10 +85,6 @@ export class GitRepo {
 
   async revParse(rev: string): Promise<string> {
     return (await this.git(["rev-parse", rev])).stdout.trim();
-  }
-
-  async verify(ref: string): Promise<boolean> {
-    return (await this.git(["rev-parse", "--verify", "-q", ref], anyExit)).code === 0;
   }
 
   async resolveCommit(rev: string): Promise<string | null> {

@@ -120,10 +120,10 @@ async function readPullRequests(
   const listed = (await source.list(sinceInstant)).filter((pr) =>
     pr.headRefName.startsWith(options.prefix)
   );
-  const graphs = await mapLimit(listed, options.jobs, (pr) => source.fetch(pr.number));
-  const prs = await mapLimit(graphs, options.jobs, async (pr) =>
-    analysePullRequest(git, pr, await upstreamRefFor(git, pr.baseRefName))
-  );
+  const prs = await mapLimit(listed, options.jobs, async ({ number }) => {
+    const pr = await source.fetch(number);
+    return analysePullRequest(git, pr, await upstreamRefFor(git, pr.baseRefName));
+  });
   return prs.sort((a, b) => a.number - b.number);
 }
 

@@ -81,8 +81,14 @@ export interface FixSpec {
   glob: string;
   commit: string; // full oid once resolved
 }
-/** merge oid -> conflicted path -> state, for the paths some FixSpec glob matches. */
+/** merge oid -> FixSpec glob -> state, for the specs whose glob matches a conflicted path. */
 export type FixStates = Map<string, Map<string, FixState>>;
+
+/** The spec a path falls under: the first whose glob matches it, or undefined. */
+export function fixMatcher(specs: FixSpec[]): (path: string) => FixSpec | undefined {
+  const globs = specs.map((spec) => ({ spec, glob: new Bun.Glob(spec.glob) }));
+  return (path) => globs.find(({ glob }) => glob.match(path))?.spec;
+}
 
 /** A usage error: bad flag, bad window, unreadable raw records, bad --fixed commit. Exit 2. */
 export class UsageError extends Error {}

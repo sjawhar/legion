@@ -2,6 +2,7 @@ import {
   type FixSpec,
   type FixState,
   type FixStates,
+  fixMatcher,
   type MergeKind,
   type MergeRecord,
   type PullRequestRecord,
@@ -240,6 +241,7 @@ interface MergeEvent {
   oid: string;
   kind: MergeKind;
   conflicts: MergeRecord["conflicts"];
+  record: MergeRecord; // the first PR's
   prs: Set<number>;
 }
 
@@ -302,9 +304,10 @@ function uniqueMerges(
 ): Map<string, MergeEvent> {
   const events = new Map<string, MergeEvent>();
   for (const pr of prs) {
-    for (const { oid, kind, conflicts, date } of pr.merges) {
+    for (const record of pr.merges) {
+      const { oid, kind, conflicts, date } = record;
       if (exclude.has(oid) || !inWindow(date)) continue;
-      const event = events.get(oid) ?? { oid, kind, conflicts, prs: new Set<number>() };
+      const event = events.get(oid) ?? { oid, kind, conflicts, record, prs: new Set<number>() };
       event.prs.add(pr.number);
       events.set(oid, event);
     }
@@ -315,7 +318,7 @@ function uniqueMerges(
 function mergeSection(prCount: number, events: Map<string, MergeEvent>): MergeSection {
   const all = [...events.values()];
   const forward = all.filter((event) => event.kind === "forward");
-  const conflicting = conflictingOf(forward);
+  const conflicting = conflictingForward(all);
   const clean = forward.filter((event) => event.conflicts?.length === 0);
   const perPr = new Map<number, number>();
   for (const event of conflicting) {
@@ -340,8 +343,11 @@ function mergeSection(prCount: number, events: Map<string, MergeEvent>): MergeSe
   };
 }
 
-function conflictingOf(forward: MergeEvent[]): Array<MergeEvent & Conflicted> {
-  return forward.filter((event): event is MergeEvent & Conflicted => !!event.conflicts?.length);
+function conflictingForward(events: MergeEvent[]): Array<MergeEvent & Conflicted> {
+  return events.filter(
+    (event): event is MergeEvent & Conflicted =>
+      event.kind === "forward" && !!event.conflicts?.length
+  );
 }
 
 const noFixes = (): FixCounts => ({ before: 0, transition: 0, after: 0 });
@@ -354,31 +360,31 @@ function applyFixes(
   fixes: NonNullable<SummaryOptions["fixes"]>
 ): FixTotal[] {
   const { specs, states } = fixes;
-  const globs = specs.map((spec) => ({ spec, glob: new Bun.Glob(spec.glob) }));
+  const match = fixMatcher(specs);
   const totals = new Map(
     specs.map((spec) => [spec, { merges: [] as MergeEvent[], states: states ? noFixes() : null }])
   );
   const rows = new Map(section.tables.files.map((row) => [row.path, row]));
-  for (const event of conflictingOf([...events.values()].filter((e) => e.kind === "forward"))) {
+  for (const event of conflictingForward([...events.values()])) {
     const matched = new Map<FixSpec, FixState | null>();
     for (const path of event.conflicts) {
-      const spec = globs.find(({ glob }) => glob.match(path))?.spec;
+      const spec = match(path);
       if (!spec) continue;
-      let state: FixState | null = null;
-      if (states) {
-        const found = states.get(event.oid)?.get(path);
-        if (!found) throw new Error(`no fix state for ${path} in merge ${event.oid}`);
-        state = found;
+      let state = matched.get(spec);
+      if (state === undefined) {
+        state = null;
+        if (states) {
+          const found = states.get(event.oid)?.get(spec.glob);
+          if (!found) throw new Error(`no fix state for ${path} in merge ${event.oid}`);
+          state = found;
+        }
+        matched.set(spec, state);
+      }
+      if (state) {
         const row = rows.get(path) as FileRow;
         row.fix ??= noFixes();
         row.fix[state]++;
       }
-      // A state depends only on the fix commit and the merge's parents, so one spec's paths in
-      // one merge share it.
-      if (matched.has(spec) && matched.get(spec) !== state) {
-        throw new Error(`merge ${event.oid} has two fix states for ${spec.glob}`);
-      }
-      matched.set(spec, state);
     }
     for (const [spec, state] of matched) {
       const total = totals.get(spec) as { merges: MergeEvent[]; states: FixCounts | null };
@@ -455,17 +461,9 @@ function windowTest(window: { since: number; until: number }): (when: string) =>
  * first PR's, as the section takes it): the merges `--fixed` classifies.
  */
 export function conflictingMerges(run: RawRun, prefix: string): MergeRecord[] {
-  const inWindow = windowTest(resolveWindow(run.since, run.until));
-  const merges = new Map<string, MergeRecord>();
-  for (const pr of run.prs) {
-    if (!pr.headRefName.startsWith(prefix)) continue;
-    for (const merge of pr.merges) {
-      if (inWindow(merge.date) && !merges.has(merge.oid)) merges.set(merge.oid, merge);
-    }
-  }
-  return [...merges.values()].filter(
-    (merge) => merge.kind === "forward" && !!merge.conflicts?.length
-  );
+  const prs = run.prs.filter((pr) => pr.headRefName.startsWith(prefix));
+  const events = uniqueMerges(prs, windowTest(resolveWindow(run.since, run.until)));
+  return conflictingForward([...events.values()]).map((event) => event.record);
 }
 
 /**
@@ -586,7 +584,7 @@ export function compare(before: Summary, after: Summary): Comparison {
     const now = afterRows.get(path);
     return {
       path,
-      category: category(path),
+      category: ((now ?? was) as FileRow).category,
       before: { events: was?.events ?? 0, prs: was?.prs.length ?? 0 },
       after: { events: now?.events ?? 0, prs: now?.prs.length ?? 0, fix: now?.fix },
     };

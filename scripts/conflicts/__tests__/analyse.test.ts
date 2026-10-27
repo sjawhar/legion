@@ -226,7 +226,7 @@ describe("fix states", () => {
 
     const stateFor = async (commit: string) => {
       const fixes = await resolveFixes(git, [{ glob: "**/CHANGELOG.md", commit }]);
-      return (await classifyFixes(git, [merge], fixes)).get(m1)?.get(CHANGELOG);
+      return (await classifyFixes(git, [merge], fixes)).get(m1)?.get("**/CHANGELOG.md");
     };
 
     expect(await stateFor(c)).toBe("before");

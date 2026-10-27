@@ -1,3 +1,4 @@
+import { run, success } from "./git.ts";
 import type { GraphCommit, GraphForcePush, GraphPullRequest } from "./types.ts";
 
 /** GitHub's search returns at most this many results; a list this long may be cut short. */
@@ -38,8 +39,8 @@ interface QueryPage {
   };
 }
 
-/** Where the pull requests come from: GitHub through `gh`, or a test's stand-in. */
-export interface PullRequestSource {
+/** Where the pull requests come from: GitHub through `gh`. */
+interface PullRequestSource {
   /** Every pull request, any state, updated at or after `sinceInstant`. */
   list(sinceInstant: string): Promise<Array<{ number: number; headRefName: string }>>;
   fetch(number: number): Promise<GraphPullRequest>;
@@ -47,14 +48,7 @@ export interface PullRequestSource {
 
 /** Runs `gh` and parses its JSON output; throws naming the command and its stderr on failure. */
 async function gh<T>(args: string[]): Promise<T> {
-  const proc = Bun.spawn(["gh", ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  if (code !== 0) throw new Error(`gh ${args.join(" ")} failed (${code}): ${stderr.trim()}`);
-  return JSON.parse(stdout) as T;
+  return JSON.parse((await run(["gh", ...args], success)).stdout) as T;
 }
 
 /** `repo`'s pull requests as `owner/name` on GitHub, read with the `gh` CLI's credentials. */
