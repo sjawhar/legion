@@ -250,6 +250,146 @@ func TestAMessageQueuedBehindItsKeyAtStopIsRedeliveredAtOnce(t *testing.T) {
 	}
 }
 
+// holdPullRequestOneUntilAbandoned is holdPullRequestOne, except that the held fetch also ends when
+// the intake abandons it (the request's context ends), so its end is recorded as soon as the
+// intake stops waiting on it, by a release or by giving the call up.
+func holdPullRequestOneUntilAbandoned(fake *fakeGitHub) *heldPullRequests {
+	held := &heldPullRequests{entered: make(chan struct{}), held: make(chan struct{})}
+	held.release = sync.OnceFunc(func() { close(held.held) })
+	fake.handle("GET /repos/acme/widgets/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		number := r.PathValue("number")
+		held.record("start " + number)
+		if number == "1" {
+			first := false
+			held.enter.Do(func() {
+				first = true
+				close(held.entered)
+			})
+			if first {
+				select {
+				case <-held.held:
+				case <-r.Context().Done():
+				}
+			}
+		}
+		held.record("end " + number)
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	return held
+}
+
+// A process standing by for the durable when the intake holding it stops does not start a pull
+// request's next message while the stopping intake is still handling the one before it: the order
+// of one key's messages holds across the hand-over, as it does inside one intake. The message the
+// stopping intake gives back reaches the standby only once its handler of that key has ended or
+// given up its GitHub call.
+func TestAHandOverKeepsAPullRequestsMessagesInOrder(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	seedDeliverySettings(t, ctx, pool)
+	fake := newFakeGitHub(t)
+	held := holdPullRequestOneUntilAbandoned(fake)
+	github := fake.newTestClient()
+	t.Cleanup(held.release)
+	natsClient := intakeTestClient(t)
+	first := newIntake(natsClient, pool, deliveryTestLeases(t, pool), github, events.NewBroker(), loadedSettingsCache(t, ctx, pool))
+	stopFirst := runIntake(t, first)
+	awaitBoundDurable(t, natsClient)
+	before := deliveryConsumerInfo(t, natsClient).Delivered.Consumer
+
+	publishPullRequestEnvelope(t, natsClient, "acme", "widgets", 1, mergedPullRequest(1))
+	held.awaitEntered(t)
+	publishPullRequestEnvelope(t, natsClient, "acme", "widgets", 1, mergedPullRequest(1))
+	var info *natsgo.ConsumerInfo
+	waitFor(t, 20*time.Second, func() bool {
+		info = deliveryConsumerInfo(t, natsClient)
+		return info.Delivered.Consumer-before == 2 && info.NumAckPending == 2
+	}, func() string {
+		return fmt.Sprintf("the second message of pull request 1 was not delivered behind the first: %+v", info)
+	})
+
+	// The standby is running before the stop, as the second envoy-dispatch process of a rolling
+	// deploy is.
+	runIntake(t, newIntake(intakeTestClient(t), pool, deliveryTestLeases(t, pool), github, events.NewBroker(), loadedSettingsCache(t, ctx, pool)))
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		stopFirst()
+	}()
+	waitFor(t, 20*time.Second, func() bool {
+		first.mu.Lock()
+		defer first.mu.Unlock()
+		return first.delivering != nil && first.delivering.stopping.Load()
+	}, func() string { return "the first intake never began stopping" })
+
+	// overlapped reports whether a fetch of pull request 1 started while an earlier one had not
+	// yet ended.
+	overlapped := func(events []string) bool {
+		open := false
+		for _, event := range events {
+			switch event {
+			case "start 1":
+				if open {
+					return true
+				}
+				open = true
+			case "end 1":
+				open = false
+			}
+		}
+		return false
+	}
+	// The standby polls for the durable every durableBindInterval, so several of them give it the
+	// time to bind and be handed whatever the stopping intake gave back.
+	for deadline := time.Now().Add(4 * durableBindInterval); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		if events := held.of("1"); overlapped(events) {
+			held.release()
+			t.Fatalf("pull request 1's events across the hand-over = %q: the standby started the pull request's next message "+
+				"while the stopping intake's handler of the one before it was still waiting on GitHub", events)
+		}
+	}
+
+	held.release()
+	select {
+	case <-stopped:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the stopping intake did not return once its handler ended")
+	}
+	awaitAcknowledged(t, natsClient)
+	if events, want := held.of("1"), []string{"start 1", "end 1", "start 1", "end 1"}; !slices.Equal(events, want) {
+		t.Fatalf("pull request 1's events = %q, want %q", events, want)
+	}
+}
+
+// A stopping intake does not wait out a GitHub call that does not answer. Dispatch's whole
+// shutdown has cmd/dispatch's stopGrace, 30 seconds (the pod's terminationGracePeriodSeconds less
+// its pre-stop wait), and the intake's stop starts at the signal, so it returns well inside that
+// however long GitHub holds the handler's call: here GitHub never answers.
+func TestAStoppingIntakeDoesNotWaitOutAGitHubCallThatDoesNotAnswer(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	seedDeliverySettings(t, ctx, pool)
+	fake := newFakeGitHub(t)
+	held := holdPullRequestOne(fake)
+	github := fake.newTestClient()
+	t.Cleanup(held.release)
+	natsClient := intakeTestClient(t)
+	stop := runIntake(t, newIntake(natsClient, pool, deliveryTestLeases(t, pool), github, events.NewBroker(), loadedSettingsCache(t, ctx, pool)))
+	awaitBoundDurable(t, natsClient)
+
+	publishPullRequestEnvelope(t, natsClient, "acme", "widgets", 1, mergedPullRequest(1))
+	held.awaitEntered(t)
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		stop()
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(20 * time.Second):
+		held.release()
+		t.Fatal("the stopping intake was still waiting on its handler's GitHub call 20 s after its context ended; Dispatch's shutdown has 30 s in all")
+	}
+}
+
 // A message NATS has delivered into the client's buffer, but the subscription's callback has not
 // yet routed when the intake stops, is negatively acknowledged rather than handled, and the next
 // process to bind the durable handles it.
