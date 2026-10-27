@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-596",
+  "completed": "2026-10-27T09:40:00Z",
+  "proof": [
+    {
+      "criterion": "Each cause found in Dispatch or Envoy is fixed with a test: a person's reply reaches the issue's claimant (no route) and every session in its thread and the thread document's authors; a person's comment on an issue with no route and no session claim reaches the primary document's session authors.",
+      "surface": "Local Dispatch stack: the Dispatch server binary built from the head on Postgres 17 + pgvector with every migration, nats-server 2.10.29 -js, a subscriber on notifications.>, driven over the HTTP API with person-header and agent-bearer requests.",
+      "command": "/legion/scratch/tmp/infra596-rig/run.sh head (BET-15's sequence on RIG-1: S-writer edits the spec, S-claim claims with no route, the person posts an anchored comment, S-claim replies and resolves, the person replies and reopens; then RIG-2: nobody claims or routes, S-spec edits the spec, the person comments on the conversation)",
+      "observed": "RIG-1 person's reply comment.created (event 9) reached notifications.dispatch.issue.RIG-1.comment.created, notifications.agent.S-claim and notifications.agent.S-writer, the same three in events.published_destinations; the reopen (event 8) only the issue topic. RIG-2 person's conversation comment (event 12) reached notifications.agent.S-spec beside the issue topic.",
+      "headSha": "86599d457b94b92107eabc08b1700865f2613d23",
+      "negativeControl": "/legion/scratch/tmp/infra596-rig/run.sh main (server built from main 448a41003a17): the same reply and the RIG-2 comment reached only their issue topics, as BET-15's events 4314/4315 did in production."
+    },
+    {
+      "criterion": "dispatch doc-read shows open comments with their text, not only their id.",
+      "surface": "The dispatch CLI bundled from the head (packages/envoy-client/bin/dispatch.ts, as build-dispatch-cli.sh bundles it) against the same local Dispatch.",
+      "command": "/legion/scratch/tmp/infra596-rig/run.sh head, step: dispatch doc-read --issue RIG-1 --artifact spec (output in /legion/scratch/tmp/infra596-rig/head/doc-read.txt)",
+      "observed": "'Open anchored threads:' then the reopened root (id, author, quote, body) and both replies with author, time and full body, including the person's reopening reply.",
+      "headSha": "86599d457b94b92107eabc08b1700865f2613d23",
+      "negativeControl": "run.sh main: main's CLI printed only 'Open anchored asks/comments: comment <id>'; a resolved thread is absent from the head's output (unit test in dispatch-execute.test.ts)."
+    },
+    {
+      "criterion": "The BET-15 comment's path is traced from Dispatch's records to the cause, with the records quoted.",
+      "surface": "Production Dispatch's database, read once read-only by the dev-box run (INFRA-608 run.sh at legion 15cb9ba1), files attached to INFRA-596 as comment-delivery-*.",
+      "command": "dispatch doc-read --issue INFRA-596 --artifact comment-delivery-trace-03207432-txt | tail -n +3 (sha256 0240d8a3… matches comment-delivery-manifest.txt)",
+      "observed": "Events 4314 (comment.reopened) and 4315 (comment.created), actor user:sami@theorem.dev, notify true, published only to notifications.dispatch.issue.BET-15.comment.reopened / .comment.created; no comment_mentions or comment_deliveries rows; claim session:01a14313 and no route at publish (issue event seq 63); thread root c1283587 by Sami, reply dc3277d4 by 01a14313. The document on INFRA-514 quotes these and the task lead's lines 18655-18664.",
+      "headSha": "15cb9ba145508580d2cfeb7cb1cad41b3418d022",
+      "negativeControl": "comment-delivery-trace-c1283587-txt: event 4260 (Sami's top-level anchored comment) lists notifications.agent.01a14313-f0d7-765d-91c1-f2e043218727 in published_destinations."
+    },
+    {
+      "criterion": "A committed query or command produces the October table; the document's counts add up: total, delivered, not delivered by cause, unknown.",
+      "surface": "report.ts over the run's files attached to INFRA-596; the uploaded documents dispatch://INFRA-514/artifact/human-comment-delivery-2026-10-md (version 2) and dispatch://INFRA-514/artifact/human-comment-delivery-2026-10-pairs-tsv.",
+      "command": "R=<dir with the comment-delivery-* files, each fetched with dispatch doc-read … | tail -n +3>; bun scripts/dispatch/comment-delivery/report.ts --comments $R/comments.csv --receipts $R/receipts.tsv --counts $R/receipts-counts.txt --trace $R/trace-03207432.txt --trace $R/trace-c1283587.txt --findings $R/comment-delivery-findings-2026-10.md --pairs $R/human-comment-delivery-2026-10-pairs.tsv > $R/human-comment-delivery-2026-10.md",
+      "observed": "Exit 0. First line: 'Total 1055 = delivered 795 + not delivered 44 (no-target 14, not-addressed:claimant 19, running-no-row 11, every other cause 0) + unknown 216'; pairs 'Total 1128 = delivered 810 + not delivered 65 + unknown 253'. Document sha256 06312018…, pairs sha256 bd067fb6…; the document read back from INFRA-514 equals the report's output byte for byte (doc-read's trailing 'Document token' line aside), the pairs TSV likewise.",
+      "headSha": "86599d457b94b92107eabc08b1700865f2613d23",
+      "negativeControl": "A counts file whose rows_without_id is 1, a duplicated receipts row, or a comment in no class makes report.ts exit 1 naming the line or rows (comment-delivery.test.ts); a pair whose session the store does not hold is reported unknown, never delivered."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/outbox/publisher.go",
+    "packages/envoy/internal/dispatch/outbox/recipients.go",
+    "packages/envoy/internal/dispatch/outbox/publisher_comment_recipients_test.go",
+    "packages/envoy/internal/dispatch/outbox/publisher_document_authors_test.go",
+    "packages/envoy/internal/dispatch/outbox/publisher_test.go",
+    "packages/envoy/internal/dispatch/outbox/throughput_test.go",
+    "packages/envoy/internal/dispatch/outbox/THROUGHPUT.md",
+    "packages/envoy/internal/dispatch/api/comment_create.go",
+    "packages/envoy/internal/dispatch/api/comment_document_authors_test.go",
+    "packages/envoy/internal/dispatch/model/model.go",
+    "packages/envoy/internal/dispatch/deliveryaudit/{comments.sql,trace.sql,deliveryaudit.go,deliveryaudit_test.go,README.md}",
+    "packages/envoy-client/src/dispatch-execute.ts",
+    "packages/envoy-client/src/dispatch-http.ts",
+    "packages/envoy-client/src/__tests__/dispatch-execute.test.ts",
+    "packages/envoy-client/src/__tests__/dispatch-http.test.ts",
+    "packages/contracts/src/dispatch-tools.ts",
+    "packages/claude-envoy/dist/{dispatch,envoy-channel,session-hook}.js",
+    "scripts/dispatch/comment-delivery/report.ts",
+    "scripts/dispatch/__tests__/comment-delivery.test.ts",
+    "scripts/dispatch/__fixtures__/comment-delivery/{comments.csv,receipts.tsv,receipts-counts.txt,trace.csv}",
+    "scripts/dispatch/README.md",
+    "skills/dispatch/SKILL.md",
+    "packages/envoy/AGENTS.md",
+    "packages/pi-envoy/AGENTS.md",
+    "docs/site/src/content/docs/dispatch/envoy.md",
+    "docs/site/src/content/docs/dispatch/for-agents.md",
+    "packages/envoy/CHANGELOG.md, packages/pi-envoy/CHANGELOG.md, packages/envoy-client/CHANGELOG.md, packages/contracts/CHANGELOG.md, packages/claude-envoy/CHANGELOG.md"
+  ],
+  "trickyParts": [
+    "comments.sql and trace.sql are pinned by sha256 to the one production run (legion 15cb9ba1); any change to either requires the run again (INFRA-608's rule). Neither changed after 15cb9ba1.",
+    "Recipients are read once per batch (loadCommentRecipients for reply threads, loadPrimaryDocumentAuthors for issues with no route and no session claim), the shape INFRA-590's planner asked for; a failed recipient query backs off only the events that needed it.",
+    "suppressed_authors now lists every mentioned session on every comment and is always [] when empty; the claimant and primary-author fallbacks skip it, ask follower routes do not read it.",
+    "Dispatch's document editor autolinks bare e-mail addresses, so report.ts writes free-text values as code spans; with that the uploaded Markdown is stored byte for byte. The per-pair rows go to a TSV file because the full table passed Dispatch's 65,536-element cap."
+  ],
+  "deviations": [
+    "Transcript-store queries moved to INFRA-608 (theorem-labs/agent-infra `tq receipts`) at the architect's direction; report.ts reads its receipts.tsv and 15-line counts file. received.sql and sessions.sql were removed.",
+    "Architect decision (Option A, 2026-10-27 08:49Z): a person's comment on an issue with no route and no session claim also reaches the primary document's session authors, beyond the plan's decision 2.",
+    "The 5 last-hop pairs that cannot be decided from the run's records are recorded as undecidable under INFRA-594, with the transcript files and line ranges that decide them (architect decision).",
+    "doc-read also prints an open ask's replies, beyond plan decision 8 (an ask printed only its question); no extra request.",
+    "The dispatch skill's claim line keeps the route/subscribe advice (a claim does not bring messages) within the 2,000-word guard; it does not name the primary-document fallback for lack of words."
+  ],
+  "openQuestions": [
+    "INFRA-49 (the controller's daily report issue) needs a route to role:legion-infra-controller; the INFRA-514 architect asked the controller to set it.",
+    "INFRA-589's committed reproduction (#2369) has not merged, so its before/after step was not run; the throughput comparison is in outbox/THROUGHPUT.md."
+  ],
+  "discoveredComplexity": [
+    "Oh My Pi 18.10.4-18.13.1 drops queued steer messages (Envoy cards) on Esc while pi-envoy keeps its dedupe claim; passed by the architect to INFRA-594."
+  ]
+}
