@@ -2,52 +2,47 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-158",
-  "completed": "2026-10-26T23:38:00Z",
-  "round": 6,
+  "completed": "2026-10-27T01:08:00Z",
+  "round": 7,
   "generation": 4,
-  "head": "58b805d967a00e12722289bfd93de702d4000d58",
+  "head": "52159aaf335f",
   "verdictProvider": "No subagent judged anything in this round; the tester's own session ran every check, so no provider or model needs naming.",
-  "fingerprint": {
-    "from": "de6daaffe1cd0699d566a468679b80ba4d35680f 39943e163ceed1ec63dbf8b878cf6e116b870b92ac6f915ec9ffe48e94bf6e36",
-    "to": "58b805d967a00e12722289bfd93de702d4000d58 172e0d29cfbcd7a0a663eeb7c8e8df1f1850ad4a92a922b87a11e3ebe2307ea0",
-    "result": "changed",
-    "why": "Both diffs touch the same files; the only difference is three 22-line hunks (actorAttribution) in the regenerated packages/claude-envoy/dist bundles, which main now carries. With that directory left out, both fingerprints are 86f1cec2360a2ac1c49b11506966d132bc68312872aab73fcbf7cf2d56c4805b. Because the fingerprint changed, this was a full round."
-  },
+  "scope": "52159aaf changes only the web app (connection.ts, pending-sync.ts) and its tests; the server is unchanged since round 6's 58b805d9.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surface independently at the merged head 58b805d9: closes, reopen, rebuild after close, margin, reconnect probe, races, upgrade from main 1357b95c, browser suites."
+    "how": "Drove the gap case independently with my own WebSocket gate, which holds every server frame except the authentication answer (the implementer's test drops frames with admitWithoutSync), against the head web app and a web app built without the fix."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Close by a person, an agent session and the Legion daemon withdraws every open ask, naming the closer, and changes nothing else; reopen restores exactly those asks; a client of the regenerated bundle reads the record",
-      "surface": "dispatch:local at 58b805d9 with the branch's CLI, the daemon's SetStatus and packages/claude-envoy/dist/dispatch.js",
-      "command": "seed.ts TT 3; alice cookie PATCH TT-1; dcli issue-update --issue TT-2 --status done; daemonclose TT-3 done; state.ts; reopen TT-1; bun packages/claude-envoy/dist/dispatch.js read --ref dispatch://TT-3/ask/<p1> and read --issue TT-3",
-      "observed": "Closes took 0.10 and 0.14 s. On each issue open_asks is 0 and the approval draft; d1, p1, p3, h1 and ap read withdrawn by alice | tester-agent-9 | legion-daemon:TT; d2 answered, p2 retracted, p4 resolved; blocks and the copy read resolved; the named versions read d1=open. The reopen restored the same 5 ids with the same waiting_on, in the Inbox. The claude-envoy bundle prints 'Kind: withdrawn', 'By: legion-daemon:TT' and 'Open asks: - none'.",
-      "headSha": "58b805d967a00e12722289bfd93de702d4000d58",
-      "negativeControl": "The same closes on main's build 1357b95c left open_asks 5, the approval awaiting and every block open"
+      "criterion": "Review round 5: what a person types between a writable reconnect's authentication and its sync is stored, survives a cut and a reload, and reaches the server",
+      "surface": "Dispatch's Playwright harness (chromium and iphone) against the head's Go server and Postgres, with a throwaway spec (deleted after)",
+      "command": "Agent spec with headings, issue closed; open read-only; reopen; wait until the page drops the closed banner; gate the next socket (authentication passes, every other server frame held); cut; type 'typed in the gap'; count IndexedDB rows; cut with new sockets held; reload; release. bunx playwright test zz-tester-probe.e2e.ts --project chromium --project iphone --repeat-each 2 --workers 1 (DISPATCH_E2E_REUSE_SERVERS=1)",
+      "observed": "4 of 4 passed: the editor turned writable at authentication; 18 rows were stored in the gap; after the reload the status said 'saved in this browser, not sent yet'; the text reached the server; no 'rebuilt since' notice.",
+      "headSha": "52159aaf335f",
+      "negativeControl": "The same spec against the web app built with connection.ts and pending-sync.ts restored to 52159aaf's parent failed 2 of 2 at the row count: Expected >= 16, Received 0, so the gap typing is never stored."
     },
     {
-      "criterion": "Review-round-4 fixes still hold on the merged head: a rebuild after a close shows the withdrawn block resolved; a withdrawn ask folds in the margin; a read-only tab's writable reconnect restores another tab's row with no false rebuild notice",
-      "surface": "dispatch:local (server API, SQL corruption), Chromium, and Dispatch's Playwright harness with the throwaway reconnect probe (chromium and iphone)",
-      "command": "TT-4: corrupt notes.md, restart, daemonclose, rebuild as alice, read, margin.ts, reopen, read; zz-tester-probe.e2e.ts --repeat-each 2 with the reconnect's server frames, except authentication, held 2.5 s (deleted after)",
-      "observed": "Rebuild 200; the block reads state=\"resolved\" and the ask is withdrawn. The margin hides both asks under 'Resolved (2)'. After the reopen the block is open, the ask is open and the withdrawn ask is shown. Probe: 4 of 4 passed; the row reached the server and no rebuild notice appeared.",
-      "headSha": "58b805d967a00e12722289bfd93de702d4000d58",
-      "negativeControl": "Round 5 against builds without each fix: the round-4 server left the rebuilt block open; the SPA without 988beb33 failed the same probe 4 of 4. Here, after the reopen, the margin unfolds the withdrawn ask (Resolved (1))."
+      "criterion": "The architect's named risk: holding the read-only load's heading-id stamp does not bring back round 1's false unsent-edit message or store rows on a tab that stays read-only",
+      "surface": "Same harness and both builds",
+      "command": "Probe 1: a closed issue whose agent-written spec has headings, opened and reloaded twice by alice, who types nothing. Probe 2: the same, with the socket cut and reconnected (still read-only), then a reload. After each load: the pending-edit status and the IndexedDB row count.",
+      "observed": "Head: 4 of 4 for each probe; no pending-edit notice and 0 rows after every load and reconnect. The round-1 browser test in close-withdraws-asks.e2e.ts passes too.",
+      "headSha": "52159aaf335f",
+      "negativeControl": "The build without 52159aaf also passes probes 1 and 2, so the fix changed nothing there. Probe 3 above is the case the fix changes, and it fails on that build."
     },
     {
-      "criterion": "Asks already open on closed issues are withdrawn by the repair naming each closer, later passes write nothing, and concurrent closes stay consistent",
-      "surface": "Main's build 1357b95c, then the merged head on the same Postgres database; dispatch:local for races",
-      "command": "Main seeds UP-1..3, adds an unindexed block to each and closes them (alice, old-agent-5, SetStatus); the head boots; 2 repair passes with an md5 before and after; race.ts resolve 10, double 6, unsettled 6, flip 6",
-      "observed": "Boot: withdrawn=15 restored=0 swept=3, naming alice, old-agent-5 and legion-daemon:UP; blocks d1, late and the copy read resolved. The passes reported withdrawn=0 restored=0 swept=0 and left the md5 unchanged. Races: 0 problems, no 5xx.",
-      "headSha": "58b805d967a00e12722289bfd93de702d4000d58",
-      "negativeControl": "On main's build 1357b95c the three closed issues kept 5 open asks each, the approval awaiting and the blocks open"
+      "criterion": "Earlier behaviour still holds: another tab's row is restored through a writable reconnect; closes withdraw and reopens restore; the browser suites pass",
+      "surface": "Same harness; dispatch:local at the head with the branch's CLI and the daemon's SetStatus",
+      "command": "Probe 4 (round 5's reconnect case with the corrected frame parser); bunx playwright test close-withdraws-asks.e2e.ts offline-edits.e2e.ts doc.e2e.ts margin.e2e.ts --project chromium --project iphone; seed.ts TT 3, closes by alice, the agent CLI and daemonclose, then a reopen",
+      "observed": "Probe 4: 4 of 4. Suites: 71 passed, 0 failed. After each close open_asks is 0, the approval draft, and every open ask withdrawn naming alice | tester-agent-9 | legion-daemon:TT; answered and retracted asks unchanged; blocks resolved. The reopen restored 5 asks and the blocks.",
+      "headSha": "52159aaf335f",
+      "negativeControl": "Round 5's control for probe 4 (the web app without 988beb33) failed 4 of 4. Round 6's control for the closes (main 1357b95c) left open_asks 5. The server is unchanged since then."
     }
   ],
-  "browserSuites": "close-withdraws-asks, offline-edits, ask-blocks, doc, margin and issue on chromium and iphone at 58b805d9: 183 passed, 0 failed, 15 skipped.",
-  "ci": "At 58b805d9: Tests 40417939926, Docs 40417939908, Worker Image 40417939907, Legion Envoy and Contracts 40417939909 and PR Title 40417939938, all queued. GitHub reports the pull request MERGEABLE.",
+  "correction": "Round 6's reconnect probe parsed the frame type wrongly ('offset += varUint()' overwrote the offset), so on the reconnect it held every server frame for 2.5 s, the authentication answer included, not every frame but authentication. Its pass still shows a delayed reconnect restores the row, but it did not hold open the window between authentication and sync. Round 5's probe and this round's parse correctly.",
+  "ci": "At 52159aaf: Tests 40427581473, Docs 40427581452, Worker Image 40427581415 and Legion Envoy and Contracts 40427581450 queued; PR Title 40427671426 pending.",
   "evidenceComments": [
-    "https://github.com/sjawhar/legion/pull/2233#issuecomment-6429930939"
+    "https://github.com/sjawhar/legion/pull/2233#issuecomment-6431075472"
   ]
 }
