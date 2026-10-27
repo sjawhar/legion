@@ -23,7 +23,17 @@
 #   * GATES are an ALLOWLIST: unknown means refused, never ungated. A gate resolves to
 #     `dorny/paths-filter` outputs tested `== 'true'` and joined by `||`, or to terms that
 #     cannot narrow by path, or it is refused. GitHub compares case-insensitively, so this
-#     check does too.
+#     check does too. One such term is a CALL MODE: `inputs.<name> == '<literal>'` (or `!=`)
+#     in a job's `if:`, in a workflow whose own `on.workflow_call.inputs` declares <name> -
+#     worker-image.yaml's build job skips on `inputs.attest_digest == ''` for release.yaml's
+#     attest-only call. The caller picks that value, not the change: a run the workflow's own
+#     path triggers start leaves the input unset, which compares as '', and every caller's
+#     triggers and gates are traced below as triggers of this workflow anyway. The one gap:
+#     this check does not read a caller's `with:`, so a caller passing a path-derived value
+#     (a paths-filter output, say) into such an input would narrow by path unseen. No caller
+#     does that today, and review holds it. Everywhere else an `inputs.` term is refused: in a
+#     step's `if:`, in a workflow without `workflow_call` or whose `workflow_call` does not
+#     declare that input, and in any shape but a plain comparison with a literal.
 #   * A build in a `run:` step is DETECTED, and EVERY detection is refused - there is no
 #     pattern that can excuse one. The detector judges ONE COMMAND at a time and is drawn
 #     broad: a container-CLI word followed later on the command by `build`, `bake` or `b`, the
@@ -98,16 +108,41 @@ PATH_EVENTS = ("push", "pull_request", "pull_request_target", "merge_group")
 NEEDS_OUTPUT = re.compile(r"needs\.([\w-]+)\.outputs\.([\w-]+)")
 STEP_OUTPUT = re.compile(r"steps\.([\w-]+)\.outputs\.([\w-]+)")
 EQUALS_TRUE = re.compile(r"needs\.([\w-]+)\.outputs\.([\w-]+)\s*==\s*'true'")
-# The only `if:` terms that do not narrow which CHANGES reach a job, so the only ones that can
-# sit beside the filters clause without being refused. GitHub's comparisons are
-# case-insensitive (Expressions → Operators), so these are too: `needs.X.result == 'Success'`
-# must read exactly like `== 'success'`, or a capital letter walks a narrowing gate past the
-# allowlist.
+# The only `if:` terms that do not narrow which CHANGES reach a job anywhere, so, with CALL_MODE
+# below, the only ones that can sit beside the filters clause without being refused. GitHub's
+# comparisons are case-insensitive (Expressions → Operators), so these are too:
+# `needs.X.result == 'Success'` must read exactly like `== 'success'`, or a capital letter walks
+# a narrowing gate past the allowlist.
 NEUTRAL = re.compile(
     r"always\(\)|success\(\)|!\s*cancelled\(\)|needs\.[\w-]+\.result(\s*[=!]=\s*'[A-Za-z_]+')?",
     re.I,
 )
 RESULT_TERM = re.compile(r"needs\.([\w-]+)\.result\s*(==|!=)\s*'([A-Za-z_]+)'", re.I)
+# A CALL MODE (the GATES paragraph above): a `workflow_call` input compared with a literal, in
+# which `''` is GitHub's escaped quote. Neutral only for the input names gate_outputs is handed,
+# which are the ones the job's own workflow declares under `on.workflow_call.inputs`.
+CALL_MODE = re.compile(r"inputs\.([\w-]+)\s*(?:==|!=)\s*'(?:[^']|'')*'", re.I)
+INPUTS_TERM = re.compile(r"(?<![\w.])inputs\.", re.I)
+
+
+def call_inputs(document: dict) -> frozenset[str]:
+    """The input names the workflow's own `on.workflow_call` declares, lowercased since GitHub
+    reads names case-insensitively: the only inputs a job-level CALL_MODE term may test."""
+    call = events(document).get("workflow_call")
+    declared = call.get("inputs") if isinstance(call, dict) else None
+    if not isinstance(declared, dict):
+        return frozenset()
+    return frozenset(str(name).lower() for name in declared)
+
+
+def neutral(term: str, modes: frozenset[str]) -> bool:
+    """True for an `if:` term that cannot narrow which CHANGES reach a job: a NEUTRAL term, or
+    a CALL_MODE comparison on one of `modes`."""
+    term = unwrap(term).strip()
+    if NEUTRAL.fullmatch(term):
+        return True
+    mode = CALL_MODE.fullmatch(term)
+    return bool(mode) and mode.group(1).lower() in modes
 
 
 def admits_skipped(term: str) -> bool:
@@ -648,7 +683,7 @@ def unwrap(expression: str) -> str:
     return expression
 
 
-def gate_outputs(condition: str) -> list[tuple[str, str]]:
+def gate_outputs(condition: str, modes: frozenset[str] = frozenset()) -> list[tuple[str, str]]:
     """(job, output) for each paths-filter output an `if:` is gated on.
 
     An allowlist, because unknown must mean refused and never ungated: a condition this check
@@ -657,8 +692,10 @@ def gate_outputs(condition: str) -> list[tuple[str, str]]:
     job does not have. Each top-level `&&` conjunct is therefore either THE filters clause
     (`needs.<job>.outputs.<name> == 'true'` tests joined by `||`, at most one such conjunct;
     other `||` terms there only widen, so they are allowed), or made entirely of terms that do
-    not narrow by path — `always()`, `success()`, `!cancelled()`, `needs.<job>.result` — or it
-    is refused, quoting the term."""
+    not narrow by path — `always()`, `success()`, `!cancelled()`, `needs.<job>.result`, and a
+    CALL_MODE comparison on one of `modes` — or it is refused, quoting the term. `modes` is
+    empty unless the `if:` is a job's, in a workflow that declares those `workflow_call`
+    inputs."""
     if not condition.strip():
         return []
     conjuncts = [unwrap(part) for part in split_top(unwrap(condition), "&&")]
@@ -666,14 +703,20 @@ def gate_outputs(condition: str) -> list[tuple[str, str]]:
     for part in conjuncts:
         if part in clauses:
             continue
-        if all(NEUTRAL.fullmatch(unwrap(term).strip()) for term in split_top(part, "||")):
+        if all(neutral(term, modes) for term in split_top(part, "||")):
             continue
+        hint = (
+            "; an `inputs.<name> == '<literal>'` comparison is admitted only in a job's if:, "
+            "in a workflow whose on.workflow_call.inputs declares <name>"
+            if INPUTS_TERM.search(part)
+            else ""
+        )
         raise Unreadable(
             f"is narrowed by `{' '.join(part.split())}`, which this check cannot evaluate "
             f"against a path filter; express which CHANGES reach the job as a "
             f"dorny/paths-filter output tested `== 'true'`, and leave anything else "
             f"(`always()`, `success()`, `!cancelled()`, a `needs.<job>.result` comparison that "
-            f"still admits `skipped`) beside it"
+            f"still admits `skipped`) beside it{hint}"
         )
     if not clauses:
         return []
@@ -697,13 +740,16 @@ def gate_outputs(condition: str) -> list[tuple[str, str]]:
     return outputs
 
 
-def gating_filters(document: dict, describe: str, holder: dict) -> list[tuple[str, Filter]]:
+def gating_filters(
+    document: dict, describe: str, holder: dict, modes: frozenset[str] = frozenset()
+) -> list[tuple[str, Filter]]:
     """The dorny/paths-filter filters an `if:` is gated on. The holder is a job that builds an
     image, a job that calls a workflow which does, a job either of those needs, or the build
-    step itself. A gate this check cannot evaluate is reported, never ignored, since ignoring it
-    would treat a gated build as one that runs on every change."""
+    step itself; `modes` are the CALL_MODE inputs its `if:` may test, none for a step. A gate
+    this check cannot evaluate is reported, never ignored, since ignoring it would treat a
+    gated build as one that runs on every change."""
     try:
-        outputs = gate_outputs(str(holder.get("if", "")))
+        outputs = gate_outputs(str(holder.get("if", "")), modes)
     except Unreadable as error:
         problems.append(f"::error::{describe} builds or calls an image, and its if: {error}")
         return []
@@ -774,6 +820,7 @@ def inherited_gates(document: dict, job_name: str) -> list[tuple[str, list[tuple
     demands. `always() && needs.X.result == 'success'` is exempt from the skip rule and then
     re-imposes X's gate by hand, so X still decides whether this job runs."""
     gates, seen, queue = [], set(), [job_name]
+    modes = call_inputs(document)
     while queue:
         name = queue.pop()
         if name in seen:
@@ -781,7 +828,7 @@ def inherited_gates(document: dict, job_name: str) -> list[tuple[str, list[tuple
         seen.add(name)
         job = (document.get("jobs") or {}).get(name) or {}
         condition = str(job.get("if", ""))
-        found = gating_filters(document, f"jobs.{name}", job)
+        found = gating_filters(document, f"jobs.{name}", job, modes)
         if found:
             gates.append((f"jobs.{name}.if", found))
         demanded = required_results(condition)

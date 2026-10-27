@@ -351,6 +351,129 @@ callers "$root" "$(printf '%s\n' "$all_inputs" | sed "s|'package.json'|'package.
 run_check "$root"
 check "package.jso? covers package.json in a dorny filter" "$(is "$status" 0)"
 
+echo "case: a workflow_call input compared with a literal is a call mode, not a path filter"
+# call_modes <root> <docker job if line> <calling job if line> [extra release.yaml on: line]:
+# makes image.yaml a called workflow declaring one workflow_call input, mode, beside a
+# pull_request trigger of its own, and adds a release.yaml whose push covers everything and
+# calls it twice, the way release.yaml calls worker-image.yaml: build with mode unset, then
+# attest with mode: attest. An empty line argument leaves that if: out.
+call_modes() {
+  local root=$1 docker_if=$2 caller_if=$3 caller_on=${4:-}
+  cat > "$root/.github/workflows/image.yaml" <<YAML
+name: Image
+on:
+  workflow_call:
+    inputs:
+      mode:
+        type: string
+        required: false
+        default: ""
+  pull_request:
+    paths:
+      - "package.json"
+      - "packages/app/**"
+      - "docker/**"
+      - ".dockerignore"
+      - ".github/workflows/image.yaml"
+jobs:
+  docker:
+    $docker_if
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+YAML
+  cat > "$root/.github/workflows/release.yaml" <<YAML
+name: Release
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**"
+$caller_on
+jobs:
+  build:
+    $caller_if
+    uses: ./.github/workflows/image.yaml
+  attest:
+    needs: build
+    uses: ./.github/workflows/image.yaml
+    with:
+      mode: attest
+YAML
+}
+
+root=$(fixture call-mode-green)
+call_modes "$root" "if: inputs.mode == ''" ""
+run_check "$root"
+check "a build job gated on its own workflow's workflow_call input passes" "$(is "$status" 0)"
+check "the called workflow's own trigger is still checked" "$(contains "$out" 'against .github/workflows/image.yaml on.pull_request.paths$')"
+check "and so is the call that leaves the input unset" "$(contains "$out" 'against .github/workflows/release.yaml on.push.paths (jobs.build)$')"
+check "and the call that sets it" "$(contains "$out" 'against .github/workflows/release.yaml on.push.paths (jobs.attest)$')"
+
+# Control: the call mode excuses no trigger, so a caller's push that leaves an input out still
+# fails.
+root=$(fixture call-mode-narrow-caller)
+call_modes "$root" "if: inputs.mode == ''" ""
+sed -i 's|^      - "\*\*"$|      - "docker/**"|' "$root/.github/workflows/release.yaml"
+run_check "$root"
+check "a call-mode gate does not excuse a caller's narrow push" "$(is "$status" 1)"
+check "  which is named" "$(contains "$out" 'release.yaml on.push.paths (jobs.build) does not cover')"
+
+root=$(fixture call-mode-case-and-not-equal)
+call_modes "$root" "if: \"!cancelled() && Inputs.MODE != 'Attest'\"" ""
+run_check "$root"
+check "!= and any letter case read the same, as GitHub compares" "$(is "$status" 0)"
+
+echo "case: an inputs. term is refused where it is no call mode of the job's own workflow"
+# (b) A caller's own if: in a workflow with no workflow_call: there `inputs.` is whatever its
+# own trigger supplies, which this check does not trace.
+root=$(fixture call-mode-in-caller)
+call_modes "$root" "if: inputs.mode == ''" "if: inputs.mode == ''"
+run_check "$root"
+check "inputs.mode == '' in a caller's own job if: is refused" "$(is "$status" 1)"
+check "  and quotes the term" "$(contains "$out" "jobs.build builds or calls an image, and its if: is narrowed by \`inputs.mode == ''\`")"
+check "  and says where it is admitted" "$(contains "$out" "admitted only in a job's if:, in a workflow whose on.workflow_call.inputs declares <name>")"
+
+# A workflow_dispatch input of that name is not a workflow_call one.
+root=$(fixture call-mode-in-caller-dispatch-input)
+call_modes "$root" "if: inputs.mode == ''" "if: inputs.mode == ''" "  workflow_dispatch:
+    inputs:
+      mode:
+        type: string"
+run_check "$root"
+check "the same, though the caller's workflow_dispatch declares mode" "$(is "$status" 1)"
+check "  and quotes the term" "$(contains "$out" "jobs.build builds or calls an image, and its if: is narrowed by \`inputs.mode == ''\`")"
+
+# (c) In the called workflow, an input its workflow_call does not declare - a typo, or one only
+# workflow_dispatch supplies - is no call mode the callers pick.
+root=$(fixture call-mode-undeclared)
+call_modes "$root" "if: inputs.other == ''" ""
+run_check "$root"
+check "an input workflow_call does not declare is refused" "$(is "$status" 1)"
+check "  and quotes the term" "$(contains "$out" "jobs.docker builds or calls an image, and its if: is narrowed by \`inputs.other == ''\`")"
+
+# A step's if: is not a job's, so no call mode is admitted there.
+root=$(fixture call-mode-step-if)
+call_modes "$root" "" ""
+sed -i "s|^      - uses: docker/build-push-action@v6$|&\n        if: inputs.mode == ''|" "$root/.github/workflows/image.yaml"
+run_check "$root"
+check "a call-mode term in the build step's own if: is refused" "$(is "$status" 1)"
+check "  and quotes the term" "$(contains "$out" "step 'an unnamed step' builds or calls an image, and its if: is narrowed by \`inputs.mode == ''\`")"
+
+# A declared input tested any way but a plain comparison with a literal.
+shape_index=0
+for shape in "inputs.mode" "contains(inputs.mode, 'attest')" "inputs.mode == github.ref_name" "'' == inputs.mode"; do
+  shape_index=$((shape_index + 1))
+  root=$(fixture "call-mode-shape-$shape_index")
+  call_modes "$root" "if: \"$shape\"" ""
+  run_check "$root"
+  check "if: $shape is refused" "$(is "$status" 1)"
+  check "  and quotes the term" "$(contains "$out" "is narrowed by \`$shape\`")"
+done
+
 # run_step <root> <run body>: replaces the build-push-action step with a run step, leaving the
 # workflow with no build this check can read.
 run_step() {
