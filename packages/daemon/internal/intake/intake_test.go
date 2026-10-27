@@ -86,6 +86,28 @@ func TestApplyFactDeduplicatesBeforeHandlers(t *testing.T) {
 	}
 }
 
+// Applied names, of the ids asked about, those ApplyFact applied from that source: an id applied
+// under another source, or not applied at all, is not named, and no ids reads nothing.
+func TestAppliedNamesOnlyTheFactsApplyFactAppliedFromTheSource(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	for _, event := range []struct{ source, id string }{{"supervise", "ready-1"}, {"supervise", "failed-2"}, {"dispatch", "ready-3"}} {
+		if _, err := ApplyFact(ctx, pool, event.source, event.id, DispatchIssue{Key: "LEGION-208"}); err != nil {
+			t.Fatalf("apply %s/%s: %v", event.source, event.id, err)
+		}
+	}
+	applied, err := Applied(ctx, pool, "supervise", []string{"ready-1", "failed-2", "ready-3", "never-4"})
+	if err != nil {
+		t.Fatalf("Applied: %v", err)
+	}
+	if want := map[string]bool{"ready-1": true, "failed-2": true}; !reflect.DeepEqual(applied, want) {
+		t.Fatalf("Applied = %v, want %v", applied, want)
+	}
+	if none, err := Applied(ctx, pool, "supervise", nil); err != nil || len(none) != 0 {
+		t.Fatalf("Applied of no ids = %v, %v; want none and no error", none, err)
+	}
+}
+
 func TestApplyFactRollsBackHandlerAndDeduplicationOnError(t *testing.T) {
 	pool := migratedPool(t)
 	createWrites(t, pool)
