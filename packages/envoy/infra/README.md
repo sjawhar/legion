@@ -162,10 +162,13 @@ to `maxFileStoreGb`, with no memory store, and monitoring listens on 8222. The p
 zone, held hard (`topology.kubernetes.io/zone`, `maxSkew: 1`, `DoNotSchedule`, `minDomains: 3`), so
 on a cluster with nodes in fewer than three zones a pod stays Pending rather than share a zone. A
 change of `users` rewrites `auth.conf` alone, which the reloader applies without restarting a
-server; a change of `sessionUser` restarts the hub pods one at a time, since nats-server refuses to
-reload a changed `no_auth_user`. The StatefulSet carries `config.kubernetes.io/depends-on` naming the
-chart's ConfigMap `<n>-config`, so Pulumi applies it only once the ConfigMap holding the new
-`auth.conf` is applied, and every restarted pod mounts the new session user.
+server. Two changes restart the hub pods one at a time instead, each through an annotation on the
+pod template, since nats-server refuses to reload them: a change of `sessionUser` (a changed
+`no_auth_user`), and a change of the file store's limit, `maxFileStoreGb` given or derived (a
+lower `max_file_store` is refused, and a refused reload blocks every later one, a `users` change's
+included, until the server restarts). The StatefulSet carries `config.kubernetes.io/depends-on`
+naming the chart's ConfigMap `<n>-config`, so Pulumi applies it only once the ConfigMap holding
+the new `nats.conf` and `auth.conf` is applied, and every restarted pod starts on them.
 
 ### Inputs
 
@@ -189,7 +192,7 @@ chart's ConfigMap `<n>-config`, so Pulumi applies it only once the ConfigMap hol
 | `users` | none | The NATS server's nkey users, as `gcp:NatsHub`'s are (see [The hub's users](docs/nats-hub.md#the-hubs-users)). At least one is required unless the hub has `tailnet`, whose listener is a user of its own. |
 | `sessionUser` | unset | `name` and `nkey`, the user a client presenting no credential becomes, granted `SessionPermissions()`, as for `gcp:NatsHub`. |
 | `tailnet` | unset | The tailnet entry: `serviceName`, the Tailscale Service's name without `svc:`, under `gcp:NatsHub`'s `hostname` rule (2 to 26 lowercase letters, digits and hyphens, starting with a letter and not ending with a hyphen); `tailnetDnsName`, the tailnet's DNS name, such as `example-tailnet.ts.net`; `tags`, at least one `tag:<name>`, which every host joins with; `replicas`, the number of hosts, 2 by default and at least 2, so a drained host leaves another serving; `tailscaleImage`, pinned by digest; and `listener`. |
-| `tailnet.listener` | required with `tailnet` | The session listener every host runs: `image`, pinned by digest; `machineId`, `tailnet.serviceName` by default; `nkey`, the public key of the listener user's seed; `seedSecretName` and `seedSecretKey`, an existing Kubernetes Secret in `namespace` and its key, which hold that seed and which the component mounts by reference and never reads; `allowedHosts`, any further address a client dials the listener by, beyond `<tailnet.serviceName>.<tailnetDnsName>`, which it always serves; and `cpu` and `memory`, the listener container's size, each its request and its limit, `500m` and `1Gi` by default. |
+| `tailnet.listener` | required with `tailnet` | The session listener every host runs: `image`, pinned by digest, which must be a build with dispatch://INFRA-557's single-deliverer take-over (see [The tailnet hosts](#the-tailnet-hosts)), since every host runs the listener as the same machine id; `machineId`, `tailnet.serviceName` by default; `nkey`, the public key of the listener user's seed; `seedSecretName` and `seedSecretKey`, an existing Kubernetes Secret in `namespace` and its key, which hold that seed and which the component mounts by reference and never reads; `allowedHosts`, any further address a client dials the listener by, beyond `<tailnet.serviceName>.<tailnetDnsName>`, which it always serves; and `cpu` and `memory`, the listener container's size, each its request and its limit, `500m` and `1Gi` by default. |
 | `tailnetAuthKey` | required with `tailnet` | A secret: the Tailscale auth key the tailnet hosts join with, which [Before the first deployment](#before-the-first-deployment) says how to make. Refused without `tailnet`. May come from another resource or stack. |
 
 Only `kubeconfig` and `tailnetAuthKey` may come from another resource's output. Every other input
@@ -278,7 +281,8 @@ image's own user, with no privilege escalation and every Linux capability droppe
   failures in a row it drains the Service and removes the ready file. A node advertised and not
   approved for 120 seconds is drained and, 15 seconds later, advertised again, the bound doubling
   up to 960 seconds: a node that advertised before the Service existed is never approved until it
-  advertises anew;
+  advertises anew. It exits at once on its SIGTERM, so it never holds the pod to the grace
+  period;
 - `listener`, Envoy's session listener from `tailnet.listener.image`, as machine
   `tailnet.listener.machineId`, on `127.0.0.1:9020`, reaching NATS at `serviceUrl` with
   `ENVOY_ALLOW_REMOTE_NATS=1`. `ENVOY_ALLOWED_HOSTS` is `<tailnet.serviceName>.<tailnetDnsName>`
@@ -292,6 +296,16 @@ image's own user, with no privilege escalation and every Linux capability droppe
   running, a 503 included: whether the host serves is the advertiser's to judge. Its preStop waits
   25 seconds, the tailscale hook's drain and wait, so it keeps answering while the node leaves the
   Service.
+
+Every host runs the listener as the same machine id, so every one of them binds the durable
+`listener-<tailnet.listener.machineId>`. `tailnet.listener.image` must therefore be a build with
+dispatch://INFRA-557's single-deliverer take-over: one pod delivers from the durable, every other
+one waits as a standby and takes over within seconds when the active pod goes, and `/healthz`
+answers 200 only on a pod that can serve `/v1`. With an earlier build, a second pod waits 135
+seconds to bind the durable the first one holds, then exits and is restarted, over and over; and
+after a NATS reconnect in place two pods can both deliver from the durable, so a session can be
+given one message twice. The component cannot read which build an image is, so it does not check
+this.
 
 The pod's termination grace period, 60 seconds, holds both shutdowns, which run side by side: the
 tailscale hook's 30 seconds and containerboot's own 25, and the listener's 25-second wait and its
@@ -382,6 +396,11 @@ With `tailnet`, also:
 - The Secret `tailnet.listener.seedSecretName`, in `namespace`, holds the listener user's seed under
   `tailnet.listener.seedSecretKey`, its public key being `tailnet.listener.nkey`. A host pod starts
   only once the Secret exists; the component never reads, creates or waits on it.
+- `tailnet.listener.image` is a listener build with dispatch://INFRA-557's single-deliverer
+  take-over, since every host runs the listener as one machine id: with an earlier build the second
+  host's listener exits after 135 seconds of waiting for the durable and is restarted, again and
+  again, and two hosts can deliver one message twice (see
+  [The tailnet hosts](#the-tailnet-hosts)).
 
 A hub may run without `tailnet` first and take it in a later update.
 

@@ -11,7 +11,9 @@
   a hub moves from the VM with its users, and with its listener's durable when the listener's
   machine id stays the VM's hostname. A users change rewrites the chart's `auth.conf` in place and
   the chart's config reloader applies it with no server restart and no client reconnect; a
-  session-user change, which nats-server refuses to reload, restarts the pods one at a time. The
+  session-user change or a change of the file store's limit (nats-server refuses to reload a new
+  `no_auth_user` or a lower `max_file_store`) restarts the pods one at a time, each on the new
+  configuration. The
   chart's StatefulSet is protected, so a change that would replace it, a disk size or a storage
   class among them, fails the preview rather than stopping all three servers; the module's README
   gives the steps that grow the disks and the step before a teardown. A NetworkPolicy admits the

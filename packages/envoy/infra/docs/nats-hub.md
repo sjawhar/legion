@@ -786,6 +786,17 @@ user, and the reload that later brings the new file is refused. So the StatefulS
 apply the StatefulSet only after the ConfigMap, and a ConfigMap update that fails stops the update
 before any pod rolls.
 
+The file store's limit is the other exception. nats-server 2.15.1 refuses a reload that lowers
+`max_file_store`, logging `config reload not supported for decreasing jetstream max memory and
+store`, and a reload is all or nothing against the options the server runs with: once `nats.conf`
+holds a lower limit, every later reload is refused too, a users change in `auth.conf` among them,
+until the server restarts. The local cluster test shows it: with a lower `max_file_store` written
+beside a new user, the reload was refused and the user was refused too, and the restarted server
+admitted it. The hub therefore also writes the limit into the hub pods' annotation
+`envoy-infra.sjawhar.dev/max-file-store`, so any change of `maxFileStoreGb`, given or derived from
+`streamMaxBytes` and `diskSizeGb`, rolls the pods onto the new `nats.conf`; a raise, which
+nats-server could reload, rolls them as well.
+
 ### Routes, guarded by the NetworkPolicy alone
 
 The servers' routes carry no credential: any process that reaches a hub pod's port 6222 can join
@@ -819,7 +830,18 @@ A host pod is ready only while its node hosts the Service, approved, so the Depl
 (`maxUnavailable: 0`, `maxSurge: 1`) and its budget (`maxUnavailable: 1`) count only hosts that
 serve: a new host serves before an old one stops. A stopping host drains the Service, waits 20
 seconds for its clients to move to another host and logs its node out, while its listener keeps
-answering for 25 seconds before it stops.
+answering for 25 seconds before it stops; the advertiser exits on its SIGTERM at once.
+
+Every host runs the listener as the same machine id, `tailnet.listener.machineId`, so all of them
+bind the one durable `listener-<machine id>`. The hosts are therefore safe only with a listener
+build that has dispatch://INFRA-557's single-deliverer take-over: one pod delivers from the
+durable, every other pod waits as a standby and takes over within seconds when the active pod
+goes, and `/healthz` answers 200 only on a pod that can serve `/v1`, which is what the advertiser
+judges. With an earlier build, a second host's listener waits 135 seconds to bind the durable the
+first one holds, then exits and is restarted, again and again (`cmd/listener/durable.go`,
+`durableBindDeadline`), and after a NATS reconnect in place two hosts can both deliver from the
+durable, so a session can be given one message twice. The component cannot tell which build
+`tailnet.listener.image` is, so this is the operator's to keep.
 
 ### Metrics and alerts
 
