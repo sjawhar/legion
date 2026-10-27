@@ -2041,12 +2041,19 @@ typed block, attribute and target, and keeps the typed block's own `mentions` ed
 only while the block holds more references to it than its pointers do (a string attribute citing
 it too, say). Prose in the typed block's children is held by those children, so a pointer and a
 prose citation of one target are two edges. A pointer whose typed block is no graph node writes no
-row, and a typed block repeating an id a block before it in document order carries, typed or not,
-holds no pointer (`pmdoc.BlockPointers`): the id's node is its first holder, so the later holder's
-values are neither edges from that node, nor charged against its mentions, nor checked by the
-refusal; and `refs.IndexBlocks` writes a pointer only when the id's node is the typed block holding
-it (its type), since a version read back from markdown by the reconciliation carries no
-paragraph's id. `heldByABlock` hides the citing document's own `mentions` edge behind a block row of any kind,
+row. A typed block repeating the id of a typed block before it in document order holds no pointer
+(`pmdoc.BlockPointers`), and `refs.IndexBlocks` writes a pointer only from the id's node, the first
+holder of the id that the render gives an offset, when that node is the typed block holding it
+(its type): a later typed holder's values are neither edges, nor charged against the first
+holder's mentions. Only typed ids count in `BlockPointers` because only they are the same in the
+tree a version write indexes and in the markdown the reconciliation reads back (a paragraph's id
+is not written there), so both paths write the same rows; a list item or table cell before a typed
+block has no offset and is never the node, so the typed block keeps its pointers. The refusal
+checks `BlockPointers`' pointers, so a pointer a write introduces on a later holder of a typed id
+is never judged; settlement's `EnsureBlockIDs` then gives that block a fresh id, and its pointer
+becomes an edge it was never refused for, while the readers still hide a disallowed target
+(`block_ref_listed`). That needs a repeat the live document already carries, since a write cannot
+make one (`RepeatedBlockID`). `heldByABlock` hides the citing document's own `mentions` edge behind a block row of any kind,
 listed or not, so that edge never shows beside or in place of a pointer's. The document-level reads
 that never looked at blocks - `GET /api/v1/artifacts/{id}/references` (`refs.ReferencedBy`,
 `refs.Outgoing`) and the issue references closure (`refs.Closure`) - keep listing the citing

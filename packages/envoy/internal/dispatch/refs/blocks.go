@@ -35,7 +35,7 @@ type Pointer struct {
 // warning naming the document, the longest such id's length and the bound.
 //
 // pointers are the version's `block[]` values (pmdoc.BlockPointers, which lists none of a typed
-// block repeating an id a block before it carries): each whose block is a node is an edge of its
+// block repeating the id of a typed block before it): each whose block is a node is an edge of its
 // attribute's kind from that block, carrying the attribute's targets as to_types, which the
 // readers list only while its target has an allowed type (block_ref_listed). A value is written in
 // its typed block's opening line, so the extraction also finds it as a mention held by that block:
@@ -228,12 +228,14 @@ func blockPairs(nodes []model.ArtifactBlock, located []text.Located, pointers []
 // number of each block's pointer values naming each target. A pinned and an unpinned value of one
 // attribute name one target, and write one pair. No attribute is named mentions (pmdoc), so no
 // pointer's pair is a mention's. A pointer writes a pair only from the node uniqueBlocks keeps for
-// its block id, the first holder of the id, and only when that node is the typed block holding
-// it (its type is the pointer's BlockType): pmdoc.BlockPointers already lists none of a typed
-// block repeating an id a typed block before it carries, but a version read back from markdown
-// (the reconciliation) carries no paragraph's id, so a paragraph holding the id first is caught
-// here. One whose block is no node (an id past the bound, say) or not its own writes nothing and
-// is charged against no mention.
+// its block id, the first holder of the id with an offset, and only when that node is the typed
+// block holding it (its type is the pointer's BlockType). pmdoc.BlockPointers already lists none
+// of a typed block repeating the id of a typed block before it; this catches an earlier holder
+// that is not typed (a paragraph), whose id the version write's tree carries and the markdown the
+// reconciliation reads back does not, so both paths write the same rows. A holder with no offset
+// (a list item, a table cell) is never a node, so a typed block after it is the id's node and
+// keeps its pointers. One whose block is no node (an id past the bound, say) or not its own
+// writes nothing and is charged against no mention.
 func pointerPairs(nodes []model.ArtifactBlock, pointers []Pointer) ([]blockPair, map[heldTarget]int) {
 	if len(pointers) == 0 {
 		return nil, nil

@@ -234,57 +234,103 @@ func TestTheReconciliationIndexesTheSamePointersAsTheVersionWrite(t *testing.T) 
 }
 
 // A rendered version can repeat a block id (a browser write can, before settlement repairs it),
-// and the index's node for that id is its first holder. A later typed block repeating the id
-// writes none of its pointers: they are no edge from the first holder, here a paragraph, and take
-// nothing from the paragraph's own mention of the same target - whether the version write indexes
-// the tree or the reconciliation reads the version's markdown back, which carries no paragraph's
-// id.
+// and the index's node for that id is its first holder with an offset. A later typed block
+// repeating the id writes no edge from that node: not from a paragraph holding it first (whose own
+// mention of the same target stays), nor from a claim holding it first (whose own pointers stay).
+// A list item has no offset, so a claim after one holding the same id is the id's node and keeps
+// its pointer. The version write, which indexes the tree, and the reconciliation, which reads the
+// version's markdown back (no paragraph's or list item's id is written there), store the same rows.
 func TestALaterHolderOfARepeatedBlockIDWritesNoPointers(t *testing.T) {
-	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(nil))
-	database, service := blockIndexService(t)
-	writeIndexedDocument(t, database, service, "target", ":::requirement{#r1}\nA requirement.\n:::\n")
-	const r1 = "dispatch://CORE-1/artifact/target#b-r1"
-	checks := writeIndexedDocument(t, database, service, "checks", "Per "+r1+".\n\n"+claimPointing("c1", r1, "It holds."))
-	paragraph := holderOf(t, service, checks, "Per ")
-	editLiveTree(t, service, checks, func(tree *pmdoc.Node) *pmdoc.Node {
-		tree.Children[1].Attrs[pmdoc.BlockIDAttr] = paragraph
-		return tree
-	})
-	if err := joinedWrite(service, func(ctx context.Context) error {
-		result, err := service.SnapshotVersion(ctx, checks, model.Actor{Kind: "user", ID: "bob"})
-		if err == nil && !result.Wrote {
-			t.Errorf("the repeated id wrote no version of checks.md")
-		}
-		return err
-	}); err != nil {
-		t.Fatalf("write the version repeating %s: %v", paragraph, err)
-	}
+	const (
+		r1 = "dispatch://CORE-1/artifact/target#b-r1"
+		r2 = "dispatch://CORE-1/artifact/target#b-r2"
+	)
+	for _, test := range []struct {
+		name     string
+		markdown string
+		// repeat gives the later block the earlier one's id, and returns that id.
+		repeat func(t *testing.T, service *Service, checks string, tree *pmdoc.Node) string
+		// want is the stored rows, each "<kind> <block id> <to id>", given the repeated id.
+		want func(id string) []string
+	}{
+		{
+			name:     "a paragraph, then a claim",
+			markdown: "Per " + r1 + ".\n\n" + claimPointing("c1", r1, "It holds."),
+			repeat: func(t *testing.T, service *Service, checks string, tree *pmdoc.Node) string {
+				paragraph := holderOf(t, service, checks, "Per ")
+				tree.Children[1].Attrs[pmdoc.BlockIDAttr] = paragraph
+				return paragraph
+			},
+			want: func(id string) []string { return []string{"mentions " + id + " CORE-1/target#r1"} },
+		},
+		{
+			name:     "a claim, then a claim",
+			markdown: claimPointing("c1", r1, "It holds.") + "\n" + claimPointing("c2", r2, "So does this."),
+			repeat: func(t *testing.T, service *Service, checks string, tree *pmdoc.Node) string {
+				tree.Children[1].Attrs[pmdoc.BlockIDAttr] = "c1"
+				return "c1"
+			},
+			want: func(id string) []string { return []string{"serves " + id + " CORE-1/target#r1"} },
+		},
+		{
+			name:     "a list item, then a claim",
+			markdown: "- An item.\n\n" + claimPointing("c1", r1, "It holds."),
+			repeat: func(t *testing.T, service *Service, checks string, tree *pmdoc.Node) string {
+				// The list item's id is not written in markdown, so the claim's value changes too,
+				// which the version must write.
+				tree.Children[0].Children[0].Attrs[pmdoc.BlockIDAttr] = "c1"
+				tree.Children[1].Attrs["serves"] = []any{r2}
+				return "c1"
+			},
+			want: func(id string) []string { return []string{"serves " + id + " CORE-1/target#r2"} },
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(nil))
+			database, service := blockIndexService(t)
+			writeIndexedDocument(t, database, service, "target", ":::requirement{#r1}\nOne.\n:::\n\n:::requirement{#r2}\nTwo.\n:::\n")
+			checks := writeIndexedDocument(t, database, service, "checks", test.markdown)
+			var id string
+			editLiveTree(t, service, checks, func(tree *pmdoc.Node) *pmdoc.Node {
+				id = test.repeat(t, service, checks, tree)
+				return tree
+			})
+			if err := joinedWrite(service, func(ctx context.Context) error {
+				result, err := service.SnapshotVersion(ctx, checks, model.Actor{Kind: "user", ID: "bob"})
+				if err == nil && !result.Wrote {
+					t.Errorf("the repeated id wrote no version of checks.md")
+				}
+				return err
+			}); err != nil {
+				t.Fatalf("write the version repeating %s: %v", id, err)
+			}
+			var markdown string
+			if err := database.Pool.QueryRow(context.Background(), `select markdown from artifact_versions where artifact_id = $1 and number = 2`, checks).Scan(&markdown); err != nil {
+				t.Fatalf("read version 2 of checks.md: %v", err)
+			}
+			if !strings.Contains(markdown, ":::claim{#"+id+" ") {
+				t.Fatalf("version 2 of checks.md = %q, want a claim repeating the id %s", markdown, id)
+			}
+			requireRows := func(stage string) {
+				t.Helper()
+				var stored []string
+				for _, row := range pointerRowsOf(t, database, checks) {
+					stored = append(stored, row.Kind+" "+row.BlockID+" "+row.ToID)
+				}
+				if want := test.want(id); !reflect.DeepEqual(stored, want) {
+					t.Fatalf("%s: block_refs of checks.md = %q, want %q", stage, stored, want)
+				}
+			}
+			requireRows("the version write")
 
-	var markdown string
-	if err := database.Pool.QueryRow(context.Background(), `select markdown from artifact_versions where artifact_id = $1 and number = 2`, checks).Scan(&markdown); err != nil {
-		t.Fatalf("read version 2 of checks.md: %v", err)
+			if _, err := database.Pool.Exec(context.Background(), `update document_block_versions set version = null where artifact_id = $1`, checks); err != nil {
+				t.Fatalf("mark checks.md owed: %v", err)
+			}
+			settle(t, database, checks)
+			if tick := reconcileBlockIndex(t, service, ""); tick.Documents != 1 {
+				t.Fatalf("block index tick = %#v, want checks.md indexed", tick)
+			}
+			requireRows("the reconciliation")
+		})
 	}
-	if !strings.Contains(markdown, ":::claim{#"+paragraph+" ") {
-		t.Fatalf("version 2 of checks.md = %q, want its claim to repeat the paragraph's id %s", markdown, paragraph)
-	}
-	requireRows := func(stage string) {
-		t.Helper()
-		var stored []string
-		for _, row := range pointerRowsOf(t, database, checks) {
-			stored = append(stored, row.Kind+" "+row.BlockID+" "+row.ToID)
-		}
-		if want := []string{"mentions " + paragraph + " CORE-1/target#r1"}; !reflect.DeepEqual(stored, want) {
-			t.Fatalf("%s: block_refs of checks.md = %q, want %q", stage, stored, want)
-		}
-	}
-	requireRows("the version write")
-
-	if _, err := database.Pool.Exec(context.Background(), `update document_block_versions set version = null where artifact_id = $1`, checks); err != nil {
-		t.Fatalf("mark checks.md owed: %v", err)
-	}
-	settle(t, database, checks)
-	if tick := reconcileBlockIndex(t, service, ""); tick.Documents != 1 {
-		t.Fatalf("block index tick = %#v, want checks.md indexed", tick)
-	}
-	requireRows("the reconciliation")
 }

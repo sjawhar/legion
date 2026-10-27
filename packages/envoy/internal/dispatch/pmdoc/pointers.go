@@ -31,10 +31,13 @@ type BlockPointer struct {
 // schema) lists none without walking tree. A tree inside the schema holds only canonical
 // references (ParseBlockPointerValue); any other value is skipped.
 //
-// Only the first holder of a repeated block id holds pointers, as the block index takes the first
-// holder for the id's node (refs.IndexBlocks): a typed block whose id a block before it in document
-// order already carries, typed or not, lists none. The walk visits a block before the blocks it
-// holds, as the renderer records their offsets, so a typed block inside another follows it.
+// A typed block repeating the id of a typed block before it in document order lists none: the
+// block index takes the first holder of an id for its node (refs.IndexBlocks). Only typed blocks
+// count here, because only their ids are certain to be the same in the tree a version write
+// indexes and in the markdown the reconciliation reads back (a paragraph's id is not written in
+// markdown, and a list item or table cell has no offset, so it is never the index's node). An
+// earlier holder that is not typed but has an offset (a paragraph) is caught by the index itself,
+// which writes a pointer only from a node of the pointer's own block type (refs.IndexBlocks).
 func BlockPointers(tree *Node) []BlockPointer {
 	if len(schemaLinkKinds) == 0 {
 		return nil
@@ -42,11 +45,8 @@ func BlockPointers(tree *Node) []BlockPointer {
 	var pointers []BlockPointer
 	held := make(map[string]struct{})
 	Walk(tree, func(node *Node) bool {
-		if node.Type == "doc" || isInlineNodeType(node.Type) {
-			return true
-		}
 		id, _ := node.Attrs[BlockIDAttr].(string)
-		if id != "" {
+		if id != "" && IsTypedBlock(node.Type) {
 			if _, repeated := held[id]; repeated {
 				return true
 			}
@@ -79,9 +79,9 @@ func BlockPointers(tree *Node) []BlockPointer {
 // or a block retyped into a type declaring the attribute, whatever the type before declared under
 // that name. A nil prior (a new document, or one outside the schema) holds none. A pointer the
 // write leaves unchanged is never refused, so a target retyped elsewhere blocks no unrelated edit.
-// Its pointers are BlockPointers', so a typed block repeating an id a block before it carries is
-// never checked, as the block index never writes its pointers: the refusal and the index judge one
-// set of pointers.
+// Its pointers are BlockPointers', so a typed block repeating the id of a typed block before it is
+// never checked, as the block index never writes its pointers. A typed block repeating the id of
+// an earlier paragraph is checked, though the index writes no edge for it either.
 //
 // resolve is called at most once, with the target of each introduced pointer whose attribute has
 // targets, and returns the current types of the blocks they name by node id (text.TargetID); none
