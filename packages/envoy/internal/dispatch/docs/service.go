@@ -719,7 +719,10 @@ const ShutdownDrainBudget = 9 * time.Second
 // is settled while it is still loaded and only then closed: ygo's CloseRoom evicts the room as it
 // closes its peers, and a settlement does not load a room during shutdown, so a room closed first
 // would leave its settlement to the next process. An edit made while its room settles is left to
-// that process too.
+// that process too. The one load Shutdown makes is for a document whose settlement this process
+// had armed when Shutdown found it: a cold write (publishLiveWrite) arms one with no room
+// resident, and its timer would have loaded the room when it fired, so Shutdown's settlement of
+// that document loads the room in the timer's place (settleRoomWithin's mayLoad).
 //
 // A settlement the budget cuts short is not lost. Its database work is cancelled and its
 // transaction rolls back, and the pending-settlement row the document's updates wrote
@@ -735,12 +738,13 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		_ = s.awarenessRelay.Close()
 		s.roomSyncSender.close()
 	}()
-	// loadedRoom is a room as Shutdown found it: the generation its settlement runs at, and
-	// whether an editor was connected.
+	// loadedRoom is a room as Shutdown found it: the generation its settlement runs at, whether an
+	// editor was connected, and whether its settlement was armed.
 	type loadedRoom struct {
 		name       string
 		generation uint64
 		connected  bool
+		armed      bool
 	}
 	var loaded []loadedRoom
 	s.rooms.Range(func(key, value any) bool {
@@ -748,7 +752,10 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		state := value.(*roomState)
 		s.shutdownRooms.Store(name, struct{}{})
 		state.mu.Lock()
-		loaded = append(loaded, loadedRoom{name: name, generation: state.roomGeneration, connected: len(state.connected) > 0})
+		loaded = append(loaded, loadedRoom{
+			name: name, generation: state.roomGeneration, connected: len(state.connected) > 0,
+			armed: s.isSettleTimerArmed(state.settle),
+		})
 		state.mu.Unlock()
 		return true
 	})
@@ -792,7 +799,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				settles = owes
 			}
 			if settles {
-				s.settleRoomWithin(drainCtx, room.name, room.generation)
+				s.settleRoomWithin(drainCtx, room.name, room.generation, room.armed)
 			}
 			if room.connected {
 				if err := s.srv.CloseRoom(room.name, true); err != nil && !errors.Is(err, websocket.ErrRoomNotFound) {
@@ -1303,7 +1310,7 @@ func (credit settlementVersionCredit) consumeAskAuthors(blockIDs []string) {
 }
 
 func (s *Service) settleRoom(room string, generation uint64) {
-	s.settleRoomWithin(context.Background(), room, generation)
+	s.settleRoomWithin(context.Background(), room, generation, false)
 }
 
 // settleRoomWithin settles room under parent. A timer's settlement runs under no deadline; the one
@@ -1312,7 +1319,12 @@ func (s *Service) settleRoom(room string, generation uint64) {
 // document's pending-settlement row leaves it to resume (onLoadDocument, RunSettlementResumption).
 // So does a settlement that has to write into a room Shutdown has begun closing, which refuses the
 // write (allowInject).
-func (s *Service) settleRoomWithin(parent context.Context, room string, generation uint64) {
+//
+// Once Shutdown has begun closing room, a settlement loads no room of it - a room Shutdown closed
+// stays closed, its settlement left to resume - unless mayLoad says this is Shutdown's own
+// settlement of a document whose settlement this process had armed: the timer Shutdown stopped
+// would have loaded the room, and a cold write (publishLiveWrite) arms one with no room resident.
+func (s *Service) settleRoomWithin(parent context.Context, room string, generation uint64, mayLoad bool) {
 	retry := func(err error) {
 		if parent.Err() != nil {
 			slog.Warn("dispatch: document settlement stopped at the shutdown budget", "room", room, "error", err)
@@ -1339,14 +1351,19 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		state.settling--
 		s.unlockState(room, state)
 	}()
-	if s.shuttingDown(room) && s.srv.GetDoc(room) == nil {
+	shuttingDown := s.shuttingDown(room)
+	if shuttingDown && !mayLoad && s.srv.GetDoc(room) == nil {
 		return
 	}
 	if s.srv.GetDoc(room) == nil {
 		state.mu.Lock()
 		state.settleWarming = true
 		s.unlockState(room, state)
-		err := s.srv.Apply(parent, room, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {})
+		warmCtx := parent
+		if shuttingDown {
+			warmCtx = withShutdownLoad(parent)
+		}
+		err := s.srv.Apply(warmCtx, room, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {})
 		state.mu.Lock()
 		state.settleWarming = false
 		s.unlockState(room, state)

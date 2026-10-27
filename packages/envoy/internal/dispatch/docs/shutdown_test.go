@@ -65,6 +65,41 @@ func TestShutdownSettlesARoomWithAnEditorConnectedBeforeClosingIt(t *testing.T) 
 	}
 }
 
+// An agent's write to a document no room holds loads no room (audit finding 11); it arms the
+// document's settlement, whose timer loads the room when it fires. A deploy that stops the process
+// inside that delay stops the timer, and Shutdown's own settlement of the document loads the room
+// in its place, so the write is versioned before the process exits rather than left to resume.
+func TestShutdownSettlesTheDocumentAColdWriteLeftOwing(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before")
+	service := newShutdownTestService(t, database, nil)
+	seedServiceText(t, service, artifactID, "before")
+	settleCurrentGeneration(t, service, artifactID)
+	closeDocumentRoom(t, service, artifactID)
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, alice, nil); err != nil {
+		t.Fatalf("apply the cold write: %v", err)
+	}
+	if service.roomHeld(artifactID) {
+		t.Fatal("the cold write loaded a room of the document")
+	}
+	waitForSettlementOwed(t, service, artifactID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := service.Shutdown(ctx); err != nil {
+		t.Fatalf("shutdown with a cold write's settlement owed: %v", err)
+	}
+	if number, markdown, authors := latestDocumentVersion(t, database, artifactID); number != 2 || markdown != "after\n" ||
+		len(authors) != 1 || authors[0] != alice {
+		t.Fatalf("the document's latest version is %d holding %q by %v, want version 2 holding the cold write, %q, credited to alice",
+			number, markdown, authors, "after\n")
+	}
+	if owed, err := settlementPending(context.Background(), database.Pool, artifactID); err != nil || owed {
+		t.Fatalf("the document still owes its settlement (%v) after the shutdown that ran it", err)
+	}
+}
+
 // A browser leaving a room settles what it was owed at once (settleLastPeer), on ygo's disconnect
 // goroutine, in place of the timer it stops. Shutdown joins that settlement as it joins a timer's:
 // it reports which documents settled, and stops ygo, only once the settlement has returned, and the

@@ -935,7 +935,8 @@ func (s *Service) creditLiveWrite(write *liveWrite, actor model.Actor) {
 // (roomCatchUps). The settlement the room's update observer would have armed for the published
 // update is armed here instead (scheduleSettle; the write's slot defers it to finishLiveWrite), so
 // the write is versioned a settle delay on, as a published one is; that settlement loads the room
-// it settles. A load already under way when the write committed was told of the write's
+// it settles, and so does Shutdown's when a shutdown stops the armed timer (settleRoomWithin's
+// mayLoad). A load already under way when the write committed was told of the write's
 // versions before the commit (Ledger.takeRoomCursors) and is listed by ygo from before its read
 // of the store, so it is found here and published into: Server.Apply waits for its load. A room
 // that retires between this check and the publish's Apply is loaded again by that Apply, from a

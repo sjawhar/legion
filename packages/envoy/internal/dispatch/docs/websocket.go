@@ -58,6 +58,22 @@ func isOwnerVerified(ctx context.Context) bool {
 	return ok
 }
 
+type shutdownLoadContextKey struct{}
+
+// withShutdownLoad marks the one injection allowInject lets through into a room Shutdown has
+// begun closing: the empty warm-up with which Shutdown's own settlement loads a document whose
+// settlement this process had armed with no room resident (a cold write's, publishLiveWrite), as
+// the armed timer would have loaded it had it fired. It loads the room and writes nothing; a write
+// that settlement then has to make into the room carries no mark and is refused like any other.
+func withShutdownLoad(ctx context.Context) context.Context {
+	return context.WithValue(ctx, shutdownLoadContextKey{}, true)
+}
+
+func isShutdownLoad(ctx context.Context) bool {
+	load, _ := ctx.Value(shutdownLoadContextKey{}).(bool)
+	return load
+}
+
 // servicePersistenceAdapter observes ygo's otherwise asynchronous persistence
 // callbacks. A failed update evicts its room so the next access reloads durable
 // state instead of retaining unsaved live state.
@@ -471,7 +487,7 @@ func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) er
 	if err := s.refuseIfRebuilding(info.Room); err != nil {
 		return err
 	}
-	if s.shuttingDown(info.Room) {
+	if s.shuttingDown(info.Room) && !isShutdownLoad(ctx) {
 		return ErrServiceUnavailable
 	}
 	if err := s.awaitRoomRecovery(ctx, info.Room); err != nil {
