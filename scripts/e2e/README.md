@@ -6,7 +6,7 @@ coordinator — unit tests do not gate a stage, these do; others prove one capab
 against the world it will run in. A later stage's script lands beside these; `lib/` holds what
 the stage scripts share: standalone helpers they run, and the files they source
 ([`lib/rig.sh`](#librigsh), [`lib/workflow.sh`](#libworkflowsh), [`lib/github-apps.sh`](#libgithub-appssh),
-[`lib/namespace-rig.sh`](#libnamespace-rigsh), [`lib/session-db.sh`](#libsession-dbsh), [`lib/kind-sandbox.sh`](#libkind-sandboxsh), [`lib/omp-home.sh`](#libomp-homesh), [`lib/box-login.sh`](#libbox-loginsh)), which `shellcheck` follows from this directory
+[`lib/namespace-rig.sh`](#libnamespace-rigsh), [`lib/session-db.sh`](#libsession-dbsh), [`lib/claude-transcript.sh`](#libclaude-transcriptsh), [`lib/kind-sandbox.sh`](#libkind-sandboxsh), [`lib/omp-home.sh`](#libomp-homesh), [`lib/box-login.sh`](#libbox-loginsh)), which `shellcheck` follows from this directory
 through `scripts/e2e/.shellcheckrc`.
 
 Every `docker run` in these scripts sets a CPU and a memory limit inline, and its container is
@@ -841,8 +841,10 @@ the evidence directory; by default it is a fresh one under `/tmp`.
 
 The rig is Stage 3's without the GitHub ingress bridge: scratch Postgres, NATS, Envoy listener and
 native Dispatch from [`lib/rig.sh`](#librigsh), the workflow's vocabulary from
-[`lib/workflow.sh`](#libworkflowsh), `admission_cap: 1`, and the design gate off, so the
-architect's gate registration starts planning with no approval. The daemon is started with the
+[`lib/workflow.sh`](#libworkflowsh), the transcript checks from
+[`lib/claude-transcript.sh`](#libclaude-transcriptsh) over the transcript's file on the devbox,
+`admission_cap: 1`, and the design gate off, so the architect's gate registration starts planning
+with no approval. The daemon is started with the
 real `gh`, `jj`, `tmux` and `bun` that `mise which` names first on its `PATH`, which every pane
 inherits ([`real_bin_path`](#librigsh): the run's own `HOME` hides mise's global config from the
 box's shims, where a pane's `jj` shim hands the call back to itself, exit 127), so all four must be
@@ -916,7 +918,10 @@ implementer's launcher saves its transcript there as a row keyed by the file's a
 restores it from there in a replacement pod (`docs/kubernetes.md`, "Where a Claude Code session
 lives across pods"). It is the first rig to run `runtime: kubernetes`, so what the tmux proof reads
 from `/proc` and a pane's own files this one reads with `kubectl exec` and `kubectl get` against
-that pod, and the session table with `psql` in the session database's container. The planner,
+that pod, and the session table with `psql` in the session database's container; it judges the
+transcript, read in the pod, with the tmux proof's own checks
+([`lib/claude-transcript.sh`](#libclaude-transcriptsh)), and starts the session database with
+Stage 4b's `session_db_start` ([`lib/session-db.sh`](#libsession-dbsh)). The planner,
 told to plan, has 2700 s to reach implementing, Stage 4b's planning budget (its plan checks, gap
 analyst and plan-review rounds run on the operator route's own models), and the run prints the time
 it took beside that budget. The checks, in order, which is the tmux proof's:
@@ -3872,24 +3877,60 @@ key), and either `label_prefix` (the prefix every run label of the proof carries
 
 ## lib/session-db.sh
 
-The reads a stage proof makes of its run's scratch session database, where every pod of the run
-keeps its sessions (`session_store: postgres`): Oh My Pi's table `omp_session_files` and its parts
+A stage proof's scratch session database, where every pod of the run keeps its sessions
+(`session_store: postgres`): Oh My Pi's table `omp_session_files` and its parts
 `omp_session_files_parts`, keyed by the path the session's file would have had. Stage 4b and
-[`claude-backend-sandbox.sh`](#claude-backend-sandboxsh) source it; each starts the database's
-container itself.
+[`claude-backend-sandbox.sh`](#claude-backend-sandboxsh) source it, after
+[`lib/rig.sh`](#librigsh), and start the database's container with `session_db_start`.
 
 ```sh
 . "$root/scripts/e2e/lib/session-db.sh"     # sourced, never run
+session_db_start "$host" --cpus 2 --memory 4g   # Stage 4b; the sandbox proof binds bind_host, --cpus 1
 ```
 
 The caller sets `session_db_container`, the container running the database (owner `legion`,
-database `sessions`). Every read goes through that container, with no client on the devbox.
+database `sessions`). Every read goes through that container, with no client on the devbox. For
+`session_db_start` it also sets `session_db_image` (the pinned Postgres image), `port_session_db`
+(the devbox port the container publishes), `host` (the address every pod dials the database at)
+and `work`, and defines `fail`, which exits.
 
 | function | does |
 | :--- | :--- |
+| `session_db_start BIND DOCKER_RUN_ARG…` | writes a fresh password only to the owner-only env file `$work/session-db.env` and the pod-facing URL `postgres://legion:…@$host:$port_session_db/sessions?sslmode=disable` only to the owner-only `$work/session-dsn` (for the providers Secret; never printed), then runs `session_db_image` as `session_db_container` with DOCKER_RUN_ARG… (the caller's CPU and memory limits), its data directory on tmpfs, publishing `BIND:$port_session_db`, and waits up to 60 s for `pg_isready`; a container docker cannot start fails naming `BIND:$port_session_db`. The caller prints its own note of where the pods reach it |
 | `session_psql NAME VALUE` | runs the SQL on stdin with `psql -A -t` as `legion`, VALUE the psql variable NAME, which the SQL quotes as `:'NAME'`, so no value is spliced into it; an SQL error is its exit status |
 | `session_text PATH` | prints the session the table holds at PATH whole, the row's content and then its parts in `start_offset` order, from one statement; a session the table does not hold, or a read that fails, fails naming PATH |
 | `session_byte_len PATH` | prints the row's `byte_len` at PATH; an answer that is no number (no such row), or a read that fails, fails naming PATH |
+
+## lib/claude-transcript.sh
+
+What a Claude Code backend proof judges in its implementer's transcript, Claude Code's own session
+JSONL. [`claude-backend-tmux.sh`](#claude-backend-tmuxsh), whose transcript is a file on the
+devbox, and [`claude-backend-sandbox.sh`](#claude-backend-sandboxsh), whose transcript is on the
+implementer pod's disk, source it after [`lib/workflow.sh`](#libworkflowsh).
+
+```sh
+. "$root/scripts/e2e/lib/claude-transcript.sh"     # sourced, never run
+```
+
+The caller defines `transcript_since OFFSET`, which prints the transcript's bytes past OFFSET
+bytes (OFFSET 0: all of it) and fails when it cannot read them: the tmux proof `tail`s its local
+file, the sandbox proof runs the same `tail` in the pod's `roles` container (`roles_exec`). Every
+predicate here reads the transcript through it alone. The caller also sets `issue` and
+`stall_offset` (the transcript's size when it told the implementer to stall), and defines `note`;
+`role_handoff` is `lib/workflow.sh`'s. The file sets `stall_reminder_needle`, the opening of
+`REMINDER` in `packages/pi-shared/src/phase-stall.ts` ("Your turn ended with your Legion phase still
+open"), which the caller's notes name.
+
+| function | does |
+| :--- | :--- |
+| `claude_entries OFFSET` | prints one line per entry past OFFSET: `assistant`, or `user <its text>` with its content's text and every run of whitespace squeezed to one space |
+| `stop_hook_reminded OFFSET` | one user entry past OFFSET holds both `Stop hook feedback` and `stall_reminder_needle` |
+| `reminded_turn_continued OFFSET` | an `assistant` entry follows that reminded entry |
+| `reminded_or_completed OFFSET` | `stop_hook_reminded OFFSET`, or `handoff_recorded` |
+| `report_stall_entries` | a `timeout_hook`: notes the first 200 characters of each entry since `stall_offset` |
+| `legion_handoff_in` | the whole transcript holds a `tool_use` of a tool named `…__legion` whose input names `handoff_complete`, and a `tool_result` for it that is not an error |
+| `resumed_reply_names OFFSET MARKER` | an assistant text block past OFFSET holds MARKER, as a fixed string |
+| `handoff_recorded` | the daemon recorded a handoff of `issue`'s implementer's `implementing` phase (`role_handoff`) |
 
 ## lib/bridge-tunnel.sh
 

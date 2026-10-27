@@ -282,6 +282,8 @@ fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
 . "$root/scripts/e2e/lib/session-db.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/role-namespaces.sh
 . "$root/scripts/e2e/lib/role-namespaces.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/claude-transcript.sh
+. "$root/scripts/e2e/lib/claude-transcript.sh"
 # Nothing the run starts inherits the operator's production Dispatch bearer.
 unset DISPATCH_TOKEN
 
@@ -513,76 +515,12 @@ transcript_prefix_sha() {
   roles_exec "$(implementer_pod)" sh -c 'head -c "$1" -- "$2" | sha256sum' sh "$1" "$transcript" |
     cut -d' ' -f1
 }
-# transcript_since OFFSET prints the transcript's bytes past OFFSET, the tail every predicate below
-# judges: a poll reads the new entries alone, not a session that grows all run.
+# transcript_since OFFSET prints the transcript's bytes past OFFSET, read in the pod as the two
+# above are: the tail every predicate of lib/claude-transcript.sh judges.
 transcript_since() {
   # shellcheck disable=SC2016  # expanded by the pod's shell
   roles_exec "$(implementer_pod)" sh -c 'tail -c "+$(($1 + 1))" -- "$2"' sh "$1" "$transcript"
 }
-# The opening of what a worker whose turn ended with its phase still open is told (REMINDER in
-# packages/pi-shared/src/phase-stall.ts), which the pod's `legion` MCP server answers its `Stop`
-# hook with. A fragment of that paragraph, not the whole of it, so a later rewording of the rest
-# does not break this proof silently; this sentence is in no other message a worker is given.
-stall_reminder_needle="Your turn ended with your Legion phase still open"
-# claude_entries OFFSET prints one line per transcript entry written past OFFSET bytes: `assistant`
-# for an assistant message, and `user <its text>` for a user one — its content, a string or the text
-# of its blocks, every run of whitespace squeezed to one space. One line is one entry, so the
-# predicates below decide on one message rather than on a line of one.
-claude_entries() {
-  transcript_since "$1" | jq -R -r '
-    fromjson?
-    | if .type == "assistant" then "assistant"
-      elif .type == "user" then
-        "user " + ((.message.content // "")
-          | if type == "string" then . else [.[]? | select(.type == "text") | .text] | join(" ") end
-          | gsub("\\s+"; " "))
-      else empty end'
-}
-# stop_hook_reminded OFFSET: past OFFSET bytes the session holds Claude Code's own `Stop hook
-# feedback`, carrying the reminder — the `{"decision":"block","reason":…}` the pod's legion MCP
-# server answered the `Stop` hook with (packages/claude-envoy/src/legion-phase-hook.ts), which
-# Claude Code turns into a user turn. Both in the one entry: the feedback is what makes it the
-# hook's own reminder rather than any other line written into the session.
-# reminded_or_completed OFFSET is the stall check's wait: the reminder reached the implementer
-# (stop_hook_reminded), or the daemon recorded its handoff first, which leaves no open phase to
-# remind it of. The check then tells the two apart, so a worker that did its phase from the task that
-# started it, against the proof's instructions, is a named failure and never a timeout.
-reminded_or_completed() { stop_hook_reminded "$1" || handoff_recorded; }
-stop_hook_reminded() {
-  local entries
-  entries=$(claude_entries "$1") || return 1
-  awk -v needle="$stall_reminder_needle" \
-    'index($0, "Stop hook feedback") && index($0, needle) { found = 1 } END { exit !found }' <<<"$entries"
-}
-# reminded_turn_continued OFFSET: an assistant message follows that feedback, so the block carried
-# the turn on in the same session rather than ending it.
-reminded_turn_continued() {
-  local entries
-  entries=$(claude_entries "$1") || return 1
-  awk -v needle="$stall_reminder_needle" '
-    index($0, "Stop hook feedback") && index($0, needle) { reminded = 1; next }
-    reminded && $0 == "assistant" { continued = 1 }
-    END { exit !continued }' <<<"$entries"
-}
-# report_stall_entries is that step's timeout_hook: what the transcript held when the wait gave up.
-report_stall_entries() {
-  note "the implementer's transcript since the stall instruction: $(claude_entries "$stall_offset" | cut -c1-200 | tr '\n' '|')"
-}
-# legion_handoff_in: the transcript holds a call of the `legion` MCP tool whose input names
-# handoff_complete, and a tool result for it that is not an error.
-legion_handoff_in() {
-  transcript_since 0 | jq -R -s -e '
-    [split("\n")[] | fromjson? | select(.message.content | type == "array") | .message.content[]] as $blocks
-    | [$blocks[] | select(.type == "tool_use" and (.name | endswith("__legion")) and (.input | tostring | contains("handoff_complete"))) | .id] as $calls
-    | any($blocks[]; .type == "tool_result" and (.tool_use_id as $id | $calls | index($id)) and (.is_error != true))' >/dev/null
-}
-# resumed_reply_names OFFSET MARKER: an assistant text written past OFFSET bytes quotes MARKER.
-resumed_reply_names() {
-  local text
-  text=$(transcript_since "$1" | jq -R -r 'fromjson? | select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text')
-  grep -Fq -- "$2" <<<"$text"
-}
-handoff_recorded() { [ -n "$(role_handoff "$issue" implementer implementing)" ]; }
 
 # ---- the scratch services ------------------------------------------------------------------------
 
@@ -1320,26 +1258,12 @@ docker exec "$pg_container" createdb -U legion legion
 # bridge.
 docker run -d --name "$nats_container" -p "$bind_host:$port_nats:4222" nats:2.10 -js >/dev/null
 until_true 60 "NATS to be ready" sh -c "docker logs '$nats_container' 2>&1 | grep -q 'Server is ready'"
-# The run's session database, a second throwaway Postgres: every pod keeps its sessions in it
-# (session_store postgres, which the daemon requires, since an issue pod's disk dies with the pod),
-# the Claude Code implementer's transcript among them, so it binds bind_host on the run's port and
-# every pod dials it at host, directly or through the bridge. It is its own container and its own
-# credential, never the daemon's database above, since its URL reaches every pod through the
-# providers Secret. Its password is the run's own and reaches docker through an owner-only env
-# file, never an argument; the pod-facing URL is written only to an owner-only file, which the
-# providers Secret reads, and is never printed. The run's own reads go through the container
-# (session_psql), so the devbox needs no URL of it.
-session_db_password=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
-(
-  umask 077
-  printf 'POSTGRES_USER=legion\nPOSTGRES_DB=sessions\nPOSTGRES_PASSWORD=%s\n' "$session_db_password" >"$work/session-db.env"
-  printf 'postgres://legion:%s@%s:%s/sessions?sslmode=disable\n' "$session_db_password" "$host" "$port_session_db" >"$work/session-dsn"
-)
-unset session_db_password
-docker run -d --name "$session_db_container" --cpus 1 --mount type=tmpfs,destination=/var/lib/postgresql/data \
-  --env-file "$work/session-db.env" -p "$bind_host:$port_session_db:5432" "$session_db_image" >/dev/null ||
-  fail "docker could not start the scratch session database $session_db_container on $bind_host:$port_session_db"
-until_true 60 "the session database to accept TCP connections" docker exec "$session_db_container" pg_isready -h 127.0.0.1 -p 5432 -U legion -d sessions
+# The run's session database (lib/session-db.sh's session_db_start): every pod keeps its sessions in
+# it (session_store postgres, which the daemon requires, since an issue pod's disk dies with the
+# pod), the Claude Code implementer's transcript among them, so it binds bind_host on the run's port
+# and every pod dials it at host, directly or through the bridge. The run's own reads go through the
+# container (session_psql), so the devbox needs no URL of it.
+session_db_start "$bind_host" --cpus 1
 note "container $session_db_container: database sessions on $bind_host:$port_session_db ($session_db_image), which every pod reads at $host:$port_session_db through the providers Secret's $session_dsn_key (the URL is in an owner-only file, not printed)"
 start_listener
 start_dispatch

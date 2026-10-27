@@ -94,6 +94,8 @@ fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
 . "$root/scripts/e2e/lib/workflow.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/leftovers.sh
 . "$root/scripts/e2e/lib/leftovers.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/claude-transcript.sh
+. "$root/scripts/e2e/lib/claude-transcript.sh"
 # Nothing the run starts inherits the operator's production Dispatch bearer.
 unset DISPATCH_TOKEN
 
@@ -482,70 +484,9 @@ bridged() {
 }
 # argv_has_pair ARGV FLAG VALUE: ARGV (one argument per line) holds FLAG immediately followed by VALUE.
 argv_has_pair() { awk -v flag="$2" -v value="$3" 'prev == flag && $0 == value { found = 1 } { prev = $0 } END { exit !found }' <<<"$1"; }
-# The opening of what a worker whose turn ended with its phase still open is told (REMINDER in
-# packages/pi-shared/src/phase-stall.ts), which the pane's `legion` MCP server answers its `Stop`
-# hook with. A fragment of that paragraph, not the whole of it, so a later rewording of the rest
-# does not break this proof silently; this sentence is in no other message a worker is given.
-stall_reminder_needle="Your turn ended with your Legion phase still open"
-# claude_entries TRANSCRIPT OFFSET prints one line per transcript entry written past OFFSET bytes:
-# `assistant` for an assistant message, and `user <its text>` for a user one — its content, a string
-# or the text of its blocks, every run of whitespace squeezed to one space. One line is one entry, so
-# the predicates below decide on one message rather than on a line of one.
-claude_entries() {
-  tail -c "+$(($2 + 1))" "$1" | jq -R -r '
-    fromjson?
-    | if .type == "assistant" then "assistant"
-      elif .type == "user" then
-        "user " + ((.message.content // "")
-          | if type == "string" then . else [.[]? | select(.type == "text") | .text] | join(" ") end
-          | gsub("\\s+"; " "))
-      else empty end'
-}
-# stop_hook_reminded TRANSCRIPT OFFSET: past OFFSET bytes the session holds Claude Code's own `Stop
-# hook feedback`, carrying the reminder — the `{"decision":"block","reason":…}` the pane's legion MCP
-# server answered the `Stop` hook with (packages/claude-envoy/src/legion-phase-hook.ts), which Claude
-# Code turns into a user turn. Both in the one entry: the feedback is what makes it the hook's own
-# reminder rather than any other line written into the session.
-# reminded_or_completed TRANSCRIPT OFFSET is the stall check's wait: the reminder reached the
-# implementer (stop_hook_reminded), or the daemon recorded its handoff first, which leaves no open
-# phase to remind it of. The check then tells the two apart, so a worker that did its phase from the
-# task that started it, against the proof's instructions, is a named failure and never a timeout.
-reminded_or_completed() { stop_hook_reminded "$1" "$2" || handoff_recorded; }
-stop_hook_reminded() {
-  local entries
-  entries=$(claude_entries "$1" "$2") || return 1
-  awk -v needle="$stall_reminder_needle" \
-    'index($0, "Stop hook feedback") && index($0, needle) { found = 1 } END { exit !found }' <<<"$entries"
-}
-# reminded_turn_continued TRANSCRIPT OFFSET: an assistant message follows that feedback, so the block
-# carried the turn on in the same session rather than ending it.
-reminded_turn_continued() {
-  local entries
-  entries=$(claude_entries "$1" "$2") || return 1
-  awk -v needle="$stall_reminder_needle" '
-    index($0, "Stop hook feedback") && index($0, needle) { reminded = 1; next }
-    reminded && $0 == "assistant" { continued = 1 }
-    END { exit !continued }' <<<"$entries"
-}
-# report_stall_entries is that step's timeout_hook: what the transcript held when the wait gave up.
-report_stall_entries() {
-  note "the implementer's transcript since the stall instruction: $(claude_entries "$transcript" "$stall_offset" | cut -c1-200 | tr '\n' '|')"
-}
-# legion_handoff_in TRANSCRIPT: the transcript holds a call of the `legion` MCP tool whose input names
-# handoff_complete, and a tool result for it that is not an error.
-legion_handoff_in() {
-  jq -R -s -e '
-    [split("\n")[] | fromjson? | select(.message.content | type == "array") | .message.content[]] as $blocks
-    | [$blocks[] | select(.type == "tool_use" and (.name | endswith("__legion")) and (.input | tostring | contains("handoff_complete"))) | .id] as $calls
-    | any($blocks[]; .type == "tool_result" and (.tool_use_id as $id | $calls | index($id)) and (.is_error != true))' "$1" >/dev/null
-}
-# resumed_reply_names TRANSCRIPT OFFSET MARKER: an assistant text written past OFFSET bytes quotes MARKER.
-resumed_reply_names() {
-  local text
-  text=$(tail -c "+$(($2 + 1))" "$1" | jq -R -r 'fromjson? | select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text')
-  grep -Fq -- "$3" <<<"$text"
-}
-handoff_recorded() { [ -n "$(role_handoff "$issue" implementer implementing)" ]; }
+# transcript_since OFFSET prints the transcript's bytes past OFFSET, read from its file on the
+# devbox: the tail every predicate of lib/claude-transcript.sh judges.
+transcript_since() { tail -c "+$(($1 + 1))" -- "$transcript"; }
 
 begin prerequisites
 require_app_inputs implement review
@@ -738,10 +679,10 @@ stall_offset=$(stat -c %s "$transcript")
 send_agent "$issue" implementer "Claude backend proof stall operation: reply with one line of plain prose saying you are standing by for your implementation instruction, and end your turn there. Change nothing, do not call the legion tool in this turn, call no other tool either, and do not begin any line with WAITING. Legion will then remind you that your phase is not complete: answer that reminder with one more line of plain prose saying the proof will instruct you next, under these same rules — no legion tool, no other tool, no WAITING line."
 timeout_hook=report_stall_entries
 until_true 600 "the implementer's turn to end with its phase open and the reminder to reach it as Stop hook feedback" \
-  reminded_or_completed "$transcript" "$stall_offset"
-stop_hook_reminded "$transcript" "$stall_offset" ||
+  reminded_or_completed "$stall_offset"
+stop_hook_reminded "$stall_offset" ||
   fail "the implementer completed its phase (handoff $(role_handoff "$issue" implementer implementing)) before the proof's stall instruction left it a turn ending with the phase open: it did the work of the task that started its phase, against the proof's instructions, so there was no open phase for the Stop hook to remind"
-until_true 300 "the blocked turn to be continued in the same session" reminded_turn_continued "$transcript" "$stall_offset"
+until_true 300 "the blocked turn to be continued in the same session" reminded_turn_continued "$stall_offset"
 timeout_hook=
 until_true 300 "the reminded implementer's turn to end" issue_worker_state "$issue" implementer idle
 note "the implementer ended a turn with implementing still open: Claude Code carried its Stop hook's block back as Stop hook feedback naming \"$stall_reminder_needle\", and took one more turn on it"
@@ -755,7 +696,7 @@ commit=$(role_handoff "$issue" implementer implementing)
 assert_handoff_committer "$issue" implementer implementing 0
 files=$(smoke_commit_files "$commit") || exit 1
 grep -q "^\.legion/$issue/" <<<"$files" || fail "the handoff commit $commit changes nothing under .legion/$issue/: $(tr '\n' ' ' <<<"$files")"
-legion_handoff_in "$transcript" || fail "the transcript $transcript holds no successful legion handoff_complete call"
+legion_handoff_in || fail "the transcript $transcript holds no successful legion handoff_complete call"
 until_true 300 "the implementer's turn to end" issue_worker_state "$issue" implementer idle
 note "handoff_complete through mcp__legion__legion recorded commit $commit, pushed to $repo under .legion/$issue/"
 pass
@@ -777,7 +718,7 @@ argv=$(claude_argv "$cc")
 argv_has_pair "$argv" --resume "$session" || fail "the relaunched claude was not started with --resume $session: $(tr '\n' ' ' <<<"$argv" | cut -c1-300)"
 [ "$(head -c "$size" "$transcript" | sha256sum)" = "$prefix" ] || fail "the transcript's first $size bytes changed across the relaunch"
 send_agent "$issue" implementer "Claude backend proof after a relaunch: reply with one line starting WAITING that quotes the proof marker your implementation instruction in this session carried. Change nothing and call no tool."
-until_true 600 "the resumed implementer to quote its first instruction's marker" resumed_reply_names "$transcript" "$size" "$marker"
+until_true 600 "the resumed implementer to quote its first instruction's marker" resumed_reply_names "$size" "$marker"
 note "killed pane $pane (generation $generation): generation $(jq -r .generation <<<"$claim") runs claude --resume $session; the transcript kept its $turns earlier turns ($size bytes unchanged) and the resumed session quoted $marker"
 pass
 

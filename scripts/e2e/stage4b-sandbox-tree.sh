@@ -3298,25 +3298,12 @@ docker run -d --name "$pg_container" --cpus 2 --memory 2g --mount type=tmpfs,des
   -p "127.0.0.1::5432" postgres:16 >/dev/null
 port_pg=$(docker port "$pg_container" 5432/tcp | sed -n '1s/.*://p')
 until_true 60 "Postgres to accept TCP connections" docker exec "$pg_container" pg_isready -h 127.0.0.1 -p 5432 -U legion -d legion
-# The run's session database, a second throwaway Postgres: every pod's Oh My Pi keeps its session
-# in it (session_store postgres: the daemon requires a store that keeps sessions in a database), so
-# a role's conversation outlives the issue pod whose disk dies with it. It is its own container and
-# its own credential, never the daemon's own database above: that one holds the daemon's state, and
-# its URL reaches every pod through the providers Secret, which no pod may be given a way into. It
-# binds the devbox's private address, not loopback, since the pods dial it as they dial the worker
-# stream; its password reaches docker through an owner-only env file, never an argument, and its URL
-# is written only to an owner-only file the providers Secret reads, and is never printed.
-session_db_password=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
-(
-  umask 077
-  printf 'POSTGRES_USER=legion\nPOSTGRES_DB=sessions\nPOSTGRES_PASSWORD=%s\n' "$session_db_password" >"$work/session-db.env"
-  printf 'postgres://legion:%s@%s:%s/sessions?sslmode=disable\n' "$session_db_password" "$host" "$port_session_db" >"$work/session-dsn"
-)
-unset session_db_password
-docker run -d --name "$session_db_container" --cpus 2 --memory 4g --mount type=tmpfs,destination=/var/lib/postgresql/data \
-  --env-file "$work/session-db.env" -p "$host:$port_session_db:5432" "$session_db_image" >/dev/null ||
-  fail "docker could not start the scratch session database $session_db_container on $host:$port_session_db"
-until_true 60 "the session database to accept TCP connections" docker exec "$session_db_container" pg_isready -h 127.0.0.1 -p 5432 -U legion -d sessions
+# The run's session database (lib/session-db.sh's session_db_start), a second throwaway Postgres:
+# every pod's Oh My Pi keeps its session in it (session_store postgres: the daemon requires a store
+# that keeps sessions in a database), so a role's conversation outlives the issue pod whose disk
+# dies with it. It binds the devbox's private address, not loopback, since the pods dial it as they
+# dial the worker stream.
+session_db_start "$host" --cpus 2 --memory 4g
 note "container $session_db_container: database sessions on $host:$port_session_db ($session_db_image), which every pod reads through the providers Secret's $session_dsn_key (the URL is in an owner-only file, not printed)"
 mkdir -p "$state"
 cat >"$work/instructions.md" <<'EOF'
