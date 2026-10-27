@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-649",
+  "completed": "2026-10-27T15:19:46Z",
+  "planDocument": "dispatch://INFRA-649/artifact/plan-md",
+  "base": "59f6647db9d72d25feac2edaedd9e0d4e5005f12 (main@origin at planning; re-take the merge base at implementation)",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase rules, the pull request body, the proof format with negative controls (references/pr-body.md), and the production check after the merge (references/merge-gate.md)",
+      "ce-simplify-code: the simplify pass pr-body.md requires on the settled diff before the implementer's final proof",
+      "dispatch: posting the merge-rule write-up on dispatch://INFRA-512 if the merge rule fails, and the production record after the merge"
+    ],
+    "test": [
+      "legion-worker: verifying the implementer's proof by re-running A1 (corpus cmp and API diff) and A2 (six load-test runs) and adding the tester's own proof with a negative control"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md for review and approval, and pr-body.md to check each proof's surface, command, head SHA and negative control"
+    ]
+  },
+  "summary": "Three changes in one pull request. (1) pmdoc/token.go: one token encoder for every caller, appending the token representation once into a per-call buffer with hand-written appenders byte-identical to encoding/json (json.Marshal fallback for any other type), recording each block-id node's span in pre-order; docs.documentTokens hashes the whole buffer (document token) and each span (block tokens, pre-order last-wins); renderedBlocks returns the document token so buildDocumentRead stops re-encoding; checkEditPrecondition uses one pass; WriteTokenJSON/tokenWriter deleted; error parity by a per-block fallback only when the one pass errors. (2) TableDescendantIDs uses Walk (no positions). (3) yattrToMarkName without its regexp (R10, -22..26% of treeOf measured); the fold keeps pmdoc.Read's attribute copy.",
+  "tasks": [
+    "1. Bind workspace; record merge base B.",
+    "2. Fetch every LINUX issue's primary spec markdown into $TMPDIR/infra649/linux-specs (GET /api/v1/issues?project=LINUX paged, then /api/v1/artifacts/{id}/text one at a time); never commit them.",
+    "3. Committed env-gated docs/token_corpus_test.go (DISPATCH_TOKEN_CORPUS, DISPATCH_TOKEN_CORPUS_OUT): Parse, EnsureBlockIDs, deterministic ids b-<n>, marks on every 5th text node, encodeDocumentTree, Y doc, treeOf, buildDocumentRead; JSONL dump of document token, markdown sha256, blocks, TableDescendantIDs; only functions present at B too; reports treeOf+buildDocumentRead time.",
+    "4. Change 1 (pmdoc/token.go, pmdoc/node.go, docs/edits.go, docs/mutation.go renderedBlocks/documentBlocks, docs/read_cache.go buildDocumentRead, comments at edits.go:170-172 and node.go:601-606, packages/envoy/AGENTS.md:384-385). tokenMark and canonicalAttrs stay (marks.go:28, node.go:69).",
+    "5. Change 2 (pmdoc/blocks.go:95) and Change 3 (pmdoc/node.go:50,93; comment at pmdoc/marks.go:21).",
+    "6. Permanent tests: oracle equality over pmdoc testdata corpus + fixtures + a ~600 KB concatenation with marks; value edge-case table with error parity; duplicate ids; documentTokens error parity; FuzzTokenJSON; yattrToMarkName table + FuzzYattrToMarkName against the regexp; a TableDescendantIDs behaviour test (none exists today).",
+    "7. go build/vet; go test pmdoc, docs, api with DISPATCH_TEST_DATABASE_URL at a local pgvector Postgres; fuzz 5m and 2m.",
+    "8. Proofs A1, A2, A3 as below.",
+    "9. packages/envoy/CHANGELOG.md [Unreleased] ### Changed entry.",
+    "10. Simplify pass, then re-run checks and the corpus proof on the applied head.",
+    "11. Pull request with Dispatch: INFRA-649 and the runs, spread, commands, inputs and load-test commit."
+  ],
+  "acceptance": [
+    {
+      "criterion": "Block tokens and document tokens byte-identical to today's on every LINUX spec",
+      "surface": "the read fold on all LINUX specs (env-gated corpus test at base B and head) and Dispatch's API on the load-test stack's seeded database (base and head envoy-dispatch on the same seed template)",
+      "command": "GOWORK=off DISPATCH_TOKEN_CORPUS=$TMPDIR/infra649/linux-specs DISPATCH_TOKEN_CORPUS_OUT=$TMPDIR/infra649/tokens-<side>.jsonl go test ./internal/dispatch/docs/ -run TestTokenCorpus -count=1 -timeout 2h in base and head exports, then cmp; and GET /api/v1/artifacts/{id}/text and /blocks for every seed.json artifact after stack.sh setup && stack.sh reset with LOADTEST_SRC=base, then head, then diff",
+      "negativeControl": "a head build with HTML escaping turned off in the string appender: cmp and diff report differences"
+    },
+    {
+      "criterion": "Merge rule of the shared context on INFRA-589's route mix (expected 0.039 of 0.19 cores in production; about 0.040 with the R10 change)",
+      "surface": "packages/envoy/loadtest/run-step.sh (INFRA-589; overlay its packages/envoy/loadtest at one recorded commit into base and head exports while PR #2369 is open)",
+      "command": "LOADTEST_ROOT=$TMPDIR/infra649/lt LOADTEST_SRC=$TMPDIR/infra649/<side> bash $TMPDIR/infra649/<side>/packages/envoy/loadtest/run-step.sh 649-<side>-<n> --events 0 --sessions 1000 --requests 60 --duration 300s, alternating b1 h1 b2 h2 b3 h3; calibrate once at base (use --requests 30 for all six if Dispatch mean cores > 1.6); every box_busy_before <= 10%",
+      "rule": "Pass when every head run's Dispatch CPU-s (cpu_cores_mean.dispatch x window) < every base run's. Else E = mean(S_base) x r, S = fold share from cpu.pprof with -focus='docs\\.\\(\\*Service\\)\\.foldDocument$' -ignore='docs\\.\\(\\*PgVersioned\\)\\.LoadDocument|runtime\\.(gcBgMarkWorker|bgsweep|bgscavenge|gcAssistAlloc)', r = 1 - head/base treeOf+buildDocumentRead time over the LINUX corpus; when E (in CPU-s) < spread, pass when every head S < every base S and mean(S_base) - mean(S_head) >= E/2. If base S < 3%, raise --requests for all six. Anything else: write-up on dispatch://INFRA-512, no merge."
+    },
+    {
+      "criterion": "No memory the server keeps resident; behaviour kept",
+      "surface": "the load test's heap.pprof and the corpus test",
+      "command": "go tool pprof -top -sample_index=inuse_space heap.pprof (last base and head runs): no new in-use site; no sync.Pool or package-level buffer in the diff; quote the token buffer size for the largest LINUX spec beside buildDocumentRead B/op at base and head"
+    }
+  ],
+  "decisions": [
+    "One encoder for every token caller; the streaming WriteTokenJSON is deleted, since a second encoder could drift from the first and refuse every edit precondition.",
+    "Per-call buffer, no pool and no package-level buffer, so nothing stays resident; AGENTS.md:384-385 and the two comments are rewritten.",
+    "R10 is fixed in this pull request by the regexp-free yattrToMarkName; the fold keeps pmdoc.Read's attribute copy, because skipping it (about 8% of treeOf, 0.0004 cores) would make LoadDocument's fresh document an ownership contract INFRA-514's children may change, against packages/envoy/AGENTS.md:554.",
+    "Load-test inputs: --events 0 and --sessions 1000 so every seeded spec is read and folds on a cold read cache with no resident rooms and no commit-lock saturation."
+  ],
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "Expected gain is in production cores (0.039 of 0.19) while the merge rule compares with the load test's spread and profile shares.", "answer": "A2 restates the expected gain in load-test terms: E = mean base fold share (foldDocument minus LoadDocument and GC, a focus stable across revisions) x the corpus-measured reduction r; the architect may restate it."},
+      {"finding": "Load-test inputs may not reach the cold fold; base has no load test; README asks for 5+ runs with medians.", "answer": "A2 fixes --events 0 --sessions 1000 --requests 60 --duration 300s --rng-seed 1, overlays INFRA-589's loadtest at one recorded commit into both exports, checks the fold share S in every run's cpu.pprof, and follows the parent's 3+3 rule, which is the contract."},
+      {"finding": "'Today's tokens' on 1,157 LINUX specs: corpus is re-parsed markdown without marks; prototype and corpus absent; specs cannot be committed.", "answer": "Today's = code at base B on the same tree. Specs are fetched to $TMPDIR and never committed; the env-gated corpus test adds deterministic proofComment/proofAuthored marks and cmp's base vs head dumps; the API diff on the stack's seeded database covers real stored trees with server-written anchor marks."},
+      {"finding": "Byte-identity cases: HTML escaping, invalid UTF-8, U+2028/9, floats, crdt.Attributes nested in lists, []byte, nil handling, mark order, duplicate ids, error parity and wrapping.", "answer": "Change 1 specifies each, falling back to json.Marshal for every type outside the canonical form; Tests add an edge-case table with error parity, duplicate-id cases, documentTokens error parity and FuzzTokenJSON against the tokenRepresentation oracle."},
+      {"finding": "One encoder or two for the other token callers.", "answer": "One: every caller moves; WriteTokenJSON and tokenWriter are deleted; the oracle test stays."},
+      {"finding": "A whole buffer versus LEGION-504's never-held-whole note.", "answer": "Per-call buffer, dropped on return, no pool; comments and AGENTS.md:384-385 rewritten; A3 checks heap in-use and quotes the buffer size."},
+      {"finding": "R10 is in the Outcome but not in the expected gain; F5 unnamed.", "answer": "R10 is fixed in this pull request (regexp-free yattrToMarkName, about 0.0011 cores estimated, added to the expectation). F5 and R10's ygo parts are reported to the architect as owned by no child."},
+      {"finding": "Ownership of the fold's tree if the attribute copy is skipped.", "answer": "The copy is kept; no ownership change."},
+      {"finding": "Overlaps with INFRA-641, 646, 653, 645, 648.", "answer": "Named to the architect; measurement runs on the actual base so a sibling landed first is already counted; the branch that merges second adapts."},
+      {"finding": "Unverified claims: corpus identity, 0.039 measured, 0.09 under LINUX, shares at 59f6647d.", "answer": "The plan re-proves identity at base B on the current corpus and measures the gain on the load test at B; the 0.09 figure stays an estimate with no criterion."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": []
+}
