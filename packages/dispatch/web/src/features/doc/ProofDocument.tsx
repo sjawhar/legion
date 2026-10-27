@@ -17,7 +17,7 @@ import {
   isDocumentSchemaError,
   isDocumentUnloadable,
 } from "../../api/client";
-import type { Artifact, AuthenticatedUser, BlockSchema, Version } from "../../api/types";
+import type { Artifact, AuthenticatedUser, Version } from "../../api/types";
 import { TruncatedText } from "../../components/TruncatedText";
 import { copyText } from "../../lib/clipboard";
 import {
@@ -62,7 +62,7 @@ import {
 import { NameVersionDialog } from "./NameVersionDialog";
 import type { PendingState } from "./pending-sync";
 import { DocumentRuntime } from "./runtime";
-import { loadBlockSchema } from "./schema";
+import { compiledBlockSchema, compiledSchemaCreatable } from "./schema";
 import { VersionDiff } from "./VersionDiff";
 import { VersionView } from "./VersionView";
 
@@ -201,11 +201,7 @@ export function ProofDocument({
   const [loadError, setLoadError] = useState<string | undefined>(undefined);
   const [schemaReadOnly, setSchemaReadOnly] = useState(false);
   const [openDecisionIndex, setOpenDecisionIndex] = useState(0);
-  const {
-    blockSchema: runtimeBlockSchema,
-    createEditor,
-    loadTransport,
-  } = useContext(DocumentRuntime);
+  const { createEditor, loadTransport } = useContext(DocumentRuntime);
   const navigate = useNavigate();
   const margin = useMargin();
   const { blockPlacements } = margin;
@@ -215,11 +211,6 @@ export function ProofDocument({
   marginRef.current = margin;
   highlightTermRef.current = highlightTerm;
   const queryClient = useQueryClient();
-  const blockSchemaQuery = useQuery({
-    queryFn: loadBlockSchema,
-    queryKey: ["block-schema"],
-    staleTime: Number.POSITIVE_INFINITY,
-  });
   const artifactQuery = useQuery({
     queryKey: ["artifact", artifact.id],
     queryFn: () => api.getArtifact(artifact.id),
@@ -295,7 +286,6 @@ export function ProofDocument({
     [artifactQuery.data?.versions, artifact.versions]
   );
   isClosedRef.current = isClosed;
-  const blockSchema: BlockSchema | undefined = runtimeBlockSchema ?? blockSchemaQuery.data;
   userRef.current = user;
 
   const requestNamedVersion = useCallback(() => {
@@ -379,9 +369,6 @@ export function ProofDocument({
   }, [onToolbarChange]);
 
   useEffect(() => {
-    if (blockSchema === undefined) {
-      return;
-    }
     const parent = root.current;
     if (parent === null) {
       return;
@@ -428,7 +415,7 @@ export function ProofDocument({
     // The editor's place in the page - its typed blocks, the margin, search highlights, a block
     // link - for as long as it is this effect's editor. It returns what undoes it.
     const bindEditor = (handle: EditorHandle, connection: DocumentConnection) => {
-      installTypedBlocks(handle.view, blockSchema, setAskBlockHosts);
+      installTypedBlocks(handle.view, compiledBlockSchema, setAskBlockHosts);
       const blockLink = window.location.hash;
       if (blockLink.startsWith("#b-")) {
         handle.focusBlock(decodeURIComponent(blockLink.slice(3)));
@@ -550,7 +537,8 @@ export function ProofDocument({
           newerReads = 0;
           setAdmission(undefined);
           const connection = connect(artifact.id, {
-            schemaVersion: blockSchema.version,
+            schemaCreatable: compiledSchemaCreatable,
+            schemaVersion: compiledBlockSchema.version,
             onAdmission: (readOnly) => {
               schemaReadOnlyRef.current = readOnly;
               setSchemaReadOnly(readOnly);
@@ -623,7 +611,7 @@ export function ProofDocument({
                   color: colorForLogin(userRef.current.login),
                   name: userRef.current.login,
                 },
-                blockSchema,
+                blockSchema: compiledBlockSchema,
                 ydoc: connection.doc,
               })
                 .then((handle) => {
@@ -652,7 +640,7 @@ export function ProofDocument({
       readmitRef.current = undefined;
       teardown();
     };
-  }, [artifact.id, blockSchema, createEditor, loadTransport, queryClient]);
+  }, [artifact.id, createEditor, loadTransport, queryClient]);
 
   // A blocked admission is admitted again by the next successful read of the document's text: the
   // refetch a repair upload's or a rebuild's invalidation makes, or any other. Each successful read
@@ -735,7 +723,7 @@ export function ProofDocument({
           ) : null}
         </div>
       )}
-      {blockSchemaQuery.isError || schemaReadOnly ? <p>Reload to edit.</p> : null}
+      {schemaReadOnly ? <p>Reload to edit.</p> : null}
       {version === undefined && openDecision !== undefined ? (
         <nav
           aria-label="Open decisions"
@@ -899,7 +887,6 @@ export function ProofDocument({
           <VersionView
             artifactId={artifact.id}
             asks={blockAsks}
-            blockSchema={blockSchema}
             createdAt={versions.find((item) => item.number === version)?.created_at}
             highlight={highlight}
             owner={owner.kind === "document" ? owner : undefined}

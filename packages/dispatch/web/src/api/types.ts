@@ -46,6 +46,7 @@ export type {
   BlockAttributeKind,
   BlockAttributeSchema,
   BlockContentRule,
+  BlockElementVersions,
   BlockSchema,
   BlockTypeSchema,
   Broadcast,

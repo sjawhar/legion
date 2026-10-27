@@ -17,7 +17,6 @@ import type {
   AskRead,
   AskSnooze,
   AuthenticatedUser,
-  BlockSchema,
   BroadcastCreated,
   BroadcastRead,
   BroadcastSummary,
@@ -356,10 +355,6 @@ export class DispatchApiClient {
 
   private post<T>(path: string, body: unknown): Promise<T> {
     return this.send<T>("POST", path, body);
-  }
-
-  getBlockSchema(): Promise<BlockSchema> {
-    return this.json<BlockSchema>("/api/v1/schema/blocks");
   }
 
   listProjects(): Promise<Project[]> {

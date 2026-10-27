@@ -761,11 +761,9 @@ export function useEventStream({
       if (anAttemptEnded) {
         // Events may have committed since the prior attempt ended - or, when the first attempt
         // failed, since the page's own reads - so every query the app holds refreshes. TanStack
-        // matches all of them when no filter is given. Nothing is excluded:
-        // the one query that looks expensive to refresh, `["block-schema"]` with an infinite
-        // `staleTime`, resolves from a module-level per-session cache (`features/doc/schema.ts`),
-        // so its refetch issues no request. A genuine reconnect after a gap refreshes on the
-        // leading edge; `visibilitychange` reopening the stream repeatedly does not.
+        // matches all of them when no filter is given, and nothing is excluded. A genuine
+        // reconnect after a gap refreshes on the leading edge; `visibilitychange` reopening the
+        // stream repeatedly does not.
         refreshEverything();
         // The one query that refresh skips: a credential list held at `null` (no broker), which
         // a server restarted since with a broker configured would now answer with a list.

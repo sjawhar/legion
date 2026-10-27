@@ -4,7 +4,7 @@ import type { Doc } from "yjs";
 
 import { api } from "../../api/client";
 import { whoAmIQuery } from "../../api/queries";
-import type { Ask, BlockSchema } from "../../api/types";
+import type { Ask } from "../../api/types";
 import { Timestamp } from "../refs/Timestamp";
 import { AskBlockCard } from "./AskBlockCard";
 import { type AskBlockHost, installTypedBlocks } from "./ask-block";
@@ -13,12 +13,12 @@ import { createDoc, type EditorHandle } from "./editor";
 import type { Highlight } from "./highlight";
 import { embedHighlight } from "./highlight";
 import { DocumentRuntime } from "./runtime";
+import { compiledBlockSchema } from "./schema";
 
 export interface VersionViewProps {
   artifactId: string;
   /** The document's block-indexed asks, so a historical decision block still names its asker. */
   asks: readonly Ask[];
-  blockSchema: BlockSchema | undefined;
   createdAt: string | undefined;
   highlight: Highlight | undefined;
   /** The project document shown, for block asks with no issue to be referenced under. */
@@ -29,7 +29,6 @@ export interface VersionViewProps {
 export function VersionView({
   artifactId,
   asks,
-  blockSchema,
   createdAt,
   highlight,
   owner,
@@ -53,12 +52,7 @@ export function VersionView({
   useEffect(() => {
     const parent = root.current;
     const user = userQuery.data;
-    if (
-      parent === null ||
-      markdown === undefined ||
-      user === undefined ||
-      blockSchema === undefined
-    ) {
+    if (parent === null || markdown === undefined || user === undefined) {
       return;
     }
 
@@ -75,7 +69,7 @@ export function VersionView({
       ydoc = doc;
       const editor = await createEditor(parent, {
         awareness: null,
-        blockSchema,
+        blockSchema: compiledBlockSchema,
         heatMapMode: "hidden",
         readOnly: true,
         user: { color: colorForLogin(user.login), name: user.login },
@@ -86,7 +80,7 @@ export function VersionView({
         editor.destroy();
         return;
       }
-      installTypedBlocks(editor.view, blockSchema, setAskBlockHosts);
+      installTypedBlocks(editor.view, compiledBlockSchema, setAskBlockHosts);
       const embedded = highlight === undefined ? undefined : embedHighlight(markdown, highlight);
       editor.setMarkdown(embedded ?? markdown);
       setHighlightMissing(highlight !== undefined && embedded === undefined);
@@ -109,7 +103,7 @@ export function VersionView({
       handle?.destroy();
       ydoc?.destroy();
     };
-  }, [blockSchema, createEditor, highlight, markdown, userQuery.data]);
+  }, [createEditor, highlight, markdown, userQuery.data]);
 
   if (versionQuery.isPending) {
     return <p>Loading version…</p>;

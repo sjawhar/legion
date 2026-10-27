@@ -810,14 +810,24 @@ of the text - every `artifact.version` event and every reconnect of the event st
 leave a connected editor alone whether they succeed or fail, so an outage that answers them 500 or
 503 keeps the editor and the edits it holds.
 
-Before constructing Proof, Dispatch fetches `/api/v1/schema/blocks` once and keeps the schema by
-version for the session. It passes that schema to the live editor, historical-version editor, and
-the one headless Markdown engine cached per schema version; the connection carries it as
-`schema_version`. A server version mismatch admits the tab read-only and the surface shows
-`Reload to edit`. Typed blocks use `:::name{#block-id key="value"}` container directives. The server
-owns their schema and version, while Dispatch owns host rendering for `render: "host"` types; the
-SPA must not invent node schemas or parse a second directive grammar.
-After the first paint, Dispatch warms that schema and headless Markdown engine so a long-lived tab
+The page uses the document schema manifest it was built with: `web/src/features/doc/schema.ts`
+imports `packages/envoy/internal/dispatch/pmdoc/schema/blocks.json` at build time
+(`compiledBlockSchema`) and reads no schema from the server, since during a release the process
+that answers can be of the other build. `GET /api/v1/schema/blocks` stays for pages of earlier
+builds. The page passes that manifest to the live editor, the historical-version editor and the one
+headless Markdown engine. The connection presents it in its query as `schema_version` (V, the
+manifest's `version`) and `schema_creatable` (R, the highest `since` among the elements the page
+may create, `compiledSchemaCreatable`, as Go's `pmdoc.SchemaCreatable()`); its Hocuspocus token
+stays V alone, because a server that predates `schema_creatable` compares the whole token with
+its own version and its answer replaces the query's. A server version mismatch admits the tab
+read-only and the surface shows `Reload to edit`. y-prosemirror deletes, from the page's copy of
+the document, an element or text the editor's schema cannot build (`createNodeFromYElement`), such
+as an element a newer build wrote; `pending-sync.ts` never keeps that repair as a pending edit, so
+no later writable admission replays it. Typed blocks use `:::name{#block-id key="value"}`
+container directives. The server owns their schema and version, while Dispatch owns host rendering
+for `render: "host"` types; the SPA must not invent node schemas or parse a second directive
+grammar.
+After the first paint, Dispatch warms the headless Markdown engine so a long-lived tab
 holds the lazy chunk through an SPA replacement. A stale Vite chunk reloads the page once per
 session (never while the browser is offline — that is an outage, not a deployment); if rendering
 still fails, `MarkdownBody` exposes its literal-text fallback with `data-markdown-fallback`.
