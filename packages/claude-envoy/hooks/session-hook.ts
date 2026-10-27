@@ -47,10 +47,11 @@
 // resolution is off with an error the hook starts this bundle again, detached, in mode
 // `answers-refresh` (never named by hooks.json): that process resolves Dispatch with commands run,
 // reads the list with a long deadline, which writes `answers.json`, and leaves what it read in
-// `answers-refresh.json` beside it, with the Dispatch URL it read. The hook carries that when it
-// lands by the print deadline and names the Dispatch URL envoy.json names to the hook now, and
-// otherwise the last list read from that URL (`sessionDispatchUrl`, which runs no command; a list
-// another Dispatch answered never stands in) or the failure line: the refresher is in its own
+// `answers-refresh.json` beside it, with the Dispatch URL it targeted (`sessionDispatchUrl`, which
+// runs no command), its failure line included when the command failed. The hook carries that when
+// it lands by the print deadline and names the Dispatch URL envoy.json names to the hook now, and
+// otherwise the last list read from that URL (resolved the same way; a list another Dispatch
+// answered never stands in) or the failure line: the refresher is in its own
 // session with no stdio of the hook's, so the command always runs to its end or its 10 s timeout
 // inside `envoy-config`'s own run, which kills its process group and removes its temporary output,
 // and the next hook carries the list it read. One refresher runs per session at a time
@@ -128,12 +129,18 @@ const REFRESH_LOCK_STALE_MS = 30_000
 const RefreshOutcome = z.object({
   /** When the refresher finished (epoch ms): a hook carries only an outcome from after it started. */
   finished_at: z.number(),
-  /** The Dispatch URL the refresher resolved and read; null when Dispatch resolved off. A hook
-   *  carries only an outcome read from the URL envoy.json names to it. */
+  /** The Dispatch URL the refresher targeted, as `sessionDispatchUrl` resolves it, the URL the
+   *  hook compares with, whether or not the token command then failed; null when envoy.json names
+   *  none. A hook carries only an outcome read for the URL envoy.json names to it. */
   dispatch_url: z.string().nullable(),
   /** `readSessionAnswers`' message; null when there was nothing to show. */
   text: z.string().nullable(),
 })
+/** Tests only: the file the answers hook writes its own timing to, `{ began, printed, ended }` in
+ *  ms after its process started (when its code began, when it printed or found nothing to print,
+ *  and when it exits), so a test can hold the hook to its deadline rather than to bun's start-up.
+ *  Unset, as Claude Code runs it, the hook writes nothing. */
+const ANSWERS_TIMING_FILE = "ENVOY_ANSWERS_TIMING_FILE"
 
 const DISPATCH_HOST_LINE = "export DISPATCH_HOST=claude"
 
@@ -296,9 +303,10 @@ type Refreshed = { readonly text: string | undefined } | { readonly reason: stri
 
 /** Starts the session's refresher unless one is running, and waits until `by` for what it reads.
  *  `startedAt` is when this process started (epoch ms): an outcome from before then is not this
- *  hook's. An outcome read from another Dispatch than `dispatchUrl`, the one envoy.json names to
- *  this hook, is a refresher started while envoy.json named another: the hook carries none of it,
- *  and a hook after the refresher this one started carries the list of the Dispatch named now. */
+ *  hook's. An outcome whose targeted Dispatch URL and `dispatchUrl`, the one envoy.json names to
+ *  this hook, are both known and differ is a refresher started while envoy.json named another: the
+ *  hook carries none of it, and a hook after the refresher this one started carries the list of
+ *  the Dispatch named now. Any other outcome, a failed token command's error included, is carried. */
 async function refreshedAnswers(
   session: string,
   cwd: string,
@@ -326,10 +334,11 @@ async function refreshedAnswers(
   for (;;) {
     const outcome = refreshOutcome(file, startedAt)
     if (outcome !== undefined) {
-      if (outcome.dispatch_url === (dispatchUrl ?? null)) return { text: outcome.text ?? undefined }
-      return {
-        reason: `the refresher read ${outcome.dispatch_url ?? "no Dispatch"}, not the Dispatch envoy.json names now`,
+      const other = outcome.dispatch_url
+      if (other === null || dispatchUrl === undefined || other === dispatchUrl) {
+        return { text: outcome.text ?? undefined }
       }
+      return { reason: `the refresher read ${other}, not the Dispatch envoy.json names now` }
     }
     const left = remainingUntil(by)
     if (left === 0) {
@@ -377,8 +386,10 @@ async function answersMessage(
 async function answers(text: string): Promise<never> {
   // The print deadline: `ANSWERS_BY_MS` after the process started, or `ANSWERS_LEAST_WAIT_MS`
   // from now when the start-up already spent that.
-  const by = Math.max(ANSWERS_BY_MS, performance.now() + ANSWERS_LEAST_WAIT_MS)
+  const began = performance.now()
+  const by = Math.max(ANSWERS_BY_MS, began + ANSWERS_LEAST_WAIT_MS)
   const startedAt = Date.now() - performance.now()
+  let printed: number | null = null
   try {
     const input = AnswersInput.parse(JSON.parse(text))
     const directory = claudeProjectDirectory(
@@ -397,6 +408,7 @@ async function answers(text: string): Promise<never> {
         }),
       )
     }
+    printed = performance.now()
     await Promise.race([
       sessionAnswersSettled(input.session_id),
       Bun.sleep(remainingUntil(by + ANSWERS_SETTLE_MS)),
@@ -404,13 +416,17 @@ async function answers(text: string): Promise<never> {
   } catch (error) {
     process.stderr.write(`envoy: people's answers were not added — ${messageFor(error)}\n`)
   }
+  const timingFile = process.env[ANSWERS_TIMING_FILE]
+  if (timingFile !== undefined) {
+    writeFileSync(timingFile, JSON.stringify({ began, printed, ended: performance.now() }))
+  }
   // Exits rather than returns: a read still running would hold the process open.
   process.exit(0)
 }
 
 /** The answers-refresh mode, which the answers hook starts detached with the session id and the
  *  project directory: resolves Dispatch with `!` commands run, reads the session's list (which
- *  writes `answers.json`) and writes what it read, and from which Dispatch URL, to
+ *  writes `answers.json`) and writes what it read, and for which Dispatch URL, to
  *  `answers-refresh.json` for the hooks waiting on it. A second refresher for the session exits at
  *  once. Nothing reads its output. */
 async function answersRefresh(session: string, cwd: string): Promise<never> {
@@ -420,6 +436,11 @@ async function answersRefresh(session: string, cwd: string): Promise<never> {
   if (takeRefreshLock(lock)) {
     try {
       const file = sessionConfigFile("claude", process.env)
+      // The URL this refresher targets, resolved as the hook resolves the one it compares with and
+      // before any command runs: when envoy.json moved on since the hook started this refresher, no
+      // hook carries what it read, and when the token command fails, the hook for the same URL
+      // carries this refresher's failure line naming why.
+      const dispatchUrl = sessionDispatchUrl(file, process.env, { cwd }) ?? null
       const { dispatch } = sessionDispatchSettings(file, process.env, { cwd })
       const read = await readSessionAnswers({
         session,
@@ -427,11 +448,9 @@ async function answersRefresh(session: string, cwd: string): Promise<never> {
         env: process.env,
         deadlineMs: REFRESH_READ_MS,
       })
-      // The URL this refresher read, which a hook compares with the one it resolved: when
-      // envoy.json moved on since the hook started this refresher, no hook carries what it read.
       const outcome: z.infer<typeof RefreshOutcome> = {
         finished_at: Date.now(),
-        dispatch_url: dispatch.enabled ? dispatch.url : null,
+        dispatch_url: dispatchUrl,
         text: read.text ?? null,
       }
       writeAtomically(join(directory, REFRESH_OUTCOME), JSON.stringify(outcome))

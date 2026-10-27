@@ -20424,6 +20424,7 @@ var RefreshOutcome = exports_external.object({
   dispatch_url: exports_external.string().nullable(),
   text: exports_external.string().nullable()
 });
+var ANSWERS_TIMING_FILE = "ENVOY_ANSWERS_TIMING_FILE";
 var DISPATCH_HOST_LINE = "export DISPATCH_HOST=claude";
 function appendOnce(envFile, line) {
   let written = "";
@@ -20580,11 +20581,11 @@ async function refreshedAnswers(session, cwd, dispatchUrl2, startedAt, by) {
   for (;; ) {
     const outcome = refreshOutcome(file2, startedAt);
     if (outcome !== undefined) {
-      if (outcome.dispatch_url === (dispatchUrl2 ?? null))
+      const other = outcome.dispatch_url;
+      if (other === null || dispatchUrl2 === undefined || other === dispatchUrl2) {
         return { text: outcome.text ?? undefined };
-      return {
-        reason: `the refresher read ${outcome.dispatch_url ?? "no Dispatch"}, not the Dispatch envoy.json names now`
-      };
+      }
+      return { reason: `the refresher read ${other}, not the Dispatch envoy.json names now` };
     }
     const left = remainingUntil(by);
     if (left === 0) {
@@ -20616,8 +20617,10 @@ async function answersMessage(session, cwd, startedAt, by) {
   return read.text;
 }
 async function answers(text) {
-  const by = Math.max(ANSWERS_BY_MS, performance.now() + ANSWERS_LEAST_WAIT_MS);
+  const began = performance.now();
+  const by = Math.max(ANSWERS_BY_MS, began + ANSWERS_LEAST_WAIT_MS);
   const startedAt = Date.now() - performance.now();
+  let printed = null;
   try {
     const input = AnswersInput.parse(JSON.parse(text));
     const directory = claudeProjectDirectory({ CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] }, input.cwd ?? process.cwd());
@@ -20630,6 +20633,7 @@ async function answers(text) {
         }
       }));
     }
+    printed = performance.now();
     await Promise.race([
       sessionAnswersSettled(input.session_id),
       Bun.sleep(remainingUntil(by + ANSWERS_SETTLE_MS))
@@ -20637,6 +20641,10 @@ async function answers(text) {
   } catch (error48) {
     process.stderr.write(`envoy: people's answers were not added \u2014 ${messageFor(error48)}
 `);
+  }
+  const timingFile = process.env[ANSWERS_TIMING_FILE];
+  if (timingFile !== undefined) {
+    writeFileSync2(timingFile, JSON.stringify({ began, printed, ended: performance.now() }));
   }
   process.exit(0);
 }
@@ -20647,6 +20655,7 @@ async function answersRefresh(session, cwd) {
   if (takeRefreshLock(lock)) {
     try {
       const file2 = sessionConfigFile("claude", process.env);
+      const dispatchUrl2 = sessionDispatchUrl(file2, process.env, { cwd }) ?? null;
       const { dispatch } = sessionDispatchSettings(file2, process.env, { cwd });
       const read = await readSessionAnswers({
         session,
@@ -20656,7 +20665,7 @@ async function answersRefresh(session, cwd) {
       });
       const outcome = {
         finished_at: Date.now(),
-        dispatch_url: dispatch.enabled ? dispatch.url : null,
+        dispatch_url: dispatchUrl2,
         text: read.text ?? null
       };
       writeAtomically(join7(directory, REFRESH_OUTCOME), JSON.stringify(outcome));
