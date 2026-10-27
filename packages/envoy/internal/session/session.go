@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/store"
 )
@@ -65,6 +66,13 @@ func (d Deliverer) DeliverWithResultForEntry(item contracts.Envelope, interest s
 	}
 	text := d.Text(item)
 
+	if entry.Delivery == DeliveryConsumer && bus.StreamCaptures(item.Topic) {
+		// The session's consumer holds this stored message, and the listener that owns the session
+		// relays it from there, serving port or not: the durable path pushes nothing and reports
+		// nothing for it. A topic the stream does not store reaches the session as before (the live
+		// lane's push to a serving port; a self-subscribed session's own subscription).
+		return DeliveryResult{Skipped: true}, nil
+	}
 	if entry.SelfSubscribed && entry.Port == 0 {
 		// The session consumes its own NATS subscription; there is nothing to push to.
 		return DeliveryResult{Skipped: true}, nil

@@ -469,6 +469,31 @@ func TestALiveLaneDropsAnInvalidEnvelope(t *testing.T) {
 	serving.noPrompt(t, time.Second)
 }
 
+// The live lane leaves a session's relay subject (notifications.envoy.deliver.<id>) alone: a frame
+// there is a stored message the listener owning the session relays to it from its consumer, never
+// one to fan out, even to a session that names the subject as a topic. Core NATS keeps one
+// publisher's order, so a team topic's envelope published after the frame being the first prompt
+// shows the frame was dropped, not late.
+func TestSessionConsumerRelaySubjectIsNotFannedOutByTheLiveLane(t *testing.T) {
+	uri := testnats.URL(t)
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "relay-subject", liveLaneEnv...)
+	listener.waitHealthy(t)
+
+	relayed, team := bus.DeliverSubject("ses_relayed_"+id.New()), "notifications.team."+id.New()
+	serving := startServingPort(t, "ses_relay_watcher_"+id.New(), http.StatusNoContent)
+	registerServingSession(t, listener, serving, "127.0.0.1", relayed, team)
+	publisher := connectPublisher(t, uri)
+
+	if err := publisher.PublishCoreTo(relayed, newEnvelope("agent", relayed, "a relay frame")); err != nil {
+		t.Fatalf("publish a frame on the relay subject: %v", err)
+	}
+	valid := newEnvelope("agent", team, "a team envelope after it")
+	publish(t, publisher, valid)
+
+	requirePromptCarries(t, serving.awaitPrompt(t, 2*time.Second), valid)
+	serving.noPrompt(t, time.Second)
+}
+
 // A listener whose NATS user may subscribe to the role lanes and reply inboxes alone, as the
 // shared hub's listener's grant allows, ends its start when told to open the live lane: NATS
 // refuses the subscription, and the listener exits 1 with an ERROR naming the variable that asked

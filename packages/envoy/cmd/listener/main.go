@@ -42,6 +42,9 @@ type listenerDeps struct {
 	// live is the live topics lane's own client (openLiveTopics), nil when ENVOY_SUBSCRIBE_ALL_TOPICS
 	// leaves the lane off.
 	live *bus.Client
+	// delivery manages the session consumers registrations ask for (sessionDelivery); nil in a
+	// test that builds the handlers without it, which answers every such registration with core.
+	delivery *sessionDelivery
 	// caches lists the stores above that are open, for the sites that treat every cache alike.
 	caches []listenerCache
 	// consumer names the durable whose lag /healthz reports.
@@ -810,6 +813,11 @@ func main() {
 		logger.Info("live topics subscribed", slog.String("subject", liveTopicsSubject), slog.String("queue", bus.ListenerLiveQueue(cfg.MachineID)))
 	}
 
+	// The session consumers a registration asks for are managed on a connection of their own
+	// (bus.ConnectSessionConsumers). One that fails to connect leaves every session on core
+	// delivery, which a listener of an earlier release serves too, rather than ending the start.
+	delivery := connectSessionDelivery(cfg.NATSURLs, logger)
+
 	// From here a SIGTERM or SIGINT is an ordered shutdown: /v1 serves from the next step, and the
 	// bind can wait out a rolling deploy's old task for most of a minute. Before here, during the
 	// NATS connect and the cache warm-ups, a signal ends the process at once, as it always has.
@@ -819,6 +827,7 @@ func main() {
 	ready := &listenerDeps{
 		client:     client,
 		live:       live,
+		delivery:   delivery,
 		registry:   registry,
 		sessions:   sessions,
 		ciStore:    ciStore,
@@ -857,7 +866,7 @@ func main() {
 				slog.Int64("waited_ms", bind.waited.Milliseconds()),
 			)
 		}
-		shutdownListener(logger, server, client, live, caches, listenerLoops{})
+		shutdownListener(logger, server, client, live, delivery, caches, listenerLoops{})
 	}
 	deps.Store(ready)
 	logger.Info("envoy-listener ready (NATS connected)")
@@ -942,7 +951,7 @@ func main() {
 	case <-stopping.Done():
 		logger.Info("received signal, shutting down", slog.String("signal", context.Cause(stopping).Error()))
 	}
-	shutdownListener(logger, server, client, live, caches, listenerLoops{
+	shutdownListener(logger, server, client, live, delivery, caches, listenerLoops{
 		stop: func() {
 			monitorCancel()
 			summaryCancel()
@@ -966,8 +975,8 @@ type listenerLoops struct {
 // shutdownListener is the ordered shutdown every end of a start that serves /v1 comes to, a
 // signal, a fatal error or a bind that did not complete, and exits non-zero so the runtime's
 // restart policy restores the listener. live is the live topics lane's client, nil when the lane
-// is off.
-func shutdownListener(logger *logging.Logger, server *http.Server, client *bus.Client, live *bus.Client, caches []listenerCache, loops listenerLoops) {
+// is off; delivery holds the session-consumer connection.
+func shutdownListener(logger *logging.Logger, server *http.Server, client *bus.Client, live *bus.Client, delivery *sessionDelivery, caches []listenerCache, loops listenerLoops) {
 	// Stop background loops before draining NATS.
 	if loops.stop != nil {
 		loops.stop()
@@ -980,6 +989,9 @@ func shutdownListener(logger *logging.Logger, server *http.Server, client *bus.C
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("http shutdown error", slog.String("error", err.Error()))
 	}
+	// The session-consumer connection carries only the consumer calls registrations make, and the
+	// HTTP server has stopped serving them.
+	delivery.close()
 
 	// 3. NATS — wait (within the HTTP deadline) for a self-health rebuild the monitor may still be
 	// running, so nothing re-subscribes or re-watches during the drain, and for a pass of a loop

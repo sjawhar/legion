@@ -1246,7 +1246,7 @@ func TestAdminInterestsHandler_ListAll(t *testing.T) {
 		"ses_list_b": {"notifications.test.>"},
 		"ses_list_a": {"notifications.github.>"},
 	})
-	handler := adminInterestsHandler(registry)
+	handler := adminInterestsHandler(registry, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/interests/", nil)
 	rec := httptest.NewRecorder()
@@ -1271,7 +1271,7 @@ func TestAdminInterestsHandler_GetBySession(t *testing.T) {
 	registry := setupAdminTestRegistry(t, map[string][]string{
 		"ses_get_test": {"notifications.test.>"},
 	})
-	handler := adminInterestsHandler(registry)
+	handler := adminInterestsHandler(registry, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/interests/ses_get_test", nil)
 	rec := httptest.NewRecorder()
@@ -1306,7 +1306,7 @@ func TestAdminInterestsHandler_GetAnswers404OnlyForAnUnknownSession(t *testing.T
 		[]string{contracts.AgentSubject("ses_known")}); err != nil {
 		t.Fatalf("failed to upsert interest: %v", err)
 	}
-	handler := adminInterestsHandler(registry)
+	handler := adminInterestsHandler(registry, nil)
 	get := func(sessionID string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/interests/"+sessionID, nil))
@@ -1335,7 +1335,7 @@ func TestAdminInterestsHandler_DeleteBySession(t *testing.T) {
 	registry := setupAdminTestRegistry(t, map[string][]string{
 		"ses_delete_target": {"notifications.test.>"},
 	})
-	handler := adminInterestsHandler(registry)
+	handler := adminInterestsHandler(registry, nil)
 
 	req := httptest.NewRequest(http.MethodDelete, "/v1/interests/ses_delete_target", nil)
 	rec := httptest.NewRecorder()
@@ -1354,7 +1354,7 @@ func TestAdminInterestsHandler_DeleteBySession(t *testing.T) {
 
 func TestAdminInterestsHandler_DeleteIdempotent(t *testing.T) {
 	registry := setupAdminTestRegistry(t, nil)
-	handler := adminInterestsHandler(registry)
+	handler := adminInterestsHandler(registry, nil)
 
 	req := httptest.NewRequest(http.MethodDelete, "/v1/interests/ses_nonexistent", nil)
 	rec := httptest.NewRecorder()
@@ -1367,7 +1367,7 @@ func TestAdminInterestsHandler_DeleteIdempotent(t *testing.T) {
 
 func TestAdminInterestsHandler_MethodNotAllowed(t *testing.T) {
 	registry := setupAdminTestRegistry(t, nil)
-	handler := adminInterestsHandler(registry)
+	handler := adminInterestsHandler(registry, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/interests/", nil)
 	rec := httptest.NewRecorder()
@@ -3487,7 +3487,13 @@ type listenerDeliveryHarness struct {
 
 func newListenerDeliveryHarness(t *testing.T, transport http.RoundTripper) listenerDeliveryHarness {
 	t.Helper()
-	client := setupPublishTestClient(t)
+	return newListenerDeliveryHarnessOn(t, setupPublishTestClient(t), transport)
+}
+
+// newListenerDeliveryHarnessOn is newListenerDeliveryHarness over client, a listener's connection
+// to a server the test chose (one whose grant it sets, say).
+func newListenerDeliveryHarnessOn(t *testing.T, client *bus.Client, transport http.RoundTripper) listenerDeliveryHarness {
+	t.Helper()
 	registry, err := store.Open(client.Conn, store.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("open interest registry: %v", err)

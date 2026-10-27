@@ -183,6 +183,48 @@ func TestDeliver_UsesPort_whenSelfSubscribedSessionAlsoHasOne(t *testing.T) {
 	}
 }
 
+// A session whose entry records consumer delivery takes every stored message from its consumer,
+// serving port or not, so the durable path pushes none of them; a topic the stream does not store
+// (the live lane's) still reaches its serving port.
+func TestDeliver_SkipsStoredTopics_whenSessionIsOnConsumerDelivery(t *testing.T) {
+	// Given
+	var requests atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+	sessions, deliverer := newKVDeliverer(t)
+	var entry session.SessionEntry
+	if err := json.Unmarshal([]byte(fmt.Sprintf(`{"port":%d,"delivery":"consumer","epoch":"e1"}`, mockPort(target.URL))), &entry); err != nil {
+		t.Fatalf("decode consumer-delivery session entry: %v", err)
+	}
+	if err := sessions.Put("ses_consumer", entry); err != nil {
+		t.Fatalf("register consumer-delivery session: %v", err)
+	}
+
+	// When
+	stored, storedErr := deliverer.DeliverWithResult(
+		newTestEnvelope("agent", "notifications.agent.ses_consumer", "stored message"),
+		store.Interest{SessionID: "ses_consumer"},
+	)
+	_, liveErr := deliverer.DeliverWithResult(
+		newTestEnvelope("agent", "notifications.team.deploy", "live message"),
+		store.Interest{SessionID: "ses_consumer"},
+	)
+
+	// Then
+	if storedErr != nil || !stored.Skipped {
+		t.Fatalf("stored message to a consumer-delivery session: result %+v, error %v; want skipped", stored, storedErr)
+	}
+	if liveErr != nil {
+		t.Fatalf("live message to a consumer-delivery session's port: %v", liveErr)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("prompt_async requests = %d, want 1 (the live topic's alone)", got)
+	}
+}
+
 func TestSessionRegistry_PortlessSelfSubscribedClaimPreservesLivePortfulRoute(t *testing.T) {
 	for _, driving := range []bool{false, true} {
 		t.Run(fmt.Sprintf("incumbent driving %t", driving), func(t *testing.T) {

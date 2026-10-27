@@ -16,7 +16,7 @@ func TestSessionEntryFromSubscribe_CarriesDrivingFlag(t *testing.T) {
 		Port:      42145,
 		Title:     "ipi eval",
 		Driving:   true,
-	}, "devbox-sami")
+	}, "devbox-sami", sessionDeliveryOutcome{})
 
 	if !got.Driving {
 		t.Fatalf("expected Driving to be carried into the session entry, got %+v", got)
@@ -36,7 +36,7 @@ func TestSessionEntryFromSubscribe_CarriesHost(t *testing.T) {
 		SessionID: "ses_z",
 		Port:      1,
 		Host:      "example-host-a",
-	}, "example-listener")
+	}, "example-listener", sessionDeliveryOutcome{})
 
 	if got.Host != "example-host-a" {
 		t.Fatalf("expected Host to be carried from the subscribe body, got %+v", got)
@@ -51,7 +51,7 @@ func TestSessionEntryFromSubscribe_DefaultsHostEmpty(t *testing.T) {
 	// invent one: an empty Host is what sends the owning listener's delivery (the only one; no
 	// other listener delivers to the session) to its fallback, host.docker.internal, and display
 	// to MachineID (HostOrMachine).
-	got := sessionEntryFromSubscribe(subscribeBody{SessionID: "ses_old", Port: 1}, "example-listener")
+	got := sessionEntryFromSubscribe(subscribeBody{SessionID: "ses_old", Port: 1}, "example-listener", sessionDeliveryOutcome{})
 
 	if got.Host != "" {
 		t.Fatalf("expected Host to stay empty for a payload without the field, got %+v", got)
@@ -59,7 +59,7 @@ func TestSessionEntryFromSubscribe_DefaultsHostEmpty(t *testing.T) {
 }
 
 func TestSessionEntryFromSubscribe_DefaultsToNonDriving(t *testing.T) {
-	got := sessionEntryFromSubscribe(subscribeBody{SessionID: "ses_y", Port: 34751}, "devbox-sami")
+	got := sessionEntryFromSubscribe(subscribeBody{SessionID: "ses_y", Port: 34751}, "devbox-sami", sessionDeliveryOutcome{})
 
 	if got.Driving {
 		t.Fatalf("expected a payload without the flag to claim non-driving, got %+v", got)
@@ -74,7 +74,7 @@ func TestSessionEntryFromSubscribe_CarriesSelfSubscribedFlag(t *testing.T) {
 	}
 
 	// When
-	entry, err := json.Marshal(sessionEntryFromSubscribe(body, "devbox-sami"))
+	entry, err := json.Marshal(sessionEntryFromSubscribe(body, "devbox-sami", sessionDeliveryOutcome{}))
 	if err != nil {
 		t.Fatalf("encode session entry: %v", err)
 	}

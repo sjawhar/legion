@@ -101,6 +101,9 @@ type publishResponse struct {
 type subscribeResponse struct {
 	store.Interest
 	Warnings []string `json:"warnings,omitempty"`
+	// Delivery is the session's delivery (deliveryAnswer), present whenever the registration
+	// carried delivery or registered a serving port.
+	Delivery *deliveryAnswer `json:"delivery,omitempty"`
 }
 
 const unwiredRepositoryWarningTimeout = 750 * time.Millisecond
@@ -767,7 +770,9 @@ func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
 	}
 }
 
-func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
+// adminInterestsHandler serves /v1/interests/[<session_id>]. removed, when not nil, is called
+// after a DELETE removed a session's interests.
+func adminInterestsHandler(registry *store.Registry, removed func(ctx context.Context, sessionID string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/interests/")
 
@@ -798,6 +803,9 @@ func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 			if err := registry.Remove(sessionID, nil); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
 				writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 				return
+			}
+			if removed != nil {
+				removed(r.Context(), sessionID)
 			}
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -1118,11 +1126,23 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			writeNATSError(w, err, http.StatusServiceUnavailable, err.Error())
 			return
 		}
-		if body.Port > 0 || body.SelfSubscribed {
-			if err := d.sessions.Put(body.SessionID, sessionEntryFromSubscribe(body, machineID)); err != nil {
+		// The session's consumer, when the registration asks for one, is created or has its filter
+		// set to the topics just stored before the registration answers, so a message published on
+		// a newly followed stored topic after the answer is the consumer's to deliver.
+		delivery := d.delivery.register(r.Context(), body, item.Topics)
+		if body.Port > 0 || body.SelfSubscribed || delivery.relayed {
+			epochChanged := false
+			if delivery.relayed {
+				previous, err := d.sessions.Get(body.SessionID)
+				epochChanged = err != nil || previous.Delivery != session.DeliveryConsumer || previous.Epoch != delivery.epoch
+			}
+			if err := d.sessions.Put(body.SessionID, sessionEntryFromSubscribe(body, machineID, delivery)); err != nil {
 				logger.Error("listener session registry put failed", slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
 				writeNATSError(w, err, http.StatusServiceUnavailable, "session registry unavailable")
 				return
+			}
+			if delivery.relayed {
+				d.delivery.registered(body.SessionID, epochChanged)
 			}
 		}
 		warningCtx, cancelWarnings := context.WithTimeout(r.Context(), unwiredRepositoryWarningTimeout)
@@ -1146,7 +1166,7 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 				warnings = append(warnings, warning)
 			}
 		}
-		writeJSON(w, http.StatusOK, subscribeResponse{Interest: item, Warnings: warnings})
+		writeJSON(w, http.StatusOK, subscribeResponse{Interest: item, Warnings: warnings, Delivery: delivery.answer})
 	}
 }
 
@@ -1177,6 +1197,8 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 			return
 		}
+		// A consumer-delivery session's consumer stops filtering on the topics just removed.
+		d.delivery.refollow(r.Context(), d, body.SessionID)
 		removed := body.Topics
 		if removed == nil {
 			removed = []string{}
@@ -1187,7 +1209,9 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 	v1.HandleFunc("/v1/roles/", roleGetHandler(d))
 	v1.HandleFunc("/v1/registry/", sessionEntryHandler(d))
 
-	v1.Handle("/v1/interests/", adminInterestsHandler(d.registry))
+	v1.Handle("/v1/interests/", adminInterestsHandler(d.registry, func(ctx context.Context, sessionID string) {
+		d.delivery.refollow(ctx, d, sessionID)
+	}))
 	v1.Handle("/v1/sessions", sessionsHandler(d.registry, d.sessions))
 	v1.Handle("/v1/sessions/", deleteSessionHandler(d.sessions))
 	v1.HandleFunc("/v1/messages/send", sendHandler(d))
