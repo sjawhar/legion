@@ -83,6 +83,10 @@ for (const input of inputs) {
     await createComment(issue.key, { body: input.body }, agent);
 
     const gap = await longestGapUntilTheCommentDraws(browser, issue.key);
+    // The measured gap is the run's evidence, so it is kept on the result even when it passes.
+    test
+      .info()
+      .annotations.push({ type: "longest main-thread gap", description: `${Math.round(gap)} ms` });
     expect(
       gap,
       `the main thread ran no task for ${Math.round(gap)} ms while the card drew`
