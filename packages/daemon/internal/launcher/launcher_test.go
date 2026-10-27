@@ -1186,7 +1186,10 @@ func TestAGenerationWhoseSessionDatabaseRefusesIsNotStarted(t *testing.T) {
 func TestAGenerationWhoseSessionDatabaseNeverAnswersIsRefusedWhileTheDaemonWaits(t *testing.T) {
 	dialer := &sessionDialer{addr: idleUpstream(t)}
 	dialer.stallAt(silentUpstream(t))
-	const grace = 400 * time.Millisecond
+	// Generation 1's bound is read from its dial's deadline, so the grace sets no race there; it is
+	// generation 2's real proof dial to a local listener that has half of it, which a host starved of
+	// CPU (six busy loops on two cores, under -race) once took more than 200ms to make.
+	const grace = 2 * time.Second
 	g := newSessionRig(t, Config{SessionDatabase: testDatabase, SessionDialer: dialer.build, StopGrace: grace})
 	marker := filepath.Join(t.TempDir(), "marker")
 
@@ -1206,8 +1209,8 @@ func TestAGenerationWhoseSessionDatabaseNeverAnswersIsRefusedWhileTheDaemonWaits
 		t.Fatalf("generation 1's proof dial was given %s, past half the %s stop grace", limit, grace)
 	}
 	if !ok || got.OK || !strings.Contains(got.Error, "generation 1") || !strings.Contains(got.Error, testInstance) ||
-		!strings.Contains(got.Error, "no answer within 200ms") {
-		t.Fatalf("start result = %#v, want a refusal naming generation 1, %s and its 200ms bound", got, testInstance)
+		!strings.Contains(got.Error, "no answer within "+(grace/2).String()) {
+		t.Fatalf("start result = %#v, want a refusal naming generation 1, %s and its %s bound", got, testInstance, grace/2)
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("a generation whose session database never answered started its child")
