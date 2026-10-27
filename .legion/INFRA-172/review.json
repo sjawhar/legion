@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-172",
+  "completed": "2026-10-27T01:26:30Z",
+  "decision": "changes_requested",
+  "reviewedCodeHead": "647724175d3c155dce009933b29b527a1f8e75c0 (code as of a6ecbc12/2e326959; 30d6bc60 adds only .legion/)",
+  "critical": 0,
+  "important": 2,
+  "minor": 3,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/docs/edits.go:1244",
+      "description": "refuseCodePipeInTableCell goes through replacementBroke, which exempts the whole document-level block when TableCodePipeError already fails on it before the write. API edits run on the live tree, which keeps a browser-left code `a\\|b` after settlement, so a later replace, delete or accepted suggestion that puts code holding `\\|` into another cell of that table (or another table in the same list or quote) is accepted and stored with that `|` taken out of the code. Reproduced at 30d6bc60 with a throwaway applyAlone test: stored `| `a\\`\\|`b` | `<code>\\`\\|`<code>` |`, no refusal. The PR body and CHANGELOG (packages/envoy/CHANGELOG.md:1340) say such writes are refused. Fix: refuse when the block after the write holds an offending code span the block before did not (compare per cell, e.g. (row, column, code) of every offending cell), keeping the exemption only for writes that add none."
+    },
+    {
+      "severity": "important",
+      "file": "PR #2272 body",
+      "description": "No `## Contract change census`. The PR adds a refusal at the Dispatch HTTP API (TableCodePipeError on doc-edit replace, delete by quote and accepted suggestion) and widens one (a row whose cells exceed the table once `\\\\|` ends a cell, on upload and table-row insert; insert_test.go:140), and a header wider than its delimiter by the new rule now makes no table. The census must list the search commands (in-repo writers of a mid-row `\\\\|` and the stored-document census), each hit with its disposition (the 8 rewritten documents among them), and the rollout line (immediate refusal, naming the data loss or misread it closes)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/pmdoc/escape.go:825-835",
+      "description": "altReadsBack's comment says Parse reads a `|` after an even run of backslashes in a cell as escaped, now false; the pipeAfterEvenBackslashes guard is dead (both thermonuclear agents removed it in a scratch copy and saw no behaviour change). Delete the sentence and guard; move pipeAfterEvenBackslashes into table_test.go, its only other user."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/pmdoc/render_table.go:216",
+      "description": "tableCodePipe.Error lays the table out on a fresh span budget, while GET /blocks uses spansBefore(doc, table); the doc comment says the cell is named as GET /blocks places it. They differ only once earlier tables spend maxSpanCells."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/pmdoc/render_table.go:84",
+      "description": "The browser-edit path stores the `|` as text after the code rather than refusing, against the spec decision's wording 'refused on write'. Accepted: a CRDT edit has no refusal channel and every character is kept; the documents and PR body name it. Recorded in Not proven / risk for the architect."
+    }
+  ],
+  "ci": "Required set lint, typecheck, test, pr-title (rulesets). CI head 64772417 (compare to 30d6bc60: handoffsOnly true, 1 file). Tests and Legion Envoy and Contracts runs were cancelled at 01:04Z with no newer push; re-run once (gh run rerun 40429689006, 40429689263); lint/typecheck/test queued at 01:25Z. Not read green this round; a REQUEST_CHANGES does not wait on it. The architect notes main is red on pi-envoy's skills-guard test since #2273 (01:07Z): main's red, not this PR's.",
+  "localChecks": "go test ./internal/dispatch/pmdoc/ at 30d6bc60 on this pod: only TestUpdateIsLinearInTheBlockCount fails (a timing test the implementer recorded failing at the base on this pod too).",
+  "thermonuclear": "At 30d6bc60: deep review CHANGES (Medium: the block-wide exemption; Minors as above), code quality CHANGES (stale altReadsBack comment and dead guard). Both found parse/render fixed points over hand-built table shapes and linear time on hostile rows.",
+  "documents": "architecture-assessment.md v4 and refactor-order.md v5 carry no open comment or ask; Open asks on INFRA-172: none. A1-A7 as the tester verified; not re-litigated."
+}
