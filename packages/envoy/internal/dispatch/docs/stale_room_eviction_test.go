@@ -41,7 +41,7 @@ func runStaleRoomEvictor(t *testing.T, service *Service) <-chan staleRoomNote {
 }
 
 // runStaleRoomEvictorListening is runStaleRoomEvictor for a test that builds the evictor itself,
-// to set the clock its interval is measured on or its listener's waits.
+// to set the clock its interval is measured on.
 func runStaleRoomEvictorListening(t *testing.T, evictor *staleRoomEvictor) <-chan staleRoomNote {
 	t.Helper()
 	notes, connected := startStaleRoomEvictor(t, evictor)
@@ -53,34 +53,29 @@ func runStaleRoomEvictorListening(t *testing.T, evictor *staleRoomEvictor) <-cha
 	return notes
 }
 
-// startStaleRoomEvictor runs evictor, on a room-sync listener of its service's, until the test
-// ends and reports what it does: notes, one per notification it decided, and connected, one per
-// LISTEN that stood and the sweep that follows it (roomSync.connected). It waits for neither,
-// because a test whose dial is down at the start has to write before any LISTEN stands.
+// startStaleRoomEvictor runs evictor, registered on a listener hub of its service's
+// (newListenerHub), until the test ends and reports what it does: notes, one per notification it
+// decided, and connected, one per LISTEN that stood and the sweep that follows it
+// (roomSync.connected). It waits for neither, because a test whose dial is down at the start has
+// to write before any LISTEN stands.
 func startStaleRoomEvictor(t *testing.T, evictor *staleRoomEvictor) (<-chan staleRoomNote, <-chan struct{}) {
 	t.Helper()
-	return startRoomSyncEvictor(t, roomSyncFor(evictor))
+	return startRoomSyncEvictor(t, newListenerHub(evictor.service), roomSyncFor(evictor))
 }
 
-// roomSyncFor is a room-sync listener of evictor's service whose document-changed notifications
-// evictor decides, for a test that sets the listener's dial or backoff before it starts.
+// roomSyncFor is the room sync of evictor's service whose document-changed notifications evictor
+// decides.
 func roomSyncFor(evictor *staleRoomEvictor) *roomSync {
 	rs := newRoomSync(evictor.service)
 	rs.evictor = evictor
 	return rs
 }
 
-// startRoomSyncEvictor is startStaleRoomEvictor for a listener the test built (roomSyncFor).
-func startRoomSyncEvictor(t *testing.T, rs *roomSync) (<-chan staleRoomNote, <-chan struct{}) {
+// startRoomSyncEvictor is startStaleRoomEvictor for a hub and a room sync the test built
+// (newListenerHub, roomSyncFor), for a test that wraps the hub's dial before it starts.
+func startRoomSyncEvictor(t *testing.T, hub *pglisten.Hub, rs *roomSync) (<-chan staleRoomNote, <-chan struct{}) {
 	t.Helper()
-	listening := make(chan struct{}, 4)
 	notes := make(chan staleRoomNote, 64)
-	rs.listening = func() {
-		select {
-		case listening <- struct{}{}:
-		default:
-		}
-	}
 	rs.evictor.handled = func(artifactID string, evicted bool) {
 		select {
 		case notes <- staleRoomNote{room: artifactID, evicted: evicted}:
@@ -88,20 +83,7 @@ func startRoomSyncEvictor(t *testing.T, rs *roomSync) (<-chan staleRoomNote, <-c
 			t.Errorf("the test read no notification note for %s", artifactID)
 		}
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		rs.run(ctx)
-	}()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			t.Error("the stale-room evictor did not return within 10s of its context ending")
-		}
-	})
+	listening, _ := startRoomSync(t, hub, rs)
 	return notes, listening
 }
 
@@ -265,8 +247,9 @@ func TestABurstOnTheOtherProcessEvictsARoomOnceWithinTheInterval(t *testing.T) {
 // on the other process - one person typing there notifies several times a second - and every one
 // of those notifications is for a room that really is behind, so the unlocked head read passes it
 // through to the confirmation under the document's advisory lock (roomBehindDurableHead), which
-// waits behind the very append that announced the change. pglisten calls OnNotify inline on its
-// one listener goroutine, so each of those waits stalls every other room's notification with it.
+// waits behind the very append that announced the change. The evictor decides every
+// notification on one lane (roomSyncLane), so each of those waits stalls every other room's
+// notification with it.
 // This test holds the document's lock in a transaction of its own and requires a notification
 // inside the interval to be decided while that lock is still held: a decision that reaches the
 // lock cannot be, so a prompt refusal is the proof that the lock is never taken. With the
@@ -305,7 +288,7 @@ func TestANotificationRefusedByTheIntervalTakesNoDocumentLock(t *testing.T) {
 			t.Fatalf("a second write within %s evicted the room again, under its readers", staleRoomEvictInterval)
 		}
 	case <-time.After(roomWait(t)):
-		t.Fatalf("the notification the interval refuses is waiting on the document's lock: the interval is asked after the locked confirmation, so every update of a burst on the other process stalls this listener goroutine behind that process's append")
+		t.Fatalf("the notification the interval refuses is waiting on the document's lock: the interval is asked after the locked confirmation, so every update of a burst on the other process stalls the evictor's lane behind that process's append")
 	}
 	if pair.taskA.srv.GetDoc(pair.artifactID) == nil {
 		t.Fatal("the room the interval refused to evict is gone")
@@ -329,9 +312,9 @@ func TestANotificationRefusedByTheIntervalTakesNoDocumentLock(t *testing.T) {
 // document-changed lane once the window ends (wakeIn, woke). Left there, that room holds text
 // the store replaced for as long as it stays resident, which for a room with a tab in it is for
 // as long as the tab is open - roomIdleTimeout is time since the last peer left. The evictor runs
-// on the real room-sync listener here, so the lane's wake is what drives this and not a call of
-// the test's own, and the interval is measured on the evictor's clock, which this test holds
-// still over the burst and then moves past the window.
+// on room sync registered on a real listener hub here, so the lane's wake is what drives this
+// and not a call of the test's own, and the interval is measured on the evictor's clock, which
+// this test holds still over the burst and then moves past the window.
 func TestTheLastWriteOfABurstEvictsTheRoomWithoutAnotherNotification(t *testing.T) {
 	pair := newProcessPair(t)
 	evictor := newStaleRoomEvictor(pair.taskA)
@@ -533,18 +516,25 @@ func TestARoomThatKeepsGettingNoAnswerBacksOffPastTheListenersIdlePeriod(t *test
 // and not on a notification.
 func TestARoomLeftBehindWhileTheListenerWasDownIsEvictedOnTheReconnect(t *testing.T) {
 	pair := newProcessPair(t)
-	rs := roomSyncFor(newStaleRoomEvictor(pair.taskA))
-	var down atomic.Bool
-	down.Store(true)
-	dial := rs.dial
-	rs.dial = func(ctx context.Context) (*pgx.Conn, error) {
-		if down.Load() {
-			return nil, errors.New("the stale-room listener has no connection")
+	hub := newListenerHub(pair.taskA)
+	// The hub's first dial fails, so it is redialing, and its redial is held until the test lets
+	// it through. Held rather than failed again: the hub's backoff is its own
+	// (pglisten.RedialBackoff), and a dial that kept failing would push the reconnect out by it.
+	up := make(chan struct{})
+	var dials atomic.Int32
+	dial := hub.Dial
+	hub.Dial = func(ctx context.Context) (*pgx.Conn, error) {
+		if dials.Add(1) == 1 {
+			return nil, errors.New("the listener hub has no connection")
+		}
+		select {
+		case <-up:
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
 		return dial(ctx)
 	}
-	rs.backoff = func(int) time.Duration { return 5 * time.Millisecond }
-	notes, connected := startRoomSyncEvictor(t, rs)
+	notes, connected := startRoomSyncEvictor(t, hub, roomSyncFor(newStaleRoomEvictor(pair.taskA)))
 
 	// Committed on the other process while the evictor has no connection: its notification
 	// reaches nobody, and task A's room is left behind the head by it.
@@ -554,7 +544,7 @@ func TestARoomLeftBehindWhileTheListenerWasDownIsEvictedOnTheReconnect(t *testin
 		t.Fatal("task A's room left before the listener reconnected, so the reconnect proves nothing")
 	}
 
-	down.Store(false)
+	close(up)
 	select {
 	case <-connected:
 	case <-time.After(roomWait(t)):

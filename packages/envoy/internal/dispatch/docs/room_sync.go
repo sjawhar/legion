@@ -20,8 +20,10 @@ import (
 // work (INFRA-556). Postgres is the only channel between them (the message bus can be down while
 // the server serves), so each process holds two connections of its own beside its pools:
 //
-//   - one LISTEN connection (roomSync), on every channel below, named in pg_stat_activity as
-//     roomSyncApplicationPrefix and the process's id (Service.processID). Holding it is what
+//   - the process's one shared LISTEN connection (a pglisten.Hub that cmd/dispatch builds and
+//     every listening subsystem registers its channels on), on which the room-sync channels
+//     below are registered (Service.RegisterRoomSync). It is named in pg_stat_activity as
+//     ListenerApplicationPrefix and the process's id (Service.ProcessID). Holding it is what
 //     makes a process a member (roomSyncMembers): a process that dies drops it with its socket,
 //     so membership needs no heartbeat and nothing to collect.
 //   - one NOTIFY connection (roomSyncSender), which sends what a process announces outside a
@@ -40,7 +42,7 @@ import (
 const documentChangedChannel = "dispatch_doc_changed"
 
 // The room-sync channels beside documentChangedChannel. Each has a slot in roomSync.handlers;
-// a slot with no handler drops what arrives on its channel.
+// a slot with no handler is still listened on, and drops what arrives on its channel.
 const (
 	// documentAwarenessChannel carries a room's awareness (cursors, presence) between processes.
 	documentAwarenessChannel = "dispatch_doc_awareness"
@@ -52,28 +54,29 @@ const (
 	documentAnswerChannel = "dispatch_doc_answer"
 )
 
-// roomSyncApplicationPrefix and roomSyncSenderApplicationPrefix begin the application_name of a
-// process's room-sync LISTEN connection and of its NOTIFY sender; each is followed by the
-// process's id. The membership query matches the listener's prefix, space included, so the
-// sender ("dispatch-room-sync-sender ...") is never counted as a member. Postgres truncates an
-// application_name past 63 bytes, and the sender's, a 36-byte uuid included, is 62.
+// ListenerApplicationPrefix and roomSyncSenderApplicationPrefix begin the application_name of a
+// process's shared LISTEN connection (its pglisten.Hub, which cmd/dispatch dials under this
+// prefix and Service.ProcessID) and of its NOTIFY sender; each is followed by the process's id.
+// The membership query matches the listener's prefix, space included, so the sender
+// ("dispatch-sender ...") is never counted as a member. Postgres truncates an application_name
+// past 63 bytes; the listener's, a 36-byte uuid included, is 54, and the sender's 52.
 const (
-	roomSyncApplicationPrefix       = "dispatch-room-sync "
-	roomSyncSenderApplicationPrefix = "dispatch-room-sync-sender "
+	ListenerApplicationPrefix       = "dispatch-listener "
+	roomSyncSenderApplicationPrefix = "dispatch-sender "
 )
 
-// roomSyncMembersStatement reads every process that holds a room-sync LISTEN connection to this
+// roomSyncMembersStatement reads every process that holds its shared LISTEN connection to this
 // database. Every Dispatch process connects as one database role, so each sees the others'
 // application_name.
 const roomSyncMembersStatement = `
 	select application_name from pg_stat_activity
-	where datname = current_database() and application_name like '` + roomSyncApplicationPrefix + `%'
+	where datname = current_database() and application_name like '` + ListenerApplicationPrefix + `%'
 	order by application_name`
 
-// roomSyncMembers returns the ids (Service.processID) of the processes whose room-sync listener
-// holds a connection right now, this process's own included while its listener does. It reads
+// roomSyncMembers returns the ids (Service.ProcessID) of the processes whose shared listener
+// holds a connection right now, this process's own included while its hub does. It reads
 // through q, so a caller inside a transaction passes that transaction and takes no second
-// connection of the pool. A process whose listener is redialing is not a member until its next
+// connection of the pool. A process whose hub is redialing is not a member until its next
 // LISTEN stands.
 func roomSyncMembers(ctx context.Context, q Queryer) ([]string, error) {
 	rows, err := q.Query(ctx, roomSyncMembersStatement)
@@ -86,15 +89,15 @@ func roomSyncMembers(ctx context.Context, q Queryer) ([]string, error) {
 	}
 	members := make([]string, 0, len(names))
 	for _, name := range names {
-		members = append(members, strings.TrimPrefix(name, roomSyncApplicationPrefix))
+		members = append(members, strings.TrimPrefix(name, ListenerApplicationPrefix))
 	}
 	return members, nil
 }
 
 // roomSyncHandler is one room-sync channel and what runs its notifications. Every func runs on
-// the channel's own goroutine (roomSyncLane), never on the listener's, so a handler that waits -
-// on a lock, on the database - delays only its own channel's notifications, and the listener
-// keeps reading and pinging its connection.
+// the channel's own goroutine (roomSyncLane), never on the hub's, so a handler that waits - on a
+// lock, on the database - delays only its own channel's notifications, and the hub keeps reading
+// and pinging the process's listener connection for every subsystem registered on it.
 type roomSyncHandler struct {
 	channel string
 	// notified runs once per notification on channel, in the order they arrived; nil drops them.
@@ -109,20 +112,14 @@ type roomSyncHandler struct {
 	woke     func(ctx context.Context)
 }
 
-// roomSync is a process's room-sync listener: one pglisten.Listener on one dedicated connection
-// for every room-sync channel. OnNotify only queues a notification on its channel's lane; the
-// handlers run there (handlers).
+// roomSync is a process's room-sync handlers, registered on the process's listener hub
+// (pglisten.Hub) for every room-sync channel. What the hub calls only queues a notification on
+// its channel's lane; the handlers run there (handlers).
 type roomSync struct {
 	service *Service
 	// evictor decides documentChangedChannel's notifications: it closes a room another
 	// process's write left behind the stored head.
 	evictor *staleRoomEvictor
-	// dial, listenIdle, pingTimeout and backoff are the listener's (pglisten.Listener); dial is
-	// the store's Dedicated connection named for this process's membership, and a test sets them
-	// otherwise before run.
-	dial                    func(ctx context.Context) (*pgx.Conn, error)
-	listenIdle, pingTimeout time.Duration
-	backoff                 func(attempt int) time.Duration
 	// awareness, issueOpenChanged, query and answer handle the four channels beside
 	// documentChangedChannel (handlers): documentAwarenessChannel, issueOpenChangedChannel,
 	// documentQueryChannel and documentAnswerChannel. Nil drops that channel's notifications, and
@@ -135,25 +132,29 @@ type roomSync struct {
 }
 
 func newRoomSync(service *Service) *roomSync {
-	name := roomSyncApplicationPrefix + service.processID
-	return &roomSync{
-		service: service,
-		evictor: newStaleRoomEvictor(service),
-		dial: func(ctx context.Context) (*pgx.Conn, error) {
-			return service.store.Pool.Dedicated(ctx, name)
-		},
-	}
+	return &roomSync{service: service, evictor: newStaleRoomEvictor(service)}
 }
 
-// RunRoomSync holds this process's room-sync listener until ctx ends, and returns once it and
-// every handler running off it have stopped. It is per-process by design: it serves the rooms
-// resident in this process, and its connection is this process's membership (roomSyncMembers).
-func (s *Service) RunRoomSync(ctx context.Context) {
-	newRoomSync(s).run(ctx)
+// ProcessID is this process's id among the envoy-dispatch processes on its database, minted once
+// when the service is built. cmd/dispatch names the process's listener connection with it, after
+// ListenerApplicationPrefix, which is what makes the process a member (roomSyncMembers).
+func (s *Service) ProcessID() string {
+	return s.processID
 }
 
-// handlers is every channel the room-sync listener LISTENs on and what runs each one's
-// notifications: the one place a channel is tied to its handler.
+// RegisterRoomSync registers every room-sync channel on hub, the process's one shared listener,
+// and returns run, which runs the handlers off it. hub must not be running yet (pglisten.Hub
+// takes no registration once Run starts). run does the handlers' work until ctx ends and returns
+// once every one of them has stopped; the caller runs it beside hub.Run. Notifications the hub
+// hears before run starts wait on their lanes for it. It is per-process by design: it serves the
+// rooms resident in this process, and the hub's connection is this process's membership
+// (roomSyncMembers).
+func (s *Service) RegisterRoomSync(hub *pglisten.Hub) (run func(ctx context.Context)) {
+	return newRoomSync(s).register(hub)
+}
+
+// handlers is every channel room sync LISTENs on and what runs each one's notifications: the one
+// place a channel is tied to its handler.
 func (r *roomSync) handlers() []roomSyncHandler {
 	return []roomSyncHandler{
 		{
@@ -171,8 +172,8 @@ func (r *roomSync) handlers() []roomSyncHandler {
 }
 
 // connected is what runs after each LISTEN stands, on documentChangedChannel's lane: every
-// notification sent while the listener had no connection reached nobody and is never sent again,
-// so each room this process has loaded is examined again (staleRoomEvictor.sweep). The test hook
+// notification sent while the hub had no connection reached nobody and is never sent again, so
+// each room this process has loaded is examined again (staleRoomEvictor.sweep). The test hook
 // runs after it, so a test that waits on the hook waits for the sweep too.
 func (r *roomSync) connected(ctx context.Context) {
 	r.evictor.sweep(ctx)
@@ -181,58 +182,49 @@ func (r *roomSync) connected(ctx context.Context) {
 	}
 }
 
-// run listens until ctx ends, then waits for every lane to return. Each handler with work to do
-// gets a lane of its own; a channel whose handler is all nil gets none, and the listener drops its
-// notifications as they arrive.
-func (r *roomSync) run(ctx context.Context) {
-	ctx = store.WithTransactionTracking(ctx)
+// register registers every handler's channel on hub and returns what runs the lanes. Each handler
+// with work to do gets a lane of its own, and what the hub calls - on its own goroutine, which
+// must not block - only queues work there. A channel whose handler is all nil gets no lane: it is
+// still listened on, and its notifications are dropped as they arrive.
+func (r *roomSync) register(hub *pglisten.Hub) (run func(ctx context.Context)) {
 	handlers := r.handlers()
-	channels := make([]string, 0, len(handlers))
-	lanes := make(map[string]*roomSyncLane, len(handlers))
-	var running sync.WaitGroup
+	lanes := make([]*roomSyncLane, 0, len(handlers))
 	for _, handler := range handlers {
-		channels = append(channels, handler.channel)
 		if handler.notified == nil && handler.connected == nil && handler.woke == nil {
+			hub.Handle(handler.channel, func(string) {})
 			continue
 		}
 		lane := newRoomSyncLane(handler)
-		lanes[handler.channel] = lane
-		running.Add(1)
-		go func() {
-			defer running.Done()
-			lane.run(ctx)
-		}()
+		lanes = append(lanes, lane)
+		if notified := handler.notified; notified != nil {
+			hub.Handle(handler.channel, func(payload string) {
+				lane.push(func(ctx context.Context) { notified(ctx, payload) })
+			})
+		} else {
+			hub.Handle(handler.channel, func(string) {})
+		}
+		if connected := handler.connected; connected != nil {
+			hub.OnConnected(func() { lane.push(connected) })
+		}
 	}
-	listener := &pglisten.Listener{
-		Owner:       "dispatch",
-		Dial:        r.dial,
-		Channels:    channels,
-		ListenIdle:  r.listenIdle,
-		PingTimeout: r.pingTimeout,
-		Backoff:     r.backoff,
-		OnConnected: func() {
-			for _, lane := range lanes {
-				if connected := lane.handler.connected; connected != nil {
-					lane.push(connected)
-				}
-			}
-		},
-		OnNotify: func(channel, payload string) {
-			lane := lanes[channel]
-			if lane == nil || lane.handler.notified == nil {
-				return
-			}
-			notified := lane.handler.notified
-			lane.push(func(ctx context.Context) { notified(ctx, payload) })
-		},
+	return func(ctx context.Context) {
+		ctx = store.WithTransactionTracking(ctx)
+		var running sync.WaitGroup
+		for _, lane := range lanes {
+			running.Add(1)
+			go func() {
+				defer running.Done()
+				lane.run(ctx)
+			}()
+		}
+		running.Wait()
 	}
-	listener.Run(ctx)
-	running.Wait()
 }
 
 // roomSyncLane runs one channel's work in arrival order on a goroutine of its own. Its queue has
-// no bound, so the listener never waits on a handler: it is as long as the notifications the
-// handler has yet to reach.
+// no bound, so the hub never waits on a handler: it is as long as the notifications the handler
+// has yet to reach. The evictor's timed wake (roomSyncHandler.nextWake, woke) is this lane's own
+// timer too, so no part of the evictor runs on the hub's goroutine.
 type roomSyncLane struct {
 	handler roomSyncHandler
 	mu      sync.Mutex
@@ -446,7 +438,7 @@ const staleRoomEvictInterval = 2 * time.Second
 // writer holds that lock, the other process's append among them. Every decision runs on that one
 // lane - each notification, the sweep after each LISTEN, and each wake - so no two decisions of
 // the evictor ever run side by side, and one such wait is every other room's document-changed
-// notification waiting too. The listener's own goroutine waits for none of it: it only queues.
+// notification waiting too. The hub's own goroutine waits for none of it: it only queues.
 //
 // The locked confirmation is real and it stays, because without it a write of this process's
 // own, between its commit and its own cursor advance, reads as another process's and a healthy
@@ -493,10 +485,10 @@ func newStaleRoomEvictor(service *Service) *staleRoomEvictor {
 }
 
 // sweep re-examines every room this process has loaded; it runs after each LISTEN stands
-// (roomSync.connected). It covers the listener's own window rather than leaving the room behind
+// (roomSync.connected). It covers the hub's own window rather than leaving the room behind
 // to its idle timeout - roomIdleTimeout is how long a room stays resident after its last peer
 // leaves, so a room with a browser in it never reaches it. The notifications sent while the
-// listener had no connection - a redial backs off as far as thirty seconds
+// hub had no connection - a redial backs off as far as thirty seconds
 // (pglisten.RedialBackoff) - each reached nobody, nothing sends them again, and a document nobody
 // writes again notifies nobody again. service.roomLoads is every room this process has loaded,
 // and nothing here takes an entry out of it: an entry goes when its document is collected and not
@@ -822,8 +814,8 @@ func (e *staleRoomEvictor) recordEviction(artifactID string) {
 // process. At the ceiling it costs one wake a minute instead, which is as often as a room
 // nothing is writing to needs looking at.
 //
-// The wake is a timer on documentChangedChannel's lane (roomSyncLane.run), not on the listener's
-// goroutine, so it neither cuts short nor stands in for the listener's ping: that ping keeps to
+// The wake is a timer on documentChangedChannel's lane (roomSyncLane.run), not on the hub's
+// goroutine, so it neither cuts short nor stands in for the hub's ping: that ping keeps to
 // the time since the connection last proved a round trip whatever the lane does.
 const staleRoomRetryBackoffMax = time.Minute
 

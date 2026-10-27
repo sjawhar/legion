@@ -4,52 +4,94 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/pglisten"
 )
 
-// runRoomSync runs rs until the test ends or stop is called, and returns once its first LISTEN
-// stands: a notification sent before that reaches nobody. stop returns once rs has returned.
-func runRoomSync(t *testing.T, rs *roomSync) (stop func()) {
+// newListenerHub is service's process listener as cmd/dispatch builds it: a pglisten.Hub on a
+// dedicated connection named for service's membership. A test may wrap its Dial before it runs it
+// (startRoomSync).
+func newListenerHub(service *Service) *pglisten.Hub {
+	return &pglisten.Hub{
+		Owner: "dispatch test",
+		Dial: func(ctx context.Context) (*pgx.Conn, error) {
+			return service.store.Pool.Dedicated(ctx, ListenerApplicationPrefix+service.ProcessID())
+		},
+	}
+}
+
+// startRoomSync registers rs on hub and runs both, as cmd/dispatch does, until the test ends or
+// stop is called. listening receives a token after each LISTEN's connected work has run
+// (roomSync.connected); it waits for none, because a test whose dial is down at the start has to
+// write before any LISTEN stands. stop returns once the hub and every lane have returned.
+func startRoomSync(t *testing.T, hub *pglisten.Hub, rs *roomSync) (listening <-chan struct{}, stop func()) {
 	t.Helper()
-	listening := make(chan struct{}, 1)
+	connected := make(chan struct{}, 4)
 	rs.listening = func() {
 		select {
-		case listening <- struct{}{}:
+		case connected <- struct{}{}:
 		default:
 		}
 	}
+	run := rs.register(hub)
 	ctx, cancel := context.WithCancel(context.Background())
+	var running sync.WaitGroup
+	running.Add(2)
+	go func() {
+		defer running.Done()
+		hub.Run(ctx)
+	}()
+	go func() {
+		defer running.Done()
+		run(ctx)
+	}()
 	done := make(chan struct{})
 	go func() {
-		defer close(done)
-		rs.run(ctx)
+		running.Wait()
+		close(done)
 	}()
+	var once sync.Once
 	stop = func() {
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			t.Error("the room-sync listener did not return within 10s of its context ending")
-		}
+		once.Do(func() {
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Error("the room sync and its listener hub did not return within 10s of their context ending")
+			}
+		})
 	}
 	t.Cleanup(stop)
+	return connected, stop
+}
+
+// runRoomSync runs rs on a listener hub of its service's (newListenerHub, startRoomSync) and
+// returns once its first LISTEN stands: a notification sent before that reaches nobody. stop
+// returns once the hub and rs have returned.
+func runRoomSync(t *testing.T, rs *roomSync) (stop func()) {
+	t.Helper()
+	listening, stop := startRoomSync(t, newListenerHub(rs.service), rs)
 	select {
 	case <-listening:
 	case <-time.After(roomWait(t)):
-		t.Fatal("the room-sync listener never listened")
+		t.Fatal("the room sync's listener hub never listened")
 	}
 	return stop
 }
 
-// Membership is the set of processes holding a room-sync LISTEN connection, read from
-// pg_stat_activity by the name that connection carries. Two processes on one database, each on a
-// pool of its own, each see both ids, their own included; the NOTIFY sender, a connection of its
-// own as well, is never counted; and a process whose listener stops leaves at once, with nothing
-// to collect, because its connection is gone.
+// Membership is the set of processes holding their shared listener connection (the
+// pglisten.Hub room sync registers on), read from pg_stat_activity by the name that connection
+// carries. Two processes on one database, each on a pool of its own, each see both ids, their
+// own included; the NOTIFY sender, a connection of its own as well, is never counted; and a
+// process whose listener stops leaves at once, with nothing to collect, because its connection is
+// gone.
 func TestEveryProcessesRoomSyncListenerIsAMemberUntilItStops(t *testing.T) {
 	ctx := context.Background()
 	database := storetest.Open(t)
