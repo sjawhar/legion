@@ -958,7 +958,7 @@ advisory locks (`pg_try_advisory_*` included) or `pg_sleep`, nor a function that
 given as text (`query_to_xml` and its kin, `ts_stat`, `ts_rewrite`): `pgmigrate.Load` refuses a
 census naming any of them, bare or quoted and in any case, anywhere outside its comments and
 string literals, and refuses a Unicode escape (`U&"…"`, `U&'…'`) outright, since one can spell any
-name and no census needs it. `Load` finds the comments and literals as Postgres 16's lexer does
+name and no census needs it. `Load` finds the comments and literals as Postgres 18's lexer does
 (nested comments, `E'…'` escapes, continued and dollar-quoted literals), and the census runs with
 `standard_conforming_strings` on, so Postgres reads its literals the same way. Review is the
 control past that, since any non-zero integer a census answers is printed.

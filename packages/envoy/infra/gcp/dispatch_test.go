@@ -126,7 +126,7 @@ func runDispatchNamed(t *testing.T, name string, args *gcp.DispatchArgs, provide
 func TestDispatchSettingsApplyDefaults(t *testing.T) {
 	settings, err := gcp.ResolveDispatch(dispatchArgs())
 	require.NoError(t, err)
-	require.Equal(t, "POSTGRES_16", settings.DatabaseVersion)
+	require.Equal(t, "POSTGRES_18", settings.DatabaseVersion)
 	require.Equal(t, "db-custom-1-3840", settings.DatabaseTier)
 	require.True(t, settings.DeletionProtection)
 	require.Equal(t, "dispatch", settings.Namespace)
@@ -1151,6 +1151,30 @@ func TestDispatchProtectsItsInstanceServerSide(t *testing.T) {
 			policy = "PREVENT"
 		}
 		require.Equal(t, policy, m.One(t, "gcp:sql/database:Database").Inputs.Mappable()["deletionPolicy"])
+	}
+}
+
+// The instance runs the major databaseVersion names, and POSTGRES_18 when it is unset; the
+// settings the component resolves name the same version.
+func TestDispatchInstanceRunsTheDatabaseVersion(t *testing.T) {
+	for _, row := range []struct {
+		name    string
+		version *string
+		want    string
+	}{
+		{"unset", nil, "POSTGRES_18"},
+		{"POSTGRES_16", pulumi.StringRef("POSTGRES_16"), "POSTGRES_16"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			args := dispatchArgs()
+			args.DatabaseVersion = row.version
+			settings, err := gcp.ResolveDispatch(args)
+			require.NoError(t, err)
+			require.Equal(t, row.want, settings.DatabaseVersion)
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+			require.Equal(t, row.want, m.One(t, "gcp:sql/databaseInstance:DatabaseInstance").Inputs.Mappable()["databaseVersion"])
+		})
 	}
 }
 

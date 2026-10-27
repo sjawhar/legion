@@ -2,7 +2,7 @@ package pgmigrate
 
 import "strings"
 
-// The scanner here reads SQL text as Postgres 16's lexer does (src/backend/parser/scan.l) with
+// The scanner here reads SQL text as Postgres 18's lexer does (src/backend/parser/scan.l) with
 // standard_conforming_strings on: which kind of token starts at each byte, and where a comment, a
 // string literal, a quoted identifier or a dollar-quoted literal ends. Two readers share it:
 // checkCensus's reading of a census file (censusTokens) and the census's reading of a migration
@@ -107,9 +107,9 @@ func nextSQLToken(text string, i int) (sqlTokenKind, int, string) {
 	return sqlOther, i + 1, ""
 }
 
-// isSQLSpace is scan.l's space: [ \t\n\r\f].
+// isSQLSpace is scan.l's space: [ \t\n\r\f\v].
 func isSQLSpace(c byte) bool {
-	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f'
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'
 }
 
 func isDigit(c byte) bool { return '0' <= c && c <= '9' }
@@ -183,7 +183,7 @@ func quoteContinues(text string, i int) (int, bool) {
 		case c == '\n' || c == '\r':
 			newline = true
 			i++
-		case c == ' ' || c == '\t' || c == '\f':
+		case c == ' ' || c == '\t' || c == '\f' || c == '\v':
 			i++
 		case c == '-' && i+1 < len(text) && text[i+1] == '-':
 			i = endOfLineComment(text, i)

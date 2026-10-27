@@ -796,6 +796,17 @@
 
 ### Changed
 
+- **Breaking:** `envoy-infra:gcp:Dispatch`'s Cloud SQL instance runs PostgreSQL 18 by default:
+  `databaseVersion` defaults to `POSTGRES_18` from this release on, where it defaulted to
+  `POSTGRES_16`. A stack that leaves `databaseVersion` unset is upgraded in place from its current
+  major version to PostgreSQL 18 at its first `pulumi up` after the `envoy-infra` package `version`
+  it pins moves to this release or later. That is a Cloud SQL major-version upgrade: Cloud SQL
+  makes the instance unavailable while it performs the upgrade, so Dispatch is down for that time,
+  and the upgrade cannot be reversed in place. Cloud SQL makes a pre-upgrade backup immediately
+  before it starts, and the way back to the earlier version is restoring that backup to a new
+  instance running it
+  ([Upgrade the database major version in-place](https://cloud.google.com/sql/docs/postgres/upgrade-major-db-version-inplace)).
+  To keep PostgreSQL 16, set `databaseVersion: POSTGRES_16` before moving the pin.
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a

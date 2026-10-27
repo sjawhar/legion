@@ -22,7 +22,7 @@ import (
 const dispatchType = "envoy-infra:gcp:Dispatch"
 
 const (
-	defaultDispatchDatabaseVersion = "POSTGRES_16"
+	defaultDispatchDatabaseVersion = "POSTGRES_18"
 	defaultDispatchDatabaseTier    = "db-custom-1-3840"
 	defaultDispatchNamespace       = "dispatch"
 	defaultDispatchReplicas        = 1

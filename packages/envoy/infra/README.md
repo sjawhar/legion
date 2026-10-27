@@ -137,7 +137,7 @@ the listener may dial the proxy, and the app alone may dial the listener.
 | VPC, subnetwork, router and Cloud NAT | Private Autopilot nodes can pull images and reach the tailnet control plane without public node addresses. |
 | Private services access range and connection | Cloud SQL receives a private IP on the component's VPC. |
 | Autopilot cluster | Enables the Secret Manager add-on, Secret Sync with rotation (GKE 1.33 or later; a new Secret Manager version reaches a synced Kubernetes Secret whose SecretProviderClass reads `versions/latest` without an apply), and Workload Identity. |
-| Cloud SQL instance, database, user and generated password | PostgreSQL 16, private IP only, automated backups and point-in-time recovery. |
+| Cloud SQL instance, database, user and generated password | PostgreSQL 18 by default (`databaseVersion`), private IP only, automated backups and point-in-time recovery. |
 | Kubernetes namespace (not with `existingNamespace`), service account, RBAC, Secrets, ConfigMap and SecretProviderClass | The pods' configuration, tailnet state permission, generated application secrets, the listener's generated bearer in a Secret of its own (`<hostname>-listener`, one key `ENVOY_API_TOKEN`), the Serve configuration, and the NATS seed mount (and, with `azureEmbedKeySecret`, a second SecretProviderClass, `<hostname>-azure-embed-key`, for the Azure embedder's key). |
 | Three ClusterIP Services and three NetworkPolicies | Dispatch's API on port 8766, to the `allowedNamespaces` and the front door; the front door's SOCKS5 proxy on port 1055, to the app and the listener; the listener's API on port 9020, to the app. Each policy admits those sources alone among pods (Kubernetes still admits each pod's own node). |
 | Three Deployments | The app at `replicas` pods, `Recreate` at one and `RollingUpdate` (`maxUnavailable: 0`, `maxSurge: 1`) above one, with a 35-second termination grace period — a five-second pre-stop wait and the thirty seconds `envoy-dispatch`'s shutdown is built for; the front door and the listener at one pod each, always `Recreate`. Every container has equal requests and limits. All three pod templates carry `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`: without it the cluster autoscaler evicts these pods whenever it consolidates a node, and the one-replica front door takes Dispatch off the tailnet until its replacement is ready. Autopilot honours the annotation as [extended-duration](https://cloud.google.com/kubernetes-engine/docs/how-to/extended-duration-pods) protection: for up to seven days, from scale-down and node auto-upgrade only (node repair, Compute Engine maintenance and drains still evict), with each such pod on a node of its own whenever possible and raised to at least 500m CPU and 512Mi memory, so the front door and the listener each request 500m and 512Mi. |
@@ -149,7 +149,7 @@ The required plain inputs are `region`, `hostname`, `tailnetDnsName`, `tags`, th
 digest-pinned images, `signInClientId`, and `signInDomain`. `tailnetAuthKey`,
 `natsUrl`, `natsSeedSecret`, and `signInClientSecret` are Pulumi inputs and may come from another
 resource or stack. `tailnetAuthKey` and `signInClientSecret` are secrets. `databaseVersion`
-defaults to `POSTGRES_16`, `databaseTier` to `db-custom-1-3840`, `namespace` to `dispatch`, and
+defaults to `POSTGRES_18`, `databaseTier` to `db-custom-1-3840`, `namespace` to `dispatch`, and
 `deletionProtection` to `true`; it sets both Pulumi's own guard and the Cloud SQL instance's
 `deletionProtectionEnabled`, which refuses a delete from the API or the console too, and the
 `dispatch` database's `deletionPolicy` `PREVENT` (otherwise `DELETE`), which keeps an instance
@@ -163,6 +163,17 @@ Tailscale state Secret included: first remove the Namespace from the stack's sta
 for a cluster that already exists: on a first apply the component creates the cluster, so no other
 program can have made the namespace yet. `allowedNamespaces`, empty by default, each a DNS label,
 names the in-cluster namespaces the NetworkPolicy admits on port 8766.
+
+The `databaseVersion` default is `POSTGRES_18` from this release on; earlier releases defaulted to
+`POSTGRES_16`. A stack that leaves `databaseVersion` unset is upgraded in place from its current
+major version to PostgreSQL 18 at its first `pulumi up` after the `envoy-infra` package `version`
+it pins moves to this release or later. That is a Cloud SQL major-version upgrade: Cloud SQL makes
+the instance unavailable while it performs the upgrade, so Dispatch is down for that time, and the
+upgrade cannot be reversed in place. Cloud SQL makes a pre-upgrade backup immediately before it
+starts, and the way back to the earlier version is restoring that backup to a new instance running
+it ([Upgrade the database major version
+in-place](https://cloud.google.com/sql/docs/postgres/upgrade-major-db-version-inplace)). To keep
+PostgreSQL 16, set `databaseVersion: POSTGRES_16` before moving the pin.
 
 `replicas` is the app Deployment's pod count, 1 by default; a value below 1 is refused by name
 before the component registers a resource. At 1 the app Deployment is recreated, stopping its pod
