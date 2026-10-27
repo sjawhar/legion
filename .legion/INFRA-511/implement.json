@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-511",
-  "completed": "2026-10-27T07:10:00Z",
+  "completed": "2026-10-27T07:50:00Z",
   "proof": [
+    {
+      "criterion": "Tester round 5: after /new, the operator sees the refused re-claim warning and the hand-over notice for a /new during the start claim, both after Oh My Pi's /new flow resets the transcript",
+      "surface": "real interactive Oh My Pi 18.12.2 under a pseudo-terminal with both plugins of this branch, stand-in daemon/listener/gateway, real NATS",
+      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:4222 bun test ./extensions/controller-start-omp.test.ts (3 runs); bun test extensions/legion.test.ts src/",
+      "observed": "8 pass x3: the tester's 'the operator sees a refused re-claim after /new' (unmodified) shows 're-claiming the controller for this session failed' and 'capability revoked' after the reset; the new 'the operator sees the hand-over notice after a /new during the start claim' shows 'the session changed while the controller claim ran' together with 'New session started', the re-claim registers the new session and its first user message is the start message. Unit suite 499 pass",
+      "headSha": "d42147b4f44d135c1f180110a96086d61480ad5d",
+      "negativeControl": "controller-session.ts from cab83c33 (previous): both real-binary cases fail, timing out with only '\u2714 New session started' on screen"
+    },
     {
       "criterion": "Review round 2 (narrowed): a /new during the start claim keeps the registration and the start message in one session with a true notice; a queued /legion-controller-start says it waits; the re-claim warning follows its own registration; the AGENTS.md row matches claimComplete",
       "surface": "pi-legion unit suite with the real extension wiring and stand-in daemon/listener, and the real interactive Oh My Pi 18.12.2 under a pseudo-terminal with both plugins and real NATS",
@@ -66,7 +74,8 @@
     ".github/workflows/envoy-and-contracts.yaml: NATS service (pinned by digest) and LEGION_TEST_NATS_URL for the pi-legion job",
     "docs: root AGENTS.md, packages/pi-legion/AGENTS.md, packages/pi-shared/AGENTS.md, docs/kubernetes.md, docs/site troubleshooting, scripts/e2e/README.md and two script comments, pi-legion/pi-envoy/claude-envoy CHANGELOGs",
     "Round 2: packages/pi-legion/src/controller-session.ts (claims serialised through one in-flight claim; /legion-controller-start waits for it and decides again), packages/pi-legion/extensions/legion.test.ts (test for /legion-claim-controller during the start claim), packages/pi-legion/AGENTS.md",
-    "Review round 1: packages/pi-legion/src/controller-session.ts (registration recorded before the send, claimComplete, two-form warning, no mark for a follow-up send, mark names the session current at the send, one promise chain, operatorLaunchedController, logger), packages/pi-shared/src/{interface.ts (startupTurn one optional slot), startup-turn.ts, pi-types.ts (CommandContext.isIdle required)}, packages/pi-legion/extensions/{legion.test.ts, controller-start-omp.test.ts}, packages/pi-legion/AGENTS.md, packages/pi-shared/AGENTS.md, packages/pi-legion/CHANGELOG.md, skills/legion-controller/references/session.md and its claude-envoy copy"
+    "Review round 1: packages/pi-legion/src/controller-session.ts (registration recorded before the send, claimComplete, two-form warning, no mark for a follow-up send, mark names the session current at the send, one promise chain, operatorLaunchedController, logger), packages/pi-shared/src/{interface.ts (startupTurn one optional slot), startup-turn.ts, pi-types.ts (CommandContext.isIdle required)}, packages/pi-legion/extensions/{legion.test.ts, controller-start-omp.test.ts}, packages/pi-legion/AGENTS.md, packages/pi-shared/AGENTS.md, packages/pi-legion/CHANGELOG.md, skills/legion-controller/references/session.md and its claude-envoy copy",
+    "Tester round 5: packages/pi-legion/src/controller-session.ts (re-claim notices deferred to after the session_switch handler via the host timer; startHandedOver), packages/pi-legion/extensions/{legion.test.ts (fixture timer), controller-start-omp.test.ts (register hook takes the body and may hold; onListener hook; new hand-over case)}, packages/pi-legion/AGENTS.md, CHANGELOG.md"
   ],
   "trickyParts": [
     "Sending the start message after the Envoy role claim was flaky (4/30): the listener forwards a role-lane card as soon as it records the role, which can reach the session before claimEnvoyRole resolves; the send now happens right after claims/register, before the role claim and the subscription.",
