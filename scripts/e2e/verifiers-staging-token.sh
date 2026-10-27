@@ -2,9 +2,11 @@
 # LEGION-208's live proof of the OIDC verifiers: the branch's own `dispatch` and `listener`
 # binaries authenticate a real projected service-account token minted by the staging EKS
 # cluster, refuse a token minted for the other binary's audience, refuse a request with no
-# bearer, and still accept their shared tokens. It also proves the two refusals that keep the
-# feature honest: a half-configured OIDC pair and an issuer that does not answer both stop the
-# boot, naming what is wrong.
+# bearer, and still accept their shared tokens. It also proves what keeps the feature honest: a
+# half-configured OIDC pair stops either boot, naming the missing variable; an issuer that does
+# not answer stops the listener's boot, naming that issuer; and Dispatch, which reads no issuer at
+# boot, starts and serves against one that does not answer, answering a JWT-shaped bearer
+# 503 OIDC_ISSUER_UNAVAILABLE until it has discovered it.
 #
 # Every step is fatal and names itself — no `|| true` outside the cleanup a trap must never
 # fail on, and every wait is bounded. The run leaves no container, no process, and nothing in
@@ -63,6 +65,9 @@ claims_json() {
 claims() {
   claims_json "$1" | jq -r '"iss=\(.iss) aud=\(.aud | join(",")) sub=\(.sub) exp=\(.exp | todate)"'
 }
+
+# b64url encodes stdin as base64url without padding, a JWT segment's encoding.
+b64url() { base64 | tr -d '\n=' | tr '+/' '-_'; }
 
 # request <url> [token] → the HTTP status on stdout, the body in $body. curl reads the
 # Authorization header from a config document on stdin, so the token is never an argument.
@@ -192,15 +197,48 @@ expect_refusal "dispatch, issuer without audience" "$work/refusal-dispatch-pair.
   fail "the listener booted with ENVOY_OIDC_AUDIENCE and no ENVOY_OIDC_ISSUER"
 expect_refusal "listener, audience without issuer" "$work/refusal-listener-pair.log" \
   "ENVOY_OIDC_ISSUER is required when ENVOY_OIDC_AUDIENCE is set"
-# An issuer that does not answer stops the boot naming the issuer it could not discover.
-"${dispatch_env[@]}" DISPATCH_OIDC_ISSUER="$absent_issuer" DISPATCH_OIDC_AUDIENCE=dispatch \
-  "$work/dispatch" >"$work/refusal-dispatch-issuer.log" 2>&1 &&
-  fail "dispatch booted against an issuer that does not answer"
-expect_refusal "dispatch, issuer that does not answer" "$work/refusal-dispatch-issuer.log" "$absent_issuer"
+# The listener reads its issuer at boot: one that does not answer stops the boot, naming it.
 "${listener_env[@]}" ENVOY_OIDC_ISSUER="$absent_issuer" ENVOY_OIDC_AUDIENCE=envoy \
   "$work/listener" >"$work/refusal-listener-issuer.log" 2>&1 &&
   fail "the listener booted against an issuer that does not answer"
 expect_refusal "listener, issuer that does not answer" "$work/refusal-listener-issuer.log" "$absent_issuer"
+
+echo "== dispatch serves against an issuer that does not answer"
+# INFRA-555: Dispatch reads no issuer at boot. It migrates, binds and serves, discovers the issuer
+# in the background, and until it has, /healthz reports service_tokens false and a JWT-shaped
+# bearer is 503 OIDC_ISSUER_UNAVAILABLE — never a 401, since the token was not judged.
+"${dispatch_env[@]}" DISPATCH_OIDC_ISSUER="$absent_issuer" DISPATCH_OIDC_AUDIENCE=dispatch \
+  "$work/dispatch" >"$work/dispatch-absent-issuer.log" 2>&1 &
+dispatch_pid=$!
+for i in $(seq 1 100); do
+  curl -fs -o "$body" --max-time 5 "http://127.0.0.1:$dispatch_port/healthz" && break
+  kill -0 "$dispatch_pid" 2>/dev/null ||
+    fail "dispatch exited during boot against an issuer that does not answer" "$work/dispatch-absent-issuer.log"
+  [ "$i" = 100 ] &&
+    fail "dispatch never answered /healthz against an issuer that does not answer" "$work/dispatch-absent-issuer.log"
+  sleep 0.3
+done
+expect_body "dispatch's /healthz against an issuer that does not answer" '.service_tokens == false'
+echo "  /healthz → 200, service_tokens false"
+# Three base64url segments, so the bearer takes the verifier's path (oidc.LooksLikeJWT) rather than
+# the token lookups'. It starts eyJ as a real token does, which the log check below looks for.
+unjudged_token="$(printf '{"alg":"RS256","typ":"JWT"}' | b64url).$(printf '{"aud":["dispatch"]}' | b64url).$(printf 'unsigned' | b64url)"
+status=$(request "http://127.0.0.1:$dispatch_port/api/v1/whoami" "$unjudged_token")
+expect_status "a JWT-shaped bearer before the issuer is discovered" 503 "$status"
+expect_body "a JWT-shaped bearer before the issuer is discovered" '.code == "OIDC_ISSUER_UNAVAILABLE"'
+echo "    body: $(redact <"$body")"
+# Stopped by its own pid, within the 30 s stopGrace it builds its shutdown for, and judged: a
+# SIGTERM is a clean stop, so any other exit status is a defect. The boot below reuses its port.
+kill -TERM "$dispatch_pid"
+for i in $(seq 1 100); do
+  kill -0 "$dispatch_pid" 2>/dev/null || break
+  [ "$i" = 100 ] && fail "dispatch did not stop within 30 s of its SIGTERM" "$work/dispatch-absent-issuer.log"
+  sleep 0.3
+done
+wait "$dispatch_pid" || fail "dispatch exited $? on its SIGTERM" "$work/dispatch-absent-issuer.log"
+dispatch_pid=
+grep -q 'eyJ' "$work/dispatch-absent-issuer.log" && fail "dispatch's log repeats the JWT-shaped bearer"
+echo "  stopped on SIGTERM with status 0; its log repeats no token"
 
 echo "== mint two real projected service-account tokens"
 ns="${VERIFIERS_E2E_NAMESPACE:-legion}"
