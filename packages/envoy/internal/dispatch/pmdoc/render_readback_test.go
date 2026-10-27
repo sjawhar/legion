@@ -282,10 +282,15 @@ func TestBareURLMarkdownComesBackFromAWriteAsWritten(t *testing.T) {
 // www URL; where its text opens with an email, which the tokenizer tries first (isBareWWWLink); and
 // in a run whose bare writing does not read back as written, because what follows it continues it -
 // a letter outside ASCII, a backslash, another www link's label - where the run is written again
-// with every www link explicit (runSpelling.angleURLs).
+// with every www link explicit (runSpelling.angleURLs). Where what follows it is plain text opening
+// with an address only the tokenizer reads (`http://localhost`), the run is written again with
+// every bare URL explicit and that address's colon escaped, a scheme's URL as an autolink.
 func TestAWWWLinkTheBareTextWouldLoseIsWrittenAsALink(t *testing.T) {
 	link := func(text string) *Node {
 		return &Node{Type: "text", Text: text, Marks: []Mark{{Type: "link", Attrs: Attrs{"href": "http://" + text, "title": nil}}}}
+	}
+	urlLink := func(url string) *Node {
+		return &Node{Type: "text", Text: url, Marks: []Mark{{Type: "link", Attrs: Attrs{"href": url, "title": nil}}}}
 	}
 	text := func(value string) *Node { return &Node{Type: "text", Text: value} }
 	code := func(value string) *Node { return &Node{Type: "text", Text: value, Marks: []Mark{{Type: "inlineCode"}}} }
@@ -307,6 +312,10 @@ func TestAWWWLinkTheBareTextWouldLoseIsWrittenAsALink(t *testing.T) {
 			"`c`[www.a.test](http://www.a.test)\\b\n"},
 		{"before another www link's label it runs on into", []*Node{link("www.a.test"), link("www.b.test"), text("|x")},
 			"[www.a.test](http://www.a.test)[www.b.test](http://www.b.test)|x\n"},
+		{"before plain text opening with a URL only the tokenizer reads", []*Node{link("www.a.test"), text("http://localhost x")},
+			"[www.a.test](http://www.a.test)http\\://localhost x\n"},
+		{"a scheme's URL before plain text opening with a URL only the tokenizer reads", []*Node{urlLink("https://a.test"), text("http://localhost x")},
+			"<https://a.test>http\\://localhost x\n"},
 	}
 	rendered := make([]string, len(tests))
 	docs := make([]*Node, len(tests))

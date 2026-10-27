@@ -164,9 +164,10 @@ type runSpelling struct {
 
 // respellings is every spelling, open marks kept open or not, that inlineWithEscapes writes a run
 // in after its first writing, in the order it tries them: the delimiter escapes from the fewest,
-// then each with every bare URL written as an autolink where the run writes one (bareURL), then
-// each with the colons of URL schemes escaped, the `@`s, and both, where its text holds them
-// (colons, ats).
+// then each with every bare URL written as an autolink where the run writes one (bareURL), the
+// colons of URL schemes escaped, or the `@`s, where its text holds them (colons, ats), then each
+// with two of these and last with all three, so a bare URL before plain text opening with an
+// address only the tokenizer reads (`http://localhost`) is written explicit with that colon escaped.
 func respellings(held delimiterEscapes, bareURL, colons, ats, keepOpen bool) []runSpelling {
 	escapes := []delimiterEscapes{delimitersAsRuled}
 	if held != delimitersAsRuled {
@@ -175,7 +176,9 @@ func respellings(held delimiterEscapes, bareURL, colons, ats, keepOpen bool) []r
 		}
 	}
 	var spellings []runSpelling
-	for _, url := range []runSpelling{{}, {angleURLs: true}, {schemeColons: true}, {ats: true}, {schemeColons: true, ats: true}} {
+	for _, url := range []runSpelling{{}, {angleURLs: true}, {schemeColons: true}, {ats: true},
+		{schemeColons: true, ats: true}, {angleURLs: true, schemeColons: true}, {angleURLs: true, ats: true},
+		{angleURLs: true, schemeColons: true, ats: true}} {
 		if url.angleURLs && !bareURL || url.schemeColons && !colons || url.ats && !ats {
 			continue
 		}
