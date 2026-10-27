@@ -3,7 +3,10 @@ package daemon
 import (
 	"context"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -105,8 +108,7 @@ func TestAHeldKeyWhoseRepositoryGitHubRefusesKeepsItsHoldAndReleasesLater(t *tes
 			t.Logf("the daemon's own log:\n%s", logs.String())
 		}
 	})
-	named := map[string]string{}
-	github := newNamedGitHub(t, named)
+	github := newNamingGitHub(t)
 	repos := newRepositories("CAPTURE")
 	repos.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
 	w := &workflowRuntime{
@@ -138,8 +140,45 @@ func TestAHeldKeyWhoseRepositoryGitHubRefusesKeepsItsHoldAndReleasesLater(t *tes
 	}
 
 	// GitHub answers for the repository, and the next tick releases the hold.
-	named["acme/widgets"] = "acme/widgets@main"
+	github.name("acme/widgets", "acme/widgets@main")
 	testwait.Eventually(t, "the held root releases once GitHub names its repository", func() bool { return !admission.Held() })
 	cancel()
 	<-done
+}
+
+// namingGitHub is newNamedGitHub's stand-in for a test that starts naming a repository while the
+// daemon is already reading it: it holds the names under a lock, so the reading goroutine and the
+// test never touch one map at once. It answers GET /repos/{owner}/{repo} as
+// "<GitHub's spelling>@<default branch>" for a repository it names, and 404 for one it does not.
+type namingGitHub struct {
+	url   string
+	mu    sync.Mutex
+	named map[string]string
+}
+
+func newNamingGitHub(t *testing.T) *namingGitHub {
+	t.Helper()
+	github := &namingGitHub{named: map[string]string{}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		github.mu.Lock()
+		named, ok := github.named[strings.ToLower(strings.TrimPrefix(r.URL.Path, "/repos/"))]
+		github.mu.Unlock()
+		if r.Method != http.MethodGet || !ok {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+			return
+		}
+		name, branch, _ := strings.Cut(named, "@")
+		_, _ = w.Write([]byte(`{"full_name":"` + name + `","default_branch":"` + branch + `"}`))
+	}))
+	t.Cleanup(server.Close)
+	github.url = server.URL
+	return github
+}
+
+// name makes GitHub answer for repo, as spelling names it ("<owner>/<name>@<default branch>").
+func (g *namingGitHub) name(repo, spelling string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.named[strings.ToLower(repo)] = spelling
 }

@@ -776,9 +776,11 @@ func (w *workflowRuntime) pollHoldReleaseWith(ctx context.Context, reader positi
 		if haveLast && position == last {
 			continue
 		}
-		if err := w.prepareHeld(ctx); err != nil {
-			w.log.Warn("ready the repositories of the held keys before releasing them", "error", err)
-			continue
+		if position.Reached(w.admission.Target()) {
+			if err := w.prepareHeld(ctx); err != nil {
+				w.log.Warn("ready the repositories of the held keys before releasing them", "error", err)
+				continue
+			}
 		}
 		eventID := fmt.Sprintf("dispatch-position:%s:%s:%d:%t", w.dispatchProject, w.bootID, position.AckFloorStream, position.Idle)
 		if _, err := intake.ApplyFact(ctx, w.pool, "dispatch", eventID, position, w.handlers...); err != nil {
@@ -789,6 +791,15 @@ func (w *workflowRuntime) pollHoldReleaseWith(ctx context.Context, reader positi
 	}
 }
 
+// heldPrepareTimeout bounds each held key's own preparation, which reads GitHub for a repository
+// whose default branch Legion has not read (or has not read within its own TTL). The poll's
+// context lives as long as the daemon and GitHub's client has no timeout of its own, so a stalled
+// read would hold the poll for good — and, since one fetch per repository is shared, hold every
+// live event's preparation for that repository behind it. The live path bounds its own
+// preparation by the consumer's AckWait (intake's prepareRepository); the poll has no AckWait, so
+// it bounds its own, generously: a read that takes longer than this is retried on the next tick.
+const heldPrepareTimeout = 30 * time.Second
+
 // prepareHeld readies the repository of every key admission holds, exactly as reconcile's boot
 // read readies each listed todo issue's, before a position fact releases them. A release records
 // an issue, and it records inside the fact's own transaction, where the workflow resolves a
@@ -796,11 +807,16 @@ func (w *workflowRuntime) pollHoldReleaseWith(ctx context.Context, reader positi
 // read. The boot's own read of the listing readies only what the mapping served then: a
 // repository the mapping began to serve afterwards (Dispatch's settings.repo_project.updated,
 // which reads no default branch) would otherwise fail the position fact, and every retry of it
-// the same way, so the hold would never release at all. A failure here leaves the hold as it is
-// and is retried on the poll's own schedule, as a failed position apply is.
+// the same way, so the hold would never release at all. The caller runs this only for a position
+// that has reached what the hold waits for, so a tick that releases nothing reads nothing. A
+// failure here leaves the hold as it is and is retried on the poll's own schedule, as a failed
+// position apply is.
 func (w *workflowRuntime) prepareHeld(ctx context.Context) error {
 	for _, summary := range w.admission.HeldSummaries() {
-		if _, err := w.prepareIssue(ctx, intake.ListedIssue(summary), false, false); err != nil {
+		read, cancel := context.WithTimeout(ctx, heldPrepareTimeout)
+		_, err := w.prepareIssue(read, intake.ListedIssue(summary), false, false)
+		cancel()
+		if err != nil {
 			return fmt.Errorf("ready the repository of the held %s: %w", summary.Key, err)
 		}
 	}
