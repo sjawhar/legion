@@ -43,8 +43,10 @@ Two consequences for the built artifact under `pull_request`:
   `github.event.pull_request.head.sha`, falling back to `github.sha` for `workflow_call` and
   `workflow_dispatch`:
   `BUILT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}`.
-- Concurrency should key on the PR, not the ref: `group: ${{ github.event.pull_request.number ||
-  github.ref }}` serialises two pushes to one PR and leaves other events on the ref key.
+- Concurrency should key on the PR, not the ref: `group: ${{ github.event_name == 'pull_request' &&
+  github.event.pull_request.number || github.sha }}` puts two pushes to one PR in one group and
+  leaves other events on a key of their own commit. Since 2026-10-27 `worker-image.yaml` sets
+  `cancel-in-progress` on `pull_request`, so the newer push cancels the older head's build.
 
 Same-repo `pull_request` runs receive the workflow's declared `permissions` (here `contents: read`
 and `packages: write`); a fork PR would get a read-only token. Say which you rely on.

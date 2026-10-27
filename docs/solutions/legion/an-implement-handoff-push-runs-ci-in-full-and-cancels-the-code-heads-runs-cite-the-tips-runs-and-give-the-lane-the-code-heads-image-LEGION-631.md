@@ -37,13 +37,17 @@ related_issues:
   beside the handoff head's green ones. The rest of this finding stands: the `skip-checks: true` push
   rule, the concurrency group cancelling the code head's runs, that the handoff head's green runs
   stand for the code head only because the handoff commit's diff over it is `.legion/` alone, and the
-  two `Worker Image` digests below.
+  code head's `Worker Image` digest below (its push timing revised 2026-10-27).
 
 - Push the implement handoff right after the code push rather than after watching the code head's
-  CI: one run then covers both commits, and nothing is cancelled half-way.
-- `Worker Image` has no such group: it completes at both heads, so one logical code change has two
-  digests (`sha-<code head>` and `sha-<handoff head>`, the same build inputs but for the revision
-  label). The operator lane runs the code head's image; give the coordinator the code head, its
+  CI: one run of `Tests`, `Docs` and `Legion Envoy and Contracts` then covers both commits, and
+  nothing of theirs is cancelled half-way.
+- `Worker Image` gives one logical code change two digests (`sha-<code head>` and
+  `sha-<handoff head>`, the same build inputs but for the revision label) only when both runs
+  complete. Since 2026-10-27 it cancels a pull request's older build at a newer push, like the
+  workflows above, so a handoff push that starts workflows cancels the code head's image run. The
+  operator lane runs the code head's image: when it needs that image, push the handoff only after
+  the code head's `Worker Image` run has completed. Then give the coordinator the code head, its
   digest, and the handoff head's green run ids in one message, and the tip's digest beside them in
   case its scripts hold the image's revision against the branch tip.
 

@@ -23,11 +23,11 @@ Extends docs/solutions/daemon/a-dockerfile-self-checks-red-control-is-a-pushed-c
 That note makes a red control a pushed commit. The delta is for a positive control on a generated
 artifact ("adding X to an input puts X in the output") and for reading the result without docker:
 
-- **Push the probe and its `jj revert` back to back, with the pull request open.** The probe adds
-  one input (a package on the apt line) and nothing else; `jj revert -r <probe> --insert-after
-  <probe>` undoes it in a new commit, never a rewrite of the pushed one. `jj diff --from <feature>
-  --to <revert>` must print nothing, so the revert head is the content that merges. Each head gets
-  its own `sha-<12 hex>` image.
+- **Push the probe, then its `jj revert` once the probe's image run has completed, with the pull
+  request open.** The probe adds one input (a package on the apt line) and nothing else; `jj
+  revert -r <probe> --insert-after <probe>` undoes it in a new commit, never a rewrite of the
+  pushed one. `jj diff --from <feature> --to <revert>` must print nothing, so the revert head is
+  the content that merges. Each head gets its own `sha-<12 hex>` image.
 - **Compare the two images with `LC_ALL=C comm -3`.** Two cold builds can pull different Debian
   archive states; `comm -3` shows drift as extra lines instead of hiding it in a pass. Expect only
   the probed name.
@@ -43,9 +43,9 @@ artifact ("adding X to an input puts X in the output") and for reading the resul
   event keys `check_runs` by check name, and the `Docs` and `Worker Image` workflows both name their
   job `build`: a settlement's passed `build` can be the docs build, with the image's job not yet
   started. Read the image run itself (`gh run list --workflow worker-image.yaml --commit <sha>`).
-- **A job in `queued` has left the concurrency wait; one in `pending` has not.** Under
-  `worker-image.yaml`'s per-PR group with `cancel-in-progress: false`, push again only once the
-  waiting run's job reads `queued` or `in_progress`; a push while it reads `pending` cancels it.
+- **A newer push cancels the pull request's image run.** Since 2026-10-27 `worker-image.yaml`'s
+  per-PR group has `cancel-in-progress` on `pull_request`: a push while the probe's run is
+  `pending`, `queued` or `in_progress` cancels it, so wait for it to complete before the next push.
 
 ## Evidence
 
