@@ -2,59 +2,56 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-571",
-  "completed": "2026-10-27T05:53:00Z",
-  "testedHead": "0fa111cd6ada4e49b8cb449174677bba40d447d7 (code head; branch head 2f62adeeea95 adds only .legion/)",
+  "completed": "2026-10-27T06:09:00Z",
+  "testedHead": "95693430d97d (code head: forward merge of main 448a4100 into e8df9ab0); branch head f843fd907f0c adds only .legion/",
+  "round": "2, a full round: the merge changed the diff (it brings in #2270's --cpus/--memory and corrects testpg.go's merged tmpfs from /var/lib/postgresql/data to /var/lib/postgresql)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran P5 (pg-upgrade-run.sh, W redirected) with servers I built myself: main 7c1290a4 (migrations to 0099) and this head (vcs.revision 2f62adee, code = 0fa111cd); same results (16 160015 -> pg_upgrade -> 18 180006, head boot applied 100..120, search lists PGUP-1, issue --force creates PGUP-4, top-5 equal). Re-ran P3 (p3-run.sh) with my head build: restore gives only the two named role errors, 120 migrations, read-back of PTHREE-1. Re-ran P1 and its negative control on a copy of the module. Re-ran P2. Drove P4 with Jobs of my own."
+    "how": "Re-ran P5 (pg-upgrade-run.sh, W redirected) with main 7c1290a4 and a server I built at this head (vcs.revision f843fd90): same results as the implementer's. Re-ran P3 with that server, P2 (dev-postgres/dev-broker tests) and P1 with its negative control on a copy of the module. Drove P4 with Jobs of my own. The implementer's P7 entry proves mergeability only (MERGEABLE); CI itself was queued at this head when read."
   },
-  "failures": [
-    {
-      "criterion": "CI's Postgres service reports server version 18 (server_version_num >= 180000) and has the vector extension; the full Go suite passes on it (spec acceptance 2, plan P7)",
-      "evidence": "Not reachable at this head. `gh pr view 2364 --repo sjawhar/legion --json mergeable,mergeStateStatus` -> CONFLICTING DIRTY (2026-10-27T05:51Z), and GitHub ran nothing: check-runs, statuses and actions/runs?head_sha all total_count 0 for 0fa111cd6ada4e49 and 2f62adeeea95d25e. `git merge-tree --write-tree main@origin(448a4100) 0fa111cd` reports content conflicts in packages/envoy/scripts/{corpus-copy.sh,dev-postgres.sh,dev-postgres.test.sh}, packages/pi-legion/scripts/skill-scenarios/rig.sh, scripts/e2e/{claude-backend-tmux.sh,controller-sweep-kind.sh,dispatch-user-turns.sh,stage3-devbox-workflow.sh,stage4b-sandbox-tree.sh,verifiers-staging-token.sh}. Cause: main's ef3a531d (#2270, 'CPU and memory limits on every docker run the proofs start', merged 04:05Z, before this PR opened at 05:32Z) edits the same docker run lines (adds --cpus/--memory; dev-postgres.sh run_flags gains '--cpus 2 --memory 2g' and dev-postgres.test.sh expects it). Fix: the implementer's forward merge of main (conflicts-and-rewrites.md 'Reintegrating the base'), keeping both the limits and this PR's image/mount changes in every site, dev-postgres.sh's printed refusal included; then CI at the merged head must show envoy-go's 'Postgres service version' step printing 1806xx|0.8.7 and every Postgres-service job green. No red test is written: the defect is the unmerged base, which no test in the repository can pin."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
+  "ci": "At 95693430 (2026-10-27T06:06Z) every check run and workflow (Tests, Legion Envoy and Contracts, Docs, Worker Image, build, lint, typecheck, test) was queued. The tester reads it as queued and does not wait. The reviewer reads the Postgres service version step (1806xx|0.8.7) and the Go suite on GitHub before approving. testpg's container path (tmpfs at /var/lib/postgresql, 2 CPU/2 GiB), as the merge resolved it, runs only in CI's envoy-infra-go; the pod has no Docker.",
   "proof": [
     {
       "criterion": "A run that migrates a Postgres 16 database, upgrades it to 18 with pg_upgrade, then starts the server and runs a search and an issue creation, passes (spec acceptance 3, P5)",
       "surface": "Dispatch server and dispatch CLI on local PGDG PostgreSQL 16.15 / 18.6 clusters with pgvector 0.8.7",
-      "command": "go build ./cmd/dispatch at 7c1290a4 (git archive) and at this head into $TMPDIR/infra571-test; OLD=.../dispatch-old NEW=.../dispatch-head bash $TMPDIR/infra571-test/p5.sh (the implementer's pg-upgrade-run.sh with its work and log dirs moved)",
-      "observed": "16 server_version_num 160015, old server schema_version 99, seeded 3 issues/1 comment/1 ask/4 artifacts + 200 vectors, Index Scan using embeddings_cosine; pg_upgrade --check 0 and pg_upgrade 0; 18 server_version_num 180006, vector 0.8.7; vacuumdb and REINDEX clean; head server healthy schema_version 120, 21 rows 100..120 applied by its boot; dispatch search 'heron ledger' lists PGUP-1; dispatch issue without --force names PGUP-1 as a duplicate, with --force creates PGUP-4; top-5 by <=> equal on 16 and 18, index and exact",
-      "headSha": "0fa111cd6ada4e49b8cb449174677bba40d447d7",
-      "negativeControl": "pg_upgrade --check against an 18 cluster with default data checksums: exit 1 'old cluster does not use data checksums but the new one does'; against 18 binaries without pgvector: exit 1 'could not load library \"$libdir/vector\"'"
+      "command": "go build ./cmd/dispatch at this head -> $TMPDIR/infra571-test/dispatch-head2 (and at 7c1290a4 -> dispatch-old); OLD=dispatch-old NEW=dispatch-head2 bash $TMPDIR/infra571-test/p5.sh (log p5-run2.log)",
+      "observed": "16 160015, old server schema_version 99, seed via CLI exit 0, 200 vectors; pg_upgrade --check 0, pg_upgrade 0; 18 180006, vector 0.8.7; vacuumdb/REINDEX clean; head server schema_version 120 with 21 rows 100..120 applied by its boot; dispatch search 'heron ledger' lists PGUP-1; dispatch issue without --force names PGUP-1 as a duplicate, with --force creates PGUP-4; top-5 by <=> equal on 16 and 18; plan on 18 Index Scan using embeddings_cosine",
+      "headSha": "95693430d97d",
+      "negativeControl": "pg_upgrade --check against a checksummed 18: exit 1 'old cluster does not use data checksums but the new one does'; against 18 without pgvector: exit 1, could not load library \"$libdir/vector\""
     },
     {
       "criterion": "The component test expects POSTGRES_18 when databaseVersion is unset, and the given value when it is set (spec acceptance 1, P1)",
       "surface": "envoy-infra gcp:Dispatch unit tests on Pulumi mocks",
-      "command": "cd packages/envoy/infra && go test ./gcp/ -count=1 -run Dispatch -v",
-      "observed": "every Dispatch test passes, TestDispatchSettingsApplyDefaults and TestDispatchInstanceRunsTheDatabaseVersion (unset -> POSTGRES_18 on ResolveDispatch and the instance's databaseVersion input; POSTGRES_16 -> POSTGRES_16) included",
-      "headSha": "0fa111cd6ada4e49b8cb449174677bba40d447d7",
-      "negativeControl": "copy of the module with defaultDispatchDatabaseVersion = \"POSTGRES_16\": dispatch_test.go:129 and TestDispatchInstanceRunsTheDatabaseVersion/unset fail 'expected: \"POSTGRES_18\" actual: \"POSTGRES_16\"'"
+      "command": "cd packages/envoy/infra && go test ./gcp/ -count=1 -run 'TestDispatchSettingsApplyDefaults|TestDispatchInstanceRunsTheDatabaseVersion' -v",
+      "observed": "TestDispatchSettingsApplyDefaults, TestDispatchInstanceRunsTheDatabaseVersion/unset and /POSTGRES_16 PASS",
+      "headSha": "95693430d97d",
+      "negativeControl": "copy of the module (replace -> this head's packages/envoy) with defaultDispatchDatabaseVersion = \"POSTGRES_16\": both tests FAIL 'expected: \"POSTGRES_18\" actual: \"POSTGRES_16\"'"
     },
     {
-      "criterion": "Dispatch's dev Postgres runs pgvector on 18, and the dump-and-restore sequence dev-postgres.sh prints moves a pgvector-on-16 dispatch-pg onto the pinned image (spec bullet 2, P2/P3)",
-      "surface": "dev-postgres.sh against its fake docker; the printed in-container commands in one cluster pod (gVisor): init container of the old pin, main container of the new pin, sharing the dump file",
-      "command": "bash packages/envoy/scripts/dev-postgres.test.sh && bash packages/envoy/scripts/dev-broker.test.sh; kubectl create -f $TMPDIR/infra571-test/p4/job-move.yaml (old image: pg_dumpall -U postgres --clean --if-exists > dump; new image: pg_isready -h 127.0.0.1 -U postgres, psql -h 127.0.0.1 -U postgres -q -f - < dump with no password, the two printed checks); kubectl logs -c old16 / -c new18; NEW=<my head build> bash $TMPDIR/infra571-test/p3.sh",
-      "observed": "8/8 dev-postgres cases and every dev-broker case PASS; pod Succeeded: old 160015, dump 9932 bytes; restore exit 0 with exactly 'current user cannot be dropped' and 'role \"postgres\" already exists'; checks print 1 and 180006; vector 0.8.7, 50 rows in the vector table with its HNSW index, databases dispatch,other,postgres, roles app,postgres; P3 on PGDG clusters: 120 migrations restored, head server boot on 18 applied 0, dispatch read PTHREE-1 returns its title",
-      "headSha": "0fa111cd6ada4e49b8cb449174677bba40d447d7",
-      "negativeControl": "the P3 dump restored into an 18 install without pgvector: 'ERROR:  extension \"vector\" is not available', no vector extension and no embeddings table"
+      "criterion": "Dispatch's dev Postgres runs pgvector on 18 and its printed dump-and-restore moves a migrated 16 Dispatch database onto 18 (spec bullet 2, P2/P3)",
+      "surface": "dev-postgres.sh against its fake docker; the SQL half on PGDG 16 and 18 clusters with this head's server",
+      "command": "cd packages/envoy && bash scripts/dev-postgres.test.sh && bash scripts/dev-broker.test.sh; NEW=dispatch-head2 bash $TMPDIR/infra571-test/p3.sh (log p3-run2.log)",
+      "observed": "8/8 dev-postgres cases PASS with the merged run flags (--cpus 2 --memory 2g) in the created container and the printed sequence; every dev-broker case PASS; 16 pg_dumpall restored into 18 with only 'current user cannot be dropped' and 'role \"postgres\" already exists', 120 migrations, head boot on 18 applied 0, dispatch read PTHREE-1 returns its title. Round 1 ran the printed in-container commands across the two real images in one pod; those commands are unchanged by the merge",
+      "headSha": "95693430d97d",
+      "negativeControl": "the same dump restored into 18 without pgvector: 'extension \"vector\" is not available', no vector extension, no embeddings table"
     },
     {
-      "criterion": "The pinned pgvector-on-18 image starts with its data mount at /var/lib/postgresql and refuses one at /var/lib/postgresql/data (the CI service image and every moved tmpfs mount, P4)",
+      "criterion": "The pinned pgvector-on-18 image starts with its data mount at /var/lib/postgresql and refuses /var/lib/postgresql/data (CI service, testpg's tmpfs and every moved mount, P4)",
       "surface": "Kubernetes Jobs in the builds namespace (gVisor, emptyDir medium Memory), image mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11",
-      "command": "kubectl create -f $TMPDIR/infra571-test/p4/job-positive.yaml / job-negative.yaml; kubectl logs; kubectl delete jobs -l infra571-tester-run=<run>",
-      "observed": "positive Succeeded: PostgreSQL 18.6, 'select current_setting(server_version_num), default vector version' -> 180006|0.8.7, create extension vector -> 0.8.7, a <=> query answers, data_directory /var/lib/postgresql/18/docker; all Jobs deleted afterwards",
-      "headSha": "0fa111cd6ada4e49b8cb449174677bba40d447d7",
-      "negativeControl": "same Job with the emptyDir at /var/lib/postgresql/data: 'Error: in 18+, these Docker images are configured to store database data in a … /var/lib/postgresql/data (unused mount/volume)', entrypoint exit 1, pod Failed"
+      "command": "kubectl create -f $TMPDIR/infra571-test/p4/job2-positive.yaml / job2-negative.yaml; kubectl logs; kubectl delete jobs -l infra571-tester-run=<run>",
+      "observed": "positive Succeeded: PostgreSQL 18.6, 180006|0.8.7, create extension vector 0.8.7, data directory /var/lib/postgresql/18/docker; both Jobs deleted",
+      "headSha": "95693430d97d",
+      "negativeControl": "mount at /var/lib/postgresql/data: 'Error: in 18+, these Docker images are configured to store database data in a … /var/lib/postgresql/data (unused mount/volume)', entrypoint exit 1, pod Failed"
     },
     {
-      "criterion": "pgmigrate reads SQL as Postgres 18 does: a vertical tab is space between words and in a string continuation",
-      "surface": "real PGDG 16.15 and 18.6 servers through psql; pgmigrate's census and touched-table readers",
-      "command": "printf 'select\\v1\\vas\\vx;' and printf \"select 'a'\\v\\n'b' as y;\" into psql on 16 and 18; then each of the three pgmigrate edits reverted in turn with go test ./internal/pgmigrate/ -run 'TestTouchedTables|TestLoad'",
-      "observed": "16: both 'syntax error'; 18: '1' and 'ab' (the premise holds). Baseline ok; reverting \\v in isSQLSpace fails TestTouchedTablesReadsVerticalTabAsSpace, TestLoadReadsAVerticalTabInACensusAsSpace and the vertical-tab continuation case; reverting touched.go's space-token rewrite fails TestTouchedTablesReadsVerticalTabAsSpace; reverting quoteContinues to [ \\t\\f] fails the continuation case",
-      "headSha": "0fa111cd6ada4e49b8cb449174677bba40d447d7",
-      "negativeControl": "the reverted scanners above, each refused by the named test"
+      "criterion": "pgmigrate reads SQL as Postgres 18 does (vertical tab as space)",
+      "surface": "real PGDG 16.15/18.6 through psql; pgmigrate's readers",
+      "command": "round 1 at 0fa111cd: printf 'select\\v1…' into psql 16 and 18, and each of the three edits reverted in turn; round 2: go test ./internal/pgmigrate/ -count=1 at this head (git diff e8df9ab0..95693430 touches no pgmigrate file)",
+      "observed": "16 syntax error, 18 returns 1 and 'ab'; each revert fails its named test; at this head the package is ok",
+      "headSha": "95693430d97d",
+      "negativeControl": "isSQLSpace without \\v fails TestTouchedTablesReadsVerticalTabAsSpace and TestLoadReadsAVerticalTabInACensusAsSpace; quoteContinues on [ \\t\\f] fails the vertical-tab continuation case"
     }
   ]
 }
