@@ -19,7 +19,10 @@ import (
 
 // ResolvedMention binds a canonical mention to the session that owned it when the comment was
 // created. SessionID is nil when no live holder was found; attemptSessionID remains internal so
-// legacy message attempts retain their existing session-id representation.
+// legacy message attempts retain their existing session-id representation. takeover is the
+// take-over pacing a comment's resolution before its transaction started (resolveThroughTakeover),
+// which that mention's sender carries on in; nil for a resolution made any other way, whose
+// sender starts its own.
 type ResolvedMention struct {
 	Target       string
 	Delivery     string
@@ -28,11 +31,13 @@ type ResolvedMention struct {
 
 	title            string
 	attemptSessionID string
+	takeover         *takeoverRetry
 }
 
-// resolveMentionTargets performs the only registry lookup for a comment's original deliveries.
-// The result is persisted in the comment-created event and handed to the post-commit sender, so a
-// role transition cannot change the target after routing suppression has been decided.
+// resolveMentionTargets is the registry lookup behind a comment's deliveries, one try per target.
+// What a comment resolved before its transaction (resolveCommentDeliveries) is persisted in the
+// comment-created event and handed to the post-commit sender, so a role transition cannot change
+// the target after routing suppression has been decided.
 func (s *server) resolveMentionTargets(ctx context.Context, targets []string, delivery string) []ResolvedMention {
 	resolved := make([]ResolvedMention, 0, len(targets))
 	for _, target := range targets {
@@ -438,6 +443,10 @@ func (s *server) recordCommentDeliveryResolution(
 // mentionResolutionFor rechecks it, or the mention's own target for a row no session is pinned to
 // yet - records that resolution and renews its claim, and sends under the same key, until a try
 // ends otherwise or takeoverRetry's window closes; the attempt settles with the last try's outcome.
+// The window is the one the comment's resolution before its transaction opened (target.takeover)
+// when there was one, so a mention whose resolution waited a take-over out is not resolved again
+// after the commit: the comment's other routes were decided on that outcome, and a session this
+// mention reached now could hear the comment from them too.
 func (s *server) deliverResolvedCommentMention(
 	ctx context.Context,
 	comment model.Comment,
@@ -454,6 +463,7 @@ func (s *server) deliverResolvedCommentMention(
 		return *claimed.settled, nil
 	}
 	stored := claimed.comment
+	paced := target.takeover
 	target, resolveError := s.mentionResolutionFor(ctx, target, claimed.pending)
 	recorded, held, _, err := s.recordCommentDeliveryResolution(ctx, stored, target, claimed.attemptClaim, resolveError)
 	if err != nil {
@@ -479,6 +489,9 @@ func (s *server) deliverResolvedCommentMention(
 	// the repeat it is (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts says by what).
 	key := stored.ID + ":" + target.Target + ":" + target.Delivery
 	takeover := newTakeoverRetry()
+	if paced != nil {
+		takeover = *paced
+	}
 	envelopeID, duplicate, deliveryError := s.sendResolvedDelivery(ctx, target, stored.Body, key, nil, frame)
 	for takeover.again(ctx, deliveryError) {
 		// A pinned row is rechecked; with no session pinned yet the recipient is still the

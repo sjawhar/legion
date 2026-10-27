@@ -47,7 +47,11 @@ import (
 // Between its first send and its settle a sender may try again (takeoverRetry): a listener being
 // replaced refuses connections, answers 503, or does not hold the session yet for a few seconds,
 // and a send that met one of those waits it out under the attempt and the idempotency key it
-// already holds, renewing its claim before each try, rather than settling the attempt failed.
+// already holds, renewing its claim before each try, rather than settling the attempt failed. A
+// comment's mention resolution that decides which sessions the comment's other routes skip waits
+// one out too, before the comment's transaction opens and with nothing held
+// (resolveThroughTakeover), and the sender of that mention carries on in the same window rather
+// than opening a second one.
 
 // errStaleResolution is how a locked write reports that a row the pre-transaction listener
 // resolution depended on had changed by the time it held the lock. It never reaches a client:
@@ -138,17 +142,29 @@ func hasCapability(capabilities []string, value string) bool {
 }
 
 // listenerNotConfiguredText is what every delivery records when no listener is configured. It
-// is the one failure under listenerUnavailablePrefix that no take-over ends.
+// is the one failure under listenerUnreachablePrefix that no take-over ends.
 const listenerNotConfiguredText = "envoy listener: ENVOY_URL is not configured"
 
-// listenerUnavailablePrefix begins the failure deliveryErrorText records for a listener that
-// could not serve the request (dispatchenvoy.ErrUnavailable): a refused or reset connection, a
-// 502, 503 or 504, an answer that does not decode.
-const listenerUnavailablePrefix = "envoy listener: "
+// listenerUnreachablePrefix begins the failure deliveryErrorText records for a listener nothing
+// answered (dispatchenvoy.ErrUnreachable): a connection refused, reset or timed out, a 502, 503 or
+// 504.
+const listenerUnreachablePrefix = "envoy listener: "
 
+// listenerAnsweredPrefix begins the failure deliveryErrorText records for every other
+// dispatchenvoy.ErrUnavailable: a status the listener chose, such as the 401 it gives a token it
+// refuses, or an answer that does not decode.
+const listenerAnsweredPrefix = "envoy listener answered: "
+
+// deliveryErrorText is the failure a delivery records for a listener error. Its prefix keeps a
+// take-over's failures (listenerUnreachablePrefix) apart from the listener's own answers
+// (listenerAnsweredPrefix), because retryableDeliveryFailure reads the recorded text.
 func deliveryErrorText(err error) string {
-	if errors.Is(err, dispatchenvoy.ErrUnavailable) {
-		return listenerUnavailablePrefix + strings.TrimPrefix(err.Error(), "envoy listener unavailable: ")
+	reason := strings.TrimPrefix(err.Error(), "envoy listener unavailable: ")
+	switch {
+	case errors.Is(err, dispatchenvoy.ErrUnreachable):
+		return listenerUnreachablePrefix + reason
+	case errors.Is(err, dispatchenvoy.ErrUnavailable):
+		return listenerAnsweredPrefix + reason
 	}
 	return err.Error()
 }
@@ -169,13 +185,15 @@ const (
 )
 
 // retryableDeliveryFailure reports whether a failure a try recorded is one a listener take-over
-// gives, which a later try can outlast: the listener unreachable (listenerUnavailablePrefix, but
-// never listenerNotConfiguredText), a receipt timeout, or the listener holding no record of the
-// session yet - "no live session", as the registry read is recorded and as the send's own 404
-// words it. A receipt timeout is safe to repeat because the retry carries the same idempotency
-// key, which the listener recognises as a repeat (DELIVERY_DUPLICATE_WINDOW_MS in
-// packages/contracts). Anything else is the listener's answer - a session that does not take
-// this mode, a send it refused - and the attempt settles with it at once.
+// gives, which a later try can outlast: the listener unreachable (listenerUnreachablePrefix - a
+// connection refused, reset or timed out, a 502, 503 or 504 - but never
+// listenerNotConfiguredText), a receipt timeout, or the listener holding no record of the session
+// yet - "no live session", as the registry read is recorded and as the send's own 404 words it. A
+// receipt timeout is safe to repeat because the retry carries the same idempotency key, which the
+// listener recognises as a repeat (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts). Anything
+// else is the listener's answer - a session that does not take this mode, a send it refused, a
+// status it chose such as a 401 for a token it refuses (listenerAnsweredPrefix) - which no
+// successor answers differently, and the attempt settles with it at once.
 //
 // It reads the recorded text rather than the error behind it because a resumed mention's first
 // try sends with the resolve error its row already holds (mentionResolutionFor), which survives
@@ -185,7 +203,7 @@ func retryableDeliveryFailure(failure string) bool {
 	case failure == listenerNotConfiguredText:
 		return false
 	case failure == receiptTimeoutText,
-		strings.HasPrefix(failure, listenerUnavailablePrefix),
+		strings.HasPrefix(failure, listenerUnreachablePrefix),
 		strings.HasPrefix(failure, "no live session"):
 		return true
 	}
@@ -193,7 +211,9 @@ func retryableDeliveryFailure(failure string) bool {
 }
 
 // takeoverRetry paces one sender's tries at a listener that is being replaced, from the moment of
-// its first try.
+// its first try. A comment mention's first try is its resolution before the comment's transaction
+// (resolveThroughTakeover), so its window spans that resolution and the sender's tries after the
+// commit together.
 type takeoverRetry struct {
 	first   time.Time
 	backoff time.Duration
@@ -202,6 +222,27 @@ type takeoverRetry struct {
 // newTakeoverRetry starts the pacing of a sender about to make its first try.
 func newTakeoverRetry() takeoverRetry {
 	return takeoverRetry{first: time.Now(), backoff: takeoverFirstBackoff}
+}
+
+// resolveThroughTakeover resolves one target as resolveMentionTargets does, with nothing held,
+// and, when wait is set, waits out a listener take-over the way a sender does: a resolution whose
+// outcome is a take-over's (retryableDeliveryFailure) is taken again after takeoverRetry's backoff
+// until the listener answers otherwise or the window closes. A comment resolves this way the
+// mentions and the route its transaction decides suppress_route and suppressed_authors from, so
+// those are decided on what the listener answered rather than on its silence.
+//
+// The pacing travels on the resolution (ResolvedMention.takeover), and the mention's sender after
+// the commit carries on in it rather than opening a window of its own: a resolution that already
+// waited the window out settles with its outcome on that sender's first try, so a comment's
+// request waits about one window for a take-over, however long it spent resolving.
+func (s *server) resolveThroughTakeover(ctx context.Context, target, delivery string, wait bool) ResolvedMention {
+	takeover := newTakeoverRetry()
+	resolved := s.resolveMentionTargets(ctx, []string{target}, delivery)[0]
+	for wait && takeover.again(ctx, resolved.ResolveError) {
+		resolved = s.resolveMentionTargets(ctx, []string{target}, delivery)[0]
+	}
+	resolved.takeover = &takeover
+	return resolved
 }
 
 // again reports whether the sender tries once more after a try that recorded failure, having

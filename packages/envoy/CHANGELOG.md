@@ -1542,11 +1542,23 @@
     first try, and only then settles `failed`. A send during a take-over therefore reaches its
     session, a request that sends during one answers up to 12 s later, and a send to a session
     that is really gone reads `failed: no live session` about 12 s after it was made rather than
-    at once.
+    at once. Any other answer from the listener settles at once as before: a listener that
+    refuses Dispatch's `ENVOY_TOKEN` (401), a 403, a 500 or an answer that does not decode is
+    recorded `envoy listener answered: …` rather than `envoy listener: …`, which now means only a
+    listener nothing answered.
+  - A comment on an issue with a route, a reply to a thread, or a comment on a document resolves
+    its mentions and the issue's route through a take-over before it is written, so the sessions
+    its route and author fan-out skip are decided on the listener's answer and a mentioned session
+    hears the comment once; a mention whose resolution waited the take-over out settles with that
+    outcome rather than waiting a second time. A comment's mentions are resolved and sent at once,
+    so a comment mentioning several ended sessions answers within one 12 s window rather than one
+    per mention.
   - The listener client reads a 502, 503 or 504 that carries a JSON reason, such as the starting
     listener's `503 {"error":"service starting"}`, as the listener being unavailable, keeping the
     reason in the error's text, so a send waits it out as above. Before, it took the reason for
-    the listener's verdict on the request, and the attempt failed with it at once.
+    the listener's verdict on the request, and the attempt failed with it at once. Such an answer,
+    and a connection refused, reset or timed out, is also `envoy.ErrUnreachable`, which is how a
+    caller tells a take-over from the listener's own answer.
 - A webhook redelivery whose Dispatch process died after it claimed the delivery and before it
   recorded GitHub's answer (a SIGKILL, an OOM kill, a lost node) is requested again once the claim
   is 60 s old, even after the failed attempt has aged out of the sweep's one-hour window. Before,

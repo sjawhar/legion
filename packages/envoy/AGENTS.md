@@ -1320,9 +1320,11 @@ active listener pod is replaced its successor refuses connections, answers 503 (
 gate's `{"error":"service starting"}`), or does not hold the session yet for a few seconds
 (INFRA-557's take-over target is under 10). The listener client reads a 502, 503 or 504 on any
 route, a role lookup and a send included, as `ErrUnavailable` whatever its body says, keeping the
-body's reason in the text. A try whose outcome
-is one of those - the listener unreachable (`envoy listener: …`, never the `ENVOY_URL is not
-configured` text), a receipt timeout, or `no live session` (`retryableDeliveryFailure`) - is
+body's reason in the text, and marks it `ErrUnreachable`, as it marks a connection refused, reset
+or timed out; a status the listener chose (a 401 for a token it refuses, a 403, a 500) and an
+answer that does not decode are `ErrUnavailable` alone, the listener's own answer. A try whose
+outcome is a take-over's - the listener unreachable (`envoy listener: …`, never the `ENVOY_URL is
+not configured` text), a receipt timeout, or `no live session` (`retryableDeliveryFailure`) - is
 tried again under the same attempt and the same idempotency key, without a new claim: the sender
 resolves again only the recipient the attempt names (its pinned session, rechecked; for a row no
 session is pinned to yet, the message's or the mention's own target, pinning what it finds),
@@ -1331,11 +1333,23 @@ is) before each try, and settles on the claim it renewed last. The backoff is 25
 2 s, and no try starts later than `listenerTakeoverWindow` (12 s) after the first; the attempt
 then settles with the last try's outcome exactly as before, so a session that is really gone
 still reads `failed: no live session`, about 12 seconds after the send. Any other outcome - a
-mode the session does not take, a send the listener refused - settles at once. Every sender
-takes this path: a request's own send (whose request therefore answers up to 12 s later), a
-broadcast worker, a Retry and the resume loop. A process killed during the wait leaves the
-attempt pending under the claim it renewed last, which the resume loop sends once that claim's
-lease has passed.
+mode the session does not take, a send the listener refused, the listener's own answer
+(`envoy listener answered: …`) - settles at once. Every sender takes this path: a request's own
+send (whose request therefore answers up to 12 s later), a broadcast worker, a Retry and the
+resume loop. A process killed during the wait leaves the attempt pending under the claim it
+renewed last, which the resume loop sends once that claim's lease has passed.
+
+A comment decides before it commits which sessions its other routes skip - the issue's route
+when a mention resolved to its session (`suppress_route`), an author route for every session a
+mention resolved to (`suppressed_authors`) - so a mention resolved only after the commit would
+reach a session those routes reach too. A comment that has such a route (the issue's route is
+set, it replies to a thread, or it is on a document) therefore resolves its mentions and its
+route through a take-over before its transaction opens, with nothing held
+(`resolveCommentDeliveries`, `resolveThroughTakeover`); a comment with none commits at once and
+its senders wait under their attempts. A mention's window starts at that first resolution and
+its sender carries on in it after the commit, so a mention whose resolution waited the window out
+settles with that outcome on its first try. A comment's lookups run at once, and so do its
+mentions' sends, so its request waits about one window however many mentions it carries.
 
 A claim outlives its sender by a minute, which Postgres judges (`claimLapsed`) against the
 `claimed_at` Postgres itself wrote, so no task's clock skew can read a live claim as lapsed or

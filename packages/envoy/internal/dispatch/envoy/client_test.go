@@ -536,3 +536,63 @@ func TestSessionReportsAnUnreachableListenerAsUnavailable(t *testing.T) {
 		t.Fatalf("refused: err = %v, want it not to read as a missing session", err)
 	}
 }
+
+// Only what a listener being replaced gives - no connection, or a 502, 503 or 504 - is
+// ErrUnreachable, the failure a sender may wait out; a status the listener chose (a 401 for a token
+// it refuses, a 403, a 500) and an answer that does not decode are its answer, which asking again
+// repeats. ErrUnreachable is ErrUnavailable too, with the same text, so a caller that asks only
+// for ErrUnavailable reads a take-over exactly as before.
+func TestOnlyATakeOverIsUnreachable(t *testing.T) {
+	calls := map[string]func(*Client) error{
+		"session": func(client *Client) error {
+			_, err := client.Session(context.Background(), "s1")
+			return err
+		},
+		"role": func(client *Client) error {
+			_, err := client.Role(context.Background(), "legion-planner")
+			return err
+		},
+		"send": func(client *Client) error {
+			_, err := client.Send(context.Background(), SendInput{TargetSession: "s1", Message: "m", IdempotencyKey: "k"})
+			return err
+		},
+	}
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closed.Close()
+	for name, call := range calls {
+		err := call(New(closed.URL))
+		if !errors.Is(err, ErrUnreachable) || !errors.Is(err, ErrUnavailable) ||
+			!strings.HasPrefix(err.Error(), "envoy listener unavailable: ") {
+			t.Errorf("%s refused: err = %v, want ErrUnreachable and ErrUnavailable with ErrUnavailable's text", name, err)
+		}
+	}
+	for _, tc := range []struct {
+		status      int
+		body        string
+		unreachable bool
+	}{
+		{status: http.StatusServiceUnavailable, body: `{"error":"service starting"}`, unreachable: true},
+		{status: http.StatusBadGateway, body: ``, unreachable: true},
+		{status: http.StatusGatewayTimeout, body: `{"error":"upstream timed out"}`, unreachable: true},
+		{status: http.StatusUnauthorized, body: `{"error":"unauthorized"}`},
+		{status: http.StatusUnauthorized, body: ``},
+		{status: http.StatusForbidden, body: `{"error":"forbidden"}`},
+		{status: http.StatusInternalServerError, body: ``},
+		{status: http.StatusOK, body: `{"session_id":`},
+	} {
+		listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(tc.status)
+			_, _ = w.Write([]byte(tc.body))
+		}))
+		for name, call := range calls {
+			err := call(New(listener.URL))
+			if err == nil || errors.Is(err, ErrUnreachable) != tc.unreachable {
+				t.Errorf("%s answered %d %s: err = %v, want ErrUnreachable %v", name, tc.status, tc.body, err, tc.unreachable)
+			}
+			if tc.unreachable && !errors.Is(err, ErrUnavailable) {
+				t.Errorf("%s answered %d %s: err = %v, want it ErrUnavailable too", name, tc.status, tc.body, err)
+			}
+		}
+		listener.Close()
+	}
+}
