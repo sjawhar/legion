@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-439",
+  "completed": "2026-10-27T01:12:00Z",
+  "round": 16,
+  "headSha": "c95305504d295746517ef9dbc9b21b36147d685d",
+  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6431096471",
+  "answeringProvider": "anthropic/claude-haiku-4-5 answered every omp 18.12.2 turn",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "The implementer proved the cut-short gap with unit tests only (its deviation). I drove it live with a kill inside that window; it passes. I re-ran notice4.sh and notice5.sh at this head: all legs pass. Smoke passes in both modes."
+  },
+  "failed": 0,
+  "failures": [],
+  "proof": [
+    {
+      "criterion": "Review 5660734397's important item: a retention gap is told once when its sweep is cut short after the notice",
+      "surface": "real omp --mode rpc 18.12.2 with this checkout's pi-envoy, natsd -js and the listener built from this head",
+      "command": "/legion/scratch/tmp/adv/cut.sh",
+      "observed": "omp was killed; 260 own messages were stored behind 3 unfollowed fillers, and the stream was purged below the first of them; omp was resumed and SIGKILLed as soon as the gap was recorded, with 85 of the 260 cards written; after the second resume: 1 gap notice in total, 0 of the 260 messages missing, 0 shown twice",
+      "headSha": "c95305504d295746517ef9dbc9b21b36147d685d",
+      "negativeControl": "the implementer's engine test against 6eba519f's replay.ts gives ['retention_gap','retention_gap']"
+    },
+    {
+      "criterion": "The earlier kill legs: retention gap and stream recreated, each held mid-turn and killed while held",
+      "surface": "same rig",
+      "command": "/legion/scratch/tmp/adv/notice4.sh; /legion/scratch/tmp/adv/notice5.sh",
+      "observed": "gap-a, gap-b, recreate-idle, recreate-a, recreate-b: all PASS (each notice once, no extra turn)",
+      "headSha": "c95305504d295746517ef9dbc9b21b36147d685d",
+      "negativeControl": "gap-b at 489fd64d showed 2 notices; recreate-b at 232a541e showed 0"
+    },
+    {
+      "criterion": "Bare gates",
+      "surface": "real omp, natsd -js and the listener built from this head; the plugin and listener suites",
+      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh (local and remote as committed); bun test extensions/envoy.test.ts -t \"a retention gap|a BTW refused live\"; go test ./cmd/listener -run 'TestReplayNeverReturnsAnotherSessions…'",
+      "observed": "SMOKE REPLAY PASS in both modes; 13 pass 0 fail (red tests cf65bda2 and bddc5c2a unchanged); listener red tests pass",
+      "headSha": "c95305504d295746517ef9dbc9b21b36147d685d",
+      "negativeControl": "the released plugin loses its messages in the smoke's controls"
+    }
+  ],
+  "minors": "Fork re-queue keyed by session and id (unit test); nats-hub.md names the replay read; the PR body's no-auth NATS user sentence is conditional on sessionUser.",
+  "ci": {
+    "head": "c95305504d295746517ef9dbc9b21b36147d685d",
+    "observed": "Tests, Legion Envoy and Contracts, Docs and Worker Image queued when read (the repository's runner queue is backed up).",
+    "envoyConfigTest": "envoy-client 'a ! command in envoy.json > still running after 10 s …' passes in CI: job 121528826179 (run 40301975592, e0ed6d23, the last completed envoy-client job on this branch), 10026 ms, 897 pass 0 fail. Its file is untouched by this PR; its failure is specific to the pod."
+  }
+}

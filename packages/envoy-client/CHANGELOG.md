@@ -42,6 +42,49 @@
 
 ### Added
 
+- `@legion/envoy-client/replay`: `createReplayEngine` shows a session, once, each message the
+  notification stream stored on a subject it follows while its own NATS subscription was down,
+  through the listener's `POST /v1/replay`. A sweep reads each followed subject after its cursor,
+  merges subjects by stream sequence, passes over role forwards, leaves a frame the live path is
+  still delivering for later, and hands the host each frame neither path showed; one sweep runs at
+  a time and none rejects. A ledger of the frames the session finished with (event id, and dedupe
+  key when it names its event), kept 72 hours from when each was recorded and capped at 20,000,
+  lets the live path drop a repeat after a restart. A frame the host fails to show three times
+  becomes a failure notice the host shows instead, and `liveFailed` shows it at once for a live
+  frame no sweep will show, a frame received before its subject's cursor started included (a host
+  stamps when the frame arrived with `readArrivals` from `@legion/envoy-client/delivery`, which
+  reads a subscription as its messages arrive, so a frame queued behind a slow delivery is not
+  stamped late, and yields every message it read before the subscription's end or error, as
+  nats.js's own iterator does);
+  `envoyNoticeText` renders a notice in TOON, so a sender's multi-line summary cannot forge a
+  field; a recreated stream (a stored `stream_id` the listener's `stream.id` no longer matches, or,
+  from a listener that answers no id, a changed `created`; a `created` that moved under the same
+  id is no recreation, and a state stored before ids takes the answer's id unless a cursor stands
+  past the stream's end), a cursor older than the stream's oldest message,
+  and a listener that does not replay (404) or cannot (503 `REPLAY_UNAVAILABLE`, 401, 403) are
+  each told once. A sweep that only moved its cursors to the stream's end is written at most
+  hourly; a recreation's cursor reset and a retention gap's cursor move are written with their
+  notice pending in the state (`notices`), so a session that ends before the notice is raised
+  raises it once at its first sweep after the restart, and a resume does not find the gap again.
+  A host that handed a frame or a failure
+  notice on without writing it yet answers `queued`: the frame stays claimed and unrecorded, its
+  cursor before it, until the host records it once written (`recordDelivered`), so a process that
+  ends first shows it after the restart;
+  `recordDeliveredFor` records for the session a frame was delivered in while the host shuts down
+  (through the host's optional `writeSessionID`); `replayLedgerIdentity` names a frame as the
+  ledger does. The transport gains `replay()` (one
+  try, 10 s) and `EnvoyApiError.code`; a `createDeliveryDedupe` claim gains `settle()` and the
+  dedupe `pending()`, true until the claim is settled or released. Beside the engine sits the host
+  policy both plugins share: the subjects followed for replay (`replayFollowedSubjects`), never a
+  role's or one reaching a private stream subject (`reachesPrivateStreamSubject`, the listener's
+  rule in `packages/envoy/internal/bus/stream.go`: another session's `notifications.agent.<id>`,
+  a failed-delivery lane `notifications.envoy.exceptions.notifications.agent.<id>` the session's
+  own included, a `notifications.legion.` controller lane, or a wildcard reaching one such as
+  `notifications.agent.*` or `notifications.>`, which the listener neither stores as an interest
+  nor replays), the topics a restore follows again (`rememberedTopics`), a replayed removal's
+  close and unregister (`closeReplayedRemoval`), and which one-time notices are a card or a
+  warning (`routeReplayNotice`) (INFRA-439).
+
 - `dispatch issues --all` reads the whole filtered listing in one request. The client gains
   `listAllIssues`, which sends neither `limit` nor `offset` and takes the bare array Dispatch
   answers for that request, refusing any other shape by name: a page back from a request carrying

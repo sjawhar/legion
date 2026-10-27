@@ -10,8 +10,9 @@ Legion pane loads beside this plugin and which reaches it through the interface 
 
 ## Overview
 
-This package owns Pi-specific tool registration, direct NATS subscriptions, targeted Dispatch
-delivery, and self-subscription registration for every session. HTTP transport, tool metadata, and
+This package owns Pi-specific tool registration, direct NATS subscriptions, the recovery of what
+they missed while down ("Missed messages" below), targeted Dispatch delivery, and
+self-subscription registration for every session. HTTP transport, tool metadata, and
 subject construction come from the Envoy core packages. Its NATS connection (the agent subjects in
 `extensions/envoy.ts`) connects as the nkey user whose seed `envoySettings` resolves
 (`NATS_NKEY_SEED_FILE`, then `NATS_NKEY_SEED`, then `envoy.natsSeed` for the same file's own
@@ -191,10 +192,186 @@ acknowledged, and a receipt that fails to publish is logged while delivery conti
 frame on the agent subject of a session the host has replaced (a `/new` or resume) that arrives
 once the host has moved its session manager but before a pass closes that subject: it is logged and
 left undelivered (`replacedSessionTopic`), as on the closed subject, so a role lane counts a failed
-delivery and the daemon re-sends to the role's holder. A fork's or branch's parent's frames still
-arrive, and so do notices on a subject the replaced session's role holds, which are addressed to
-the role until a pass ends it: the controller claims its role again for the session its pane is
-left on when the switch's event runs, and a wake dropped there would be lost.
+delivery and the daemon re-sends to the role's holder. Any other such frame stays in the
+notification stream instead of being lost: when that session id is resumed within the stream's
+72 hours, its first sweep shows it ("Missed messages" below). A fork's or branch's parent's frames
+still arrive, and so do notices on a subject the replaced session's role holds, which are
+addressed to the role until a pass ends it: the controller claims its role again for the session
+its pane is left on when the switch's event runs, and a wake dropped there would be lost.
+
+## Missed messages
+
+nats.js keeps nothing for a client that is disconnected, so a message published while this
+session's NATS connection, or one of its subscriptions, is down never reaches that subscription.
+The notification stream (`ENVOY_NOTIFICATIONS`, 72 hours) keeps what it captures, and the session
+reads that back from its listener, `POST /v1/replay` (the "Listener API" table of
+`packages/envoy/AGENTS.md`), through the shared engine `@legion/envoy-client/replay`
+(`createReplayEngine`, whose doc comments state its rules, and which words the cards);
+`src/missed-messages.ts` holds this package's transcript entries. The live path is unchanged in
+what it shows and runs, and as fast, with two additions: a frame is recorded in the engine's
+ledger (`recordDelivered`), and its claim settles, only once the host wrote it to the transcript,
+and a frame the ledger already holds (a repeat after a restart, which the in-memory dedupe has
+forgotten) is dropped.
+
+A frame counts as shown once the host wrote it. Oh My Pi holds a card (`pi.sendMessage`, steer or
+aside) or a user turn sent while a turn streams in memory, and writes it, emitting the message's
+`message_end`, only when the turn takes it; an idle session writes it as the turn it triggers
+starts, and a process that ends in between loses it (measured on omp 18.8.9, which writes a queued
+card after an abort too). So a card carries the frame's ledger identity in its `details`
+(`{event_id?, dedupe_key?}`, `replayLedgerIdentity`), and the `message_end` of a card naming a
+frame the plugin waits on (`UnwrittenFrames` in `src/unwritten-frames.ts`, which owns each such
+claim's settle and release) records it and settles its claim; a card whose `details` name nothing
+is known by the event id its rendered text names (the
+`envoy:` block's `id:`, or a failure notice's `event_id:`). Until then the claim stays pending:
+a sweep leaves the stream's copy, and that subject's cursor stays before it, so the restarted
+session's sweep shows it. A replayed card and a failure notice claim their frame too, and the
+engine hears `queued`. A person's Send run as a turn is recorded on the `message_end` of the
+user message `matchInjectedUserTurn` finds for it: by its `tag` for typed input
+(`pi.sendUserInput`), which the host keeps on the message idle and queued alike, or by its text
+for `pi.sendUserMessage` on a host without `sendUserInput`, whose search the run's end stops,
+recording the turn then. Typed input the host answers submitted no message (a command, a refusal,
+a failure) is recorded at that answer, which the person gets on Dispatch. A BTW is answered or
+refused on Dispatch and never shown as a card: it is recorded by its event id alone the moment its
+delivery starts, before the side turn and before any reply is posted, in the transcript of the
+session it was delivered in, even while that session shuts down (`recordDeliveredFor`, through
+the host's `writeSessionID`), so the stream's copy never comes back as a card that starts a turn:
+not while the side turn runs or a reply is in flight, not when a reply fails, and not after the
+process ends mid-turn or mid-reply and the session is resumed. An answered BTW's reply records
+its dedupe key too once posted. A same-mode Retry of a refused one, a new event id under the same
+dedupe key, still reaches the session. Whatever the record, a BTW that reaches replay is one inert
+notice by construction: its card is a steer handed with `triggerTurn: false` (`CardDelivery`
+`inert`), as is a failure notice naming a BTW, and it is handed only while the host is settled
+(idle, holding no message, on this instance's session: `hostSettled`). An idle host writes it at
+once and runs nothing, but a streaming turn takes a steer it is handed and the agent loop runs
+another model turn for it at the stop boundary (measured on omp 18.12.2), so while the host is
+busy the card waits under its claim, unhanded, and the first settled heartbeat hands it
+(`UnwrittenFrames.handBackWithdrawn`), as it does a withdrawn inert card. The notice says it runs
+nothing and that Dispatch shows whether it was answered. A replayed card of a
+frame the dedupe let go of that the open session's ledger lacks (shown before the host moved to
+this session) waits on its write too, with no claim.
+
+The host can also drop a card it holds without writing it while the process lives on. A session
+change drops what the session left was handed and has not written: its claims are released,
+recording nothing, so that session's sweep, once the host is back on it or resumes it, shows the
+stream's copy again. An interrupt (Escape at the terminal, RPC `abort_and_restore_queue`:
+`clearQueue({ forInterrupt: true })`) withdraws every card the turn held, writes none and restores
+none, and leaves the host idle with an empty queue; a plain abort keeps them queued and writes
+them in the run it starts at once (measured on omp 18.8.9: `ctx.hasPendingMessages()` false, then
+true, at the aborted run's `agent_end`). So each heartbeat tick, while the host is idle
+(`ctx.isIdle()`) and holds no message (`ctx.hasPendingMessages()`), hands each card still
+unwritten again, as it was and under its claim, which also covers a live frame on a topic the
+stream does not keep (`UnwrittenFrames.handBackWithdrawn`). A card handed since the last tick or
+aborted run's end is left alone: `pi.sendMessage` returns before the host queues the card or
+starts its run, so the host reads idle and empty for that moment. A person's turn the interrupt
+withdrew is not handed again (run late, it could act on an instruction the person no longer
+means): Oh My Pi 18.8.9 answers a typed input (`pi.sendUserInput`, `handled: "prompt"`) or a
+`pi.sendUserMessage`
+turn the streaming turn held in `abort_and_restore_queue`'s `steering` list, to whoever
+interrupted, and never writes it. So at that same moment a turn still unwritten that the host
+took into its queue before the last tick or aborted run's end (a typed input from when
+`sendUserInput` answered that it submitted a message) is released, recording nothing, and the
+next sweep shows the stream's copy as a card that runs nothing. A `pi.sendUserMessage` turn is
+recorded at the run's end, found or not, since its text was the only way to find it, so one an
+interrupt withdrew is not shown again.
+
+A sweep asks, for each followed subject, for the stored messages after that subject's cursor,
+merges them by stream sequence and shows each that neither path has shown. The followed subjects
+are what `registerSession` registers (`followedSubjects`, by the engine's shared rule
+`replayFollowedSubjects`): the agent subject and every open subscription not held for a role nor
+reaching a private stream subject (`reachesPrivateStreamSubject`: another session's agent subject,
+a failed-delivery lane, the Legion controller lane, or a wildcard reaching one, the listener's own
+rule, which would refuse it and warn on every heartbeat). One
+sweep runs at a time, on the engine's own chain, never in
+`passes` or `roleMoves`. A sweep starts (`triggerReplay`) after a pass opens the agent subject and
+the recovered interests (a start, a switch, a resume), after the pump reopens a subscription,
+on each nats.js `reconnect` status (`watchReconnects`), on every heartbeat tick, and after
+`envoy_subscribe`. A topic followed now gets its cursor at the stream's end at the next sweep,
+so it brings up no older history, and a new session, or one first run under this plugin, starts
+every cursor at the first answer it gets.
+
+What is replayed: the frames the stream keeps on the agent subject and on the topics the session
+follows (the issue topics, and any other topic the deployed stream captures). What is not: role
+messages, which stay live only (a frame whose dedupe key starts `envoy.role.forward.` or whose
+topic is a role lane is passed over); team and other ad-hoc topics, which the stream does not keep
+(the listener answers them `not_retained`) and which stay live only; anything published before
+the session followed the subject; and anything older than the stream's 72 hours. A replayed frame
+(`showReplayed`) is rendered by `renderInbound` and shown as an `envoy-message` card
+(`deliverAs: "steer"`, `triggerTurn: true`) whose last line says when it was published while the
+session's connection was down. A replayed targeted frame (BTW, Aside, Steer, a person's Send) is
+that card and nothing more: it runs no side turn, asks Dispatch to accept no user turn and posts no
+Dispatch reply, since a person's stale input run late could act on an old instruction. Dispatch
+recorded that attempt as sent when the listener stored it, and nothing later accepts or answers
+it. A frame the renderer skips (`notify: false`, the session's own event, another session's
+follow) records nothing, so an eligible copy of it on another subject still shows. A replayed
+`subscription.removed` closes a topic only when it was stored after the session started following
+that topic (the cursor's `since`), and takes it out of the listener's registry as
+`envoy_unsubscribe` does (`client.unsubscribe`), both by the engine's shared rule
+(`closeReplayedRemoval`): a resumed session registered the topic again before the sweep, and the
+registry, which only ever adds a registered topic, would have the next restart follow it again.
+
+Two transcript entries hold it, written with `pi.appendEntry` and rebuilt by
+`restoreLocalSessionState` from every entry of the session file (`replaySnapshot`):
+`envoy-replay-delivered` (`{event_id?, dedupe_key?, at}`), one per frame the ledger records,
+shown live or replayed or named in a failure notice; and `envoy-replay-state`
+(`{stream_id?, stream_created, subjects: {<subject>: {since, after}}, notices?}`), written only
+when it changed, the newest being the state; `notices` holds a one-time notice the sweep raised
+but has not told yet, written with the cursor change that raised it, so a process that ends before
+telling it tells it at the first sweep after the restart. The ledger also takes the frame of
+every `envoy-message` card the session file holds (`custom_message` entries, every branch;
+`writtenCardIdentity`), dated by its entry, so a card written just before the process ended, its
+record not, is not shown twice. A heartbeat
+sweep that handled no message and only moved its cursors to the stream's end, which other
+subjects' traffic moves, writes nothing: that move goes with the next write, or once the state
+last written is an hour old. A restore drops ledger entries recorded 72 hours ago or more and
+keeps the state at any age. `recoverRegisteredInterests` resubscribes the union of
+the listener's registered interests and the newest state's topics (`rememberedTopics`: neither an
+agent subject nor a role lane), so a session stopped longer
+than the listener's 10-minute grace still follows its topics and recovers what the stream kept for
+them; an unfollow (`envoy_unsubscribe`, a removal) is written at once and stays unfollowed.
+
+A frame that fails to show is retried by the next sweeps. On its third failure (counted in memory,
+so a restart gives it three more tries) the session is shown one card in its place naming the
+sender, the event id, the summary, when it was published and the error, and how to read it:
+`dispatch read` for a Dispatch event, `envoy_inbox` otherwise. A notice is recorded as the frame
+would be, once the host wrote it. If the notice fails too, a `logger.warn` and a UI warning say
+so, and the next sweep tries the notice again. A live frame that fails and that no sweep will
+show gets the notice at once: a role forward after its receipt, or a frame on a subscription the
+replay does not read (a team topic, a subject refused or without a cursor yet, or while the
+listener's replay is failing), or one the plugin received before its subject's cursor started (a
+new follow, a new session, a reset after a stream recreation), since that cursor starts at the
+stream's end, which can be past a frame the live path still held. A frame is stamped when its
+subscription yielded it (`readArrivals`, which reads each subscription as its messages arrive),
+not when the frames queued before it finished delivering. One card that starts no turn
+(`routeReplayNotice` sends this kind to a card, through `UnwrittenFrames.sendNotice`) says that
+the stream was recreated, so messages from before it may be lost, or that a cursor fell behind the
+stream's oldest message, so messages older than 72 hours may be missing. The stream is recreated
+when the listener's `stream.id` differs from the stored `stream_id`; a `created` that moved under
+the same id (a restore, or a leader election after a clustered restore) is the same stream, and
+an answer without an id is
+judged by `created`. It is a steer with
+`triggerTurn: false`, so like an inert card it is handed only while the host is settled: raised
+while a turn streams, it is held, and the first settled heartbeat hands it, so no extra model turn
+runs for it; a notice held for a session the host has left is dropped. A held notice is recorded in
+the session file (`envoy-replay-notice`, `{id, content}`, then `{id, handed: true}` once handed), and
+the restore of that session's state (a start, a resume, a switch back) holds each one still unhanded
+again, by its id, since the replay state that raised it no longer shows its cause. A listener
+without the route answers 404; one whose NATS
+user lacks the read, or that has no stream, answers 503 `REPLAY_UNAVAILABLE`; either, or a 401 or
+403, is said once as a `logger.warn` and a UI warning that messages published while the
+connection is down are not recovered, live delivery goes on as before, and every heartbeat asks
+again.
+
+Each frame is shown once across reconnects and restarts, within two limits: the ledger's 72
+hours, and its 20,000 entries, the oldest dropped first, so a session shown more frames than that
+inside 72 hours can be shown the oldest of them again by a sweep that reads it. A frame the host
+still held unwritten when the process ended is shown after the restart, as a card; one an
+interrupt withdrew is shown again by the next heartbeat in the same process (a card handed again,
+a person's turn as a card that runs nothing), and one a switch away
+dropped by that session's sweep once the host is back on it or resumes it; a card written whose
+record was not is read back from the transcript; a user turn written whose record was not (the
+process ending between the two) is shown again as a card. Inside one sweep replayed frames
+go out in stream order; nothing orders them against live ones. `scripts/smoke-replay.sh` is the
+live proof (`scripts/README.md`).
 
 ## Legion
 
@@ -460,16 +637,18 @@ state never nudges.
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |
 | Real end-to-end delivery smoke | `scripts/smoke-delivery.sh`, `scripts/smoke-btw.sh`, `scripts/README.md` | Manual installed-plugin smokes against live Envoy; `smoke-btw.sh` creates a targeted Dispatch BTW or Steer attempt and verifies its correlated reply |
+| Missed messages | `extensions/envoy.ts` (`replay`, `showReplayed`, `triggerReplay`), `src/missed-messages.ts`, `src/unwritten-frames.ts` (`UnwrittenFrames`: the cards and turns handed and not yet written, each claim's settle and release), `../envoy-client/src/replay.ts`, `scripts/smoke-replay.sh` | The replay of what the stream stored while a subscription was down ("Missed messages" above); the engine and its rules, with the host policy both plugins share (`replayFollowedSubjects`, `rememberedTopics`, `closeReplayedRemoval`, `routeReplayNotice`), are `@legion/envoy-client/replay`'s; this package holds its triggers, cards and transcript entries |
 
 ## Critical conventions
 
 - Register every schema through the injected `pi.zod`. Every field counts, not just the outer object: OMP's converter reads internals (`.ir`) only its own Zod produces, and a field from another Zod instance fails the whole extension load (`undefined is not an object (evaluating 'e.ir.desc')`). `envoy.test.ts` proves every registered field came from the injected instance. |
-- Keep direct NATS subscription lifecycle and Pi delivery adapter-local. Register `["aside", "btw", "steer"]` when the host has a side turn (`ctx.runEphemeralTurn`, Oh My Pi 18.3 on; pi-envoy wraps the question in the /btw prompt itself, since the host sends the prompt as given) and `["aside", "steer"]` otherwise — both built from the contracts' `DELIVERY_CAPABILITIES`, never spelled here; an advertised `btw` frame never falls back to steering. Deliver targeted **Aside** / **Steer** with `triggerTurn: true`; reject an unparsed targeted frame without primary-turn injection, log it, and post its error to Dispatch whenever it has a reply address.
+- Keep direct NATS subscription lifecycle and Pi delivery adapter-local. Register `["aside", "btw", "steer"]` when the host has a side turn (`ctx.runEphemeralTurn`, Oh My Pi 18.3 on; pi-envoy wraps the question in the /btw prompt itself, since the host sends the prompt as given) and `["aside", "steer"]` otherwise — both built from the contracts' `DELIVERY_CAPABILITIES`, never spelled here; an advertised `btw` frame never falls back to steering. Deliver targeted **Aside** / **Steer** with `triggerTurn: true`; reject an unparsed targeted frame without primary-turn injection, log it, and post its error to Dispatch whenever it has a reply address. Once the host wrote a live frame to the transcript (the `message_end` of its card or user turn), record it in the replay ledger (`recordDelivered`) before its claim settles, never sooner, and drop a live frame the ledger already holds; a replayed frame (`showReplayed`) is a card and runs nothing, whatever it carries ("Missed messages").
 - Render every inbound envelope through `renderInbound`. Keep its bounded 50-item `envoy_inbox` metadata-only; use the shared `envoy_role_get` transport operation for current role holders.
-- Session state converges in one serialized pass (`reconcile`), which every session event (`session_start`, `session_switch`, `session_branch`, `session_tree`), every registration heartbeat tick (`ensureHeartbeat`, `ENVOY_HEARTBEAT_MS`, default 90 s) and every bridge call for a session not yet established runs. Both serial queues (`passes` and `roleMoves`) give each task a deadline (`passDeadlineMs`, `ENVOY_PASS_DEADLINE_MS`, default `max(heartbeatMs, 30 s)` and never shorter than `heartbeatMs`, since a deadline under one tick abandons every pass before the next and so disables the registration backstop, which runs inside the heartbeat's `healing` latch; an explicit value below the heartbeat is raised to it): past it the caller's promise rejects with `AbandonedTaskError`, the queue starts the next task, and the abandoned task is fenced, so its late continuation writes nothing. The heartbeat tick also re-posts the registration itself, outside both queues, when a pass is still running and the last accepted registration is a whole refresh interval old; a stall counts as a failed registration, so the next healthy tick re-asserts the role and fires the regain hook with reason `"reregistered"`, and it is said once per episode — one `context.ui.notify` and one `logger.warn`. A pass reads what is true now: the host's session id (`sessionManager.getSessionId()`, which Oh My Pi moves before it dispatches a switch's event), that session's own records (the last `envoy-role-claim` entry on its branch), and the one hold this process owns at the listener (`claimedRoleTopic` under `claimedRoleSessionID`). It converges to them idempotently: the host session's agent subject open and registered and Dispatch bound to it (refreshing the shell's environment when no event did), every other agent subject this process opened closed, and, in its turn of the role moves (`roleMoves`, `settleRole`), the role that session should hold held for it — the role its records name; else the role this process holds when its hold is under that session or one it continues; else, until a pass has decided for it, the listener's rows for it and for the sessions it continues; none of them while the listener has refused that role to that session (`refusedRoles`, below) — with any other role handed back at the listener. Only opening the agent subject needs NATS: the registration and the role go over HTTP, so an outage of the plugin's own NATS connection stops neither, a Legion claim through the bridge included; the pass throws `InboundError` once both are settled, the session's start or switch warns of the outage, and the next pass opens the subject. What a session continues is how it was born (`continues`, `noteMove`): a fork or branch continues the session it left, learned from `session_before_switch` or `session_before_branch` or else the switch's event; a `/new` or resume continues nothing; a move with no word to an id never seen here carries the session on, as the drift heal always has; a move back to a session seen before (a resume Oh My Pi rolled back) changes nothing. An announcement lasts until a pass sees the host move, the next session event wherever it lands (a `/reload` lands on its own session), or the end, with a reply not aborted, of a run that started under it on the session it announced leaving: a switch that goes ahead aborts a run still going, and one another extension cancelled does not (a run that starts and ends while another extension's announcement handler still runs reads the same, and no host event tells the two apart). Every automatic claim is soft, naming the hold it may supersede — this process's own, wherever the listener names it, or whichever session the claimant continues the listener names — and the listener decides. A pass that finds the host moved after any await stops, and the pass the move queues converges, so the order of host events never matters; a claim the move outran stays this process's hold for that pass to keep or hand back. A switch's event also ends at once a role the new session's records rule out, so a `/new` never takes the old role's notices while an earlier pass finishes; the next pass hands that hold back whether or not its registration succeeds (`pendingHandBacks`), unless the hold is under the session open here, read at that moment (`sessionOpen`), and that session wants its role, whose hold it is again (a resume Oh My Pi rolled back) — unconfirmed until a soft claim naming it checks it at the listener (`holdUnconfirmed`) — and a claim of the role drops such a hand-back. A hold under a session this process has left is never its own again, since another process may run that session now. One the listener does not take back is abandoned (`abandonedHolds`), whatever session it is under, and waits for the listener's reaping until this process registers that session again; a claim the listener refuses naming it records no refusal while the listener's `last_seen` for that session stands still, so a pass claims again once the listener has reaped it. A `last_seen` that moved means another process registers that session, which is then the newer holder; any registration of that session by this process, in a pass or not and answered or not, first takes the hold back as its own, a pending hand-back under that id (`registerSession`). A heartbeat pass whose session already holds its role reads `GET /v1/roles/<role>` and claims softly only when the listener does not name it, so a healthy tick writes nothing and appends no transcript entry. A 409 to any automatic claim (a different live holder) drops the local claim, since the newer holder is correct, and no pass claims that role for that session again — each session's refusal its own — until a session event lands on it, the model or a plugin claims a role for it, or the process restarts and reads its records afresh. A regain — or the first pass that decides after a failed registration, when a surviving claim may still have been unresolvable — fires `onEnvoyRoleRegained` detached from the heartbeat chain (a slow daemon never blocks the next re-registration), which re-runs a claim's `claims/ready` with bounded retries; a pass the host overtook keeps that regain for the next. A role end after a move no session event announced is one no plugin heard: it warns, naming the role and who claims it again (the plugin that opened its notices, on its next session switch or restart, or the model with `envoy_role_set`), and a pass that claims or takes back a role whose plugin notices are still closed says they stay closed. A carried switch tells the agent its id changed once, from the pass that converges to it, in the session the notice names. The controller re-runs nothing, since the daemon holds nothing for it. `packages/pi-legion/src/claim-session.ts` registers that listener on the shared interface's `roleClaim.regained` slot (`@legion/pi-shared/interface`, `packages/pi-shared/AGENTS.md`) only once it holds a Legion identity, since a `task` subagent's re-bound instance shares the process and would otherwise replace it.
+- Session state converges in one serialized pass (`reconcile`), which every session event (`session_start`, `session_switch`, `session_branch`, `session_tree`), every registration heartbeat tick (`ensureHeartbeat`, `ENVOY_HEARTBEAT_MS`, default 90 s) and every bridge call for a session not yet established runs. Both serial queues (`passes` and `roleMoves`) give each task a deadline (`passDeadlineMs`, `ENVOY_PASS_DEADLINE_MS`, default `max(heartbeatMs, 30 s)` and never shorter than `heartbeatMs`, since a deadline under one tick abandons every pass before the next and so disables the registration backstop, which runs inside the heartbeat's `healing` latch; an explicit value below the heartbeat is raised to it): past it the caller's promise rejects with `AbandonedTaskError`, the queue starts the next task, and the abandoned task is fenced, so its late continuation writes nothing. The heartbeat tick also re-posts the registration itself, outside both queues, when a pass is still running and the last accepted registration is a whole refresh interval old; a stall counts as a failed registration, so the next healthy tick re-asserts the role and fires the regain hook with reason `"reregistered"`, and it is said once per episode — one `context.ui.notify` and one `logger.warn`. A pass reads what is true now: the host's session id (`sessionManager.getSessionId()`, which Oh My Pi moves before it dispatches a switch's event), that session's own records (the last `envoy-role-claim` entry on its branch), and the one hold this process owns at the listener (`claimedRoleTopic` under `claimedRoleSessionID`). It converges to them idempotently: the host session's agent subject open and registered and Dispatch bound to it (refreshing the shell's environment when no event did), every other agent subject this process opened closed, and, in its turn of the role moves (`roleMoves`, `settleRole`), the role that session should hold held for it — the role its records name; else the role this process holds when its hold is under that session or one it continues; else, until a pass has decided for it, the listener's rows for it and for the sessions it continues; none of them while the listener has refused that role to that session (`refusedRoles`, below) — with any other role handed back at the listener. Only opening the agent subject needs NATS: the registration and the role go over HTTP, so an outage of the plugin's own NATS connection stops neither, a Legion claim through the bridge included; the pass throws `InboundError` once both are settled, the session's start or switch warns of the outage, and the next pass opens the subject and starts a sweep, which shows what the stream stored for the session while it was closed ("Missed messages"; the sweep runs on its own chain, never in either queue). What a session continues is how it was born (`continues`, `noteMove`): a fork or branch continues the session it left, learned from `session_before_switch` or `session_before_branch` or else the switch's event; a `/new` or resume continues nothing; a move with no word to an id never seen here carries the session on, as the drift heal always has; a move back to a session seen before (a resume Oh My Pi rolled back) changes nothing. An announcement lasts until a pass sees the host move, the next session event wherever it lands (a `/reload` lands on its own session), or the end, with a reply not aborted, of a run that started under it on the session it announced leaving: a switch that goes ahead aborts a run still going, and one another extension cancelled does not (a run that starts and ends while another extension's announcement handler still runs reads the same, and no host event tells the two apart). Every automatic claim is soft, naming the hold it may supersede — this process's own, wherever the listener names it, or whichever session the claimant continues the listener names — and the listener decides. A pass that finds the host moved after any await stops, and the pass the move queues converges, so the order of host events never matters; a claim the move outran stays this process's hold for that pass to keep or hand back. A switch's event also ends at once a role the new session's records rule out, so a `/new` never takes the old role's notices while an earlier pass finishes; the next pass hands that hold back whether or not its registration succeeds (`pendingHandBacks`), unless the hold is under the session open here, read at that moment (`sessionOpen`), and that session wants its role, whose hold it is again (a resume Oh My Pi rolled back) — unconfirmed until a soft claim naming it checks it at the listener (`holdUnconfirmed`) — and a claim of the role drops such a hand-back. A hold under a session this process has left is never its own again, since another process may run that session now. One the listener does not take back is abandoned (`abandonedHolds`), whatever session it is under, and waits for the listener's reaping until this process registers that session again; a claim the listener refuses naming it records no refusal while the listener's `last_seen` for that session stands still, so a pass claims again once the listener has reaped it. A `last_seen` that moved means another process registers that session, which is then the newer holder; any registration of that session by this process, in a pass or not and answered or not, first takes the hold back as its own, a pending hand-back under that id (`registerSession`). A heartbeat pass whose session already holds its role reads `GET /v1/roles/<role>` and claims softly only when the listener does not name it, so a healthy tick writes nothing and appends no transcript entry. A 409 to any automatic claim (a different live holder) drops the local claim, since the newer holder is correct, and no pass claims that role for that session again — each session's refusal its own — until a session event lands on it, the model or a plugin claims a role for it, or the process restarts and reads its records afresh. A regain — or the first pass that decides after a failed registration, when a surviving claim may still have been unresolvable — fires `onEnvoyRoleRegained` detached from the heartbeat chain (a slow daemon never blocks the next re-registration), which re-runs a claim's `claims/ready` with bounded retries; a pass the host overtook keeps that regain for the next. A role end after a move no session event announced is one no plugin heard: it warns, naming the role and who claims it again (the plugin that opened its notices, on its next session switch or restart, or the model with `envoy_role_set`), and a pass that claims or takes back a role whose plugin notices are still closed says they stay closed. A carried switch tells the agent its id changed once, from the pass that converges to it, in the session the notice names. The controller re-runs nothing, since the daemon holds nothing for it. `packages/pi-legion/src/claim-session.ts` registers that listener on the shared interface's `roleClaim.regained` slot (`@legion/pi-shared/interface`, `packages/pi-shared/AGENTS.md`) only once it holds a Legion identity, since a `task` subagent's re-bound instance shares the process and would otherwise replace it.
 - A `task` subagent's session shares its parent's identity in both plugins (`subagentSessionCheck` in `@legion/pi-shared/subagent-session`): in a Legion process it claims no role, calls no daemon route, and never exits (`packages/pi-legion/extensions/legion.ts`), and in every process `extensions/envoy.ts` skips its `session_start` and switch events entirely — no listener registration, no agent-subject subscription, no heartbeat — so `envoy ps` lists only top-level sessions and a finished subagent leaves no row heartbeating for the life of the parent process. Both entries ask the host's own roster first (`registeredSubagent`: `AgentRegistry.global()` from `@oh-my-pi/pi-coding-agent`, where `createAgentSession` registers every session as `main`, `sub`, or `advisor` before `session_start` fires), which needs no transcript and no write, so it also covers a subagent under `OMP_SESSION_STORAGE=sql` or of a `--no-session` parent, and stays per session rather than per process (an ACP host runs several top-level sessions in one process). The roster's answer outranks the transcript layout. Only where the roster gives no opinion (a host build without the export, or a session the global roster does not list) does the transcript decide, once `ensureOnDisk` has published it; that publish stays, since the transcript is then the only signal and has to be on disk to read as top-level. It fails while another writer holds the transcript's publish lock (Oh My Pi's `SessionLockError`); the check then answers that one call from the transcript as it is on disk, logs a warning, and asks again at the next call, so a lost race never fails a hook or the tool call it gates. Each hook calls the check once and passes the answer on, and each extension instance keeps only a settled answer, for its life. The transcript check is recognised by either of two signals: the process-local one — the claim session's boot and a launched controller's claim (`packages/pi-legion/src/claim-session.ts`, `packages/pi-legion/src/controller-session.ts`) record the bootstrapped session's transcript path on the shared interface (`bootstrappedSession` in `@legion/pi-shared/interface`), and any later `session_start` in the same process with a different transcript path is a subagent — or OMP's on-disk layout for file storage (the parent's `.jsonl` sits beside the subagent's transcript directory). The process-local signal is what holds when the transcript is a SQL row rather than a file (LEGION-80: `OMP_SESSION_STORAGE=sql`); the on-disk check stays as the fallback for a process that has not bootstrapped anything. The identity it shares is its reply address. Every top-level instance publishes its own session on `globalThis` under `Symbol.for("legion.pi-envoy.envoy-session")` (`src/envoy-session.ts`), keyed by its transcript path, at the one chokepoint that moves the module id — `restoreLocalSessionState`, which a start, a switch and the heartbeat's drift heal all run — and deletes its previous key when its id or transcript path changes, so a retired session leaves no entry to resolve. A session is recorded from its `session_start`, before the host has minted its id — under its transcript path, with the empty id it has — so a fresh TUI's subagent resolves that session and reports no address until the drift heal fills the id in, rather than falling through to another live session; and `session_shutdown` deletes the entry, since a deregistered session is not an address a reply reaches. It is a map, not one slot, because an ACP host runs several top-level sessions in one process: one slot would hand a subagent whichever of them last started. A subagent, whose module `sessionID` stays empty, resolves its own by walking OMP's layout up — `dirname(<own transcript>) + ".jsonl"`, repeated for a nested subagent — until a recorded session matches, and `envoy_whoami`, the `/whoami` command, and the `source_session` of `envoy_send` and `envoy_publish` all name that session. `envoy_whoami` reports it as `session_id` and the subagent's own host id under `subagent`. Where the walk matches nothing, one recorded session is used only when it is the only one in the process; otherwise there is no reply address at all — `session_id` is empty, the `subagent` note says so, and `packages/envoy-client/src/transport.ts` omits `source_session` rather than send an empty one, which the listener's `omitempty` erases on the way out, costing the recipient both the sender label and the reply hint. Naming an unrelated live session is never the answer. A subagent's `envoy_publish` never reaches its own parent: the listener delivers nothing to the session an envelope names as its source — `roleTopicDelivery` skips the resolved holder and `fanoutDelivery` skips any interest whose session is the source — so a publish to a role the parent holds, or to any topic it subscribes to, is accepted and delivered to nobody. The publish tool result says so for the role case, where the answer names the holder; the hop a subagent actually has to its parent is a `write` to the parent's `agent://` address. A direct `envoy_send` is unaffected, the agent-subject lane having no such skip. The host's own `AgentRegistry` carries a `parentId`, but it is undocumented and a host upgrade could change it silently; the published record is this package's own.
 - What a daemon refusal of the boot registration does to a Legion process (`bootLegionClaim` in `@legion/pi-shared/legion-claim-core`, whose `stop` the Legion entry makes its exit) is the Legion entry's rule: see the critical conventions of `packages/pi-legion/AGENTS.md`.
 - Nothing under `extensions/` or `src/` imports `packages/pi-legion`: what both plugins need lives in `@legion/pi-shared`, which each bundles (`src/no-cross-import.test.ts`).
 - `envoy_list` must report the union of locally live and registry-persisted topics, with each topic marked `live`, `registry`, or `both`.
 - Do not alter `~/.omp` from this package. The README documents the local developer symlink.
 - `scripts/smoke-delivery.sh`, `scripts/smoke-btw.sh` and `scripts/smoke-registration-stall.sh` are manual, real end-to-end smokes against a live listener; never wire any of them into CI without live Envoy/NATS, Dispatch, and a configured model provider. The first two run their session on their own tmux server, on a socket in their temp directory (`tmux() { command tmux -S "$tmux_socket" "$@"; }`), and print the `tmux -S <socket> attach -t <session>` line that watches it, so their cleanup's `tmux kill-session` can end only the session they started: on the shared default server that kill could end anyone's session. Keep new tmux calls on that wrapper rather than the default server. `smoke-registration-stall.sh` is the registration-stall proof (INFRA-246) no unit test can give, since it turns on a real pane's record outliving the listener's own 300 s expiry: it runs one headless `omp --mode rpc` pane per arm (no tmux) with `scripts/stall-fixture.ts` loaded ahead of the plugin, which wraps `fetch` to wedge one registration post forever and records every registration and `logger.warn` line. `--arm stall` watches a wedged pane stay listed, keep refreshing and say the stall exactly once; `--arm recover` deletes a running pane's record and watches it re-register itself. Each arm has a `--control` that must fail the way the bug failed — the stall control runs the plugin at `--base-rev`, materialised by `jj file show` into a dot-prefixed file under `extensions/` (its imports resolve nowhere else) that the trap removes. `ENVOY_URL` and `ENVOY_TOKEN_FILE` are required operator inputs, never defaults in the file. `stall-fixture.ts` ships in no deployment: it is not in `omp.extensions` and nothing bundles it.
+- `scripts/smoke-replay.sh` is the missed-messages proof (INFRA-439), manual for the same reason: every model call it makes is real. It runs one headless `omp --mode rpc` session with this checkout's plugin, which reaches NATS only through a `socat` proxy the script owns, against a JetStream natsd and a listener it builds from the checkout, or, with `SMOKE_REPLAY_ENVOY_URL` and `SMOKE_REPLAY_NATS_URL`, against an existing pair (the production check after a rollout). It kills the proxy, publishes a Dispatch-shaped envelope to the session's agent subject, brings the proxy back and requires exactly one card for it in the session file, then does the same across a stop and resume of the session; its control runs the released plugin (`SMOKE_REPLAY_CONTROL_PLUGIN`) and must show none. `scripts/README.md` says how to run it. Never wire it into CI.

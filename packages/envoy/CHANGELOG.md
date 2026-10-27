@@ -4,6 +4,40 @@
 
 ### Added
 
+- The listener answers `POST /v1/replay` with the messages `ENVOY_NOTIFICATIONS` stored for a
+  session after a cursor per subject, so a session that receives on its own NATS subscriptions
+  (pi-envoy, claude-envoy) reads back what it missed while they were down. It serves only the
+  session's own `notifications.agent.<session_id>`, exactly, and the topics registered as its
+  interests that lie inside a shared stream subject (`notifications.dispatch.>`,
+  `notifications.github.>`, `notifications.slack.>`, `notifications.ghostwispr.>`,
+  `notifications.whatsapp.>`), whose publishers never carry one session's private payload. Every
+  other subject is `refused: "not_followed"` even when the interest store holds it: another
+  session's agent subject or a wildcard over them, every exception lane (the session's own
+  included), the Legion controller's `notifications.legion.>` notices, and a wildcard wider than
+  one shared subject such as `notifications.>`. Every subject of the stream is classified shared
+  or private beside the stream's subject list, and a test fails on a new one left unclassified. An
+  answered subject the deployed stream does not retain is `refused: "not_retained"`; a subject
+  without a cursor gets the stream's last sequence to start one. The answer's `stream` names the
+  stream's `id`, the `envoy_stream_id` metadata the listener and Dispatch's server set once (on the
+  stream they create, or on a deployed one without it, whose other metadata every start keeps; a
+  deployed stream that needs no other change gets the id alone, its replicas and every other
+  setting kept as deployed), which a backup and restore, a reconcile and a leader election keep,
+  while a restore changes `created`, and after a clustered restore the servers can report
+  different `created` times, so a later leader election can change it too. One answer holds at
+  most 32 subjects, 500 messages (100 by default), 2 MiB and 5 s of reading, and says `more` for
+  a subject it cut short. NATS refusing the read is `503 {"code":"REPLAY_UNAVAILABLE"}` naming
+  NATS's error; a listener without the route answers 404, which a session reads as "does not
+  replay". A `session_id` that is not one literal NATS token (`.`, `*`, `>`, whitespace or a
+  control character) is a 400, so a wildcard cannot make `notifications.agent.>` its own subject
+  and read every session's inbox (INFRA-439).
+- `envoy-infra`'s `ListenerPermissions`, and through it `HostPermissions` and
+  `DispatchPermissions`, grant `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS`, the stored-message
+  read `/v1/replay` makes; it reads one message at a time and can create, change or delete
+  nothing, and `SessionPermissions` does not get it. The rendered users change, so moving a hub
+  with a `listener`, a `machineId` user or a `dispatchMachineId` user to this release replaces its
+  VM once, with NATS down until the new VM starts; a hub with none of them keeps its VM. A
+  listener whose NATS user lacks the read answers `/v1/replay` with `REPLAY_UNAVAILABLE`
+  (INFRA-439).
 - `envoy-infra:gcp:Dispatch` takes `pprofPort`, which sets `DISPATCH_PPROF_PORT` on the app
   Deployment's `envoy-dispatch` container alone, so a deployment turns on Dispatch's loopback-only
   profiler through the component rather than by editing the Deployment, which the next update
@@ -785,6 +819,25 @@
 
 ### Changed
 
+- `POST /v1/interests/subscribe` no longer stores a topic reaching a private stream subject other
+  than the session's own agent subject (`bus.ReachesPrivateStreamSubject`): another session's
+  `notifications.agent.<id>`, a failed-delivery lane
+  `notifications.envoy.exceptions.notifications.agent.<id>` (the session's own included), a
+  Legion daemon notice under `notifications.legion.>` (the controller lane
+  `notifications.legion.<project>.controller`), or a wildcard overlapping one
+  (`notifications.agent.*`, `notifications.agent.>`, `notifications.envoy.>`,
+  `notifications.>`, `notifications.*.<x>`), since the stored topics drive the listener's fan-out
+  to serve-port sessions and such a topic would hand one session another's inbox, a failed
+  delivery's payload or the controller's notices (`/v1/replay` refuses such a subject on its own).
+  The rest of the registration is stored and the answer stays 200, its `warnings` naming each
+  topic left out (`<topic> was not registered: …`), so a released pi-envoy, which registers a fork
+  parent's agent subject with the rest of what it follows, keeps registering. A row an earlier
+  build stored with such a topic is cleaned at the session's next registration: the registry drops
+  every such topic from the merged row, not only from the incoming topics, as do a role claim and
+  an unsubscribe that rewrite the row, so the fan-out stops reaching the session after its next
+  heartbeat. pi-envoy and claude-envoy no longer register or replay a topic reaching a private
+  stream subject other than their own agent subject (`reachesPrivateStreamSubject` in
+  `@legion/envoy-client/replay`, mirroring `bus.ReachesPrivateStreamSubject`) (INFRA-439).
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a

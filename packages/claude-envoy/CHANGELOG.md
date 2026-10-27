@@ -4,6 +4,35 @@
 
 ### Added
 
+- The channel server delivers once each Envoy message the session missed while its NATS
+  subscriptions were down, NATS was restarting or Claude Code was not running. It asks the
+  listener's new `POST /v1/replay` for what the notification stream (72 hours) stored on the
+  session's own subject and on every topic it follows after where it last read, at channel start
+  (a resume included), on each NATS reconnect, on every heartbeat and after a new follow, and
+  hands each message the session was not given on the same path as a live one (the channel
+  notification, or the Legion bridge's inbox), with a line saying when it was published while the
+  connection was down; it runs nothing. Role messages and team or other ad-hoc topics stay live
+  only. `replay-<session id>.json` in the plugin's data directory (mode 0600, never pruned) keeps
+  the cursors, the followed topics, which the server follows again at start after the listener
+  reaped them, and up to 72 hours and 20,000 entries of what the session was handed, so a resume
+  repeats nothing (a live repeat included) and a `/clear` starts afresh. A frame that fails three
+  times, or a live failure no sweep will retry (one received before its subject's cursor started
+  included, stamped when it arrived even behind a slow delivery), is replaced by a notice naming
+  it, its fields rendered in TOON as a live card's are,
+  so a sender's multi-line summary cannot add a field of its own. A recreated stream (its
+  `stream.id` changed, or, from a listener that answers no id, its creation time; a restore moves
+  the creation time under the same id, as can a leader election after a clustered restore, and
+  that is no recreation) or
+  a cursor older than the stream's oldest message is said once as a card, also by a channel
+  started again after one that stopped before saying it; a listener
+  without the route, or unable to read the stream, is said once on stderr. A BTW that reaches
+  replay is passed over and named on stderr, never handed: the listener never sends this session
+  a BTW, and neither delivery path can show one without starting a turn. A followed topic
+  reaching a private stream subject, by the listener's own rule (another session's
+  `notifications.agent.<id>`, a failed-delivery lane, a `notifications.legion.` controller lane, or
+  a wildcard reaching one such as `notifications.agent.*`), is followed live but neither registered
+  nor replayed, since the listener refuses to store it. `dist/` was rebuilt (INFRA-439).
+
 - The `dispatch` command (`dist/dispatch.js`) takes `dispatch issues --all`, which reads the whole
   filtered issue listing in one request rather than a page, for a caller that must not miss or
   repeat a row while the list changes under it. `--all` with `--limit` or `--offset` is a usage

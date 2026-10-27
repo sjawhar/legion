@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-439",
+  "completed": "2026-10-27T00:42:07Z",
+  "pr": 2228,
+  "round": "review round 5 (changes requested at b08c70f3): retention gap told twice when its sweep is cut short; fork requeue order; nats-hub.md replay read; conditional no-auth NATS user sentence",
+  "proof": [
+    {
+      "criterion": "A retention gap is told once when its sweep is cut short between the notice and the page's last frame",
+      "surface": "envoy-client bun test (replay.test.ts) and pi-envoy bun test (extensions/envoy.test.ts), cutting the sweep while a gapped page's frame is shown",
+      "command": "cd packages/envoy-client && bun test (911 pass; the 1 fail is envoy-config.test.ts 'still running after 10 s', untouched by this PR, failing alone in this pod); cd packages/pi-envoy && bun test (1015 pass, 0 fail)",
+      "observed": "one retention_gap across the cut engine and the engine restored from its last write; a later-page gap gives one notice in total; the pi-envoy session cut at the surviving frame's card shows one gap notice after the restart and the frame once",
+      "headSha": "c95305504d295746517ef9dbc9b21b36147d685d",
+      "negativeControl": "against 6eba519f's replay.ts the engine test gives ['retention_gap','retention_gap'] and the new tests fail"
+    },
+    {
+      "criterion": "Held replay notices still survive a kill and are told once live; the fork fix and gap fix leave the replay smoke green",
+      "surface": "the tester's notice4.sh and notice2.sh (unchanged) and packages/pi-envoy/scripts/smoke-replay.sh in local mode, on real omp 18.12.2",
+      "command": "bash /legion/scratch/tmp/adv/notice4.sh; bash /legion/scratch/tmp/adv/notice2.sh; bash packages/pi-envoy/scripts/smoke-replay.sh (https://github.com/sjawhar/legion/pull/2228#issuecomment-6430820579)",
+      "observed": "NOTICE4 RESULT: gap-a:PASS gap-b:PASS; NOTICE RESULT: N2-shown-after-resume:PASS N2-once:PASS; smoke exit 0, SMOKE REPLAY PASS",
+      "headSha": "c95305504d295746517ef9dbc9b21b36147d685d",
+      "negativeControl": "notice4 at 489fd64d gave gap-b:FAIL(0->2->2); the fork unit test fails against the id-only dedupe (notice never handed in the fork)"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy-client/src/replay.ts",
+    "packages/envoy-client/src/__tests__/replay.test.ts",
+    "packages/envoy-client/CHANGELOG.md",
+    "packages/claude-envoy/dist/envoy-channel.js",
+    "packages/pi-envoy/extensions/envoy.test.ts (test added only)",
+    "packages/pi-envoy/src/unwritten-frames.ts",
+    "packages/pi-envoy/src/unwritten-frames.test.ts",
+    "packages/envoy/infra/docs/nats-hub.md"
+  ],
+  "trickyParts": [
+    "Every subject gapped on a page is lifted to first_seq - 1 in both the sweep's reading and its cursor, written with flush(alive, true), and only then is the one notice per sweep raised; the page's frames (all at first_seq or later) are still handled.",
+    "Held and handed notices are keyed by (session, id): a fork's transcript copies its parent's held entry with the same id."
+  ],
+  "deviations": [
+    "The cut between a gap notice and the page-end write lasts milliseconds; it is proven by engine and pi-envoy tests, not by a live kill."
+  ]
+}
