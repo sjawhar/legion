@@ -2,34 +2,35 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-158",
-  "completed": "2026-10-27T09:47:00Z",
-  "round": 13,
+  "completed": "2026-10-27T10:52:00Z",
+  "round": 14,
   "generation": 4,
-  "head": "3a58ed47b6d2",
-  "verdictProvider": "No subagent judged anything in this round; the tester's own session ran every check, so no provider or model needs naming.",
+  "head": "6c7b9483ff36",
+  "verdictProvider": "No subagent judged anything in this round; the tester's own session ran every check, so no provider or model needs naming. The verdict follows the architect's ruling (Envoy 3d1ba166) that the deploy-order identity swap is a defect.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "The red tests 2f3a9b7f and 196f5a85 are unchanged (sha256 of each function body equal at 3a58ed47). On the surface, after main 1357b95c's close, the typed line answers 'No block' while closed and is dated v2 after the reopen. honest.sh finds no recorded text that its version lacks. d1@v4 gives version 4's state=\"open\". owed_documents reaches 0 in the deploy order and after rebuild-refs. The implementer's case is verified. It misses identical paragraphs."
+    "how": "Red test 44cf9cac is unchanged (sha256 of the function body equal) and the implementer reports it passes. On the surface in rows mode (edge_h5): every block that version 1 holds keeps its own id at v1 while closed: identical paragraphs, a block moved by cut and paste, and an edited block with its version-1 text. The new blocks answer No block, and after the reopen they and the edit are dated v2. honest.sh is clean. Verified for the rows mode it claims. The deploy mode with repeated text fails, below."
   },
   "failed": 1,
   "failures": [
     {
-      "criterion": "Architect points (3) and (4) for decision 22: every block a version holds resolves on the closed page, identical paragraphs included, and after the reopen each block is dated to the first version that holds it",
-      "evidence": "Red test TestAClosedDocumentsIdenticalParagraphsKeepTheirOwnHistory, commit 44cf9cac in packages/envoy/internal/dispatch/docs/block_index_test.go. Command: cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://… go test -count=1 -run TestAClosedDocumentsIdenticalParagraphsKeepTheirOwnHistory ./internal/dispatch/docs/. Head: FAIL 'block f3387491-… that version 1 holds is dated 0 (text at version 1 false, deleted at version 1 true)'. cb3a2711: FAIL on the other half ('the inserted paragraph … which no version holds, has a text at version 1'). Real surface (edge_h4, head): version 1 '## Plan / Same. / Same. / Other. / Same. / Alpha. / Beta. / Gamma.' was indexed while ED-1 was open (third Same. = 538a70a2, v1). With versions refused, alice typed a new 'Same.' after 'Other.' (49a2b5b9) and moved Alpha by cut and paste (a new id). SetStatus closed ED-1 and rebuild-refs ran. Closed: 538a70a2 answers 'No block', with a deletion row at version 1; 49a2b5b9 answers 'Changed in version: 1'. After the reopen and version 2: 538a70a2 is 'Changed in version: 2' and its @v1 pin answers 'no block … at version 1'; 49a2b5b9 stays 'Changed in version: 1' with a text at version 1. The cause: closedVersionBlocks aligns untyped blocks by text alone with difflib, whose longest match pairs version 1's third 'Same.' with the new paragraph, although the index holds 538a70a2's own row with that text. Edge the design leaves open: in the deploy order with no earlier index, a block that version 1 holds and that an unsettled edit changed in place has no row and no live match, so it answers 'No block' while the issue is closed."
+      "criterion": "Architect's ruling for point (3) (Envoy 3d1ba166): with no row, a repeated text is matched in order only when the version and the live document hold the same number of copies of it, in the same relative order; otherwise every copy stays unmatched until a settlement, and a paragraph typed after the close is never dated version 1, neither while closed nor after the reopen. Control: with equal counts and no edits to them, every copy resolves at version 1",
+      "evidence": "Red test TestAClosedDocumentsRepeatedTextWithNoRowIsMatchedOnlyWhenItsCountsAgree, commit c12da9a2 in packages/envoy/internal/dispatch/docs/block_index_test.go. Command: cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://… go test -count=1 -run TestAClosedDocumentsRepeatedTextWithNoRowIsMatchedOnlyWhenItsCountsAgree ./internal/dispatch/docs/. Head: FAIL 'spec paragraph 5cc084b3-… \"Same.\" is dated 1 (text at version 1 true) while closed; the version holds \"Same.\" 3 times and the live document 4, so no copy may be matched'. Real surface (dep_r5): main 1357b95c closed ED-1 with version 1 'Same. / Same. / Other. / Same.' and an unsettled 'Same.' typed after 'Other.'. On the head deploy, the tick logged documents=1 owed_documents=0; the typed fe1ed832 is dated v1 and its @v1 pin answers 'Unchanged since version 1'; the original third 'Same.' 52d7159e answers 'No block'. After the reopen, 52d7159e is dated v2 and fe1ed832 stays v1. Cause: closedVersionBlocks' difflib text step inside each gap matches repeated text with no row, against its own comment 'a repeated paragraph is never given another's id'. Accepted limit (architect): an original copy left unmatched may be dated to the reopen's version."
     }
   ],
   "proof": [
     {
-      "criterion": "Points (1), (2) and (5): no history or pin names a version lacking the text, ask state included; owed_documents reaches 0 in the deploy order and after rebuild-refs; open issues unchanged",
-      "surface": "dispatch:local with the head's Go server, the dispatch CLI and Chromium (as alice), on databases written by main 1357b95c; honest.sh audits document_block_texts and document_blocks against artifact_versions",
-      "command": "old-edge.sh dep_e4, NOENTER=1 old-edge.sh dep_c4 and old-seed.sh dep_h4 on 1357b95c; srv.sh head on each; resolve.sh and honest.sh; dispatch-e2e rebuild-refs; reopen; dcli read --ref …@v1 and UP-1#b-d1@v4. On dep_h4, open OP-1 with versions refused: type.ts, rebuild-refs, then the refusal lifted",
-      "observed": "dep_e4: documents=1 owed_documents=0. Heading, Context and Ship it resolve at v1; the typed line answers No block, and @v1 answers no block at version 1. After the reopen the line is v2, and honest.sh is clean. dep_h4: withdrawn=15, documents=6 owed_documents=0, 12 of 12 of each issue's blocks resolve at v4, d1@v4 gives state=\"open\", and the same after rebuild-refs and after UP-1's reopen. OP-1: live_ahead=1 and the line answers No block until the settlement indexes v2.",
-      "headSha": "3a58ed47b6d2",
-      "negativeControl": "cb3a2711 on the same seed (dep_e4n) records 'unsettled typed line' at version 1 (honest.sh: ED-1|c196f9ce…|1), and last round cb3a2711 gave d1@v4 as state=\"resolved\""
+      "criterion": "Rows mode identity, the ask-state deploy order with rebuild-refs, and open issues unchanged, at the merged head",
+      "surface": "dispatch:local with the head's Go server, the web app and dispatch CLI rebuilt after main's merge, and Chromium (as alice); honest.sh audits document_block_texts and document_blocks against artifact_versions",
+      "command": "edge_h5: create ED-1, wait for its index, refuse versions by trigger, then type.ts 'Same.' after 'Other.', move.ts Alpha after Gamma, and NOENTER type.ts into Beta; daemonclose; drop the trigger; rebuild-refs; resolve.sh and honest.sh; reopen. dep_h5: old-seed.sh on 1357b95c, srv.sh head, resolve.sh, honest.sh, d1@v4, rebuild-refs. OP-1 open with versions refused, then the refusal lifted",
+      "observed": "edge_h5 closed: 17a1e7bd, 345a4b9e, 5bc94f50, c01c5236 (third Same.), 72dc173b (old Alpha), 82aba1fa (Beta, version 1's text) and 4e4ef6f3 resolve at v1; the new Same. e8f5b2a9 and the new Alpha answer No block. After the reopen: e8f5b2a9, the new Alpha and Beta are dated v2, and 72dc173b is recorded deleted at v2. dep_h5: withdrawn=15, documents=6 owed_documents=0, 12 of 12 per issue at v4, d1@v4 state=\"open\", the same after rebuild-refs; honest.sh is clean everywhere. OP-1: live_ahead=1 and No block, then v2 after it settles.",
+      "headSha": "6c7b9483ff36",
+      "negativeControl": "3a58ed47 on the same rows-mode shape recorded the held Same. 538a70a2 as deleted at version 1, and it answered No block (last round)"
     }
   ],
-  "ci": "At 3a58ed47: Tests 40480590080, Docs 40480590066 and Legion Envoy and Contracts 40480589994 are queued, and Worker Image 40480590025 is pending.",
+  "notRun": "The browser suites (close-withdraws-asks, offline-edits, doc, margin, ask-blocks, references, unknown-directive; chromium and iphone) were started at the head and stopped at 18 of 248 with no failure once the round's verdict was fail; the next round runs them whole.",
+  "ci": "At 6c7b9483: Tests 40488821626 and Legion Envoy and Contracts 40488821655 are queued, and Docs 40488821571 and Worker Image 40488821641 are pending.",
   "evidenceComments": [
-    "https://github.com/sjawhar/legion/pull/2233#issuecomment-6438564749"
+    "https://github.com/sjawhar/legion/pull/2233#issuecomment-6439916289"
   ]
 }
