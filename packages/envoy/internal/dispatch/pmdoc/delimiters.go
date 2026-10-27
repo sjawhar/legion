@@ -33,10 +33,15 @@ type delimiterList struct {
 	// above the one pushed when it opened.
 	pushed int
 	// bottoms is, for each link or image label open, innermost last, the pushed count when it opened,
-	// as goldmark's link parser keeps the last delimiter on its list (pushLinkBottom).
+	// as goldmark's link parser keeps the last delimiter on its list (pushLinkBottom). Only openLabel
+	// and closeLabel change it.
 	bottoms []int
 	// first is the group whose run the textblock tokenized first, or runGroups before any.
 	first runGroup
+	// slab is the chunk push takes its next run from, so a textblock's runs cost an allocation per
+	// chunk rather than one each. A full chunk is replaced, never grown, so no run moves from where
+	// the list's links point to it.
+	slab []listedRun
 }
 
 // listedRun is a run on delimiterList: the delimiter goldmark's inline parser placed among the
@@ -96,7 +101,11 @@ func (l *delimiterList) tokenized(group runGroup) {
 // push adds d, which the inline parser has placed among the textblock's nodes, as the last run,
 // grouped and kinded by goldmark's rules or micromark's.
 func (l *delimiterList) push(d *parser.Delimiter, goldmarkRules bool) {
-	run := &listedRun{delimiter: d, group: emphasisRuns}
+	if len(l.slab) == cap(l.slab) {
+		l.slab = make([]listedRun, 0, 64)
+	}
+	l.slab = append(l.slab, listedRun{delimiter: d, group: emphasisRuns})
+	run := &l.slab[len(l.slab)-1]
 	switch {
 	case d.Char == '*':
 		run.kind = starRun
@@ -135,12 +144,28 @@ func (l *delimiterList) push(d *parser.Delimiter, goldmarkRules bool) {
 func (l *delimiterList) pairTextblock(goldmarkRules bool) {
 	switch {
 	case goldmarkRules:
-		l.pair(scopePass(emphasisRuns, 0))
+		l.pair(0, emphasisRuns)
 	case l.first == tildeRuns:
-		l.pair(scopePass(emphasisRuns, 0), scopePass(tildeRuns, 0))
+		l.pair(0, tildeRuns, emphasisRuns)
 	default:
-		l.pair(scopePass(tildeRuns, 0), scopePass(emphasisRuns, 0))
+		l.pair(0, emphasisRuns, tildeRuns)
 	}
+}
+
+// openLabel records that a link or image label opened once bottom runs had been pushed.
+func (l *delimiterList) openLabel(bottom int) {
+	l.bottoms = append(l.bottoms, bottom)
+}
+
+// closeLabel takes off the innermost label open and returns how many runs had been pushed when it
+// opened, or reports that no label is open, as on a nil list.
+func (l *delimiterList) closeLabel() (bottom int, open bool) {
+	if l == nil || len(l.bottoms) == 0 {
+		return 0, false
+	}
+	bottom = l.bottoms[len(l.bottoms)-1]
+	l.bottoms = l.bottoms[:len(l.bottoms)-1]
+	return bottom, true
 }
 
 // pairLabel pairs the runs of a link or image label that formed: those pushed after bottom, now the
@@ -148,46 +173,42 @@ func (l *delimiterList) pairTextblock(goldmarkRules bool) {
 // with the extensions' resolvers before its own attention (resolveToLabelEnd, insideSpan).
 func (l *delimiterList) pairLabel(bottom int, goldmarkRules bool) {
 	if goldmarkRules {
-		l.pair(scopePass(emphasisRuns, bottom))
+		l.pair(bottom, emphasisRuns)
 		return
 	}
-	l.pair(scopePass(emphasisRuns, bottom), scopePass(tildeRuns, bottom))
+	l.pair(bottom, tildeRuns, emphasisRuns)
 }
 
 // pairingPass is one pass pairing the runs of group whose seq lies above bottom and below top.
-// closer is the next run it tries as a closer, once started.
+// closer is the next run it tries as a closer.
 type pairingPass struct {
 	group       runGroup
 	bottom, top int
 	closer      *listedRun
-	started     bool
 }
 
-// scopePass is the pass over every run of group pushed after bottom.
-func scopePass(group runGroup, bottom int) pairingPass {
-	return pairingPass{group: group, bottom: bottom, top: math.MaxInt}
-}
-
-// pair makes passes, the last first, and every pass a pair they make calls for. micromark resolves
-// what a pair encloses as soon as it makes the pair, with every resolver over the runs between its
-// opener and closer (resolveAll over insideSpan), so no run pairs out of a pair: a pass that pairs
-// an opener and a closer enclosing runs of the other group pairs those at once, in a pass of their
-// own, before it goes on. The passes are a stack rather than calls, so how deeply pairs call for
-// passes is bounded by memory, not by the goroutine's stack.
-func (l *delimiterList) pair(passes ...pairingPass) {
-	stack := passes
-	for len(stack) > 0 {
-		pass := stack[len(stack)-1]
-		if !pass.started {
-			pass.closer, pass.started = l.firstAfter(pass.group, pass.bottom), true
+// pair pairs the runs of each of groups pushed after bottom, a pass per group in the order given,
+// and makes every pass a pair calls for. micromark resolves what a pair encloses as soon as it
+// makes the pair, with every resolver over the runs between its opener and closer (resolveAll over
+// insideSpan), so no run pairs out of a pair: a pass that pairs an opener and a closer enclosing
+// runs of the other group pairs those at once, in a pass of their own, before it goes on. A group's
+// pass starts at its first run left once the groups before it are paired. The passes are a stack
+// rather than calls, so how deeply pairs call for passes is bounded by memory, not by the
+// goroutine's stack.
+func (l *delimiterList) pair(bottom int, groups ...runGroup) {
+	var stack []pairingPass
+	for _, group := range groups {
+		stack = append(stack, pairingPass{group: group, bottom: bottom, top: math.MaxInt, closer: l.firstAfter(group, bottom)})
+		for len(stack) > 0 {
+			pass := stack[len(stack)-1]
+			if inner, found := l.advance(&pass); found {
+				stack[len(stack)-1] = pass
+				stack = append(stack, inner)
+				continue
+			}
+			l.clear(pass)
+			stack = stack[:len(stack)-1]
 		}
-		if inner, found := l.advance(&pass); found {
-			stack[len(stack)-1] = pass
-			stack = append(stack, inner)
-			continue
-		}
-		l.clear(pass)
-		stack = stack[:len(stack)-1]
 	}
 }
 
@@ -263,7 +284,7 @@ func (l *delimiterList) advance(pass *pairingPass) (pairingPass, bool) {
 			l.remove(closer)
 		}
 		if enclosed != closer {
-			return pairingPass{group: enclosed.group, bottom: opener.seq, top: closer.seq, closer: enclosed, started: true}, true
+			return pairingPass{group: enclosed.group, bottom: opener.seq, top: closer.seq, closer: enclosed}, true
 		}
 	}
 	return pairingPass{}, false

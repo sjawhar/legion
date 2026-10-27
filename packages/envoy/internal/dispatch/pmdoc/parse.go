@@ -41,7 +41,7 @@ func newBlockReader(emphasis emphasisParser) markdownReader {
 			parser.WithInlineParsers(inlineParsers(emphasis)...),
 			parser.WithParagraphTransformers(util.Prioritized(linkReferenceDefinitions{parser.LinkReferenceParagraphTransformer}, 100)),
 		)),
-		goldmark.WithExtensions(linkify{}, lazyAwareTable{}, strikethrough{goldmarkRules: emphasis.goldmarkRules}, taskList{}, footnotes{}),
+		goldmark.WithExtensions(linkify{}, lazyAwareTable{}, taskList{}, footnotes{}),
 		goldmark.WithParserOptions(
 			parser.WithBlockParsers(
 				util.Prioritized(elementBlockCounter{}, -1),
@@ -271,7 +271,6 @@ func inlineParserOptions(emphasis emphasisParser) []parser.Option {
 		parser.WithInlineParsers(inlineParsers(emphasis)...),
 		parser.WithInlineParsers(
 			util.Prioritized(elementInlineCounter{}, -1),
-			util.Prioritized(tildeParser{goldmarkRules: emphasis.goldmarkRules}, 500),
 			util.Prioritized(newLinkifyGuard(), 999),
 		),
 	}

@@ -3,7 +3,6 @@ package pmdoc
 import (
 	"reflect"
 
-	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	extensionast "github.com/yuin/goldmark/extension/ast"
 	"github.com/yuin/goldmark/parser"
@@ -13,7 +12,9 @@ import (
 
 // inlineParsers is goldmark's default inline parsers, each found by its type as blockParsers finds
 // the block parsers it wraps: its emphasis parser replaced by emphasis, and its link parser
-// measuring the images it makes and pairing their labels' runs by emphasis's rules (imageNesting).
+// measuring the images it makes and pairing their labels' runs by emphasis's rules (imageNesting),
+// with tildeParser added, reading `~` runs by emphasis's rules, at the priority goldmark's
+// strikethrough extension gives its own (500).
 func inlineParsers(emphasis emphasisParser) []util.PrioritizedValue {
 	parsers := parser.DefaultInlineParsers()
 	emphasisType := reflect.TypeOf(parser.NewEmphasisParser())
@@ -26,7 +27,7 @@ func inlineParsers(emphasis emphasisParser) []util.PrioritizedValue {
 			parsers[index].Value = imageNesting{goldmarkLinkParser: prioritized.Value.(goldmarkLinkParser), goldmarkRules: emphasis.goldmarkRules}
 		}
 	}
-	return parsers
+	return append(parsers, util.Prioritized(tildeParser{goldmarkRules: emphasis.goldmarkRules}, 500))
 }
 
 // emphasisParser reads `*` and `_` delimiter runs as the browser editor's parser (micromark) does:
@@ -108,13 +109,6 @@ func (p emphasisParser) CloseBlock(_ ast.Node, _ text.Reader, pc parser.Context)
 		delimiters.pairTextblock(p.goldmarkRules)
 		pc.Set(delimitersKey, nil)
 	}
-}
-
-// strikethrough is GFM's strikethrough read by tildeParser, by goldmark's rules or micromark's.
-type strikethrough struct{ goldmarkRules bool }
-
-func (s strikethrough) Extend(markdown goldmark.Markdown) {
-	markdown.Parser().AddOptions(parser.WithInlineParsers(util.Prioritized(tildeParser{goldmarkRules: s.goldmarkRules}, 500)))
 }
 
 // tildeParser reads a `~` delimiter run as the browser editor's strikethrough
