@@ -1,10 +1,5 @@
 import type { HeadlessProofEditor, SoftBreaks } from "@legion/proof-editor/headless";
-import {
-  DOMSerializer,
-  Fragment,
-  type Node as ProseMirrorNode,
-  type Schema,
-} from "prosemirror-model";
+import { DOMSerializer, type Node as ProseMirrorNode, type Schema } from "prosemirror-model";
 import { useLayoutEffect, useState } from "react";
 
 import type { BlockSchema } from "../../api/types";
@@ -132,19 +127,14 @@ function withoutServerAttributes(node: ProseMirrorNode, defaults: ServerDefaults
   if (node.inlineContent || node.isLeaf) {
     return node;
   }
-  let children: ProseMirrorNode[] | undefined;
+  let content = node.content;
   for (let index = 0; index < node.childCount; index += 1) {
     const child = node.child(index);
     const reset = withoutServerAttributes(child, defaults);
-    if (children === undefined && reset !== child) {
-      children = [];
-      for (let before = 0; before < index; before += 1) {
-        children.push(node.child(before));
-      }
+    if (reset !== child) {
+      content = content.replaceChild(index, reset);
     }
-    children?.push(reset);
   }
-  const content = children === undefined ? node.content : Fragment.from(children);
   const server = defaults.get(node.type.name);
   if (
     server !== undefined &&
@@ -152,7 +142,7 @@ function withoutServerAttributes(node: ProseMirrorNode, defaults: ServerDefaults
   ) {
     return node.type.create({ ...node.attrs, ...server }, content, node.marks);
   }
-  return children === undefined ? node : node.copy(content);
+  return content === node.content ? node : node.copy(content);
 }
 
 function buildEngine(proof: HeadlessProofEditor, blockSchema: BlockSchema): MarkdownEngine {
@@ -174,18 +164,13 @@ function loadEngine(blockSchema: BlockSchema): Promise<MarkdownEngine> {
   if (cached !== undefined) {
     return cached;
   }
-  // The headless engine hands `renderBlock` its own copy of the block type, whose `content` is
-  // any string; the drawing reads Dispatch's, so it is looked up by name.
-  const typeByName = new Map(blockSchema.types.map((type) => [type.name, type]));
   headlessModule ??= import("@legion/proof-editor/headless");
   const created = headlessModule
     .then(({ createHeadlessProof }) =>
       createHeadlessProof({
         blockSchema,
         renderBlock: (node, type) =>
-          type.name === "ask"
-            ? renderAskBlockShell(node)
-            : renderTypedBlock(node, typeByName.get(type.name)),
+          type.name === "ask" ? renderAskBlockShell(node) : renderTypedBlock(node, type),
       })
     )
     .then((proof) => {

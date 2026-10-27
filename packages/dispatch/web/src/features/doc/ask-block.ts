@@ -8,6 +8,7 @@ import {
   type AskBlockHost,
   askBlockFacts,
   askBlockShell,
+  renderAskBlockShell,
   renderTypedBlock,
 } from "./typed-block-drawing";
 
@@ -30,14 +31,15 @@ function typedBlockView(
 
 let nextHostKey = 0;
 
-/** The decision block's ProseMirror node view. It owns only the shell — the card frame with its
- * urgency accent and tint, a header slot, the content hole, and a footer slot — and hands the
- * slots to React through the host registry; `AskBlockCard` renders everything a reader sees in
- * them. Two things make a plain `toDOM` spec unusable here and justify the node view: ProseMirror
- * treats DOM changes inside a spec-rendered node as a suspect edit and redraws the node from its
- * state (wiping a portal and the reader's half-made choice), so `ignoreMutation` excludes the
- * slots; and the slots are `contenteditable="false"` with `stopEvent` keeping keystrokes in the
- * answer controls away from the editor's keymaps. */
+/** The decision block's ProseMirror node view. It owns only the shell — `renderAskBlockShell`'s
+ * drawing, the same spec the text engine draws: the card frame with its urgency accent and tint,
+ * a header slot, the content hole, and a footer slot — and hands the slots to React through the
+ * host registry; `AskBlockCard` renders everything a reader sees in them. Two things make a plain
+ * `toDOM` spec unusable here and justify the node view: ProseMirror treats DOM changes inside a
+ * spec-rendered node as a suspect edit and redraws the node from its state (wiping a portal and
+ * the reader's half-made choice), so `ignoreMutation` excludes the slots; and the slots are
+ * `contenteditable="false"` with `stopEvent` keeping keystrokes in the answer controls away from
+ * the editor's keymaps. */
 class AskBlockView implements NodeView {
   readonly dom: HTMLElement;
   readonly contentDOM: HTMLElement;
@@ -53,22 +55,14 @@ class AskBlockView implements NodeView {
     private readonly publish: () => void
   ) {
     this.node = node;
-    this.dom = document.createElement("section");
-    this.dom.dataset.proofBlockType = "ask";
-    // The slots hold the app's own card, not document text: `not-prose` keeps the editor
-    // root's Typography (`prose`, from the library theme) off everything React renders into
-    // them, in every state of the card.
-    this.header = document.createElement("div");
-    this.header.className = "not-prose";
-    this.header.contentEditable = "false";
-    this.header.dataset.dispatchAskHeader = "";
-    this.contentDOM = document.createElement("div");
-    this.contentDOM.dataset.proofBlockContent = "";
-    this.footer = document.createElement("div");
-    this.footer.className = "not-prose";
-    this.footer.contentEditable = "false";
-    this.footer.dataset.dispatchAskFooter = "";
-    this.dom.append(this.header, this.contentDOM, this.footer);
+    const { dom, contentDOM } = DOMSerializer.renderSpec(document, renderAskBlockShell(node));
+    this.dom = dom as HTMLElement;
+    if (contentDOM === undefined) {
+      throw new Error("the decision shell has no content hole");
+    }
+    this.contentDOM = contentDOM;
+    this.header = slot(this.dom, "data-dispatch-ask-header");
+    this.footer = slot(this.dom, "data-dispatch-ask-footer");
     this.applyShell();
     this.register();
   }
@@ -79,8 +73,8 @@ class AskBlockView implements NodeView {
     this.dom.className = shell.frameClass;
     this.dom.dataset.blockId = facts.blockId;
     this.dom.dataset.dispatchAskBlock = facts.blockId;
-    this.dom.dataset.dispatchAskUrgency = shell.urgency;
-    this.dom.dataset.dispatchAskState = shell.state;
+    this.dom.dataset.dispatchAskUrgency = facts.urgency;
+    this.dom.dataset.dispatchAskState = facts.state;
     if (shell.malformed) {
       this.dom.dataset.dispatchAskMalformed = "true";
       delete this.dom.dataset.dispatchAskOptions;
@@ -126,6 +120,15 @@ class AskBlockView implements NodeView {
     this.registry.delete(this.key);
     this.publish();
   }
+}
+
+/** The shell's slot element marked with `attribute`. */
+function slot(dom: HTMLElement, attribute: string): HTMLElement {
+  const element = dom.querySelector<HTMLElement>(`[${attribute}]`);
+  if (element === null) {
+    throw new Error(`the decision shell has no ${attribute} slot`);
+  }
+  return element;
 }
 
 /** The document position of the `ask` node the selection head sits inside, or undefined when

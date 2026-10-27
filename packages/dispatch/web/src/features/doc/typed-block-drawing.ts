@@ -40,7 +40,7 @@ function attributeValue(value: unknown): string {
  */
 export function renderTypedBlock(
   node: ProseMirrorNode,
-  type?: BlockTypeSchema | undefined
+  type?: Pick<BlockTypeSchema, "attributes"> | undefined
 ): DOMOutputSpec {
   const shown = Object.entries(node.attrs).filter(
     ([name, value]) =>
@@ -187,14 +187,10 @@ export interface AskBlockHost {
 }
 
 /** How a decision block's shell presents itself: the frame's classes (the card frame with its
- * urgency accent and tint), the content hole's classes, and the facts the shell stamps as data
- * attributes. Both the editor's `AskBlockView` and the text engine's `renderAskBlockShell` draw
- * from it, so the two shells cannot drift apart. */
+ * urgency accent and tint), the content hole's classes, and whether the block is malformed. */
 export interface AskBlockShell {
   readonly frameClass: string;
   readonly contentClass: string;
-  readonly urgency: AskUrgency;
-  readonly state: string;
   readonly malformed: boolean;
 }
 
@@ -206,30 +202,33 @@ export function askBlockShell(facts: AskBlockFacts): AskBlockShell {
       : textPrimaryOnSurface,
     frameClass: `proof-typed-block proof-typed-block-ask my-5 rounded-xl border border-l-4 px-4 pt-3 pb-4 shadow-sm ${borderDefault} ${askUrgencyAccent[facts.urgency]} ${askBlockTint[facts.urgency]}`,
     malformed,
-    state: facts.state,
-    urgency: facts.urgency,
   };
 }
 
 /**
- * The decision block's shell as a static spec, for the read-only text engine (a comment, ask or
- * message body): the same frame, `not-prose` header and footer slots, and content hole as
- * `AskBlockView`, without the node view. Three of the node view's attributes are absent on
- * purpose. `data-dispatch-ask-block` marks a live decision under the editor root, and a body
- * rendered inside a document's decision footer (a reply, an answer note) would otherwise add a
- * second decision id there. `data-block-id` is the schema's own wrapper's to add. And
- * `data-dispatch-ask-options` folds the source option list, so it is set only where the body
- * mounts a card whose rows render the options; without it the list stays visible.
+ * The decision block's shell as a static spec: the frame, a header slot, the content hole, and a
+ * footer slot. The editor's `AskBlockView` and the read-only text engine (a comment, ask or
+ * message body) both draw this one spec, so the two shells cannot drift apart. The slots hold the
+ * app's own card, not document text: `not-prose` keeps the surrounding Typography (`prose`, from
+ * the editor's library theme or a body's `markdownClassName`) off everything React renders into
+ * them, in every state of the card. Three of the node view's attributes are absent on purpose;
+ * `AskBlockView` adds them over this drawing. `data-dispatch-ask-block` marks a live decision
+ * under the editor root, and a body rendered inside a document's decision footer (a reply, an
+ * answer note) would otherwise add a second decision id there. `data-block-id` is the schema's
+ * own wrapper's to add. And `data-dispatch-ask-options` folds the source option list, so it is set
+ * only where the body mounts a card whose rows render the options; without it the list stays
+ * visible.
  */
 export function renderAskBlockShell(node: ProseMirrorNode): DOMOutputSpec {
-  const shell = askBlockShell(askBlockFacts(node));
+  const facts = askBlockFacts(node);
+  const shell = askBlockShell(facts);
   return [
     "section",
     {
       class: shell.frameClass,
       "data-proof-block-type": "ask",
-      "data-dispatch-ask-urgency": shell.urgency,
-      "data-dispatch-ask-state": shell.state,
+      "data-dispatch-ask-urgency": facts.urgency,
+      "data-dispatch-ask-state": facts.state,
       ...(shell.malformed ? { "data-dispatch-ask-malformed": "true" } : {}),
     },
     ["div", { class: "not-prose", contenteditable: "false", "data-dispatch-ask-header": "" }],
