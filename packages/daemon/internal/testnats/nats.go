@@ -424,3 +424,5 @@ func ready(ctx context.Context, url string) (*nats.Conn, jetstream.JetStream, er
 	}
 	return conn, js, nil
 }
+
+// scratch INFRA-520 typecheck
