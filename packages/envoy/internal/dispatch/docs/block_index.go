@@ -5,12 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -271,8 +274,16 @@ func (s *Service) owedDocuments(ctx context.Context, after string) ([]owedDocume
 // settlement, or owes one but its live markdown equals the version's stored markdown byte for
 // byte. A document whose live text is ahead of its latest version, and differs from it, is
 // skipped and reported liveAhead, and stays owed: indexing it at that version would date a later
-// edit's blocks to it. Its settlement indexes it when it writes the next version - which, on a
-// closed issue, waits for the issue to reopen (RunSettlementResumption resumes open issues only).
+// edit's blocks to it. Its settlement indexes it when it writes the next version.
+//
+// A closed issue's document is the exception, since no settlement runs while its issue is closed
+// (RunSettlementResumption resumes open issues only), and the issue's close, its final sweep and
+// the repair write ask blocks' attributes into it and write no version (WriteIssueAskStates).
+// Where that is all that sets its live text apart from its latest version, the version is
+// indexed from its own text, with each block under the id the live document gives it
+// (closedVersionBlocks): those writes change no block id, and the version's markdown names the id
+// of a typed block alone, so its own parse would mint the rest. Any other difference is an edit no
+// settlement has versioned, and the document is skipped as live ahead until the issue reopens.
 //
 // A document the server cannot read (ErrDocumentUnloadable, ErrDocOutsideSchema) or that has no
 // stored state has no block to show, so its latest version's markdown is indexed with no blocks.
@@ -301,7 +312,7 @@ func (s *Service) indexOwedDocument(ctx context.Context, document owedDocument) 
 		return false, false, err
 	}
 	defer tx.Rollback(ctx)
-	owner, _, err := lockArtifactOwner(ctx, tx, document.id)
+	owner, open, err := lockArtifactOwner(ctx, tx, document.id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, false, nil
 	}
@@ -337,7 +348,13 @@ func (s *Service) indexOwedDocument(ctx context.Context, document owedDocument) 
 	case unreadable || markdown == "" && len(blocks) == 0:
 		markdown, blocks = stored, nil
 	case pending && markdown != stored:
-		return false, true, nil
+		if open {
+			return false, true, nil
+		}
+		var held bool
+		if markdown, blocks, held = closedVersionBlocks(stored, markdown, blocks); !held {
+			return false, true, nil
+		}
 	}
 	if _, err := s.indexRenderedVersion(ctx, tx, document.id, version, versionAt, markdown, blocks); err != nil {
 		return false, false, err
@@ -349,6 +366,92 @@ func (s *Service) indexOwedDocument(ctx context.Context, document owedDocument) 
 		return false, false, err
 	}
 	return true, false, nil
+}
+
+// closedVersionBlocks is the rendering of the version whose stored markdown is stored, with the
+// blocks that index into it, each under the id the live document gives the block at its place,
+// and whether the live document - live, with liveBlocks (TextWithBlocks) - differs from that
+// version in its ask blocks' attributes alone. Only then is the live document's block at each
+// place the version's block at that place, so only then are the live ids the version's.
+//
+// It parses live; while that parse renders as live, with as many blocks of the same types, its
+// blocks are liveBlocks in order, and its own untyped ids, which the parse minted, are not used.
+// Given the attributes of the version's ask block at each of its ask blocks' places, the parse
+// must render as the version does today. The version is compared and indexed as it renders today,
+// as the live text is, so a version an earlier renderer stored is not left owed for that alone.
+func closedVersionBlocks(stored, live string, liveBlocks []model.ArtifactBlock) (string, []model.ArtifactBlock, bool) {
+	version, err := pmdoc.ParseRendering(stored)
+	if err != nil {
+		return "", nil, false
+	}
+	want, err := pmdoc.Render(version)
+	if err != nil {
+		return "", nil, false
+	}
+	current, err := pmdoc.ParseRendering(live)
+	if err != nil {
+		return "", nil, false
+	}
+	reread, offsets, err := pmdoc.RenderWithBlockOffsets(current)
+	if err != nil || reread != live || !sameBlockTypes(offsets, liveBlocks) || !takeAskAttributes(current, version) {
+		return "", nil, false
+	}
+	markdown, offsets, err := pmdoc.RenderWithBlockOffsets(current)
+	if err != nil || markdown != want || !sameBlockTypes(offsets, liveBlocks) {
+		return "", nil, false
+	}
+	blocks := make([]model.ArtifactBlock, len(offsets))
+	for index, offset := range offsets {
+		blocks[index] = model.ArtifactBlock{ID: liveBlocks[index].ID, Type: offset.Type, From: offset.From, To: offset.To}
+	}
+	return markdown, blocks, true
+}
+
+// sameBlockTypes reports whether offsets and blocks list as many blocks, of the same type at each
+// place.
+func sameBlockTypes(offsets []pmdoc.BlockOffset, blocks []model.ArtifactBlock) bool {
+	if len(offsets) != len(blocks) {
+		return false
+	}
+	for index, offset := range offsets {
+		if offset.Type != blocks[index].Type {
+			return false
+		}
+	}
+	return true
+}
+
+// takeAskAttributes gives each ask block of current the attributes of version's ask block at its
+// place among version's ask blocks, and reports whether the two hold as many ask blocks, each at
+// the same place under the same id. An ask block's id is written in its markdown, so version's are
+// the ones its blocks carried.
+func takeAskAttributes(current, version *pmdoc.Node) bool {
+	var asks []*pmdoc.Node
+	pmdoc.Walk(version, func(node *pmdoc.Node) bool {
+		if node.Type == "ask" {
+			asks = append(asks, node)
+		}
+		return true
+	})
+	taken, same := 0, true
+	pmdoc.Walk(current, func(node *pmdoc.Node) bool {
+		if node.Type != "ask" {
+			return true
+		}
+		if taken == len(asks) {
+			same = false
+			return false
+		}
+		id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
+		if held, _ := asks[taken].Attrs[pmdoc.BlockIDAttr].(string); id != held {
+			same = false
+			return false
+		}
+		node.Attrs = maps.Clone(asks[taken].Attrs)
+		taken++
+		return true
+	})
+	return same && taken == len(asks)
 }
 
 // stampVersionEvent gives the edges a re-index of version inserted the source_seq of the event

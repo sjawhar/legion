@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 // blockIndexService is a document service whose documents never settle during the test, on a
@@ -298,6 +299,111 @@ func TestBlockIndexIndexesAClosedDocumentWhoseLiveTextEqualsItsVersion(t *testin
 	holder := holderOf(t, service, spec, "dispatch://CORE-2")
 	if pairs := blockPairsOf(t, database, spec); len(pairs) != 1 || pairs[0].BlockID != holder {
 		t.Fatalf("block_refs = %#v, want the mention from block %s", pairs, holder)
+	}
+}
+
+// closedSpec is a spec whose paragraph cites CORE-2, beside an ask block no settlement has indexed.
+const closedSpec = "Ship it after dispatch://CORE-2.\n\n:::ask{#region urgency=\"med\" multiple=\"false\"}\nWhich region?\n:::\n"
+
+// An issue's close, its final sweep and the repair write ask blocks' states into a closed issue's
+// documents and write no version, and no settlement runs while the issue is closed, so such a
+// document stays live ahead of its latest version until the issue reopens. A deploy that marks
+// every document owed (migration 0121), or a rebuild-refs, must still index it: it is indexed at
+// its latest version, from that version's own text, with each block under the id the live
+// document gives it, which those writes leave as it was. Every block of it, an untyped one
+// included, then resolves by its #b- reference.
+func TestBlockIndexIndexesAClosedDocumentWhoseAskStatesAreAheadOfItsVersion(t *testing.T) {
+	database, service := blockIndexService(t)
+	ctx := context.Background()
+	spec := createOwedDocument(t, database, service, "", "spec", closedSpec, "")
+	var stored string
+	if err := database.Pool.QueryRow(ctx, `select markdown from artifact_versions where artifact_id = $1 and number = 1`, spec).Scan(&stored); err != nil {
+		t.Fatalf("read version 1: %v", err)
+	}
+	if _, err := database.Pool.Exec(ctx, `update issues set closed_at = now() where key = 'CORE-1'`); err != nil {
+		t.Fatalf("close CORE-1: %v", err)
+	}
+	// The close's final sweep, as the repair runs it, under the issue's row: it writes resolved
+	// the ask block no settlement has indexed.
+	var marked []BlockRef
+	if err := joinedWrite(service, func(ctx context.Context) (err error) {
+		tx, _ := txFromContext(ctx)
+		if _, err := tx.Exec(ctx, `select 1 from issues where key = 'CORE-1' for no key update`); err != nil {
+			return fmt.Errorf("lock the issue: %w", err)
+		}
+		marked, err = service.WriteIssueAskStates(ctx, "CORE-1", nil, model.Actor{Kind: "user", ID: "carol"}, true)
+		return err
+	}); err != nil {
+		t.Fatalf("write the closed issue's ask states: %v", err)
+	}
+	if want := []BlockRef{{ArtifactID: spec, BlockID: "region"}}; !reflect.DeepEqual(marked, want) {
+		t.Fatalf("the sweep marked %+v, want %+v", marked, want)
+	}
+	closeDocumentRoom(t, service, spec)
+	live, liveBlocks, err := service.TextWithBlocks(ctx, spec)
+	if err != nil {
+		t.Fatalf("read the live document: %v", err)
+	}
+	var pending bool
+	if err := database.Pool.QueryRow(ctx, `select exists (select 1 from doc_settlements_pending where artifact_id = $1)`, spec).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if live == stored || !strings.Contains(live, `state="resolved"`) || !pending {
+		t.Fatalf("the sweep left live text %q (settlement pending %v), want it ahead of version 1 %q", live, pending, stored)
+	}
+
+	tick := reconcileBlockIndex(t, service, "")
+	if tick.Documents != 1 || tick.LiveAhead != 0 || tick.OwedDocuments != 0 {
+		t.Fatalf("tick = %#v, want the closed document indexed and nothing owed", tick)
+	}
+	if version := blockIndexAt(t, database, spec); version == nil || *version != 1 {
+		t.Fatalf("blocks indexed at %v, want version 1", version)
+	}
+	rows, err := database.Pool.Query(ctx, `
+		select d.block_id, t.text from document_blocks d
+		join document_block_texts t on t.artifact_id = d.artifact_id and t.block_id = d.block_id and t.version = 1
+		where d.artifact_id = $1 order by d.block_id
+	`, spec)
+	if err != nil {
+		t.Fatalf("read the indexed blocks: %v", err)
+	}
+	texts := map[string]string{}
+	for rows.Next() {
+		var id, blockText string
+		if err := rows.Scan(&id, &blockText); err != nil {
+			t.Fatalf("scan an indexed block: %v", err)
+		}
+		texts[id] = blockText
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the indexed blocks: %v", err)
+	}
+	if len(texts) != len(liveBlocks) {
+		t.Fatalf("indexed blocks %v, want the live document's %#v", texts, liveBlocks)
+	}
+	for _, block := range liveBlocks {
+		blockText, indexed := texts[block.ID]
+		if !indexed || !strings.Contains(stored, blockText) {
+			t.Fatalf("block %s is indexed %v with text %q, want it indexed with its text in version 1 %q", block.ID, indexed, blockText, stored)
+		}
+	}
+	if strings.Contains(texts["region"], `state="resolved"`) {
+		t.Fatalf("the ask block is indexed at version 1 with the sweep's state: %q", texts["region"])
+	}
+	document, found, err := refs.Node(ctx, database.Pool, "artifact", spec, false)
+	if err != nil || !found {
+		t.Fatalf("resolve the spec: found %v (%v)", found, err)
+	}
+	for _, id := range []string{holderOf(t, service, spec, "dispatch://CORE-2"), "region"} {
+		reference := refs.BlockRef(document.Ref, id)
+		ref, ok := text.ParseRef(reference, "https://dispatch.example")
+		if !ok {
+			t.Fatalf("%s is no reference", reference)
+		}
+		node, found, err := refs.Node(ctx, database.Pool, "block", text.TargetID(ref), true)
+		if err != nil || !found || node.BlockID != id {
+			t.Fatalf("%s resolves to %#v, found %v (%v), want block %s", reference, node, found, err, id)
+		}
 	}
 }
 

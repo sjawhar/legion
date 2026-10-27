@@ -14,8 +14,10 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 // The repair pass (RepairIssueAsks) brings the asks of an issue a release older than the
@@ -616,6 +618,104 @@ func TestARepairPassThatFailsOneIssueStillMovesTheWindowAndRetriesIt(t *testing.
 	}
 	if !reflect.DeepEqual(retry, []string{failing.Key}) {
 		t.Fatalf("the second pass carries %v, want the failed issue %s alone", retry, failing.Key)
+	}
+}
+
+// The deploy of the block index: migration 0121 marks every document owed a block index, with no
+// block indexed, and the boot repairs the asks (RepairIssueAsks, bounded as the boot bounds it)
+// before the block-index loop starts (RunBlockIndexReconciliation), as cmd/dispatch's main runs
+// them. An issue an older release closed without withdrawing still holds an open decision block,
+// which the repair withdraws, writing its state into the live document and no version, and no
+// settlement runs on the closed issue. The loop still indexes that document at its latest version,
+// leaves nothing owed, and every block of it resolves by its dispatch://KEY/spec#b- reference.
+func TestTheBlockIndexAfterTheBootRepairIndexesAClosedIssuesDocument(t *testing.T) {
+	f := newRepairFixture(t)
+	issue := createInteractionIssue(t, f.handler, "TEST", "Closed by an older release", closeDecision)
+	awaitIndexedAskBlock(t, f.handler, issue.PrimaryArtifactID, "close-decision", "Ship it?")
+	ask := requireBlockAsk(t, f.handler, issue.Key, issue.PrimaryArtifactID, "close-decision")
+	awaitSettled(t, f.database, issue.PrimaryArtifactID)
+	closer := repairActor("session-older-closer")
+	closeWithoutWithdrawing(t, f, issue.Key, &closer, time.Now().Add(-time.Hour))
+	requireLiveText(t, f.handler, issue.PrimaryArtifactID, `#close-decision urgency="med" multiple="false" state="open"`)
+
+	ctx := context.Background()
+	// Migration 0121: no block is indexed, and every document is owed its block index.
+	if _, err := f.database.Pool.Exec(ctx, `
+		delete from block_refs;
+		delete from document_block_texts;
+		delete from document_indexed_versions;
+		delete from document_blocks;
+		insert into document_block_versions (artifact_id) select id from artifacts where kind = 'doc'
+		on conflict (artifact_id) do update set version = null;
+	`); err != nil {
+		t.Fatalf("mark every document owed a block index: %v", err)
+	}
+	latest := latestVersion(t, f.database, issue.PrimaryArtifactID).Number
+
+	markedSince := time.Now().Add(-IssueAskRepairInterval)
+	repair, err := RepairIssueAsks(ctx, f.deps, &markedSince)
+	if err != nil {
+		t.Fatalf("boot repair: %v", err)
+	}
+	if repair.Withdrawn != 1 {
+		t.Fatalf("boot repair = %+v, want the decision block's ask withdrawn", repair)
+	}
+	requireWithdrawn(t, f.handler, issue.Key, ask, closer)
+	requireLiveText(t, f.handler, issue.PrimaryArtifactID, `#close-decision urgency="med" multiple="false" state="resolved"`)
+
+	leases, err := f.database.Pool.Leases()
+	if err != nil {
+		t.Fatalf("open the lease pool: %v", err)
+	}
+	loopCtx, stopLoop := context.WithCancel(ctx)
+	loopDone := make(chan struct{})
+	go func() {
+		defer close(loopDone)
+		f.documents.RunBlockIndexReconciliation(loopCtx, leases)
+	}()
+	defer func() {
+		stopLoop()
+		<-loopDone
+	}()
+	var indexed *int
+	var owed int
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if err := f.database.Pool.QueryRow(ctx, `
+			select (select version from document_block_versions where artifact_id = $1),
+			       (select count(*) from document_block_versions where version is null)
+		`, issue.PrimaryArtifactID).Scan(&indexed, &owed); err != nil {
+			t.Fatalf("read the block index: %v", err)
+		}
+		if indexed != nil && owed == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			live, _ := documentTexts(t, f.handler, issue.PrimaryArtifactID)
+			t.Fatalf("the block-index loop left the closed issue's document indexed at %v with %d documents owed; live text:\n%s", indexed, owed, live)
+		}
+	}
+	requireIndexedAt(t, f.database, issue.PrimaryArtifactID, latest)
+	if got := latestVersion(t, f.database, issue.PrimaryArtifactID).Number; got != latest {
+		t.Fatalf("the document's latest version moved from %d to %d on its closed issue", latest, got)
+	}
+
+	_, blocks, err := f.documents.TextWithBlocks(ctx, issue.PrimaryArtifactID)
+	if err != nil {
+		t.Fatalf("read the document's blocks: %v", err)
+	}
+	if len(blocks) == 0 {
+		t.Fatal("the document has no blocks")
+	}
+	for _, block := range blocks {
+		reference := "dispatch://" + issue.Key + "/spec#b-" + text.EncodeBlockID(block.ID)
+		ref, ok := text.ParseRef(reference, "https://dispatch.example")
+		if !ok {
+			t.Fatalf("%s is no reference", reference)
+		}
+		node, found, err := refs.Node(ctx, f.database.Pool, "block", text.TargetID(ref), true)
+		if err != nil || !found || node.BlockID != block.ID {
+			t.Fatalf("%s resolves to %#v, found %v (%v), want block %s", reference, node, found, err, block.ID)
+		}
 	}
 }
 
