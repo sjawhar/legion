@@ -2,56 +2,51 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-511",
-  "completed": "2026-10-27T05:38:12Z",
+  "completed": "2026-10-27T06:28:45Z",
   "decision": "changes_requested",
-  "reviewedHead": "49a82477f8b8dab4c7428d945e79200fd3c1f85d",
-  "codeHead": "b507c98c40d305040ab4f36fa76aaf867684e0b8",
+  "round": 2,
+  "reviewedHead": "17aa79c90363d492203d3e2c8367f2d65be63546",
+  "codeHead": "05af9dbe4d6775fb23752ed9b20db9929bfabf73",
   "critical": 0,
-  "important": 3,
-  "minor": 5,
+  "important": 1,
+  "minor": 4,
+  "previousFindings": {
+    "1 warning promised an unsent start message": "fixed (controller-session.ts:355-359), except the /new case below",
+    "2 startupTurn mark outlived a follow-up send / named the old session": "fixed (:264-267; tests legion.test.ts:3125, :3145)",
+    "3 contract change census": "added to the PR body; prose and record hits of its own searches carry no disposition (below)",
+    "4 startupTurn shape": "fixed (interface.ts:52, startup-turn.ts)",
+    "5 legion calls refused before the claim was recorded": "fixed (:247-251 before the send), except the /new case below",
+    "6 silent wait behind a hung claim": "partly fixed: claim() notifies, but a second /legion-controller-start waits silently (:334-335; legion.test.ts:2726 pins [NOTHING_TO_DO] only), contrary to packages/pi-legion/AGENTS.md:390-392",
+    "7 console.error over the TUI": "fixed (logger.error at :179, :233, :354)"
+  },
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/pi-legion/src/controller-session.ts:315",
-      "description": "After a failure past the send (role claim or controller-topic subscribe), the warning says /legion-claim-controller 'sends the start message once the claim succeeds', but startMessageSent blocks any second send; the start turn ran while the legion tool refused (controllerSessionID unset) and is never re-run. legion.test.ts:2838 pins the false text and :2856 asserts the retry sends nothing. The PR widened this: the send moved before claimEnvoyRole."
-    },
-    {
-      "severity": "important",
-      "file": "packages/pi-legion/src/controller-session.ts:225",
-      "description": "startupTurn is not cleared in the follow-up case: the operator's run already fired agent_start before markStartupTurnSent, and Oh My Pi consumes a followUp inside the same run (agent-loop.ts:648 agent_start once per run, :1823-1827 follow-ups drained in-run; agent-session.ts:9426 followUp only queues). The mark stays set after the start turn ran, contrary to pi-legion AGENTS.md:388-390, startup-turn.ts:3-5 and interface.ts:45-46. A /new during the claim marks the old session id. This mark is the spec's deliverable for pi-envoy."
-    },
-    {
-      "severity": "important",
-      "file": "PR body",
-      "description": "No `## Contract change census`, though the PR adds a refusal (non-terminal stdin, controller.go:126), bumps the daemon API contract 40->41 (skewed CLI/plugin refused) and the plugin interface 3->4 (pi-envoy/pi-legion pair)."
+      "file": "packages/pi-legion/src/controller-session.ts:263",
+      "description": "A /new during the start claim: claimWith registered the old session (sessionID read at :190, recorded at :250) but sends the start message into the new session, whose legion calls are refused (isClaimedSession false) until the switch's queued re-claim registers it; the role claim for the old session then fails and the warning (:357) says 'The start turn has the controller's registration; run /legion-claim-controller', both false (the queued re-claim does it; following the instruction rotates the secret once more). legion.test.ts:3161 pins that notice. Fix: after the registration, when the current session is not the registered one, do not send (startMessageSent stays false) and let the queued re-claim send it in the new session; word the warning for that case."
     },
     {
       "severity": "minor",
-      "file": "packages/pi-shared/src/interface.ts:49",
-      "description": "startupTurn's type admits a marked-but-unsent state nothing produces; pi-shared AGENTS.md:46 ('undefined until sent') and interface.ts:43 ('/legion-controller-start sets both', but any claim that sends does) describe the earlier design. Fix before interface 4 ships, since a later shape change needs another lockstep bump."
+      "file": "packages/pi-legion/src/controller-session.ts:335",
+      "description": "Previous finding 6 open on one path: startCommand calls serialised directly, so a second /legion-controller-start behind a hung claim waits with no notice; the docs say every waiting claim says so."
     },
     {
       "severity": "minor",
-      "file": "packages/pi-legion/src/controller-session.ts:233",
-      "description": "The start turn now starts before claimEnvoyRole and the subscription; controllerSessionID/mintControllerGrant are set only after them (:261-263), so a slow listener makes the start procedure's first legion call refused."
+      "file": "packages/pi-legion/src/controller-session.ts:383",
+      "description": "The re-claim warning says the session keeps its registration whenever controllerSessionID equals the current session, including when the re-claim failed before registering (state() error, 403 because a later `legion controller start` revoked the capability), so it can say set_status still works when every grant fails. Decide from whether this claim registered."
     },
     {
       "severity": "minor",
-      "file": "packages/pi-legion/src/controller-session.ts:133",
-      "description": "A claim that hangs (daemon-client sets no timeout) now silently blocks /legion-claim-controller and a re-run of the command; tell the operator it waits for the claim in flight."
+      "file": "packages/pi-legion/AGENTS.md:383",
+      "description": "The row 'the claim that sent it, or a later one, did not finish' does not match claimComplete, which resets only once a registration is in (:247)."
     },
     {
       "severity": "minor",
-      "file": "packages/pi-legion/src/controller-session.ts:313",
-      "description": "console.error now runs while the TUI is up (no console interception in the pinned Oh My Pi); use the logger."
-    },
-    {
-      "severity": "minor",
-      "file": "skills/legion-controller/references/session.md:87",
-      "description": "Still says a LEGION_CONTROLLER=1 session claims at startup as the launched controller; the operator-launched controller now claims from /legion-controller-start (also the claude-envoy generated copy)."
+      "file": "PR body, Contract change census",
+      "description": "The census's own searches return prose and record hits it gives no disposition: search 2 (docs/kubernetes.md, docs/solutions/**, packages/{claude-envoy,contracts,pi-envoy,pi-legion}/AGENTS.md, the CHANGELOGs, packages/pi-legion/README.md, scripts/e2e/README.md), search 3 (docs/solutions/envoy/two-plugins-in-one-process-…md, packages/{pi-legion,pi-shared}/AGENTS.md, scripts/e2e/README.md), search 1's non-invocation hits (troubleshooting.md, concepts.md, walkthrough.md, the liveness verdict strings). None spells a stale number (checked); list them with 'unaffected'."
     }
   ],
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. CI head f1606838 (only .legion/ changed since, compare handoffsOnly true, 1 file): every required check queued at 05:37Z; not waited on, since the review requests changes.",
-  "thermo": "thermonuclear-deep-review: CHANGES (findings 1, 2, 5-7); thermonuclear-code-quality: CHANGES (findings 2, 4, 8 plus cleanup), both at 49a82477.",
-  "fastFollow": "controller-session and test cleanup: claimInFlight as one promise chain, isIdle required, one operator-controller predicate, the command word shared from @legion/contracts, onRequest in place of the fetch wrapper, controller-start-omp.test.ts duplicate case and START_MESSAGE_JSON, legion.test.ts:4030 toEqual of every log line."
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. CI head 05af9dbe (compare to 17aa79c9: .legion/ only, 2 files): every required check queued at 06:20Z; not waited on, since this round requests changes.",
+  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality at 17aa79c9: both CHANGES (the /new warning; the silent second start command; the re-claim warning; AGENTS.md row; cleanup).",
+  "fastFollow": "the implementer's: share the command word between Go and TypeScript. Cleanup also open: isIdle declared on SessionContext so the `in` checks go, duplicated notice texts, launched && !supervised in claimWith, one loggedErrors helper."
 }
