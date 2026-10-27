@@ -82,7 +82,9 @@ func WithLogger(log *slog.Logger) OpenOption {
 	return func(o *openOpts) { o.log = log }
 }
 
-// WithReplicas overrides the KV bucket replica count. Use 1 for single-node test NATS.
+// WithReplicas sets the deployment's replica count (bus.ReplicasEnvVar, default 1) for the interest
+// and role buckets: the count a new bucket is created at, and a floor an existing bucket is raised
+// to and never lowered from (bus.EnsureKeyValue).
 func WithReplicas(n int) OpenOption {
 	return func(o *openOpts) { o.replicas = n }
 }

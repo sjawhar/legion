@@ -744,8 +744,9 @@ func TestEnsureStreamWithConfigCreatesTheStreamWithAFreshID(t *testing.T) {
 
 // A deployed stream without an id gets one on the next start, even when nothing else about it
 // differs from the binary's configuration, and keeps the rest of its configuration and metadata:
-// settings the binary's configuration does not choose (here limits and a description; in a
-// cluster, the stream's replicas) stay as deployed.
+// settings the binary's configuration does not choose (here the message limits and a description;
+// in a cluster, the stream's placement) stay as deployed, and so do the ones it would only keep (a
+// byte limit, with no limit of its own set) or already matches (DiscardOld, the replicas).
 func TestEnsureStreamWithConfigGivesADeployedStreamWithoutAnIDOne(t *testing.T) {
 	js := streamTestJetStream(t)
 	deployed := *streamCfg
@@ -753,7 +754,6 @@ func TestEnsureStreamWithConfigGivesADeployedStreamWithoutAnIDOne(t *testing.T) 
 	deployed.MaxMsgs = 100_000
 	deployed.MaxBytes = 64 << 20
 	deployed.MaxMsgsPerSubject = 1_000
-	deployed.Discard = nats.DiscardNew
 	deployed.Metadata = map[string]string{"owner": "operations"}
 	if _, err := js.AddStream(&deployed); err != nil {
 		t.Fatalf("create the stream without an id: %v", err)
