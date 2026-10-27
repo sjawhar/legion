@@ -99,6 +99,8 @@ docker:
         - arch: arm64
           runner: ubuntu-24.04-arm
   runs-on: ${{ matrix.runner }}
+  env:
+    BUILD_CACHE: type=gha,scope=<name>-${{ matrix.arch }}
   steps:
     - uses: docker/setup-buildx-action@v4
     - id: build
@@ -106,28 +108,32 @@ docker:
       with:
         platforms: linux/${{ matrix.arch }}
         provenance: mode=min
-        outputs: type=image,name=ghcr.io/sjawhar/legion/envoy,push-by-digest=true,name-canonical=true,push=true
-        cache-from: type=registry,ref=ghcr.io/sjawhar/legion/envoy:buildcache-${{ matrix.arch }}
-        cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/sjawhar/legion/envoy:buildcache-{0},mode=max', matrix.arch) || '' }}
+        outputs: type=image,name=<image>,push-by-digest=true,name-canonical=true,push=true
+        cache-from: ${{ env.BUILD_CACHE }}
+        cache-to: ${{ github.ref == 'refs/heads/main' && format('{0},mode=min', env.BUILD_CACHE) || '' }}
 ```
 
 - `outputs` replaces `push` and `tags`: the leg pushes an untagged image, and only the join tags
   `envoy:<sha>`, once both legs have pushed. `push: true` beside `outputs` would request a second
   exporter.
-- The layer cache is a registry cache in the image's own package
-  (`cache-from: type=registry,ref=<image>:buildcache-<arch>`): a cache manifest, not an image.
-  Every build reads it; `cache-to` is set only on `main`, through the
-  `github.ref == 'refs/heads/main' && format(...) || ''` expression, so a dispatch from another
-  branch writes none: the empty string leaves the leg with no cache export.
-- Each platform needs a cache tag of its own (`buildcache-<arch>`). Legs sharing one ref
-  overwrite each other's cache manifest, so each run would find only the other platform's cache.
-- Not `type=gha`: its `mode=max` export added about 1.6 GB of new Actions-cache entries per main
-  run, at 27-29 runs a day (measured 2026-10-27), and evicted the entries pull requests read.
-  A writer on a branch or pull request can also be cancelled mid-export. With writes on `main`
-  only, the cache tracks the tree every build branches from, and no branch replaces it with its
-  own layers.
-- `docker/setup-buildx-action` stays on every leg: the registry cache exporter (and `mode=max`)
-  needs the `docker-container` builder it creates, not the default `docker` driver.
+- Each platform needs a cache scope of its own (`scope=<name>-<arch>`). Legs sharing one scope
+  overwrite each other's cache index, so each run would find only the other platform's cache.
+- The layer cache is the Actions cache (`type=gha`), not a registry cache (a `<image>:buildcache`
+  tag), for trust: GitHub scopes Actions-cache entries by ref, and a `main` run restores only
+  `main`'s entries, never a branch's. A registry tag is writable by any run holding
+  `packages: write` (a dispatch of an edited branch copy, another workflow's pull request run), and
+  `main`'s attested build would then read those layers. BuildKit advisory GHSA-f2v9-hprr-32q3: do
+  not share build cache between trusted and untrusted builds.
+- Every build reads the cache; `cache-to` is set only on `main`, through the
+  `github.ref == 'refs/heads/main' && format(...) || ''` expression (the empty string leaves the
+  leg with no cache export), and with `mode=min`. A `mode=max` export added about 1.6 GB of new
+  Actions-cache entries per main run, at 27-29 runs a day (measured 2026-10-27), and evicted the
+  `main` entries pull requests read. `mode=min` exports only the layers of the final image, so an
+  intermediate stage (a Go build stage, say) has no cached steps of its own: when none of its inputs
+  changed, the final layers still match and nothing is rebuilt, but when one did, the stage reruns
+  from its first step (module download included), not from the first step that changed.
+- `docker/setup-buildx-action` stays on every leg: the `gha` cache exporter needs the
+  `docker-container` builder it creates, not the default `docker` driver.
 - The digests travel as artifacts, not job outputs: a matrix job's outputs keep only the last
   leg's value. Each leg writes `steps.build.outputs.digest` as the name of an empty file and
   uploads it as `envoy-image-digest-<arch>`; the join downloads them with `pattern:
