@@ -1,6 +1,7 @@
 import { expect, type Page, test } from "@playwright/test";
 
 import {
+  answerAsk,
   createAsk,
   createComment,
   createIssue,
@@ -8,6 +9,7 @@ import {
   createProject,
   createProjectDocument,
   e2eAgentToken,
+  resolveAsk,
 } from "./api";
 import { documentEditor } from "./editor";
 import { resetDatabase } from "./seed";
@@ -164,6 +166,76 @@ test("a search term lists marked document, comment, ask, and issue-title results
   }
 });
 
+test("an ask hit says whether it is answered, and an answered one shows its latest answer, who gave it and the options chosen", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "ask hit states are independent of viewport");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Planetarium" });
+  const answered = await createAsk(
+    issue.key,
+    {
+      options: [{ label: "Brass" }, { label: "Steel" }],
+      question: "Which orrery frame do we keep?",
+    },
+    searchSession
+  );
+  const resolved = await createAsk(
+    issue.key,
+    { question: "Should the orrery gears be oiled?" },
+    searchSession
+  );
+  await createAsk(issue.key, { question: "Who winds the orrery?" }, searchSession);
+  const first = await answerAsk(answered.id, {
+    expected_edited_at: null,
+    selected: ["Brass"],
+    text: "Keep the brass one.",
+  });
+  expect(first.answer).not.toBeNull();
+  await answerAsk(answered.id, {
+    expected_answer_at: first.answer?.at,
+    expected_edited_at: null,
+    selected: [],
+    text: "Keep the steel one after all.",
+  });
+  await resolveAsk(
+    resolved.id,
+    { kind: "resolved", reason: "Settled in the spec." },
+    searchSession
+  );
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    await openSearchFromRail(page, false);
+    await page.getByRole("combobox", { name: "Search" }).fill("orrery");
+
+    const dialog = page.getByRole("dialog", { name: "Search" });
+    await expect(dialog.getByRole("option")).toHaveCount(3);
+    await expect(dialog.getByRole("option", { name: /^ask / })).toHaveCount(3);
+
+    const answeredHit = dialog.getByRole("option").filter({ hasText: "Which orrery frame" });
+    await expect(answeredHit).toContainText("Answered");
+    await expect(answeredHit).toContainText("alice");
+    await expect(answeredHit).toContainText("No option chosen");
+    await expect(answeredHit).toContainText("Keep the steel one after all.");
+    await expect(answeredHit).not.toContainText("Keep the brass one.");
+    await expect(answeredHit).not.toContainText("Chose Brass");
+
+    const resolvedHit = dialog.getByRole("option").filter({ hasText: "orrery gears" });
+    await expect(resolvedHit).toContainText("Closed, no answer");
+    await expect(resolvedHit).toContainText("Resolved by");
+    await expect(resolvedHit).not.toContainText("Answered");
+
+    // The server's snippet drops the question's leading stop word.
+    const openHit = dialog.getByRole("option").filter({ hasText: "winds the orrery" });
+    await expect(openHit).toContainText("Open");
+    await expect(openHit).not.toContainText("Answered");
+  } finally {
+    await context.close();
+  }
+});
+
 test("a project-document hit is grouped under the document and opens it; a message hit opens its Conversation turn", async ({
   browser,
 }, testInfo) => {
@@ -261,6 +333,21 @@ test("phone search rows are at least 44px, do not overflow, and a comment result
     "phone row geometry is covered by the iphone project"
   );
   const fixture = await seedSearchFixture();
+  // An answered ask whose answer runs past its three-line clamp, so the overflow check covers
+  // the ask hit's status line and answer text as well.
+  const ask = await createAsk(
+    fixture.firstIssueKey,
+    {
+      options: [{ label: "On the chart table" }, { label: "In the captain's cabin" }],
+      question: "Where does the astrolabe live between voyages?",
+    },
+    searchSession
+  );
+  await answerAsk(ask.id, {
+    expected_edited_at: null,
+    selected: ["On the chart table"],
+    text: "Keep the astrolabe on the chart table during every crossing, and recalibrate its rete against the meridian at local noon whenever the sky is clear enough to take a clean sighting. Log each reading beside the dead-reckoning position in the ship's book, note the observer and the instrument's serial number, and send any drift larger than half a degree to the instrument maker before the next voyage leaves port.",
+  });
   const context = await asUser(browser, "alice");
 
   try {
@@ -271,7 +358,10 @@ test("phone search rows are at least 44px, do not overflow, and a comment result
     // Scoped to the palette: inbox rows carry a priority <select> whose options share the role.
     const dialog = page.getByRole("dialog", { name: "Search" });
     const options = dialog.getByRole("option");
-    await expect(options).toHaveCount(2);
+    await expect(options).toHaveCount(3);
+    await expect(dialog.getByRole("option", { name: /^ask / })).toContainText(
+      "Chose On the chart table"
+    );
     for (let index = 0; index < (await options.count()); index += 1) {
       const box = await options.nth(index).boundingBox();
       expect(box, `result option ${index} has a layout box`).not.toBeNull();

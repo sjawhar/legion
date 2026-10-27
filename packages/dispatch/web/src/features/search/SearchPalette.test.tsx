@@ -172,6 +172,62 @@ test("renders document-owned results under the document and opens their discussi
   }
 });
 
+test("an ask hit says where it stands and shows its latest answer", async () => {
+  const answer = {
+    at: "2026-10-01T00:00:00Z",
+    selected: ["Brass", "Steel"],
+    text: "Keep **both** frames.",
+    user: "alice",
+  };
+  const resolution = {
+    actor: { id: "bob", kind: "user" as const },
+    at: "2026-10-02T00:00:00Z",
+    kind: "resolved" as const,
+    reason: "Settled in the spec.",
+  };
+  const askHit = (id: string, ask: SearchResult["ask"]): SearchResult => ({
+    ask,
+    href: `/issues/LEGION-5/asks/${id}`,
+    id,
+    kind: "ask",
+    owner: { key: "LEGION-5", kind: "issue", status: "todo", title: "Orrery" },
+    rank: 1,
+    snippet: `Which <mark>orrery</mark> frame, ${id}?`,
+  });
+  const search = spyOn(api, "search").mockResolvedValue(
+    searchAnswer([
+      askHit("open", { state: "open" }),
+      askHit("answered", { answer: { ...answer, selected: [], text: null }, state: "answered" }),
+      askHit("closed", { resolution, state: "resolved" }),
+      askHit("closed-answered", { answer, resolution, state: "resolved" }),
+    ])
+  );
+  const view = renderPalette();
+
+  try {
+    await searchFor("orrery");
+    const option = (id: string) =>
+      screen.getAllByRole("option").find((row) => row.textContent?.includes(`frame, ${id}?`));
+    await waitFor(() => expect(option("closed-answered")?.textContent).toContain("both"));
+
+    expect(option("open")?.textContent).toContain("Open");
+    expect(option("answered")?.textContent).toContain("Answered");
+    expect(option("answered")?.textContent).toContain("alice · ");
+    expect(option("answered")?.textContent).toContain("No option chosen");
+    expect(option("closed")?.textContent).toContain("Closed, no answer");
+    expect(option("closed")?.textContent).toContain("Resolved by bob · ");
+    expect(option("closed")?.textContent).not.toContain("alice");
+    expect(option("closed-answered")?.textContent).toContain("Closed after an answer");
+    expect(option("closed-answered")?.textContent).toContain("Resolved by bob · ");
+    expect(option("closed-answered")?.textContent).toContain("Chose Brass, Steel");
+    expect(screen.getAllByRole("option", { name: /^ask / })).toHaveLength(4);
+  } finally {
+    search.mockRestore();
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
 test("does not query below two characters", () => {
   const search = spyOn(api, "search").mockResolvedValue(searchAnswer([]));
   const view = renderPalette();

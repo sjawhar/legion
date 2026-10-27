@@ -268,12 +268,19 @@ const RESOLUTION_VERB: Record<AskResolution["kind"], string> = {
 };
 
 /** `Resolved by <agent>` / `Retracted by <agent>`: the verb-and-actor prefix of a resolution,
- *  for callers that render its reason with their own markup. */
-export function AskResolutionLine({ resolution }: { resolution: AskResolution }): ReactNode {
+ *  for callers that render its reason with their own markup. `agent="static"` names the agent
+ *  without its link, for a host that is itself one control (a listbox option). */
+export function AskResolutionLine({
+  agent = "link",
+  resolution,
+}: {
+  agent?: "link" | "static";
+  resolution: AskResolution;
+}): ReactNode {
   return (
     <>
       {`${RESOLUTION_VERB[resolution.kind]} by `}
-      <AgentName actor={resolution.actor} inline />
+      <AgentName actor={resolution.actor} inline kind={agent} />
     </>
   );
 }
