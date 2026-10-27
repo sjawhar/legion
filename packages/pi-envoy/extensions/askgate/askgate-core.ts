@@ -442,18 +442,36 @@ export function parseMode(raw: string | undefined): Mode | undefined {
   return (MODES as readonly (string | undefined)[]).includes(value) ? (value as Mode) : undefined;
 }
 
-/**
- * The mode the session's latest `experiments` entry sets: `warn` when its `askgate_block` arm is
- * off, else `block` (no such entry, or one that carries no arm, included).
- */
-export function sessionMode(entries: readonly unknown[]): Mode {
+/** The `on` value of the session's latest `experiments` entry's `askgate_block` arm, if it has one. */
+function blockArm(entries: readonly unknown[]): boolean | undefined {
   const latest = entries.findLast(
     (entry) =>
       isRecord(entry) && entry.type === "custom" && entry.customType === EXPERIMENTS_ENTRY_TYPE
   );
   const features = isRecord(latest) && isRecord(latest.data) ? latest.data.features : undefined;
   const arm = isRecord(features) ? features.askgate_block : undefined;
-  return isRecord(arm) && arm.on === false ? "warn" : "block";
+  return isRecord(arm) && typeof arm.on === "boolean" ? arm.on : undefined;
+}
+
+/**
+ * The mode of a model's revise verdict that the session's latest `experiments` entry sets: `warn`
+ * when its `askgate_block` arm is off, else `block` (no such entry, or one that carries no arm,
+ * included). This is the verdict's default; the CLI's marker checks have their own (`checkMode`).
+ */
+export function sessionMode(entries: readonly unknown[]): Mode {
+  return blockArm(entries) === false ? "warn" : "block";
+}
+
+/**
+ * The mode of the checks a call's marker carries: no matching marker, a file changed after the
+ * review, a file absent at review. `block` only when the session chose block explicitly
+ * (OMP_ASKGATE=block, or with OMP_ASKGATE not a mode, its latest `experiments` entry's arm on);
+ * else `warn`, which posts with a warning and an entry the report counts. The gate records it in
+ * its store, where the CLI reads it.
+ */
+export function checkMode(envMode: Mode | undefined, entries: readonly unknown[]): Mode {
+  if (envMode !== undefined) return envMode;
+  return blockArm(entries) === true ? "block" : "warn";
 }
 
 function parseTimeout(raw: string | undefined): number {
@@ -2620,7 +2638,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       command: unknown,
       bound: { args: Input; files: readonly FileDigest[] } | null,
       outcome: string,
-      mode: Mode = envMode ?? "block"
+      mode: Mode = envMode ?? "warn"
     ): ToolCallResult => {
       const argv = commandArgv(command);
       if (argv === undefined)
@@ -2654,6 +2672,9 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       // OMP_ASKGATE when it is a mode; else this session's latest experiments entry, read per call
       // because one binding serves every session the process switches to.
       let mode: Mode = envMode ?? "block";
+      // The mode of the checks the CLI makes on this call's marker, and of a file the gate could not
+      // read: block only when the session chose it (`checkMode`).
+      let checks: Mode = envMode ?? "warn";
       try {
         if (event.toolName === "bash") rememberCause(event.toolCallId, event.input.command);
         // A task subagent's literal write is neither reviewed nor recorded, as before the CLI
@@ -2663,13 +2684,17 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
             ? mintFor(event.toolCallId, event.input.command, null, "subagent")
             : undefined;
         if (event.toolName === "write") return stripRebuttal(event);
-        if (envMode === undefined) mode = sessionMode(ctx.sessionManager.getEntries());
-        // The CLI reads the mode from the store: every shell or cell could run it.
+        if (envMode === undefined) {
+          const entries = ctx.sessionManager.getEntries();
+          mode = sessionMode(entries);
+          checks = checkMode(envMode, entries);
+        }
+        // The CLI reads the check mode from the store: every shell or cell could run it.
         if (event.toolName === "bash" || event.toolName === "eval") {
           try {
-            recordMode(mode);
+            recordMode(checks);
           } catch {
-            // A store that takes no mode leaves the CLI's default, block, which refuses more.
+            // A store that takes no mode leaves the CLI's default, warn.
           }
         }
         // Only a `bash` call in the literal grammar is read. Any other call runs, and the CLI
@@ -2697,7 +2722,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
                 decision = pass("skipped", {
                   reason: `primary on ${ctx.model?.provider ?? "no model"}`,
                 });
-              else decision = unreadableCall(run.unreadable, mode);
+              else decision = unreadableCall(run.unreadable, checks);
             }
             // The CLI refuses arguments it cannot parse before it sends anything, so the
             // command runs.
@@ -2791,7 +2816,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           (revised ?? event.input).command,
           bound,
           outcome,
-          mode
+          checks
         );
         if (minted?.block) {
           notices.delete(event.toolCallId);

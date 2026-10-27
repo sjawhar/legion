@@ -208,9 +208,9 @@ function sweepStores(root, now) {
 }
 function storeMode(store) {
   try {
-    return readFileSync(join(store, MODE_FILE), "utf-8") === "warn" ? "warn" : "block";
+    return readFileSync(join(store, MODE_FILE), "utf-8") === "block" ? "block" : "warn";
   } catch {
-    return "block";
+    return "warn";
   }
 }
 function askgateState(dir) {
@@ -258,7 +258,7 @@ function askgateState(dir) {
   return {
     kind: "on",
     stores: live.map(({ store }) => store),
-    mode: live.every(({ store }) => storeMode(store) === "warn") ? "warn" : "block"
+    mode: live.some(({ store }) => storeMode(store) === "block") ? "block" : "warn"
   };
 }
 var isFileDigest = (value) => typeof value === "object" && value !== null && typeof value.flag === "string" && typeof value.operand === "string" && typeof value.sha256 === "string";

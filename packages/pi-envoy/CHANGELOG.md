@@ -4,6 +4,12 @@
 
 ### Added
 
+- AskGate's marker checks at the `dispatch` CLI (no matching marker, a file changed after the
+  review, a file missing when the gate ran) warn by default: the write posts with its warning and
+  an entry the report counts. They refuse only when the session chose block (`OMP_ASKGATE=block`,
+  or its `experiments` entry's `askgate_block` arm on). A model's revise verdict still blocks by
+  default, and no model role or a gate that did not load still refuses in both modes.
+
 - The `dispatch` skill never claims an issue with the `legion` label unless the session is a
   Legion role of its tree, even when its claim reads `not running`: the Legion daemon suspends a
   root's architect while the root waits on a person, and taking that claim takes the tree out of

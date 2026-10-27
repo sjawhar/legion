@@ -17,6 +17,7 @@ import * as core from "./askgate-core";
 import {
   ADVISOR_GATE_ENTRY_TYPE,
   type CompleteRequest,
+  checkMode,
   createAskGate,
   type DryRunOptions,
   type DryRunResult,
@@ -326,7 +327,7 @@ describe("mode and model role (plan tests c-g)", () => {
     expect(g.entries[0].verdictMode).toBe("warn");
     expect(g.notices).toEqual([expect.stringContaining('OMP_ASKGATE is "bogus"')]);
   });
-  test("(e) an experiments entry whose askgate_block arm is off makes warn, and no entry makes block", async () => {
+  test("(e) the revise verdict's default: an experiments entry whose askgate_block arm is off makes warn, and no entry makes block", async () => {
     const off = bind({ entries: [experimentsEntry(false)], complete: revise });
     expect((await off.device("t1", "dispatch_comment", COMMENT))?.block).toBeUndefined();
     const none = bind({ entries: [], complete: revise });
@@ -349,6 +350,18 @@ describe("mode and model role (plan tests c-g)", () => {
     const noArm = { type: "custom", customType: "experiments", data: { v: 1, features: {} } };
     expect(sessionMode([experimentsEntry(false), noArm])).toBe("block");
     expect(sessionMode([{ type: "message", customType: "experiments" }])).toBe("block");
+  });
+  test("the CLI's marker checks have their own default, warn: only OMP_ASKGATE=block or the arm on makes block", () => {
+    expect(checkMode(undefined, [])).toBe("warn");
+    expect(checkMode(undefined, [experimentsEntry(false)])).toBe("warn");
+    expect(checkMode(undefined, [experimentsEntry(true)])).toBe("block");
+    expect(checkMode(undefined, [experimentsEntry(true), experimentsEntry(false)])).toBe("warn");
+    const noArm = { type: "custom", customType: "experiments", data: { v: 1, features: {} } };
+    expect(checkMode(undefined, [experimentsEntry(true), noArm])).toBe("warn");
+    expect(checkMode("block", [])).toBe("block");
+    expect(checkMode("warn", [experimentsEntry(true)])).toBe("warn");
+    // The verdict keeps C5's default, block, where the checks warn.
+    expect([sessionMode([]), checkMode(undefined, [])]).toEqual(["block", "warn"]);
   });
   test("the entries are read for each call, so a switch to a session in the other arm changes the mode", async () => {
     let arm = false;
@@ -2619,7 +2632,7 @@ console.log(JSON.stringify(args, null, 2));
       expect(markersIn(g.store)).toEqual([]);
     });
 
-    test("the gate records its mode in the store for the CLI, on every main-agent bash or eval call", async () => {
+    test("the gate records the check mode in the store for the CLI, on every main-agent bash or eval call", async () => {
       const warn = bind({ env: STUB, cwd: work });
       await warn.bash("n", "ls");
       expect(fs.readFileSync(path.join(warn.store, "mode"), "utf8")).toBe("warn");
@@ -2630,6 +2643,13 @@ console.log(JSON.stringify(args, null, 2));
       arm = true;
       await switching.bash("n", "ls");
       expect(fs.readFileSync(path.join(switching.store, "mode"), "utf8")).toBe("block");
+      // No entry: the revise verdict blocks, but the CLI's checks warn, since block was not chosen.
+      const none = bind({ env: STUB, cwd: work, entries: [] });
+      await none.bash("n", "ls");
+      expect(fs.readFileSync(path.join(none.store, "mode"), "utf8")).toBe("warn");
+      const chosen = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work, entries: [] });
+      await chosen.bash("n", "ls");
+      expect(fs.readFileSync(path.join(chosen.store, "mode"), "utf8")).toBe("block");
     });
 
     // The mint comes once, after every check and after the record: a write no review stands

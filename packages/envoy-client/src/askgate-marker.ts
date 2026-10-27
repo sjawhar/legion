@@ -338,17 +338,22 @@ export function sweepStores(root: string, now: number): void {
   }
 }
 
-/** Records the gate's mode in its store, for the CLI to read. */
+/**
+ * Records in the gate's store how the CLI treats a gated write whose marker check fails (no
+ * matching marker, a file changed after review): `block` only when the session chose block
+ * explicitly, `warn` otherwise. A model's revise verdict is the gate's, and keeps its own default.
+ */
 export function setStoreMode(store: string, mode: AskgateMode): void {
   openStore(store);
   writeAtomically(join(store, MODE_FILE), mode);
 }
 
+/** A store's recorded mode: `block` only when it says so; no mode recorded is the default, warn. */
 function storeMode(store: string): AskgateMode {
   try {
-    return readFileSync(join(store, MODE_FILE), "utf-8") === "warn" ? "warn" : "block";
+    return readFileSync(join(store, MODE_FILE), "utf-8") === "block" ? "block" : "warn";
   } catch {
-    return "block";
+    return "warn";
   }
 }
 
@@ -360,8 +365,8 @@ export type AskgateState =
 
 /**
  * The state of session directory `dir`'s record: off when there is none or no owner lives, on with
- * each live owner's store (warn only when every one is in warn mode), broken when the record or an
- * owner file cannot be read or a live owner's store is gone.
+ * each live owner's store (block when any one's session chose block, else warn), broken when the
+ * record or an owner file cannot be read or a live owner's store is gone.
  */
 export function askgateState(dir: string): AskgateState {
   const record = join(dir, ASKGATE_RECORD);
@@ -404,7 +409,7 @@ export function askgateState(dir: string): AskgateState {
   return {
     kind: "on",
     stores: live.map(({ store }) => store),
-    mode: live.every(({ store }) => storeMode(store) === "warn") ? "warn" : "block",
+    mode: live.some(({ store }) => storeMode(store) === "block") ? "block" : "warn",
   };
 }
 

@@ -347,14 +347,17 @@ No section, or `enabled: true`, keeps it on. A checkout's `.envoy/envoy.json` ca
 checkout's `dispatch.enabled: false` does not turn it off. A section that does not parse keeps
 AskGate on, and the start notice names the file.
 
-**The modes.** In `block` mode a write that the gate sends back does not post, and the CLI refuses
-a gated write that carries no marker. In `warn` mode the write posts, and the reason or the CLI's
-warning comes back to the agent. `OMP_ASKGATE=warn` or `OMP_ASKGATE=block` sets the mode. AskGate
-ignores any other value, `off` included, and the first review shows one notice that names
-`askgate.enabled` as the switch. With no such variable, the session's latest `experiments` entry
-decides: its `askgate_block` arm off is `warn`. Every other session uses `block`. The gate writes
-the mode into its store at each main-agent `bash` or `eval` call, where the CLI reads it. Two
-refusals do not follow the mode: no model role and a gate that did not load refuse in both modes,
+**The modes.** A model's revise verdict and the CLI's marker checks have separate defaults. A revise
+verdict blocks by default: the write does not post. `OMP_ASKGATE=warn`, or a session whose latest
+`experiments` entry turns its `askgate_block` arm off, lets the write post with the reason. The
+CLI's checks warn by default: a gated write with no matching marker, a file changed after the
+review, and a file missing when the gate ran each post with a warning and an `unmarked` or
+`unreadable` entry that the report counts. They refuse only when the session chose block
+explicitly: `OMP_ASKGATE=block`, or, with no such variable, an `experiments` entry whose arm is on.
+AskGate ignores any other value of `OMP_ASKGATE`, `off` included, and the first review shows one
+notice that names `askgate.enabled` as the switch. The gate writes the checks' mode into its store
+at each main-agent `bash` or `eval` call, where the CLI reads it, and a store with no mode is warn.
+Two refusals follow neither mode: no model role and a gate that did not load refuse in both modes,
 since neither can review anything, and a gate that cannot review is no off switch.
 
 **The model.** The gate asks the session's `askgate` model role (`modelRoles.askgate`). When that
@@ -382,7 +385,8 @@ why. The note reaches a headless session too:
 | `shutdown` (warn mode) | the session shut down before the review answered |
 | `unmarked` (warn mode) | the CLI found no marker for a gated write sent in another form |
 
-In `block` mode `unreadable`, `abandoned`, `shutdown` and `unmarked` refuse the call instead. Only
+Where the mode that applies is `block` (the verdict's for `abandoned` and `shutdown`, the checks'
+for `unreadable` and `unmarked`), those outcomes refuse the call instead. Only
 `askgate.enabled: false`, and a session with no Dispatch, are silent. Each outcome after a failure
 runs the agent's own command as written: a gate that fails breaks no valid write.
 

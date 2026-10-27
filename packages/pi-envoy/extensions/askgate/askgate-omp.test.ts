@@ -72,6 +72,8 @@ async function runSession(options: {
   config?: readonly string[];
   files?: Readonly<Record<string, string>>;
   dispatchUrl?: string;
+  /** OMP_ASKGATE for the session: unset leaves the defaults, block for a verdict, warn for checks. */
+  mode?: "warn" | "block";
 }): Promise<{ requests: Request[]; sessions: string }> {
   if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
   const { root, home, workspace, sessions } = await ompRoot(omp, "askgate-omp-", cleanup);
@@ -146,6 +148,7 @@ async function runSession(options: {
         DISPATCH_URL: options.dispatchUrl ?? base,
         DISPATCH_TOKEN: "askgate-token",
         ENVOY_CONFIG_FILE: path.join(root, "envoy.json"),
+        ...(options.mode === undefined ? {} : { OMP_ASKGATE: options.mode }),
       },
       onFrame: (frame) => {
         if (
@@ -379,13 +382,14 @@ for (const [form, firstTurn, config] of [
   ],
 ] as const)
   test.skipIf(omp === undefined && !onActions)(
-    `the real CLI refuses a gated write from ${form}, which carries no marker`,
+    `the real CLI refuses a gated write from ${form}, which carries no marker, once the session chose block`,
     async () => {
       const { requests, sessions } = await runSession({
         cli: "real",
         gateAnswer: '{"decision":"allow"}',
         firstTurn,
         config,
+        mode: "block",
       });
       expect(asksPosted(requests)).toBe(0);
       expect(lastTurn(requests)).toContain(REFUSED);
@@ -396,6 +400,30 @@ for (const [form, firstTurn, config] of [
     },
     180_000
   );
+
+// The CLI's checks default to warn: in a session that chose no mode, a gated write with no marker
+// posts with its warning, and pi-envoy records an `unmarked` entry for the report.
+test.skipIf(omp === undefined && !onActions)(
+  "the real CLI posts a gated write with no marker, with its warning, when the session chose no mode",
+  async () => {
+    const { requests, sessions } = await runSession({
+      cli: "real",
+      gateAnswer: '{"decision":"allow"}',
+      firstTurn: (dispatch) => ({
+        type: "tool_use",
+        name: "bash",
+        input: { command: `python3 -c 'import subprocess; subprocess.run(${askArgv(dispatch)})'` },
+      }),
+    });
+    expect(asksPosted(requests)).toBe(1);
+    expect(lastTurn(requests)).not.toContain(REFUSED);
+    expect(lastTurn(requests)).toContain("AskGate is on for this session in warn mode");
+    expect(await gateEntries(sessions)).toMatchObject([
+      { tool: "dispatch_ask", outcome: "unmarked", decision: "allow", verdictMode: "warn" },
+    ]);
+  },
+  180_000
+);
 
 test.skipIf(omp === undefined && !onActions)(
   "with askgate.enabled false no record is written, and python3 -c under bash posts once",

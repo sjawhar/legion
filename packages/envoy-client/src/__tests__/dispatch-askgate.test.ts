@@ -95,7 +95,11 @@ function ownerFile(id: string, owner: { pid: number; start: string | null }): st
   return join(stateDir, "sessions", id, "askgate", `${name}.json`);
 }
 
-/** The record a live gate writes for session `id`: this test process stands in for Oh My Pi. */
+/**
+ * The record a live gate writes for session `id`: this test process stands in for Oh My Pi.
+ * `mode` is what the gate records for the CLI's marker checks: `block`, as a session that chose
+ * block does (most tests here), `warn`, or null for none recorded, which the CLI reads as warn.
+ */
 function writeRecord(
   id = "ses-1",
   owner: { pid: number; start: string | null; store: string } = {
@@ -103,13 +107,13 @@ function writeRecord(
     start: startOf(process.pid),
     store: store(),
   },
-  mode?: "warn" | "block"
+  mode: "warn" | "block" | null = "block"
 ): void {
   const file = ownerFile(id, owner);
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, JSON.stringify({ v: 1, ...owner }));
   mkdirSync(join(owner.store, "markers"), { recursive: true });
-  if (mode !== undefined) writeFileSync(join(owner.store, "mode"), mode);
+  if (mode !== null) writeFileSync(join(owner.store, "mode"), mode);
 }
 
 /** The sha256 of a file's bytes, as a marker binds each file it names. */
@@ -371,6 +375,23 @@ describe("AskGate at the dispatch CLI", () => {
         askgate: { mode: "warn", why: expect.stringContaining(CHANGED) },
       });
     });
+
+    test("with block not chosen, the default, a changed file posts with its warning", async () => {
+      writeRecord("ses-1", undefined, null);
+      writeFileSync(note(), "The reviewed text.\n");
+      await reviewed(comment(), "--body-file", note());
+      writeFileSync(note(), "Text an edit of the same message wrote.\n");
+      const { code, stdout } = await run(comment());
+      expect(code).toBe(0);
+      expect(stdout).toContain(
+        `dispatch: warning: AskGate is on for this session in warn mode, and ${CHANGED}`
+      );
+      expect(postsTo(COMMENTS)).toHaveLength(1);
+      expect(ledger()[0]).toMatchObject({
+        tool: "dispatch_comment",
+        askgate: { mode: "warn", why: expect.stringContaining(CHANGED) },
+      });
+    });
   });
 
   // The attack on the marker design at cf3f1e021, N1: the gate mints a marker when it prepares the
@@ -433,6 +454,19 @@ describe("AskGate at the dispatch CLI", () => {
     expect(before).not.toHaveProperty("details");
     expect(after).toMatchObject({ tool: "dispatch_message", details: expect.any(Object) });
     expect(after).not.toHaveProperty("askgate");
+  });
+
+  test("with block not chosen, the default, a write with no marker posts with its warning and an entry", async () => {
+    writeRecord("ses-1", undefined, null);
+    const { code, stdout } = await run(MESSAGE);
+    expect(code).toBe(0);
+    expect(messagePosts()).toHaveLength(1);
+    expect(stdout).toContain("dispatch: warning: AskGate is on for this session in warn mode");
+    expect(cliRefusals(stdout)).toEqual([]);
+    expect(ledger()[0]).toMatchObject({
+      tool: "dispatch_message",
+      askgate: { mode: "warn", why: "this call carries no AskGate marker" },
+    });
   });
 
   test("in warn mode a write with no marker whose ledger line cannot be written does not post", async () => {

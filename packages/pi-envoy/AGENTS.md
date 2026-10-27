@@ -242,14 +242,17 @@ deliberate pass to the dry run's arguments and to the sha256 of each file the ar
 for a `task` subagent's literal call. A marker goes when its call ends or at shutdown, and the CLI
 refuses one older than two hours (`MARKER_MAX_AGE_MS`). The CLI reads each named file once,
 consumes one matching marker by unlinking it before it posts a gated write under a live record,
-sends an upload's bytes from that same read, and in block mode refuses a write with no matching
-marker (`gatedWrite`, the one predicate both sides use); a file that changed after the review
-matches none and is refused with the advice to send the call again in a later message. In warn
-mode the CLI writes the ledger line before it posts. The gate writes its mode into the store for
-the CLI; `envoy.ts` turns each write the CLI logged as unmarked into an `unmarked` entry, and the
-gate appends a cause note (`nonLiteralCause`, `causeNote`) to the result of a call outside the
-literal form that the CLI refused. A gate that did not load mints nothing, so the CLI refuses those
-writes too. Precision comes first: the gate refuses no call that holds no Dispatch write.
+sends an upload's bytes from that same read, and, when the session chose block, refuses a write
+with no matching marker (`gatedWrite`, the one predicate both sides use); a file that changed after
+the review matches none and gets the advice to send the call again in a later message. In warn mode,
+the default for these checks, the CLI writes the ledger line before it posts. The gate writes the
+checks' mode into the store for the CLI (`checkMode`: block only when the session chose it, and a
+store with no mode is warn), apart from the verdict's mode (`sessionMode`, block by default);
+`envoy.ts` turns each write the CLI logged as unmarked into an `unmarked` entry, and the gate
+appends a cause note (`nonLiteralCause`, `causeNote`) to the result of a call outside the literal
+form that the CLI refused. A gate that did not load mints nothing and writes no mode, so the CLI
+posts such a write with its warning, while `loadFailureGate` refuses each literal call. Precision
+comes first: the gate refuses no call that holds no Dispatch write.
 Every other way a write passes
 unreviewed records its outcome and tells the agent so (`renderUnreviewed`), and each one runs the
 agent's own command as written (`UNREVIEWED_OUTCOMES`): a gate that fails breaks no valid write.
