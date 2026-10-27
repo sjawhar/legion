@@ -108,6 +108,12 @@ describe("envoyToolSpecs", () => {
     expect(subscribe?.description).toContain("envoy.exceptions.<original-topic>");
     expect(publish?.description).toContain("at-least-once, possibly out of order across topics");
     expect(publish?.description).toContain("id for dedupe and at for freshness");
+    for (const description of [subscribe?.description, publish?.description]) {
+      expect(description).toContain(
+        "reach each subscribed session once, also one that was away or restarted, when its listener supports consumer delivery"
+      );
+      expect(description).toContain("Team and other ad-hoc topics are live only.");
+    }
   });
 });
 

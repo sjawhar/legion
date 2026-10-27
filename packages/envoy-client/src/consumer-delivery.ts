@@ -1,0 +1,580 @@
+import { agentSubject } from "@legion/contracts";
+import { z } from "zod";
+import { DedupeIdentitySchema } from "./delivery";
+import type { ReplayEngine, ReplayNotice } from "./replay";
+import {
+  type DeliveryAnswer,
+  type DeliveryRequest,
+  expandSubscriptionTopics,
+  type ResumePoint,
+} from "./transport";
+
+/**
+ * The core subject the owning listener relays a session's durable consumer on: this prefix and the
+ * session id. The stream does not store it. The listener's `DeliverSubjectPrefix` is the same.
+ */
+export const DELIVER_SUBJECT_PREFIX = "notifications.envoy.deliver.";
+
+/** The subject a session's relay frames arrive on. */
+export function deliverSubject(sessionID: string): string {
+  return `${DELIVER_SUBJECT_PREFIX}${sessionID}`;
+}
+
+/** The headers of a relay frame. */
+export const RelayHeader = {
+  /** The subject the stream stored the message on. */
+  subject: "Envoy-Subject",
+  /** The stream sequence, decimal. */
+  streamSeq: "Envoy-Stream-Seq",
+  /** The stream's `envoy_stream_id`. */
+  streamID: "Envoy-Stream-Id",
+  /** JetStream's delivery count, decimal; 1 is the first delivery. */
+  delivered: "Envoy-Delivered",
+  /** When the stream stored the message: RFC 3339 with nanoseconds, UTC. */
+  storedAt: "Envoy-Stored-At",
+  /** `true` only on the first frame after the relay restarted below the stream's first sequence. */
+  gap: "Envoy-Gap",
+} as const;
+
+/**
+ * A session's answers on a frame's reply subject, each exactly one ASCII word. `received`: the
+ * frame decoded, before any host work. `progress`: still held unwritten (the listener extends the
+ * ack wait). `done`: written, or skipped, suppressed, rejected or a duplicate (the listener acks
+ * it); it also counts as `received`. `nak`: the session cannot take it (the listener redelivers).
+ */
+export type RelayReply = "received" | "progress" | "done" | "nak";
+
+/** How often a held frame's `progress` goes out; the listener's ack wait is 60 s. */
+export const RELAY_PROGRESS_INTERVAL_MS = 20_000;
+
+/**
+ * How much earlier than a topic's follow time a frame stored on it may be and still be shown. The
+ * follow time is the plugin's clock and the stored time the NATS server's: a frame stored just
+ * after the follow must not be dropped for a clock a little ahead, which would lose it, while one
+ * stored this little before the follow is shown, which costs nothing.
+ */
+export const FOLLOW_CLOCK_ALLOWANCE_MS = 2_000;
+
+/**
+ * How many deliveries of one frame may fail in the host (its `deliver` threw) before the frame is
+ * answered `done` and the host told (`ConsumerDeliveryHost.failed`) instead of `nak`: a frame the
+ * host can never show must not come back every second forever.
+ */
+export const RELAY_ATTEMPTS_BEFORE_FAILED = 3;
+
+/** What `decodeRelayFrame` reads headers through; a NATS message's `headers` is one. */
+export interface RelayHeaders {
+  get(name: string): string | null | undefined;
+}
+
+/** A message received on the relay subject, as any NATS client hands it over. */
+export interface RelayMessage {
+  readonly data: Uint8Array | string;
+  readonly headers?: RelayHeaders | undefined;
+  readonly reply?: string | undefined;
+}
+
+/** A decoded relay frame. */
+export interface RelayFrame {
+  /** The subject the stream stored the message on. */
+  readonly subject: string;
+  readonly streamSeq: number;
+  readonly streamID: string;
+  /** JetStream's delivery count; 1 is the first delivery. */
+  readonly delivered: number;
+  /** The stored time as the header carries it (RFC 3339, UTC). */
+  readonly storedAt: string;
+  /** The stored time in milliseconds since the epoch. */
+  readonly storedAtMs: number;
+  /** The relay restarted below the stream's first sequence just before this frame. */
+  readonly gap: boolean;
+  /** The stored message's bytes as text: the Envoy envelope JSON. */
+  readonly data: string;
+  /** The listener's inbox for this frame's replies. */
+  readonly reply: string;
+}
+
+export type DecodedRelayFrame = { readonly frame: RelayFrame } | { readonly error: string };
+
+const decoder = new TextDecoder();
+const DECIMAL = /^[0-9]+$/;
+// RFC 3339 with up to nine fractional digits. `Date.parse` reads at most milliseconds portably,
+// so the fraction is cut to three digits first.
+const RFC3339 = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/;
+
+function positiveInteger(text: string | null | undefined): number | undefined {
+  if (text === null || text === undefined || !DECIMAL.test(text)) return undefined;
+  const value = Number(text);
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+function parseStoredAt(text: string): number | undefined {
+  const match = RFC3339.exec(text);
+  if (match === null) return undefined;
+  const fraction = (match[2] ?? "").padEnd(3, "0").slice(0, 3);
+  const ms = Date.parse(`${match[1]}.${fraction}${match[3]}`);
+  return Number.isNaN(ms) ? undefined : ms;
+}
+
+/** Reads a relay frame's headers; any header missing or malformed, or no reply, is an error. */
+export function decodeRelayFrame(message: RelayMessage): DecodedRelayFrame {
+  const reply = message.reply ?? "";
+  if (reply === "") return { error: "no reply subject" };
+  const headers = message.headers;
+  if (headers === undefined) return { error: "no headers" };
+  const subject = headers.get(RelayHeader.subject) ?? "";
+  if (subject === "") return { error: `no ${RelayHeader.subject}` };
+  const streamSeq = positiveInteger(headers.get(RelayHeader.streamSeq));
+  if (streamSeq === undefined) return { error: `bad ${RelayHeader.streamSeq}` };
+  const streamID = headers.get(RelayHeader.streamID) ?? "";
+  if (streamID === "") return { error: `no ${RelayHeader.streamID}` };
+  const delivered = positiveInteger(headers.get(RelayHeader.delivered));
+  if (delivered === undefined) return { error: `bad ${RelayHeader.delivered}` };
+  const storedAt = headers.get(RelayHeader.storedAt) ?? "";
+  const storedAtMs = parseStoredAt(storedAt);
+  if (storedAtMs === undefined) return { error: `bad ${RelayHeader.storedAt}` };
+  return {
+    frame: {
+      subject,
+      streamSeq,
+      streamID,
+      delivered,
+      storedAt,
+      storedAtMs,
+      gap: headers.get(RelayHeader.gap) === "true",
+      data: typeof message.data === "string" ? message.data : decoder.decode(message.data),
+      reply,
+    },
+  };
+}
+
+/** A random string per plugin NATS connection: the registration's `delivery.epoch`. */
+export function newEpoch(): string {
+  return crypto.randomUUID();
+}
+
+/** One NATS connection's epoch: its id, and when it began on the host's clock. */
+export interface ConsumerEpoch {
+  readonly id: string;
+  readonly startedAt: number;
+}
+
+/** A notice the session is told once: messages may be missing. A host shows it as #2228's. */
+export type ConsumerGapNotice = Extract<
+  ReplayNotice,
+  { readonly kind: "retention_gap" | "stream_recreated" }
+>;
+
+const GAP_MESSAGES: Record<ConsumerGapNotice["kind"], string> = {
+  retention_gap:
+    "The notification stream no longer holds some messages published to this session while it was away: messages older than 72 hours may be missing.",
+  stream_recreated:
+    "Envoy's notification stream was recreated, so messages published to this session before that may be lost.",
+};
+
+/**
+ * A frame handed to the host. The host answers it once: `done` when the frame is written to the
+ * session's record (or skipped, suppressed, rejected), `nak` when the session cannot take it.
+ * Until then `progress` goes out every 20 s. `release` says the frame no longer blocks the next
+ * one (a side question whose model call runs off the queue); `done` and `nak` release it too, and
+ * so does `deliver` returning. Each is idempotent; nothing is answered after `done` or `nak`.
+ */
+export interface ConsumerFrame extends RelayFrame {
+  /**
+   * Delivered before (`delivered` > 1) or stored before the current epoch began: a late side
+   * question never starts a side turn, it is shown as a card.
+   */
+  readonly late: boolean;
+  done(): void;
+  nak(): void;
+  release(): void;
+}
+
+export interface ConsumerDeliveryHost {
+  /**
+   * Hands a frame to the session. Frames come in stream order, one at a time: the next waits until
+   * this returns or the frame is released or settled. A throw on an unsettled frame answers `nak`,
+   * or, from its third delivery on, `done` and `failed`.
+   */
+  deliver(frame: ConsumerFrame): void | Promise<void>;
+  /** The host gave up on a frame its `deliver` kept throwing on: it shows a failure notice. */
+  failed(frame: ConsumerFrame, error: unknown): void;
+  /** Tells the session once that messages may be missing (#2228's gap notice). */
+  gap(notice: ConsumerGapNotice): void;
+  log(message: string, error?: unknown): void;
+}
+
+export interface ConsumerDeliveryOptions {
+  readonly sessionID: string;
+  readonly host: ConsumerDeliveryHost;
+  /** Publishes a reply body on a frame's reply subject (core NATS, no reply expected). */
+  readonly publish: (reply: string, body: RelayReply) => void;
+  /** The persisted ledger of frames written (#2228's `ReplayEngine.delivered`). */
+  readonly ledger: Pick<ReplayEngine, "delivered">;
+  readonly now?: () => number;
+  /** Runs `callback` every `ms` until the returned stop runs; `setInterval` by default. */
+  readonly every?: (ms: number, callback: () => void) => () => void;
+}
+
+/**
+ * What a host persists and restores: the resume point, and when each followed topic was first
+ * followed, so frames stored before a follow are dropped across a restart too.
+ */
+export const ConsumerDeliverySnapshotSchema = z.object({
+  resume: z
+    .object({ stream_id: z.string().min(1), seq: z.number().int().nonnegative() })
+    .optional(),
+  follows: z.record(z.string(), z.number()).default({}),
+});
+
+export type ConsumerDeliverySnapshot = z.infer<typeof ConsumerDeliverySnapshotSchema>;
+
+/** One session's relay delivery: decode, reply, filter, order, and track the resume point. */
+export interface ConsumerDelivery {
+  /** The relay subject; the host subscribes to it before it registers. */
+  readonly subject: string;
+  /** Takes one message from the relay subscription. */
+  receive(message: RelayMessage): void;
+  /** The current epoch; one begins when the delivery is created. */
+  epoch(): ConsumerEpoch;
+  /** Begins a new epoch: call it for every new NATS connection, then register again. */
+  beginEpoch(): ConsumerEpoch;
+  /** The registration's `delivery` field: the epoch, and the resume point when one is known. */
+  registration(): DeliveryRequest;
+  /**
+   * Takes the registration's answer (`deliveryAnswerOf`) and returns its mode. A consumer answer
+   * that reports a gap, or names another stream than the resume point's, tells the session once.
+   */
+  answered(answer: DeliveryAnswer): DeliveryAnswer["mode"];
+  /**
+   * Takes the topics the session follows now (its agent subject is always taken). A new one is
+   * stamped now, so frames stored before it are dropped; a dropped one is forgotten. Call it before
+   * the registration that adds a topic, and persist `snapshot()` after it.
+   */
+  setFollowed(topics: Iterable<string>): void;
+  /**
+   * Below this point the session holds nothing unwritten: the lowest stream sequence received and
+   * not yet written, minus one, or, with none held, the highest written. Undefined before any.
+   */
+  resumePoint(): ResumePoint | undefined;
+  snapshot(): ConsumerDeliverySnapshot;
+  /** Restores what a host persisted; call it before `setFollowed`. */
+  restore(snapshot: ConsumerDeliverySnapshot): void;
+  /** The session is replaced: every unsettled frame is answered `nak`, and so is any later one. */
+  close(): void;
+}
+
+/** Whether a concrete subject matches a NATS pattern: `*` one token, `>` one or more trailing. */
+function subjectMatches(pattern: string, subject: string): boolean {
+  const wanted = pattern.split(".");
+  const tokens = subject.split(".");
+  for (let index = 0; index < wanted.length; index += 1) {
+    if (wanted[index] === ">") return tokens.length > index;
+    if (index >= tokens.length) return false;
+    if (wanted[index] !== "*" && wanted[index] !== tokens[index]) return false;
+  }
+  return wanted.length === tokens.length;
+}
+
+function parseIdentity(data: string) {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return undefined;
+  }
+  const identity = DedupeIdentitySchema.safeParse(parsed);
+  if (!identity.success) return undefined;
+  const { event_id, dedupe_key } = identity.data;
+  return event_id === undefined && dedupe_key === undefined ? undefined : identity.data;
+}
+
+function every(ms: number, callback: () => void): () => void {
+  const timer = setInterval(callback, ms);
+  return () => clearInterval(timer);
+}
+
+interface Entry {
+  readonly frame: RelayFrame;
+  readonly late: boolean;
+  readonly replies: string[];
+  readonly key: string;
+  stopProgress: () => void;
+  settled: boolean;
+}
+
+export function createConsumerDelivery(options: ConsumerDeliveryOptions): ConsumerDelivery {
+  const { host, ledger, sessionID } = options;
+  const now = options.now ?? Date.now;
+  const repeat = options.every ?? every;
+  const ownSubject = agentSubject(sessionID);
+
+  let currentEpoch: ConsumerEpoch = { id: newEpoch(), startedAt: now() };
+  // When each followed topic was first followed, on the host's clock.
+  let follows = new Map<string, number>();
+  // The resume point's stream, the frames of it received and not yet written, and the highest
+  // written. A `nak` leaves its frame held: it comes again and is not written yet.
+  let streamID: string | undefined;
+  let held = new Set<number>();
+  let written: number | undefined;
+  // A retention gap the registration answer told: the next frame's `Envoy-Gap` is the same one.
+  let gapTold = false;
+  let closed = false;
+  // Frames received and unsettled, by stream and sequence: a redelivery joins its first copy.
+  const entries = new Map<string, Entry>();
+  const queue: Entry[] = [];
+  let blocking: Entry | undefined;
+  let pumping = false;
+
+  const safely = (what: string, call: () => void) => {
+    try {
+      call();
+    } catch (error) {
+      try {
+        host.log(`consumer delivery: ${what} failed`, error);
+      } catch {
+        // A host whose log throws has nowhere left to report to.
+      }
+    }
+  };
+  const log = (message: string, error?: unknown) =>
+    safely("log", () => host.log(`consumer delivery: ${message}`, error));
+  const send = (reply: string, body: RelayReply) =>
+    safely(`reply ${body}`, () => options.publish(reply, body));
+  const tellGap = (kind: ConsumerGapNotice["kind"]) =>
+    safely("gap notice", () => host.gap({ kind, message: GAP_MESSAGES[kind] }));
+
+  const switchStream = (id: string) => {
+    if (streamID === id) return;
+    streamID = id;
+    held = new Set();
+    written = undefined;
+  };
+
+  const followedAt = (subject: string): number | undefined => {
+    if (subject === ownSubject) return Number.NEGATIVE_INFINITY;
+    let earliest: number | undefined;
+    for (const [topic, at] of follows) {
+      if (!expandSubscriptionTopics([topic]).some((pattern) => subjectMatches(pattern, subject))) {
+        continue;
+      }
+      if (earliest === undefined || at < earliest) earliest = at;
+    }
+    return earliest;
+  };
+
+  const settle = (entry: Entry, body: "done" | "nak") => {
+    if (entry.settled) return;
+    entry.settled = true;
+    entry.stopProgress();
+    entries.delete(entry.key);
+    for (const reply of entry.replies) send(reply, body);
+    if (body === "done" && entry.frame.streamID === streamID) {
+      held.delete(entry.frame.streamSeq);
+      written = Math.max(written ?? 0, entry.frame.streamSeq);
+    }
+    release(entry);
+  };
+
+  // The next frame goes at once: inside a hand-off the running pump takes it, else this call does.
+  const release = (entry: Entry) => {
+    if (blocking !== entry) return;
+    blocking = undefined;
+    pump();
+  };
+
+  const duplicate = (frame: RelayFrame): boolean => {
+    const identity = parseIdentity(frame.data);
+    return identity !== undefined && ledger.delivered(identity);
+  };
+
+  const failed = (entry: Entry, handle: ConsumerFrame, error: unknown) => {
+    if (entry.settled) return;
+    if (entry.frame.delivered < RELAY_ATTEMPTS_BEFORE_FAILED) {
+      log(`frame ${entry.frame.streamSeq} failed; it comes again`, error);
+      settle(entry, "nak");
+      return;
+    }
+    safely("failure notice", () => host.failed(handle, error));
+    settle(entry, "done");
+  };
+
+  const handOff = (entry: Entry) => {
+    const handle: ConsumerFrame = {
+      ...entry.frame,
+      late: entry.late,
+      done: () => settle(entry, "done"),
+      nak: () => settle(entry, "nak"),
+      release: () => release(entry),
+    };
+    blocking = entry;
+    let result: void | Promise<void>;
+    try {
+      result = host.deliver(handle);
+    } catch (error) {
+      failed(entry, handle, error);
+      release(entry);
+      return;
+    }
+    if (!(result instanceof Promise)) {
+      release(entry);
+      return;
+    }
+    result.then(
+      () => release(entry),
+      (error: unknown) => {
+        failed(entry, handle, error);
+        release(entry);
+      }
+    );
+  };
+
+  function pump() {
+    if (pumping) return;
+    pumping = true;
+    try {
+      while (blocking === undefined && !closed) {
+        const entry = queue.shift();
+        if (entry === undefined) return;
+        if (entry.settled) continue;
+        // Written while it waited (another copy of the event on another subject).
+        if (duplicate(entry.frame)) {
+          settle(entry, "done");
+          continue;
+        }
+        handOff(entry);
+      }
+    } finally {
+      pumping = false;
+    }
+  }
+
+  const receive = (message: RelayMessage) => {
+    const decoded = decodeRelayFrame(message);
+    if ("error" in decoded) {
+      // Redelivery cannot fix a frame that does not decode, so it is acked away.
+      log(`dropping an undecodable relay frame: ${decoded.error}`);
+      if (message.reply !== undefined && message.reply !== "") send(message.reply, "done");
+      return;
+    }
+    const { frame } = decoded;
+    if (closed) {
+      send(frame.reply, "nak");
+      return;
+    }
+    send(frame.reply, "received");
+
+    if (frame.gap && !gapTold) tellGap("retention_gap");
+    gapTold = false;
+    if (frame.streamID !== streamID) {
+      if (streamID !== undefined && (written !== undefined || held.size > 0)) {
+        tellGap("stream_recreated");
+      }
+      switchStream(frame.streamID);
+    }
+
+    const key = `${frame.streamID}:${frame.streamSeq}`;
+    const first = entries.get(key);
+    if (first !== undefined) {
+      // A redelivery of a frame still held (the relay restarted at its ack floor): its answers go
+      // to every inbox it came with.
+      first.replies.push(frame.reply);
+      return;
+    }
+
+    // Not followed (the agent subject always is), stored before its topic was followed, or
+    // already written: answered done, and the resume point passes it.
+    const since = followedAt(frame.subject);
+    if (
+      since === undefined ||
+      frame.storedAtMs < since - FOLLOW_CLOCK_ALLOWANCE_MS ||
+      duplicate(frame)
+    ) {
+      send(frame.reply, "done");
+      written = Math.max(written ?? 0, frame.streamSeq);
+      return;
+    }
+
+    held.add(frame.streamSeq);
+    const entry: Entry = {
+      frame,
+      late: frame.delivered > 1 || frame.storedAtMs < currentEpoch.startedAt,
+      replies: [frame.reply],
+      key,
+      stopProgress: () => undefined,
+      settled: false,
+    };
+    entry.stopProgress = repeat(RELAY_PROGRESS_INTERVAL_MS, () => {
+      if (entry.settled) return;
+      for (const reply of entry.replies) send(reply, "progress");
+    });
+    entries.set(key, entry);
+    queue.push(entry);
+    pump();
+  };
+
+  const resumePoint = (): ResumePoint | undefined => {
+    if (streamID === undefined) return undefined;
+    if (held.size > 0) return { stream_id: streamID, seq: Math.min(...held) - 1 };
+    return written === undefined ? undefined : { stream_id: streamID, seq: written };
+  };
+
+  return {
+    subject: deliverSubject(sessionID),
+    receive,
+    epoch: () => currentEpoch,
+    beginEpoch() {
+      currentEpoch = { id: newEpoch(), startedAt: now() };
+      return currentEpoch;
+    },
+    registration() {
+      const resume = resumePoint();
+      return {
+        consumer: true,
+        epoch: currentEpoch.id,
+        ...(resume === undefined ? {} : { resume }),
+      };
+    },
+    answered(answer) {
+      if (answer.mode !== "consumer") return answer.mode;
+      const resume = resumePoint();
+      if (answer.stream_id !== "" && answer.stream_id !== streamID) {
+        if (resume !== undefined) tellGap("stream_recreated");
+        switchStream(answer.stream_id);
+      }
+      if (answer.gap) {
+        tellGap("retention_gap");
+        gapTold = true;
+      }
+      return answer.mode;
+    },
+    setFollowed(topics) {
+      const at = now();
+      const next = new Map<string, number>();
+      for (const topic of topics) next.set(topic, follows.get(topic) ?? at);
+      follows = next;
+    },
+    resumePoint,
+    snapshot() {
+      const resume = resumePoint();
+      return {
+        ...(resume === undefined ? {} : { resume }),
+        follows: Object.fromEntries(follows),
+      };
+    },
+    restore(snapshot) {
+      const restored = new Map(Object.entries(snapshot.follows));
+      for (const [topic, at] of follows) if (!restored.has(topic)) restored.set(topic, at);
+      follows = restored;
+      streamID = snapshot.resume?.stream_id;
+      held = new Set();
+      written = snapshot.resume?.seq;
+    },
+    close() {
+      closed = true;
+      queue.length = 0;
+      for (const entry of [...entries.values()]) settle(entry, "nak");
+      blocking = undefined;
+    },
+  };
+}

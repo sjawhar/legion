@@ -305,9 +305,16 @@ export interface ReplayEngine {
   /**
    * Reads and shows what the stream stored after the cursors. One runs at a time; a call while
    * one runs queues at most one more, and every call resolves when the run it joined ends. It
-   * never rejects.
+   * never rejects. In consumer mode (`setConsumerMode`) it makes no replay call: it only tells
+   * the notices a restore brought back.
    */
   sweep(): Promise<void>;
+  /**
+   * Whether the listener confirmed consumer delivery for the session (its registration answered
+   * `delivery.mode` `consumer`): the session's consumer relays every stored subject, so sweeps
+   * stop calling `POST /v1/replay`. `false` (a `core` answer, or none) sweeps as before.
+   */
+  setConsumerMode(on: boolean): void;
   /**
    * Takes the host's followed subjects now: a new one is listed without a cursor (the next sweep
    * starts it at the stream's end, with no history), a dropped one loses its cursor. Persisted
@@ -430,6 +437,8 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
   const answered = new Set<string>();
   let running: Promise<void> | undefined;
   let rerun: Promise<void> | undefined;
+  // The listener relays the stored stream to the session itself (`setConsumerMode`).
+  let consumerMode = false;
 
   const safely = (what: string, call: () => void) => {
     try {
@@ -746,6 +755,8 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
       await flush(alive);
       if (!alive()) return;
     }
+    // The session's consumer delivers the stored stream; nothing is read here.
+    if (consumerMode) return;
 
     for (let page = 0; page < REPLAY_PAGES_PER_SWEEP; page += 1) {
       let handledAny = false;
@@ -950,6 +961,9 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
 
   return {
     sweep,
+    setConsumerMode(on) {
+      consumerMode = on;
+    },
     async followedChanged() {
       const alive = bind()?.alive;
       if (alive === undefined) return;

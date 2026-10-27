@@ -13,6 +13,12 @@ import type { MessageMetadataInput } from "./transport";
 const DELIVERY_CONTRACT =
   "Delivery is at-least-once, possibly out of order across topics; use id for dedupe and at for freshness.";
 
+const STORED_DELIVERY =
+  "Stored topics (agent, dispatch, github, slack, legion, ghostwispr, whatsapp; a role message " +
+  "reaches its holder as a stored copy on the holder's agent topic) reach each subscribed session " +
+  "once, also one that was away or restarted, when its listener supports consumer delivery. Team " +
+  "and other ad-hoc topics are live only.";
+
 const TOPIC_GUIDE =
   "Topic guide (all are under notifications.): agent.<session_id> (subscribe: own inbox); role.<role> " +
   "(publish-to; holders claim via envoy_role_set). > matches one or more trailing tokens and does not " +
@@ -145,7 +151,7 @@ export type ToolSpec = {
 export const envoyToolSpecs = [
   {
     name: "envoy_subscribe",
-    description: `Subscribe this session to Envoy notification topics. ${TOPIC_GUIDE}`,
+    description: `Subscribe this session to Envoy notification topics. ${STORED_DELIVERY} ${TOPIC_GUIDE}`,
     arguments: (schema) => ({
       topics: schema.array(schema.string()).describe("NATS-style topic patterns to subscribe to."),
     }),
@@ -184,7 +190,7 @@ export const envoyToolSpecs = [
   },
   {
     name: "envoy_publish",
-    description: `Publish an Envoy message to a notifications. topic. A role or built-in topic is delivered as its guide says; any other notifications. topic you name (a team topic such as notifications.team.deploy-squad.all) is live only: it reaches every session subscribed to it when you publish, and is not retained. A session that holds its own NATS connection receives it directly, yours included; a session the listener delivers to over a serve port, such as an OpenCode agent, receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
+    description: `Publish an Envoy message to a notifications. topic. ${STORED_DELIVERY} A team or ad-hoc topic (such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not retained. A session that holds its own NATS connection receives it directly, yours included; a session the listener delivers to over a serve port, such as an OpenCode agent, receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish,
   },
