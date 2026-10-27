@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-547",
+  "completed": "2026-10-27T06:28:17Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2370",
+  "proof": [
+    {
+      "criterion": "A role message sent every 250 ms for at least 60 s through the sending listener is received by the holder or its sender's call errs, while the holder's server is lame-ducked and force-killed; every repeat carries its first id",
+      "surface": "the real envoy-listener binary (two processes, holder-host and sender-host, ENVOY_NATS_REPLICAS=3) over a three-server in-process nats-server cluster, driven over its HTTP API as envoy-client drives it",
+      "command": "cd packages/envoy && go test -tags serverchange -count=1 -timeout 15m -v -run TestServerChange ./cmd/listener (log: https://github.com/sjawhar/legion/pull/2370#issuecomment-6435358120)",
+      "observed": "--- PASS: TestServerChange (73.71s); sent for 1m3.25s with 8 disruptions (4 lame duck, 4 kill); role: sent 253, received live 253, errored 0, every repeat with its first id",
+      "headSha": "5f593338042f8ad26106633af90a0c43dac54f15",
+      "negativeControl": "the same test file and cluster rig on the branch base without this change (sjawhar/legion#2228 tip 3ea454d3): --- FAIL, assertion 1: role messages 24, 45, 46, 83, 104, 105, 144, 165, 166, 198, 219, 220 were answered 200 and never received"
+    },
+    {
+      "criterion": "The same holds for a topic message sent through /v1/messages/publish to a subscribed session (ad-hoc topic and stream-captured topic)",
+      "surface": "same as the role criterion",
+      "command": "cd packages/envoy && go test -tags serverchange -count=1 -timeout 15m -v -run TestServerChange ./cmd/listener",
+      "observed": "ad-hoc: sent 253, received live 253, errored 0; captured: sent 254, received live 189 and 65 only by #2228's replay, errored 0; every repeat with its first id",
+      "headSha": "5f593338042f8ad26106633af90a0c43dac54f15",
+      "negativeControl": "base 3ea454d3 with the same test: assertion 1 fails for 68 ad-hoc messages answered 200 and never received; with the stand-in's replay call removed (soak worker run) assertion 1 fails for captured messages 24..238"
+    },
+    {
+      "criterion": "packages/envoy/AGENTS.md and .dispatch/architecture/envoy-listener.md describe when a send is answered",
+      "surface": "the two documents",
+      "command": "grep -n \"answering once the server has accepted the publish\\|Do not add durable role consumers or retry transit\" packages/envoy/AGENTS.md; grep -n '504 {' packages/envoy/AGENTS.md; grep -n '504' .dispatch/architecture/envoy-listener.md",
+      "observed": "first grep prints nothing; second prints line 2028, the /v1/messages/publish row; third prints line 7, the sentence that the publish route answers once each recipient confirmed, or 504",
+      "headSha": "5f593338042f8ad26106633af90a0c43dac54f15",
+      "negativeControl": "on base a2a6afc9 the first grep finds 2 lines and the other two find 0"
+    },
+    {
+      "criterion": "(plan) the route answers inside its deadline and the daemon handles each answer",
+      "surface": "listener tests on a real in-process nats-server with holder stand-ins on their own connections; daemon notify/outbox tests on a real Postgres 16 and nats-server 2.10.29",
+      "command": "cd packages/envoy && go test -count=1 -skip 'TestDispatch(MentionResolvesASessionTheCacheHasNotRefilled|BroadcastResolvesSessionsTheCacheHasNotRefilled|RefusesABroadcastWhenASessionReadDoesNotAnswer|RefusesAClaimTakeoverWhileTheCacheRefills)' ./cmd/listener; go test -count=1 ./internal/bus ./internal/store ./internal/testnats; (cd infra && go test -count=1 ./core); cd packages/daemon && LEGION_TEST_PG_DSN=... LEGION_TEST_NATS_URL=... go test -count=1 -run 'Notice|Rehold|Reheld|MergeQueue|HTTPPublisher' ./internal/notify ./internal/daemon",
+      "observed": "all ok: cmd/listener 289.7s, internal/bus 221.7s, store, testnats, infra/core; daemon notify 0.046s, daemon 69.7s. Second-attempt receipt answered 200 in 2.7 s; silent holder 504 receipt_timeout inside 4.5 s; stalled claim read 504 delivery_failed after about 4.0 s",
+      "headSha": "5f593338042f8ad26106633af90a0c43dac54f15",
+      "negativeControl": "old publishHandler body restored: receipt-retry test got 0 frames (want 2), silent holder got 200 (want 504), stalled read got 500 after 10 s, ad-hoc got 200 (want 504); daemon mappings turned off: the re-hold schedule, answer-and-exception, refusal and merge-queue tests fail"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/cmd/listener/confirmed.go (new: the confirmed send)",
+    "packages/envoy/cmd/listener/api.go, delivery.go, main.go",
+    "packages/envoy/cmd/listener/confirmed_test.go (new), server_change_test.go (new, tag serverchange), api_test.go, main_test.go, startup_test.go, live_topics_test.go",
+    "packages/envoy/internal/bus/nats.go (ForwardMsgID, Nats-Msg-Id on forwards, receipt rule, UsesCoreTransport), request_core_test.go (new), confirm_reconnect_test.go, adhoc_topic_test.go",
+    "packages/envoy/internal/store/kv.go (MatchAll), kv_test.go",
+    "packages/envoy/internal/testnats/cluster.go, cluster_test.go (INFRA-546's rig, copied), nats.go (LameDuck, rig lame-duck timing)",
+    "packages/envoy/infra/core/permissions_live_test.go",
+    "packages/daemon/internal/notify/notify.go, notify_test.go",
+    "packages/daemon/internal/daemon/outbox.go, notice_exceptions.go, outbox_test.go, notice_exceptions_test.go",
+    "packages/claude-envoy/src/envoy-channel-server.ts, tests/envoy-channel-server.test.ts, dist/envoy-channel.js, CHANGELOG.md",
+    "packages/envoy-client/src/tool-contract.ts, src/__tests__/tool-contract.test.ts, CHANGELOG.md",
+    "packages/envoy/AGENTS.md, CHANGELOG.md, docs/architecture.md; .dispatch/architecture/envoy-listener.md; docs/site/src/content/docs/dispatch/envoy.md",
+    "packages/pi-envoy/README.md, AGENTS.md, extensions/envoy.ts (comment)",
+    "skills/envoy/SKILL.md, skills/envoy/references/roles.md",
+    ".github/workflows/envoy-and-contracts.yaml (job listener-server-change)"
+  ],
+  "trickyParts": [
+    "A forward with a header gets its replies with an empty header block, so RequestCoreTo reads a receipt as a reply with no data and no header field (a stream PubAck and a no-responders answer are not receipts).",
+    "Registry reads take no context: readBefore runs each on its own goroutine and stops waiting at the send's deadline.",
+    "The route's first resolution keeps resolveLiveRoleHolder's 404s; attempts re-resolve by the role lane's ClaimStaleAfter rule (resolveLaneRoleHolder, shared with the lane, whose exceptions are unchanged).",
+    "sjawhar/legion#2228 is merged into this branch (merge commit 0c3775d9) for the replay route; it brings .legion/INFRA-439/ until #2228 lands and main is merged forward."
+  ],
+  "deviations": [
+    "Cluster rig: INFRA-546's cluster.go (route relays) is copied unchanged instead of the plan's gate-band route ports, agreed with INFRA-546's implementer; this branch adds Server.LameDuck and the rig's lame-duck timing (nats-server refuses lame_duck_duration under 30 s in a config file, so the rig sets it on the parsed options).",
+    "The CI job runs -run TestServerChange only; envoy-go already runs the package's untagged tests, so no Postgres service is needed.",
+    "504 error strings name the role holder and each unconfirmed session, because envoy-client's EnvoyApiError shows the agent only the error string and the tool text says the error names them.",
+    "Claude Code's channel now presents a frame on the agent subject with its envelope's topic (a role forward and an ad-hoc forward), with a test; skills/envoy text updated for the new publish answers.",
+    "Added bus.ForwardMsgID, agreed with INFRA-590, which reuses it for Dispatch's role forwards."
+  ],
+  "openQuestions": [
+    "Merge order: this pull request merges after sjawhar/legion#2228 (main merged forward then); INFRA-594 merges after this one and keeps the receipt-or-error contract and the soak green, as agreed with its planner and implementer.",
+    "Locally unrun: four Docker-backed cmd/listener TestDispatch* tests and three daemon tests that start their own authorised NATS container (no Docker in this pod); CI runs them. Two bun failures here are unrelated to the diff: pi-envoy's Dispatch-skills word count (2,057 > 2,000; those skills are unchanged by this branch) and an envoy-client envoy.json shell-command timeout test."
+  ]
+}
