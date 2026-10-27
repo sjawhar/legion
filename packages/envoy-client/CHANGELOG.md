@@ -55,7 +55,7 @@
 
 - `session-answers.ts` (`@legion/envoy-client/session-answers`), the one module pi-envoy,
   claude-envoy and the CLI use for what people wrote to a session in the last 72 hours
-  (INFRA-148). `renderSessionAnswers(items, {now, maxChars?, total?, cachedAt?})` renders the
+  (INFRA-148). `renderSessionAnswers(items, {now, total?, cachedAt?})` renders the
   per-request message: the marker line `[Dispatch: what people wrote to this session in the last
   72 hours, newest first, word for word. Reference, not a new request.]` (a cached list adds
   `As read at <time>; Dispatch did not answer now.` on the next line), then each item's time,

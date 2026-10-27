@@ -2232,7 +2232,7 @@ async function openArtifactMarks(
   }
   const comments = commentsResult.value;
   const byId = new Map(comments.map((comment) => [comment.id, comment]));
-  const threads = new Map<string, { readonly comment: Comment; readonly replies: Comment[] }>();
+  const threads = new Map<string, CommentRead>();
   for (const comment of comments) {
     if (
       !comment.reply_to &&

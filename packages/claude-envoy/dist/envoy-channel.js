@@ -40332,11 +40332,11 @@ function withinWindow(items, now) {
   const start = now - SESSION_ANSWERS_WINDOW_MS;
   return items.filter((item) => Date.parse(item.at) >= start);
 }
-function leftOutLine(count, maxChars) {
-  return `${count} older ${count === 1 ? "item" : "items"} left out to stay under ${maxChars.toLocaleString("en-US")} characters: run \`dispatch answers\` to read every one in full.`;
+var MAX_CHARS_TEXT = SESSION_ANSWERS_MAX_CHARS.toLocaleString("en-US");
+function leftOutLine(count) {
+  return `${count} older ${count === 1 ? "item" : "items"} left out to stay under ${MAX_CHARS_TEXT} characters: run \`dispatch answers\` to read every one in full.`;
 }
 function renderSessionAnswers(items, options) {
-  const maxChars = options.maxChars ?? SESSION_ANSWERS_MAX_CHARS;
   const shown = withinWindow(items, Number(options.now));
   const unsent = shown.length === items.length ? Math.max(0, (options.total ?? items.length) - items.length) : 0;
   const count = shown.length + unsent;
@@ -40349,14 +40349,14 @@ As read at ${options.cachedAt}; Dispatch did not answer now.`;
   for (const item of shown) {
     const block = renderSessionAnswerItem(item);
     const after = count - blocks.length - 1;
-    const needed = length + 2 + block.length + (after === 0 ? 0 : 2 + leftOutLine(after, maxChars).length);
-    if (needed > maxChars)
+    const needed = length + 2 + block.length + (after === 0 ? 0 : 2 + leftOutLine(after).length);
+    if (needed > SESSION_ANSWERS_MAX_CHARS)
       break;
     blocks.push(block);
     length += 2 + block.length;
   }
   const leftOut = count - blocks.length;
-  return [header, ...blocks, ...leftOut === 0 ? [] : [leftOutLine(leftOut, maxChars)]].join(`
+  return [header, ...blocks, ...leftOut === 0 ? [] : [leftOutLine(leftOut)]].join(`
 
 `);
 }
@@ -40383,14 +40383,8 @@ var state = processGlobal[STATE_KEY] ?? {
 processGlobal[STATE_KEY] = state;
 var CACHE_FILE = "answers.json";
 function readCacheFile(directory) {
-  let text;
   try {
-    text = readFileSync(join(directory, CACHE_FILE), "utf-8");
-  } catch {
-    return;
-  }
-  try {
-    const value = JSON.parse(text);
+    const value = JSON.parse(readFileSync(join(directory, CACHE_FILE), "utf-8"));
     if (typeof value === "object" && value !== null && "read_at" in value && typeof value.read_at === "string" && "total" in value && typeof value.total === "number" && "items" in value && Array.isArray(value.items)) {
       return { read_at: value.read_at, total: value.total, items: value.items };
     }
@@ -40428,20 +40422,19 @@ async function settleWithin(promise2, ms, signal) {
 }
 async function readSessionAnswers(options) {
   const now = options.now ?? Date.now;
-  const maxChars = options.maxChars ?? SESSION_ANSWERS_MAX_CHARS;
   const { dispatch, session, stateDirectory } = options;
   if (!dispatch.enabled && dispatch.error === null) {
     return { text: undefined, source: "off", reason: dispatch.notice };
   }
-  let entry = state.sessions.get(session);
-  if (entry === undefined) {
-    entry = { cache: undefined, inFlight: undefined, overdue: false };
-    state.sessions.set(session, entry);
+  const current = state.sessions.get(session) ?? {
+    cache: undefined,
+    inFlight: undefined,
+    overdue: false
+  };
+  state.sessions.set(session, current);
+  if (current.cache === undefined && stateDirectory !== undefined) {
+    current.cache = readCacheFile(stateDirectory);
   }
-  if (entry.cache === undefined && stateDirectory !== undefined) {
-    entry.cache = readCacheFile(stateDirectory);
-  }
-  const current = entry;
   const carry = (reason) => {
     const { cache } = current;
     if (cache === undefined) {
@@ -40450,7 +40443,6 @@ async function readSessionAnswers(options) {
     return {
       text: renderSessionAnswers(cache.items, {
         now: now(),
-        maxChars,
         total: cache.total,
         cachedAt: cache.read_at
       }),
@@ -40470,8 +40462,8 @@ async function readSessionAnswers(options) {
   if (read === undefined) {
     const client = new DispatchClient(dispatch.url, dispatch.token, options.fetchImpl ?? fetch);
     const started = client.sessionAnswers(session, {
-      maxChars,
-      signal: AbortSignal.timeout(options.readTimeoutMs ?? READ_TIMEOUT_MS)
+      maxChars: SESSION_ANSWERS_MAX_CHARS,
+      signal: AbortSignal.timeout(READ_TIMEOUT_MS)
     }).then((response) => {
       if (!Array.isArray(response?.items) || typeof response.total !== "number") {
         return { failure: "Dispatch answered with something that is not an answers list" };
@@ -40518,7 +40510,6 @@ async function readSessionAnswers(options) {
   return {
     text: renderSessionAnswers(outcome.cache.items, {
       now: now(),
-      maxChars,
       total: outcome.cache.total
     }),
     source: "fresh",

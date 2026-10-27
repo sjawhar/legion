@@ -1,4 +1,5 @@
 import { isSessionAnswersText } from "@legion/envoy-client/session-answers";
+import { leadingUserText, userTextMessage } from "./dispatch-first";
 
 /**
  * Whether the request's last message is the list of people's answers as `withSessionAnswers`
@@ -8,25 +9,8 @@ import { isSessionAnswersText } from "@legion/envoy-client/session-answers";
  * marker earlier in the conversation is conversation, which must not switch the list off.
  */
 function endsWithSessionAnswers(messages: readonly unknown[]): boolean {
-  const last = messages.at(-1);
-  if (
-    typeof last !== "object" ||
-    last === null ||
-    !("role" in last) ||
-    last.role !== "user" ||
-    !("content" in last) ||
-    !Array.isArray(last.content)
-  ) {
-    return false;
-  }
-  const [first]: unknown[] = last.content;
-  return (
-    typeof first === "object" &&
-    first !== null &&
-    "text" in first &&
-    typeof first.text === "string" &&
-    isSessionAnswersText(first.text)
-  );
+  const text = leadingUserText(messages.at(-1));
+  return text !== undefined && isSessionAnswersText(text);
 }
 
 /**
@@ -48,5 +32,5 @@ export async function withSessionAnswers(
   if (endsWithSessionAnswers(messages)) return undefined;
   const text = await read();
   if (text === undefined) return undefined;
-  return [...messages, { role: "user", content: [{ type: "text", text }], timestamp: 0 }];
+  return [...messages, userTextMessage(text)];
 }

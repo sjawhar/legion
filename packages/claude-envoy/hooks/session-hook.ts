@@ -86,11 +86,8 @@ const DispatchFirstInput = z.object({
   hook_event_name: z.enum(["SessionStart", "SubagentStart"]),
   cwd: z.string().optional(),
 })
-const AnswersInput = z.object({
-  session_id: z.string().min(1),
-  hook_event_name: z.enum(["SessionStart", "SubagentStart"]),
-  cwd: z.string().optional(),
-})
+// session_id first, as the schema always had it, so a ZodError lists its issues in the same order.
+const AnswersInput = z.object({ session_id: z.string().min(1), ...DispatchFirstInput.shape })
 
 /** When the answers hook prints, in ms after its process started: the per-request deadline, with
  *  bun's start-up and Dispatch's resolution inside it, so the session waits no longer on it than a

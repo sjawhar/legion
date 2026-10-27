@@ -113,15 +113,16 @@ function withinWindow(items: readonly SessionAnswer[], now: number): SessionAnsw
   return items.filter((item) => Date.parse(item.at) >= start);
 }
 
-function leftOutLine(count: number, maxChars: number): string {
-  return `${count} older ${count === 1 ? "item" : "items"} left out to stay under ${maxChars.toLocaleString("en-US")} characters: run \`dispatch answers\` to read every one in full.`;
+/** `SESSION_ANSWERS_MAX_CHARS` as the left-out line prints it. */
+const MAX_CHARS_TEXT = SESSION_ANSWERS_MAX_CHARS.toLocaleString("en-US");
+
+function leftOutLine(count: number): string {
+  return `${count} older ${count === 1 ? "item" : "items"} left out to stay under ${MAX_CHARS_TEXT} characters: run \`dispatch answers\` to read every one in full.`;
 }
 
 export interface RenderSessionAnswersOptions {
   /** The render's time: an item written more than 72 hours before it is not shown or counted. */
   readonly now: number | Date;
-  /** The cap on the whole message (`SESSION_ANSWERS_MAX_CHARS` by default). */
-  readonly maxChars?: number | undefined;
   /** How many items the window held when the list was read (`SessionAnswersResponse.total`),
    *  when the server cut the list short with `max_chars`, so the left-out count covers the items
    *  it did not send; the items' own count when unset. */
@@ -135,16 +136,15 @@ export interface RenderSessionAnswersOptions {
  * The per-request message: `SESSION_ANSWERS_MARKER` (and, for a cached list, `As read at <time>;
  * Dispatch did not answer now.` on the next line), then each item newest first, blank-line
  * separated, as a strict prefix under the cap: the whole message, header and left-out line
- * included, is at most `maxChars` long; the first item that does not fit is left out with every
- * item after it, so an item over the cap on its own is left out whole, never cut. When any item is
- * left out, the last line counts them and names `dispatch answers`. Items are filtered by the
- * 72-hour window at `now` first. Undefined when the window holds nothing.
+ * included, is at most `SESSION_ANSWERS_MAX_CHARS` long; the first item that does not fit is left
+ * out with every item after it, so an item over the cap on its own is left out whole, never cut.
+ * When any item is left out, the last line counts them and names `dispatch answers`. Items are
+ * filtered by the 72-hour window at `now` first. Undefined when the window holds nothing.
  */
 export function renderSessionAnswers(
   items: readonly SessionAnswer[],
   options: RenderSessionAnswersOptions
 ): string | undefined {
-  const maxChars = options.maxChars ?? SESSION_ANSWERS_MAX_CHARS;
   const shown = withinWindow(items, Number(options.now));
   // A list the server cut short with max_chars left out only items older than every one it sent,
   // so once any item it sent has left the window, every one it left out has too.
@@ -161,16 +161,13 @@ export function renderSessionAnswers(
   for (const item of shown) {
     const block = renderSessionAnswerItem(item);
     const after = count - blocks.length - 1;
-    const needed =
-      length + 2 + block.length + (after === 0 ? 0 : 2 + leftOutLine(after, maxChars).length);
-    if (needed > maxChars) break;
+    const needed = length + 2 + block.length + (after === 0 ? 0 : 2 + leftOutLine(after).length);
+    if (needed > SESSION_ANSWERS_MAX_CHARS) break;
     blocks.push(block);
     length += 2 + block.length;
   }
   const leftOut = count - blocks.length;
-  return [header, ...blocks, ...(leftOut === 0 ? [] : [leftOutLine(leftOut, maxChars)])].join(
-    "\n\n"
-  );
+  return [header, ...blocks, ...(leftOut === 0 ? [] : [leftOutLine(leftOut)])].join("\n\n");
 }
 
 /** What `dispatch answers` prints: every item of the 72 hours before `now`, newest first, in the
@@ -240,14 +237,8 @@ const CACHE_FILE = "answers.json";
 /** `answers.json` under `directory`, or undefined when it cannot be read or is not a cache: a
  *  missing or broken cache only means the request has no list to carry. */
 function readCacheFile(directory: string): SessionAnswersCache | undefined {
-  let text: string;
   try {
-    text = readFileSync(join(directory, CACHE_FILE), "utf-8");
-  } catch {
-    return undefined;
-  }
-  try {
-    const value: unknown = JSON.parse(text);
+    const value: unknown = JSON.parse(readFileSync(join(directory, CACHE_FILE), "utf-8"));
     if (
       typeof value === "object" &&
       value !== null &&
@@ -263,7 +254,7 @@ function readCacheFile(directory: string): SessionAnswersCache | undefined {
       return { read_at: value.read_at, total: value.total, items: value.items as SessionAnswer[] };
     }
   } catch {
-    // Not JSON: no cache.
+    // Missing, unreadable or not JSON: no cache.
   }
   return undefined;
 }
@@ -301,10 +292,6 @@ export interface ReadSessionAnswersOptions {
   readonly now?: (() => number) | undefined;
   /** How long this call waits on the read (`SESSION_ANSWERS_DEADLINE_MS` by default). */
   readonly deadlineMs?: number | undefined;
-  /** How long the read itself may run, in the background past the deadline (10 s by default). */
-  readonly readTimeoutMs?: number | undefined;
-  /** The message's cap (`SESSION_ANSWERS_MAX_CHARS` by default), also sent as `max_chars`. */
-  readonly maxChars?: number | undefined;
 }
 
 export interface SessionAnswersRead {
@@ -347,8 +334,8 @@ async function settleWithin<T>(
  * The list for one model request, never throwing. Every request reads it; one read is in flight
  * per session for the whole process, and every request of the session (the parent's and each
  * subagent's) joins it. A request waits at most `deadlineMs` (800 ms); past that it carries the last
- * list read, and the read goes on in the background (for at most `readTimeoutMs`) and fills the
- * cache when it answers. While a read that a request already waited out is still in flight, a new
+ * list read, and the read goes on in the background (for at most 10 s) and fills the cache when it
+ * answers. While a read that a request already waited out is still in flight, a new
  * request does not wait on it: it carries the cache at once. The cache is in memory, keyed by
  * session, and in `answers.json` under `stateDirectory`, loaded when memory has none; a cached
  * list is rendered with its read time and filtered by the 72 hours again. With no list ever read,
@@ -359,20 +346,19 @@ export async function readSessionAnswers(
   options: ReadSessionAnswersOptions
 ): Promise<SessionAnswersRead> {
   const now = options.now ?? Date.now;
-  const maxChars = options.maxChars ?? SESSION_ANSWERS_MAX_CHARS;
   const { dispatch, session, stateDirectory } = options;
   if (!dispatch.enabled && dispatch.error === null) {
     return { text: undefined, source: "off", reason: dispatch.notice };
   }
-  let entry = state.sessions.get(session);
-  if (entry === undefined) {
-    entry = { cache: undefined, inFlight: undefined, overdue: false };
-    state.sessions.set(session, entry);
+  const current: SessionEntry = state.sessions.get(session) ?? {
+    cache: undefined,
+    inFlight: undefined,
+    overdue: false,
+  };
+  state.sessions.set(session, current);
+  if (current.cache === undefined && stateDirectory !== undefined) {
+    current.cache = readCacheFile(stateDirectory);
   }
-  if (entry.cache === undefined && stateDirectory !== undefined) {
-    entry.cache = readCacheFile(stateDirectory);
-  }
-  const current = entry;
   const carry = (reason: string): SessionAnswersRead => {
     const { cache } = current;
     if (cache === undefined) {
@@ -381,7 +367,6 @@ export async function readSessionAnswers(
     return {
       text: renderSessionAnswers(cache.items, {
         now: now(),
-        maxChars,
         total: cache.total,
         cachedAt: cache.read_at,
       }),
@@ -400,8 +385,8 @@ export async function readSessionAnswers(
     const client = new DispatchClient(dispatch.url, dispatch.token, options.fetchImpl ?? fetch);
     const started = client
       .sessionAnswers(session, {
-        maxChars,
-        signal: AbortSignal.timeout(options.readTimeoutMs ?? READ_TIMEOUT_MS),
+        maxChars: SESSION_ANSWERS_MAX_CHARS,
+        signal: AbortSignal.timeout(READ_TIMEOUT_MS),
       })
       .then(
         (response): ReadOutcome => {
@@ -453,7 +438,6 @@ export async function readSessionAnswers(
   return {
     text: renderSessionAnswers(outcome.cache.items, {
       now: now(),
-      maxChars,
       total: outcome.cache.total,
     }),
     source: "fresh",

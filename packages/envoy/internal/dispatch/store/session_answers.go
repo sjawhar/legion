@@ -32,9 +32,14 @@ type Queryer interface {
 //   - S2 (message_ids' second arm): the session's sent message deliveries (message_deliveries_session):
 //     targeted messages, direct or on an issue, and broadcast copies.
 //   - S3 (mentioned): the session's sent comment deliveries, a mention's (comment_deliveries_session,
-//     0122). A delivery row's created_at is its transaction's now(), which for a comment's first
-//     attempt precedes the comment's own clock_timestamp() created_at, so the window is applied to
-//     the comment and not to its delivery.
+//     0122).
+//
+// A delivery row's created_at is its transaction's now(), which for a first attempt can precede the
+// comment's or message's own clock_timestamp() created_at by as long as that transaction ran, so
+// the window is applied to the comment or message and not to its delivery. Both delivery arms still
+// read only rows created since an hour before the window, so a long-lived session's every earlier
+// delivery is not read on every request: a delivery of an item in the window was created in or
+// after the transaction that wrote the item, and no such transaction runs for an hour.
 //
 // Each source names a row by its id, and each kind's ids are a set, so an item reached several ways
 // is one row. Every row is then read at its current words: an ask's current answer (asks.answer)
@@ -61,7 +66,7 @@ const sessionAnswersQuery = `
 	), mentioned as (
 		select cd.comment_id::text as id
 		from comment_deliveries cd
-		where cd.session_id = $1 and cd.state = 'sent'
+		where cd.session_id = $1 and cd.state = 'sent' and cd.created_at >= $2 - interval '1 hour'
 	), answer_ids as (
 		select distinct id from reached where type = 'ask.answered'
 	), answer_events as materialized (
@@ -69,15 +74,19 @@ const sessionAnswersQuery = `
 		from events e
 		where e.type = 'ask.answered' and e.payload->>'id' in (select id from answer_ids)
 	), comment_ids as (
-		select id from reached where type = 'comment.created'
-		union
-		select id from mentioned
+		select id, bool_or(m) as mentioned
+		from (
+			select id, false as m from reached where type = 'comment.created'
+			union all
+			select id, true from mentioned
+		) s
+		group by id
 	), message_ids as (
 		select id from reached where type in ('message.created', 'message.answered')
 		union
 		select md.message_id::text
 		from message_deliveries md
-		where md.session_id = $1 and md.state = 'sent'
+		where md.session_id = $1 and md.state = 'sent' and md.created_at >= $2 - interval '1 hour'
 	)
 	select 'answer' as kind, a.id::text as id, (a.answer->>'at')::timestamptz as at,
 	       null::timestamptz as edited_at, null::jsonb as author, null::text as body, a.answer,
@@ -96,7 +105,7 @@ const sessionAnswersQuery = `
 	select 'comment', c.id::text, c.created_at, c.edited_at, c.author, c.body, null, false,
 	       q.id::text, q.question,
 	       i.key, i.title, ar.project_key, ar.slug, ar.name,
-	       exists (select 1 from mentioned m where m.id = x.id),
+	       x.mentioned,
 	       c.ask_id is not null, c.reply_to is not null,
 	       c.artifact_id is not null or c.anchor->>'artifact_id' is not null,
 	       false
@@ -222,11 +231,15 @@ func scanSessionAnswer(row pgx.Row, session string) (model.SessionAnswer, error)
 // direct message to the session: it has no owner and no address, and links to the session's
 // conversation.
 func sessionAnswerPlace(kind, id, session string, issueKey, issueTitle, docProject, docSlug, docName *string) (*model.OpenAskOwner, *string, string) {
-	segment := map[string]string{
-		model.SessionAnswerKindAnswer:  "ask",
-		model.SessionAnswerKindComment: "comment",
-		model.SessionAnswerKindMessage: "message",
-	}[kind]
+	var segment string
+	switch kind {
+	case model.SessionAnswerKindAnswer:
+		segment = "ask"
+	case model.SessionAnswerKindComment:
+		segment = "comment"
+	case model.SessionAnswerKindMessage:
+		segment = "message"
+	}
 	switch {
 	case issueKey != nil:
 		ref := "dispatch://" + *issueKey + "/" + segment + "/" + id
