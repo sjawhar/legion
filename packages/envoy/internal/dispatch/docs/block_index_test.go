@@ -814,6 +814,99 @@ func TestAClosedDocumentsIdenticalParagraphsKeepTheirOwnHistory(t *testing.T) {
 	}
 }
 
+// With no row to name a block (a document none of whose blocks the index holds yet, as in the
+// deploy order), a text held more than once is matched in order only when the version and the
+// live document hold the same number of copies of it. Otherwise no copy of it is matched until a
+// settlement. In the spec, version 1 holds "Same." three times; the live document holds it four
+// times, a copy typed after the close sitting before the version's third. No copy of "Same." is
+// indexed at version 1 while the issue is closed, and the typed copy is never dated version 1,
+// also after the reopen. (An original copy left unmatched may then be dated to the reopen's
+// version, as #2210 dates any block it first indexes after the deploy: that is the accepted limit.)
+// The notes are the control: version 1 holds "Same." three times, unedited, and a paragraph typed
+// after the close is all that sets the live text apart, so every copy resolves at version 1.
+func TestAClosedDocumentsRepeatedTextWithNoRowIsMatchedOnlyWhenItsCountsAgree(t *testing.T) {
+	database, service := blockIndexService(t)
+	ctx := context.Background()
+	stored := "Same.\n\nSame.\n\nOther.\n\nSame.\n"
+	spec := createOwedDocument(t, database, service, "", "spec", "Same.\n\nSame.\n\nOther.\n\nSame.\n\nSame.\n", stored)
+	notes := createOwedDocument(t, database, service, "", "notes", stored+"\nTyped after the close.\n", stored)
+	if _, err := database.Pool.Exec(ctx, `update issues set closed_at = now() where key = 'CORE-1'`); err != nil {
+		t.Fatalf("close CORE-1: %v", err)
+	}
+	closeDocumentRoom(t, service, spec)
+	closeDocumentRoom(t, service, notes)
+	type paragraph struct{ ID, Text string }
+	paragraphs := func(artifactID string) []paragraph {
+		t.Helper()
+		live, blocks, err := service.TextWithBlocks(ctx, artifactID)
+		if err != nil {
+			t.Fatalf("read the live document %s: %v", artifactID, err)
+		}
+		var held []paragraph
+		for _, block := range blocks {
+			if block.Type == "paragraph" {
+				held = append(held, paragraph{ID: block.ID, Text: strings.TrimSpace(live[block.From:block.To])})
+			}
+		}
+		return held
+	}
+	specParagraphs := paragraphs(spec)
+	if len(specParagraphs) != 5 || specParagraphs[3].Text != "Same." {
+		t.Fatalf("live spec paragraphs %#v, want Same., Same., Other., the typed Same., Same.", specParagraphs)
+	}
+	typed := specParagraphs[3].ID
+	dated := func(artifactID, id string) (int, bool) {
+		t.Helper()
+		var changed int
+		var recorded bool
+		if err := database.Pool.QueryRow(ctx, `
+			select coalesce((select changed_version from document_blocks where artifact_id = $1 and block_id = $2), 0),
+			       exists (select 1 from document_block_texts where artifact_id = $1 and block_id = $2 and version = 1 and text is not null)
+		`, artifactID, id).Scan(&changed, &recorded); err != nil {
+			t.Fatalf("read block %s: %v", id, err)
+		}
+		return changed, recorded
+	}
+
+	if tick := reconcileBlockIndex(t, service, ""); tick.Documents != 2 || tick.OwedDocuments != 0 {
+		t.Fatalf("tick = %#v, want both closed documents indexed and nothing owed", tick)
+	}
+	for _, block := range specParagraphs {
+		changed, recorded := dated(spec, block.ID)
+		if block.Text == "Same." && (changed == 1 || recorded) {
+			t.Fatalf("spec paragraph %s %q is dated %d (text at version 1 %v) while closed; the version holds \"Same.\" 3 times and the live document 4, so no copy may be matched", block.ID, block.Text, changed, recorded)
+		}
+		if block.Text == "Other." && (changed != 1 || !recorded) {
+			t.Fatalf("spec paragraph %s %q is dated %d (text at version 1 %v), want version 1", block.ID, block.Text, changed, recorded)
+		}
+	}
+	for _, block := range paragraphs(notes) {
+		changed, recorded := dated(notes, block.ID)
+		if block.Text == "Typed after the close." {
+			if changed == 1 || recorded {
+				t.Fatalf("the notes' typed paragraph %s is dated %d (text at version 1 %v), want no history at version 1", block.ID, changed, recorded)
+			}
+			continue
+		}
+		if changed != 1 || !recorded {
+			t.Fatalf("notes paragraph %s %q is dated %d (text at version 1 %v); the counts agree, so it must resolve at version 1", block.ID, block.Text, changed, recorded)
+		}
+	}
+
+	if _, err := database.Pool.Exec(ctx, `update issues set closed_at = null where key = 'CORE-1'`); err != nil {
+		t.Fatalf("reopen CORE-1: %v", err)
+	}
+	if err := service.SettleIssueDocuments(ctx, "CORE-1"); err != nil {
+		t.Fatalf("settle the reopened issue's documents: %v", err)
+	}
+	if version := blockIndexAt(t, database, spec); version == nil || *version != 2 {
+		t.Fatalf("spec blocks indexed at %v, want version 2", version)
+	}
+	if changed, recorded := dated(spec, typed); changed != 2 || recorded {
+		t.Fatalf("after the reopen, the typed copy %s is dated %d (text at version 1 %v), want version 2", typed, changed, recorded)
+	}
+}
+
 // A closed issue's document keeps the history its rows give it when unsettled edits cross. Version
 // 1 holds the paragraphs "Intro.", "Moved.", "Same.", "Same.", "Retyped.", "Middle.", "Same." and
 // "End.". Unsettled edits then move "Moved." to the end, delete "Retyped." and type in its place a
