@@ -622,7 +622,7 @@ func TestAGateWaitIsDecidedOnceTheGateIsSwitchedOff(t *testing.T) {
 				t.Fatalf("wait = %#v, want it answered", got.Awaiting)
 			}
 			task := resumeTask("LEGION-208", *got.Awaiting, &record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 3}, nil, false)
-			for _, want := range []string{"no approval", "closed at version 3", "register it at its current version, which opens the gate"} {
+			for _, want := range []string{"no approval of your spec version 3 is asked for", "closed at version 3", "register it at its current version, which opens the gate"} {
 				if !strings.Contains(task, want) {
 					t.Errorf("resume task = %q, want it to name %q", task, want)
 				}
@@ -649,6 +649,36 @@ func reconcileGateOff(t *testing.T, pool *pgxpool.Pool) bool {
 		return err
 	})
 	return changed
+}
+
+// A gate wait the gates.design: off rule answered is no person's approval. Should the operator turn
+// the gate back on before the root resumes, its task says the gate was off when the wait was
+// answered and that the spec is not approved, never that a person approved it.
+func TestAGateWaitTheGateOffAnsweredClaimsNoApprovalOnceTheGateIsOnAgain(t *testing.T) {
+	pool := migratedPool(t)
+	root := askRoot()
+	root.Phase = phase.AwaitingPerson
+	root.Awaiting = &record.Awaiting{GateVersion: 3, Artifact: "artifact-208", Since: record.EventMark{Seq: 5}}
+	seedIssue(t, pool, root)
+	gate := record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 3}
+	seedGate(t, pool, gate)
+	reconcileGateOff(t, pool)
+	got := recordedRoot(t, pool)
+	if !got.Answered() || got.Awaiting.AnsweredBy != record.AnsweredByApproval {
+		t.Fatalf("wait = %#v, want it answered, as approved on the wire", got.Awaiting)
+	}
+	task := resumeTask("LEGION-208", *got.Awaiting, &gate, nil, true)
+	for _, want := range []string{"design gate on LEGION-208 was off", "no person approved your spec version 3 then;",
+		"Your spec is not approved at version 3", "register that version with register_gate"} {
+		if !strings.Contains(task, want) {
+			t.Errorf("resume task = %q, want it to name %q", task, want)
+		}
+	}
+	for _, not := range []string{"was approved", "That approval no longer stands"} {
+		if strings.Contains(task, not) {
+			t.Errorf("resume task = %q, want no %q: no person approved the spec", task, not)
+		}
+	}
 }
 
 // Under gates.design: off a wait on a question is no wait on the gate: the pass leaves it on its

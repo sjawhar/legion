@@ -188,7 +188,10 @@ const (
 	// looks again.
 	AnsweredByTurn Answer = "turn"
 	// AnsweredByApproval is the root's design gate standing open: a person's approval of the
-	// root's spec, or a registration under gates.design: off, where nobody approved it.
+	// root's spec, or a registration under gates.design: off, where nobody approved it. A wait on
+	// a closed gate that gates.design: off answered (workflow's leaveGateOff) is recorded as this
+	// too, since the API's answeredBy has no value of its own for it; its AnsweredDetail marks it,
+	// so the resume never says a person approved the spec.
 	AnsweredByApproval Answer = "approved"
 	// AnsweredByChanges is a person's changes request on the root's spec, which the gate records
 	// as told with its reason.
