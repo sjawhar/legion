@@ -1481,6 +1481,31 @@ fold_plan_run packages/rel=rel-v packages/nolog
 check "fold-plan: a package without CHANGELOG.md is refused, printing no plan" \
   "$(is "$rc|$out|$(contains "$err" '^::error::release-push.sh fold-plan: packages/nolog holds no CHANGELOG.md at HEAD')" "1||true")"
 
+# A fragment name holding a glob character is still one file: fold-plan finds the commit that
+# added that file, never one that added another file the name matches as a pattern. Here
+# INFRA-7-[a].yaml ships in glob-v1.0.0, and INFRA-7-a.yaml, which `[a]` matches as a glob, is
+# added after it and ships in glob-v1.1.0.
+gt="$work/fold-glob"
+mkdir -p "$gt/packages/glob/.changes/unreleased"
+git init -q -b main "$gt"
+identity "$gt"
+printf '# Changelog\n' > "$gt/packages/glob/CHANGELOG.md"
+printf 'kind: Added\nbody: bracketed\n' > "$gt/packages/glob/.changes/unreleased/INFRA-7-[a].yaml"
+git -C "$gt" add -A
+GIT_COMMITTER_DATE=2026-05-01T12:00:00+00:00 git -C "$gt" commit -q -m "feat: bracketed"
+git -C "$gt" tag glob-v1.0.0
+printf 'kind: Added\nbody: plain\n' > "$gt/packages/glob/.changes/unreleased/INFRA-7-a.yaml"
+git -C "$gt" add -A
+GIT_COMMITTER_DATE=2026-05-02T12:00:00+00:00 git -C "$gt" commit -q -m "feat: plain"
+git -C "$gt" tag glob-v1.1.0
+set +e
+out=$(cd "$gt" && "$release_push" fold-plan packages/glob=glob-v 2>/dev/null)
+rc=$?
+set -e
+check "fold-plan: a fragment whose name holds a glob character gets the release of the commit that added that very file" \
+  "$(is "$rc|$out" "0|packages/glob	1.0.0	2026-05-01	packages/glob/$u/INFRA-7-[a].yaml
+packages/glob	1.1.0	2026-05-02	packages/glob/$u/INFRA-7-a.yaml")"
+
 # The stub gh, first on PATH in a directory of its own. It logs each call to $GH_TEST_DIR/calls as
 # one line, each argument in brackets; `gh workflow run` fails when $GH_TEST_FAIL is set, and any
 # other call fails as unexpected.
@@ -1705,6 +1730,18 @@ fold_case fold-no-key
 push_fold DEPLOY_KEY=
 fold_refused "a missing DEPLOY_KEY" "DEPLOY_KEY is unset or empty"
 check "push-fold refuses a missing DEPLOY_KEY: nothing is made in TMPDIR" "$(is "$left" 0)"
+
+# A release tag pushed between the two jobs: the build planned and rendered without it, and the
+# publish job's checkout fetches every tag again, so its plan holds a group the notes lack. A
+# release workflow running beside the fold does this (the listener pushes its tag in its publish
+# job). The fold of that run must not fail the run, and must not delete a fragment it holds no
+# notes for.
+fold_case fold-tag-between-jobs
+git -C "$fc/a" tag rel-v1.11.0 "$base"
+push_fold
+third_kept=$(git -C "$fc/origin.git" cat-file -e "main:packages/rel/$u/INFRA-3-third.yaml" 2>/dev/null && echo true || echo false)
+check "push-fold, a release tag pushed between the jobs: exits 0 and keeps the fragment the notes do not hold" \
+  "$(is "$rc|$third_kept" "0|true")"
 
 summary "release-push.sh version, push-main, tagged, tag, release, push-tag, handed, no-credential, fold-plan and push-fold"
 
