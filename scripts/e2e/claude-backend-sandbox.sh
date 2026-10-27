@@ -586,23 +586,20 @@ handoff_recorded() { [ -n "$(role_handoff "$issue" implementer implementing)" ];
 # ---- the scratch services ------------------------------------------------------------------------
 
 # Each binds bind_host (the devbox's private address, or its loopback under bridge) on the port the
-# operator named, which prerequisites held free: a service that cannot take it has lost it to
-# another process since, and the run says so rather than picking another, since only an admitted or
-# forwarded port is one a pod can dial.
+# operator named, which prerequisites held free. These two bind it themselves rather than serve on a
+# socket lib/rig.sh's start_held holds: held-port.py holds only a port the kernel chose, and only an
+# admitted or forwarded port is one a pod can dial. A service that cannot take its port has lost it
+# to another process since: it exits, and await_start fails naming the port and its log rather than
+# the run picking another.
 start_listener() {
-  local offset
-  offset=$(log_size listener)
   ENVOY_API_TOKEN="$(cat "$work/envoy-token")" PORT="$port_listener" ENVOY_LISTEN_HOST="$bind_host" \
     ENVOY_MACHINE_ID="legion-e2eccs-$$" NATS_URLS="nats://$bind_host:$port_nats" \
     start_process listener env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" "$work/envoy-listener"
-  await_start listener "$listener_pid" "$offset" 60 "the Envoy listener to answer /v1/sessions" \
-    curl -fsS -H "@$work/envoy-auth-header" "http://$bind_host:$port_listener/v1/sessions" ||
-    fail "the Envoy listener could not take port $port_listener; see $evidence/logs/listener.log"
+  await_start listener "$listener_pid" 60 "the Envoy listener to answer /v1/sessions on its port $port_listener" \
+    curl -fsS -H "@$work/envoy-auth-header" "http://$bind_host:$port_listener/v1/sessions"
 }
 
 start_dispatch() {
-  local offset
-  offset=$(log_size dispatch)
   mkdir -p "$work/dispatch-home"
   chmod 0700 "$work/dispatch-home"
   # HOME and XDG_CONFIG_HOME are the scratch home, so the server reads no envoy.json of the operator's.
@@ -615,9 +612,8 @@ start_dispatch() {
     ENVOY_URL="http://$bind_host:$port_listener" \
     start_process dispatch env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" "$work/envoy-dispatch"
   dispatch_base="http://$bind_host:$port_dispatch"
-  await_start dispatch "$dispatch_pid" "$offset" 60 "the scratch Dispatch server" \
-    curl -fsS "$dispatch_base/api/v1" ||
-    fail "the scratch Dispatch could not take port $port_dispatch; see $evidence/logs/dispatch.log"
+  await_start dispatch "$dispatch_pid" 60 "the scratch Dispatch server on its port $port_dispatch" \
+    curl -fsS "$dispatch_base/api/v1"
 }
 
 # ---- the operator's route and the run's own Secret ------------------------------------------------

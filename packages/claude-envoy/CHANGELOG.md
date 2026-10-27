@@ -4,6 +4,9 @@
 
 ### Added
 
+- A person's browser edit of a spec a session wrote reaches that session's channel as one card, 30
+  seconds after the person stops editing: the card names the document, the two versions and each
+  editor, and the diff follows it in a fenced `diff` block.
 - The `dispatch` command (`dist/dispatch.js`) reads one block of a document:
   `dispatch read --ref dispatch://KEY/spec#b-<id>` (or an issue's or a project's document with
   `#b-<id>`, optionally pinned to a version with `@v<N>`) prints the block, the version its text
@@ -79,6 +82,12 @@
   (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`; the shared hub's listener does not), where they said such a
   session received none. A session of this plugin holds its own NATS connection and receives such
   a topic as before (INFRA-122).
+
+- `scripts/smoke-session-title.sh` starts nats-server (`-p -1`) and the Envoy listener (`PORT=0`)
+  on ports the kernel chooses and reads each back from the server's own log, instead of picking a
+  port that was free a moment earlier, which another program could take before the server bound
+  it; the Dispatch address its session is configured with, which nothing serves, is
+  `http://127.0.0.1:1` (INFRA-253).
 
 ### Fixed
 
