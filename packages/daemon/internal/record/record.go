@@ -403,19 +403,24 @@ type PullRequest struct {
 	// a red within that attempt (classify.FixAttemptCapHolds).
 	HeadCounted string
 	// HeadCountedBefore is the mark HeadCounted held before the count that set it. A count made
-	// before its head's push arrived is taken back when that push proves handoff-only or the review
-	// App's (classify.ApplyPush), which restores this mark, so the counted attempt does not depend on
-	// which of the push and the head's arrival GitHub delivers first - for a head that replaced the
-	// recorded one in one push (HeadCountedFrom).
+	// before its head's pushes arrived is taken back when they prove the move spares it
+	// (classify.ApplyPush), which restores this mark, so the counted attempt does not depend on
+	// which of the pushes and the head's arrival GitHub delivers first, while the counted head is
+	// still the recorded head (classify.AdvancePullRequestHead names the order it does not cover).
 	HeadCountedBefore string
 	// HeadCountedFrom is the recorded head (HeadSHA) that HeadCounted replaced when it was counted:
-	// the head the counted move started from. Only a push that left HeadCounted from this head takes
-	// the count back (classify.ApplyPush); a push that left the counted head from another head - the
-	// required-checks pass's compare from an approved head, say - did not make the move the count
-	// counted. A head the daemon reached past one it never recorded (a read of GitHub's head, a
-	// reopen) was counted from a head its own push does not name, so no push takes that count back.
-	// Empty when no count stands, and for a mark a take-back restored, which no push takes back.
+	// the head the counted move started from. The count is taken back once the recorded pushes chain
+	// from this head to HeadCounted, each handoff-only or the review App's and none forced
+	// (classify.ApplyPush); a push that reached the counted head from another head - the
+	// required-checks pass's compare from an approved head, say - is on no such chain. Empty when no
+	// count stands, and for a mark a take-back restored, which nothing takes back.
 	HeadCountedFrom string
+	// HeadArrivedFrom is the head HeadSHA replaced when it arrived (classify.AdvancePullRequestHead),
+	// set on every head move, empty before the first and after a new generation. The planned mark
+	// (PlannedRed) is the last push that may change code on the chain of recorded pushes from this
+	// head to HeadSHA, whichever of the pushes and the head arrives first (classify.ApplyPush), also
+	// when the daemon reached the head past heads it never recorded.
+	HeadArrivedFrom string
 	// PlannedRed is whether the newest head that changed a path outside .legion/ was the review
 	// App's (the tester's red tests): a red on it is planned, so the next head is not a fix attempt.
 	PlannedRed bool

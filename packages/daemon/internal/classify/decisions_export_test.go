@@ -1,6 +1,7 @@
 package classify
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -31,12 +32,12 @@ func TestApplyPushTakesBackOnlyTheCurrentHandoffOnlyCount(t *testing.T) {
 	}
 }
 
-// Only the counted move's own push takes the count back: the push that left the counted head from
-// the head the count moved from. A push that left the same head from another head - the
-// required-checks pass's compare from an approved head (daemon's readApprovalCarry) - says only
-// what changed between those two heads, not in the move the count counted, which can carry code:
-// here h3 changed code on the approved h1, and h4 takes that code out again, so h1 to h4 changes
-// only handoffs while h3 to h4 changes code.
+// A push that reached the counted head from another head - the required-checks pass's compare from
+// an approved head (daemon's readApprovalCarry) - says only what changed between those two heads,
+// not in the move the count counted, which can carry code: here h3 changed code on the approved
+// h1, and h4 takes that code out again, so h1 to h4 changes only handoffs while h3 to h4 changes
+// code. Only a chain of pushes from the head the count moved from takes the count back, here h4's
+// own push from h3.
 func TestApplyPushTakesBackOnlyTheCountedMovesOwnPush(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -66,6 +67,131 @@ func TestApplyPushTakesBackOnlyTheCountedMovesOwnPush(t *testing.T) {
 					got.FixAttempts, got.HeadCounted, got.HeadCountedBefore, got.HeadCountedFrom)
 			}
 		})
+	}
+}
+
+// A move's count and planned mark do not depend on the order its pushes and its head arrive in:
+// every order of the pushes, with the head arriving before, between or after them, leaves the same
+// count, counted mark and planned mark. The head can arrive past a head the daemon never recorded
+// (followHead's read of GitHub's head, a reopen), h2 to h4 here with h3 between: the move is spared
+// when the pushes chain from h2 to h4, each handoff-only or the review App's, and counted otherwise
+// - also when the pushes arrive first and h4's own handoff push left a head (h3) the implementer's
+// fix made. The planned mark is the chain's last push that may change code: the review App's red
+// tests at h3 plan a red at h4 above them, though h4's own push is a handoff. A forced push may
+// change code whatever its paths say, so it counts, takes nothing back, and decides the mark. Each
+// case runs from an unplanned red, where the count is decided, and from a planned one, where
+// nothing counts and a move of handoffs alone carries the mark.
+func TestAMoveCountsAndPlansTheSameInEveryOrderOfItsPushesAndItsHead(t *testing.T) {
+	planned, unplanned := true, false
+	for _, tc := range []struct {
+		name   string
+		head   string
+		pushes []record.ClassifiedPush
+		// counted is whether the move h2 to head counts a fix attempt from an unplanned red; plans is
+		// the planned mark it leaves, nil when it carries the mark.
+		counted bool
+		plans   *bool
+	}{
+		{"the review App's red tests h2..h3, then a handoff h3..h4, h3 never recorded", "h4", []record.ClassifiedPush{
+			{SHA: "h3", Before: "h2", ByReviewApp: true}, {SHA: "h4", Before: "h3", HandoffOnly: true}}, false, &planned},
+		{"two handoffs, h3 never recorded", "h4", []record.ClassifiedPush{
+			{SHA: "h3", Before: "h2", HandoffOnly: true}, {SHA: "h4", Before: "h3", HandoffOnly: true}}, false, nil},
+		{"the implementer's fix, then a handoff, h3 never recorded", "h4", []record.ClassifiedPush{
+			{SHA: "h3", Before: "h2"}, {SHA: "h4", Before: "h3", HandoffOnly: true}}, true, &unplanned},
+		{"the implementer's fix, then the review App's red tests, h3 never recorded", "h4", []record.ClassifiedPush{
+			{SHA: "h3", Before: "h2"}, {SHA: "h4", Before: "h3", ByReviewApp: true}}, true, &planned},
+		{"a handoff, then a forced handoff, h3 never recorded", "h4", []record.ClassifiedPush{
+			{SHA: "h3", Before: "h2", HandoffOnly: true}, {SHA: "h4", Before: "h3", HandoffOnly: true, Forced: true}}, true, &unplanned},
+		{"one handoff", "h3", []record.ClassifiedPush{{SHA: "h3", Before: "h2", HandoffOnly: true}}, false, nil},
+		{"one forced handoff", "h3", []record.ClassifiedPush{{SHA: "h3", Before: "h2", HandoffOnly: true, Forced: true}}, true, &unplanned},
+		{"one forced push of the review App's", "h3", []record.ClassifiedPush{{SHA: "h3", Before: "h2", ByReviewApp: true, Forced: true}}, true, &planned},
+	} {
+		for _, wasPlanned := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, from a red planned %v", tc.name, wasPlanned), func(t *testing.T) {
+				red := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
+					CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, FixAttempts: 2, PlannedRed: wasPlanned}
+				wantAttempts, wantCounted, wantFrom, wantPlanned := 2, "", "", wasPlanned
+				if tc.counted && !wasPlanned {
+					wantAttempts, wantCounted, wantFrom = 3, tc.head, "h2"
+				}
+				if tc.plans != nil {
+					wantPlanned = *tc.plans
+				}
+				for _, order := range pushOrders(tc.pushes) {
+					for at := 0; at <= len(order); at++ {
+						got, steps := red, []string{}
+						for i := 0; i <= len(order); i++ {
+							if i == at {
+								got, steps = AdvancePullRequestHead(got, tc.head), append(steps, "head "+tc.head)
+							}
+							if i < len(order) {
+								got, steps = ApplyPush(got, order[i]), append(steps, "push "+order[i].Before+".."+order[i].SHA)
+							}
+						}
+						if got.FixAttempts != wantAttempts || got.HeadCounted != wantCounted || got.HeadCountedFrom != wantFrom ||
+							got.HeadCountedBefore != "" || got.PlannedRed != wantPlanned || got.HeadArrivedFrom != "h2" {
+							t.Errorf("%v: fixAttempts=%d headCounted=%q headCountedFrom=%q headCountedBefore=%q plannedRed=%v headArrivedFrom=%q, want %d, %q, %q, \"\", %v and \"h2\"",
+								steps, got.FixAttempts, got.HeadCounted, got.HeadCountedFrom, got.HeadCountedBefore, got.PlannedRed, got.HeadArrivedFrom,
+								wantAttempts, wantCounted, wantFrom, wantPlanned)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+// pushOrders is every order of pushes.
+func pushOrders(pushes []record.ClassifiedPush) [][]record.ClassifiedPush {
+	if len(pushes) <= 1 {
+		return [][]record.ClassifiedPush{append([]record.ClassifiedPush{}, pushes...)}
+	}
+	var orders [][]record.ClassifiedPush
+	for i := range pushes {
+		rest := append(append([]record.ClassifiedPush{}, pushes[:i]...), pushes[i+1:]...)
+		for _, order := range pushOrders(rest) {
+			orders = append(orders, append([]record.ClassifiedPush{pushes[i]}, order...))
+		}
+	}
+	return orders
+}
+
+// A push for a later move that arrives before the move's first link waits for its chain: the
+// review App's red tests h4..h5 arrive first, then h3 arrives over h2..h3, then h5 past h4, and
+// the handoff h3..h4 last. h5's arrival counts until that handoff completes the chain h3..h4..h5,
+// which takes the count back and plans h5's red, as the pushes arriving first would have left it.
+func TestAPushForALaterMoveWaitsForItsChain(t *testing.T) {
+	red := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
+		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, FixAttempts: 2}
+	first := record.ClassifiedPush{SHA: "h3", Before: "h2", HandoffOnly: true}
+	link := record.ClassifiedPush{SHA: "h4", Before: "h3", HandoffOnly: true}
+	tests := record.ClassifiedPush{SHA: "h5", Before: "h4", ByReviewApp: true}
+	early := AdvancePullRequestHead(ApplyPush(ApplyPush(ApplyPush(red, first), link), tests), "h3")
+	early = AdvancePullRequestHead(early, "h5")
+	late := AdvancePullRequestHead(ApplyPush(ApplyPush(red, tests), first), "h3")
+	late = AdvancePullRequestHead(late, "h5")
+	if late.FixAttempts != 3 || late.HeadCounted != "h5" {
+		t.Fatalf("h5 arrived before its chain: fixAttempts=%d headCounted=%q, want 3 and \"h5\"", late.FixAttempts, late.HeadCounted)
+	}
+	late = ApplyPush(late, link)
+	for name, got := range map[string]record.PullRequest{"pushes first": early, "the link last": late} {
+		if got.FixAttempts != 2 || got.HeadCounted != "" || !got.PlannedRed {
+			t.Errorf("%s: fixAttempts=%d headCounted=%q plannedRed=%v, want 2, \"\" and true", name, got.FixAttempts, got.HeadCounted, got.PlannedRed)
+		}
+	}
+}
+
+// A head that arrives before its push each time keeps no more than the push still to be linked: a
+// late push lies behind the next head's arrival, and is spent there.
+func TestPushesThatArriveAfterTheirHeadsAreSpent(t *testing.T) {
+	pr := record.PullRequest{HeadSHA: "c0"}
+	for i := 1; i <= 10; i++ {
+		head := fmt.Sprintf("c%d", i)
+		pr = AdvancePullRequestHead(pr, head)
+		pr = ApplyPush(pr, record.ClassifiedPush{SHA: head, Before: fmt.Sprintf("c%d", i-1)})
+		if len(pr.Pushes) > 1 {
+			t.Fatalf("after %d moves, each head first, %d pushes are kept, want at most 1: %+v", i, len(pr.Pushes), pr.Pushes)
+		}
 	}
 }
 

@@ -441,7 +441,15 @@ func (fixture fixturePullRequest) record() record.PullRequest {
 	// The shipped state holds one pending push; the Go record keeps every one.
 	var pushes []record.ClassifiedPush
 	if fixture.PendingPush != nil {
-		pushes = []record.ClassifiedPush{*fixture.PendingPush}
+		pending := *fixture.PendingPush
+		// The shipped daemon matched a head's pending push by its sha alone and read it as the push
+		// that replaced the recorded head, whatever before it named (none, from a listener that
+		// predated the field); the Go record judges a move by the chain of pushes from the recorded
+		// head (sparedMove), so the replay places the push there.
+		if pending.SHA != fixture.HeadSHA {
+			pending.Before = fixture.HeadSHA
+		}
+		pushes = []record.ClassifiedPush{pending}
 	}
 	// The shipped state's verdict is always its head's (a new head cleared it), and a state that
 	// records one has settled, so its head is the checked head. The shipped daemon judged every

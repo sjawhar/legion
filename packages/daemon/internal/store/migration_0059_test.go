@@ -5,9 +5,11 @@ import (
 	"testing"
 )
 
-// 0059 adds the head a counted fix attempt moved from. A pull request recorded before it, its
-// count standing, gets an empty one, which no push names, so a late push takes nothing back from it.
-func TestAPullRequestCountedBefore0059NamesNoMoveItsCountCameFrom(t *testing.T) {
+// 0059 adds where a pull request's head moves started: the head a counted fix attempt moved from
+// and the head the current head replaced. A pull request recorded before it, its count standing,
+// gets an empty one of each, which no chain of pushes starts from, so a late push takes nothing
+// back from it and settles its planned mark only as that head's own push.
+func TestAPullRequestRecordedBefore0059NamesNoStartOfItsMoves(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
 	migrateThrough(t, store, 58)
@@ -27,11 +29,12 @@ func TestAPullRequestCountedBefore0059NamesNoMoveItsCountCameFrom(t *testing.T) 
 	if _, err := store.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	var counted, from string
-	if err := store.Pool().QueryRow(ctx, `select head_counted, head_counted_from from pull_requests where issue = 'LEGION-208'`).Scan(&counted, &from); err != nil {
-		t.Fatalf("read head_counted_from: %v", err)
+	var counted, countedFrom, arrivedFrom string
+	if err := store.Pool().QueryRow(ctx, `select head_counted, head_counted_from, head_arrived_from from pull_requests where issue = 'LEGION-208'`).
+		Scan(&counted, &countedFrom, &arrivedFrom); err != nil {
+		t.Fatalf("read the columns 0059 adds: %v", err)
 	}
-	if counted != "h4" || from != "" {
-		t.Fatalf("head_counted=%q head_counted_from=%q after 0059, want \"h4\" and \"\"", counted, from)
+	if counted != "h4" || countedFrom != "" || arrivedFrom != "" {
+		t.Fatalf("head_counted=%q head_counted_from=%q head_arrived_from=%q after 0059, want \"h4\", \"\" and \"\"", counted, countedFrom, arrivedFrom)
 	}
 }
