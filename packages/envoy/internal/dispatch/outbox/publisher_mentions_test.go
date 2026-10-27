@@ -3,12 +3,15 @@ package outbox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/retry"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
@@ -325,6 +328,89 @@ func TestAScanDefersAClaimantCopyWhileItsMentionIsBeingSent(t *testing.T) {
 			}
 			if attempts, _ := nextAttempt(t, database, event.ID); attempts != 0 {
 				t.Fatalf("attempt_count = %d after the deferral resolved, want 0", attempts)
+			}
+		})
+	}
+}
+
+// TestAHeldBackClaimantCopyDefersNoAttemptThatFailedElsewhere drives the scan itself: a new
+// comment whose claimant copy is held back for its mention still being sent is deferred only when
+// that is all that kept the attempt from finishing. When NATS denies another destination of the
+// same event, the attempt is backed off like any denied one - counted, its retry.Delay waited, the
+// destinations it reached recorded - rather than retried every mentionPendingDelay uncounted. When
+// the connection fails, the event is released for the next scan as any event that met it is.
+func TestAHeldBackClaimantCopyDefersNoAttemptThatFailedElsewhere(t *testing.T) {
+	const (
+		issueTopic  = "notifications.dispatch.issue.T-1.comment.created"
+		authorTopic = "notifications.agent.writer"
+	)
+	for _, tc := range []struct {
+		name       string
+		failTopics map[string]error
+		state      outcomeState
+		reached    []string
+	}{
+		{
+			name:       "a denied role route backs the event off",
+			failTopics: map[string]error{roleTopic: denial(roleTopic)},
+			state:      backedOff,
+			reached:    []string{issueTopic, authorTopic},
+		},
+		{
+			name:       "an unavailable connection releases the event",
+			failTopics: map[string]error{authorTopic: fmt.Errorf("bus: %w", bus.ErrUnavailable)},
+			state:      released,
+			reached:    []string{issueTopic, roleTopic},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := store.WithTransactionTracking(context.Background())
+			database := storetest.Open(t)
+			broker := events.NewBroker()
+			route := "role:reviewer"
+			seedIssue(t, database, "T-1", &route)
+			claimIssue(t, database, "T-1", model.Actor{Kind: "session", ID: "session-claimant"})
+			alice := model.Actor{Kind: "user", ID: "alice"}
+			// A reply to a session's comment: its destinations are the issue topic, the role
+			// route, the claimant route and then the author route.
+			root := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "writer"}, "Draft", nil)
+			commentID := seedComment(t, database, "T-1", alice, "@session-claimant ship it.", &root)
+			event := appendEvent(t, database, broker, model.Event{
+				IssueKey: new("T-1"), Type: "comment.created", Actor: alice,
+				Payload: model.CommentEventPayload{Comment: model.Comment{
+					ID: commentID, IssueKey: new("T-1"), Body: "@session-claimant ship it.", ReplyTo: &root,
+					Mentions: mentionOf("session-claimant"),
+				}},
+			})
+			seedMentionDelivery(t, database, commentID, "session-claimant", "pending")
+			publisher := &countingPublisher{failTopics: tc.failTopics}
+
+			before := time.Now()
+			scan(ctx, Deps{Store: database, Publisher: publisher})
+			after := time.Now()
+			if got := publisher.attempted(); !reflect.DeepEqual(got, []string{issueTopic, roleTopic, authorTopic}) {
+				t.Fatalf("topics sent = %#v, want every destination but the held-back claimant copy", got)
+			}
+			if at := publishedAt(t, database, event.ID); at != nil {
+				t.Fatalf("published_at = %v, though the attempt did not finish", at)
+			}
+			if destinations, _ := publishedDestinations(t, database, event.ID); !reflect.DeepEqual(destinations, tc.reached) {
+				t.Fatalf("published_destinations = %#v, want the destinations reached, %#v", destinations, tc.reached)
+			}
+			attempts, due := nextAttempt(t, database, event.ID)
+			switch tc.state {
+			case backedOff:
+				if attempts != 1 {
+					t.Fatalf("attempt_count = %d, want the one backed-off attempt, not a deferral's 0", attempts)
+				}
+				if due == nil || due.Before(before.Add(retry.Delay(1))) || due.After(after.Add(retry.Delay(1))) {
+					t.Fatalf("next_attempt_at = %v, want retry.Delay(1) = %v from the scan, not mentionPendingDelay",
+						due, retry.Delay(1))
+				}
+			case released:
+				if attempts != 0 || due != nil {
+					t.Fatalf("attempt_count = %d and next_attempt_at = %v, want the claim released: 0 and none", attempts, due)
+				}
 			}
 		})
 	}

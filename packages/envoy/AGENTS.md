@@ -2630,7 +2630,9 @@ the synchronous listener call records the sent or failed attempt instead of blin
   its dead letter. Every other session - each attempt `failed`, a `pending` one past the minute
   (abandoned; the API's `claimLapsed` is built from the same `model.DeliveryClaimLapse`), or no
   row at all - is published to as if it had not been mentioned. A deferral with a denial
-  (`bus.ErrPublishDenied`) or any other failure is backed off as a failure.
+  (`bus.ErrPublishDenied`) or any other failure of the event is backed off as a failure, its
+  attempt counted; a deferral that meets a lost NATS connection (`bus.ErrUnavailable`) or a
+  stopping process is released, not backed off, like any event that met them.
   A comment's edit, resolution and reopening, and every other event, are never left to a mention.
   One copy is not guaranteed: a receipt timeout records the attempt `failed` though the listener
   may have delivered the mention, and a first attempt stranded `pending` past the minute may have

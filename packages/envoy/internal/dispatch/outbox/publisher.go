@@ -328,24 +328,31 @@ func settle(ctx context.Context, item pendingEvent, a *attempt) outcome {
 	}
 	a.wait(ctx)
 	result.reached = a.reached
-	if err := a.err(); err != nil {
-		if errors.Is(err, errMentionPending) {
-			slog.Debug("dispatch outbox: event waits on a mention's delivery", "event_id", item.event.ID)
-			result.state = deferred
-			result.retryAt = time.Now().Add(mentionPendingDelay)
-			return result
-		}
-		// The connection failing, or the process stopping before every answer came, is no
-		// failure of the event's own.
-		if errors.Is(err, bus.ErrUnavailable) || ctx.Err() != nil {
-			slog.Info("dispatch outbox: event released", "event_id", item.event.ID, "error", err)
-			result.state = released
-			return result
-		}
+	err := a.err()
+	switch {
+	case err == nil:
+		result.state = published
+		return result
+	// A held-back copy defers the event only when it is the whole of why the attempt did not
+	// finish: err is errMentionPending itself, not joined with a denial, a failure or the error
+	// that ended the attempt. An attempt that also met one of those is that error's, as any
+	// failed attempt is - released below, or backed off with its attempt counted - so a denied
+	// destination is never retried every mentionPendingDelay with no attempt counted, and the
+	// destinations it did reach are recorded either way.
+	case err == errMentionPending:
+		slog.Debug("dispatch outbox: event waits on a mention's delivery", "event_id", item.event.ID)
+		result.state = deferred
+		result.retryAt = time.Now().Add(mentionPendingDelay)
+		return result
+	// The connection failing, or the process stopping before every answer came, is no failure of
+	// the event's own.
+	case errors.Is(err, bus.ErrUnavailable) || ctx.Err() != nil:
+		slog.Info("dispatch outbox: event released", "event_id", item.event.ID, "error", err)
+		result.state = released
+		return result
+	default:
 		return backOff(result, item, "dispatch outbox: publish event", err)
 	}
-	result.state = published
-	return result
 }
 
 // backOff reports item's failure under what and returns result backed off by retry.Delay of the
