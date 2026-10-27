@@ -194,15 +194,17 @@ tailscaled writes its certificate cache readable by its own uid alone.
 `databaseTier`, `db-custom-4-15360` (4 vCPU and 15 GB) by default, is sized by connections. Cloud
 SQL's default `max_connections` follows the instance's memory, and from 15 to under 30 GB it is
 500 ([Configure database flags](https://cloud.google.com/sql/docs/postgres/flags),
-`max_connections`). Every app pod opens up to the sum of its pools
-(`packages/envoy/internal/dispatch/store/pool.go`): 64 shared, on which migrations run too, 4 for
-document rooms, 1 for health, 9 for leases, 1 for the outbox, and the 3 `LISTEN` connections the
-listener pool dials and hands off, 82 in all; the listener's and the front door's pods open none.
-Six pods open 492, inside 500 with 8 to spare, and a rolling update runs `replicas` plus one pod,
-so up to 5 replicas roll inside it. The previous default, `db-custom-1-3840` (3.75 GB, 100
-connections), holds one pod and no roll, and its one vCPU served every query. A deployment that
-left `databaseTier` unset moves to the new default on its next update; one whose instance
-runs another tier, set by hand, sets `databaseTier` to that tier so the update does not resize it.
+`max_connections`). PostgreSQL keeps 3 of them for superusers (`superuser_reserved_connections`),
+and Dispatch's user is not one. Every app pod opens up to the sum of its pools and its permanent
+`LISTEN` connections (`ConnectionsPerProcess` in `packages/envoy/internal/dispatch/store/pool.go`);
+the listener's and the front door's pods open none. A rolling update runs `replicas` plus one pod,
+so the default tier holds up to 4 replicas rolling: `dispatchDefaultTierRollingReplicas` in
+`packages/envoy/infra/gcp/dispatch.go` computes that bound from those figures, and a test fails
+when a pool changes and the bound does not follow. The previous default, `db-custom-1-3840`
+(3.75 GB, 100 connections), holds one pod and no roll, and its one vCPU served every query. A
+deployment that left `databaseTier` unset moves to the new default on its next update; one whose
+instance runs another tier, set by hand, sets `databaseTier` to that tier so the update does not
+resize it.
 
 `databaseAvailabilityType` is the Cloud SQL instance's availability type: `ZONAL`, the default and
 the instance's value before the input existed, keeps it in one zone, and `REGIONAL` keeps a
@@ -230,7 +232,7 @@ second, and a killed holder's lease is taken over in about six.
 `proxyMemory` its `cloud-sql-proxy` sidecar: plain Kubernetes quantities (`2`, `1500m`; `8Gi`,
 `6144Mi`), each rendered as both its request and its limit. `appCpu` and `appMemory` are 1 CPU and
 `4Gi` by default, the size the container always had. `proxyCpu` and `proxyMemory` are 1 CPU and
-`2Gi` by default: every database call of the pod passes through the proxy's TLS, up to the 82
+`2Gi` by default: every database call of the pod passes through the proxy's TLS, up to the
 connections of one pod's pools (above), and the proxy's own Kubernetes sidecar example requests 1
 CPU, since its CPU use scales with the traffic between the database and the application, and
 `2Gi`, since its memory scales with the active connections
