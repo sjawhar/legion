@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# Release source-state publisher, shared by the release workflows.
+# Release source-state publisher, shared by the release workflows and by
+# claude-envoy-rebuild.yaml, which is no release but pushes to main with the
+# same deploy key.
 #
 # The workflows split each release into a build job, which runs the
 # dependencies' code and holds no credential, and a publish job, which holds
-# the credentials and runs no dependency code. `version` and `no-credential`
-# are the build job's; `tag`, `release`, `restart`, `push-main` and `push-tag`
-# the publish job's; `tagged` and `handed` serve both.
+# the credentials and runs no dependency code (the rebuild workflow's push job
+# is one). `version` and `no-credential` are the build job's; `tag`,
+# `release`, `restart`, `push-main`, `push-tag` and `push-built` the publish
+# job's; `tagged` and `handed` serve both.
 #
 # version:   the one version step every build job calls: print the release
 #            this checkout gets, as the three lines `version=`, `tag=` and
@@ -149,10 +152,51 @@
 #            no credential. The key and GitHub's host keys, pinned below, go
 #            into a directory of its own that only the runner's user can read,
 #            removed when the script exits, pushed or not (deploy_key_env,
-#            which push-main shares). ssh reads no config file, offers only
-#            that key, never prompts, and refuses any host key but the pinned
-#            ones; GitHub publishes them at `gh api meta --jq .ssh_keys`, which
-#            release-push.test.sh compares with these when it can reach GitHub.
+#            which push-main and push-built share). ssh reads no config file,
+#            offers only that key, never prompts, and refuses any host key but
+#            the pinned ones; GitHub publishes them at `gh api meta --jq
+#            .ssh_keys`, which release-push.test.sh compares with these when it
+#            can reach GitHub.
+# push-built: land a build of the Claude Envoy plugin on main, for
+#            claude-envoy-rebuild.yaml's push job. <tar> is what its build
+#            job built from <base-sha>, main's tip when that job started: the
+#            package's dist/ and legion/. HEAD must be <base-sha>, 40
+#            lower-case hex, and the work tree clean. The tar is checked from
+#            its listing before anything changes: every member a regular file
+#            or a directory (no symlink, no hard link, nothing else); every
+#            name dist or legion, then path components of letters, digits, '.',
+#            '_' and '-' only, so no absolute path, no member outside the two
+#            directories, and no '..' component; no regular member with an
+#            execute, setuid, setgid or sticky bit; and the files every build
+#            holds present: dist/envoy-channel.js, dist/session-hook.js,
+#            dist/session-title-hook.js, dist/dispatch.js,
+#            dist/THIRD_PARTY_NOTICES, legion/.claude-plugin/plugin.json and a
+#            file under each of legion/skills/ and legion/agents/. Each refusal
+#            is an ::error:: naming the member, with nothing changed. Then
+#            packages/claude-envoy/dist and packages/claude-envoy/legion are
+#            replaced by the tar's content and only those two are staged. A
+#            build main's files already match stages nothing: a ::notice says
+#            so and nothing is pushed. Otherwise github-actions[bot], as `tag`
+#            commits, commits them as `chore(claude-envoy): rebuild dist/ and
+#            legion/ from <the base's first 12 hex> [skip ci]`, once every
+#            staged path is checked to sit under the two directories: GitHub's
+#            skip keyword, so the commit starts no CI or release run (the
+#            build job ran the private-name check over the bundle already).
+#
+#            land_on_main <base-sha> <workflow-file>, the function that then
+#            lands it, never forces and never rebases. It refuses a <base-sha>
+#            that is not 40 lower-case hex and a HEAD that is not exactly one
+#            commit whose one parent is <base-sha>, then fetches main with the
+#            deploy key (deploy_key_env, as push-tag does). When main's tip is
+#            <base-sha> it pushes HEAD there and appends `pushed=true` to
+#            $GITHUB_OUTPUT when that is set. When main's tip is another
+#            commit, before the push or after a rejected push, the commit was
+#            built from a main that has moved on, so it pushes nothing: it
+#            starts a fresh run of <workflow-file> on main (`gh workflow run`,
+#            with $GH_TOKEN), which builds main's newest tip, and a ::notice
+#            names both commits. A failed fetch, a push rejected while main's
+#            tip is still <base-sha>, or a failed `gh workflow run` is an
+#            ::error:: and exit 1.
 # handed:    check what a build job handed a publish job before the publish job
 #            acts on it, and print the release tag, <tag-prefix><version>. The
 #            version is the build job's output, so it must be X.Y.Z, each field
@@ -175,7 +219,7 @@
 #            credential wired into a build job by mistake.
 set -euo pipefail
 
-command=${1:?usage: release-push.sh version <tag-prefix> [--package-dir <dir>] [--first-npm <npm package>] [--expect <X.Y.Z>] [--patch-path <path>]... -- <paths>... | release-push.sh restart <workflow-file> <lost-races> | release-push.sh tag <package-dir> <commit-message> <tag> | release-push.sh tagged <tag-prefix> [<package-dir>] | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh push-main <package-dir> <version> | release-push.sh push-tag <tag> | release-push.sh handed <tag-prefix> <version> <dir> <file>... | release-push.sh no-credential}
+command=${1:?usage: release-push.sh version <tag-prefix> [--package-dir <dir>] [--first-npm <npm package>] [--expect <X.Y.Z>] [--patch-path <path>]... -- <paths>... | release-push.sh restart <workflow-file> <lost-races> | release-push.sh tag <package-dir> <commit-message> <tag> | release-push.sh tagged <tag-prefix> [<package-dir>] | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh push-main <package-dir> <version> | release-push.sh push-tag <tag> | release-push.sh push-built <base-sha> <tar> | release-push.sh handed <tag-prefix> <version> <dir> <file>... | release-push.sh no-credential}
 
 # is_plain_version <value>: true when <value> is X.Y.Z, each field a number
 # without leading zeros (release-bump.sh does arithmetic on the fields, where a
@@ -266,6 +310,49 @@ fail_outstanding() {
     printf '**Version bump for %s v%s did not land on main.** %s\n' "$package_dir" "$version" "$message" >> "$GITHUB_STEP_SUMMARY"
   fi
   exit 1
+}
+
+# land_on_main <base-sha> <workflow-file>: land HEAD, exactly one commit whose
+# one parent is <base-sha>, on main with the deploy key when main's tip is still
+# <base-sha>, and otherwise push nothing and start a fresh run of
+# <workflow-file> on main (the header's push-built paragraph). Never forces,
+# never rebases. Returns 0 when it pushed or started a run; every other outcome
+# is an ::error:: and exit 1.
+land_on_main() {
+  local base=$1 workflow=$2 shas head parents tip started
+  if ! [[ $base =~ ^[0-9a-f]{40}$ ]]; then
+    fail_error "the base commit $(quote_all "$base") is not 40 lower-case hex; refusing it"
+  fi
+  # HEAD's sha, then its parents, space-separated: exactly one, the base.
+  shas=$(git rev-list --parents -n 1 HEAD) || fail_error "reading HEAD failed"
+  head=${shas%% *}
+  parents=${shas#"$head"}
+  parents=${parents# }
+  if [ "$parents" != "$base" ]; then
+    fail_error "HEAD $head has the parents '$parents', not exactly the one parent $base; only one commit on the commit it was built from lands on main"
+  fi
+  deploy_key_env
+  git fetch "$remote" main || fail_error "fetching main failed"
+  tip=$(git rev-parse FETCH_HEAD) || fail_error "reading main's fetched tip failed"
+  if [ "$tip" = "$base" ]; then
+    if git push "$remote" HEAD:refs/heads/main; then
+      if [ -n "${GITHUB_OUTPUT:-}" ]; then
+        echo "pushed=true" >> "$GITHUB_OUTPUT"
+      fi
+      return 0
+    fi
+    git fetch "$remote" main || fail_error "the push to main was rejected, and fetching main again failed"
+    tip=$(git rev-parse FETCH_HEAD) || fail_error "reading main's fetched tip failed"
+    if [ "$tip" = "$base" ]; then
+      fail_error "the push of $head to main was rejected while main's tip is still $base, the commit it was built on, so no newer commit beat it; the push itself failed"
+    fi
+  fi
+  # main moved past the base: what HEAD holds was made from an older main, so a
+  # fresh run builds main's tip instead. gh prints the new run's URL (restart's
+  # note), or nothing on an older gh.
+  started=$(gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" --ref main) ||
+    fail_error "main moved from $base to $tip, and starting a fresh run of $workflow on main failed; start one by hand: gh workflow run $workflow --repo $GITHUB_REPOSITORY --ref main"
+  echo "::notice title=Nothing pushed; a fresh run started::main moved from $base, the commit this run built from, to $tip, so $head was not pushed; a fresh run of $workflow on main, ${started:-the newest run of $workflow}, builds main's tip" >&2
 }
 
 case "$command" in
@@ -634,6 +721,99 @@ case "$command" in
     tag=${2:?tag}
     deploy_key_env
     git push "$remote" "refs/tags/$tag"
+    ;;
+  push-built)
+    [ $# -eq 3 ] || fail_error "usage: release-push.sh push-built <base-sha> <tar>"
+    base=$2 tar_file=$3
+    if ! [[ $base =~ ^[0-9a-f]{40}$ ]]; then
+      fail_error "the base commit $(quote_all "$base") is not 40 lower-case hex; refusing it"
+    fi
+    head=$(git rev-parse HEAD) || fail_error "reading HEAD failed"
+    if [ "$head" != "$base" ]; then
+      fail_error "HEAD is $head, not $base, the commit the build was made from"
+    fi
+    dirty=$(git status --porcelain) || fail_error "reading the work tree's status failed"
+    if [ -n "$dirty" ]; then
+      fail_error "the work tree is not clean (${dirty//$'\n'/; }); the commit holds the build and nothing else"
+    fi
+    # The tar's path is made absolute before the move to the checkout's root,
+    # where the package's paths below are read.
+    case $tar_file in /*) ;; *) tar_file=$PWD/$tar_file ;; esac
+    shown_tar=$(quote_all "$tar_file")
+    cd "$(git rev-parse --show-toplevel)"
+    # Every member's name from -t, one per line (GNU tar escapes a newline in a
+    # name), and its type and mode from the first field of the same line of -tv.
+    names=$(tar -tf "$tar_file") || fail_error "listing $shown_tar failed"
+    listing=$(tar -tvf "$tar_file") || fail_error "listing $shown_tar failed"
+    [ -n "$names" ] || fail_error "$shown_tar holds no member"
+    mapfile -t members <<<"$names"
+    mapfile -t modes <<<"$listing"
+    if [ "${#members[@]}" != "${#modes[@]}" ]; then
+      fail_error "$shown_tar lists ${#members[@]} names but ${#modes[@]} entries; refusing it"
+    fi
+    declare -A regular=()
+    for i in "${!members[@]}"; do
+      member=${members[i]} mode=${modes[i]%% *}
+      shown="member $(quote_all "$member") of $shown_tar"
+      case $mode in
+        -* | d*) ;;
+        l*) fail_error "$shown is a symlink; only regular files and directories are accepted" ;;
+        h*) fail_error "$shown is a hard link; only regular files and directories are accepted" ;;
+        *) fail_error "$shown is of type '${mode:0:1}', not a regular file or a directory" ;;
+      esac
+      if [[ $member == /* ]]; then
+        fail_error "$shown is an absolute path"
+      fi
+      if [[ /$member/ == */../* ]]; then
+        fail_error "$shown has a '..' component"
+      fi
+      if ! [[ $member =~ ^(dist|legion)(/[A-Za-z0-9._-]+)*/?$ ]]; then
+        fail_error "$shown is not dist, legion or a path under them in letters, digits, '.', '_' and '-'"
+      fi
+      if [[ $mode == -* ]]; then
+        # The owner's, the group's and the others' execute places of the mode.
+        if [ "${mode:3:1}${mode:6:1}${mode:9:1}" != --- ]; then
+          fail_error "$shown has the mode $mode, with an execute, setuid, setgid or sticky bit; no file of the plugin is executable"
+        fi
+        regular[$member]=1
+      fi
+    done
+    for need in dist/envoy-channel.js dist/session-hook.js dist/session-title-hook.js dist/dispatch.js \
+      dist/THIRD_PARTY_NOTICES legion/.claude-plugin/plugin.json; do
+      if [ -z "${regular[$need]:-}" ]; then
+        fail_error "$shown_tar lacks $need, a file every build of the plugin holds"
+      fi
+    done
+    for dir in legion/skills legion/agents; do
+      found=false
+      for member in "${!regular[@]}"; do
+        if [[ $member == "$dir"/* ]]; then found=true; fi
+      done
+      if ! "$found"; then
+        fail_error "$shown_tar holds no file under $dir/, which every build of the plugin fills"
+      fi
+    done
+    # The tar is the whole of both directories: a file it lacks is deleted.
+    rm -rf packages/claude-envoy/dist packages/claude-envoy/legion
+    tar -xf "$tar_file" -C packages/claude-envoy --no-same-owner || fail_error "extracting $shown_tar into packages/claude-envoy failed"
+    git add -A -- packages/claude-envoy/dist packages/claude-envoy/legion
+    if git diff --cached --quiet; then
+      echo "::notice title=Nothing to push::main's packages/claude-envoy/dist and packages/claude-envoy/legion at $base already match this build" >&2
+      exit 0
+    fi
+    staged=$(git diff --cached --name-only) || fail_error "reading the staged paths failed"
+    while IFS= read -r path; do
+      case $path in
+        packages/claude-envoy/dist/* | packages/claude-envoy/legion/*) ;;
+        *) fail_error "the staged path $(quote_all "$path") is outside packages/claude-envoy/dist and packages/claude-envoy/legion; refusing to commit it" ;;
+      esac
+    done <<<"$staged"
+    # The identity `tag` commits as, set for author and committer alike in the
+    # environment, which wins over any GIT_AUTHOR_* or GIT_COMMITTER_* already set.
+    bot="github-actions[bot]" bot_email="41898282+github-actions[bot]@users.noreply.github.com"
+    GIT_AUTHOR_NAME=$bot GIT_AUTHOR_EMAIL=$bot_email GIT_COMMITTER_NAME=$bot GIT_COMMITTER_EMAIL=$bot_email \
+      git commit -q -m "chore(claude-envoy): rebuild dist/ and legion/ from ${base:0:12} [skip ci]"
+    land_on_main "$base" claude-envoy-rebuild.yaml
     ;;
   handed)
     if [ $# -lt 5 ]; then

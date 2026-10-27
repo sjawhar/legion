@@ -4,7 +4,9 @@
 # holds no write scope and no secret, and a publish job, which holds the credentials and runs no
 # dependency code: only release-push.sh, git, gh, jq, sha256sum, npm view and npm publish and a
 # handful of pinned actions, with no cache restored and the deploy key in the env of the one or two
-# steps that push. This check pins that shape, so a later edit cannot undo it quietly:
+# steps that push. claude-envoy-rebuild.yaml, which is no release but pushes to main with the same
+# deploy key, takes the same split: a build job that builds the plugin, and a push job. This check
+# pins that shape, so a later edit cannot undo it quietly:
 #
 # 1. A credentialed job — one whose `permissions` grants contents, id-token, attestations or
 #    actions: write (the workflow's `permissions` when the job declares none, as GitHub gives it;
@@ -13,8 +15,9 @@
 #    `secrets['DEPLOY_KEY']`, in any casing (GitHub resolves `secrets.deploy_key` too) —
 #    (a) runs no dependency code, (b) uses only the actions on CREDENTIALED_USES below, (c) sets
 #    `cache-mode: none`, and (d) names the deploy key only as `DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}`
-#    (the dot form) in the step-level `env:` of a step whose `run:` calls `release-push.sh push-tag`
-#    or `push-main`; the workflow's `env:` reaches every job, so the key there is never allowed.
+#    (the dot form) in the step-level `env:` of a step whose `run:` calls `release-push.sh push-tag`,
+#    `push-main` or `push-built`; the workflow's `env:` reaches every job, so the key there is never
+#    allowed.
 # 2. A build job — one that runs dependency code — holds none of those four write scopes and no
 #    `secrets` reference but `secrets.GITHUB_TOKEN`, in its own text or the workflow's `env:` (so
 #    no deploy key, by dot or by index, no other secret and no `toJSON(secrets)`), declares
@@ -92,8 +95,10 @@
 # variable in command position, `xargs`, `nohup`, an unlisted program, a `bun` behind `docker -Dl
 # debug run`) is accepted on that ground.
 #
-# Scope: exactly the three release workflows named in WORKFLOWS. Rules 1-3 read every job that has
-# `steps:`; a job that calls a reusable workflow (`uses:` and no steps, release.yaml's
+# Scope: exactly the four workflows named in WORKFLOWS: the three release workflows (release.yaml,
+# release-envoy-listener.yaml, release-envoy-infra.yaml) and claude-envoy-rebuild.yaml, which is no
+# release but pushes to main with the deploy key, so the same split binds it. Rules 1-3 read every
+# job that has `steps:`; a job that calls a reusable workflow (`uses:` and no steps, release.yaml's
 # worker_image) is out of their scope, since what it runs is that workflow's own jobs. Rules 4-5
 # read the jobs they name. Rule 6 reads every job's `if:`, steps or not.
 #
@@ -135,7 +140,8 @@ LineLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapp
 RELEASE = Path(".github/workflows/release.yaml")
 LISTENER = Path(".github/workflows/release-envoy-listener.yaml")
 INFRA = Path(".github/workflows/release-envoy-infra.yaml")
-WORKFLOWS = [RELEASE, LISTENER, INFRA]
+REBUILD = Path(".github/workflows/claude-envoy-rebuild.yaml")
+WORKFLOWS = [RELEASE, LISTENER, INFRA, REBUILD]
 
 # What makes a job credentialed: one of these scopes, or the deploy key's name anywhere in it, by
 # dot or by index (`secrets.DEPLOY_KEY`, `secrets['DEPLOY_KEY']`, `secrets["DEPLOY_KEY"]`), in any
@@ -148,7 +154,7 @@ DEPLOY_KEY_REF = re.compile(
 DEPLOY_KEY_VALUE = re.compile(r"\$\{\{\s*secrets\.DEPLOY_KEY\s*\}\}", re.IGNORECASE)
 RELEASE_PUSH = ".github/scripts/release-push.sh"
 TRIPWIRE = f"{RELEASE_PUSH} no-credential"
-PUSH_COMMANDS = ("release-push.sh push-tag", "release-push.sh push-main")
+PUSH_COMMANDS = ("release-push.sh push-tag", "release-push.sh push-main", "release-push.sh push-built")
 # A secret other than GITHUB_TOKEN, which a build job must not hold: `secrets.X` or `secrets['X']`
 # for any X but GITHUB_TOKEN, `toJSON(secrets)` (the context and functions are case-insensitive,
 # as are secret names), or a bare `secrets` inside a `${{ … }}` expression (`${{ secrets }}`,
@@ -603,7 +609,8 @@ def check_job(
                     path, line,
                     f"job '{name}' names secrets.DEPLOY_KEY at {describe_site(steps, key_path)}; "
                     f"the deploy key may appear only as 'DEPLOY_KEY: ${{{{ secrets.DEPLOY_KEY }}}}' "
-                    f"in the env of a step whose run calls release-push.sh push-tag or push-main",
+                    f"in the env of a step whose run calls release-push.sh push-tag, push-main or "
+                    f"push-built",
                 )
 
     if dependency:
@@ -826,7 +833,7 @@ if problems:
 
 print(
     f"check-release-credentials: {credentialed_jobs} credentialed job(s) and {build_jobs} build "
-    f"job(s) across {len(WORKFLOWS)} release workflows keep credentials out of jobs that run "
+    f"job(s) across {len(WORKFLOWS)} workflows keep credentials out of jobs that run "
     f"dependency code"
 )
 PY
