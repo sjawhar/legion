@@ -2,37 +2,27 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-526",
-  "completed": "2026-10-27T05:07:54Z",
+  "completed": "2026-10-27T06:57:23Z",
   "round": 2,
-  "reviewedHead": "154d6cea2207c992c6cdccfdd5af633d446f33f7 (code; handoff heads above it change only .legion/)",
-  "decision": "changes_requested",
+  "reviewedHead": "2497adefd872c64ad0cdf4b27d062b472a4531d4 (code: forward merge of main 448a4100 into 8740e472; handoff heads above it change only .legion/)",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 2,
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "CI: required check `test` (Tests workflow run 40447649770, job 122002633673)",
-      "description": "The required check `test` completed as failure at the CI head 154d6cea. The failures are in the Go daemon only (packages/daemon/internal/daemon and internal/api, 306 lines of 'list this project's slotted issues: ... number of field descriptions must equal number of destinations, got 20 and 31'). This PR changes no Go code: main broke in #2273/#2289, and main fixed it in #2317 (baadccdc, 'fix(daemon): the slotted-issue read selects every issue column again'). The pull_request run tests the merge with main as of the push at 04:03Z, which does not have #2317, and a re-run keeps that same merge commit. Until a run of this code against a main that has #2317 is green, the code head is red, so no approval. The Dispatch code itself has no correctness finding open."
-    },
-    {
       "severity": "minor",
       "file": "packages/dispatch/web/src/styles.css:366-371 vs :518-524",
-      "description": "Spacing only: in a reply shown in a document decision's footer, a nested decision card's question gets the footer's paragraph top margin, because the footer rule's specificity (0,4,1) is higher than the content hole's first-child rule (0,4,0). Not a defect: no behaviour changes and no content is hidden. Recorded under 'Not proven / risk' in the PR body."
+      "description": "Spacing only: in a reply shown in a document decision's footer, a nested decision card's question gets the footer's paragraph top margin (specificity (0,4,1) is higher than the first-child rule's (0,4,0)). Not a defect; recorded in the PR body's 'Not proven / risk'."
     },
     {
       "severity": "minor",
       "file": "packages/dispatch/web/src/features/doc/typed-block-drawing.ts (askBlockShell contentClass)",
-      "description": "Cosmetic: in a body, paintBlock removes the <p> from tight list items, so the malformed class's li:has(>p:empty) selector does not hide a blank option, and an empty bullet shows. The malformed reason already names that option. Not a defect; recorded in the PR body."
-    },
-    {
-      "severity": "cleanup",
-      "file": "packages/dispatch/web/src/features/doc/typed-block-drawing.ts; ask-block.ts:70-90,127-135; useRenderedMarkdown.tsx:31-35,62-66,160-174",
-      "description": "Fast-follow (no behaviour change): one exported askShellSlots(frame) next to renderAskBlockShell in place of the two :scope slot lookups, and one exported frame writer that applies the stamps and the fold, so that neither caller names a data-dispatch-ask-* attribute and AskShellHost goes."
+      "description": "Cosmetic: in a body, a blank option of a malformed decision shows an empty bullet, because paintBlock removes the tight item's <p>. Not a defect; recorded in the PR body."
     }
   ],
-  "threads": "PRRT_kwDORFy7ds6wiYih (mine, round 1): the implementer fixed it in a1faafec and resolved it. I replied that I accept the fix (discussion_r4385090019). No other threads.",
-  "ci": "Required (rulesets): lint, typecheck, test, pr-title. CI head 154d6cea; compare to 861d69ea: handoffsOnly true, 2 files. At 05:07Z: lint success, test failure (main's red, above), typecheck queued, pr-title queued.",
-  "thermonuclear": "Both run at 154d6cea. Deep review: approve, no Medium or High finding; three Minors (the spacing and the empty bullet above, and the stale PR-body risk lines, which I have rewritten); security rows untrusted-input and agent-def hold. Code quality: three findings about the remaining shell-stamp and slot-lookup duplication. I judge them cleanup with no behaviour change; they are the fast-follow.",
-  "verifiedLocally": "cd packages/dispatch && bun test web/src/features/refs web/src/features/doc: 351 pass, 0 fail at 154d6cea."
+  "continuation": "Round 2 continued: the fingerprint of the PR diff is 5051300770a6dd6d111c0f4dbd52d8014cb466caf440a0a08aafe4b82bbecfef at my last review's commit 8740e472 (fork point 7f7edb8d) and at d2e74755 (fork point 448a4100). Equal, and my last review was REQUEST_CHANGES (only for CI), so this continues that round against the new head, with no new thermonuclear pass.",
+  "ci": "Required (rulesets): lint, typecheck, test, pr-title. CI head 2497adef: lint, typecheck, test and pr-title completed success (read at 06:57Z); compare 2497adef...d2e74755: handoffsOnly true, 2 files.",
+  "threads": "PRRT_kwDORFy7ds6wiYih (mine, round 1): fixed in a1faafec, accepted in my reply (discussion_r4385090019), resolved by the implementer. No other threads.",
+  "thermonuclear": "Round 2 pair at 154d6cea, unchanged diff since: deep review approves (no Medium or High; security rows untrusted-input and agent-def hold); the code-quality findings are cleanup, carried as the fast-follow that INFRA-612 owns."
 }
