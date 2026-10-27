@@ -16449,6 +16449,9 @@ function relatedCheckLines(suggestions, context) {
     if (decision !== undefined && decision !== null) {
       const when = decision.answered_at === undefined ? "" : ` on ${decision.answered_at}`;
       lines.push(`A past decision may already answer this: ${suggestionLabel(decision)}, answered by ${decision.answered_by}${when} \u2192 ${absoluteHref(decision.href, context.configUrl)}`);
+      if (decision.ask !== undefined && decision.ask !== null) {
+        lines.push(...askStateLines(decision.ask));
+      }
     }
     for (const match of suggestions.title_matches ?? []) {
       lines.push(`Title overlaps you forced past: ${match.key} [${match.status}] ${match.title} \u2192 ${absoluteHref(match.href, context.configUrl)}`);
@@ -16518,21 +16521,30 @@ function relatedItemLines(item, configUrl) {
   try {
     const lines = [`- ${suggestionLabel(item)} \u2192 ${absoluteHref(item.href, configUrl)}`];
     if (item.kind === "ask" && item.ask !== undefined && item.ask !== null) {
-      const { ask } = item;
-      if (ask.state === "open") {
-        lines.push("  Ask: open");
-      } else if (ask.state === "answered") {
-        lines.push(`  Ask: answered by ${answerSummary(ask.answer)}`, ...answerTextLines(ask.answer));
-      } else if (ask.answer === undefined || ask.answer === null) {
-        lines.push(`  Ask: closed with no answer: ${ask.resolution.kind}`);
-      } else {
-        lines.push(`  Ask: closed after an answer: ${ask.resolution.kind}; last answered by ${answerSummary(ask.answer)}`, ...answerTextLines(ask.answer));
-      }
+      lines.push(...askStateLines(item.ask));
     }
     return lines;
   } catch (error48) {
     const href = item?.href;
     return [`- ${String(href)} (this client could not show it: ${messageFor(error48)})`];
+  }
+}
+function askStateLines(ask) {
+  try {
+    if (ask.state === "open")
+      return ["  Ask: open"];
+    if (ask.state === "answered") {
+      return [`  Ask: answered by ${answerSummary(ask.answer)}`, ...answerTextLines(ask.answer)];
+    }
+    if (ask.answer === undefined || ask.answer === null) {
+      return [`  Ask: closed with no answer: ${ask.resolution.kind}`];
+    }
+    return [
+      `  Ask: closed after an answer: ${ask.resolution.kind}; last answered by ${answerSummary(ask.answer)}`,
+      ...answerTextLines(ask.answer)
+    ];
+  } catch (error48) {
+    return [`  Ask: this client could not show it: ${messageFor(error48)}`];
   }
 }
 function answerSummary(answer) {

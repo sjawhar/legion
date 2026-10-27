@@ -1,4 +1,10 @@
-import type { AskAnswer, Suggestions, WriteAdvice, WriteSuggestion } from "@legion/contracts";
+import type {
+  AskAnswer,
+  SearchAsk,
+  Suggestions,
+  WriteAdvice,
+  WriteSuggestion,
+} from "@legion/contracts";
 import { messageFor } from "./errors";
 
 /** What a not-made line needs to name the search to run by hand. */
@@ -16,7 +22,8 @@ export interface RelatedCheckContext {
  * The related-item check's lines (INFRA-568). They hold exactly one of three forms, so a check
  * that never ran cannot read as one that found nothing: the items it found and how it searched,
  * that it searched and found nothing, or that no check was made, why, and the `dispatch search` to
- * run instead. A past decision and the titles a forced create went past follow the form.
+ * run instead. A past decision, with where its ask stands, and the titles a forced create went
+ * past follow the form.
  *
  * A server predating the forms sends less, and each of its shapes maps to one form: no result at
  * all, `missing`, items with no `outcome`, and nothing at all with no `outcome`.
@@ -46,6 +53,11 @@ export function relatedCheckLines(
       lines.push(
         `A past decision may already answer this: ${suggestionLabel(decision)}, answered by ${decision.answered_by}${when} → ${absoluteHref(decision.href, context.configUrl)}`
       );
+      // One item per owner can collapse the decision's ask out of the related items, so its latest
+      // answer and options print here; an older server sends no state and gets the line alone.
+      if (decision.ask !== undefined && decision.ask !== null) {
+        lines.push(...askStateLines(decision.ask));
+      }
     }
     for (const match of suggestions.title_matches ?? []) {
       lines.push(
@@ -141,28 +153,35 @@ function relatedItemLines(item: WriteSuggestion, configUrl: string): string[] {
   try {
     const lines = [`- ${suggestionLabel(item)} → ${absoluteHref(item.href, configUrl)}`];
     if (item.kind === "ask" && item.ask !== undefined && item.ask !== null) {
-      const { ask } = item;
-      if (ask.state === "open") {
-        lines.push("  Ask: open");
-      } else if (ask.state === "answered") {
-        lines.push(
-          `  Ask: answered by ${answerSummary(ask.answer)}`,
-          ...answerTextLines(ask.answer)
-        );
-      } else if (ask.answer === undefined || ask.answer === null) {
-        lines.push(`  Ask: closed with no answer: ${ask.resolution.kind}`);
-      } else {
-        lines.push(
-          `  Ask: closed after an answer: ${ask.resolution.kind}; last answered by ${answerSummary(ask.answer)}`,
-          ...answerTextLines(ask.answer)
-        );
-      }
+      lines.push(...askStateLines(item.ask));
     }
     return lines;
   } catch (error) {
     // One item the client cannot read costs only that item, never the form.
     const href = (item as { readonly href?: unknown } | null)?.href;
     return [`- ${String(href)} (this client could not show it: ${messageFor(error)})`];
+  }
+}
+
+/**
+ * Where an ask stands, under the line that names it: open, its latest answer, or how it closed.
+ * Never throws: a state this client cannot read costs only these lines, never the item above them.
+ */
+function askStateLines(ask: SearchAsk): string[] {
+  try {
+    if (ask.state === "open") return ["  Ask: open"];
+    if (ask.state === "answered") {
+      return [`  Ask: answered by ${answerSummary(ask.answer)}`, ...answerTextLines(ask.answer)];
+    }
+    if (ask.answer === undefined || ask.answer === null) {
+      return [`  Ask: closed with no answer: ${ask.resolution.kind}`];
+    }
+    return [
+      `  Ask: closed after an answer: ${ask.resolution.kind}; last answered by ${answerSummary(ask.answer)}`,
+      ...answerTextLines(ask.answer),
+    ];
+  } catch (error) {
+    return [`  Ask: this client could not show it: ${messageFor(error)}`];
   }
 }
 

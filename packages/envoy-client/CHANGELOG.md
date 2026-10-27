@@ -12,7 +12,8 @@
   `Answer text:`, or `Ask: closed …`; `Related-item check searched (<mode>) and found nothing.`;
   or `No related-item check was made: <reason>. Search before you rely on this being new:
   dispatch search --project <KEY> --query '<words>'`, the words the server's `search_query` or
-  else the first three words of four or more letters of the text it checked. A past decision
+  else the first three words of four or more letters of the text it checked. A past decision,
+  followed by the same `Ask:` and `Answer text:` lines when the server sends its latest answer,
   and, for a forced create, `Title overlaps you forced past: <KEY> [<status>] <title> → <link>`
   follow the form. A
   `dispatch doc-edit` that adds decision blocks prints `Decision block <id>:` and that block's
