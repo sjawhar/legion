@@ -1041,6 +1041,54 @@ describe("a ! command in envoy.json", () => {
     expect(readFileSync(runs, "utf-8")).toBe("run\nrun\n");
   });
 
+  // The per-request feed of people's answers resolves Dispatch on a deadline a 10 s command would
+  // blow, so it takes only an outcome another call already kept.
+  test("read with commands: kept, never runs: it fails saying so until a run keeps a value, then takes it", () => {
+    const home = tempDir();
+    const env = commandEnvironment(home);
+    const runs = path.join(home, "runs");
+    const file = writeFile(path.join(home, "envoy.json"), {
+      dispatch: { ...dispatchOn, token: `!echo run >> ${runs}; echo kept-secret` },
+    });
+    const resolve = (commands?: "kept") =>
+      dispatchSettings(env, readEnvoyConfig(file, env, { cwd: tempDir() }), { commands });
+
+    expect(resolve("kept")).toEqual({
+      enabled: false,
+      notice: null,
+      error: `${file}: dispatch.token's command has not run in this process yet, and this read does not run it`,
+    });
+    expect(existsSync(runs)).toBe(false);
+    expect(resolve()).toMatchObject({ enabled: true, token: "kept-secret" });
+    expect(resolve("kept")).toMatchObject({ enabled: true, token: "kept-secret" });
+    expect(readFileSync(runs, "utf-8")).toBe("run\n");
+  });
+
+  test("read with commands: kept, takes a kept failure however old, and never runs it again", () => {
+    const home = tempDir();
+    const env = commandEnvironment(home);
+    const runs = path.join(home, "runs");
+    const file = writeFile(path.join(home, "envoy.json"), {
+      dispatch: { ...dispatchOn, token: `!echo run >> ${runs}; exit 3` },
+    });
+    const resolve = (commands?: "kept") =>
+      dispatchSettings(env, readEnvoyConfig(file, env, { cwd: tempDir() }), { commands });
+    const failed: DispatchConfigResolution = {
+      enabled: false,
+      notice: null,
+      error: `${file}: dispatch.token's command exited with status 3`,
+    };
+    const start = Date.now();
+    try {
+      expect(resolve()).toEqual(failed);
+      setSystemTime(new Date(start + 61_000));
+      expect(resolve("kept")).toEqual(failed);
+      expect(readFileSync(runs, "utf-8")).toBe("run\n");
+    } finally {
+      setSystemTime();
+    }
+  });
+
   // A failing natsSeed command turns off only inbound messages: the seed is for NATS alone.
   test("that fails or prints nothing turns off only what it is for, naming the field and the file, never its output", () => {
     const home = tempDir();

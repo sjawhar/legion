@@ -241,6 +241,34 @@ describe("DispatchClient", () => {
     });
   });
 
+  test("reads a session's answers with since and max_chars, and the caller's signal aborts it", async () => {
+    const body = { session_id: "session-1", since: "2026-10-24T00:00:00Z", total: 0, items: [] };
+    const { fetchImpl, requests } = fakeFetch([jsonResponse(body), jsonResponse(body)]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const controller = new AbortController();
+
+    await expect(
+      client.sessionAnswers("session-1", {
+        since: "2026-10-24T00:00:00Z",
+        maxChars: 8000,
+        signal: controller.signal,
+      })
+    ).resolves.toEqual(body);
+    await expect(client.sessionAnswers("session-1")).resolves.toEqual(body);
+
+    expect(
+      requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
+    ).toEqual([
+      "/api/v1/agents/session-1/answers?since=2026-10-24T00%3A00%3A00Z&max_chars=8000",
+      "/api/v1/agents/session-1/answers",
+    ]);
+    const signal = requests[0]?.init.signal;
+    expect(signal?.aborted).toBe(false);
+    controller.abort();
+    expect(signal?.aborted).toBe(true);
+    expect(requests[1]?.init.signal?.aborted).toBe(false);
+  });
+
   test("maps project document and reference routes to authenticated API requests", async () => {
     const { fetchImpl, requests } = fakeFetch(
       Array.from({ length: 14 }, () => jsonResponse({ ok: true }))

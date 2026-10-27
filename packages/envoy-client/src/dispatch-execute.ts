@@ -37,6 +37,7 @@ import type {
   OpenAsk,
   OpenAsksResponse,
   Project,
+  SessionAnswersResponse,
   Suggestions,
   WriteAdvice,
   WriteSuggestion,
@@ -116,6 +117,7 @@ import {
 import { ownerSubscribeLine } from "./dispatch-subscribe";
 import { messageFor } from "./errors";
 import { pageSummaryText, searchAnswer } from "./search-answer";
+import { isNoAnswersRoute, renderSessionAnswersList } from "./session-answers";
 import { formatZodIssues, ToolInputError } from "./tool-input-errors";
 
 /**
@@ -441,6 +443,7 @@ const issueFreeTools: Readonly<Record<string, true>> = {
   dispatch_project: true,
   dispatch_projects: true,
   dispatch_open_asks: true,
+  dispatch_answers: true,
   dispatch_whoami: true,
   dispatch_architecture_sync: true,
 };
@@ -2196,10 +2199,15 @@ function messageSummary({ message, replies }: MessageRead, graph: readonly strin
   ].join("\n");
 }
 
+/** A document's open anchored asks, by id, and its open anchored comment threads: each open
+ *  comment anchored on it, oldest first, with every reply in its thread, oldest first. A reply
+ *  carries no anchor, so Dispatch's document filter never lists it: the owner's whole comment list
+ *  is read, and each reply goes under the root its `reply_to` chain leads to. A Dispatch that
+ *  answers the comment read 404 leaves the asks alone. */
 async function openArtifactMarks(
   client: DispatchClient,
   resolved: ResolvedArtifact
-): Promise<string[]> {
+): Promise<{ readonly asks: readonly string[]; readonly threads: readonly CommentRead[] }> {
   const asksPromise =
     resolved.owner.kind === "project"
       ? client.getArtifactAsks(resolved.artifact.id)
@@ -2207,29 +2215,60 @@ async function openArtifactMarks(
   const commentsPromise =
     resolved.owner.kind === "project"
       ? client.getArtifactComments(resolved.artifact.id)
-      : client.getComments(resolved.issue?.key ?? "", resolved.artifact.id);
+      : client.getComments(resolved.issue?.key ?? "");
   const commentsResultPromise = commentsPromise.then(
     (value) => ({ status: "fulfilled" as const, value }),
     (reason) => ({ status: "rejected" as const, reason })
   );
   // An ask error takes precedence over a comment error. Capture a concurrent comment failure
   // so it is handled without delaying an ask failure.
-  const asks = await asksPromise;
-  const marks = asks
+  const asks = (await asksPromise)
     .filter((ask) => ask.state === "open" && ask.anchor?.artifact_id === resolved.artifact.id)
     .map((ask) => `ask ${ask.id}`);
   const commentsResult = await commentsResultPromise;
   if (commentsResult.status === "rejected") {
-    if (dispatchAnswered(commentsResult.reason, 404)) return marks;
+    if (dispatchAnswered(commentsResult.reason, 404)) return { asks, threads: [] };
     throw commentsResult.reason;
   }
+  const comments = commentsResult.value;
+  const byId = new Map(comments.map((comment) => [comment.id, comment]));
+  const threads = new Map<string, { readonly comment: Comment; readonly replies: Comment[] }>();
+  for (const comment of comments) {
+    if (
+      !comment.reply_to &&
+      !comment.resolved &&
+      comment.anchor?.artifact_id === resolved.artifact.id
+    ) {
+      threads.set(comment.id, { comment, replies: [] });
+    }
+  }
+  for (const reply of comments) {
+    if (!reply.reply_to) continue;
+    // comments.reply_to has no acyclicity constraint, so the walk stops at a row it has seen.
+    const seen = new Set([reply.id]);
+    let root = byId.get(reply.reply_to);
+    while (root?.reply_to && !seen.has(root.id)) {
+      seen.add(root.id);
+      root = byId.get(root.reply_to);
+    }
+    // Only a root (no reply_to) heads a thread, so a walk that ended in a cycle adds nothing.
+    if (root !== undefined) threads.get(root.id)?.replies.push(reply);
+  }
+  return { asks, threads: [...threads.values()] };
+}
+
+/** One open anchored comment thread as `doc-read` prints it after the document: the quote it is
+ *  anchored to (with its position when the record has one), the comment's author, time and full
+ *  body, a suggestion's replacement, then each reply, oldest first, with its full body. */
+function commentThreadLines({ comment, replies }: CommentRead): string[] {
+  const head = (kind: "comment" | "reply", record: Comment): string =>
+    `${kind} ${record.id} · ${actorText(record.author)} · ${record.created_at}${record.edited_at ? ` · edited ${record.edited_at}` : ""}`;
   return [
-    ...marks,
-    ...commentsResult.value
-      .filter(
-        (comment) => !comment.resolved && comment.anchor?.artifact_id === resolved.artifact.id
-      )
-      .map((comment) => `comment ${comment.id}`),
+    ...anchorLines(comment),
+    head("comment", comment),
+    comment.body,
+    ...(comment.suggestion ? [`Suggests: ${comment.suggestion.replace_with}`] : []),
+    ...replies.flatMap((reply) => [head("reply", reply), reply.body]),
   ];
 }
 
@@ -2762,6 +2801,25 @@ export async function executeDispatchTool(
     if (!sessionId) throw new Error("host session id is required for dispatch open-asks");
     const response = await client.openAsks(sessionId);
     return { text: formatOpenAsksSummary(response, linkBase), details: { ...response } };
+  }
+  if (input.tool === "dispatch_answers") {
+    const sessionId = input.sessionId?.trim();
+    if (!sessionId) throw new Error("host session id is required for dispatch answers");
+    let response: SessionAnswersResponse;
+    try {
+      response = await dispatchClient().sessionAnswers(sessionId);
+    } catch (error) {
+      if (isNoAnswersRoute(error)) {
+        throw new Error(
+          `This Dispatch (${configUrl}) has no answers route yet: its build predates INFRA-148.`
+        );
+      }
+      throw error;
+    }
+    return {
+      text: renderSessionAnswersList(response.items, { now: Date.now() }),
+      details: { session: sessionId, since: response.since, total: response.total },
+    };
   }
   if (input.tool === "dispatch_whoami") {
     const sessionId = input.sessionId?.trim();
@@ -3777,14 +3835,25 @@ export async function executeDispatchTool(
       const document = await documentPromise;
       const marksResult = await marksResultPromise;
       if (marksResult.status === "rejected") throw marksResult.reason;
-      const marks = marksResult.value;
+      const { asks, threads } = marksResult.value;
       const approval = approvalLine(resolved.artifact);
+      // A named version is read as it was; the comments listed are always the live document's.
+      const comments =
+        threads.length === 0
+          ? []
+          : [
+              version === undefined
+                ? "Open anchored comments:"
+                : "Open anchored comments (on the live document):",
+              ...threads.flatMap((thread) => ["", ...commentThreadLines(thread)]),
+            ];
       const trailer = [
         ...("token" in document && document.token !== undefined
           ? [`Document token: ${document.token}`]
           : []),
-        ...(marks.length === 0 ? [] : [`Open anchored asks/comments: ${marks.join(", ")}`]),
-        ...(approval === undefined ? [] : [approval]),
+        ...(asks.length === 0 ? [] : [`Open anchored asks: ${asks.join(", ")}`]),
+        ...comments,
+        ...(approval === undefined ? [] : [...(comments.length === 0 ? [] : [""]), approval]),
       ];
       return {
         text:

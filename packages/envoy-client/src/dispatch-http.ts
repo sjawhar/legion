@@ -47,6 +47,7 @@ import type {
   Project,
   ResolveAskInput,
   SearchResponse,
+  SessionAnswersResponse,
   UpdateIssueInput,
   Version,
   WhoamiResponse,
@@ -568,6 +569,32 @@ export class DispatchClient {
     return this.#json("GET", ["api", "v1", "asks", "open"], undefined, { project });
   }
 
+  /** `GET /api/v1/agents/{session_id}/answers`: what people wrote that Dispatch delivered to the
+   *  session since `since` (72 hours ago when unset), newest first. With `maxChars` the server
+   *  stops after the item whose text takes the running sum of text lengths past it, so the body
+   *  stays about that size plus one item. `signal` aborts the request beside the client's own
+   *  deadline, so a caller with a shorter deadline of its own does not leave it running. A server
+   *  older than the route answers 404. */
+  async sessionAnswers(
+    sessionID: string,
+    options: {
+      readonly since?: string;
+      readonly maxChars?: number;
+      readonly signal?: AbortSignal;
+    } = {}
+  ): Promise<SessionAnswersResponse> {
+    return this.#json(
+      "GET",
+      ["api", "v1", "agents", sessionID, "answers"],
+      undefined,
+      {
+        ...(options.since === undefined ? {} : { since: options.since }),
+        ...(options.maxChars === undefined ? {} : { max_chars: options.maxChars }),
+      },
+      options.signal
+    );
+  }
+
   /** `GET /api/v1/agents`: the Envoy listener's live sessions, for naming a session by the
    *  title it is running under rather than the one it stamped on an old write. */
   async listAgents(): Promise<Agent[]> {
@@ -980,17 +1007,20 @@ export class DispatchClient {
     method: string,
     path: readonly string[],
     body?: unknown,
-    query?: object
+    query?: object,
+    signal?: AbortSignal
   ): Promise<T> {
-    return (await this.#jsonAnswer<T>(method, path, body, query)).payload;
+    return (await this.#jsonAnswer<T>(method, path, body, query, signal)).payload;
   }
 
-  /** `#json` with the status Dispatch answered, for a route whose status says what it did. */
+  /** `#json` with the status Dispatch answered, for a route whose status says what it did.
+   *  `signal` aborts this one request beside the client's own signal. */
   async #jsonAnswer<T>(
     method: string,
     path: readonly string[],
     body?: unknown,
-    query?: object
+    query?: object,
+    signal?: AbortSignal
   ): Promise<{ readonly status: number; readonly payload: T }> {
     const headers: Record<string, string> = {
       Accept: "application/json",
@@ -1001,7 +1031,7 @@ export class DispatchClient {
     const response = await this.fetchImpl(url, {
       method,
       headers,
-      signal: this.#signal,
+      signal: signal === undefined ? this.#signal : AbortSignal.any([this.#signal, signal]),
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     return { status: response.status, payload: await this.#response<T>(method, url, response) };

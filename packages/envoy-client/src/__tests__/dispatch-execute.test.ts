@@ -26,6 +26,7 @@ import {
 } from "../dispatch-execute";
 import { DispatchClient } from "../dispatch-http";
 import { followedAsk } from "../dispatch-subscribe";
+import { renderSessionAnswersList } from "../session-answers";
 import { ToolInputError } from "../tool-input-errors";
 import { fakeSearchResponse } from "./fake-search-response";
 
@@ -1987,6 +1988,73 @@ describe("executeDispatchTool", () => {
       code: "SERVICE_UNAVAILABLE",
       status: 503,
     });
+  });
+
+  test("dispatch_answers prints every item of the 72 hours newest first, in full and uncapped", async () => {
+    const requests: string[] = [];
+    const at = (hours: number) => new Date(Date.now() - hours * 3_600_000).toISOString();
+    const items = Array.from({ length: 10 }, (_, index) => ({
+      kind: "message" as const,
+      relation: "sent_you_a_message" as const,
+      id: `m-${index}`,
+      at: at(index + 1),
+      author: { kind: "user" as const, id: "ana@example.com" },
+      text: `${index} ${"w".repeat(1_000)}`,
+      owner: { issue: { key: "DSP-42", title: "Native workspace" } },
+      ref: `dispatch://DSP-42/message/m-${index}`,
+      href: `/issues/DSP-42#message-m-${index}`,
+    }));
+    const since = at(72);
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      return response({ session_id: "session-1", since, total: 10, items });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_answers",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(requests).toEqual(["/api/v1/agents/session-1/answers"]);
+    expect(result.text).toBe(renderSessionAnswersList(items, { now: Date.now() }));
+    expect(result.text.length).toBeGreaterThan(10_000);
+    expect(result.text.split("\n")[0]).toBe(
+      "10 items people wrote to this session in the last 72 hours, newest first, word for word:"
+    );
+    for (const item of items) expect(result.text).toContain(item.text);
+    expect(result.details).toEqual({ session: "session-1", since, total: 10 });
+  });
+
+  test("dispatch_answers against a Dispatch without the route says its build predates INFRA-148", async () => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> =>
+      response(
+        { code: "NOT_FOUND", error: `no route for GET ${new URL(String(url)).pathname}` },
+        404
+      );
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_answers",
+        args: {},
+        cwd: "/workspace",
+        host: "omp",
+        sessionId: "session-1",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).rejects.toThrow(
+      "This Dispatch (http://dispatch.test) has no answers route yet: its build predates INFRA-148."
+    );
   });
 
   test("dispatch_claim claims for the calling session and releases with release: true", async () => {
@@ -4748,8 +4816,76 @@ describe("executeDispatchTool", () => {
     );
   });
 
-  test("reads a named artifact version from a singular dispatch URI", async () => {
+  test("reads a named artifact version from a singular dispatch URI, and lists the live document's open anchored comments in full", async () => {
     const requests: string[] = [];
+    const sami = { kind: "user", id: "sami@example.com" };
+    const comment = (fields: Record<string, unknown>) => ({
+      issue_key: "DSP-42",
+      author: sami,
+      anchor: null,
+      reply_to: null,
+      ask_id: null,
+      turn: null,
+      resolved: false,
+      resolved_by: null,
+      resolved_at: null,
+      edited_at: null,
+      suggestion: null,
+      mentions: [],
+      deliveries: [],
+      ...fields,
+    });
+    // Dispatch lists an issue's comments oldest first; a reply carries no anchor.
+    const comments = [
+      comment({
+        id: "c-resolved",
+        anchor: { artifact_id: "artifact-42", quote: "old text" },
+        resolved: true,
+        body: "Done already.",
+        created_at: "2026-10-27T08:00:00Z",
+      }),
+      comment({
+        id: "c-resolved-reply",
+        reply_to: "c-resolved",
+        body: "Resolved thread reply.",
+        created_at: "2026-10-27T08:10:00Z",
+      }),
+      comment({
+        id: "c-other-doc",
+        anchor: { artifact_id: "artifact-7", quote: "elsewhere" },
+        body: "On another document.",
+        created_at: "2026-10-27T08:30:00Z",
+      }),
+      comment({
+        id: "c-root",
+        anchor: { artifact_id: "artifact-42", quote: "the public API" },
+        body: "Which API do\nyou mean here?",
+        created_at: "2026-10-27T09:00:00Z",
+      }),
+      comment({ id: "c-issue", body: "On the issue itself.", created_at: "2026-10-27T09:05:00Z" }),
+      comment({
+        id: "c-reply-1",
+        author: { kind: "session", id: "ses-impl" },
+        reply_to: "c-root",
+        body: "The REST one.",
+        created_at: "2026-10-27T09:10:00Z",
+      }),
+      comment({
+        id: "c-suggest",
+        anchor: { artifact_id: "artifact-42", quote: "teh" },
+        suggestion: { replace_with: "the", accepted: null },
+        body: "Typo.",
+        created_at: "2026-10-27T09:20:00Z",
+        edited_at: "2026-10-27T09:25:00Z",
+      }),
+      comment({
+        id: "c-reply-2",
+        reply_to: "c-reply-1",
+        body: "Thanks, that settles it.",
+        created_at: "2026-10-27T09:30:00Z",
+        edited_at: "2026-10-27T09:31:00Z",
+      }),
+    ];
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));
       requests.push(target.pathname + target.search);
@@ -4771,7 +4907,7 @@ describe("executeDispatchTool", () => {
       if (target.pathname === "/api/v1/artifacts/artifact-42/versions/3") {
         return response({ markdown: "Version three" });
       }
-      if (target.pathname === "/api/v1/issues/DSP-42/comments") return response([]);
+      if (target.pathname === "/api/v1/issues/DSP-42/comments") return response(comments);
       throw new Error(`unexpected request: ${target.pathname}`);
     };
 
@@ -4787,14 +4923,35 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result).toEqual({
-      text: "Version three\n\nOpen anchored asks/comments: ask ask-1",
+      text: [
+        "Version three",
+        "",
+        "Open anchored asks: ask ask-1",
+        "Open anchored comments (on the live document):",
+        "",
+        "> the public API",
+        "comment c-root · user sami@example.com · 2026-10-27T09:00:00Z",
+        "Which API do",
+        "you mean here?",
+        "reply c-reply-1 · session ses-impl · 2026-10-27T09:10:00Z",
+        "The REST one.",
+        "reply c-reply-2 · user sami@example.com · 2026-10-27T09:30:00Z · edited 2026-10-27T09:31:00Z",
+        "Thanks, that settles it.",
+        "",
+        "> teh",
+        "comment c-suggest · user sami@example.com · 2026-10-27T09:20:00Z · edited 2026-10-27T09:25:00Z",
+        "Typo.",
+        "Suggests: the",
+      ].join("\n"),
       details: { issue: "DSP-42" },
     });
+    expect(result.text).not.toContain("Done already.");
+    expect(result.text).not.toContain("Resolved thread reply.");
     expect(followedAsk(result.details)).toBeNull();
     expect(requests).toEqual([
       "/api/v1/issues/DSP-42",
       "/api/v1/artifacts/artifact-42/versions/3",
-      "/api/v1/issues/DSP-42/comments?artifact=artifact-42",
+      "/api/v1/issues/DSP-42/comments",
     ]);
   });
 
@@ -4983,6 +5140,97 @@ describe("executeDispatchTool", () => {
       text: "# Notes\n\nDocument token: sha256:notes",
       details: { project: "CORE", document: "CORE/notes" },
     });
+  });
+
+  test("dispatch_doc_read of a live project document lists each open anchored comment under its quote, after the token", async () => {
+    const notes = {
+      id: "artifact-42",
+      issue_key: null,
+      project: "CORE",
+      ref_key: "CORE/notes",
+      slug: "notes",
+      name: "notes.md",
+      kind: "doc",
+      primary: false,
+      created_by: { kind: "session", id: "session-1" },
+      created_at: "2026-09-18T00:00:00Z",
+      versions: [],
+    };
+    const base = {
+      issue_key: null,
+      artifact_id: "artifact-42",
+      author: { kind: "user", id: "ana@example.com" },
+      ask_id: null,
+      turn: null,
+      resolved: false,
+      resolved_by: null,
+      resolved_at: null,
+      edited_at: null,
+      suggestion: null,
+      mentions: [],
+      deliveries: [],
+    };
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/projects/CORE/artifacts/notes") return response(notes);
+      if (target.pathname === "/api/v1/projects/CORE/artifacts") return response([notes]);
+      if (target.pathname === "/api/v1/artifacts/artifact-42/text") {
+        return response({ markdown: "# Notes\n\nShip on Friday.", version: 2, token: "sha256:n" });
+      }
+      if (target.pathname === "/api/v1/artifacts/artifact-42/asks") return response([]);
+      if (target.pathname === "/api/v1/artifacts/artifact-42/comments") {
+        return response([
+          {
+            ...base,
+            id: "c-1",
+            anchor: { artifact_id: "artifact-42", quote: "Ship on Friday." },
+            anchor_block: { path: [{ type: "paragraph", index: 1 }] },
+            reply_to: null,
+            body: `Friday is a freeze day.\n\n${"Full words, never cut. ".repeat(20)}`,
+            created_at: "2026-10-27T09:00:00Z",
+          },
+          {
+            ...base,
+            id: "c-2",
+            author: { kind: "session", id: "ses-writer" },
+            anchor: null,
+            reply_to: "c-1",
+            body: "Moving it to Monday.",
+            created_at: "2026-10-27T09:05:00Z",
+          },
+        ]);
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_read",
+      args: { project: "CORE", artifact: "notes" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toBe(
+      [
+        "# Notes",
+        "",
+        "Ship on Friday.",
+        "",
+        "Document token: sha256:n",
+        "Open anchored comments:",
+        "",
+        "> Ship on Friday.",
+        "Position: paragraph[1]",
+        "comment c-1 · user ana@example.com · 2026-10-27T09:00:00Z",
+        `Friday is a freeze day.\n\n${"Full words, never cut. ".repeat(20)}`,
+        "reply c-2 · session ses-writer · 2026-10-27T09:05:00Z",
+        "Moving it to Monday.",
+      ].join("\n")
+    );
   });
   test("rejects a plural artifact Dispatch URI", async () => {
     const fetchImpl = (() => {

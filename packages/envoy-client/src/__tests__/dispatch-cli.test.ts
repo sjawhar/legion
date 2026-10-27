@@ -331,6 +331,13 @@ const server = Bun.serve({
       });
     }
     if (pathname === "/v1/interests/ses-1") return interests();
+    // A Dispatch build older than INFRA-148, which has no answers route.
+    if (pathname.endsWith("/answers")) {
+      return Response.json(
+        { code: "NOT_FOUND", error: `no route for ${request.method} ${pathname}` },
+        { status: 404 }
+      );
+    }
     return Response.json({ error: `unexpected ${request.method} ${pathname}` }, { status: 500 });
   },
 });
@@ -427,6 +434,15 @@ describe("the dispatch CLI", () => {
     expect(code).toBe(2);
     expect(stdout).toContain("DISPATCH_SESSION_ID");
     expect(requests).toEqual([]);
+  });
+
+  test("answers against a Dispatch without the route says its build predates INFRA-148, exit 1", async () => {
+    const { code, stdout } = await run(["answers"], omp);
+    expect(code).toBe(1);
+    expect(stdout).toBe(
+      `This Dispatch (http://127.0.0.1:${server.port}) has no answers route yet: its build predates INFRA-148.\n`
+    );
+    expect(requests.map((request) => request.path)).toEqual(["/api/v1/agents/ses-1/answers"]);
   });
 
   test("an unknown flag is refused in command syntax, with an example", async () => {

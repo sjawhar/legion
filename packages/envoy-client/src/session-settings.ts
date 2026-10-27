@@ -4,6 +4,7 @@ import {
   dispatchSettings,
 } from "./dispatch-config";
 import {
+  type CommandMode,
   type EnvoyConfig,
   type EnvoyHarness,
   envoyConfigPath,
@@ -144,17 +145,20 @@ export interface SessionDispatch {
 /** Dispatch from `file`, read now: for a command, which resolves it once, and for a plugin that
  * resolves it on every use rather than once at its start. A file whose location could not be
  * worked out turns Dispatch off with that error. `activeDispatchSettings` turns its `dispatch` into
- * the configuration a caller uses, or null, or a throw. */
+ * the configuration a caller uses, or null, or a throw. `commands: "kept"` never runs a `!` token
+ * command: it takes the outcome one of the session's other Dispatch calls already kept in this
+ * process, and with none Dispatch reads as off with an error saying so (`dispatchSettings`), for a
+ * caller on a deadline such as the per-request feed of people's answers. */
 export function sessionDispatchSettings(
   file: SessionConfigFile,
   env: DispatchEnvironment,
-  options: { readonly cwd: string }
+  options: { readonly cwd: string; readonly commands?: CommandMode | undefined }
 ): SessionDispatch {
   if (file.path === null)
     return { dispatch: offWithError(file.error), warnings: [], missing: null };
   const config = readEnvoyConfig(file.path, env, options);
   return {
-    dispatch: dispatchSettings(env, config),
+    dispatch: dispatchSettings(env, config, { commands: options.commands }),
     warnings: config.kind === "read" ? config.warnings : [],
     missing: config.kind === "read" ? config.missing : null,
   };

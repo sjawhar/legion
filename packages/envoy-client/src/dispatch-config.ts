@@ -1,6 +1,7 @@
 import { type BearerSource, bearerSource, type FileBearer, fileBearer } from "./bearer";
 import {
   type CheckoutEnvoyConfig,
+  type CommandMode,
   type EnvoyConfig,
   type EnvoyConfigEnvironment,
   httpUrl,
@@ -111,13 +112,16 @@ function writtenToken(
  * `DISPATCH_TOKEN` or `DISPATCH_TOKEN_FILE`. A checkout's server with its own token points the
  * session at that server as that token's holder, whichever server it is, the user's own included;
  * what a checkout cannot do is take the user's token, or a variable's, anywhere. A checkout's `!`
- * token is refused; the chosen file's runs here, only once Dispatch is about to use it. Dispatch is
- * on only when both URL and bearer token resolve; off, it says why: a `notice` when nothing names
- * it or a file turns it off, an `error` otherwise.
+ * token is refused; the chosen file's runs here, only once Dispatch is about to use it, unless
+ * `options.commands` is `kept`: then only an outcome a run already kept in this process answers,
+ * and with none Dispatch is off with an error saying the command has not run (`fileValue`).
+ * Dispatch is on only when both URL and bearer token resolve; off, it says why: a `notice` when
+ * nothing names it or a file turns it off, an `error` otherwise.
  */
 export function dispatchSettings(
   env: DispatchEnvironment,
-  config: EnvoyConfig
+  config: EnvoyConfig,
+  options: { readonly commands?: CommandMode | undefined } = {}
 ): DispatchConfigResolution {
   if (config.kind === "failed") return offWithError(config.error);
   const explicitUrl = nonEmpty(env.DISPATCH_URL);
@@ -169,7 +173,9 @@ export function dispatchSettings(
       (source.kind === "file" ? source.server : (own.serverUrl ?? DEFAULT_SERVER_URL))
     ).replace(/\/+$/, "");
     const token =
-      source.kind === "variable" ? source.token : fileBearer(source, url, "DISPATCH", env);
+      source.kind === "variable"
+        ? source.token
+        : fileBearer(source, url, "DISPATCH", env, options.commands);
     // An http(s) URL the URL parser takes whose port, when it names one, is from 1 to 65535. The
     // daemon accepts at load only values taken here, under a narrower rule (its CheckPod and this
     // read hold to packages/contracts/fixtures/dispatch-public-url.json).

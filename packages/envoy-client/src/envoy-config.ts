@@ -403,6 +403,11 @@ function runCommand(command: string, env: EnvoyConfigEnvironment, cwd: string): 
   }
 }
 
+/** Whether reading a `!` value may run its command: `run`, as every read does by default, or
+ * `kept`, which only takes the outcome a run already kept in this process and never runs one, for a
+ * caller on a deadline that a 10 s command would blow (the per-request feed of people's answers). */
+export type CommandMode = "run" | "kept";
+
 /**
  * A value from the chosen file: as written, or, for one starting with `!`, its command's trimmed
  * stdout. The command runs under `/bin/sh -c` with `env`, in the directory of the file that names
@@ -416,12 +421,16 @@ function runCommand(command: string, env: EnvoyConfigEnvironment, cwd: string): 
  * timeout or empty output throws naming the field and the file. A value with whitespace or a
  * control character inside it, as written or as printed, throws too, since it cannot be sent as one
  * bearer. No error carries the value or either stream.
+ *
+ * With `commands: "kept"` the command never runs: the kept outcome answers, a kept failure throws
+ * as above however old it is, and a command with no kept outcome throws saying it has not run.
  */
 export function fileValue(
   value: string,
   field: string,
   filePath: string,
-  env: EnvoyConfigEnvironment
+  env: EnvoyConfigEnvironment,
+  commands: CommandMode = "run"
 ): string {
   if (!value.startsWith("!")) {
     if (!sendable(value)) {
@@ -433,7 +442,13 @@ export function fileValue(
   const cwd = path.dirname(path.resolve(filePath));
   const key = JSON.stringify([command, filePath, cwd]);
   let outcome = commandOutcomes.get(key);
-  if (
+  if (commands === "kept") {
+    if (outcome === undefined) {
+      throw new Error(
+        `${filePath}: ${field}'s command has not run in this process yet, and this read does not run it`
+      );
+    }
+  } else if (
     outcome === undefined ||
     ("failure" in outcome && !outcome.timedOut && Date.now() - outcome.at >= FAILURE_KEPT_MS)
   ) {

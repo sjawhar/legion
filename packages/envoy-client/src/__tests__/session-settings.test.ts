@@ -331,6 +331,30 @@ describe("sessionDispatchSettings", () => {
       missing: { link: null },
     });
   });
+
+  test("commands: kept never runs a token command, and takes the value a run kept", () => {
+    const home = tempDir();
+    const runs = path.join(home, "runs");
+    const file = writeFile(path.join(home, "envoy.json"), {
+      dispatch: { ...dispatchOn, token: `!echo run >> ${runs}; echo kept-token` },
+    });
+    const chosen = { path: file, error: null } as const;
+    const env = { HOME: home, PATH: process.env.PATH };
+    expect(
+      sessionDispatchSettings(chosen, env, { cwd: tempDir(), commands: "kept" }).dispatch
+    ).toEqual({
+      enabled: false,
+      notice: null,
+      error: `${file}: dispatch.token's command has not run in this process yet, and this read does not run it`,
+    });
+    expect(existsSync(runs)).toBe(false);
+    expect(sessionDispatchSettings(chosen, env, { cwd: tempDir() }).dispatch).toMatchObject({
+      token: "kept-token",
+    });
+    expect(
+      sessionDispatchSettings(chosen, env, { cwd: tempDir(), commands: "kept" }).dispatch
+    ).toMatchObject({ enabled: true, token: "kept-token" });
+  });
 });
 
 describe("handedConfigFile", () => {
