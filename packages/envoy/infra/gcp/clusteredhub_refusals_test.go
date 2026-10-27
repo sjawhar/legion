@@ -52,6 +52,11 @@ func listener(a *gcp.ClusteredNatsHubArgs) *gcp.ClusteredHubListenerArgs { retur
 func TestClusteredNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 	type A = gcp.ClusteredNatsHubArgs
 	str := pulumi.StringRef
+	// limit is INFRA-546's streamMaxBytes, for the sizing rows.
+	limit := func(a *A) *A {
+		a.StreamMaxBytes = pulumi.IntRef(infra546StreamMaxBytes)
+		return a
+	}
 	requireClusteredRefusals(t, []clusteredRefusal{
 		{"no kubeconfig", func(a *A) { a.Kubeconfig = nil }, "kubeconfig", []string{"kubeconfig is required"}},
 
@@ -86,6 +91,17 @@ func TestClusteredNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 		{"diskSizeGb 0", func(a *A) { a.DiskSizeGb = pulumi.IntRef(0) }, "diskSizeGb", []string{"diskSizeGb 0 must be above maxFileStoreGb 1"}},
 		{"diskSizeGb at an explicit store", func(a *A) { a.DiskSizeGb, a.MaxFileStoreGb = pulumi.IntRef(5), pulumi.IntRef(5) }, "maxFileStoreGb",
 			[]string{"maxFileStoreGb 5 must be below diskSizeGb 5"}},
+		// INFRA-546's limit needs S = 46.1 GiB of store and F ≈ 4.31 GiB (4409.4 MiB) of memory
+		// (TestClusteredNatsHubSizingFollowsStreamMaxBytes, whose acceptance rows at 47, 4410Mi
+		// and 4.5Gi these rows bound).
+		{"maxFileStoreGb below S", func(a *A) { limit(a).MaxFileStoreGb = pulumi.IntRef(46) }, "maxFileStoreGb",
+			[]string{"maxFileStoreGb 46 is below the 46.1 GiB that streamMaxBytes 44023414784 needs", "leave it unset for 47"}},
+		{"diskSizeGb at the store streamMaxBytes needs", func(a *A) { limit(a).DiskSizeGb = pulumi.IntRef(47) }, "diskSizeGb",
+			[]string{"diskSizeGb 47 must be above maxFileStoreGb 47, its default for streamMaxBytes 44023414784"}},
+		{"natsMemory 4Gi below F", func(a *A) { limit(a).NatsMemory = str("4Gi") }, "natsMemory",
+			[]string{`natsMemory "4Gi" is below the 4.31 GiB that streamMaxBytes 44023414784 needs`, "21170387 messages", "172.9 B each", "leave it unset for 5Gi"}},
+		{"natsMemory a MiB below F", func(a *A) { limit(a).NatsMemory = str("4409Mi") }, "natsMemory",
+			[]string{`natsMemory "4409Mi" is below the 4.31 GiB that streamMaxBytes 44023414784 needs`}},
 
 		{"an empty storage class", func(a *A) { a.StorageClassName = str("") }, "storageClassName", []string{"storageClassName"}},
 		{"a storage class with an underscore", func(a *A) { a.StorageClassName = str("premium_rwo") }, "storageClassName", []string{`storageClassName "premium_rwo"`}},

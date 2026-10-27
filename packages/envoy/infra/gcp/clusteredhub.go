@@ -3,6 +3,8 @@ package gcp
 import (
 	"errors"
 	"fmt"
+	"math"
+	"math/big"
 	"regexp"
 	"strings"
 
@@ -27,9 +29,11 @@ const (
 	// JetStream keeps of a stream there: it refuses a stream with more replicas than servers.
 	clusteredHubServers = 3
 
-	defaultClusteredHubDiskSizeGb      = 10
-	defaultClusteredHubNatsCPU         = "1"
-	defaultClusteredHubNatsMemory      = "2Gi"
+	defaultClusteredHubDiskSizeGb = 10
+	defaultClusteredHubNatsCPU    = "1"
+	// defaultClusteredHubNatsMemoryGi is nats-server's memory in Gi without streamMaxBytes, and
+	// the least its default is with it.
+	defaultClusteredHubNatsMemoryGi    = 2
 	defaultClusteredHubTailnetReplicas = 2
 	// minClusteredHubTailnetReplicas is the fewest tailnet hosts the hub runs: with one, every
 	// drain of its node takes the hub off the tailnet.
@@ -47,6 +51,41 @@ const (
 	clusteredHubReloaderMemory = "64Mi"
 	clusteredHubExporterCPU    = "50m"
 	clusteredHubExporterMemory = "128Mi"
+)
+
+// The sizes INFRA-546 measured for the session listener's notification stream, from which the hub
+// sizes JetStream's file store and nats-server's memory for a given streamMaxBytes (hubSizing):
+// sjawhar/legion#2362's description, section "Sizing of ENVOY_STREAM_MAX_BYTES", over the window
+// 2026-10-27 02:35:54Z to 03:55:54Z.
+var (
+	// clusteredHubMeanMessageBytes is a stored message's mean size, B / M: 16,823 B/s of stored
+	// bytes over 8.09 messages/s, kept exact as 1682300/809 bytes.
+	clusteredHubMeanMessageBytes = big.NewRat(1682300, 809)
+	// clusteredHubMessageIDBytes is the heap nats-server holds per retained message carrying a
+	// Nats-Msg-Id, its entry in the stream's duplicate map: 172.9 B (nats-server v2.10.29, 100,000
+	// messages in-process).
+	clusteredHubMessageIDBytes = big.NewRat(1729, 10)
+	// clusteredHubKVBytes is the KV buckets' budget in the file store: 1 GiB (the live session
+	// registry is 460 KB for 487 sessions).
+	clusteredHubKVBytes = new(big.Rat).SetInt64(1 << 30)
+	// clusteredHubRaftHeadroom is the Raft log's headroom in the file store, as a fraction of the
+	// byte limit: 10%.
+	clusteredHubRaftHeadroom = big.NewRat(1, 10)
+)
+
+var (
+	// clusteredHubIdleMemory is nats-server's own memory beside the duplicate map: 38,486,016 B,
+	// nats-server v2.15.1's resident memory (/varz mem) after a three-server JetStream cluster
+	// formed on loopback with a meta leader, the largest of the three, measured 2026-10-27 by
+	// INFRA-549's implementer.
+	clusteredHubIdleMemory = new(big.Rat).SetInt64(38486016)
+	// clusteredHubGoMemLimitFraction is nats-server's GOMEMLIMIT as a fraction of its container's
+	// memory limit: 80%, as the nats chart 2.15.1's README recommends ("NATS Container Resources",
+	// README.md lines 120-148). Without GOMEMLIMIT the Go runtime lets the heap grow to about twice
+	// its live size before it collects (GOGC=100), so a live duplicate map of 3.4 GiB could reach
+	// the limit and the container be OOM-killed; with it, the runtime collects before the heap
+	// reaches the limit, and the memory floor (hubSizing) is the live heap over this fraction.
+	clusteredHubGoMemLimitFraction = big.NewRat(4, 5)
 )
 
 // dns1035LabelRule is a DNS-1035 label's shape, the one a Kubernetes Service's name takes: a
@@ -93,17 +132,22 @@ type ClusteredNatsHubArgs struct {
 	// the variable is unset.
 	NatsReplicas *int `pulumi:"natsReplicas,optional"`
 	// The byte limit of the session listener's notification stream, ENVOY_STREAM_MAX_BYTES, at
-	// least 1. Unset, the variable is unset.
+	// least 1. Unset, the variable is unset. Set, it sizes maxFileStoreGb, diskSizeGb and
+	// natsMemory: their defaults and the least maxFileStoreGb and natsMemory may be (hubSizing).
 	StreamMaxBytes *int `pulumi:"streamMaxBytes,optional"`
-	// JetStream's max_file_store in whole GiB, below diskSizeGb: ⌊0.9 × diskSizeGb⌋ (at least 1)
-	// by default.
+	// JetStream's max_file_store in whole GiB, below diskSizeGb. With streamMaxBytes, at least S,
+	// the stream at that limit, the KV buckets' 1 GiB and the Raft log's 10% of the limit, in GiB,
+	// and ⌈S⌉ by default; without it, ⌊0.9 × diskSizeGb⌋ (at least 1) by default.
 	MaxFileStoreGb *int `pulumi:"maxFileStoreGb,optional"`
-	// Each pod's volume size in whole GiB, above maxFileStoreGb: 10 by default.
+	// Each pod's volume size in whole GiB, above maxFileStoreGb. With streamMaxBytes,
+	// ⌈maxFileStoreGb / 0.9⌉ and at least maxFileStoreGb + 1 by default; without it, 10.
 	DiskSizeGb *int `pulumi:"diskSizeGb,optional"`
 	// The volumes' StorageClass; the cluster's default class when unset.
 	StorageClassName *string `pulumi:"storageClassName,optional"`
 	// nats-server's container size, a Kubernetes quantity each, set as both its request and its
-	// limit: 1 CPU and 2Gi by default.
+	// limit: 1 CPU and 2Gi by default. With streamMaxBytes, natsMemory is at least the memory the
+	// stream's duplicate window needs at that limit, beside nats-server's idle memory, under its
+	// GOMEMLIMIT (hubSizing), and by default that rounded up to a whole Gi, never below 2Gi.
 	NatsCpu    *string `pulumi:"natsCpu,optional"`
 	NatsMemory *string `pulumi:"natsMemory,optional"`
 	// The name of an existing PriorityClass every pod of the component names; none when unset.
@@ -204,11 +248,11 @@ type clusteredHubSettings struct {
 	tailnet     *clusteredHubTailnet
 }
 
-// clusteredHubSize is each hub pod's volume, JetStream's file store within it, and nats-server's
-// container size.
+// clusteredHubSize is each hub pod's volume, JetStream's file store within it, nats-server's
+// container size, and the GOMEMLIMIT it runs under (clusteredHubGoMemLimit).
 type clusteredHubSize struct {
-	diskSizeGb, maxFileStoreGb int
-	natsCPU, natsMemory        string
+	diskSizeGb, maxFileStoreGb      int
+	natsCPU, natsMemory, goMemLimit string
 }
 
 // clusteredHubTailnet is the resolved tailnet entry, nil without tailnet.
@@ -398,37 +442,128 @@ func newClusteredHubSettings(args *ClusteredNatsHubArgs) (clusteredHubSettings, 
 }
 
 // hubSizing resolves each hub pod's volume (diskSizeGb), JetStream's file store within it
-// (maxFileStoreGb) and nats-server's container size (natsCpu, natsMemory). The file store stays
-// below the volume, which the filesystem's own overhead takes part of; with diskSizeGb alone, it
-// is ⌊0.9 × diskSizeGb⌋ and at least 1. A store at or above the volume is refused naming both
-// inputs: maxFileStoreGb when it was given, diskSizeGb when the store is its default. The
-// container's size is refused where Autopilot would not run the pod as rendered (clusteredHubPod).
+// (maxFileStoreGb), nats-server's container size (natsCpu, natsMemory) and its GOMEMLIMIT. The
+// file store stays below the volume, which the filesystem's own overhead takes part of. A store at
+// or above the volume is refused naming both inputs: maxFileStoreGb when it was given, diskSizeGb
+// when the store is its default. The container's size is refused where Autopilot would not run
+// the pod as rendered (clusteredHubPod).
+//
+// Without streamMaxBytes, the volume is 10 GiB, the store ⌊0.9 × diskSizeGb⌋ and at least 1, and
+// nats-server's memory 2Gi. With streamMaxBytes, which newClusteredHubSettings has checked is at
+// least 1, the sizes follow INFRA-546's measurement:
+//   - the store holds S (clusteredHubStoreBytes), the stream at its limit, the KV buckets' budget
+//     and the Raft log's headroom: ⌈S⌉ GiB by default, and an explicit maxFileStoreGb below S is
+//     refused naming it and streamMaxBytes, since JetStream refuses to create a stream past
+//     max_file_store;
+//   - the volume is ⌈maxFileStoreGb / 0.9⌉ GiB by default, and at least maxFileStoreGb + 1;
+//   - nats-server's memory holds F (clusteredHubMemoryFloor), the duplicate window's message ids
+//     at the limit and the server's idle memory under its GOMEMLIMIT: ⌈F⌉ in whole Gi by default,
+//     never below 2Gi, and an explicit natsMemory below F is refused naming it and
+//     streamMaxBytes.
 func hubSizing(args *ClusteredNatsHubArgs) (clusteredHubSize, error) {
+	defaultMemoryGi := int64(defaultClusteredHubNatsMemoryGi)
+	var storeGiB, memoryFloor *big.Rat // S in GiB and F in bytes; nil without streamMaxBytes
+	var storeGb int                    // ⌈S⌉
+	if args.StreamMaxBytes != nil {
+		limit := new(big.Rat).SetInt64(int64(*args.StreamMaxBytes))
+		storeGiB = new(big.Rat).Quo(clusteredHubStoreBytes(limit), gibibyte)
+		storeGb = int(ceilRat(storeGiB).Int64())
+		memoryFloor = clusteredHubMemoryFloor(limit)
+		defaultMemoryGi = max(defaultMemoryGi, ceilRat(new(big.Rat).Quo(memoryFloor, gibibyte)).Int64())
+	}
 	size := clusteredHubSize{diskSizeGb: defaultClusteredHubDiskSizeGb}
 	if args.DiskSizeGb != nil {
 		size.diskSizeGb = *args.DiskSizeGb
 	}
-	if args.MaxFileStoreGb != nil {
+	storeDefault := "its default for this volume"
+	switch {
+	case args.MaxFileStoreGb != nil:
 		size.maxFileStoreGb = *args.MaxFileStoreGb
 		if size.maxFileStoreGb < 1 {
 			return clusteredHubSize{}, core.InputErrorf("maxFileStoreGb", "maxFileStoreGb %d must be at least 1", size.maxFileStoreGb)
 		}
-		if size.maxFileStoreGb >= size.diskSizeGb {
+		if storeGiB != nil && new(big.Rat).SetInt64(int64(size.maxFileStoreGb)).Cmp(storeGiB) < 0 {
+			return clusteredHubSize{}, core.InputErrorf("maxFileStoreGb", "maxFileStoreGb %d is below the %s GiB that streamMaxBytes %d needs: the stream at that limit, the KV buckets' 1 GiB and the Raft log's 10%% of the limit, and JetStream refuses to create a stream past max_file_store; leave it unset for %d",
+				size.maxFileStoreGb, ceilDecimals(storeGiB, 1), *args.StreamMaxBytes, storeGb)
+		}
+	case storeGiB != nil:
+		size.maxFileStoreGb = storeGb
+		storeDefault = fmt.Sprintf("its default for streamMaxBytes %d", *args.StreamMaxBytes)
+	default:
+		size.maxFileStoreGb = max(1, ninetyPercent(size.diskSizeGb))
+	}
+	if storeGiB != nil && args.DiskSizeGb == nil {
+		var ok bool
+		if size.diskSizeGb, ok = tenNinths(size.maxFileStoreGb); !ok {
+			return clusteredHubSize{}, core.InputErrorf("maxFileStoreGb", "maxFileStoreGb %d leaves no int for diskSizeGb's default, ⌈maxFileStoreGb / 0.9⌉", size.maxFileStoreGb)
+		}
+	}
+	if size.maxFileStoreGb >= size.diskSizeGb {
+		if args.MaxFileStoreGb != nil {
 			return clusteredHubSize{}, core.InputErrorf("maxFileStoreGb", "maxFileStoreGb %d must be below diskSizeGb %d: the filesystem takes part of the volume, so a store as large as the volume fills it before JetStream's limit holds",
 				size.maxFileStoreGb, size.diskSizeGb)
 		}
-	} else {
-		size.maxFileStoreGb = max(1, ninetyPercent(size.diskSizeGb))
-		if size.diskSizeGb <= size.maxFileStoreGb {
-			return clusteredHubSize{}, core.InputErrorf("diskSizeGb", "diskSizeGb %d must be above maxFileStoreGb %d, its default for this volume: the filesystem takes part of the volume, so a store as large as the volume fills it before JetStream's limit holds",
-				size.diskSizeGb, size.maxFileStoreGb)
-		}
+		return clusteredHubSize{}, core.InputErrorf("diskSizeGb", "diskSizeGb %d must be above maxFileStoreGb %d, %s: the filesystem takes part of the volume, so a store as large as the volume fills it before JetStream's limit holds",
+			size.diskSizeGb, size.maxFileStoreGb, storeDefault)
 	}
 	var err error
-	if size.natsCPU, size.natsMemory, err = clusteredHubPod(args); err != nil {
+	if size.natsCPU, size.natsMemory, err = clusteredHubPod(args, fmt.Sprintf("%dGi", defaultMemoryGi)); err != nil {
 		return clusteredHubSize{}, err
 	}
+	memory, _ := quantityValue(size.natsMemory) // a quantity: autopilotPodSize has read it
+	if memoryFloor != nil && memory.Cmp(memoryFloor) < 0 {
+		messages := new(big.Rat).Quo(new(big.Rat).SetInt64(int64(*args.StreamMaxBytes)), clusteredHubMeanMessageBytes)
+		return clusteredHubSize{}, core.InputErrorf("natsMemory", "natsMemory %q is below the %s GiB that streamMaxBytes %d needs: nats-server holds the id of each of the stream's %s messages at that limit for its duplicate window, %s B each, beside its idle memory, and runs with GOMEMLIMIT at 80%% of natsMemory; leave it unset for %dGi",
+			size.natsMemory, ceilDecimals(new(big.Rat).Quo(memoryFloor, gibibyte), 2), *args.StreamMaxBytes,
+			messages.FloatString(0), clusteredHubMessageIDBytes.FloatString(1), defaultMemoryGi)
+	}
+	size.goMemLimit = clusteredHubGoMemLimit(memory)
 	return size, nil
+}
+
+// clusteredHubStoreBytes is S, the file store a stream of byte limit limit needs, in bytes: the
+// limit, the KV buckets' budget and the Raft log's headroom on the limit.
+func clusteredHubStoreBytes(limit *big.Rat) *big.Rat {
+	store := new(big.Rat).Mul(limit, clusteredHubRaftHeadroom)
+	return store.Add(store, limit).Add(store, clusteredHubKVBytes)
+}
+
+// clusteredHubMemoryFloor is F, the least memory nats-server's container takes for a stream of
+// byte limit limit, in bytes: the stream's message count at the limit (limit over the mean stored
+// message size) times the heap each retained message id takes in the duplicate map, plus the
+// server's idle memory, over the GOMEMLIMIT fraction, so that heap fits under GOMEMLIMIT.
+func clusteredHubMemoryFloor(limit *big.Rat) *big.Rat {
+	floor := new(big.Rat).Quo(limit, clusteredHubMeanMessageBytes)
+	floor.Mul(floor, clusteredHubMessageIDBytes).Add(floor, clusteredHubIdleMemory)
+	return floor.Quo(floor, clusteredHubGoMemLimitFraction)
+}
+
+// clusteredHubGoMemLimit is nats-server's GOMEMLIMIT for a container memory limit of memory
+// bytes: ⌊80% of memory⌋ in whole MiB, written with the MiB suffix Go's runtime reads.
+func clusteredHubGoMemLimit(memory *big.Rat) string {
+	limit := new(big.Rat).Mul(memory, clusteredHubGoMemLimitFraction)
+	limit.Quo(limit, new(big.Rat).SetInt64(1<<20))
+	return new(big.Int).Quo(limit.Num(), limit.Denom()).String() + "MiB"
+}
+
+// gibibyte is 1 GiB in bytes.
+var gibibyte = new(big.Rat).SetInt64(1 << 30)
+
+// ceilRat is ⌈r⌉ for r ≥ 0.
+func ceilRat(r *big.Rat) *big.Int {
+	q, m := new(big.Int).QuoRem(r.Num(), r.Denom(), new(big.Int))
+	if m.Sign() > 0 {
+		q.Add(q, big.NewInt(1))
+	}
+	return q
+}
+
+// ceilDecimals writes r ≥ 0 rounded up to decimals places, so a least size a refusal quotes is
+// never below the size it stands for.
+func ceilDecimals(r *big.Rat, decimals int) string {
+	scale := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
+	scaled := ceilRat(new(big.Rat).Mul(r, new(big.Rat).SetInt(scale)))
+	return new(big.Rat).SetFrac(scaled, scale).FloatString(decimals)
 }
 
 // ninetyPercent is ⌊0.9 × n⌋ for n ≥ 0, n − ⌈n / 10⌉, computed without overflow. A negative n gives
@@ -441,15 +576,28 @@ func ninetyPercent(n int) int {
 	return n - tenth
 }
 
-// clusteredHubPod resolves natsCpu and natsMemory, nats-server's request and limit, and refuses a
-// size at which Autopilot would not run the hub pod as rendered, with the reloader's and the
-// exporter's fixed sizes beside it (autopilotPodSize).
-func clusteredHubPod(args *ClusteredNatsHubArgs) (cpu, memory string, err error) {
+// tenNinths is ⌈n / 0.9⌉ for n ≥ 1, n + ⌈n / 9⌉, and so at least n + 1: false when it exceeds an
+// int.
+func tenNinths(n int) (int, bool) {
+	ninth := n / 9
+	if n%9 > 0 {
+		ninth++
+	}
+	if n > math.MaxInt-ninth {
+		return 0, false
+	}
+	return n + ninth, true
+}
+
+// clusteredHubPod resolves natsCpu and natsMemory, nats-server's request and limit, natsMemory
+// defaultMemory when unset, and refuses a size at which Autopilot would not run the hub pod as
+// rendered, with the reloader's and the exporter's fixed sizes beside it (autopilotPodSize).
+func clusteredHubPod(args *ClusteredNatsHubArgs, defaultMemory string) (cpu, memory string, err error) {
 	return autopilotPodSize(autopilotPod{
 		name:     "the hub pod",
 		cpuInput: "natsCpu", memoryInput: "natsMemory",
 		cpu: args.NatsCpu, memory: args.NatsMemory,
-		defaultCPU: defaultClusteredHubNatsCPU, defaultMemory: defaultClusteredHubNatsMemory,
+		defaultCPU: defaultClusteredHubNatsCPU, defaultMemory: defaultMemory,
 		memoryExamples: "2Gi or 4096Mi",
 		sidecars: []autopilotSidecar{
 			{name: "the reloader", cpu: clusteredHubReloaderCPU, memory: clusteredHubReloaderMemory},

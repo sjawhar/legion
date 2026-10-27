@@ -124,9 +124,9 @@ func clusteredResources(cpu, memory string) map[string]any {
 // wantChartValues is the chart's values for clusteredArgs, given no storage class, no priority
 // class and its session user: three clustered servers that advertise no pod address, JetStream
 // on a 10Gi claim holding at most 9Gi, no memory store, monitoring on 8222, auth.conf included
-// and held in the chart's ConfigMap, the three images by digest, the sizes, the client Service
-// with the nats port alone, one server per zone, the session user's key on the pods, the
-// budget, and no nats-box.
+// and held in the chart's ConfigMap, the three images by digest, the sizes, nats-server's
+// GOMEMLIMIT at 80% of its 2Gi (⌊1638.4⌋ MiB), the client Service with the nats port alone, one
+// server per zone, the session user's key on the pods, the budget, and no nats-box.
 func wantChartValues(authConf string) map[string]any {
 	ports := map[string]any{}
 	for _, port := range []string{"nats", "leafnodes", "websocket", "mqtt", "cluster", "gateway", "monitor", "profiling"} {
@@ -149,6 +149,7 @@ func wantChartValues(authConf string) map[string]any {
 		"container": map[string]any{
 			"image":     map[string]any{"fullImageName": natsImage},
 			"resources": clusteredResources("1", "2Gi"),
+			"env":       map[string]any{"GOMEMLIMIT": "1638MiB"},
 		},
 		"reloader": map[string]any{
 			"image": map[string]any{"fullImageName": reloaderImage},
@@ -185,8 +186,9 @@ func TestClusteredNatsHubChartValues(t *testing.T) {
 }
 
 // storageClassName names the claims' class, beside their size, and the sizes follow diskSizeGb,
-// maxFileStoreGb, natsCpu and natsMemory; unset, the claim names no class (the cluster's
-// default), as TestClusteredNatsHubChartValues pins.
+// maxFileStoreGb, natsCpu and natsMemory, GOMEMLIMIT following natsMemory (⌊0.8 × 4096⌋ MiB);
+// unset, the claim names no class (the cluster's default), as TestClusteredNatsHubChartValues
+// pins.
 func TestClusteredNatsHubChartValuesFollowTheSizes(t *testing.T) {
 	args := clusteredArgs()
 	args.StorageClassName = pulumi.StringRef("premium-rwo")
@@ -203,7 +205,39 @@ func TestClusteredNatsHubChartValuesFollowTheSizes(t *testing.T) {
 		"pvc": map[string]any{"size": "40Gi", "storageClassName": "premium-rwo"}, "maxSize": "30Gi",
 	}
 	want["container"].(map[string]any)["resources"] = clusteredResources("2", "4Gi")
+	want["container"].(map[string]any)["env"] = map[string]any{"GOMEMLIMIT": "3276MiB"}
 	require.Equal(t, want, values)
+}
+
+// With INFRA-546's streamMaxBytes the chart takes the sizes it gives
+// (TestClusteredNatsHubSizingFollowsStreamMaxBytes): a 53Gi claim holding at most 47Gi, and
+// nats-server at 5Gi under a GOMEMLIMIT of 80% of it, 4096MiB; an explicit natsMemory of 4.5Gi
+// gives ⌊0.8 × 4608⌋ = 3686MiB. Without streamMaxBytes, TestClusteredNatsHubChartValues pins
+// 1638MiB for 2Gi.
+func TestClusteredNatsHubChartValuesFollowStreamMaxBytes(t *testing.T) {
+	s, err := gcp.ResolveClusteredNatsHub(clusteredArgs())
+	require.NoError(t, err)
+	for _, row := range []struct {
+		name, natsMemory, memory, goMemLimit string
+	}{
+		{"default natsMemory", "", "5Gi", "4096MiB"},
+		{"natsMemory 4.5Gi", "4.5Gi", "4.5Gi", "3686MiB"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			args := clusteredArgs()
+			args.StreamMaxBytes = pulumi.IntRef(infra546StreamMaxBytes)
+			if row.natsMemory != "" {
+				args.NatsMemory = pulumi.StringRef(row.natsMemory)
+			}
+			want := wantChartValues(s.AuthConf)
+			want["config"].(map[string]any)["jetstream"].(map[string]any)["fileStore"] = map[string]any{
+				"pvc": map[string]any{"size": "53Gi"}, "maxSize": "47Gi",
+			}
+			want["container"].(map[string]any)["resources"] = clusteredResources("1", row.memory)
+			want["container"].(map[string]any)["env"] = map[string]any{"GOMEMLIMIT": row.goMemLimit}
+			require.Equal(t, want, chartValues(t, runClusteredHub(t, args)))
+		})
+	}
 }
 
 // priorityClassName reaches the hub's pods through the chart's pod template, and the hub reads

@@ -329,6 +329,11 @@ func TestClusteredNatsHubChart(t *testing.T) {
 	require.Equal(t, s.NatsImage, r.container(t, "nats")["image"])
 	require.Equal(t, s.ReloaderImage, r.container(t, "reloader")["image"])
 	require.Equal(t, s.ExporterImage, r.container(t, "prom-exporter")["image"])
+	// nats-server runs under GOMEMLIMIT at 80% of its memory limit, the chart's container.env
+	// rendered as a plain env var: liveHubArgs leave natsMemory at 2Gi, so ⌊0.8 × 2048⌋ MiB.
+	require.Equal(t, "2Gi", s.NatsMemory)
+	require.Equal(t, "2Gi", dig(t, r.container(t, "nats"), "resources", "limits", "memory"))
+	require.Contains(t, r.container(t, "nats")["env"], map[string]any{"name": "GOMEMLIMIT", "value": "1638MiB"})
 	require.Equal(t, []string{
 		"-pid", "/var/run/nats/nats.pid", "-config", "/etc/nats-config/nats.conf", "-config", "/etc/nats-config/auth.conf",
 	}, stringList(t, r.container(t, "reloader")["args"]), "the reloader watches auth.conf beside nats.conf")

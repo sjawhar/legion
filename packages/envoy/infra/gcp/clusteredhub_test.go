@@ -201,6 +201,55 @@ func TestClusteredNatsHubSizingDefaults(t *testing.T) {
 		[]any{s.DiskSizeGb, s.MaxFileStoreGb, s.NatsCPU, s.NatsMemory, s.StorageClassName, s.PriorityClassName})
 }
 
+// infra546StreamMaxBytes is INFRA-546's ENVOY_STREAM_MAX_BYTES, 41 GiB (sjawhar/legion#2362,
+// "Sizing of ENVOY_STREAM_MAX_BYTES").
+const infra546StreamMaxBytes = 44023414784
+
+// streamMaxBytes = L sizes the hub from INFRA-546's measurement: JetStream's file store holds S =
+// (L + the KV buckets' 1 GiB + 10% of L) / 1 GiB, ⌈S⌉ by default; the volume is ⌈maxFileStoreGb /
+// 0.9⌉ by default; nats-server's memory holds F = (L / (1682300/809 B) × 172.9 B + 38,486,016 B) /
+// 0.8, ⌈F⌉ in whole Gi by default and never below 2Gi. An explicit size at or above its floor is
+// taken as given; the refusal rows below S and F (TestClusteredNatsHubResolverRefusesInvalidInputs)
+// are these rows' negative controls.
+func TestClusteredNatsHubSizingFollowsStreamMaxBytes(t *testing.T) {
+	type A = gcp.ClusteredNatsHubArgs
+	for _, row := range []struct {
+		name           string
+		streamMaxBytes int
+		edit           func(*A)
+		disk, store    int
+		memory         string
+	}{
+		// The plan's worked example. L = 19.3 GiB / 1.1, rounded down to 18,839,288,366 B, gives S
+		// = (1.1 × L + 1 GiB) / 1 GiB = 20.3 GiB (a hair below), so maxFileStoreGb ⌈20.3⌉ = 21 and
+		// diskSizeGb ⌈21 / 0.9⌉ = ⌈23.3⌉ = 24. F = (L × 809 / 1682300 ≈ 9.06 M messages × 172.9 B
+		// ≈ 1.46 GiB + 0.036 GiB idle) / 0.8 ≈ 1.87 GiB, so natsMemory stays at its 2Gi floor.
+		{"S = 20.3 GiB", 18839288366, nil, 24, 21, "2Gi"},
+		// INFRA-546's limit, 41 GiB: S = 1.1 × 41 + 1 = 46.1 GiB, so maxFileStoreGb 47 and
+		// diskSizeGb ⌈47 / 0.9⌉ = ⌈52.2⌉ = 53. The message count at the limit is 44023414784 × 809 /
+		// 1682300 ≈ 21.17 M; × 172.9 B ≈ 3.41 GiB; + 0.036 GiB idle; / 0.8 ≈ 4.31 GiB (4409.4 MiB),
+		// so natsMemory 5Gi.
+		{"INFRA-546's limit", infra546StreamMaxBytes, nil, 53, 47, "5Gi"},
+		{"an explicit store at ⌈S⌉", infra546StreamMaxBytes, func(a *A) { a.MaxFileStoreGb = pulumi.IntRef(47) }, 53, 47, "5Gi"},
+		{"an explicit store above S sizes the volume", infra546StreamMaxBytes, func(a *A) { a.MaxFileStoreGb = pulumi.IntRef(50) }, 56, 50, "5Gi"},
+		{"an explicit volume just above the default store", infra546StreamMaxBytes, func(a *A) { a.DiskSizeGb = pulumi.IntRef(48) }, 48, 47, "5Gi"},
+		{"an explicit natsMemory above F", infra546StreamMaxBytes, func(a *A) { a.NatsMemory = pulumi.StringRef("4.5Gi") }, 53, 47, "4.5Gi"},
+		{"an explicit natsMemory at F rounded up to a MiB", infra546StreamMaxBytes, func(a *A) { a.NatsMemory = pulumi.StringRef("4410Mi") }, 53, 47, "4410Mi"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			args := clusteredArgs()
+			args.StreamMaxBytes = pulumi.IntRef(row.streamMaxBytes)
+			if row.edit != nil {
+				row.edit(args)
+			}
+			s, err := gcp.ResolveClusteredNatsHub(args)
+			require.NoError(t, err)
+			require.Equal(t, []any{row.disk, row.store, "1", row.memory},
+				[]any{s.DiskSizeGb, s.MaxFileStoreGb, s.NatsCPU, s.NatsMemory})
+		})
+	}
+}
+
 // The other defaults: the GMP collectors' namespaces admitted to the exporter, two tailnet hosts,
 // and the listener at 500m and 1Gi.
 func TestClusteredNatsHubDefaults(t *testing.T) {

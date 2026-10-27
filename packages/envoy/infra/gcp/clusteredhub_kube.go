@@ -153,6 +153,8 @@ func protectClusteredHubStatefulSet(_ context.Context, args *pulumi.ResourceTran
 // clusteredHubChartValues is the nats chart's values for the hub (chart 2.15.1's values.yaml and
 // templates). The reloader and the exporter take no resources value in this chart version, so
 // their fixed sizes are merged into their containers (reloader.merge, promExporter.merge).
+// nats-server's GOMEMLIMIT is a container.env entry, which the chart renders as a plain env var
+// of the nats container (files/stateful-set/nats-container.yaml, templates/_helpers.tpl nats.env).
 func clusteredHubChartValues(s clusteredHubSettings) pulumi.Map {
 	jetstreamPVC := pulumi.Map{"size": gibibytes(s.size.diskSizeGb)}
 	if s.storageClassName != "" {
@@ -197,6 +199,7 @@ func clusteredHubChartValues(s clusteredHubSettings) pulumi.Map {
 		"container": pulumi.Map{
 			"image":     pulumi.Map{"fullImageName": pulumi.String(s.images.nats)},
 			"resources": chartResources(s.size.natsCPU, s.size.natsMemory),
+			"env":       pulumi.Map{"GOMEMLIMIT": pulumi.String(s.size.goMemLimit)},
 		},
 		"reloader": pulumi.Map{
 			"image": pulumi.Map{"fullImageName": pulumi.String(s.images.reloader)},
