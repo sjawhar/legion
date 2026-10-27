@@ -33,10 +33,11 @@ type supervisor struct {
 	project  string
 	stateDir string
 	log      *slog.Logger
-	// restored closes once every stored claim has its machine: a hello waits for it, so a shim
-	// reconnecting across a restart is admitted by a claim already supervised. Nothing that waits for
-	// a worker to reach the daemon may run before it closes: the boot's relaunches run after it
-	// (supervision.start), since a relaunched worker's hello would wait for the relaunch itself.
+	// restored closes once every stored claim has its machine and the boot has replayed their
+	// terminal facts: a hello waits for it, so a shim reconnecting across a restart is admitted by a
+	// claim already supervised, and the boot settles with no hello's traffic beside it. Nothing that
+	// waits for a worker to reach the daemon may run before it closes: the boot's relaunches run after
+	// it (supervision.start), since a relaunched worker's hello would wait for the relaunch itself.
 	restored chan struct{}
 	terminal func(supervise.Claim, supervise.ClaimState)
 
@@ -299,10 +300,11 @@ func (s *supervisor) wait() {
 // way and supervision.stop cancels s.ctx before the stream closes, releasing every held hello
 // rather than leaving one to time out mid-boot naming a credential problem that does not exist.
 // The token is resolved again once restoration ends, under a fresh bound: the hold lasts as long
-// as the boot's readiness gate waits, and the first resolve's generation and Stale flag are only
-// ever as fresh as the moment they were read. Judging the hold by that first result would accept a
-// generation its claim has left meanwhile, taking the stream slot the new generation's own hello
-// then finds "already bound to a live stream".
+// as the boot's readiness gate waits and its terminal replay runs (supervision.start), and the
+// first resolve's generation and Stale flag are only ever as fresh as the moment they were read.
+// Judging the hold by that first result would accept a generation its claim has left meanwhile,
+// taking the stream slot the new generation's own hello then finds "already bound to a live
+// stream".
 //
 // A store that fails either read answers the hello with that error, never as an unknown token: the
 // failure says nothing about the token, and the listener closes the connection unrefused for the

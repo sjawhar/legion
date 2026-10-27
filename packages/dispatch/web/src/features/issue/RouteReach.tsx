@@ -10,8 +10,9 @@ type RoutedIssue = IssueRouteReach & { readonly route: string | null };
 /**
  * The warning an issue carries wherever it is shown - the issue header, a List row, a Board
  * card - when its route reaches nobody: `route_status` is `no_holder`, meaning a role nobody
- * running holds, or a session that is not running, at the moment of the read. The server resolves the status on every
- * issue read, so this names it and judges nothing. A route that reaches a live session, an
+ * running holds, or a session that is not running, as of the server's copy of the listener's
+ * session list, at most 5 s old. The server resolves the status on every issue read, so this
+ * names it and judges nothing. A route that reaches a live session, an
  * unrouted issue, and a route the listener could not judge (`unknown`) render nothing here, so
  * healthy routes stay quiet and a listener restart does not mark every card.
  *
