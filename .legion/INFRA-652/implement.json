@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-652",
+  "completed": "2026-10-27T18:19:30Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2429",
+  "proof": [
+    {
+      "criterion": "Merge rule of the shared context on INFRA-589's route mix: every head run below every base run, or (expected gain smaller than the spread) median head S <= median base S - G/2 in share points.",
+      "surface": "packages/envoy/loadtest from #2369 (legion/INFRA-589 at a30d1f50ae85, overlaid in plain clones of base 59f6647db9d7 and head 76dbf9108bb3) driving the Dispatch server binary, the real listener with 400 sessions, NATS and Postgres 16.2+pgvector on this 2-vCPU pod",
+      "command": "LOADTEST_ROOT=$TMPDIR/dispatch-loadtest; stack.sh setup && start && seed --force (base); 3x LOADTEST_SRC=<base> run-step.sh base-N --events 0 --sessions 400 --requests 60 --rng-seed 1; 3x LOADTEST_SRC=<head> run-step.sh final-N (same flags); S/E via go tool pprof -top -nodecount=1000000 -nodefraction=0 -edgefraction=0 -focus='envoy\\.\\(\\*Client\\)\\.Sessions' [-show_from='api\\.\\(\\*server\\)\\.listAgents'] cpu.pprof",
+      "observed": "base cores 0.1974/0.1988/0.1904 (spread 0.0084), S 1.18/1.31/1.50%, E 0.88/1.05/1.07% (sampled 0.30/0.36/0.35 s, so 180 s runs sufficed); head cores 0.2065/0.2021/0.1953, S 0.28/0.29/0.15%, E 0 in all three. Not every head run below every base run; G = 1.05 pp = 0.0021 cores < spread, so the share branch applies: median head S 0.28% <= 1.31% - 0.525 = 0.785%: merges. box_busy_before <= 0.026 in all six. Alloc share under Sessions 2.1% (~95 MB/run) -> ~0.6% (~25 MB/run). https://github.com/sjawhar/legion/pull/2429#issuecomment-6449285567",
+      "headSha": "76dbf9108bb35f9c619728744d48486c6d4aa195",
+      "negativeControl": "At head the listAgents-scoped E command reports 0 samples in every run (it reported 0.30-0.36 s at base); an earlier head series whose first run had box_busy_before 0.864 (>10%) was discarded as the plan's rule requires."
+    },
+    {
+      "criterion": "What an agent sees does not change: same rows, fields and order for the same listener answer, at fleet size.",
+      "surface": "Dispatch server binary over HTTP (GET /api/v1/agents with the agent bearer and with a trusted human header) against a copy of the load-test seed and a static fake listener",
+      "command": "$TMPDIR/infra652/proof.sh equivalence: 1,000-session listener file (captured 400 from the load-test listener + 600 synthesized: 181 last_seen ties, 171 without host, shared roles, 8 seed actors for last_activity, shuffled); base then head binary on database infra652_proof; curl /api/v1/agents > base.json / head.json; cmp",
+      "observed": "base and head: 200, 1000 rows, 236,934 bytes, cmp identical for bearer and human reads, sha256 569e4bd94c9acb1dc0ad8ec67aa00e3016bdc5c774e10be22f7450088ff3f206 both; 8 rows with last_activity; tie order by session id.",
+      "headSha": "76dbf9108bb35f9c619728744d48486c6d4aa195",
+      "negativeControl": "One session's last_seen raised in the served file: head read within 5 s still identical to before (the copy), read after 6 s differs from base.json at char 25 (first row now ses-lg-0248)."
+    },
+    {
+      "criterion": "A listener failure still answers 503 ENVOY_UNAVAILABLE.",
+      "surface": "Dispatch server binary over HTTP",
+      "command": "$TMPDIR/infra652/proof.sh unavailable: stop the fake listener, GET /api/v1/agents twice, restart it, read at once and 5 s later; base binary on the stopped listener",
+      "observed": "head: 503 {\"code\":\"ENVOY_UNAVAILABLE\",\"error\":\"envoy listener unavailable: GET /v1/sessions: ... connect: connection refused\"} twice (second with no new call), 503 right after restart (silence window, 0 calls), 200 with 1000 rows 5 s later (1 call); base answers the identical 503 body.",
+      "headSha": "76dbf9108bb35f9c619728744d48486c6d4aa195",
+      "negativeControl": "Listener up before the stop: 200; Go tests TestAgentsAnswer503ThroughTheSilenceWindowAndListOnceTheListenerRecovers and TestAgentsReportsListenerUnavailable pass under -race."
+    },
+    {
+      "criterion": "The list is no staler than route_status (<= 5 s plus fetch), and agents and issue reads share one listener call per TTL.",
+      "surface": "Dispatch server binary over HTTP with a request-counting fake listener",
+      "command": "$TMPDIR/infra652/proof.sh counts: per build, 6 s after boot, 20 bearer GET /api/v1/agents interleaved with 20 GET /api/v1/issues/LGA-1 (routed), count GET /v1/sessions",
+      "observed": "base: 21 listener calls in 2308 ms; head: 1 listener call in 2055 ms.",
+      "headSha": "76dbf9108bb35f9c619728744d48486c6d4aa195",
+      "negativeControl": "head started with DISPATCH_TEST_HOOKS=1 DISPATCH_TEST_ROSTER_UNCACHED=1: 40 listener calls for the same 40 reads."
+    },
+    {
+      "criterion": "The cache holds one bounded session list; bytes measured.",
+      "surface": "throwaway Go program inside the envoy module decoding the captured listener answers with the real envoy.Client.Sessions and building the roster",
+      "command": "$TMPDIR/infra652/bin-mem sessions-400.json; bin-mem sessions-1000.json (one file per process, HeapAlloc with GC forced, three repetitions)",
+      "observed": "400 sessions: base (id set + holder map) 20,584 B, head 118,528 B, difference 97,944 B; 1,000 sessions: base 71,848 B, head 314,624 B, difference 242,776 B; difference identical across repetitions.",
+      "headSha": "76dbf9108bb35f9c619728744d48486c6d4aa195",
+      "negativeControl": "Base keeps only the maps (the slice dropped), so the difference is exactly the []envoy.Session the head keeps; at base every agents read allocated a whole decoded list of its own (~95 MB alloc_space under Client.Sessions per load-test run vs ~25 MB at head)."
+    },
+    {
+      "criterion": "Dispatch's browser suite unchanged.",
+      "surface": "Playwright against the e2e server (e2e/run.ts, e2e/run-server.sh), chromium",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:15432/infra652_e2e bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --reporter=line <the 24 specs matching setLiveSessions|seedAgents|setSessionLive|api/v1/agents|route_status>",
+      "observed": "261 passed, 12 skipped (23.6 min). https://github.com/sjawhar/legion/pull/2429#issuecomment-6450127431. The full suite (1,674 tests, WebKit included) is CI's dispatch job on this head; WebKit cannot run on this pod (missing host libraries).",
+      "headSha": "76dbf9108bb35f9c619728744d48486c6d4aa195",
+      "negativeControl": "Same harness with the DISPATCH_TEST_ROSTER_UNCACHED=1 line removed from run-server.sh (restored after): agents, agent-name, keyboard-agents, claim, message-agent, agents-search specs -> 7 failed, 2 skipped, 51 passed."
+    },
+    {
+      "criterion": "Go packages and repo gates green.",
+      "surface": "go test / go vet / biome in the workspace",
+      "command": "cd packages/envoy && CGO_ENABLED=1 DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:15432/postgres go test -race -count=1 ./internal/dispatch/api/ -run 'Agent|Roster|Route|Listener|TTL|Silence|Fetch|Shutdown|Concurrent' && go test -race -count=1 ./cmd/dispatch/ -run TestEverySettingReachesItsReader && go vet ./internal/dispatch/api/ ./cmd/dispatch/; bunx biome check packages/dispatch/ packages/envoy-client/",
+      "observed": "api: ok 144.4 s; cmd/dispatch: ok 23.2 s; vet exit 0; gofmt -l empty; biome: 700 files, no fixes, 2 infos in untouched files. Earlier full-package runs: cmd/dispatch ok; api all green but TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, which refuses a C-collation test database by design (environment, unrelated).",
+      "headSha": "76dbf9108bb35f9c619728744d48486c6d4aa195",
+      "negativeControl": "T1 fails when listAgents calls Envoy.Sessions directly (second list = [ses-new], want cached [ses-sre]); T4 reports DATA RACE and a reordered cached list when the shared slice is sorted in place; the settings router subtest fails (1 call, want 2) without the main.go hand-off."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/api/issue_route_status.go",
+    "packages/envoy/internal/dispatch/api/agents.go",
+    "packages/envoy/internal/dispatch/api/server.go",
+    "packages/envoy/internal/dispatch/api/agents_test.go",
+    "packages/envoy/internal/dispatch/api/issue_route_status_cache_test.go",
+    "packages/envoy/internal/dispatch/api/routes_table.go",
+    "packages/envoy/internal/dispatch/routes/router.go",
+    "packages/envoy/cmd/dispatch/main.go",
+    "packages/envoy/cmd/dispatch/settings.go",
+    "packages/envoy/cmd/dispatch/settings_test.go",
+    "packages/envoy/cmd/dispatch/README.md",
+    "packages/envoy/cmd/dispatch/AGENTS.md",
+    "packages/envoy/CHANGELOG.md",
+    "packages/envoy/deploy/compose/dispatch.acceptance.compose.yml",
+    "packages/dispatch/e2e/run-server.sh",
+    "packages/dispatch/web/src/features/refs/agent-registry.ts",
+    "packages/envoy-client/src/dispatch-http.ts"
+  ],
+  "trickyParts": [
+    "The roster's sessions slice is shared by every read; listAgents clones before sorting and never writes a session (Roles/Capabilities are shared too). TestConcurrentAgentsListsAndIssueReadsLeaveTheSharedListAsTheListenerSentIt locks that under -race.",
+    "readRouteRoster's ctx.Done branch now carries an ErrUnavailable-wrapped error so a cancelled agents read answers 503 rather than a nil-error path.",
+    "The uncached switch is read from Deps (simplify pass), so DISPATCH_TEST_ROSTER_UNCACHED reaches the server through bootConfig -> routes.AppContextOptions -> api.DepsInput -> api.Deps; routes/router.go was the plumbing hop the plan did not list."
+  ],
+  "deviations": [
+    "routes/router.go changed (not in the plan's file list): main.go hands boot values to routes.AppContextOptions and BuildAppContext builds api.DepsInput there.",
+    "Simplify pass applied 2 findings (writeEnvoyError reuse; rosterCache.uncached field dropped in favour of Deps.ListenerRosterUncached); the load-test head series and binary proofs were re-run at the applied head 76dbf910. Skipped: sort-once-per-fetch.",
+    "The local browser run covers the 24 agent/route_status specs in chromium, not all 1,674 tests: the whole suite takes hours on this 2-vCPU pod and WebKit lacks host libraries here; CI's dispatch job runs the whole suite on the head."
+  ],
+  "openQuestions": []
+}
