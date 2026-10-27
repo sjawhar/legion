@@ -1055,8 +1055,8 @@ func (e *Engine) treesStartingChildren(ctx context.Context, tx pgx.Tx, issues []
 		live[waiting.Key] = true
 	}
 	// A root that lingers, and one waiting on a person, start no child of their own: the second
-	// gives its slot back while it waits, so record.Waiting carries it and the live check alone
-	// would read it as a tree that starts its children.
+	// gives its slot back while it waits, and once a person answers it record.Waiting carries it
+	// until it resumes, so the live check alone would read it as a tree that starts its children.
 	waits := map[string]bool{}
 	for _, issue := range issues {
 		waits[issue.Key] = issue.Lingers() || issue.AwaitingPerson()

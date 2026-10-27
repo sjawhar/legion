@@ -477,9 +477,9 @@ func TestAHeldChildDoesNotStartWhileItsRootWaitsOnAPerson(t *testing.T) {
 	assertOutboxKinds(t, pool, []string{})
 }
 
-// The same holds for a root the waiting line carries: a root handed to Legion, in todo and
-// holding no slot, is a candidate record.Waiting lists, so a judgement that read liveness alone
-// would take its tree for one that starts its children while the person has not answered.
+// The same holds for a root the waiting line carries: a root handed to Legion that a person
+// answered, and that holds no slot again yet, is a candidate record.Waiting lists, so a judgement
+// that read liveness alone would start its children before the root resumes.
 func TestAHeldChildDoesNotStartWhileItsHandedOverRootWaitsOnAPerson(t *testing.T) {
 	pool := migratedPool(t)
 	root := awaitingRoot(3)
