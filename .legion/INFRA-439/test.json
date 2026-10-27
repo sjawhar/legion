@@ -2,24 +2,44 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-439",
-  "completed": "2026-10-27T09:40:00Z",
-  "round": "20 (rebase re-check after a forward merge of main on a reported conflict)",
-  "headSha": "5579f099d21e36d1a81e13e9a880efcad0522aff",
-  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6438370146",
+  "completed": "2026-10-27T11:32:00Z",
+  "round": "21 (two forward merges of main; the fingerprint moved through call-site changes)",
+  "headSha": "cd3c748767ee2760e9ff59f1c1aaeebb9bec526d",
+  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6440781831",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Recomputed the unchanged-diff fingerprint myself: fcfbc288… at both 34b3e846 (a92387a8) and 5579f099 (926040d9). The merge leaves this branch's diff unchanged, as the implementer reported, so round 18's real-surface verification at fcc7d008 stands."
+    "how": "Diffed the PR's own diff at a817758f against the one at 77ff022b. The only changes are call sites that now pass a context to Registry.Get, Registry.Remove and publishConfirmed, re-merged doc table rows, and import changes, matching the implementer's account of fcfbc288 -> 50792ce8. Production code passes the request's context; context.Background() appears only in tests."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Rebase re-check: the forward merge of main leaves the PR's diff unchanged, and the bare gates pass",
-      "surface": "the jj unchanged-diff fingerprint; packages/pi-envoy/scripts/smoke-replay.sh in local mode and in remote mode (services from svc.sh); bun test and go test for the red tests; GitHub Actions read for CI",
-      "command": "jj diff --from fork_point(\"main\"@origin | <head>) --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum at a92387a8 and 926040d9; bash packages/pi-envoy/scripts/smoke-replay.sh in both modes; bun test src/__tests__/replay.test.ts -t 'keeps its id but stands behind a cursor'; bun test extensions/envoy.test.ts -t 'a retention gap|a BTW refused live'; go test ./cmd/listener -run 'TestReplayNeverReturnsAnotherSessions…'",
-      "observed": "Fingerprint fcfbc288f05b54a8f89461975c53a87e0da717f16b03149df2a0cf507b638fcf at both heads. Smoke PASS in both modes, exit 0. Red test 46751dc66075: 1 pass. pi-envoy red tests: 13 pass, 0 fail. Listener red tests: ok. The merge changed no test file. CI at 5579f099: all four lanes queued when read.",
-      "headSha": "5579f099d21e36d1a81e13e9a880efcad0522aff",
-      "negativeControl": "Round 18's negative control stands, since the diff is unchanged: at 067a15af the restore and re-add legs lost 424, 415 and 416 with no notice."
+      "criterion": "The merge's changed call sites pass the request's context, not a background one, where the old code had a request",
+      "surface": "the PR's own diff at a817758f against 77ff022b; packages/envoy/cmd/listener/replay.go and packages/envoy/internal/bus at cd3c7487",
+      "command": "diff of the two fingerprint inputs; grep for context.Background() in the new diff; read replay.go:167,185,234 and bus requestConfirmed and confirm.go publishConfirmed",
+      "observed": "/v1/replay builds ctx from context.WithTimeout(r.Context(), replayReadBudget), passes it to replayFollowed(ctx, …), which calls registry.Get(ctx, …). requestConfirmed passes its caller's ctx, which always has a deadline, to publishConfirmed. Every context.Background() in the new diff is in a test file.",
+      "headSha": "cd3c748767ee2760e9ff59f1c1aaeebb9bec526d",
+      "negativeControl": "The old diff, at a817758f, called registry.Get(sessionID) with no context and publishConfirmed with a deadline only. The new calls carry the request's ctx, and none calls context.Background() outside a test file."
+    },
+    {
+      "criterion": "The listener's replay and interest paths, and the red tests, pass at the merge head",
+      "surface": "go test, go vet, bun test in the workspace at cd3c7487",
+      "command": "go vet ./cmd/listener ./internal/bus ./internal/store; go test ./cmd/listener -run 'Replay|Interest' -count=1; go test ./cmd/listener -run 'TestReplayNeverReturnsAnotherSessions…' -v; go test ./internal/bus -run 'Stored|Confirm|Request'; cd packages/envoy-client && bun test src/__tests__/replay.test.ts; cd packages/pi-envoy && bun test extensions/envoy.test.ts -t 'a retention gap|a BTW refused live'",
+      "observed": "vet clean. cmd/listener: ok, 40 top-level tests passed. Red tests 9f8ac8ff and 240a4c4a: PASS. internal/bus: ok. replay.test.ts: 51 pass, 0 fail, including red test 46751dc66075, unchanged. pi-envoy red tests: 13 pass, 0 fail.",
+      "headSha": "cd3c748767ee2760e9ff59f1c1aaeebb9bec526d",
+      "negativeControl": "The red tests are the negative controls: each failed against the code it pinned in an earlier round."
+    },
+    {
+      "criterion": "smoke-replay passes in local and remote mode at the merge head, and the listener refuses another session's inbox",
+      "surface": "packages/pi-envoy/scripts/smoke-replay.sh with real omp 18.12.2 (anthropic/claude-haiku-4-5), natsd and the listener built from cd3c7487; curl against that listener",
+      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh; SMOKE_REPLAY_ENVOY_URL=http://127.0.0.1:10875 SMOKE_REPLAY_NATS_URL=nats://127.0.0.1:13268 bash packages/pi-envoy/scripts/smoke-replay.sh; curl POST /v1/interests/subscribe and /v1/replay as ses_tester_a",
+      "observed": "Local: SMOKE REPLAY PASS, exit 0. Remote: the log reads 'mode remote', SMOKE REPLAY PASS, exit 0. Subscribe stored notifications.agent.ses_tester_a and notifications.dispatch.issue.KEY-1.>. The listener did not store notifications.agent.ses_tester_b and named it in warnings.",
+      "headSha": "cd3c748767ee2760e9ff59f1c1aaeebb9bec526d",
+      "negativeControl": "/v1/replay of another session's inbox, notifications.agent.ses_tester_b, answered refused: not_followed, while the session's own subject and its registered dispatch topic replayed with no refusal."
     }
-  ]
+  ],
+  "observations": [
+    "My first remote-mode smoke run this round fell back to local mode: the services had not printed their URLs. I re-ran it with the services ready and confirmed 'mode remote' in the log."
+  ],
+  "ci": "At cd3c7487 when read: Tests, Docs, Legion Envoy and Contracts and Worker Image were queued."
 }
