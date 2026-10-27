@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-177",
+  "completed": "2026-10-27T04:37:46Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2354",
+  "proof": [
+    {
+      "criterion": "A6: a 40 KB handoff writes and reads back; two writes give versions 1 and 2",
+      "surface": "the real `dispatch` CLI against the real Dispatch server, in scripts/e2e/handoff-records.sh",
+      "command": "source /legion/harness/env.sh && LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server bash scripts/e2e/handoff-records.sh",
+      "observed": "two 41024-byte bodies recorded as implement versions 1 and 2; handoff-read of each byte-identical to the file written; check a6 ok; PASS in 62s",
+      "headSha": "bbdd897563bd1d9fd8f6988fcd895810676d498c",
+      "negativeControl": "a 262145-byte body: handoff-write refuses before sending ('1 bytes over the 262144-byte limit') and a raw POST answers 413 CAP_EXCEEDED; the list still holds versions 2 and 1"
+    },
+    {
+      "criterion": "A3: a handoff under another session's name is refused at completion",
+      "surface": "POST /legion/v1/handoff/complete on the whole daemon, record read from the real Dispatch server",
+      "command": "bash scripts/e2e/handoff-records.sh (checks a3 and a3-control)",
+      "observed": "403 HANDOFF_SESSION_MISMATCH naming ses_a3_another_session and ses_a3_planner; the issue stayed in planning",
+      "headSha": "bbdd897563bd1d9fd8f6988fcd895810676d498c",
+      "negativeControl": "the same completion naming a record the planner's own session wrote: 200 and the issue moved to implementing"
+    },
+    {
+      "criterion": "A10: while Dispatch refuses writes, the write fails and the completion is refused; once Dispatch answers, the retried write succeeds and shows in what Conversation lists",
+      "surface": "the real Dispatch process stopped and restarted under the whole daemon",
+      "command": "bash scripts/e2e/handoff-records.sh (checks a10-*)",
+      "observed": "write exits 1 (connection refused), completion 502 DISPATCH_READ_FAILED and the phase unchanged; after restart the write is version 2, the completion 200, and GET /api/v1/issues/<KEY>/handoffs lists it",
+      "headSha": "bbdd897563bd1d9fd8f6988fcd895810676d498c",
+      "negativeControl": "with Dispatch up the first write succeeds (check a10-control)"
+    },
+    {
+      "criterion": "A7: an issue mid-phase at the cutover completes after the import",
+      "surface": "legion handoffs import (handoffimport.Run) against the running daemon and real Dispatch, then the tester's completion",
+      "command": "bash scripts/e2e/handoff-records.sh (check a7); go test ./internal/handoffimport/ (9 tests)",
+      "observed": "import wrote plan/implement/test v1 under legion-daemon:<PROJECT> and one unforced removal commit; the tester's completion naming it was refused 403 HANDOFF_SESSION_MISMATCH, it wrote the body again (v2) and completed; the reviewer's task reads 'Handoff: test version 2 (dispatch handoff-read ...)'",
+      "headSha": "bbdd897563bd1d9fd8f6988fcd895810676d498c",
+      "negativeControl": "a second import run writes and pushes nothing; a worker-written newest record is kept, never written above"
+    },
+    {
+      "criterion": "A1: a handoff shows in Conversation as one entry with its fields",
+      "surface": "Dispatch dashboard in Chromium against the real Go server (packages/dispatch/e2e/handoffs.e2e.ts)",
+      "command": "bash /legion/harness/dispatch-e2e.sh 'postgres://postgres@127.0.0.1:5433/dispatch_e2e?sslmode=disable' e2e/handoffs.e2e.ts",
+      "observed": "2 passed: two Conversation cards 'implement handoff, version 2/1', expanding v2 shows its fields and both proof entries; Activity has two 'recorded the implement handoff' lines",
+      "headSha": "bbdd897563bd1d9fd8f6988fcd895810676d498c",
+      "negativeControl": "the same spec against the build of 8a4d97bf (Activity commit, before the Conversation change): Conversation test failed (Expected 2, Received 0 cards), Activity test passed"
+    },
+    {
+      "criterion": "A8/A9 GitHub half and D13: the import's removal push and an empty root commit start the required checks; GitHub opens an empty-commit pull request",
+      "surface": "sjawhar/legion-smoke as the implement App (scripts/e2e/handoff-cutover-github.sh)",
+      "command": "bash scripts/e2e/handoff-cutover-github.sh",
+      "observed": "removal commit 55ff1879: gate started after 1s (run 40449819514); GitHub opened PR #818 on an empty commit and gate started after 1s (run 40449829991); PASS in 686s, branches and PRs cleaned up",
+      "headSha": "bbdd897563bd1d9fd8f6988fcd895810676d498c",
+      "negativeControl": "a .legion/-only commit with the skip-checks trailer (e69b6daf): no gate check run and no workflow run in 600s"
+    },
+    {
+      "criterion": "A5: a tester reads the implementer's proof list from the record",
+      "surface": "a real headless Oh My Pi tester session (composed tester prompt) against a scratch Dispatch server",
+      "command": "omp -p --no-extensions --append-system-prompt <composed tester prompt> 'Continue ... Phase: testing. Handoff: implement version 1 (dispatch handoff-read --issue PFOUR-1 --phase implement).' (rig: /legion/scratch/tmp/infra177/p4/)",
+      "observed": "the agent ran dispatch handoff-read --issue PFOUR-1 --phase implement, re-ran the record's two proof commands and wrote its test record under p4-tester with implementerProof verified naming C1 and C2",
+      "headSha": "bbdd897563bd1d9fd8f6988fcd895810676d498c",
+      "negativeControl": "the same run on PFOUR-2 with no implement record: the tester recorded implementerProof rejected and failed: 1 instead of inventing a proof"
+    },
+    {
+      "criterion": "A4: the tree has no skip-checks rule, READY_HEAD_CARRIES_HANDOFFS or handoff-only classifier",
+      "surface": "the repository tree at the head",
+      "command": "grep -rnE 'skip-checks|READY_HEAD_CARRIES_HANDOFFS|HandoffOnly|handoffOnly|ClassifyPush|classifyPush' packages/daemon packages/pi-shared packages/pi-legion packages/claude-envoy packages/contracts skills AGENTS.md README.md docs (excluding node_modules, docs/solutions, docs/plans, migrations, daemon testdata, CHANGELOGs, api/version.go)",
+      "observed": "one hit: handoff_records_live_test.go:1286, the assertion that the import's commit message carries no skip-checks or [skip keyword",
+      "headSha": "bbdd897563bd1d9fd8f6988fcd895810676d498c",
+      "negativeControl": "the same git grep at main ad909178a: 115 matching files"
+    }
+  ],
+  "filesChanged": [
+    "packages/contracts: handoff types, handoff.recorded event, DISPATCH_HANDOFF_BODY_MAX and phase rule (generated into Go), dispatch_handoff_write/read specs, legion-api contract 40, classifyPush fixtures removed, reduceGithubEvent fixtures re-derived",
+    "packages/envoy/internal/dispatch: migration 0120 handoffs, api/handoffs.go (four routes), routes table, model, outbox summary",
+    "packages/envoy-client: DispatchClient handoff methods, handoff-write/handoff-read, claude session = ENVOY_SESSION_ID ?? CLAUDE_CODE_SESSION_ID",
+    "packages/dispatch/web: Activity line, SSE invalidation, client reads, Conversation HandoffTurn; e2e/handoffs.e2e.ts",
+    "packages/daemon: api/handoff.go record checks, engine/effects/review/pullrequest, record + migration 0055, projection/state, contract 40; classify/push.go and the carry removed; READY narrowed; internal/handoffimport + cmd/legion/handoffs.go; githubrest.Patch; live drivers",
+    "packages/pi-shared/src/handoff-record.ts (replaces handoff-commit.ts), legion-phase-ops; pi-legion and claude-envoy wiring, dist rebuilt",
+    "prompts, skills (skip-checks-trailer.md deleted), AGENTS.md files, README, docs/kubernetes.md, docs/site, check-plugin-names, scripts/e2e (two new proofs, stage scripts), skill-scenarios rig, changelogs"
+  ],
+  "trickyParts": [
+    "Harness for the tester: bash /legion/harness/setup.sh (idempotent; Postgres 17 + pgvector on 127.0.0.1:5433, nats-server on 14222), then prefix commands with `source /legion/harness/env.sh &&` (LEGION_TEST_PG_DSN, DISPATCH_TEST_DATABASE_URL, LEGION_TEST_NATS_URL/_MONITOR_URL). Browser spec: bash /legion/harness/dispatch-e2e.sh <DATABASE_URL> e2e/handoffs.e2e.ts. Whole-daemon proofs need LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server.",
+    "The running daemon is pre-change, so this issue's own handoffs are still committed .legion/ files; after this merges and deploys, handoffs are Dispatch records.",
+    "In reviewing, a synchronize now re-asks the review round as soon as the head moves (no wait for the push to be classified), since any push may change code.",
+    "P7 asserts GitHub started the required gate run on each head, not that it finished: legion-smoke runs sat queued 20-40 minutes.",
+    "Pod-only test failures that also fail on main: Docker-requiring testcontainers tests, TestTmuxBootRewritesEveryOlderClonesCredentialHelper, TestATerminalAttempt* (gVisor), launcher resume tests, runtime/tmux TestNewRefusesLaunchersItCannotRun, pi-legion judge-omp rig tests (no docker)."
+  ],
+  "deviations": [
+    "Spec departures 1-6 as the plan lists, accepted by the INFRA-138 architect (dispatch://INFRA-177/comment/e88a7bb0-a734-4f85-9108-d72280951be6).",
+    "D13's condition is met: P7 shows GitHub opens an empty-commit pull request and starts its required check.",
+    "The Dispatch handoff route's request limit is 6 x cap + 4 KiB (not cap + 4 KiB), since JSON string escaping can make each body byte up to six on the wire; the cap itself is enforced on the decoded body.",
+    "The pane no longer runs the JJ_USER App-identity check: the daemon checks the record's session, and the merger's @- is the implementer's commit.",
+    "The envoy listener still sends changed_paths, changed_paths_truncated and forced on push envelopes; the daemon no longer reads them. Removing them from the listener before the import runs would change how the old daemon classifies the import's removal push, so they stay for the cutover (documented in packages/envoy/AGENTS.md)."
+  ],
+  "openQuestions": [
+    "Whether to remove changed_paths/changed_paths_truncated/forced from the envoy listener after the cutover completes is the architect's call."
+  ]
+}
