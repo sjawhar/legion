@@ -1669,11 +1669,17 @@ export type GraphEdgeKind =
 // GraphNode is one end of a reference-graph edge. `ref` is its dispatch:// address; a
 // session node has none. A component node's id is `<project>/<component id>`.
 //
+// Every node carries six facts: `made_by` and `made_at` (who made it and when), `changed_by`
+// and `changed_at` (who last changed its own text or fields and when; the maker when nothing
+// changed it since), `parent` (the node it belongs to) and `parent_version` (the version of the
+// parent it belongs to). An actor list Dispatch never recorded is `[]`, any other fact `null`.
+// They are optional because a server older than them omits them.
+//
 // A block node (`kind: "block"`, id `<document ref_key>#<block id>`) also carries `block_id`,
-// its document's reference as `document`, and `changed_version` and `changed_at`, the document
-// version in which its text last changed. `text` and `pin` are set only on the node a reference
-// read names: `text` is the block's whole current text, and `pin` answers a reference pinned to
-// a version.
+// its document's reference as `document`, and `changed_version`, the document version in which
+// its text last changed (its `changed_at` is that version's time). `text` and `pin` are set only
+// on the node a reference read names: `text` is the block's whole current text, and `pin`
+// answers a reference pinned to a version.
 export interface GraphNode {
   readonly kind:
     | "issue"
@@ -1691,9 +1697,23 @@ export interface GraphNode {
   readonly ref?: string;
   readonly document?: string;
   readonly changed_version?: number;
-  readonly changed_at?: string;
+  readonly made_by?: Actor[];
+  readonly made_at?: string | null;
+  readonly changed_by?: Actor[];
+  readonly changed_at?: string | null;
+  readonly parent?: GraphNodeParent | null;
+  readonly parent_version?: number | null;
   readonly text?: string;
   readonly pin?: BlockPin;
+}
+
+// GraphNodeParent is the node a graph node belongs to: `id` is the parent node's own `id` (an
+// artifact's uuid, an issue's key, a component's `<project>/<id>`) and `ref` its dispatch://
+// reference, absent when it has none (a session).
+export interface GraphNodeParent {
+  readonly kind: GraphNode["kind"];
+  readonly id: string;
+  readonly ref?: string;
 }
 
 // BlockPin is a block reference pinned to a version of its document (`#b-<id>@v<N>`): the
