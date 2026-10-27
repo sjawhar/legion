@@ -2,23 +2,35 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-596",
-  "completed": "2026-10-27T16:23:30Z",
-  "testedHead": "ed4c190ebf29e073b66a47499ba319a5182d4d06",
-  "codeHead": "577d1dc1afc80a122c001f6ac31284c2b27431b5",
+  "completed": "2026-10-27T16:40:45Z",
+  "testedHead": "3fb442ce4c61f9f83d0b3e932f9f73fe408a2acb",
+  "codeHead": "969be5239a3ab322727b3900f09fe0f40c77efe4",
+  "rebaseRecheck": {
+    "from": "ed4c190ebf29e073b66a47499ba319a5182d4d06",
+    "to": "3fb442ce4c61f9f83d0b3e932f9f73fe408a2acb",
+    "fingerprintBefore": "825a73c990e69117e47fac08aa3e4c6beb0f2a294fa90871fbabb198a95e3745",
+    "fingerprintAfter": "825a73c990e69117e47fac08aa3e4c6beb0f2a294fa90871fbabb198a95e3745",
+    "result": "unchanged: bare gates only",
+    "command": "base=$(gh pr view 2366 -R sjawhar/legion --json baseRefName -q '.baseRefName | @json'); jj -R \"$LEGION_WORKSPACE\" diff --from \"fork_point(${base}@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, for each head"
+  },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's report command at the head: report.ts on the six run files from INFRA-596 gives document sha256 0631201835fd… and pairs bd067fb66dac…, cmp-equal to the INFRA-514 uploads read back now. The outbox, doc-read and API code are unchanged since fe6b65fc (the diff from d6f1c41c to 577d1dc1 touches only scripts/dispatch, packages/pi-envoy/CHANGELOG.md and skills/dispatch/SKILL.md), where round 3 drove the delivery, failed-query, human-edit and doc-read proofs on the local stack."
+    "how": "Recomputed the implementer's fingerprint comment (825a73c9… at 23a02918 and 969be523; the same at ed4c190e and 3fb442ce) and drove its delivery and report claims at the merge head with the smoke below. The real-surface verification of rounds 3 and 4 (tester-evidence-txt version 3) stands, the diff being unchanged."
   },
-  "failures": [
+  "failures": [],
+  "failed": 0,
+  "bareGates": {
+    "ci": "GitHub at 16:39Z: pull request mergeable true (mergeable_state blocked: required checks pending) against base 2df3353c523c; check runs at the merge head 969be5239a3a: build, changes, lint, test, typecheck queued. Not waited on. Round 4's failure (a conflicting head, so no checks at all) is resolved.",
+    "smoke": "tester-rig-edge.sh head at 3fb442ce (server built from the merged tree): 12/12 delivery cases OK, no subject received twice, 30-issue burst each to its claimant once; report.ts on the INFRA-596 run files cmp-equal to the INFRA-514 document and pairs TSV."
+  },
+  "proof": [
     {
-      "criterion": "The pull request can merge, and the required checks (among them the `test` lane that review round 3 found red on GitHub's runners) run at the head and report a result.",
-      "evidence": "gh api repos/sjawhar/legion/pulls/2366 at 16:22Z: mergeable false, mergeable_state dirty, base c892b97df887 while main is 2df3353c523c. git merge-tree --write-tree 2df3353c523c ed4c190ebf29: 'CONFLICT (content): Merge conflict in packages/envoy/CHANGELOG.md' (the only conflict; claude-envoy dist bundles and the other changelogs auto-merge). gh api repos/sjawhar/legion/commits/577d1dc1afc80a122c001f6ac31284c2b27431b5/check-runs: no check run at all, combined status pending, because GitHub computes no merge ref for a conflicting head. So round 3's finding (the comment-delivery test's temporary directory, fixed in e1b1ab46 with node:os tmpdir()) has no CI result. The forward merge is the implementer's (skill://legion-worker/references/conflicts-and-rewrites.md, 'Reintegrating the base'); a conflict has no test to write, so this failure carries no red test. After the merge, the tester's re-check is the unchanged-diff fingerprint at 577d1dc1 against the merge head, then the bare gates."
+      "criterion": "Rebase re-check after the conflict-forced forward merge of main 2df3353c: the pull request's diff is unchanged, it can merge, and the changed path still works at the merge head.",
+      "surface": "GitHub's pull request API and the local Dispatch stack: the Dispatch server built from the merged tree on Postgres 17 + pgvector with every migration, nats-server 2.10.29 -js, a subscriber on notifications.>, a stub Envoy listener.",
+      "command": "the unchanged-diff check at ed4c190e and 3fb442ce; gh api repos/sjawhar/legion/pulls/2366; $TMPDIR/infra596-tester/edge.sh head (dispatch://INFRA-596/artifact/tester-rig-edge-sh); bun scripts/dispatch/comment-delivery/report.ts on the INFRA-596 run files",
+      "observed": "Fingerprint 825a73c990e6… at both heads. mergeable true against 2df3353c523c; checks queued at 969be523. Edge: 12/12 OK, burst 30/30, no duplicates. Report output cmp-equal to the INFRA-514 uploads (sha256 0631201835fd…, bd067fb66dac…).",
+      "headSha": "3fb442ce4c61f9f83d0b3e932f9f73fe408a2acb",
+      "negativeControl": "Round 4 at ed4c190e: mergeable false, mergeable_state dirty, zero check runs at 577d1dc1 (the conflict this merge resolved); round 2's edge.sh at main 448a41003a17 fails the 8 changed cases and all 30 burst comments."
     }
-  ],
-  "failed": 1,
-  "verifiedThisRound": [
-    "report.ts (single class chain, cause lookups that now throw on a part with no CAUSES entry) rebuilds dispatch://INFRA-514/artifact/human-comment-delivery-2026-10-md and its pairs TSV byte for byte from the run files attached to INFRA-596.",
-    "14 broken inputs each make report.ts exit 1 naming the line: duplicated receipts row (line 1273), duplicated comments row (lines 2 and 1130), a row dropped from either file, comments.csv cut mid-row (line 1129: 19 fields), rows_without_id 1, comments or received off by one, a receipt for an unknown comment, a received row flipped to not_received, an unknown status, a reordered receipts header, --counts missing, and owed_reasons \"author\" (line 46).",
-    "skills/dispatch/SKILL.md and packages/claude-envoy/legion/ hold no change from the merge base: the skill change left this pull request for sjawhar/legion#2417."
   ]
 }
