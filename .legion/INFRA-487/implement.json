@@ -2,38 +2,30 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-487",
-  "completed": "2026-10-27T03:20:28Z",
-  "round": 7,
+  "completed": "2026-10-27T05:25:57Z",
+  "round": 8,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2269",
-  "scope": "Conflict return (architect, envoy b06a012e): forward merge of main only, no change to the change; the PR body's Fast-follow line now points at INFRA-585.",
+  "scope": "CI red at 89ea9abd (required `test`, run 40443580364): the daemon admission tests main broke in #2289 and fixed in #2317 (baadccdc). Per the INFRA-115 architect (envoy 0ac66990): merge main once more, no change to the change.",
   "merge": {
-    "oldHead": "e96d10c0307162478acf42443919f7384570bd33",
-    "newHead": "015a2e699f652d224db3e9c47774c51e2fb21946",
-    "base": "main@origin d64c4073",
+    "oldHead": "89ea9abdf70bf8ab21ac39ae56d498e42282aaee",
+    "newHead": "30494e4c291c308c41fc9923f3c19ebbbf6f6c59",
+    "base": "main@origin 448a4100 (contains baadccdc)",
     "fingerprintBefore": "f265f321824ec11f926320d38b0f5a04bb4778b1a534e085d36af5e2c9ba0efd",
     "fingerprintAfter": "f265f321824ec11f926320d38b0f5a04bb4778b1a534e085d36af5e2c9ba0efd",
     "verdict": "unchanged",
-    "conflicts": ["packages/envoy/CHANGELOG.md [Unreleased] Fixed: both entries kept (INFRA-487's and main's envoy-infra integer-input entry)"],
-    "comment": "https://github.com/sjawhar/legion/pull/2269#issuecomment-6432909601"
+    "conflicts": [],
+    "comment": "https://github.com/sjawhar/legion/pull/2269#issuecomment-6434513331"
   },
   "proof": [
     {
-      "criterion": "The forward merge leaves the change itself unchanged and the branch mergeable",
-      "surface": "the merged tree in the issue workspace and GitHub's mergeability",
-      "command": "jj diff --from \"fork_point(\\\"main\\\"@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, at e96d10c0 and at 015a2e69; gh pr view 2269 --json mergeable",
-      "observed": "fingerprint f265f321... at both heads (unchanged); GitHub reports MERGEABLE",
-      "headSha": "015a2e699f652d224db3e9c47774c51e2fb21946",
-      "negativeControl": "before the merge GitHub reported CONFLICTING / DIRTY at e96d10c0"
-    },
-    {
-      "criterion": "Bare gates at the merged head",
-      "surface": "Go build and the broker store, enroll and config suites on real Postgres; the daemon's agentsecrets package",
-      "command": "cd packages/envoy && go build ./... && go vet ./internal/broker/... ./cmd/broker && BROKER_TEST_DATABASE_URL=... go test -count=1 -v -skip TestOpenSignsEveryNewConnectionInWithAFreshlyMintedToken ./internal/broker/store ./internal/broker/enroll ./internal/broker/config; cd packages/daemon && go build ./... && go test -count=1 ./internal/agentsecrets",
-      "observed": "build and vet clean; store, enroll, config ok, 0 FAIL, 0 SKIP; agentsecrets ok; migrations still end at 0019 (main added none)",
-      "headSha": "015a2e699f652d224db3e9c47774c51e2fb21946",
-      "negativeControl": "the outage acceptance test is unchanged since 301addfd, where it failed on eee16056 with PROOF_INVALID not live and passed with 0 skips"
+      "criterion": "The red required check came from main and the merge brings main's fix, leaving the change unchanged",
+      "surface": "the failing run's log, the merged tree in the issue workspace, and the daemon admission tests on real Postgres 16.4",
+      "command": "gh run view 40443580364 --log-failed (TestApplyFact*, TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun failing in packages/daemon/internal/admit); jj fingerprint at 89ea9abd and 30494e4c; cd packages/daemon && LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:54487/zzadmit?sslmode=disable go test -count=1 -p 1 -run 'TestApplyFact|TestPromotionStartsAChild' ./internal/admit/...",
+      "observed": "fingerprint f265f321... at both heads; admit tests ok (49.9s) at 30494e4c; envoy and daemon build, broker vet clean; daemon agentsecrets ok; migrations still end at 0019",
+      "headSha": "30494e4c291c308c41fc9923f3c19ebbbf6f6c59",
+      "negativeControl": "at 015a2e69 (main before #2317) the same admission tests failed in CI run 40443580364"
     }
   ],
-  "filesChanged": ["merge commit 015a2e69 (packages/envoy/CHANGELOG.md resolution only)"],
+  "filesChanged": ["merge commit 30494e4c (no conflict, no file of this change touched)"],
   "openQuestions": []
 }
