@@ -2,19 +2,16 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-610",
-  "completed": "2026-10-27T08:44:00Z",
+  "completed": "2026-10-27T10:48:30Z",
+  "round": 2,
   "decision": "approved",
-  "reviewedCodeHead": "12da3a9bf2805bc5a1821e4a418e7e7af2ccb3cb",
+  "reviewedCodeHead": "aad325eaca53275b6951992874006dca6e1dec8a",
   "critical": 0,
   "important": 0,
-  "minor": 3,
-  "ci": "Required set on main (rulesets): lint, typecheck, test, pr-title; branch protection lists none. CI head (newest pull_request run) 12da3a9bf280: lint, typecheck, test, pr-title all completed/success at 08:42Z; compare 12da3a9bf280...30c7e36da0d3 handoffsOnly true (2 files). The non-required Legion Envoy and Contracts jobs (envoy-go, envoy-go-race, envoy-e2e-local, ...) were still queued behind a ~200-run backlog when read.",
-  "thermonuclear": "Run once at 12da3a9bf280. Deep review: no critical or important finding; one Minor (stale kv_test.go:942 comment); Security: agent-def only (packages/envoy/AGENTS.md:1965, factual, cannot steer review). Code quality: graceWindow no longer the whole window (the plan's chosen design per INFRA-514's plan; no behaviour change), the same stale comment, InterestRefreshAge's doc written for today, timing prose repeated in envoy.ts and the architecture doc; none changes behaviour.",
+  "minor": 0,
+  "ci": "Required set on main (rulesets): lint, typecheck, test, pr-title; branch protection lists none. CI head (newest pull_request run) 0da2ee0421ee (carries aad325eaca53): lint, typecheck, test completed/success, pr-title completed/success (two superseded pr-title runs cancelled) at 10:47Z; compare 0da2ee0421ee...160355f8eda6 handoffsOnly true (1 file). Non-required envoy-go and envoy-go-race still queued behind the runner backlog.",
+  "thermonuclear": "Run once at aad325eaca53. Deep review: approve, no findings; the delta changes // comments only (kv.go:772-775, kv_test.go:942-943), both true against Reap and TestInterestReaper; Security: no sensitive surface in the delta, round 1's agent-def answer (packages/envoy/AGENTS.md:1965) stands. Code quality: approve, no findings; both round-1 stale-comment Minors settled.",
   "threads": "0 threads on the pull request (gh api graphql reviewThreads: []).",
-  "e2e": "E2E (implementer) and E2E (tester) both present in the PR body, both at 12da3a9bf280 with base-listener negative controls. Reviewer re-ran go test -race -count=1 -run 'Reap|Reaper' ./internal/store/ ./internal/integration/ at the head: ok both.",
-  "keyFindings": [
-    {"severity": "minor", "file": "packages/envoy/internal/store/kv_test.go:942", "description": "Comment 'Reap with 0 grace window — all dead sessions should be reaped' is no longer true: Reap(…, 0) keeps rows younger than InterestRefreshAge. Cleanup only; fast-follow."},
-    {"severity": "minor", "file": "packages/envoy/internal/store/kv.go:772-776", "description": "InterestRefreshAge's doc says 'Today every heartbeat rewrites the row; a later build will skip…', which INFRA-514 must reword when it lands. Cleanup only; fast-follow."},
-    {"severity": "minor", "file": "packages/envoy/internal/store/kv.go:789", "description": "graceWindow no longer holds the whole window (5 min always added). The plan chose this shape deliberately (INFRA-514 plan, T4 step 1); recorded under Not proven / risk, not a change request."}
-  ]
+  "e2e": "E2E (implementer) carries a round-2 entry at aad325eaca53 (comments-only grep plus reaper tests, with a negative control); E2E (tester) re-drove the live listener probes at aad325eaca53 with base-listener negative controls (new rule at head, old rule at base).",
+  "keyFindings": []
 }
