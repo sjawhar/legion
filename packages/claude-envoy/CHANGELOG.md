@@ -93,6 +93,12 @@
   `TMUX`, so its title was not affected; the real-tmux test, which ran tmux without `-u`, failed in
   such an environment and now passes. The daemon's real-tmux test rig reads tmux with `-u` too.
 
+- The channel server's one tmux call as it starts, which names the session's title after its pane,
+  is held to its 1 s bound by a timer that kills tmux with SIGKILL and stops reading its output,
+  not by the synchronous spawn's `timeout`: Bun 1.3.14's `execFileSync` let a hung or slow `tmux`
+  (measured: a `sleep 5` in its place, about half the runs) run to its end, holding the server's
+  start that long. `dist/` was rebuilt.
+
 - The `dispatch` command (`dist/dispatch.js`) waits at most 1 s for tmux to name the session's
   pane, then kills the tmux client and sends the call without the pane. A tmux client waiting to
   connect to a tmux server too busy to accept caught the SIGTERM of the lookup's 5 s timeout and

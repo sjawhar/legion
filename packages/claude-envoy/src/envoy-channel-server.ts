@@ -1118,7 +1118,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
   // that throws when it is unset and runs only after the Envoy-off return: a session with Envoy
   // off and no plugin data must still serve.
   const pluginData = configuredValue(process.env["CLAUDE_PLUGIN_DATA"])
-  const title = sessionTitle(
+  const title = await sessionTitle(
     {
       ENVOY_SESSION_TITLE: process.env["ENVOY_SESSION_TITLE"],
       TMUX: process.env["TMUX"],

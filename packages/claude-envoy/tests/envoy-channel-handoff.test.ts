@@ -179,7 +179,7 @@ test("a name chosen after the server started is what the next registration and s
   })
   // The real title function over the real state directory, so this row exercises the precedence
   // the server wires rather than a stub of it.
-  const title = sessionTitle({}, "/work/legion", {
+  const title = await sessionTitle({}, "/work/legion", {
     chosen: (sessionId) => readChosenTitleSync(sessionTitleFile(stateDirectory, sessionId)),
   })
   const session = await startChannelSession(

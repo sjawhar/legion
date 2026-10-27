@@ -49272,21 +49272,45 @@ function isAncestor(candidate, pid = process.pid) {
   }
   return false;
 }
-function queryTmux(socket, pane, format) {
+async function queryTmux(socket, pane, format) {
+  let child;
   try {
-    const answer = execFileSync("tmux", ["-u", "-S", socket, "display-message", "-p", "-t", pane, format], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: TMUX_TIMEOUT_MS,
-      killSignal: "SIGKILL"
+    child = Bun.spawn(["tmux", "-u", "-S", socket, "display-message", "-p", "-t", pane, format], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore"
     });
-    return answer.trim() === "" ? undefined : answer;
   } catch {
     return;
   }
+  const reader = child.stdout.getReader();
+  const expired = Promise.withResolvers();
+  const timer = setTimeout(() => {
+    child.kill("SIGKILL");
+    reader.cancel().catch(() => {
+      return;
+    });
+    expired.resolve(undefined);
+  }, TMUX_TIMEOUT_MS);
+  const answered = (async () => {
+    const decoder2 = new TextDecoder;
+    let answer = "";
+    for (let chunk = await reader.read();!chunk.done; chunk = await reader.read()) {
+      answer += decoder2.decode(chunk.value, { stream: true });
+    }
+    answer += decoder2.decode();
+    return await child.exited === 0 && answer.trim() !== "" ? answer : undefined;
+  })().catch(() => {
+    return;
+  });
+  try {
+    return await Promise.race([answered, expired.promise]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
-function tmuxPaneTitle(socket, serverPid, pane, ownPane, query = queryTmux) {
-  const fields = query(socket, pane, TMUX_PANE_FORMAT)?.replace(/\r?\n$/, "").split("\t");
+async function tmuxPaneTitle(socket, serverPid, pane, ownPane, query = queryTmux) {
+  const fields = (await query(socket, pane, TMUX_PANE_FORMAT))?.replace(/\r?\n$/, "").split("\t");
   if (fields === undefined || fields.length < 6)
     return;
   const [name = "", window2 = "", automaticRename, group = "", pid, panePid = ""] = fields.map(oneLine);
@@ -49300,7 +49324,7 @@ function tmuxPaneTitle(socket, serverPid, pane, ownPane, query = queryTmux) {
   }
   return /^[0-9]+$/.test(session) ? undefined : session;
 }
-function sessionTitle(environment, directory, sources = {}) {
+async function sessionTitle(environment, directory, sources = {}) {
   const {
     query = queryTmux,
     ownPane = (panePid) => isAncestor(panePid),
@@ -49316,7 +49340,7 @@ function sessionTitle(environment, directory, sources = {}) {
   const serverPid = parts.at(-2) ?? "";
   const pane = configuredValue(environment.TMUX_PANE)?.trim();
   const directoryName = oneLine(basename4(directory) || directory);
-  const name = (socket === "" || serverPid === "" || pane === undefined ? undefined : tmuxPaneTitle(socket, serverPid, pane, ownPane, query)) ?? (visible(directoryName) ? directoryName : "session");
+  const name = (socket === "" || serverPid === "" || pane === undefined ? undefined : await tmuxPaneTitle(socket, serverPid, pane, ownPane, query)) ?? (visible(directoryName) ? directoryName : "session");
   return (sessionId) => {
     const own = oneLine(chosen(sessionId) ?? "");
     return visible(own) ? own : `${name} ${sessionId.slice(0, SHORT_ID_LENGTH)}`;
@@ -49927,7 +49951,7 @@ async function runEnvoyChannelServer() {
 `);
   const overrideSessionId = process.env["ENVOY_SESSION_ID"];
   const pluginData = configuredValue(process.env["CLAUDE_PLUGIN_DATA"]);
-  const title = sessionTitle({
+  const title = await sessionTitle({
     ENVOY_SESSION_TITLE: process.env["ENVOY_SESSION_TITLE"],
     TMUX: process.env["TMUX"],
     TMUX_PANE: process.env["TMUX_PANE"]
