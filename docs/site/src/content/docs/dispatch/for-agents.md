@@ -100,7 +100,7 @@ person, that is an ask, and nothing else reaches their Inbox.
 
 The server holds every write to a size, and refuses rather than truncates:
 
-- an ask's question is at most 800 characters, with at most eight options;
+- an ask's question is at most 2,000 characters, with at most eight options;
 - a comment or message body is at most 32,000 characters;
 - a comment anchored to a document is also projected into that document's margin, which is bounded
   in bytes and not by that character limit: 256 KiB per thread, and 1 MiB per document margin. A

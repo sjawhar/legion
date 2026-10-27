@@ -937,6 +937,10 @@
 
 ### Changed
 
+- Dispatch accepts an ask question of up to 2,000 UTF-16 units, from 800, on `POST .../asks` and
+  `PATCH /api/v1/asks/{id}`, read from the generated `contracts.AskQuestionMax`; an approval
+  request's `summary` gets what its question leaves of the same limit.
+
 - `POST /v1/interests/subscribe` no longer stores a topic reaching a private stream subject other
   than the session's own agent subject (`bus.ReachesPrivateStreamSubject`): another session's
   `notifications.agent.<id>`, a failed-delivery lane
