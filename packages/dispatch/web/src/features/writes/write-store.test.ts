@@ -752,6 +752,34 @@ test("a sign-out out holds its person's writes until Dispatch answers it", async
     expect(writes.rows()).toEqual([]);
   });
 });
+// A hold let go because its tab went, while Dispatch still named the person
+// (`releaseUnsettled`), is not the end of that sign-out: the gone tab's own request may still
+// reach Dispatch after this page's read did. A lapse within `KEYED_SEND_ATTEMPT_MS` of that
+// release is that sign-out landing late, and the writes it would discard go; a lapse after it is
+// a lapse, and keeps them, as does one after a hold its tab said the end of (`release`).
+test("a lapse just after a gone tab's hold was let go discards; a later one keeps", async () => {
+  await onFakeClock(async () => {
+    const labels = (writes: Writes) => writes.rows().map((write) => write.label);
+    const held = async (letGo: (writes: Writes) => void, wait: number) => {
+      const { writes } = storeOf();
+      writes.signedIn("alice");
+      void statusWrite(writes, () => Promise.reject(dropped())).catch(() => {});
+      await settle();
+      writes.holdFor("alice");
+      letGo(writes);
+      await tick(wait);
+      writes.signedIn(undefined);
+      await settle();
+      return labels(writes);
+    };
+
+    expect(await held((writes) => writes.releaseUnsettled("alice"), 1_000)).toEqual([]);
+    expect(
+      await held((writes) => writes.releaseUnsettled("alice"), KEYED_SEND_ATTEMPT_MS + 1_000)
+    ).toEqual(["CORE-1 set to done"]);
+    expect(await held((writes) => writes.release("alice"), 1_000)).toEqual(["CORE-1 set to done"]);
+  });
+});
 
 // W25. Writes to one target go out in press order: a later one waits while an earlier one is still
 // being tried, a refused one no longer holds the line, and its Retry joins at the back.

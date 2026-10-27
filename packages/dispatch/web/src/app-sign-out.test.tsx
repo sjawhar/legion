@@ -546,6 +546,28 @@ test("a 401 while another tab's sign-out holds the writes discards them, after t
   }
 }, 15_000);
 
+// The third order, the one WebKit takes: the tab goes, its whoami read answers 200 because the
+// sign-out's own request had not reached Dispatch yet, the hold is let go - and Dispatch ends the
+// session a moment later. That release is unsettled (`Writes.releaseUnsettled`), so the lapse
+// that follows it is that sign-out landing late, and the writes it would discard go rather than
+// being kept for a sign-in the person discarded them before.
+test("a 401 just after a gone tab's hold was let go discards the writes it held", async () => {
+  const { app, attempts, signer, state } = await holdingForAnotherTab();
+  try {
+    signer.close();
+    // The read its going starts still names alice: the hold is let go, and the write goes on.
+    await waitFor(() =>
+      expect(screen.queryByText(/Waiting for a sign-out in another tab/)).toBeNull()
+    );
+    state.signedIn = false;
+    await act(() => app.queryClient.invalidateQueries({ queryKey: ["whoami"] }));
+    await discardedFor(app, attempts);
+  } finally {
+    signer.close();
+    app.teardown();
+  }
+}, 15_000);
+
 // A lapse with no other tab's sign-out holding the writes is a lapse, as before: they are kept
 // for the person's next sign-in.
 test("a 401 with no other tab's sign-out holding the writes keeps them", async () => {

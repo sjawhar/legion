@@ -7,6 +7,7 @@ import type { AuthenticatedUser } from "../../api/types";
 import { newSendKey } from "../../lib/send-key";
 import { indexedDbFiles, type KeptFiles } from "./kept-files";
 import {
+  KEYED_SEND_ATTEMPT_MS,
   retriesUnderItsKey,
   SEND_DEADLINE_MS,
   SendInterruptedError,
@@ -307,6 +308,10 @@ export class Writes {
   /** The logins whose sign-out another tab of this browser has out (`holdFor`), held the same way
    *  until that tab says how it ended, goes, or stops saying it is out (`SignInChannel`). */
   readonly #signingOutElsewhere = new Set<string>();
+  /** The logins whose sign-out in another tab ended without a word - that tab went - while
+   *  Dispatch still named them (`releaseUnsettled`), each with the time until which a lapse of
+   *  theirs is that sign-out landing late rather than a lapse. */
+  readonly #unsettledSignOuts = new Map<string, number>();
 
   constructor(
     client: QueryClient,
@@ -496,10 +501,18 @@ export class Writes {
     this.#login = login;
     if (login === undefined) {
       this.#lapsed = true;
-      if (before !== undefined && this.#signingOutElsewhere.has(before)) this.dropLogin(before);
+      const unsettledUntil = before === undefined ? undefined : this.#unsettledSignOuts.get(before);
+      this.#unsettledSignOuts.clear();
+      const landed =
+        before !== undefined &&
+        (this.#signingOutElsewhere.has(before) ||
+          (unsettledUntil !== undefined && Date.now() <= unsettledUntil));
+      if (landed) this.dropLogin(before);
       for (const entry of [...this.#entries.values()]) this.#hold(entry);
       return;
     }
+    // Dispatch names someone, so no sign-out of this browser's is still unaccounted for.
+    this.#unsettledSignOuts.clear();
     this.#lapsed = false;
     this.#take([...this.#entries.values()].filter((entry) => entry.write.login !== login));
     void this.#files.keepOnly(login);
@@ -542,6 +555,17 @@ export class Writes {
     if (!this.#signingOutElsewhere.delete(login)) return;
     this.#markHeld();
     this.#advanceEvery();
+  }
+
+  /** Lets `login`'s writes go on, as `release` does, for a sign-out in another tab that ended
+   *  without a word - its tab went - while Dispatch still named the person. That sign-out may
+   *  still land: the closed tab's request can reach Dispatch after this tab's own read did. So a
+   *  lapse of theirs within `KEYED_SEND_ATTEMPT_MS`, the longest the page waits on a silent
+   *  request, is that sign-out landing late, and their writes go (`signedIn`); a lapse after that
+   *  is a lapse, and keeps them. */
+  releaseUnsettled(login: string): void {
+    this.#unsettledSignOuts.set(login, Date.now() + KEYED_SEND_ATTEMPT_MS);
+    this.release(login);
   }
 
   /** Stops the trying of every write `login` pressed but a sign-out (`#hold`): a sign-out of

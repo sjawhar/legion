@@ -877,11 +877,14 @@ export function signOutQuestion(unsent: readonly string[], unanswered = false): 
  *  cookie is that browser session's - and a `401 NO_IDENTITY` is the sign-out landed, so
  *  `login`'s writes go, as the person chose when they confirmed it (`Writes.dropLogin`), rather
  *  than waiting for a sign-in they already discarded them before. Any other answer is a sign-out
- *  that did not land - a refusal from in front of Dispatch, a read that could not be made, or
- *  the person still signed in - and their writes go on where they stood (`Writes.release`). An
- *  answer naming anyone but `login` is the sign-in check's news too, so it is read again here,
- *  and the gate drops their writes as it would any other login's; one that goes out before that
- *  read lands carries their `Dispatch-Login` and is refused `409 LOGIN_CHANGED` before it runs.
+ *  that has not landed - a refusal from in front of Dispatch, a read that could not be made, or
+ *  the person still signed in - and their writes go on where they stood. Not for good, though:
+ *  the gone tab's own request may still be on its way, and Dispatch may end the session just
+ *  after this read answered, so the release is an unsettled one (`Writes.releaseUnsettled`) and
+ *  a lapse that follows it closely is that sign-out landing late rather than a lapse. An answer
+ *  naming anyone but `login` is the sign-in check's news too, so it is read again here, and the
+ *  gate drops their writes as it would any other login's; one that goes out before that read
+ *  lands carries their `Dispatch-Login` and is refused `409 LOGIN_CHANGED` before it runs.
  */
 async function heldWritesOfGoneHolder(queryClient: QueryClient, login: string): Promise<void> {
   const who = await api.whoAmI().then(
@@ -890,6 +893,7 @@ async function heldWritesOfGoneHolder(queryClient: QueryClient, login: string): 
   );
   const writes = writesOf(queryClient);
   if (who === null) writes.dropLogin(login);
+  else if (who === login) writes.releaseUnsettled(login);
   else writes.release(login);
   if (who !== login) void queryClient.invalidateQueries({ queryKey: ["whoami"] });
 }
