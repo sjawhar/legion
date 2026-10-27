@@ -336,12 +336,21 @@ func (s *server) waitBackground() {
 	s.eventRelay.wait()
 }
 
-// horizon is the server's one events.Horizon over the shared pool (eventHorizon), built by the
-// first reader that asks for it. Every global-id reader of the event log on this server reads
-// through it: one per process is what lets concurrent readers share an observation, each of
-// which consumes a transaction id, rather than each reader observing on its own.
+// horizon is the server's one events.Horizon (eventHorizon), built by the first reader that asks
+// for it and observing through the store's horizon pool (store.Pool.Horizon), so an observation
+// never queues behind the requests holding the shared pool. Every global-id reader of the event
+// log on this server reads through it: one per process is what lets concurrent readers share an
+// observation, each of which consumes a transaction id, rather than each reader observing on its
+// own. The pool opens only on a store that is still open; a closed store's Horizon observes
+// through the shared pool, which is closed too, so every observation fails with its error.
 func (s *server) horizon() *events.Horizon {
-	s.horizonOnce.Do(func() { s.eventHorizon = events.NewHorizon(s.deps.Store.Pool) })
+	s.horizonOnce.Do(func() {
+		var db events.HorizonDB = s.deps.Store.Pool
+		if pool, err := s.deps.Store.Pool.Horizon(); err == nil {
+			db = pool
+		}
+		s.eventHorizon = events.NewHorizon(db)
+	})
 	return s.eventHorizon
 }
 

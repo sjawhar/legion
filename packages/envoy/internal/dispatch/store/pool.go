@@ -131,13 +131,14 @@ type Pool struct {
 	// mu guards each separate pool's creation against this pool's close: one lock, so a
 	// caller that loses the race is told the pool is closed rather than opening one nothing
 	// will ever close.
-	mu     sync.Mutex
-	rooms  *pgxpool.Pool
-	health *pgxpool.Pool
-	listen *pgxpool.Pool
-	leases *pgxpool.Pool
-	outbox *pgxpool.Pool
-	closed bool
+	mu      sync.Mutex
+	rooms   *pgxpool.Pool
+	health  *pgxpool.Pool
+	listen  *pgxpool.Pool
+	leases  *pgxpool.Pool
+	outbox  *pgxpool.Pool
+	horizon *pgxpool.Pool
+	closed  bool
 }
 
 // NewPool wraps an open pgx pool.
@@ -299,6 +300,25 @@ func (p *Pool) Outbox() (*Pool, error) {
 	return NewPool(opened), nil
 }
 
+// horizonPoolSize bounds the pool the event log's safe horizon (events.Horizon) observes through.
+// The server keeps one Horizon, whose concurrent callers share the one observation in flight, so
+// one connection serves every observation; the second is for the stall diagnosis, which runs after
+// an observation has released its waiters and so can run beside the next one.
+const horizonPoolSize = 2
+
+// Horizon is the pool the event log's safe horizon (events.Horizon) takes its observations and
+// its stall diagnosis through. Every reader that pages the event log by a global id cursor - the
+// event stream relay, the delivery hub, a references read since a cursor - reads only up to what
+// an observation has proven safe. Under load the API's requests queue for the shared pool's
+// connections, and an observation queued behind them holds back every live reader of the event
+// log; on a pool of its own it waits for none of them, and holds no connection a request could
+// use. Like the rooms pool it is outside the nested-acquire guard, because a separate pool cannot
+// close the cycle the guard prevents: neither the observation (one batch) nor the diagnosis (one
+// row) asks for a second connection while it holds one.
+func (p *Pool) Horizon() (*pgxpool.Pool, error) {
+	return p.separate(&p.horizon, horizonPoolSize, "event horizon")
+}
+
 // separate opens the pool held at field on demand, sized at size and copied from the shared
 // pool's configuration, and closes it with the shared pool. Each caller holds mu for the whole
 // check-and-open so two of them cannot open two pools, and one opened after Close would be a
@@ -327,8 +347,8 @@ func (p *Pool) separate(field **pgxpool.Pool, size int32, name string) (*pgxpool
 	return opened, nil
 }
 
-// Close releases every connection the pool holds, the document rooms and the health probe
-// included.
+// Close releases every connection the pool holds, the separate pools' - the document rooms, the
+// health probe, the listener, the leases, the outbox and the event horizon - included.
 func (p *Pool) Close() {
 	p.mu.Lock()
 	if p.closed {
@@ -336,10 +356,10 @@ func (p *Pool) Close() {
 		return
 	}
 	p.closed = true
-	rooms, health, listen, leases, outbox := p.rooms, p.health, p.listen, p.leases, p.outbox
-	p.rooms, p.health, p.listen, p.leases, p.outbox = nil, nil, nil, nil, nil
+	rooms, health, listen, leases, outbox, horizon := p.rooms, p.health, p.listen, p.leases, p.outbox, p.horizon
+	p.rooms, p.health, p.listen, p.leases, p.outbox, p.horizon = nil, nil, nil, nil, nil, nil
 	p.mu.Unlock()
-	for _, separate := range []*pgxpool.Pool{rooms, health, listen, leases, outbox} {
+	for _, separate := range []*pgxpool.Pool{rooms, health, listen, leases, outbox, horizon} {
 		if separate != nil {
 			separate.Close()
 		}

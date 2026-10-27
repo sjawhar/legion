@@ -1213,7 +1213,9 @@ are deliberately unguarded — a load or a probe taken under an open transaction
 not refused, and a separate pool cannot close the cycle the guard prevents. The events outbox
 claims, reads and records its batches on a pool of its own too (`store.Pool.Outbox`, one
 connection): it runs one statement at a time, and a full shared pool must not hold back
-publishing.
+publishing. So does the event log's safe horizon (`store.Pool.Horizon`, two connections, the
+server's one `events.Horizon`): an observation queued behind requests would hold back every live
+reader of the event log.
 
 The migration runner takes one more connection outside the shared pool. `pgmigrate.Exec`, which
 applies every migration, first sets the transaction's `lock_timeout` to `pgmigrate.LockTimeout`

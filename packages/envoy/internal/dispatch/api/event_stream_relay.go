@@ -268,7 +268,10 @@ func (r *eventStreamRelay) onConnected() { signal(r.wake) }
 // schedules a re-read of its own, eventRelayGapMin doubling to eventRelayGapMax while the horizon
 // stands still and back to eventRelayGapMin whenever it moves. The timer runs only while a gap is
 // open, so an idle relay observes nothing; a notification arriving meanwhile reads at once, as
-// ever.
+// ever. A gap re-read skips the reset check: it asks only whether the horizon has moved, on the
+// horizon's own connection, and reads the shared pool only once there is something to publish,
+// so a gap held open by a long transaction costs no request a connection. A reset is still caught
+// at the next notification, which the refill's own inserts send.
 func (r *eventStreamRelay) run(ctx context.Context) {
 	var (
 		gapTimer *time.Timer
@@ -281,6 +284,7 @@ func (r *eventStreamRelay) run(ctx context.Context) {
 		}
 	}()
 	for {
+		checkReset := true
 		select {
 		case <-ctx.Done():
 			return
@@ -289,17 +293,18 @@ func (r *eventStreamRelay) run(ctx context.Context) {
 				return
 			}
 		case <-gapRead:
+			checkReset = false
 		}
 		if gapTimer != nil {
 			gapTimer.Stop()
 			gapTimer, gapRead = nil, nil
 		}
-		safe, gap, ok := r.read(ctx)
+		safe, gap, ok := r.read(ctx, checkReset)
 		for !ok {
 			if !waitFor(ctx, eventRelayRetry) {
 				return
 			}
-			safe, gap, ok = r.read(ctx)
+			safe, gap, ok = r.read(ctx, checkReset)
 		}
 		wait, open := gaps.next(safe, gap)
 		if !open {
@@ -316,22 +321,24 @@ func (r *eventStreamRelay) run(ctx context.Context) {
 // the relay has started. It pages until a short page, as streamEvents does, or until the cursor
 // stands on the horizon, all through the one horizon it read first: what commits meanwhile is the
 // next read's. A log that was reset under the cursor is answered first, and publishes nothing
-// (resetCursor).
+// (resetCursor); checkReset false skips that check (run's gap re-read).
 //
 // It answers the horizon it read through and whether a gap stands open above it (Pending): an
 // event observed above the horizon that this read could not publish, which run re-reads for.
 // ok false is a read that failed.
-func (r *eventStreamRelay) read(ctx context.Context) (safe int64, gap, ok bool) {
+func (r *eventStreamRelay) read(ctx context.Context, checkReset bool) (safe int64, gap, ok bool) {
 	tracked := store.WithTransactionTracking(ctx)
 	horizon := r.server.horizon()
-	switch reset, resetSafe, err := r.resetCursor(tracked); {
-	case err != nil:
-		if ctx.Err() == nil {
-			slog.Warn("dispatch: live event stream could not check its cursor against the event log; retrying", "error", err)
+	if checkReset {
+		switch reset, resetSafe, err := r.resetCursor(tracked); {
+		case err != nil:
+			if ctx.Err() == nil {
+				slog.Warn("dispatch: live event stream could not check its cursor against the event log; retrying", "error", err)
+			}
+			return 0, false, false
+		case reset:
+			return resetSafe, horizon.Pending(), true
 		}
-		return 0, false, false
-	case reset:
-		return resetSafe, horizon.Pending(), true
 	}
 	safe, err := horizon.Safe(tracked)
 	if err != nil {
