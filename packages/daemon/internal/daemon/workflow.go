@@ -25,6 +25,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/notify"
@@ -69,6 +70,17 @@ type workflowRuntime struct {
 	// would otherwise repeat the same (ack floor, idle) pairs and have its own releases swallowed
 	// as duplicates of the previous boot's.
 	bootID string
+	// caughtUp names each root (key and generation) the boot's catch-up finished, so a retry of the
+	// catch-up resumes after it rather than reading it again (catchUpAwaiting), and the reconcile's
+	// retry does not hold it again (holdForCatchUp). The boot alone writes it, from its one
+	// readiness goroutine.
+	caughtUp map[string]struct{}
+	// catchUpRootTimeout bounds the boot's catch-up of one root; zero means bootTimeout. A test
+	// shortens it.
+	catchUpRootTimeout time.Duration
+	// catchUpRetryDelay is the wait between two reads of one root Dispatch refused with an error it
+	// may stop giving; zero means catchUpRetryDelay's default. A test shortens it.
+	catchUpRetryDelay time.Duration
 	// holdPollInterval is pollHoldRelease's ticker period; zero means the production default. A
 	// test shortens it to bound how long a release takes to observe.
 	holdPollInterval time.Duration
@@ -132,6 +144,11 @@ type workflowRuntime struct {
 	// held in memory only, so a restart's first pass judges again with the permission GitHub gives
 	// then. Only the pass touches it.
 	refusedReviews map[int64]bool
+	// openedWarned is when the pass last warned, by repository and pull request number, that it
+	// applies an open pull request GitHub shows for an issue with none recorded
+	// (readUnrecordedPullRequests): one the workflow does not record is found again every pass, and
+	// is told at most once every openedWarnEvery. Only the pass touches it.
+	openedWarned map[string]time.Time
 	// failed carries the first supervision terminal fact that could not be applied. serve stops
 	// the daemon with it: the claim's terminal state is durable, so the next boot's replay applies
 	// the fact the failed callback lost.
@@ -484,6 +501,12 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 		if err := blockers.Reconcile(scoped, tx, w.records, w.dispatchProject, issues); err != nil {
 			return err
 		}
+		// Every root the boot's catch-up will read is held out of the decision whether it waits on
+		// a person before admission's pass here, until its catch-up has applied what Dispatch
+		// recorded while the daemon was down (catchUpAwaiting).
+		if err := w.holdForCatchUp(scoped, tx); err != nil {
+			return err
+		}
 		return w.admission.Reconcile(scoped, tx, listed, target, position)
 	}); err != nil {
 		return fmt.Errorf("reconcile admission: %w", err)
@@ -501,6 +524,17 @@ func (w *workflowRuntime) identity(ctx context.Context, role claim.Role, owner s
 		return runtime.GitIdentity{}, fmt.Errorf("mint the %s App lease for %s on %s: %w", appauth.AppRoleFor(role), role, owner, err)
 	}
 	return lease.Identity, nil
+}
+
+// ensureWorkspace provisions an issue's workspace on the daemon's host when a launch finds it
+// missing or not checked out (outbox.ensureWorkspace), through the outbox, which orders every
+// provision of the shared clones (provisionLocks). The outbox exists from attach on, and attach
+// runs before supervision restores or launches any claim.
+func (w *workflowRuntime) ensureWorkspace(ctx context.Context, issue string, repo ghrepo.Repository, defaultBranch string) error {
+	if w.outbox == nil {
+		return fmt.Errorf("provision the workspace of %s: the workflow's outbox is not attached yet", issue)
+	}
+	return w.outbox.ensureWorkspace(ctx, issue, repo, defaultBranch)
 }
 
 func (w *workflowRuntime) attach(supervision *supervision) {

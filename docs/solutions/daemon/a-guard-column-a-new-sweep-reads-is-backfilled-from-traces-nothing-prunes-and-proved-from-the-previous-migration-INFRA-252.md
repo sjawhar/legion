@@ -36,7 +36,7 @@ Extends docs/solutions/daemon/an-exemption-stored-on-a-record-belongs-to-the-run
 
 sjawhar/legion#2226 added `issues.handed_over_from` and an adoption sweep that refuses a root
 carrying it. Review round 7 found that existing roots an older daemon had handed over carried `''`
-and would be adopted back by the first sweep after the deploy. `0058_issue_ancestry.up.sql` now
-backfills from `processed_events` and `claims`, `store/migration_0058_test.go` proves it from
-version 57 (it fails for the two marked rows with the `update` removed), and the pull request's
+and would be adopted back by the first sweep after the deploy. `0059_issue_ancestry.up.sql` now
+backfills from `processed_events` and `claims`, `store/migration_0059_test.go` proves it from
+version 58 (it fails for the two marked rows with the `update` removed), and the pull request's
 deploy note carries the query for an orphan a person admitted that never ran a worker.

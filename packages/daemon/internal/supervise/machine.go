@@ -966,6 +966,16 @@ func (m *Machine) backOff(ctx context.Context) error {
 	return nil
 }
 
+// start launches the claim's process for this try: a Resume of its recorded session, or a Spawn
+// when it records none. A Resume the runtime answers with runtime.ErrSessionFileMissing is the
+// operator's takeover of another runtime's claims (the tmux runtime's `runtime.tmux.take_over`): the
+// previous process was that runtime's, and its session is found nowhere this one runs the agent. It
+// would fail the same way on every try and wedge the claim until its launch budget ran out, so the
+// claim forgets the session and the same try spawns a fresh agent, which registers its own session;
+// the runtime has started nothing first. It is logged, never charged: the session stayed with the
+// runtime the operator moved the project off. Any other refusal of a Resume, a session file missing
+// elsewhere among them, is a launch failure the caller charges, and the claim keeps its session:
+// a fresh agent on a claim that had one is what the same-agent refusal exists to catch.
 func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, error) {
 	spec, err := m.deps.Specs.SpawnSpec(ctx, m.claim)
 	if err != nil {
@@ -977,7 +987,15 @@ func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, err
 		return m.deps.Runtime.Spawn(ctx, spec)
 	}
 	spec.ResumeSessionFile = m.claim.SessionFile
-	return m.deps.Runtime.Resume(ctx, m.previous, spec)
+	loc, err := m.deps.Runtime.Resume(ctx, m.previous, spec)
+	if !errors.Is(err, runtime.ErrSessionFileMissing) {
+		return loc, err
+	}
+	m.log.Warn("supervise: the session of the process another runtime ran is found nowhere this runtime runs the agent; taking the claim over with a fresh session",
+		"session", m.claim.Session, "sessionFile", m.claim.SessionFile, "error", err)
+	m.forgetSession()
+	spec.ResumeSessionFile = ""
+	return m.deps.Runtime.Spawn(ctx, spec)
 }
 
 // stopPrevious stops the process letGo moved into previous when a launch fails: the claim no longer

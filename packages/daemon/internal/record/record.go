@@ -772,6 +772,12 @@ type Store interface {
 	// FillIssueRepository does.
 	UnnamedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error)
 	NameIssueRepository(ctx context.Context, tx pgx.Tx, key, repo, githubRepo string) error
+	// HandedOffWithoutPullRequest is every record of the Dispatch project key project in
+	// implementing, named on its repository as GitHub spells it, whose implementer has recorded its
+	// handoff and which has no open or merged pull request recorded, by key: an issue whose
+	// completion waits for the pull request record that only its opened webhook writes. A merged
+	// one is left out, as GitHub never reopens it and a new generation removes it.
+	HandedOffWithoutPullRequest(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error)
 	// RepoNote is what the daemon last said on issue about its repository, nil for nothing;
 	// PutRepoNote records a note it posts.
 	RepoNote(ctx context.Context, tx pgx.Tx, issue string) (*RepoNote, error)
@@ -845,7 +851,8 @@ type Store interface {
 	// StartHandout records that the daemon gives issue's architect work now: HandoutSeq rises to
 	// the highest Dispatch sequence the record holds of the issue (its last observation, the claim
 	// its Dispatch mirror shows, its wait's start, every fence and person's act of its mirrored
-	// asks, its gate's reviews), and DeclaredSeq clears.
+	// asks, its gate's reviews), DeclaredSeq clears, and an issue with no catch-up cursor (recorded
+	// before it existed) gets one at 0, so its next catch-up reads from this handout.
 	StartHandout(ctx context.Context, tx pgx.Tx, issue string) error
 	// TakeInThrough records work the daemon gives issue's architect about an event at seq (a
 	// design-changes notice): HandoutSeq rises to seq, and DeclaredSeq clears only when it is at or
@@ -856,6 +863,16 @@ type Store interface {
 	Declare(ctx context.Context, tx pgx.Tx, issue string, mark EventMark) error
 	// ClearDeclared clears DeclaredSeq: nothing the architect handed back is still with the person.
 	ClearDeclared(ctx context.Context, tx pgx.Tx, issue string) error
+	// CaughtUpSeq is the Dispatch sequence the boot catch-up last applied issue's event log
+	// through, and whether the issue has a cursor at all: an issue recorded before the cursor
+	// existed and given no work by this release since has none (its first catch-up replays
+	// nothing); one recorded since, or handed work since (StartHandout), starts at 0.
+	CaughtUpSeq(ctx context.Context, tx pgx.Tx, issue string) (int64, bool, error)
+	// SetCaughtUp raises issue's catch-up cursor to seq; it is never lowered.
+	SetCaughtUp(ctx context.Context, tx pgx.Tx, issue string, seq int64) error
+	// RestartCaughtUp sets issue's catch-up cursor back to 0, so its next catch-up reads from its
+	// last handout: a re-admission's new generation, whose old generation's events are not its own.
+	RestartCaughtUp(ctx context.Context, tx pgx.Tx, issue string) error
 	Slots(ctx context.Context, tx pgx.Tx) ([]Slot, error)
 	PutSlot(ctx context.Context, tx pgx.Tx, slot Slot) error
 	ReleaseSlot(ctx context.Context, tx pgx.Tx, issue string) error
