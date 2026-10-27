@@ -177,8 +177,9 @@ test("a mermaid source the renderer refuses shows the reason and its source, and
       .getByRole("status")
       .filter({ hasText: "Unable to render Mermaid diagram" });
     await expect(refusal).toHaveText(/^Unable to render Mermaid diagram: Dangling Mermaid edge/);
-    // The disclosure opens on a refusal, so the source is readable without a click.
-    await expect(card.getByText("A -->")).toBeVisible();
+    // The disclosure opens on a refusal, so the source is readable without a click. The status
+    // quotes the dangling line too, so the source is read from its code block.
+    await expect(card.locator("pre code").filter({ hasText: "A -->" })).toBeVisible();
     await expect(diagramIn(card)).toHaveCount(0);
   } finally {
     await alice.close();
