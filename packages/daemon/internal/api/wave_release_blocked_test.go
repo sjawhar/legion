@@ -472,7 +472,8 @@ func TestWaveReleaseStandsWhenTheRecordDoesNotTakeALandedWrite(t *testing.T) {
 
 // A todo child the release cannot record yet (its parent is outside the wave and unrecorded, so
 // the answer is CHILD_NOT_RECORDED) does not hold back the rest of the wave: every child the release
-// writes todo is written first, and recorded from its own write, before the stuck child answers.
+// writes todo is written first, and one under none of the wave's todo children is recorded from its
+// own write before the stuck child answers.
 func TestWaveReleaseWritesAndRecordsTheWaveBeforeAStuckTodoChildAnswers(t *testing.T) {
 	h, statuses := releaseHarness(t, true)
 	stuck, unrecordedParent, free := "LEGION-209", "LEGION-299", "LEGION-210"
@@ -525,12 +526,11 @@ func TestWaveReleaseRecordsWrittenDescendantsOfATodoChildOfTheWave(t *testing.T)
 	}
 }
 
-// Over the daemon's whole handler chain (mirror, engine, admission), a child carrying the legion
-// label that the release writes todo under a child of the wave Dispatch already showed todo, and
-// that the daemon has not recorded, joins the tree under that parent. Recorded from its write before
-// its parent, the engine would record nothing and admission would take it for an orphan and record
-// it as a root of its own.
-func TestWaveReleaseRecordsALabelledChildUnderAnUnrecordedTodoChildInItsTree(t *testing.T) {
+// releaseHarnessWithAdmission is releaseHarness over the daemon's whole handler chain: the mirror,
+// the engine and admission (daemon/workflow.go), which takes an unrecorded todo issue carrying the
+// legion label for an orphan and records it as a root of its own.
+func releaseHarnessWithAdmission(t *testing.T) (*harness, *statusRecorder) {
+	t.Helper()
 	h, statuses := releaseHarness(t, true)
 	records := record.NewStore()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -541,11 +541,25 @@ func TestWaveReleaseRecordsALabelledChildUnderAnUnrecordedTodoChildInItsTree(t *
 		Handlers: []intake.Handler{blockers.NewMirror(records, testDispatchProject), engine, admit.New(records, engine, 4, testDispatchProject, log)},
 		Dispatch: statuses,
 	}).Handler
+	return h, statuses
+}
+
+// labelledChild is a child of parent carrying the legion label, in Dispatch status status.
+func labelledChild(key, parent, status string) dispatch.Issue {
+	child := todoChild(key)
+	child.Parent, child.Status, child.HandedOver, child.Labels = &parent, status, true, []string{"legion"}
+	return child
+}
+
+// A child carrying the legion label that the release writes todo under a child of the wave
+// Dispatch already showed todo, and that the daemon has not recorded, joins the tree under that
+// parent. Recorded from its write before its parent, no handler of the workflow would record it,
+// and admission would take it for an orphan and record it as a root of its own.
+func TestWaveReleaseRecordsALabelledChildUnderAnUnrecordedTodoChildInItsTree(t *testing.T) {
+	h, statuses := releaseHarnessWithAdmission(t)
 	parent, labelled := "LEGION-209", "LEGION-210"
 	statuses.issues[parent] = todoChild(parent)
-	child := backlogChild(labelled)
-	child.Parent, child.HandedOver, child.Labels = &parent, true, []string{"legion"}
-	statuses.issues[labelled] = child
+	statuses.issues[labelled] = labelledChild(labelled, parent, "backlog")
 	architect := newLiveClaim(t, h, releaseRoot, claim.RoleArchitect)
 
 	response, _ := releaseWave(t, h, architect, labelled, parent)
@@ -555,6 +569,31 @@ func TestWaveReleaseRecordsALabelledChildUnderAnUnrecordedTodoChildInItsTree(t *
 	}
 	if recorded := recordedChild(t, h, labelled); recorded == nil || recorded.Tree != releaseRoot {
 		t.Fatalf("the record of %s = %#v, want it in %s's tree, not a root of its own", labelled, recorded, releaseRoot)
+	}
+}
+
+// The same holds a level further down: a labelled child Dispatch already showed todo, under a child
+// the release writes todo, under a todo child of the wave, is recorded only after the written child
+// is, and joins the tree.
+func TestWaveReleaseRecordsATodoChildUnderAWrittenChildOfTheWaveInItsTree(t *testing.T) {
+	h, statuses := releaseHarnessWithAdmission(t)
+	top, middle, bottom := "LEGION-209", "LEGION-210", "LEGION-211"
+	statuses.issues[top] = todoChild(top)
+	written := backlogChild(middle)
+	written.Parent = &top
+	statuses.issues[middle] = written
+	statuses.issues[bottom] = labelledChild(bottom, middle, "todo")
+	architect := newLiveClaim(t, h, releaseRoot, claim.RoleArchitect)
+
+	response, _ := releaseWave(t, h, architect, bottom, middle, top)
+
+	if want := []string{bottom, middle, top}; !reflect.DeepEqual(response.Started, want) {
+		t.Fatalf("release answered started %v, want %v", response.Started, want)
+	}
+	for _, key := range []string{top, middle, bottom} {
+		if recorded := recordedChild(t, h, key); recorded == nil || recorded.Tree != releaseRoot {
+			t.Fatalf("the record of %s = %#v, want it in %s's tree", key, recorded, releaseRoot)
+		}
 	}
 }
 

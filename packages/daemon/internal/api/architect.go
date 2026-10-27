@@ -605,17 +605,18 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 	}
 	// Every child the release writes todo is written first, so no child of the wave holds back
 	// another's release. Then each written child is recorded from its own write in this request
-	// (recordOwnStatusWrite), not when the write's event comes back through the Dispatch consumer,
-	// and each child Dispatch already showed todo from Dispatch's view of it (enterTodoChild), which
-	// answers the request when it cannot record one (CHILD_NOT_RECORDED and the like). Each pass runs
-	// in releaseOrder, which takes a parent the wave releases before its child, since the workflow
-	// records a child only under a recorded parent. A written child under one of the wave's todo
-	// children, directly or through written children of the wave, waits until those are recorded:
-	// applied before its parent is recorded, the engine would record nothing, and admission, which
-	// applies after it, would take a child carrying the legion label for an orphan and record it as
-	// a root of its own. A written child the record does not take still stands released: Dispatch
-	// shows it todo, and its write's event records it when the consumer delivers it, so that failure
-	// is logged and does not fail the release.
+	// (recordOwnStatusWrite), not when the write's event comes back through the Dispatch consumer.
+	// A written child under none of the wave's todo children is recorded first. The rest go in one
+	// pass in releaseOrder, which takes a parent the wave releases before its child (the workflow
+	// records a child only under a recorded parent): each child Dispatch already showed todo is
+	// recorded from Dispatch's view of it (enterTodoChild), which answers the request when it
+	// cannot record one (CHILD_NOT_RECORDED and the like), and each written child under one of
+	// those, directly or through written children of the wave, after its parent. Applied before its
+	// parent is recorded, a child would be recorded by no handler of the workflow, and admission,
+	// which applies after it, would take one carrying the legion label for an orphan and record it
+	// as a root of its own. A written child the record does not take still stands released:
+	// Dispatch shows it todo, and its write's event records it when the consumer delivers it, so
+	// that failure is logged and does not fail the release.
 	ordered := releaseOrder(children)
 	written := make(map[string]dispatch.Issue, len(ordered))
 	for _, child := range ordered {
@@ -641,12 +642,12 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	for _, child := range ordered {
-		if !child.write && !s.enterTodoChild(w, r, grant.Tree, child.view) {
-			return
-		}
-	}
-	for _, child := range ordered {
-		if child.write && underTodo[child.view.Key] {
+		switch {
+		case !child.write:
+			if !s.enterTodoChild(w, r, grant.Tree, child.view) {
+				return
+			}
+		case underTodo[child.view.Key]:
 			record(child)
 		}
 	}
