@@ -2,61 +2,60 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-588",
-  "completed": "2026-10-27T17:03:00Z",
-  "round": 1,
-  "head": "6d453c4a5388b2b0748cae3f2c3e3337b64732c9",
-  "codeHead": "ebeda2541e7f82a1285901fb7ac8f9841ca35f97",
+  "completed": "2026-10-27T17:42:30Z",
+  "round": 2,
+  "head": "06db6c23cd6e0d1eaf34e014c24652ad7967f4fa",
+  "codeHead": "5cfd1080069831382a886cc5e72666f5a1274275",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran P1-P4 at the head under test in workdirs of my own ($TMPDIR/ct-r1, a fresh clone) and checked each result another way: P1's output cmp-equal to my round-0 output and its table rows diffed against baseline.md; P2's 128 PRs read recomputed with jq from the 141 listed records by the README's existed-in-window rule; P3's 79/10/2 recomputed by my own git merge-base --is-ancestor loop; P4's 58 PRs and 376 rows checked against the raw records and the union of both windows' files. The review's missing-parent defect reproduced as the review described it, now refused with exit 1. The implementer's figures hold."
+    "how": "Drove the round-2 finding myself on one clone with this head and with ebeda2541e7f's scripts (extracted with jj file show): 61 against 19 PRs read, with gh pr list --state open giving 61 open legion/ PRs created by the window's end, 41 not updated since its start (the implementer saw 61/22/41 at 17:22Z). Re-ran P1-P4 in a fresh workdir of my own and checked each figure another way (cmp against my round-0 output, jq recount of the PRs read, my own ancestry loop, the union of both windows' files). The figures hold."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "The port reproduces the before measurement (P1, unchanged by round 1)",
+      "criterion": "The port reproduces the before measurement (P1, unchanged by round 2)",
       "surface": "the CLI on the Python run's raw records (dispatch://INFRA-588/artifact/conflict-baseline-2026-10-20-to-27-json)",
-      "command": "bun scripts/conflicts/measure.ts --from-json \"$TMPDIR/before.json\" --branch-prefix legion/ (and without --branch-prefix); cmp against my round-0 outputs; table rows diffed against conflict-baseline-2026-10-20-to-27.md after removing separator rows, collapsing cell spacing and mapping **tests** to __tests__",
-      "observed": "exit 0; both outputs byte-identical to round 0's at fa1502d187dd; combined 126 / 80 / 253, tiers 89 and 108, packages/envoy/CHANGELOG.md 89 in 39; Part 1's 638 and Part 2's 870 table rows equal",
-      "headSha": "6d453c4a5388b2b0748cae3f2c3e3337b64732c9",
-      "negativeControl": "records with prs[6].closedAt set to the number 5 -> 'raw records: prs[6].closedAt is not a string or null', exit 2"
+      "command": "bun scripts/conflicts/measure.ts --from-json \"$TMPDIR/before.json\" --branch-prefix legion/ (and without --branch-prefix); cmp against my round-0 outputs, whose table rows equal baseline.md Part 1 (638 rows) and Part 2 (870 rows)",
+      "observed": "exit 0; both outputs byte-identical to round 0's: combined 126 / 80 / 253, tiers 89 and 108, packages/envoy/CHANGELOG.md 89 in 39; merged section 68/38/117/106 (36 PRs)/11. Round-0 and round-1 live raw files still read (128 and 36 PRs)",
+      "headSha": "06db6c23cd6e0d1eaf34e014c24652ad7967f4fa",
+      "negativeControl": "before records with prs[0].createdAt removed -> 'prs[0].createdAt is missing or not a string', exit 2; with prs[0].mergedAt = 5, and with it removed -> 'prs[0].mergedAt is missing or not a string or null', exit 2"
     },
     {
-      "criterion": "The script measures live GitHub history the same way (P2), counting only PRs that existed in the window",
+      "criterion": "A run counts every PR open through the window, whenever it is made (round-2 finding)",
+      "surface": "the CLI against sjawhar/legion on GitHub, one clone shared by this head and the previous code head",
+      "command": "bun scripts/conflicts/measure.ts --since 2026-10-27T17:08:19Z --until 2026-10-27T17:28:19Z --branch-prefix legion/ --no-fetch, once at this head and once with ebeda2541e7f's scripts/conflicts; alongside, gh pr list --repo sjawhar/legion --state open --limit 1000 --json number,headRefName,createdAt,updatedAt",
+      "observed": "this head: 61 PRs read (0 merged in the window, 61 other); gh lists 61 open legion/ PRs created by 17:28:19Z, 41 of them not updated since 17:08:19Z",
+      "headSha": "06db6c23cd6e0d1eaf34e014c24652ad7967f4fa",
+      "negativeControl": "the same window with ebeda2541e7f's code reads 19 PRs: the open PRs nothing updated in the window are missed"
+    },
+    {
+      "criterion": "The script measures live GitHub history the same way (P2)",
       "surface": "the CLI against sjawhar/legion on GitHub, fresh workdir",
-      "command": "rm -rf $TMPDIR/ct-r1 && bun scripts/conflicts/measure.ts --since 2026-10-20 --until 2026-10-27T11:21:00Z --branch-prefix legion/ --workdir \"$TMPDIR/ct-r1\"; then bun scripts/conflicts/measure.ts --since 2026-10-26 --until 2026-10-26T12:00:00Z --branch-prefix legion/ --workdir \"$TMPDIR/ct-r1\"; each raw file checked with jq + awk applying the README's existed-in-window rule",
-      "observed": "first run: exit 0, 224 s, 621 MB; merged section cmp-equal to P1's; combined 128 / 82 / 259; of 141 listed legion/ PRs my rule keeps 128 (the before run's 126 plus #2235 and #2397) and drops 13 (#2402-#2406, #2411, #2414, #2416, #2419, #2420, #2422, #2423, #2425), all created after --until with no merge or force push in the window. Second run: exit 0, 82 s, 36 PRs read; my rule over its 120 listed PRs keeps 36 and drops 26 merged before 2026-10-26 and 58 created after its end",
-      "headSha": "6d453c4a5388b2b0748cae3f2c3e3337b64732c9",
-      "negativeControl": "--since 2026-10-28 --until 2026-10-27 -> exit 2, and --since 2026-02-30 -> exit 2, neither creating the workdir"
+      "command": "rm -rf $TMPDIR/ct-r2 && bun scripts/conflicts/measure.ts --since 2026-10-20 --until 2026-10-27T11:21:00Z --branch-prefix legion/ --workdir \"$TMPDIR/ct-r2\"; jq + awk over the raw file applying the README's existed-in-window rule",
+      "observed": "exit 0, 226 s, 619 MB; merged section cmp-equal to P1's; combined 128 / 82 / 259; my rule over the 142 listed PRs keeps 128 (the before run's 126 plus #2235 and #2397) and drops 14, so the open list added no PR that did not exist in the window",
+      "headSha": "06db6c23cd6e0d1eaf34e014c24652ad7967f4fa",
+      "negativeControl": "--since 2026-10-28 --until 2026-10-27 -> exit 2 with no workdir (round 1, unchanged code path)"
     },
     {
-      "criterion": "Fix states work on real history, and a missing parent is never given a state (P3, the review's first finding)",
+      "criterion": "Fix states work on real history, and a missing parent is refused (P3)",
       "surface": "the CLI with --fixed against the live clone, and --fixed on --from-json records with an absent parent",
-      "command": "P2's command plus --fixed 'packages/envoy/CHANGELOG.md=1b8d5c13e496' --fixed 'packages/claude-envoy/legion/**=1b8d5c13e496', then my own git merge-base --is-ancestor loop over the 91 envoy-changelog merges in the raw file; then the live raw file with merge cd3c748767ee's upstream_parent (and separately its branch_parent) set to 0123456789abcdef0123456789abcdef01234567, run with --from-json --no-fetch --workdir $TMPDIR/ct-r1 --fixed 'packages/envoy/CHANGELOG.md=1b8d5c13e496'",
-      "observed": "91 merges (39 PRs) = before 79 + transition 10 + after 2, equal to my loop's 79/10/2; claude-envoy/legion/** 25 merges in 11 PRs, all before. The same broken records without --fixed, or with a glob that does not match the broken merge, exit 0, since no state is needed. With --no-fetch on a clone fetched 85 minutes earlier, the 16:00-16:45Z window gives the same six forward merges, kinds and conflicts as the fresh clone",
-      "headSha": "6d453c4a5388b2b0748cae3f2c3e3337b64732c9",
-      "negativeControl": "the absent-upstream and absent-branch-parent records with --fixed -> each exit 1, 'merge cd3c748767ee2760e9ff59f1c1aaeebb9bec526d: parent 0123456789abcdef0123456789abcdef01234567 is missing and could not be fetched', empty stdout (the review saw before 80 / after 1, exit 0, at fa1502d187dd); --fixed …=0000… -> exit 2; --fixed refs/pull/2397/head (19a825b26642) -> 'is not on origin/main', exit 2"
+      "command": "P2's command with --no-fetch plus --fixed 'packages/envoy/CHANGELOG.md=1b8d5c13e496' --fixed 'packages/claude-envoy/legion/**=1b8d5c13e496', then my own git merge-base --is-ancestor loop over the raw file; then the raw file with merge cd3c748767ee's upstream_parent set to 0123456789abcdef0123456789abcdef01234567 and --from-json --no-fetch --fixed 'packages/envoy/CHANGELOG.md=1b8d5c13e496'",
+      "observed": "91 merges (39 PRs) = before 79 + transition 10 + after 2, equal to my loop; claude-envoy/legion/** 25 merges in 11 PRs, all before",
+      "headSha": "06db6c23cd6e0d1eaf34e014c24652ad7967f4fa",
+      "negativeControl": "the absent-parent records -> exit 1, 'merge cd3c748767ee…: parent 0123…4567 is missing and could not be fetched', empty stdout"
     },
     {
       "criterion": "The comparison the production check runs works before the merge (P4)",
       "surface": "the CLI with --compare-with the before records, live window since the Python run",
-      "command": "bun scripts/conflicts/measure.ts --since 2026-10-27T11:21:00Z --branch-prefix legion/ --workdir \"$TMPDIR/ct-r1\" --compare-with \"$TMPDIR/before.json\"",
-      "observed": "exit 0, 45 s; before 126 / 80 (63.5%) / 253 (2.01) / 89 (35.2%) / 108 (42.7%), equal to P1; after 58 / 34 (58.6%) / 59, and my rule keeps all 58 listed PRs; 376 file rows = union of the 337 before and 79 after files",
-      "headSha": "6d453c4a5388b2b0748cae3f2c3e3337b64732c9",
-      "negativeControl": "--compare-with a file containing 'not json' -> 'raw records are not JSON', exit 2, no workdir created"
-    },
-    {
-      "criterion": "Which PRs existed in the window: edges and older raw files (the review's second finding)",
-      "surface": "the CLI on crafted raw records with selection 'updated-since', and on a round-0 raw file",
-      "command": "bun scripts/conflicts/measure.ts --from-json ew.json, where ew.json is window 2026-10-20T00:00:00Z..2026-10-27T00:00:00Z with eight PRs: created at until; created one second after; merged at since; merged one second before; closed one second before; closed at since; CLOSED with no closedAt; created after the window carrying a force push inside it. Then --from-json the 2026-10-26 raw file with --compare-with round 0's raw file from $TMPDIR/ct-p2 (written before closedAt existed)",
-      "observed": "5 PRs read, the five expected (created at until, merged at since, closed at since, no closedAt, late PR with an in-window push); the round-0 file reads as 128 PRs (134 listed), exit 0",
-      "headSha": "6d453c4a5388b2b0748cae3f2c3e3337b64732c9",
-      "negativeControl": "the same records with prs[6].closedAt = 5 -> exit 2"
+      "command": "bun scripts/conflicts/measure.ts --since 2026-10-27T11:21:00Z --branch-prefix legion/ --workdir \"$TMPDIR/ct-r2\" --compare-with \"$TMPDIR/before.json\"",
+      "observed": "exit 0, 61 s; before 126 / 80 (63.5%) / 253 (2.01), equal to P1; after 73 read / 38 carrying (52.1%) / 63; my rule keeps all 73 listed PRs; 387 file rows = union of the 337 before and 99 after files",
+      "headSha": "06db6c23cd6e0d1eaf34e014c24652ad7967f4fa",
+      "negativeControl": "--compare-with a non-JSON file -> exit 2 (rounds 0-1, unchanged code path)"
     }
   ],
   "observations": [
-    "CI at code head ebeda2541e7f: lint, typecheck and test were still queued when I read them (the newest head, 6d453c4a5388, changes only .legion/INFRA-588/implement.json).",
-    "Mutation check of round 1 in a scratch copy: removing the .changes/ rule, the created-at-until edge, the closed-before rule, the merge and force-push rescue, the Python-file exemption, isAncestor's exit-128 throw, and either parent fetch each fail the suite. One mutation passes: counting a PR merged exactly at `since` as merged before the window (`<` changed to `<=`). The CLI keeps that PR today (crafted records above), so this is a test gap at one edge and not a defect.",
-    "Round 0's observations are answered: the README now says an earlier glob can shadow a later one (lines 120-121), and the .changes/ rule has a test."
+    "CI at code head 5cfd10800698: lint, typecheck and test queued when I read them; at the previous code head ebeda2541e7f they completed as cancelled, not run. The newest head 06db6c23 changes only .legion/INFRA-588/implement.json.",
+    "Round 1's note stands: no test pins a PR merged exactly at `since` (counting it as before the window passes the suite); the CLI keeps it (round-1 crafted records)."
   ]
 }
