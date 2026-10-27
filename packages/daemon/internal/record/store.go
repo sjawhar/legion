@@ -72,17 +72,17 @@ func (s *Postgres) Issues(ctx context.Context, tx pgx.Tx) ([]Issue, error) {
 	return issues, nil
 }
 
-// slottedIssueColumns is issueColumns of the issues table under the alias the slot join gives it.
-const slottedIssueColumns = `i.key, i.tree, i.project, i.title, i.parent, i.phase, i.generation, i.status, i.rank, i.handed_over, i.taken_back, i.linger_until, i.held_from, i.last_dispatch_seq, i.ready_pending_version, coalesce(i.hold_reason, ''), i.dispatch_status, i.repo, i.default_branch, i.github_repo`
-
 // SlottedIssues is the record of each issue of project that holds an admission slot, in slot order
 // (index, then issue), in one read: what admission judges when it releases the slots a fact has
 // finished with (admit's releaseSlots), on every fact and under the one fact lock. The slots table
 // is shared by every project's daemon, so another project's slot is left out here rather than by
-// the caller, and no issue of another project, and no issue holding no slot, is read at all.
+// the caller, and no issue of another project, and no issue holding no slot, is read at all. It
+// selects issueColumns itself, so it reads every column scanIssue scans: the slots join is a
+// derived table whose columns are renamed, so no column of issueColumns is ambiguous.
 func (s *Postgres) SlottedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error) {
-	rows, err := tx.Query(ctx, `select `+slottedIssueColumns+` from slots s join issues i on i.key = s.issue
-		where i.project = $1 order by s.index, s.issue`, project)
+	rows, err := tx.Query(ctx, `select `+issueColumns+` from issues
+		join (select index, issue from slots) slot (slot_index, slot_issue) on slot.slot_issue = issues.key
+		where issues.project = $1 order by slot.slot_index, slot.slot_issue`, project)
 	if err != nil {
 		return nil, fmt.Errorf("list the slotted issues of project %s: %w", project, err)
 	}
