@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-534",
+  "completed": "2026-10-27T02:01:52Z",
+  "planDocument": "dispatch://INFRA-534/artifact/plan-md",
+  "prototype": "dispatch://INFRA-534/artifact/infra-534-prototype-diff",
+  "base": "4bbb2a9c",
+  "summary": "pmdoc owns delimiter pairing (own list, per-kind links, paired at link formation and block close): micromark mode (equal-length tildes, run allowed after an escaped tilde, separate ~ and */_ passes in micromark's order) for every document reader; goldmark mode for the renderer's byte-stability reader and alt-text read-back. Tests first (Go rows with direct trees and engine equality, escape_test byte pins, linear shapes, corpus fixture, browser test on editor/version/comment), then the change, a committed delimiter corpus generator, differential at 0 on three corpora, docs and changelog.",
+  "tasks": [
+    "T1 Go tests first (strikethrough_test.go, escape_test.go rows, linear_test.go shapes, testdata/corpus/strikethrough-run-lengths.md + wantNames + bun run gen); red at base",
+    "T2 Browser test packages/dispatch/e2e/strikethrough.e2e.ts (editor, version view, comment, stored text); red at base",
+    "T3 delimiters.go owned pairing; emphasis.go tilde parser + CloseBlock + goldmarkRules rename; nesting.go bottoms + label pairing; parse.go modes + goldmark block reader; render_inline.go; escape.go altReadsBack both + textEscape comment",
+    "T4 pmdoc/gen/delimiter-corpus.ts",
+    "T5 packages/envoy/AGENTS.md, comments, packages/envoy/CHANGELOG.md Fixed",
+    "T6 green runs, pmdoc and dispatch suites, differential (in-repo + url + delimiter corpora, every GATE 0), lint/typecheck, red runs at the fork point",
+    "T7 pull request with Dispatch: INFRA-534, red/green runs, GATE blocks, E2E lines; main's skills-guard red handled per the architect's notice"
+  ],
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: phase rules, pr-body.md (proofs, simplify pass), merge-gate.md (production check after the close), default-branch-check.md",
+      "skill://dispatch: the production check's project-document write and doc-read",
+      "skill://ce-simplify-code: the simplify pass pr-body.md names"
+    ],
+    "test": [
+      "skill://legion-worker: pr-body.md proof rules; re-run T1, T2 and the differential at the head and the red runs at the fork point in the INFRA-42/43 browser harness; linearity verdict from GitHub envoy-go/envoy-go-race"
+    ],
+    "review": [
+      "skill://legion-worker: merge-gate.md and review-threads.md; verify the goldmark-rules reader is goldmark's exactly, no other reader keeps the old rule, kind links never cross a scope, and correctly stored renderings keep their bytes (differential churn 0, pinned escape_test rows)"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "Scope undecided (A/B/C); option B ships a differential regression (`> **\\~~](u)![_![~_`).",
+        "answer": "Architect chose A (Envoy 01:37Z): INFRA-534 builds micromark's pairing order in pmdoc's owned pairing; plan D0, order test rows in T1, INFRA-535 keeps classification and gets its three readings recorded (TestTildeReadingsThatDifferAreRecorded)."
+      },
+      {
+        "finding": "'An escaped tilde is text' has two readings; the real change is that a run directly after an escaped `~` may open or close.",
+        "answer": "D1: refuse a `~` run only directly after an unescaped `~` (odd backslashes = escaped) via existing escapedByBackslashes; T1 escape, reference, line-start, table-cell and label rows with direct expected trees; `\\&#126;` forms left to INFRA-536."
+      },
+      {
+        "finding": "Which Go readers change, and what the writer reads back with, is undecided.",
+        "answer": "D2: every document reader uses micromark's rules; the renderer's byte-stability reader (renamed from flankingOnly to goldmarkRules/goldmarkMarkdown) reads every run by goldmark's rules (flanking, any-length tildes refused after any `~`, single loop, no `~` marker); comments and AGENTS.md rewritten (T5)."
+      },
+      {
+        "finding": "Stored renderings change bytes (mint versions, stale approvals): alt text, base-misread renderings, production exposure, backfill.",
+        "answer": "D3 alt text reads back under both rules; D4 base-misread renderings (e.g. `\\~~~x~~`) change as the fix, no backfill, production count not measurable by any role; pinned escape_test.go rows (T1) and differential churn 0 (T6); CHANGELOG states it (T5)."
+      },
+      {
+        "finding": "Linearity: the minimal change adds quadratic shapes; owned pairing touches every emphasis parse; pre-existing mixed shapes are quadratic; write path; corpora; CI as authority.",
+        "answer": "D5 owned pairing with per-kind links; two-part shapes, label and nested shapes through ParseRendering and Parse, escaped-tilde runs in linear_test.go (T1); differential over in-repo, URL and delimiter corpora (T6); linearity verdict from GitHub envoy-go/envoy-go-race."
+      },
+      {
+        "finding": "A1's 'shows the same strike as a comment' names no surface.",
+        "answer": "Surface table (editor, stored rendering/GET text/doc-read, past version, comment) with exact bytes; T2 asserts all views and the stored text."
+      },
+      {
+        "finding": "'Written through the API' names no write path.",
+        "answer": "T1 asserts every Go reader (Parse, ParseRendering, ParseInline, ParseFragment); T2 writes through the issue-create API."
+      },
+      {
+        "finding": "The browser negative control needs a written procedure.",
+        "answer": "T6 red-run procedure: git archive of the fork point, head test copied in, base-only helpers, paragraph-scoped `del` locator, whole textContent asserted, INFRA-42/43 harness, both runs quoted."
+      },
+      {
+        "finding": "Go tests' negative control can pass by skipping without bun.",
+        "answer": "Direct expected-tree assertions in every row plus Go=engine; red run with bun on PATH; corpus file regenerates fixtures (bun run gen/check)."
+      },
+      {
+        "finding": "Evidence cannot be re-run from the repo (throwaway probes).",
+        "answer": "D6/T4 commit gen/delimiter-corpus.ts (deterministic, INFRA-535's extra pieces and wrappers); exact differential command with every GATE line 0."
+      },
+      {
+        "finding": "The production check names no page and cannot write on a closed issue.",
+        "answer": "Production row: check script with --page /issues/INFRA-534/spec and the spec text route, plus a project document write in INFRA (dispatch artifact --project INFRA) and doc-read expecting the stored column; states the script never proves a strike."
+      },
+      {
+        "finding": "'Each case above' can mean three strings or the class.",
+        "answer": "D8: acceptance is the three strings on every surface; the class is covered by the committed corpus with the gate at 0 and remaining divergences named (INFRA-535, INFRA-536)."
+      },
+      {
+        "finding": "Claims with no source (30/20,000, micromark behaviour, API vs browser, textEscape comment).",
+        "answer": "Micromark source read (syntax.js path cited); counts replaced by committed-corpus evidence (D6); browser test supplies the API-vs-comment proof; textEscape comment rewritten (T5)."
+      },
+      {
+        "finding": "Documents and changelog the change reaches.",
+        "answer": "T5: packages/envoy/AGENTS.md delimiter paragraph, emphasis/tilde/textEscape/escape_test comments, CHANGELOG Fixed entry."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "Change: Go's strikethrough follows micromark-extension-gfm-strikethrough: an opener pairs only with a closer of the same length (1 or 2), and an escaped tilde is text.",
+      "plan": "Besides the tilde rule, pmdoc takes the delimiter pairing over from goldmark (own list, per-kind links) and pairs `~` and `*`/`_` in micromark's order (separate passes, first run tokenized first, `~` first inside labels and pairs); the renderer keeps a goldmark-rules reader so correctly stored renderings keep their bytes.",
+      "evidence": "Prototype at 4bbb2a9c: the tilde rule alone makes Parse quadratic (`~~a `x16000+`a~ `x16000: 4.23 s) and main is already quadratic on mixed runs (3.83-4.18 s at 112 KB); owned pairing: 71-86 ms. differential.sh over 20,000 generated paragraphs: without the renderer rule churn 352 / engine-tree churn 530; with it 3 / 6 (alt text); one regression `> **\\~~](u)![_![~_` needs micromark's order. The INFRA-138 architect chose option A (Envoy, 2026-10-27 01:37Z).",
+      "outcome": {
+        "kind": "changed",
+        "scope": "Adds micromark's pairing order across `~` and `*`/`_` (taken from INFRA-535, which keeps only the `~` attention-marker classification), linear pairing on mixed `~`/`*` runs including two shapes already quadratic at main, and the renderer's goldmark-rules byte-stability reading for tildes and image alt text."
+      }
+    }
+  ]
+}
