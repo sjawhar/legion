@@ -7,10 +7,11 @@ name: CI
 # failed). The last job, `ci-ok`, condenses every job's result into one check, the one main's
 # ruleset requires beside pr-title.
 #
-# A new job joins the router in four places: a filter in `changes` that names every file the job
+# A new job joins the router in five places: a filter in `changes` that names every file the job
 # reads, an output of `changes` for that filter, the job's `needs: changes` and an `if:` on that
-# output, and an entry in `ci-ok`'s `needs:`. docs/solutions/github/join-a-job-to-the-ci-router.md
-# walks through it.
+# output, an entry in `ci-ok`'s `needs:`, and a gate in .github/scripts/ci_job_reads.py, which
+# the ci-filters job's .github/scripts/check-ci-filters.sh holds the filter to.
+# docs/solutions/github/join-a-job-to-the-ci-router.md walks through it.
 #
 # Caches: no pull-request or merge-queue run writes an Actions cache entry. setup-go caches nothing
 # here (`cache: false` on every step). The jobs that cache Go restore one of five families with
@@ -81,6 +82,7 @@ jobs:
       envoy_smoke: ${{ steps.filter.outputs.envoy_smoke }}
       envoy_e2e_local: ${{ steps.filter.outputs.envoy_e2e_local }}
       go_notices: ${{ steps.filter.outputs.go_notices }}
+      ci_filters: ${{ steps.filter.outputs.ci_filters }}
     steps:
       # On pull_request dorny/paths-filter reads the file list from the API and never reads the
       # tree; push and merge_group diff with git and need the clone (a merge group diffs its
@@ -97,7 +99,8 @@ jobs:
           # for Go, the closure of the packages the job compiles (`go list -deps -test`), the
           # targets of the go commands its tests start, and the module files of the workspace the
           # build runs in, whose go.mod files move the versions it compiles; and this file, since a
-          # job reads its own definition.
+          # job reads its own definition. The ci-filters job (.github/scripts/check-ci-filters.sh)
+          # recomputes those sets and fails naming each file a filter misses.
           #
           # dorny/paths-filter v4.0.3's `some-with-excludes` quantifier matches a change to a filter
           # when one of its patterns without `!` matches and none of its `!` patterns does. Only
@@ -345,7 +348,8 @@ jobs:
               - *dispatch_server
               - 'packages/envoy/internal/contracts/**'
               # Each .github/scripts/*.test.sh runs its checker, through test-lib.sh (and
-              # workflow_paths.py, check-pr-text.sh, release-bump.sh where a checker sources them).
+              # workflow_paths.py, check-pr-text.sh, release-bump.sh, ci_filter_coverage.py where a
+              # checker sources them).
               - '.github/scripts/*'
               - 'scripts/third-party-notices.ts'
               - 'scripts/third-party-notices.test.ts'
@@ -721,7 +725,8 @@ jobs:
             # workspace, and envoy-infra's host live tests and plugin in the infra one.
             # .github/scripts/check-image-trigger-paths.sh fails the build when this list misses a
             # file the image build reads; it reads this filter only as a flat list, so it names no
-            # anchor.
+            # anchor. check-ci-filters.sh holds it to the rest: the job's go commands and its other
+            # steps' reads.
             envoy_smoke:
               - '.github/workflows/ci.yaml'
               # The image: the Dockerfile, its context's .dockerignore, the web stage's frozen
@@ -892,6 +897,26 @@ jobs:
               - 'packages/envoy/internal/broker/secrets/*'
               - 'packages/envoy/internal/buildversion/*'
               - 'packages/envoy/internal/githubappjwt/*'
+            # check-ci-filters.sh, which holds every filter above to what its job reads: every file
+            # whose change can move a Go closure (Go code anywhere, the modules' embedded files and
+            # testdata, every module and workspace file, the target lists the go commands expand
+            # over), this file, and the check's own script, engine, data and path model.
+            ci_filters:
+              - '.github/workflows/ci.yaml'
+              - '.github/scripts/check-ci-filters.sh'
+              - '.github/scripts/ci_filter_coverage.py'
+              - '.github/scripts/ci_job_reads.py'
+              - '.github/scripts/workflow_paths.py'
+              - '.github/go-release-targets.json'
+              - '.github/agent-secrets-client-targets.json'
+              - '.github/envoy-infra-targets.json'
+              - '**/*.go'
+              - '**/go.mod'
+              - '**/go.sum'
+              - '**/go.work'
+              - '**/go.work.sum'
+              - 'packages/daemon/**'
+              - 'packages/envoy/**'
 
   # Reads the whole tree, so it runs on every non-draft run, also when `changes` failed.
   lint:
@@ -1227,6 +1252,10 @@ jobs:
             ~/.cache/go-build
           key: go-daemon-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: go-daemon-${{ runner.os }}-
+
+      # After setup-go: its fixtures run go list over a scratch module.
+      - name: Test the CI filter check
+        run: .github/scripts/check-ci-filters.test.sh
 
       # The tmux runtime's tests drive a real tmux server and skip without one, and the daemon
       # supervises under tmux and refuses to start without it.
@@ -2329,6 +2358,24 @@ jobs:
             ~/.cache/go-build
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
+  # Holds every filter in `changes` to every file its job reads, recomputing each Go job's closure
+  # with go list (.github/scripts/check-ci-filters.sh). go list runs with GOPROXY=off over an empty
+  # module cache, so the job needs Go but downloads no module and restores no cache.
+  ci-filters:
+    needs: changes
+    if: needs.changes.outputs.ci_filters == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/daemon/go.mod
+          cache: false
+      - name: Check every CI filter matches every file its job reads
+        run: .github/scripts/check-ci-filters.sh
+
   # The worker image's pull-request build: worker-image.yaml builds the head and publishes its
   # sha- tag only. Main's image builds are release.yaml's call of the same workflow.
   worker-image:
@@ -2373,6 +2420,7 @@ jobs:
       - broker-multiprocess
       - envoy-smoke
       - envoy-e2e-local
+      - ci-filters
       - worker-image
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04

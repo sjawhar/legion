@@ -2,8 +2,9 @@
 them: a walk of the repository's files, a path glob as a regex, an ordered pattern list where `!`
 negates, a dorny/paths-filter filter under its predicate quantifier, and a workflow's events.
 
-check-image-trigger-paths.sh imports it from the repository it checks, running
-`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.github/scripts python3` from that repository's root.
+check-image-trigger-paths.sh and check-ci-filters.sh (through ci_filter_coverage.py) import it from
+the repository they check, running `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.github/scripts python3`
+from that repository's root.
 """
 
 import re

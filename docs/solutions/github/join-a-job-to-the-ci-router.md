@@ -28,13 +28,15 @@ the change touched and selects jobs through one dorny/paths-filter filter per jo
 `ci-ok`, condenses every job's result into one check. The deployment repository keeps its own
 router guide for its own workflows; this page covers this repository only.
 
-## The four places a job joins
+## The five places a job joins
 
 1. **A filter in `changes`** that names every file the job reads (the method is below).
 2. **An output of `changes`** for that filter: `<filter>: ${{ steps.filter.outputs.<filter> }}`.
 3. **`needs: changes`** on the job, and `if: needs.changes.outputs.<filter> == 'true'`.
 4. **The job in `ci-ok`'s `needs:`.** A job that is not there can fail and still let `ci-ok`
    pass.
+5. **A gate in `.github/scripts/ci_job_reads.py`** that says what the job reads, which
+   `.github/scripts/check-ci-filters.sh` holds the filter to (the section on the check below).
 
 A Go job also restores its caches the way the section on caches below says.
 
@@ -93,6 +95,36 @@ So when a change makes a job's command, or a binary its tests build, compile a n
 in production code or in a test), embed a file, or read a new file, or makes a test start a new go
 command, re-run the method and extend the filter in the same pull request. A file read only behind an
 environment variable CI never sets stays out.
+
+## check-ci-filters.sh holds every filter to what its job reads
+
+The `ci-filters` job runs `.github/scripts/check-ci-filters.sh` on every change to Go code, a
+module or workspace file, the release target lists, `ci.yaml` or the check itself. For each gate
+in `ci_job_reads.py` it reruns the method above with `go list` over the job's go commands, adds
+the gate's other reads, and fails naming each file the job reads that its filter misses, with
+the go command or step that reads it. So an import that pulls a package outside a Go job's filter
+fails the pull request that adds it.
+
+`ci_job_reads.py` is the part the check cannot find by itself, kept by hand:
+
+- `GATES`: per filter, the job, its go commands and its other steps' reads. Each go command is a
+  `Run` pinned to its text: `step_run` for a `run:` step of the job, `script_run` for a script the
+  job runs. The check fails when a job's `run:` step starts a go command (`go test`, `vet`,
+  `build`, `run`, `list`, `install`, `generate`) no `Run` claims, when a pinned text is gone, and
+  when a job or step is gated on a filter neither `GATES` nor `EXCLUDED` lists. A job with no go
+  commands still gets a gate with its reads.
+- `RULES`: per source file, what a test does outside its package: a go command it starts, or a
+  file it reads through `..`. Add one in the change that makes a test do it.
+- `EXCLUDED`: `worker_image`, whose image inputs `check-image-trigger-paths.sh` proves instead.
+  `envoy_smoke` is a gate for its job's go commands and other step reads; its image inputs are
+  `check-image-trigger-paths.sh`'s too.
+
+The non-Go reads and `RULES` are what the check is told, not what it finds: it proves the filters
+cover them, not that they are complete, and a new file under a glob a filter names only in part
+runs the check only when the change also touches one of its triggers. It runs go with
+`GOPROXY=off` over an empty module cache, so it downloads nothing and gives the same answer on a
+cold runner as on a warm machine; third-party packages fail to load, which loses no first-party
+package. Run it locally from anywhere: `.github/scripts/check-ci-filters.sh`.
 
 ## Caches: only main writes
 
