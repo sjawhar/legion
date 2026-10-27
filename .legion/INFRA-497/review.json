@@ -2,24 +2,21 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-497",
-  "completed": "2026-10-27T02:37:15Z",
-  "round": 3,
+  "completed": "2026-10-27T04:03:58Z",
+  "round": 4,
   "decision": "changes_requested",
-  "reviewedCodeHead": "655b7ac05dc4",
+  "reviewedCodeHead": "5741f6785ca1",
   "critical": 0,
-  "important": 3,
-  "minor": 2,
-  "keyFindings": [
-    {"severity": "important", "file": "packages/pi-envoy/src/card-wake.ts", "description": "Spec sentence: the #autoCompactions counter (214, 323-337) depends on event order; a mid-run automatic compaction emits session_compact and auto_compaction_end detached (session-maintenance.ts:2519-2524), so a slow session_compact handler of another extension lets the end land first, #runActive goes false mid-run, and a later card is marked setup; folded under a held latch or in plan mode it gets no turn where main's steer resumes past both (#canAutoContinueForFollowUp, agent-session.ts:8949). pi-envoy can close it alone: clear #runActive at session_compact and session_switch only when ctx.isIdle() is true (manual/extension compaction and new/resume switch find the host idle after abort, 10209-10227; every automatic compaction inside a run or prompt finds it busy), which removes the counter, the reason filter and the AGENTS.md limit."},
-    {"severity": "important", "file": "packages/pi-envoy/extensions/envoy.test.ts", "description": "The 11-row wiring table (9493-9599) never fires agent_end: deleting cardWake.agentEnd(context) (envoy.ts:2928) leaves envoy.test.ts green (877/0, code-quality pass)."},
-    {"severity": "important", "file": "packages/pi-envoy/extensions/envoy.ts", "description": "A3 edge (AGENTS.md:82-86): a run dropped with no session_switch/session_compact (a failed manual compaction or switch after its abort) leaves #runActive true until the host is seen idle, so an Esc in the next prompt's setup gets a wake. The existing input handler (974) runs before every RPC, terminal and sendUserInput prompt while the host is still idle; clearing #runActive there when ctx.isIdle() is true closes it."},
-    {"severity": "minor", "file": "packages/pi-envoy/AGENTS.md", "description": "Line 535 says the test script runs envoy.test.ts in a process of its own; package.json:27 runs extensions/card-delivery-omp.test.ts alone."},
-    {"severity": "minor", "file": ".github/workflows/envoy-and-contracts.yaml", "description": "Hardening: the nats:2.10 service (530) is pinned by tag; the pgvector services in the same file are pinned by digest (657, 794)."}
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "requestedByArchitect": [
+    "After sjawhar/legion#2317 (main's SlottedIssues fix) and INFRA-511's #2300 both merge, merge main into legion/INFRA-497: the required `test` job is red at 5741f678 only from main's Go daemon break (run 40441626398: 'number of field descriptions must equal number of destinations, got 20 and 31'; main's runs 40441090191, 40440568722 fail the same way; #2278 changes no packages/daemon file).",
+    "Add pi-envoy's wait for INFRA-511's start mark so the startup wake runs after the controller's start turn, with its real-binary tests (A6, A13), from branch legion/INFRA-511-startup-wait.",
+    "If main then has sjawhar/legion#2316, move #2278's envoy-and-contracts.yaml edits into ci.yaml."
   ],
-  "specLimitsNotClosableByPiEnvoy": [
-    "AGENTS.md:80-82 (a setup card the host folds with no interrupt: plan mode, a prompt refused before its run) and AGENTS.md:50-52 (a card after a willContinue agent_end whose continuation is skipped): main's steer gives that card a turn past a held latch and plan mode (agent-session.ts:8949). The host folds only under a held latch or plan mode (1377-1398), otherwise it wakes itself (1399). At the pinned tag an Esc in that window and a refusal or skip leave the same extension-visible state: before_agent_start gets no setup signal (8164), agent.abort emits nothing with no loop (agent.ts:1554-1556), plan mode is not exposed to extensions. Waking would reopen round-1 finding 1. For the architect at acceptance."
-  ],
-  "verification": "Reviewer ran `bun run test` in packages/pi-envoy at 655b7ac0 with pinned omp v18.12.2-sami.20261026-135627 and nats-server 2.10.29: 999 pass 0 fail, then card-delivery-omp.test.ts alone 9 pass 0 fail.",
-  "ci": "At 655b7ac0: Tests, Legion Envoy and Contracts, Docs, Worker Image queued at review time.",
-  "thermonuclear": "Both run once at 655b7ac0: deep review APPROVE with Minors (counter order, input-handler idle clear, nats digest) and the limits table; code quality CHANGES (agent_end row, AGENTS.md:535, isIdle in place of the counter)."
+  "roundFindings": "Narrowed round (architect, review-round cap): the five round-3 findings are fixed at 5741f678 (seenIdle at session_compact/session_switch/input replaces the counter; agent_end wiring row; AGENTS.md names card-delivery-omp.test.ts; nats:2.10 pinned by the index digest the mirror serves, checked with a registry HEAD). No correctness defect found.",
+  "verification": "Reviewer ran `bun run test` in packages/pi-envoy at 5741f678 with pinned omp v18.12.2-sami.20261026-135627 and nats-server 2.10.29: 1006 pass 0 fail, then card-delivery-omp.test.ts alone 9 pass 0 fail; `bunx tsc --noEmit` exit 0.",
+  "ci": "At 5741f678: typecheck and lint success; test failure from main's Go daemon break; pi-envoy job queued.",
+  "thermonuclear": "Both run once at 5741f678: deep review APPROVE, no findings; code quality APPROVE, wiring table fails for every deleted CardWake call; two Fast-follow items (duplicate drop-path unit tests in card-wake.test.ts; the name seenIdle)."
 }
