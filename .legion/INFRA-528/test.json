@@ -2,35 +2,36 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-528",
-  "completed": "2026-10-27T03:10:00Z",
-  "testedHead": "e0c9502649e62abb677f9c846b6083f684e7dd32 (code head 9607c1b933cf84a437dab8f596b96488261f96b3, merge of main 9f8766c6)",
+  "completed": "2026-10-27T04:41:00Z",
+  "testedHead": "5a5e1be2f7e74c12010f0e92f1c5d190e62ac8c9 (code head d9ff6c6169634f601b8a041414a4bbfd5ae45d60)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its command on the tester lane (port 20777, db dispatch_tester_e2e) after `bun run build:web` at e0c95026: `bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox` -> 28 passed (2.2m), matching its count. Drove its fence claims on the same surface independently (throwaway e2e, 19 bodies below). The tester's two red tests from 313753db are unmodified at the head: `git diff 313753db e0c95026 -- MarkdownBody.test.tsx` removes no line, only adds the implementer's quote/list case."
+    "how": "Re-ran its command on the tester lane (port 20777, db dispatch_tester_e2e) after `bun run build:web` at 5a5e1be2: `bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox` -> 32 passed (2.9m), including 'a diagram too large to draw in time shows the reason, and the page keeps responding' in all four projects (8.3-9.9 s each). Matches its count."
   },
-  "failed": 0,
-  "failures": [],
-  "roundOneFailures": {
-    "linkReferenceDefinition": "fixed in 9607c1b9: the open-fence check re-parses the body with a probe line; refdef bodies draw (below).",
-    "lineThatCannotCloseFence": "fixed in 9607c1b9: ``` under ```` and ~~~ under ``` stay code (below).",
-    "conflictNoCi": "fixed in 9f8766c6: the merge of main resolved packages/envoy/CHANGELOG.md keeping both entries (`git show --remerge-diff 9f8766c6` shows only the conflict markers removed); PR #2311 reads MERGEABLE. CI at e0c95026 on GitHub at the time of reading: build x2, changes, lint, test, typecheck and pr-title all queued (one earlier pr-title cancelled); no lane had concluded."
-  },
+  "failed": 1,
+  "failures": [
+    {
+      "criterion": "Review finding (mermaid-diagrams.ts:150): one author's diagram must not degrade every reader's Dispatch; drawing cost is bounded",
+      "evidence": "The worker draws one source at a time, and a cancelled draw (its body re-painted or unmounted) leaves its source queued in `requests` (mermaid-diagrams.ts:312-326: the cancel only clears `target.blocks`), so the worker still draws every source of a page the reader has left, each up to the 5 s limit, before any source of the page they are on. Real surface, chromium, tester lane (throwaway e2e, deleted after the run): issue CORE-1 holds one message with two 450-node flowcharts (27,989 chars); issue CORE-2 holds a message with `graph TD Start --> Finish`. CORE-2 opened alone: its diagram drew in 1.9-2.9 s. CORE-1 opened alone: refusals at 7.0 s and 12.8 s (serial). CORE-1 opened, then an in-app move to CORE-2 (history.pushState + popstate, same document confirmed) 2.7 s later: CORE-2's diagram drew 11.7 s after the move, 14.4 s after CORE-1 loaded, so it waited for CORE-1's second diagram, which no reader was shown. A full page load (the in-body link is a hard navigation) resets the worker, so only in-app moves (sidebar, tabs, Inbox) carry the queue. An issue holding many slow diagrams therefore stalls every diagram for the rest of the reader's SPA session, 5 s per diagram. Red test: `a source no body still waits for is never sent to the worker` in packages/dispatch/web/src/features/refs/MarkdownBody.test.tsx (commit c9a6c465), shown failing by `cd packages/dispatch && bun test web/src/features/refs/MarkdownBody.test.tsx -t Mermaid` -> 12 pass, 1 fail: `expect(sent.some((source) => source.includes(\"Gone\"))).toBe(false)` received true."
+    }
+  ],
   "proof": [
     {
-      "criterion": "A1 and the spec Summary rows: comment, Inbox ask, message, reply, refusal, markup label, other-language guard",
+      "criterion": "A1, the spec Summary rows and the time limit: comment, Inbox ask, message, reply, refusal, too-large refusal with the page responsive, markup label, other-language guard",
       "surface": "Dispatch Conversation and Inbox against the real Go Dispatch server and Postgres 17 + pgvector, Desktop Chrome, iPhone 13, WebKit, Firefox",
       "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox",
-      "observed": "28 passed (2.2m)",
-      "headSha": "e0c9502649e62abb677f9c846b6083f684e7dd32",
-      "negativeControl": "Same command at the red commit ecc18ff3 (round 1, built there) -> 24 failed, 4 passed (9.1m); the ts-fence guard row passed at both commits."
+      "observed": "32 passed (2.9m)",
+      "headSha": "5a5e1be2f7e74c12010f0e92f1c5d190e62ac8c9",
+      "negativeControl": "Round 1: the same suite at the red commit ecc18ff3 -> 24 failed, 4 passed; the implementer's time-limit row at 9607c1b9 failed with a 100 ms timer arriving after 11,014.8 ms."
     },
     {
-      "criterion": "A finished diagram draws whatever follows its closed fence, and a fence the parser still reads as open (a streamed turn) stays code, in every container",
-      "surface": "Dispatch Conversation, one comment per body, chromium, real server (throwaway e2e/zz-tester-probe2.e2e.ts, deleted after the run)",
-      "command": "bunx playwright test --config e2e/playwright.config.ts e2e/zz-tester-probe2.e2e.ts --project chromium",
-      "observed": "19/19 as expected. Draw (1 image, no status): closed fence + one or two link reference definitions, ```` closed by ````, ~~~ closed by ~~~, closed in a quote, a bullet item, an ordered item, a quote inside a list item, CRLF line endings, trailing blank and whitespace lines, a paragraph right after the fence, an author line holding the probe string itself. Stay code (0 images, no refusal): ```` ended by ```, ``` ended by ~~~, open in a quote, a bullet item, an ordered item, a quote inside a list item, open followed by blank lines.",
-      "headSha": "e0c9502649e62abb677f9c846b6083f684e7dd32",
-      "negativeControl": "The same refdef body at round 1's head d2e90bba drew 0 images and showed the source as code (screenshot /legion/scratch/tmp/tester-probe-refdef.png); the ```` ... ``` body drew there, and both stay correct now."
+      "criterion": "The sanitizer still holds on the worker path: author text never fetches, never styles the page, markers scoped",
+      "surface": "Dispatch Conversation, chromium, throwaway e2e (deleted after the run)",
+      "command": "one message holding a flowchart with a `</text><style>…url(https://evil.example/l)…` label, classDef fill:url(https://evil.example/c), style fill:\\75rl(…), linkStyle stroke:url(https://evil.example/ls), and two identical `graph TD P --> Q` diagrams; page.on('request') records every non-local request",
+      "observed": "3 diagrams drawn; zero non-local requests; no <style> under page SVGs outside shadow roots; no @import in any shadow style; the only non-data-* attributes naming the host are inert: two marker ids (`arrowhead-url28https3a2f2fevil…`) and the local reference marker-end=url(#arrowhead-url28…); each diagram's markers resolve in its own shadow root.",
+      "headSha": "5a5e1be2f7e74c12010f0e92f1c5d190e62ac8c9",
+      "negativeControl": "Round 1: the raw upstream markup for these sources carries evil.example in presentation attributes, which the sanitizer removes."
     }
-  ]
+  ],
+  "ci": "At 5a5e1be2 on GitHub when read (04:40Z): build x2, changes, lint, test, typecheck, pr-title queued; earlier pr-title runs cancelled; no lane concluded. d9ff6c61 has no runs (pushed with the handoff)."
 }
