@@ -88,6 +88,7 @@ func TestPrepareReadsTheDispatchChainAboveAParent(t *testing.T) {
 	unlabelled := labelled
 	unlabelled.HandedOver = false
 	top := shownUnder(tree, "in_progress", "", true)
+	pool := isolatedOutboxPool(t)
 	for _, tc := range []struct {
 		name       string
 		recorded   []record.Issue
@@ -125,7 +126,11 @@ func TestPrepareReadsTheDispatchChainAboveAParent(t *testing.T) {
 			shown: []dispatch.Issue{shownUnder(child, "todo", parent, true), shownUnder(parent, "backlog", tree, false), top}, failing: parent, fails: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			pool := isolatedOutboxPool(t)
+			// The preparation only reads, so the cases share one migrated database (a fresh one per
+			// case cost the package a second each) and each starts from no recorded issue.
+			if _, err := pool.Exec(context.Background(), "delete from issues"); err != nil {
+				t.Fatalf("clear the recorded issues: %v", err)
+			}
 			records := record.NewStore()
 			for _, issue := range tc.recorded {
 				putOutboxIssue(t, pool, records, issue)
