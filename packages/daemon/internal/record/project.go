@@ -31,7 +31,11 @@ func OutOfWorkflow(status string) bool {
 	}
 }
 
-// Waiting returns the slotless todo roots and orphans handed to Legion, in Dispatch rank order. A
+// Waiting returns the slotless roots handed to Legion that may take a slot. A root a person
+// answered while it waited in awaiting_person comes before every root that never ran, ordered by
+// its answer time and then rank; the others follow, the slotless todo roots and orphans, in
+// Dispatch rank order. An unanswered awaiting root waits on the person rather than a slot,
+// whatever Dispatch status it currently shows, so it is not in the line until it is Answered. A
 // root without the label waits for nothing; a child's tree holds its place, so a child needs none.
 func Waiting(issues []Issue, slots []Slot) []Issue {
 	slotted := make(map[string]struct{}, len(slots))
@@ -40,21 +44,43 @@ func Waiting(issues []Issue, slots []Slot) []Issue {
 	}
 	waiting := make([]Issue, 0, len(issues))
 	for _, issue := range issues {
-		if issue.Status == "todo" && issue.HandedOver && claim.IsTreeRoot(issue.Key, issue.Tree) {
-			if _, ok := slotted[issue.Key]; !ok {
-				waiting = append(waiting, issue)
-			}
+		if !issue.HandedOver || !claim.IsTreeRoot(issue.Key, issue.Tree) {
+			continue
+		}
+		if _, ok := slotted[issue.Key]; ok {
+			continue
+		}
+		if issue.Answered() || (!issue.AwaitingPerson() && issue.Status == "todo") {
+			waiting = append(waiting, issue)
 		}
 	}
-	sort.Slice(waiting, func(i, j int) bool { return RankLess(waiting[i], waiting[j]) })
+	sort.Slice(waiting, func(i, j int) bool {
+		left, right := waiting[i], waiting[j]
+		leftAnswered, rightAnswered := left.Answered(), right.Answered()
+		switch {
+		case leftAnswered && rightAnswered:
+			if !left.Awaiting.AnsweredAt.Equal(*right.Awaiting.AnsweredAt) {
+				return left.Awaiting.AnsweredAt.Before(*right.Awaiting.AnsweredAt)
+			}
+		case leftAnswered:
+			return true
+		case rightAnswered:
+			return false
+		}
+		return RankLess(left, right)
+	})
 	return waiting
 }
 
-// TreeLive says whether root's tree is live: the root holds a slot or waits for one, and does not
-// linger after its close. A todo child under a live tree runs in it; under any other it is an orphan.
+// TreeLive says whether root's tree is live: the root holds a slot, waits for one, or waits on a
+// person with its session suspended, and does not linger after its close. A todo child under a
+// live tree runs in it; under any other it is an orphan.
 func TreeLive(ctx context.Context, store Store, tx pgx.Tx, root Issue) (bool, error) {
 	if root.Lingers() {
 		return false, nil
+	}
+	if root.AwaitingPerson() {
+		return true, nil
 	}
 	slots, err := store.Slots(ctx, tx)
 	if err != nil {
