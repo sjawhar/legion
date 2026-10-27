@@ -1916,8 +1916,9 @@ What the run touches, and nothing else:
 - `/tmp/verifiers-e2e` — the two built binaries, the boot logs, the refusal logs, the last response
   body, and the scratch `HOME` the binaries run under, so Dispatch's signing key never lands in the
   box's `~/.local/share/dispatch`. Recreated from empty each run.
-- the containers `verifiers-e2e-pg` (`postgres:16`) and `verifiers-e2e-nats` (`nats:2.10 -js`), both
-  on ephemeral loopback ports.
+- the containers `verifiers-e2e-pg` (pgvector on PostgreSQL 18, the image CI's Dispatch service
+  runs, pinned by digest) and `verifiers-e2e-nats` (`nats:2.10 -js`), both on ephemeral loopback
+  ports.
 - two ports from [`lib/free-port.sh`](#libfree-portsh), one for `dispatch` and one for the
   listener, the second excluding the first.
 

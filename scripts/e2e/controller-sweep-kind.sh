@@ -31,7 +31,7 @@ transcript_to "$evidence/transcript.log"
 . "$root/scripts/e2e/lib/kind-sandbox.sh"
 
 # The store's image: the pinned Postgres the repository's CI tests against.
-pg_image=mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+pg_image=mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
 
 cluster=legion-controller-sweep-$$
 work=$(mktemp -d "/tmp/legion-e2e-controller-sweep.$$.XXXXXXXX")
@@ -126,7 +126,7 @@ kind_sandbox_internal_kubeconfig "$work/kubeconfig-internal"
 pass
 
 begin store
-docker run -d --name "$pg" --network kind --tmpfs /var/lib/postgresql/data -e POSTGRES_PASSWORD=p "$pg_image" >/dev/null
+docker run -d --name "$pg" --network kind --tmpfs /var/lib/postgresql -e POSTGRES_PASSWORD=p "$pg_image" >/dev/null
 for _ in $(seq 1 60); do
   docker exec "$pg" pg_isready -h 127.0.0.1 -p 5432 -U postgres >/dev/null 2>&1 && break
   sleep 1

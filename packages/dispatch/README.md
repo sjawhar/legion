@@ -147,7 +147,9 @@ it, so a server reading another Envoy listener refuses the run instead of answer
 wrong sessions (`e2e/preflight.ts`). `e2e:deployed` also starts the plain-HTTP proxy on
 `PLAIN_HTTP_PORT`. The fake Envoy makes subscriber, Agents-page, and fixture-hook rows exercise
 the deployed server instead of a real session. Fake GitHub rows still skip because the acceptance
-service does not configure that listener.
+service does not configure that listener. Its Postgres is PostgreSQL 18 on the volume
+`dispatch-acceptance-pg18`; a volume `dispatch-acceptance-pg` left from before holds PostgreSQL 16
+data no longer used, and `docker volume rm <project>_dispatch-acceptance-pg` removes it.
 
 ```bash
 cd packages/envoy/deploy/compose

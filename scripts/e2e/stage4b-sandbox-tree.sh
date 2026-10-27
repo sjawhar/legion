@@ -211,7 +211,7 @@ port_worker_stream=${LEGION_E2E_WORKER_STREAM_PORT:-13373}
 port_session_db=${LEGION_E2E_SESSION_DB_PORT:-}
 # The session database's image, the pinned Postgres the repository's CI tests against, and the
 # providers Secret key its URL reaches every pod under (runtime.kubernetes.session_dsn_secret).
-session_db_image=pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+session_db_image=mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
 session_dsn_key=SESSION_DSN
 # The sessions directory of a pod's Oh My Pi profile (the runtime's ompSessionsDir). No pod keeps a
 # file there: a session's key in the session database is the path its file would have had, so this
@@ -3321,7 +3321,7 @@ session_db_password=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
   printf 'postgres://legion:%s@%s:%s/sessions?sslmode=disable\n' "$session_db_password" "$host" "$port_session_db" >"$work/session-dsn"
 )
 unset session_db_password
-docker run -d --name "$session_db_container" --cpus 1 --mount type=tmpfs,destination=/var/lib/postgresql/data \
+docker run -d --name "$session_db_container" --cpus 1 --mount type=tmpfs,destination=/var/lib/postgresql \
   --env-file "$work/session-db.env" -p "$host:$port_session_db:5432" "$session_db_image" >/dev/null ||
   fail "docker could not start the scratch session database $session_db_container on $host:$port_session_db"
 until_true 60 "the session database to accept TCP connections" docker exec "$session_db_container" pg_isready -h 127.0.0.1 -p 5432 -U legion -d sessions

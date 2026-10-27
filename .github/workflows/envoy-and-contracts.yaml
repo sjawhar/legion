@@ -46,7 +46,8 @@ on:
       - ".github/actions/install-omp/**"
       # The Pulumi CLI envoy-smoke's envoy-infra live tests run.
       - ".github/actions/install-pulumi/**"
-      # The image pull envoy-go, envoy-infra-go, envoy-go-race and envoy-smoke run first.
+      # The image pull envoy-go, dispatch-go-postgres-16, envoy-infra-go, envoy-go-race and
+      # envoy-smoke run first.
       - ".github/actions/pull-test-images/**"
       # The envoy-smoke job builds packages/envoy/docker/Dockerfile, so this list owes every
       # file that build reads: the six below before the target list are the ones the entries
@@ -204,7 +205,8 @@ jobs:
               # Its pack step writes each archive's notices, for each target the list names.
               - 'scripts/go-third-party-notices.sh'
               - '.github/go-release-targets.json'
-              # The image pull envoy-go, envoy-infra-go and envoy-go-race run before their tests.
+              # The image pull envoy-go, dispatch-go-postgres-16, envoy-infra-go and envoy-go-race
+              # run before their tests.
               - '.github/actions/pull-test-images/**'
             # Every file packages/envoy/docker/Dockerfile builds from, so the envoy-smoke job
             # runs whenever the image it smokes changes. `envoy` is deliberately not widened to
@@ -650,7 +652,7 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -787,7 +789,7 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -827,6 +829,11 @@ jobs:
       - name: Check pmdoc fixtures are up to date
         run: bun run check
         working-directory: packages/envoy/internal/dispatch/pmdoc/gen
+      # The server's version and the pgvector version it offers, read from the service itself, so
+      # the run shows which Postgres the tests below ran on.
+      - name: Postgres service version
+        run: |
+          docker exec "${{ job.services.postgres.id }}" psql -U postgres -Atc "select current_setting('server_version_num'), coalesce((select default_version from pg_available_extensions where name = 'vector'), 'no vector')"
       # Every image the tests here start: testnats.Image and testnats.HubImage, which the
       # natslive step below runs the two-image matrix on, and tests3.Image, pulled first for the
       # reason the action gives.
@@ -887,6 +894,55 @@ jobs:
           path: |
             out/pr-artifacts/legion-envoy-amd64.tar.gz
             out/pr-artifacts/legion-envoy-arm64.tar.gz
+
+  # Production Dispatch runs Postgres 16 until dispatch://INFRA-572's apply moves it to 18, so
+  # until then Dispatch's Go suite also runs here on the pgvector-on-16 image production's database
+  # matches; dispatch://INFRA-573 deletes this job then. The packages are Dispatch's server, its
+  # internal packages and the migrations. Their NATS runs in the test process (internal/testnats);
+  # the one container they start is internal/dispatch/files' S3 server, tests3.Image, pulled first
+  # for the reason .github/actions/pull-test-images gives. pmdoc's tests shell out to the generated
+  # TypeScript fixtures, so Bun is set up as in envoy-go.
+  dispatch-go-postgres-16:
+    name: Dispatch Go suite on production's Postgres 16 (until INFRA-572)
+    needs: changes
+    if: needs.changes.outputs.envoy == 'true'
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      # internal/dispatch/api's broker contract test skips without it, as in envoy-go.
+      BROKER_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      TESTCONTAINERS_RYUK_DISABLED: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-bun
+      - run: bun install --frozen-lockfile
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+      - name: Postgres service version
+        run: |
+          docker exec "${{ job.services.postgres.id }}" psql -U postgres -Atc "select current_setting('server_version_num'), coalesce((select default_version from pg_available_extensions where name = 'vector'), 'no vector')"
+      - name: Pull test container images
+        uses: ./.github/actions/pull-test-images
+        with:
+          consts: |
+            packages/envoy/internal/tests3/seaweedfs.go Image
+      - name: Unit test Dispatch's Go packages on Postgres 16
+        run: go test ./cmd/dispatch/... ./internal/dispatch/... ./internal/pgmigrate/...
+        working-directory: packages/envoy
 
   # The envoy-infra Pulumi plugin's module (packages/envoy/infra). It is not in the root go.work:
   # its own go.work binds it and packages/envoy, so Pulumi's requirements never move the versions
@@ -959,7 +1015,7 @@ jobs:
     timeout-minutes: 45
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -995,7 +1051,7 @@ jobs:
     timeout-minutes: 75
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -1033,7 +1089,7 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -1078,7 +1134,7 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]

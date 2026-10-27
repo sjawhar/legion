@@ -6,7 +6,7 @@ services:
   # set, so this server reaches only the fake listener Playwright starts. The acceptance service
   # builds its own image, so the recipe needs none of the production service's variables.
   postgres-acceptance:
-    image: pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+    image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
     network_mode: host
     command:
       ["postgres", "-c", "listen_addresses=127.0.0.1", "-c", "port=${DISPATCH_ACCEPTANCE_PG_PORT:-55434}"]
@@ -14,7 +14,7 @@ services:
       POSTGRES_PASSWORD: ${DISPATCH_ACCEPTANCE_PG_PASSWORD:-dispatch}
       POSTGRES_DB: dispatch_acceptance
     volumes:
-      - dispatch-acceptance-pg:/var/lib/postgresql/data
+      - dispatch-acceptance-pg18:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p ${DISPATCH_ACCEPTANCE_PG_PORT:-55434} -U postgres"]
       interval: 10s
@@ -46,4 +46,4 @@ services:
       DISPATCH_TEST_HOOKS: "1"
       ENVOY_URL: http://127.0.0.1:${FAKE_ENVOY_PORT:?set FAKE_ENVOY_PORT to the harness fake Envoy port; see packages/dispatch/README.md}
 volumes:
-  dispatch-acceptance-pg:
+  dispatch-acceptance-pg18:

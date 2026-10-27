@@ -17,9 +17,10 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// Image is the pgvector server image CI uses for Dispatch's Postgres service. The envoy-infra-go
-// job pulls it before the natslive tests run, so a test does not fetch it in the middle of a lane.
-const Image = "mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a"
+// Image is the pgvector server image CI uses for Dispatch's Postgres service: pgvector 0.8.7 on
+// PostgreSQL 18 (tag 0.8.7-pg18), pinned by digest. The envoy-infra-go job pulls it before the
+// natslive tests run, so a test does not fetch it in the middle of a lane.
+const Image = "mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11"
 
 // databaseURLEnv names the Postgres server a test may be given instead of starting one. It is
 // spelled here rather than taken from internal/dispatch/store/storetest, which declares the same
