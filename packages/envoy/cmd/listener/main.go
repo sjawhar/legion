@@ -759,6 +759,33 @@ func openDeliveryLease(urls []string, replicas int, machineID, instance string, 
 	}
 }
 
+// ledgerTakeoverMargin is how much longer than the longest prompt (session.Deliverer.RequestLimit)
+// a pod waits on another pod's unresolved delivery attempt before it takes the attempt over: the
+// other pod may still be prompting until then, and after it, that pod died without resolving it.
+const ledgerTakeoverMargin = 5 * time.Second
+
+// newDeliveryLedger makes the delivery ledger every lane asks before it prompts a session or
+// forwards a role-lane message to it: the `delivery.` keys of the listener state bucket, shared by
+// every pod of machineID, under the lease's boot, so a pod that takes the lease over does not prompt
+// a session again for a message the pod before it delivered. A listener with no lease (its NATS
+// user lacks the grant for the bucket) is the machine's one deliverer and keeps the ledger in
+// process (dedupe.Memory), which a restart forgets.
+//
+// A record is keyed by the envelope's dedupe key, not its event id: fan-out normalization can
+// produce envelopes with one event id and distinct dedupe keys. Each prompt is recorded as
+// attempted before it is sent and as delivered once it lands, so a slow server that accepts
+// prompt_async but answers 204 after the HTTP client gave up is not prompted again (#389).
+func newDeliveryLedger(deliveryLease *lease, machineID string, requestLimit time.Duration) dedupe.Ledger {
+	if deliveryLease == nil {
+		return dedupe.NewMemory()
+	}
+	return dedupe.NewKV(deliveryLease.kv, dedupe.KVConfig{
+		Durable:       bus.ListenerDurable(machineID),
+		Boot:          deliveryLease.boot,
+		TakeoverAfter: requestLimit + ledgerTakeoverMargin,
+	})
+}
+
 func main() {
 	instance, err := listenerInstance()
 	if err != nil {
@@ -981,16 +1008,7 @@ func main() {
 		Sessions:     sessions,
 	}
 
-	dedupeCache := dedupe.New(10 * time.Minute)
-
-	// attemptCache tracks (dedupe_key, session_id) pairs BEFORE delivery to
-	// prevent phantom duplicates when slow serves accept prompt_async but
-	// the HTTP client times out before receiving 204. Keyed by DedupeKey
-	// (not EventID) because fan-out normalization can produce multiple
-	// envelopes with the same EventID but distinct DedupeKeys. The existing
-	// dedupeCache records only successful deliveries (post-delivery) and
-	// cannot catch this slow-204 case. See #389.
-	attemptCache := dedupe.New(5 * time.Minute)
+	ledger := newDeliveryLedger(deliveryLease, cfg.MachineID, deliver.RequestLimit)
 
 	roleQueue := bus.ListenerQueue(cfg.MachineID)
 
@@ -1005,8 +1023,7 @@ func main() {
 		sessions:          sessions,
 		machineID:         cfg.MachineID,
 		deliverer:         &deliver,
-		dedupeCache:       dedupeCache,
-		attemptCache:      attemptCache,
+		ledger:            ledger,
 		logger:            logger,
 		messagesReceived:  messagesReceived,
 		messagesDelivered: messagesDelivered,

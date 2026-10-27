@@ -28,7 +28,7 @@ type testEnv struct {
 	registry  *store.Registry
 	sessions  session.SessionLookup
 	deliverer session.Deliverer
-	dedupe    *dedupe.Cache
+	ledger    *dedupe.KV
 }
 
 type testEnvOption func(*testEnvOpts)
@@ -75,17 +75,39 @@ func setupTestEnv(t *testing.T, options ...testEnvOption) *testEnv {
 		Sessions:     sessions,
 	}
 
-	dc := dedupe.New(5 * time.Minute)
-
-	return &testEnv{
+	env := &testEnv{
 		t:         t,
 		ctx:       ctx,
 		client:    client,
 		registry:  registry,
 		sessions:  sessions,
 		deliverer: deliverer,
-		dedupe:    dc,
 	}
+	env.ledger = env.deliveryLedger("boot-consumer", 0)
+	return env
+}
+
+// deliveryLedger opens the listener state bucket on env's NATS as the listener does and returns
+// test-machine's shared delivery ledger as the process boot would hold it, whose delivered records
+// hold for deliveredAge (dedupe.DeliveredAge when zero).
+func (env *testEnv) deliveryLedger(boot string, deliveredAge time.Duration) *dedupe.KV {
+	env.t.Helper()
+	kv, err := bus.EnsureKeyValue(env.client.JS(), &natsgo.KeyValueConfig{
+		Bucket:   bus.ListenerStateBucket,
+		History:  1,
+		TTL:      10 * time.Minute,
+		Storage:  natsgo.FileStorage,
+		Replicas: 1,
+	})
+	if err != nil {
+		env.t.Fatalf("open the listener state bucket: %v", err)
+	}
+	return dedupe.NewKV(kv, dedupe.KVConfig{
+		Durable:       bus.ListenerDurable("test-machine"),
+		Boot:          boot,
+		TakeoverAfter: env.deliverer.RequestLimit + 5*time.Second,
+		DeliveredAge:  deliveredAge,
+	})
 }
 
 // mockSession starts a mock HTTP server that counts prompt_async calls.
@@ -164,7 +186,9 @@ func newEnvelope(source, topic, summary, dedupeKey string) contracts.Envelope {
 	}
 }
 
-// startConsumer subscribes to NATS and processes messages using the same logic as the listener.
+// startConsumer subscribes to NATS and processes messages using the same logic as the listener:
+// each (dedupe key, session) pair is attempted in the delivery ledger before it is delivered,
+// recorded delivered once it lands and cleared when it does not.
 func (env *testEnv) startConsumer(machineID string) {
 	env.t.Helper()
 	_, err := env.client.JS().Subscribe("", func(msg *natsgo.Msg) {
@@ -181,7 +205,12 @@ func (env *testEnv) startConsumer(machineID string) {
 		// Agent path
 		if item.Source == "agent" {
 			sessionID := item.Topic[len("notifications.agent."):]
-			if env.dedupe.Seen(item.DedupeKey, sessionID) {
+			attempt, err := env.ledger.Attempt(item.DedupeKey, sessionID)
+			if err != nil {
+				msg.NakWithDelay(1 * time.Second)
+				return
+			}
+			if attempt.Verdict != dedupe.Proceed {
 				msg.Ack()
 				return
 			}
@@ -192,7 +221,9 @@ func (env *testEnv) startConsumer(machineID string) {
 			}
 			result := session.HandleAgentMessage(item, sessionID, machineID, interestPtr, &env.deliverer)
 			if result.Delivered {
-				env.dedupe.Record(item.DedupeKey, sessionID)
+				_ = env.ledger.Record(attempt)
+			} else {
+				_ = env.ledger.Clear(attempt)
 			}
 			if result.ShouldNAK {
 				msg.NakWithDelay(1 * time.Second)
@@ -210,16 +241,22 @@ func (env *testEnv) startConsumer(machineID string) {
 		}
 		var failed bool
 		for _, interest := range items {
-			if env.dedupe.Seen(item.DedupeKey, interest.SessionID) {
-				continue
-			}
 			if item.SourceSession != "" && item.SourceSession == interest.SessionID {
 				continue
 			}
+			attempt, err := env.ledger.Attempt(item.DedupeKey, interest.SessionID)
+			if err != nil {
+				failed = true
+				continue
+			}
+			if attempt.Verdict != dedupe.Proceed {
+				continue
+			}
 			if err := env.deliverer.Deliver(item, interest); err != nil {
+				_ = env.ledger.Clear(attempt)
 				failed = true
 			} else {
-				env.dedupe.Record(item.DedupeKey, interest.SessionID)
+				_ = env.ledger.Record(attempt)
 			}
 		}
 		if failed {
@@ -587,7 +624,7 @@ func TestDelivery_SessionReRegistration(t *testing.T) {
 
 func TestDelivery_DedupeWindowExpiry(t *testing.T) {
 	env := setupTestEnv(t)
-	env.dedupe = dedupe.New(500 * time.Millisecond)
+	env.ledger = env.deliveryLedger("boot-consumer", 500*time.Millisecond)
 
 	port, deliveries, _, _ := mockSession(t)
 	env.registerSession("ses_expiry", port, nil)

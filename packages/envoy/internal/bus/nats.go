@@ -891,10 +891,25 @@ func (c *Client) PublishReportingDuplicate(item contracts.Envelope) (bool, error
 	return c.publishJetStream(item)
 }
 
+// DeliveryExceptionDedupePrefix begins the dedupe key of a delivery exception the listener
+// publishes on an ExceptionTopicPrefix topic. The listener derives the exception's id from the
+// delivery it reports (the event, the recipient and the reason), so a redelivery that ends the same
+// way publishes the same key, and the stream stores that exception once.
+const DeliveryExceptionDedupePrefix = "envoy.exception."
+
+// namesItsDeliveryException reports whether item is the listener's delivery exception, whose
+// dedupe key names the delivery it reports (DeliveryExceptionDedupePrefix).
+func namesItsDeliveryException(item contracts.Envelope) bool {
+	return item.Source == "envoy" && strings.HasPrefix(item.Topic, ExceptionTopicPrefix) &&
+		strings.HasPrefix(item.DedupeKey, DeliveryExceptionDedupePrefix)
+}
+
 // publishJetStream publishes item to the notification stream. The MsgId, where the envelope earns
-// one, is the dedupe key and the topic together, because one upstream event can be published on
-// several topics under one key - a GitHub comment that mentions the trigger is published on its
-// mention topic beside its comment topic - and each of those must be retained.
+// one (its key names its event, contracts.DedupeKeyNamesTheUpstreamEvent, or it is the listener's
+// delivery exception, namesItsDeliveryException), is the dedupe key and the topic together,
+// because one upstream event can be published on several topics under one key - a GitHub comment
+// that mentions the trigger is published on its mention topic beside its comment topic - and each
+// of those must be retained.
 func (c *Client) publishJetStream(item contracts.Envelope) (bool, error) {
 	if err := checkSubject(item.Topic); err != nil {
 		return false, err
@@ -909,7 +924,7 @@ func (c *Client) publishJetStream(item contracts.Envelope) (bool, error) {
 		return false, err
 	}
 	options := []nats.PubOpt{nats.Context(ctx)}
-	if contracts.DedupeKeyNamesTheUpstreamEvent(item) {
+	if contracts.DedupeKeyNamesTheUpstreamEvent(item) || namesItsDeliveryException(item) {
 		options = append(options, nats.MsgId(item.DedupeKey+":"+item.Topic))
 	}
 	js := c.JS()

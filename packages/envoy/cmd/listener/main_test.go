@@ -923,7 +923,7 @@ func TestPublishHandler_ExplicitDedupeKeyForwardsAgainAfterReceiptTimeoutOnly(t 
 		}
 	}
 
-	// 1. The holder swallows the forward: receipt_timeout, attempt cache cleared.
+	// 1. The holder swallows the forward: receipt_timeout, the ledger attempt cleared.
 	first := publish("first publish")
 	expectForward("first publish", first)
 	assertDeliveryException(t, exceptionProbe, first, "receipt_timeout")
@@ -2486,7 +2486,7 @@ func TestListenerDeliveryHandler_RoleForwardPublishErrorEmitsDeliveryFailed(t *t
 	assertDeliveryException(t, probe, item, "delivery_failed")
 
 	if got := forwards.Load(); got != 2 {
-		t.Fatalf("forward attempts = %d, want 2: a failed forward must clear the attempt cache", got)
+		t.Fatalf("forward attempts = %d, want 2: a failed forward must clear its ledger attempt", got)
 	}
 	if logs := harness.logs.String(); strings.Contains(logs, "receipt_timeout") || !strings.Contains(logs, `"msg":"listener role forward failed"`) {
 		t.Fatalf("a forward publish error must log as a failed forward, never as a receipt timeout:\n%s", logs)
@@ -2545,7 +2545,7 @@ func TestListenerDeliveryHandler_RoleForwardRefusesUnadvertisedDeliveryMode(t *t
 }
 
 // TestListenerDeliveryHandler_RoleForwardDedupeSkipsCapabilityRecheckOnRedelivery proves the
-// dedupe/attempt-cache check runs BEFORE the capability guard: a duplicate of an envelope
+// delivery-ledger check runs BEFORE the capability guard: a duplicate of an envelope
 // already forwarded successfully must be dropped by the existing dedupe skip -- zero forwards,
 // zero exceptions -- even if the holder's advertised capabilities have since changed, rather
 // than being re-evaluated against the holder's current capabilities and misreported as a fresh
@@ -3236,10 +3236,6 @@ func newListenerDeliveryHarness(t *testing.T, transport http.RoundTripper) liste
 	if err != nil {
 		t.Fatalf("open session registry: %v", err)
 	}
-	dedupeCache := dedupe.New(10 * time.Minute)
-	attemptCache := dedupe.New(5 * time.Minute)
-	t.Cleanup(dedupeCache.Stop)
-	t.Cleanup(attemptCache.Stop)
 	deliverer := session.Deliverer{
 		MachineID:    "test-machine",
 		RequestLimit: 5 * time.Second,
@@ -3262,8 +3258,7 @@ func newListenerDeliveryHarness(t *testing.T, transport http.RoundTripper) liste
 		sessions:          sessions,
 		machineID:         "test-machine",
 		deliverer:         &deliverer,
-		dedupeCache:       dedupeCache,
-		attemptCache:      attemptCache,
+		ledger:            testDeliveryLedger(t, client.Conn, "test-machine", "boot-test"),
 		logger:            logging.NewWithWriter("test", logs),
 		messagesReceived:  met.NewCounter("test_messages_received", "test"),
 		messagesDelivered: met.NewCounter("test_messages_delivered", "test"),
@@ -3281,6 +3276,22 @@ func newListenerDeliveryHarness(t *testing.T, transport http.RoundTripper) liste
 		logs:        logs,
 		config:      deliveryConfig,
 	}
+}
+
+// testDeliveryLedger opens the listener state bucket on conn as main does and returns machineID's
+// shared delivery ledger as the process boot would hold it, with main's takeover age for a 5 s
+// request limit.
+func testDeliveryLedger(t *testing.T, conn *natsgo.Conn, machineID, boot string) *dedupe.KV {
+	t.Helper()
+	kv, err := openListenerState(conn, 1, listenerStateRequestWait)
+	if err != nil {
+		t.Fatalf("open the listener state bucket: %v", err)
+	}
+	return dedupe.NewKV(kv, dedupe.KVConfig{
+		Durable:       bus.ListenerDurable(machineID),
+		Boot:          boot,
+		TakeoverAfter: 5*time.Second + ledgerTakeoverMargin,
+	})
 }
 
 func (h listenerDeliveryHarness) registerTarget(t *testing.T, sessionID, topic string) {

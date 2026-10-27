@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/cmdtest"
-	"github.com/sjawhar/envoy/internal/dedupe"
 	dispatchapi "github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
@@ -108,10 +107,7 @@ func listenerRigLogger(t *testing.T, name string) *logging.Logger {
 // so a delivery is observed where the agent would receive it rather than in a log line.
 func startListenerDelivery(t *testing.T, d *listenerDeps) {
 	t.Helper()
-	dedupeCache := dedupe.New(10 * time.Minute)
-	attemptCache := dedupe.New(5 * time.Minute)
-	t.Cleanup(dedupeCache.Stop)
-	t.Cleanup(attemptCache.Stop)
+	machineID := "dispatch-" + id.New()
 	met := metrics.New()
 	config := listenerDeliveryHandlerConfig{
 		client:      d.client,
@@ -125,15 +121,14 @@ func startListenerDelivery(t *testing.T, d *listenerDeps) {
 			RequestLimit: 5 * time.Second,
 			Sessions:     d.sessions,
 		},
-		dedupeCache:       dedupeCache,
-		attemptCache:      attemptCache,
+		ledger:            testDeliveryLedger(t, d.client.Conn, machineID, "boot-pod-a"),
 		logger:            listenerRigLogger(t, "delivery listener"),
 		messagesReceived:  met.NewCounter("rig_messages_received", "test"),
 		messagesDelivered: met.NewCounter("rig_messages_delivered", "test"),
 		messagesNAKed:     met.NewCounter("rig_messages_naked", "test"),
 		deliveryDuration:  met.NewHistogram("rig_delivery_duration", "test", metrics.DefaultBuckets),
 	}
-	rig := startReceiverRig(t, d.client.Conn.ConnectedUrl(), "dispatch-"+id.New(), "pod-a", jetStreamDeliveryHandler(config), testReceiveTiming(), testLeaseTiming())
+	rig := startReceiverRig(t, d.client.Conn.ConnectedUrl(), machineID, "pod-a", jetStreamDeliveryHandler(config), testReceiveTiming(), testLeaseTiming())
 	rig.awaitState(t, receiveActive, 10*time.Second)
 }
 

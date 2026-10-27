@@ -73,17 +73,19 @@ func (r *sessionRecorder) expectNoDelivery(t *testing.T, timeout time.Duration) 
 	}
 }
 
+// listenerHarness is one listener process: its own connection and durable subscription, and its
+// own boot in the machine's shared delivery ledger, so two harnesses over one consumer are a
+// restarted listener and the one before it.
 type listenerHarness struct {
-	t            *testing.T
-	env          *testEnv
-	client       *bus.Client
-	machineID    string
-	consumer     string
-	dedupeCache  *dedupe.Cache
-	attemptCache *dedupe.Cache
-	nakDelay     time.Duration
-	sub          *natsgo.Subscription
-	once         sync.Once
+	t         *testing.T
+	env       *testEnv
+	client    *bus.Client
+	machineID string
+	consumer  string
+	ledger    *dedupe.KV
+	nakDelay  time.Duration
+	sub       *natsgo.Subscription
+	once      sync.Once
 }
 
 func newListenerHarness(t *testing.T, env *testEnv, machineID, consumer string) *listenerHarness {
@@ -93,14 +95,13 @@ func newListenerHarness(t *testing.T, env *testEnv, machineID, consumer string) 
 		t.Fatalf("connect listener harness: %v", err)
 	}
 	h := &listenerHarness{
-		t:            t,
-		env:          env,
-		client:       client,
-		machineID:    machineID,
-		consumer:     consumer,
-		dedupeCache:  dedupe.New(5 * time.Minute),
-		attemptCache: dedupe.New(5 * time.Minute),
-		nakDelay:     50 * time.Millisecond,
+		t:         t,
+		env:       env,
+		client:    client,
+		machineID: machineID,
+		consumer:  consumer,
+		ledger:    env.deliveryLedger(fmt.Sprintf("%s-%d", consumer, time.Now().UnixNano()), 0),
+		nakDelay:  50 * time.Millisecond,
 	}
 	t.Cleanup(h.close)
 	return h
@@ -161,14 +162,30 @@ func (h *listenerHarness) handle(msg *natsgo.Msg) {
 	h.handleFanout(msg, item)
 }
 
+// attempt asks the harness's ledger for (item, sessionID): deliver=true when this listener goes on
+// to deliver it, else retryIn > 0 when another listener's attempt may still be in flight and the
+// message is retried once it can be taken over, or zero when it is skipped.
+func (h *listenerHarness) attempt(item contracts.Envelope, sessionID string) (attempt dedupe.Attempt, deliver bool, retryIn time.Duration) {
+	attempt, err := h.ledger.Attempt(item.DedupeKey, sessionID)
+	switch {
+	case err != nil:
+		return dedupe.Attempt{}, false, h.nakDelay
+	case attempt.Verdict == dedupe.Deferred:
+		return attempt, false, attempt.RetryIn
+	default:
+		return attempt, attempt.Verdict == dedupe.Proceed, 0
+	}
+}
+
 func (h *listenerHarness) handleAgent(msg *natsgo.Msg, item contracts.Envelope) {
 	sessionID := item.Topic[len(contracts.AgentTopicPrefix):]
-	if h.dedupeCache.Seen(item.DedupeKey, sessionID) {
-		_ = msg.Ack()
-		return
-	}
-	if h.attemptCache.Seen(item.DedupeKey, sessionID) {
-		_ = msg.Ack()
+	attempt, deliver, retryIn := h.attempt(item, sessionID)
+	if !deliver {
+		if retryIn > 0 {
+			_ = msg.NakWithDelay(retryIn)
+		} else {
+			_ = msg.Ack()
+		}
 		return
 	}
 	interest, err := h.env.registry.Get(sessionID)
@@ -176,12 +193,12 @@ func (h *listenerHarness) handleAgent(msg *natsgo.Msg, item contracts.Envelope) 
 	if err == nil {
 		interestPtr = &interest
 	}
-	h.attemptCache.Record(item.DedupeKey, sessionID)
 	result := session.HandleAgentMessage(item, sessionID, h.machineID, interestPtr, &h.env.deliverer)
 	if result.Delivered {
-		h.dedupeCache.Record(item.DedupeKey, sessionID)
+		_ = h.ledger.Record(attempt)
 	}
 	if result.ShouldNAK {
+		_ = h.ledger.Clear(attempt)
 		_ = msg.NakWithDelay(h.nakDelay)
 		return
 	}
@@ -194,28 +211,27 @@ func (h *listenerHarness) handleFanout(msg *natsgo.Msg, item contracts.Envelope)
 		_ = msg.Ack()
 		return
 	}
-	var failed bool
+	var retryIn time.Duration
 	for _, interest := range items {
-		if h.dedupeCache.Seen(item.DedupeKey, interest.SessionID) {
-			continue
-		}
-		if h.attemptCache.Seen(item.DedupeKey, interest.SessionID) {
-			continue
-		}
 		if item.SourceSession != "" && item.SourceSession == interest.SessionID {
 			continue
 		}
-		h.attemptCache.Record(item.DedupeKey, interest.SessionID)
+		attempt, deliver, wait := h.attempt(item, interest.SessionID)
+		if !deliver {
+			retryIn = max(retryIn, wait)
+			continue
+		}
 		if err := h.env.deliverer.Deliver(item, interest); err != nil {
 			if fanoutShouldNAK(h.env.sessions, interest.SessionID, err) {
-				failed = true
+				_ = h.ledger.Clear(attempt)
+				retryIn = max(retryIn, h.nakDelay)
 			}
 			continue
 		}
-		h.dedupeCache.Record(item.DedupeKey, interest.SessionID)
+		_ = h.ledger.Record(attempt)
 	}
-	if failed {
-		_ = msg.NakWithDelay(h.nakDelay)
+	if retryIn > 0 {
+		_ = msg.NakWithDelay(retryIn)
 		return
 	}
 	_ = msg.Ack()

@@ -76,3 +76,52 @@ func TestPublishReportingDuplicateReportsTheStreamsVerdict(t *testing.T) {
 		}
 	}
 }
+
+// A delivery exception's dedupe key names the delivery it reports, so it publishes under a MsgId
+// and a repeat of it, from a redelivery that ended the same way, is stored once. An exception
+// under another key, or one that is not the listener's, carries none.
+func TestADeliveryExceptionPublishesUnderAMsgIdOfItsKey(t *testing.T) {
+	client, err := ConnectOwningStream([]string{testnats.URL(t)})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+
+	exception := func(eventID, dedupeKey string) contracts.Envelope {
+		return contracts.Envelope{
+			EventID:        eventID,
+			Source:         "envoy",
+			Topic:          ExceptionTopicPrefix + "notifications.agent.ses_dup",
+			DedupeKey:      dedupeKey,
+			IssuedAt:       contracts.NowMillis(),
+			PayloadSummary: "delivery exception: no_holder",
+			TraceID:        "trace-" + eventID,
+		}
+	}
+	publish := func(item contracts.Envelope) bool {
+		t.Helper()
+		duplicate, err := client.PublishReportingDuplicate(item)
+		if err != nil {
+			t.Fatalf("publish %s: %v", item.DedupeKey, err)
+		}
+		return duplicate
+	}
+
+	const id = "0123456789abcdef0123456789abcdef"
+	if publish(exception(id, DeliveryExceptionDedupePrefix+id)) {
+		t.Fatal("the first exception reported a duplicate; the stream held nothing")
+	}
+	if !publish(exception(id, DeliveryExceptionDedupePrefix+id)) {
+		t.Fatal("a repeat of a delivery exception must be a duplicate the stream already holds")
+	}
+
+	other := exception("other", "other.key")
+	if publish(other) || publish(other) {
+		t.Fatal("an exception under a key that is not a delivery exception's carries no MsgId")
+	}
+	notListeners := exception("agent-made", DeliveryExceptionDedupePrefix+"agent-made")
+	notListeners.Source = "agent"
+	if publish(notListeners) || publish(notListeners) {
+		t.Fatal("an envelope the listener did not make carries no MsgId")
+	}
+}
