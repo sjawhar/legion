@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-526",
-  "completed": "2026-10-27T04:20:00Z",
-  "round": 3,
+  "completed": "2026-10-27T05:21:00Z",
+  "round": 4,
   "headTested": "154d6cea2207c992c6cdccfdd5af633d446f33f7 (code; PR head c14f0a3b adds only the implement handoff)",
   "implementerProof": {
     "verdict": "verified",
@@ -32,5 +32,14 @@
   "observations": [
     "A decision nested in an option of another decision is hidden, and the outer option's description runs the inner block's text together ('firstInner?X: exY: why'). The comment, the document's version view (before and after this change) and the live document (hidden inner, server rows correct) all do this. It is how the document draws it, not a regression of this change; reported to the architect for a decision on whether nested decisions need their own work."
   ],
-  "ciAtHead": "Read on GitHub at 154d6cea at 2026-10-27T04:19Z: build, changes, lint, test, typecheck queued; pr-title one cancelled, two queued. I did not wait for them."
+  "ciAtHead": "Read on GitHub at 2497adef at 05:17Z: build, changes, lint, test, typecheck queued; pr-title one cancelled, one queued. I did not wait for them. The reviewer reads the required checks before approving.",
+  "rebaseRecheck": {
+    "from": "154d6cea2207c992c6cdccfdd5af633d446f33f7",
+    "to": "2497adefd872c64ad0cdf4b27d062b472a4531d4",
+    "line": "rebase re-check 154d6cea → 2497adef: fingerprint unchanged, bare gates only",
+    "fingerprint": "5051300770a6dd6d111c0f4dbd52d8014cb466caf440a0a08aafe4b82bbecfef at both heads (jj diff --from fork_point(\"main\"@origin | <head>) --to <head> --git --context 0 '~(.legion | docs/solutions)', @@ and index lines dropped, sha256)",
+    "merge": "2497adef is a forward merge of main 448a4100 (includes #2317 baadccdc) into 8740e472, with no conflict, done as the architect directed",
+    "smoke": "cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts --project chromium --project iphone from a fresh build at 2497adef: 6 passed (callout header, decision card, reply under a document decision keeps its lists; chromium and iphone)",
+    "ci": "Read on GitHub at 2497adef at 05:17Z: build, changes, lint, test, typecheck queued; pr-title one cancelled, one queued. I did not wait for them. The reviewer reads the required checks before approving."
+  }
 }
