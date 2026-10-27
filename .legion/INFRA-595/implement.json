@@ -2,70 +2,55 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-595",
-  "completed": "2026-10-27T05:47:09Z",
+  "completed": "2026-10-27T06:47:59Z",
+  "round": 1,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2367",
-  "evidence": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6434786198",
+  "evidence": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6435639833",
+  "evidenceRound0": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6434786198",
+  "reviewThreads": [
+    "PRRT_kwDORFy7ds6wkuMu: fixed in 46034eb2, TestARecreatedBucketForgetsTheOldBucketsRecords locks the reset branch; resolved",
+    "PRRT_kwDORFy7ds6wkuMz: fixed in 46034eb2, AGENTS.md says 'published again at every attempt'; resolved",
+    "PRRT_kwDORFy7ds6wkuM2: fixed in 46034eb2, dead claimFresh check removed from settle; resolved",
+    "PRRT_kwDORFy7ds6wkuM3: fixed in 46034eb2, heldBack moved into summary_loop_test.go, comments name verdictHeld/legacyBacklog; resolved",
+    "PRRT_kwDORFy7ds6wkuM7: fixed in 46034eb2, openStore registers t.Cleanup -> forgetTestSummarizer; resolved"
+  ],
   "proof": [
     {
       "criterion": "The summary is recomputed only when an entry changes or falls due (event-driven, due entries in order); no step copies or sorts the whole cache.",
-      "surface": "the real envoy-listener binary (packages/envoy/cmd/listener) on testnats natsd with 30,000 seeded CI records in envoy_ci_state (99% settled, 1% waiting), ENVOY_CI_DEBOUNCE=5s, GitHub webhook route mounted",
-      "command": "bash $TMPDIR/infra595/idle.sh $TMPDIR/infra595/listener-head $TMPDIR/infra595/idle-after.txt --keep (throwaway harness: waits for /healthz + 30 s, reads utime+stime from /proc/<pid>/stat at t0 and t0+60 s); grep -rn 'func (s \\*Store) List\\|sort\\.' packages/envoy/internal/cistore/*.go | grep -v _test.go; go test -run 'TestTheSummaryLoopSleepsWhileNothingChanges|TestScheduleMatchesThePredicates' -v ./internal/cistore/",
-      "observed": "head idle 0.0003 cores (delta 2 ticks in 60.02 s); all 30,000 records settled (the 300 waiting ones by deadline); grep shows no List and only State.Hash's per-record sorts, render.go's per-record sorts and loop.go:269 sort.Strings(batch); both tests PASS",
-      "headSha": "e55604e4f5c4fc9a9751b2a15403980039248f39",
-      "negativeControl": "listener-base (main c3d09eec) on the same seed and machine: 0.4537 cores and 0.4438 cores idle in two runs"
-    },
-    {
-      "criterion": "Benchmark at 12,000 and 30,000 records: idle near zero, per-change cost independent of size; before and after in the PR.",
-      "surface": "internal/cistore benchmarks BenchmarkSummaryIdle / BenchmarkSummaryChange (summary_bench_test.go, committed before the production change)",
-      "command": "cd packages/envoy && go test -run '^$' -bench 'BenchmarkSummary(Idle|Change)' -benchmem -count 6 ./internal/cistore/ at base (bench-before.txt) and head (bench-after.txt); go run golang.org/x/perf/cmd/benchstat@v0.0.0-20261009192801-be2c69fb417e bench-before.txt bench-after.txt",
-      "observed": "head idle 241.6 ns/op (12,000) and 233.4 ns/op (30,000), 0 B/op, 0 allocs/op; head change 1.493 us/op (12,000) and 1.447 us/op (30,000), 280 B/op, 3 allocs/op at both sizes; base idle 155 ms / 407 ms, 496k / 1.37M allocs/op; benchstat posted on the PR",
-      "headSha": "e55604e4f5c4fc9a9751b2a15403980039248f39",
-      "negativeControl": "the same benchmark at base c3d09eec: idle 155,096,188 ns/op at 12,000 and 406,768,806 ns/op at 30,000, growing with the cache size"
+      "surface": "the real envoy-listener binary (packages/envoy/cmd/listener) on testnats natsd with 30,000 seeded CI records in envoy_ci_state (99% settled, 1% waiting), ENVOY_CI_DEBOUNCE=5s",
+      "command": "go build -o $TMPDIR/infra595/listener-head2 ./cmd/listener && bash $TMPDIR/infra595/idle.sh $TMPDIR/infra595/listener-head2 $TMPDIR/infra595/idle-after-r1.txt --keep",
+      "observed": "0.0002 cores idle (delta 1 tick in 60.02 s); all 30,000 records settled, including the 300 waiting ones by deadline; envoy_ci_legacy_records_held 0",
+      "headSha": "46034eb294162ace30db3912aa7a5c460f105f9c",
+      "negativeControl": "listener-base (main c3d09eec) on the same seed and machine: 0.4537 and 0.4438 cores idle"
     },
     {
       "criterion": "Behaviour visible to callers unchanged; existing cistore tests pass; a test covers an entry falling due with no other change.",
-      "surface": "the real envoy-listener binary with a signed check_run webhook; packages/envoy/scripts/e2e-local.sh; internal/cistore and cmd/listener test suites",
-      "command": "$TMPDIR/infra595/settle.sh check-run-proof.json (posts a signed check_run to /webhook/github and times the pr.42.checks message on NATS) against listener-head and listener-base; bash packages/envoy/scripts/e2e-local.sh; go vet ./... && go test -count=1 ./internal/cistore/ ./cmd/listener/ && CGO_ENABLED=1 go test -race -count=1 ./internal/cistore/; go test -run TestARecordFallingDueSettlesWithNoOtherChange -v ./internal/cistore/",
-      "observed": "settlement 5,998 ms after the post at head vs 5,957 ms at base, same payload summary; e2e-local PASS with its four pr.42.checks settlements; vet ok, cistore ok, cmd/listener ok (285 s), race ok; TestARecordFallingDueSettlesWithNoOtherChange PASS",
-      "headSha": "e55604e4f5c4fc9a9751b2a15403980039248f39",
-      "negativeControl": "StartSummaryLoop with its timer re-arm for queued deadlines removed: TestARecordFallingDueSettlesWithNoOtherChange FAIL ('0 settlements by 1793079941359, want 1'); restored, PASS"
+      "surface": "the real envoy-listener binary with a signed check_run webhook; packages/envoy/scripts/e2e-local.sh; internal/cistore tests",
+      "command": "$TMPDIR/infra595/settle.sh check-run-proof-r1.json infra595-proof-r1 settle-after-r1.txt; bash packages/envoy/scripts/e2e-local.sh; go vet ./internal/cistore/ ./cmd/listener/ && go test -count=1 ./internal/cistore/ && CGO_ENABLED=1 go test -race -count=1 ./internal/cistore/",
+      "observed": "settlement 5,578 ms after the post (base 5,957 ms), payload 'checks settled on example-org/example-repo#42 @ 5965965: 1 passed'; e2e-local PASS with four pr.42.checks settlements; vet clean, cistore ok 16.6 s, race ok 29.8 s",
+      "headSha": "46034eb294162ace30db3912aa7a5c460f105f9c",
+      "negativeControl": "reset branch in summarizer.pass disabled: TestARecreatedBucketForgetsTheOldBucketsRecords FAIL 'held back 3 records, want 1'; restored, PASS x3"
     },
     {
-      "criterion": ".dispatch/architecture/envoy-listener.md says what is now true.",
-      "surface": ".dispatch/architecture/envoy-listener.md",
-      "command": "grep -c 'event-driven' .dispatch/architecture/envoy-listener.md",
-      "observed": "1; the sentence names the change feed, the deadline queue (debounce, claim, handover grace) and passes only on the one-second tick, as loop.go and cmd/listener/main.go implement",
-      "headSha": "e55604e4f5c4fc9a9751b2a15403980039248f39",
-      "negativeControl": "the same grep at base c3d09eec prints 0"
+      "criterion": "Benchmark at 12,000 and 30,000 records: idle near zero, per-change cost independent of size; before and after in the PR.",
+      "surface": "internal/cistore benchmarks BenchmarkSummaryIdle / BenchmarkSummaryChange",
+      "command": "cd packages/envoy && go test -run '^$' -bench 'BenchmarkSummary(Idle|Change)' -benchmem -count 1 ./internal/cistore/",
+      "observed": "idle 256 ns/op and 284 ns/op, 0 allocs/op; change 2.6 us and 1.6 us, 3 allocs/op at both sizes (round 0 benchstat at e55604e4 in the PR)",
+      "headSha": "46034eb294162ace30db3912aa7a5c460f105f9c",
+      "negativeControl": "the same benchmark at base c3d09eec: idle 155 ms/op at 12,000 and 407 ms/op at 30,000"
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/cistore/cistore.go",
     "packages/envoy/internal/cistore/loop.go",
-    "packages/envoy/internal/cistore/summary_bench_test.go",
-    "packages/envoy/internal/cistore/summary_helpers_test.go",
+    "packages/envoy/internal/cistore/cistore.go",
     "packages/envoy/internal/cistore/summary_loop_test.go",
-    "packages/envoy/internal/cistore/loop_test.go",
-    "packages/envoy/internal/cistore/legacy_test.go",
-    "packages/envoy/internal/cistore/record_bound_test.go",
-    "packages/envoy/internal/cistore/burst_test.go",
-    "packages/envoy/cmd/listener/main.go",
-    "packages/envoy/cmd/listener/startup_test.go",
-    "packages/envoy/AGENTS.md",
-    "packages/envoy/CHANGELOG.md",
-    "docs/solutions/architecture-patterns/envoy-ci-summary.md",
-    ".dispatch/architecture/envoy-listener.md"
+    "packages/envoy/internal/cistore/summary_helpers_test.go",
+    "packages/envoy/internal/cistore/cistore_test.go",
+    "packages/envoy/AGENTS.md"
   ],
   "trickyParts": [
-    "Passes stay on the grid start + k*tick: a change-feed wake arms the next grid instant strictly after now, and after a pass the timer is armed for the first grid instant at or after the earliest queued deadline and strictly after this pass, so a failed publish retries at the next tick and does not spin on the summarizer's own writes (TestAFailingPublisherIsRetriedOncePerTick).",
-    "cacheStateLocked marks a change only for a higher revision or a key not cached before; an equal-revision Rewatch replay marks nothing (TestTheSummaryLoopSleepsWhileNothingChanges).",
-    "schedule's deadlines are exact integer milliseconds: D, ClaimedAt+2*debounce+1, and G for an unstamped record with a fresh claim; claimFresh is shared by schedule and settle (TestScheduleMatchesThePredicates scans every millisecond around each boundary).",
-    "TestTheSummaryLoopSleepsWhileNothingChanges detects passes through the held gauge, which every pass sets, so no test-only counter is left in production code."
+    "The recreated-bucket test drives the real reset path: it deletes and recreates envoy_ci_state, then Rewatch makes the watcher call resetCache, as the listener's self-health does."
   ],
-  "deviations": [
-    "StartSummaryLoop panics in the caller for a non-positive tick, as time.NewTicker did before; the timer-based loop would otherwise panic later in its goroutine.",
-    "The planned unexported pass counter was not kept: the sleep test reads the held gauge instead, so the counter would have had no reader.",
-    "Before/after numbers come from the committed benchmark and the real listener binary, not the INFRA-589 load step (the plan's recorded spec departure; that load step runs no CI store)."
-  ],
+  "deviations": [],
   "openQuestions": []
 }
