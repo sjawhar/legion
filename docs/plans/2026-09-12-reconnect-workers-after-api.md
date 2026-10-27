@@ -630,10 +630,10 @@ gates:
   design: root-issues
 github_apps:
   implement:
-    app_id: "3202636"
+    app_id: "5341240"
     private_key_command: 'printf "%s" "\$GH_AGENT_APP_PRIVATE_KEY_B64" | base64 --ignore-garbage --decode'
   review:
-    app_id: "3202653"
+    app_id: "5341243"
     private_key_command: 'printf "%s" "\$GH_REVIEW_APP_PRIVATE_KEY_B64" | base64 --ignore-garbage --decode'
 EOF
 

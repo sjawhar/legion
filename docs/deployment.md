@@ -77,10 +77,10 @@ the daemon refuses to start, quoting it.
 ```yaml
 github_apps:
   implement:
-    app_id: "3202636"
+    app_id: "5341240"
     private_key_secret: LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64
   review:
-    app_id: "3202653"
+    app_id: "5341243"
     private_key_secret: GH_REVIEW_APP_PRIVATE_KEY_B64
 ```
 

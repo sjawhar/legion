@@ -83,8 +83,8 @@
 # second-owner provisions an issue and proves its pod's gh and git read sjawhar/legion-smoke with
 # read-only tokens (nothing is pushed to it); LEGION_E2E_IMPLEMENT_APP_ID and
 # LEGION_E2E_IMPLEMENT_APP_KEY_NAME (this deployment's implement App by default) the App's numeric
-# id and the secret-store key the `secrets` CLI resolves to its private key (agent tier: no YubiKey
-# touch), which prerequisites proves is that id's App against GitHub's GET /app before the run
+# id and the secrets broker key the `agent-secrets` client resolves to its private key (agent tier:
+# no person's grant), which prerequisites proves is that id's App against GitHub's GET /app before the run
 # writes anything (lib/github-apps.sh; the run acts as no other App); LEGION_E2E_PREVIOUS_IMAGE
 # (required) a worker image by digest built from a commit of main at daemon API contract 37 or 38,
 # before one container (its issue pods run six role containers), which this checkout contains: previous-layout builds that commit's
@@ -193,7 +193,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 begin prerequisites
-for tool in go kubectl curl ss secrets diff docker jq bun; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go kubectl curl ss secrets agent-secrets diff docker jq bun; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 [ -n "$runtime_context" ] || fail "LEGION_E2E_RUNTIME_CONTEXT is unset: the runtime must run as the Legion daemon's restricted identity, never the operator's"
 [ -r "$runtime_kubeconfig" ] || fail "the runtime kubeconfig $runtime_kubeconfig is not readable"
 case "$runtime_identity_kind" in

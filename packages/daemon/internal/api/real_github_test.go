@@ -190,7 +190,7 @@ check_github_apps implement review`
 
 // realGitHubApps is Legion's implement and review Apps: the lib's default pair, another
 // deployment's through the same four inputs the stage proofs read, each App's id
-// and the secrets-store key the devbox's `secrets` CLI resolves to its private key, all as
+// and the secrets broker key the `agent-secrets` client resolves to its private key, all as
 // liveProofApps reads them from the lib, and the block it returns proved against GitHub before a
 // proof acts as it.
 func realGitHubApps(t *testing.T) config.GitHubApps {
@@ -267,8 +267,8 @@ func TestLiveProofAppsReadTheLib(t *testing.T) {
 			t.Errorf("with no input the %s App is %s/%s, want the lib's default %s/%s", check.role,
 				check.app.id, check.app.keyName, defaults[check.role+"_app_id"], defaults[check.role+"_app_key_name"])
 		}
-		if !strings.HasPrefix(check.app.keyCommand, "secrets "+check.app.keyName+" -- sh -c ") {
-			t.Errorf("the %s App's key command reads %q, want `secrets %s -- sh -c …`", check.role, check.app.keyCommand, check.app.keyName)
+		if !strings.HasPrefix(check.app.keyCommand, "agent-secrets "+check.app.keyName+" --reason=legion-live-proof-github-app-key -- sh -c ") {
+			t.Errorf("the %s App's key command reads %q, want `agent-secrets %s --reason=… -- sh -c …`", check.role, check.app.keyCommand, check.app.keyName)
 		}
 	}
 
@@ -284,14 +284,14 @@ func TestLiveProofAppsReadTheLib(t *testing.T) {
 	}
 	// The key command is what the proofs sign with, so it must read the input's key, not a default's,
 	// and decode it as the store holds it: Node-style base64, URL-safe and unpadded, perhaps with one
-	// dangling sextet. A stand-in `secrets` puts each value in the command's environment as the
+	// dangling sextet. A stand-in `agent-secrets` puts each value in the command's environment as the
 	// real one does, and the command's output must be the value's bytes.
 	stub := t.TempDir()
-	if err := os.WriteFile(filepath.Join(stub, "secrets"), []byte("#!/bin/sh\nname=$1\nshift 2\nexport \"$name=$STUB_VALUE\"\nexec \"$@\"\n"), 0o700); err != nil {
+	if err := os.WriteFile(filepath.Join(stub, "agent-secrets"), []byte("#!/bin/sh\nname=$1\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexport \"$name=$STUB_VALUE\"\nexec \"$@\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	for role, app := range map[string]liveProofApp{"implement": implement, "review": review} {
-		want := "secrets EXAMPLE_" + strings.ToUpper(role) + "_KEY -- sh -c "
+		want := "agent-secrets EXAMPLE_" + strings.ToUpper(role) + "_KEY --reason=legion-live-proof-github-app-key -- sh -c "
 		if !strings.HasPrefix(app.keyCommand, want) || !strings.Contains(app.keyCommand, "${EXAMPLE_"+strings.ToUpper(role)+"_KEY}") {
 			t.Errorf("with every input set the %s App's key command reads %q, want `%s…` reading that key", role, app.keyCommand, want)
 		}
@@ -443,8 +443,8 @@ write_github_apps implement review`, want); err != nil {
 			{"a seventh field", wrap + `require_app_inputs() { real_require_app_inputs "$@"; printf 'extra\0'; }`, "printed 7 fields"},
 			{"stray output on a line of its own", wrap + `require_app_inputs() { real_require_app_inputs "$@"; echo debug; }`, "field 1 of the two Apps empty or on more than one line"},
 			{"an empty key command", `app_key_command() { :; }`, "field 3 of the two Apps empty or on more than one line"},
-			{"a key command that failed", `app_key_command() { printf 'secrets %s' "$1"; return 3; }`, "exit status 3"},
-			{"a key command on two lines", `app_key_command() { printf 'secrets %s\nmore' "$1"; }`, "field 3 of the two Apps empty or on more than one line"},
+			{"a key command that failed", `app_key_command() { printf 'agent-secrets %s' "$1"; return 3; }`, "exit status 3"},
+			{"a key command on two lines", `app_key_command() { printf 'agent-secrets %s\nmore' "$1"; }`, "field 3 of the two Apps empty or on more than one line"},
 		} {
 			lib := filepath.Join(t.TempDir(), "github-apps.sh")
 			if err := os.WriteFile(lib, []byte("source "+strconv.Quote(real)+"\n"+scratch.body+"\n"), 0o600); err != nil {

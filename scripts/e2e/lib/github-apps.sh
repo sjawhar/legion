@@ -9,14 +9,14 @@
 # app_key_command from stdout, so neither of those two writes anything else to stdout, and
 # proveLiveProofApps defines fail and note, writes $work/github-apps.yaml itself from the block the
 # proofs act with, and runs check_github_apps on it. Each App is an id and the
-# name of the secret-store key holding its private key, read by require_app_inputs from two inputs
+# secrets broker name of the key holding its private key, read by require_app_inputs from two inputs
 # that default to the pair below:
 #   LEGION_E2E_<ROLE>_APP_ID        the App's numeric id (ROLE is IMPLEMENT or REVIEW)
-#   LEGION_E2E_<ROLE>_APP_KEY_NAME  the secret-store key the `secrets` CLI resolves to the App's
-#                                   private key, base64-encoded PEM
-# A deployment with its own Apps sets all four; a run here sets none and acts as it always has.
+#   LEGION_E2E_<ROLE>_APP_KEY_NAME  the secrets broker's name for the App's private key, which the
+#                                   `agent-secrets` client resolves to base64-encoded PEM
+# A deployment with its own Apps sets all four; a run here sets none and takes the default pair.
 # write_github_apps writes the `github_apps` block of legion.yaml from them, each key read by a
-# private_key_command that runs `secrets <name> -- …`, and check_github_apps proves each App's key
+# private_key_command that runs `agent-secrets <name> -- …`, and check_github_apps proves each App's key
 # is its id's, whether the pair came from a default or an input: lib/app-logins.ts signs an App JWT
 # with the key and refuses the run unless GitHub's GET /app answers that id and the write
 # permission the role's work needs. The key never enters
@@ -30,13 +30,14 @@
 
 github_apps_lib=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 
-# The default pair, which a run that sets no input takes: the App ids and secret-store key names
-# the live proofs here have used since they were written. GitHub shows both Apps owned by an
-# organization, not by this repository's owner, so a deployment with Apps of its own passes them
-# through the inputs; no other deployment's ids or names belong here.
-default_implement_app_id=3202636
+# The default pair, which a run that sets no input takes: the App ids and secrets broker key names
+# of the legion-implementer and legion-reviewer Apps, both owned by the sjawhar account. The
+# implement key is agent tier; the review key is human tier, so its first read waits for a person's
+# grant. A deployment with Apps of its own passes them through the inputs; no other deployment's
+# ids or names belong here.
+default_implement_app_id=5341240
 default_implement_app_key_name=LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64
-default_review_app_id=3202653
+default_review_app_id=5341243
 default_review_app_key_name=GH_REVIEW_APP_PRIVATE_KEY_B64
 
 # require_app_inputs ROLE... sets <role>_app_id and <role>_app_key_name for each ROLE (implement,
@@ -70,7 +71,7 @@ require_app_inputs() {
     # The bounds keep a pasted credential out of the message: a base64 key is letters and digits
     # too, so only its length tells it from a store key's name, and a refusal prints neither.
     [[ "$id" =~ ^[1-9][0-9]*$ && ${#id} -le 12 ]] || fail "$id_var must be the $role App's numeric id (1 to 12 digits, no leading zero); its value is not printed"
-    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && ${#key} -le 64 ]] || fail "$key_var must be a secret-store key's name (letters, digits and underscores, at most 64), not the key itself; its value is not printed"
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && ${#key} -le 64 ]] || fail "$key_var must be a secrets broker key's name (letters, digits and underscores, at most 64), not the key itself; its value is not printed"
     printf -v "${role}_app_id" %s "$id"
     printf -v "${role}_app_key_name" %s "$key"
     roles_read+=("$role")
@@ -95,13 +96,13 @@ require_app_inputs() {
   done < <(compgen -e)
 }
 
-# app_key_command NAME prints the private_key_command that prints the PEM the secret-store key NAME
-# holds: `secrets` puts the value in one `sh` child's environment, which turns the store's
+# app_key_command NAME prints the private_key_command that prints the PEM the secrets broker key
+# NAME holds: `agent-secrets` puts the value in one `sh` child's environment, which turns the store's
 # Node-style base64 (URL-safe alphabet, unpadded, maybe one dangling sextet) into POSIX base64 and
 # decodes it to stdout, the daemon's pipe.
 app_key_command() {
   # shellcheck disable=SC2016 # the expansions are the key command's own, run by its sh
-  printf 'secrets %s -- sh -c '\''value=$(printf %%s "${%s}" | tr "_-" "/+"); case $((${#value} %% 4)) in 1) value=${value%%?};; 2) value="${value}==";; 3) value="${value}=";; esac; printf %%s "$value" | base64 -d'\''' "$1" "$1"
+  printf 'agent-secrets %s --reason=legion-live-proof-github-app-key -- sh -c '\''value=$(printf %%s "${%s}" | tr "_-" "/+"); case $((${#value} %% 4)) in 1) value=${value%%?};; 2) value="${value}==";; 3) value="${value}=";; esac; printf %%s "$value" | base64 -d'\''' "$1" "$1"
 }
 
 # write_github_apps ROLE... writes $work/github-apps.yaml, the `github_apps` block of legion.yaml

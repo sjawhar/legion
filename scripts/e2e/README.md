@@ -203,8 +203,8 @@ The `secrets` CLI named here and below is secretsd, shipped from `sjawhar/forwar
 `sjawhar/secretsd` repository is archived): it reads its agent tier from local sops files and its
 human tier through the local secretsd daemon, which asks for a YubiKey touch, and it never reads
 the agent-secrets broker. `agent-secrets` is the other CLI, which reads that broker, backed by a
-cloud Secret Manager. One key name can hold different values in the two stores - the App keys
-these runs use are the `secrets` store's. `agent-secrets` names its store in output and every
+cloud Secret Manager. One key name can hold different values in the two stores - the GitHub App
+keys these runs use are the broker's, read with `agent-secrets`. `agent-secrets` names its store in output and every
 refusal; `secrets` names none today.
 
 CI runs the unit and integration tests, not this script; what only this
@@ -332,8 +332,8 @@ submission on its accepted READY: the repository allows no auto-merge, so the da
 GitHub reports it mergeable, and the proof only reads it (`await_ready_merge`), never merging it by
 hand.
 The run needs `go`, `docker`, `jq`, `curl`, `ss`, `tmux`, `bun`, `mise`, `gh`, `shellcheck`, the
-`secrets` CLI holding the two role App keys (the default pair unless the App inputs name
-another deployment's), and
+`secrets` CLI, the `agent-secrets` client reaching the secrets broker that holds the two role App
+keys (the default pair unless the App inputs name another deployment's), and
 `LEGION_E2E_MODEL_ROUTE` (required, `gateway`, `key-file` or `box-login`), which picks how
 the agents reach Anthropic, independently of which devbox this runs on:
 - `gateway`: the operator's model gateway access — `LEGION_E2E_MODEL_GATEWAY_URL` naming the
@@ -803,11 +803,11 @@ box's shims, where a pane's `jj` shim hands the call back to itself, exit 127), 
 pinned in mise. `LEGION_CLAUDE_PATH` is set to the `claude` on the operator's `PATH`,
 `LEGION_BUN_PATH` to that real `bun`, and `LEGION_CLAUDE_PLUGIN_DIR` to this checkout's
 `packages/claude-envoy`, whose `dist/envoy-channel.js` and generated `legion/` must be built.
-Legion's role Apps resolve as Stage 3's do: the daemon runs `secrets <implement App key> -- …` and
-`secrets <review App key> -- …` (the key names `LEGION_E2E_IMPLEMENT_APP_KEY_NAME` and
-`LEGION_E2E_REVIEW_APP_KEY_NAME` give) as each App's `private_key_command`, and `prerequisites`
-checks each with `secrets get <KEY> --no-request`, which prints only the key and its tier, refuses
-one that does not resolve to the agent tier, and then proves each key is its id's App
+Legion's role Apps resolve as Stage 3's do: the daemon runs `agent-secrets <implement App key> -- …`
+and `agent-secrets <review App key> -- …` (the key names `LEGION_E2E_IMPLEMENT_APP_KEY_NAME` and
+`LEGION_E2E_REVIEW_APP_KEY_NAME` give) as each App's `private_key_command`, so each key comes from
+the secrets broker (the default review key is human tier: its first read waits for a person's
+grant), and `prerequisites` proves each key is its id's App
 ([`read_app_logins`](#libworkflowsh)) before the run's first write. The proof human is the devbox's ordinary
 `gh` acting as `sjawhar-agent[bot]` ([`require_proof_human`](#libworkflowsh)), so the run starts
 from the operator's own Oh My Pi session. The `EXIT` trap stops every process and container,
@@ -884,18 +884,18 @@ extended-duration affinity, the cgroup cpu quota in place of `nproc`), `LEGION_E
 (`aws-private-ip`, today's shape, or `bridge`, for a cluster whose pods cannot reach the devbox at
 all — GKE's shape; [below](#the-bridge-legion_e2e_pod_reachabilitybridge)) and
 `LEGION_E2E_MODEL_ROUTE` (`gateway`, today's shape, or `key-file`, for a cluster with no model
-gateway in front of Anthropic). The script needs `go`, `kubectl`, `curl`, `ss`,
-`diff`, `docker` (the scratch session database), `jq` and `bun` (the `plugins` step, below),
+gateway in front of Anthropic). The script needs `go`, `kubectl`, `curl`, `ss`, `secrets`,
+`agent-secrets`, `diff`, `docker` (the scratch session database), `jq` and `bun` (the `plugins` step, below),
 `aws` only under `LEGION_E2E_RUNTIME_IDENTITY_KIND=aws-iam-role` (the runtime kubeconfig's `aws eks
-get-token`), and the `secrets` CLI holding the implement App's key under the name
-`LEGION_E2E_IMPLEMENT_APP_KEY_NAME` gives (agent tier: no YubiKey touch), with
+get-token`), and the secrets broker holding the implement App's key under the name
+`LEGION_E2E_IMPLEMENT_APP_KEY_NAME` gives (agent tier: no person's grant), with
 `LEGION_E2E_IMPLEMENT_APP_ID` that App's id ([`lib/github-apps.sh`](#libgithub-appssh); both
 optional, defaulting to the default pair, and each refused by name when it is set and
 malformed). Stage 4a acts as the implement App alone, so it reads no
 review App input. `prerequisites` proves the key is that id's App (`check_github_apps implement`:
 GitHub's `GET /app` under the key's JWT must answer that id and `contents: write`) before the run writes anything. The
-harness runs `secrets <KEY> -- sh -c 'printf %s "$<KEY>"'`: the `secrets` CLI
-decrypts the key and puts it in the environment of that one `sh` child, which prints it to a pipe
+harness runs `agent-secrets <KEY> -- sh -c 'printf %s "$<KEY>"'`: the `agent-secrets` client
+fetches the key from the broker and puts it in the environment of that one `sh` child, which prints it to a pipe
 the harness reads into memory. The harness decodes it there and mints the implement App's
 installation token in process. The key is written to no file, appears in no argv, and reaches no
 other process; only the installation token enters each claim's Secret.
@@ -1022,7 +1022,7 @@ that reachability with a reverse tunnel, entirely of the run's own:
 | `LEGION_E2E_REPO_SECOND_OWNER` | required | `<owner>/<name>`, a repository under an owner other than `sjawhar` on which both Legion Apps are installed, where `second-owner` provisions an issue; refused when unset, not `<owner>/<name>`, or under `sjawhar`. Nothing is pushed to it |
 | `LEGION_E2E_PREVIOUS_IMAGE` | required | a worker image, by digest, built from a commit of `main` at daemon API contract 37 (the pod-owned disk, whose harness records each claim's session for the fixture) or 38 (the blocked issues, the same harness) and before one container (its issue pods run six role containers) that this checkout contains; refused when not pinned by digest, when its `org.opencontainers.image.revision` is a commit `origin/main` or this checkout does not contain, when that commit already runs one container, or when that commit's `DaemonAPIVersion` is neither 37 nor 38. `previous-layout` builds that commit's own harness and runs it on the image |
 | `LEGION_E2E_IMPLEMENT_APP_ID` | the default pair's implement App | the App's numeric id, which GitHub's `GET /app` must answer for its key ([`lib/github-apps.sh`](#libgithub-appssh)) |
-| `LEGION_E2E_IMPLEMENT_APP_KEY_NAME` | the default pair's implement App key | the agent-tier secret-store key the `secrets` CLI resolves to that App's private key; `prerequisites` proves it is that id's App, and the harness mints the App's installation tokens from it |
+| `LEGION_E2E_IMPLEMENT_APP_KEY_NAME` | the default pair's implement App key | the agent-tier secrets broker key the `agent-secrets` client resolves to that App's private key; `prerequisites` proves it is that id's App, and the harness mints the App's installation tokens from it |
 | `STAGE4A_FROM` | unset | a development entry point: any check after `identity` except `stale-incarnation`, which rides `kill-role-init`'s relaunch; the harness refuses any other name at `identity`, before it creates anything. `identity` always runs; the checks before the entry point are skipped, and each later check first puts the claims it needs where the full run would have left them, through the same runtime calls. The run ends `stage 4a e2e: every check from <check> passed — a development run, never the proof`, and is never cited as the proof |
 | `STAGE4A_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e4a-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `transcript.log` (the whole run), `runtime.log` (the runtime's and the listener's JSON log lines), and the two namespace snapshots |
 | `LEGION_E2E_AGENT_SECRETS_URL` | unset (the `secrets-*` checks report `SKIPPED-BLOCKED`) | the agent-secrets broker the run enrolls pods with — the **production** broker (Plan D, the broker design's AWS deployment plan), never a development slot (below) |
@@ -3225,11 +3225,12 @@ which two optional operator inputs give:
 | input | what it names |
 | :--- | :--- |
 | `LEGION_E2E_IMPLEMENT_APP_ID`, `LEGION_E2E_REVIEW_APP_ID` | the App's numeric id |
-| `LEGION_E2E_IMPLEMENT_APP_KEY_NAME`, `LEGION_E2E_REVIEW_APP_KEY_NAME` | the secret-store key the `secrets` CLI resolves to the App's private key (base64-encoded PEM) |
+| `LEGION_E2E_IMPLEMENT_APP_KEY_NAME`, `LEGION_E2E_REVIEW_APP_KEY_NAME` | the secrets broker key the `agent-secrets` client resolves to the App's private key (base64-encoded PEM) |
 
-Each defaults to the pair the live proofs have always used, which the lib holds in one place
-(`default_<role>_app_id`, `default_<role>_app_key_name`), so a run here sets none of them and acts
-as it always has, and a deployment with its own Apps sets all four.
+Each defaults to the lib's default pair, `legion-implementer` (App ID 5341240) and
+`legion-reviewer` (App ID 5341243), which the lib holds in one place (`default_<role>_app_id`,
+`default_<role>_app_key_name`), so a run here sets none of them, and a deployment with its own Apps
+sets all four.
 
 `require_app_inputs ROLE...` reads each role's pair, taking the default for an input that is
 unset, and fails naming the input that is set but malformed: an id that is not a number of at most
@@ -3238,7 +3239,7 @@ in a shell command and as a variable name, and a pasted key is refused by its le
 never prints the value. With both roles read it also refuses one id or one key
 name for both Apps. `write_github_apps ROLE...` writes `$work/github-apps.yaml`, the `github_apps`
 block a run's `legion.yaml` includes as it is: each App's `app_id` and a `private_key_command` that
-runs `secrets <name> -- sh -c …` to decode the store's Node-style base64 into the PEM on stdout. It
+runs `agent-secrets <name> -- sh -c …` to decode the store's Node-style base64 into the PEM on stdout. It
 refuses, writing nothing, a role the last `require_app_inputs` did not read.
 `check_github_apps ROLE...` runs [`lib/app-logins.ts`](#libworkflowsh) `--roles` over that file and
 fails the check unless GitHub's `GET /app`, under a JWT each key signs with its id as issuer,

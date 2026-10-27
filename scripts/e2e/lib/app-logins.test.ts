@@ -310,7 +310,7 @@ describe("read_app_logins", () => {
 
 // lib/github-apps.sh as a stage proof uses it: sourced under the stage scripts' shell options with
 // their check helpers, the inputs in the environment, and `then` run after. The seams are bun,
-// handed the stand-in GitHub after the helper's own arguments, and a stand-in `secrets` first on
+// handed the stand-in GitHub after the helper's own arguments, and a stand-in `agent-secrets` first on
 // PATH, which puts the store's value for the key it names (the App's PEM in the store's Node-style
 // base64: URL-safe alphabet, unpadded) into the environment of the command after `--`, as the real
 // CLI does.
@@ -331,8 +331,8 @@ writeFileSync(
   Buffer.from(apps["404"].key.privateKey).toString("base64url")
 );
 writeFileSync(
-  join(fakeBin, "secrets"),
-  `#!/bin/sh\nname=$1\nshift\n[ "$1" = -- ] && shift\nexport "$name=$(cat "${store}/$name")"\nexec "$@"\n`,
+  join(fakeBin, "agent-secrets"),
+  `#!/bin/sh\nname=$1\nwhile [ "$1" != -- ]; do shift; done\nshift\nexport "$name=$(cat "${store}/$name")"\nexec "$@"\n`,
   { mode: 0o755 }
 );
 const appInputs = {
@@ -400,7 +400,7 @@ echo "defaults $default_implement_app_id $default_implement_app_key_name"`
     const defaults = (stdout.split("\n").find((l) => l.startsWith("defaults ")) ?? "").split(" ");
     const sources = appKeySources(readFileSync(join(work, "github-apps.yaml"), "utf8"));
     expect(sources.implement?.appId).toBe(defaults[1]);
-    expect(sources.implement?.privateKeyCommand).toStartWith(`secrets ${defaults[2]} -- sh -c '`);
+    expect(sources.implement?.privateKeyCommand).toStartWith(`agent-secrets ${defaults[2]} --reason=legion-live-proof-github-app-key -- sh -c '`);
     expect(sources.review?.appId).toBe("202");
     // The default pair is never asked of GitHub by this test: check_github_apps did not run.
     expect(seen).toEqual([]);
@@ -506,7 +506,7 @@ env "\${app_key_unsets[@]}" sh -c "echo \\"left \\$(env | grep -c -E '^($names)=
     expect(stderr).toContain("401");
   });
 
-  test("matching Apps pass, and the block written is the daemon's: each id and its secrets command", async () => {
+  test("matching Apps pass, and the block written is the daemon's: each id and its agent-secrets command", async () => {
     const { code, stdout, stderr, work } = await githubApps(appInputs, proveBoth);
     expect(stderr).toBe("");
     expect(code).toBe(0);
@@ -517,9 +517,9 @@ env "\${app_key_unsets[@]}" sh -c "echo \\"left \\$(env | grep -c -E '^($names)=
     });
     const sources = appKeySources(readFileSync(join(work, "github-apps.yaml"), "utf8"));
     expect(sources.implement?.appId).toBe("101");
-    expect(sources.implement?.privateKeyCommand).toStartWith("secrets IMPLEMENT_KEY -- sh -c '");
+    expect(sources.implement?.privateKeyCommand).toStartWith("agent-secrets IMPLEMENT_KEY --reason=legion-live-proof-github-app-key -- sh -c '");
     expect(sources.review?.appId).toBe("202");
-    expect(sources.review?.privateKeyCommand).toStartWith("secrets REVIEW_KEY -- sh -c '");
+    expect(sources.review?.privateKeyCommand).toStartWith("agent-secrets REVIEW_KEY --reason=legion-live-proof-github-app-key -- sh -c '");
   });
 
   test("one role proves that App alone, as Stage 4a runs it", async () => {

@@ -131,10 +131,10 @@ implement-only fixtures (#1016, see the rebase note in
 
 Read from GitHub itself (`GET /app` with each App's JWT, 2026-09-13):
 
-| App id | role | slug on 2026-09-13 | permissions |
+| App | role | slug on 2026-09-13 | permissions |
 | --- | --- | --- | --- |
-| 3202636 | implement | `legion-implementer` | actions:write, checks:**read**, contents:write, issues:write, metadata:read, organization_projects:write, packages:read, pull_requests:write, repository_projects:write, **statuses:write**, workflows:write |
-| 3202653 | review | `legion-reviewer` | actions:write, **checks:write**, issues:write, metadata:read, packages:read, pull_requests:write |
+| the previous implement App | implement | `legion-implementer` | actions:write, checks:**read**, contents:write, issues:write, metadata:read, organization_projects:write, packages:read, pull_requests:write, repository_projects:write, **statuses:write**, workflows:write |
+| the previous review App | review | `legion-reviewer` | actions:write, **checks:write**, issues:write, metadata:read, packages:read, pull_requests:write |
 
 (2026-10-26: both Apps' slugs changed on 2026-10-16. GitHub's record of each App gives its
 `updated_at` as 2026-10-16T05:44Z, main's commits by bot user 271566630 change their author login
@@ -144,7 +144,9 @@ this entry and older entries quote, before 2026-10-16, are these two Apps. The s
 `legion-implementer` and `legion-reviewer` have since gone to two other Apps, and main carries
 commits by `legion-implementer[bot]` after 2026-10-16 under another bot user id. Identify an App by
 its id, which `GET /app` answers with the App's own JWT, or a bot by its user id, never by a slug
-or login.)
+or login.) (2026-10-27: the live proofs' default pair is now App ids 5341240 (`legion-implementer`)
+and 5341243 (`legion-reviewer`), both owned by the sjawhar account; the table above is the
+previous App pair's.)
 
 (2026-09-25: the review App's installations have since gained `contents: write`; the current record
 is in `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps.)

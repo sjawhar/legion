@@ -572,7 +572,7 @@ until_true_quiet() {
 }
 
 begin prerequisites
-for tool in go psql jq curl ss tmux bun mise secrets gh jj hawk-token; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go psql jq curl ss tmux bun mise secrets agent-secrets gh jj hawk-token; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 # Legion's two role Apps, this deployment's own unless the App inputs name another's, proved
 # against GitHub here, before the run writes anything (lib/github-apps.sh, which the lib sourced
 # from ACCEPT_ROOT must carry).
