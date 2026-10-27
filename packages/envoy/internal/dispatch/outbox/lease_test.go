@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
@@ -363,7 +365,7 @@ func TestABatchPastThePublisherHoldsDeadlineSendsAndRecordsNothingMore(t *testin
 		})
 	}
 	publisher := &fenceAfterFirstSend{}
-	batch, err := scanBatch(context.Background(), Deps{Store: database, Publisher: publisher}, publisher)
+	batch, err := scanBatch(context.Background(), Deps{Store: database, Publisher: publisher}, publisher, uuid.New())
 	if err != nil {
 		t.Fatalf("scan the batch: %v", err)
 	}

@@ -330,11 +330,11 @@ func TestALiveStreamOnOneProcessCarriesTheOtherProcessesEvent(t *testing.T) {
 // duplicate window hides nothing there. It is the lane a second publish of one event shows up on.
 const outboxRoleLane = "multiprocess-outbox"
 
-// Both processes' outboxes scan one events table. Each claims its batch under
-// `for update skip locked` before it publishes, so one event is published once however many
-// processes are scanning: every row reaches published_at, the stream holds one retained message
-// per (dedupe key, topic), and the role lane - core NATS, no message id, no deduplication
-// anywhere - carries exactly one message per event.
+// Both processes run an outbox on one events table, and one of them at a time holds the publisher
+// hold and publishes, so one event is published once however many processes run: every row
+// reaches published_at, the stream holds one retained message per (dedupe key, topic), and the
+// role lane - core NATS, no message id, no deduplication anywhere - carries exactly one message per
+// event.
 func TestTheOutboxPublishesEachEventOnceAcrossBothProcesses(t *testing.T) {
 	pair := startPair(t, nil)
 	conn := testnats.Connect(t, pair.nats)
@@ -390,7 +390,7 @@ func TestTheOutboxPublishesEachEventOnceAcrossBothProcesses(t *testing.T) {
 	}
 	for eventID, count := range perEvent {
 		if count != 1 {
-			t.Errorf("event %s reached the role lane %d times; two processes publishing one event is what the claim prevents:\n%v",
+			t.Errorf("event %s reached the role lane %d times; two processes publishing one event is what the publisher hold prevents:\n%v",
 				eventID, count, perEvent)
 		}
 	}
@@ -409,9 +409,9 @@ func TestTheOutboxPublishesEachEventOnceAcrossBothProcesses(t *testing.T) {
 	}
 }
 
-// waitForEveryEventPublished waits for every event row the outbox takes to carry published_at.
-// A row whose payload says `pending` is not one the outbox claims (claimPendingEvents' own
-// predicate), so it is not waited for.
+// waitForEveryEventPublished waits for every event row the outbox publishes to carry published_at.
+// A row whose payload says `pending` is a subscription command the outbox never publishes, so it
+// is not waited for; the predicate is spelled as the outbox's own (outbox.readBatchSQL).
 func waitForEveryEventPublished(t *testing.T, database *store.Store, within time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(within)
@@ -419,7 +419,7 @@ func waitForEveryEventPublished(t *testing.T, database *store.Store, within time
 		var unpublished int
 		if err := database.Pool.QueryRow(context.Background(), `
 			select count(*) from events
-			where published_at is null and coalesce(payload ->> 'pending', 'false') <> 'true'
+			where published_at is null and (payload ->> 'pending') is distinct from 'true'
 		`).Scan(&unpublished); err != nil {
 			t.Fatalf("count unpublished events: %v", err)
 		}

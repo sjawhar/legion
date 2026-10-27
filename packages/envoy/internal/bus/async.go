@@ -67,10 +67,16 @@ type RequestOptions struct {
 // or not at all. Its first send waits, within publishAcknowledgementTimeout, for the client to have
 // a connection, and pins the window to it. Every later send goes out on that connection only while
 // it is connected and has not reconnected since; otherwise it answers ErrUnavailable at once,
-// without sending. A NATS server takes one connection's messages in the order they arrive, so the
-// stream stores, and a core subscriber receives, a window's envelopes in send order, and what of
-// them reached NATS is always a prefix of what was sent: once one is lost to the connection, none
-// sent after it can land after it on a connection that came back.
+// without sending, so what of a window reached NATS is always a prefix of what was sent: once one
+// is lost to the connection, none sent after it can land after it on a connection that came back.
+//
+// That is all the order a window keeps. Its answers come back in whatever order the server and the
+// stream give them; a JetStream publish NATS did not acknowledge may still be stored, after sends
+// made later; and a core publish sent again (below) lands after the sends made since. A caller
+// that needs one envelope to land before another sends the second only once the first's answer is
+// in: the outbox does so for each owner's events to each destination key (internal/dispatch/outbox,
+// planChains), which is the order a receiver relies on, and lets everything else proceed side by
+// side.
 //
 // Each send goes on the transport Publish would use (usesCoreTransport), under the same MsgId. An
 // outcome decided before anything was sent is in the channel when PublishAsync returns: a refusal

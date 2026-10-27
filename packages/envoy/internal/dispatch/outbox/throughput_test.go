@@ -325,13 +325,15 @@ func (r *throughputRig) roleArrivals() []int64 {
 // The outbox publishes a backlog at well above the rate Dispatch creates events under load (2.3 to
 // 4.5 a second in production) when every NATS round trip carries a remote hub's latency and the
 // API keeps the shared database pool busy, and it keeps the order consumers rely on: each issue's
-// events reach its subject in id order (the Legion daemon fences an issue's facts on their
-// sequence and drops one older than the last it applied), and on the success path the stream and
-// the role lane hold them in id order overall. The rate is logged for comparison.
+// events reach each of its destinations in id order - its subject on the stream, the author's own
+// subject, the role lane (the Legion daemon fences an issue's facts on their sequence and drops
+// one older than the last it applied). Different issues' events interleave as their sends' answers
+// allow. The rate is logged for comparison.
 //
 // The burst cases put a batch of events on one issue, the shape whose events share every
-// destination, and log the drain time: from the outbox's start until every event is marked
-// published. They hold no rate floor; the drain time is the reading.
+// destination, so each destination takes them one round trip after another, and log the drain
+// time: from the outbox's start until every event is marked published. They hold no rate floor;
+// the drain time is the reading.
 func TestOutboxThroughputUnderRemoteLatency(t *testing.T) {
 	const (
 		backlogIssues = 20
@@ -409,13 +411,19 @@ func TestOutboxThroughputUnderRemoteLatency(t *testing.T) {
 			if len(all) != wantStream {
 				t.Fatalf("the stream holds %d messages, want %d", len(all), wantStream)
 			}
-			if at := firstDescent(all); at >= 0 {
-				t.Fatalf("the stream holds event %d after event %d", all[at], all[at-1])
-			}
 			waitFor(t, 5*time.Second, "every role-lane envelope", func() bool { return len(rig.roleArrivals()) == len(seeded) })
-			if roles := rig.roleArrivals(); firstDescent(roles) >= 0 {
-				at := firstDescent(roles)
-				t.Fatalf("the role lane received event %d after event %d", roles[at], roles[at-1])
+			issueOf := map[int64]string{}
+			for _, event := range seeded {
+				issueOf[event.ID] = *event.IssueKey
+			}
+			roles := map[string][]int64{}
+			for _, id := range rig.roleArrivals() {
+				roles[issueOf[id]] = append(roles[issueOf[id]], id)
+			}
+			for issue, ids := range roles {
+				if at := firstDescent(ids); at >= 0 {
+					t.Fatalf("the role lane received %s's event %d after its event %d", issue, ids[at], ids[at-1])
+				}
 			}
 		})
 	}

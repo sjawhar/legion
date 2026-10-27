@@ -276,18 +276,13 @@ func TestPublishAuthorRoutesSkipsTheCommenterAmongTheDocumentsWriters(t *testing
 	writer := model.Actor{Kind: "session", ID: "session-writer"}
 	editor := model.Actor{Kind: "session", ID: "session-editor"}
 	doc := seedDocument(t, database, new("T-1"), "notes", writer, []model.Actor{writer, editor})
-	publisher := &recordingPublisher{}
 	event := model.Event{
 		IssueKey: new("T-1"),
 		Type:     "comment.created",
 		Actor:    writer,
 		Payload:  map[string]any{"id": "00000000-0000-0000-0000-000000000012", "anchor": anchorOn(doc)},
 	}
-	item := contracts.Envelope{EventID: "dispatch-1", Topic: "notifications.dispatch.issue.T-1.comment.created"}
-	if err := publishAuthorRoutes(context.Background(), Deps{Store: database, Publisher: publisher}, 0, item, event, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
-		t.Fatalf("publish author routes: %v", err)
-	}
-	if got := topicsOf(publisher.all()); !slices.Equal(got, []string{"notifications.agent.session-editor"}) {
+	if got := routeTopics(t, database, event, addAuthorRoutes); !slices.Equal(got, []string{"notifications.agent.session-editor"}) {
 		t.Fatalf("author routes = %v, want the document's other writer alone", got)
 	}
 }

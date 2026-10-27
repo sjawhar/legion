@@ -1,0 +1,457 @@
+package outbox
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"reflect"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
+
+	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
+)
+
+// pendingEvent is one row of a batch, read out before anything is published: an open cursor holds
+// its pooled connection until it closes, and publishing a batch reads followers and authors through
+// the same pool, so the rows are drained first and the work done after.
+type pendingEvent struct {
+	event model.Event
+	// owner is the issue key, document id or project key whose events this one is ordered among,
+	// and empty for an event with none.
+	owner string
+	// due is whether the event may be sent now: it was never tried, or its back-off has passed.
+	// An event that is not due is read only as a blocker of its owner's later events
+	// (planChains): it is never sent, and nothing is recorded for it.
+	due bool
+	// nextAttempt is when an event that is not due falls due, on the database's clock.
+	nextAttempt  *time.Time
+	attempts     int
+	destinations []string
+	slug         string
+	route        *string
+	// candidates are the owner's events that are due and that the batch's choice of owners found
+	// (readBatch), and windowSize how many of the owner's events the batch read before it kept the
+	// first batchSize due ones: a candidate a window read whole does not hold is one past it.
+	candidates []int64
+	windowSize int
+	// failure is why the row cannot be published as it was read - it did not scan, or its actor or
+	// payload JSON did not decode - and failureLog is the predicate it reports under. Such an
+	// event has no destinations: it is backed off, and holds back no other event.
+	failure    error
+	failureLog string
+}
+
+// readBatchSQL chooses a batch and reads it, writing nothing. It chooses owners that have a due
+// event: the lowest-id events never tried (events_outbox_fresh) and the earliest back-offs that
+// have fallen due (events_outbox_retry), batchSize of each, grouped by owner, the owner first
+// whose due event has the lowest id. For each chosen owner it reads that owner's unpublished events
+// in id order (events_outbox_owner), batchSize at most, due or not: an event not due holds the
+// later ones back from its unreached destinations. An event with no owner has no destination and
+// forms no chain, and is read alone. A pending subscription command (api/subscribers.go) is in no
+// index this reads, and neither is a backed-off event of an owner the batch does not choose. Every
+// predicate on pending is spelled as the indexes spell it (migration 0122), which is what lets
+// Postgres prove the indexes' predicates from the query's.
+//
+// Of the rows read, the batch keeps every row before its batchSize-th due one in id order, and that
+// row: at most batchSize events are sent per batch, and each owner keeps a prefix of its events, the
+// owners' events interleaved as they were written, so a backlog over many owners makes short chains
+// rather than long ones for a few. The issue, document and project columns a publish needs are
+// joined onto the kept rows.
+const readBatchSQL = `
+	with fresh as (
+		select id, coalesce(issue_key, artifact_id::text, project_key) as owner
+		from events
+		where published_at is null and next_attempt_at is null
+		  and (payload ->> 'pending') is distinct from 'true'
+		order by id
+		limit $1
+	), retried as (
+		select id, coalesce(issue_key, artifact_id::text, project_key) as owner
+		from events
+		where published_at is null and next_attempt_at is not null
+		  and (payload ->> 'pending') is distinct from 'true'
+		  and next_attempt_at <= now()
+		order by next_attempt_at, id
+		limit $1
+	), due as (
+		select id, owner from fresh
+		union all
+		select id, owner from retried
+	), owners as (
+		select owner, min(id) as first, array_agg(id order by id) as candidates
+		from due
+		where owner is not null
+		group by owner
+		order by first
+		limit $1
+	), chosen as (
+		select o.first, o.candidates, w.*
+		from owners o
+		cross join lateral (
+			select e.id, e.issue_key, e.artifact_id, e.project_key, e.seq, e.type, e.actor, e.notify,
+			       e.created_at, e.payload, e.attempt_count, e.published_destinations, e.next_attempt_at
+			from events e
+			where coalesce(e.issue_key, e.artifact_id::text, e.project_key) = o.owner
+			  and e.published_at is null
+			  and (e.payload ->> 'pending') is distinct from 'true'
+			order by e.id
+			limit $1
+		) w
+		union all
+		select d.id, array[d.id], e.id, e.issue_key, e.artifact_id, e.project_key, e.seq, e.type, e.actor,
+		       e.notify, e.created_at, e.payload, e.attempt_count, e.published_destinations, e.next_attempt_at
+		from due d
+		join events e on e.id = d.id
+		where d.owner is null
+	), ranked as (
+		select chosen.*,
+		       (next_attempt_at is null or next_attempt_at <= now()) as due,
+		       count(*) filter (where next_attempt_at is null or next_attempt_at <= now())
+		           over (order by id) as sendable,
+		       count(*) over (partition by first) as window_size
+		from chosen
+	)
+	select r.id, r.issue_key, r.artifact_id::text, coalesce(r.project_key, i.project_key, ar.project_key, ''),
+	       r.seq, r.type, r.actor, r.notify, r.created_at, r.payload, r.attempt_count,
+	       r.published_destinations, coalesce(ar.slug, ''), coalesce(i.route, ai.route),
+	       coalesce(r.issue_key, r.artifact_id::text, r.project_key), r.due, r.next_attempt_at, r.candidates,
+	       r.window_size
+	from ranked r
+	left join issues i on i.key = r.issue_key
+	left join artifacts ar on ar.id = r.artifact_id
+	left join issues ai on ai.key = ar.issue_key
+	where r.sendable - r.due::int < $1
+	order by r.first, r.id
+`
+
+// readBatch reads a batch (readBatchSQL), in owner order and each owner's events in id order. It
+// writes no row. stopped reports a row that failed to scan, which ends pgx's cursor: the rows after
+// it are not read, and the batch is the rows before it and that row, backed off.
+func readBatch(ctx context.Context, deps Deps) (pending []pendingEvent, stopped bool, err error) {
+	rows, err := deps.Store.Pool.Query(ctx, readBatchSQL, batchSize)
+	if err != nil {
+		return nil, false, fmt.Errorf("read the outbox's batch: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var item pendingEvent
+		var actor, payload []byte
+		var destinations []pgtype.Text
+		var owner *string
+		if err := rows.Scan(
+			&item.event.ID,
+			&item.event.IssueKey,
+			&item.event.ArtifactID,
+			&item.event.Project,
+			&item.event.Seq,
+			&item.event.Type,
+			&actor,
+			&item.event.Notify,
+			&item.event.CreatedAt,
+			&payload,
+			&item.attempts,
+			&destinations,
+			&item.slug,
+			&item.route,
+			&owner,
+			&item.due,
+			&item.nextAttempt,
+			&item.candidates,
+			&item.windowSize,
+		); err != nil {
+			// pgx scans positionally and treats a failure as fatal to the cursor, so this row ends
+			// the batch and rows.Err() below repeats the same error. e.id is the first column, so
+			// the row scanned that far before it failed, and it is carried on as a failure, backed
+			// off like any other event that cannot be published.
+			item.failure = fmt.Errorf("read event: %w", err)
+			item.failureLog = "dispatch outbox: read event"
+			item.due = true
+			pending = append(pending, item)
+			stopped = true
+			continue
+		}
+		if owner != nil {
+			item.owner = *owner
+		}
+		for _, destination := range destinations {
+			if !destination.Valid {
+				item.failure = errors.New("read event: published_destinations holds a null")
+				item.failureLog = "dispatch outbox: read event"
+				break
+			}
+			item.destinations = append(item.destinations, destination.String)
+		}
+		if item.failure == nil {
+			if err := json.Unmarshal(actor, &item.event.Actor); err != nil {
+				item.failure = fmt.Errorf("decode event actor: %w", err)
+				item.failureLog = "dispatch outbox: decode event actor"
+			} else if err := json.Unmarshal(payload, &item.event.Payload); err != nil {
+				item.failure = fmt.Errorf("decode event payload: %w", err)
+				item.failureLog = "dispatch outbox: decode event payload"
+			}
+		}
+		pending = append(pending, item)
+	}
+	// Closed before anything else reads the pool: a cursor still open holds one of its
+	// connections, and a caller asking for a second is refused (store.ErrNestedAcquire). Close is
+	// idempotent, so the deferred one above still stands.
+	rows.Close()
+	if err := rows.Err(); err != nil && !stopped {
+		return nil, false, fmt.Errorf("read the outbox's batch: %w", err)
+	}
+	return pending, stopped, nil
+}
+
+// destination is one subject an event is sent to, named by label and id in what a failure reports
+// (`publish route "role:reviewer": …`), since a subject alone does not say which of the event's
+// destinations it was.
+type destination struct {
+	subject string
+	label   string
+	id      string
+}
+
+// ownerTopicKey is the destination key of an owner's topic family (destinationKey).
+const ownerTopicKey = "owner"
+
+// destinationKey names the subject family a session receives subject on, which is what the order
+// of an owner's events is kept on (planChains). Every subject an owner's events go to under
+// notifications.dispatch. - an issue's, a document's or a project's, one per event type - is one
+// family, the owner's topic family. Each notifications.agent.<session> subject is one, whichever
+// route reaches it: the issue's session route, an author or follower route, a previous claimant's
+// notice. A role route is its role topic.
+func destinationKey(subject string) string {
+	if strings.HasPrefix(subject, dispatchTopicPrefix) {
+		return ownerTopicKey
+	}
+	return subject
+}
+
+// batchEvent is one event of a batch with what the batch made of it: its envelope and
+// destinations, its sends, the blockers that held a destination of it back, and its outcome.
+type batchEvent struct {
+	pendingEvent
+	item contracts.Envelope
+	// destinationsOf are every destination the event has; resolveErr is why the list is
+	// incomplete, when it is (eventDestinations).
+	destinationsOf []destination
+	resolveErr     error
+	sends          []*chainSend
+	// held are the not-due events of the owner that held a destination of this one back.
+	held    []blocker
+	outcome outcome
+}
+
+// blocker is what held an event's send to a destination back: an earlier event of its owner that
+// had that destination unreached. It is either an event of the batch whose send to it failed, whose
+// outcome then says when the held one is tried again, or one that is not due, until its
+// nextAttempt.
+type blocker struct {
+	event *batchEvent
+	until *time.Time
+}
+
+// sendState is what one send of a chain came to.
+type sendState int
+
+const (
+	// unsent: the send was never made, because the batch stopped first (NATS unreachable, the
+	// publisher hold's deadline passed, the process stopping).
+	unsent sendState = iota
+	// reached: NATS accepted the envelope, or refused it in a way no retry changes (bus.ErrRefused).
+	reached
+	// failed: NATS answered the send with a failure of the envelope: a denial, no acknowledgement
+	// on a connection still current, or another error.
+	failed
+	// lost: the send met a lost connection, the hold's deadline or the process stopping, so whether
+	// it landed is unknown and no fault of the event.
+	lost
+	// held: an earlier send of the chain failed, so this one was not made.
+	held
+)
+
+// chainSend is one send of a chain: event's envelope to dest.
+type chainSend struct {
+	event  *batchEvent
+	dest   destination
+	answer <-chan error
+	state  sendState
+	err    error
+	// heldBy is the event whose failed send held this one back.
+	heldBy *batchEvent
+}
+
+// chain is the sends of one owner's events to one destination key, in id order. Its next send is
+// made only once the one before it reached its destination.
+type chain struct {
+	sends []*chainSend
+	next  int
+}
+
+// planChains orders each owner's sends. An owner's events are walked in id order, and each
+// destination an event has not reached yet goes on its owner's chain for that destination's key -
+// unless an earlier event of the owner that is not due has that key unreached, in which case the
+// event is held back from it (batchEvent.held). Every destination key of every owner is a chain of
+// its own, and a chain's sends go one at a time (sendChains), so the order holds per (owner,
+// destination key): event N+1 of an owner reaches a destination only after every earlier
+// unpublished event of that owner bound for it has. A destination that stalls - its send failed, or
+// its event is waiting out a back-off - holds back that destination's later events of that owner
+// and nothing else.
+//
+// The order is kept per destination key, not per session: a session that subscribes to an issue's
+// topic family and is also routed to by its events receives on two keys, so when event N's topic
+// publish fails and N+1's agent publish succeeds it sees N+1's first copy before N's. Both are
+// JetStream publishes on the same stream, so it takes a stream failing one subject and not the
+// other.
+//
+// An event with no owner has no destination and forms no chain; an event that cannot be read has
+// none either, and holds nothing back.
+func planChains(events []*batchEvent) []*chain {
+	var chains []*chain
+	byOwner := map[string]map[string]*chain{}
+	blocked := map[string]map[string]blocker{}
+	for _, event := range events {
+		if event.failure != nil || event.owner == "" {
+			continue
+		}
+		if byOwner[event.owner] == nil {
+			byOwner[event.owner] = map[string]*chain{}
+			blocked[event.owner] = map[string]blocker{}
+		}
+		reached := publishedDestinationSet(event.destinations)
+		for _, dest := range event.destinationsOf {
+			if _, ok := reached[dest.subject]; ok {
+				continue
+			}
+			key := destinationKey(dest.subject)
+			if !event.due {
+				if _, ok := blocked[event.owner][key]; !ok {
+					blocked[event.owner][key] = blocker{until: event.nextAttempt}
+				}
+				continue
+			}
+			if by, ok := blocked[event.owner][key]; ok {
+				event.held = append(event.held, by)
+				continue
+			}
+			keyed := byOwner[event.owner][key]
+			if keyed == nil {
+				keyed = &chain{}
+				byOwner[event.owner][key] = keyed
+				chains = append(chains, keyed)
+			}
+			send := &chainSend{event: event, dest: dest}
+			keyed.sends = append(keyed.sends, send)
+			event.sends = append(event.sends, send)
+		}
+	}
+	return chains
+}
+
+// sendChains runs chains through sender, one window: the first send of every chain at once, in the
+// order the chains were planned, and each chain's next send as soon as the answer to the one before
+// it came back as reached, so the chains proceed side by side and each one in order. A failed send
+// holds back the rest of its chain. A send that meets a lost connection or a passed deadline
+// (bus.ErrUnavailable, errFenced) stops the batch: no further send of any chain is made. So does
+// ctx ending; the answers already in are still read, and every other send in flight is lost.
+func sendChains(ctx context.Context, sender bus.Sender, chains []*chain) {
+	stopped := false
+	var inflight []*chain
+	issue := func(c *chain) {
+		if stopped || ctx.Err() != nil {
+			return
+		}
+		send := c.sends[c.next]
+		routed := send.event.item
+		routed.Topic = send.dest.subject
+		send.answer = sender.PublishAsync(routed)
+		inflight = append(inflight, c)
+	}
+	settle := func(index int, err error) {
+		c := inflight[index]
+		inflight = append(inflight[:index], inflight[index+1:]...)
+		send := c.sends[c.next]
+		send.err = err
+		switch {
+		case err == nil:
+			send.state = reached
+		case errors.Is(err, bus.ErrRefused):
+			// Refused the same way however often it is retried (the envelope is past the server's
+			// max payload, or its subject past NATS's limit or holding whitespace, as an unbounded
+			// document slug or a bearer's session id can make it), so it is logged once and counts
+			// as reached.
+			slog.Error("dispatch outbox: destination refused", "event_id", send.event.event.ID, "topic", send.dest.subject, "error", err)
+			send.state = reached
+		case errors.Is(err, errFenced), errors.Is(err, bus.ErrUnavailable):
+			send.state = lost
+			stopped = true
+		case ctx.Err() != nil && errors.Is(err, ctx.Err()):
+			send.state = lost
+		default:
+			send.state = failed
+		}
+		c.next++
+		if send.state != reached {
+			for _, rest := range c.sends[c.next:] {
+				if send.state == failed {
+					rest.state, rest.heldBy = held, send.event
+				}
+			}
+			c.next = len(c.sends)
+			return
+		}
+		if c.next < len(c.sends) {
+			issue(c)
+		}
+	}
+	for _, c := range chains {
+		issue(c)
+	}
+	for len(inflight) > 0 {
+		// An answer already in is taken first, in the order the chains were planned, so a batch
+		// whose answers are all in proceeds the same way every time.
+		if index, err, ok := firstAnswered(inflight); ok {
+			settle(index, err)
+			continue
+		}
+		if ctx.Err() != nil {
+			for len(inflight) > 0 {
+				settle(0, ctx.Err())
+			}
+			break
+		}
+		cases := make([]reflect.SelectCase, 0, len(inflight)+1)
+		for _, c := range inflight {
+			cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(c.sends[c.next].answer)})
+		}
+		cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ctx.Done())})
+		chosen, value, _ := reflect.Select(cases)
+		if chosen == len(inflight) {
+			continue
+		}
+		var err error
+		if !value.IsNil() {
+			err = value.Interface().(error)
+		}
+		settle(chosen, err)
+	}
+}
+
+// firstAnswered returns the first chain of inflight whose current send's answer is in, and that
+// answer.
+func firstAnswered(inflight []*chain) (int, error, bool) {
+	for index, c := range inflight {
+		select {
+		case err := <-c.sends[c.next].answer:
+			return index, err, true
+		default:
+		}
+	}
+	return 0, nil, false
+}

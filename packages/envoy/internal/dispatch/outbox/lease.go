@@ -19,7 +19,7 @@ import (
 
 const (
 	// publisherHold names the hold (duty.Hold) a process publishes the outbox under: one process
-	// at a time holds it, and only the holder claims and sends events.
+	// at a time holds it, and only the holder reads and sends events.
 	publisherHold = "dispatch-outbox"
 	// eventsChannel is the channel migration 0107's trigger notifies once per statement that
 	// inserts events, whichever process committed it.
@@ -55,7 +55,7 @@ const (
 )
 
 // Outbox publishes durable Dispatch events to NATS, one process at a time. Every process runs one;
-// the one holding the publisher hold (publisherHold) claims and sends events, and the others stand
+// the one holding the publisher hold (publisherHold) reads and sends events, and the others stand
 // by to take the hold over.
 type Outbox struct {
 	deps Deps
@@ -68,7 +68,7 @@ type Outbox struct {
 	wake chan struct{}
 	// hold is the publisher hold while this process holds it, and nil otherwise.
 	hold atomic.Pointer[duty.Hold]
-	// claims counts the batches this outbox claimed, one per scanBatch: how often it scanned.
+	// claims counts the batches this outbox read, one per scanBatch: how often it scanned.
 	claims atomic.Int64
 }
 
@@ -334,13 +334,14 @@ func (o *Outbox) serve(ctx context.Context, hold *duty.Hold) holdEnd {
 	}
 }
 
-// scanEnd is how a scan ended: fenced, the hold's deadline passed; natsLost, a batch's sends failed
-// for the connection and the probe of it failed; failed, a statement failed.
+// scanEnd is how a scan ended: fenced, the hold's deadline passed or a record found the hold
+// another's; natsLost, a batch's sends failed for the connection and the probe of it failed;
+// failed, a statement failed.
 type scanEnd struct {
 	fenced, natsLost, failed bool
 }
 
-// scan claims and publishes batches under hold until there is nothing more to take: it takes the
+// scan reads and publishes batches under hold until there is nothing more to send: it takes the
 // next batch while the last one published anything or was full, and nothing went wrong. It takes
 // none once hold's deadline has passed. Every batch that sent anything is logged with this
 // process's instance and the span of event ids it sent.
@@ -353,7 +354,7 @@ func (o *Outbox) scan(ctx context.Context, hold fence) scanEnd {
 			return scanEnd{fenced: true}
 		}
 		o.claims.Add(1)
-		batch, err := scanBatch(ctx, o.deps, hold)
+		batch, err := scanBatch(ctx, o.deps, hold, o.instance)
 		if batch.sent > 0 {
 			slog.Info("dispatch outbox: published batch", "instance", o.instance,
 				"events", batch.sent, "first_id", batch.firstID, "last_id", batch.lastID, "started", batch.started)
@@ -368,7 +369,7 @@ func (o *Outbox) scan(ctx context.Context, hold fence) scanEnd {
 			return scanEnd{fenced: true}
 		case batch.natsLost:
 			return scanEnd{natsLost: true}
-		case batch.blocked, batch.published == 0 && batch.claimed < batchSize:
+		case batch.blocked, batch.published == 0 && batch.sendable < batchSize:
 			return scanEnd{}
 		}
 	}
@@ -387,7 +388,7 @@ func (o *Outbox) nextRetry(ctx context.Context, failed bool) (time.Duration, boo
 		from events
 		where published_at is null
 		  and next_attempt_at is not null
-		  and coalesce(payload ->> 'pending', 'false') <> 'true'
+		  and (payload ->> 'pending') is distinct from 'true'
 	`).Scan(&micros); err != nil {
 		if ctx.Err() == nil {
 			slog.Error("dispatch outbox: read the next retry", "instance", o.instance, "error", err)
