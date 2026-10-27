@@ -106,12 +106,12 @@ export function renderSummary(summary: Summary): string {
     ),
   ];
   if (other.conflicting > 0) {
-    lines.push(...tableLines(other.tables, "Conflicting forward merges, open PRs"));
+    lines.push(...tableLines(other.tables, "Conflicting forward merges, other PRs read"));
   }
 
   const errors = forcePushes.errors.map(({ error, count }) => `${pyRepr(error)}: ${count}`);
   lines.push(
-    "## Force pushes (merged + open PRs)",
+    "## Force pushes (every PR read)",
     `- force pushes: ${forcePushes.count} in ${forcePushes.prs} PRs; pre-push head conflicted ` +
       `with main at push time: ${forcePushes.conflicting} in ${forcePushes.conflictingPrs} PRs; ` +
       `undeterminable: ${forcePushes.undeterminable} ({${errors.join(", ")}})`

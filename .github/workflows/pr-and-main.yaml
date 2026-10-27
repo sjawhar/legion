@@ -287,6 +287,16 @@ jobs:
       - name: Test the Dispatch census script
         run: bun test scripts/dispatch
 
+      - name: Lint the conflict measurement script
+        run: bunx biome check --error-on-warnings scripts/conflicts
+
+      # scripts/conflicts is no workspace; the root package pins its TypeScript and Bun types.
+      - name: Typecheck the conflict measurement script
+        run: bunx tsc --noEmit -p scripts/conflicts
+
+      - name: Test the conflict measurement script
+        run: bun test scripts/conflicts
+
       - name: Lint the GitHub App registration script
         run: bunx biome check --error-on-warnings scripts/github-apps
 

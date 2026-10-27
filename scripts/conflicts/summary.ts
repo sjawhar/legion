@@ -65,8 +65,13 @@ function parseBound(flag: string, value: string, dayTime: string): number {
   const day = DATE.test(value) ? value : INSTANT.exec(value)?.[1];
   const instant = DATE.test(value) ? `${value}T${dayTime}Z` : value;
   const ms = day === undefined ? Number.NaN : Date.parse(instant);
-  // Date.parse rolls 2026-02-30 over into March; a real calendar day survives the round trip.
-  const real = day !== undefined && new Date(`${day}T00:00:00Z`).toISOString().startsWith(day);
+  // Date.parse rolls 2026-02-30 over into March and gives NaN for month 13; a real calendar day
+  // survives the round trip.
+  const midnight = new Date(`${day}T00:00:00Z`);
+  const real =
+    day !== undefined &&
+    !Number.isNaN(midnight.getTime()) &&
+    midnight.toISOString().startsWith(day);
   if (Number.isNaN(ms) || !real) {
     throw new UsageError(`${flag} must be YYYY-MM-DD or an RFC 3339 instant, got "${value}"`);
   }
@@ -407,6 +412,32 @@ function snapshotSection(open: PullRequestRecord[]): SnapshotSection {
   };
 }
 
+/** Whether an RFC 3339 time falls inside the run's window, bounds included. */
+function windowTest(window: { since: number; until: number }): (when: string) => boolean {
+  return (when) => {
+    const at = Date.parse(when);
+    return window.since <= at && at <= window.until;
+  };
+}
+
+/**
+ * The combined section's counted conflicting forward merges, one record per merge commit (the
+ * first PR's, as the section takes it): the merges `--fixed` classifies.
+ */
+export function conflictingMerges(run: RawRun, prefix: string): MergeRecord[] {
+  const inWindow = windowTest(resolveWindow(run.since, run.until));
+  const merges = new Map<string, MergeRecord>();
+  for (const pr of run.prs) {
+    if (!pr.headRefName.startsWith(prefix)) continue;
+    for (const merge of pr.merges) {
+      if (inWindow(merge.date) && !merges.has(merge.oid)) merges.set(merge.oid, merge);
+    }
+  }
+  return [...merges.values()].filter(
+    (merge) => merge.kind === "forward" && !!merge.conflicts?.length
+  );
+}
+
 /**
  * Python's `summarise` as numbers: events are unique merge commits, a merge carried by several
  * PRs counts once and is attributed to each; only merges and force pushes dated inside the
@@ -414,10 +445,7 @@ function snapshotSection(open: PullRequestRecord[]): SnapshotSection {
  */
 export function summarise(run: RawRun, options: SummaryOptions): Summary {
   const window = resolveWindow(run.since, run.until);
-  const inWindow = (when: string) => {
-    const at = Date.parse(when);
-    return window.since <= at && at <= window.until;
-  };
+  const inWindow = windowTest(window);
   const prs = run.prs.filter((pr) => pr.headRefName.startsWith(options.prefix));
   const isMerged =
     run.selection === undefined
