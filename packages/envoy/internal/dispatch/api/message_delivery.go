@@ -628,7 +628,7 @@ var errAttemptNotPending = errors.New("delivery attempt is no longer pending")
 // would put a second frame on the session's subject.
 //
 // Bound or not, a send that meets a listener take-over tries again under the attempt it claimed
-// (takeoverRetry, renewMessageDeliveryClaim) and settles only with the last try's outcome.
+// (takeoverRetry.retry, renewMessageDeliveryClaim) and settles only with the last try's outcome.
 func (s *server) deliverMessageResuming(
 	ctx context.Context,
 	message model.Message,
@@ -662,21 +662,26 @@ func (s *server) deliverMessageResuming(
 	// reached.
 	key := message.ID + ":" + pending.resolved.Delivery
 	takeover := newTakeoverRetry()
-	envelopeID, duplicate, deliveryError := s.sendResolvedDelivery(
-		ctx, pending.resolved, message.Body, key, urgency, pending.frame,
+	var envelopeID *string
+	var duplicate bool
+	deliveryError, err := takeover.retry(ctx,
+		func() string {
+			var failure string
+			envelopeID, duplicate, failure = s.sendResolvedDelivery(
+				ctx, pending.resolved, message.Body, key, urgency, pending.frame,
+			)
+			return failure
+		},
+		func() (bool, error) {
+			renewed, held, err := s.renewMessageDeliveryClaim(ctx, message, pending)
+			if held {
+				pending = renewed
+			}
+			return held, err
+		},
 	)
-	for takeover.again(ctx, deliveryError) {
-		renewed, held, err := s.renewMessageDeliveryClaim(ctx, message, pending)
-		if err != nil {
-			return model.MessageDelivery{}, err
-		}
-		if !held {
-			break
-		}
-		pending = renewed
-		envelopeID, duplicate, deliveryError = s.sendResolvedDelivery(
-			ctx, pending.resolved, message.Body, key, urgency, pending.frame,
-		)
+	if err != nil {
+		return model.MessageDelivery{}, err
 	}
 	return s.completeMessageDelivery(ctx, message, actor, pending, envelopeID, duplicate, deliveryError)
 }

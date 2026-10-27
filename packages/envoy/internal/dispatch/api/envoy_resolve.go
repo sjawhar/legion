@@ -44,14 +44,15 @@ import (
 // once the claim lease (claimLapsed) has passed, under the attempt's own number and idempotency
 // key (delivery_resume.go); only an attempt older than the loop's horizon waits for a Retry.
 //
-// Between its first send and its settle a sender may try again (takeoverRetry): a listener being
-// replaced refuses connections, answers 503, or does not hold the session yet for a few seconds,
-// and a send that met one of those waits it out under the attempt and the idempotency key it
-// already holds, renewing its claim before each try, rather than settling the attempt failed. A
+// Between its first send and its settle a sender may try again (takeoverRetry.retry): a listener
+// being replaced refuses connections, answers 503, or does not hold the session yet for a few
+// seconds, and a send that met one of those waits it out under the attempt and the idempotency key
+// it already holds, renewing its claim before each try, rather than settling the attempt failed. A
 // comment's mention resolution that decides which sessions the comment's other routes skip waits
 // one out too, before the comment's transaction opens and with nothing held
 // (resolveThroughTakeover), and the sender of that mention carries on in the same window rather
-// than opening a second one.
+// than opening a second one. That attempt keeps the resolution those routes were decided on, for
+// whichever sender finishes it (deliverResolvedCommentMention).
 
 // errStaleResolution is how a locked write reports that a row the pre-transaction listener
 // resolution depended on had changed by the time it held the lock. It never reaches a client:
@@ -224,6 +225,31 @@ func newTakeoverRetry() takeoverRetry {
 	return takeoverRetry{first: time.Now(), backoff: takeoverFirstBackoff}
 }
 
+// retry is the one take-over loop every sender runs: it makes a try, and while again allows
+// another after a take-over's failure, renews and tries again; it returns the failure the last try
+// recorded, "" for one that succeeded. try makes one try and returns its failure, leaving whatever
+// else the try produced in its caller's variables. renew prepares the next try of an attempt - it
+// resolves again what the attempt names and renews the claim - and reports whether this sender
+// still holds the attempt; a sender that no longer does makes no further try and settles with the
+// last one, and an error from renew ends the tries with that error. renew is nil for tries that
+// hold no attempt (resolveThroughTakeover).
+func (r *takeoverRetry) retry(ctx context.Context, try func() string, renew func() (bool, error)) (string, error) {
+	failure := try()
+	for r.again(ctx, failure) {
+		if renew != nil {
+			held, err := renew()
+			if err != nil {
+				return failure, err
+			}
+			if !held {
+				break
+			}
+		}
+		failure = try()
+	}
+	return failure, nil
+}
+
 // resolveThroughTakeover resolves one target as resolveMentionTargets does, with nothing held,
 // and, when wait is set, waits out a listener take-over the way a sender does: a resolution whose
 // outcome is a take-over's (retryableDeliveryFailure) is taken again after takeoverRetry's backoff
@@ -231,18 +257,26 @@ func newTakeoverRetry() takeoverRetry {
 // mentions and the route its transaction decides suppress_route and suppressed_authors from, so
 // those are decided on what the listener answered rather than on its silence.
 //
-// The pacing travels on the resolution (ResolvedMention.takeover), and the mention's sender after
-// the commit carries on in it rather than opening a window of its own: a resolution that already
-// waited the window out settles with its outcome on that sender's first try, so a comment's
+// It returns the pacing with the resolution, and the mention's sender after the commit carries on
+// in it (deliverResolvedCommentMention) rather than opening a window of its own: a resolution that
+// already waited the window out settles with its outcome on that sender's first try, so a comment's
 // request waits about one window for a take-over, however long it spent resolving.
-func (s *server) resolveThroughTakeover(ctx context.Context, target, delivery string, wait bool) ResolvedMention {
+func (s *server) resolveThroughTakeover(
+	ctx context.Context, target, delivery string, wait bool,
+) (ResolvedMention, takeoverRetry) {
 	takeover := newTakeoverRetry()
-	resolved := s.resolveMentionTargets(ctx, []string{target}, delivery)[0]
-	for wait && takeover.again(ctx, resolved.ResolveError) {
+	var resolved ResolvedMention
+	resolve := func() string {
 		resolved = s.resolveMentionTargets(ctx, []string{target}, delivery)[0]
+		return resolved.ResolveError
 	}
-	resolved.takeover = &takeover
-	return resolved
+	if !wait {
+		resolve()
+		return resolved, takeover
+	}
+	// A try that holds nothing has nothing to renew, so retry answers no error.
+	_, _ = takeover.retry(ctx, resolve, nil)
+	return resolved, takeover
 }
 
 // again reports whether the sender tries once more after a try that recorded failure, having

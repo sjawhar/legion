@@ -242,9 +242,15 @@ type commentRoute struct {
 
 // commentResolution is what the Envoy listener said about a comment before its transaction
 // opened: the session each mention names, and the owner's route with the session it names.
+// takeovers is each mention's take-over pacing (resolveThroughTakeover), which its sender carries
+// on in after the commit. decidesRoutes is set when the comment reaches sessions beyond its
+// mentions, so the mentions were resolved through a take-over and the comment's other routes are
+// decided on them; the comment.created event records it (mentions_decide_routes).
 type commentResolution struct {
-	mentions []ResolvedMention
-	route    commentRoute
+	mentions      []ResolvedMention
+	takeovers     []takeoverRetry
+	route         commentRoute
+	decidesRoutes bool
 }
 
 // commentWrite is the open comment transaction and what its locked owner said: the owner's
@@ -267,9 +273,13 @@ type commentWrite struct {
 // the route through a listener take-over (resolveThroughTakeover), because a mention that did not
 // resolve here leaves those routes on, and the same mention resolved by its sender after the
 // commit would reach a session those routes reach too: the session would hear the comment twice.
-// A comment with no such route commits at once, and its mentions' senders wait out the take-over
-// under the attempts the commit made durable. Every lookup runs at once, so a comment waits about
-// one take-over window however many mentions it carries (validateCommentMentions allows ten).
+// So the comment.created event records that its routes were decided on these resolutions
+// (mentions_decide_routes), and each mention's attempt 1 keeps its resolution for whichever sender
+// finishes it, the resume loop and a Retry included (deliverResolvedCommentMention). A comment with
+// no such route commits at once, and its mentions' senders wait out the take-over under the
+// attempts the commit made durable, resolving the mention again. Every lookup runs at once, so a
+// comment waits about one take-over window however many mentions it carries
+// (validateCommentMentions allows ten).
 // The lookups share the request's tracking mark because they call only the listener and never
 // take a pooled connection; one that read the database would need a mark of its own
 // (store.ForConcurrentRead), as the senders after the commit take.
@@ -284,15 +294,22 @@ func (s *server) resolveCommentDeliveries(
 		return commentResolution{}, err
 	}
 	wait := route.route != "" || input.ReplyTo != nil || input.Anchor != nil || owner.ArtifactID != nil
-	resolved := commentResolution{mentions: make([]ResolvedMention, len(targets)), route: route}
+	resolved := commentResolution{
+		mentions:      make([]ResolvedMention, len(targets)),
+		takeovers:     make([]takeoverRetry, len(targets)),
+		route:         route,
+		decidesRoutes: wait,
+	}
 	mentioned := slices.Index(targets, route.route)
 	var routeResolution ResolvedMention
 	var lookups sync.WaitGroup
 	for index, target := range targets {
-		lookups.Go(func() { resolved.mentions[index] = s.resolveThroughTakeover(ctx, target, delivery, wait) })
+		lookups.Go(func() {
+			resolved.mentions[index], resolved.takeovers[index] = s.resolveThroughTakeover(ctx, target, delivery, wait)
+		})
 	}
 	if route.route != "" && mentioned < 0 {
-		lookups.Go(func() { routeResolution = s.resolveThroughTakeover(ctx, route.route, "steer", wait) })
+		lookups.Go(func() { routeResolution, _ = s.resolveThroughTakeover(ctx, route.route, "steer", wait) })
 	}
 	lookups.Wait()
 	switch {
@@ -678,6 +695,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	payload.SuppressedAuthors = suppressedAuthors
 	payload.SuppressedRoute = suppressedRoute
 	payload.SuppressedRouteSessionID = suppressedRouteSessionID
+	payload.MentionsDecideRoutes = start.decidesRoutes
 	event, err := s.appendEvent(r.Context(), tx, owner.event(
 		"comment.created",
 		actor,
@@ -732,7 +750,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	for index, mention := range resolvedMentions {
 		sends.Go(func() {
 			attempts[index], failures[index] = s.deliverResolvedCommentMention(
-				senders[index], comment, event, mention, actor, commentClaim{mode: claimCreating},
+				senders[index], comment, event, mention, actor, 1, start.takeovers[index],
 			)
 		})
 	}

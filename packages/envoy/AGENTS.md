@@ -1347,11 +1347,17 @@ mention resolved to (`suppressed_authors`) - so a mention resolved only after th
 reach a session those routes reach too. A comment that has such a route (the issue's route is
 set, it replies to a thread, or it is on a document) therefore resolves its mentions and its
 route through a take-over before its transaction opens, with nothing held
-(`resolveCommentDeliveries`, `resolveThroughTakeover`); a comment with none commits at once and
-its senders wait under their attempts. A mention's window starts at that first resolution and
-its sender carries on in it after the commit, so a mention whose resolution waited the window out
-settles with that outcome on its first try. A comment's lookups run at once, and so do its
-mentions' sends, so its request waits about one window however many mentions it carries.
+(`resolveCommentDeliveries`, `resolveThroughTakeover`), and its `comment.created` payload records
+that (`mentions_decide_routes`); a comment with none commits at once and its senders wait under
+their attempts. A mention's window starts at that first resolution and its sender carries on in it
+after the commit (`deliverResolvedCommentMention` takes the pacing as an argument), so a mention
+whose resolution waited the window out settles with that outcome on its first try. Attempt 1 of a
+mention whose comment records `mentions_decide_routes` keeps that resolution whichever sender
+finishes it - the creating request, the resume loop, or a Retry that takes it after its sender
+died: a pinned session is only rechecked, and a resolve error settles the attempt `failed` with
+that error, never resolved again, so the route holder does not hear the comment from the route and
+again from the mention under a key the listener cannot match. A comment's lookups run at once, and
+so do its mentions' sends, so its request waits about one window however many mentions it carries.
 
 A claim outlives its sender by a minute, which Postgres judges (`claimLapsed`) against the
 `claimed_at` Postgres itself wrote, so no task's clock skew can read a live claim as lapsed or
@@ -1361,8 +1367,10 @@ attempt keeps the recipient it was opened for - a comment attempt its pinned ses
 resolve error, a message attempt the session its row names - because that is the session holding
 the frame; a role that has moved since is reached by an attempt of its own rather than by
 re-pointing this one, and only whether the original recipient can still receive the mode is
-re-derived. An attempt stranded before anything was resolved has no recipient to keep and is
-resolved afresh under that same number, never reported undeliverable unsent.
+re-derived. A take-over retry of a resumed comment attempt whose comment does not record
+`mentions_decide_routes` resolves an unpinned row's own target again, as every sender does. An
+attempt stranded before anything was resolved has no recipient to keep and is resolved afresh
+under that same number, never reported undeliverable unsent.
 
 **A stranded attempt is sent without anyone pressing Retry.** `api.RunDeliveryResume`
 (`api/delivery_resume.go`, wired in `cmd/dispatch/main.go`) runs every `DeliveryResumeInterval`
@@ -1373,14 +1381,14 @@ row - is more than a minute old and that were created within the last hour (`str
 less those whose claim would be refused for good (a closed issue, a gone document or mention),
 and sends each, four at a time, bound to that attempt: a message's through
 `deliverMessageResuming` with the attempt's number, its `requested_by` (the author when null) and
-its `urgency`, a mention's in the `claimResume` mode, which claims that exact attempt when its
-claim has lapsed and otherwise sends nothing. It never opens an attempt, so the key is the one
-the stopped sender used and a send that had landed reads `duplicate`. The hour is the horizon:
-inside it a resend is provably not a second delivery (the 72-hour duplicate window), and an
-attempt older than that means every process was down for an hour, and a steer that old sent
-unasked could act on stale instructions, so it waits for a person's Retry. A resumed direct
-message is more than a minute old, so the session's accept answers `ACCEPT_STALE` and shows it
-as a card rather than as its user's turn.
+its `urgency`, a mention's through `deliverResolvedCommentMention` with the attempt's number,
+which claims that exact attempt when its claim has lapsed and otherwise sends nothing. It never
+opens an attempt, so the key is the one the stopped sender used and a send that had landed reads
+`duplicate`. The hour is the horizon: inside it a resend is provably not a second delivery (the
+72-hour duplicate window), and an attempt older than that means every process was down for an
+hour, and a steer that old sent unasked could act on stale instructions, so it waits for a
+person's Retry. A resumed direct message is more than a minute old, so the session's accept
+answers `ACCEPT_STALE` and shows it as a card rather than as its user's turn.
 
 The idempotency key carries no attempt number: it is `<message>:<mode>` and
 `<comment>:<target>:<mode>`, stable across every attempt of that pair. The listener prefixes the

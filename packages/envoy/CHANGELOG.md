@@ -1737,9 +1737,12 @@
     its mentions and the issue's route through a take-over before it is written, so the sessions
     its route and author fan-out skip are decided on the listener's answer and a mentioned session
     hears the comment once; a mention whose resolution waited the take-over out settles with that
-    outcome rather than waiting a second time. A comment's mentions are resolved and sent at once,
-    so a comment mentioning several ended sessions answers within one 12 s window rather than one
-    per mention.
+    outcome rather than waiting a second time. Its `comment.created` payload carries
+    `mentions_decide_routes: true`, and each mention's first attempt keeps that resolution when the
+    resume loop or a person's Retry finishes it after its sender stopped, so a mention that reached
+    nobody settles `failed` rather than reaching the route holder a second time. A comment's
+    mentions are resolved and sent at once, so a comment mentioning several ended sessions answers
+    within one 12 s window rather than one per mention.
   - The listener client reads a 502, 503 or 504 that carries a JSON reason, such as the starting
     listener's `503 {"error":"service starting"}`, as the listener being unavailable, keeping the
     reason in the error's text, so a send waits it out as above. Before, it took the reason for

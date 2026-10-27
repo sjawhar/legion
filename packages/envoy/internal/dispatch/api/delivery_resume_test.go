@@ -180,12 +180,11 @@ func TestACommentResumeSendsNothingBesideALiveSenderAndTakesTheAttemptOnceItLaps
 		t.Fatalf("load the comment's event: %v", err)
 	}
 	mention := ResolvedMention{Target: "session:s1", Delivery: "steer"}
-	resume := commentClaim{mode: claimResume, attempt: 1}
 
 	// A sender claimed attempt 1 a moment ago and is still sending it.
 	strandAttempt(t, database, "comment_deliveries", "comment_id", comment.ID, "'0 seconds'", "'5 minutes'")
 	listener.forget()
-	held, err := direct.deliverResolvedCommentMention(context.Background(), comment, event, mention, comment.Author, resume)
+	held, err := direct.deliverResolvedCommentMention(context.Background(), comment, event, mention, comment.Author, 1, newTakeoverRetry())
 	if err != nil {
 		t.Fatalf("resume beside a live sender: %v", err)
 	}
@@ -201,7 +200,7 @@ func TestACommentResumeSendsNothingBesideALiveSenderAndTakesTheAttemptOnceItLaps
 
 	// That sender never came back.
 	strandAttempt(t, database, "comment_deliveries", "comment_id", comment.ID, "'5 minutes'", "'5 minutes'")
-	resumed, err := direct.deliverResolvedCommentMention(context.Background(), comment, event, mention, comment.Author, resume)
+	resumed, err := direct.deliverResolvedCommentMention(context.Background(), comment, event, mention, comment.Author, 1, newTakeoverRetry())
 	if err != nil {
 		t.Fatalf("resume the abandoned attempt: %v", err)
 	}

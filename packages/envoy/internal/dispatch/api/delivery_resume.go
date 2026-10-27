@@ -236,10 +236,10 @@ func (s *server) resumeMessageAttempt(ctx context.Context, stranded strandedMess
 	}
 }
 
-// resumeCommentAttempt sends one stranded comment mention attempt in the resume claim mode, so it
-// sends that attempt or nothing, under the key `<comment>:<target>:<mode>` its first send used,
-// with the comment's own comment.created event as the frame. comment_deliveries records no
-// requester, so the comment's author is the actor its receipt names.
+// resumeCommentAttempt sends one stranded comment mention attempt, bound to it, so it sends that
+// attempt or nothing, under the key `<comment>:<target>:<mode>` its first send used, with the
+// comment's own comment.created event as the frame. comment_deliveries records no requester, so
+// the comment's author is the actor its receipt names.
 func (s *server) resumeCommentAttempt(ctx context.Context, stranded strandedCommentAttempt) {
 	comment, err := s.loadComment(ctx, s.deps.Store.Pool, stranded.commentID)
 	if err != nil {
@@ -254,8 +254,9 @@ func (s *server) resumeCommentAttempt(ctx context.Context, stranded strandedComm
 		return
 	}
 	mention := ResolvedMention{Target: stranded.target, Delivery: stranded.delivery}
-	claim := commentClaim{mode: claimResume, attempt: stranded.attempt}
-	if _, err := s.deliverResolvedCommentMention(ctx, comment, created, mention, comment.Author, claim); err != nil {
+	if _, err := s.deliverResolvedCommentMention(
+		ctx, comment, created, mention, comment.Author, stranded.attempt, newTakeoverRetry(),
+	); err != nil {
 		slog.Warn("dispatch: resume a stranded mention attempt", "comment", stranded.commentID,
 			"target", stranded.target, "attempt", stranded.attempt, "error", err)
 	}

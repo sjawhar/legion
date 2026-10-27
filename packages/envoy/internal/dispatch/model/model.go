@@ -1229,6 +1229,13 @@ type CommentEventPayload struct {
 	SuppressedRoute          string   `json:"suppressed_route,omitempty"`
 	SuppressedRouteSessionID *string  `json:"suppressed_route_session_id,omitempty"`
 	SuppressedAuthors        []string `json:"suppressed_authors"`
+	// MentionsDecideRoutes records that the comment reaches sessions beyond its mentions - the
+	// issue had a route, the comment replies to a thread, or it is on a document - so its
+	// mentions were resolved, through a listener take-over, before it committed, and the route and
+	// author fan-outs above were decided on those resolutions. Each mention's first attempt keeps
+	// its resolution for whichever sender finishes it: a mention resolved again after the commit
+	// could reach a session one of those fan-outs reaches too. Omitted when false.
+	MentionsDecideRoutes bool `json:"mentions_decide_routes,omitempty"`
 	// ReferenceChangesPayload names the nodes whose inbound reference edges this write moved,
 	// so a reader carrying their batched backlink counts refreshes exactly those rows.
 	ReferenceChangesPayload
