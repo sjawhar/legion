@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-172",
-  "completed": "2026-10-27T00:57:42Z",
+  "completed": "2026-10-27T02:43:11Z",
   "pinnedCommit": "ad909178a0cbc43e0deef1a528051bc499ce1fb0",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2272",
   "documents": [
@@ -15,8 +15,8 @@
       "criterion": "R4 settled in code: Go and the browser read a mid-row escaped pipe in a table row the same way",
       "surface": "Dispatch's browser suite (packages/dispatch/e2e) against the real server and SPA with a rootless Postgres in the issue pod",
       "command": "cd packages/dispatch && PLAYWRIGHT_BROWSERS_PATH=$TMPDIR/ms-playwright DATABASE_URL=postgres://postgres@127.0.0.1:5433/infra172_head?sslmode=disable bun run e2e editor-paste -g \"two backslashes|row is empty, pasted into\"",
-      "observed": "'a pipe after two backslashes ends a table cell in Go as in the editor' passes in chromium and iphone; 18 passed ($TMPDIR/infra172/e2e-head-2e326959.txt)",
-      "headSha": "2e326959bbb3d205223a0816d4d513b9e48b1b0e",
+      "observed": "'a pipe after two backslashes ends a table cell in Go as in the editor' passes in chromium and iphone; 18 passed ($TMPDIR/infra172/e2e-head-20dedb36.txt)",
+      "headSha": "20dedb367e0853eada66d69eb1db5a6a7703d29c",
       "negativeControl": "The same test against a server and SPA built from ad909178 fails both projects on the cell assertion: the editor shows [\"a \\\\| b\", \"\"] where [\"a \\\\\", \"b\"] is expected; 16 passed, 2 failed ($TMPDIR/infra172/e2e-C.txt)"
     },
     {
@@ -24,7 +24,7 @@
       "surface": "pmdoc differential over production's stored documents (2,050 latest versions from the census, kept under $TMPDIR, never committed)",
       "command": "bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base ad909178 --head a6ecbc12 --corpus $TMPDIR/infra172/corpus.jsonl --out $TMPDIR/infra172/diff-a6",
       "observed": "GATE regressions 0, misreads 0, churn 0, engine-tree regressions 0, engine-tree churn 0, head panics 0, lost fixed points 0; PASS. Reports: the in-repo table-cell-pipes case 'fixed' and the 4 documents the census found 'lost fixed point of a misread'. After those documents were rewritten, the same differential over their new versions (and LINUX-39's) reports 0 on every gate",
-      "headSha": "a6ecbc12b4dceda916933a07b35407da7cc30b64",
+      "headSha": "20dedb367e0853eada66d69eb1db5a6a7703d29c",
       "negativeControl": "Before the rewrite, pmdoc.Parse at the head refuses BET-34 census-md v8 ('a table row holding 5 cells where its table has 4'), and the differential flags the 4 unrewritten documents"
     },
     {
@@ -32,7 +32,7 @@
       "surface": "the census script through production Dispatch's HTTP API, and refactor-order-md",
       "command": "bun escaped-pipe-census.ts --out census-out (AHXV6, BET, EVALS, GTM, INFRA, every version, 20:17-21:14Z) and --projects LINUX,OSSV,ROADMAP,SMOKE,XV6SSH,ZLIB --latest-only (22:59-23:52Z)",
       "observed": "8 documents with a mid-row hit in their latest version, 0 closing hits, 0 approved versions with a hit; every version: 671 hit versions in AHXV6/BET/EVALS/GTM/INFRA (12,721 versions) and 55 in LINUX/OSSV/ROADMAP/SMOKE/XV6SSH/ZLIB (13,898 versions, all LINUX); 0 failed requests. The corrected matcher (tables in blockquotes and list items) re-run over the three stored corpora (8,015 latest versions) finds the same 8 documents. All 8 rewritten by guarded doc-edits; the matcher finds 0 hits in each new version",
-      "headSha": "2e326959bbb3d205223a0816d4d513b9e48b1b0e",
+      "headSha": "20dedb367e0853eada66d69eb1db5a6a7703d29c",
       "negativeControl": "bun escaped-pipe-census.ts --file matcher-fixture.md reports exactly mid=1 closing=1; over the tester's fixture with a blockquoted, a list-item and a plain table row it reports mid=3 (the first matcher reported mid=2)"
     },
     {
@@ -40,7 +40,7 @@
       "surface": "architecture-assessment-md and refactor-order-md against the repository at ad909178",
       "command": "bash $TMPDIR/infra172/check-links.sh $TMPDIR/infra172/architecture-assessment.md $TMPDIR/infra172/refactor-order.md",
       "observed": "checked=453 bad=0 for the assessment v3, checked=51 bad=0 for the refactor order",
-      "headSha": "2e326959bbb3d205223a0816d4d513b9e48b1b0e",
+      "headSha": "20dedb367e0853eada66d69eb1db5a6a7703d29c",
       "negativeControl": "a made-up packages/envoy/go.mod#L99999 citation is flagged PAST-END(148)"
     },
     {
@@ -48,8 +48,16 @@
       "surface": "architecture-assessment-md v4 and Dispatch",
       "command": "dispatch read --ref dispatch://INFRA-534, -535, -536 and -531; the throwaway inline differential (20,000 generated paragraphs, Go pmdoc.Parse against the headless engine at ad909178, $TMPDIR/infra172/inlinefuzz/cmp.py)",
       "observed": "20 rows, each with a link; 4,447 of 20,000 paragraphs differ, in classes now covered by INFRA-530, INFRA-531, INFRA-534, INFRA-535 and INFRA-536",
-      "headSha": "2e326959bbb3d205223a0816d4d513b9e48b1b0e",
+      "headSha": "20dedb367e0853eada66d69eb1db5a6a7703d29c",
       "negativeControl": "Plain ~~a~~ text. reads the same in Go and the engine (struck 'a'), as do the 15,553 paragraphs the differential found equal"
+    },
+    {
+      "criterion": "Review round 1, finding 1: an API write that adds code with a pipe after an odd backslash run to a table cell is refused, also beside such code a browser edit left; contract change census entries driven through the real CLI",
+      "surface": "the real dispatch command against the harness Dispatch server (packages/dispatch/e2e/run-server.sh, port 8787, rootless Postgres), and the docs package tests with real Postgres and real settlement",
+      "command": "dispatch doc-edit --issue ACME-1 --artifact cmds-md --ops-json '[{\"op\":\"replace\",\"find\":\"x\",\"with\":\"`grep -n 'one\\\\|two' notes.txt`\"}]'; dispatch artifact (wide.md, fits.md); dispatch doc-edit insert '| new | a \\\\| b |'; go test ./internal/dispatch/docs/ -run 'TestApplyOperationRefusesCodeWithAPipe|TestAcceptSuggestionRefusesCodeWithAPipe'",
+      "observed": "replace refused naming row 1, column 1 under header 'Note'; upload of '| x | y \\\\| z |' refused as 3 cells under 2; '| x \\\\| y |' stored as cells 'x \\' and 'y'; bare row insert refused TABLE_WIDTH; the beside-browser-edit replace, delete and accept cases are refused (all 14 subtests pass)",
+      "headSha": "20dedb367e0853eada66d69eb1db5a6a7703d29c",
+      "negativeControl": "the same doc-edit with code '`ls | wc -l`' is accepted and stored as '`ls \\| wc -l`'; at 9f12932b the beside-browser-edit replace and delete returned nil (accepted)"
     }
   ],
   "filesChanged": [
@@ -63,6 +71,7 @@
     "packages/envoy/internal/dispatch/docs/marks.go",
     "packages/envoy/internal/dispatch/docs/marks_test.go",
     "packages/envoy/internal/dispatch/pmdoc/block_path.go",
+    "packages/envoy/internal/dispatch/pmdoc/escape.go",
     "packages/envoy/internal/dispatch/pmdoc/insert_test.go",
     "packages/envoy/internal/dispatch/pmdoc/render_inline.go",
     "packages/envoy/internal/dispatch/pmdoc/render_readback_test.go",
@@ -71,7 +80,9 @@
     "packages/envoy/internal/dispatch/pmdoc/table.go",
     "packages/envoy/internal/dispatch/pmdoc/table_test.go",
     "packages/envoy/internal/dispatch/pmdoc/testdata/corpus/table-cell-pipes.md",
-    "packages/envoy/internal/dispatch/pmdoc/testdata/fixtures.json"
+    "packages/envoy/internal/dispatch/pmdoc/testdata/fixtures.json",
+    "skills/dispatch/references/document-edits.md",
+    "skills/dispatch/references/documents.md"
   ],
   "trickyParts": [
     "Code in a table cell whose text holds a | right after an odd run of backslashes has no GFM spelling once \\\\| ends a cell. API writes (replace, delete by quote, accepted suggestion) that leave it are refused with TableCodePipeError naming the table, cell and header; a browser edit holding it is rendered with that | as text after the code (codePipesOutOfCode). A table that already held the shape does not block later writes (replacementBroke).",
@@ -97,5 +108,13 @@
     "Tester failure A4: the census matcher now reads tables in blockquotes and list items (and nested); the count stands (same 8 documents over 8,015 stored latest versions); the script as run is uploaded as escaped-pipe-census-ts v2, and refactor-order (v4, v5) states the flags and the matcher change.",
     "Tester observation: the test cases that held a git command taken from a stored document now use a made-up grep command (commit 2e326959).",
     "Tester observation: the every-version count of the six other projects is complete and is on the pull request and in refactor-order v4."
+  ],
+  "round3": [
+    "Review finding 1 (important): refuseCodePipeInTableCell compares pmdoc.TableCodePipes of the changed blocks before and after, counted by code text, and refuses the first span the write adds (96976206); TableCodePipeError removed. A write that changes the text of an existing offending span but keeps the shape is refused too (its text is new).",
+    "Review finding 2 (important): '## Contract change census' added to the PR body: three changes, the searches with every hit and its disposition, the 8 rewritten documents, the rollout (immediate refusal, naming the misread and data loss it closes). The search found one migration: skills/dispatch/references/document-edits.md now says a | in a replace's cell text is written bare (20dedb36).",
+    "Minor: escape.go altReadsBack's false sentence and dead pipeAfterEvenBackslashes guard removed; the function moved to table_test.go.",
+    "Minor: the refusal's header lookup comment no longer claims GET /blocks placement.",
+    "Both review threads answered and resolved individually.",
+    "The full docs package suite needs -timeout 50m on this pod (passes in 823 s); the default 10-minute timeout ends it."
   ]
 }
