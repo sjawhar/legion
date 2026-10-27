@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-591",
+  "completed": "2026-10-27T11:15:00Z",
+  "proof": [
+    {
+      "criterion": "The global serialization is gone: a write holds no lock shared with writes to other issues.",
+      "surface": "Dispatch store on a real Postgres 16.2, a local Dispatch on the INFRA-589 load-reproduction stack, and that harness's general pg_locks sampler",
+      "command": "go test ./internal/dispatch/events/ -run TestAppendsOnDifferentIssuesDoNotWaitForEachOther -v (DISPATCH_TEST_DATABASE_URL set); smoke-lock.sh after (comment POST while a psql transaction holds pg_advisory_xact_lock(0x4449535041544348)); run-seq.sh before/after at 0.5x, 1x, 2x, three runs each, then medians.py",
+      "observed": "T1 passes: an append on issue PP-2 commits while an append on PP-1 stays open, with no backend waiting on a lock. The head answers the comment POST 201 in 160 ms while the old lock is held. In all 9 after runs every sampled lock wait is a write waiting for its own issue's row, or Postgres's NOTIFY commit lock (0.2% of samples at 1x, 1.3% at 2x; kept by decision D1); the commit-order lock is gone.",
+      "headSha": "48cb088a6556 (code identical to 9380c4a0b8ce, at which the measured binary was built; 48cb088a adds docs only)",
+      "negativeControl": "With `select pg_advisory_xact_lock(0x4449535041544348)` put back after lockEventOwner, T1 failed: 'append on PP-2 while PP-1's write is open: acquire event commit order lock: timeout'. The base build c3d09eec gave the comment POST no answer within 8 s while the old lock was held, and its 1x runs show the commit-order lock held in 100% of samples with 33 to 49 writers queued."
+    },
+    {
+      "criterion": "A reader resuming from a cursor never misses an event that commits later with a lower id; a test commits two writes out of id order and a resuming reader gets both in a defined order.",
+      "surface": "GET /api/v1/events (SSE) with and without Last-Event-ID on a local Dispatch; events.Horizon on a real Postgres",
+      "command": "smoke.sh after (plan 6.1): curl -N /api/v1/events open; psql begin; select pg_current_xact_id(); insert an event on LGA-12; POST /api/v1/issues/LGA-22/comments; commit; reconnect with Last-Event-ID; plus go test ./internal/dispatch/api/ -run 'TestSSEResumeCursorOrdersConcurrentEventCommits|TestOutOfOrderCommitsOnAnotherProcessReachAnOpenStreamInIDOrder' and ./internal/dispatch/events/ -run 'TestHorizonStaysBelowAnOpenLowerWrite|TestHorizonDoesNotPassAWriterAboveTheSnapshotXmax'",
+      "observed": "While the LGA-12 write (id 21140) was open, the stream sent nothing for 3 s although the LGA-22 comment (id 21141) had committed in 287 ms; after commit it sent 21140 then 21141; a new connection with Last-Event-ID 21139 sent 21140 then 21141. The tests pass, including the xmax-hole case a single-snapshot rule would pass.",
+      "headSha": "48cb088a6556 (code identical to 9380c4a0b8ce, at which the measured binary was built; 48cb088a adds docs only)",
+      "negativeControl": "The base build c3d09eec, same steps: the open stream sent 9008 (committed higher id) at once and never 9007 (the lower id that committed later). With the relay read uncapped, TestSSEResumeCursorOrdersConcurrentEventCommits failed: 'the stream sent event 6 while the lower id is still open, want nothing above 4'."
+    },
+    {
+      "criterion": "Every consumer of the event stream keeps the order it relies on; the plan lists each and the test covers each.",
+      "surface": "Each consumer's own path: SSE handler and resume, the relay across two real envoy-dispatch processes, the delivery hub, GET /api/v1/references?since=, the outbox's per-issue NATS order, per-owner readers, and the browser suite",
+      "command": "go test ./internal/dispatch/... ./internal/pglisten/... -count=1 -timeout 90m; go test -tags multiprocess ./cmd/dispatch; bunx playwright test e2e/inbox.e2e.ts e2e/live.e2e.ts e2e/board.e2e.ts e2e/approval.e2e.ts e2e/agents.e2e.ts --project=chromium",
+      "observed": "T2 (per-owner order, cache-1), T3/T4/T5 (SSE, cursor race, two processes, reset), T6 (hub never passes an open lower id; receive applies cursor+1 only once final), T7 (references since withholds an open lower mention), T8 (one issue's events on its NATS subject in seq order) pass; the multiprocess suite passes (TestALiveStreamOnOneProcessCarriesTheOtherProcessesEvent among them); browser: 89 passed, 3 skipped. 0 SSE order violations in all 18 load runs. The full suite's failures are all environmental and outside the changed code, the same kinds as the base run on c3d09eec: the rank test needs a non-C collation, the files test needs Docker, and pmdoc's linear-time tests (and on the base, one docs residency count) fail on gVisor timing.",
+      "headSha": "48cb088a6556 (code identical to 9380c4a0b8ce, at which the measured binary was built; 48cb088a adds docs only)",
+      "negativeControl": "Each new test was run against its bug put back: publish and cursor move split across two lock holds -> 'the stream sent event 4 before event 3, which it skipped'; no Horizon.Reset on a reset log -> 'sent event 3 but not 1'; an outbox claim by id cursor -> 'issue TT-2's subject carried seqs [2], want [1 2]'; LockOwners removed -> TestRepoProjectOppositeMovesDoNotDeadlock 500 (40P01) 5 of 5."
+    },
+    {
+      "criterion": "Before and after on the committed load reproduction at tonight's step and twice it: lock hold samples, committed vs offered, write latency p50/p99, delivery latency from the write's arrival.",
+      "surface": "INFRA-589 harness archive plus a general pg_locks sampler and SSE frame timing, one 2-vCPU pod, Postgres 16.2 behind the 1 ms proxy, seeded once (1,000 issues)",
+      "command": "run-seq.sh before/after x 0.5x/1x/2x, three runs each alternating; analyze.py; medians.py (dispatch://INFRA-591/artifact/load-before-after-md, dispatch://INFRA-591/artifact/infra591-measurements-tar-gz)",
+      "observed": "Medians at 1x: commit-order lock held 100% -> gone; committed 0.69 -> 3.07 events/s (0.17 -> 0.78 of offered); comment write p50 29.1 s -> 7.1 s; NATS delivery from write sent p50 29.2 s -> 9.1 s; SSE frame from event p50 29.6 -> 36.1 s, p99 145 -> 65 s; requests 2xx 29% -> 71%. At 2x committed 0.07 -> 5.24. At 0.5x committed 0.99 -> 1.00.",
+      "headSha": "48cb088a6556 (code identical to 9380c4a0b8ce, at which the measured binary was built; 48cb088a adds docs only)",
+      "negativeControl": "The base build reproduces the root report's knee in all three 1x runs (lock held 100%, 33 to 49 writers queued, committed 0.19 to 2.83 events/s); the first after build without the horizon pool (665bad6a) showed SSE frames 73.6 s after the write's response, the regression the horizon pool removed (26.3 s)."
+    },
+    {
+      "criterion": ".dispatch/architecture/dispatch-events.md says what is now true.",
+      "surface": "The architecture doc",
+      "command": "rg -n 'global advisory lock' .dispatch/architecture/; read .dispatch/architecture/dispatch-events.md",
+      "observed": "No match; the doc names the owner-row-only append, the xid-before-nextval and CACHE 1 invariants, the horizon rule (observation, later-snapshot proof, why one snapshot is not enough), every global-id reader, the costs, the horizon's own pool and the primary-only constraint.",
+      "headSha": "48cb088a6556 (code identical to 9380c4a0b8ce, at which the measured binary was built; 48cb088a adds docs only)",
+      "negativeControl": "The same rg on the base c3d09eec version of the file finds 1 match ('orders commits with a global advisory lock')."
+    }
+  ],
+  "filesChanged": [
+    ".dispatch/architecture/dispatch-events.md",
+    "packages/envoy/AGENTS.md",
+    "packages/envoy/CHANGELOG.md",
+    "packages/envoy/cmd/dispatch/AGENTS.md",
+    "packages/envoy/cmd/dispatch/README.md",
+    "packages/envoy/internal/dispatch/api/copy_lock_order_test.go",
+    "packages/envoy/internal/dispatch/api/delivery_live_events.go",
+    "packages/envoy/internal/dispatch/api/delivery_live_events_test.go",
+    "packages/envoy/internal/dispatch/api/delivery_live_hub.go",
+    "packages/envoy/internal/dispatch/api/delivery_live_hub_intake.go",
+    "packages/envoy/internal/dispatch/api/delivery_live_hub_test.go",
+    "packages/envoy/internal/dispatch/api/event_insert_guard_test.go",
+    "packages/envoy/internal/dispatch/api/event_stream_relay.go",
+    "packages/envoy/internal/dispatch/api/event_stream_relay_test.go",
+    "packages/envoy/internal/dispatch/api/events.go",
+    "packages/envoy/internal/dispatch/api/references.go",
+    "packages/envoy/internal/dispatch/api/references_test.go",
+    "packages/envoy/internal/dispatch/api/replies.go",
+    "packages/envoy/internal/dispatch/api/repo_projects_race_test.go",
+    "packages/envoy/internal/dispatch/api/routes_table.go",
+    "packages/envoy/internal/dispatch/api/server.go",
+    "packages/envoy/internal/dispatch/api/server_test.go",
+    "packages/envoy/internal/dispatch/api/upload_lock_test.go",
+    "packages/envoy/internal/dispatch/docs/approval_review.go",
+    "packages/envoy/internal/dispatch/docs/copied_asks.go",
+    "packages/envoy/internal/dispatch/docs/copied_asks_test.go",
+    "packages/envoy/internal/dispatch/docs/persistence.go",
+    "packages/envoy/internal/dispatch/docs/service.go",
+    "packages/envoy/internal/dispatch/duty/exclusive.go",
+    "packages/envoy/internal/dispatch/events/broker.go",
+    "packages/envoy/internal/dispatch/events/broker_test.go",
+    "packages/envoy/internal/dispatch/events/horizon.go",
+    "packages/envoy/internal/dispatch/events/horizon_test.go",
+    "packages/envoy/internal/dispatch/events/stream.go",
+    "packages/envoy/internal/dispatch/outbox/THROUGHPUT.md",
+    "packages/envoy/internal/dispatch/outbox/window_test.go",
+    "packages/envoy/internal/dispatch/refs/graph.go",
+    "packages/envoy/internal/dispatch/store/pool.go",
+    "packages/envoy/internal/dispatch/store/pool_test.go"
+  ],
+  "trickyParts": [
+    "events.Horizon: an observation is safe only once a LATER snapshot's xmin is above the observer's own xid; one snapshot cannot prove its own max(id) (xmax hole). Await waits for an observation that started after the call.",
+    "Relay: one mutex is held across each page's publish and the cursor move, and across subscribe and the cursor read, so streamEvents can hand over at the published cursor P with no gap and no repeat; sentDuringCatchup is gone.",
+    "Relay and hub cursors stay on the last existing row at or below H, so the existing reset check (row at the cursor gone or another created_at) still works; a detected reset calls Horizon.Reset and re-awaits.",
+    "The horizon observes on store.Pool.Horizon (2 connections): on the shared pool the relay queued behind ~1,500 requests per observation under load. A gap re-read asks only the horizon (no reset check), so a gap held open by a long transaction costs the shared pool nothing."
+  ],
+  "deviations": [
+    "The plan's 1x pass thresholds (committed/offered >= 0.99, SSE p99 <= 1 s) are not met (0.78, 65 s): once the lock is gone, the shared pool and the 2 CPUs saturate at 1x on this box (INFRA-592, INFRA-512). Accepted by INFRA-514's architect on 2026-10-27 as a deviation recorded in the PR body.",
+    "Beyond the plan: store.Pool.Horizon, a 2-connection pool for the horizon's observations, and gap re-reads that skip the reset check. Overlaps INFRA-592's planned Live() pool; the architect agreed whichever merges second folds it in (comment on INFRA-592).",
+    "Harness samplers were applied as a patch to the INFRA-589 archive (INFRA-589 not merged); INFRA-589's implementer ported them into PR #2369.",
+    "LockOwners skips ownerless events (no row to lock), so the xid is taken once, in Append."
+  ],
+  "openQuestions": [
+    "D2 (from the plan): ship before multi-replica Dispatch (INFRA-63) or roll this release with Recreate; old pods' readers would skip events new pods commit out of id order during a rolling update."
+  ],
+  "discoveredComplexity": [
+    "Under saturation the horizon makes live SSE frames wait for every long write transaction open at their commit: at 1x the SSE p50 rose from 29.6 s to 36.1 s while p99 fell from 145 s to 65 s; at 0.5x p50 326 -> 375 ms, p99 2.5 -> 3.2 s. Shorter write transactions (INFRA-512) shrink it.",
+    "Measurement environment for the tester: the harness stack stays up under /legion/scratch/tmp/infra591/repro (Postgres 15432 seeded, proxy 15433, NATS 14222, listener 19120; Dispatch stopped; bin/envoy-dispatch-{before,after}); run steps with /legion/scratch/tmp/infra591/run-one-step.sh <build> <name> <factor> from a script file (run-step.sh's pgrep kills any shell whose command line contains bin/envoy-dispatch). Test Postgres for go test is 127.0.0.1:15532."
+  ]
+}
