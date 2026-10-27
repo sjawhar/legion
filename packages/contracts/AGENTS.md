@@ -123,3 +123,5 @@ the Dispatch specs behind the `dispatch` command:
 - `SearchResult.owner` is always present: an issue owner carries `key`, `title`, and `status`; a standalone project-document owner carries `project`, `slug`, `artifact_id`, and `name`. Clients render from `owner`; the optional `issue` block on issue-owned hits only mirrors the owner's `key`/`title`/`status` for agent clients built before the owner-only shape (#1119) and goes away once no installed pi-legion-envoy / opencode-legion-envoy / claude-envoy (or a legacy claude-envoy-bridge install) predates it. A message hit's `href` is `/issues/KEY/conversation`. Ask event payloads carry `options` as an array, never `null`.
 - Keep examples synchronized with the real receiver output (Slack team IDs,
   GitHub owner/repo segments, and native Dispatch keys).
+
+<!-- scratch INFRA-520 contracts -->
