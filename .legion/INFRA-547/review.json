@@ -2,49 +2,37 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-547",
-  "completed": "2026-10-27T07:35:20Z",
-  "round": 1,
-  "reviewedHead": "d28ece2a96356eee7e4157d90eb189199bc8e370",
-  "codeHead": "6112adc201ea4b3d9c2e325a54cfd897e79ff470",
+  "completed": "2026-10-27T09:08:50Z",
+  "round": 2,
+  "reviewedHead": "112faf2a07f51c973bcc3f2330dc337cc09204ba",
+  "codeHead": "e6644f73f2f34dd06253c4ea3ab24186a8ebc2aa",
   "decision": "changes_requested",
-  "critical": 1,
-  "important": 2,
+  "critical": 0,
+  "important": 0,
   "minor": 3,
-  "ci": "Required set on main (rulesets): lint, typecheck, test, pr-title; branch protection: none. CI head 6112adc2 (newest pull_request run); compare 6112adc2...d28ece2a: handoffsOnly true, 2 files. At 07:35Z every check-run on 6112adc2 is still queued (195 runs queued repo-wide); not a gate for a request for changes.",
-  "threads": "0 review threads on the pull request (gh api graphql).",
-  "e2eLines": "E2E (implementer) and E2E (tester) both present, each naming the real envoy-listener binary, a command, observation, head 6112adc2 and a negative control.",
-  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality run once at code head 6112adc2 on this change's own diff (synthesized base: merge-tree of main 657c24e4 and #2228 tip 3ea454d3); both CHANGES.",
+  "correctnessFindingsStanding": 0,
+  "whyChangesRequested": "No correctness finding stands. Three cleanup findings stand, and the deployment instructions allow no deferral (no Fast-follow), so they are fixed in this pull request. The merge waits on sjawhar/legion#2228 anyway, so this round adds no merge latency.",
+  "ci": "Required set on main (rulesets): lint, typecheck, test, pr-title; no branch protection. CI head e6644f73; compare e6644f73...112faf2a: handoffsOnly true, 2 files. At 09:08Z every check-run on e6644f73 that is not cancelled is still queued.",
+  "threads": "6 threads, all opened by the reviewer in round 1, all resolved by the implementer. I replied on each and accepted each: PRRT_kwDORFy7ds6wlkAK (7f2ebee1; my repro at e6644f73 gives 504 with the lane on and off), PRRT_kwDORFy7ds6wlkAP (7f2ebee1, publish_failed), PRRT_kwDORFy7ds6wlkAR (9c04cf17, go.work.sum equals main's), PRRT_kwDORFy7ds6wlkAa (a7600dd3, one resolver), PRRT_kwDORFy7ds6wlkAc (a7600dd3, beforeForward), PRRT_kwDORFy7ds6wlkAe (7f2ebee1, errNoDeadline).",
+  "census": "Present. I re-ran its three searches at the head and every hit is listed with a disposition. Not listed: packages/pi-envoy/extensions/envoy.test.ts, a test file; workflow.go:529, the notify.New construction the notify.go row covers; and api.go/confirmed.go, the producer. Rollout: daemons before listeners. Neither answer refuses input that an earlier listener accepted: each reports a message the earlier listener answered 200 and then failed to deliver. I checked the serve-port claim against base 657c24e4: roleTopicDelivery acknowledges a stored role forward copy by roleForwardDedupePrefix.",
+  "e2eLines": "E2E (implementer) and E2E (tester) are both present at code head e6644f73, with negative controls.",
+  "thermo": "thermonuclear-deep-review: APPROVE at e6644f73 (Minor only). thermonuclear-code-quality: CHANGES at e6644f73 (cleanup only).",
   "keyFindings": [
     {
-      "severity": "critical",
-      "file": "packages/envoy/cmd/listener/confirmed.go:368",
-      "description": "confirmTopicRecipient counts any dedupeCache record as a confirmation, and the live topics lane (ENVOY_SUBSCRIBE_ALL_TOPICS=1, set by deploy/compose/listener.compose.yml:35 and single-node.compose.yml:61) records the route's own core publish for a portless self-subscribed session it Skipped (delivery.go:800-810, session.go:68-71) in the same cache (main.go:757). Reproduced on the real binary: lane off 504 receipt_timeout in 4.22 s, lane on 200 in 0.22 s for a recipient that never confirmed."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/cmd/listener/confirmed.go:453-457",
-      "description": "A core publish (or the sender-stamp read) the window cuts short answers 504 not_confirmed with every recipient delivery_failed, and with no registered recipient the body is undelivered [] and the text '0 of 0 sessions ... did not confirm'; nothing names the failed topic publish, the same failure answered fast is a 500 (writeNATSError), and AGENTS.md:2176 documents 200 for a topic with no recipient without this answer."
-    },
-    {
-      "severity": "important",
-      "file": "PR body",
-      "description": "The PR adds answers at a process boundary (403 capability and 504 receipt_timeout/delivery_failed/not_confirmed on POST /v1/messages/publish, which answered 200; notify.ErrNotDelivered/ErrRefusedByHolder in the daemon) with no '## Contract change census': no search commands, no per-consumer dispositions (envoy-client transport.ts, daemon notify.go, claude-envoy, pi-envoy, scripts/e2e/dispatch-user-turns.sh:455, packages/pi-envoy/scripts/smoke-delivery.sh:217, packages/envoy/scripts/e2e-local.sh:403), and a release-order line that names only the 504 although an earlier daemon also retries the 403 without a cap and fences later notices behind it."
+      "severity": "minor",
+      "file": "packages/envoy/cmd/listener/delivery.go:342-396",
+      "description": "resolveCoreRoleHolder's switch sets `failure` inside the errors.As of the claim-read arm. The session-read and release arms work only because that arm runs first. Reordering the arms sends those failures to the 'churned past resolution bound' default with no compile error. Fix: call errors.As once before the switch and switch on failure.step."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/infra/go.work.sum",
-      "description": "Unrelated churn (+2/-23) from commit af958e66, a local go run rewrite; revert to main's."
+      "file": "packages/envoy/cmd/listener/confirmed.go:85-118,226,455",
+      "description": "sendOutcome is only half typed. The answer structs' Reason fields are still strings, filled through the identity reason(); settle switches on metric-label strings; line 455 logs a refused forward as `failed` while the recipient's outcome is delivery_failed. The type's doc says the log, the answer and the lane's lines read alike, but route lines log the raw outcome as delivery_status where the lane logs failed/skipped."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/cmd/listener/delivery.go:371",
-      "description": "Role-holder resolution now exists twice (resolveLaneRoleHolder with laneHolderOutcome/laneHolderResolution beside resolveLiveRoleHolder with roleHolderResult), bridged by liveResolution and a field-by-field translation in sendToRole; and deliveryModeRefusal (api.go:477) is not used by roleTopicDelivery, which keeps its own copy (delivery.go:530-558). Drift risk between the lane and the route."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/bus/nats.go:962-965",
-      "description": "PublishCoreContext's no-deadline fallback is unreachable (both callers pass a deadline) and contradicts its doc; plus listenerDeps duplicates listenerDeliveryHandlerConfig fields (main.go:51-61), outcomes are untyped strings (confirmed.go), and docs/solutions files still tell operators to look for 'listener role forwarded' for daemon notices, which now log 'listener publish role send'."
+      "file": "packages/envoy/cmd/listener/confirmed.go:504,520",
+      "description": "An ad-hoc send answered publish_failed, or a refused topic publish, adds nothing to envoy_messages_delivered_total. Every other failure through the route is counted (each unconfirmed recipient, every role send), so a hub outage seen through the route is invisible in that metric."
     }
   ],
-  "stack": "The head carries sjawhar/legion#2228 (INFRA-439) at 3ea454d3, open with changes requested (its head is now a92387a8); READY checks only .legion/INFRA-547/, so nothing in the gate stops #2228's code and .legion/INFRA-439/ reaching main through this pull request. Told to the architect; recorded in the PR body's Not proven / risk."
+  "stack": "The head still carries sjawhar/legion#2228 at 3ea454d3, and #2228 is still open with changes requested (head a92387a8). Recorded in the PR body's Not proven / risk; already told to the architect in round 1."
 }
