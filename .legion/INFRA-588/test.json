@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-588",
+  "completed": "2026-10-27T16:08:00Z",
+  "head": "c16bccdd6a0724505febc3a7c527cb2de7f117b8",
+  "codeHead": "fa1502d187dd6945f0ff4808b4eb9adb915e7a60",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran P1-P4 at the head under test in a workdir of my own ($TMPDIR/ct-p2, fresh clone), and checked each claim by an independent route: P1's combined numbers recomputed with jq from the raw records and every table row diffed against baseline.md Parts 1 and 2; P2's population and merge differences derived by set difference of the two raw files; P3's 79/10/2 split recomputed by my own git merge-base --is-ancestor loop over all 91 merges; P4's row count checked as the union of both windows' file sets. All the implementer's figures hold; P2 now reads 134 PRs (implementer 133) because #2411 itself was opened after the implementer's run, and P4 shows 372 rows (implementer 373) at a later run time, the union invariant holding."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "The port reproduces the before measurement (P1)",
+      "surface": "the CLI on the Python run's raw records (dispatch://INFRA-588/artifact/conflict-baseline-2026-10-20-to-27-json)",
+      "command": "bun scripts/conflicts/measure.ts --from-json \"$TMPDIR/before.json\" --branch-prefix legion/ (and without --branch-prefix); table rows of each section diffed against dispatch://INFRA-588/artifact/conflict-baseline-2026-10-20-to-27-md after removing separator rows, collapsing cell spacing and mapping **tests** back to __tests__",
+      "observed": "exit 0; combined 126 read / 80 carrying / 253 conflicting / tiers 89 and 108 / packages/envoy/CHANGELOG.md 89 events in 39 PRs, and jq over the raw records gives the same 253, 80, 89, 39; merged section 68/38/117/106 (36 PRs)/11, tiers 31/41/43/62; the merged, other, force-push and snapshot sections' 638 table rows equal baseline.md Part 1's, and without the prefix 870 rows equal Part 2's (193 merged); summary bullet lines identical apart from the renamed section headers",
+      "headSha": "c16bccdd6a0724505febc3a7c527cb2de7f117b8",
+      "negativeControl": "--from-json of a JSON array -> 'raw records are not a JSON object', exit 2; of {prs:[{number:1}]} -> 'prs[0] needs a number, headRefName, state, merges and force_pushes', exit 2; of a run with until 'x' -> '--until must be YYYY-MM-DD or an RFC 3339 instant', exit 2; of selection 'x' -> unknown selection, exit 2"
+    },
+    {
+      "criterion": "The script measures live GitHub history the same way (P2)",
+      "surface": "the CLI against sjawhar/legion on GitHub, fresh workdir",
+      "command": "rm -rf $TMPDIR/ct-p2 && bun scripts/conflicts/measure.ts --since 2026-10-20 --until 2026-10-27T11:21:00Z --branch-prefix legion/ --workdir \"$TMPDIR/ct-p2\"",
+      "observed": "exit 0, 214 s, workdir 620 MB; merged-in-window section byte-equal (cmp) to P1's; combined 134/82/259; set difference of the raw files: +8 PRs read (#2235 closed unmerged; #2397, #2402-#2406, #2411 created 11:27Z-15:48Z), +6 unique conflicting merges (#2235 2026-10-26T09:12Z, #2397 08:16Z, #2373 11:15:05Z, #2361 11:15:48Z, #2366 11:17:24Z, #2233 11:20:26Z), no merge of the before run missing; 0b7f2af (09:42Z) is newly carried by #2323 but was already counted under #2390",
+      "headSha": "c16bccdd6a0724505febc3a7c527cb2de7f117b8",
+      "negativeControl": "--since 2026-10-28 --until 2026-10-27 -> '--since 2026-10-28 is after --until 2026-10-27', exit 2; --since 2026-02-30, 2026-13-01, 2026-10-20T25:00:00Z, a zone-less instant and a space-separated instant -> each exit 2 naming --since; no workdir created by any of them; --since 2024-01-01 -> exit 1, '1000 pull requests were updated since 2024-01-01T00:00:00Z, GitHub's search cap'"
+    },
+    {
+      "criterion": "Fix states work on real history (P3)",
+      "surface": "the CLI with --fixed against the live clone",
+      "command": "P2's command with --workdir $TMPDIR/ct-p2 plus --fixed 'packages/envoy/CHANGELOG.md=1b8d5c13e496' --fixed 'packages/claude-envoy/legion/**=1b8d5c13e496'; then a shell loop running git merge-base --is-ancestor 1b8d5c13e496 against each counted merge's upstream and branch parents from the raw records",
+      "observed": "exit 0; envoy CHANGELOG 91 merges (39 PRs) = before 79 + transition 10 + after 2, and my own ancestry loop over all 91 gives 79/10/2 (transition e.g. 6c7b9483ff36, aac74fb5cb3d; after cd3c748767ee, f530ab46c931); packages/claude-envoy/legion/** 25 merges in 11 PRs, the spec's figure; two concurrent --from-json --fixed runs on the same workdir both exit 0 with identical output",
+      "headSha": "c16bccdd6a0724505febc3a7c527cb2de7f117b8",
+      "negativeControl": "--fixed 'packages/envoy/CHANGELOG.md=0000000000000000000000000000000000000000' -> 'does not resolve to a commit', exit 2; --fixed with refs/pull/2397/head (34719431fb67, merge-base --is-ancestor on origin/main exit 1) -> 'is not on origin/main', exit 2; --fixed '=abc' and 'x=' -> 'must be <glob>=<commit>', exit 2"
+    },
+    {
+      "criterion": "The comparison the production check runs works before the merge (P4)",
+      "surface": "the CLI with --compare-with the before records, live window since the Python run",
+      "command": "bun scripts/conflicts/measure.ts --since 2026-10-27T11:21:00Z --branch-prefix legion/ --workdir \"$TMPDIR/ct-p2\" --compare-with \"$TMPDIR/before.json\"",
+      "observed": "exit 0, 42 s; before column 126 read / 80 carrying (63.5%) / 253 merges (2.01 per PR) / tiers 89 (35.2%) and 108 (42.7%), equal to P1's combined section; after 49 / 29 (59.2%) / 50; 372 file rows, equal to the union of P1's 337 and this run's 66 conflicted files",
+      "headSha": "c16bccdd6a0724505febc3a7c527cb2de7f117b8",
+      "negativeControl": "--compare-with a file containing 'not json' -> 'raw records are not JSON', exit 2, no workdir created; --compare-with /nonexistent -> 'cannot read /nonexistent', exit 2"
+    },
+    {
+      "criterion": "Window bounds are inclusive dates or exact instants",
+      "surface": "the CLI on the before raw records with edited since/until",
+      "command": "jq-edited copies of before.json with since/until set to the first (2026-10-20T00:11:15Z) and last (2026-10-27T11:12:22Z) counted merge, one second inside each, and since 2026-10-20T02:00:00+02:00; each run with --from-json --branch-prefix legion/",
+      "observed": "since or until at the merge's second: 253; one second inside: 252; the +02:00 offset instant: 253, equal to the date",
+      "headSha": "c16bccdd6a0724505febc3a7c527cb2de7f117b8",
+      "negativeControl": "--from-json together with --since -> '--since and --until do not apply to --from-json', exit 2"
+    }
+  ],
+  "observations": [
+    "Overlapping --fixed globs: the first matching glob wins (README line 107), so --fixed 'packages/*/CHANGELOG.md=X' --fixed 'packages/envoy/CHANGELOG.md=X' totals the second glob as 0 merges though 89 match it; README line 109 says zeros appear 'when it matched nothing'. The production check's planned globs do not overlap, so no measured number changes; the reviewer may judge the wording.",
+    "--compare-with is parsed before the run but its window is validated only after the live run, so a records file with a malformed since/until is refused with exit 2 after the run (the run's own raw records are written first).",
+    "Mutation check of the suite in a scratch copy: until/since exclusivity, transition/after swap, before-by-branch-parent, no dedupe, merge-tree first-line slice, fix-not-on-main, other-branch kind, prefix ignored, date-until at midnight, per-glob double count and since-after-until are each caught; removing the .changes/ changelog rule is caught by no test (the CLI classifies .changes/ paths as changelog correctly today)."
+  ]
+}
