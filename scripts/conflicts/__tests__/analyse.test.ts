@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { analysePullRequest, classifyFixes, resolveFixes } from "../analyse.ts";
 import { GitRepo } from "../git.ts";
-import { type GraphCommit, type GraphPullRequest, type MergeRecord, UsageError } from "../types.ts";
+import {
+  type FixPair,
+  type GraphCommit,
+  type GraphPullRequest,
+  type MergeRecord,
+  UsageError,
+} from "../types.ts";
 
 const UPSTREAM = "refs/remotes/origin/main";
 /** An oid no test repository holds, and that `file:///nonexistent` cannot provide. */
@@ -152,6 +158,12 @@ function mergeOf(merges: MergeRecord[], oid: string): MergeRecord {
   return merge;
 }
 
+/** `merge` counted against the fix `commit` under `glob`, as `summarise` pairs them. */
+function pairOf(merge: MergeRecord, glob: string, commit: string): FixPair {
+  const { oid, branch_parent, upstream_parent, conflicts } = merge;
+  return { oid, glob, commit, branch_parent, upstream_parent, paths: conflicts ?? [] };
+}
+
 /** `pr` with each commit's parent `from` renamed `to`, as GitHub lists a commit the clone lacks. */
 function withParent(pr: GraphPullRequest, from: string, to: string): GraphPullRequest {
   const commits = pr.commits.map((c) => ({
@@ -277,8 +289,9 @@ describe("fix states", () => {
     const merge = mergeOf((await analysePullRequest(git, pr, UPSTREAM)).merges, m1);
 
     const stateFor = async (commit: string) => {
-      const fixes = await resolveFixes(git, [{ glob: "**/CHANGELOG.md", commit }]);
-      return (await classifyFixes(git, [merge], fixes)).get(m1)?.get("**/CHANGELOG.md");
+      const [fix] = await resolveFixes(git, [{ glob: "**/CHANGELOG.md", commit }]);
+      const pair = pairOf(merge, fix.glob, fix.commit);
+      return (await classifyFixes(git, [pair])).get(m1)?.get("**/CHANGELOG.md");
     };
 
     expect(await stateFor(c)).toBe("before");
@@ -303,17 +316,18 @@ describe("fix states", () => {
   test("classifyFixes refuses a merge whose parent cannot be fetched", async () => {
     const { git, pr, c, m1 } = await changelogHistory();
     const merge = mergeOf((await analysePullRequest(git, pr, UPSTREAM)).merges, m1);
-    const fixes = await resolveFixes(git, [{ glob: "**/CHANGELOG.md", commit: c }]);
+    const [fix] = await resolveFixes(git, [{ glob: "**/CHANGELOG.md", commit: c }]);
 
     for (const event of [
       { ...merge, upstream_parent: ABSENT },
       { ...merge, branch_parent: ABSENT },
     ]) {
-      const error = await classifyFixes(git, [event], fixes).catch((e: unknown) => e);
+      const pair = pairOf(event, fix.glob, fix.commit);
+      const error = await classifyFixes(git, [pair]).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(Error);
       expect(error).not.toBeInstanceOf(UsageError);
     }
-    const states = await classifyFixes(git, [merge], fixes);
+    const states = await classifyFixes(git, [pairOf(merge, fix.glob, fix.commit)]);
     expect(states.get(m1)?.get("**/CHANGELOG.md")).toBe("before");
   });
 });

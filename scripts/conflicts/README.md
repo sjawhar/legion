@@ -116,9 +116,11 @@ The by-file table gains `before`, `transition` and `after` columns for the match
 comparison shows the after run's states. The first matching glob wins. Each glob also totals the
 conflicting merges with a conflicted file it matches, each merge once however many of its files
 match, with the pull requests carrying them and each merge's state (zeros when it matched nothing);
-the comparison shows these totals before and after, the before run's counted without git. Fix states
-need git, so `--fixed` with `--from-json` uses the bare clone in `--workdir`, fetched unless
-`--no-fetch`.
+the comparison shows these totals before and after, the before run's counted without git. A glob
+also totals zero when an earlier `--fixed` glob takes every path it matches: with
+`packages/*/CHANGELOG.md` given before `packages/envoy/CHANGELOG.md`, the second totals 0, so give
+narrower globs first. Fix states need git, so `--fixed` with `--from-json` uses the bare clone in
+`--workdir`, fetched unless `--no-fetch`.
 
 ## Raw records
 

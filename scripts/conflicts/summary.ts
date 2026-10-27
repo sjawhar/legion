@@ -1,8 +1,8 @@
 import {
+  type FixPair,
   type FixSpec,
   type FixState,
   type FixStates,
-  fixMatcher,
   type MergeKind,
   type MergeRecord,
   type PullRequestRecord,
@@ -226,12 +226,14 @@ export interface Summary {
   forcePushes: ForcePushSection;
   snapshot: SnapshotSection;
   fixes: FixTotal[] | null;
+  /** The (merge, glob) pairs the totals count; fix states are found for these. */
+  fixPairs: FixPair[];
 }
 
 export interface SummaryOptions {
   prefix: string;
-  /** Without `states`, the totals carry no states and the file rows no `fix`. */
-  fixes?: { specs: FixSpec[]; states?: FixStates };
+  /** The totals carry no states and the file rows no `fix`; `applyFixStates` adds them. */
+  fixes?: FixSpec[];
 }
 
 /** A counted thing with conflicted paths: a merge, a force push or an open head. */
@@ -355,53 +357,88 @@ function conflictingForward(events: MergeEvent[]): Array<MergeEvent & Conflicted
 
 const noFixes = (): FixCounts => ({ before: 0, transition: 0, after: 0 });
 
-/** Totals each spec's matching merges, and with fix states puts them on the file rows a spec
- * matches (per merge and path) and on the totals (per merge). */
-function applyFixes(
-  section: MergeSection,
+/** The spec a path falls under: the first whose glob matches it, or undefined. */
+function fixMatcher(specs: FixSpec[]): (path: string) => FixSpec | undefined {
+  const globs = specs.map((spec) => ({ spec, glob: new Bun.Glob(spec.glob) }));
+  return (path) => globs.find(({ glob }) => glob.match(path))?.spec;
+}
+
+/** Totals each spec's matching merges, without states, and gives the (merge, glob) pairs it
+ * counted; a path counts for the first spec matching it, a merge once per spec. */
+function countFixes(
   events: Map<string, MergeEvent>,
-  fixes: NonNullable<SummaryOptions["fixes"]>
-): FixTotal[] {
-  const { specs, states } = fixes;
+  specs: FixSpec[]
+): { totals: FixTotal[]; pairs: FixPair[] } {
   const match = fixMatcher(specs);
-  const totals = new Map(
-    specs.map((spec) => [spec, { merges: [] as MergeEvent[], states: states ? noFixes() : null }])
-  );
-  const rows = new Map(section.tables.files.map((row) => [row.path, row]));
+  const merges = new Map(specs.map((spec) => [spec, [] as MergeEvent[]]));
+  const pairs: FixPair[] = [];
   for (const event of conflictingForward([...events.values()])) {
-    const matched = new Map<FixSpec, FixState | null>();
+    const matched = new Map<FixSpec, string[]>();
     for (const path of event.conflicts) {
       const spec = match(path);
       if (!spec) continue;
-      let state = matched.get(spec);
-      if (state === undefined) {
-        state = null;
-        if (states) {
-          const found = states.get(event.oid)?.get(spec.glob);
-          if (!found) throw new Error(`no fix state for ${path} in merge ${event.oid}`);
-          state = found;
-        }
-        matched.set(spec, state);
-      }
-      if (state) {
-        const row = rows.get(path) as FileRow;
-        row.fix ??= noFixes();
-        row.fix[state]++;
-      }
+      const paths = matched.get(spec);
+      if (paths) paths.push(path);
+      else matched.set(spec, [path]);
     }
-    for (const [spec, state] of matched) {
-      const total = totals.get(spec) as { merges: MergeEvent[]; states: FixCounts | null };
-      total.merges.push(event);
-      if (state && total.states) total.states[state]++;
+    const { branch_parent, upstream_parent } = event.record;
+    for (const [spec, paths] of matched) {
+      (merges.get(spec) as MergeEvent[]).push(event);
+      pairs.push({
+        oid: event.oid,
+        glob: spec.glob,
+        commit: spec.commit,
+        branch_parent,
+        upstream_parent,
+        paths,
+      });
     }
   }
-  return [...totals].map(([{ glob, commit }, total]) => ({
+  const totals = [...merges].map(([{ glob, commit }, matching]) => ({
     glob,
     commit,
-    merges: total.merges.length,
-    prs: prsOf(total.merges).size,
-    states: total.states,
+    merges: matching.length,
+    prs: prsOf(matching).size,
+    states: null,
   }));
+  return { totals, pairs };
+}
+
+/**
+ * The summary with the fix states of its pairs: each spec's totals count each of its merges once,
+ * in its state, and each by-file row a spec takes counts each merge on it, in its state.
+ */
+export function applyFixStates(summary: Summary, states: FixStates): Summary {
+  const totals = new Map<string, FixCounts>();
+  const byFile = new Map<string, FixCounts>();
+  for (const { oid, glob, paths } of summary.fixPairs) {
+    const state = states.get(oid)?.get(glob);
+    if (state === undefined) throw new Error(`no fix state for ${glob} in merge ${oid}`);
+    const total = totals.get(glob) ?? noFixes();
+    total[state]++;
+    totals.set(glob, total);
+    for (const path of paths) {
+      const fix = byFile.get(path) ?? noFixes();
+      fix[state]++;
+      byFile.set(path, fix);
+    }
+  }
+  const { combined } = summary;
+  const files = combined.tables.files.map((row) => {
+    const fix = byFile.get(row.path);
+    return fix ? { ...row, fix } : row;
+  });
+  return {
+    ...summary,
+    combined: { ...combined, tables: { ...combined.tables, files } },
+    // A repeated glob's later spec matches nothing: the first takes every path it matches.
+    fixes:
+      summary.fixes?.map((fix) => {
+        const counts = totals.get(fix.glob) ?? noFixes();
+        totals.delete(fix.glob);
+        return { ...fix, states: counts };
+      }) ?? null,
+  };
 }
 
 function forcePushSection(
@@ -497,17 +534,6 @@ function prsRead(
 }
 
 /**
- * The combined section's counted conflicting forward merges, one record per merge commit (the
- * first PR's, as the section takes it): the merges `--fixed` classifies.
- */
-export function conflictingMerges(run: RawRun, prefix: string): MergeRecord[] {
-  const window = resolveWindow(run.since, run.until);
-  const inWindow = windowTest(window);
-  const events = uniqueMerges(prsRead(run, prefix, window, inWindow), inWindow);
-  return conflictingForward([...events.values()]).map((event) => event.record);
-}
-
-/**
  * Python's `summarise` as numbers: events are unique merge commits, a merge carried by several
  * PRs counts once and is attributed to each; only merges and force pushes dated inside the
  * window count, and only the PRs `prsRead` gives.
@@ -525,7 +551,7 @@ export function summarise(run: RawRun, options: SummaryOptions): Summary {
 
   const allEvents = uniqueMerges(prs, inWindow);
   const mergedEvents = uniqueMerges(merged, inWindow);
-  const combined = mergeSection(prs.length, allEvents);
+  const fixes = options.fixes ? countFixes(allEvents, options.fixes) : null;
   return {
     window: {
       since: run.since,
@@ -536,12 +562,13 @@ export function summarise(run: RawRun, options: SummaryOptions): Summary {
     },
     originMain: run.origin_main,
     prefix: options.prefix,
-    combined,
+    combined: mergeSection(prs.length, allEvents),
     merged: mergeSection(merged.length, mergedEvents),
     other: mergeSection(other.length, uniqueMerges(other, inWindow, new Set(mergedEvents.keys()))),
     forcePushes: forcePushSection([...merged, ...other], inWindow),
     snapshot: snapshotSection(prs.filter((pr) => pr.state === "OPEN")),
-    fixes: options.fixes ? applyFixes(combined, allEvents, options.fixes) : null,
+    fixes: fixes?.totals ?? null,
+    fixPairs: fixes?.pairs ?? [],
   };
 }
 

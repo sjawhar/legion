@@ -39,78 +39,72 @@ interface QueryPage {
   };
 }
 
-/** Where the pull requests come from: GitHub through `gh`. */
-interface PullRequestSource {
-  /** Every pull request, any state, updated at or after `sinceInstant`. */
-  list(sinceInstant: string): Promise<Array<{ number: number; headRefName: string }>>;
-  fetch(number: number): Promise<GraphPullRequest>;
-}
-
 /** Runs `gh` and parses its JSON output; throws naming the command and its stderr on failure. */
 async function gh<T>(args: string[]): Promise<T> {
   return JSON.parse((await run(["gh", ...args], success)).stdout) as T;
 }
 
-/** `repo`'s pull requests as `owner/name` on GitHub, read with the `gh` CLI's credentials. */
-export function ghSource(repo: string): PullRequestSource {
-  const [owner, name] = repo.split("/");
-  return {
-    async list(sinceInstant) {
-      const prs = await gh<Array<{ number: number; headRefName: string }>>([
-        "pr",
-        "list",
-        "--repo",
-        repo,
-        "--state",
-        "all",
-        "--limit",
-        `${SEARCH_CAP}`,
-        "--search",
-        `updated:>=${sinceInstant}`,
-        "--json",
-        "number,headRefName",
-      ]);
-      if (prs.length >= SEARCH_CAP) {
-        throw new Error(
-          `${prs.length} pull requests were updated since ${sinceInstant}, GitHub's search cap: ` +
-            "the window is too large for one search; measure a shorter window"
-        );
-      }
-      return prs;
-    },
+/** Every pull request of `repo` (`owner/name` on GitHub), any state, updated at or after
+ * `sinceInstant`, read with the `gh` CLI's credentials. */
+export async function listPullRequests(
+  repo: string,
+  sinceInstant: string
+): Promise<Array<{ number: number; headRefName: string }>> {
+  const prs = await gh<Array<{ number: number; headRefName: string }>>([
+    "pr",
+    "list",
+    "--repo",
+    repo,
+    "--state",
+    "all",
+    "--limit",
+    `${SEARCH_CAP}`,
+    "--search",
+    `updated:>=${sinceInstant}`,
+    "--json",
+    "number,headRefName",
+  ]);
+  if (prs.length >= SEARCH_CAP) {
+    throw new Error(
+      `${prs.length} pull requests were updated since ${sinceInstant}, GitHub's search cap: ` +
+        "the window is too large for one search; measure a shorter window"
+    );
+  }
+  return prs;
+}
 
-    async fetch(number) {
-      const commits: GraphCommit[] = [];
-      let after: string | null = null;
-      for (;;) {
-        const page: QueryPage = await gh<QueryPage>([
-          "api",
-          "graphql",
-          "-f",
-          `query=${QUERY}`,
-          "-f",
-          `owner=${owner}`,
-          "-f",
-          `name=${name}`,
-          "-F",
-          `n=${number}`,
-          ...(after ? ["-f", `after=${after}`] : []),
-        ]);
-        const pr = page.data.repository.pullRequest;
-        if (pr === null) throw new Error(`${repo}#${number} is not a pull request`);
-        commits.push(...pr.commits.nodes.map((node) => node.commit));
-        if (!pr.commits.pageInfo.hasNextPage) {
-          const { commits: _, timelineItems, ...fields } = pr;
-          return {
-            ...fields,
-            commits,
-            forcePushes: timelineItems.nodes.filter(
-              (node): node is GraphForcePush => node?.createdAt !== undefined
-            ),
-          };
-        }
-        after = pr.commits.pageInfo.endCursor;
-      }
-    },
-  };
+/** Pull request `number` of `repo` (`owner/name` on GitHub), every page of its commits read. */
+export async function fetchPullRequest(repo: string, number: number): Promise<GraphPullRequest> {
+  const [owner, name] = repo.split("/");
+  const commits: GraphCommit[] = [];
+  let after: string | null = null;
+  for (;;) {
+    const page: QueryPage = await gh<QueryPage>([
+      "api",
+      "graphql",
+      "-f",
+      `query=${QUERY}`,
+      "-f",
+      `owner=${owner}`,
+      "-f",
+      `name=${name}`,
+      "-F",
+      `n=${number}`,
+      ...(after ? ["-f", `after=${after}`] : []),
+    ]);
+    const pr = page.data.repository.pullRequest;
+    if (pr === null) throw new Error(`${repo}#${number} is not a pull request`);
+    commits.push(...pr.commits.nodes.map((node) => node.commit));
+    if (!pr.commits.pageInfo.hasNextPage) {
+      const { commits: _, timelineItems, ...fields } = pr;
+      return {
+        ...fields,
+        commits,
+        forcePushes: timelineItems.nodes.filter(
+          (node): node is GraphForcePush => node?.createdAt !== undefined
+        ),
+      };
+    }
+    after = pr.commits.pageInfo.endCursor;
+  }
 }

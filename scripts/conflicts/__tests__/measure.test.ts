@@ -3,7 +3,6 @@ import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { conflictingMerges, readRawRun, summarise } from "../summary.ts";
 
 const MEASURE = join(import.meta.dir, "..", "measure.ts");
 const WINDOW = join(import.meta.dir, "..", "__fixtures__", "window.json");
@@ -63,17 +62,7 @@ describe("measure exit codes", () => {
   test("valid raw records are summarised with 0", async () => {
     const { code, stdout } = await measure(["--from-json", WINDOW, "--branch-prefix", "legion/"]);
     expect(code).toBe(0);
-    expect(stdout.length).toBeGreaterThan(0);
-  });
-});
-
-describe("conflictingMerges", () => {
-  test("gives --fixed exactly the combined section's conflicting forward merges", async () => {
-    const run = readRawRun(await Bun.file(WINDOW).text());
-    for (const prefix of ["legion/", ""]) {
-      const merges = conflictingMerges(run, prefix);
-      expect(new Set(merges.map((merge) => merge.oid)).size).toBe(merges.length);
-      expect(merges.length).toBe(summarise(run, { prefix }).combined.conflicting);
-    }
+    // window.json holds three PRs on legion/ branches, all of them read.
+    expect(/^- PRs read: (\d+);/m.exec(stdout)?.[1]).toBe("3");
   });
 });

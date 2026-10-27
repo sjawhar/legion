@@ -1,10 +1,10 @@
 import { type GitRepo, ORIGIN_MAIN } from "./git.ts";
 import {
+  type FixPair,
   type FixSpec,
   type FixState,
   type FixStates,
   type ForcePushRecord,
-  fixMatcher,
   type GraphPullRequest,
   type MergeRecord,
   type PullRequestRecord,
@@ -151,40 +151,31 @@ export async function resolveFixes(
 }
 
 /**
- * Where each merge stood against each fix whose glob matches one of its conflicted paths (first
- * matching spec wins per path), keyed by the spec's glob: `before` when the upstream parent lacks
+ * Where each pair's merge stood against its glob's fix: `before` when the upstream parent lacks
  * the fix, `transition` when the upstream parent has it and the branch parent does not, `after`
- * when both have it. Throws when a classified merge's parent cannot be fetched.
+ * when both have it. Throws when a merge's parent is absent or cannot be fetched.
  */
-export async function classifyFixes(
-  git: GitRepo,
-  events: Array<Pick<MergeRecord, "oid" | "branch_parent" | "upstream_parent" | "conflicts">>,
-  fixes: FixSpec[]
-): Promise<FixStates> {
-  const match = fixMatcher(fixes);
+export async function classifyFixes(git: GitRepo, pairs: FixPair[]): Promise<FixStates> {
   const states: FixStates = new Map();
-  for (const { oid, branch_parent, upstream_parent, conflicts } of events) {
-    if (!branch_parent || !upstream_parent || !conflicts) continue;
-    const matched = new Map<string, FixSpec>();
-    for (const path of conflicts) {
-      const fix = match(path);
-      if (fix && !matched.has(fix.glob)) matched.set(fix.glob, fix);
+  for (const { oid, glob, commit, branch_parent, upstream_parent } of pairs) {
+    if (!branch_parent || !upstream_parent) {
+      throw new Error(`merge ${oid}: no branch or upstream parent to classify against ${glob}`);
     }
-    if (matched.size === 0) continue;
-    for (const parent of [upstream_parent, branch_parent]) {
-      if (!(await git.fetchOid(parent))) {
-        throw new Error(`merge ${oid}: parent ${parent} is missing and could not be fetched`);
+    let byGlob = states.get(oid);
+    if (byGlob === undefined) {
+      for (const parent of [upstream_parent, branch_parent]) {
+        if (!(await git.fetchOid(parent))) {
+          throw new Error(`merge ${oid}: parent ${parent} is missing and could not be fetched`);
+        }
       }
+      byGlob = new Map<string, FixState>();
+      states.set(oid, byGlob);
     }
-    const byGlob = new Map<string, FixState>();
-    for (const [glob, fix] of matched) {
-      let state: FixState;
-      if (!(await git.isAncestor(fix.commit, upstream_parent))) state = "before";
-      else if (!(await git.isAncestor(fix.commit, branch_parent))) state = "transition";
-      else state = "after";
-      byGlob.set(glob, state);
-    }
-    states.set(oid, byGlob);
+    let state: FixState;
+    if (!(await git.isAncestor(commit, upstream_parent))) state = "before";
+    else if (!(await git.isAncestor(commit, branch_parent))) state = "transition";
+    else state = "after";
+    byGlob.set(glob, state);
   }
   return states;
 }

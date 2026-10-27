@@ -10,22 +10,29 @@ import {
   upstreamRefFor,
 } from "./analyse.ts";
 import { GitRepo, ORIGIN_MAIN } from "./git.ts";
-import { ghSource } from "./github.ts";
+import { fetchPullRequest, listPullRequests } from "./github.ts";
 import { renderComparison, renderSummary } from "./render.ts";
-import { compare, conflictingMerges, readRawRun, resolveWindow, summarise } from "./summary.ts";
+import { applyFixStates, compare, readRawRun, resolveWindow, summarise } from "./summary.ts";
 import { type FixSpec, type PullRequestRecord, type RawRun, UsageError } from "./types.ts";
 
+/** Where the run comes from: measured live over a window, or read from earlier raw records. */
+type Source = { kind: "live"; since: string; until?: string } | { kind: "json"; path: string };
+
 interface Options {
-  since?: string;
-  until?: string;
+  source: Source;
   repo: string;
   workdir: string;
   fetch: boolean;
-  fromJson?: string;
   jobs: number;
   prefix: string;
   fixed: Array<{ glob: string; commit: string }>;
   compareWith?: string;
+}
+
+/** A run's raw records, and the clone and resolved specs its fix states need under `--fixed`. */
+interface Measured {
+  run: RawRun;
+  fixes: { git: GitRepo; specs: FixSpec[] } | null;
 }
 
 /** An RFC 3339 instant truncated to whole seconds. */
@@ -60,22 +67,11 @@ function parseOptions(argv: string[]): Options {
       }
       return { glob: value.slice(0, at), commit: value.slice(at + 1) };
     });
-    const fromJson = values["from-json"];
-    if (fromJson === undefined && since === undefined) {
-      throw new UsageError("--since is required unless --from-json is given");
-    }
-    if (fromJson !== undefined && (since !== undefined || until !== undefined)) {
-      throw new UsageError(
-        "--since and --until do not apply to --from-json: its run has its window"
-      );
-    }
     return {
-      since,
-      until,
+      source: parseSource(values["from-json"], since, until),
       repo: values.repo,
       workdir: values.workdir ?? join(process.env.TMPDIR || ".", "conflicts"),
       fetch: !values["no-fetch"],
-      fromJson,
       jobs: Number(jobs),
       prefix: values["branch-prefix"],
       fixed,
@@ -85,6 +81,24 @@ function parseOptions(argv: string[]): Options {
     // parseArgs throws a TypeError for an unknown flag, a missing value or a positional.
     throw error instanceof UsageError ? error : new UsageError((error as Error).message);
   }
+}
+
+/** The run's source: `--from-json`'s file, or the window `--since` (required without it) opens. */
+function parseSource(
+  fromJson: string | undefined,
+  since: string | undefined,
+  until: string | undefined
+): Source {
+  if (fromJson === undefined) {
+    if (since === undefined) {
+      throw new UsageError("--since is required unless --from-json is given");
+    }
+    return { kind: "live", since, until };
+  }
+  if (since !== undefined || until !== undefined) {
+    throw new UsageError("--since and --until do not apply to --from-json: its run has its window");
+  }
+  return { kind: "json", path: fromJson };
 }
 
 /** An earlier run's raw records; an unreadable file is a usage error, as invalid records are. */
@@ -116,62 +130,69 @@ async function readPullRequests(
   options: Options,
   sinceInstant: string
 ): Promise<PullRequestRecord[]> {
-  const source = ghSource(options.repo);
-  const listed = (await source.list(sinceInstant)).filter((pr) =>
+  const listed = (await listPullRequests(options.repo, sinceInstant)).filter((pr) =>
     pr.headRefName.startsWith(options.prefix)
   );
   const prs = await mapLimit(listed, options.jobs, async ({ number }) => {
-    const pr = await source.fetch(number);
+    const pr = await fetchPullRequest(options.repo, number);
     return analysePullRequest(git, pr, await upstreamRefFor(git, pr.baseRefName));
   });
   return prs.sort((a, b) => a.number - b.number);
 }
 
+/** Earlier raw records; with `--fixed`, the clone is opened and the specs resolved after them. */
+async function readJsonRun(options: Options, path: string): Promise<Measured> {
+  const run = await readRun(path);
+  if (options.fixed.length === 0) return { run, fixes: null };
+  const git = await openRepo(options);
+  return { run, fixes: { git, specs: await resolveFixes(git, options.fixed) } };
+}
+
+/** Measures the window live and writes its raw records to the workdir. */
+async function measureRun(
+  options: Options,
+  source: Extract<Source, { kind: "live" }>
+): Promise<Measured> {
+  const measuredAt = instant(Date.now());
+  const { since } = source;
+  const until = source.until ?? measuredAt;
+  // A bad window, then a bad --fixed commit, is refused before the long part of the run.
+  const window = resolveWindow(since, until);
+  const git = await openRepo(options);
+  const specs = await resolveFixes(git, options.fixed);
+  const originMain = await git.revParse(ORIGIN_MAIN);
+  const run: RawRun = {
+    since,
+    until,
+    origin_main: originMain,
+    prs: await readPullRequests(git, options, instant(window.since)),
+    measured_at: measuredAt,
+    selection: "updated-since",
+  };
+  const out = join(options.workdir, `conflicts-${since}_${until}.json`);
+  await writeFile(out, `${JSON.stringify(run, null, 1)}\n`);
+  console.error(`raw records: ${out}`);
+  return { run, fixes: specs.length > 0 ? { git, specs } : null };
+}
+
 async function main(argv: string[]): Promise<void> {
   const options = parseOptions(argv);
   const before = options.compareWith === undefined ? null : await readRun(options.compareWith);
+  const { source } = options;
+  const { run, fixes } =
+    source.kind === "json"
+      ? await readJsonRun(options, source.path)
+      : await measureRun(options, source);
 
-  let run: RawRun;
-  let git: GitRepo | null = null;
-  let specs: FixSpec[] = [];
-  if (options.fromJson !== undefined) {
-    run = await readRun(options.fromJson);
-    if (options.fixed.length > 0) {
-      git = await openRepo(options);
-      specs = await resolveFixes(git, options.fixed);
-    }
-  } else {
-    const measuredAt = instant(Date.now());
-    const since = options.since as string;
-    const until = options.until ?? measuredAt;
-    // A bad window, then a bad --fixed commit, is refused before the long part of the run.
-    const window = resolveWindow(since, until);
-    git = await openRepo(options);
-    specs = await resolveFixes(git, options.fixed);
-    const originMain = await git.revParse(ORIGIN_MAIN);
-    run = {
-      since,
-      until,
-      origin_main: originMain,
-      prs: await readPullRequests(git, options, instant(window.since)),
-      measured_at: measuredAt,
-      selection: "updated-since",
-    };
-    const out = join(options.workdir, `conflicts-${since}_${until}.json`);
-    await writeFile(out, `${JSON.stringify(run, null, 1)}\n`);
-    console.error(`raw records: ${out}`);
-  }
-
-  const fixes =
-    git !== null && specs.length > 0
-      ? { specs, states: await classifyFixes(git, conflictingMerges(run, options.prefix), specs) }
-      : undefined;
-  const summary = summarise(run, { prefix: options.prefix, fixes });
+  const counted = summarise(run, { prefix: options.prefix, fixes: fixes?.specs });
+  const summary =
+    fixes === null
+      ? counted
+      : applyFixStates(counted, await classifyFixes(fixes.git, counted.fixPairs));
   console.log(renderSummary(summary));
   if (before !== null) {
     // The before run's glob totals, without states: its merges need no git.
-    const beforeFixes = specs.length > 0 ? { specs } : undefined;
-    const was = summarise(before, { prefix: options.prefix, fixes: beforeFixes });
+    const was = summarise(before, { prefix: options.prefix, fixes: fixes?.specs });
     console.log(renderComparison(compare(was, summary)));
   }
 }

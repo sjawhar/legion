@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { category, compare, readRawRun, resolveWindow, summarise } from "../summary.ts";
+import {
+  applyFixStates,
+  category,
+  compare,
+  readRawRun,
+  resolveWindow,
+  summarise,
+} from "../summary.ts";
 import {
   type FixState,
   type MergeRecord,
@@ -272,10 +279,10 @@ describe("summarise", () => {
       { glob: "packages/*/CHANGELOG.md", commit: "c1" },
       { glob: "docs/**", commit: "c2" },
     ];
-    const summary = summarise(await fixture("window.json"), {
-      prefix: "legion/",
-      fixes: { specs, states },
-    });
+    const summary = applyFixStates(
+      summarise(await fixture("window.json"), { prefix: "legion/", fixes: specs }),
+      states
+    );
     const fixOf = (path: string) =>
       summary.combined.tables.files.find((row) => row.path === path)?.fix;
     expect(fixOf(X_CHANGELOG)).toEqual({ before: 1, transition: 1, after: 1 });
@@ -340,7 +347,7 @@ describe("summarise", () => {
         ["k1", new Map<string, FixState>([["gen/**", "after"]])],
         ["k2", new Map<string, FixState>([["gen/**", "before"]])],
       ]);
-      const summary = summarise(run, { prefix: "legion/", fixes: { specs, states } });
+      const summary = applyFixStates(summarise(run, { prefix: "legion/", fixes: specs }), states);
       expect(summary.fixes).toEqual([
         {
           glob: "gen/**",
@@ -358,11 +365,58 @@ describe("summarise", () => {
     });
 
     test("without states the totals have no states and the file rows no fix", () => {
-      const summary = summarise(run, { prefix: "legion/", fixes: { specs } });
+      const summary = summarise(run, { prefix: "legion/", fixes: specs });
       expect(summary.fixes).toEqual([
         { glob: "gen/**", commit: "c", merges: 2, prs: 2, states: null },
       ]);
       expect(summary.combined.tables.files.every((row) => row.fix === undefined)).toBe(true);
+      expect(summary.fixPairs).toEqual([
+        {
+          oid: "k1",
+          glob: "gen/**",
+          commit: "c",
+          branch_parent: "k1-branch",
+          upstream_parent: "k1-main",
+          paths: ["gen/a.js", "gen/b.js"],
+        },
+        {
+          oid: "k2",
+          glob: "gen/**",
+          commit: "c",
+          branch_parent: "k2-branch",
+          upstream_parent: "k2-main",
+          paths: ["gen/a.js"],
+        },
+      ]);
+    });
+
+    test("takes every path a narrower later glob matches, leaving that glob at zero", () => {
+      const narrower = [...specs, { glob: "gen/a.js", commit: "c2" }];
+      const states = new Map<string, Map<string, FixState>>([
+        ["k1", new Map<string, FixState>([["gen/**", "after"]])],
+        ["k2", new Map<string, FixState>([["gen/**", "before"]])],
+      ]);
+      const counted = summarise(run, { prefix: "legion/", fixes: narrower });
+      expect(counted.fixPairs.map(({ oid, glob }) => [oid, glob])).toEqual([
+        ["k1", "gen/**"],
+        ["k2", "gen/**"],
+      ]);
+      expect(applyFixStates(counted, states).fixes).toEqual([
+        {
+          glob: "gen/**",
+          commit: "c",
+          merges: 2,
+          prs: 2,
+          states: { before: 1, transition: 0, after: 1 },
+        },
+        {
+          glob: "gen/a.js",
+          commit: "c2",
+          merges: 0,
+          prs: 0,
+          states: { before: 0, transition: 0, after: 0 },
+        },
+      ]);
     });
   });
 });
@@ -428,19 +482,16 @@ describe("compare", () => {
       { glob: "src/**", commit: "c2" },
       { glob: "README.md", commit: "c3" },
     ];
-    const before = summarise(await fixture("window.json"), {
-      prefix: "legion/",
-      fixes: { specs },
-    });
+    const before = summarise(await fixture("window.json"), { prefix: "legion/", fixes: specs });
     const states = new Map<string, Map<string, FixState>>([
       ["n1", new Map<string, FixState>([["packages/*/CHANGELOG.md", "after"]])],
       ["n2", new Map<string, FixState>([["README.md", "before"]])],
       ["n4", new Map<string, FixState>([["packages/*/CHANGELOG.md", "transition"]])],
     ]);
-    const after = summarise(await fixture("after.json"), {
-      prefix: "legion/",
-      fixes: { specs, states },
-    });
+    const after = applyFixStates(
+      summarise(await fixture("after.json"), { prefix: "legion/", fixes: specs }),
+      states
+    );
     const comparison = compare(before, after);
     expect(comparison.fixes).toBe(true);
     expect(comparison.globs).toEqual([
@@ -481,7 +532,7 @@ describe("compare", () => {
     const before = summarise(await fixture("window.json"), { prefix: "legion/" });
     const after = summarise(await fixture("after.json"), {
       prefix: "legion/",
-      fixes: { specs: [{ glob: "packages/*/CHANGELOG.md", commit: "c1" }] },
+      fixes: [{ glob: "packages/*/CHANGELOG.md", commit: "c1" }],
     });
     expect(compare(before, after).globs).toEqual([
       {
