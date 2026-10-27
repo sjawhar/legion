@@ -4,6 +4,7 @@ import { useLayoutEffect, useState } from "react";
 
 import type { BlockSchema } from "../../api/types";
 import { loadBlockSchema } from "../doc/schema";
+import { renderAskBlockShell, renderTypedBlock } from "../doc/typed-block-drawing";
 import { referenceSpans } from "./reference-spans";
 import {
   buildDispatchReference,
@@ -48,6 +49,10 @@ export interface MarkdownEngine {
    * parser and the next parse builds a fresh one (about 0.03 ms): one refused body answers
    * `undefined` here and falls back to literal text, and the next turn or card someone else is
    * reading still formats.
+   *
+   * Every attribute the block schema marks `server` on a typed block is reset to its schema
+   * default: outside a document no server wrote it, so a body's `:::ask{state="answered" …}`
+   * reads as the open decision its author wrote, never as an answer nobody recorded.
    */
   parse(markdown: string, softBreaks?: SoftBreaks): ProseMirrorNode | undefined;
 }
@@ -104,12 +109,56 @@ function pictureSerializer(schema: Schema): DOMSerializer {
   );
 }
 
-function buildEngine(proof: HeadlessProofEditor): MarkdownEngine {
+/** Each typed block type with a server-owned attribute, mapped to those attributes at their
+ *  schema defaults: what `withoutServerAttributes` writes over a parsed block. */
+type ServerDefaults = ReadonlyMap<string, Readonly<Record<string, unknown>>>;
+
+function serverDefaults(blockSchema: BlockSchema): ServerDefaults {
+  const defaults = new Map<string, Readonly<Record<string, unknown>>>();
+  for (const type of blockSchema.types) {
+    const server = Object.entries(type.attributes).filter(([, attribute]) => attribute.server);
+    if (server.length > 0) {
+      defaults.set(
+        type.name,
+        Object.fromEntries(server.map(([name, attribute]) => [name, attribute.default]))
+      );
+    }
+  }
+  return defaults;
+}
+
+/** `node` with every typed block under it (itself included) holding its server-owned attributes
+ *  at their defaults. Only the path to a changed block is rebuilt: a node with nothing to reset
+ *  under it is answered as itself, so a body without a typed block costs one walk. */
+function withoutServerAttributes(node: ProseMirrorNode, defaults: ServerDefaults): ProseMirrorNode {
+  if (node.inlineContent || node.isLeaf) {
+    return node;
+  }
+  let content = node.content;
+  for (let index = 0; index < node.childCount; index += 1) {
+    const child = node.child(index);
+    const reset = withoutServerAttributes(child, defaults);
+    if (reset !== child) {
+      content = content.replaceChild(index, reset);
+    }
+  }
+  const server = defaults.get(node.type.name);
+  if (
+    server !== undefined &&
+    Object.entries(server).some(([name, value]) => node.attrs[name] !== value)
+  ) {
+    return node.type.create({ ...node.attrs, ...server }, content, node.marks);
+  }
+  return content === node.content ? node : node.copy(content);
+}
+
+function buildEngine(proof: HeadlessProofEditor, blockSchema: BlockSchema): MarkdownEngine {
+  const defaults = serverDefaults(blockSchema);
   return {
     serializer: pictureSerializer(proof.schema),
     parse(markdown, softBreaks = "space") {
       try {
-        return proof.parseMarkdown(markdown, softBreaks);
+        return withoutServerAttributes(proof.parseMarkdown(markdown, softBreaks), defaults);
       } catch {
         return undefined;
       }
@@ -124,9 +173,16 @@ function loadEngine(blockSchema: BlockSchema): Promise<MarkdownEngine> {
   }
   headlessModule ??= import("@legion/proof-editor/headless");
   const created = headlessModule
-    .then(({ createHeadlessProof }) => createHeadlessProof({ blockSchema, readOnly: true }))
+    .then(({ createHeadlessProof }) =>
+      createHeadlessProof({
+        blockSchema,
+        readOnly: true,
+        renderBlock: (node, type) =>
+          type.name === "ask" ? renderAskBlockShell(node) : renderTypedBlock(node, type),
+      })
+    )
     .then((proof) => {
-      const engine = buildEngine(proof);
+      const engine = buildEngine(proof, blockSchema);
       readyEngine = engine;
       return engine;
     });

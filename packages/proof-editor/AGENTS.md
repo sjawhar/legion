@@ -47,7 +47,7 @@ not reach them:
 | `src/directive-container.ts` | `directiveContainerSyntax`, the micromark extension `remarkContainerDirectives` registers for the `:::name[label]{attributes}` container: a micromark document construct, held on the document tokenizer's container stack as a block quote or a list item is, in place of micromark-extension-directive's flow construct, which tokenized a block's content once for each block around it, so a body nesting `:::` a few thousand deep froze a reader's tab for about a minute (INFRA-581). It emits that package's token types, so `mdast-util-directive` builds the same `containerDirective` nodes from them; its `resolveAll` (`resolveDirectiveContainers`) and the `lazyContentEnd` construct keep the flow construct's reading of blank lines, lazy lines and the line endings after fences; and an opener standing inside `maxDirectiveNesting` (32) open directive containers does not open, so its line reads as the text it is. Its `factoryName`, `factoryLabel` and `factoryAttributes` are copies from micromark-extension-directive 4.0.0, which does not export them, under that package's MIT license (below); it is also biome-checked |
 | `src/tests/harness.ts` | The `bun test` registration the copied suites call instead of their own `test()` tally |
 
-Eighteen kinds of edit are allowed in the copied files, and no others: the import specifiers of
+Nineteen kinds of edit are allowed in the copied files, and no others: the import specifiers of
 upstream modules; `bun test` registration in the suites (`src/tests/harness.ts` replaces each
 file's own `test()` tally and its `process.exit` tail); `src/tests/headless-no-dom.test.ts`,
 whose entry named the fork's built `dist/headless.js` and now names `../lib-headless.js` — its
@@ -82,7 +82,10 @@ or stale range or a read-only view, with `src/lib.ts` exposing `commentOnSelecti
 for Dispatch's `Ctrl+Alt+M` (LEGION-680); `src/block-schema.ts` exporting `typedBlockRefusal`,
 the refusal `visit` throws, so the read-only transform decides with the same rule, and
 `src/lib-headless.ts`'s `readOnly` option installing `remarkReadOnlyDirectives` from
-`./read-only-directives` in place of `remarkTypedBlocks` (INFRA-529);
+`./read-only-directives` in place of `remarkTypedBlocks` (INFRA-529); `src/lib-headless.ts`
+taking `renderBlock` and passing it to `blockSchemaPlugins`, as `src/lib.ts` does, and
+re-exporting `HostBlockRenderer`, with the case in `src/tests/block-schema.test.ts` that a host
+drawing keeps the block's copy attributes (INFRA-526);
 `src/lib-remark-directive-plugin.ts` registering `directiveContainerSyntax` from
 `./directive-container` in place of micromark-extension-directive's flow container, with
 `containerDirectiveSyntax`, the package's import and the `micromark-util-types` import it needed
@@ -90,12 +93,12 @@ gone and the plugin's doc comment rewritten to say which construct it registers 
 `src/block-schema.ts`'s default-mode refusal of a `:::name{...}` paragraph line standing inside
 `maxDirectiveNesting` directives (imported from `./directive-container`), an opener the tokenizer
 left as text — `rejectUnsupportedDirectiveSyntax` counts the `containerDirective` nodes around
-each paragraph and `unsupportedDirectiveReason` takes that count (INFRA-581); and annotations, casts and
-assertions that make a file type-check, each of which erases before runtime (below).
+each paragraph and `unsupportedDirectiveReason` takes that count (INFRA-581); and annotations,
+casts and assertions that make a file type-check, each of which erases before runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
 24a5fc94 root:src/<file>`; every file in the copied-files table has that counterpart, and the
-only lines that differ should be the eighteen kinds.
+only lines that differ should be the nineteen kinds.
 
 `scripts/`, `tests/` and `upstream/` are legion's own. `scripts/` and `tests/` are linted and
 type-checked like any other package's; `upstream/` is generated, and Biome is off over it the

@@ -14,8 +14,9 @@ which you have; those need no runner.
 - `psql` — the Dispatch browser suite (`bun run e2e`) resets its database for every spec through
   `packages/dispatch/e2e/psql.ts`, which `seed.ts` calls, and the local stack (`bun run
   dispatch:local`, `packages/dispatch/e2e/local-instance.ts`) refuses to start without `go`,
-  `psql`, `flock` and `openssl` on `PATH`, and without `docker` too unless a `DATABASE_URL` is
-  given. The image carries `go`, `flock` and `openssl`, a `DATABASE_URL` stands in for `docker`,
+  `psql`, `flock`, `openssl` and `python3` on `PATH`, and without `docker` too unless a
+  `DATABASE_URL` is given. The image carries `go`, `flock`, `openssl` and `python3`, a
+  `DATABASE_URL` stands in for `docker`,
   and `psql` was the one a role had no way to supply — so a role whose change owes that suite can
   run it.
 - `redis-cli` — no repository of the project speaks Redis today; it is carried anyway, at about a

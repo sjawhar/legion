@@ -22,7 +22,10 @@ func ghostWisprSkip(event string) bool {
 	return true
 }
 
-// GhostWisprHandler returns the HTTP handler for Ghost Wispr webhook events.
+// GhostWisprHandler returns the HTTP handler for Ghost Wispr webhook events. Its publish runs under
+// the request's own context, so it ends when the sender gives up on the request, and at the bus's
+// own 5 s bound otherwise (bus.Client.PublishWithin), inside the 10 s the listener's server gives a
+// route to answer: Ghost Wispr sets no answer deadline of its own.
 func GhostWisprHandler(secret string, publisher Publisher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -88,7 +91,7 @@ func GhostWisprHandler(secret string, publisher Publisher) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := publisher.Publish(item); err != nil {
+		if err := publisher.PublishWithin(r.Context(), item); err != nil {
 			deliveryFailed(w, "ghostwispr publish", err)
 			return
 		}
