@@ -56,7 +56,8 @@ it, and any other change to the head voids it.
   `cancelled`, or absent: `gh run rerun <run-id>` once, then wait; when nothing will run it (a
   check only a commit status reports, a workflow another repository defines), tell the architect
   and do not approve. `gh pr checks <n>` is not the read: it reads only the current head, which
-  at a handoff head shows only the `pr-title` runs the review events start (measured on
+  at a handoff head shows only what review and comment events start, the `public-text-scan` run
+  and the `public-text` status (measured with `pr-title`, which review events then started, on
   sjawhar/legion#1944 at 0220b94fc2 on 2026-10-14).
   Approval is refused while either `E2E (implementer)` or `E2E (tester)` is missing: `REQUEST_CHANGES` naming the missing line.
   Skip the `Thermo` line entirely on a docs-only PR. Submit **one review per round** —

@@ -14,24 +14,26 @@
 # review or review comment), never its text.
 #
 # It reads the event payload GitHub writes to GITHUB_EVENT_PATH, never the step's environment,
-# which the runner prints in the job log. A pull_request or pull_request_review payload carries
-# the pull request: its number, title, body, branch name, and the base and head sha the run
-# checks, which is the head the event names rather than whatever head the pull request has by the
-# time a route is read, since a push can land while the job runs and gets a run of its own. A
+# which the runner prints in the job log. The payload carries the pull request (a pull_request or
+# review payload does; pr-public-text.yaml writes one for an issue comment): its
+# number, title, body, branch name, and the base and head sha the run checks, which is the head
+# the event names rather than whatever head the pull request has by the time a route is read,
+# since a push can land while the job runs and gets a run of its own. A
 # payload without one is refused. The rest it reads with gh (GH_TOKEN, GITHUB_REPOSITORY): the
 # commits from the compare route between that base and head, which pages through every commit and
 # reports their total, so a list that comes back shorter than that total is refused loudly here
 # instead of silently scanning part of it; and the issue comments, reviews and review comments
 # from their list routes, which report no total, so each is read 100 at a time until a page comes
 # back short. There is no total to cross-check those lists against, and none is needed: a list
-# that changes while a run reads it is read again by the next push, edit or review run and by the
-# lint job at the next push, and those runs' checks are the ones the merge reads. A NUL byte in any
-# of them, which would make `grep -I` treat the file as binary and skip it, is stripped first.
+# that changes while a run reads it is read again by the next push, edit, comment or review run
+# and by the lint job at the next push. A NUL byte in any of them, which would make `grep -I`
+# treat the file as binary and skip it, is stripped first.
 #
 # Usage: GITHUB_EVENT_PATH=<payload> GITHUB_REPOSITORY=<owner>/<repo> .github/scripts/check-pr-text.sh
-# CI runs it in the required lint job of pr-and-main.yaml on every pull request push, and in
-# pr-title.yaml when a pull request is opened, reopened or edited or a review on it is submitted
-# or edited; its tests are in check-private-names.test.sh.
+# CI runs it in the required lint job of pr-and-main.yaml on every pull request push, in the
+# required pr-title.yaml when a pull request is opened, reopened or edited, and in pr-public-text.yaml
+# when a review on it is submitted or edited or a comment on it is posted, edited or deleted; its
+# tests are in check-private-names.test.sh.
 set -euo pipefail
 
 event=${GITHUB_EVENT_PATH:?GITHUB_EVENT_PATH must name the pull request event payload}
@@ -77,8 +79,8 @@ jq -r '.commits[] | .commit.message, .commit.author.name, .commit.author.email, 
 # this repository posted it (it posts as a Bot, which only such an App or github-actions can do;
 # Legion's role Apps carry the CONTRIBUTOR association here, so association alone would drop them)
 # or its author is the repository's owner, a member of its organization or a collaborator. On a
-# public repository anyone signed in can comment or review, and every run reports the required
-# check; a stranger's text skipped this way can neither fail the check nor clear one that failed.
+# public repository anyone signed in can comment or review, and starts a run; a stranger's text
+# skipped this way can neither fail the check nor clear one that failed.
 # Each skipped item is printed as `skipped <kind>:<id>: author <login> (<association>) is not
 # trusted`, with no text.
 trusted='.user.type == "Bot" or (.author_association // "" | IN("OWNER", "MEMBER", "COLLABORATOR"))'
@@ -142,9 +144,10 @@ if [ "$status" -ne 0 ] && grep -q -E "(^|[:=])$kind_pattern:[0-9]+:" "$work/repo
   echo "    now: delete each comment and review comment, since an edit keeps the old text in its"
   echo "    edit history, which anyone who can read the repository can open; a submitted review"
   echo "    cannot be deleted, so edit its body and delete the old revision from that history."
-  echo "    Then re-run the newest failed run of each check that reported it on the current head:"
-  echo "    lint, and pr-title once for each event that is red (\`gh run rerun <run-id> --failed\`)."
-  echo "    Never re-run an older run: a re-run reads the comments again but checks the title and"
-  echo "    body as they were at its own event, so it could pass over a newer run that failed."
+  echo "    The deletion or edit runs PR Public Text again, which clears its red public-text status."
+  echo "    Then re-run the newest failed run of each required check that reported it on the current"
+  echo "    head: lint, and pr-title (\`gh run rerun <run-id> --failed\`). Never re-run an older"
+  echo "    run: a re-run reads the comments again but checks the title and body as they were at"
+  echo "    its own event, so it could pass over a newer run that failed."
 fi
 exit "$status"
