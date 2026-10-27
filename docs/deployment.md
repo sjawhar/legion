@@ -12,7 +12,9 @@ reads its agent tier from local sops files and its human tier through the local 
 which asks for a YubiKey touch, and it never reads the agent-secrets broker. `agent-secrets` reads
 that broker, which is backed by a cloud Secret Manager. One key name can therefore hold different
 values in the two stores. `agent-secrets` names its store in output and every refusal; `secrets`
-names none today. This page is about `secrets`.
+names none today. This page is mostly about `secrets`; the keys of the `legion-implementer` (App ID
+5341240) and `legion-reviewer` (App ID 5341243) Apps are in the broker, and
+[their own section](#the-legion-implementer-and-legion-reviewer-apps) says how a daemon reads them.
 
 ## Current decision for the LEGION deployment
 
@@ -72,15 +74,41 @@ memory for its whole lifetime, so a grant ending never interrupts a running daem
 after it notices. A request nobody taps within 90 seconds fails with secretsd's timeout message and
 the daemon refuses to start, quoting it.
 
-## The `private_key_secret` form
+## The `legion-implementer` and `legion-reviewer` Apps
+
+The `sjawhar` account owns both Apps. Their keys are in the secrets broker, not in secretsd:
+`LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` (agent tier) and `GH_REVIEW_APP_PRIVATE_KEY_B64` (human tier:
+each read waits for a person's grant in Dispatch). `private_key_secret` reads secretsd only, so a
+daemon uses these Apps through `private_key_command`, as the live proofs do
+(`scripts/e2e/lib/github-apps.sh`, `app_key_command`):
 
 ```yaml
 github_apps:
   implement:
     app_id: "5341240"
-    private_key_secret: LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64
+    private_key_command: "agent-secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 --reason=legion-daemon-github-app-key -- sh -c 'printf %s \"$LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64\" | base64 -d'"
   review:
     app_id: "5341243"
+    private_key_command: "agent-secrets GH_REVIEW_APP_PRIVATE_KEY_B64 --reason=legion-daemon-github-app-key -- sh -c 'printf %s \"$GH_REVIEW_APP_PRIVATE_KEY_B64\" | base64 -d'"
+```
+
+The daemon passes the command's stderr through as it runs, so `agent-secrets`' line naming the
+pending request appears in the daemon's log while the review key waits for its grant.
+
+To rotate either key: in the App's GitHub settings, generate a new private key; store it with
+`base64 -w0 < key.pem | agent-secrets secret set <NAME>`; restart the daemon and confirm a fresh
+worker pane's `gh auth status` shows account `x-access-token`; only then revoke the old key in
+GitHub, for the reason step 7 below gives.
+
+## The `private_key_secret` form
+
+```yaml
+github_apps:
+  implement:
+    app_id: "<implement App id>"
+    private_key_secret: LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64
+  review:
+    app_id: "<review App id>"
     private_key_secret: GH_REVIEW_APP_PRIVATE_KEY_B64
 ```
 
@@ -253,9 +281,11 @@ pane is its recorded process only while its root process's command line, `sh -c`
 command, holds a configured harness's marker: `omp` for Oh My Pi, ` claude-bridge -- ` for Claude
 Code. A daemon with no `worker_backends` has Oh My Pi's launcher alone and checks for `omp` alone.
 
-## Rotating the App keys
+## Rotating App keys held in secretsd
 
-When a shared-box deployment rotates its keys under the human-tier boundary, rotation is pointless
+This runbook is for a shared-box deployment whose App keys are in secretsd under the human-tier
+boundary (the `legion-implementer` and `legion-reviewer` keys are in the broker; rotate those as
+[their section](#the-legion-implementer-and-legion-reviewer-apps) says). Rotation is pointless
 while panes can still read the keys, so the order is:
 
 1. Deploy the pane fix from LEGION-74 ("Every Legion pane inherits the daemon's GitHub App private

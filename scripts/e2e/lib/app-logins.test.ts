@@ -195,9 +195,18 @@ describe("app-logins.ts", () => {
       NATS_NKEY_SEED_FILE: "/seed-file",
     });
     expect(code).toBe(1);
+    // The command's stderr reaches the operator as it is written, then again in the failure.
     expect(stderr).toBe(
-      "app-logins: github_apps.implement.private_key_command failed (exit 4): ||/seed-file|"
+      "||/seed-file|app-logins: github_apps.implement.private_key_command failed (exit 4): ||/seed-file|"
     );
+  });
+
+  test("a key command's stderr reaches the operator on success too, and the key it prints still signs", async () => {
+    const pending = `printf 'request req-42 pending\\n' >&2; cat ${join(dir, "key-101.pem")}`;
+    const { code, stdout, stderr } = await run(config(app("101", pending), app("202")));
+    expect(code).toBe(0);
+    expect(stderr).toBe("request req-42 pending");
+    expect(stdout).not.toBe("");
   });
 
   test("two roles on one App are refused, as the daemon refuses them at boot", async () => {
@@ -533,5 +542,50 @@ echo "logins $github_app_logins"`
     expect(stderr).toBe("");
     expect(code).toBe(0);
     expect(stdout).toContain('logins {"implement":"example-implement[bot]"}');
+  });
+});
+
+// lib/secrets-via-broker.sh is Stage 4a's `secrets` for the previous release's harness. A stand-in
+// `agent-secrets` records its argv and, as the real one does, runs the command after `--` with the
+// named secret in its environment.
+describe("lib/secrets-via-broker.sh", () => {
+  const shim = join(import.meta.dir, "secrets-via-broker.sh");
+  const bin = join(dir, "broker-shim-bin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(
+    join(bin, "agent-secrets"),
+    `#!/bin/sh\nprintf '%s\\n' "$*" >"${join(dir, "broker-shim-argv")}"\nname=$1\nwhile [ "$1" != -- ]; do shift; done\nshift\nexport "$name=from-broker"\nexec "$@"\n`,
+    { mode: 0o755 }
+  );
+  const shimRun = async (...args: string[]) => {
+    const child = Bun.spawn(["sh", shim, ...args], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    return { stdout, stderr, code };
+  };
+
+  test("the previous harness's `secrets NAME -- cmd` becomes `agent-secrets NAME --reason=… -- cmd`", async () => {
+    const { stdout, stderr, code } = await shimRun("IMPLEMENT_KEY", "--", "sh", "-c", 'printf %s "$IMPLEMENT_KEY"');
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    expect(stdout).toBe("from-broker");
+    expect(readFileSync(join(dir, "broker-shim-argv"), "utf8")).toBe(
+      'IMPLEMENT_KEY --reason=legion-live-proof-github-app-key -- sh -c printf %s "$IMPLEMENT_KEY"\n'
+    );
+  });
+
+  test("any other `secrets` call shape is refused, never sent to the broker", async () => {
+    for (const args of [["get", "IMPLEMENT_KEY", "--no-request"], ["IMPLEMENT_KEY", "sh"], ["-x", "--", "true"]]) {
+      const { code, stderr } = await shimRun(...args);
+      expect(code).toBe(2);
+      expect(stderr).toStartWith("secrets-via-broker: ");
+    }
   });
 });

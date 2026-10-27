@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
@@ -489,11 +490,20 @@ func resolveGitHubApp(app GitHubApp, field string) (GitHubApp, error) {
 	}
 }
 
+// executePrivateKeyCommand runs command and returns its trimmed stdout. Its stderr goes to the
+// daemon's own stderr as it is written, so an operator sees what `agent-secrets` prints while it
+// waits for a person's grant (the request's id), and is kept for the failure's message.
 func executePrivateKeyCommand(command, field string) (string, error) {
 	keyCommand := exec.Command("sh", "-c", command)
 	keyCommand.Env = runtime.WithoutNATSSeeds(os.Environ())
+	var stderr strings.Builder
+	keyCommand.Stderr = io.MultiWriter(os.Stderr, &stderr)
 	result, err := keyCommand.Output()
 	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			exit.Stderr = []byte(stderr.String())
+		}
 		return "", commandError(field, err)
 	}
 	key := strings.TrimSpace(string(result))

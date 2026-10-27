@@ -131,10 +131,10 @@ implement-only fixtures (#1016, see the rebase note in
 
 Read from GitHub itself (`GET /app` with each App's JWT, 2026-09-13):
 
-| App | role | slug on 2026-09-13 | permissions |
+| App (bot user id) | role | slug on 2026-09-13 | permissions |
 | --- | --- | --- | --- |
-| the previous implement App | implement | `legion-implementer` | actions:write, checks:**read**, contents:write, issues:write, metadata:read, organization_projects:write, packages:read, pull_requests:write, repository_projects:write, **statuses:write**, workflows:write |
-| the previous review App | review | `legion-reviewer` | actions:write, **checks:write**, issues:write, metadata:read, packages:read, pull_requests:write |
+| the previous implement App (bot user 271566630) | implement | `legion-implementer` | actions:write, checks:**read**, contents:write, issues:write, metadata:read, organization_projects:write, packages:read, pull_requests:write, repository_projects:write, **statuses:write**, workflows:write |
+| the previous review App (bot user 271566912) | review | `legion-reviewer` | actions:write, **checks:write**, issues:write, metadata:read, packages:read, pull_requests:write |
 
 (2026-10-26: both Apps' slugs changed on 2026-10-16. GitHub's record of each App gives its
 `updated_at` as 2026-10-16T05:44Z, main's commits by bot user 271566630 change their author login

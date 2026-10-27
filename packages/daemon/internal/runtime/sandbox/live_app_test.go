@@ -71,7 +71,7 @@ func (t implementTokens) Credential(ctx context.Context, _ claim.Role, owner str
 // memory.
 func (r *liveRig) resolveApp() error {
 	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(r.ctx, "agent-secrets", r.env.appKeyName, "--", "sh", "-c", `printf %s "$`+r.env.appKeyName+`"`)
+	cmd := exec.CommandContext(r.ctx, "agent-secrets", r.env.appKeyName, "--reason=legion-live-proof-github-app-key", "--", "sh", "-c", `printf %s "$`+r.env.appKeyName+`"`)
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("reading %s from the secrets broker: %v: %s", r.env.appKeyName, err, strings.TrimSpace(stderr.String()))

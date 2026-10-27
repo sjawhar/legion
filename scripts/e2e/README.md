@@ -884,7 +884,7 @@ extended-duration affinity, the cgroup cpu quota in place of `nproc`), `LEGION_E
 (`aws-private-ip`, today's shape, or `bridge`, for a cluster whose pods cannot reach the devbox at
 all — GKE's shape; [below](#the-bridge-legion_e2e_pod_reachabilitybridge)) and
 `LEGION_E2E_MODEL_ROUTE` (`gateway`, today's shape, or `key-file`, for a cluster with no model
-gateway in front of Anthropic). The script needs `go`, `kubectl`, `curl`, `ss`, `secrets`,
+gateway in front of Anthropic). The script needs `go`, `kubectl`, `curl`, `ss`,
 `agent-secrets`, `diff`, `docker` (the scratch session database), `jq` and `bun` (the `plugins` step, below),
 `aws` only under `LEGION_E2E_RUNTIME_IDENTITY_KIND=aws-iam-role` (the runtime kubeconfig's `aws eks
 get-token`), and the secrets broker holding the implement App's key under the name
@@ -894,11 +894,16 @@ optional, defaulting to the default pair, and each refused by name when it is se
 malformed). Stage 4a acts as the implement App alone, so it reads no
 review App input. `prerequisites` proves the key is that id's App (`check_github_apps implement`:
 GitHub's `GET /app` under the key's JWT must answer that id and `contents: write`) before the run writes anything. The
-harness runs `agent-secrets <KEY> -- sh -c 'printf %s "$<KEY>"'`: the `agent-secrets` client
+harness runs `agent-secrets <KEY> --reason=legion-live-proof-github-app-key -- sh -c 'printf %s "$<KEY>"'`: the `agent-secrets` client
 fetches the key from the broker and puts it in the environment of that one `sh` child, which prints it to a pipe
 the harness reads into memory. The harness decodes it there and mints the implement App's
 installation token in process. The key is written to no file, appears in no argv, and reaches no
-other process; only the installation token enters each claim's Secret.
+other process; only the installation token enters each claim's Secret. `previous-layout`'s
+harness, an older commit's, reads the key with `secrets <KEY> -- …` instead; the script runs it
+through a wrapper (`$work/previous-harness`) that puts
+[`lib/secrets-via-broker.sh`](lib/secrets-via-broker.sh) first on its `PATH` as `secrets`, which
+turns that one call shape into the same `agent-secrets <KEY> --reason=… -- …` read and refuses any
+other.
 
 The `plugins` step packs this checkout's own `@sjawhar/pi-envoy` and `@sjawhar/pi-legion` for
 `stale-plugin-install`'s own Resume through `lib/pack-plugin.sh`, as every proof that installs a

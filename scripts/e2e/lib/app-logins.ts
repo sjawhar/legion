@@ -21,7 +21,6 @@
 // for a failure's message alone. The key stays in this process's memory: it is never printed,
 // written to a file, or handed to another process, and neither is the JWT. An App configured with
 // any other key source is refused, since every stage proof's file names a command.
-import { spawnSync } from "node:child_process";
 import { createSign } from "node:crypto";
 import { readFileSync } from "node:fs";
 
@@ -95,24 +94,34 @@ export function appJWT(appId: string, privateKeyPEM: string, now: Date): string 
 const natsSeedVariables = ["NATS_NKEY_SEED", "NATS_DAEMON_NKEY_SEED"];
 
 /** Runs one App's private_key_command and returns the key it printed, trimmed, as the daemon does.
- * A failure is named as the daemon names it (internal/config, commandError): its field and exit
- * code, then the command's stderr when it wrote any; its stdout is never quoted. */
-function runKeyCommand(role: AppRole, command: string): string {
+ * The command's stderr is passed through to this process's stderr as it is written, so an operator
+ * sees what `agent-secrets` prints while it waits for a person's grant (the request's id). A failure
+ * is named as the daemon names it (internal/config, commandError): its field and exit code, then
+ * the command's stderr when it wrote any; its stdout is never quoted. */
+async function runKeyCommand(role: AppRole, command: string): Promise<string> {
   const field = `github_apps.${role}.private_key_command`;
   const env = { ...process.env };
   for (const name of natsSeedVariables) delete env[name];
-  const run = spawnSync("sh", ["-c", command], {
-    encoding: "utf8",
-    env,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  if (run.error !== undefined) throw new Error(`${field} could not run: ${run.error.message}`);
-  if (run.status !== 0) {
-    const stderr = run.stderr.trim();
-    const failed = `${field} failed (exit ${run.status ?? -1})`;
-    throw new Error(stderr === "" ? failed : `${failed}: ${stderr}`);
+  let child: Bun.Subprocess<"ignore", "pipe", "pipe">;
+  try {
+    child = Bun.spawn(["sh", "-c", command], { env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  } catch (error) {
+    throw new Error(`${field} could not run: ${error instanceof Error ? error.message : String(error)}`);
   }
-  const key = run.stdout.trim();
+  let stderr = "";
+  const decoder = new TextDecoder();
+  const relay = (async () => {
+    for await (const chunk of child.stderr) {
+      stderr += decoder.decode(chunk, { stream: true });
+      process.stderr.write(chunk);
+    }
+  })();
+  const [stdout, status] = await Promise.all([new Response(child.stdout).text(), child.exited, relay]);
+  if (status !== 0) {
+    const failed = `${field} failed (exit ${status})`;
+    throw new Error(stderr.trim() === "" ? failed : `${failed}: ${stderr.trim()}`);
+  }
+  const key = stdout.trim();
   if (key === "") throw new Error(`${field} produced empty output`);
   return key;
 }
@@ -128,7 +137,7 @@ export async function appLogin(
   now: () => Date = () => new Date()
 ): Promise<string> {
   const read = `GET /app as the ${role} App (app_id ${source.appId})`;
-  const jwt = appJWT(source.appId, runKeyCommand(role, source.privateKeyCommand), now());
+  const jwt = appJWT(source.appId, await runKeyCommand(role, source.privateKeyCommand), now());
   let response: Response;
   let body: string;
   try {

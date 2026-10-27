@@ -193,7 +193,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 begin prerequisites
-for tool in go kubectl curl ss secrets agent-secrets diff docker jq bun; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go kubectl curl ss agent-secrets diff docker jq bun; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 [ -n "$runtime_context" ] || fail "LEGION_E2E_RUNTIME_CONTEXT is unset: the runtime must run as the Legion daemon's restricted identity, never the operator's"
 [ -r "$runtime_kubeconfig" ] || fail "the runtime kubeconfig $runtime_kubeconfig is not readable"
 case "$runtime_identity_kind" in
@@ -460,6 +460,15 @@ cp "$root/packages/daemon/internal/runtime/sandbox/testdata/previouslayout/fixtu
 go -C "$work/previous/packages/daemon" test -c -tags e2e -o "$work/previous.test" ./internal/runtime/sandbox ||
   fail "building the previous release's ($previous_base) harness with the previous-layout fixture failed"
 note "built the previous release's ($previous_base) harness with the previous-layout fixture; its image $previous_image"
+# That harness reads the implement App's key with `secrets NAME -- …` from the local store; the key
+# is in the secrets broker. It runs through a wrapper that puts lib/secrets-via-broker.sh first on
+# its PATH as `secrets`, which makes that read `agent-secrets NAME --reason=… -- …`. The current
+# harness and every other process keep the operator's PATH.
+mkdir "$work/previous-bin"
+ln -s "$root/scripts/e2e/lib/secrets-via-broker.sh" "$work/previous-bin/secrets"
+# shellcheck disable=SC2016 # "$PATH" and "$@" are the wrapper's own, expanded when it runs
+printf '#!/bin/sh\nPATH=%s:"$PATH" exec %s "$@"\n' "'$work/previous-bin'" "'$work/previous.test'" >"$work/previous-harness"
+chmod 0700 "$work/previous-harness"
 
 harness_ok=
 # -test.timeout 150m must stay under the harness's staleRunBranchAge (4 hours): another run's
@@ -500,7 +509,7 @@ env \
   LEGION_E2E_PI_ENVOY_TARBALL="$pi_envoy_tarball" \
   LEGION_E2E_PI_LEGION_VERSION="$pi_legion_version" \
   LEGION_E2E_PI_ENVOY_VERSION="$pi_envoy_version" \
-  LEGION_E2E_PREVIOUS_HARNESS="$work/previous.test" \
+  LEGION_E2E_PREVIOUS_HARNESS="$work/previous-harness" \
   LEGION_E2E_PREVIOUS_IMAGE="$previous_image" \
   "$work/stage4a.test" -test.run '^TestStage4aSandboxRuntimeLive$' -test.v -test.timeout 150m &
 # Backgrounded and waited on, not run as env's own foreground child: a foreign command's shell
