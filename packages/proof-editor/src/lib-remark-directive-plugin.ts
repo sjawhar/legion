@@ -4,7 +4,7 @@ import type { Root } from '@milkdown/kit/transformer';
 import type { Processor, Transformer } from 'unified';
 
 import { remarkTypedBlocks, type BlockSchema } from './block-schema.js';
-import { directiveContainer } from './directive-container.js';
+import { directiveContainerSyntax } from './directive-container.js';
 
 /**
  * unified plugin: `:::name{...}` container blocks, and no other directive.
@@ -27,7 +27,7 @@ import { directiveContainer } from './directive-container.js';
  */
 export function remarkContainerDirectives(this: Processor): void {
   const data = this.data();
-  (data.micromarkExtensions ??= []).push({ document: { 58: [directiveContainer] } });
+  (data.micromarkExtensions ??= []).push(directiveContainerSyntax);
   (data.fromMarkdownExtensions ??= []).push(directiveFromMarkdown());
   (data.toMarkdownExtensions ??= []).push(directiveToMarkdown());
 }
