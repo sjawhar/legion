@@ -894,8 +894,10 @@ jobs:
   # workspace. Vet compiles the files behind the live-test tags (pulumilive, natslive) too. The unit
   # tests start no container; the natslive files run in a step of their own against real
   # nats-server and Postgres, on testnats.Image, testnats.HubImage and testpg.Image, pulled first
-  # for the reason .github/actions/pull-test-images gives. The per-target compile runs in
-  # pr-and-main.yaml's required lint job.
+  # for the reason .github/actions/pull-test-images gives. The gcp natslive tests pull no image:
+  # they install helm, nats-server, the config reloader and the exporter with go install, at the
+  # versions the clustered hub runs, and render the vendored chart in gcp/testdata. The per-target
+  # compile runs in pr-and-main.yaml's required lint job.
   envoy-infra-go:
     needs: changes
     if: needs.changes.outputs.envoy == 'true'
@@ -933,7 +935,9 @@ jobs:
         run: go test ./...
         working-directory: packages/envoy/infra
       - name: Live tests of envoy-infra against nats-server (natslive)
-        run: go test -tags natslive ./core/ ./seed/
+        # gcp's live tests build helm, nats-server, the config reloader and the exporter with go
+        # install first, minutes on a cold cache, so the package gets more than go test's 10 m.
+        run: go test -timeout 30m -tags natslive ./core/ ./seed/ ./gcp/
         working-directory: packages/envoy/infra
 
   # The document service and the API that drives it, pmdoc (LEGION-571: its own flakes under
