@@ -1311,8 +1311,11 @@ the live view's phone layout. It does not replace the manual phone check: run
 the server on a tailnet-reachable address, open it from a phone, open the
 review panel, and answer an open ask in Waiting on you.
 
-The rules below apply only to a test that `iphone` can run at its own
-viewport. A test stays untagged, whatever its title says, when it:
+A phone width here is one under 768 px, where `PHONE_VIEWPORT_QUERY`
+(`(max-width: 767px)`, `web/src/features/shell/useDialog.ts`) matches; a desktop
+width is 768 px or wider, the compact layout below 1280 px included. The rules
+below apply only to a test that `iphone` can run at its own viewport. A test
+stays untagged, whatever its title says, when it:
 
 - skips every project but `chromium`
   (`test.skip(project.name !== "chromium", …)`) or every project but
@@ -1349,8 +1352,9 @@ branches on it. A test that skips every project but `iphone` is always tagged
 - **R6** says in its title or its own comments that it covers the phone layout
   (a phone, the drawer, the bottom sheet, 390 px).
 
-When unsure, tag it: an extra phone test costs CI minutes, and a missing one
-loses the phone coverage. Write the tag at the end of the title,
+Once the exceptions above are ruled out, when unsure, tag it: an extra phone
+test costs CI minutes, and a missing one loses the phone coverage. Write the
+tag at the end of the title,
 `test("a reply opens the Thread dialog @phone", …)`, or at the end of a
 `test.describe` title when every test inside it qualifies. Playwright reads an
 `@word` in a title as a tag; the title form keeps the call at two arguments, so
@@ -1358,8 +1362,9 @@ Biome does not re-indent the body as it does for a `{ tag }` details argument.
 A user-agent path (the Mac keymap that the iPhone user agent also takes) is not
 a phone-only path. An untagged test needs no
 `test.skip(project.name === "iphone", …)`, since `iphone` no longer runs it:
-drop the skip. A `!== "chromium"` skip stays: it says the test is desktop-only
-by design, and keeps it off any other project whose `testMatch` names its file.
+drop the skip. A `!== "chromium"` skip stays: it marks a test that one project
+covers (it sets its own viewport, or does not depend on the layout), and it
+keeps that test out of the tag under the first exception above.
 
 Nothing fails when a phone test lacks the tag: it silently drops out of
 `iphone` and runs only on `chromium`. So after writing or renaming one, run

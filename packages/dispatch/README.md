@@ -175,11 +175,9 @@ docker rmi "ghcr.io/sjawhar/legion/envoy:${acceptance_image_tag}"
 `e2e/seed.ts` truncates its database before each scenario. Always set
 `PLAYWRIGHT_DATABASE_URL` to an isolated test database when using a deployed URL.
 The suite has seven projects. `chromium` runs every spec except the two plain-HTTP specs. `iphone`
-runs, from those same specs, only the tests tagged `@phone` (the tag is written at the end of the
-test's or its `test.describe`'s title): the tests that take a phone-only path, because they branch
-on the project or on the phone layout, read the window's size, use touch, run only on the phone,
-or say they cover the phone layout. `packages/dispatch/AGENTS.md`, "Phone acceptance", has the
-full rule; an untagged test drops out of `iphone` with no failure. The iPhone project uses
+runs, from those same specs, only the tests tagged `@phone` (written at the end of the test's or
+its `test.describe`'s title); which tests take the tag is in `packages/dispatch/AGENTS.md`, "Phone
+acceptance". An untagged test drops out of `iphone` with no failure. The iPhone project uses
 Chromium with iPhone 13 viewport, touch, and user-agent emulation. A deployed run
 (`bun run e2e:deployed`) uses the same projects, so its `iphone` project also runs only the
 `@phone` tests. `webkit` runs `e2e/collab-cursor.e2e.ts`, since where a caret lands beside a
