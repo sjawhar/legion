@@ -30,17 +30,16 @@ import (
 // Each root keeps a cursor (record.Store.CaughtUpSeq): the boot reads only the events after it,
 // and raises it to the issue's latest sequence it read, or to just below the first event whose
 // fact failed to apply, so the next boot reads that event again (catchUpWindow). A root recorded
-// before the cursor existed, and given no work by this release since, has none: its first catch-up
-// replays nothing and only
-// sets the cursor, since a daemon of an earlier release applied everything before it live, and a
-// replay of that history through this release's handlers would read old hand-backs as new. A root
-// recorded since, or handed work by this release since (an admission, a re-admission, a resume:
-// record.Store.StartHandout), starts at 0 and reads from its last handout; a re-admission sets the
-// cursor back to 0, so a new generation never replays the old one's tail. A gate whose document
-// has no approval request in the asks' mirror — one an earlier release registered before the
-// mirror existed, or one whose request the daemon never saw
-// an event of — has the request Dispatch shows open on its document mirrored, which declares the
-// architect's hand-back when the request waits on the person (workflow's gateRequestFound).
+// before the cursor existed, and given no work by this release since, has none: its first
+// catch-up replays nothing and only sets the cursor, since a daemon of an earlier release applied
+// everything before it live, and a replay of that history through this release's handlers would
+// read old hand-backs as new. A root recorded since, or handed work by this release since (an
+// admission, a re-admission, a resume: record.Store.StartHandout), starts at 0 and reads from its
+// last handout; a re-admission sets the cursor back to 0, so a new generation never replays the
+// old one's tail. A gate whose document has no approval request in the asks' mirror — one an
+// earlier release registered before the mirror existed, or one whose request the daemon never
+// saw an event of — has the request Dispatch shows open on its document mirrored, which declares
+// the architect's hand-back when the request waits on the person (workflow's gateRequestFound).
 
 // catchUpRoot is one root the boot's catch-up reads: its record, its design gate (nil for none),
 // its cursor (cursor, and whether it has one at all), and whether the mirror holds an approval
@@ -267,13 +266,12 @@ func retriable(refusal *dispatch.Error) bool {
 
 // catchUpRoot catches up one root: it reads the issue's latest sequence on Dispatch, mirrors the
 // approval request Dispatch shows open on a gate's document the mirror holds none of (as of that
-// sequence), applies its
-// event log's window — the events after its cursor, or after its last handout for a root with a
-// cursor of 0, and none at all for a root with no cursor — and then finishes it (finishCatchUp).
-// The request's read and the window are independent: one failing still runs the other, and the
-// root is finished only when both succeeded, so a failed read leaves its cursor where it was. A
-// window with an event its handlers failed on finishes the root with the cursor just below that
-// event, so the next boot reads it again.
+// sequence), applies its event log's window — the events after its cursor, or after its last
+// handout for a root with a cursor of 0, and none at all for a root with no cursor — and then
+// finishes it (finishCatchUp). The request's read and the window are independent: one failing
+// still runs the other, and the root is finished only when both succeeded, so a failed read
+// leaves its cursor where it was. A window with an event its handlers failed on finishes the root
+// with the cursor just below the first such event, so the next boot reads it again.
 func (w *workflowRuntime) catchUpRoot(ctx context.Context, root catchUpRoot) error {
 	current, err := w.dispatch.GetIssue(ctx, root.issue.Key)
 	if err != nil {
@@ -345,13 +343,14 @@ func (w *workflowRuntime) bindGateRequest(ctx context.Context, root catchUpRoot,
 }
 
 // catchUpWindow applies every ask event (an ask.edited one when it moved an approval request),
-// review and document version Dispatch recorded on the
-// root after from: it reads the root's event log past that point and applies each through the live
-// decoder and the live handlers, with its own sequence, so the asks' mirror and the architect's
-// hand-backs stand as the live events would have left them. It returns the highest sequence it
-// read, and the lowest sequence of an event whose fact failed to apply (0 for none). Each fact's
-// id names the event's sequence and the root's generation, so a second catch-up of the same event
-// is dropped as processed.
+// review and document version Dispatch recorded on the root after from: it reads the root's event
+// log past that point and applies each through the live decoder and the live handlers, with its
+// own sequence, so the asks' mirror and the architect's hand-backs stand as the live events would
+// have left them. It returns the highest sequence it read, and the lowest sequence of an event
+// whose fact failed to apply (0 for none). Each fact's id names the event's sequence and the
+// root's generation, so an event an earlier catch-up applied is passed over: one query
+// (intake.Applied) reads which of the window's events are applied, and only the rest are decoded
+// and applied, one fact transaction each.
 //
 // The catch-up treats each event as the live Dispatch consumer does. An event of a type the
 // catch-up does not read is passed over before it is decoded (an issue's own events are the boot
@@ -362,14 +361,24 @@ func (w *workflowRuntime) bindGateRequest(ctx context.Context, root catchUpRoot,
 // live consumer retries such an event until it applies, and the cursor stops just below it
 // (catchUpRoot), so the next boot reads it again. That matters once an outage outlasts the
 // notification stream's retention, when the event log is the only place the event is still
-// held. An event that fails at every boot costs each boot a re-read of the window from it, and
-// nothing more: the root is still finished and decided. Only the boot's own end (ctx) stops the
-// window.
+// held. An event that fails at every boot keeps the cursor below it, so each boot reads the
+// window from it again, Dispatch pages that grow with the root's later events; those events are
+// applied once, and later boots pass them over in the one query, so the boot applies only the
+// failed event and the root is still finished and decided. Only the boot's own end (ctx) stops
+// the window.
 func (w *workflowRuntime) catchUpWindow(ctx context.Context, root catchUpRoot, from int64) (read, failed int64, err error) {
 	events, err := w.dispatch.EventsAfter(ctx, root.issue.Key, from)
 	if err != nil {
 		return 0, 0, fmt.Errorf("read the events of %s after %d: %w", root.issue.Key, from, err)
 	}
+	type windowEvent struct {
+		raw  json.RawMessage
+		seq  int64
+		kind string
+		id   string
+	}
+	var window []windowEvent
+	var ids []string
 	for _, event := range events {
 		var header struct {
 			Seq  int64  `json:"seq"`
@@ -385,24 +394,36 @@ func (w *workflowRuntime) catchUpWindow(ctx context.Context, root catchUpRoot, f
 		default:
 			continue
 		}
-		fact, unread, err := intake.DecodeDispatchEvent(w.dispatchProject, root.issue.Key, event)
+		id := fmt.Sprintf("event:%s:%d:%d", root.issue.Key, root.issue.Generation, header.Seq)
+		window = append(window, windowEvent{raw: event, seq: header.Seq, kind: header.Type, id: id})
+		ids = append(ids, catchUpEventID(id))
+	}
+	applied, err := intake.Applied(ctx, w.pool, catchUpSource, ids)
+	if err != nil {
+		return 0, 0, fmt.Errorf("read which events of %s the catch-up applied: %w", root.issue.Key, err)
+	}
+	for _, event := range window {
+		if applied[catchUpEventID(event.id)] {
+			continue
+		}
+		fact, unread, err := intake.DecodeDispatchEvent(w.dispatchProject, root.issue.Key, event.raw)
 		if err != nil {
-			w.log.Warn("boot catch-up passed over an event it could not read", "issue", root.issue.Key, "seq", header.Seq, "type", header.Type, "error", err)
+			w.log.Warn("boot catch-up passed over an event it could not read", "issue", root.issue.Key, "seq", event.seq, "type", event.kind, "error", err)
 			continue
 		}
 		if len(unread) > 0 {
-			w.log.Warn("boot catch-up read an event with fields it took as unknown", "issue", root.issue.Key, "seq", header.Seq, "type", header.Type, "unread", unread)
+			w.log.Warn("boot catch-up read an event with fields it took as unknown", "issue", root.issue.Key, "seq", event.seq, "type", event.kind, "unread", unread)
 		}
 		if fact == nil {
 			continue
 		}
-		if err := w.applyCatchUp(ctx, fmt.Sprintf("event:%s:%d:%d", root.issue.Key, root.issue.Generation, header.Seq), fact); err != nil {
+		if err := w.applyCatchUp(ctx, event.id, fact); err != nil {
 			if ctx.Err() != nil {
 				return 0, 0, err
 			}
-			w.log.Error("boot catch-up failed to apply an event, and reads it again at the next boot", "issue", root.issue.Key, "seq", header.Seq, "type", header.Type, "error", err)
-			if failed == 0 || header.Seq < failed {
-				failed = header.Seq
+			w.log.Error("boot catch-up failed to apply an event, and reads it again at the next boot", "issue", root.issue.Key, "seq", event.seq, "type", event.kind, "error", err)
+			if failed == 0 || event.seq < failed {
+				failed = event.seq
 			}
 		}
 	}
@@ -422,8 +443,14 @@ func (w *workflowRuntime) finishCatchUp(ctx context.Context, root catchUpRoot, t
 	return nil
 }
 
+// catchUpSource is the source of every fact the boot's catch-up applies, and catchUpEventID the
+// processed id of the one eventID names.
+const catchUpSource = "daemon"
+
+func catchUpEventID(eventID string) string { return "awaiting-catch-up:" + eventID }
+
 func (w *workflowRuntime) applyCatchUp(ctx context.Context, eventID string, fact intake.Fact) error {
-	if _, err := intake.ApplyFact(ctx, w.pool, "daemon", "awaiting-catch-up:"+eventID, fact, w.handlers...); err != nil {
+	if _, err := intake.ApplyFact(ctx, w.pool, catchUpSource, catchUpEventID(eventID), fact, w.handlers...); err != nil {
 		return fmt.Errorf("apply %s: %w", eventID, err)
 	}
 	return nil
