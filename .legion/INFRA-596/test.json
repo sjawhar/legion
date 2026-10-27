@@ -2,49 +2,68 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-596",
-  "completed": "2026-10-27T09:54:30Z",
+  "completed": "2026-10-27T11:41:30Z",
+  "testedHead": "c73382871c542a12b1030c24d97ecfdf3a78782e",
+  "codeHead": "9ac93a9703a08a11a746a98c747099e5087fb7e8",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's run.sh head and run.sh main in a copy of its rig ($TMPDIR/infra596-tester, own databases): head event 9 (the person's reply) reached notifications.dispatch.issue.RIG-1.comment.created, notifications.agent.S-claim and notifications.agent.S-writer, the reopen (event 8) only the issue topic, the RIG-2 comment (event 12) reached notifications.agent.S-spec; main reached only the issue topics; head doc-read printed the reopened thread with both replies, main printed only 'Open anchored asks/comments: comment <id>'. Re-ran report.ts on the run files fetched from INFRA-596 and got the uploaded document and pairs TSV byte for byte. Read the BET-15 trace files: events 4314/4315 published only to the issue topics, claim session:01a14313 and no route at publish, no mention or delivery rows; event 4260 lists notifications.agent.01a14313."
+    "how": "Drove each claim's surface independently at c7338287 (code 9ac93a97). The local-stack delivery claim is tester-rig-edge.sh E1 (BET-15's shape: the person's reply reached S-claim, S-other and S-writer once each). Review finding 1, which the implementer proved with Go tests, I drove live with tester-rig-fail.sh: the owner topic and route go out before the failed recipient query backs the event off, the retry sends only the rest, and the previous head 86599d45 published nothing. The report claim: report.ts at head on the six run files from INFRA-596 (hashes equal to the manifest) gives document sha256 0631201835fd… and pairs bd067fb6…, cmp-equal to the INFRA-514 uploads."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
+      "criterion": "Review round 1, finding 1: a failed recipient query still publishes the comment's owner topic and route, backs off only the events that needed it, and a retry sends only the rest.",
+      "surface": "Local Dispatch stack: the Dispatch server built from the head on Postgres 17 + pgvector with every migration, nats-server 2.10.29 -js, a subscriber on notifications.>; driven over the HTTP API, with one data fault injected by psql.",
+      "command": "$TMPDIR/infra596-tester/fail.sh head (dispatch://INFRA-596/artifact/tester-rig-fail-sh): set every S-writer spec version's authors to the JSON scalar 5, post a person's reply on a claimed unrouted issue (FC), a reply on a routed issue (FR), a conversation comment on an issue nobody claimed or routed (FU), and a comment on a healthy claimed issue (HC); then repair the authors and make the backed-off events due",
+      "observed": "First attempt: FC published_destinations [issue topic, notifications.agent.S-claim], FR [issue topic, notifications.agent.S-route], FU [issue topic], each published_at null, attempt_count 1, retry scheduled; server log 'load comment recipients' / 'load primary document authors: ERROR: cannot extract elements from a scalar (SQLSTATE 22023)'; HC published at once to its issue topic and S-healthy. After the repair: FC and FR added S-other and S-writer, FU added S-writer, attempt_count stayed 1; the subscriber saw every subject of every comment exactly once.",
+      "headSha": "c73382871c542a12b1030c24d97ecfdf3a78782e",
+      "negativeControl": "fail.sh old (server from the previous head 86599d457b94): FC, FR and FU recorded published_destinations {} (no issue topic, no route) and attempt_count 2 before the repair; HC unaffected."
+    },
+    {
       "criterion": "Each cause found in Dispatch or Envoy is fixed with a test: a person's reply reaches the claimant (no route), every session in its thread and the thread document's authors; a person's comment on an issue with no route and no session claim reaches the primary document's session authors.",
-      "surface": "Local Dispatch stack: the Dispatch server built from the head on Postgres 17 + pgvector with every migration, nats-server 2.10.29 -js, a subscriber on notifications.>, a stub Envoy listener answering /v1/sessions, /v1/registry and /v1/messages/send; driven over the HTTP API with person-header and agent-bearer requests.",
-      "command": "$TMPDIR/infra596-tester/edge.sh head (dispatch://INFRA-596/artifact/tester-rig-edge-sh, stub dispatch://INFRA-596/artifact/fake-envoy-py; output in dispatch://INFRA-596/artifact/tester-evidence-txt section 2)",
-      "observed": "12/12 cases OK, no subject received twice: E1 person reply, its edit, and a reply aimed at S-other's reply each reached S-claim, S-other, S-writer; the root's edit reached S-claim, S-writer; a session's reply reached no agent. E2 routed (session:S-route) and claimed: conversation comment reached S-route only, reply reached S-route and S-claim (a thread member). E3 person-claimed: reached S-spec. E4 ask thread: S-asker and S-claim. E5 session comment and E6 released claim: no agent. E9 reply mentioning the claimant: S-other and S-writer on NATS, S-claim by one Envoy send only, suppressed_authors [\"S-claim\"]. Burst: 30 claimed issues, a person's comment each, 15 in parallel: each reached its claimant once; no outbox error in the server log.",
-      "headSha": "88478652a00c287c7bf3e408199373f674ba7dc5",
-      "negativeControl": "edge.sh main (server from main 448a41003a17): the 8 cases the change adds recipients to fail (replies reach no agent, the person-claimed and ask-thread comments miss S-spec and S-claim, the mention case reaches nobody on NATS) and all 30 burst comments reach only their issue topic; the 4 unchanged cases pass."
+      "surface": "The same local Dispatch stack, plus a stub Envoy listener answering /v1/sessions, /v1/registry and /v1/messages/send.",
+      "command": "$TMPDIR/infra596-tester/edge.sh head (dispatch://INFRA-596/artifact/tester-rig-edge-sh v2; output in dispatch://INFRA-596/artifact/tester-evidence-txt v2 section 2)",
+      "observed": "12/12 cases OK and no subject received twice: E1 the person's reply, its edit, and a reply aimed at S-other's reply each reached S-claim, S-other, S-writer; the root's edit S-claim, S-writer; a session's reply no agent. E2 routed and claimed: the conversation comment reached S-route, the reply S-route and S-claim (a thread member). E3 person-claimed: S-spec. E4 ask thread: S-asker, S-claim. E5 session comment, E6 released claim: no agent. E9 mentioned claimant: S-other, S-writer on NATS, S-claim by one Envoy send. Burst: 30 claimed issues, 15 comments at a time, each reached its claimant once.",
+      "headSha": "c73382871c542a12b1030c24d97ecfdf3a78782e",
+      "negativeControl": "edge.sh main (448a41003a17): the 8 cases the change adds recipients to and all 30 burst comments fail; the 4 unchanged cases pass."
+    },
+    {
+      "criterion": "The forward merge of #2137 (artifact.human_edited author read moved into publishAuthorRoutes) keeps a person's spec edit reaching the spec's agents.",
+      "surface": "The same local Dispatch stack.",
+      "command": "$TMPDIR/infra596-tester/he.sh head (dispatch://INFRA-596/artifact/tester-rig-he-sh): S-writer edits HE's spec, S-claim claims, the person edits the spec, wait out the 30 s quiet window",
+      "observed": "Event 6 artifact.human_edited, actor person@example.com, published_destinations [notifications.dispatch.issue.RIG-1.artifact.human_edited, notifications.agent.S-writer]; the subscriber saw each once.",
+      "headSha": "c73382871c542a12b1030c24d97ecfdf3a78782e",
+      "negativeControl": "he.sh against current main c892b97df887 gives the same two destinations, so the merge changed nothing there; the person's own artifact.version (event 5) reaches only the issue topic at both."
     },
     {
       "criterion": "dispatch doc-read shows open comments with their text, not only their id.",
-      "surface": "The dispatch CLI bundled from the head (packages/envoy-client/bin/dispatch.ts, as build-dispatch-cli.sh bundles it) against the same local Dispatch.",
-      "command": "$TMPDIR/infra596-tester/docread.sh head (dispatch://INFRA-596/artifact/tester-rig-docread-sh): dispatch doc-read --issue RIG-1 --artifact spec, --artifact plan-md, and --project RIG --artifact notes-md",
-      "observed": "spec: 'Open anchored threads:' with the open ask (question and the person's reply), T1 root with both replies (the multi-line reply body intact) and the reopened T8; absent: resolved T2 and its reply, retracted anchored ask T7, unanchored ask T6, conversation comment T4, the plan's thread T3. plan-md: T3 with its reply only. Project document: its root with S-proj's reply.",
-      "headSha": "88478652a00c287c7bf3e408199373f674ba7dc5",
-      "negativeControl": "doc-read --artifact nosuch: exit 1, 'document \"nosuch\" not found by slug; this issue's documents: spec (spec.md), plan-md (plan.md)'; main's CLI (run.sh main) printed only 'Open anchored asks/comments: comment <id>'."
-    },
-    {
-      "criterion": "The BET-15 comment's path is traced from Dispatch's records to the cause, with the records quoted.",
-      "surface": "The run's trace files attached to INFRA-596, fetched with dispatch doc-read.",
-      "command": "dispatch doc-read --issue INFRA-596 --artifact comment-delivery-trace-03207432-txt | tail -n +3 | sha256sum (0240d8a3…, equal to comment-delivery-manifest.txt); same for comment-delivery-trace-c1283587-txt (1f68bfec…)",
-      "observed": "Events 4314 comment.reopened and 4315 comment.created, actor user:sami@theorem.dev, notify true, published_destinations only the BET-15 issue topics; comment_mentions and comment_deliveries sections 0 rows; issue_state at publish: no route, claim session:01a14313 (source seq 63); thread root c1283587 by Sami, reply dc3277d4 by 01a14313, reply 03207432 by Sami. The trace and comments SQL are unchanged since the run's commit 15cb9ba1.",
-      "headSha": "88478652a00c287c7bf3e408199373f674ba7dc5",
-      "negativeControl": "trace-c1283587: event 4260 (Sami's top-level anchored comment) published to notifications.agent.01a14313-f0d7-765d-91c1-f2e043218727 beside the issue topic."
+      "surface": "The dispatch CLI bundled from the head (packages/envoy-client/bin/dispatch.ts) against the same local Dispatch.",
+      "command": "$TMPDIR/infra596-tester/docread.sh head (dispatch://INFRA-596/artifact/tester-rig-docread-sh v2): doc-read --issue RIG-1 --artifact spec, --artifact plan-md, --project RIG --artifact notes-md",
+      "observed": "spec: 'Open anchored threads:' with the open anchored ask and its reply, T1 with both replies (multi-line body intact), the reopened T8; absent: resolved T2, retracted ask T7, unanchored ask T6, conversation comment T4, the plan's T3. plan-md: T3 with its reply. Project document: root and S-proj's reply.",
+      "headSha": "c73382871c542a12b1030c24d97ecfdf3a78782e",
+      "negativeControl": "doc-read --artifact nosuch: exit 1, 'document \"nosuch\" not found by slug; this issue's documents: spec (spec.md), plan-md (plan.md)'."
     },
     {
       "criterion": "A committed query or command produces the October table; the document's counts add up: total, delivered, not delivered by cause, unknown.",
-      "surface": "scripts/dispatch/comment-delivery/report.ts at the head over the six run files attached to INFRA-596; the uploaded dispatch://INFRA-514/artifact/human-comment-delivery-2026-10-md and -pairs-tsv.",
-      "command": "R=$TMPDIR/infra596-tester/report; bun scripts/dispatch/comment-delivery/report.ts --comments $R/comments.csv --receipts $R/receipts.tsv --counts $R/receipts-counts.txt --trace $R/trace-03207432.txt --trace $R/trace-c1283587.txt --findings $R/comment-delivery-findings-2026-10.md --pairs $R/human-comment-delivery-2026-10-pairs.tsv > $R/human-comment-delivery-2026-10.md; cmp against the INFRA-514 documents",
-      "observed": "Exit 0; input sha256s equal the run manifest; output sha256 06312018… and pairs bd067fb6… equal to the uploaded document (its doc-read token trailer removed) and pairs TSV byte for byte. First line: 'Total 1055 = delivered 795 + not delivered 44 (… no-target 14, not-addressed:claimant 19, … running-no-row 11 …) + unknown 216'; pairs 'Total 1128 = delivered 810 + not delivered 65 + unknown 253'; 795 equals the counts file's comments_with_receipt and 44 + 216 its comments_without_receipt 260.",
-      "headSha": "88478652a00c287c7bf3e408199373f674ba7dc5",
-      "negativeControl": "13 mutations of the real inputs each exit 1 naming the line: duplicated receipts row, duplicated comments row, one row dropped from either file, comments.csv cut mid-row, rows_without_id 1, counts comments or received off by one, a receipt for an unknown comment, a received row flipped to not_received, an unknown status, a reordered header, --counts missing."
+      "surface": "scripts/dispatch/comment-delivery/report.ts (now inputs/join/classes/render/report) at the head over the six run files attached to INFRA-596; dispatch://INFRA-514/artifact/human-comment-delivery-2026-10-md and -pairs-tsv.",
+      "command": "R=$TMPDIR/infra596-tester/report; bun scripts/dispatch/comment-delivery/report.ts --comments $R/comments.csv --receipts $R/receipts.tsv --counts $R/receipts-counts.txt --trace $R/trace-03207432.txt --trace $R/trace-c1283587.txt --findings $R/comment-delivery-findings-2026-10.md --pairs $R/human-comment-delivery-2026-10-pairs.tsv > $R/human-comment-delivery-2026-10.md; cmp against the INFRA-514 documents read back now",
+      "observed": "Exit 0; document sha256 0631201835fd…, pairs bd067fb66dac…, both cmp-equal to the uploads; 'Total 1055 = delivered 795 + not delivered 44 (… no-target 14, not-addressed:claimant 19, … running-no-row 11 …) + unknown 216'.",
+      "headSha": "c73382871c542a12b1030c24d97ecfdf3a78782e",
+      "negativeControl": "13 mutations of the real inputs each exit 1 naming the line: duplicated receipts or comments row, a row dropped from either file, comments.csv cut mid-row, rows_without_id 1, comments or received off by one, a receipt for an unknown comment, a received row flipped to not_received, an unknown status, a reordered header, --counts missing."
+    },
+    {
+      "criterion": "The BET-15 comment's path is traced from Dispatch's records to the cause, with the records quoted.",
+      "surface": "The run's trace files attached to INFRA-596.",
+      "command": "dispatch doc-read --issue INFRA-596 --artifact comment-delivery-trace-03207432-txt | tail -n +3 | sha256sum (round 1; files and trace.sql unchanged since, sha256 0240d8a3… equal to the manifest)",
+      "observed": "Events 4314/4315 by user:sami@theorem.dev, notify true, published only to the BET-15 issue topics; no mention or delivery rows; no route and claim session:01a14313 at publish; thread c1283587 (Sami) → dc3277d4 (01a14313) → 03207432 (Sami).",
+      "headSha": "c73382871c542a12b1030c24d97ecfdf3a78782e",
+      "negativeControl": "trace-c1283587: event 4260 published to notifications.agent.01a14313-f0d7-765d-91c1-f2e043218727 beside the issue topic."
     }
   ],
   "observations": [
-    "CI at code head 86599d457b94 (the handoff head 88478652 carries skip-checks): build, changes, lint, test and typecheck were queued when read; not waited on.",
-    "No test makes loadCommentRecipients or loadPrimaryDocumentAuthors fail to show that only the events that needed it back off; the path was not driven live either (no way to make the query fail on the rig without corrupting data, and the comments_anchor_artifact expression index refuses the one data shape, a non-uuid anchor artifact_id, that could make the cast in commentRecipientsQuery fail). Not a defect found."
+    "CI at code head 9ac93a9703a0 (c7338287 is handoff-only): build, changes, lint, test, typecheck queued when read; not waited on.",
+    "The stopping-batch release (a cancelled context releases the events whose recipient query failed) was not driven live: a stop cannot be timed inside a batch on the rig. TestAStoppingBatchReleasesTheEventsWhoseRecipientQueryFailed pins it.",
+    "THROUGHPUT.md's re-measurement ran at c2a223fc, before the two forward merges; the outbox difference they bring (#2137's artifact.human_edited arm) runs no query on the measured loads."
   ]
 }
