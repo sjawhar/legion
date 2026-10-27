@@ -5,10 +5,11 @@ import (
 	"testing"
 )
 
-// 0060 adds the head run and drops the marks a late push took a count back by. A pull request
-// recorded before it, its count standing, keeps its count and its mark and has no run open, so a
-// late push for its head replays nothing and takes nothing back.
-func TestAPullRequestRecordedBefore0060HasNoHeadRunOpen(t *testing.T) {
+// 0060 adds where a pull request's head moves started: the head a counted fix attempt moved from
+// and the head the current head replaced. A pull request recorded before it, its count standing,
+// gets an empty one of each, which no chain of pushes starts from, so a late push takes nothing
+// back from it and settles its planned mark only as that head's own push.
+func TestAPullRequestRecordedBefore0060NamesNoStartOfItsMoves(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
 	migrateThrough(t, store, 59)
@@ -19,31 +20,19 @@ func TestAPullRequestRecordedBefore0060HasNoHeadRunOpen(t *testing.T) {
 	}
 	if _, err := store.Pool().Exec(ctx, `insert into pull_requests
 		(issue, repo, number, branch, head_sha, head_updated_at, failing, cancelled, fix_attempts, blocked_attempts, check_runs,
-		 generation, snapshot, pushes, head_counted, head_counted_before, head_counted_from, head_arrived_from, planned_red,
-		 review_seen, state, checked_head, required_workflows, required_workflows_head, mergeability)
+		 generation, snapshot, pushes, head_counted, head_counted_before, planned_red, review_seen, state, checked_head,
+		 required_workflows, required_workflows_head, mergeability)
 		values ('LEGION-208', 'sjawhar/legion', 1208, 'legion/LEGION-208', 'h4', now(), '[]', '[]', 3, 0, '[]',
-		 0, '', '[]', 'h4', 'h2', 'h3', 'h3', false, 0, 'open', '', '[]', '', '')`); err != nil {
+		 0, '', '[]', 'h4', 'h2', false, 0, 'open', '', '[]', '', '')`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
+	migrateThrough(t, store, 60)
+	var counted, countedFrom, arrivedFrom string
+	if err := store.Pool().QueryRow(ctx, `select head_counted, head_counted_from, head_arrived_from from pull_requests where issue = 'LEGION-208'`).
+		Scan(&counted, &countedFrom, &arrivedFrom); err != nil {
+		t.Fatalf("read the columns 0060 adds: %v", err)
 	}
-	var attempts int
-	var counted, moves string
-	var open bool
-	if err := store.Pool().QueryRow(ctx, `select fix_attempts, head_counted, head_run is not null, head_moves::text from pull_requests where issue = 'LEGION-208'`).
-		Scan(&attempts, &counted, &open, &moves); err != nil {
-		t.Fatalf("read the pull request after 0060: %v", err)
-	}
-	if attempts != 3 || counted != "h4" || open || moves != "[]" {
-		t.Fatalf("fix_attempts=%d head_counted=%q head run open %v head_moves %s after 0060, want 3, \"h4\", none and []", attempts, counted, open, moves)
-	}
-	var dropped int
-	if err := store.Pool().QueryRow(ctx, `select count(*) from information_schema.columns where table_name = 'pull_requests'
-		and column_name in ('head_counted_before', 'head_counted_from', 'head_arrived_from')`).Scan(&dropped); err != nil {
-		t.Fatal(err)
-	}
-	if dropped != 0 {
-		t.Fatalf("%d of the marks 0060 drops remain", dropped)
+	if counted != "h4" || countedFrom != "" || arrivedFrom != "" {
+		t.Fatalf("head_counted=%q head_counted_from=%q head_arrived_from=%q after 0060, want \"h4\", \"\" and \"\"", counted, countedFrom, arrivedFrom)
 	}
 }

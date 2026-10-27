@@ -1,6 +1,6 @@
--- 0060_pull_request_head_run.up.sql — the head run (record.PullRequest.Run), which replaces the
+-- 0061_pull_request_head_run.up.sql — the head run (record.PullRequest.Run), which replaces the
 -- marks a late push took a count back by: the mark a count replaced (0036) and where a count and a
--- head moved from (0059).
+-- head moved from (0060).
 --
 -- A head that arrives before every push of its move is recorded opens a run: the pull request's
 -- judgement as it stood before that head (the count and its mark, the planned mark, the CI

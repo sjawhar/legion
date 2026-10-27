@@ -1,8 +1,8 @@
 # shellcheck shell=bash
-# The run a whole-daemon live proof makes around its driver: merged-root-waits.sh and
-# no-required-checks.sh differ only in what their driver proves, so both are this run. Sourced by
-# the entry script, never run. The entry script sets `set -euo pipefail` and root, the checkout it
-# sources this file from, and calls live_daemon_proof as its last command.
+# The run a whole-daemon live proof makes around its driver: merged-root-waits.sh,
+# no-required-checks.sh and child-adoption.sh differ only in what their driver proves, so each is
+# this run. Sourced by the entry script, never run. The entry script sets `set -euo pipefail` and
+# root, the checkout it sources this file from, and calls live_daemon_proof as its last command.
 #
 # live_daemon_proof LABEL SLUG TEST EVIDENCE runs four checks, each printing `== <check>`, what it
 # observed and `ok <check> (<s>s)`; the first that fails prints `FAIL <check>: <why>` and ends the
