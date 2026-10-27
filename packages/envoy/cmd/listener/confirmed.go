@@ -35,28 +35,28 @@ const publishRetryPause = 100 * time.Millisecond
 // send last resolved, empty when none was; Attempts counts the forwards it made, every one the same
 // envelope under one event_id.
 type roleSendFailure struct {
-	Error     string `json:"error"`
-	Reason    string `json:"reason"`
-	EventID   string `json:"event_id"`
-	DedupeKey string `json:"dedupe_key"`
-	Holder    string `json:"holder"`
-	Attempts  int    `json:"attempts"`
+	Error     string      `json:"error"`
+	Reason    sendOutcome `json:"reason"`
+	EventID   string      `json:"event_id"`
+	DedupeKey string      `json:"dedupe_key"`
+	Holder    string      `json:"holder"`
+	Attempts  int         `json:"attempts"`
 }
 
 // capabilityRefusal is the 403 of a role send whose holder cannot take the payload's delivery
 // mode: it does not advertise the mode, or the mode cannot be read unambiguously. Its error reads
 // as /v1/messages/send's answer to the same refusal.
 type capabilityRefusal struct {
-	Error  string `json:"error"`
-	Reason string `json:"reason"`
-	Holder string `json:"holder"`
+	Error  string      `json:"error"`
+	Reason sendOutcome `json:"reason"`
+	Holder string      `json:"holder"`
 }
 
 // undeliveredRecipient names one session of an ad-hoc topic send that did not confirm the message,
 // with the reason a role send would give.
 type undeliveredRecipient struct {
-	SessionID string `json:"session_id"`
-	Reason    string `json:"reason"`
+	SessionID string      `json:"session_id"`
+	Reason    sendOutcome `json:"reason"`
 }
 
 // topicSendFailure is the 504 of an ad-hoc topic send that published the message and that some
@@ -64,7 +64,7 @@ type undeliveredRecipient struct {
 // list is [] rather than null.
 type topicSendFailure struct {
 	Error       string                 `json:"error"`
-	Reason      string                 `json:"reason"`
+	Reason      sendOutcome            `json:"reason"`
 	EventID     string                 `json:"event_id"`
 	DedupeKey   string                 `json:"dedupe_key"`
 	Delivered   []string               `json:"delivered"`
@@ -76,15 +76,17 @@ type topicSendFailure struct {
 // none, and its error says the topic was not published, which is all a client that shows only the
 // error (envoy-client's EnvoyApiError) tells its agent.
 type topicPublishFailure struct {
-	Error     string `json:"error"`
-	Reason    string `json:"reason"`
-	EventID   string `json:"event_id"`
-	DedupeKey string `json:"dedupe_key"`
+	Error     string      `json:"error"`
+	Reason    sendOutcome `json:"reason"`
+	EventID   string      `json:"event_id"`
+	DedupeKey string      `json:"dedupe_key"`
 }
 
-// sendOutcome is how a confirmed send ended, or how one recipient of an ad-hoc topic send did. Its
-// value is the outcome the send's log line names and, where the answer carries a reason, that
-// reason, so the log, the answer and the role lane's own lines read alike.
+// sendOutcome is how a confirmed send ended, or how one recipient of an ad-hoc topic send did. An
+// answer that carries a reason carries the outcome itself, which marshals as its string. A send's
+// log line names the outcome as its reason attribute and deliveryStatus's label for it as its
+// delivery_status attribute, so the reason reads as the answer does and delivery_status reads as
+// the role lane's own lines and the messagesDelivered count do.
 type sendOutcome string
 
 const (
@@ -114,12 +116,10 @@ const (
 	sendPublishFailed sendOutcome = "publish_failed"
 )
 
-// reason is the outcome as an answer's JSON reason names it.
-func (o sendOutcome) reason() string { return string(o) }
-
-// deliveryStatus is the messagesDelivered label the role lane gives the same outcome, so the
-// route's counts read as the lane's: an unclaimed role is skipped, and every outcome that is
-// neither taken, skipped nor a receipt timeout is failed.
+// deliveryStatus is the label the role lane gives the same outcome, which the route counts under
+// messagesDelivered and logs as delivery_status, so the route's counts and lines read as the
+// lane's: an unclaimed role is skipped, and every outcome that is neither taken, skipped nor a
+// receipt timeout is failed.
 func (o sendOutcome) deliveryStatus() string {
 	switch o {
 	case sendDelivered, sendDedupe, sendSkipped, sendReceiptTimeout:
@@ -217,16 +217,17 @@ type roleSend struct {
 }
 
 // settle counts and logs the send's outcome, the one line a send writes, once its answer is written.
-// It counts the label the role lane gives the same outcome.
+// It counts and logs as delivery_status the label the role lane gives the same outcome, and logs
+// the outcome itself as reason.
 func (s *roleSend) settle(outcome sendOutcome) {
-	metricStatus := outcome.deliveryStatus()
-	s.d.delivery.messagesDelivered.Inc([2]string{"delivery_status", metricStatus})
+	s.d.delivery.messagesDelivered.Inc([2]string{"delivery_status", outcome.deliveryStatus()})
 	level := slog.LevelWarn
-	switch metricStatus {
-	case string(sendDelivered), string(sendSkipped), string(sendDedupe):
+	switch outcome {
+	case sendDelivered, sendSkipped, sendDedupe, sendUnclaimed:
 		level = slog.LevelInfo
 	}
-	s.d.delivery.logger.DeliveryLog(level, "listener publish role send", s.holder, s.item.Topic, s.item.EventID, string(outcome),
+	s.d.delivery.logger.DeliveryLog(level, "listener publish role send", s.holder, s.item.Topic, s.item.EventID, outcome.deliveryStatus(),
+		slog.String("reason", string(outcome)),
 		slog.String("dedupe_key", s.item.DedupeKey),
 		slog.Int("attempts", s.attempts),
 		slog.String("elapsed", time.Since(s.arrived).String()))
@@ -261,8 +262,8 @@ func (s *roleSend) timedOut(lastForward error) {
 	outcome := unconfirmedReason(lastForward)
 	writeJSON(s.w, http.StatusGatewayTimeout, roleSendFailure{
 		Error: fmt.Sprintf("role %s: event %s was not confirmed by its holder %s within %s (%s)",
-			s.role, s.item.EventID, cmp.Or(s.holder, "(none)"), publishDeliveryWindow, outcome.reason()),
-		Reason:    outcome.reason(),
+			s.role, s.item.EventID, cmp.Or(s.holder, "(none)"), publishDeliveryWindow, outcome),
+		Reason:    outcome,
 		EventID:   s.item.EventID,
 		DedupeKey: s.item.DedupeKey,
 		Holder:    s.holder,
@@ -293,7 +294,7 @@ func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
 	default:
 		writeJSON(s.w, http.StatusForbidden, capabilityRefusal{
 			Error:  verdict.refusal,
-			Reason: sendCapability.reason(),
+			Reason: sendCapability,
 			Holder: s.holder,
 		})
 		s.settle(sendCapability)
@@ -452,8 +453,10 @@ func confirmTopicRecipient(ctx context.Context, d *listenerDeps, item contracts.
 				return sendDelivered
 			}
 			if forwardRefused(err) {
-				d.delivery.logger.DeliveryLog(slog.LevelWarn, "listener publish topic forward refused", sessionID, item.Topic, item.EventID, string(sendFailed), slog.String("error", err.Error()))
-				return sendDeliveryFailed
+				outcome := sendDeliveryFailed
+				d.delivery.logger.DeliveryLog(slog.LevelWarn, "listener publish topic forward refused", sessionID, item.Topic, item.EventID, outcome.deliveryStatus(),
+					slog.String("reason", string(outcome)), slog.String("error", err.Error()))
+				return outcome
 			}
 			lastForward = err
 		}
@@ -482,22 +485,32 @@ func confirmTopicRecipient(ctx context.Context, d *listenerDeps, item contracts.
 func sendToTopic(ctx context.Context, w http.ResponseWriter, d *listenerDeps, item contracts.Envelope, arrived time.Time) {
 	recipients := topicRecipients(d, item)
 	settle := func(outcome sendOutcome, delivered []string, undelivered []undeliveredRecipient, attrs ...slog.Attr) {
+		switch outcome {
+		case sendPublishFailed, sendFailed:
+			// The send forwarded nothing, so each recipient it did not reach counts failed, as
+			// not_confirmed counts each recipient that did not confirm; a send with no recipient
+			// counts nothing. Every other outcome's recipients are counted as each one ended.
+			for range recipients {
+				d.delivery.messagesDelivered.Inc([2]string{"delivery_status", outcome.deliveryStatus()})
+			}
+		}
 		level := slog.LevelInfo
 		if outcome != sendDelivered {
 			level = slog.LevelWarn
 		}
 		attrs = append([]slog.Attr{
+			slog.String("reason", string(outcome)),
 			slog.String("dedupe_key", item.DedupeKey),
 			slog.Any("delivered", delivered),
 			slog.Any("undelivered", undelivered),
 			slog.String("elapsed", time.Since(arrived).String()),
 		}, attrs...)
-		d.delivery.logger.DeliveryLog(level, "listener publish topic send", "", item.Topic, item.EventID, string(outcome), attrs...)
+		d.delivery.logger.DeliveryLog(level, "listener publish topic send", "", item.Topic, item.EventID, outcome.deliveryStatus(), attrs...)
 	}
 	notPublished := func(cause error) {
 		writeJSON(w, http.StatusGatewayTimeout, topicPublishFailure{
 			Error:     fmt.Sprintf("%s was not published within %s: %v; no session was sent it", item.Topic, publishDeliveryWindow, cause),
-			Reason:    sendPublishFailed.reason(),
+			Reason:    sendPublishFailed,
 			EventID:   item.EventID,
 			DedupeKey: item.DedupeKey,
 		})
@@ -537,7 +550,7 @@ func sendToTopic(ctx context.Context, w http.ResponseWriter, d *listenerDeps, it
 		case sendDelivered, sendDedupe:
 			delivered = append(delivered, recipients[i])
 		default:
-			undelivered = append(undelivered, undeliveredRecipient{SessionID: recipients[i], Reason: outcome.reason()})
+			undelivered = append(undelivered, undeliveredRecipient{SessionID: recipients[i], Reason: outcome})
 		}
 	}
 	if len(undelivered) > 0 {
@@ -550,7 +563,7 @@ func sendToTopic(ctx context.Context, w http.ResponseWriter, d *listenerDeps, it
 		writeJSON(w, http.StatusGatewayTimeout, topicSendFailure{
 			Error: fmt.Sprintf("%d of %d sessions subscribed to %s did not confirm event %s within %s: %s",
 				len(undelivered), len(recipients), item.Topic, item.EventID, publishDeliveryWindow, strings.Join(named, ", ")),
-			Reason:      sendNotConfirmed.reason(),
+			Reason:      sendNotConfirmed,
 			EventID:     item.EventID,
 			DedupeKey:   item.DedupeKey,
 			Delivered:   delivered,

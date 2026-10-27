@@ -502,6 +502,82 @@ func TestPublishRouteAnswersPublishFailedForAnAdHocTopicItCouldNotPublish(t *tes
 	}
 }
 
+// An ad-hoc topic send that forwarded nothing, because its own publish did not reach NATS or NATS
+// refused it, counts each self-subscribed recipient it did not reach failed under
+// messagesDelivered, as a send answered not_confirmed counts each recipient that did not confirm;
+// with no recipient it counts nothing.
+func TestPublishRouteCountsEachRecipientOfAnAdHocTopicItForwardedNothingTo(t *testing.T) {
+	cases := []struct {
+		name       string
+		recipients []string
+		closed     bool
+		message    string
+		status     int
+		want       string
+	}{
+		{
+			name:       "the publish did not reach NATS",
+			recipients: []string{"ses_first", "ses_second"},
+			closed:     true,
+			message:    "through no hub",
+			status:     http.StatusGatewayTimeout,
+			want:       `test_messages_delivered{delivery_status="failed"} 2`,
+		},
+		{
+			name:       "NATS refused the publish",
+			recipients: []string{"ses_first", "ses_second"},
+			message:    strings.Repeat("m", 2<<20),
+			status:     http.StatusRequestEntityTooLarge,
+			want:       `test_messages_delivered{delivery_status="failed"} 2`,
+		},
+		{
+			name:    "the publish did not reach NATS and nobody is subscribed",
+			closed:  true,
+			message: "through no hub",
+			status:  http.StatusGatewayTimeout,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			harness := newListenerDeliveryHarness(t, nil)
+			for _, sessionID := range tc.recipients {
+				if _, err := harness.registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "other-machine"}, []string{"notifications.team.>"}); err != nil {
+					t.Fatalf("register %s's interest: %v", sessionID, err)
+				}
+				if err := harness.sessions.Put(sessionID, session.SessionEntry{MachineID: "other-machine", SelfSubscribed: true}); err != nil {
+					t.Fatalf("register %s: %v", sessionID, err)
+				}
+			}
+			deps := harness.publishDeps(t)
+			if tc.closed {
+				closed, err := bus.Connect([]string{testnats.URL(t)}, bus.WithName("closed-publisher"))
+				if err != nil {
+					t.Fatalf("connect: %v", err)
+				}
+				closed.Close()
+				deps.client = closed
+			}
+			body, err := json.Marshal(map[string]string{"topic": "notifications.team.unsent", "message": tc.message, "idempotency_key": "unsent-1"})
+			if err != nil {
+				t.Fatalf("marshal the request: %v", err)
+			}
+			recorder, _ := publishThrough(deps, string(body))
+			if recorder.Code != tc.status {
+				t.Fatalf("status %d, want %d; body %.300s", recorder.Code, tc.status, recorder.Body.String())
+			}
+			scrape := httptest.NewRecorder()
+			harness.metrics.Handler().ServeHTTP(scrape, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+			counted := scrape.Body.String()
+			if tc.want != "" && !strings.Contains(counted, tc.want) {
+				t.Fatalf("metrics do not hold %s:\n%s", tc.want, counted)
+			}
+			if tc.want == "" && strings.Contains(counted, "test_messages_delivered{") {
+				t.Fatalf("a send with no recipient counted a delivery:\n%s", counted)
+			}
+		})
+	}
+}
+
 // An ad-hoc topic sent while the listener's connection to its server is down is answered inside
 // the send's window, as packages/envoy/AGENTS.md says of both confirmed sends, with an error rather
 // than a 200. The topic's own core publish waits on the reconnect too, so it must end with the

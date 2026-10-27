@@ -339,28 +339,39 @@ func laneHolderFresh(entry session.SessionEntry) bool {
 func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Envelope, role string) (string, session.SessionEntry, bool) {
 	resolved, err := resolveRoleHolder(cfg.registry, cfg.sessions, role, laneHolderFresh)
 	sessionID := resolved.holder
+	// Every error resolveRoleHolder returns is a *roleHolderFailure naming the read that failed.
+	// One that is not would still be a read that failed, so it is logged as the claim read with
+	// its own error rather than left without a step to branch on.
 	var failure *roleHolderFailure
-	switch {
-	case err == nil && resolved.state == roleHolderLive:
-		return sessionID, resolved.entry, true
-	case err == nil && resolved.state == roleHolderUnclaimed:
-		applyDeliveryOutcome(cfg, item, deliveryOutcome{
-			metricStatus: "skipped",
-			log: func(logger *logging.Logger) {
-				logger.DeliveryLog(slog.LevelWarn, "listener role has no holder", "", item.Topic, item.EventID, "skipped")
-			},
-			exceptionReason: "no_holder",
-		})
-	case err == nil:
-		applyDeliveryOutcome(cfg, item, deliveryOutcome{
-			sessionID:    sessionID,
-			metricStatus: "failed",
-			log: func(logger *logging.Logger) {
-				logger.DeliveryLog(slog.LevelWarn, "listener role holder is not live", sessionID, item.Topic, item.EventID, "failed")
-			},
-			exceptionReason: "delivery_failed",
-		})
-	case errors.As(err, &failure) && failure.step == roleHolderClaimRead:
+	if err != nil && !errors.As(err, &failure) {
+		failure = &roleHolderFailure{step: roleHolderClaimRead, cause: err}
+	}
+	if err == nil {
+		switch resolved.state {
+		case roleHolderLive:
+			return sessionID, resolved.entry, true
+		case roleHolderUnclaimed:
+			applyDeliveryOutcome(cfg, item, deliveryOutcome{
+				metricStatus: "skipped",
+				log: func(logger *logging.Logger) {
+					logger.DeliveryLog(slog.LevelWarn, "listener role has no holder", "", item.Topic, item.EventID, "skipped")
+				},
+				exceptionReason: "no_holder",
+			})
+		default:
+			applyDeliveryOutcome(cfg, item, deliveryOutcome{
+				sessionID:    sessionID,
+				metricStatus: "failed",
+				log: func(logger *logging.Logger) {
+					logger.DeliveryLog(slog.LevelWarn, "listener role holder is not live", sessionID, item.Topic, item.EventID, "failed")
+				},
+				exceptionReason: "delivery_failed",
+			})
+		}
+		return "", session.SessionEntry{}, false
+	}
+	switch failure.step {
+	case roleHolderClaimRead:
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			metricStatus: "failed",
 			log: func(logger *logging.Logger) {
@@ -368,7 +379,7 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 			},
 			exceptionReason: "delivery_failed",
 		})
-	case failure != nil && failure.step == roleHolderSessionRead:
+	case roleHolderSessionRead:
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID:    sessionID,
 			metricStatus: "failed",
@@ -377,7 +388,7 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 			},
 			exceptionReason: "delivery_failed",
 		})
-	case failure != nil && failure.step == roleHolderRelease:
+	case roleHolderRelease:
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID:    sessionID,
 			metricStatus: "failed",
@@ -387,6 +398,7 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 			exceptionReason: "delivery_failed",
 		})
 	default:
+		// roleHolderChurn, whose failure carries no cause.
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			metricStatus: "failed",
 			log: func(logger *logging.Logger) {
