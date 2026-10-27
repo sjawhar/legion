@@ -223,7 +223,15 @@ test.each([
     expect(card.section.querySelector("[data-dispatch-ask-asked]")).toBeNull();
     const hosted = card.footer.getByRole("article", { name: `Urgency: ${label}` });
     expect(hosted.dataset.testid).toBe("ask-ask-1");
-    expect(within(hosted).getByText("Architect for CORE-1 (for sjawhar)")).toBeDefined();
+    // The asker's button holds its name, its attribution follows, and its live link sits beside
+    // the button rather than inside it.
+    const asker = within(hosted).getByRole("button", { name: "Architect for CORE-1" });
+    const agent = asker.closest<HTMLElement>("[data-agent-name]");
+    expect(agent?.textContent).toContain("Architect for CORE-1 (for sjawhar)");
+    const live = within(agent as HTMLElement).getByRole("link", {
+      name: "Open live conversation with Architect for CORE-1 (for sjawhar)",
+    });
+    expect(asker.contains(live)).toBe(false);
     await waitFor(() =>
       expect(within(hosted).getByText("3 minutes ago", { exact: false })).toBeDefined()
     );
@@ -277,6 +285,23 @@ test("a block copied from an issue's spec links to the spec", () => {
   }
 });
 
+test("a copied block's link names its block as encodeBlockId writes it", () => {
+  const card = renderCard({
+    indexed: false,
+    node: askNode({
+      blockId: "ship_it",
+      copied_from: "ask-source",
+      copied_from_document: "dispatch://CORE-1/artifact/plan",
+    }),
+  });
+  try {
+    const link = card.header.getByRole("link", { name: "CORE-1 plan" });
+    expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/plan#b-ship%5Fit");
+  } finally {
+    card.unmount();
+  }
+});
+
 test("a project document's copied block links to its source under the project", () => {
   const card = renderCard({
     indexed: false,
@@ -289,6 +314,29 @@ test("a project document's copied block links to its source under the project", 
   try {
     const link = card.header.getByRole("link", { name: "CORE/plan" });
     expect(link.getAttribute("href")).toBe("/projects/CORE/documents/plan#b-b-1");
+  } finally {
+    card.unmount();
+  }
+});
+
+// The source document's reference is the server's, so a document whose name is past the bound
+// text is held to (2683 characters, which a new upload's reference key still holds) is linked
+// all the same, at the block, for an issue's document and a project's.
+test.each([
+  ["CORE-1", "CORE-1 ", "/issues/CORE-1/artifacts/"],
+  ["CORE", "CORE/", "/projects/CORE/documents/"],
+] as const)("a block copied from a long-named %s document links to it", (owner, name, path) => {
+  const slug = "a".repeat(2683);
+  const card = renderCard({
+    indexed: false,
+    node: askNode({
+      copied_from: "ask-source",
+      copied_from_document: `dispatch://${owner}/artifact/${slug}`,
+    }),
+  });
+  try {
+    const link = card.header.getByRole("link", { name: `${name}${slug}` });
+    expect(link.getAttribute("href")).toBe(`${path}${slug}#b-b-1`);
   } finally {
     card.unmount();
   }

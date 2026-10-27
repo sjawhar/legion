@@ -8,16 +8,30 @@
 # pane is killed, comes back with `--resume` into the same Claude Code session, its transcript's
 # earlier turns intact and in its context.
 #
-# Run it as `LEGION_E2E_CLAUDE_KEY_FILE=<file> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic
-# bash scripts/e2e/claude-backend-tmux.sh`. LEGION_E2E_CLAUDE_KEY_FILE is a file holding the
-# Anthropic API key the Claude Code implementer reaches its model with: the run copies it once into
-# its work directory (0600), and the implementer's claim directory names a key command that prints
-# that copy (Claude Code's apiKeyHelper), so the key reaches no pane's environment, no argv and no
-# transcript. The Oh My Pi agents reach their model through the Hawk model gateway, as Stage 3's do
-# (lib/install-model-gateway.sh). The rig is Stage 3's without its GitHub ingress bridge: scratch
-# Postgres, NATS, Envoy listener and Dispatch, Legion's role Apps through `secrets` (resolved by the
-# daemon's private_key_command and once by lib/app-logins.ts, never in this shell), and the smoke
-# repository sjawhar/legion-smoke, where the implementer pushes a branch and opens no pull request.
+# Run it as `LEGION_E2E_MODEL_ROUTE=<gateway|key-file> … bash scripts/e2e/claude-backend-tmux.sh`.
+# LEGION_E2E_MODEL_ROUTE is required, as Stage 2's and Stage 3's is, and picks how the Oh My Pi
+# agents (the architect and the planner) reach their model:
+#   - `gateway`: the Hawk model gateway, as Stage 3's agents do, with
+#     LEGION_E2E_MODEL_GATEWAY_URL (required in this mode; lib/install-model-gateway.sh) and
+#     hawk-token on PATH; LEGION_E2E_CLAUDE_KEY_FILE names the Claude Code pane's own key file.
+#   - `key-file`: Anthropic's own endpoint keyed by a 0600 file read fresh on every call
+#     (lib/install-key-file-model-route.sh), for a devbox with no Hawk gateway. The file is
+#     LEGION_E2E_ANTHROPIC_KEY_FILE, and LEGION_E2E_CLAUDE_KEY_FILE unset falls back to it, so one
+#     key file serves both halves of the run; naming both puts the Claude Code pane on
+#     LEGION_E2E_CLAUDE_KEY_FILE and the Oh My Pi agents on LEGION_E2E_ANTHROPIC_KEY_FILE, and the
+#     notes name both paths.
+# The Claude Code pane's key file holds the Anthropic API key the Claude Code implementer reaches
+# its model with, and Anthropic's own `GET /v1/models` must accept it before any pane starts: the
+# run copies it once into its work directory (0600), and the implementer's claim directory names a
+# key command that prints that copy (Claude Code's apiKeyHelper), so the key reaches no pane's
+# environment, no argv and no transcript.
+# The rig is Stage 3's without its GitHub ingress bridge: scratch
+# Postgres, NATS, Envoy listener and Dispatch, Legion's role Apps through `secrets` (this
+# deployment's own pair unless the four LEGION_E2E_*_APP_* inputs name another deployment's,
+# lib/github-apps.sh; each key is resolved by the daemon's private_key_command and once by
+# lib/app-logins.ts, which proves it is its id's App before the run writes anything, never in this
+# shell), and the smoke repository
+# sjawhar/legion-smoke, where the implementer pushes a branch and opens no pull request.
 set -Eeuo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -112,14 +126,19 @@ cleanup() {
   # Teardown is best effort: a failing command here is a warning about the teardown, never a check's
   # FAIL line, and the run's exit status stays the one the checks set.
   trap 'printf "cleanup warning: line %s exited %s\n" "$LINENO" "$?" >&2' ERR
+  # First, before anything slower (stopping panes, docker, the gh calls in remove_run_branch) can
+  # hang or be ended by a second signal: the Claude pane's key copy and the key-file route's own
+  # key command, which bakes in --key-file's resolved path. Neither may survive this script on any
+  # exit, so neither is conditioned on how the rest of cleanup goes. Stages 2 and 3 do the same.
   rm -f "$work/claude-model-key" "$work/claude-key-header"
+  rm -rf "$work/model-gateway-key" || true
   stop_tree "$watcher_pid"
   stop_pid "$daemon_pid"
   stop_pid "$dispatch_pid"
   stop_pid "$listener_pid"
   TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1 || true
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
-  docker rm -f "$pg_container" "$nats_container" >/dev/null 2>&1 || true
+  docker rm -f -v "$pg_container" "$nats_container" >/dev/null 2>&1 || true
   collect_transcripts
   remove_run_branch
   rm -rf "$work/model-gateway-cache" || true
@@ -148,8 +167,7 @@ start_listener() {
     offset=$(log_size listener)
     ENVOY_API_TOKEN="$token" PORT="$port_listener" ENVOY_LISTEN_HOST=127.0.0.1 \
       ENVOY_MACHINE_ID="legion-e2ecc-$$" NATS_URLS="nats://127.0.0.1:$port_nats" \
-      start_process listener env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
-        -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/envoy-listener"
+      start_process listener env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" "$work/envoy-listener"
     result=0
     await_start listener "$listener_pid" "$offset" 60 "the Envoy listener to answer /v1/sessions" \
       curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$port_listener/v1/sessions" || result=$?
@@ -177,8 +195,7 @@ start_dispatch() {
       DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT="$port_dispatch" \
       DISPATCH_SERVER_URL="http://127.0.0.1:$port_dispatch" NATS_URLS="nats://127.0.0.1:$port_nats" \
       ENVOY_URL="http://127.0.0.1:$port_listener" \
-      start_process dispatch env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
-        -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/envoy-dispatch"
+      start_process dispatch env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" "$work/envoy-dispatch"
     result=0
     await_start dispatch "$dispatch_pid" "$offset" 60 "the scratch Dispatch server" \
       curl -fsS "http://127.0.0.1:$port_dispatch/api/v1" || result=$?
@@ -216,13 +233,7 @@ admission_cap: 1
 instructions: $work/instructions.md
 worker_backends:
   implementer: claude
-github_apps:
-  implement:
-    app_id: "3202636"
-    private_key_command: "secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -- sh -c 'value=\$(printf %s \"\${LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64}\" | tr \"_-\" \"/+\"); case \$((\${#value} % 4)) in 1) value=\${value%?};; 2) value=\"\${value}==\";; 3) value=\"\${value}=\";; esac; printf %s \"\$value\" | base64 -d'"
-  review:
-    app_id: "3202653"
-    private_key_command: "secrets GH_REVIEW_APP_PRIVATE_KEY_B64 -- sh -c 'value=\$(printf %s \"\${GH_REVIEW_APP_PRIVATE_KEY_B64}\" | tr \"_-\" \"/+\"); case \$((\${#value} % 4)) in 1) value=\${value%?};; 2) value=\"\${value}==\";; 3) value=\"\${value}=\";; esac; printf %s \"\$value\" | base64 -d'"
+$(<"$work/github-apps.yaml")
 EOF
 }
 
@@ -236,11 +247,11 @@ start_daemon() {
     pick_port port_worker_stream
     write_legion_config
     offset=$(log_size daemon)
-    HOME="$omp_home" OMP_PROFILE="$profile" PATH="$(dirname "$real_gh"):$work/realtmux:$PATH" \
-      LEGION_CLAUDE_PATH="$claude_bin" LEGION_BUN_PATH="$bun_bin" LEGION_CLAUDE_PLUGIN_DIR="$root/packages/claude-envoy" \
+    HOME="$omp_home" OMP_PROFILE="$profile" PATH="$realbin:$PATH" \
+      LEGION_CLAUDE_PATH="$claude_bin" LEGION_BUN_PATH="$realbin/bun" LEGION_CLAUDE_PLUGIN_DIR="$root/packages/claude-envoy" \
       env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE \
-      -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -u GH_AGENT_APP_PRIVATE_KEY_B64 \
-      -u GH_REVIEW_APP_PRIVATE_KEY_B64 -u ANTHROPIC_API_KEY \
+      -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" \
+      -u ANTHROPIC_API_KEY \
       "$work/legion" start --config "$work/legion.yaml" >>"$evidence/logs/daemon.log" 2>&1 &
     daemon_pid=$!
     result=0
@@ -283,18 +294,50 @@ workspace_jj() {
 }
 
 # ---- the production guards -------------------------------------------------------------------
+# process_args PID NAME reads PID's arguments into the array NAME from the NUL-delimited
+# /proc/PID/cmdline, in this shell: no pipe stands between the read and the check, so nothing can
+# end early on a pane's command line, which holds its whole system prompt (past 64 KB, with
+# newlines). It fails when the entry cannot be read or holds no argument (the process has gone).
+process_args() {
+  local -n _args=$2
+  { mapfile -d '' -t _args <"/proc/$1/cmdline"; } 2>/dev/null && [ "${#_args[@]}" -gt 0 ]
+}
+# read_environ PID NAME reads PID's environment once into the associative array NAME from the
+# NUL-delimited /proc/PID/environ, the first value of a repeated name winning, as getenv's does. A
+# read that fails, or an empty environment (the process has exited), prints why and fails: the
+# environment was not read, which is never the same as a clean one.
+read_environ() {
+  local -n _env=$2
+  local entry
+  local -a entries
+  if ! { mapfile -d '' -t entries <"/proc/$1/environ"; } 2>/dev/null; then
+    printf 'its environment could not be read (/proc/%s/environ)\n' "$1"
+    return 1
+  fi
+  if [ "${#entries[@]}" = 0 ]; then
+    printf 'its environment is empty (/proc/%s/environ): it has exited\n' "$1"
+    return 1
+  fi
+  for entry in "${entries[@]}"; do
+    [ -n "${_env[${entry%%=*}]+set}" ] || _env[${entry%%=*}]=${entry#*=}
+  done
+}
 # agent_descendant PID prints the first process under PID (PID included) that is an agent: Oh My Pi
 # (argv[0] omp) or Claude Code (argv[0] claude). A Claude Code pane's MCP server is claude's child,
 # so the walk meets claude first.
 agent_descendant() {
-  local queue=("$1") pid children name
+  local queue=("$1") pid children
+  local -a args
   while [ "${#queue[@]}" -gt 0 ]; do
     pid=${queue[0]}
     queue=("${queue[@]:1}")
-    name=$(basename "$(tr '\0' '\n' <"/proc/$pid/cmdline" 2>/dev/null | sed -n 1p)")
-    if [ "$name" = omp ] || [ "$name" = claude ]; then
-      printf '%s\n' "$pid"
-      return 0
+    if process_args "$pid" args; then
+      case $(basename -- "${args[0]}") in
+        omp | claude)
+          printf '%s\n' "$pid"
+          return 0
+          ;;
+      esac
     fi
     children=$(cat /proc/"$pid"/task/*/children 2>/dev/null || true)
     for child in $children; do queue+=("$child"); done
@@ -305,11 +348,17 @@ claim_pane_pid() {
   daemon_state | jq -er --arg issue "$1" --arg role "$2" \
     '(if $role == "architect" then .issues[$issue].architect else .issues[$issue].workers[$role].claim end).locator.incarnation | split(":")[0]'
 }
-pane_value() { tr '\0' '\n' <"/proc/$1/environ" | sed -n "s/^$2=//p"; }
-# endpoint_mismatch AGENT_PID prints the first rig endpoint the agent does not carry, or the
-# ANTHROPIC_API_KEY it must not carry: every agent's key is a key command's, never its environment's.
+# endpoint_mismatch AGENT_PID checks the agent's environment, read once (read_environ), and
+# prints what it found: the first rig endpoint the agent does not carry, or a model credential
+# variable it must not carry, and returns 0; nothing, and returns 1, when the environment is clean;
+# why it could not be read, and returns 2, when it was not checked. Every agent's key is a key
+# command's, never its environment's. Beside ANTHROPIC_API_KEY, Oh My Pi reads
+# ANTHROPIC_OAUTH_TOKEN and ANTHROPIC_FOUNDRY_API_KEY, and Claude Code ANTHROPIC_AUTH_TOKEN and
+# CLAUDE_CODE_OAUTH_TOKEN.
 endpoint_mismatch() {
-  local agent=$1 name want got
+  local agent=$1 name want
+  local -A env=()
+  read_environ "$agent" env || return 2
   for name in DISPATCH_URL DISPATCH_TOKEN_FILE ENVOY_URL ENVOY_NATS_URL; do
     case "$name" in
       DISPATCH_URL) want="http://127.0.0.1:$port_dispatch" ;;
@@ -317,31 +366,37 @@ endpoint_mismatch() {
       ENVOY_URL) want="http://127.0.0.1:$port_listener" ;;
       ENVOY_NATS_URL) want="nats://127.0.0.1:$port_nats" ;;
     esac
-    got=$(pane_value "$agent" "$name")
-    if [ "$got" != "$want" ]; then
-      printf '%s=%s, want %s\n' "$name" "${got:-<unset>}" "$want"
+    if [ -z "${env[$name]+set}" ] || [ "${env[$name]}" != "$want" ]; then
+      printf '%s=%s, want %s\n' "$name" "${env[$name]-<unset>}" "$want"
       return 0
     fi
   done
-  if grep -qz '^ANTHROPIC_API_KEY=' "/proc/$agent/environ" 2>/dev/null; then
-    printf 'ANTHROPIC_API_KEY set, want unset\n'
-    return 0
-  fi
+  for name in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_OAUTH_TOKEN ANTHROPIC_FOUNDRY_API_KEY CLAUDE_CODE_OAUTH_TOKEN; do
+    if [ -n "${env[$name]+set}" ]; then
+      printf '%s set, want unset\n' "$name"
+      return 0
+    fi
+  done
   return 1
 }
 assert_claim_endpoints() {
-  local issue=$1 role=$2 pane_pid agent mismatch
+  local issue=$1 role=$2 pane_pid agent found status=0
   pane_pid=$(claim_pane_pid "$issue" "$role") || fail "$role pane on $issue has no process locator"
   agent=$(agent_descendant "$pane_pid") || fail "$role pane on $issue (pid $pane_pid) has no agent process"
-  if mismatch=$(endpoint_mismatch "$agent"); then
-    fail "ABORT: $role pane on $issue (agent pid $agent) has $mismatch"
-  fi
+  found=$(endpoint_mismatch "$agent") || status=$?
+  case $status in
+    0) fail "ABORT: $role pane on $issue (agent pid $agent) has $found" ;;
+    2) fail "$role pane on $issue (agent pid $agent) was not checked: $found" ;;
+  esac
 }
 # pane_watcher checks every pane the daemon launches as soon as its agent process exists, before it
 # registers and before any turn; a mismatch kills the private tmux server, and the next bounded wait
-# aborts naming the pane.
+# aborts naming the pane. An agent whose environment could not be read is not checked: the watcher
+# records why in $evidence/pane-endpoints-unchecked.txt, once per incarnation, and reads it again at
+# its next poll, so an incarnation never read stays out of pane-endpoints-checked.txt and
+# every-launch-endpoint-checked fails naming it.
 pane_watcher() {
-  local claims inc issue role agent mismatch
+  local claims inc issue role agent found status
   trap - EXIT ERR
   set +e
   while kill -0 "$$" 2>/dev/null; do
@@ -349,13 +404,24 @@ pane_watcher() {
       while IFS=$'\t' read -r inc issue role; do
         grep -qF "$inc " "$evidence/pane-endpoints-checked.txt" 2>/dev/null && continue
         agent=$(agent_descendant "${inc%%:*}") || continue
-        if mismatch=$(endpoint_mismatch "$agent"); then
-          printf '%s pane on %s (incarnation %s, agent pid %s) has %s\n' "$role" "$issue" "$inc" "$agent" "$mismatch" \
-            >"$evidence/pane-endpoint-violation.txt"
-          TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1 || true
-          return 0
-        fi
-        printf '%s %s %s %s %s\n' "$inc" "$issue" "$role" "$agent" "$(date -u +%FT%T.%3NZ)" >>"$evidence/pane-endpoints-checked.txt"
+        found=$(endpoint_mismatch "$agent")
+        status=$?
+        case $status in
+          0)
+            printf '%s pane on %s (incarnation %s, agent pid %s) has %s\n' "$role" "$issue" "$inc" "$agent" "$found" \
+              >"$evidence/pane-endpoint-violation.txt"
+            TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1 || true
+            return 0
+            ;;
+          1)
+            printf '%s %s %s %s %s\n' "$inc" "$issue" "$role" "$agent" "$(date -u +%FT%T.%3NZ)" >>"$evidence/pane-endpoints-checked.txt"
+            ;;
+          *)
+            grep -qF "$inc " "$evidence/pane-endpoints-unchecked.txt" 2>/dev/null ||
+              printf '%s %s %s %s %s not checked: %s\n' "$inc" "$issue" "$role" "$agent" "$(date -u +%FT%T.%3NZ)" "$found" \
+                >>"$evidence/pane-endpoints-unchecked.txt"
+            ;;
+        esac
       done < <(jq -r '.claims[] | select(.locator != null) | [.locator.incarnation, .issue, .role] | @tsv' <<<"$claims")
     fi
     sleep 0.2
@@ -368,28 +434,66 @@ unchecked_launches() {
   done
 }
 no_unchecked_launches() { [ -z "$(unchecked_launches)" ]; }
+# report_unchecked_launches notes each launched incarnation the watcher never checked, with why when
+# it recorded a reason: every-launch-endpoint-checked's timeout hook.
+report_unchecked_launches() {
+  local inc why
+  for inc in $(unchecked_launches); do
+    why=$(grep -m1 -F "$inc " "$evidence/pane-endpoints-unchecked.txt" 2>/dev/null) || why=
+    note "incarnation $inc was never endpoint-checked${why:+: ${why#*not checked: }}"
+  done
+}
 
 # ---- the Claude Code implementer --------------------------------------------------------------
 implementer_claim() {
   "$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" |
     jq -ce --arg token "$(claim_token "$issue" implementer)" '.claims[] | select(.token == $token)'
 }
-# claude_pid PANE_PID prints the pane's Claude Code process, failing when the pane's agent is not one.
+# parent_pid PID prints its parent's, from the stat fields after the comm field's own `) `.
+parent_pid() {
+  local stat
+  stat=$(cat "/proc/$1/stat") || return 1
+  read -r -a stat <<<"${stat##*) }"
+  printf '%s\n' "${stat[1]}"
+}
+# claude_pid PANE_PID prints the pane's Claude Code process, failing when the pane's agent is not one:
+# its first argument, whole, names an executable called claude, whatever spaces its path holds.
 claude_pid() {
   local agent
+  local -a args
   agent=$(agent_descendant "$1") || return 1
-  [ "$(basename "$(tr '\0' '\n' <"/proc/$agent/cmdline" | sed -n 1p)")" = claude ] || return 1
+  process_args "$agent" args && [ "$(basename -- "${args[0]}")" = claude ] || return 1
   printf '%s\n' "$agent"
 }
 # claude_argv CLAUDE_PID prints its argv, one argument per line.
 claude_argv() { tr '\0' '\n' <"/proc/$1/cmdline"; }
-# bridged CLAUDE_PID: its parent is `legion claude-bridge`, the pane's bridge to the shim.
+# ancestry PID prints PID and each ancestor above it, one `<pid> <argv>` line each, up to pid 1: what
+# a pane's process tree was when a check about it failed.
+ancestry() {
+  local pid=$1 line
+  local -a args
+  while [ -n "$pid" ] && [ "$pid" != 0 ] && [ "$pid" != 1 ]; do
+    args=()
+    process_args "$pid" args || true
+    line=${args[*]-}
+    line=${line//$'\n'/ }
+    printf '     %s %s\n' "$pid" "${line:0:160}"
+    pid=$(parent_pid "$pid") || break
+  done
+}
+# bridged CLAUDE_PID: its parent is the run's `legion claude-bridge -- <the run's claude>`, as the
+# tmux runtime builds it (claudeInnerCommand): the parent's executable is the run's legion
+# (/proc/<pid>/exe, the kernel's record, not the name it was called by), and its arguments, read
+# whole (process_args), are `claude-bridge`, `--` and the run's claude, in that order, after the
+# executable's own name. No other word of its command line counts, its system prompt included.
 bridged() {
-  local stat parent
-  stat=$(cat "/proc/$1/stat")
-  read -r -a stat <<<"${stat##*) }"
-  parent=${stat[1]}
-  tr '\0' ' ' <"/proc/$parent/cmdline" | grep -q ' claude-bridge '
+  local parent legion
+  local -a args
+  parent=$(parent_pid "$1") || return 1
+  process_args "$parent" args || return 1
+  legion=$(realpath -e -- "$work/legion") || return 1
+  [ "$(readlink "/proc/$parent/exe")" = "$legion" ] &&
+    [ "${args[1]-}" = claude-bridge ] && [ "${args[2]-}" = -- ] && [ "${args[3]-}" = "$claude_bin" ]
 }
 # argv_has_pair ARGV FLAG VALUE: ARGV (one argument per line) holds FLAG immediately followed by VALUE.
 argv_has_pair() { awk -v flag="$2" -v value="$3" 'prev == flag && $0 == value { found = 1 } { prev = $0 } END { exit !found }' <<<"$1"; }
@@ -410,46 +514,81 @@ resumed_reply_names() {
 handoff_recorded() { [ -n "$(role_handoff "$issue" implementer implementing)" ]; }
 
 begin prerequisites
+require_app_inputs implement review
+model_route=${LEGION_E2E_MODEL_ROUTE:-}
+case "$model_route" in
+gateway | key-file) ;;
+*) fail "LEGION_E2E_MODEL_ROUTE must be gateway or key-file, not '$model_route'" ;;
+esac
+# The Claude Code pane's own key file. Under the key-file route the Oh My Pi agents read a key
+# file too, so one file can serve both halves: whichever of the two variables is set serves both,
+# and naming both puts the Claude pane on LEGION_E2E_CLAUDE_KEY_FILE and the agents on
+# LEGION_E2E_ANTHROPIC_KEY_FILE. Both paths are in the notes, so a split is visible.
+key_file_var=LEGION_E2E_CLAUDE_KEY_FILE
 key_file=${LEGION_E2E_CLAUDE_KEY_FILE:-}
+if [ -z "$key_file" ] && [ "$model_route" = key-file ]; then
+  key_file_var=LEGION_E2E_ANTHROPIC_KEY_FILE
+  key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-}
+  [ -n "$key_file" ] ||
+    fail "LEGION_E2E_CLAUDE_KEY_FILE and LEGION_E2E_ANTHROPIC_KEY_FILE are both unset: under LEGION_E2E_MODEL_ROUTE=key-file one file holding the Anthropic API key serves the Claude Code implementer and the Oh My Pi agents"
+fi
 [ -n "$key_file" ] ||
   fail "LEGION_E2E_CLAUDE_KEY_FILE is unset: name a file holding the Anthropic API key the Claude Code implementer reaches its model with"
-[ -f "$key_file" ] && [ -r "$key_file" ] || fail "LEGION_E2E_CLAUDE_KEY_FILE names $key_file, which is not a readable file"
+[ -f "$key_file" ] && [ -r "$key_file" ] || fail "$key_file_var names $key_file, which is not a readable file"
+agent_key_file=$key_file
+if [ "$model_route" = key-file ]; then
+  agent_key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-$key_file}
+  [ -f "$agent_key_file" ] && [ -r "$agent_key_file" ] ||
+    fail "LEGION_E2E_ANTHROPIC_KEY_FILE names $agent_key_file, which is not a readable file"
+fi
 refuse_leftovers legion-e2ecc
-for tool in go docker jq curl ss tmux bun mise secrets gh jj hawk-token pgrep claude; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go docker jq curl ss tmux bun mise secrets gh jj pgrep claude; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+[ "$model_route" != gateway ] || command -v hawk-token >/dev/null || fail "hawk-token is required under LEGION_E2E_MODEL_ROUTE=gateway"
 (umask 077 && tr -d '[:space:]' <"$key_file" >"$work/claude-model-key")
-[ -s "$work/claude-model-key" ] || fail "LEGION_E2E_CLAUDE_KEY_FILE ($key_file) holds no key"
+[ -s "$work/claude-model-key" ] || fail "$key_file_var ($key_file) holds no key"
 # The key's preflight: Anthropic lists its models to a key it accepts. The header goes by file, so the
 # key is in no argv.
 (umask 077 && printf 'x-api-key: %s\n' "$(cat "$work/claude-model-key")" >"$work/claude-key-header")
 code=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -H "@$work/claude-key-header" -H 'anthropic-version: 2023-06-01' \
   https://api.anthropic.com/v1/models) || code="unreachable (curl exited $?)"
 rm -f "$work/claude-key-header"
-[ "$code" = 200 ] || fail "Anthropic refuses the key in LEGION_E2E_CLAUDE_KEY_FILE ($key_file): GET /v1/models answered $code"
+[ "$code" = 200 ] || fail "Anthropic refuses the key in $key_file_var ($key_file): GET /v1/models answered $code"
 note "the Claude Code implementer's key from $key_file: Anthropic accepts it"
-for key in LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64; do
+for key in "$implement_app_key_name" "$review_app_key_name"; do
   status=$(secrets get "$key" --no-request 2>&1) || fail "secrets get $key does not resolve: $status"
   jq -e --arg key "$key" '.key == $key and .tier == "agent"' <<<"$status" >/dev/null 2>&1 ||
     fail "secrets get $key reports $status, want the agent tier"
   note "secrets get $key: $status"
 done
+# Legion's two role Apps proved against GitHub before the run writes anything (lib/github-apps.sh);
+# legion.yaml's github_apps is the block proved.
+write_github_apps implement review
+read_app_logins
 claude_bin=$(command -v claude)
-bun_bin=$(command -v bun)
-note "Claude Code: $claude_bin ($("$claude_bin" --version)); bun: $bun_bin"
-real_gh=$(mise which gh) || fail "mise has no gh"
-# The real tmux comes after the real gh on the daemon's PATH: the tmux runtime runs tmux with the
-# pane allow-list alone, where a shimmed tmux, run from a directory under the operator's real
-# HOME, finds that HOME's mise config untrusted and exits 1 (lib/rig.sh, real_bin_path).
-real_tmux=$(mise which tmux) || fail "mise has no tmux"
-mkdir -p "$work/realtmux"
-ln -sfn "$real_tmux" "$work/realtmux/tmux"
+# The daemon and every pane run with HOME moved to the run's own (make_omp_home), which hides mise's
+# global config from the box's own gh, jj, tmux and bun shims: a pane's jj shim hands the call back
+# to itself (exit 127), and the pane's MCP server finds no bun. So the real binaries mise resolves
+# here come first on the daemon's PATH, which every pane inherits (lib/rig.sh, real_bin_path), and
+# LEGION_BUN_PATH names the real bun. The real tmux is among them because the tmux runtime runs tmux
+# with the pane allow-list alone, where a shimmed tmux finds the operator's mise config untrusted.
+realbin=$(real_bin_path "$work/realbin" gh jj tmux bun)
+note "Claude Code: $claude_bin ($("$claude_bin" --version)); bun: $(readlink "$realbin/bun")"
 require_proof_human
 gh repo view "$repo" --json name >/dev/null || fail "the devbox's ordinary gh cannot read $repo"
 mkdir -p "$state" "$work/xdg" "$work/tmux"
 chmod 0700 "$state" "$work/xdg" "$work/tmux"
 make_omp_home "$omp_home"
-key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
-  fail "the Oh My Pi agents' model route through the Hawk model gateway could not be installed (the reason is above)"
-note "the Oh My Pi agents' model route: keyed by $key_command"
+case "$model_route" in
+gateway)
+  key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
+    fail "the Oh My Pi agents' model route through the Hawk model gateway could not be installed (the reason is above)"
+  ;;
+key-file)
+  key_command=$(bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --key-dir "$work/model-gateway-key" --key-file "$agent_key_file") ||
+    fail "the Oh My Pi agents' model route through the key file could not be installed (the reason is above)"
+  ;;
+esac
+note "the Oh My Pi agents' model route ($model_route): keyed by $key_command$([ "$model_route" = key-file ] && printf ', from %s' "$agent_key_file")"
 export XDG_STATE_HOME="$work/xdg"
 export TMUX_TMPDIR="$work/tmux"
 pass
@@ -467,14 +606,14 @@ chmod 0600 "$work"/*token "$work"/*-header "$work/postgres-password"
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener && go build -o "$work/envoy-dispatch" ./cmd/dispatch)
 built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion" "$work/envoy-listener" "$work/envoy-dispatch") || fail "lib/built-from.sh could not say what the run built"
 while IFS= read -r line; do note "$line"; done <<<"$built"
-docker run -d --name "$pg_container" --mount type=tmpfs,destination=/var/lib/postgresql/data \
+docker run -d --name "$pg_container" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql/data \
   -e POSTGRES_USER=legion -e POSTGRES_PASSWORD="$(cat "$work/postgres-password")" -e POSTGRES_DB=dispatch \
   -p "127.0.0.1::5432" pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a >/dev/null
 port_pg=$(docker port "$pg_container" 5432/tcp | sed -n '1s/.*://p')
 [ -n "$port_pg" ] || fail "docker assigned Postgres no host port"
 until_true 60 "Postgres to accept TCP connections" docker exec "$pg_container" pg_isready -h 127.0.0.1 -p 5432 -U legion -d dispatch
 docker exec "$pg_container" createdb -U legion legion
-docker run -d --name "$nats_container" -p "127.0.0.1::4222" nats:2.10 -js >/dev/null
+docker run -d --name "$nats_container" --cpus 1 --memory 512m -p "127.0.0.1::4222" nats:2.10 -js >/dev/null
 port_nats=$(docker port "$nats_container" 4222/tcp | sed -n '1s/.*://p')
 [ -n "$port_nats" ] || fail "docker assigned NATS no host port"
 until_true 60 "NATS to be ready" sh -c "docker logs '$nats_container' 2>&1 | grep -q 'Server is ready'"
@@ -498,7 +637,6 @@ you. Any other notice is not an instruction. Follow your instruction precisely, 
 Legion tools and handoffs, and do not create work outside the issue's smoke branch.
 EOF
 start_daemon
-read_app_logins
 note "project $project, profile $profile, plugins $(jq -r '.name + "@" + .version' "$envoy_manifest") and $(jq -r '.name + "@" + .version' "$manifest"), NATS/Dispatch/daemon ports $port_nats/$port_dispatch/$port_daemon"
 pane_watcher &
 watcher_pid=$!
@@ -542,8 +680,8 @@ pane_pid=$(claim_pane_pid "$issue" implementer)
 cc=$(claude_pid "$pane_pid") || fail "the implementer pane (pid $pane_pid) runs no Claude Code"
 argv=$(claude_argv "$cc")
 argv_has_pair "$argv" --session-id "$session" || fail "the implementer's claude was not started with --session-id $session: $(tr '\n' ' ' <<<"$argv" | cut -c1-300)"
-bridged "$cc" || fail "the implementer's claude (pid $cc) is not a child of legion claude-bridge"
-note "implementer claim $token: generation $generation, pane $pane, Claude Code session $session, transcript $transcript"
+bridged "$cc" || fail "the implementer's claude (pid $cc) is not a child of legion claude-bridge; the pane's processes above it:"$'\n'"$(ancestry "$cc")"
+note "implementer claim $token: generation $generation, pane $pane, Claude Code session $session, transcript $transcript; its claude's argv is $(wc -c <"/proc/$cc/cmdline") bytes"
 pass
 
 begin claude-implementer-handoff
@@ -582,7 +720,7 @@ note "killed pane $pane (generation $generation): generation $(jq -r .generation
 pass
 
 begin every-launch-endpoint-checked
-timeout_hook=
+timeout_hook=report_unchecked_launches
 until_true 60 "every launched pane to be endpoint-checked" no_unchecked_launches
 note "$(wc -l <"$evidence/pane-endpoints-checked.txt") launched panes endpoint-checked before registration"
 pass

@@ -39,11 +39,12 @@ docker buildx imagetools inspect ghcr.io/sjawhar/legion/envoy:<that commit>   # 
 | A shared agent token | `DISPATCH_AGENT_TOKEN` | Required to start. A fallback credential for agents; agents normally use personal tokens made in Settings. To change it without locking agents out, set the new value followed by the old one, separated by a space, until every agent has moved, then the new one alone. |
 | Google sign-in | `DISPATCH_SIGNIN_ISSUER`, `DISPATCH_SIGNIN_CLIENT_ID`, `DISPATCH_SIGNIN_CLIENT_SECRET`, and `DISPATCH_SIGNIN_GROUP` or `DISPATCH_SIGNIN_DOMAIN` | The OpenID Connect issuer people sign in through, Dispatch's client there and that client's secret, and exactly one of: the group a person must be in, through a Cognito sign-in pool; or the Google Workspace domain whose people may sign in, with Google itself as the issuer. Required for the default cookie sign-in. [Signing people in](#signing-people-in) covers both. |
 | The browser address | `DISPATCH_SERVER_URL` | The exact address people type, such as `https://dispatch.internal.example`. Dispatch's client at the issuer lists this address followed by `/auth/callback` as a callback URL. |
-| The GitHub App | `DISPATCH_APP_CLIENT_ID`, `DISPATCH_APP_PEM_B64` | Without it the server starts, but the web app's GitHub reads answer `503` and architecture sources cannot be saved. |
+| The GitHub App | `DISPATCH_APP_CLIENT_ID`, `DISPATCH_APP_PEM_B64` | `DISPATCH_APP_PEM_B64` holds the App's private key as the PEM GitHub gives or the base64 of that PEM; a key that does not parse stops boot. Without the App the server starts, but the web app's GitHub reads answer `503` and architecture sources cannot be saved. |
 | A stable session key | `DISPATCH_SIGNING_KEY` | Signs sign-in cookies and seals the issuer's refresh tokens Dispatch stores. When unset, Dispatch creates one under `~/.local/share/dispatch`; keep that directory on a volume, or every restart signs everyone out. Give every server the same key when you run more than one, or a cookie one made is refused by the other and nothing tells you so ([Running more than one copy](#running-more-than-one-copy)). Changing the key signs everyone out and leaves every stored refresh token unopenable, so each person signs in again, but revokes none at the issuer: after the key leaks, sign people out at the issuer too. |
 | An Envoy listener | `ENVOY_URL` | Where the Agents page finds live agent sessions. Defaults to `http://127.0.0.1:9020`. |
 | NATS | `NATS_URLS`, `NATS_NKEY_SEED_FILE` | Where Dispatch publishes its events for agents. The Agents page's live view also needs it. Dispatch refuses a NATS server on another machine unless `ENVOY_ALLOW_REMOTE_NATS=1`. Set `DISPATCH_NATS_DISABLED=1` to run without it. |
 | An address to listen on | `DISPATCH_LISTEN_HOST`, `DISPATCH_PORT` | Port `8766` by default. |
+| Meaning search | `DISPATCH_EMBEDDER`, and for Azure the `DISPATCH_AZURE_*` settings | Search by meaning embeds text with Cohere Embed v4 on AWS Bedrock (the default, with the AWS SDK's region and credentials) or on Azure AI Foundry (`DISPATCH_EMBEDDER=azure`: the endpoint, the deployment's tokens-per-minute quota, and either the deployment's key or a keyless sign-in through a federated token). Without it, search answers by words alone and says so. The server embeds everything it already holds by itself, at start and every ten minutes; `GET /api/v1/search/coverage` shows how far it has got. |
 
 These are the settings most deployments need, not all of them. The full list, generated from the
 server, is in [Configuration](/legion/dispatch/reference/configuration/).
@@ -195,8 +196,9 @@ To sign in for real instead, replace `DISPATCH_DEV_SIGNIN=1` in step 3 with the 
 client secret and group or domain settings, and list `http://127.0.0.1:8766/auth/callback` as a
 callback URL of Dispatch's client: the sign-in pool's app client, or a Google web client, with
 `DISPATCH_SIGNIN_ISSUER=https://accounts.google.com` and `DISPATCH_SIGNIN_DOMAIN=example.com` for
-your domain. With Google directly, the server needs no AWS account or credentials: without them
-it logs that meaning search is unavailable and serves everything else.
+your domain. With Google directly, the server needs no AWS account or credentials. Search by meaning
+needs AWS credentials for Bedrock, or the Azure settings ([What it needs](#what-it-needs)); without
+either, the server logs that meaning search is unavailable and serves everything else.
 
 ## First steps after it starts
 
@@ -205,8 +207,14 @@ Sign in, then open **Settings**:
 - **Projects**: create your first project, with a key such as `CORE` and a name.
 - **Repositories → Projects**: choose which project issues from each GitHub repository land in.
   `DISPATCH_DEFAULT_PROJECT` catches repositories with no mapping; that project must already exist.
-- **Architecture sources**: point a project at a repository branch holding its architecture
-  model. Saving checks that the GitHub App can read it.
+- **Projects → Default assignee**: name the person each project's unowned work lands on, in the
+  projects table's own column. An issue created with no assignee, by an agent on the shared token
+  and under no parent that names one, goes to that person; a project with no default leaves such
+  an issue unassigned. Only a person sets it, here — no agent command or flag does — and the
+  picker's **Unassigned** clears it.
+- **Architecture sources**: add each repository branch holding part of a project's architecture
+  model. A project can have several, one per repository, and its model is all of their components
+  together. Saving checks that the GitHub App can read the repository.
 - **Delivery timeline**: name the repository that deploys, its deploy and pull-request-check
   workflows, the job whose success is a production deploy, and whose merged pull requests count.
   Three job names are optional and feed the [Pipeline](/legion/dispatch/delivery/#pipeline) page:
@@ -246,7 +254,7 @@ Sign in, then open **Settings**:
 
 Dispatch runs as more than one server against one database, so a new version rolls out without
 taking Dispatch away from everyone: start the new version, let it take traffic, then stop the old
-one. Two things have to be true first, and Dispatch can check neither of them for you.
+one. Three things have to be true first, and Dispatch can check none of them for you.
 
 - **Give every server the same `DISPATCH_SIGNING_KEY`.** Left unset, each server makes a key of
   its own in its own data directory, and a sign-in made by one server is then refused by the
@@ -254,16 +262,27 @@ one. Two things have to be true first, and Dispatch can check neither of them fo
   reads as missing. No server can see another's key, so nothing refuses to start, nothing is
   logged, and the health check cannot report it. That is why this is a precondition rather than
   something Dispatch tells you about.
+- **Give every server the same embedder settings.** Each stored vector records the embedder that
+  made it, and each server drops the vectors another embedder made and embeds that text again, so
+  two servers set up differently keep replacing each other's work. A rollout that changes the
+  settings settles once the last old server stops. For the same reason, a new model on Azure goes
+  under a new deployment name: the name, not the model, tells the vectors apart.
 - **Every migration leaves the version before it able to read and write the database**
   ([Migrations](#migrations)), because a rolling update runs both versions against the one
   database while it lasts.
+- **Expect an issue's notifications out of order while two servers publish.** Each server's
+  events outbox claims a batch of events at a time, and nothing yet keeps two servers from
+  publishing adjacent batches at once, so a later event of an issue can reach NATS before an
+  earlier one, and the Legion daemon drops the earlier one as stale. Run one server, and replace it
+  rather than rolling it (Kubernetes `strategy: Recreate`), until a single-publisher lock lands.
 
 A second server also costs connections, and Postgres counts them per server. Each server opens up
-to 16 connections for requests, up to 8 for the periodic work it runs once across the servers, up
-to 4 for loading documents, and one for the health check, and it holds three more open for as long
-as it runs: one each for the three things that wait on Postgres notifications, which are delivery,
-the live event stream, and closing a document session another server has written to. That is 32
-connections for one server at its ceiling, and twice that for two. Check the database's connection
+to 64 connections for requests, up to 9 for the periodic work it runs once across the servers, up
+to 4 for loading documents, one for the health check, and one for the events outbox, and it holds
+three more open for as long as it runs: one each for the three things that wait on Postgres
+notifications, which are delivery, the live event stream, and closing a document session another
+server has written to. That is 82 connections for one server at its ceiling, and twice that for
+two, past a default Postgres's limit of 100. Check the database's connection
 limit before you start the second server: a limit sized for one server, with whatever else uses
 that database counted in, is the thing that runs out.
 
@@ -312,6 +331,21 @@ never happening: the one that adds each issue's repository (migration `0113`) ho
 32 links below its root in its API alone, and an issue an older server puts deeper fails to load
 until you clear the parent of an ancestor that still loads. That release was deployed with the
 running server stopped first, and no server older than it has run against the database since.
+
+The release that lets a project import its components from several repositories (migration
+`0117`) is deployed the same way: stop every server of the earlier version, or scale it to zero,
+before the new version starts, and never start a version older than it again. An older server
+cannot work with the new database: saving an architecture source fails with a server error, an
+import that changes a project's components fails, and an import of an empty architecture folder
+deletes the components of every source of the project. Its census refuses while any component
+belongs to a project with no architecture source, which only a change made directly in the
+database leaves behind; delete those rows on the version still running, then take the census
+again:
+
+```sql
+delete from components c
+where not exists (select 1 from architecture_sources s where s.project_key = c.project_key);
+```
 
 ## The HTTP API
 

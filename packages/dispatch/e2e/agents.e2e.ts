@@ -26,6 +26,7 @@ import {
 import { recordClipboard } from "./clipboard";
 import { holdFirstRequest } from "./editor";
 import { resetDatabase, setCreatedAt } from "./seed";
+import { assertPageFits, assertWhole } from "./unclipped";
 import { asUser } from "./users";
 
 const planner: FakeSession = {
@@ -153,9 +154,8 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     await expect(quietToggle).toHaveAttribute("aria-expanded", "true");
     await expect(shownTitles).toHaveText(["Planner", "Reviewer", "Silent"]);
     await expect(silentCard.getByText("No Dispatch activity", { exact: true })).toBeVisible();
-    await expect(
-      silentCard.getByRole("status", { name: "Seen less than 2 minutes ago" })
-    ).toBeVisible();
+    // The row's state is the shared running state: the session is listed, so it is running.
+    await expect(silentCard.getByRole("img", { exact: true, name: "Running" })).toBeVisible();
     await quietToggle.click();
     await expect(silentCard).toHaveCount(1);
     await expect(silentCard).toBeHidden();
@@ -163,17 +163,21 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     await inactiveToggle.click();
     await expect(inactiveToggle).toHaveAttribute("aria-expanded", "true");
     await expect(shownTitles).toHaveText(["Planner", "Reviewer", "Archivist"]);
-    await expect(
-      archivistCard.getByRole("status", { name: "Seen 10 minutes ago or longer" })
-    ).toBeVisible();
+    // Still listed, so still running: the fold says it has been quiet, and the mark's `title`
+    // says for how long.
+    const archivistState = archivistCard.getByRole("img", { exact: true, name: "Running" });
+    await expect(archivistState).toBeVisible();
+    await expect(archivistState).toHaveAttribute("title", /^Running · seen \d+ minutes ago$/);
     await archivistCard.getByRole("button", { exact: true, name: "Archivist" }).click();
     await expect(archivistCard.getByRole("textbox", { name: "Comment" })).toBeVisible();
     await inactiveToggle.click();
     await expect(archivistCard).toHaveCount(1);
     await expect(archivistCard).toBeHidden();
+    await expect(plannerCard.getByRole("img", { exact: true, name: "Running" })).toBeVisible();
+    // The row's live link, beside its toggle, opens the session's live conversation.
     await expect(
-      plannerCard.getByRole("status", { name: "Seen less than 2 minutes ago" })
-    ).toBeVisible();
+      plannerCard.getByRole("link", { name: "Open live conversation with Planner" })
+    ).toHaveAttribute("href", `/agents/${planner.session_id}/live`);
 
     // Collapsed by default: no conversation or composer on screen until a card's title is
     // expanded. The Archivist's, opened above and folded away with its row, is kept - with any
@@ -1147,16 +1151,15 @@ test("with half the recipients unable to take the mode, the compact composer kee
       const last = await fixture.excludedLine.evaluate((element) => {
         const lastName = "Planner 40";
         const scrolls = element.scrollWidth > element.clientWidth;
-        const text = [...element.childNodes].find((node) => node.textContent?.includes(lastName));
-        if (text === undefined) return { scrolls, visible: false };
-        const range = document.createRange();
-        const start = text.textContent?.indexOf(lastName) ?? 0;
-        range.setStart(text, start);
-        range.setEnd(text, start + lastName.length);
+        // Each excluded agent is drawn by `AgentName`: its name is the text of its live link.
+        const link = [...element.querySelectorAll("[data-agent-name] a")].find(
+          (node) => node.textContent === lastName
+        );
+        if (link === undefined) return { scrolls, visible: false };
         // Scroll the line so the name's left edge meets the line's, then read both again.
         element.scrollLeft +=
-          range.getBoundingClientRect().left - element.getBoundingClientRect().left;
-        const [name, line] = [range.getBoundingClientRect(), element.getBoundingClientRect()];
+          link.getBoundingClientRect().left - element.getBoundingClientRect().left;
+        const [name, line] = [link.getBoundingClientRect(), element.getBoundingClientRect()];
         return {
           scrolls,
           visible: name.left >= line.left - 0.5 && name.right <= line.right + 0.5,
@@ -1581,15 +1584,24 @@ test("a mode no selected agent advertises leaves Send dead, and Send says so and
     await expect(mode).toHaveValue("btw");
 
     // The label refuses rather than counting, and the reason rides the button itself: the
-    // Excluded line, which names each agent, why, and the mode that would reach them.
+    // Excluded line, which names each agent, why, and the mode that would reach them. The line
+    // draws each agent through `AgentName`, so the description the button reads from it carries
+    // each agent's running state before its name; the `title` is the line as plain text.
     const dead = composer.getByRole("button", { name: "No recipient" });
     const why =
       "Excluded: Builder A (does not advertise BTW), Builder B (does not advertise BTW). Nothing is sent to them, and no other mode is substituted. Sending as Send would reach 2 of them.";
     await expect(dead).toBeDisabled();
-    await expect(dead).toHaveAccessibleDescription(why);
+    await expect(dead).toHaveAccessibleDescription(
+      "Excluded: Running Builder A (does not advertise BTW), Running Builder B (does not advertise BTW). Nothing is sent to them, and no other mode is substituted. Sending as Send would reach 2 of them."
+    );
     await expect(dead).toHaveAttribute("title", why);
-    // A keyboard reaches it, so the reason does too: Tab from the message lands on Send.
+    // A keyboard reaches it, so the reason does too: Tab from the message passes the line's two
+    // agent links and lands on Send.
     await message.press("Tab");
+    await expect(composer.getByRole("link", { exact: true, name: "Builder A" })).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(composer.getByRole("link", { exact: true, name: "Builder B" })).toBeFocused();
+    await page.keyboard.press("Tab");
     await expect(dead).toBeFocused();
     // Refused, not merely grey: pressing it anyway asks nothing of the server.
     await dead.click({ force: true });
@@ -1629,12 +1641,12 @@ test("with one of two selected agents gone from the registry, Send reaches the l
     await expect(composer.getByRole("button", { name: "Send to 2" })).toBeEnabled();
 
     // Bravo leaves; the page learns of it on its next agent poll, and names it by its ID since
-    // the registry no longer holds its title.
+    // the registry no longer holds its title, with its state - not running - before the name.
     await setSessionLive(bravo.session_id, false);
     const send = composer.getByRole("button", { name: "Send to 1" });
     await expect(send).toBeEnabled({ timeout: 30_000 });
     await expect(send).toHaveAccessibleDescription(
-      "Excluded: session:bravo-se… (no live session). Nothing is sent to them, and no other mode is substituted."
+      "Excluded: Not running session:bravo-se… (no live session). Nothing is sent to them, and no other mode is substituted."
     );
     await expect(
       composer.getByRole("button", { name: /^session:bravo-se… · no live session/ })
@@ -1710,5 +1722,157 @@ test("the Agents page loads through one dropped request for its agents", async (
     await expect(page.getByText(/^Could not (load|refresh) agents/)).toHaveCount(0);
   } finally {
     await alice.close();
+  }
+});
+
+test("an agent row shows the whole session name at every width, and shortens its directory only where a hover can show the path", async ({
+  browser,
+}, testInfo) => {
+  // The row is sized against what these fixtures put in it, so each one's length is asserted
+  // here rather than trusted: a shorter name would prove nothing about the row's width.
+  const name64 = "Legion implementer · INFRA-92 — the whole name shows on this row";
+  expect(name64).toHaveLength(64);
+  const dir70 = "/workspaces/sjawhar/legion/infra-92/packages/dispatch/web/src/features";
+  expect(dir70).toHaveLength(70);
+  // A name with nothing to break on: it can only wrap mid-word, or push the page wider.
+  const unbroken64 = "legion-implementer-infra-92-agents-row-name-wraps-unbroken-names";
+  expect(unbroken64).toHaveLength(64);
+  expect(unbroken64).not.toContain(" ");
+
+  const longName: FakeSession = {
+    capabilities: ["aside", "btw"],
+    dir: dir70,
+    last_seen: Date.now(),
+    machine_id: "build-host",
+    roles: ["implementer"],
+    session_id: "long-name-session",
+    title: name64,
+  };
+  const unbrokenName: FakeSession = {
+    capabilities: ["aside", "btw"],
+    dir: "/w/legion",
+    last_seen: Date.now(),
+    machine_id: "build-host",
+    roles: ["implementer"],
+    session_id: "unbroken-name-session",
+    title: unbroken64,
+  };
+  await setLiveSessions([longName, unbrokenName]);
+
+  // A live session Dispatch has never heard from sits in the closed `No Dispatch activity` fold,
+  // where its row is hidden and nothing about it can be measured, so each one comments once.
+  await createProject({ key: "ROW", name: "Row" });
+  const issue = await createIssue({ project: "ROW", title: "Agent row widths" });
+  for (const session of [longName, unbrokenName]) {
+    await createComment(
+      issue.key,
+      { body: `Working from ${session.dir}.` },
+      { actor: { id: session.session_id, kind: "session" }, as: "agent" }
+    );
+  }
+
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    await page.goto("/agents");
+
+    // The name first: it is what this row is about, and checking it before the directory fails
+    // on the name itself rather than waiting out a directory locator's timeout.
+    for (const [session, name] of [
+      [longName, name64],
+      [unbrokenName, unbroken64],
+    ] as const) {
+      const row = agentRow(page, session.session_id);
+      await expect(row).toBeVisible();
+      const heading = row.getByRole("heading", { name });
+      await expect(heading).toHaveText(name);
+      // The whole name is shown: no clamp, no ellipsis, no box too small for its text.
+      await assertWhole(heading);
+    }
+    // The unbroken name wraps rather than pushing the page wider than the viewport.
+    await assertPageFits(page);
+
+    const directory = agentRow(page, longName.session_id).locator("[data-agent-dir]");
+    if (testInfo.project.name === "iphone") {
+      // A phone has no hover, and the directory already sits on its own line under the name, so
+      // it keeps the whole path.
+      await expect(directory).toHaveText(`build-host · ${dir70}`);
+      await assertWhole(directory);
+    } else {
+      // On a laptop the directory gives the row's width to the name and keeps its last segment,
+      // with the whole path a hover away.
+      await expect(directory).toHaveText("build-host · features");
+      await expect(directory).toHaveAttribute("title", `build-host · ${dir70}`);
+      // Text and `title` are both there on an element squeezed to no width, where nothing is
+      // painted and no hover can reach it, so the box itself is asserted too — and the
+      // shortened text is meant to be read, so nothing above it may cut it either.
+      await expect(directory).toBeVisible();
+      await assertWhole(directory);
+    }
+  } finally {
+    await context.close();
+    await setLiveSessions([]);
+  }
+});
+
+test("an agent row's directory is still shown beside the longest name in use, so its path stays one hover away", async ({
+  browser,
+}) => {
+  // The name the spec sizes the row against: the longest in use on the Agents page today.
+  const name64 = "Legion implementer · INFRA-92 — the whole name shows on this row";
+  expect(name64).toHaveLength(64);
+  const dir70 = "/workspaces/sjawhar/legion/infra-92/packages/dispatch/web/src/features";
+  expect(dir70).toHaveLength(70);
+
+  const longName: FakeSession = {
+    capabilities: ["aside", "btw"],
+    dir: dir70,
+    last_seen: Date.now(),
+    machine_id: "build-host",
+    roles: ["implementer"],
+    session_id: "long-name-row",
+    title: name64,
+  };
+  // The same row with a short name, as the control: whatever width this one's directory gets is
+  // width the row has, so a directory of nothing beside the long name is the name taking it.
+  const shortName: FakeSession = { ...longName, session_id: "short-name-row", title: "Short" };
+  await setLiveSessions([longName, shortName]);
+
+  // A live session Dispatch has never heard from sits in the closed `No Dispatch activity` fold,
+  // where its row is hidden and nothing about it can be measured, so each one comments once.
+  await createProject({ key: "DIR", name: "Directory" });
+  const issue = await createIssue({ project: "DIR", title: "Agent row directory" });
+  for (const session of [longName, shortName]) {
+    await createComment(
+      issue.key,
+      { body: `Working from ${session.dir}.` },
+      { actor: { id: session.session_id, kind: "session" }, as: "agent" }
+    );
+  }
+
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    await page.goto("/agents");
+    await expect(agentRow(page, longName.session_id)).toBeVisible();
+
+    const shortRowDirectory = agentRow(page, shortName.session_id).locator("[data-agent-dir]");
+    await expect(shortRowDirectory).toBeVisible();
+    const control = await shortRowDirectory.boundingBox();
+
+    const directory = agentRow(page, longName.session_id).locator("[data-agent-dir]");
+    // Its text and its `title` are there at every width, and the row above pins both. What a
+    // person needs is a directory with a width: at zero nothing is painted and nothing can be
+    // hovered, so the path the shortened directory promises can be read nowhere.
+    const box = await directory.boundingBox();
+    expect(
+      Math.round(box?.width ?? 0),
+      `the directory beside the 64-character name is ${Math.round(box?.width ?? 0)}px wide, ` +
+        `against ${Math.round(control?.width ?? 0)}px in the same row with a short name`
+    ).toBeGreaterThan(0);
+    await expect(directory).toBeVisible();
+  } finally {
+    await context.close();
+    await setLiveSessions([]);
   }
 });

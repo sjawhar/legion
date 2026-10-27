@@ -32,6 +32,11 @@ type Image struct {
 	Env []string
 	// WorkDir is where the checks run.
 	WorkDir string
+	// SkipBrowser leaves the browser row unchecked (`probe-image --skip-browser`): an image built
+	// for a deployment that turns Oh My Pi's browser off (`browser.enabled: false`) carries no
+	// Chromium. The daemon's probe Sandbox never sets it, so a Sandbox pod's image is always
+	// checked for the browser.
+	SkipBrowser bool
 }
 
 // commandTimeout bounds each command a check runs: a `--version` or a `--check` that has not
@@ -52,18 +57,22 @@ var imageChecks = map[Name]imageCheck{
 }
 
 // CheckImage checks every image-site row under img and renders every row of Table, in its order:
-// image rows present or missing with their evidence, live rows reported as what each session
-// reports at its start and `legion state` renders, deployment rows reported as what the daemon
-// reports from the deployment's configuration, withheld rows with their ruling. It runs after the
-// launch probes (daemon.ProbeImage) passed: the eval-js and skills rows are present by those
-// probes, which ran Oh My Pi — its own JavaScript runtime — and resolved the prompt-named skills.
-// err is nil when every image row's check passed; otherwise it names every missing one, so one
-// rebuild of the image fixes them all rather than the first alone. A ctx that ends ends the check
-// with an error wrapping ctx's.
+// image rows present or missing with their evidence (with img.SkipBrowser, the browser row
+// unchecked and no browser run), live rows reported as what each session reports at its start
+// and `legion state` renders, deployment rows reported as what the daemon reports from the
+// deployment's configuration, withheld rows with their ruling. It runs after the launch probes
+// (daemon.ProbeImage) passed: the eval-js and skills rows are present by those probes, which ran
+// Oh My Pi — its own JavaScript runtime — and resolved the prompt-named skills. err is nil when
+// every image row's check passed; otherwise it names every missing one, so one rebuild of the
+// image fixes them all rather than the first alone. A ctx that ends ends the check with an error
+// wrapping ctx's.
 func CheckImage(ctx context.Context, img Image) ([]State, error) {
 	var absent []string
 	states, err := render(ctx, renderer{
 		image: func(row Capability) State {
+			if row.Name == Browser && img.SkipBrowser {
+				return State{Name: row.Name, Status: StatusUnchecked, Detail: "not checked (--skip-browser): the image is for a deployment that turns Oh My Pi's browser off"}
+			}
 			detail, ok := imageChecks[row.Name](ctx, img)
 			if !ok {
 				absent = append(absent, fmt.Sprintf("capability %s is missing: %s", row.Name, detail))
@@ -245,10 +254,24 @@ func pluginEnabled(lock, name string) (string, bool) {
 // whose own toolchain download or GOTOOLCHAIN setting can make a present binary fail to run. flock
 // is on the list because the install Legion renders for an installing launch serialises on the
 // issue's shared bun install cache with it (installBlock,
-// packages/daemon/internal/runtime/sandbox/plugins.go), so a role container whose image lacks it
-// fails every installing launch.
+// packages/daemon/internal/runtime/sandbox/plugins.go), so a role whose image lacks it
+// fails every installing launch. psql is on it because `bun run e2e`, the Dispatch browser suite a
+// reader-facing Dispatch change must pass before it merges, reaches psql through
+// packages/dispatch/e2e/psql.ts, which seed.ts calls for every spec's database reset, and the
+// local stack `bun run dispatch:local` (packages/dispatch/e2e/local-instance.ts) refuses to start
+// without psql on PATH, so a role whose image lacks psql cannot run the suite its own change owes.
+// redis-cli, sqlite3, nc and dig are the clients a role's own work needs and an unprivileged
+// container cannot apt-install for itself: a repository's own SQLite fixture or database (and Oh
+// My Pi's own profile databases, which are SQLite where a role's session is not), a reachability
+// check, a name that does not resolve. gcc is on it, beside go, for cgo: Go refuses -race without
+// cgo, and cgo needs a C compiler, so a role runs the race detector as `CGO_ENABLED=1 go test -race
+// …` (the worker image keeps cgo off by default, with ENV CGO_ENABLED=0).
+// A missing tool fails the publish naming the tool; a deployment that layers its own image on the
+// published one inherits the five clients (psql, redis-cli, sqlite3, nc and dig) and gcc; a
+// deployment still pinning an older digest keeps the old list,
+// because the probe runs that image's own `legion`.
 func toolchain(ctx context.Context, img Image) (string, bool) {
-	paths, detail, ok := onPath(img, "go", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "jq", "ssh-keygen", "flock")
+	paths, detail, ok := onPath(img, "go", "gcc", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "jq", "ssh-keygen", "flock", "psql", "redis-cli", "sqlite3", "nc", "dig")
 	if !ok {
 		return detail, false
 	}

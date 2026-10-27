@@ -46,12 +46,35 @@
 # CI runs it over the repository in the lint job of pr-and-main.yaml, over the built site in
 # docs.yaml, over a pull request's title, body, branch name, commits (each one's message, author
 # and committer), issue comments, reviews and review comments through check-pr-text.sh (the
-# required lint job at each push, and pr-title.yaml when the pull request is edited or a comment,
-# review or review comment is posted, edited or deleted), and its tests in pr-and-main.yaml's test
-# job.
+# required lint job at each push, and pr-title.yaml when the pull request is opened, reopened or
+# edited or a review is submitted or edited), and its tests in pr-and-main.yaml's test job.
 set -euo pipefail
 
-cd "$(dirname "$0")/../.."
+# A relative path argument is read from the caller's directory, so it is prefixed with that
+# directory's path from the repository root (or its absolute path, outside the repository) before
+# the cd below. The path is never rewritten: the kernel follows its symlinks and `..` parts as the
+# caller's shell would, and a name starting with "-" gets a "./" so find does not read an option.
+# Each directory is read with an "x" after pwd's newline, since a command substitution drops every
+# trailing newline, a directory name's own included.
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P && printf x)
+repo_root=${repo_root%$'\n'x}
+caller=$(pwd -P && printf x)
+caller=${caller%$'\n'x}
+case $caller in
+  "$repo_root") prefix= ;;
+  "$repo_root"/*) prefix=${caller#"$repo_root"/}/ ;;
+  *) prefix=$caller/ ;;
+esac
+args=()
+for arg in "$@"; do
+  case $arg in
+    '' | /*) args+=("$arg") ;;
+    -*) args+=("${prefix:-./}$arg") ;;
+    *) args+=("$prefix$arg") ;;
+  esac
+done
+set -- "${args[@]}"
+cd "$repo_root"
 
 encoded_byte='%[[:xdigit:]]{2}'
 dashes='‐|‑|‒|–|—|―|−|﹘|﹣|－'

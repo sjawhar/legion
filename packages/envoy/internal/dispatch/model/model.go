@@ -92,13 +92,19 @@ type RepoProject struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// ArchitectureSource names the repository and branch a project's architecture
-// documents are imported from. InstallationID caches the GitHub App
+// ArchitectureSource names a repository and branch a project's architecture
+// documents are imported from; a project has one per repository, and its
+// component model is every source's components together. ID names the source
+// within its project (the first source of a project before sources were per
+// repository is 0) and is a server detail kept out of the JSON shape, as the
+// repository already addresses a source. InstallationID caches the GitHub App
 // installation the access check resolved — the importer re-resolves it on
-// sync — and is a server detail kept out of the JSON shape. The sync
-// bookkeeping fields stay null until the importer runs.
+// sync — and is kept out of the JSON shape too. The sync bookkeeping fields
+// stay null until the importer runs; Components is how many components the
+// source currently projects.
 type ArchitectureSource struct {
 	Project        string     `json:"project"`
+	ID             int64      `json:"-"`
 	Repo           string     `json:"repo"`
 	Branch         string     `json:"branch"`
 	Enabled        bool       `json:"enabled"`
@@ -112,6 +118,7 @@ type ArchitectureSource struct {
 	// successful import: importer bookkeeping for the unchanged-model
 	// short-circuit, kept out of the JSON shape.
 	LastTreeSha *string `json:"-"`
+	Components  int     `json:"components"`
 }
 
 // ExternalLink connects a native issue to an external tracker item.
@@ -221,10 +228,11 @@ const (
 	RouteUnknown = "unknown"
 )
 
-// IssueRouteReach is whether an issue's route reaches anyone: resolved on read from one
-// listener roster per request, stored nowhere, and never part of an event payload, which is
-// why it sits beside Issue in a read response rather than in it. Both fields are null for an
-// issue with no route; RouteHolder names the session only when RouteStatus is RouteLive.
+// IssueRouteReach is whether an issue's route reaches anyone: resolved on read from the server's
+// copy of the listener's session list, at most 5 s old, stored in no table, and never part of an
+// event payload, which is why it sits beside Issue in a read response rather than in it. Both
+// fields are null for an issue with no route; RouteHolder names the session only when
+// RouteStatus is RouteLive.
 type IssueRouteReach struct {
 	RouteStatus *string `json:"route_status"`
 	RouteHolder *string `json:"route_holder"`
@@ -318,10 +326,45 @@ type SearchResponse struct {
 	Offset    int   `json:"offset"`
 	TookMS    int64 `json:"took_ms"`
 	// Degraded names why search fell back to keyword-only ranking this request - today only
-	// "embedder_unavailable" (contracts.SearchDegradedEmbedderUnavailable; LEGION-549: no Bedrock
-	// credentials configured, the query's own embedding timed out, or Bedrock answered an error) -
-	// and is empty when meaning search ran normally.
+	// "embedder_unavailable" (contracts.SearchDegradedEmbedderUnavailable; LEGION-549: no
+	// embedder configured, the query's own embedding timed out, or the model service answered an
+	// error) - and is empty when meaning search ran normally.
 	Degraded string `json:"degraded,omitempty"`
+}
+
+// SearchCoverage is how much of what meaning search covers has a current vector from the
+// configured embedder (INFRA-393, GET /api/v1/search/coverage). Identity is the embedder's
+// identity (embed.Embedder.Identity), Place ("bedrock" or "azure") and Model are read from it;
+// all three are null when no embedder is configured, and then nothing is current.
+type SearchCoverage struct {
+	Identity *string              `json:"identity"`
+	Place    *string              `json:"place"`
+	Model    *string              `json:"model"`
+	Total    SearchCoverageCounts `json:"total"`
+	Kinds    SearchCoverageKinds  `json:"kinds"`
+}
+
+// SearchCoverageKinds is SearchCoverage's counts for each kind meaning search ranks.
+type SearchCoverageKinds struct {
+	Issue    SearchCoverageCounts `json:"issue"`
+	Document SearchCoverageCounts `json:"document"`
+	Comment  SearchCoverageCounts `json:"comment"`
+	Ask      SearchCoverageCounts `json:"ask"`
+	Message  SearchCoverageCounts `json:"message"`
+}
+
+// SearchCoverageCounts splits Items, the searchable items of a kind (or of all of them), into
+// Current (embedded at the item's current text by the configured identity), Failed (dead and not
+// current) and Lacking (the rest). An item whose text is empty or only white space is not
+// searchable by meaning and is in none of them: it needs no vector. OldestLackingSeconds is how
+// long the longest-waiting lacking item has waited for its vector, counted from when its row last
+// became pending or from when the item was written, whichever is later; null when nothing lacks.
+type SearchCoverageCounts struct {
+	Items                int64  `json:"items"`
+	Current              int64  `json:"current"`
+	Lacking              int64  `json:"lacking"`
+	Failed               int64  `json:"failed"`
+	OldestLackingSeconds *int64 `json:"oldest_lacking_seconds"`
 }
 
 // DuplicateCandidate is a potential duplicate issue proposed before creation.
@@ -373,7 +416,8 @@ type IssueChild struct {
 }
 
 // ArchitectureTree is GET /api/v1/projects/{key}/architecture: the project's
-// component model with the work attached to it. Counting rule: a component
+// component model — every source's components together — with the work
+// attached to it. Counting rule: a component
 // counts every distinct issue whose effective set names it or any component it
 // contains (transitively over parent), parents and icebox included, each once;
 // Own* restricts that to issues whose effective set names this component
@@ -381,7 +425,7 @@ type IssueChild struct {
 // those resolving to a `none` row; RetiredLinks those whose effective set names
 // a component a re-import retired.
 type ArchitectureTree struct {
-	Source           ArchitectureTreeSource      `json:"source"`
+	Sources          []ArchitectureTreeSource    `json:"sources"`
 	Totals           ArchitectureTreeTotals      `json:"totals"`
 	Components       []ArchitectureTreeComponent `json:"components"`
 	Unassigned       []ArchitectureTreeIssueRef  `json:"unassigned"`
@@ -389,7 +433,8 @@ type ArchitectureTree struct {
 	RetiredLinks     []ArchitectureTreeRetired   `json:"retired_links"`
 }
 
-// ArchitectureTreeSource is the source row's sync bookkeeping.
+// ArchitectureTreeSource is one source row's sync bookkeeping; the tree lists
+// them in the order the project added its sources.
 type ArchitectureTreeSource struct {
 	Repo       string     `json:"repo"`
 	Branch     string     `json:"branch"`
@@ -411,9 +456,11 @@ type ArchitectureTreeTotals struct {
 }
 
 // ArchitectureTreeComponent is one component with its counts and the issues
-// counted, each saying how it qualified.
+// counted, each saying how it qualified. Source is the repository of the
+// source whose files define it.
 type ArchitectureTreeComponent struct {
 	ID        string                  `json:"id"`
+	Source    string                  `json:"source"`
 	Title     string                  `json:"title"`
 	Parent    *string                 `json:"parent"`
 	DependsOn []string                `json:"depends_on"`
@@ -491,7 +538,10 @@ type Artifact struct {
 }
 
 // ArtifactReview is one human review of a document, pinned to the version it was
-// given on: an approval, or a request for changes with a reason.
+// given on: an approval, or a request for changes with a reason. EventSeq is the
+// sequence of the artifact.* event the review appended on its document's owner, nil
+// for a review recorded before Dispatch kept it; the approval read returns it as
+// ArtifactApproval.Seq, and the review list does not carry it.
 type ArtifactReview struct {
 	ID         string    `json:"id"`
 	ArtifactID string    `json:"artifact_id"`
@@ -501,6 +551,7 @@ type ArtifactReview struct {
 	Reason     *string   `json:"reason"`
 	AskID      *string   `json:"ask_id"`
 	CreatedAt  time.Time `json:"created_at"`
+	EventSeq   *int64    `json:"-"`
 }
 
 // ArtifactApproval is a document's approval state as of its latest version:
@@ -509,13 +560,20 @@ type ArtifactReview struct {
 // version), or changes_requested (the latest review asks for changes). An
 // awaiting approval carries its request's WaitingOn: agent once a version moved
 // the request past the one its agent handed to the human, or a reply left it with
-// the agent; human otherwise (the ask reads' waiting_on).
+// the agent; human otherwise (the ask reads' waiting_on). Seq is the latest
+// review's event sequence on the document's owner, absent for a review recorded
+// before Dispatch kept it and on every read the release before that serves during
+// a rollout or a rollback, so a missing Seq does not prove an older review: the
+// owner's row lock orders its events as they commit, so Seq places the review
+// among them where At, its transaction's start, cannot. Seq orders; Version, not
+// Seq, says which version the review covers.
 type ArtifactApproval struct {
 	State         string  `json:"state"`
 	LatestVersion int     `json:"latest_version"`
 	Version       *int    `json:"version,omitempty"`
 	By            *Actor  `json:"by,omitempty"`
 	At            *string `json:"at,omitempty"`
+	Seq           *int64  `json:"seq,omitempty"`
 	Reason        *string `json:"reason,omitempty"`
 	AskID         *string `json:"ask_id,omitempty"`
 	RequestedBy   *Actor  `json:"requested_by,omitempty"`
@@ -781,10 +839,14 @@ type AskLastReply struct {
 // AskEventPayload is the wire payload of every `ask.*` event that carries the ask row: the ask
 // itself, flat, plus what the write moved in the reference graph. NewAskEventPayload is the only
 // way to build one, and it takes the changes, so a producer whose question text can cite
-// something cannot append an event that stays silent about it.
+// something cannot append an event that stays silent about it. Restored marks the `ask.opened` or
+// `ask.answered` settlement appends when a person's edit restores a decision block it retracted:
+// the ask returns to the state it had, and the event records no new answer (an `ask.answered`
+// restore carries the answer given before the retraction, credited to the editor who restored it).
 type AskEventPayload struct {
 	Ask
 	ReferenceChangesPayload
+	Restored bool `json:"restored,omitempty"`
 }
 
 // NewReferenceChangesPayload states what a write moved on a typed event payload.
@@ -1305,12 +1367,35 @@ type ArtifactReferences struct {
 // agent's conversation owns has neither and is located by Ref alone
 // (`dispatch://agent/<session id>/artifact/<slug>`). Ref is its dispatch:// address and is empty
 // for session nodes, which have none.
+//
+// A block node (kind `block`, id `<document ref_key>#<block id>`) also carries BlockID, its
+// document's reference as Document, and ChangedVersion and ChangedAt, the document version in
+// which its text last changed. Text and Pin are set only on the node a reference read names:
+// Text is the block's whole current text, and Pin answers a reference pinned to a version.
 type GraphNode struct {
-	Kind     string  `json:"kind"`
-	ID       string  `json:"id"`
-	IssueKey *string `json:"issue_key,omitempty"`
-	Project  string  `json:"project,omitempty"`
-	Ref      string  `json:"ref,omitempty"`
+	Kind           string     `json:"kind"`
+	ID             string     `json:"id"`
+	BlockID        string     `json:"block_id,omitempty"`
+	IssueKey       *string    `json:"issue_key,omitempty"`
+	Project        string     `json:"project,omitempty"`
+	Ref            string     `json:"ref,omitempty"`
+	Document       string     `json:"document,omitempty"`
+	ChangedVersion int        `json:"changed_version,omitempty"`
+	ChangedAt      *time.Time `json:"changed_at,omitempty"`
+	Text           string     `json:"text,omitempty"`
+	Pin            *BlockPin  `json:"pin,omitempty"`
+}
+
+// BlockPin is a block reference pinned to a version of its document (`#b-<id>@v<N>`): the
+// pinned reference, the block's whole text at that version, and how the block stands now. State
+// is "unchanged" when its current text equals Text, "changed" when it differs, and "removed"
+// when no current version holds the block; RemovedVersion is then the version that deleted it.
+type BlockPin struct {
+	Version        int    `json:"version"`
+	Ref            string `json:"ref"`
+	Text           string `json:"text"`
+	State          string `json:"state"`
+	RemovedVersion int    `json:"removed_version,omitempty"`
 }
 
 // GraphExcerpt is the text shown for an edge: the block containing a document mention (with its
@@ -1323,10 +1408,13 @@ type GraphExcerpt struct {
 // GraphEdge is one typed, timestamped edge of graph_edges seen from the queried node: Node is
 // the other end, Direction is "in" for edges pointing at the queried node and "out" for edges
 // it writes. SourceSeq is the events.id that introduced a mention; nil for structural edges.
+// Block, on a document's read, names the document's block at the queried end: the block an
+// inbound edge points at, or the block that holds an outbound link.
 type GraphEdge struct {
 	Kind      string        `json:"kind"`
 	Direction string        `json:"direction"`
 	Node      GraphNode     `json:"node"`
+	Block     *GraphNode    `json:"block,omitempty"`
 	Excerpt   *GraphExcerpt `json:"excerpt,omitempty"`
 	CreatedAt time.Time     `json:"created_at"`
 	SourceSeq *int64        `json:"source_seq"`
@@ -1336,6 +1424,25 @@ type GraphEdge struct {
 type GraphReferences struct {
 	Node  GraphNode   `json:"node"`
 	Edges []GraphEdge `json:"edges"`
+}
+
+// BlockLink is one link from a block of one document to a block of a document: its edge kind,
+// both block nodes, and when and in which version of its document the source block first held
+// it.
+type BlockLink struct {
+	Kind           string    `json:"kind"`
+	From           GraphNode `json:"from"`
+	To             GraphNode `json:"to"`
+	CreatedAt      time.Time `json:"created_at"`
+	CreatedVersion int       `json:"created_version"`
+}
+
+// BlockLinks is GET /api/v1/block-links: the two documents and the links from blocks of From to
+// blocks of To, newest first.
+type BlockLinks struct {
+	From  GraphNode   `json:"from"`
+	To    GraphNode   `json:"to"`
+	Links []BlockLink `json:"links"`
 }
 
 // Event is the immutable event-log record for a Dispatch mutation.
@@ -1396,9 +1503,14 @@ type Route struct {
 	ID   string
 }
 
+// IssueStatusTriage is the status every issue is created in: nobody has decided yet whether the
+// work is wanted. It is named because a write's advice reads it (api.computeWriteAdvice resolves
+// who owns the status only there), and one spelling is better than two.
+const IssueStatusTriage = "triage"
+
 // IssueStatuses is the canonical Legion issue lifecycle.
 var IssueStatuses = []string{
-	"triage",
+	IssueStatusTriage,
 	"icebox",
 	"backlog",
 	"todo",

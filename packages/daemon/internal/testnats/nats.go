@@ -6,6 +6,15 @@
 // so a later test's start, finding it removing, fails ("unexpected container status removing"). A
 // per-test container left such a gap whenever the tests between two NATS tests outlasted the
 // timeout, as a loaded Docker host makes them.
+//
+// A host with no Docker, such as a Sandbox pod, runs a nats-server of its own with JetStream and
+// its monitoring endpoint, and names it in LEGION_TEST_NATS_URL (its client URL) and
+// LEGION_TEST_NATS_MONITOR_URL (the monitoring endpoint's base URL). With both set, URL serves that
+// server, emptied for each test exactly as the container is, starts no container, and Main removes
+// nothing; one set without the other fails the test, since a half-named server is a mistake rather
+// than a reason to fall back to Docker. The reset holds the server for one test of one test binary
+// at a time, and waits for every client connection to it to end, so the server is the tests' alone
+// and the packages using it run one after another (go test -p 1).
 package testnats
 
 import (
@@ -20,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types/container"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/testcontainers/testcontainers-go"
@@ -32,6 +42,14 @@ const Image = "mirror.gcr.io/library/nats:2.10"
 // readinessTimeout bounds the wait for the JetStream API once the container runs. The container
 // start is not bounded by it: how long Docker takes to create a container is the daemon's load.
 const readinessTimeout = 30 * time.Second
+
+// externalURLEnv and externalMonitorEnv name a running NATS server for URL to serve in place of a
+// container (the package comment): its client URL, and its monitoring endpoint's base URL, which
+// the reset reads for the client connections it waits out.
+const (
+	externalURLEnv     = "LEGION_TEST_NATS_URL"
+	externalMonitorEnv = "LEGION_TEST_NATS_MONITOR_URL"
+)
 
 var (
 	// held is locked by the test using the server, from URL until the test's cleanups have run, so
@@ -61,8 +79,8 @@ func init() {
 }
 
 // Main runs the package's tests, then removes the NATS container if a test started one, and
-// returns the exit code. A package whose tests use URL or JetStream calls it from TestMain:
-// os.Exit(testnats.Main(m)).
+// returns the exit code; a run on an external server (external) started none and removes nothing.
+// A package whose tests use URL or JetStream calls it from TestMain: os.Exit(testnats.Main(m)).
 func Main(m *testing.M) int {
 	mainRuns = true
 	code := m.Run()
@@ -78,7 +96,9 @@ func Main(m *testing.M) int {
 }
 
 // URL returns the package's NATS server with no stream on it, so none of a previous test's
-// streams, consumers or messages, and holds it for t until t ends. The reset waits for the server
+// streams, consumers or messages, and holds it for t until t ends. The server is the external one
+// LEGION_TEST_NATS_URL and LEGION_TEST_NATS_MONITOR_URL name when both are set (external), and
+// otherwise the package's container, started on first use. The reset waits for the server
 // to report no client connection first: a previous test that published without waiting for acks
 // leaves messages the server still routes after the test ends, into a stream this test recreates.
 // The reset deletes every stream, so a test creates its own there with CreateStream.
@@ -89,6 +109,10 @@ func URL(t testing.TB) string {
 	}
 	take(t)
 	startOnce.Do(func() {
+		serverURL, monitorURL, startErr = external()
+		if startErr != nil || serverURL != "" {
+			return
+		}
 		started, err := start(Image)
 		if err != nil {
 			startErr = err
@@ -127,6 +151,19 @@ func URL(t testing.TB) string {
 		t.Fatalf("the NATS server still holds %d streams after emptying it", info.Streams)
 	}
 	return serverURL
+}
+
+// external is the running server LEGION_TEST_NATS_URL and LEGION_TEST_NATS_MONITOR_URL name: its
+// client URL and its monitoring endpoint's base URL, without a trailing slash, as the reset appends
+// /connz to it. Neither set is no external server, both empty; one set without the other is an
+// error naming both.
+func external() (string, string, error) {
+	server, monitoring := os.Getenv(externalURLEnv), os.Getenv(externalMonitorEnv)
+	if (server == "") != (monitoring == "") {
+		return "", "", fmt.Errorf("set both %s and %s to use a running NATS server, or neither to start a container (%s is %q, %s is %q)",
+			externalURLEnv, externalMonitorEnv, externalURLEnv, server, externalMonitorEnv, monitoring)
+	}
+	return server, strings.TrimSuffix(monitoring, "/"), nil
 }
 
 // take holds the shared server for t until t ends, refusing a take by the test already holding it
@@ -274,11 +311,18 @@ func retryStreamStoreFailure(create func() error) error {
 	}
 }
 
+// limits caps a NATS test container at one CPU and 512 MiB, as every container the repository's
+// tests and proofs start is capped on a shared host: a test server holds a few small streams.
+var limits = testcontainers.WithHostConfigModifier(func(hostConfig *container.HostConfig) {
+	hostConfig.NanoCPUs = 1_000_000_000
+	hostConfig.Memory = 512 << 20
+})
+
 // start runs a NATS container, with its monitoring endpoint on 8222. A container Docker created and never saw ready (a readiness wait
 // that timed out under load) comes back beside the error, and is removed before start returns:
 // no test's end would remove a container the package shares.
 func start(image string, options ...testcontainers.ContainerCustomizer) (*tcnats.NATSContainer, error) {
-	options = append([]testcontainers.ContainerCustomizer{tcnats.WithArgument("http_port", "8222")}, options...)
+	options = append([]testcontainers.ContainerCustomizer{tcnats.WithArgument("http_port", "8222"), limits}, options...)
 	started, err := tcnats.Run(context.Background(), image, options...)
 	if err != nil {
 		return started, errors.Join(err, testcontainers.TerminateContainer(started))

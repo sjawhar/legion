@@ -77,13 +77,21 @@ import {
 } from "./legion-tool"
 import {
   pruneStaleSessionHandoffs,
+  pruneStaleSessionRoles,
   readPersistedRole,
   readSessionHandoff,
   roleStateFile,
   SessionIdentity,
   sessionHandoffFile,
+  UnparseableRoleRecordError,
   writePersistedRole,
 } from "./session-identity"
+import {
+  pruneStaleSessionTitles,
+  readChosenTitleSync,
+  sessionTitleFile,
+  touchStateFile,
+} from "./session-state"
 import { type SessionTitle, sessionTitle } from "./session-title"
 
 const CHANNEL_NOTIFICATION_METHOD = "notifications/claude/channel" as const
@@ -580,6 +588,35 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       })
   }
 
+  /** Whether a failure to refresh the role record has been reported since the last success. */
+  let roleRefreshFailureReported = false
+  /**
+   * Marks the role record of a holder the heartbeat has just confirmed, so its mtime is the last
+   * time this session was seen holding the role, which is what `pruneStaleSessionRoles`'s age
+   * rule takes it for: nothing else touches the record of a session that keeps its role, and
+   * without this the sweep expires a live holder's only way back to it.
+   *
+   * A timestamp touch and not a rewrite: the record's content has not changed, and an atomic
+   * rewrite would leave a temporary file beside it in `roles/` every two minutes. Best-effort,
+   * because a state directory that cannot be written must not cost the session its heartbeat;
+   * the record it could not touch is still there to restore from until the sweep's age.
+   */
+  const refreshRoleRecord = async (): Promise<void> => {
+    const roleFile = roleStateFile(options.stateDirectory, identity.id)
+    try {
+      await touchStateFile(roleFile)
+      roleRefreshFailureReported = false
+    } catch (error) {
+      // Said once per failure run: every heartbeat retries it.
+      if (!roleRefreshFailureReported) {
+        roleRefreshFailureReported = true
+        process.stderr.write(
+          `envoy-channel: could not refresh the role record ${roleFile} (${messageFor(error)}); retrying every heartbeat\n`,
+        )
+      }
+    }
+  }
+
   /** `afterOutage`: the last tick's registration failed, so a holder the listener still names
    * may have been answered "no holder" meanwhile. */
   const reassertRole = async (afterOutage: boolean): Promise<void> => {
@@ -589,6 +626,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       .getRole(role)
       .then((info) => info.holder, undefinedOnNotFound)
     if (holder === identity.id) {
+      await refreshRoleRecord()
       if (afterOutage) fireRegained(role, "reregistered")
       return
     }
@@ -610,10 +648,33 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
    * handoff whose registration failed leaves it for the next heartbeat.
    */
   let roleTransferFrom: string | undefined
+  /** Whether a failure to take back the queued role has been reported since the last success. */
+  let roleTransferFailureReported = false
+  /**
+   * Best-effort, unlike `syncRegisteredInterests` behind it on the heartbeat. A failed transfer
+   * keeps its own retry, `roleTransferFrom`, which clears only once `restoreRole` resolves; a
+   * throw would add nothing to that and would end the tick before the interests reconciliation,
+   * on every tick for as long as the failure lasts — a resumed session would never adopt its
+   * subscriptions and a registry-side unsubscribe that failed would never be cleared. The
+   * session works without its role meanwhile; it does not work without its interests, whose read
+   * has no queue of its own and needs the failed tick, its report and its retry.
+   */
   const transferRole = async (): Promise<void> => {
-    if (roleTransferFrom === undefined) return
-    await restoreRole(roleTransferFrom)
-    roleTransferFrom = undefined
+    const from = roleTransferFrom
+    if (from === undefined) return
+    try {
+      await restoreRole(from)
+      roleTransferFrom = undefined
+      roleTransferFailureReported = false
+    } catch (error) {
+      // Said once per failure run: every heartbeat retries it.
+      if (!roleTransferFailureReported) {
+        roleTransferFailureReported = true
+        process.stderr.write(
+          `envoy-channel: could not take back the role held by ${from} (${messageFor(error)}); retrying every heartbeat\n`,
+        )
+      }
+    }
   }
 
   /**
@@ -801,9 +862,50 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   await options.connection.flush()
   await serialized(async () => {
     await register()
-    await restoreRole()
+    // Best-effort, as the interests read above is, and for a sharper reason: registration has
+    // already happened, so a throw here takes down a channel the registry is advertising and
+    // leaves the Agents page a row that never beats again.
+    //
+    // A failure is queued as a transfer from this session's own id, so the heartbeat's
+    // `transferRole` runs `restoreRole` again on every tick until it resolves. That covers every
+    // failure but one: a listener answer that is not JSON or misses the schema, an unreadable
+    // role file, any transient error. The one is a role file whose bytes cannot be parsed, which
+    // only `readPersistedRole` can tell apart: no later read of the same bytes succeeds, so it is
+    // not queued, and it costs this session its role and nothing more.
+    await restoreRole().catch((error: unknown) => {
+      if (error instanceof UnparseableRoleRecordError) {
+        process.stderr.write(
+          `envoy-channel: ${messageFor(error)}; the session starts without a role\n`,
+        )
+        return
+      }
+      roleTransferFrom = identity.id
+      // This is the first failure of the run `transferRole` reports, so it says nothing more
+      // until the retry has succeeded once.
+      roleTransferFailureReported = true
+      process.stderr.write(
+        `envoy-channel: could not restore the role (${messageFor(error)}); the next heartbeat retries\n`,
+      )
+    })
   })
-  await pruneStaleSessionHandoffs(options.stateDirectory)
+  // Housekeeping of the plugin's own state directories, each best-effort for the reason the
+  // interests read above is: the heartbeat timer below is not armed yet, so a sweep that threw
+  // here would take the session's whole channel down over a dead pid's handoff, a cosmetic title
+  // or a role the session can restore anyway. Everything else this state adds degrades the same
+  // way — the reader swallows a failed read, the hook always exits 0 — and a directory this run
+  // could not sweep is swept by the next session that starts.
+  for (const prune of [
+    () => pruneStaleSessionHandoffs(options.stateDirectory),
+    () => pruneStaleSessionTitles(options.stateDirectory),
+    // The role sweep is told whose session this is: see `pruneStaleSessionRoles`.
+    () => pruneStaleSessionRoles(options.stateDirectory, identity.id),
+  ]) {
+    await prune().catch((error: unknown) => {
+      process.stderr.write(
+        `envoy-channel: could not prune stale session state (${messageFor(error)})\n`,
+      )
+    })
+  }
   const heartbeatTimer = setInterval(() => {
     void heartbeat()
   }, options.heartbeatMs)
@@ -1005,6 +1107,10 @@ export async function runEnvoyChannelServer(): Promise<void> {
   // The title every registration sends, and the one the `dispatch` command stamps on this
   // session's Dispatch writes. Registration stamps it; with Envoy or its inbound messages off,
   // nothing registers, so those paths stamp it once themselves.
+  // `CLAUDE_PLUGIN_DATA` is read here, rather than through `pluginStateDirectory` below, because
+  // that throws when it is unset and runs only after the Envoy-off return: a session with Envoy
+  // off and no plugin data must still serve.
+  const pluginData = configuredValue(process.env["CLAUDE_PLUGIN_DATA"])
   const title = sessionTitle(
     {
       ENVOY_SESSION_TITLE: process.env["ENVOY_SESSION_TITLE"],
@@ -1012,6 +1118,12 @@ export async function runEnvoyChannelServer(): Promise<void> {
       TMUX_PANE: process.env["TMUX_PANE"],
     },
     directory,
+    {
+      chosen: (sessionId) =>
+        pluginData === undefined
+          ? undefined
+          : readChosenTitleSync(sessionTitleFile(pluginData, sessionId)),
+    },
   )
   const stampTitle = (sessionId: string, value: string): void => {
     writeSessionTitle(dispatchSessionDirectory(process.env, sessionId), value)
@@ -1092,14 +1204,18 @@ export async function runEnvoyChannelServer(): Promise<void> {
     ...(daemon === undefined ? [] : [legionToolDefinition()]),
   ]
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolDefinitions }))
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     if (daemon !== undefined && request.params.name === LEGION_TOOL_NAME) {
       const legionRuntime: LegionToolRuntime = {
         daemon,
         claim: () => claim?.capability(),
         handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: process.env }),
       }
-      return mcpResult(await executeLegionTool(legionRuntime, request.params.arguments))
+      // The request's signal aborts on the client's notifications/cancelled, which ends a wait
+      // for a restarting daemon.
+      return mcpResult(
+        await executeLegionTool(legionRuntime, request.params.arguments, extra.signal),
+      )
     }
     if (runtime === undefined) throw new Error("Envoy channel server is still starting")
     return mcpResult(await executeEnvoyTool(runtime, request.params.name, request.params.arguments))

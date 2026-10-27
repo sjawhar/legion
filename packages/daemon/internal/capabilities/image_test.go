@@ -68,6 +68,15 @@ func (s stubs) lock() string {
 	return capabilitiestest.LockPath(s.home)
 }
 
+// onPATH is the detail a row that checks PATH alone renders for names, each under s.bin.
+func (s stubs) onPATH(names ...string) string {
+	paths := make([]string, len(names))
+	for i, name := range names {
+		paths[i] = filepath.Join(s.bin, name)
+	}
+	return "on PATH: " + strings.Join(paths, ", ")
+}
+
 func (s stubs) writeLock(content string) {
 	capabilitiestest.WriteLock(s.t, s.home, content)
 }
@@ -126,9 +135,9 @@ func TestCheckImageRendersEveryRowWhenEveryImageRowIsPresent(t *testing.T) {
 	for name, want := range map[Name]string{
 		EvalPython:           "omp setup python --check reports available=true",
 		Browser:              filepath.Join(s.bin, "chromium") + " (chromium on PATH) --version: Chromium 141.0.0.0",
-		LSP:                  "on PATH: " + filepath.Join(s.bin, "gopls") + ", " + filepath.Join(s.bin, "typescript-language-server") + ", " + filepath.Join(s.bin, "pyright-langserver"),
+		LSP:                  s.onPATH("gopls", "typescript-language-server", "pyright-langserver"),
 		CodeGraph:            filepath.Join(s.bin, "codegraph") + " on PATH; @bopstack/pi-codegraph enabled in " + s.lock(),
-		Toolchain:            "on PATH: " + filepath.Join(s.bin, "go") + ", " + filepath.Join(s.bin, "curl") + ", " + filepath.Join(s.bin, "wget") + ", " + filepath.Join(s.bin, "python3") + ", " + filepath.Join(s.bin, "node") + ", " + filepath.Join(s.bin, "bun") + ", " + filepath.Join(s.bin, "uv") + ", " + filepath.Join(s.bin, "kubectl") + ", " + filepath.Join(s.bin, "jq") + ", " + filepath.Join(s.bin, "ssh-keygen") + ", " + filepath.Join(s.bin, "flock") + "; go version go1.27.1 linux/amd64",
+		Toolchain:            s.onPATH("go", "gcc", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "jq", "ssh-keygen", "flock", "psql", "redis-cli", "sqlite3", "nc", "dig") + "; go version go1.27.1 linux/amd64",
 		RepositoryExtensions: "each session reports it at start; `legion state` renders it: loads the Oh My Pi extensions the repository it works carries",
 	} {
 		if got[name].Detail != want {
@@ -267,6 +276,63 @@ func TestCheckImageResolvesTheBrowserAsOhMyPiDoes(t *testing.T) {
 		states, _ := CheckImage(context.Background(), s.image())
 		if got := byName(states)[Browser]; got.Status != StatusMissing || got.Detail != "chromium is not on PATH, and PUPPETEER_EXECUTABLE_PATH names no executable" {
 			t.Errorf("browser state = %+v, want missing naming both resolutions", got)
+		}
+	})
+}
+
+// SkipBrowser (`probe-image --skip-browser`) leaves the browser row unchecked and runs no browser,
+// so an image with no Chromium passes while every other image row is still checked: one that
+// lacks another capability still fails, naming that row and not the browser.
+func TestCheckImageSkipBrowserLeavesTheBrowserRowUnchecked(t *testing.T) {
+	const detail = "not checked (--skip-browser): the image is for a deployment that turns Oh My Pi's browser off"
+	t.Run("no chromium anywhere", func(t *testing.T) {
+		s := newStubs(t)
+		s.remove("chromium")
+		img := s.image()
+		img.SkipBrowser = true
+
+		states, err := CheckImage(context.Background(), img)
+
+		if err != nil {
+			t.Fatalf("CheckImage = %v, want no error: the browser row is the only one the image lacks", err)
+		}
+		got := byName(states)
+		if got[Browser].Status != StatusUnchecked || got[Browser].Detail != detail {
+			t.Errorf("browser state = %+v, want %s (%s)", got[Browser], StatusUnchecked, detail)
+		}
+		for _, row := range Table {
+			if row.Site == SiteImage && row.Name != Browser && got[row.Name].Status != StatusPresent {
+				t.Errorf("%s state = %+v, want %s: SkipBrowser leaves only the browser row unchecked", row.Name, got[row.Name], StatusPresent)
+			}
+		}
+	})
+	t.Run("a chromium on PATH is not run", func(t *testing.T) {
+		s := newStubs(t)
+		ran := filepath.Join(t.TempDir(), "ran")
+		s.install("chromium", "#!/bin/sh\ntouch "+ran+"\nexit 1\n")
+		img := s.image()
+		img.SkipBrowser = true
+
+		states, err := CheckImage(context.Background(), img)
+
+		if err != nil || byName(states)[Browser].Status != StatusUnchecked {
+			t.Errorf("CheckImage = %v, browser state %+v, want no error and the row unchecked", err, byName(states)[Browser])
+		}
+		if _, statErr := os.Stat(ran); !errors.Is(statErr, os.ErrNotExist) {
+			t.Errorf("the chromium on PATH ran (stat %s: %v), want no browser run under SkipBrowser", ran, statErr)
+		}
+	})
+	t.Run("another capability missing", func(t *testing.T) {
+		s := newStubs(t)
+		s.remove("chromium")
+		s.remove("gopls")
+		img := s.image()
+		img.SkipBrowser = true
+
+		_, err := CheckImage(context.Background(), img)
+
+		if err == nil || !strings.Contains(err.Error(), "capability lsp is missing") || strings.Contains(err.Error(), "capability browser") {
+			t.Errorf("CheckImage = %v, want an error naming lsp and not the browser", err)
 		}
 	})
 }

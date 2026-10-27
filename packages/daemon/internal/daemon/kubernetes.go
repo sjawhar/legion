@@ -18,7 +18,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
-	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
@@ -211,7 +210,8 @@ func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan)
 type sandboxBoot struct {
 	// clusterCheck is the cluster's half of boot's refusals (plan.clusterCheck), each read-only:
 	// Agent Sandbox is installed, and no Sandbox of a layout before this runtime's remains in the
-	// namespace for the project.
+	// namespace for the project. The census logs what it accepts but will not keep — an issue
+	// Sandbox whose next launch replaces its disk — to the runtime's own logger.
 	clusterCheck func(context.Context) error
 	// probe is the image probe the runtime runs (sandbox.ImageProbe), over the references of the
 	// role prompts every worker pod is handed (prompts.RoleReferences).
@@ -230,7 +230,7 @@ func sandboxBootOf(cfg config.Config, reads sandboxReads) (sandboxBoot, error) {
 		if err := sandbox.CheckInstalled(checking, reads.client, agentSandbox); err != nil {
 			return err
 		}
-		return sandbox.CensusLegacyIssueSandboxes(ctx, reads.client, reads.opts.Namespace, reads.opts.Project)
+		return sandbox.CensusLegacyIssueSandboxes(ctx, reads.client, reads.opts.Namespace, reads.opts.Project, reads.opts.Log)
 	}
 	return sandboxBoot{clusterCheck: clusterCheck, probe: probe}, nil
 }
@@ -238,19 +238,19 @@ func sandboxBootOf(cfg config.Config, reads sandboxReads) (sandboxBoot, error) {
 // probeReservation is the image probe pod's own reservation, fixed: `legion probe-image` starts
 // one Oh My Pi at a time, each briefly (pi.agents, the plugin's load, the session-storage
 // setting), runs no lane and no browser (the browser check runs Chromium's --version), and exits,
-// so 250m and 1Gi hold it, over a 5Gi bound on the node's disk and the same 1Gi disk request every
-// role makes. It is no role's share on purpose: the probe runs at every boot, before anything is
-// served, and a probe that reserved a role's share — the controller's 1 CPU and 4Gi, as it did
-// until LEGION-632 — could leave the daemon unable to boot on a pool full enough to place nothing
-// that large, while a 250m / 1Gi pod still fits (stage 4b's daemon-controller-liveness restart,
-// whose controller reservation no node can hold, met exactly that).
-var probeReservation = config.RoleResources{CPU: "250m", CPURequest: "250m", Memory: "1Gi", MemoryRequest: "1Gi", EphemeralStorage: "5Gi", EphemeralStorageRequest: "1Gi"}
+// so 250m and 1Gi hold it, over a 5Gi bound on the node's disk and a 1Gi disk request. It is no
+// pod's share on purpose: the probe runs at every boot, before anything is served, and a probe that
+// reserved a pod's share — the controller's 1 CPU and 4Gi, or an issue pod's 3 CPU and 19Gi —
+// could leave the daemon unable to boot on a pool full enough to place nothing that large, while a
+// 250m / 1Gi pod still fits (stage 4b's daemon-controller-liveness restart, whose controller
+// reservation no node can hold, met exactly that).
+var probeReservation = config.Reservation{CPU: "250m", CPURequest: "250m", Memory: "1Gi", MemoryRequest: "1Gi", EphemeralStorage: "5Gi", EphemeralStorageRequest: "1Gi"}
 
 // imageProbe is the probe of the daemon's worker image: this daemon's contract, the role prompts
 // every pod is handed — this daemon's, inlined at each launch, so the probe resolves what they name
 // rather than the image's copy — and the probe's own reservation (probeReservation), translated as
-// every role's is (requirements), its requests equal to its limits so the probe pod is Guaranteed
-// whatever the roles request: a deployment's Burstable roles never reach the probe. The error is
+// every pod's is (requirements), its requests equal to its limits so the probe pod is Guaranteed
+// whatever an issue pod requests: a deployment's Burstable issue pods never reach the probe. The error is
 // the translation's, which only an edit to probeReservation can cause. Budget is ProbeBudget's.
 func imageProbe(cfg config.Config, references promptrefs.Names) (sandbox.ImageProbe, error) {
 	resources, err := requirements("the image probe's reservation", probeReservation)
@@ -296,9 +296,9 @@ func kubeClient(k config.Kubernetes) (*rest.Config, error) {
 
 // sandboxOptions translates the configuration into the runtime's Options, all but the worker
 // stream's address, the connection directory and the token source, which boot hands the factory.
-// Every role the configuration holds a reservation for — all seven once the loader settled it —
-// gets its container requirements (roleRequirements). lookup is the daemon's environment, which
-// can name the NATS nkey seed (launchSecrets).
+// The issue pod's one container gets runtime.kubernetes.resources.issue as its requirements, and
+// the daemon-launched controller's container runtime.kubernetes.resources.controller (requirements).
+// lookup is the daemon's environment, which can name the NATS nkey seed (launchSecrets).
 func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchToken string, lookup func(string) (string, bool), log *slog.Logger) (sandbox.Options, error) {
 	issueVolume, err := resource.ParseQuantity(k.IssueVolume)
 	if err != nil {
@@ -310,13 +310,13 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchTok
 			Key: t.Key, Operator: corev1.TolerationOperator(t.Operator), Value: t.Value, Effect: corev1.TaintEffect(t.Effect),
 		})
 	}
-	resources := make(map[claim.Role]corev1.ResourceRequirements, len(k.Resources))
-	for role, reservation := range k.Resources {
-		requirements, err := roleRequirements(role, reservation)
-		if err != nil {
-			return sandbox.Options{}, err
-		}
-		resources[role] = requirements
+	issue, err := requirements("runtime.kubernetes.resources.issue", k.Resources.Issue)
+	if err != nil {
+		return sandbox.Options{}, err
+	}
+	controller, err := requirements("runtime.kubernetes.resources.controller", k.Resources.Controller)
+	if err != nil {
+		return sandbox.Options{}, err
 	}
 	var agentSecrets *sandbox.AgentSecrets
 	if a := k.AgentSecrets; a != nil {
@@ -329,7 +329,7 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchTok
 	return sandbox.Options{
 		Namespace: k.Namespace, Project: project, Image: k.Image, StorageClass: k.StorageClass, IssueVolume: issueVolume,
 		Scheduling: sandbox.Scheduling{NodeSelector: k.Scheduling.NodeSelector, Tolerations: tolerations, PriorityClass: k.Scheduling.PriorityClass},
-		Resources:  resources,
+		Resources:  sandbox.PodResources{Issue: issue, Controller: controller},
 		DaemonURL:  cfg.DaemonURL, EnvoyURL: cfg.EnvoyURL, DispatchURL: cfg.DispatchURL, DispatchToken: dispatchToken,
 		NATSURLs: cfg.NatsURLs,
 		// The controller this runtime launches is told the project's channels, and is relaunched
@@ -340,7 +340,7 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchTok
 		ProviderKeys:            providerSecretKeys(cfg.ProviderKeys),
 		LaunchSecrets:           launchSecretNames(cfg, lookup),
 		ProvidersSecrets:        providersSecrets(cfg, lookup),
-		SessionDSNKey:           k.SessionDSNSecret,
+		SessionStore:            k.SessionStore,
 		Setup:                   k.Setup,
 		BootTimeout:             cfg.WorkerBootTimeout,
 		RegistrationIntervals:   cfg.WorkerBootRegistrationDeadlineIntervals,
@@ -431,12 +431,6 @@ func providerSecretKeys(keys []config.ProviderKey) map[string]string {
 	return secretKeys
 }
 
-// roleRequirements is one role's reservation as a container's requirements (requirements), its
-// errors keyed by the role's `runtime.kubernetes.resources.<role>`.
-func roleRequirements(role claim.Role, reservation config.RoleResources) (corev1.ResourceRequirements, error) {
-	return requirements("runtime.kubernetes.resources."+string(role), reservation)
-}
-
 // requirements is a reservation as a container's requirements: its cpu and memory limits, and its
 // cpu and memory requests, each at most its limit (the loader holds them there) — equal to it at
 // the defaults, so the pod the containers make is Guaranteed and bursts past nothing, and below it
@@ -444,8 +438,8 @@ func roleRequirements(role claim.Role, reservation config.RoleResources) (corev1
 // and memory alone); and its ephemeral storage, the limit on what the container writes to the
 // node's disk and the smaller request the scheduler fits to the node's allocatable disk. The two
 // lists are built apart so neither edit reaches the other. key names the reservation in an error:
-// a role's configuration key, or the probe's.
-func requirements(key string, reservation config.RoleResources) (corev1.ResourceRequirements, error) {
+// a pod's configuration key, or the probe's.
+func requirements(key string, reservation config.Reservation) (corev1.ResourceRequirements, error) {
 	requests, limits := corev1.ResourceList{}, corev1.ResourceList{}
 	for _, field := range []struct {
 		name          corev1.ResourceName

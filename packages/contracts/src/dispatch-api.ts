@@ -125,6 +125,23 @@ export interface Project {
   readonly created_at: string;
 }
 
+/**
+ * A project's default assignee: the last step of an issue create's assignee chain, reached when
+ * the create named nobody, the session acts for nobody, and no parent carries one. `assignee` is
+ * a person's lowercase email, or null for a project that names nobody — which
+ * `GET /api/v1/settings/project-default-assignees` leaves out of its list entirely.
+ */
+export interface ProjectDefaultAssignee {
+  readonly project: string;
+  readonly assignee: string | null;
+}
+
+/** The body of `PUT /api/v1/projects/{key}/default-assignee`: the person the project's unowned
+ *  work lands on, or null to clear the default. */
+export interface ProjectDefaultAssigneeInput {
+  readonly assignee: string | null;
+}
+
 export interface RepoProject {
   readonly repo: string;
   readonly project: string;
@@ -136,10 +153,12 @@ export interface RepoProject {
 }
 
 /**
- * The repository and branch a project's architecture documents are imported
- * from (directory fixed at .dispatch/architecture/). The GitHub App
- * installation id backing the access check is a server detail and never
- * appears here. The sync fields stay null until the importer runs.
+ * One repository a project's architecture documents are imported from (directory
+ * fixed at .dispatch/architecture/), on its branch. A project may have several
+ * sources, one per repository, and its component model is every source's components
+ * together. The GitHub App installation id backing the access check is a server
+ * detail and never appears here. The sync fields stay null until the importer runs;
+ * `components` is how many components this source currently projects.
  */
 export interface ArchitectureSource {
   readonly project: string;
@@ -151,6 +170,7 @@ export interface ArchitectureSource {
   readonly last_sync_at: string | null;
   readonly last_commit: string | null;
   readonly last_error: string | null;
+  readonly components: number;
 }
 
 export interface ExternalLink {
@@ -191,6 +211,7 @@ export interface IssueComponentsInput {
 export interface WriteAdvice {
   /** Issue-scoped fields are omitted on project-document writes. */
   readonly issue_status?: IssueStatus;
+  /** The calling session's own messages, comments and asks on the issue since the last human event. */
   readonly session_writes_since_human?: number;
   readonly your_open_asks?: Array<{ id: string; question: string }>;
   /** The ask blocks in the document an upload or issue creation stored, answered ones included. */
@@ -214,6 +235,15 @@ export interface WriteAdvice {
    * `suggestions.missing` explains why search did not answer in time instead.
    */
   readonly suggestions?: Suggestions;
+  /**
+   * True when the issue carries the `legion` label in any case, or sits under an issue that
+   * does, so only the Legion daemon writes its status and a status anyone else sets is undone.
+   * Resolved only where a line depends on it: a session's write on an issue whose status is
+   * `triage`, where it decides whether the "still in triage" advice is printed. Absent
+   * everywhere else — on a write to an issue past triage, and on a write whose actor is not a
+   * session, which is answered without running any advice query.
+   */
+  readonly legion_managed_status?: boolean;
 }
 /** Response-only; never on an event payload. */
 export type Advised<T> = T & { readonly advice?: WriteAdvice };
@@ -297,14 +327,32 @@ export interface Issue {
 export type IssueRouteStatus = (typeof ISSUE_ROUTE_STATUSES)[number];
 
 /**
- * Every issue read (the detail, the list, the pinned list) resolves this from one listener read
- * per request. It is stored nowhere and is never on an event payload, which is why it is not a
- * field of `Issue`. Both are null when the issue has no route.
+ * Every issue read (the detail, the list, the pinned list) resolves this from the server's copy
+ * of the listener's session list, at most 5 s old. It is stored in no table and is never on an
+ * event payload, which is why it is not a field of `Issue`. Both are null when the issue has no
+ * route.
  */
 export interface IssueRouteReach {
   readonly route_status: IssueRouteStatus | null;
   /** The live session the route reaches; set only when `route_status` is `live`. */
   readonly route_holder: string | null;
+}
+
+/**
+ * What both claim routes answer: the issue, flat, with whether the Legion daemon owns its
+ * status. `legion_managed_status` is true when the issue carries the `legion` label in any case,
+ * or sits under an issue that does; on such an issue only the Legion daemon writes the status,
+ * and a status anyone else sets is undone. It is resolved on read from the issue's labels and
+ * its parents', stored nowhere, and never on an event payload, which is why it is not a field of
+ * `Issue`.
+ */
+export interface ClaimedIssue extends Issue {
+  /**
+   * Absent when the server did not answer it: a Dispatch older than the field, or a label walk
+   * that failed (the claim still stands). A client reads an absent field as not Legion-managed,
+   * which is what every client said before the field existed.
+   */
+  readonly legion_managed_status?: boolean;
 }
 
 export interface IssueSummary
@@ -396,14 +444,15 @@ export interface IssueChild {
 }
 
 /**
- * GET /api/v1/projects/{key}/architecture: the project's component model with the work
- * attached to it. Counting rule: a component counts every distinct issue whose effective set
- * names it or any component it contains (transitively over `parent`), parents and icebox
- * included, each once; `own_*` keeps only the issues naming this component itself. History
- * is not served.
+ * GET /api/v1/projects/{key}/architecture: the project's component model, every source's
+ * components together, with the work attached to it. Counting rule: a component counts every
+ * distinct issue whose effective set names it or any component it contains (transitively over
+ * `parent`), parents and icebox included, each once; `own_*` keeps only the issues naming this
+ * component itself. History is not served.
  */
 export interface ArchitectureTree {
-  readonly source: ArchitectureTreeSource;
+  /** Each source's sync bookkeeping, in the order the project added its sources. */
+  readonly sources: ArchitectureTreeSource[];
   readonly totals: ArchitectureTreeTotals;
   readonly components: ArchitectureTreeComponent[];
   /** Issues no ancestor chain attached. */
@@ -435,6 +484,8 @@ export interface ArchitectureTreeTotals {
 
 export interface ArchitectureTreeComponent {
   readonly id: string;
+  /** The repository of the source whose files define this component. */
+  readonly source: string;
   readonly title: string;
   readonly parent: string | null;
   readonly depends_on: string[];
@@ -530,7 +581,15 @@ export interface ArtifactApproval {
   readonly latest_version: number;
   readonly version?: number;
   readonly by?: Actor;
+  /** The latest review's `created_at`, which its `artifact.*` event shares. */
   readonly at?: string;
+  /** The latest review's event sequence on the document's owner, which orders the review among
+   *  the owner's events as they commit. Absent for a review recorded before Dispatch kept it, and
+   *  on every read the release before that serves (during a rollout or a rollback), so a missing
+   *  `seq` does not prove an older review. It orders; it does not say which versions the review
+   *  covers, which is `version`: a carried approval's `seq` can be below its version's own
+   *  `artifact.version`. */
+  readonly seq?: number;
   readonly reason?: string | null;
   readonly ask_id?: string | null;
   readonly requested_by?: Actor;
@@ -968,8 +1027,12 @@ export interface ReferenceChangesPayload {
 export type IssueEventPayload = Issue & ReferenceChangesPayload;
 
 /** Every `ask.*` event payload is the ask row, flat, plus what the write moved in the reference
- *  graph. */
-export type AskEventPayload = Ask & ReferenceChangesPayload;
+ *  graph. `restored` is true on the `ask.opened` or `ask.answered` settlement appends when an edit
+ *  restores a decision block it retracted: the ask returns to the state it had, and no one answered
+ *  anything new. A restore the release before Dispatch kept the mark writes - every one already in
+ *  the event log, and one written during a rollout or an image rollback - carries no mark, so a
+ *  missing `restored` does not prove an event is a new answer. */
+export type AskEventPayload = Ask & ReferenceChangesPayload & { readonly restored?: boolean };
 
 /** An `ask.answered` payload. `previous_answer` is present when the answer replaced an earlier
  *  one; the asker and every follower receive it as they received the first. */
@@ -1395,7 +1458,7 @@ export interface SearchResultsPage {
 export type SearchResultsPageAbsentAs<V> = { readonly [K in keyof SearchResultsPage]?: V };
 
 /** `SearchResponse.degraded`'s one value today: meaning search could not run for this request (no
- * Bedrock credentials configured, the query's own embedding timed out, or Bedrock answered an
+ * embedder configured, the query's own embedding timed out, or the model service answered an
  * error) and search fell back to keyword-only ranking. Generated into Go as
  * `contracts.SearchDegradedEmbedderUnavailable` so the string Dispatch writes and the string
  * `search-answer.ts` compares against cannot drift apart. */
@@ -1410,12 +1473,48 @@ export type SearchResponse = {
   readonly took_ms: number;
   /**
    * Why this search fell back to keyword-only ranking - today only
-   * `SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE` (LEGION-549: no Bedrock credentials configured, the
-   * query's own embedding timed out, or Bedrock answered an error) - absent when meaning search
+   * `SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE` (LEGION-549: no embedder configured, the query's own
+   * embedding timed out, or the model service answered an error) - absent when meaning search
    * ran normally.
    */
   readonly degraded?: typeof SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE;
 } & (SearchResultsPage | SearchResultsPageAbsentAs<undefined>);
+
+/** One kind's (or every kind's) counts in `SearchCoverage`. `items` is every searchable item;
+ * `current` those with a vector from the configured embedder's identity at the item's current
+ * text, `failed` those whose row is dead and not current, and `lacking` the rest
+ * (`items - current - failed`). `oldest_lacking_seconds` is how long the longest-waiting lacking
+ * item has waited for its vector, from when its row last became pending or when the item was
+ * written, whichever is later; null when nothing lacks. Mirrors `model.SearchCoverageCounts`. */
+export interface SearchCoverageCounts {
+  readonly items: number;
+  readonly current: number;
+  readonly lacking: number;
+  readonly failed: number;
+  readonly oldest_lacking_seconds: number | null;
+}
+
+/** `SearchCoverage`'s counts for each kind meaning search ranks. Mirrors
+ * `model.SearchCoverageKinds`. */
+export interface SearchCoverageKinds {
+  readonly issue: SearchCoverageCounts;
+  readonly document: SearchCoverageCounts;
+  readonly comment: SearchCoverageCounts;
+  readonly ask: SearchCoverageCounts;
+  readonly message: SearchCoverageCounts;
+}
+
+/** `GET /api/v1/search/coverage`: how much of what meaning search ranks has a current vector from
+ * the configured embedder (INFRA-393). `identity` is the value `embeddings.model` records and
+ * search compares, `place` and `model` are read from it; all three are null when no embedder is
+ * configured, and then nothing is current. Mirrors `model.SearchCoverage`. */
+export interface SearchCoverage {
+  readonly identity: string | null;
+  readonly place: "bedrock" | "azure" | null;
+  readonly model: string | null;
+  readonly total: SearchCoverageCounts;
+  readonly kinds: SearchCoverageKinds;
+}
 
 export interface DuplicateCandidate {
   readonly key: string;
@@ -1522,6 +1621,10 @@ export interface IssueReferences {
   readonly truncated: boolean;
 }
 
+// OutgoingReference is one Dispatch mention a document writes, by its target's kind and id.
+// `artifact` is the target document when it resolves; a block target (`kind: "block"`, `to_id`
+// `<document ref_key>#<block id>`) carries its document, and is listed only while a current
+// version of that document holds the block.
 export interface OutgoingReference {
   readonly kind: string;
   readonly to_id: string;
@@ -1548,12 +1651,45 @@ export type GraphEdgeKind =
 
 // GraphNode is one end of a reference-graph edge. `ref` is its dispatch:// address; a
 // session node has none. A component node's id is `<project>/<component id>`.
+//
+// A block node (`kind: "block"`, id `<document ref_key>#<block id>`) also carries `block_id`,
+// its document's reference as `document`, and `changed_version` and `changed_at`, the document
+// version in which its text last changed. `text` and `pin` are set only on the node a reference
+// read names: `text` is the block's whole current text, and `pin` answers a reference pinned to
+// a version.
 export interface GraphNode {
-  readonly kind: "issue" | "artifact" | "ask" | "comment" | "message" | "session" | "component";
+  readonly kind:
+    | "issue"
+    | "artifact"
+    | "block"
+    | "ask"
+    | "comment"
+    | "message"
+    | "session"
+    | "component";
   readonly id: string;
+  readonly block_id?: string;
   readonly issue_key?: string;
   readonly project?: string;
   readonly ref?: string;
+  readonly document?: string;
+  readonly changed_version?: number;
+  readonly changed_at?: string;
+  readonly text?: string;
+  readonly pin?: BlockPin;
+}
+
+// BlockPin is a block reference pinned to a version of its document (`#b-<id>@v<N>`): the
+// pinned reference, the block's whole text at that version, and how the block stands now.
+// `state` is "unchanged" when its current text equals `text`, "changed" when it differs, and
+// "removed" when no current version holds the block; `removed_version` is then the version that
+// deleted it.
+export interface BlockPin {
+  readonly version: number;
+  readonly ref: string;
+  readonly text: string;
+  readonly state: "unchanged" | "changed" | "removed";
+  readonly removed_version?: number;
 }
 
 // GraphExcerpt is the text shown beside an edge: the block containing a document mention
@@ -1566,10 +1702,13 @@ export interface GraphExcerpt {
 // GraphEdge is one typed, timestamped edge seen from the queried node: `node` is the other
 // end, `direction` is "in" for edges pointing at the queried node and "out" for edges it
 // writes, and `source_seq` is the events.id that introduced a mention (null for structure).
+// `block`, on a document's read, names the document's block at the queried end: the block an
+// inbound edge points at, or the block that holds an outbound link.
 export interface GraphEdge {
   readonly kind: GraphEdgeKind;
   readonly direction: "in" | "out";
   readonly node: GraphNode;
+  readonly block?: GraphNode;
   readonly excerpt?: GraphExcerpt;
   readonly created_at: string;
   readonly source_seq: number | null;
@@ -1579,6 +1718,26 @@ export interface GraphEdge {
 export interface GraphReferences {
   readonly node: GraphNode;
   readonly edges: GraphEdge[];
+}
+
+// BlockLink is one link from a block of one document to a block of a document: its edge kind,
+// both block nodes, and when and in which version of its document the source block first held
+// it.
+export interface BlockLink {
+  readonly kind: GraphEdgeKind;
+  readonly from: GraphNode;
+  readonly to: GraphNode;
+  readonly created_at: string;
+  readonly created_version: number;
+}
+
+// BlockLinks is GET /api/v1/block-links?from=<document ref>&to=<document ref>: the two documents
+// and the links from blocks of `from` to blocks of `to`, newest first, then by `from.id`, then by
+// `to.id`. A link is listed only while both of its blocks are current blocks of their documents.
+export interface BlockLinks {
+  readonly from: GraphNode;
+  readonly to: GraphNode;
+  readonly links: BlockLink[];
 }
 
 export interface ArtifactCreatedEventPayload extends ReferenceChangesPayload {
@@ -1671,20 +1830,32 @@ export interface RepoProjectUpdatedEventPayload {
   readonly deleted: boolean;
 }
 
+/** `settings.project_default_assignee.updated`: a human set or cleared a project's default
+ *  assignee. The payload is the stored row, so a clear carries `assignee: null`. */
+export type ProjectDefaultAssigneeUpdatedEventPayload = ProjectDefaultAssignee;
+
 export interface ArchitectureSourceUpdatedEventPayload {
   readonly source: ArchitectureSource;
   readonly deleted: boolean;
 }
 
-/** `architecture.synced`: the importer replaced the project's model. */
+/** `architecture.synced`: the importer replaced one source's part of the project's model.
+ *  `repo` and `branch` name that source; events retained from before projects had several
+ *  sources lack them. */
 export interface ArchitectureSyncedEventPayload {
+  readonly repo?: string;
+  readonly branch?: string;
   readonly commit: string;
   readonly components: number;
 }
 
-/** `architecture.sync_failed`: the import was rejected or failed; the previous
- *  model stays up and the source row carries the same text in `last_error`. */
+/** `architecture.sync_failed`: one source's import was rejected or failed; that source's
+ *  previous components stay up and its row carries the same text in `last_error`. `repo` and
+ *  `branch` name that source; events retained from before projects had several sources lack
+ *  them. */
 export interface ArchitectureSyncFailedEventPayload {
+  readonly repo?: string;
+  readonly branch?: string;
   readonly error: string;
 }
 
@@ -1790,6 +1961,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "settings.repo_project.updated";
       readonly payload: RepoProjectUpdatedEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "settings.project_default_assignee.updated";
+      readonly payload: ProjectDefaultAssigneeUpdatedEventPayload;
     })
   | (DispatchEventBase & {
       readonly type: "settings.architecture_source.updated";
@@ -2038,7 +2213,8 @@ export interface CreateIssueInput {
   readonly labels?: string[];
   readonly priority?: IssuePriority | null;
   /** The email of a person who has signed in; omitted, the server picks the creating person, the
-   *  personal token's owner, or the parent's assignee. */
+   *  personal token's owner, the parent's assignee, or the project's default assignee when that
+   *  still names a person who has signed in. */
   readonly assignee?: string;
   /** The issue's own component attachment; omitted, it inherits its parent's. */
   readonly components?: IssueComponentsInput;
@@ -2317,6 +2493,12 @@ export interface IssueRead {
   readonly events: Event[];
 }
 
+/**
+ * How many of an issue's events `dispatch_read` lists, the newest ones, when it names neither
+ * `events` nor `all_events`: what `DispatchClient.read` returns by default.
+ */
+export const DEFAULT_ISSUE_READ_EVENTS = 10;
+
 export interface ArtifactText {
   readonly markdown: string;
   readonly version: number | null;
@@ -2472,6 +2654,7 @@ const askEventPayloadFields = {
       at: z.string().optional(),
     })
     .nullish(),
+  restored: z.boolean().optional(),
   anchor: z
     .object({
       quote: z.string().optional(),

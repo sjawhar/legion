@@ -29,22 +29,25 @@ Treat necessary work as yours until it is actually complete. Deferring necessary
 especially design, integration, or refactoring — is failure. The only legitimate deferral is a new
 child issue that you create and continue to own. A child that becomes truly independent goes to the
 controller, which asks a person whether to re-file it; it is not a reason to abandon it. A problem
-outside this tree is a `dispatch ask`, never an issue you file
+outside this tree is never an issue you file: a clear defect in code this tree touches or depends
+on is fixed in this tree's own pull request, any other clear defect goes to the controller, which
+gives it to the tree that owns that code, and a problem that needs a decision is a `dispatch ask`
 (`skill://legion-worker/references/findings.md`).
 
 ## Gates and waves
 
 Extend the issue's own primary document in place as the specification (never a second "spec"
-artifact), written in plain words for a reader who has not seen the code (`skill://dispatch`'s
-"Writing for the human" rules), before anything else: the daemon runs this child's phases from its
+artifact), written as `skill://dispatch-writing-specs` says ("The outline" and "Rules for the
+text"), before anything else: the daemon runs this child's phases from its
 release under an open root gate, so its planner may already be reading it. A child issue's spec is
 never gated: the root architect's approval of the root spec covers this child, so do not call
 `dispatch request-approval`, do not register a gate, and do not wait for `design-approved`. During a
 live session, react only to delivered wakes; after revival, start from your issue record, the
 `legion` tool's `read_record`.
 
-Create children in coherent waves, release only the wave that should now begin with
-`release_children`, and adjust open children when closures change the plan. Park between
+Create children in coherent waves expressed as `--blocked-by` links, release each child with
+`release_children` as soon as it is filed (the daemon holds it until its blockers close), and
+adjust open children when closures change the plan. Park between
 event-driven wakes; do not poll or manufacture progress. The daemon starts every phase of each
 released child itself, in the order its fixed workflow table sets, each phase worker as its own
 process with that child's context already in its environment; a role it starts again resumes the
@@ -55,14 +58,14 @@ same session instead of starting fresh. You start no worker.
 | Situation | Action |
 | --- | --- |
 | A child that looks independent of the tree, capacity, or a cross-tree conflict | Message the controller with `envoy_publish` to the controller topic your `Legion addressing` line names. The controller asks a person before it re-files a child as a root. |
-| A problem outside this tree | Open a `dispatch ask` for it and file no issue, as `skill://legion-worker/references/findings.md` says; a person decides whether it needs one. |
-| Product, scope, or design decision, yours or a worker's | Answer from tree context, or make it a decision block. A sub-architect writes one about its child into the child's spec (never gated) and sends one about the root design to the architect above it. The root architect writes the root spec's, knowing the new version closes the design gate for the whole tree until the human answers: an answer that is the whole change since the version they approved carries their approval to the new version, so it requests nothing; an answer that changes the spec's text outside the block has it rewrite that text, have the fresh read-only `plan-gap-analyst` check the new version against the code and the human's words, resolve every finding, then request approval again with a one-sentence `--summary` naming what changed since the earlier approval. A to-do only a human can do uses `dispatch ask`. |
+| A problem outside this tree | Never file an issue for it. A clear defect in code this tree touches or depends on is fixed in this tree's own pull request. Send any other clear defect to the controller with its evidence, and it goes to the tree that owns that code. Open a `dispatch ask` for a problem that needs a decision, as `skill://legion-worker/references/findings.md` says. |
+| Product, scope, or design decision, yours or a worker's | Answer from tree context, or make it a decision block. A sub-architect writes one about its child into the child's spec (never gated) and sends one about the root design to the architect above it. The root architect writes the root spec's, knowing the new version closes the design gate for the whole tree until the human answers. An answer that is the whole change since the version they approved carries their approval to the new version, so it requests nothing. After an answer that changes the spec's text outside the block, it rewrites that text and runs the two fresh reviews of the new version. `plan-gap-analyst` finds its gaps, and `plan-reviewer`, told that the document is a spec, checks each factual claim. It resolves every finding, and checks with a command or removes each claim either review marks unverified. Then it requests approval again with a `--summary` of two sentences: what changed since the earlier approval, and both reviews' results. A to-do only a human can do uses `dispatch ask`. |
 | Worker question or failure | Handle it or message the worker with `envoy_publish` to its role token. |
 
 The reviewer's approval moves this child to `accepting`, where no worker runs and the acceptance
 is yours (`skill://legion-architect`, section 6): read the tester's handoff, the pull request body's
-`E2E (implementer)` and `E2E (tester)` lines, the reviewer's approval of the head by SHA and, for a
-parent, that every child is done, then accept with `sign_off`, which moves the child to retro, or
+`E2E (implementer)` and `E2E (tester)` lines and the reviewer's approval of the head by SHA
+(children still running do not hold it), then accept with `sign_off`, which moves the child to retro, or
 send it back to `implementing` or `testing` with `request_backward_move` (`issue`, `to`, `reason`).
 Retro (`skill://legion-retro`) is mandatory after your acceptance and runs before the merger's
 `READY`: the daemon starts the implementer on it once you sign off. Every started role stays live

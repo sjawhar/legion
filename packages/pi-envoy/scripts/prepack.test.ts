@@ -45,9 +45,10 @@ describe("omp.skills / prepack manifest contract", () => {
 
     test("are exactly this plugin's partition: the Dispatch and Envoy skills every session uses", () => {
       expect(readdirSync(staged).sort()).toEqual([
+        "asd-ste100",
         "dispatch",
-        "dispatch-brainstorming",
         "dispatch-first",
+        "dispatch-writing-specs",
         "envoy",
       ]);
     });

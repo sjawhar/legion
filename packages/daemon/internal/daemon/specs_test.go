@@ -33,7 +33,7 @@ func TestARootArchitectIsToldTheDesignGatePolicyAndWhatItAsks(t *testing.T) {
 	}
 	instructions := []string{
 		"the tree's work starts only once you register your spec with `register_gate`, under either design gate policy",
-		"With `root-issues`, once the spec's decision blocks are settled (the dispatch skill's \"Approval of a spec\"), request its approval with `dispatch request-approval` and a `--summary`",
+		"With `root-issues`, once the spec's decision blocks are settled (`skill://dispatch-writing-specs`, \"Approval\"), request its approval with `dispatch request-approval` and a `--summary`",
 		"With `off`, request no approval and wait for no `design-approved`",
 	}
 	for _, policy := range []config.DesignGate{config.DesignGateRootIssues, config.DesignGateOff} {
@@ -280,8 +280,8 @@ func TestTheControllersLaunchIsItsHeadlessPromptAndNoCheckout(t *testing.T) {
 	if spec.Prompt.DeploymentInstructionsPath != s.instructions {
 		t.Errorf("instructions = %q, want %q", spec.Prompt.DeploymentInstructionsPath, s.instructions)
 	}
-	if !spec.Repository.IsZero() || spec.DefaultBranch != "" || len(spec.Env) != 0 || spec.WorkspaceRecoveredFrom != "" {
-		t.Errorf("repository %q, default branch %q, env %v, recovered from %q; want none of them", spec.Repository, spec.DefaultBranch, spec.Env, spec.WorkspaceRecoveredFrom)
+	if !spec.Repository.IsZero() || spec.DefaultBranch != "" || len(spec.Env) != 0 {
+		t.Errorf("repository %q, default branch %q, env %v; want none of them", spec.Repository, spec.DefaultBranch, spec.Env)
 	}
 	if spec.Backend != runtime.BackendOmp {
 		t.Errorf("backend = %q, want omp, named", spec.Backend)
@@ -489,4 +489,62 @@ func withSession(c supervise.Claim, session string) supervise.Claim {
 func withContract(c supervise.Claim, contract int) supervise.Claim {
 	c.PluginContract = contract
 	return c
+}
+
+// Under a runtime that leaves workspaces to the daemon's host (tmux), every launch of a worker —
+// a claim resumed or relaunched as well as created — first makes sure its issue's workspace is
+// there (ensureWorkspace), with the repository and default branch the issue's record names; a
+// launch whose workspace cannot be provisioned is refused, naming the claim. Under a runtime that
+// provisions its own (a Sandbox pod), nothing is asked of the host. The controller works no
+// checkout.
+func TestAHostLaunchProvisionsItsWorkspaceFirst(t *testing.T) {
+	composer, err := prompts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("compose the shipped prompts: %v", err)
+	}
+	var ensured []string
+	var refuse error
+	s := specs{
+		stateDir: t.TempDir(), project: "s1", prompts: composer, repositories: noRepositoriesView,
+		repository: func(context.Context, string) (ghrepo.Repository, string, error) {
+			return ghrepo.MustParse("acme/widgets"), "release/v7.1", nil
+		},
+		hostWorkspaces: true,
+		ensureWorkspace: func(_ context.Context, issue string, repo ghrepo.Repository, defaultBranch string) error {
+			ensured = append(ensured, issue+" "+repo.String()+"@"+defaultBranch)
+			return refuse
+		},
+	}
+	token, err := claim.NewToken("s1", "S1-2", claim.RoleImplementer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed := supervise.Claim{Token: token, Issue: "S1-2", Tree: "S1-1", Role: claim.RoleImplementer, Session: "ses-1"}
+	if _, err := s.SpawnSpec(context.Background(), resumed); err != nil {
+		t.Fatalf("SpawnSpec: %v", err)
+	}
+	if want := []string{"S1-2 acme/widgets@release/v7.1"}; !slices.Equal(ensured, want) {
+		t.Errorf("ensured %q, want %q", ensured, want)
+	}
+
+	refuse = errors.New("no installation token")
+	if _, err := s.SpawnSpec(context.Background(), resumed); err == nil || !strings.Contains(err.Error(), "the workspace of "+string(token)) || !strings.Contains(err.Error(), "no installation token") {
+		t.Errorf("SpawnSpec with a provision that failed = %v, want the refusal naming the claim", err)
+	}
+
+	ensured, refuse = nil, nil
+	if _, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: claim.ControllerToken("s1"), Project: "s1", Role: claim.RoleController}); err != nil {
+		t.Fatalf("SpawnSpec of the controller: %v", err)
+	}
+	if len(ensured) != 0 {
+		t.Errorf("the controller's launch provisioned %q, want nothing", ensured)
+	}
+
+	s.hostWorkspaces = false
+	if _, err := s.SpawnSpec(context.Background(), resumed); err != nil {
+		t.Fatalf("SpawnSpec under a runtime that provisions its own: %v", err)
+	}
+	if len(ensured) != 0 {
+		t.Errorf("a pod's launch provisioned %q on the host, want nothing", ensured)
+	}
 }

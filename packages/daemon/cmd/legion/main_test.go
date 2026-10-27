@@ -886,6 +886,12 @@ func TestStartCheckConfigRefusesWhatTheSandboxRuntimeRefuses(t *testing.T) {
 `, func(string) string {
 			return "legion start: runtime.kubernetes.pod.volume_mounts[0].mount_path /var/run/legion/launcher overlaps /var/run/legion/launcher, which Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's\n"
 		}},
+		{"an operator mount reaching Legion's roles directory through the image's /var/run link", `    pod:
+      volumes: [{name: creds, secret: {name: legion-creds}}]
+      volume_mounts: [{volume: creds, mount_path: /run/legion/roles/implementer/private}]
+`, func(string) string {
+			return "legion start: runtime.kubernetes.pod.volume_mounts[0].mount_path /run/legion/roles/implementer/private overlaps /var/run/legion/roles (spelled /run/legion/roles/implementer/private against /run/legion/roles, through the worker image's directory links), which Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's\n"
+		}},
 		{"a kubeconfig that cannot be read", "    kubeconfig: ./kubeconfig\n", func(dir string) string {
 			return "legion start: read runtime.kubernetes.kubeconfig " + filepath.Join(dir, "kubeconfig") + ": "
 		}},
@@ -915,6 +921,8 @@ runtime:
     namespace: legion
     image: ghcr.io/sjawhar/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     storage_class: gp2
+    session_store: postgres
+    session_dsn_secret: SESSION_DSN
 %s`, filepath.Join(dir, "state"), command, command, tc.runtime)
 			config := filepath.Join(dir, "legion.yaml")
 			for name, contents := range map[string]string{config: body, "envoy-token": "envoy\n", "operator-token": "operator\n", "dispatch-token": "dispatch\n"} {
@@ -967,6 +975,8 @@ runtime:
     namespace: legion
     image: ghcr.io/sjawhar/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     storage_class: gp2
+    session_store: postgres
+    session_dsn_secret: SESSION_DSN
     kubeconfig: ./kubeconfig
     context: legion-daemon
 %s`, filepath.Join(dir, "state"), extra)
@@ -996,34 +1006,27 @@ current-context: legion-daemon
 // and naming the legion.yaml line that records a decision — and exits 0, because a gap is reported,
 // never refused. A decision quiets its row, and a configured broker's secrets row is boot's to
 // measure, so the check says nothing of it. The resource-limits row is never open on a Kubernetes
-// file: the loader fills every role's reservation from the daemon's defaults, with or without a
-// `resources` block and whatever fields it sets (config.RoleResources.Reserved); the tmux cases
+// file: the loader fills both pods' reservations from the daemon's defaults, with or without a
+// `resources` block and whatever fields it sets (config.Reservation.Reserved); the tmux cases
 // (tmuxCapabilityGaps) are where it is open. Model fallback is the probe's, and pool capacity the
 // probe's run's, and neither is printed here.
 func TestStartCheckConfigReportsTheConfigurationsCapabilityGaps(t *testing.T) {
 	legionState(t)
-	const everyRole = `    resources:
-      architect: {cpu: 500m, memory: 1Gi}
-      planner: {cpu: 500m, memory: 1Gi}
-      implementer: {cpu: "1", memory: 2Gi}
-      tester: {cpu: "2", memory: 4Gi}
-      reviewer: {cpu: 500m, memory: 1Gi}
-      merger: {cpu: 500m, memory: 1Gi}
-`
+	const issueSet = "    resources:\n      issue: {cpu: \"4\", memory: 24Gi}\n"
 	const secretsGap = "capability secrets is open: runtime.kubernetes.agent_secrets is not configured; to record a decision, add to legion.yaml: capabilities.decided.secrets: \"<reason>\"\n"
 	const pluginsGap = "plugins: none — set runtime.kubernetes.plugins or run a release build; a daemon that knows none relaunches no process on another plugin contract\n"
 	for _, tc := range []struct{ name, extra, want string }{
-		{"no resources block, no broker: every role at the defaults", "", secretsGap},
-		{"a role with one field set, the other the default", "    resources: {tester: {memory: 12Gi}}\n", secretsGap},
-		{"a role's disk bound set, its request the default", "    resources: {tester: {ephemeral_storage: 40Gi}}\n", secretsGap},
-		{"every role set", everyRole, secretsGap},
-		{"the controller at its default under controller: daemon", everyRole + "controller: daemon\n", secretsGap},
-		{"a broker configured, whose login is boot's", everyRole + "    agent_secrets: {url: https://secrets.internal.example, token_file: /var/run/legion/agent-secrets-token/token}\n", ""},
+		{"no resources block, no broker: both pods at the defaults", "", secretsGap},
+		{"the issue pod with one field set, the other the default", "    resources: {issue: {memory: 12Gi}}\n", secretsGap},
+		{"the issue pod's disk bound set, its request the default", "    resources: {issue: {ephemeral_storage: 40Gi}}\n", secretsGap},
+		{"the issue pod set", issueSet, secretsGap},
+		{"the controller at its default under controller: daemon", issueSet + "controller: daemon\n", secretsGap},
+		{"a broker configured, whose login is boot's", issueSet + "    agent_secrets: {url: https://secrets.internal.example, token_file: /var/run/legion/agent-secrets-token/token}\n", ""},
 		{"secrets decided", "capabilities:\n  decided:\n    secrets: \"dispatch://LEGION-205 enrolls pods later\"\n", ""},
-		{"a role requesting less memory than its limit", "    resources: {implementer: {memory: 32Gi, memory_request: 8Gi}}\n",
-			secretsGap + "resources: Burstable roles (a request below the limit): implementer, so every issue pod is Burstable; every other pod is Guaranteed\n"},
+		{"the issue pod requesting less memory than its limit", "    resources: {issue: {memory: 32Gi, memory_request: 8Gi}}\n",
+			secretsGap + "resources: Burstable (a request below the limit): the issue pod; every other pod is Guaranteed\n"},
 		{"the controller requesting less cpu than its limit", "    resources: {controller: {cpu: 2, cpu_request: 500m}}\ncontroller: daemon\n",
-			secretsGap + "resources: Burstable roles (a request below the limit): controller, so the controller's pod is Burstable; every other pod is Guaranteed\n"},
+			secretsGap + "resources: Burstable (a request below the limit): the controller's pod; every other pod is Guaranteed\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			config := kubernetesCheckConfig(t, tc.extra)
@@ -1043,12 +1046,12 @@ func TestStartCheckConfigReportsTheConfigurationsCapabilityGaps(t *testing.T) {
 func TestStartCheckConfigRefusesARequestItCannotRender(t *testing.T) {
 	legionState(t)
 	for _, tc := range []struct{ name, extra, want string }{
-		{"a memory request past its limit", "    resources: {implementer: {memory: 32Gi, memory_request: 40Gi}}\n",
-			"legion start: runtime.kubernetes.resources.implementer.memory_request 40Gi exceeds memory 32Gi\n"},
-		{"a cpu request past the default limit", "    resources: {tester: {cpu_request: 2}}\n",
-			"legion start: runtime.kubernetes.resources.tester.cpu_request 2 exceeds cpu 750m\n"},
-		{"a request that is no quantity", "    resources: {implementer: {memory_request: lots}}\n",
-			"legion start: runtime.kubernetes.resources.implementer.memory_request must be a positive Kubernetes quantity (e.g. 20Gi or 500m)\n"},
+		{"a memory request past its limit", "    resources: {issue: {memory: 32Gi, memory_request: 40Gi}}\n",
+			"legion start: runtime.kubernetes.resources.issue.memory_request 40Gi exceeds memory 32Gi\n"},
+		{"a cpu request past the default limit", "    resources: {issue: {cpu_request: 4}}\n",
+			"legion start: runtime.kubernetes.resources.issue.cpu_request 4 exceeds cpu 3\n"},
+		{"a request that is no quantity", "    resources: {issue: {memory_request: lots}}\n",
+			"legion start: runtime.kubernetes.resources.issue.memory_request must be a positive Kubernetes quantity (e.g. 20Gi or 500m)\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			config := kubernetesCheckConfig(t, tc.extra)
@@ -1371,6 +1374,54 @@ func TestPlainStateSummarizesTheOpenProductionChecks(t *testing.T) {
 	}
 }
 
+// An operator reading plain `legion state` is told which roots gave their slot up to wait on a
+// person, how many a person answered, and each by key with what it waits on: an unanswered one is
+// in neither admission list, so without this line the capacity it freed looks idle.
+func TestPlainStateNamesTheRootsWaitingOnAPerson(t *testing.T) {
+	daemon := `"daemon":{"project":"LEGION","schemaVersion":6,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},` +
+		`"admission":{"cap":2,"active":[],"waiting":["LEGION-211"]},"pendingStatusWrites":[]`
+	gate := `"LEGION-210":{"key":"LEGION-210","generation":1,"phase":"awaiting_person","status":"in_progress",` +
+		`"waitingOn":{"kind":"gate","gateVersion":3,"artifactId":"spec-210","since":"2026-10-25T10:00:00Z"}}`
+	asked := `"LEGION-211":{"key":"LEGION-211","generation":1,"phase":"awaiting_person","status":"in_progress",` +
+		`"waitingOn":{"kind":"ask","ask":"ask-7","since":"2026-10-25T11:00:00Z","answeredAt":"2026-10-25T12:00:00Z","answeredBy":"reply"}}`
+	for _, tc := range []struct {
+		name, issues, want string
+	}{
+		{
+			name:   "two waiting, one answered",
+			issues: `{` + asked + `,` + gate + `}`,
+			want: "roots waiting on a person: 2, 1 answered and waiting for a slot — LEGION-210 waits on spec version 3 of spec-210, unanswered; " +
+				"LEGION-211 waits on ask ask-7, answered at 2026-10-25T12:00:00Z (reply)\n",
+		},
+		{
+			name:   "one unanswered",
+			issues: `{` + gate + `}`,
+			want:   "roots waiting on a person: 1, 0 answered and waiting for a slot — LEGION-210 waits on spec version 3 of spec-210, unanswered\n",
+		},
+		{name: "none", issues: `{}`, want: "roots waiting on a person: none\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			served := "{" + daemon + `,"issues":` + tc.issues + "}"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(served))
+			}))
+			defer server.Close()
+			t.Chdir(t.TempDir())
+			t.Setenv("LEGION_DAEMON_URL", server.URL)
+			t.Setenv("LEGION_ISSUE", "")
+
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), []string{"legion", "state"}, &out, &errb); code != 0 {
+				t.Fatalf("legion state = %d, stderr %q", code, errb.String())
+			}
+			if !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("legion state printed %q, want the line %q", out.String(), tc.want)
+			}
+		})
+	}
+}
+
 // An operator reading plain `legion state` is told which claims nothing will wake, each by issue
 // and role under the move that brings it back (api.StrandedClaim.Move), on one line however many
 // there are; with none the line says so.
@@ -1395,6 +1446,53 @@ func TestPlainStateNamesTheClaimsNothingWillWake(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			served := "{" + daemon + `,"strandedClaims":` + tc.stranded + "}"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(served))
+			}))
+			defer server.Close()
+			t.Chdir(t.TempDir())
+			t.Setenv("LEGION_DAEMON_URL", server.URL)
+			t.Setenv("LEGION_ISSUE", "")
+
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), []string{"legion", "state"}, &out, &errb); code != 0 {
+				t.Fatalf("legion state = %d, stderr %q", code, errb.String())
+			}
+			if !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("legion state printed %q, want the line %q", out.String(), tc.want)
+			}
+		})
+	}
+}
+
+// An operator reading plain `legion state` is told which issues Legion is waiting to start behind
+// a Dispatch issue nobody has finished (api.Admission.Blocked): each by issue and what it waits
+// on, roots and held children alike, on one line however many there are; with none the line says
+// so. Nothing here is the daemon's to clear, so the line names them and stops.
+func TestPlainStateNamesWhatLegionIsBlockedOn(t *testing.T) {
+	admission := func(blocked string) string {
+		return `"admission":{"cap":2,"active":["LEGION-208"],"waiting":["LEGION-211"],"blocked":` + blocked + `}`
+	}
+	daemon := `"daemon":{"project":"LEGION","schemaVersion":6,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},`
+	for _, tc := range []struct {
+		name, blocked, want string
+	}{
+		{
+			name: "a held child and a waiting root",
+			blocked: `[{"issue":"LEGION-209","blockedBy":["LEGION-300"]},` +
+				`{"issue":"LEGION-211","blockedBy":["LEGION-301","LEGION-302"]}]`,
+			want: "blocked on Dispatch links: 2 — LEGION-209 waits on LEGION-300; LEGION-211 waits on LEGION-301, LEGION-302\n",
+		},
+		{
+			name:    "one",
+			blocked: `[{"issue":"LEGION-209","blockedBy":["LEGION-300"]}]`,
+			want:    "blocked on Dispatch links: 1 — LEGION-209 waits on LEGION-300\n",
+		},
+		{name: "none", blocked: `[]`, want: "blocked on Dispatch links: none\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			served := "{" + daemon + admission(tc.blocked) + `,"issues":{},"pendingStatusWrites":[]}`
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(served))

@@ -16,6 +16,7 @@ import {
   patchIssue,
 } from "./api";
 import { actionBar, barAction, documentEditor, needsYouCards, selectEditorText } from "./editor";
+import { expectConsecutiveLinksClear } from "./layout";
 import { insertExternalLink, resetDatabase } from "./seed";
 import { refusePosts } from "./sends";
 import { asUser } from "./users";
@@ -390,6 +391,10 @@ test("inline @ autocomplete has touch-sized controls and no overflow on iPhone",
 // boxes with blank space around them in the middle of a line, so the hit box grows by vertical
 // padding, not an overlay: padding on an inline element grows the hit box without moving the
 // line, and without covering whatever happens to sit within 44px of the link.
+// The row places the turn itself and then waits for it to stop moving: the Conversation's jump
+// to its newest turn lands well after a link first has a box, and the row measures what it
+// placed rather than trusting the page's own placement, since a turn left under the fixed comment
+// composer would have a hit test read the composer and not the link.
 test("an inline link keeps its line and grows its hit box without covering its neighbours", async ({
   browser,
 }, testInfo) => {
@@ -410,8 +415,10 @@ test("an inline link keeps its line and grows its hit box without covering its n
     { actor: { id: "e2e-session", kind: "session" }, as: "agent" }
   );
   // An open ask's question renders in full on the Inbox, so it is where a body with a wrapped
-  // link and two stacked links can be measured. A generous hit box would reach the words
-  // beside the first and the link above the last.
+  // link, two stacked links and two links on consecutive lines can be measured. A generous hit
+  // box would reach the words beside the first, the link below the stacked pair's upper one, and
+  // the text of the line above the last. A question reads a single newline as a space, so the
+  // last pair is split by a hard break.
   const bodyAsk = await createAsk(
     issue.key,
     {
@@ -421,13 +428,15 @@ test("an inline link keeps its line and grows its hit box without covering its n
         "[First choice](https://example.invalid/one)",
         "",
         "[Second choice](https://example.invalid/two)",
+        "",
+        "[Upper choice](https://example.invalid/upper-choice)\\\n[Lower choice](https://example.invalid/lower-choice)",
       ].join("\n"),
     },
     { actor: { id: "e2e-session", kind: "session" }, as: "agent" }
   );
 
-  // A message turn is 16px prose on 24px lines - the tightest pitch a body reaches - and a
-  // hard break puts two links on consecutive lines of it.
+  // A message turn is 16px prose on 24px lines, and a hard break puts two links on consecutive
+  // lines of it.
   await createMessage(
     issue.key,
     {
@@ -468,6 +477,36 @@ test("an inline link keeps its line and grows its hit box without covering its n
 
     await page.goto(`/issues/${issue.key}/conversation`);
     await expect(page.getByRole("link", { name: "Lower line" }).first()).toBeVisible();
+    // The jump to the newest turn, and the unread "New" marks clearing after it, both move the
+    // turn after `toBeVisible()`: put the upper link in the middle of the viewport and hold
+    // there until its rect has not moved for 1.5 s, so the measurement is taken at a position
+    // this row chose.
+    await page.evaluate(async () => {
+      // The same link the measurement below takes: outside the ask cards, where a decision
+      // block renders the same body in its own card.
+      const upper = [...document.querySelectorAll("main a")]
+        .filter((link) => link.closest('[data-testid^="ask-"]') === null)
+        .find((link) => (link.textContent ?? "") === "Upper line");
+      if (upper === undefined) {
+        throw new Error("the conversation is missing its seeded upper link");
+      }
+      upper.scrollIntoView({ block: "center" });
+      // 30 samples 50 ms apart, the counter reset whenever the rect moves, bounded at 20 s.
+      let stable = 0;
+      let previous = upper.getBoundingClientRect().y;
+      for (let sample = 0; sample < 400; sample += 1) {
+        const tick = Promise.withResolvers<void>();
+        setTimeout(tick.resolve, 50);
+        await tick.promise;
+        const y = upper.getBoundingClientRect().y;
+        stable = y === previous ? stable + 1 : 0;
+        previous = y;
+        if (stable >= 30) {
+          return;
+        }
+      }
+      throw new Error("the seeded upper link never stopped moving");
+    });
     const line = await page.evaluate(() => {
       // Outside the ask cards: a decision block renders the same body in its own card.
       const links = [...document.querySelectorAll("main a")].filter(
@@ -481,18 +520,99 @@ test("an inline link keeps its line and grows its hit box without covering its n
       const range = document.createRange();
       range.selectNodeContents(upper);
       const upperText = range.getBoundingClientRect();
-      const node = document.elementFromPoint(
-        upperText.x + upperText.width / 2,
-        upperText.bottom - 1
-      );
+      const x = upperText.x + upperText.width / 2;
+      // One pixel below the link's own text, and one pixel above its bottom edge: both points
+      // are the text's, never the anchor's padded box, which would move with the padding they
+      // are there to measure.
+      const probeY = upperText.bottom + 1;
+      // Playwright measures a click `position` from the padding box's top-left corner, so the
+      // points are returned as offsets inside it. That is what makes the lower one
+      // mutation-sensitive: the point stays on the page where it is, and without the padding
+      // the box shrinks above it and no longer receives it.
+      const box = upper.getBoundingClientRect();
+      const style = getComputedStyle(upper);
+      const padTop = box.top + Number.parseFloat(style.borderTopWidth);
+      const padLeft = box.left + Number.parseFloat(style.borderLeftWidth);
+      // The composer is a fixed box over the foot of the page: a probe under it reads the
+      // composer whatever the link does, so the probe point has to clear it. The selector is
+      // the product's own (`use-follow-latest.ts`): not finding it is a failure, not clearance.
+      const composer = document.querySelector('[aria-label="Comment composer"]');
       return {
+        hitX: x - padLeft,
+        inPaddingY: probeY - padTop,
         // How far the lower link's padding box starts below the upper link's own text.
         // Negative is padding sitting on letters a reader is trying to tap.
         lowerClearance: lower.getBoundingClientRect().y - upperText.bottom,
-        onUpperTextBottom:
-          node === null ? "null" : (node.closest("a")?.textContent ?? "not-a-link"),
+        onTextBottomY: upperText.bottom - 1 - padTop,
+        probeClear:
+          composer !== null &&
+          x >= 0 &&
+          x <= window.innerWidth &&
+          probeY >= 0 &&
+          probeY <= window.innerHeight &&
+          probeY < composer.getBoundingClientRect().top,
       };
     });
+
+    // Those points were taken on screen: inside the viewport, and above the composer's fixed
+    // box, so what the clicks below hit is the turn.
+    expect(
+      line.probeClear,
+      'the turn was left under the fixed comment composer, so the probe measured the composer - or [aria-label="Comment composer"] is gone'
+    ).toBe(true);
+    // On consecutive lines of one message turn - 16px prose on 24px lines - the lower link's
+    // padded box starts at least two pixels below the upper link's own text, which is the
+    // margin the probe at `upperText.bottom + 1` needs.
+    expect(
+      line.lowerClearance,
+      "the lower link's padded box starts within a pixel of the upper link's own text, so the probe one pixel below that text is inside the lower link, and the padding check below would go red for the pitch rather than for the padding"
+    ).toBeGreaterThanOrEqual(2);
+
+    // The same link the measurement took: the seeded one outside the ask cards. Its hit tests
+    // are Playwright's own actionability check rather than an `elementFromPoint` snapshot - a
+    // trial click waits and retries until the link is attached, visible, stable and is what
+    // the action point hits, and then performs no click - bounded so a refusal is prompt.
+    const upperLink = page
+      .locator('main a:not([data-testid^="ask-"] a)')
+      .filter({ hasText: /^Upper line$/ });
+    await expect(upperLink).toHaveCount(1);
+    // On consecutive lines of one message turn - 16px prose on 24px lines - a tap at the bottom
+    // of the upper link's own text is taken by the upper link.
+    await upperLink.click({
+      position: { x: line.hitX, y: line.onTextBottomY },
+      timeout: 5_000,
+      trial: true,
+    });
+    // One pixel below that text is still inside the upper link's hit box: this trial click is
+    // the check that goes red when the padding of `.prose a { padding-block }` is gone.
+    await upperLink.click({
+      position: { x: line.hitX, y: line.inPaddingY },
+      timeout: 5_000,
+      trial: true,
+    });
+
+    // A real finger at the padded point, which no hit test can speak for: the click is
+    // recorded in the capture phase - before anything on the way can stop it - and not
+    // followed.
+    await page.evaluate(() => {
+      document.addEventListener(
+        "click",
+        (event) => {
+          const target = event.target;
+          document.documentElement.dataset.e2eTappedLink =
+            target instanceof Element ? (target.closest("a")?.textContent ?? "not-a-link") : "none";
+          event.preventDefault();
+        },
+        true
+      );
+    });
+    await upperLink.tap({ position: { x: line.hitX, y: line.inPaddingY } });
+    // And a finger there reaches the link, which an actionability check does not say. The
+    // click Chromium synthesises from the touch sequence need not be dispatched in the task
+    // that resolves the tap, so the read-back is polled.
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.dataset.e2eTappedLink ?? "no-click"))
+      .toBe("Upper line");
 
     await page.goto("/");
     const card = page.getByTestId(`ask-${bodyAsk.id}`);
@@ -534,21 +654,26 @@ test("an inline link keeps its line and grows its hit box without covering its n
       };
     });
 
+    // The probe, the two trial clicks and the tap are asserted above, each beside what it
+    // measures. What is left:
     // 1. The line the inline link sits in is a line of text: it was 44px as a control box.
     expect(inline.lineHeight).toBeLessThanOrEqual(28);
     // 2. Its own hit box clears the 24px WCAG 2.5.8 target.
     expect(inline.viewHeight).toBeGreaterThanOrEqual(24);
-    // 3. On consecutive lines of one message turn - 16px prose on 24px lines, the tightest
-    //    pitch a body reaches - the lower link's padding starts below the upper link's own
-    //    text, so a tap at the bottom of that text opens the upper link.
-    expect(line.lowerClearance).toBeGreaterThanOrEqual(0);
-    expect(line.onUpperTextBottom).toBe("Upper line");
-    // 4. A tap on the word before a wrapped link stays on the text.
+    // 3. A tap on the word before a wrapped link stays on the text - a claim that nothing is
+    //    there, which a trial click cannot express, so it stays a hand-made hit test.
     expect(measured.onWord).toBe("not-a-link");
-    // 5. Two stacked links: the lower edge of the first is the first, and it never reaches the
+    // 4. Two stacked links: the lower edge of the first is the first, and it never reaches the
     //    second.
     expect(measured.onFirstLowerEdge).toBe("First choice");
     expect(measured.firstBottom).toBeLessThanOrEqual(measured.secondTop);
+    // 5. Two choices a hard break puts on consecutive lines of the card's 15px text on 24.375px
+    //    lines (`text-[15px] leading-relaxed`): the lower one's padded box starts at or below
+    //    the upper one's own text.
+    await expectConsecutiveLinksClear(card, "Upper choice", "Lower choice", {
+      fontSize: 15,
+      lineHeight: 24.375,
+    });
   } finally {
     await context.close();
   }
@@ -721,7 +846,7 @@ test("a long name ends in an ellipsis wherever a link or control truncates it", 
     await expectEllipsis(authorChip);
     await expect
       .soft(authorChip.getByText(longTitle, { exact: true }))
-      .toHaveAttribute("title", longTitle);
+      .toHaveAttribute("title", `${longTitle} · e2e-long-title`);
 
     await page.goto(`/issues/${issue.key}`);
     await expectEllipsis(page.getByRole("link", { name: longUrl }));
@@ -753,12 +878,6 @@ test("a long name ends in an ellipsis wherever a link or control truncates it", 
     await expect
       .soft(labelOption.getByText(longLabel, { exact: true }))
       .toHaveAttribute("title", longLabel);
-
-    // An agent row's name, which opens the row. The button carries the full name itself.
-    await page.goto("/agents");
-    const agentName = page.getByRole("heading", { name: longTitle }).getByRole("button");
-    await expectEllipsis(agentName);
-    await expect.soft(agentName).toHaveAttribute("title", longTitle);
 
     // A sent broadcast's row: the metadata line, then the message's first line under it, cut
     // by a one-line clamp. Its hover title is the message as plain words (the preview renders

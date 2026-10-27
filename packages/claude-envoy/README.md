@@ -43,7 +43,10 @@ events and sends them to the current Claude Code session as supported
   session on the same `SessionStart` events and of each subagent (`SubagentStart`), as a hook of
   its own so neither output crowds the other past Claude Code's 10,000-character hook limit. On a
   resume or fork Claude Code adds it only when the transcript does not already hold the same text,
-  so a session keeps one copy, and one opened before the skill shipped gets it.
+  so a session keeps one copy, and one opened before the skill shipped gets it. On every
+  `UserPromptSubmit`, `dist/session-title-hook.js` records the name a person gave the session
+  (below, "Session title"); its `timeout` is 5 s, and it is a bundle of its own because Claude
+  Code holds the prompt until it returns.
 - The channel server subscribes directly to `notifications.agent.<session_id>` and to every topic
   followed by `envoy_subscribe`. It renders every envelope with the shared
   `@legion/envoy-client/delivery` renderer and never exposes raw envelope bytes.
@@ -195,16 +198,17 @@ human approval surface.
 
 ## Skills
 
-The plugin ships four skills, `claude-envoy:envoy`, `claude-envoy:dispatch`,
-`claude-envoy:dispatch-first` and `claude-envoy:dispatch-brainstorming`, which teach the Envoy
-tools and the `dispatch` command. `skills/` holds one relative symlink per skill into the repository-root `skills/`, which
+The plugin ships five skills, `claude-envoy:envoy`, `claude-envoy:dispatch`,
+`claude-envoy:dispatch-first`, `claude-envoy:dispatch-writing-specs` and `claude-envoy:asd-ste100`.
+The first four teach the Envoy tools, the `dispatch` command and how to write a spec; `asd-ste100` gives the
+ASD-STE100 rules for text a person reads. `skills/` holds one relative symlink per skill into the repository-root `skills/`, which
 stays their only source; Claude Code copies each target into the plugin cache at install. With
 Dispatch configured, the `dispatch-first` hook also puts `dispatch-first` into the model's context
 on every `SessionStart` (startup, resume, clear, compact, fork) and `SubagentStart`, as the
-`hooks/hooks.json` bullet above describes; it sends a design conversation or a plan to
-`dispatch-brainstorming`, which the session loads by name.
+`hooks/hooks.json` bullet above describes; it sends a spec, or an ask, comment or message a person
+reads, to `dispatch-writing-specs`, which the session loads by name.
 
-`envoy`, `dispatch`, `dispatch-first` and `dispatch-brainstorming` are the four a standalone Claude Code session uses. The other root skills
+`envoy`, `dispatch`, `dispatch-first`, `dispatch-writing-specs` and `asd-ste100` are the five a standalone Claude Code session uses. The other root skills
 stay out of this plugin: they belong to Legion's roles (the architect, controller, oracle and retro
 skills, and the phase workers' `legion-worker` and `ce-simplify-code`) and to the reviewer's
 `thermonuclear-*` pair (`skills/AGENTS.md`). A phase worker on Claude Code gets them from the
@@ -238,9 +242,10 @@ with the bundle and never edit it by hand. A standalone Claude Code session does
 The marketplace installs this package's git tree into Claude Code's plugin cache with no
 `node_modules`: `workspace:*` dependencies cannot resolve there, and Claude Code skips its automatic
 dependency install because the package has no lockfile of its own (the monorepo's lives at the
-root). So the three executables ship as committed single-file Bun bundles, `dist/envoy-channel.js`,
-`dist/session-hook.js` and `dist/dispatch.js` (the `dispatch` command, built from
-`@legion/envoy-client`'s `bin/dispatch.ts`), with every dependency inlined (`@legion/contracts`,
+root). So the four executables ship as committed single-file Bun bundles,
+`dist/envoy-channel.js`, `dist/session-hook.js`, `dist/session-title-hook.js` and
+`dist/dispatch.js` (the `dispatch` command, built from `@legion/envoy-client`'s
+`bin/dispatch.ts`), with every dependency inlined (`@legion/contracts`,
 `@legion/envoy-client`, `@modelcontextprotocol/sdk`, `nats`, `zod` and theirs; the package version
 is inlined from `package.json`, so the MCP server reports `package.json`'s version, which
 `.omp-plugin/plugin.json` repeats). `dist/THIRD_PARTY_NOTICES` beside them carries the license of
@@ -359,28 +364,47 @@ is substituted as the literal text, which used to register a session as the lite
 
 The session registers under a title, which Dispatch's Agents page shows in place of its session id:
 `ENVOY_SESSION_TITLE` when it is set and holds a character that shows
-(`ENVOY_SESSION_TITLE='review the listener' claude`), on one line. Otherwise the title is a name and
-the first eight characters of the session id (`work:review 3084299d`, `legion 3084299d`), so two
-sessions in one tmux window, or in one project outside tmux, keep apart, and the id part follows
-the new id after `/clear`.
+(`ENVOY_SESSION_TITLE='review the listener' claude`), on one line. Otherwise it is the name the
+person running the session gave it — `claude -n 'review the listener'`, `--name`, or `/rename` —
+alone, with no short id after it, since a name somebody chose already tells its session apart.
+Otherwise the title is a name and the first eight characters of the session id
+(`work:review 3084299d`, `legion 3084299d`), so two sessions in one tmux window, or in one project
+outside tmux, keep apart, and the id part follows the new id after `/clear`.
 
-Inside tmux the name is `session:window` for a window whose `automatic-rename` is off (one named
-with `rename-window` or `new-window -n`, one a program in it renamed through `allow-rename`, or any
-window where the tmux configuration turns it off), else the tmux session's name; in grouped
-sessions, the group's name, which tmux keeps even after the sessions are renamed or end. A window
-index is never used, since tmux moves it under `renumber-windows`. The server asks the tmux server
-`TMUX` names about the pane `TMUX_PANE` names, and uses the answer only when that server's pid is
-the one in `TMUX` (a server started again on the socket gives out the same pane ids) and the
-pane's process is one of the session's own ancestors (tmux hands a popup or `run-shell` job a
-`TMUX_PANE` left over from elsewhere). Otherwise, and for a session named only by digits (plain
-`tmux` names its first one `0`) in a window nobody named, the name is the project directory's.
-The server works the name out once as it starts, with at most one `tmux display-message` call
-bounded at one second (on a host without `/proc`, reading the pane's process chain adds one
-`ps` call per step, each bounded the same way), so a later tmux rename shows from the next start. It also writes the title
-to the session's Dispatch state directory, where the `dispatch` command reads it to stamp the
-session's Dispatch writes, so a comment or message from the session carries the same name. With
-inbound messages or Envoy off it writes it once, for the id the session starts with. It writes
-nothing when the session starts with Dispatch off, or under the QA override `ENVOY_SESSION_ID`.
+Claude Code hands the chosen name to a hook and to nothing else, as `session_title` on the
+`SessionStart` and `UserPromptSubmit` payloads, so the plugin's hooks record it under
+`${CLAUDE_PLUGIN_DATA}/titles/`, by session id, and the channel server reads that file every time
+it registers. The `UserPromptSubmit` hook is a bundle of its own, `dist/session-title-hook.js`,
+because Claude Code holds the prompt until it returns: it parses its payload and writes one file,
+and costs about what starting `bun` at all costs. A rename therefore reaches the Agents page on
+the session's next prompt and the registration heartbeat that follows it, within about two
+minutes; nothing watches the file. Taking the name away removes the record, so the session
+returns to the name-and-short-id title instead of wearing a name nobody chose any more, and a
+name that is blank or invisible once cleaned falls back the same way; a name written on several
+lines is put on one, not refused. Records untouched for thirty days are pruned as the channel
+server starts — the titles, and the role files beside them — so a session resumed weeks later
+still finds its name and its role, and neither directory grows for ever; a sweep that fails says
+so on stderr and the session starts regardless.
+
+Inside tmux that fallback name is `session:window` for a window whose `automatic-rename` is off
+(one named with `rename-window` or `new-window -n`, one a program in it renamed through
+`allow-rename`, or any window where the tmux configuration turns it off), else the tmux session's
+name; in grouped sessions, the group's name, which tmux keeps even after the sessions are renamed
+or end. A window index is never used, since tmux moves it under `renumber-windows`. The server
+asks the tmux server `TMUX` names about the pane `TMUX_PANE` names, and uses the answer only when
+that server's pid is the one in `TMUX` (a server started again on the socket gives out the same
+pane ids) and the pane's process is one of the session's own ancestors (tmux hands a popup or
+`run-shell` job a `TMUX_PANE` left over from elsewhere). Otherwise, and for a session named only
+by digits (plain `tmux` names its first one `0`) in a window nobody named, the name is the project
+directory's. The server works that name out once as it starts, with at most one
+`tmux display-message` call bounded at one second (on a host without `/proc`, reading the pane's
+process chain adds one `ps` call per step, each bounded the same way), so a later tmux rename
+shows from the next start. The chosen name is read afresh on every registration instead, which is
+why a rename needs no restart. The server also writes the title to the session's Dispatch state
+directory, where the `dispatch` command reads it to stamp the session's Dispatch writes, so a
+comment or message from the session carries the same name. With inbound messages or Envoy off it
+writes it once, for the id the session starts with. It writes nothing when the session starts with
+Dispatch off, or under the QA override `ENVOY_SESSION_ID`.
 
 `claude -p` can run a channel session, but it disables features that need terminal input, including
 multiple-choice questions and plan approval. Production Legion workers must have MCP and channel
@@ -446,6 +470,24 @@ plugin cache directory), it reproduces the stale subject that build leaves behin
 
 ```bash
 ENVOY_NATS_URL=nats://127.0.0.1:4222 packages/claude-envoy/scripts/smoke-clear-rebind.sh
+```
+
+`smoke-session-title.sh` checks that the name a person gave a session is what the plugin
+registers. It starts a nats-server and an Envoy listener built from this tree, runs the committed
+`dist/session-hook.js` and `dist/session-title-hook.js` on the payloads Claude Code's hooks
+reference documents and `dist/envoy-channel.js` as the session, and reads each title back through
+the listener's `GET /v1/sessions`: the chosen name registers alone, a rename replaces it, taking
+the name away brings the folder-and-short-id title back, and the `dispatch` command's stamp in
+the session's Dispatch state directory carries the same name. Its negative control runs the first
+case again against the `dist/envoy-channel.js` of `BASE_REV` (default `main@origin`), which
+registers the folder name instead. It needs `bun`, `curl`, `jq`, `go` and `nats-server`
+(`go install github.com/nats-io/nats-server/v2@v2.11.4`), and no Claude authentication, since
+Claude Code is not installed in an issue pod and the two hook payloads are written by the script;
+that the field arrives at all rests on Claude Code's documentation. Like the other two, it is
+never a CI step:
+
+```bash
+bash packages/claude-envoy/scripts/smoke-session-title.sh
 ```
 
 ## Local checks

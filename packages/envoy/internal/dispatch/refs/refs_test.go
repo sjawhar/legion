@@ -2,6 +2,8 @@ package refs
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"os"
 	"reflect"
 	"strconv"
@@ -13,6 +15,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
@@ -89,7 +92,7 @@ func TestReplaceWritesRefKeysAndSkipsExternalURLs(t *testing.T) {
 	defer tx.Rollback(ctx)
 
 	body := "see dispatch://CORE/artifact/design-notes and dispatch://OPS-2/artifact/spec and https://example.com"
-	if _, err := replace(ctx, tx, "comment", "c1", body, "https://dispatch.example"); err != nil {
+	if _, err := replaceRefs(ctx, tx, "comment", "c1", text.Extract(body, "https://dispatch.example"), nil); err != nil {
 		t.Fatalf("replace references: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -136,7 +139,7 @@ func TestReplaceWritesRefKeysAndSkipsExternalURLs(t *testing.T) {
 		t.Fatalf("begin clear transaction: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err := replace(ctx, tx, "comment", "c1", "", "https://dispatch.example"); err != nil {
+	if _, err := replaceRefs(ctx, tx, "comment", "c1", text.Extract("", "https://dispatch.example"), nil); err != nil {
 		t.Fatalf("clear references: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -148,6 +151,205 @@ func TestReplaceWritesRefKeysAndSkipsExternalURLs(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("references after clear = %d; want 0", count)
+	}
+}
+
+// The target id the grammar bounds is the one an edge stores, and every key holding it fits: a
+// block reference whose target is at text.MaxTargetBytes, an issue's document's or a
+// project's, is written to refs from a comment, and to block_refs from a block whose id is
+// text.MaxBlockIDBytes long, the widest key either table has, each to_id exactly the bound. The
+// slug and the citing block's id are incompressible, so no index holds them by compressing them.
+func TestABlockTargetAtTheGrammarsBoundIsStoredWhole(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	random := func(t *testing.T, length int) string {
+		t.Helper()
+		bytes := make([]byte, (length+1)/2)
+		if _, err := rand.Read(bytes); err != nil {
+			t.Fatal(err)
+		}
+		return hex.EncodeToString(bytes)[:length]
+	}
+	for _, owner := range []string{"CORE-1", "CORE"} {
+		t.Run(owner, func(t *testing.T) {
+			const server = "https://dispatch.example"
+			markdown := "See dispatch://" + owner + "/artifact/" + random(t, text.MaxTargetBytes-len(owner+"/#x")) + "#b-x.\n"
+			located := text.ExtractAt(markdown, server)
+			if len(located) != 1 || located[0].Kind != "block" {
+				t.Fatalf("the reference at the bound parsed as %#v, want one block", located)
+			}
+			if id := text.TargetID(located[0].Ref); len(id) != text.MaxTargetBytes {
+				t.Fatalf("TargetID is %d bytes, want the bound %d", len(id), text.MaxTargetBytes)
+			}
+			tx, err := database.Pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(ctx)
+			if _, err := replaceRefs(ctx, tx, "comment", "00000000-0000-4000-8000-000000000000", text.Extract(markdown, server), nil); err != nil {
+				t.Fatalf("write the reference at the bound from a comment: %v", err)
+			}
+			createReferenceProject(t, tx, "ACME")
+			citer, _ := createReferenceArtifact(t, tx, "", "ACME", "citer")
+			citingBlock := random(t, text.MaxBlockIDBytes)
+			blocks := []model.ArtifactBlock{{ID: citingBlock, Type: "paragraph", From: 0, To: len(markdown)}}
+			if _, err := IndexBlocks(ctx, tx, citer, 1, time.Now(), markdown, blocks, located); err != nil {
+				t.Fatalf("write the reference at the bound from a block of %d bytes: %v", text.MaxBlockIDBytes, err)
+			}
+			var fromComment, fromBlock int
+			if err := tx.QueryRow(ctx, `select length(to_id) from refs where to_kind = 'block'`).Scan(&fromComment); err != nil || fromComment != text.MaxTargetBytes {
+				t.Fatalf("refs.to_id is %d bytes (%v), want %d", fromComment, err, text.MaxTargetBytes)
+			}
+			if err := tx.QueryRow(ctx, `select length(to_id) from block_refs where block_id = $1 and to_kind = 'block'`, citingBlock).Scan(&fromBlock); err != nil || fromBlock != text.MaxTargetBytes {
+				t.Fatalf("block_refs.to_id is %d bytes (%v), want %d", fromBlock, err, text.MaxTargetBytes)
+			}
+		})
+	}
+}
+
+// Every target id the grammar reads at text.MaxTargetBytes is the id its edge stores, and every key
+// holding it fits: an issue whose number is long, an issue's and a project's document, an agent's
+// upload under a long session id, an ask's, a comment's and a message's id and a component's, all
+// at the bound, are written to refs from a document (`artifact`, the widest source kind, under its
+// uuid) beside the widest target kind, `component`, and to block_refs from a block whose id is
+// text.MaxBlockIDBytes long. Each run is incompressible, so no index holds it by compressing it.
+func TestEveryTargetAtTheGrammarsBoundIsStoredWhole(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	random := func(t *testing.T, length int) string {
+		t.Helper()
+		bytes := make([]byte, (length+1)/2)
+		if _, err := rand.Read(bytes); err != nil {
+			t.Fatal(err)
+		}
+		return hex.EncodeToString(bytes)[:length]
+	}
+	digits := func(t *testing.T, length int) string {
+		t.Helper()
+		bytes := make([]byte, length)
+		if _, err := rand.Read(bytes); err != nil {
+			t.Fatal(err)
+		}
+		for index := range bytes {
+			bytes[index] = '0' + bytes[index]%10
+		}
+		return string(bytes)
+	}
+	const server = "https://dispatch.example"
+	references := []string{
+		"dispatch://CORE-1" + digits(t, text.MaxTargetBytes-len("CORE-1")),
+		"dispatch://CORE-1/artifact/" + random(t, text.MaxTargetBytes-len("CORE-1/")),
+		"dispatch://CORE/artifact/" + random(t, text.MaxTargetBytes-len("CORE/")),
+		"dispatch://agent/" + random(t, text.MaxTargetBytes-len("agent//x")) + "/artifact/x",
+		"dispatch://CORE-1/ask/" + random(t, text.MaxTargetBytes),
+		"dispatch://CORE-1/comment/" + random(t, text.MaxTargetBytes),
+		"dispatch://CORE-1/message/" + random(t, text.MaxTargetBytes),
+		"dispatch://CORE/artifact/plan-md/comment/" + random(t, text.MaxTargetBytes),
+		"dispatch://CORE/component/" + random(t, text.MaxTargetBytes-len("CORE/")),
+	}
+	markdown := ""
+	for _, reference := range references {
+		markdown += "See " + reference + ".\n"
+	}
+	located := text.ExtractAt(markdown, server)
+	if len(located) != len(references) {
+		t.Fatalf("%d references at the bound parsed as %d", len(references), len(located))
+	}
+	for _, item := range located {
+		if id := text.TargetID(item.Ref); len(id) != text.MaxTargetBytes {
+			t.Fatalf("TargetID of a %s is %d bytes, want the bound %d", item.Kind, len(id), text.MaxTargetBytes)
+		}
+	}
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	createReferenceProject(t, tx, "ACME")
+	citer, _ := createReferenceArtifact(t, tx, "", "ACME", "citer")
+	if _, err := replaceRefs(ctx, tx, "artifact", citer, text.Extract(markdown, server), nil); err != nil {
+		t.Fatalf("write the references at the bound from a document: %v", err)
+	}
+	citingBlock := random(t, text.MaxBlockIDBytes)
+	blocks := []model.ArtifactBlock{{ID: citingBlock, Type: "paragraph", From: 0, To: len(markdown)}}
+	if _, err := IndexBlocks(ctx, tx, citer, 1, time.Now(), markdown, blocks, located); err != nil {
+		t.Fatalf("write the references at the bound from a block of %d bytes: %v", text.MaxBlockIDBytes, err)
+	}
+	for _, table := range []string{"refs", "block_refs"} {
+		var count, shortest, longest int
+		if err := tx.QueryRow(ctx, `select count(*), coalesce(min(length(to_id)), 0), coalesce(max(length(to_id)), 0) from `+table).Scan(&count, &shortest, &longest); err != nil {
+			t.Fatal(err)
+		}
+		if count != len(references) || shortest != text.MaxTargetBytes || longest != text.MaxTargetBytes {
+			t.Fatalf("%s holds %d edges of %d to %d bytes, want %d of %d", table, count, shortest, longest, len(references), text.MaxTargetBytes)
+		}
+	}
+}
+
+// Every kind of reference stores its edge under the id the graph names its target node by, the
+// one text.TargetID writes and the target bound counts: an issue's key; a document's own ref_key
+// as the artifacts row stores it, for an issue's spec and document, a project's document and an
+// agent's upload, a version making no difference; a block's `<ref_key>#<block id>` (the block's
+// node id), a pin making none; a component's `<project>/<id>` as graph_edges spells it; and an
+// ask's, a comment's or a message's id, decoded.
+func TestEveryTargetIDIsTheNodeIDTheGraphStores(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	createReferenceProject(t, tx, "CORE")
+	createReferenceIssue(t, tx, "CORE-1", "CORE")
+	refKey := func(owner, values string, args ...any) string {
+		t.Helper()
+		var key string
+		if err := tx.QueryRow(ctx, `insert into artifacts (`+owner+`, slug, name, kind, is_primary, created_by) values (`+values+`, 'doc', $3, '{"kind":"user","id":"alice"}') returning ref_key`, args...).Scan(&key); err != nil {
+			t.Fatalf("create artifact %v: %v", args, err)
+		}
+		return key
+	}
+	spec := refKey("issue_key, project_key", "$1, 'CORE', $2, $2", "CORE-1", "spec", true)
+	notes := refKey("issue_key, project_key", "$1, 'CORE', $2, $2", "CORE-1", "notes-md", false)
+	handbook := refKey("project_key", "$1, $2, $2", "CORE", "handbook-md", false)
+	shot := refKey("session_id", "$1, $2, $2", "01a1058e-f14f-7684-87eb-3dc885955551", "shot-png", false)
+	if spec != "CORE-1/spec" || notes != "CORE-1/notes-md" || handbook != "CORE/handbook-md" || shot != "agent/01a1058e-f14f-7684-87eb-3dc885955551/shot-png" {
+		t.Fatalf("the documents' ref_keys are %q, %q, %q and %q", spec, notes, handbook, shot)
+	}
+	const server, from = "https://dispatch.example", "00000000-0000-4000-8000-000000000000"
+	for _, test := range []struct{ reference, kind, node string }{
+		{"dispatch://CORE-1", "issue", "CORE-1"},
+		{"dispatch://CORE-1/spec", "artifact", spec},
+		{"dispatch://CORE-1/artifact/notes-md@v2", "artifact", notes},
+		{"dispatch://CORE/artifact/handbook-md", "artifact", handbook},
+		{"dispatch://agent/01a1058e-f14f-7684-87eb-3dc885955551/artifact/shot-png@v3", "artifact", shot},
+		{"dispatch://CORE-1/spec#b-ship%5Fit@v3", "block", spec + "#ship_it"},
+		{"dispatch://CORE-1/artifact/notes-md#b-x", "block", notes + "#x"},
+		{"https://dispatch.example/projects/CORE/documents/handbook-md#b-d%C3%A9", "block", handbook + "#dé"},
+		{"dispatch://CORE/component/api", "component", "CORE/api"},
+		{"dispatch://CORE-1/ask/a1", "ask", "a1"},
+		{"dispatch://CORE/artifact/handbook-md/ask/a2", "ask", "a2"},
+		{"dispatch://CORE-1/comment/c%3B1", "comment", "c;1"},
+		{"https://dispatch.example/issues/CORE-1/spec?comment=c2", "comment", "c2"},
+		{"dispatch://CORE-1/message/m1", "message", "m1"},
+	} {
+		t.Run(test.reference, func(t *testing.T) {
+			ref, ok := text.ParseRef(test.reference, server)
+			if !ok || ref.Kind != test.kind || text.TargetID(ref) != test.node {
+				t.Fatalf("%s parsed as %#v (%t), whose target id is %q; want a %s at %q", test.reference, ref, ok, text.TargetID(ref), test.kind, test.node)
+			}
+			if _, err := replaceRefs(ctx, tx, "comment", from, text.Extract("See "+test.reference+".", server), nil); err != nil {
+				t.Fatalf("write the reference: %v", err)
+			}
+			var stored []string
+			if err := tx.QueryRow(ctx, `select coalesce(array_agg(to_kind || ' ' || to_id), '{}') from refs where from_kind = 'comment' and from_id = $1`, from).Scan(&stored); err != nil {
+				t.Fatal(err)
+			}
+			if want := test.kind + " " + test.node; len(stored) != 1 || stored[0] != want {
+				t.Fatalf("refs stores %q, want only %q", stored, want)
+			}
+		})
 	}
 }
 
@@ -191,7 +393,7 @@ func replaceAndStamp(t *testing.T, database *store.Store, fromKind, fromID, body
 		t.Fatalf("begin: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err := replace(ctx, tx, fromKind, fromID, body, "https://dispatch.example"); err != nil {
+	if _, err := replaceRefs(ctx, tx, fromKind, fromID, text.Extract(body, "https://dispatch.example"), nil); err != nil {
 		t.Fatalf("replace references: %v", err)
 	}
 	if err := Stamp(ctx, tx, fromKind, fromID, eventID); err != nil {
@@ -325,5 +527,70 @@ func TestReferencedByIncludesArtifactSources(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("referenced by = %#v; want %#v", got, want)
+	}
+}
+
+// A database a newer build has written to can hold an edge whose other end is a node kind this
+// build does not know. That edge is invisible here: a read in either direction lists every edge
+// it can address and skips the rest, a node cited only by such an edge reads as empty rather than
+// failing, and the count beside it agrees with the list behind it.
+func TestGraphReadsSkipANodeKindThisBuildCannotAddress(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin fixture transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	createReferenceProject(t, tx, "CORE")
+	createReferenceProject(t, tx, "OPS")
+	createReferenceIssue(t, tx, "CORE-1", "CORE")
+	createReferenceIssue(t, tx, "OPS-1", "OPS")
+	commentID := createReferenceComment(t, tx, "CORE-1")
+	insertReference(t, tx, "comment", commentID, "issue", "CORE-1")
+	insertReference(t, tx, "future", "x#y", "issue", "CORE-1")
+	insertReference(t, tx, "comment", commentID, "future", "x#y")
+	insertReference(t, tx, "future", "x#y", "issue", "OPS-1")
+
+	incoming, err := Edges(ctx, tx, Query{Direction: "in", Kind: "issue", ID: "CORE-1", Kinds: []string{"mentions"}})
+	if err != nil {
+		t.Errorf("read CORE-1 backlinks: %v", err)
+	} else if len(incoming) != 1 || incoming[0].Kind != "mentions" || incoming[0].Direction != "in" || incoming[0].Node.Kind != "comment" || incoming[0].Node.ID != commentID {
+		t.Errorf("CORE-1 backlinks = %#v; want only the mention from comment %q", incoming, commentID)
+	}
+
+	outgoing, err := Edges(ctx, tx, Query{Direction: "out", Kind: "comment", ID: commentID})
+	if err != nil {
+		t.Errorf("read comment links: %v", err)
+	} else if len(outgoing) != 1 || outgoing[0].Kind != "mentions" || outgoing[0].Direction != "out" || outgoing[0].Node.Kind != "issue" || outgoing[0].Node.ID != "CORE-1" {
+		t.Errorf("comment links = %#v; want only the mention of CORE-1", outgoing)
+	}
+
+	unknownOnly, err := Edges(ctx, tx, Query{Direction: "in", Kind: "issue", ID: "OPS-1"})
+	if err != nil {
+		t.Errorf("read OPS-1 backlinks: %v", err)
+	} else if unknownOnly == nil || len(unknownOnly) != 0 {
+		t.Errorf("OPS-1 backlinks = %#v; want an empty list", unknownOnly)
+	}
+
+	counts, err := BacklinkCounts(ctx, tx, "issue", []string{"CORE-1", "OPS-1"}, nil)
+	if err != nil {
+		t.Errorf("count issue backlinks: %v", err)
+	} else if want := map[string]int{"CORE-1": 1}; !reflect.DeepEqual(counts, want) {
+		t.Errorf("issue backlink counts = %v; want %v", counts, want)
+	}
+	// Every ask read passes AskBacklinkExclusions, so this is the count each ask card and the
+	// Inbox show: the comment's mention stays and the unknown-kind row stays out.
+	askCounts, err := BacklinkCounts(ctx, tx, "issue", []string{"CORE-1", "OPS-1"}, AskBacklinkExclusions)
+	if err != nil {
+		t.Errorf("count issue backlinks with the ask exclusions: %v", err)
+	} else if want := map[string]int{"CORE-1": 1}; !reflect.DeepEqual(askCounts, want) {
+		t.Errorf("issue backlink counts with the ask exclusions = %v; want %v", askCounts, want)
+	}
+	excluded, err := BacklinkCounts(ctx, tx, "issue", []string{"CORE-1", "OPS-1"}, []string{"mentions"})
+	if err != nil {
+		t.Errorf("count issue backlinks excluding mentions: %v", err)
+	} else if len(excluded) != 0 {
+		t.Errorf("issue backlink counts excluding mentions = %v; want none", excluded)
 	}
 }

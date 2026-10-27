@@ -20,7 +20,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
-	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 type versionWrite struct {
@@ -1270,6 +1269,16 @@ func (s *Service) registerStampedAskBlocks(ctx context.Context, room string, sta
 // after the take, for a change the version holds or not, stays pending for the next version
 // (LEGION-503). The room is taken inside the Apply that loads and as docTree reads it: a room
 // looked up again once that Apply returned can have been evicted in between.
+//
+// A version is never rendered from a room behind the durable head (refuseRoomBehindHead): with two
+// envoy-dispatch processes on one Postgres, that room lacks what the other process appended, and
+// the version would record that update's cursor over text missing it, so no later settlement
+// would version those words (INFRA-218). A room found behind the head inside the Apply, under the
+// document's advisory lock this transaction holds, is versioned from the stored document instead,
+// as a write behind the head forks from it (coldFork); so is a write's fork that came from the
+// store. Neither holds a change still in flight in the room, so the version lists none of the
+// room's in-flight credits (withoutInflight): a credit whose append lands later is owed then, and
+// one whose append the gate refuses is credited again when its browser resends the edit.
 func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, actor *model.Actor) (renderedTree, authorCapture, error) {
 	tx, _ := txFromContext(ctx)
 	write := joinedLiveWrite(ctx, room)
@@ -1317,6 +1326,9 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 		if s.afterCaptureFork != nil {
 			s.afterCaptureFork(room)
 		}
+		if write.cold {
+			capture = capture.withoutInflight(write, actor)
+		}
 		if write.tree != nil && write.fork == fork {
 			return renderedTree{tree: write.tree, markdown: write.markdown, offsets: write.offsets}, capture, nil
 		}
@@ -1324,6 +1336,13 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 			return renderedTree{}, authorCapture{}, err
 		}
 	} else {
+		// The head under the document's advisory lock, which this transaction holds from here to
+		// its end: every append, this process's own included, waits for it, so no room's cursor
+		// moves and the head stays where it is read.
+		head, err := currentUpdateCursor(ctx, tx, room)
+		if err != nil {
+			return renderedTree{}, authorCapture{}, err
+		}
 		if capture, err = s.capturePendingAuthors(ctx, tx, room, nil, actor); err != nil {
 			return renderedTree{}, authorCapture{}, err
 		}
@@ -1331,7 +1350,12 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 			s.afterCaptureAuthorsTake(room)
 		}
 		var readErr error
+		var behind bool
 		err = s.srv.Apply(ctx, room, func(live *crdt.Doc, _ func(func(*crdt.Transaction))) {
+			if cursor := s.cursorOf(live); cursor != nil && refuseRoomBehindHead(room, cursor, head) != nil {
+				behind = true
+				return
+			}
 			var doc *crdt.Doc
 			var release func()
 			doc, release, readErr = s.holdLive(room, live)
@@ -1347,12 +1371,41 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 		if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 			return renderedTree{}, authorCapture{}, fmt.Errorf("warm live document: %w", err)
 		}
+		if behind {
+			capture = capture.withoutInflight(nil, actor)
+			if tree, err = s.storedTree(ctx, room); err != nil {
+				return renderedTree{}, authorCapture{}, err
+			}
+		}
 	}
 	markdown, offsets, err := documentMarkdownWithOffsets(tree)
 	if err != nil {
 		return renderedTree{}, authorCapture{}, err
 	}
 	return renderedTree{tree: tree, markdown: markdown, offsets: offsets}, capture, nil
+}
+
+// storedTree is the tree of artifactID's stored document at its head, for a version whose room
+// stands behind that head (captureLiveTextAndAuthors). It is read on the pool that owns loads
+// (LoadDocument), as a cold write's fork reads the stored document (coldFork), and the caller
+// holds the document's advisory lock, so no append lands between the head it compared against
+// and this read. A load that fails does not fail the room, where coldFork's does: coldFork reads
+// the store in place of a room, so its failure is the document's, while here the room is sound
+// and only behind, and its settlement or the stale-room evictor reloads it. The version's
+// transaction answers ErrServiceUnavailable instead, and its caller retries.
+func (s *Service) storedTree(ctx context.Context, artifactID string) (*pmdoc.Node, error) {
+	loaded, err := s.persistence.LoadDocument(ctx, artifactID)
+	if err != nil {
+		if errors.Is(err, ErrDocumentUnloadable) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: %w", ErrServiceUnavailable, err)
+	}
+	doc := loaded.Doc
+	if doc == nil {
+		doc = newDocumentCopy()
+	}
+	return treeOf(doc)
 }
 
 func latestVersion(ctx context.Context, tx pgx.Tx, artifactID string) (struct {
@@ -1402,11 +1455,11 @@ type versionWriteResult struct {
 
 // renderedTree is a document tree with its canonical markdown and each identified block's byte
 // range in that markdown, all from one render (pmdoc.RenderWithBlockOffsets), so a version write
-// stores the markdown and cuts its mentions' excerpts from that render rather than rendering the
-// tree again for them. An upload that changes the document still renders it twice: ReplaceText
-// renders the replacement to tell whether it changes anything, and applyLive renders the fork it
-// leaves; the excerpts are cut from applyLive's render, which IndexDocumentReferences checks is
-// the version's markdown.
+// stores the markdown and indexes its blocks and cuts its mentions' excerpts from that render
+// rather than rendering the tree again for them. An upload that changes the document still renders
+// it twice: ReplaceText renders the replacement to tell whether it changes anything, and applyLive
+// renders the fork it leaves; the blocks and excerpts are cut from applyLive's render, which
+// IndexDocumentReferences checks is the version's markdown.
 type renderedTree struct {
 	tree     *pmdoc.Node
 	markdown string
@@ -1414,10 +1467,10 @@ type renderedTree struct {
 }
 
 // writeVersionTx is the only path that changes the durable version protocol:
-// version writes index references, move open approval asks to the new version, carry a human's
-// approval to the version his answer to a decision block writes (carryApproval), refresh anchors,
-// and retain their author capture until the enclosing transaction commits. A nil write records no
-// version but keeps a transactional tree mutation's anchors in the same path.
+// version writes index references and blocks, move open approval asks to the new version, carry a
+// human's approval to the version his answer to a decision block writes (carryApproval), refresh
+// anchors, and retain their author capture until the enclosing transaction commits. A nil write
+// records no version but keeps a transactional tree mutation's anchors in the same path.
 func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID string, rendered renderedTree, actor model.Actor, write *versionWrite) (versionWriteResult, error) {
 	markdown, tree := rendered.markdown, rendered.tree
 	if write == nil {
@@ -1449,13 +1502,11 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID stri
 	if err := json.Unmarshal(authorsRaw, &version.Authors); err != nil {
 		return versionWriteResult{}, fmt.Errorf("decode document version authors: %w", err)
 	}
-	changes, err := refs.ReplaceCounted(ctx, tx, "artifact", artifactID, markdown, s.serverURL)
+	// The version's references, its mentions' excerpts and its blocks are indexed from the render
+	// this version's markdown came from, in its own transaction, so GET /api/v1/references serves
+	// them without rendering the document.
+	changes, err := s.indexDocument(ctx, tx, artifactID, version.Number, version.CreatedAt, markdown, rendered)
 	if err != nil {
-		return versionWriteResult{}, err
-	}
-	// The mentions' excerpts are cut from the render this version's markdown came from, in its own
-	// transaction, so GET /api/v1/references serves them without rendering the document.
-	if err := s.recordTreeExcerpts(ctx, tx, artifactID, version.Number, rendered); err != nil {
 		return versionWriteResult{}, err
 	}
 	// The open approval request follows the document version without leaving its thread or opening

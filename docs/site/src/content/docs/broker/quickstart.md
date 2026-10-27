@@ -35,21 +35,28 @@ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh
 - `--reason` is what the approver reads. Say what the command is for.
 - Everything after `--` is the command.
 
-When the secret's owner and tier grant it automatically, the command runs at once:
+When the secret's owner and tier grant it automatically, the command runs at once. One line on
+standard error names the secrets it put in the command's environment and where they came from -
+the broker, and the store that broker keeps them in - never a value:
 
 ```console
 $ agent-secrets DEMO_READ_TOKEN -- printenv DEMO_READ_TOKEN
+agent-secrets: DEMO_READ_TOKEN from the broker at secrets.internal.example (AWS Secrets Manager account 111122223333 in us-east-1)
 demo-read-token-value
 ```
 
-When it needs a person's approval, `agent-secrets` says so, with the request's id, who approves it,
-and where (the request's Dispatch page when `AGENT_SECRETS_APPROVE_URL` names Dispatch's address,
-otherwise Credential requests in the Dispatch Inbox), and waits (up to 30 minutes; set `--wait` to
-a duration such as `5m` to change that) while the approver decides:
+That line is why a reader never has to guess which store answered: another secrets CLI on the same
+machine can hold a different value under the same name, and every `agent-secrets` answer and
+refusal names its own broker and store.
+
+When it needs a person's approval, `agent-secrets` says so, with the request's id, where it was
+made, who approves it, and where (the request's Dispatch page when `AGENT_SECRETS_APPROVE_URL`
+names Dispatch's address, otherwise Credential requests in the Dispatch Inbox), and waits (up to
+30 minutes; set `--wait` to a duration such as `5m` to change that) while the approver decides:
 
 ```console
 $ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh
-agent-secrets: request 0eaf43c4-dea5-4d41-8798-c25f6be7d811 is waiting for approval; waiting up to 30m0s
+agent-secrets: request 0eaf43c4-dea5-4d41-8798-c25f6be7d811 to the broker at secrets.internal.example (AWS Secrets Manager account 111122223333 in us-east-1) is waiting for approval; waiting up to 30m0s
 agent-secrets: waiting for ada@example.com to approve it under Credential requests in their Dispatch Inbox
 ```
 
@@ -95,12 +102,14 @@ Once approved, the waiting `agent-secrets` collects the grant and replaces itsel
 
 ```console
 $ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- sh -c 'echo "deploying with a ${#DEMO_API_KEY}-character key"'
+agent-secrets: DEMO_API_KEY from the broker at secrets.internal.example (AWS Secrets Manager account 111122223333 in us-east-1)
 deploying with a 18-character key
 ```
 
 The grant outlives the command: it lasts until the session ends, unless the agent asked for less
 with `--ttl`. Meanwhile the same session asking for exactly the same secrets gets it again without
-asking anyone; `agent-secrets self` lists the session's live grants:
+asking anyone; `agent-secrets self` lists the session's live grants, and the broker and store they
+are at:
 
 ```console
 $ agent-secrets self
@@ -108,6 +117,7 @@ enrollment_id: 2b8627f4-9a2a-4c12-85bf-910144bc0b5c
 kind: session
 operator: ada@example.com
 lease_expires_at: 2026-10-03T03:36:40Z
+source: the broker at secrets.internal.example (AWS Secrets Manager account 111122223333 in us-east-1)
 grant: f5167d29-1789-4719-8e8c-9aec6f1229e7 (request ce11549a-ab03-4a13-95cf-896961c36fc0, until this session ends)
 grant: be34ed2a-78e2-4457-9a75-71283a87c16b (request 7db349e6-ad3c-4f40-86d7-c6a38e899306, until this session ends)
 ```
@@ -121,15 +131,15 @@ From a session with no live grant of `DEMO_API_KEY` (a new session, or one that 
 
 ```console
 $ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh
-agent-secrets: request 2375f92d-bab0-4123-a0cb-d139c98de73c was denied
+agent-secrets: request 2375f92d-bab0-4123-a0cb-d139c98de73c to the broker at secrets.internal.example (AWS Secrets Manager account 111122223333 in us-east-1) was denied
 ```
 
 A request still undecided when `--wait` runs out exits 75 and runs nothing; a name the broker does
-not serve is refused at once:
+not serve is refused at once, naming the broker it asked:
 
 ```console
 $ agent-secrets NO_SUCH_SECRET -- true
-agent-secrets: no agent secret has this name (UNKNOWN_SECRET)
+agent-secrets: no agent secret has this name (UNKNOWN_SECRET); asked the broker at secrets.internal.example (AWS Secrets Manager account 111122223333 in us-east-1)
 ```
 
 [Troubleshooting](/legion/broker/guides/troubleshooting/) lists every refusal and what to do about

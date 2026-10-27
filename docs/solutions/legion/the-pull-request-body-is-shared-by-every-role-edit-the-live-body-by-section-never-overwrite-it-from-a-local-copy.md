@@ -40,3 +40,14 @@ never the source of truth afterwards.
 The same holds in the other direction: a tester or reviewer appending its line must edit the
 live body too — the implementer's `CI` line may already name a newer head after a
 conflict-forced rebase.
+
+**Superseded 2026-10-23 (dispatch://INFRA-83):** only the reason is superseded — the implementer's
+`CI` line naming a newer head after a conflict-forced rebase — because the body carries no `CI:`
+line (`skills/legion-worker/references/pr-body.md`), and no role records a check result for a later
+step to trust: the tester and the reviewer each read CI on GitHub at the head they are judging and
+record none of it (the reviewer's own four GitHub reads are in
+`skills/legion-worker/references/merge-gate.md`). The rule itself is untouched, and so is the rest
+of this learning: a tester or reviewer appending its line must edit the live body too, because the
+body carries the reviewer's `Look at first` and `Not proven / risk`, the implementer's `Threads`
+and `Size`, and both `E2E` lines, every one of which another role may have written or changed since
+you fetched it.

@@ -18,7 +18,9 @@
 #
 # Run it as `bash scripts/e2e/stage3-4b13b-acceptance.sh` from the operator's own Oh My Pi session,
 # with the Stage 3 proof's two required inputs, LEGION_E2E_MODEL_GATEWAY_URL and SMOKE_UPSTREAM_NATS
-# (scripts/e2e/README.md), and three of its own, since it creates no Docker container:
+# (scripts/e2e/README.md; Legion's two role Apps are this deployment's own unless the four
+# LEGION_E2E_*_APP_* inputs name another's, lib/github-apps.sh), and three of its own, since it
+# creates no Docker container:
 # ACCEPT_PG_CONTAINER and ACCEPT_PG_PORT name a running Postgres container (user postgres, password
 # ci) in which the daemon and Dispatch take their own databases, and ACCEPT_NATS_BIN a nats-server
 # binary it runs natively. Its GitHub writes are the Stage 3 proof human's, the devbox gh acting as
@@ -199,10 +201,10 @@ start_listener() {
   for attempt in 1 2 3 4 5; do
     pick_port port_listener
     offset=$(log_size listener)
+    # shellcheck disable=SC2154 # require_app_inputs sets it; this file sources its libs as source=/dev/null
     ENVOY_API_TOKEN="$token" PORT="$port_listener" ENVOY_LISTEN_HOST=127.0.0.1 \
       ENVOY_MACHINE_ID="legion-accept4b13b-$$" NATS_URLS="nats://127.0.0.1:$port_nats" \
-      start_process listener env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
-        -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/envoy-listener"
+      start_process listener env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" "$work/envoy-listener"
     result=0
     await_start listener "$listener_pid" "$offset" 60 "the Envoy listener to answer /v1/sessions" \
       curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$port_listener/v1/sessions" || result=$?
@@ -231,8 +233,7 @@ start_dispatch() {
       DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT="$port_dispatch" \
       DISPATCH_SERVER_URL="http://127.0.0.1:$port_dispatch" NATS_URLS="nats://127.0.0.1:$port_nats" \
       ENVOY_URL="http://127.0.0.1:$port_listener" \
-      start_process dispatch env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
-        -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/envoy-dispatch"
+      start_process dispatch env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" "$work/envoy-dispatch"
     result=0
     await_start dispatch "$dispatch_pid" "$offset" 60 "the scratch Dispatch server" \
       curl -fsS "http://127.0.0.1:$port_dispatch/api/v1" || result=$?
@@ -267,13 +268,7 @@ gates:
 admission_cap: 3
 review_round_cap: 3
 instructions: $work/instructions.md
-github_apps:
-  implement:
-    app_id: "3202636"
-    private_key_command: "secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -- sh -c 'value=\$(printf %s \"\${LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64}\" | tr \"_-\" \"/+\"); case \$((\${#value} % 4)) in 1) value=\${value%?};; 2) value=\"\${value}==\";; 3) value=\"\${value}=\";; esac; printf %s \"\$value\" | base64 -d'"
-  review:
-    app_id: "3202653"
-    private_key_command: "secrets GH_REVIEW_APP_PRIVATE_KEY_B64 -- sh -c 'value=\$(printf %s \"\${GH_REVIEW_APP_PRIVATE_KEY_B64}\" | tr \"_-\" \"/+\"); case \$((\${#value} % 4)) in 1) value=\${value%?};; 2) value=\"\${value}==\";; 3) value=\"\${value}=\";; esac; printf %s \"\$value\" | base64 -d'"
+$(<"$work/github-apps.yaml")
 EOF
 }
 
@@ -287,8 +282,7 @@ start_daemon() {
     fi
     offset=$(log_size daemon)
     HOME="$omp_home" OMP_PROFILE="$profile" PATH="$(dirname "$real_gh"):$work/realtmux:$PATH" env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE \
-      -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
-      -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 \
+      -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" \
       "$work/legion" start --config "$work/legion.yaml" >>"$evidence/logs/daemon.log" 2>&1 &
     daemon_pid=$!
     result=0
@@ -440,11 +434,18 @@ gate_send() {
   gate_artifacts[$issue]=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
   architect_registers_gate "$issue" "$issue"
 }
+# gate_finish ISSUE: the root waits on a person at its closed gate without a slot, its architect
+# suspended (await_gate_wait); the proof human approves, the root takes a slot back
+# (await_answered_slot), and only then reaches planning. admission_cap 3 is the run's three roots
+# (the child takes none), so the slots every waiting root gave back stand free and the answered root
+# takes one at once.
 gate_finish() {
   local issue=$1 artifact=${gate_artifacts[$1]}
   until_true 600 "$issue architect to register primary artifact $artifact" sh -c \
     "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$issue' --arg artifact '$artifact' '.issues[\$issue].designGate.artifactId == \$artifact and .issues[\$issue].designGate.currentVersion > 0'"
+  await_gate_wait "$issue" "$issue"
   dispatch_human POST "artifacts/$artifact/reviews" '{"state":"approved"}' >/dev/null
+  await_answered_slot "$issue" "$issue"
   wait_for_phase "$issue" planning
   wait_for_worker "$issue" planner
 }
@@ -489,7 +490,7 @@ instruction_for() {
   esac
 }
 instructor() {
-  local issue spec role phase f key tick=0 n st cl cur live
+  local issue spec role phase f key tick=0 n st cl cur live watched
   trap - EXIT ERR
   set +e
   mkdir -p "$evidence/instructed"
@@ -497,7 +498,8 @@ instructor() {
     # One state read and one claims read per pass, so the watcher adds two daemon calls every two
     # seconds, not one per issue and role.
     if ! st=$(daemon_state 2>/dev/null) || ! cl=$(claims list --json 2>/dev/null); then sleep 2; continue; fi
-    for issue in $(cat "$work/instructor-issues"); do
+    mapfile -t watched <"$work/instructor-issues"
+    for issue in "${watched[@]}"; do
       cur=$(jq -r --arg i "$issue" '.issues[$i].phase // ""' <<<"$st")
       for spec in implementer:implementing tester:testing reviewer:reviewing implementer:retro merger:merging; do
         role=${spec%%:*} phase=${spec#*:}
@@ -579,6 +581,14 @@ until_true_quiet() {
 
 begin prerequisites
 for tool in go psql jq curl ss tmux bun mise secrets gh jj hawk-token; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+# Legion's two role Apps, this deployment's own unless the App inputs name another's, proved
+# against GitHub here, before the run writes anything (lib/github-apps.sh, which the lib sourced
+# from ACCEPT_ROOT must carry).
+declare -F require_app_inputs >/dev/null ||
+  fail "ACCEPT_ROOT's scripts/e2e/lib/workflow.sh ($root) predates lib/github-apps.sh: point ACCEPT_ROOT at a checkout that has it"
+require_app_inputs implement review
+write_github_apps implement review
+read_app_logins
 [ -x "$nats_bin" ] || fail "no native nats-server at $nats_bin"
 # The suspension waits are bounded by lib/workflow.sh's turn budget, and the lib sourced is ACCEPT_ROOT's.
 [ -n "${phase_seconds:-}" ] || fail "ACCEPT_ROOT's scripts/e2e/lib/workflow.sh ($root) predates phase_seconds: point ACCEPT_ROOT at a checkout that has it"
@@ -644,8 +654,7 @@ dispatch_human POST projects "$(jq -cn --arg key "$project" --arg name "4b.13b a
 dispatch_human PUT "settings/repo-projects/$repo" "$(jq -cn --arg project "$project" '{project:$project,default:true}')" >/dev/null
 SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://127.0.0.1:$port_nats" \
   SMOKE_UPSTREAM_NATS="$upstream_nats" \
-  start_process bridge env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
-    -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 \
+  start_process bridge env -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" \
     bun run "$root/scripts/e2e/lib/envoy-bridge.ts"
 until_true 90 "the GitHub ingress bridge to report ready" grep -q 'BRIDGE READY' "$evidence/logs/bridge.log"
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
@@ -670,7 +679,6 @@ main_sha=$(gh api "repos/$repo/git/ref/heads/main" --jq .object.sha)
 gh api "repos/$repo/git/refs" -f ref="refs/heads/$scratch_base" -f sha="$main_sha" >/dev/null
 note "scratch base $repo:$scratch_base at main $main_sha"
 start_daemon
-read_app_logins
 note "project $project, profile $profile, plugins $(jq -r '.name + "@" + .version' "$envoy_manifest") and $(jq -r '.name + "@" + .version' "$manifest"), ports NATS $port_nats Dispatch $port_dispatch daemon $port_daemon listener $port_listener"
 pane_watcher &
 watcher_pid=$!
@@ -719,7 +727,8 @@ holder_tree="${project}-900"
 # the directory, and a delivery first adopts the working copy for the role's App (jj metaedit), so it
 # is a jj repository of its own; the holder never touches the smoke repository.
 holder_dir="$state/workspaces/$repo/${holder_tree,,}"
-mkdir -p "$holder_dir" && jj git init "$holder_dir" >/dev/null 2>&1 || fail "could not create the holder's jj workspace"
+mkdir -p "$holder_dir" || fail "could not create the holder's jj workspace"
+jj git init "$holder_dir" >/dev/null 2>&1 || fail "could not create the holder's jj workspace"
 holder=$(claims spawn --json --tree "$holder_tree" --issue "$holder_tree" --role architect \
   --task "Acceptance operation: call your envoy_role_set tool with role merge-queue now, so this session holds the merge-queue role. Then reply with the single line 'holding merge-queue' and wait. Do nothing else." | jq -er .token)
 claim_registered() { claim_is "$1" '(.session // "") != ""'; }
@@ -753,7 +762,7 @@ set_status "$child" todo
 until_true 180 "$child recorded under $root1" sh -c \
   "'$work/legion' state --json --port '$port_daemon' | jq -e --arg c '$child' '.issues[\$c].phase == \"admitted\"'"
 note "roots $root1 $root2 $root3; child $child admitted under $root1"
-for issue in "$root1" "$root2" "$root3"; do wait_for_worker "$issue" architect; done
+for issue in "$root1" "$root2" "$root3"; do wait_for_architect "$issue"; done
 printf '%s\n' "$root1" "$root2" "$root3" "$child" >"$work/instructor-issues"
 instructor &
 instructor_pid=$!

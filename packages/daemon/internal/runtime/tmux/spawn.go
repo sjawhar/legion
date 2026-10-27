@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,9 +42,23 @@ func treeName(issue string) string {
 	return full[:maxWindowNameLength-len(suffix)-1] + "-" + suffix
 }
 
+// controllerWindow is the window the daemon's own controller (`controller: daemon`) runs in, and
+// the working directory under the state directory it starts in: it works on no issue, so it shares
+// no issue's window, and no issue key, which always holds a `-`, is ever this name.
+const controllerWindow = "controller"
+
+// windowKey is what spec's pane shares a window by: its issue, or the controller's own window.
+func windowKey(spec runtime.SpawnSpec) string {
+	if spec.Role == claim.RoleController {
+		return controllerWindow
+	}
+	return spec.Issue
+}
+
 // runtimeOwned are the variables every pane gets from the runtime itself: exactly the names
 // panePairs sets for a tree pane (TestRuntimeOwnedIsWhatEveryPaneIsToldByTheRuntime), which the
-// shared validator refuses in a spec's Env and as a secret's pointer.
+// shared validator refuses in a spec's Env and as a secret's pointer. A controller pane is told
+// controllerOwned in place of the tree, issue and workspace.
 var runtimeOwned = map[string]bool{
 	"LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ROLE": true,
 	"LEGION_GENERATION": true, "LEGION_PROJECT": true, "LEGION_DAEMON_URL": true,
@@ -54,18 +70,37 @@ var runtimeOwned = map[string]bool{
 	"PI_SHELL_PREFIX": true, "PI_CONFIG_FILES": true,
 }
 
+// controllerOwned are the variables a controller pane is told in place of a tree pane's
+// LEGION_TREE, LEGION_ISSUE and LEGION_WORKSPACE: the controller marker the plugin classifies the
+// session by, and LEGION_SLACK_CHANNELS, which the plugin requires of the controller the daemon
+// launches — always empty here, since only a controller enrolled with the secrets broker
+// (runtime.kubernetes.agent_secrets) may have Slack channels (config.checkSlackChannels).
+var controllerOwned = map[string]bool{"LEGION_CONTROLLER": true, "LEGION_SLACK_CHANNELS": true}
+
+// ownedNames is every variable the runtime sets on some pane itself: a spec may set none of them.
+var ownedNames = func() map[string]bool {
+	owned := map[string]bool{}
+	for _, set := range []map[string]bool{runtimeOwned, controllerOwned} {
+		for name := range set {
+			owned[name] = true
+		}
+	}
+	return owned
+}()
+
 // validateSpawnSpec refuses a spec the runtime cannot honour exactly, before anything touches the
 // disk or tmux: the shared refusal (runtime.ValidateSpawnSpec) — nothing may reach a pane as a -e
 // value that is a secret, or that overrides a variable the runtime sets — then tmux's own. A claim
-// token names the pane's secret files, so it is one file name. A pane's workspace is a directory
-// on the daemon's own disk, which is never lost and recovered, so a spec recovering one is refused.
+// token names the pane's secret files, so it is one file name.
 //
 // providerKeys are the names the shim will export into OMP's environment from the provider-env
 // directory. The shim skips a NAME whose NAME_FILE pointer the pane carries and refuses to start
 // over a NAME the pane already carries (internal/shim/config.go:59-98), so a spec that collides
-// with one is refused here rather than launch a pane without its key.
-func validateSpawnSpec(spec runtime.SpawnSpec, providerKeys []string) error {
-	if err := runtime.ValidateSpawnSpec(spec, runtimeOwned); err != nil {
+// with one is refused here rather than launch a pane without its key. operatorEnv is the
+// operator's pane variables (Options.PaneEnv): a spec variable or secret pointer of the same name
+// would have one of the two silently win, so it is refused too.
+func validateSpawnSpec(spec runtime.SpawnSpec, providerKeys []string, operatorEnv map[string]string) error {
+	if err := runtime.ValidateSpawnSpec(spec, ownedNames); err != nil {
 		return err
 	}
 	// The token names the pane's secret files, and it is one file name: the shared validation
@@ -74,10 +109,7 @@ func validateSpawnSpec(spec runtime.SpawnSpec, providerKeys []string) error {
 	refuse := func(format string, args ...any) error {
 		return fmt.Errorf("spawn %s: "+format, append([]any{token}, args...)...)
 	}
-	if spec.WorkspaceRecoveredFrom != "" {
-		return refuse("the spec recovers a lost workspace from %s, and a tmux pane's workspace is on the daemon's own disk, never lost",
-			spec.WorkspaceRecoveredFrom)
-	}
+
 	for _, key := range providerKeys {
 		_, inEnv := spec.Env[key]
 		_, isSecret := spec.Secrets[key]
@@ -89,16 +121,30 @@ func validateSpawnSpec(spec runtime.SpawnSpec, providerKeys []string) error {
 			return refuse("provider key %s would not reach OMP: the pane carries %s_FILE", key, key)
 		}
 	}
+	for _, name := range sortedKeys(spec.Env) {
+		if _, set := operatorEnv[name]; set {
+			return refuse("Env sets %s, which runtime.tmux.pane_env sets on every pane", name)
+		}
+	}
+	for _, name := range sortedKeys(spec.Secrets) {
+		if _, set := operatorEnv[name+"_FILE"]; set {
+			return refuse("secret %s's pointer %s_FILE is set on every pane by runtime.tmux.pane_env", name, name)
+		}
+	}
 	return nil
 }
 
 // workspaceDir is where spec's agent works, under the daemon's state directory: the issue's jj
-// workspace the outbox provisioned at `<state_dir>/workspaces/<owner>/<repo>/<issue>`
-// (workspace.Location), which must exist, or, for a configuration with no repository,
-// `<state_dir>/workspaces/<issue>`, made here.
+// workspace the daemon provisioned at `<state_dir>/workspaces/<owner>/<repo>/<issue>`
+// (workspace.Location), which must exist; for a configuration with no repository,
+// `<state_dir>/workspaces/<issue>`, made here; and for the controller, which works no checkout,
+// `<state_dir>/controller`, made here.
 func (r *Runtime) workspaceDir(spec runtime.SpawnSpec) (string, error) {
-	if spec.Repository.IsZero() {
+	if spec.Role == claim.RoleController || spec.Repository.IsZero() {
 		dir := filepath.Join(r.stateDir, "workspaces", spec.Issue)
+		if spec.Role == claim.RoleController {
+			dir = filepath.Join(r.stateDir, controllerWindow)
+		}
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return "", fmt.Errorf("the workspace: %w", err)
 		}
@@ -154,35 +200,52 @@ type PaneInputs struct {
 	// GHOwnersDir is the claim's gh bundle root (runtime.GHConfigDir), the pane's
 	// LEGION_GH_OWNERS_DIR, GHDefault the bundle's default owner, whose directory is the pane's
 	// GH_CONFIG_DIR, and GH the real gh the pane's `legion gh` runs, its LEGION_GH_PATH; an empty
-	// GHOwnersDir is none, and the pane is then told no gh variable at all: every pane of a runtime
-	// whose GitHubCredential function is nil.
+	// GHDefault is the controller of a project with no GitHub owner, whose GH_CONFIG_DIR is the
+	// empty root itself, so its gh acts as nobody; an empty GHOwnersDir is none, and the pane is
+	// then told no gh variable at all: every pane of a runtime whose GitHubCredential function is
+	// nil.
 	GHOwnersDir, GHDefault, GH string
+	// OperatorEnv is the operator's pane variables (runtime.tmux.pane_env) and PiConfigFiles the
+	// operator's Oh My Pi overlays (runtime.tmux.pi_config_files); nil for none.
+	OperatorEnv   map[string]string
+	PiConfigFiles []string
 }
 
 // panePairs are a pane's -e pairs, in one order: the variables every Legion pane is told (the
-// identity, daemon, state, workspace, Envoy and Dispatch variables; for a pane with a GHOwnersDir,
+// identity — a tree pane's tree and issue, or the controller's marker LEGION_CONTROLLER=1 — the
+// daemon, state and, for a tree pane, workspace variables; for the controller, its empty
+// LEGION_SLACK_CHANNELS; the Envoy and Dispatch variables; for a pane with a GHOwnersDir,
 // GH_CONFIG_DIR, its default owner's directory of gh files, with GH_TOKEN, GITHUB_TOKEN and GH_HOST
 // set to the empty string, which gh ignores, so no token in the daemon's environment outranks the
 // file — a non-empty GH_TOKEN would — then LEGION_GH_OWNERS_DIR, the bundle's root, and
 // LEGION_GH_PATH, the real gh the `legion gh` wrapper first on the pane's PATH runs;
 // PI_SHELL_PREFIX, which keeps this daemon's launcher directory (its legion and gh) first in the
-// agent's bash tool; PI_CONFIG_FILES, which names the turn-scoping overlay writeTurnScopeOverlay
-// writes (podsafety.TurnScopeOverlay) — the one settings overlay a pane gets at all), the four XDG
-// base directories under `<state_dir>/home`, the spec's own variables sorted, then a `<NAME>_FILE`
-// pointer per secret file. PATH is never among them — tmux would replace it (LEGION-91) — and
-// neither is any secret's value. No other tool path is told: a pane's git and jj are whatever its
-// PATH, the daemon's, gives.
+// agent's bash tool; PI_CONFIG_FILES, the operator's overlays then the turn-scoping overlay
+// writeTurnScopeOverlay writes (podsafety.TurnScopeOverlay), last so its keys outrank theirs), the
+// four XDG base directories under `<state_dir>/home`, the operator's pane variables sorted, the
+// spec's own variables sorted, then a `<NAME>_FILE` pointer per secret file. PATH is never among
+// them — tmux would replace it (LEGION-91) — and neither is any secret's value. No other tool path
+// is told: a pane's git and jj are whatever its PATH, the daemon's, gives.
 func panePairs(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile) []string {
 	var pairs []string
 	add := func(name, value string) { pairs = append(pairs, "-e", name+"="+value) }
-	add("LEGION_TREE", spec.Tree)
-	add("LEGION_ISSUE", spec.Issue)
+	controller := spec.Role == claim.RoleController
+	if controller {
+		add("LEGION_CONTROLLER", "1")
+	} else {
+		add("LEGION_TREE", spec.Tree)
+		add("LEGION_ISSUE", spec.Issue)
+	}
 	add("LEGION_ROLE", string(spec.Role))
 	add("LEGION_GENERATION", strconv.FormatUint(spec.Generation, 10))
 	add("LEGION_PROJECT", spec.Project)
 	add("LEGION_DAEMON_URL", in.DaemonURL)
 	add("LEGION_STATE_DIR", in.StateDir)
-	add("LEGION_WORKSPACE", in.Workspace)
+	if controller {
+		add("LEGION_SLACK_CHANNELS", "")
+	} else {
+		add("LEGION_WORKSPACE", in.Workspace)
+	}
 	if len(in.NATSURLs) > 0 {
 		add("ENVOY_NATS_URL", strings.Join(in.NATSURLs, ","))
 	}
@@ -200,10 +263,14 @@ func panePairs(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile
 		add("LEGION_GH_PATH", in.GH)
 	}
 	add("PI_SHELL_PREFIX", shellprefix.For(workerbin.LauncherDir(in.StateDir)))
-	add("PI_CONFIG_FILES", filepath.Join(in.StateDir, podsafety.TurnScopeFile))
+	overlays := append(slices.Clone(in.PiConfigFiles), filepath.Join(in.StateDir, podsafety.TurnScopeFile))
+	add("PI_CONFIG_FILES", strings.Join(overlays, ":"))
 	add("GIT_TERMINAL_PROMPT", "0")
 	for _, dir := range xdgDirectories(in.StateDir) {
 		add(dir[0], dir[1])
+	}
+	for _, name := range sortedKeys(in.OperatorEnv) {
+		add(name, in.OperatorEnv[name])
 	}
 	for _, name := range sortedKeys(spec.Env) {
 		if name != "PATH" {
@@ -227,9 +294,10 @@ func makePaneHome(stateDir string) error {
 }
 
 // writeTurnScopeOverlay writes podsafety.TurnScopeOverlay under stateDir, read-only, so panePairs
-// can name it first in a pane's PI_CONFIG_FILES: the one settings overlay a tmux pane gets at all,
-// the same one a pod's shim writes (podsafety.Apply), and the two keys supervise.Machine.Quiesce's
-// own promise depends on regardless of runtime (LEGION-462).
+// can name it last in a pane's PI_CONFIG_FILES, after the operator's own overlays
+// (runtime.tmux.pi_config_files): the same overlay a pod's shim writes (podsafety.Apply), and the
+// two keys supervise.Machine.Quiesce's own promise depends on regardless of runtime (LEGION-462),
+// which no operator overlay outranks here.
 func writeTurnScopeOverlay(stateDir string) error {
 	return podsafety.WriteReadOnly(filepath.Join(stateDir, podsafety.TurnScopeFile), podsafety.TurnScopeOverlay)
 }
@@ -300,14 +368,25 @@ func (r *Runtime) Spawn(ctx context.Context, spec runtime.SpawnSpec) (runtime.Lo
 	if spec.ResumeSessionFile != "" {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: a ResumeSessionFile is Resume's to set", spec.Claim)
 	}
-	return r.launch(ctx, spec)
+	return r.launch(ctx, spec, false)
 }
 
 // Resume starts the agent prev's claim recorded, again, from spec.ResumeSessionFile — after
 // waiting, up to the stop grace, for prev's incarnation to be gone: one claim, one process. A nil
 // prev means no previous incarnation is known (a claim suspended across a daemon restart) and
-// there is nothing to wait for. A session file that is missing is a refusal, never a fresh agent:
-// the claim resumes the agent it recorded or none (assertResumeSessionFile, runtime.ts).
+// there is nothing to wait for; under runtime.tmux.take_over, so does a prev of the runtime this
+// one takes over (foreign), whose process this runtime cannot see, and without the key such a prev
+// is refused, naming the key (paneOf). The session is resumed where it is: at its recorded path,
+// or, by its name, in another working directory's folder of the recorded path's sessions directory
+// or of the pane's own (sessionFileOf), where a session carried over from a pod lands. One found
+// nowhere starts nothing. A session this runtime takes over found nowhere wraps
+// runtime.ErrSessionFileMissing, which the claim's machine answers by forgetting the session and
+// spawning a fresh agent: the session was another runtime's, and the operator chose the takeover.
+// That is a resume over a foreign prev, and every session found nowhere while take_over is set
+// (takingOverSession), since neither the recorded path nor the previous incarnation tells the
+// other runtime's sessions from this host's own. With the key off, a session found nowhere is a
+// refusal, never a fresh agent: the claim resumes the agent it recorded or none
+// (assertResumeSessionFile, runtime.ts), and the refusal is charged as any launch failure is.
 func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	if spec.ResumeSessionFile == "" {
 		return runtime.Locator{}, fmt.Errorf("resume %s: no session file to resume from", spec.Claim)
@@ -315,18 +394,19 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 	if err := (runtime.Known{Claim: spec.Claim, Locator: prev}).Validate(); err != nil {
 		return runtime.Locator{}, fmt.Errorf("resume: %w", err)
 	}
-	if prev != nil {
+	takenOver := prev != nil && r.foreign(*prev)
+	if prev != nil && !takenOver {
 		if err := r.awaitGone(ctx, *prev); err != nil {
 			return runtime.Locator{}, err
 		}
 	}
-	return r.launch(ctx, spec)
+	return r.launch(ctx, spec, takenOver)
 }
 
 // awaitGone waits, up to the stop grace, until loc's incarnation is no longer its pane's process,
 // then stops watching it.
 func (r *Runtime) awaitGone(ctx context.Context, loc runtime.Locator) error {
-	pane, inc, err := paneOf(loc)
+	pane, inc, err := r.paneOf(loc)
 	if err != nil {
 		return fmt.Errorf("resume %s: %w", loc.Claim, err)
 	}
@@ -350,9 +430,11 @@ func (r *Runtime) awaitGone(ctx context.Context, loc runtime.Locator) error {
 }
 
 // launch is Spawn's and Resume's shared half: every check that needs no tmux, the secret files,
-// the claim's gh bundle, then the pane.
-func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.Locator, error) {
-	if err := validateSpawnSpec(spec, r.providerKeys); err != nil {
+// the claim's gh bundle, then the pane. takenOver is a resume over a previous incarnation of the
+// runtime this one takes over (Resume); its session, or any session while take_over is set
+// (takingOverSession), found nowhere is runtime.ErrSessionFileMissing rather than a refusal.
+func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec, takenOver bool) (runtime.Locator, error) {
+	if err := validateSpawnSpec(spec, r.providerKeys, r.operatorEnv); err != nil {
 		return runtime.Locator{}, err
 	}
 	for _, path := range append(append([]string{}, spec.Prompt.RolePromptPaths...), spec.Prompt.DeploymentInstructionsPath) {
@@ -374,18 +456,35 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
 	}
 	if spec.ResumeSessionFile != "" {
-		if _, err := os.Stat(spec.ResumeSessionFile); err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				verb := "respawning"
-				if claim.IsTreeArchitect(spec.Role, spec.Issue, spec.Tree) {
-					verb = "resurrecting"
-				}
-				return runtime.Locator{}, fmt.Errorf("Refusing to start %s fresh while %s: recorded %s session file is missing: %s",
-					spec.Issue, verb, runtime.Backends[backend].Name, spec.ResumeSessionFile)
+		harness := runtime.Backends[backend].Name
+		found, searched, err := sessionFileOf(spec.ResumeSessionFile, func() (string, error) {
+			env := maps.Clone(r.paneEnv)
+			maps.Copy(env, r.operatorEnv)
+			dir, err := launcher.SessionsDir(spec, Host{StateDir: r.stateDir, Legion: r.legion}, env, workDir)
+			if err != nil {
+				return "", fmt.Errorf("the pane's %s sessions directory: %w", harness, err)
 			}
+			return dir, nil
+		})
+		switch {
+		case err != nil:
 			return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
+		case found == "" && (takenOver || r.takingOverSession()):
+			return runtime.Locator{}, fmt.Errorf("resume %s: %w: no %s session at %s, and no other folder of %s holds that session",
+				spec.Claim, runtime.ErrSessionFileMissing, harness, spec.ResumeSessionFile, searchedIn(searched))
+		case found == "":
+			verb := "respawning"
+			if claim.IsTreeArchitect(spec.Role, spec.Issue, spec.Tree) {
+				verb = "resurrecting"
+			}
+			return runtime.Locator{}, fmt.Errorf("Refusing to start %s fresh while %s: recorded %s session file is missing: %s, and no other folder of %s holds that session",
+				spec.Issue, verb, harness, spec.ResumeSessionFile, searchedIn(searched))
+		case found != spec.ResumeSessionFile:
+			r.log.Warn("tmux runtime: the recorded session is in another folder; resuming it there",
+				"claim", spec.Claim, "backend", backend, "recorded", spec.ResumeSessionFile, "session", found)
+			spec.ResumeSessionFile = found
 		}
-		r.log.Info("tmux runtime: resuming a recorded "+runtime.Backends[backend].Name+" session", "claim", spec.Claim, "backend", backend, "session", spec.ResumeSessionFile)
+		r.log.Info("tmux runtime: resuming a recorded "+harness+" session", "claim", spec.Claim, "backend", backend, "session", spec.ResumeSessionFile)
 	}
 	if err := makePaneHome(r.stateDir); err != nil {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
@@ -401,16 +500,26 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	if r.gitHubCredential != nil {
 		ghRoot = runtime.GHConfigDir(r.stateDir, spec.Claim)
 		bundle, err := r.gitHubCredential(ctx, spec.Role, ghWriter)
-		if err != nil {
+		switch {
+		case spec.Role == claim.RoleController && errors.Is(err, runtime.ErrNoGitHubOwner):
+			// A project with no GitHub owner to mint for still runs its controller, with gh acting
+			// as nobody, as `legion controller start` and the sandbox runtime do there: its gh
+			// directory empty, so no token an earlier launch wrote outlives this one.
+			if err := emptyGitHubBundle(ghRoot); err != nil {
+				return runtime.Locator{}, fmt.Errorf("spawn %s: empty the github credential: %w", spec.Claim, err)
+			}
+			r.log.Info("tmux runtime: no GitHub owner to act for; the controller's gh acts as nobody", "claim", spec.Claim)
+		case err != nil:
 			return runtime.Locator{}, fmt.Errorf("spawn %s: write the github credential: %w", spec.Claim, err)
+		default:
+			if _, err := ghconfig.WriteBundle(ghRoot, bundle); err != nil {
+				return runtime.Locator{}, fmt.Errorf("spawn %s: write the github credential: %w", spec.Claim, err)
+			}
+			ghDefault = bundle.Default
+			written := bundle.Owners[ghDefault]
+			r.log.Info("tmux runtime: github credential written", "claim", spec.Claim, "role", spec.Role, "app", written.App,
+				"expiresAt", written.ExpiresAt, "owners", bundle.OwnerNames())
 		}
-		if _, err := ghconfig.WriteBundle(ghRoot, bundle); err != nil {
-			return runtime.Locator{}, fmt.Errorf("spawn %s: write the github credential: %w", spec.Claim, err)
-		}
-		ghDefault = bundle.Default
-		written := bundle.Owners[ghDefault]
-		r.log.Info("tmux runtime: github credential written", "claim", spec.Claim, "role", spec.Role, "app", written.App,
-			"expiresAt", written.ExpiresAt, "owners", bundle.OwnerNames())
 	}
 	path := r.paneEnv["PATH"]
 	if spec.Env["PATH"] != "" {
@@ -425,15 +534,17 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	pairs := panePairs(spec, PaneInputs{
 		StateDir: r.stateDir, Workspace: workDir, DaemonURL: r.daemonURL, EnvoyURL: r.envoyURL, NATSURLs: r.natsURLs,
 		DispatchURL: r.dispatchURL, DispatchTokenFile: r.dispatchToken, GHOwnersDir: ghRoot, GHDefault: ghDefault, GH: r.gh,
+		OperatorEnv: r.operatorEnv, PiConfigFiles: r.piConfigFiles,
 	}, files)
 	return r.openPane(ctx, spec, ghWriter, paneCommand(append(pairs, backendPairs...), command))
 }
 
 // openPane puts the pane on the server under the launch lock: into the window of a pane of the
-// same issue that still verifies as its recorded process, else into a new window for the issue.
-// The pane is recorded — its incarnation read, the process watched with ghWriter, the owner its
-// launch minted the gh bundle's write token for ("" for none) — before the lock is released, so the
-// next spawn on the issue can share its window and no orphan sweep mistakes it for one.
+// same issue — or, for the controller, of the controller's own window — that still verifies as its
+// recorded process, else into a new window named for it (windowKey). The pane is recorded — its
+// incarnation read, the process watched with ghWriter, the owner its launch minted the gh bundle's
+// write token for ("" for none) — before the lock is released, so the next spawn on the issue can
+// share its window and no orphan sweep mistakes it for one.
 func (r *Runtime) openPane(ctx context.Context, spec runtime.SpawnSpec, ghWriter string, pane []string) (runtime.Locator, error) {
 	r.launchMu.Lock()
 	defer r.launchMu.Unlock()
@@ -441,7 +552,8 @@ func (r *Runtime) openPane(ctx context.Context, spec runtime.SpawnSpec, ghWriter
 	if err := r.refuseLiveIncarnation(ctx, spec.Claim); err != nil {
 		return runtime.Locator{}, err
 	}
-	window, err := r.issueWindow(ctx, spec.Issue)
+	key := windowKey(spec)
+	window, err := r.issueWindow(ctx, key)
 	if err != nil {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
 	}
@@ -449,7 +561,7 @@ func (r *Runtime) openPane(ctx context.Context, spec runtime.SpawnSpec, ghWriter
 	if window != "" {
 		report, err = r.splitWindow(ctx, window, pane)
 	} else {
-		report, err = r.openWindow(ctx, treeName(spec.Issue), pane)
+		report, err = r.openWindow(ctx, treeName(key), pane)
 	}
 	if err != nil {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
@@ -472,7 +584,7 @@ func (r *Runtime) openPane(ctx context.Context, spec runtime.SpawnSpec, ghWriter
 		Incarnation: incarnation{pid: report.pid, ticks: ticks}.String(),
 		Tmux:        &runtime.TmuxLocator{Window: report.window, Pane: report.pane},
 	}
-	r.track(loc, spec.Issue, ghWriter)
+	r.track(loc, key, ghWriter)
 	return loc, nil
 }
 
@@ -524,7 +636,7 @@ func (r *Runtime) refuseLiveIncarnation(ctx context.Context, token claim.Token) 
 		if entry.locator.Claim != token {
 			continue
 		}
-		pane, inc, err := paneOf(entry.locator)
+		pane, inc, err := r.paneOf(entry.locator)
 		if err != nil {
 			return err
 		}
@@ -553,7 +665,7 @@ func (r *Runtime) issueWindow(ctx context.Context, issue string) (string, error)
 		if entry.issue != issue {
 			continue
 		}
-		pane, inc, err := paneOf(entry.locator)
+		pane, inc, err := r.paneOf(entry.locator)
 		if err != nil {
 			return "", err
 		}

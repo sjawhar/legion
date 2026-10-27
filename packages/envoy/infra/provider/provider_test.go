@@ -9,9 +9,12 @@ import (
 	"github.com/blang/semver"
 	p "github.com/pulumi/pulumi-go-provider"
 	"github.com/pulumi/pulumi-go-provider/integration"
+	pproperty "github.com/pulumi/pulumi/sdk/v3/go/property"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sjawhar/envoy/infra/internal/pulumitest"
 	"github.com/sjawhar/envoy/infra/provider"
+	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 // schemaJSON serves the plugin in process and returns the schema it answers GetSchema with.
@@ -30,6 +33,7 @@ func schemaJSON(t *testing.T) string {
 type property struct {
 	Type   string `json:"type"`
 	Secret bool   `json:"secret"`
+	Plain  bool   `json:"plain"`
 	Ref    string `json:"$ref"`
 	Items  struct {
 		Ref string `json:"$ref"`
@@ -141,13 +145,47 @@ func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
 	require.True(t, dispatch.IsComponent)
 	require.True(t, dispatch.InputProperties["tailnetAuthKey"].Secret)
 	require.True(t, dispatch.InputProperties["signInClientSecret"].Secret)
-	require.False(t, dispatch.InputProperties["agentSecretsTokenSecret"].Secret)
+	require.Contains(t, dispatch.InputProperties, "agentSecretsAudience")
+	require.False(t, dispatch.InputProperties["agentSecretsAudience"].Secret)
+	require.NotContains(t, dispatch.InputProperties, "agentSecretsTokenSecret")
 	require.NotContains(t, dispatch.InputProperties, "agentSecretsToken")
 	require.NotContains(t, dispatch.InputProperties, "appPrivateKey")
 	for _, input := range []string{"appClientId", "appId", "appPrivateKeySecretName", "appPrivateKeySecretKey"} {
 		require.False(t, dispatch.InputProperties[input].Secret, input)
 	}
+	// The Azure embedder's inputs are references and identifiers, never the key: the key form
+	// takes a Secret Manager path, the keyless form a tenant and a client id.
+	for _, input := range []string{
+		"azureEmbedEndpoint", "azureEmbedDeployment", "azureEmbedTokensPerMinute", "azureEmbedKeySecret",
+		"azureTenantId", "azureClientId", "azureFederationAudience",
+	} {
+		require.Contains(t, dispatch.InputProperties, input)
+		require.False(t, dispatch.InputProperties[input].Secret, input)
+		require.NotContains(t, dispatch.RequiredInputs, input)
+	}
+	require.NotContains(t, dispatch.InputProperties, "azureEmbedKey")
+	// The profiler's port is an optional plain integer.
+	require.Equal(t, "integer", dispatch.InputProperties["pprofPort"].Type)
+	require.False(t, dispatch.InputProperties["pprofPort"].Secret)
+	require.NotContains(t, dispatch.RequiredInputs, "pprofPort")
+	// The app container's size is two optional plain strings, Kubernetes quantities.
+	for _, input := range []string{"appCpu", "appMemory"} {
+		require.Equal(t, "string", dispatch.InputProperties[input].Type, input)
+		require.False(t, dispatch.InputProperties[input].Secret, input)
+		require.NotContains(t, dispatch.RequiredInputs, input)
+	}
+	// The app pod's disruption protection is an optional plain string and an optional plain integer.
+	for input, typ := range map[string]string{"appPriorityClassName": "string", "appPdbMinAvailable": "integer"} {
+		require.Equal(t, typ, dispatch.InputProperties[input].Type, input)
+		require.True(t, dispatch.InputProperties[input].Plain, input)
+		require.False(t, dispatch.InputProperties[input].Secret, input)
+		require.NotContains(t, dispatch.RequiredInputs, input)
+	}
 	require.True(t, dispatch.Properties["agentToken"].Secret)
+	for _, output := range []string{"serviceAccountIssuer", "serviceAccountSubject"} {
+		require.Equal(t, "string", dispatch.Properties[output].Type, output)
+		require.False(t, dispatch.Properties[output].Secret, output)
+	}
 }
 
 func TestSchemaServesTheNatsServiceComponentWithNoSecretInput(t *testing.T) {
@@ -180,10 +218,13 @@ func TestSchemaServesTheWebhookListenerComponentWithNoSecretInput(t *testing.T) 
 	for name, input := range listener.InputProperties {
 		require.False(t, input.Secret, "%s is not a secret input", name)
 	}
-	// Every input is required but the seed, each webhook's inputs and adopt.
+	// Every input is required but the seed, each webhook's inputs, the opt-in to every
+	// notification topic and adopt.
 	require.ElementsMatch(t, []string{
-		"seedSecretArn", "githubWebhookSecretArn", "slackSigningSecretArn", "reviewerAppId", "mentionTrigger", "adopt",
+		"seedSecretArn", "githubWebhookSecretArn", "slackSigningSecretArn", "reviewerAppId", "mentionTrigger",
+		"subscribeAllTopics", "adopt",
 	}, optionalInputs(listener.InputProperties, listener.RequiredInputs))
+	require.Equal(t, "boolean", listener.InputProperties["subscribeAllTopics"].Type)
 }
 
 // optionalInputs are the names in properties that required does not list.
@@ -195,4 +236,41 @@ func optionalInputs[V any](properties map[string]V, required []string) []string 
 		}
 	}
 	return optional
+}
+
+// Every integer input of every component the plugin serves refuses a fraction through Construct,
+// as a typed SDK or Pulumi YAML program sends one, naming the component and the input, before the
+// component registers anything. Each input is sent alone: the refusal runs before the component
+// decodes its inputs, so no other input need be valid. The inputs come from the served schema, so
+// an integer input is covered the day it is added.
+func TestConstructRefusesAFractionInEveryIntegerInput(t *testing.T) {
+	var covered int
+	for typ, component := range servedSchema(t).Resources {
+		for input, spec := range component.InputProperties {
+			if spec.Type != "integer" {
+				continue
+			}
+			covered++
+			t.Run(typ+"/"+input, func(t *testing.T) {
+				m := &pulumitest.Mocks{}
+				_, err := pulumitest.Construct(t, m, typ, "example", map[string]pproperty.Value{input: pproperty.New(2.5)}, false, nil)
+				require.EqualError(t, err, typ+" example: "+input+" 2.5 must be a whole number")
+				require.Empty(t, m.Types())
+			})
+			// The check's refusal quotes the component's name, so a name holding an nkey seed is
+			// left to the component, which refuses it first without quoting it.
+			t.Run(typ+"/"+input+"/a seed as the name", func(t *testing.T) {
+				seed, _ := testnats.User(t)
+				m := &pulumitest.Mocks{}
+				_, err := pulumitest.Construct(t, m, typ, seed, map[string]pproperty.Value{input: pproperty.New(2.5)}, false, nil)
+				require.ErrorContains(t, err, "nkey seed")
+				require.NotContains(t, err.Error(), seed)
+				require.Empty(t, m.Types())
+			})
+		}
+	}
+	// aws:NatsService logRetentionDays; aws:WebhookListener logRetentionDays and natsReplicas;
+	// gcp:Dispatch replicas, pprofPort and azureEmbedTokensPerMinute; gcp:NatsHub diskSizeGb;
+	// host:Listener port.
+	require.GreaterOrEqual(t, covered, 8)
 }

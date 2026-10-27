@@ -1,8 +1,15 @@
 import type { Event } from "../../api/types";
 import { capabilityLabel } from "../conversation/delivery";
-import { actorLabel, describeAskResolution } from "../refs/actor";
+import { type AgentPart, askResolutionParts } from "../refs/AgentName";
 
-export function eventDescription(event: Event): string {
+/** An event's line in the Pinned tab, as `AgentPart`s: an agent it names keeps its identity
+ *  until `EventBody` draws it through `AgentName`. */
+export function eventDescription(event: Event): AgentPart[] {
+  const description = describe(event);
+  return typeof description === "string" ? [description] : description;
+}
+
+function describe(event: Event): string | AgentPart[] {
   switch (event.type) {
     case "project.created":
       return `Project created: ${event.payload.name}`;
@@ -10,12 +17,24 @@ export function eventDescription(event: Event): string {
       return `Project updated: ${event.payload.name}`;
     case "settings.repo_project.updated":
       return `${event.payload.deleted ? "Repository mapping removed" : "Repository mapping updated"}: ${event.payload.mapping.repo}`;
+    case "settings.project_default_assignee.updated":
+      return event.payload.assignee === null
+        ? `Default assignee cleared: ${event.payload.project}`
+        : `Default assignee updated: ${event.payload.project} → ${event.payload.assignee}`;
     case "settings.architecture_source.updated":
       return `${event.payload.deleted ? "Architecture source removed" : "Architecture source updated"}: ${event.payload.source.repo}`;
-    case "architecture.synced":
-      return `Architecture synced: ${event.payload.components} component${event.payload.components === 1 ? "" : "s"} at ${event.payload.commit.slice(0, 12)}`;
+    // An event retained from before a project had several sources names no repository and
+    // keeps its original wording.
+    case "architecture.synced": {
+      const count = `${event.payload.components} component${event.payload.components === 1 ? "" : "s"} at ${event.payload.commit.slice(0, 12)}`;
+      return event.payload.repo === undefined
+        ? `Architecture synced: ${count}`
+        : `Architecture synced from ${event.payload.repo}: ${count}`;
+    }
     case "architecture.sync_failed":
-      return `Architecture sync failed: ${event.payload.error}`;
+      return event.payload.repo === undefined
+        ? `Architecture sync failed: ${event.payload.error}`
+        : `Architecture sync from ${event.payload.repo} failed: ${event.payload.error}`;
     case "user_state.updated":
       return "User state updated";
     case "user_agent_state.updated":
@@ -23,7 +42,7 @@ export function eventDescription(event: Event): string {
     case "user_thread_state.updated":
       return "Thread read";
     case "ask.resolved":
-      return describeAskResolution(event.payload.resolution);
+      return askResolutionParts(event.payload.resolution);
     case "ask.answered":
       return event.payload.previous_answer === undefined
         ? `Ask answered: ${event.payload.question}`
@@ -76,7 +95,7 @@ export function eventDescription(event: Event): string {
     case "issue.claimed":
       return event.payload.previous_claim === undefined
         ? "Issue claimed"
-        : `Claim taken from ${actorLabel(event.payload.previous_claim.actor)}`;
+        : ["Claim taken from ", { actor: event.payload.previous_claim.actor }];
     case "issue.released":
       return event.payload.reason === "closed" ? "Claim released on close" : "Claim released";
     case "issue.deployed":
@@ -100,13 +119,19 @@ export function eventDescription(event: Event): string {
     case "child.removed":
       return `Removed child ${event.payload.child_key}`;
     case "subscription.remove_requested":
-      return `Unsubscribe requested for ${event.payload.session_id}`;
+      return [
+        "Unsubscribe requested for ",
+        { sessionId: event.payload.session_id, storedTitle: undefined },
+      ];
     case "subscription.removed":
-      return `Unsubscribed ${event.payload.session_id}`;
+      return ["Unsubscribed ", { sessionId: event.payload.session_id, storedTitle: undefined }];
     case "ask.follower_added":
-      return `${event.payload.session_id} follows an ask`;
+      return [{ sessionId: event.payload.session_id, storedTitle: undefined }, " follows an ask"];
     case "ask.follower_removed":
-      return `${event.payload.session_id} unfollowed an ask`;
+      return [
+        { sessionId: event.payload.session_id, storedTitle: undefined },
+        " unfollowed an ask",
+      ];
     case "block.repaired":
       return `Repaired block ${event.payload.block_id}`;
     case "block.invalid":

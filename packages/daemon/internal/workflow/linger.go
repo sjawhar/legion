@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/legion/daemon/internal/blockers"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -22,24 +23,30 @@ import (
 // it leaves the table, its phase parked in done, so no transition or status write follows the
 // human's move; the tree's architect is told, and decides what the rest of its tree does, as the
 // shipped daemon routes a child's close to the architect. A later todo re-enters the child. What
-// becomes of the child's claims and its pod is the status's: a child parked in backlog, icebox or
-// triage has every claim suspended and its Sandbox kept, sessions and volume with it, until it runs
-// again or its tree closes; a child closed as done with no merged pull request (close_root, a
-// human's done) is finished, so each of its claims is closed (issue_close: retired, its session
-// dropped) and its Sandbox released with the volume it owns (record.IssueSuspend's Release), while
-// its parent keeps running on a volume of its own. A child closed as done at its merge still owes
-// its production check: five of its claims are closed, the implementer's is not, no IssueSuspend
-// is written, and the check opens in the implementer's live session; the check's close writes the
-// release (closeCheck). A done child set back to todo starts fresh. An issue leaving disarms its
-// open pull request (disarmOpen), as a root's linger disarms every member's.
+// becomes of the child's claims is the status's: a child parked in backlog, icebox or triage has
+// every claim suspended with its session, for a later todo to resume; a child closed as done with
+// no merged pull request (close_root, a human's done) is finished, so each of its claims is
+// closed (issue_close: retired, its session dropped). Its pod goes either way, and the disk it
+// ran on with it, so its Sandbox is deleted either way (record.IssueSuspend), while its parent
+// keeps running in a pod of its own. A child closed as done at its merge still owes its
+// production check: five of its claims are closed, the implementer's is not, no IssueSuspend is
+// written, and the check opens in the implementer's live session; the check's close writes the
+// suspension (closeCheck). A done child set back to todo starts fresh. An issue leaving disarms
+// its open pull request (disarmOpen), as a root's linger disarms every member's.
 //
-// A child's leave may be the last its root waited for: a root the boot's sweep left in
-// awaiting_merge on a merged pull request while a child still ran (booted) closes once no child is
-// in the workflow (closeAwaitingRoot). The child's check opens after that close, so its start row
-// follows the linger's suspends and resumes the implementer as a root's own check does, rather
-// than being stopped by them.
+// A member's leave may be the last its root waited for: a merged root stands in awaiting_merge
+// while any other issue of its tree is in the workflow (closeMerged), and closes once the last of
+// them leaves (closeAwaitingRoot). Every way a member stops holding it runs this function — a
+// status moving to backlog, icebox, triage or done (dispatchIssue), a phase reaching done
+// (transition), the architect's close_root, and LeaveUnslotted — and the boot's sweep is the
+// backstop. The child's check opens after that close, so its start row follows the linger's
+// suspends and resumes the implementer as a root's own check does, rather than being stopped by
+// them.
 func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, status string) error {
 	e.logOnCommit(ctx, "workflow: issue left the workflow", "issue", issue.Key, "tree", issue.Tree, "status", status)
+	if err := e.untellUnresumedChanges(ctx, tx, issue); err != nil {
+		return err
+	}
 	if claim.IsTreeRoot(issue.Key, issue.Tree) {
 		if issue.Lingers() {
 			return nil
@@ -72,9 +79,9 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 		return err
 	}
 	merged := status == "done" && pr != nil && pr.State == record.PullRequestMerged
-	op, release, except := record.SuperviseOp("suspend"), false, claim.Role("")
+	op, except := record.SuperviseOp("suspend"), claim.Role("")
 	if status == "done" {
-		op, release = "issue_close", true
+		op = "issue_close"
 	}
 	if merged {
 		except = claim.RoleImplementer
@@ -91,7 +98,7 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 	}
 	if !merged {
 		if err := e.enqueue(ctx, tx, issue.Key, record.IssueSuspend{
-			Tree: issue.Tree, Generation: issue.Generation, TreeGeneration: root.Generation, Release: release,
+			Tree: issue.Tree, Generation: issue.Generation, TreeGeneration: root.Generation,
 		}); err != nil {
 			return err
 		}
@@ -140,7 +147,7 @@ func (e *Engine) operatorHoldsTree(ctx context.Context, tx pgx.Tx, root record.I
 func (e *Engine) leaveUnderOperator(ctx context.Context, tx pgx.Tx, root record.Issue, status string) error {
 	e.logOnCommit(ctx, "workflow: a waiting root left the workflow while the operator runs a tree under its key; the operator's tree is left alone",
 		"issue", root.Key, "tree", root.Tree, "status", status)
-	root.Phase, root.Hold, root.ReadyPendingVersion = phase.Done, nil, nil
+	root.Phase, root.Hold, root.Awaiting, root.ReadyPendingVersion = phase.Done, nil, nil, nil
 	return e.store.PutIssue(ctx, tx, root)
 }
 
@@ -168,11 +175,12 @@ func (e *Engine) openCheckIfMerged(ctx context.Context, tx pgx.Tx, issue record.
 	return e.openCheck(ctx, tx, issue, *pr, wake)
 }
 
-// closeAwaitingRoot closes root when its merge was waiting on its children: the boot's sweep leaves
-// a migrated root in awaiting_merge (or held from it) on a merged pull request while a child still
-// runs (booted), and the root closes, as its merge would have, once no child of its tree is in the
-// workflow — one still admitted, or in a phase short of done with a workflow status, keeps it
-// waiting. Any other root changes nothing here.
+// closeAwaitingRoot closes root when its merge was waiting on the rest of its tree: a merged root
+// stands in awaiting_merge (or held from it) while any other member of its tree is in the workflow
+// (closeMerged), and closes, as its merge would have, once the last of them leaves. Which members
+// still hold it is closeMerged's to judge, so this runs on every issue that leaves the workflow
+// and changes nothing for any other root. It tells nobody: the architect heard the wait when the
+// close entered it (merged), and this path is walked at every departure.
 func (e *Engine) closeAwaitingRoot(ctx context.Context, tx pgx.Tx, root record.Issue) error {
 	if !awaitsMerge(root) {
 		return nil
@@ -181,17 +189,12 @@ func (e *Engine) closeAwaitingRoot(ctx context.Context, tx pgx.Tx, root record.I
 	if err != nil || pr == nil || pr.State != record.PullRequestMerged {
 		return err
 	}
-	members, err := e.treeMembers(ctx, tx, root)
-	if err != nil {
+	waiting, err := e.closeMerged(ctx, tx, root, pr)
+	if err != nil || len(waiting) > 0 {
 		return err
 	}
-	for _, member := range members {
-		if member.Key != root.Key && InWorkflow(member) {
-			return nil
-		}
-	}
 	e.logOnCommit(ctx, "workflow: a merged root closes once its last child left the workflow", "issue", root.Key, "pullRequest", pr.Number)
-	return e.closeMerged(ctx, tx, root, pr)
+	return nil
 }
 
 // awaitsMerge says whether issue awaits its merge: in awaiting_merge, or held from it, the hold
@@ -216,7 +219,7 @@ func InWorkflow(issue record.Issue) bool {
 func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) error {
 	until := e.lingerAt()
 	root.LingerUntil = &until
-	root.Phase, root.Hold = phase.Done, nil
+	root.Phase, root.Hold, root.Awaiting = phase.Done, nil, nil
 	if err := e.store.PutIssue(ctx, tx, root); err != nil {
 		return err
 	}
@@ -249,12 +252,35 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 // lingerExpired is fenced on the root generation, and the durable hand-over record makes a late
 // daemon PATCH no-op when the root came back before its event arrives. Each hand-over keeps the
 // child's phase, gate, phase rows and pull request across a new root generation; promotion starts
-// the phase's role again in that phase. A child still admitted never started under its tree's
-// design, and one finished or parked has no run to carry on.
+// the phase's role again in that phase. A child finished or parked has no run to carry on.
+//
+// A child still admitted never started under its tree's design, so it is left where it is — with
+// one exception: one the mirror still shows waiting on an unfinished issue (blockers.Holds)
+// is handed over, so that a child whose blockers outlive its tree is not parked for good but comes
+// back as a root of its own once they close. A never-gated child of a finishing tree, which waits
+// on nothing, would instead take an admission slot for work its tree's design never opened. The
+// mirror is loaded by the first member that reaches that exception and then read for the rest
+// (blockers.Load), so the ordinary finishing tree — whose members all left admitted long ago —
+// loads nothing: record.Issue.CarriesRun is false at phase.Admitted, so the new root carries no
+// run, and its re-admission is another tree's work arriving rather than its own coming back, so
+// it is no tree taken back either — it is checked, which is what the blocked-root rule reads when
+// the child comes up for admission (blockers.Exempt).
 func (e *Engine) settleUnfinished(ctx context.Context, tx pgx.Tx, root record.Issue, members []record.Issue) error {
+	var rows map[string]blockers.Row
 	for _, member := range members {
-		if member.Key == root.Key || member.Phase == phase.Admitted || record.OutOfWorkflow(member.Status) {
+		if member.Key == root.Key || record.OutOfWorkflow(member.Status) {
 			continue
+		}
+		if member.Phase == phase.Admitted {
+			if rows == nil {
+				var err error
+				if rows, err = blockers.Load(ctx, tx, e.store, e.cfg.Project); err != nil {
+					return err
+				}
+			}
+			if len(blockers.Holds(rows, member)) == 0 {
+				continue
+			}
 		}
 		if err := e.handOver(ctx, tx, root, member); err != nil {
 			return err

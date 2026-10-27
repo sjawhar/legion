@@ -84,13 +84,13 @@ var commands = map[string]commandEntry{
 	"restart":        {runRestart, "stop a registered daemon and start it again from the configuration it recorded"},
 	"claude-bridge":  {runClaudeBridge, "run Claude Code in Oh My Pi's place under worker-shim, for a role worker_backends puts on claude"},
 	"worker-shim":    {runWorkerShim, "bridge an agent's Oh My Pi to the daemon's worker stream (the daemon starts it in every pod)"},
-	"launcher":       {runLauncher, "PID 1 of one role container in an issue pod: starts and stops that role's worker-shim on the daemon's command"},
+	"launcher":       {runLauncher, "PID 1 of an issue pod's roles container or the controller's pod: starts and stops each role's worker-shim on the daemon's command"},
 	"model-token":    {runModelToken, "sign a pod in to Cognito with its service-account token and print the access token (a model apiKey command)"},
 	"claims":         {runClaims, "the operator's hand on the daemon's claims"},
 	"sessions":       {runSessions, "copy recorded session files into Oh My Pi's session database (runtime.kubernetes.session_store postgres)"},
 	"probe-boot":     {runProbeBoot, "run a Kubernetes daemon's cluster check and worker image probe from legion.yaml, with no workflow, and exit"},
 	"probe-image":    {runProbeImage, "run the worker image's launch probes (the image build and the daemon's probe Sandbox run it)"},
-	"workspace-init": {runWorkspaceInit, "a Sandbox pod's init containers: fetch the repository, provision the issue's workspace, prepare the controller's volume; and a repository cache pod's process"},
+	"workspace-init": {runWorkspaceInit, "an issue pod's init containers: fetch the repository, provision the issue's workspace; and a repository cache pod's process"},
 	"controller":     {runController, "start the operator's controller, the interactive Oh My Pi session an operator talks to"},
 	"git-credential": {runGitCredential, "git's credential helper in every shared clone: answers git with the token of the owner the repository's path names (git runs it, never a person)"},
 	"gh":             {runGh, "the gh first on a pane's or pod's PATH: runs the real gh with the gh directory of the owner the command names (a pane runs it, never a person)"},
@@ -235,8 +235,8 @@ func pluginsSourceWords(source string) string {
 // names a mise tool. The OK line names each NATS nkey seed's public key when there is one, never
 // the seed. After it, one line per deployment capability the file alone leaves open, in the words
 // boot logs it with (capabilities.Deployment.OpenFromConfiguration): a report, so the exit stays 0.
-// Under kubernetes, when a role requests less cpu or memory than its limit, one plain `resources:`
-// line names those roles and the pods they make Burstable (capabilities.Deployment.BurstableLine);
+// Under kubernetes, when a pod's reservation requests less cpu or memory than its limit, one plain
+// `resources:` line names those pods as Burstable (capabilities.Deployment.BurstableLine);
 // a file that sets no lower request prints none, its pods all Guaranteed. Then, when the image
 // probe's attempt budget is derived above slow_command_timeout_seconds (daemon.ProbeBudget), one
 // plain line names the derived bound and why; then one names the repository cache every mapped
@@ -459,6 +459,8 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		state.Daemon.StartedAt.Format(time.RFC3339), state.Daemon.FirstBootAt.Format(time.RFC3339))
 	fmt.Fprintf(stdout, "admission: %d active, %d waiting, cap %d; %d issues\n",
 		len(state.Admission.Active), len(state.Admission.Waiting), state.Admission.Cap, len(state.Issues))
+	fmt.Fprintln(stdout, blockedSummary(state.Admission.Blocked))
+	fmt.Fprintln(stdout, awaitingSummary(state.Issues))
 	fmt.Fprintln(stdout, checksSummary(openChecks(state.Issues)))
 	fmt.Fprintln(stdout, pendingSummary(state.PendingStatusWrites))
 	fmt.Fprintln(stdout, heldSummary(state.HeldOutboxRows))
@@ -478,6 +480,59 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprintf(stdout, "issue %s:\n%s\n", key, record)
 	}
 	return 0
+}
+
+// blockedSummary is the one line an operator reads for the issues Legion is waiting to start
+// behind a Dispatch issue nobody has finished (api.Admission.Blocked): how many, and each by
+// issue with what it waits on, in the state's own key order. Nothing here is the daemon's to
+// clear — a blocker is finished in Dispatch by a person — so the line names them and stops.
+func blockedSummary(blocked []api.BlockedIssue) string {
+	if len(blocked) == 0 {
+		return "blocked on Dispatch links: none"
+	}
+	waits := make([]string, len(blocked))
+	for i, issue := range blocked {
+		waits[i] = issue.Issue + " waits on " + strings.Join(issue.BlockedBy, ", ")
+	}
+	return fmt.Sprintf("blocked on Dispatch links: %d — %s", len(blocked), strings.Join(waits, "; "))
+}
+
+// awaitingSummary is the one line an operator reads for the roots that gave their admission slot
+// up to wait on a person (api.WaitingOnView): an unanswered one is in neither admission list and
+// holds no slot, so without this line the capacity it freed looks idle. It says how many, how many
+// a person answered (each at the front of the waiting line for the next free slot), and each by
+// key with what it waits on and whether, when and by what act it was answered.
+func awaitingSummary(issues map[string]api.Issue) string {
+	var keys []string
+	answered := 0
+	for key, issue := range issues {
+		if issue.WaitingOn == nil {
+			continue
+		}
+		keys = append(keys, key)
+		if issue.WaitingOn.AnsweredAt != nil {
+			answered++
+		}
+	}
+	if len(keys) == 0 {
+		return "roots waiting on a person: none"
+	}
+	slices.Sort(keys)
+	waits := make([]string, len(keys))
+	for i, key := range keys {
+		wait := issues[key].WaitingOn
+		on := "ask " + wait.Ask
+		if wait.Kind == "gate" {
+			on = fmt.Sprintf("spec version %d of %s", wait.GateVersion, wait.ArtifactID)
+		}
+		state := "unanswered"
+		if wait.AnsweredAt != nil {
+			state = fmt.Sprintf("answered at %s (%s)", wait.AnsweredAt.UTC().Format(time.RFC3339), wait.AnsweredBy)
+		}
+		waits[i] = key + " waits on " + on + ", " + state
+	}
+	return fmt.Sprintf("roots waiting on a person: %d, %d answered and waiting for a slot — %s",
+		len(keys), answered, strings.Join(waits, "; "))
 }
 
 // pendingSummary is the one line an operator reads for the Dispatch status writes the daemon has

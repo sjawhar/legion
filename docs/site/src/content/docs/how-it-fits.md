@@ -60,7 +60,10 @@ Legion's coordinator works only the issues handed to it, which are the ones carr
 label `legion`. That lets Legion share a project with people and other agents. A person sets the
 label from the issue header, or asks Legion's own **controller** agent to set it for them; the
 controller never hands over work on its own. An agent that finds a problem outside its own issue
-asks a person in a Dispatch ask whether it needs an issue, rather than filing one.
+files no issue: a defect with a clear fix in code its own tree touches or depends on is fixed in that tree's
+pull request, any other goes to the controller, which gives it to the tree that owns that code and
+files it for Legion only when none does, and a
+problem that needs a decision goes to a person in a Dispatch ask.
 
 Each admitted issue gets an **architect**, which owns the issue's tree. It writes the spec, splits
 large work into child issues, and runs each change through phase workers in turn: a **planner**, an
@@ -76,10 +79,10 @@ Two decisions stay with people:
   approves it, unless that version is the person's own answer to a decision block and the answer is
   the whole change since the version they approved: then Dispatch records their approval at the new
   version and the gate reopens. The gate is on by default; a deployment can turn it off.
-- **The merge.** The merger sends `READY`. The daemon accepts it only when no check or workflow
-  the base branch requires has failed or is missing, posts it on the Dispatch issue, and submits
-  the pull request for merge. The repository's own rules decide when it lands, so a review a
-  person must give, or a by-hand merge, stays theirs.
+- **The merge.** The merger sends `READY`. The daemon accepts it on the approved head, posts it on
+  the Dispatch issue, and submits the pull request for merge. The repository's own rules decide
+  whether and when it lands, so a check it requires, a review a person must give, or a by-hand
+  merge, stays theirs.
 
 The coordinator runs its agents as Oh My Pi sessions, either in tmux panes on one host or as Agent
 Sandbox pods in a Kubernetes cluster.
@@ -125,12 +128,14 @@ only where an event goes; what to do about it is the coordinator's and the agent
    changes sends it back to the implementer, and through the tester again.
 6. Once the reviewer approves, the architect reads the evidence and accepts the change (or sends
    it back), and the retrospective runs. The merger then sends `READY`, which the daemon accepts
-   once no required check has failed or is missing, and posts on the issue.
+   on the approved head plus retro's notes, and posts on the issue.
 7. The daemon submits the pull request for merge, and it lands under the repository's own rules.
    The merge closes the issue: it is Done.
 8. After the close, once the deploy carries the merge, the implementer drives the change in
-   production and records what it observed on the pull request; Dispatch's `issue.deployed` event
-   is what wakes it for that look.
+   production and records what it observed on the pull request. Dispatch's `issue.deployed` event
+   wakes it for that look, as does each run of the repository's deploy workflow on its default
+   branch whose deploy step succeeded after the merge, when the project's `legion.yaml` names that
+   workflow.
 
 Read on in [Legion](/legion/legion/), [Dispatch](/legion/dispatch/) and the
 [Secrets Broker](/legion/broker/).

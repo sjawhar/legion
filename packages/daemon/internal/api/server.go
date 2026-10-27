@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -41,8 +42,16 @@ type Options struct {
 	Supervisor Supervisor
 	// BootTokens resolves a registration's boot token.
 	BootTokens *BootTokens
-	// Project is the project token new claims are filed under (`claim.ProjectToken`).
-	Project string
+	// Project and DispatchProject are the two names this one project answers to, and the daemon
+	// holds both because a row written under one is invisible to a read with the other. Project is
+	// the claim project token (`claim.ProjectToken`): lowercased and alphanumeric, the form every
+	// claim token, tree lifecycle and controller record is keyed by. DispatchProject is the
+	// project key Dispatch itself files the issues under (config.Config.Project, which Dispatch
+	// constrains to `^[A-Z][A-Z0-9]{1,9}$`), and so the key of the issue records and of the
+	// blockers mirror the release routes read. The two can never be equal in a deployment, since
+	// the token is the lowercase of a key that must start uppercase.
+	Project         string
+	DispatchProject string
 	// OperatorToken is the bearer every operator route compares against; empty admits no one.
 	OperatorToken string
 	// Controller is the project's controller record, which the controller secret route mints,
@@ -102,8 +111,13 @@ type Options struct {
 	// before release_children applies its view of a child (the daemon's prepareObserved, handed the
 	// child as Dispatch's detail shows it, intake.ObservedIssue). Nil prepares nothing.
 	PrepareRepository func(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error)
-	Record            record.Store
-	Dispatch          dispatch.Client
+	// RoleFor is the role that works a phase (the daemon's workflow.RoleFor, handed in because the
+	// workflow's tests import this package). The operator's retry of a failed phase worker applies
+	// its issue's held phase only when that phase's role is the claim's (retryClaim); nil retries no
+	// held phase, leaving every one to its architect.
+	RoleFor  func(phase.Phase) claim.Role
+	Record   record.Store
+	Dispatch dispatch.Client
 	// ClaimReady is told of each claim whose agent's ready the claim took, on the session it
 	// registered: a launched or relaunched agent once it took its Envoy role, or a live one that
 	// took the role back. A ready the claim refuses tells no one. Nil tells no one. It is called
@@ -136,11 +150,13 @@ type server struct {
 	stateTransactions StateTransactions
 	supervisor        Supervisor
 	bootTokens        *BootTokens
-	project           string
-	operatorSet       bool
-	operatorHash      [sha256.Size]byte
-	controller        ControllerStore
-	designGate        config.DesignGate
+	// project and dispatchProject are Options.Project and Options.DispatchProject.
+	project         string
+	dispatchProject string
+	operatorSet     bool
+	operatorHash    [sha256.Size]byte
+	controller      ControllerStore
+	designGate      config.DesignGate
 	// controllerLaunched is Options.ControllerLaunched.
 	controllerLaunched bool
 	// pluginRelaunchable is Options.PluginRelaunchable.
@@ -158,6 +174,7 @@ type server struct {
 	pool         *pgxpool.Pool
 	handlers     []intake.Handler
 	prepare      func(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error)
+	roleFor      func(phase.Phase) claim.Role
 	records      record.Store
 	dispatch     dispatch.Client
 	claimReady   func(c supervise.Claim)
@@ -186,6 +203,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		supervisor:         opts.Supervisor,
 		bootTokens:         opts.BootTokens,
 		project:            opts.Project,
+		dispatchProject:    opts.DispatchProject,
 		controller:         opts.Controller,
 		designGate:         opts.DesignGate,
 		controllerLaunched: opts.ControllerLaunched,
@@ -200,6 +218,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		pool:               opts.Pool,
 		handlers:           opts.Handlers,
 		prepare:            opts.PrepareRepository,
+		roleFor:            opts.RoleFor,
 		records:            opts.Record,
 		dispatch:           opts.Dispatch,
 		claimReady:         opts.ClaimReady,
@@ -258,7 +277,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/suspend", s.operator(s.claimRequest("suspend", suspendEvent)))
 	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/resume", s.operator(s.claimRequest("resume", resumeEvent)))
 	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/stop", s.operator(s.claimRequest("stop", stopEvent)))
-	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/retry", s.operator(s.claimRequest("retry", retryEvent)))
+	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/retry", s.operator(s.retryClaim))
 	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/close", s.operator(s.closeTree))
 
 	// The catch-all answers every unrouted request, including a known path asked for with the

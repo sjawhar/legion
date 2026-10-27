@@ -149,23 +149,44 @@ func (dir feedSource) open(repository ghrepo.Repository, bookmark, defaultBranch
 	return feedRemote(feed, repository, bookmark, defaultBranch), nil
 }
 
-// FromGitHub is GitHub itself, reached with the one-shot credential holding token, created under
-// credentialDir and removed again: the tmux runtime, which names its state directory.
-func FromGitHub(token, credentialDir string) Source {
+// FromGitHub is GitHub itself, reached with the one-shot credential holding the token that token
+// answers, created under credentialDir and removed again: the tmux runtime, which names its state
+// directory. token is asked when the provision opens the source, under the shared clone's store
+// lock (Request.StoreLock), never before: a provision may wait on that lock behind a repository's
+// whole queue of provisions, and a token minted before the wait could expire in it. Its fetch
+// brings only the repository's default branch and the issue's own branch, by their exact names:
+// it runs under the store lock, and every branch of a busy repository would hold every other
+// issue's provision behind it. A pane's own `jj git fetch` brings the rest when it needs them.
+func FromGitHub(token func() (string, error), credentialDir string) Source {
 	return gitHubSource{token: token, credentialDir: credentialDir}
 }
 
-type gitHubSource struct{ token, credentialDir string }
+type gitHubSource struct {
+	token         func() (string, error)
+	credentialDir string
+}
 
 func (s gitHubSource) check(ghrepo.Repository) error {
 	if s.credentialDir == "" {
 		return errors.New("workspace credential directory is required")
 	}
+	if s.token == nil {
+		return errors.New("workspace provisioning token is required")
+	}
 	return nil
 }
 
-func (s gitHubSource) open(ghrepo.Repository, string, string) (remote, error) {
-	return newProvisioningCredential(s.credentialDir, s.token)
+func (s gitHubSource) open(_ ghrepo.Repository, bookmark, defaultBranch string) (remote, error) {
+	token, err := s.token()
+	if err != nil {
+		return remote{}, err
+	}
+	r, err := newProvisioningCredential(s.credentialDir, token)
+	if err != nil {
+		return remote{}, err
+	}
+	r.branches = []string{defaultBranch, bookmark}
+	return r, nil
 }
 
 // FeedRepository is where Fetch clones repository under a feed directory, and where a feed
@@ -184,12 +205,17 @@ func FeedRepository(feed string, repository ghrepo.Repository) (string, error) {
 
 // FeedEntry is whether name — a path inside a bare repository, slash-separated and relative to it,
 // a directory when dir is set — is one of the refs and packs the repository cache streams and a
-// feed takes from it: HEAD, packed-refs, what lies under refs/, and objects/pack/pack-<id>.pack.
-// Never a loose object, nor a pack's index, reverse index or bitmap, a multi-pack index or a
-// commit-graph, which the feed builds itself from the packs it verifies (unpackCache); never the
-// repository's own configuration, hooks, info or description, which a feed makes for itself, nor
-// objects/info/alternates or http-alternates, which would point the feed at objects elsewhere; and
-// never a file or directory git is still writing (tmp_*, incoming-*, *.lock).
+// feed takes from it: HEAD, packed-refs, what lies under refs/, and each pack of objects/pack/,
+// both its pack-<id>.pack and the pack-<id>.idx git reads it through. The index comes with the
+// pack because building it again costs every issue pod minutes of CPU on a large repository
+// (`git index-pack` inflates and hashes every object); the feed holds both to the checksums git
+// wrote into them and takes the index's names on the cache's word, which verifyCache states
+// exactly. Never a loose object, a
+// pack's reverse index or bitmap, a multi-pack index or a commit-graph, which git builds for
+// itself; never the repository's own configuration, hooks, info or description, which a feed makes
+// for itself, nor objects/info/alternates or http-alternates, which would point the feed at
+// objects elsewhere; and never a file or directory git is still writing (tmp_*, incoming-*,
+// *.lock).
 func FeedEntry(name string, dir bool) bool {
 	base := path.Base(name)
 	if strings.HasPrefix(base, "tmp_") || strings.HasPrefix(base, "incoming-") || strings.HasSuffix(base, ".lock") {
@@ -206,8 +232,9 @@ func FeedEntry(name string, dir bool) bool {
 	return false
 }
 
-// packFile is the name git gives a pack: its SHA-1 or SHA-256 id.
-var packFile = regexp.MustCompile(`^pack-([0-9a-f]{40}|[0-9a-f]{64})\.pack$`)
+// packFile is the name git gives a pack and the index it reads it through: the pack's SHA-1 or
+// SHA-256 id.
+var packFile = regexp.MustCompile(`^pack-([0-9a-f]{40}|[0-9a-f]{64})\.(pack|idx)$`)
 
 // GitHubURL is the repository's GitHub remote: the URL the shared clone is cloned from and Fetch
 // clones into the feed, and so the URL feedRemote rewrites to the feed.

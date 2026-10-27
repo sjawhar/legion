@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -17,7 +18,8 @@ import (
 
 // RoleFor is the role that works a phase: the one a transition starts, and the one whose handoff
 // the `legion` tool's `handoff_complete` resolves the carrying commit of for a file-backed phase
-// (packages/pi-shared/src/handoff-commit.ts). A phase no role works — awaiting_merge, done, held —
+// (packages/pi-shared/src/handoff-commit.ts). A phase no role works — awaiting_person,
+// awaiting_merge, done, held —
 // has none. Accepting is the tree architect's, a claim per tree that no row starts: every site
 // that starts, resumes or reports a phase's worker skips it (start, admit's startMidPhaseMembers,
 // booted, Stranded).
@@ -334,6 +336,24 @@ func HeldNotice(issue record.Issue) record.Notice {
 // root's own promotion made the tree live.
 func ChildReenteredNotice(child, root string) record.Notice {
 	return record.Notice{Kind: "child-status", Role: claim.RoleArchitect, Reason: fmt.Sprintf("%s is todo; it runs again under %s", child, root)}
+}
+
+// ChildUnblockedNotice is the notice the tree's architect is told whenever a child it holds for
+// blockers starts (Engine.StartUnblockedChildren), its reason saying what cleared the hold. waited
+// is every issue the child's mirror row still names, in Dispatch's own order, all of them done by
+// now: the last of them closed. Empty, the child names none any longer — someone (a person or
+// the tree's architect) took its blocked-by links off while it waited — and the reason says that
+// instead. A start nobody hears of is the silent state the hold's report exists to remove, so
+// neither path starts a child without one. It is the same child-status kind a child's leave and a
+// re-entry are told with — the daemon's notice routing sends one on a non-root child to the
+// architect that owns it — and not phase-finished: no phase of the child ended, it is beginning
+// its first.
+func ChildUnblockedNotice(child, root string, waited []string) record.Notice {
+	reason := fmt.Sprintf("%s starts planning under %s: every issue it waited on (%s) is done", child, root, strings.Join(waited, ", "))
+	if len(waited) == 0 {
+		reason = fmt.Sprintf("%s starts planning under %s: its blocked-by links were taken off, so it waits on nothing", child, root)
+	}
+	return record.Notice{Kind: "child-status", Role: claim.RoleArchitect, Reason: reason}
 }
 
 func (e *Engine) lingerAt() time.Time { return e.now().Add(e.cfg.Linger) }

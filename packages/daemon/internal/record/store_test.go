@@ -374,6 +374,18 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 		if len(slots) != 1 || slots[0].Issue != slot.Issue || slots[0].Index != slot.Index || !slots[0].AdmittedAt.Equal(slot.AdmittedAt) {
 			t.Fatalf("slots = %#v, want %#v", slots, slot)
 		}
+		// The slotted read admission makes on every fact returns the whole issue record, every
+		// column the issue read returns, so a column added to the issue is never left out of it.
+		slotted, err := records.SlottedIssues(ctx, tx, issue.Project)
+		must(t, err)
+		if !reflect.DeepEqual(slotted, []Issue{issue}) {
+			t.Fatalf("slotted issues = %#v, want %#v", slotted, []Issue{issue})
+		}
+		other, err := records.SlottedIssues(ctx, tx, "OTHER")
+		must(t, err)
+		if len(other) != 0 {
+			t.Fatalf("slotted issues of another project = %#v, want none", other)
+		}
 	})
 
 	inTx(t, st, func(tx pgx.Tx) {
@@ -382,6 +394,106 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 		must(t, err)
 		if len(slots) != 0 {
 			t.Fatalf("slots after release = %#v, want no rows", slots)
+		}
+	})
+}
+
+// The mark that an issue has stood in a phase of its own is what promotion reads when a tree that
+// ran comes up again on a later pass, long after its run, so it has to survive the write: PutIssue
+// stores it and Issue, like every read behind issueColumns, gives it back. The store keeps
+// whatever the record says, both ways — the workflow never clears the mark, but a record written
+// without it, as every issue that never ran is, must read back without it.
+func TestStoreRoundTripsATreeTakenBack(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	taken := issueFixture("LEGION-215")
+	taken.Phase, taken.Status, taken.TakenBack = phase.Admitted, "todo", true
+
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, taken))
+		got, err := records.Issue(ctx, tx, taken.Key)
+		must(t, err)
+		if !reflect.DeepEqual(got, &taken) {
+			t.Fatalf("taken-back issue = %#v, want %#v", got, taken)
+		}
+		issues, err := records.Issues(ctx, tx)
+		must(t, err)
+		if !reflect.DeepEqual(issues, []Issue{taken}) {
+			t.Fatalf("listed issues = %#v, want %#v", issues, []Issue{taken})
+		}
+	})
+
+	cleared := taken
+	cleared.TakenBack = false
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, cleared))
+		got, err := records.Issue(ctx, tx, cleared.Key)
+		must(t, err)
+		if !reflect.DeepEqual(got, &cleared) {
+			t.Fatalf("issue after a write that carries no mark = %#v, want %#v", got, cleared)
+		}
+	})
+}
+
+// A gate records the changes request the architect was told of, its version, the reviewer's
+// reason and the review's place in the issue's Dispatch event log, so a registration or a gate seed
+// that re-reads the same review from Dispatch knows it was told, and where Dispatch recorded the
+// approval it holds. An approval of that version clears the record. The store keeps the shape
+// itself: a mark or a reason is written only with its version, and a row an older daemon left with
+// a version cleared and its mark still set reads back with no mark.
+func TestGateRoundTripsTheReviewsItRecords(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	at := time.Date(2026, 10, 23, 17, 0, 0, 123456000, time.UTC)
+	issue := Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
+		Tree: "LEGION-209", Project: "LEGION", Title: "gate", Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: "U"}
+	told := 4
+	closed := DesignGate{Issue: issue.Key, ArtifactID: "artifact-209", LatestVersion: 4, ToldChangesVersion: &told, ToldChangesReason: "name the rollback path",
+		ToldChangesMark: EventMark{Seq: 12, At: at}}
+	timeOnly := closed
+	timeOnly.ToldChangesMark = EventMark{At: at}
+	approved := 4
+	opened := DesignGate{Issue: issue.Key, ArtifactID: "artifact-209", LatestVersion: 4, ApprovedVersion: &approved, ApprovedMark: EventMark{Seq: 14, At: at.Add(time.Minute)}}
+	stray := DesignGate{Issue: issue.Key, ArtifactID: "artifact-209", LatestVersion: 5, ApprovedMark: EventMark{Seq: 15}, ToldChangesReason: "no version", ToldChangesMark: EventMark{Seq: 16}}
+
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, issue))
+		read := func() *DesignGate {
+			t.Helper()
+			got, err := records.Gate(ctx, tx, issue.Key)
+			must(t, err)
+			return got
+		}
+		must(t, records.PutGate(ctx, tx, closed))
+		if got := read(); !reflect.DeepEqual(got, &closed) {
+			t.Fatalf("gate = %#v, want %#v", got, closed)
+		}
+		forArtifact, err := records.GatesForArtifact(ctx, tx, closed.ArtifactID)
+		must(t, err)
+		if !reflect.DeepEqual(forArtifact, []DesignGate{closed}) {
+			t.Fatalf("gates for artifact = %#v, want %#v", forArtifact, []DesignGate{closed})
+		}
+		must(t, records.PutGate(ctx, tx, timeOnly))
+		if got := read(); !reflect.DeepEqual(got, &timeOnly) {
+			t.Fatalf("gate told of a review with no sequence = %#v, want %#v", got, timeOnly)
+		}
+		must(t, records.PutGate(ctx, tx, opened))
+		if got := read(); !reflect.DeepEqual(got, &opened) {
+			t.Fatalf("gate after an approval = %#v, want %#v with the changes request cleared", got, opened)
+		}
+		must(t, records.PutGate(ctx, tx, stray))
+		if got, want := read(), (DesignGate{Issue: issue.Key, ArtifactID: "artifact-209", LatestVersion: 5}); !reflect.DeepEqual(got, &want) {
+			t.Fatalf("gate written with marks and a reason but no versions = %#v, want %#v", got, want)
+		}
+		// What an older daemon writes: approved_version cleared, approved_seq and approved_at left.
+		must(t, records.PutGate(ctx, tx, opened))
+		if _, err := tx.Exec(ctx, `update design_gates set approved_version = null where issue = $1`, issue.Key); err != nil {
+			t.Fatalf("clear the approval as an older daemon does: %v", err)
+		}
+		if got, want := read(), (DesignGate{Issue: issue.Key, ArtifactID: "artifact-209", LatestVersion: 4}); !reflect.DeepEqual(got, &want) {
+			t.Fatalf("gate whose approval an older daemon cleared = %#v, want %#v with no mark", got, want)
 		}
 	})
 }
@@ -1612,11 +1724,17 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
 	want := map[string][]string{
-		"issues":            {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason", "dispatch_status", "repo", "default_branch", "github_repo"},
+		"issues": {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "taken_back",
+			"linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason", "dispatch_status", "repo", "default_branch",
+			"github_repo", "awaiting_ask", "awaiting_gate_version", "awaiting_artifact", "awaiting_answered_at", "awaiting_answered_by",
+			"awaiting_answered_detail", "awaiting_since_seq", "awaiting_since", "handout_seq", "declared_seq", "declared_at", "caught_up_seq"},
 		"phases":            {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at", "merge_note"},
 		"pull_requests":     {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_counted", "head_counted_before", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability", "merge_sha"},
 		"production_checks": {"issue", "project", "tree", "repo", "pr_number", "merge_sha", "opened_at", "bound_at", "looks", "look_open", "look_wake_at", "last_wake_kind", "last_wake_detail", "last_wake_at", "pending_cause_kind", "pending_cause_detail", "last", "closed_at", "outcome"},
-		"design_gates":      {"issue", "artifact_id", "latest_version", "approved_version"},
+		"design_gates":      {"issue", "artifact_id", "latest_version", "approved_version", "approved_seq", "approved_at", "told_changes_version", "told_changes_reason", "told_changes_seq", "told_changes_at"},
+		"root_asks":         {"issue", "ask", "kind", "artifact", "open", "seq", "waiting_on", "waiting_on_seq", "closed_by", "closed_seq", "by_tree", "person_seq", "person_answer_seq"},
+		"dispatch_issues":   {"key", "project", "status", "blockers", "dispatch_seq"},
+		"dispatch_claims":   {"key", "claimed_by", "claim_seq"},
 		"slots":             {"issue", "index", "admitted_at"},
 		"processed_events":  {"source", "event_id", "processed_at"},
 		"outbox":            {"id", "kind", "issue", "payload", "attempts", "next_at", "last_error", "created_at", "lease_token", "lease_until"},

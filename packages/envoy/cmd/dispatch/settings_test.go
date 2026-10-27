@@ -35,10 +35,13 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/githubappjwt"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 	"github.com/sjawhar/envoy/internal/testsocks5"
 )
@@ -505,7 +508,8 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 
 	// brokerReceived is the call the secrets broker DISPATCH_AGENT_SECRETS_URL names receives, as
 	// "<method> <request URI> <Authorization>", when a signed-in human lists the credential
-	// requests awaiting them, with token as DISPATCH_AGENT_SECRETS_TOKEN.
+	// requests awaiting them, with token in the file DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE
+	// names.
 	brokerReceived := func(t *testing.T, token string) string {
 		t.Helper()
 		received := make(chan string, 1)
@@ -514,7 +518,10 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			_, _ = w.Write([]byte(`{"requests":[]}`))
 		}))
 		defer broker.Close()
-		boot := resolveWith(t, map[string]string{"DISPATCH_AGENT_SECRETS_URL": broker.URL, "DISPATCH_AGENT_SECRETS_TOKEN": token})
+		boot := resolveWith(t, map[string]string{
+			"DISPATCH_AGENT_SECRETS_URL":                broker.URL,
+			"DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": writeFile(t, "account-token", token),
+		})
 		request := signedIn(t, httptest.NewRequest(http.MethodGet, "/api/v1/credential-requests?approver=me", nil), "alice")
 		response := httptest.NewRecorder()
 		routerFor(t, boot, routes.AppContextOptions{}).ServeHTTP(response, request)
@@ -750,6 +757,15 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			refusedWith(t, map[string]string{"DISPATCH_PORT": "0"}, "DISPATCH_PORT")
 		},
+		"DISPATCH_PPROF_PORT": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{"DISPATCH_PPROF_PORT": "6060"}); boot.PprofAddr != "127.0.0.1:6060" {
+				t.Errorf("PprofAddr = %q, want 127.0.0.1:6060", boot.PprofAddr)
+			}
+			if boot := resolveWith(t, nil); boot.PprofAddr != "" {
+				t.Errorf("unset: PprofAddr = %q, want none", boot.PprofAddr)
+			}
+			refusedWith(t, map[string]string{"DISPATCH_PPROF_PORT": "0"}, "DISPATCH_PPROF_PORT")
+		},
 		"DISPATCH_SERVER_URL": func(t *testing.T) {
 			if cfg, err := envoyJSON(t, map[string]string{"DISPATCH_SERVER_URL": "https://from-the-table.example"}); err != nil || cfg.Dispatch.ServerURL != "https://from-the-table.example" {
 				t.Errorf("set: %+v, %v; want the variable over envoy.json", cfg, err)
@@ -930,12 +946,73 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 		},
 		"DISPATCH_APP_PEM_B64": func(t *testing.T) {
-			app, _, err := loadAppCredentials(envGetter(map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_PEM_B64": base64.StdEncoding.EncodeToString([]byte("app private key"))}), t.TempDir())
-			if err != nil || app.PEM != "app private key" {
-				t.Errorf("app %+v, %v", app, err)
+			// The variable holds the App's PEM as GKE Secret Sync copies it from Secret Manager,
+			// or the base64 of that PEM; a key that does not parse is refused at load, naming the
+			// variable and the form it came in, and never quoting the value.
+			key, pkcs1 := githubapptest.Key(t)
+			pkcs8Bytes, err := x509.MarshalPKCS8PrivateKey(key)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if _, _, err := loadApp(t, map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_PEM_B64": "not base64!"}); err == nil || !strings.Contains(err.Error(), "DISPATCH_APP_PEM_B64") {
-				t.Errorf("malformed: err = %v, want a refusal naming DISPATCH_APP_PEM_B64", err)
+			pkcs8 := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8Bytes}))
+			encoded := base64.StdEncoding.EncodeToString([]byte(pkcs1))
+			var wrapped strings.Builder // base64 as the base64 command prints it: 76 columns a line
+			for rest := encoded; rest != ""; {
+				line := rest[:min(76, len(rest))]
+				rest = rest[len(line):]
+				wrapped.WriteString(line + "\n")
+			}
+			const garbageArmour = "-----BEGIN RSA PRIVATE KEY-----\nbm90IGEga2V5\n-----END RSA PRIVATE KEY-----\n"
+			load := func(value string) (*auth.AppConfig, error) {
+				values := map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_PEM_B64": value}
+				app, _, err := loadAppCredentials(envGetter(values), t.TempDir())
+				return app, err
+			}
+			for _, tc := range []struct {
+				name, value string
+				want        string   // the PEM the App holds, when it loads
+				refusal     []string // what the error names, when it is refused
+			}{
+				{name: "a plain PEM", value: pkcs1, want: pkcs1},
+				{name: "base64 of the PEM", value: encoded, want: pkcs1},
+				{name: "base64 wrapped at 76 columns", value: wrapped.String(), want: pkcs1},
+				{name: "a PKCS8 plain PEM", value: pkcs8, want: pkcs8},
+				{name: "not base64", value: "not base64!", refusal: []string{"DISPATCH_APP_PEM_B64"}},
+				{name: "base64 of no key", value: base64.StdEncoding.EncodeToString([]byte("app private key")), refusal: []string{"DISPATCH_APP_PEM_B64", "base64 of a PEM"}},
+				{name: "PEM armour around garbage", value: garbageArmour, refusal: []string{"DISPATCH_APP_PEM_B64", "plain PEM"}},
+				{name: "empty or unset"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					app, err := load(tc.value)
+					if tc.refusal == nil {
+						if err != nil || app == nil || app.PEM != tc.want {
+							t.Fatalf("err = %v, App loaded %t, PEM as given %t; want an App holding the case's PEM", err, app != nil, app != nil && app.PEM == tc.want)
+						}
+						if tc.want != "" {
+							if _, err := githubappjwt.ParseKey(app.PEM); err != nil {
+								t.Errorf("the App's PEM does not parse: %v", err)
+							}
+						}
+						return
+					}
+					if err == nil {
+						t.Fatalf("app %+v; want a refusal naming %q", app, tc.refusal)
+					}
+					for _, want := range tc.refusal {
+						if !strings.Contains(err.Error(), want) {
+							t.Errorf("err = %v, want it to name %q", err, want)
+						}
+					}
+					// No part of the value or of the key reaches the message: neither whole,
+					// nor any of their lines.
+					for _, text := range []string{tc.value, pkcs1, pkcs8, encoded} {
+						for _, part := range append([]string{text}, strings.Split(text, "\n")...) {
+							if part = strings.TrimSpace(part); part != "" && strings.Contains(err.Error(), part) {
+								t.Errorf("err = %v quotes %q", err, part)
+							}
+						}
+					}
+				})
 			}
 		},
 		"DISPATCH_APP_ID": func(t *testing.T) {
@@ -988,7 +1065,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 					w.WriteHeader(http.StatusNotFound)
 				}))
 				defer github.Close()
-				request := httptest.NewRequest(http.MethodPost, "/api/v1/projects/ARCH/architecture-source/sync", nil)
+				request := httptest.NewRequest(http.MethodPost, "/api/v1/projects/ARCH/architecture-sources/acme/arch/sync", nil)
 				request.Header.Set("Authorization", "Bearer agent-token")
 				response := httptest.NewRecorder()
 				routerFor(t, resolveWith(t, map[string]string{"DISPATCH_GITHUB_API_BASE": github.URL}), routes.AppContextOptions{App: app, Store: database}).ServeHTTP(response, request)
@@ -1120,14 +1197,15 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			refusedWith(t, map[string]string{"DISPATCH_OIDC_ISSUER": "https://issuer.example"}, "DISPATCH_OIDC_AUDIENCE")
 		},
 		"DISPATCH_AGENT_SECRETS_URL": func(t *testing.T) {
-			if boot := resolveWith(t, map[string]string{"DISPATCH_AGENT_SECRETS_URL": "https://broker.example/", "DISPATCH_AGENT_SECRETS_TOKEN": "t"}); boot.AgentSecretsURL != "https://broker.example" {
+			tokenFile := writeFile(t, "account-token", "account-token")
+			if boot := resolveWith(t, map[string]string{"DISPATCH_AGENT_SECRETS_URL": "https://broker.example/", "DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": tokenFile}); boot.AgentSecretsURL != "https://broker.example" {
 				t.Errorf("AgentSecretsURL = %q", boot.AgentSecretsURL)
 			}
-			refusedWith(t, map[string]string{"DISPATCH_AGENT_SECRETS_URL": "https://broker.example/v1", "DISPATCH_AGENT_SECRETS_TOKEN": "t"}, "DISPATCH_AGENT_SECRETS_URL")
+			refusedWith(t, map[string]string{"DISPATCH_AGENT_SECRETS_URL": "https://broker.example/v1", "DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": tokenFile}, "DISPATCH_AGENT_SECRETS_URL")
 			// The broker the router relays credential requests to; without one it has none, and the
 			// pending list answers null.
 			t.Run("router", func(t *testing.T) {
-				if got := brokerReceived(t, "ui-token"); !strings.HasPrefix(got, "GET /v1/pending?approver=alice ") {
+				if got := brokerReceived(t, "account-token"); !strings.HasPrefix(got, "GET /v1/pending?approver=alice ") {
 					t.Errorf("the broker DISPATCH_AGENT_SECRETS_URL names received %q, want alice's pending list", got)
 				}
 				request := signedIn(t, httptest.NewRequest(http.MethodGet, "/api/v1/credential-requests?approver=me", nil), "alice")
@@ -1138,30 +1216,122 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				}
 			})
 		},
-		"DISPATCH_AGENT_SECRETS_TOKEN": func(t *testing.T) {
+		"DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": func(t *testing.T) {
 			broker := map[string]string{"DISPATCH_AGENT_SECRETS_URL": "https://broker.example"}
-			refusedWith(t, broker, "DISPATCH_AGENT_SECRETS_TOKEN")
-			broker["DISPATCH_AGENT_SECRETS_TOKEN"] = " bare-token "
-			if boot := resolveWith(t, broker); boot.AgentSecretsToken != "bare-token" {
-				t.Errorf("bare: AgentSecretsToken = %q", boot.AgentSecretsToken)
+			refusedWith(t, broker, "DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE")
+			broker["DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE"] = " /var/run/secrets/broker/token "
+			if boot := resolveWith(t, broker); boot.AgentSecretsTokenFile != "/var/run/secrets/broker/token" {
+				t.Errorf("AgentSecretsTokenFile = %q, want the trimmed path", boot.AgentSecretsTokenFile)
 			}
-			broker["DISPATCH_AGENT_SECRETS_TOKEN_FILE"] = writeFile(t, "token", "  file-token\n")
-			if boot := resolveWith(t, broker); boot.AgentSecretsToken != "file-token" {
-				t.Errorf("both: AgentSecretsToken = %q, want the file's", boot.AgentSecretsToken)
-			}
+			// The path is never read at boot: the client reads it on each call, since the kubelet
+			// rewrites a projected token in place.
 			missing := filepath.Join(t.TempDir(), "missing")
-			broker["DISPATCH_AGENT_SECRETS_TOKEN_FILE"] = missing
-			refusedWith(t, broker, "DISPATCH_AGENT_SECRETS_TOKEN_FILE")
-			// Without a broker URL the token is never read, so an unreadable file refuses nothing.
-			if boot := resolveWith(t, map[string]string{"DISPATCH_AGENT_SECRETS_TOKEN_FILE": missing}); boot.AgentSecretsToken != "" {
-				t.Errorf("no broker: AgentSecretsToken = %q", boot.AgentSecretsToken)
+			if boot := resolveWith(t, map[string]string{"DISPATCH_AGENT_SECRETS_URL": "https://broker.example", "DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": missing}); boot.AgentSecretsTokenFile != missing {
+				t.Errorf("AgentSecretsTokenFile = %q, want the path a boot does not read", boot.AgentSecretsTokenFile)
 			}
-			// The bearer the broker receives on the router's relay.
+			// Without a broker URL nothing is required and no client is built.
+			if boot := resolveWith(t, map[string]string{"DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": missing}); boot.AgentSecretsTokenFile != "" {
+				t.Errorf("no broker: AgentSecretsTokenFile = %q", boot.AgentSecretsTokenFile)
+			}
+			// The bearer the broker receives on the router's relay: the file's trimmed contents.
 			t.Run("router", func(t *testing.T) {
-				if got := brokerReceived(t, " ui-token "); !strings.HasSuffix(got, " Bearer ui-token") {
-					t.Errorf("the broker received %q, want Authorization Bearer ui-token", got)
+				if got := brokerReceived(t, " account-token\n"); !strings.HasSuffix(got, " Bearer account-token") {
+					t.Errorf("the broker received %q, want Authorization Bearer account-token", got)
 				}
 			})
+		},
+		"DISPATCH_EMBEDDER": func(t *testing.T) {
+			if boot := resolveWith(t, nil); boot.Embedder.Place != embed.PlaceBedrock {
+				t.Errorf("unset: Embedder.Place = %q, want bedrock", boot.Embedder.Place)
+			}
+			if boot := resolveWith(t, map[string]string{"DISPATCH_EMBEDDER": "bedrock"}); boot.Embedder.Place != embed.PlaceBedrock {
+				t.Errorf("bedrock: Embedder.Place = %q", boot.Embedder.Place)
+			}
+			refusedWith(t, map[string]string{"DISPATCH_EMBEDDER": "cohere"}, `DISPATCH_EMBEDDER="cohere" (expected bedrock or azure)`)
+			// The place newEmbedder builds: Azure's client, named by the endpoint's host.
+			if embedder := azureEmbedderFor(t, nil); !strings.HasPrefix(embedder.Identity(), "azure:") {
+				t.Errorf("DISPATCH_EMBEDDER=azure built %s, want an Azure identity", embedder.Identity())
+			}
+		},
+		"DISPATCH_AZURE_EMBED_ENDPOINT": func(t *testing.T) {
+			boot := resolveWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_ENDPOINT": " https://Embed.Example/models/ "}))
+			if boot.Embedder.AzureEndpoint != "https://Embed.Example/models/" {
+				t.Errorf("AzureEndpoint = %q, want the trimmed URL", boot.Embedder.AzureEndpoint)
+			}
+			if embedder := azureEmbedderFor(t, map[string]string{"DISPATCH_AZURE_EMBED_ENDPOINT": "https://Embed.Example/models/"}); embedder.Identity() != "azure:embed.example/embed-v-4-0" {
+				t.Errorf("Identity() = %q, want the endpoint's host", embedder.Identity())
+			}
+			refusedWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_ENDPOINT": ""}), "DISPATCH_AZURE_EMBED_ENDPOINT is required")
+			refusedWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_ENDPOINT": "http://embed.example/models"}), "DISPATCH_AZURE_EMBED_ENDPOINT=")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_EMBED_ENDPOINT": "https://embed.example/models"}, "DISPATCH_AZURE_EMBED_ENDPOINT set, but DISPATCH_EMBEDDER is unset")
+		},
+		"DISPATCH_AZURE_EMBED_DEPLOYMENT": func(t *testing.T) {
+			if boot := resolveWith(t, azureEmbedEnvironment(nil)); boot.Embedder.AzureDeployment != "embed-v-4-0" {
+				t.Errorf("unset: AzureDeployment = %q, want embed-v-4-0", boot.Embedder.AzureDeployment)
+			}
+			if embedder := azureEmbedderFor(t, map[string]string{"DISPATCH_AZURE_EMBED_DEPLOYMENT": " cohere-embed "}); embedder.Identity() != "azure:embed.example/cohere-embed" {
+				t.Errorf("Identity() = %q, want the trimmed deployment", embedder.Identity())
+			}
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_EMBED_DEPLOYMENT": "cohere-embed"}, "DISPATCH_AZURE_EMBED_DEPLOYMENT set, but DISPATCH_EMBEDDER is unset")
+		},
+		"DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE": func(t *testing.T) {
+			if embedder := azureEmbedderFor(t, map[string]string{"DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE": " 90000 "}); embedder.Limits().BackgroundTokensPerMinute != 60_000 {
+				t.Errorf("BackgroundTokensPerMinute = %d, want two thirds of 90,000", embedder.Limits().BackgroundTokensPerMinute)
+			}
+			refusedWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE": ""}), "DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE is required")
+			refusedWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE": "0"}), `DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE="0"`)
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE": "90000"}, "DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE set, but DISPATCH_EMBEDDER is unset")
+		},
+		"DISPATCH_AZURE_EMBED_KEY": func(t *testing.T) {
+			if boot := resolveWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_KEY": " bare-key "})); boot.Embedder.AzureKey != "bare-key" {
+				t.Errorf("bare: AzureKey = %q", boot.Embedder.AzureKey)
+			}
+			file := writeFile(t, "azure-key", "  file-key\n")
+			if boot := resolveWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_KEY_FILE": file})); boot.Embedder.AzureKey != "file-key" {
+				t.Errorf("both: AzureKey = %q, want the file's", boot.Embedder.AzureKey)
+			}
+			if boot := resolveWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_KEY": "", "DISPATCH_AZURE_EMBED_KEY_FILE": file})); boot.Embedder.AzureKey != "file-key" {
+				t.Errorf("file alone: AzureKey = %q, want the file's", boot.Embedder.AzureKey)
+			}
+			// An unreadable or blank file refuses, naming both variables, rather than falling back to
+			// the bare key.
+			missing := filepath.Join(t.TempDir(), "missing")
+			refusedWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_KEY_FILE": missing}),
+				"DISPATCH_AZURE_EMBED_KEY_FILE names "+missing+", which could not be read, and DISPATCH_AZURE_EMBED_KEY is not read in its place")
+			blank := writeFile(t, "blank", "\n")
+			refusedWith(t, azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_KEY_FILE": blank}),
+				"DISPATCH_AZURE_EMBED_KEY_FILE names "+blank+", which is empty, and DISPATCH_AZURE_EMBED_KEY is not read in its place")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_EMBED_KEY": "bare-key"}, "DISPATCH_AZURE_EMBED_KEY set, but DISPATCH_EMBEDDER is unset")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_EMBED_KEY_FILE": file}, "DISPATCH_AZURE_EMBED_KEY_FILE set, but DISPATCH_EMBEDDER is unset")
+			if _, ok := azureEmbedderFor(t, map[string]string{"DISPATCH_AZURE_EMBED_KEY_FILE": file}).(*embed.AzureClient); !ok {
+				t.Error("the key form built no Azure client")
+			}
+		},
+		"DISPATCH_AZURE_TENANT_ID": func(t *testing.T) {
+			if boot := resolveWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_TENANT_ID": " tenant "}))); boot.Embedder.AzureTenantID != "tenant" {
+				t.Errorf("AzureTenantID = %q", boot.Embedder.AzureTenantID)
+			}
+			refusedWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_TENANT_ID": ""})), "DISPATCH_AZURE_TENANT_ID missing")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_TENANT_ID": "tenant"}, "DISPATCH_AZURE_TENANT_ID set, but DISPATCH_EMBEDDER is unset")
+			if embedder := azureEmbedderFor(t, azureKeyless); embedder.Identity() != "azure:embed.example/embed-v-4-0" {
+				t.Errorf("keyless: Identity() = %q", embedder.Identity())
+			}
+		},
+		"DISPATCH_AZURE_CLIENT_ID": func(t *testing.T) {
+			if boot := resolveWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_CLIENT_ID": " client "}))); boot.Embedder.AzureClientID != "client" {
+				t.Errorf("AzureClientID = %q", boot.Embedder.AzureClientID)
+			}
+			refusedWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_CLIENT_ID": ""})), "DISPATCH_AZURE_CLIENT_ID missing")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_CLIENT_ID": "client"}, "DISPATCH_AZURE_CLIENT_ID set, but DISPATCH_EMBEDDER is unset")
+		},
+		"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": func(t *testing.T) {
+			// A path, read at each exchange, not at boot: a file that is not there yet boots.
+			missing := filepath.Join(t.TempDir(), "token")
+			if boot := resolveWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": " " + missing + " "}))); boot.Embedder.AzureTokenFile != missing {
+				t.Errorf("AzureTokenFile = %q, want %q", boot.Embedder.AzureTokenFile, missing)
+			}
+			refusedWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": ""})), "DISPATCH_AZURE_FEDERATED_TOKEN_FILE missing")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": missing}, "DISPATCH_AZURE_FEDERATED_TOKEN_FILE set, but DISPATCH_EMBEDDER is unset")
 		},
 		"DISPATCH_ASSET_STORE_BUCKET": func(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_ASSET_STORE_BUCKET": " retained-assets "}); boot.AssetStoreBucket != "retained-assets" {
@@ -1388,5 +1558,46 @@ func sharedAgentTokenListReachesTheAPIAndTheDocumentWebsocket(t *testing.T) {
 		if strings.Contains(logged.String(), token) {
 			t.Errorf("the log holds the token %q", token)
 		}
+	}
+}
+
+// TestACredentialPageWithAnUnreadableAccountTokenDoesNotBlameTheBroker: Dispatch's boot no longer
+// reads the file DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE names, so a wrong path or an empty file
+// boots, and only the first credential page finds it out. That call never reaches the broker, so
+// the answer must not be AGENT_SECRETS_UNAVAILABLE, the code that tells an operator the broker is
+// unreachable: what is wrong is Dispatch's own credential, which the operator fixes in Dispatch's
+// deployment, not in the broker's.
+func TestACredentialPageWithAnUnreadableAccountTokenDoesNotBlameTheBroker(t *testing.T) {
+	for name, tokenFile := range map[string]string{
+		"a path that does not exist": filepath.Join(t.TempDir(), "missing"),
+		"an empty file":              writeFile(t, "account-token", "\n"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			called := false
+			broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				called = true
+				_, _ = w.Write([]byte(`{"requests":[]}`))
+			}))
+			defer broker.Close()
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_AGENT_SECRETS_URL":                broker.URL,
+				"DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": tokenFile,
+			})
+			request := signedIn(t, httptest.NewRequest(http.MethodGet, "/api/v1/credential-requests?approver=me", nil), "alice")
+			response := httptest.NewRecorder()
+			routerFor(t, boot, routes.AppContextOptions{}).ServeHTTP(response, request)
+			if called {
+				t.Fatal("the broker was called with no token Dispatch could read")
+			}
+			var answer struct {
+				Code string `json:"code"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &answer); err != nil {
+				t.Fatalf("GET /api/v1/credential-requests answered %d %s, which is not a JSON error", response.Code, response.Body.String())
+			}
+			if answer.Code == "AGENT_SECRETS_UNAVAILABLE" {
+				t.Fatalf("GET /api/v1/credential-requests = %d %s: the broker was never called, so the answer must name Dispatch's own unreadable ServiceAccount token, not an unreachable broker", response.Code, response.Body.String())
+			}
+		})
 	}
 }

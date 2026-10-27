@@ -81,7 +81,17 @@
 # bridge, forwarded through the same tunnel); LEGION_E2E_REPO_SECOND_OWNER (required) `<owner>/<name>`,
 # a repository under an owner other than sjawhar on which both Legion Apps are installed, where
 # second-owner provisions an issue and proves its pod's gh and git read sjawhar/legion-smoke with
-# read-only tokens (nothing is pushed to it); STAGE4A_FROM a development entry point, which is
+# read-only tokens (nothing is pushed to it); LEGION_E2E_IMPLEMENT_APP_ID and
+# LEGION_E2E_IMPLEMENT_APP_KEY_NAME (this deployment's implement App by default) the App's numeric
+# id and the secret-store key the `secrets` CLI resolves to its private key (agent tier: no YubiKey
+# touch), which prerequisites proves is that id's App against GitHub's GET /app before the run
+# writes anything (lib/github-apps.sh; the run acts as no other App); LEGION_E2E_PREVIOUS_IMAGE
+# (required) a worker image by digest built from a commit of main at daemon API contract 37 or 38,
+# before one container (its issue pods run six role containers), which this checkout contains: previous-layout builds that commit's
+# own Stage 4a harness (the image's org.opencontainers.image.revision) with testdata/previouslayout's
+# fixture and runs it on that image, to leave a pod of the previous layout running for this runtime
+# to take over; the script refuses an image whose revision main or this checkout does not contain,
+# one whose commit already runs one container, or one at a contract other than 37 or 38; STAGE4A_FROM a development entry point, which is
 # never the proof; STAGE4A_EVIDENCE_DIR where the transcript and the runtime's log go (default a
 # fresh /tmp directory, kept and printed).
 #
@@ -109,8 +119,7 @@ namespace=legion
 port=${LEGION_E2E_WORKER_STREAM_PORT:-13373}
 repo=sjawhar/legion-smoke
 second_owner_repo=${LEGION_E2E_REPO_SECOND_OWNER:-}
-app_id=3202636
-app_key=LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64
+previous_image=${LEGION_E2E_PREVIOUS_IMAGE:-}
 # The scratch session database's image: the pinned Postgres the repository's CI tests against.
 session_db_image=pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
 session_db_port=${LEGION_E2E_SESSION_DB_PORT:-}
@@ -175,6 +184,8 @@ fail() {
 . "$root/scripts/e2e/lib/bridge-tunnel.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/teardown.sh
 . "$root/scripts/e2e/lib/teardown.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/github-apps.sh
+. "$root/scripts/e2e/lib/github-apps.sh"
 
 trap cleanup EXIT
 trap 'exit 129' HUP
@@ -230,7 +241,7 @@ bridge)
 *) fail "LEGION_E2E_POD_REACHABILITY must be aws-private-ip or bridge, not '$pod_reachability'" ;;
 esac
 case "$session_db_port" in
-'') fail "LEGION_E2E_SESSION_DB_PORT is unset: postgres-resume's scratch Postgres listens on a port every pod reaches as it reaches the worker stream" ;;
+'') fail "LEGION_E2E_SESSION_DB_PORT is unset: the run's scratch Postgres, which every pod of the run keeps its sessions in, listens on a port every pod reaches as it reaches the worker stream" ;;
 *[!0-9]*) fail "LEGION_E2E_SESSION_DB_PORT must be a port number, not '$session_db_port'" ;;
 esac
 [ "$session_db_port" != "$port" ] || fail "LEGION_E2E_SESSION_DB_PORT is the worker stream's port $port"
@@ -239,6 +250,25 @@ esac
 [[ $second_owner_repo =~ ^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+$ ]] || fail "LEGION_E2E_REPO_SECOND_OWNER must be <owner>/<name>, not '$second_owner_repo'"
 [ "$(tr '[:upper:]' '[:lower:]' <<<"${second_owner_repo%%/*}")" != "$(tr '[:upper:]' '[:lower:]' <<<"${repo%%/*}")" ] ||
   fail "LEGION_E2E_REPO_SECOND_OWNER $second_owner_repo is under ${repo%%/*}, $repo's owner: the check needs a repository of another owner"
+case "$previous_image" in *@sha256:*) ;; *) fail "LEGION_E2E_PREVIOUS_IMAGE must be a worker image of main from before one container, pinned by digest (…@sha256:…), not '$previous_image'" ;; esac
+previous_base=$(docker buildx imagetools inspect "$previous_image" --format '{{json .Image.Config.Labels}}' | jq -r '."org.opencontainers.image.revision" // empty') ||
+  fail "reading LEGION_E2E_PREVIOUS_IMAGE $previous_image's labels failed"
+[ -n "$previous_base" ] || fail "LEGION_E2E_PREVIOUS_IMAGE $previous_image names no org.opencontainers.image.revision"
+git -C "$root" merge-base --is-ancestor "$previous_base" origin/main ||
+  fail "LEGION_E2E_PREVIOUS_IMAGE $previous_image was built from $previous_base, which origin/main does not contain: the previous layout is a release's"
+git -C "$root" merge-base --is-ancestor "$previous_base" HEAD ||
+  fail "LEGION_E2E_PREVIOUS_IMAGE $previous_image was built from $previous_base, which this checkout does not contain"
+if git -C "$root" cat-file -e "$previous_base:packages/daemon/internal/runtime/sandbox/one_container_test.go" 2>/dev/null; then
+  fail "LEGION_E2E_PREVIOUS_IMAGE $previous_image was built from $previous_base, which already runs issue pods of one container"
+fi
+previous_contract=$(git -C "$root" show "$previous_base:packages/daemon/internal/api/version.go" | sed -n 's/^const DaemonAPIVersion = \([0-9]*\)$/\1/p')
+case "$previous_contract" in
+37 | 38) ;;
+*) fail "LEGION_E2E_PREVIOUS_IMAGE $previous_image was built from $previous_base, at daemon API contract ${previous_contract:-unknown}: previous-layout needs a main build at contract 37 or 38, the two whose harness records the claim's session and whose issue pods run six role containers" ;;
+esac
+require_app_inputs implement
+write_github_apps implement
+check_github_apps implement
 for taken in "$port" "$session_db_port"; do
   if [ -n "$(ss -Hltn "sport = :$taken")" ]; then
     fail "port $taken is taken on the devbox: $(ss -Hltnp "sport = :$taken")"
@@ -334,11 +364,15 @@ else
 fi
 
 begin session-db
-# postgres-resume's session database: a throwaway Postgres on the devbox, which pods reach as they
-# reach the worker stream (directly in AWS mode, through the bridge in GKE mode). Its password is
+# The run's session database: a throwaway Postgres on the devbox, which pods reach as they
+# reach the worker stream (directly in AWS mode, through the bridge in GKE mode). The daemon
+# requires a store that keeps sessions in a database, and the harness names this one
+# (runtime.kubernetes.session_store postgres), so every runtime the harness
+# builds keeps its sessions here and every resume of the run is held to this table — which is what
+# a role carries across a pod now that an issue's disk dies with its pod. Its password is
 # the run's own and reaches docker through an owner-only env file, never an argument; the URL is
 # written only to an owner-only file, which the harness and the providers Secret read, and is
-# never printed. The harness's own direct connection (postgres-resume's writeSession) needs the
+# never printed. The harness's own direct connection (writeSession) needs the
 # address the devbox itself can dial — bind_host, loopback under bridge — never advertise_host (a
 # bridge-mode devbox cannot resolve the bridge's cluster-DNS name), so a second file carries the
 # same database at that address, for the harness alone; the providers Secret and every pod still
@@ -352,7 +386,8 @@ session_db_password=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
 )
 unset session_db_password
 session_db_started=1
-docker run -d --name "$session_db" --cpus 1 --env-file "$work/session-db.env" -p "$bind_host:$session_db_port:5432" "$session_db_image" >/dev/null ||
+docker run -d --name "$session_db" --cpus 2 --memory 4g --mount type=tmpfs,destination=/var/lib/postgresql/data \
+  --env-file "$work/session-db.env" -p "$bind_host:$session_db_port:5432" "$session_db_image" >/dev/null ||
   fail "docker could not start the scratch session database $session_db on $bind_host:$session_db_port"
 ready=
 for _ in $(seq 60); do
@@ -400,9 +435,10 @@ op create configmap "$route_configmap" --from-file=models.yml="$work/models.yml"
   --dry-run=client -o yaml | op label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
   fail "the operator could not create ConfigMap $route_configmap"
 # The run's providers Secret, named as the runtime names it (ProvidersSecretName): one key no model
-# route reads, the scratch session database's URL, which postgres-resume's runtime keeps sessions
-# in (session_dsn_secret stage4a_sessions), and, under LEGION_E2E_MODEL_ROUTE=key-file, a
-# placeholder ANTHROPIC_API_KEY.
+# route reads, the scratch session database's URL, which every runtime of the run keeps its
+# sessions in (session_dsn_secret stage4a_sessions, the key of the run's session_store postgres; the
+# daemon requires a store that keeps sessions in a database), and, under
+# LEGION_E2E_MODEL_ROUTE=key-file, a placeholder ANTHROPIC_API_KEY.
 op create secret generic "$providers_secret" --from-literal=stage4a="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" \
   --from-file=stage4a_sessions="$work/session-dsn" \
   "${anthropic_key_args[@]}" \
@@ -415,6 +451,16 @@ begin build
 go -C "$root/packages/daemon" test -c -tags e2e -o "$work/stage4a.test" ./internal/runtime/sandbox
 go -C "$root/packages/envoy" build -o "$work/agent-secrets" ./cmd/agent-secrets
 note "built the e2e harness and agent-secrets from the checkout"
+# previous-layout's fixture: the previous release's own Stage 4a harness (LEGION_E2E_PREVIOUS_IMAGE's revision), with testdata/previouslayout's
+# one test added, built from an archive of that commit so no worktree or branch is made.
+mkdir "$work/previous"
+git -C "$root" archive "$previous_base" go.work go.work.sum packages/daemon packages/envoy | tar -x -C "$work/previous" ||
+  fail "archiving $previous_base for the previous release's harness failed"
+cp "$root/packages/daemon/internal/runtime/sandbox/testdata/previouslayout/fixture_test.go.txt" \
+  "$work/previous/packages/daemon/internal/runtime/sandbox/zz_previous_layout_fixture_test.go"
+go -C "$work/previous/packages/daemon" test -c -tags e2e -o "$work/previous.test" ./internal/runtime/sandbox ||
+  fail "building the previous release's ($previous_base) harness with the previous-layout fixture failed"
+note "built the previous release's ($previous_base) harness with the previous-layout fixture; its image $previous_image"
 
 harness_ok=
 # -test.timeout 150m must stay under the harness's staleRunBranchAge (4 hours): another run's
@@ -436,8 +482,8 @@ env \
   LEGION_E2E_RUNTIME_IDENTITY_KIND="$runtime_identity_kind" \
   LEGION_E2E_PLATFORM="$platform" \
   LEGION_E2E_POD_REACHABILITY="$pod_reachability" \
-  LEGION_E2E_IMPLEMENT_APP_ID="$app_id" \
-  LEGION_E2E_IMPLEMENT_APP_KEY="$app_key" \
+  LEGION_E2E_IMPLEMENT_APP_ID="$implement_app_id" \
+  LEGION_E2E_IMPLEMENT_APP_KEY_NAME="$implement_app_key_name" \
   LEGION_E2E_RECORD="$record" \
   LEGION_E2E_WORK="$evidence" \
   LEGION_E2E_FROM="$from" \
@@ -455,6 +501,8 @@ env \
   LEGION_E2E_PI_ENVOY_TARBALL="$pi_envoy_tarball" \
   LEGION_E2E_PI_LEGION_VERSION="$pi_legion_version" \
   LEGION_E2E_PI_ENVOY_VERSION="$pi_envoy_version" \
+  LEGION_E2E_PREVIOUS_HARNESS="$work/previous.test" \
+  LEGION_E2E_PREVIOUS_IMAGE="$previous_image" \
   "$work/stage4a.test" -test.run '^TestStage4aSandboxRuntimeLive$' -test.v -test.timeout 150m &
 # Backgrounded and waited on, not run as env's own foreground child: a foreign command's shell
 # blocks delivering a trapped signal until that command itself exits, so a bare `if env ... cmd

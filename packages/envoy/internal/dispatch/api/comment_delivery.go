@@ -50,6 +50,11 @@ func (s *server) resolveMentionTargets(ctx context.Context, targets []string, de
 		// A missing session is not a resolved target, even though the legacy message delivery
 		// model retains its requested id in an attempt row. A live session that lacks a mode is
 		// still resolved and participates in the event's session-level suppression calculation.
+		// resolveDeliveryTarget writes this exact prefix for one answer only - the listener
+		// holds no record under that session id - so the prefix test separates "no record",
+		// whose requested id is kept on the attempt row, from a capability refusal. A read that
+		// did not answer gives no session id here, so it sets no pin; an existing attempt keeps
+		// the one it holds only through the coalesce(session_id, ...) update further down.
 		if sessionID != "" && !strings.HasPrefix(resolveError, "no live session ") {
 			item.SessionID = new(sessionID)
 		}
@@ -497,7 +502,7 @@ func (s *server) createCommentDelivery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !human {
-		if actor, err = bearerSessionActor(actor, input.Actor); err != nil {
+		if actor, err = bearerSessionActor(r, actor, input.Actor); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}

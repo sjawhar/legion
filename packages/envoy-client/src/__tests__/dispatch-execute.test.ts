@@ -16,6 +16,7 @@ import {
 } from "@legion/contracts";
 import { DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
 import { z } from "zod";
+import { cliRefusals } from "../dispatch-cli";
 import type { ExecFn } from "../dispatch-cwd";
 import {
   type DispatchToolResult,
@@ -90,34 +91,23 @@ const createdIssueLine =
 const architectureSourceUnavailableGuidance =
   'Could not check whether project LEGION has an architecture model: architecture source network error. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
 
-/** A project with no architecture source, as a current server answers it: `200 null`. */
-function sourceNull(): Response {
-  return new Response("null", { headers: { "Content-Type": "application/json" } });
+/** A project with no architecture source, as the list route answers it: `[]`. */
+function noSources(): Response {
+  return new Response("[]", { headers: { "Content-Type": "application/json" } });
 }
 
-/** The same project as an older server answers it, which a client still meets mid-rollout. */
-function sourceNotFound(): Response {
-  return new Response(
-    JSON.stringify({
-      code: "SOURCE_NOT_FOUND",
-      error: "no architecture source configured for LEGION",
-    }),
-    { status: 404, headers: { "Content-Type": "application/json" } }
-  );
-}
-
-/** A 404 that is not the no-source answer: a project the server does not know. */
+/** A 404 from the list route: a project the server does not know (`writeHandlerError`'s answer). */
 function projectNotFound(): Response {
-  return new Response(JSON.stringify({ code: "NOT_FOUND", error: "project LEGION not found" }), {
+  return new Response(JSON.stringify({ code: "NOT_FOUND", error: "not found" }), {
     status: 404,
     headers: { "Content-Type": "application/json" },
   });
 }
 
-function architectureSource(project: string) {
+function architectureSource(project: string, repo = "sjawhar/legion") {
   return {
     project,
-    repo: "sjawhar/legion",
+    repo,
     branch: "main",
     enabled: true,
     created_by: { kind: "user", login: "sjawhar" },
@@ -125,6 +115,7 @@ function architectureSource(project: string) {
     last_sync_at: null,
     last_commit: null,
     last_error: null,
+    components: 0,
   };
 }
 function issueComponents(
@@ -137,16 +128,24 @@ function issueComponents(
   return { mode, ids, unknown, reason, inherited_from: inheritedFrom };
 }
 
+/**
+ * How the server answers the architecture source read: a current server's list route, or (the
+ * `older-` states) a server older than the list route, which answers it with no route and serves
+ * the singular read instead: `200 null`, a pre-#1522 `404 SOURCE_NOT_FOUND`, or one source row.
+ */
 type ArchitectureSourceState =
-  | "exists"
-  | "null"
-  | "source-not-found"
+  | "one"
+  | "several"
+  | "none"
   | "project-not-found"
-  | "fails";
+  | "fails"
+  | "older-none"
+  | "older-source-not-found"
+  | "older-one";
 
 async function createIssueWithComponents(
   components: IssueComponents,
-  source: ArchitectureSourceState = "exists"
+  source: ArchitectureSourceState = "one"
 ): Promise<{ readonly result: DispatchToolResult; readonly requests: string[] }> {
   const requests: string[] = [];
   const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -160,14 +159,37 @@ async function createIssueWithComponents(
         components,
       });
     }
-    if (target.pathname === "/api/v1/projects/LEGION/architecture-source") {
-      if (source === "exists") {
-        return response(architectureSource("LEGION"));
+    if (target.pathname === "/api/v1/projects/LEGION/architecture-sources") {
+      if (source.startsWith("older-")) {
+        return response(
+          {
+            code: "NOT_FOUND",
+            error: `no route for GET ${target.pathname}`,
+            hint: "GET /api/v1 lists every route",
+          },
+          404
+        );
       }
-      if (source === "null") return sourceNull();
-      if (source === "source-not-found") return sourceNotFound();
+      if (source === "one") return response([architectureSource("LEGION")]);
+      if (source === "several") {
+        return response([
+          architectureSource("LEGION"),
+          architectureSource("LEGION", "theorem-labs/agent-infra"),
+        ]);
+      }
+      if (source === "none") return noSources();
       if (source === "project-not-found") return projectNotFound();
       throw new Error("architecture source network error");
+    }
+    if (target.pathname === "/api/v1/projects/LEGION/architecture-source") {
+      if (source === "older-none") return response(null);
+      if (source === "older-one") return response(architectureSource("LEGION"));
+      if (source === "older-source-not-found") {
+        return response(
+          { code: "SOURCE_NOT_FOUND", error: "no architecture source configured for LEGION" },
+          404
+        );
+      }
     }
     throw new Error(`unexpected request: ${target.pathname}`);
   };
@@ -561,7 +583,7 @@ describe("executeDispatchTool", () => {
     expect(await problemsOf("dispatch_doc_read", { ref: documentAsk })).toEqual([
       `ref ${documentAsk} names an ask on CORE/runbook-md; dispatch doc-read would act on CORE/runbook-md and drop the ask: read it with dispatch read, or name CORE/runbook-md with project CORE and artifact runbook-md`,
     ]);
-    // suggest and doc-edit act on a document, so an issue-owned link's hint names one.
+    // suggest still requires an artifact, so an issue-owned link's hint names one.
     expect(
       await problemsOf("dispatch_suggest", {
         ref: ask,
@@ -570,6 +592,15 @@ describe("executeDispatchTool", () => {
       })
     ).toEqual([
       `ref ${ask} names an ask on DSP-42; dispatch suggest would act on DSP-42 and drop the ask: read it with dispatch read, or name DSP-42 with issue DSP-42 and artifact <the document's slug>`,
+    ]);
+    // doc-edit edits the issue's primary document, so its hint names the issue alone.
+    expect(
+      await problemsOf("dispatch_doc_edit", {
+        ref: ask,
+        ops: [{ op: "replace", find: "old line", with: "new line" }],
+      })
+    ).toEqual([
+      `ref ${ask} names an ask on DSP-42; dispatch doc-edit would act on DSP-42 and drop the ask: read it with dispatch read, or name DSP-42 with issue DSP-42`,
     ]);
   });
 
@@ -1453,9 +1484,8 @@ describe("executeDispatchTool", () => {
     expect(requests).toBe(0);
   });
 
-  test("dispatch_architecture_sync posts the sync route and reports the imported commit", async () => {
-    const requests: string[] = [];
-    const source = {
+  function syncedSource(overrides: Record<string, unknown> = {}) {
+    return {
       project: "CORE",
       repo: "legion/arch",
       branch: "main",
@@ -1465,16 +1495,20 @@ describe("executeDispatchTool", () => {
       last_sync_at: "2026-09-17T00:05:00Z",
       last_commit: "c0ffee",
       last_error: null,
+      components: 4,
+      ...overrides,
     };
-    const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      const target = new URL(String(url));
-      requests.push(`${init?.method ?? "GET"} ${target.pathname}`);
-      return response(source);
-    }) as typeof fetch;
+  }
 
-    const result = await executeDispatchTool({
+  function runArchitectureSync(args: Record<string, unknown>, answer: () => Response) {
+    const requests: string[] = [];
+    const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      requests.push(`${init?.method ?? "GET"} ${new URL(String(url)).pathname}`);
+      return answer();
+    }) as typeof fetch;
+    const result = executeDispatchTool({
       tool: "dispatch_architecture_sync",
-      args: { project: "CORE" },
+      args,
       cwd: "/workspace",
       host: "omp",
       config,
@@ -1482,55 +1516,142 @@ describe("executeDispatchTool", () => {
       exec: repoExec("owner/repo"),
       fetchImpl,
     });
+    return { result, requests };
+  }
 
-    expect(requests).toEqual(["POST /api/v1/projects/CORE/architecture-source/sync"]);
-    expect(result.text).toBe(
-      "Synced CORE architecture from legion/arch@main: commit c0ffee (2026-09-17T00:05:00Z)."
+  test("dispatch_architecture_sync imports every source and answers one line per source", async () => {
+    const { result, requests } = runArchitectureSync({ project: "CORE" }, () =>
+      response([
+        syncedSource(),
+        syncedSource({
+          repo: "acme/infra",
+          branch: "release",
+          last_sync_at: "2026-09-17T00:06:00Z",
+          last_commit: "beef01",
+          last_error: 'component id "api" is already a component of CORE from legion/arch',
+        }),
+        syncedSource({
+          repo: "acme/tools",
+          last_sync_at: "2026-09-17T00:07:00Z",
+          last_commit: null,
+          last_error: "tools.md: missing title",
+          components: 0,
+        }),
+        // Re-saved on another branch: no recorded commit, its earlier components still up.
+        syncedSource({
+          repo: "acme/docs",
+          branch: "next",
+          last_sync_at: "2026-09-17T00:08:00Z",
+          last_commit: null,
+          last_error: 'component id "api" is already a component of CORE from legion/arch',
+          components: 1,
+        }),
+      ])
     );
-    expect(result.details).toEqual({
+    const answered = await result;
+
+    expect(requests).toEqual(["POST /api/v1/projects/CORE/architecture-sources/sync"]);
+    expect(answered.text).toBe(
+      [
+        "Synced CORE architecture from legion/arch@main: commit c0ffee (2026-09-17T00:05:00Z).",
+        'Sync failed for CORE (acme/infra@release): component id "api" is already a component of CORE from legion/arch',
+        "The previous model of acme/infra stays up (commit beef01).",
+        "Sync failed for CORE (acme/tools@main): tools.md: missing title",
+        "No model has ever imported from acme/tools.",
+        'Sync failed for CORE (acme/docs@next): component id "api" is already a component of CORE from legion/arch',
+        "The previous model of acme/docs stays up (1 component).",
+      ].join("\n")
+    );
+    expect(answered.details).toEqual({
       project: "CORE",
-      repo: "legion/arch",
-      branch: "main",
-      commit: "c0ffee",
-      error: null,
+      sources: [
+        { repo: "legion/arch", branch: "main", commit: "c0ffee", error: null },
+        {
+          repo: "acme/infra",
+          branch: "release",
+          commit: "beef01",
+          error: 'component id "api" is already a component of CORE from legion/arch',
+        },
+        {
+          repo: "acme/tools",
+          branch: "main",
+          commit: null,
+          error: "tools.md: missing title",
+        },
+        {
+          repo: "acme/docs",
+          branch: "next",
+          commit: null,
+          error: 'component id "api" is already a component of CORE from legion/arch',
+        },
+      ],
     });
   });
 
-  test("dispatch_architecture_sync reports a rejected model with the surviving commit", async () => {
-    const fetchImpl = (async (): Promise<Response> =>
-      response({
-        project: "CORE",
-        repo: "legion/arch",
-        branch: "main",
-        enabled: true,
-        created_by: { kind: "user", id: "alice" },
-        created_at: "2026-09-17T00:00:00Z",
-        last_sync_at: "2026-09-17T00:10:00Z",
-        last_commit: "c0ffee",
-        last_error: "api.md: duplicate component id",
-      })) as unknown as typeof fetch;
+  test("dispatch_architecture_sync --repo imports only that source", async () => {
+    const { result, requests } = runArchitectureSync({ project: "CORE", repo: "acme/infra" }, () =>
+      response(syncedSource({ repo: "acme/infra", last_commit: "beef01" }))
+    );
+    const answered = await result;
 
-    const result = await executeDispatchTool({
-      tool: "dispatch_architecture_sync",
-      args: { project: "CORE" },
-      cwd: "/workspace",
-      host: "omp",
-      config,
-      env: {},
-      exec: repoExec("owner/repo"),
-      fetchImpl,
+    expect(requests).toEqual(["POST /api/v1/projects/CORE/architecture-sources/acme/infra/sync"]);
+    expect(answered.text).toBe(
+      "Synced CORE architecture from acme/infra@main: commit beef01 (2026-09-17T00:05:00Z)."
+    );
+    expect(answered.details).toEqual({
+      project: "CORE",
+      sources: [{ repo: "acme/infra", branch: "main", commit: "beef01", error: null }],
     });
+  });
 
-    expect(result.text).toBe(
+  test("dispatch_architecture_sync --repo reports a rejected model with that source's surviving commit", async () => {
+    const { result } = runArchitectureSync({ project: "CORE", repo: "legion/arch" }, () =>
+      response(
+        syncedSource({
+          last_sync_at: "2026-09-17T00:10:00Z",
+          last_error: "api.md: duplicate component id",
+        })
+      )
+    );
+
+    expect((await result).text).toBe(
       [
         "Sync failed for CORE (legion/arch@main): api.md: duplicate component id",
-        "The previous model stays up (commit c0ffee).",
+        "The previous model of legion/arch stays up (commit c0ffee).",
       ].join("\n")
     );
-    expect(result.details).toMatchObject({
-      commit: "c0ffee",
-      error: "api.md: duplicate component id",
-    });
+  });
+
+  test.each([
+    [{ project: "CORE" }, "SOURCE_NOT_FOUND", 404, "no architecture source configured for CORE"],
+    [
+      { project: "CORE", repo: "acme/infra" },
+      "SOURCE_NOT_FOUND",
+      404,
+      "no architecture source acme/infra configured for CORE",
+    ],
+    [
+      { project: "CORE", repo: "acme/infra" },
+      "SOURCE_ACCESS",
+      409,
+      "the GitHub App cannot read acme/infra",
+    ],
+  ] as const)("dispatch_architecture_sync %j exits with the server's %s", async (args, code, status, error) => {
+    const { result } = runArchitectureSync(args, () => response({ code, error }, status));
+
+    await expect(result).rejects.toMatchObject({ code, status, message: error });
+  });
+
+  test("dispatch_architecture_sync refuses a repo that is not owner/name before any request", async () => {
+    const { result, requests } = runArchitectureSync(
+      { project: "CORE", repo: "acme/infra/extra" },
+      () => response(syncedSource())
+    );
+
+    await expect(result).rejects.toThrow(
+      "repo is not a repository: give it as owner/name, such as acme/infra."
+    );
+    expect(requests).toEqual([]);
   });
 
   test("dispatch_project posts the key and name as this session and prints the created project", async () => {
@@ -1886,6 +2007,7 @@ describe("executeDispatchTool", () => {
         key: "DSP-1",
         status: "todo",
         claim: method === "POST" ? claim : null,
+        legion_managed_status: false,
       });
     };
     const run = (args: Record<string, unknown>) =>
@@ -1917,6 +2039,87 @@ describe("executeDispatchTool", () => {
     expect(calls[1]?.pathname).toBe("/api/v1/issues/DSP-1/claim");
     expect(released.text).toContain("DSP-1: claim released");
     expect(released.details).toMatchObject({ issue: "DSP-1", claim: null });
+  });
+
+  test("dispatch_claim on an issue Legion runs tells nobody to move its status", async () => {
+    const claim = {
+      actor: { kind: "session", id: "session-one" },
+      at: "2026-09-24T06:00:00Z",
+    };
+    const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const method = init?.method ?? "GET";
+      return response({
+        key: "DSP-1",
+        status: "todo",
+        claim: method === "POST" ? claim : null,
+        legion_managed_status: true,
+      });
+    };
+    const run = (args: Record<string, unknown>) =>
+      executeDispatchTool({
+        tool: "dispatch_claim",
+        args,
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        sessionId: "session-one",
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+    // The Legion daemon owns the status of an issue it runs: a status this session writes is
+    // undone, so neither answer may send it to issue-update.
+    const claimed = await run({ issue: "DSP-1" });
+    expect(claimed.text).toContain(
+      "Legion's daemon moves this issue's status on an issue it runs, so leave it alone — a status written here is undone"
+    );
+    expect(claimed.text).not.toContain("issue-update");
+
+    const released = await run({ issue: "DSP-1", release: true });
+    expect(released.text).toContain(
+      "Legion's daemon moves this issue's status on an issue it runs, so leave it alone — a status written here is undone"
+    );
+    expect(released.text).not.toContain("issue-update");
+  });
+
+  test("dispatch_claim reads an omitted legion_managed_status as not Legion-managed", async () => {
+    const claim = {
+      actor: { kind: "session", id: "session-one" },
+      at: "2026-09-24T06:00:00Z",
+    };
+    // An older Dispatch, or a failed label walk on this one, answers without the field; the
+    // claim stands and the wording is the one every client had before the field existed.
+    const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const method = init?.method ?? "GET";
+      return response({
+        key: "DSP-1",
+        status: "todo",
+        claim: method === "POST" ? claim : null,
+      });
+    };
+    const run = (args: Record<string, unknown>) =>
+      executeDispatchTool({
+        tool: "dispatch_claim",
+        args,
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        sessionId: "session-one",
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+    const claimed = await run({ issue: "DSP-1" });
+    expect(claimed.text).toContain("move it to in_progress with dispatch issue-update");
+    expect(claimed.text).not.toContain("Legion's daemon");
+
+    const released = await run({ issue: "DSP-1", release: true });
+    expect(released.text).toContain(
+      "DSP-1: claim released; nobody is working it now. Its status is still todo — move it yourself"
+    );
+    expect(released.text).not.toContain("Legion's daemon");
   });
 
   test("a refused dispatch_claim reaches the caller with the code it must act on", async () => {
@@ -2391,6 +2594,101 @@ describe("executeDispatchTool", () => {
     ]);
   });
 
+  // --all is for a caller that must not miss or repeat a row: Dispatch answers the whole filtered
+  // listing only when the request carries neither limit nor offset (api/issue_page.go's
+  // parseIssuePage), so what matters is the query string that goes out, not just the rows back.
+  test("dispatch_issues --all asks Dispatch for the unpaged listing and renders every row", async () => {
+    const issues = Array.from({ length: 251 }, (_, index) => ({
+      key: `ACME-${index}`,
+      title: `Issue ${index}`,
+      status: "needs_review",
+      priority: null,
+      rank: "a",
+      labels: [],
+      parent: null,
+      assignee: null,
+      updated_at: "2026-09-13T00:00:00Z",
+      last_seq: 1,
+      open_asks: 0,
+    }));
+    const served: Array<{ limit: string | null; offset: string | null; status: string | null }> =
+      [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const query = new URL(String(url)).searchParams;
+      served.push({
+        limit: query.get("limit"),
+        offset: query.get("offset"),
+        status: query.get("status"),
+      });
+      // The unpaged path answers a bare array, never a page.
+      return response(issues);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issues",
+      args: { project: "ACME", status: "needs_review", all: true },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(served).toEqual([{ limit: null, offset: null, status: "needs_review" }]);
+    expect(result.details.issues).toHaveLength(251);
+    expect(result.details).toMatchObject({ total: 251, offset: 0 });
+    // Every row is the answer, so the render names no page.
+    expect(result.text).toContain("251 issues in ACME");
+    expect(result.text).not.toContain("showing");
+    expect(result.text).toContain("ACME-250 [needs_review] Issue 250");
+  });
+
+  test("dispatch_issues without --all still pages, limit and offset unchanged", async () => {
+    const served: Array<{ limit: string | null; offset: string | null }> = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const query = new URL(String(url)).searchParams;
+      served.push({ limit: query.get("limit"), offset: query.get("offset") });
+      return response({ issues: [], total: 0, limit: 50, offset: 0 });
+    };
+
+    await executeDispatchTool({
+      tool: "dispatch_issues",
+      args: { project: "ACME" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(served).toEqual([{ limit: "50", offset: "0" }]);
+  });
+
+  test.each([
+    [{ project: "ACME", all: true, limit: 100 }, "--limit"],
+    [{ project: "ACME", all: true, offset: 250 }, "--offset"],
+    [{ project: "ACME", all: true, limit: 100, offset: 250 }, "--limit or --offset"],
+  ])("dispatch_issues refuses --all beside paging (%#)", async (args, named) => {
+    const fetchImpl = (() => {
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_issues",
+        args,
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      })
+    ).rejects.toThrow(`cannot be combined with ${named}`);
+  });
+
   test("dispatch_issues names an empty page past the listing's end", async () => {
     const fetchImpl = async (_url: RequestInfo | URL): Promise<Response> =>
       response({ issues: [], total: 1, limit: 50, offset: 1 });
@@ -2456,8 +2754,8 @@ describe("executeDispatchTool", () => {
   test("dispatch_issue forwards force", async () => {
     const requests: Array<{ readonly body: unknown }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-source") {
-        return sourceNull();
+      if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-sources") {
+        return noSources();
       }
       requests.push({ body: JSON.parse(String(init?.body)) });
       return response({
@@ -2496,8 +2794,8 @@ describe("executeDispatchTool", () => {
     [null, "; unassigned"],
   ] as const)("dispatch_issue links the public dashboard and names the assignee %p", async (assignee, said) => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
-      if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-source") {
-        return sourceNull();
+      if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-sources") {
+        return noSources();
       }
       return response({
         key: "LEGION-13",
@@ -2528,13 +2826,19 @@ describe("executeDispatchTool", () => {
     );
   });
 
-  test("guides an unassigned new issue to architecture components when its project has a source", async () => {
-    const { result, requests } = await createIssueWithComponents(issueComponents("inherit", []));
+  test.each([
+    ["one source", "one"],
+    ["several sources", "several"],
+  ] as const)("guides an unassigned new issue to architecture components when its project has %s", async (_sources, source) => {
+    const { result, requests } = await createIssueWithComponents(
+      issueComponents("inherit", []),
+      source
+    );
 
     expect(result.text).toBe([createdIssueLine, architectureComponentsGuidance].join("\n"));
     expect(requests).toEqual([
       "POST /api/v1/issues",
-      "GET /api/v1/projects/LEGION/architecture-source",
+      "GET /api/v1/projects/LEGION/architecture-sources",
     ]);
   });
 
@@ -2552,8 +2856,8 @@ describe("executeDispatchTool", () => {
           components: issueComponents("inherit", []),
         });
       }
-      if (target.pathname === "/api/v1/projects/LEGION/architecture-source") {
-        return response(architectureSource("LEGION"));
+      if (target.pathname === "/api/v1/projects/LEGION/architecture-sources") {
+        return response([architectureSource("LEGION")]);
       }
       throw new Error(`unexpected request: ${target.pathname}`);
     };
@@ -2572,7 +2876,7 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain(architectureComponentsGuidance);
     expect(requests).toEqual([
       "POST /api/v1/issues",
-      "GET /api/v1/projects/LEGION/architecture-source",
+      "GET /api/v1/projects/LEGION/architecture-sources",
     ]);
   });
 
@@ -2593,8 +2897,8 @@ describe("executeDispatchTool", () => {
           components: issueComponents("inherit", []),
         });
       }
-      if (target.pathname === "/api/v1/projects/LEGION/architecture-source") {
-        return response(architectureSource("LEGION"));
+      if (target.pathname === "/api/v1/projects/LEGION/architecture-sources") {
+        return response([architectureSource("LEGION")]);
       }
       throw new Error(`unexpected request: ${target.pathname}`);
     };
@@ -2613,16 +2917,47 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain(architectureComponentsGuidance);
     expect(requests).toEqual([
       "POST /api/v1/issues",
-      "GET /api/v1/projects/LEGION/architecture-source",
+      "GET /api/v1/projects/LEGION/architecture-sources",
     ]);
   });
 
-  // A rollout mixes servers and clients, so both answers a server gives for a project with no
-  // source mean no source: a current server's 200 null and an older one's 404 SOURCE_NOT_FOUND.
+  test("does not guide an unassigned new issue when its project has no source", async () => {
+    const { result, requests } = await createIssueWithComponents(
+      issueComponents("inherit", []),
+      "none"
+    );
+
+    expect(result.text).toBe(createdIssueLine);
+    expect(requests).toEqual([
+      "POST /api/v1/issues",
+      "GET /api/v1/projects/LEGION/architecture-sources",
+    ]);
+  });
+
+  test("reports a project the server does not know as a source it could not check, with no fallback", async () => {
+    const { result, requests } = await createIssueWithComponents(
+      issueComponents("inherit", []),
+      "project-not-found"
+    );
+
+    expect(result.text).toBe(
+      [
+        createdIssueLine,
+        'Could not check whether project LEGION has an architecture model: not found. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.',
+      ].join("\n")
+    );
+    expect(requests).toEqual([
+      "POST /api/v1/issues",
+      "GET /api/v1/projects/LEGION/architecture-sources",
+    ]);
+  });
+
+  // The plugin and the server ship separately (#1522): a server older than the list route answers
+  // it with no route, and the singular read it does serve says whether the project has a model.
   test.each([
-    ["200 null", "null"],
-    ["404 SOURCE_NOT_FOUND", "source-not-found"],
-  ] as const)("does not guide an unassigned new issue when the source read answers %s", async (_answer, source) => {
+    ["200 null", "older-none"],
+    ["a pre-#1522 404 SOURCE_NOT_FOUND", "older-source-not-found"],
+  ] as const)("does not guide a new issue when an older server answers its singular read %s", async (_answer, source) => {
     const { result, requests } = await createIssueWithComponents(
       issueComponents("inherit", []),
       source
@@ -2631,22 +2966,23 @@ describe("executeDispatchTool", () => {
     expect(result.text).toBe(createdIssueLine);
     expect(requests).toEqual([
       "POST /api/v1/issues",
+      "GET /api/v1/projects/LEGION/architecture-sources",
       "GET /api/v1/projects/LEGION/architecture-source",
     ]);
   });
 
-  test("reports a 404 other than SOURCE_NOT_FOUND as a source it could not check", async () => {
-    const { result } = await createIssueWithComponents(
+  test("guides a new issue when an older server's singular read answers a source", async () => {
+    const { result, requests } = await createIssueWithComponents(
       issueComponents("inherit", []),
-      "project-not-found"
+      "older-one"
     );
 
-    expect(result.text).toBe(
-      [
-        createdIssueLine,
-        'Could not check whether project LEGION has an architecture model: project LEGION not found. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.',
-      ].join("\n")
-    );
+    expect(result.text).toBe([createdIssueLine, architectureComponentsGuidance].join("\n"));
+    expect(requests).toEqual([
+      "POST /api/v1/issues",
+      "GET /api/v1/projects/LEGION/architecture-sources",
+      "GET /api/v1/projects/LEGION/architecture-source",
+    ]);
   });
 
   test("does not guide a child whose live component attachment comes from its parent", async () => {
@@ -2675,7 +3011,7 @@ describe("executeDispatchTool", () => {
     expect(result.text).toBe([createdIssueLine, architectureComponentsGuidance].join("\n"));
     expect(requests).toEqual([
       "POST /api/v1/issues",
-      "GET /api/v1/projects/LEGION/architecture-source",
+      "GET /api/v1/projects/LEGION/architecture-sources",
     ]);
   });
 
@@ -2688,7 +3024,7 @@ describe("executeDispatchTool", () => {
     expect(result.text).toBe([createdIssueLine, architectureSourceUnavailableGuidance].join("\n"));
     expect(requests).toEqual([
       "POST /api/v1/issues",
-      "GET /api/v1/projects/LEGION/architecture-source",
+      "GET /api/v1/projects/LEGION/architecture-sources",
     ]);
   });
 
@@ -2704,8 +3040,8 @@ describe("executeDispatchTool", () => {
   test("dispatch_issue forwards initial labels", async () => {
     const requests: Array<{ readonly body: unknown }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-source") {
-        return sourceNull();
+      if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-sources") {
+        return noSources();
       }
       requests.push({ body: JSON.parse(String(init?.body)) });
       return response({
@@ -2735,8 +3071,8 @@ describe("executeDispatchTool", () => {
   test("dispatch_issue forwards an initial priority", async () => {
     const requests: Array<{ readonly body: unknown }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-source") {
-        return sourceNull();
+      if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-sources") {
+        return noSources();
       }
       requests.push({ body: JSON.parse(String(init?.body)) });
       return response({
@@ -2764,8 +3100,8 @@ describe("executeDispatchTool", () => {
   test("dispatch_issue forwards an assignee login", async () => {
     const requests: Array<{ readonly body: unknown }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-source") {
-        return sourceNull();
+      if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-sources") {
+        return noSources();
       }
       requests.push({ body: JSON.parse(String(init?.body)) });
       return response({
@@ -2794,7 +3130,7 @@ describe("executeDispatchTool", () => {
     const requests: Array<{ readonly method: string; readonly body: unknown }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const pathname = new URL(String(url)).pathname;
-      if (pathname === "/api/v1/projects/LEGION/architecture-source") return sourceNull();
+      if (pathname === "/api/v1/projects/LEGION/architecture-sources") return noSources();
       const method = init?.method ?? "GET";
       if (method === "GET") {
         return response({
@@ -2861,8 +3197,8 @@ describe("executeDispatchTool", () => {
       components: issueComponents("inherit", []),
     };
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      if (new URL(String(url)).pathname === "/api/v1/projects/ACME/architecture-source") {
-        return sourceNull();
+      if (new URL(String(url)).pathname === "/api/v1/projects/ACME/architecture-sources") {
+        return noSources();
       }
       const method = init?.method ?? "GET";
       if (method === "PATCH") bodies.push(JSON.parse(String(init?.body)));
@@ -2915,7 +3251,7 @@ describe("executeDispatchTool", () => {
     };
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const pathname = new URL(String(url)).pathname;
-      if (pathname === "/api/v1/projects/LEGION/architecture-source") return sourceNull();
+      if (pathname === "/api/v1/projects/LEGION/architecture-sources") return noSources();
       return response(olderIssue);
     };
     const run = (tool: string, args: Record<string, unknown>) =>
@@ -4398,7 +4734,10 @@ describe("executeDispatchTool", () => {
     expect(await read({ ref: "http://dispatch.test/issues/DSP-42/spec?q=workspace" })).toEqual(
       spec
     );
-    expect(await read({ ref: "http://dispatch.test/issues/DSP-42/spec#b-ship-it" })).toEqual(spec);
+    // A block's link on the Spec tab names that block, so the read is the block's, not the spec's.
+    expect(
+      (await read({ ref: "http://dispatch.test/issues/DSP-42/spec#b-ship-it" })).text
+    ).toStartWith("Block: ship-it\nDocument: dispatch://DSP-42/spec\n");
     expect(await read({ ref: "http://dispatch.test/issues/DSP-42/spec" })).toEqual(spec);
     expect(
       await read({ ref: "http://dispatch.test/issues/DSP-42/artifacts/notes-md?q=workspace" })
@@ -4410,6 +4749,328 @@ describe("executeDispatchTool", () => {
     expect(requests).toContain(
       `/api/v1/references?to=${encodeURIComponent("dispatch://DSP-42/artifact/notes-md")}`
     );
+  });
+
+  describe("a block reference", () => {
+    const blockRef = "dispatch://CORE-1/spec#b-d%C3%A9cision%3A1";
+    const blockNode = {
+      kind: "block",
+      id: "CORE-1/spec#décision:1",
+      block_id: "décision:1",
+      issue_key: "CORE-1",
+      project: "CORE",
+      ref: blockRef,
+      document: "dispatch://CORE-1/spec",
+    };
+    const notFound = (error: string) => response({ error, code: "NOT_FOUND" }, 404);
+    /** A read of `ref` against a server whose references route answers `to` and `from`: the
+     *  pending result, and the requests it sends. */
+    const readBlock = (
+      ref: string,
+      to: () => Response,
+      from: () => Response = () => response({ node: blockNode, edges: [] })
+    ) => {
+      const requests: string[] = [];
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const target = new URL(String(url));
+        requests.push(target.pathname + target.search);
+        if (target.pathname === "/api/v1/references" && target.searchParams.get("to") === ref) {
+          return to();
+        }
+        if (target.pathname === "/api/v1/references" && target.searchParams.get("from") === ref) {
+          return from();
+        }
+        throw new Error(`unexpected request: ${target.pathname}${target.search}`);
+      };
+      const result = executeDispatchTool({
+        tool: "dispatch_read",
+        args: { ref },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+      return { result, requests };
+    };
+
+    test("reads the block: its document, the version its text last changed in, its text and its links", async () => {
+      const commentRef = "dispatch://CORE-1/comment/cccccccc-0000-4000-8000-000000000042";
+      const { result, requests } = readBlock(
+        blockRef,
+        () =>
+          response({
+            node: {
+              ...blockNode,
+              changed_version: 3,
+              changed_at: "2026-10-20T00:00:00Z",
+              text: "We ship on Friday.\n\nThe release waits for OPS-1.",
+            },
+            edges: [
+              {
+                kind: "mentions",
+                direction: "in",
+                node: {
+                  kind: "comment",
+                  id: "cccccccc-0000-4000-8000-000000000042",
+                  ref: commentRef,
+                },
+                excerpt: { text: "See the decision." },
+                created_at: "2026-10-21T00:00:00Z",
+                source_seq: 7,
+              },
+            ],
+          }),
+        () =>
+          response({
+            node: blockNode,
+            edges: [
+              {
+                kind: "mentions",
+                direction: "out",
+                node: { kind: "issue", id: "OPS-1", ref: "dispatch://OPS-1" },
+                created_at: "2026-10-20T00:00:00Z",
+                source_seq: 5,
+              },
+              {
+                kind: "part_of",
+                direction: "out",
+                node: {
+                  kind: "artifact",
+                  id: "artifact-1",
+                  ref: "dispatch://CORE-1/artifact/spec",
+                },
+                created_at: "2026-10-19T00:00:00Z",
+                source_seq: null,
+              },
+            ],
+          })
+      );
+
+      expect(await result).toEqual({
+        text: [
+          "Block: décision:1",
+          "Document: dispatch://CORE-1/spec",
+          "Changed in version: 3",
+          "Text:",
+          "We ship on Friday.\n\nThe release waits for OPS-1.",
+          "Referenced by:",
+          `- mentions comment ${commentRef} (See the decision. · 2026-10-21T00:00:00Z)`,
+          "Links:",
+          "- mentions issue dispatch://OPS-1 (2026-10-20T00:00:00Z)",
+          "- part_of artifact dispatch://CORE-1/artifact/spec (2026-10-19T00:00:00Z)",
+        ].join("\n"),
+        details: { issue: "CORE-1", block: "décision:1" },
+      });
+      // The block's own node, both ways, and nothing of the issue or the document.
+      expect(requests.sort()).toEqual([
+        `/api/v1/references?from=${encodeURIComponent(blockRef)}`,
+        `/api/v1/references?to=${encodeURIComponent(blockRef)}`,
+      ]);
+    });
+
+    test("a pinned block says how it stands against its version and shows that version's text", async () => {
+      const pinned = "dispatch://CORE-1/spec#b-ship%5Fit@v1";
+      const node = {
+        ...blockNode,
+        id: "CORE-1/spec#ship_it",
+        block_id: "ship_it",
+        ref: "dispatch://CORE-1/spec#b-ship%5Fit",
+        changed_version: 2,
+        changed_at: "2026-10-22T00:00:00Z",
+        text: "Ship on Monday.",
+      };
+      const pinRead = (state: "changed" | "unchanged", text: string) =>
+        readBlock(pinned, () =>
+          response({
+            node: { ...node, pin: { version: 1, ref: pinned, text, state } },
+            edges: [],
+          })
+        ).result;
+      const head = [
+        "Block: ship_it",
+        "Document: dispatch://CORE-1/spec",
+        "Changed in version: 2",
+        "Text:",
+        "Ship on Monday.",
+        "Pinned to version: 1",
+      ];
+      const sections = ["Referenced by:", "- none", "Links:", "- none"];
+
+      expect((await pinRead("changed", "Ship on Friday.")).text).toBe(
+        [
+          ...head,
+          "Changed since version 1; last changed in version 2.",
+          "Text at version 1:",
+          "Ship on Friday.",
+          ...sections,
+        ].join("\n")
+      );
+      expect((await pinRead("unchanged", "Ship on Monday.")).text).toBe(
+        [
+          ...head,
+          "Unchanged since version 1.",
+          "Text at version 1:",
+          "Ship on Monday.",
+          ...sections,
+        ].join("\n")
+      );
+    });
+
+    test("a pinned block that was removed shows its version's text and no links, and the read succeeds", async () => {
+      const pinned = `${blockRef}@v2`;
+      const { result } = readBlock(pinned, () =>
+        response({
+          node: {
+            ...blockNode,
+            pin: {
+              version: 2,
+              ref: pinned,
+              text: "We ship on Friday.",
+              state: "removed",
+              removed_version: 3,
+            },
+          },
+          edges: [],
+        })
+      );
+
+      expect((await result).text).toBe(
+        [
+          "Block: décision:1",
+          "Document: dispatch://CORE-1/spec",
+          "Pinned to version: 2",
+          "Removed in version 3.",
+          "Text at version 2:",
+          "We ship on Friday.",
+          "Referenced by:",
+          "- none",
+          "Links:",
+          "- none",
+        ].join("\n")
+      );
+    });
+
+    test("a block no current version holds is an error naming the block and its document", async () => {
+      const absent = () => notFound('no block "décision:1" in dispatch://CORE-1/spec');
+      const { result } = readBlock(blockRef, absent, absent);
+
+      await expect(result).rejects.toThrow(
+        new Error("No block décision:1 in dispatch://CORE-1/spec.")
+      );
+      // A pinned ref's 404 says which of the version, its record or the block is missing.
+      const pinned = `${blockRef}@v9`;
+      const noVersion = () => notFound("no version 9 of dispatch://CORE-1/spec");
+      await expect(readBlock(pinned, noVersion, noVersion).result).rejects.toThrow(
+        "no version 9 of dispatch://CORE-1/spec"
+      );
+    });
+
+    test("a tool that would act on the block's owner refuses it before any request", async () => {
+      const problemsOf = (tool: string, args: Record<string, unknown>) =>
+        executeDispatchTool({
+          tool,
+          args,
+          cwd: "/workspace",
+          host: "omp",
+          config,
+          env: {},
+          exec: repoExec("owner/repo"),
+          fetchImpl: (() => {
+            throw new Error("network must not be called");
+          }) as unknown as typeof fetch,
+        }).then(
+          () => {
+            throw new Error(`${tool} was not refused`);
+          },
+          (error: unknown) => {
+            if (!(error instanceof ToolInputError)) throw error;
+            return error.problems;
+          }
+        );
+
+      expect(
+        await problemsOf("dispatch_comment", { ref: "dispatch://CORE-1/spec#b-x", body: "Agreed." })
+      ).toEqual([
+        "ref dispatch://CORE-1/spec#b-x names block x on CORE-1; dispatch comment would act on CORE-1 and drop the block: read it with dispatch read, or name CORE-1 with issue CORE-1",
+      ]);
+      // A document tool acts on the issue's primary document unless named, so the hint names
+      // the block's own document.
+      const notesBlock = "dispatch://CORE-1/artifact/notes-md#b-x@v2";
+      expect(
+        await problemsOf("dispatch_doc_edit", {
+          ref: notesBlock,
+          ops: [{ op: "replace", find: "old line", with: "new line" }],
+        })
+      ).toEqual([
+        `ref ${notesBlock} names block x on CORE-1; dispatch doc-edit would act on CORE-1 and drop the block: read it with dispatch read, or name CORE-1 with issue CORE-1 and artifact notes-md`,
+      ]);
+      const handbookBlock = "dispatch://CORE/artifact/handbook-md#b-x";
+      expect(await problemsOf("dispatch_doc_read", { ref: handbookBlock })).toEqual([
+        `ref ${handbookBlock} names block x on CORE/handbook-md; dispatch doc-read would act on CORE/handbook-md and drop the block: read it with dispatch read, or name CORE/handbook-md with project CORE and artifact handbook-md`,
+      ]);
+      // A read of the block names its document, so another document beside it is refused.
+      expect(
+        await problemsOf("dispatch_read", {
+          ref: "dispatch://CORE-1/spec#b-x",
+          artifact: "notes-md",
+        })
+      ).toEqual([
+        "artifact notes-md and ref dispatch://CORE-1/spec#b-x name two documents; --ref dispatch://CORE-1/spec#b-x alone names spec, and --issue CORE-1 --artifact notes-md names notes-md",
+      ]);
+    });
+
+    test("a document read names the document's block each link is at", async () => {
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const target = new URL(String(url));
+        if (target.pathname === "/api/v1/projects/CORE/artifacts/handbook-md") {
+          return response({
+            id: "artifact-7",
+            slug: "handbook-md",
+            name: "handbook.md",
+            project: "CORE",
+            versions: [{ version: 1 }],
+          });
+        }
+        if (target.pathname === "/api/v1/references" && target.searchParams.has("to")) {
+          return response({
+            node: { kind: "artifact", id: "CORE/artifact/handbook-md" },
+            edges: [
+              {
+                kind: "mentions",
+                direction: "in",
+                node: { kind: "issue", id: "OPS-1", ref: "dispatch://OPS-1" },
+                block: {
+                  kind: "block",
+                  id: "CORE/artifact/handbook-md#ship-it",
+                  ref: "dispatch://CORE/artifact/handbook-md#b-ship-it",
+                },
+                created_at: "2026-10-21T00:00:00Z",
+                source_seq: 9,
+              },
+            ],
+          });
+        }
+        if (target.pathname === "/api/v1/references") return response(emptyGraph("artifact"));
+        throw new Error(`unexpected request: ${target.pathname}`);
+      };
+
+      const result = await executeDispatchTool({
+        tool: "dispatch_read",
+        args: { ref: "dispatch://CORE/artifact/handbook-md" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+      expect(result.text).toContain(
+        "Referenced by:\n- mentions issue dispatch://OPS-1 (2026-10-21T00:00:00Z) (block dispatch://CORE/artifact/handbook-md#b-ship-it)\nLinks:"
+      );
+    });
   });
 
   test("reads a named artifact version from a singular dispatch URI", async () => {
@@ -4687,7 +5348,11 @@ describe("executeDispatchTool", () => {
       "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " +
         "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " +
         "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " +
-        "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), or " +
+        "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), " +
+        "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " +
+        "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " +
+        "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " +
+        "dispatch read), or " +
         "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " +
         "for dispatch doc-read)"
     );
@@ -5053,6 +5718,8 @@ describe("executeDispatchTool", () => {
       // but its line no longer sends the agent to doc-edit, since an answered block already
       // carries its own record and needs no restatement.
       expect(lines[4]).toContain('"Question of b-4?" (block b-4, ask ask-b-4)');
+      // The CLI prints this refusal as it is: a transcript reader finds it, naming the command.
+      expect(cliRefusals(refusal)).toEqual([{ line: lines[0], command: "request-approval" }]);
       expect(lines[4]).toContain("answered but still open in version 4");
       expect(lines[4]).not.toContain("doc-edit");
       expect(refusal).toContain("even when a human asked for it");
@@ -5350,6 +6017,8 @@ describe("executeDispatchTool", () => {
           '- "Where should the nightly file be written?" (block b-1, ask ask-b-1)',
           "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace, relocate it with move, or change its question, options, urgency or multiple with dispatch edit-ask if you asked it; each keeps it.",
         ]);
+        const [line] = (await outcome).split("\n");
+        expect(cliRefusals(await outcome)).toEqual([{ line, command: "doc-edit" }]);
         expect(reads).toEqual([
           "/api/v1/artifacts/artifact-42/blocks",
           "/api/v1/issues/DSP-42/asks?state=open",
@@ -6010,6 +6679,47 @@ describe("executeDispatchTool", () => {
       summary: "Record final wording",
       precondition: { document: "sha256:current-document" },
     });
+  });
+
+  test("edits the issue's primary document when no artifact names another", async () => {
+    const requests: Array<{ url: string; init: RequestInit }> = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const request = { url: String(url), init: init ?? {} };
+      requests.push(request);
+      const path = new URL(request.url).pathname;
+      if (path === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          primary_artifact_id: "artifact-42",
+          artifacts: [
+            { id: "artifact-7", slug: "notes", name: "notes.md", primary: false },
+            { id: "artifact-42", slug: "spec", name: "spec.md", primary: true },
+          ],
+        });
+      }
+      if (path === "/api/v1/artifacts/artifact-42/edits") {
+        return response({ applied: 1, version: null, token: "sha256:after-edit" });
+      }
+      throw new Error(`unexpected request: ${path}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_edit",
+      args: {
+        issue: "DSP-42",
+        ops: [{ op: "replace", find: "draft", with: "final" }],
+      },
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-42",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.details).toEqual({ issue: "DSP-42", applied: 1, token: "sha256:after-edit" });
+    expect(requests[1]?.url).toContain("/api/v1/artifacts/artifact-42/edits");
   });
 
   test("says nothing changed and names the operations that changed nothing", async () => {
@@ -6731,8 +7441,8 @@ describe("executeDispatchTool", () => {
           components: issueComponents("inherit", []),
         });
       }
-      if (target.pathname === "/api/v1/projects/TEST/architecture-source") {
-        return sourceNull();
+      if (target.pathname === "/api/v1/projects/TEST/architecture-sources") {
+        return noSources();
       }
       throw new Error(`unexpected request: ${target.pathname}`);
     };
@@ -6755,7 +7465,7 @@ describe("executeDispatchTool", () => {
     ).resolves.toMatchObject({ details: { issue: "TEST-1" } });
     expect(
       requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
-    ).toEqual(["/api/v1/issues", "/api/v1/projects/TEST/architecture-source"]);
+    ).toEqual(["/api/v1/issues", "/api/v1/projects/TEST/architecture-sources"]);
     expect(JSON.parse(requests[0]?.init.body as string)).toMatchObject({
       project: "TEST",
       title: "External issue",
@@ -8368,6 +9078,77 @@ describe("executeDispatchTool", () => {
       ].join("\n"),
       details: { issue: "DSP-42" },
     });
+  });
+
+  // A message has no other address in the log: its event line carries the reference that reads it.
+  test("names each message, comment and ask on the log by its dispatch reference", async () => {
+    const messageId = "652aec73-6214-46c0-a230-3b21a0466990";
+    const commentId = "0f050a24-7f30-47f7-953c-8dd0597615c8";
+    const askId = "f44e6e26-794f-44db-a64f-2d1847da392f";
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          title: "Dispatch issue",
+          status: "open",
+          route: null,
+          open_asks: [],
+          children: [],
+          last_seq: 4,
+        });
+      }
+      if (target.pathname === "/api/v1/issues/DSP-42/events") {
+        return response([
+          {
+            seq: 2,
+            type: "message.created",
+            issue_key: "DSP-42",
+            actor: { kind: "user", id: "alice" },
+            created_at: "2026-09-09T00:02:00Z",
+            payload: { id: messageId, body: "Ship it." },
+          },
+          {
+            seq: 3,
+            type: "comment.created",
+            issue_key: "DSP-42",
+            actor: { kind: "user", id: "alice" },
+            created_at: "2026-09-09T00:03:00Z",
+            payload: { id: commentId, body: "Fix this." },
+          },
+          {
+            seq: 4,
+            type: "ask.opened",
+            issue_key: "DSP-42",
+            actor: { kind: "session", id: "s1" },
+            created_at: "2026-09-09T00:04:00Z",
+            payload: { id: askId, question: "Which store?" },
+          },
+        ]);
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { ref: "dispatch://DSP-42/log" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toBe(
+      [
+        "Key: DSP-42",
+        "Events:",
+        `- #2 message.created dispatch://DSP-42/message/${messageId} · user alice · 2026-09-09T00:02:00Z · Ship it.`,
+        `- #3 comment.created dispatch://DSP-42/comment/${commentId} · user alice · 2026-09-09T00:03:00Z · Fix this.`,
+        `- #4 ask.opened dispatch://DSP-42/ask/${askId} · session s1 · 2026-09-09T00:04:00Z · Which store?`,
+      ].join("\n")
+    );
   });
 
   test("reads an issue from its dashboard URL on the configured server", async () => {

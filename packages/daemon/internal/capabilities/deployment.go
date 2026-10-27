@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
-	"github.com/sjawhar/legion/daemon/internal/claim"
 )
 
 // Deployment is what the daemon knows of its deployment's capabilities: what its configuration
@@ -30,16 +29,15 @@ type Deployment struct {
 	// SecretsLogin is the broker login's state (agentsecrets.LoginState.State: "none", "issued" or
 	// "failed"); "" with no broker.
 	SecretsLogin string
-	// RolesWithoutResources are the roles whose pods reserve no CPU and memory: those lacking CPU
-	// and memory requests and limits under runtime.kubernetes.resources, among claim.Roles and,
-	// under controller: daemon, claim.RoleController.
-	RolesWithoutResources []claim.Role
-	// BurstableRoles are the roles among the same set whose cpu or memory request is below its
-	// limit (config.RoleResources.Burstable): each makes the pods holding its container Burstable —
-	// a workflow role every issue pod, since every issue pod holds all six, and the controller its
-	// own pod. Every other role requests its limit, and the image probe its own fixed reservation,
-	// so a deployment that names none runs Guaranteed pods alone.
-	BurstableRoles []claim.Role
+	// UnreservedPods are the pods the daemon builds that reserve no CPU and memory, those whose
+	// entry under runtime.kubernetes.resources lacks CPU and memory requests and limits: the issue
+	// pod and, under controller: daemon, the controller's pod, in that order (PodIssue,
+	// PodController).
+	UnreservedPods []Pod
+	// BurstablePods are the pods among the same set whose cpu or memory request is below its limit
+	// (config.Reservation.Burstable). Every other pod requests its limit, and the image probe its
+	// own fixed reservation, so a deployment that names none runs Guaranteed pods alone.
+	BurstablePods []Pod
 	// ModelFallback is whether the pod's Oh My Pi falls back to another model,
 	// bootprobe.ModelFallbackOn or bootprobe.ModelFallbackOff as the probe's OK line reports it
 	// (bootprobe.ImageReport) or the plugin gate read it under tmux, bootprobe.ModelFallbackUnread
@@ -59,7 +57,8 @@ type Deployment struct {
 }
 
 // The statuses a State carries: an image row is present or missing, a live or a deployment row
-// present, reported, decided or open, a withheld row withheld, and an unmeasured row unchecked.
+// present, reported, decided or open, a withheld row withheld, and an unmeasured row unchecked
+// (in the probe table, the browser row under `probe-image --skip-browser`).
 // StatusMissing and StatusReported are the probe table's alone (CheckImage): a deployment row
 // `legion state` carries (api.CapabilityState) is never missing or reported, since the daemon
 // either measures it or has nothing yet to measure it with.
@@ -312,12 +311,12 @@ func (d Deployment) measure(name Name) (bool, Source, string) {
 		switch {
 		case tmux:
 			return false, SourceConfiguration, "the tmux runtime sets no requests or limits on a pane"
-		case len(d.RolesWithoutResources) > 0:
-			return false, SourceConfiguration, "roles without CPU and memory requests and limits under runtime.kubernetes.resources: " + joinRoles(d.RolesWithoutResources)
-		case len(d.BurstableRoles) == 0:
-			return true, SourceConfiguration, "every role has CPU and memory requests and limits under runtime.kubernetes.resources, each request equal to its limit, so every pod is Guaranteed"
+		case len(d.UnreservedPods) > 0:
+			return false, SourceConfiguration, "no CPU and memory requests and limits under runtime.kubernetes.resources for " + joinPods(d.UnreservedPods)
+		case len(d.BurstablePods) == 0:
+			return true, SourceConfiguration, "every pod has CPU and memory requests and limits under runtime.kubernetes.resources, each request equal to its limit, so every pod is Guaranteed"
 		default:
-			return true, SourceConfiguration, "every role has CPU and memory requests and limits under runtime.kubernetes.resources; " + d.BurstableLine()
+			return true, SourceConfiguration, "every pod has CPU and memory requests and limits under runtime.kubernetes.resources; " + d.BurstableLine()
 		}
 	case PoolCapacity:
 		switch {
@@ -334,37 +333,32 @@ func (d Deployment) measure(name Name) (bool, Source, string) {
 	return false, "", "no measurement"
 }
 
-// BurstableLine names the Burstable roles and the pods they make Burstable — every issue pod for a
-// workflow role, since each holds all six, and the controller's pod for the controller — and says
-// every other pod is Guaranteed; "" when no role requests less than its limit. The resource-limits
-// row's detail carries it, and `legion start --check-config` prints it after Config OK.
+// Pod is one of the pods the daemon builds as the resource-limits row names it.
+type Pod string
+
+// The pods the resource-limits row reads: every issue pod, whose one container runs every workflow
+// role (runtime.kubernetes.resources.issue), and the controller's pod the daemon launches under
+// controller: daemon (runtime.kubernetes.resources.controller).
+const (
+	PodIssue      Pod = "the issue pod"
+	PodController Pod = "the controller's pod"
+)
+
+// BurstableLine names the Burstable pods and says every other pod is Guaranteed; "" when no pod
+// requests less than its limit. The resource-limits row's detail carries it, and `legion start
+// --check-config` prints it after Config OK.
 func (d Deployment) BurstableLine() string {
-	if len(d.BurstableRoles) == 0 {
+	if len(d.BurstablePods) == 0 {
 		return ""
 	}
-	issue, controller := false, false
-	for _, role := range d.BurstableRoles {
-		if role == claim.RoleController {
-			controller = true
-		} else {
-			issue = true
-		}
-	}
-	pods := "every issue pod is Burstable"
-	switch {
-	case issue && controller:
-		pods = "every issue pod and the controller's pod are Burstable"
-	case controller:
-		pods = "the controller's pod is Burstable"
-	}
-	return "Burstable roles (a request below the limit): " + joinRoles(d.BurstableRoles) + ", so " + pods + "; every other pod is Guaranteed"
+	return "Burstable (a request below the limit): " + joinPods(d.BurstablePods) + "; every other pod is Guaranteed"
 }
 
-// joinRoles is roles as a comma-separated list, in their order.
-func joinRoles(roles []claim.Role) string {
-	names := make([]string, len(roles))
-	for i, role := range roles {
-		names[i] = string(role)
+// joinPods is pods as a list joined by "and", in their order.
+func joinPods(pods []Pod) string {
+	names := make([]string, len(pods))
+	for i, pod := range pods {
+		names[i] = string(pod)
 	}
-	return strings.Join(names, ", ")
+	return strings.Join(names, " and ")
 }

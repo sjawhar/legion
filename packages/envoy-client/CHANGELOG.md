@@ -2,7 +2,71 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `dispatch architecture-sync` imports every architecture source of the project,
+  one per repository, and prints each source's answer in turn: `Synced P architecture from
+  repo@branch: commit C (time).`, or `Sync failed for P (repo@branch): error` followed by `The
+  previous model of repo stays up (commit C).`, `The previous model of repo stays up (N
+  components).` (a source re-saved on another branch, whose earlier components stay until an
+  import replaces them) or `No model has ever imported from repo.`; its
+  `details` are `{project, sources: [{repo, branch, commit, error}]}`. `--repo <owner/name>`
+  imports that one source alone, and a credential or branch problem there is still an error exit
+  (`409 SOURCE_ACCESS`); without it, every source is attempted and such a problem is that
+  source's failed line. `DispatchClient` gains `listArchitectureSources(project)`,
+  `syncArchitectureSources(project)` and `syncArchitectureSource(project, repo)`, on the routes
+  under `/api/v1/projects/{key}/architecture-sources`, and loses `getArchitectureSource`; the
+  issue create's architecture guidance reads the list and takes `[]` as no model. A Dispatch older
+  than this release has no route for the list, so the client then reads that server's
+  `GET /api/v1/projects/{key}/architecture-source` (`null`, or a pre-#1522 `404
+  SOURCE_NOT_FOUND`, is no model; a row is one source) and the guidance stays right while the
+  plugin and the server roll out separately; a project the server does not know is still reported
+  as "Could not check whether project … has an architecture model". Against a Dispatch older than
+  this release, `dispatch architecture-sync --project <KEY>` falls back to that server's
+  single-source sync (`POST /api/v1/projects/{key}/architecture-source/sync`) and prints its one
+  line, and `--repo` needs a Dispatch of this release; the other way round, an older plugin's
+  `architecture-sync` keeps working against this release's Dispatch, which keeps the singular sync
+  route for it (INFRA-391).
+- A session refreshes its Envoy registration every 90 s rather than every 120 s: the listener
+  expires a session record 300 s after its last write, and three refresh attempts plus one whole
+  listener call's budget (10 250 ms: two 5 000 ms attempts and the 250 ms retry delay between
+  them) fit inside that lifetime — 3 × 90 000 + 10 250 = 280 250 ms — so two whole refreshes may
+  fail and the third still completes before a live session's record is dropped.
+- The `envoy_publish` description says who receives a team topic (any `notifications.` topic the
+  stream does not store): every session subscribed to it when it is published, and it is not
+  retained. A session holding its own NATS connection receives it directly, the publisher's own
+  included; a session on a serve port, such as an OpenCode agent, receives it through its
+  machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`;
+  the shared hub's listener does not), where the description said such a session received nothing
+  (INFRA-122).
+
 ### Added
+
+- `dispatch read --ref` reads one block of a document: `dispatch://KEY/spec#b-<id>`,
+  `dispatch://KEY/artifact/<slug>#b-<id>` or `dispatch://PROJECT/artifact/<slug>#b-<id>`,
+  optionally pinned `@v<N>`, or a live document page's URL ending `#b-<id>`. It prints `Block:`,
+  `Document:`, `Changed in version:` and `Text:`, then, for a pinned reference, `Pinned to version:`,
+  whether the block is unchanged, changed or removed since, and `Text at version N:`, then
+  `Referenced by:` and `Links:`. An unpinned reference to a block the document no longer holds
+  exits 1 with `No block <id> in <document>.`; a pinned one to a removed block prints it and exits 0.
+  `dispatch comment`, `suggest`, `doc-edit` and `doc-read` refuse a block reference, naming the
+  arguments for its document, and every read's reference row on a document ends
+  `(block <ref>)` when the graph names the document's block at that edge. `ParsedDispatchRef`
+  gains kind `"block"` with `block`, `document` and `pin`; `pin` is N's decimal digits, a string,
+  so a pin past 2^53 is never rounded. As the server reads it, a pin past 9223372036854775807 is
+  no reference. `parseDispatchRef` and `dispatchRefFromUrl` read a reference of any length, as the
+  server reads a request's (`text.ParseRef`): the 256-byte block-id and 2048-byte target-id bounds
+  decide only what text the server indexes, so a document of any name is read by its own
+  reference, and a block whose id is past 256 bytes, no graph node, reads as
+  `No block <id> in <document>.`
+- `dispatch issues --all` reads the whole filtered listing in one request. The client gains
+  `listAllIssues`, which sends neither `limit` nor `offset` and takes the bare array Dispatch
+  answers for that request, refusing any other shape by name: a page back from a request carrying
+  no paging is a Dispatch that still pages one. `dispatch_issues` routes `--all` there and leaves
+  every other call on `listIssuePage` with the same default page, and `--all` beside `--limit` or
+  `--offset` is refused before any request goes out. The command is for a caller that must not
+  miss or repeat a row: a row whose status changes between two offset reads comes back twice or
+  never, which bites hardest when the caller's own writes are what move it.
 
 - `dispatch issue-update --before <KEY>` and `--after <KEY>` move an issue on its project's board:
   the executor carries the two arguments into the server's `rank` on the PATCH it already makes, so
@@ -13,7 +77,31 @@
   issue to the bottom of the board. The flags follow from the tool's schema, so the command itself
   needed no change (INFRA-188).
 
+- `ENVOY_PASS_DEADLINE_MS` resolves `passDeadlineMs`, the bound on one task of the pi-envoy
+  plugin's serial queues, so a task that never settles cannot hold the next heartbeat tick, session
+  event or Legion claim behind it. A finite value above 0 is used, floored at 25 ms; anything else
+  falls back to `MIN_PASS_DEADLINE_MS`, 30 s, which the exported constant is named for: it is a
+  floor, not a default, since the resolved deadline is never shorter than the resolved
+  `heartbeatMs` either, and an explicit `ENVOY_PASS_DEADLINE_MS` below the heartbeat is raised to
+  it. A deadline inside one tick would abandon every pass before the next tick, so the heartbeat's
+  `healing` latch — and the registration backstop that runs under it, which keeps a pane with a
+  wedged pass registered — would be false at every tick and the backstop would never post. A
+  caller that wants a short deadline shortens `ENVOY_HEARTBEAT_MS` with it. A raise is reported
+  rather than applied in silence: an explicit `ENVOY_PASS_DEADLINE_MS` that is usable and shorter
+  than the resolved heartbeat comes back as `passDeadlineRaisedFrom`, the value it named, and the
+  session's start notice (`sessionSettings`' `notice`, which pi-envoy shows at `session_start`)
+  names that value beside the deadline in force. The field reports that one raise: the 25 ms
+  interval floor and the timer's ceiling are applied in silence and are not reported by it.
+
 ### Fixed
+
+- The `dispatch` command logs a refusal it makes before the call reaches Dispatch (an unknown
+  flag or command, a missing or unknown host, a session it cannot name a directory for, a file
+  that turns Dispatch off) to the session's ledger, whenever the call knows its session. A reader
+  of the ledger now sees a call whose output a pipe, `$(…)` or another program swallowed. A call
+  with no session id logs nothing, as before. A `--help` that prints help and a `--dry-run` that
+  passes its checks log nothing; a `--help` of an unknown command and a `--dry-run` with a bad
+  argument are refused, and logged like any other refusal.
 
 - `resolveOrigin` waits at most 1 s for `tmux display-message` to name the session's pane, then
   aborts the lookup and returns the origin without `tmux` and `pane`. An aborted `defaultExec` call
@@ -78,9 +166,10 @@
   `process.exit` dropped whatever a pipe had not yet taken, so every omp session, which reads the
   command through one, lost the end of any output over the pipe's buffer (8 KB to 16 KB) with exit
   code 0.
-- A `dispatch` command that takes `--issue`, given a bare issue key in its place
-  (`dispatch read ACME-12`), names the fix in its refusal: `use --issue <KEY>, as in: dispatch
-  read --issue ACME-12`. The command still refuses a positional value.
+- A `dispatch` command that takes `--issue` takes a bare issue key as its first argument as its
+  `--issue` (`dispatch read ACME-12` is `dispatch read --issue ACME-12`), only when `--issue` is
+  not also given. A key-shaped word anywhere later (`message --body hi SHA-256`) is refused, as is
+  every other positional value.
 - `dispatch comment`, `suggest`, `doc-edit` and `doc-read` refuse an ask, comment or message link
   as `--ref`, before any request. They take `--ref` as the issue or document they act on, so such
   a link used to post or read on its owner and drop the item: a comment meant for an ask's thread
@@ -90,6 +179,19 @@
 
 ### Changed
 
+- The notice after a primary spec with no ask block reads: "This spec holds no ask blocks. A person
+  does not watch your chat. They see that you need them only through an open ask or a spec that
+  waits for their approval. If the design needs a person's choice, add an ask block. If it does not,
+  request approval with `dispatch request-approval`." The notice for a typed-block
+  opening stored as text cites the `dispatch-writing-specs` skill, "Questions". A test holds each
+  skill section a notice cites to a heading of that skill.
+- `dispatch read` names each message, comment and ask on an issue's event log by its
+  `dispatch://KEY/message|comment|ask/<id>` reference, after the event type. A message had no other
+  address there, so an agent that read the log could not open or link one.
+- `dispatch whoami` under the shared token says an issue you create without an assignee takes its
+  parent's assignee, else the project's default assignee, else nobody, rather than calling it
+  unassigned: a project whose default a person set on the Settings page is the create chain's last
+  step.
 - The `envoy_unsubscribe` and `envoy_role_set` descriptions say what an Oh My Pi session keeps:
   unsubscribe keeps the subscriptions another plugin holds for the session's role, and a move to a
   different role is refused while any are held. A host without such subscriptions behaves as
@@ -204,6 +306,20 @@
 
 ### Added
 
+- `dispatch-cli` exports `cliRefusals(text)`, which lists each refusal line the `dispatch` CLI
+  printed in `text`, with the command a `was not called` line names (null for a usage refusal).
+  It reads the CLI's output as a transcript holds it, so a refusal counts when a pipe hid the
+  CLI's exit. A warning, the note that the session's state was not written, and the notice of a
+  file that is not read are not refusals. pi-legion's skill-scenario scorer reads refusals with it.
+- `dispatch read --events N` lists an issue's last N events and `--all-events` every one, on an
+  issue read and on its `dispatch://KEY/log`; without either the read lists the last 10, as before.
+  `DispatchClient.read` takes `{ events: N | "all" }` (`IssueReadOptions`; `DEFAULT_ISSUE_READ_EVENTS`
+  when absent) and reads the newest N with `GET /api/v1/issues/{key}/events`, 200 to a request,
+  the most one request may ask for. Both flags together, or either beside a read that lists no
+  events (a document summary, an ask, a comment, a message's conversation, the issue's children),
+  are refused before any request, naming what the read prints instead. An agent that audits who
+  asked what and which ask was answered reads it with the command, not the events API by hand. A
+  `dispatch://KEY/children` read reads only the issue, no longer its last 10 events.
 - `dispatch issue --repo <owner/name>` and `dispatch issue-update --repo` (`''` clears) set the
   repository an issue targets, and `dispatch read` prints a `Repository:` line: `owner/name (own)`,
   `owner/name (inherited or project default)`, or `none`. Against a Dispatch server older than the

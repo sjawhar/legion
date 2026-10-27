@@ -14,8 +14,10 @@ questions, approve the spec, and review the pull request. Everything happens in
 - **The issue must be in a Dispatch project a Legion daemon runs.** Each daemon runs the projects its
   operator configured; ask your operator which ones.
 - **Assign the issue to the person who will answer for it.** The assignee's Inbox gets the
-  architect's questions and the spec approval for the whole tree. An unassigned issue still runs,
-  but its questions reach nobody's Inbox list and nobody's **Needs you** count until someone takes
+  architect's questions and the spec approval for the whole tree. An issue an agent files without
+  one is not always unassigned: it takes its parent's assignee, else the project's default
+  assignee where a person set one in Settings. An issue that ends up unassigned still runs, but
+  its questions reach nobody's Inbox list and nobody's **Needs you** count until someone takes
   it: they are found through the Inbox's **Assignee** filter, under **Unassigned**, or on the
   issue's own page.
 - **Write the outcome, not the steps.** A title that says what someone can do afterwards, and a spec
@@ -33,11 +35,14 @@ to `in_progress`; when every slot is taken, the issue waits in `todo` and takes 
 in the board's order. A labelled issue in `triage` goes to the controller first, which admits it,
 parks it, or leaves it for you.
 
-The controller never takes an issue on its own, whatever slots are free: Legion works only what a
-person hands it. You can also ask the controller to hand an issue over for you, in a message or in
-Slack, and when an agent finds a problem outside its own issue it asks you in a Dispatch ask whether
-to file one, rather than filing it; answer with `File it for Legion` and the controller files it
-labelled `legion`.
+The controller never takes an issue on its own, whatever slots are free: Legion works what a person
+hands it, and the clear defects its own agents report. You can also ask the controller to hand an
+issue over for you, in a message or in Slack. An agent that finds a defect outside its own issue
+whose fix needs no choice of yours fixes it in its own tree's pull request when that tree touches
+or depends on the code. Otherwise the controller gives it to the tree that owns the code, and files it labelled
+`legion` only when no tree does. When the problem
+needs a decision, the agent asks you in a Dispatch ask whether to file one, rather than filing it.
+Answer with `File it for Legion` and the controller files it labelled `legion`.
 
 Do not label child issues: a child runs under its tree once the root is admitted.
 
@@ -114,8 +119,8 @@ the default branch; the pull request's file list shows them only until that comm
 ## Merge
 
 When the change is tested, reviewed and approved, the merger sends **READY**. The daemon accepts it
-only when no check or workflow the repository requires has failed or is missing (one still running
-refuses nothing), and posts it on the Dispatch issue as one message:
+on the approved head plus retro's notes, reading no check of that head, and posts it on the
+Dispatch issue as one message:
 
 ```text
 READY #<pull request> at <head sha> (approved at <approved sha>) for <KEY> (<pull request url>)
@@ -128,11 +133,15 @@ merged by a person instead, and its READY says so. Nothing in Legion approves a 
 your behalf or changes who may merge.
 
 The merge closes the issue: it moves to `done` the moment GitHub reports the pull request merged.
-The architect accepted the change before that, when the reviewer approved it, with a comment on
-the issue summarizing the evidence. After the close the implementer checks the change in
-production, once your deploy carries it, and records what it saw on the pull request's
-`Production:` line; a closed issue takes no further write, so look there. The tree's workspace is
-kept for three days (`linger_hours`, 72 by default) in case the work resumes.
+A root with work still running beneath it is the exception: its merge is recorded and the issue
+waits until the last other issue of its tree is done or parked, so no child's finished work is cut
+off, and then it closes. The architect accepted the change before that, when the reviewer approved
+it, with a comment on the issue summarizing the evidence; work still running beneath an issue does
+not hold that acceptance, since the root's close waits for it. After the close the
+implementer checks the change in production, once your deploy carries it, and records what it saw
+on the pull request's `Production:` line; a closed issue takes no further write, so look there.
+The tree's workspace is kept for three days (`linger_hours`, 72 by default) in case the work
+resumes.
 
 ## Stop, park or rerun
 
@@ -161,5 +170,5 @@ architect is told who wrote it; only a person's move in the dashboard, the contr
 | `in_progress` | the daemon | Admitted: the architect is writing the spec or waiting for your approval, or the planner or implementer is working. Work sent back by a failed test, red CI or a review returns here. |
 | `testing` | the daemon | The implementer opened the pull request and finished; the tester is checking the change. |
 | `needs_review` | the daemon | The tester passed; Legion's reviewer is reviewing, and once it approves the architect reads the evidence and accepts the change or sends it back. Your GitHub review counts now. |
-| `retro` | the daemon | The architect accepted. The issue stays here through retro, `READY` and the wait for the merge. |
-| `done` | the daemon at the merge, or a person | Finished: the pull request merged. The implementer's production check follows on the pull request; the tree lingers, then closes. |
+| `retro` | the daemon | The architect accepted. The issue stays here through retro, `READY` and the wait for the merge — and, for a root whose tree still runs, through the wait between its merge and its close. |
+| `done` | the daemon at the merge, or a person | Finished: the pull request merged. A root whose tree is still running waits in `retro` until the last of it is done or parked, then closes. The implementer's production check follows on the pull request; the tree lingers, then closes. |

@@ -56,10 +56,12 @@ refuses any other `Host`. The server process has no caller Home or XDG
 directory and receives no inherited `DISPATCH_*`, `ENVOY_*` or `NATS_*`
 variable, so neither a shell setting nor `~/.config/legion/envoy.json` /
 `~/.local/share/dispatch` can redirect it. The one way in from outside is the
-broker switch below: a URL in `DISPATCH_E2E_AGENT_SECRETS_URL`, with its bearer
-in `DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE`, points the server's credential
+broker switch below: a URL in `DISPATCH_E2E_AGENT_SECRETS_URL`, with the token
+of a ServiceAccount that broker lists in
+`DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, points the server's credential
 requests at a broker the caller runs, as the secrets broker's docs rig
-(`docs/site/media/broker/rig.sh`) does.
+(`docs/site/media/broker/rig.sh`) does with the token its local issuer
+(`packages/envoy/cmd/dev-oidc-issuer`) keeps.
 
 `DATABASE_URL` is required and must name an isolated loopback database:
 `e2e/seed.ts` truncates it before every scenario and never selects a shared
@@ -131,6 +133,44 @@ A spec runs against the instance with the printed command, which sets
 fake Envoy, so restart the command to reseed it. `bun run build:web` while it runs refreshes the
 SPA, which the server reads from `web/dist` on each request. `docker rm -f dispatch-pg` removes the
 container and every database in it.
+
+## Acceptance drivers
+
+`e2e/acceptance/block-graph.sh` drives the block graph end to end against a running server, as an
+agent sees it, through the HTTP API and the real `dispatch` CLI
+(`packages/envoy-client/bin/dispatch.ts`, run in an environment the script builds, so a calling
+shell's Dispatch URL, token file and Envoy configuration never reach it). It covers a comment
+citing a block and the block's backlinks, a deleted and restored block, a pinned block reference
+that changes and is removed, `GET /api/v1/block-links` between the blocks of two documents, each
+block's changed version, every block `part_of` its document, a link in a list item, and the older
+`GET /api/v1/artifacts/{id}/references` route. Each passing check prints
+`PASS: <section> <what>`; the first failure prints `FAIL: <section> <what>: <observed>` and exits 1.
+Its three inputs:
+
+- `DISPATCH_URL`, the server;
+- `DISPATCH_TOKEN`, an agent bearer, or `DISPATCH_TOKEN_FILE`, a file holding one, which the script
+  reads itself and never prints;
+- `PROJECT`, an existing project key.
+
+It writes one issue in `PROJECT` (its spec, comments and the documents `cites.md`, `decisions.md`,
+`changes.md` and `list.md`) and closes it, also when a check fails. Against
+`bun run dispatch:local`:
+
+```bash
+DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE \
+  bash packages/dispatch/e2e/acceptance/block-graph.sh
+```
+
+`e2e/acceptance/block-coverage.sh` takes the same inputs, with `PROJECT` optional (unset, every
+project), and only reads. For every document it can list (each project's documents and each
+issue's documents), it counts the document as not indexed when `GET /api/v1/artifacts/{id}/blocks`
+lists blocks while `GET /api/v1/references?to=<document>&kind=part_of` lists none, and prints
+`documents=<n> indexed=<n> not_indexed=<n>`, then each not-indexed document's reference. A document
+with no blocks counts as indexed, since it owes no nodes.
+
+Both source `e2e/acceptance/lib.sh`, the preamble they share: it refuses an unset input or a
+missing command with exit 2, and reads the bearer from `DISPATCH_TOKEN` or `DISPATCH_TOKEN_FILE`
+without printing it, unsetting both so no process the script starts inherits it.
 
 ## Acceptance run against the deployed image
 

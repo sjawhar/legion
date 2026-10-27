@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"maps"
@@ -277,7 +278,7 @@ func wantContains(t *testing.T, err error, wants ...string) {
 // okLine is the OK line an image prints when every probe passed, confirming contract, the
 // prompt-named agents' models resolved, the capability list checked, model fallback off.
 func okLine(contract int) string {
-	return bootprobe.OKLine("/opt/omp/bin/omp", contract, bootprobe.AgentModelsResolved, "off")
+	return bootprobe.OKLine("/opt/omp/bin/omp", contract, bootprobe.AgentModelsResolved, bootprobe.CapabilitiesAll, "off")
 }
 
 // Role references whose encoding the image's Decode refuses would fail the probe pod, and the
@@ -355,7 +356,7 @@ func TestProbeImageReportsTheModelFallbackMark(t *testing.T) {
 			g := newProbeRig(t, nil)
 			g.succeeds("probe-image: capability eval-js: present (Oh My Pi is its JavaScript runtime, and the launch probes ran it)\n" +
 				"probe-image: capability model-fallback: reported (the daemon reports it from the deployment's configuration)\n" +
-				bootprobe.OKLine("/opt/omp/bin/omp", 3, bootprobe.AgentModelsResolved, mark) + "\n")
+				bootprobe.OKLine("/opt/omp/bin/omp", 3, bootprobe.AgentModelsResolved, bootprobe.CapabilitiesAll, mark) + "\n")
 
 			report, err := g.r.ProbeImage(g.ctx, probeOptions(t))
 
@@ -400,9 +401,13 @@ func TestProbeImageRefusesWhatTheProbePodAnswered(t *testing.T) {
 				"legion probe-image: capability browser is missing: /nonexistent/chromium (PUPPETEER_EXECUTABLE_PATH) --version: fork/exec /nonexistent/chromium: no such file or directory")
 		}, []string{"Failed (container probe terminated", "exit code 1", "capability browser is missing"}},
 		{"a build-time probe's result", func(g *probeRig) {
-			g.succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3, bootprobe.AgentModelsSkipped, "off"))
+			g.succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3, bootprobe.AgentModelsSkipped, bootprobe.CapabilitiesAll, "off"))
 		},
 			[]string{"without resolving the prompt-named agents' models (its OK line's agent-models mark: skipped, where the daemon's probe requires resolved)"}},
+		{"a probe that left the browser row unchecked", func(g *probeRig) {
+			g.succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3, bootprobe.AgentModelsResolved, bootprobe.CapabilitiesBrowserSkipped, "off"))
+		},
+			[]string{"Succeeded without checking the whole capability list (its OK line's capabilities mark: browser-skipped, where the daemon's probe requires checked)"}},
 		{"a CLI that predates the discovery-on pod lane", func(g *probeRig) {
 			g.succeeds("probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=resolved capabilities=checked model-fallback=on daemon-api-version=3")
 		}, []string{"Succeeded without the extensions=discovered mark: its legion CLI predates the discovery-on pod lane and its profile links the plugins a pod names explicitly, which a pod of this daemon would load twice — build the image from this daemon's commit"}},
@@ -781,7 +786,7 @@ func TestProbeImageRefusesAProvidersSecretThePodCannotMount(t *testing.T) {
 			err := g.probe(p)
 
 			if testCase.refused {
-				wantContains(t, err, "cannot mount the providers Secret "+ProvidersSecretName(testProject), "(anthropic)", testCase.message)
+				wantContains(t, err, "cannot mount the providers Secret "+ProvidersSecretName(testProject), "(SESSION_DSN, anthropic)", testCase.message)
 				if n := g.creates.Load(); n != 1 {
 					t.Errorf("ran the probe %d times for a Secret the pod cannot mount, want once", n)
 				}
@@ -1489,15 +1494,19 @@ func TestProbeImagesCapacityStopNeedsTheBudgetToOutliveTheBootTimeout(t *testing
 }
 
 // The probe runs as a worker runs: it resolves the daemon's role prompts' references, always, and
-// with provider keys configured it exports the providers Secret's keys as the worker's shim does.
+// reads the providers Secret's keys as the worker's shim does, with or without a provider key —
+// under the postgres store goldenOptions configures, the probe's pod mounts that Secret for the
+// session database's URL key at least (mountsProviders). A pod that mounts none is told no
+// directory (TestTheProvidersDirectoryIsToldWhereThePodMountsIt). It also runs a role generation's
+// namespaces over its own volume at RoleProbeDir, as an issue pod's launcher runs every role.
 func TestTheProbeRunsAsAWorkerRuns(t *testing.T) {
 	for _, testCase := range []struct {
 		name string
 		keys map[string]string
 		want []string
 	}{
-		{"no provider keys", nil, []string{"--role-references", testRoleReferencesJSON}},
-		{"provider keys", map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, []string{"--provider-env-dir", ProvidersDir, "--role-references", testRoleReferencesJSON}},
+		{"no provider keys", nil, []string{"--provider-env-dir", ProvidersDir, "--role-references", testRoleReferencesJSON, "--role-namespaces", RoleProbeDir}},
+		{"provider keys", map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, []string{"--provider-env-dir", ProvidersDir, "--role-references", testRoleReferencesJSON, "--role-namespaces", RoleProbeDir}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			opts := goldenOptions()
@@ -1510,6 +1519,15 @@ func TestTheProbeRunsAsAWorkerRuns(t *testing.T) {
 			base := []string{opts.Tools.Legion, "probe-image", "--daemon-api-version", "3", "--plugin-root", legionPlugin, "--envoy-plugin-root", envoyPlugin, "--pod-safety"}
 			if want := append(base, testCase.want...); !slices.Equal(command, want) {
 				t.Errorf("the probe's command = %q, want %q", command, want)
+			}
+			pod := r.probeManifest(probeSandboxName, ImageProbe{Contract: 3, RoleReferences: testRoleReferences}, time.Now()).Spec.PodTemplate.Spec
+			if mount := mountHolding(pod.Containers[0], RoleProbeDir); mount == nil || mount.MountPath != RoleProbeDir || mount.Name != roleProbeVolume {
+				t.Errorf("the probe's %s is on mount %+v, want the %s volume's own", RoleProbeDir, mount, roleProbeVolume)
+			}
+			if !slices.ContainsFunc(pod.Volumes, func(v corev1.Volume) bool {
+				return v.Name == roleProbeVolume && v.EmptyDir != nil && v.EmptyDir.Medium == corev1.StorageMediumDefault
+			}) {
+				t.Errorf("the probe pod's volumes %+v hold no disk emptyDir %s", pod.Volumes, roleProbeVolume)
 			}
 		})
 	}
@@ -1662,6 +1680,49 @@ func TestLastBytesKeepsTheEndOfTheTail(t *testing.T) {
 			t.Fatalf("lastBytes of an exactly-keep stream was not returned unchanged (len %d, want %d)", len(got), keep)
 		}
 	})
+}
+
+// tailBytes holds a log's newest keep bytes and no more, however long the log: a log of a hundred
+// times keep is read to its end, its last keep bytes come back with the cut reported, and the
+// buffer never grew past the 2×keep it started with, so a log's size never decides what the daemon
+// holds (readLog's memory, which io.ReadAll let a 2000-line tail grow to its whole size).
+func TestTailBytesHoldsOnlyTheNewestBytes(t *testing.T) {
+	const keep = 4 << 10
+	var log strings.Builder
+	for i := 0; log.Len() < 100*keep; i++ {
+		fmt.Fprintf(&log, "line %d %s\n", i, strings.Repeat("x", i%300))
+	}
+	full := log.String()
+	counted := &countingReader{r: strings.NewReader(full)}
+	got, cut, err := tailBytes(counted, keep)
+	if err != nil {
+		t.Fatalf("tailBytes = %v", err)
+	}
+	if counted.n != len(full) {
+		t.Fatalf("tailBytes read %d bytes of %d, want the whole log", counted.n, len(full))
+	}
+	if !cut || string(got) != full[len(full)-keep:] {
+		t.Fatalf("tailBytes = %d bytes, cut %v; want the log's last %d bytes and the cut reported", len(got), cut, keep)
+	}
+	if cap(got) > 2*keep {
+		t.Fatalf("tailBytes' buffer grew to %d bytes reading a %d-byte log, want at most %d", cap(got), len(full), 2*keep)
+	}
+	short := "a short log\n"
+	if got, cut, err := tailBytes(strings.NewReader(short), keep); err != nil || cut || string(got) != short {
+		t.Fatalf("tailBytes of a short log = %q, cut %v, %v; want it whole and no cut", got, cut, err)
+	}
+}
+
+// countingReader counts the bytes read through it.
+type countingReader struct {
+	r io.Reader
+	n int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += n
+	return n, err
 }
 
 // A probe pod's log a hundred lines of a kilobyte, the OK line last, still passes: probeLog keeps

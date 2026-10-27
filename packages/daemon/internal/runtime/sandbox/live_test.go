@@ -9,11 +9,17 @@
 // Each check prints what it observed, each line naming the identity that observed it, and then
 // `CHECK <name>: PASS`. The first check that does not hold prints `CHECK <name>: FAIL: <why>` and
 // ends the run. The agent every pod runs is a stub (decision 7): the Go shim bridges it as it would
-// Oh My Pi, and it appends its own role, pod uid and generation to a marker file on the issue's volume
-// — the session file a resume names — and sleeps. The marker is the issue pod's: SandboxName (see
-// names.go) is shared by all six of an issue's role claims, so one issue pod's resident roles each
-// append their own launches to the same file, and a check reads only its own claim's lines back out
-// of it (roleIncarnations).
+// Oh My Pi, and it appends its own role, pod uid and generation to a marker file on the issue pod's
+// own disk, and sleeps. That disk is the pod's own ephemeral volume and dies with it (INFRA-80), so
+// the marker proves a role's identity within one pod and nothing across pods. Within the pod it is
+// shared: SandboxName (see names.go) is one name for all six of an issue's role claims, so one issue
+// pod's resident roles each append their own launches to the same file, and a check reads only its
+// own claim's lines back out of it (roleIncarnations); a pod replacement leaves a fresh, empty one.
+// Continuity across a pod replacement is the session table's instead. Every runtime of the run keeps
+// sessions in the scratch Postgres the script started (session_store postgres, liveSessionsSecretKey),
+// the harness records each claim's session there as `legion sessions import` copies one
+// (recordSession), and every resume names that recorded path, which the role launcher looks up in the
+// table — never on the disk — before any child runs.
 //
 // This file is the rig: the run's inputs, the boot-token registry, the observation and log
 // records, the runtime's lifecycle, and the launches and reads every check shares. The checks
@@ -52,6 +58,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 )
@@ -91,11 +98,11 @@ var liveChecks = []liveCheck{
 	{"secrets-self-enroll-negative", (*liveRig).checkSecretsSelfEnrollNegative, secretsBlocked},
 	{"secrets-approval-ask", (*liveRig).checkSecretsApprovalAsk, secretsBlocked},
 	{"suspend", (*liveRig).checkSuspend, nil},
-	{"role-container-isolation", (*liveRig).checkRoleContainerIsolation, nil},
+	{"role-isolation", (*liveRig).checkRoleIsolation, nil},
 	{"resume", (*liveRig).checkResume, nil},
 	{"stale-plugin-install", (*liveRig).checkStalePluginInstall, stalePluginBlocked},
 	{"same-agent-negative", (*liveRig).checkSameAgentNegative, nil},
-	{"kill-launcher", (*liveRig).checkKillLauncher, nil},
+	{"kill-role-init", (*liveRig).checkKillRoleInit, nil},
 	{"stale-incarnation", (*liveRig).checkStaleIncarnation, nil},
 	{"secrets-old-uid-and-revocation", (*liveRig).checkSecretsOldUIDAndRevocation, secretsBlocked},
 	{"respawn-before-register", (*liveRig).checkRespawnBeforeRegister, nil},
@@ -106,9 +113,11 @@ var liveChecks = []liveCheck{
 	{"cache-lost-volume", (*liveRig).checkCacheLostVolume, nil},
 	{"re-adopt", (*liveRig).checkReAdopt, nil},
 	{"orphan-sweep", (*liveRig).checkOrphanSweep, nil},
-	{"release-preserves-issue", (*liveRig).checkReleasePreservesIssue, nil},
+	{"cleanup-reaps-the-issue", (*liveRig).checkCleanupReapsTheIssue, nil},
 	{"displaced", (*liveRig).checkDisplaced, nil},
+	{"previous-layout", (*liveRig).checkPreviousLayout, previousLayoutBlocked},
 	{"postgres-resume", (*liveRig).checkPostgresResume, nil},
+	{"issue-suspend-resume", (*liveRig).checkIssueSuspendResume, nil},
 }
 
 // The runtime's settings for the run: the boot timeout covers a Karpenter node coming up and the
@@ -163,87 +172,32 @@ func (r *liveRig) mapRepository(repo ghrepo.Repository) {
 	}
 }
 
-// liveOverrides are the roles whose reservation the rig sets itself, as a deployment's
-// `runtime.kubernetes.resources.<role>` does, field by field: the implementer's and tester's cpu
-// and memory, the tester's ephemeral-storage limit AND request beside them (both explicitly
-// configured and equal — see liveResources' own doc comment for why only one role gets this), the
-// reviewer's memory alone (its cpu stays the default). The architect, planner and merger keep
-// config.DefaultResources(), so the root's pod carries a reservation from each path — an
-// override, a default, and one with a field of each — and the `resources` check tells them apart,
-// the disk bound's two paths included. The stub agent sleeps, so the overrides size the pods down
-// from the defaults' 3 CPU and 19 GiB to 2.5 CPU and 6 GiB, which nproc and MemTotal in the pod
-// are then checked against.
-var liveOverrides = map[claim.Role]config.RoleResources{
-	claim.RoleImplementer: {CPU: "500m", Memory: "1Gi"},
-	claim.RoleTester:      {CPU: "500m", Memory: "1Gi", EphemeralStorage: "2Gi", EphemeralStorageRequest: "2Gi"},
-	claim.RoleReviewer:    {Memory: "1Gi"},
-}
+// liveIssueOverride is the issue pod's reservation the rig sets itself, as a deployment's
+// `runtime.kubernetes.resources.issue` does, field by field: its cpu and memory, which the stub
+// agents need little of, and its ephemeral-storage limit and request, both explicitly configured
+// and equal at the GKE Autopilot cap; the controller's pod keeps config.DefaultResources(). The
+// stub agent sleeps, so the override sizes the issue pod down from the default 3 CPU and 19 GiB to
+// 2 CPU and 4 GiB, which nproc and MemTotal in the pod are then checked against.
+var liveIssueOverride = config.Reservation{CPU: "2", Memory: "4Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "10Gi"}
 
 // liveResources are the reservations the rig hands the runtime (Options.Resources): the daemon's
-// defaults as it translates them (reservations, manifest_test.go) with liveOverrides applied field
-// by field, as resolveKubernetes settles a file's `resources` block. Cpu and memory are each the
-// request and the limit alike; the ephemeral-storage limit and request are set apart except where
-// liveOverrides gives both explicitly (the tester, above) — every other role keeps
-// config.DefaultResources()'s own split, EphemeralStorageRequest 1Gi under whatever limit the role
-// (default or liveOverrides) configures.
-//
-// GKE admits a container's ephemeral-storage limit equal to its request, discarding whatever
-// higher limit was configured (confirmed live, 2026-10-17, on a bare debug pod and every role
-// container of a real production issue pod); `checkResources`' own ephemeralStorageClamped
-// parameter asserts that admitted reality rather than the originally-configured limit, for every
-// role whose request and limit differ. Raising a role's own ephemeral_storage_request to match its
-// limit — this rig's own tester override — defeats that clamp for that one role alone, proving the
-// mechanism an operator would reach for works correctly. It cannot be the fix for every role at
-// once, and that is its own, separate, structural finding, confirmed live the same day: equalizing
-// every role's request to its own configured limit (architect/planner/reviewer/merger at 10Gi,
-// implementer at 20Gi, tester at 30Gi, the two workspace-init containers already at 10Gi each) sums
-// to roughly 110Gi requested across the root pod's eight containers, and GKE Autopilot's Warden
-// admission webhook refused to schedule the pod at all: "Total ephemeral-storage requested by
-// containers … is higher than the Autopilot maximum of 10Gi" (autogke-pod-limit-constraints).
-// Because Legion runs every role of one issue in containers of a single pod, that 10Gi is a shared
-// budget across all six roles together, not a per-role one — config.DefaultResources()'s 10-30Gi
-// per-role bounds, meant as the per-role disk ceiling, cannot be realized simultaneously for more
-// than a small fraction of the roles on GKE Autopilot as the runtime is architected today, whatever
-// an operator configures: a gap for the daemon's resource model or its pod layout to resolve, not
-// something a deployment's `legion.yaml` can configure around, and not something this harness can
-// fix from a test rig.
-func (r *liveRig) liveResources() map[claim.Role]corev1.ResourceRequirements {
+// defaults as it translates them (reservations, manifest_test.go) with liveIssueOverride applied
+// field by field to the issue pod's, as resolveKubernetes settles a file's `resources` block. Cpu
+// and memory are each the request and the limit alike. GKE admits a container's ephemeral-storage
+// limit equal to its request, discarding whatever higher limit was configured (confirmed live,
+// 2026-10-17); setting the two equal keeps what the rig asks for what GKE admits.
+func (r *liveRig) liveResources() PodResources {
 	resources := reservations()
-	for role, override := range liveOverrides {
-		requirements := resources[role]
-		for name, value := range map[corev1.ResourceName]string{corev1.ResourceCPU: override.CPU, corev1.ResourceMemory: override.Memory} {
-			if value == "" {
-				continue
-			}
-			quantity := resource.MustParse(value)
-			requirements.Requests[name] = quantity
-			requirements.Limits[name] = quantity.DeepCopy()
-		}
-		if override.EphemeralStorage != "" {
-			requirements.Limits[corev1.ResourceEphemeralStorage] = resource.MustParse(override.EphemeralStorage)
-		}
-		if override.EphemeralStorageRequest != "" {
-			requirements.Requests[corev1.ResourceEphemeralStorage] = resource.MustParse(override.EphemeralStorageRequest)
-		}
-		resources[role] = requirements
+	issue := *resources.Issue.DeepCopy()
+	for name, value := range map[corev1.ResourceName]string{corev1.ResourceCPU: liveIssueOverride.CPU, corev1.ResourceMemory: liveIssueOverride.Memory} {
+		quantity := resource.MustParse(value)
+		issue.Requests[name] = quantity
+		issue.Limits[name] = quantity.DeepCopy()
 	}
+	issue.Limits[corev1.ResourceEphemeralStorage] = resource.MustParse(liveIssueOverride.EphemeralStorage)
+	issue.Requests[corev1.ResourceEphemeralStorage] = resource.MustParse(liveIssueOverride.EphemeralStorageRequest)
+	resources.Issue = issue
 	return resources
-}
-
-// overridden reports whether role's reservation field name comes from liveOverrides rather than
-// the defaults: for ephemeral-storage, whether either side of the bound does.
-func overridden(role claim.Role, name corev1.ResourceName) bool {
-	override, ok := liveOverrides[role]
-	if !ok {
-		return false
-	}
-	switch name {
-	case corev1.ResourceCPU:
-		return override.CPU != ""
-	case corev1.ResourceEphemeralStorage:
-		return override.EphemeralStorage != "" || override.EphemeralStorageRequest != ""
-	}
-	return override.Memory != ""
 }
 
 // The run's one provider key: the variable its agents' Oh My Pi gets, and the key of the providers
@@ -265,7 +219,8 @@ const fixtureConfigMap = "legion-operator-route"
 // The marker is the runtime locator's process incarnation: an unchanged pod UID plus the launch
 // generation, prefixed with the role that launched it since the marker is one issue pod's, shared
 // by every resident role (SandboxName). A role restart keeps the pod UID but must append a new
-// incarnation.
+// incarnation. It lives on the pod's own disk, so it says nothing about any earlier pod: what a
+// role carries across a pod replacement is its session, which the table holds (recordSession).
 var stubAgent = []string{"/bin/sh", "-c", `printf '%s:%s/%s\n' "$LEGION_ROLE" "$POD_UID" "$LEGION_GENERATION" >>"$LEGION_E2E_MARKER" && exec sleep infinity`, "stage4a-stub"}
 
 // liveEnv is what the script hands the harness.
@@ -321,13 +276,14 @@ type liveEnv struct {
 	// person approving it. Every field here is read with os.Getenv, unlike the rest of liveEnv: unset
 	// is a blocked run of the secrets-* checks, never a refusal to start (secretsBlocked).
 	agentSecretsURL, agentSecretsOperator, agentSecretsAutoSHA, agentSecretsBin, agentSecretsTokenFile string
-	// The scratch Postgres the script started for postgres-resume: the file holding its URL at
-	// streamAdvertiseHost, which the script also wrote into the providers Secret under
-	// liveSessionsSecretKey for every pod to dial as it dials the worker stream, and the address it
-	// listens on there. sessionDSNLocalFile holds the same database's URL at streamHost instead —
-	// loopback under bridge, where the script's own docker container actually binds, reachable from
-	// the devbox the harness runs on even though streamAdvertiseHost (the bridge's cluster-DNS
-	// name) is not — for the harness's own direct connection in writeSession, never handed to a pod.
+	// The scratch Postgres the script started, which every pod of the run keeps its sessions in:
+	// the file holding its URL at streamAdvertiseHost, which the script also wrote into the
+	// providers Secret under liveSessionsSecretKey for every pod to dial as it dials the worker
+	// stream, and the address it listens on there. sessionDSNLocalFile holds the same database's
+	// URL at streamHost instead — loopback under bridge, where the script's own docker container
+	// actually binds, reachable from the devbox the harness runs on even though
+	// streamAdvertiseHost (the bridge's cluster-DNS name) is not — for the harness's own direct
+	// connection in writeSession, never handed to a pod.
 	sessionDSNFile, sessionDBAddress, sessionDSNLocalFile string
 	// The stale-plugin-install checkpoint's own inputs: the devbox paths of this checkout's packed
 	// pi-legion and pi-envoy and their versions. Its negative control names the published
@@ -336,6 +292,10 @@ type liveEnv struct {
 	// checkpoint with a clear message, never a refusal to start, so an older invocation of the
 	// script still runs every checkpoint it knows (stalePluginBlocked).
 	piLegionTarball, piEnvoyTarball, piLegionVersion, piEnvoyVersion string
+	// previous-layout's own inputs: the previous release's fixture harness the script built from
+	// LEGION_E2E_PREVIOUS_IMAGE's revision (testdata/previouslayout), and that release's worker image by digest, which
+	// it runs on. Read with os.Getenv, as the plugin inputs are (previousLayoutBlocked).
+	previousHarness, previousImage string
 }
 
 func readLiveEnv(t *testing.T) liveEnv {
@@ -364,7 +324,7 @@ func readLiveEnv(t *testing.T) liveEnv {
 		platform:              get("LEGION_E2E_PLATFORM"),
 		runtimeIdentityKind:   get("LEGION_E2E_RUNTIME_IDENTITY_KIND"),
 		appID:                 get("LEGION_E2E_IMPLEMENT_APP_ID"),
-		appKeyName:            get("LEGION_E2E_IMPLEMENT_APP_KEY"),
+		appKeyName:            get("LEGION_E2E_IMPLEMENT_APP_KEY_NAME"),
 		record:                get("LEGION_E2E_RECORD"),
 		work:                  get("LEGION_E2E_WORK"),
 		from:                  os.Getenv("LEGION_E2E_FROM"),
@@ -382,6 +342,8 @@ func readLiveEnv(t *testing.T) liveEnv {
 		piEnvoyTarball:        os.Getenv("LEGION_E2E_PI_ENVOY_TARBALL"),
 		piLegionVersion:       os.Getenv("LEGION_E2E_PI_LEGION_VERSION"),
 		piEnvoyVersion:        os.Getenv("LEGION_E2E_PI_ENVOY_VERSION"),
+		previousHarness:       os.Getenv("LEGION_E2E_PREVIOUS_HARNESS"),
+		previousImage:         os.Getenv("LEGION_E2E_PREVIOUS_IMAGE"),
 	}
 	repo, err := ghrepo.Parse("LEGION_E2E_REPO", get("LEGION_E2E_REPO"))
 	if err != nil {
@@ -421,7 +383,7 @@ func readLiveEnv(t *testing.T) liveEnv {
 	env.claimProject = strings.ReplaceAll(env.project, "-", "")
 	entry := func(check liveCheck) bool { return check.name == env.from }
 	if env.from != "" && (env.from == "identity" || env.from == "stale-incarnation" || !slices.ContainsFunc(liveChecks, entry)) {
-		fmt.Printf("CHECK identity: FAIL: STAGE4A_FROM=%s is not an entry point (any check but identity and stale-incarnation, which rides kill-pod)\n", env.from)
+		fmt.Printf("CHECK identity: FAIL: STAGE4A_FROM=%s is not an entry point (any check but identity and stale-incarnation, which rides kill-role-init)\n", env.from)
 		t.FailNow()
 	}
 	return env
@@ -464,8 +426,13 @@ type liveClaim struct {
 	tree, issue, name string
 	role              claim.Role
 	// repo is the claim's repository when it is not LEGION_E2E_REPO (second-owner's).
-	repo      ghrepo.Repository
-	marker    string
+	repo   ghrepo.Repository
+	marker string
+	// session is the claim's recorded session, the path every resume of it names. No pod ever
+	// holds a file there — the disk it would have sat on dies with the pod — so the role launcher
+	// finds it in the session table alone; recorded says the harness has put it there.
+	session   string
+	recorded  bool
 	state     claimState
 	gen       uint64
 	bootToken string
@@ -747,7 +714,7 @@ type liveRig struct {
 
 	// claims are the run's claims in newLiveRig's order, each tree's root before its other claims.
 	claims []*liveClaim
-	// What kill-pod recorded for stale-incarnation.
+	// What kill-role-init recorded for stale-incarnation.
 	killed struct {
 		old, fresh runtime.Locator
 		gone       observed
@@ -766,9 +733,12 @@ type liveRig struct {
 	enrollments        map[claim.Token]liveEnrollment
 	grants             map[claim.Token]string
 	requests           map[claim.Token]string
-	// sessionStore is the providers Secret's key every runtime started from now on keeps sessions
-	// in (Options.SessionDSNKey, session_store postgres): set by postgres-resume, "" before it.
-	sessionStore string
+	// sessionStore is where every runtime of the run keeps its sessions (Options.SessionStore,
+	// runtime.kubernetes.session_store postgres): liveSessionsSecretKey, the providers Secret key
+	// holding the scratch database's URL the script wrote there, from the rig's first runtime on.
+	// The daemon loads no store that keeps sessions on the issue's disk, so there is no run of this
+	// harness without a database.
+	sessionStore ompsessions.Store
 }
 
 func TestStage4aSandboxRuntimeLive(t *testing.T) {
@@ -818,6 +788,7 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 	r := &liveRig{
 		t: t, env: env, ctx: ctx, cancel: cancel, reg: newRegistry(), obs: &observations{changed: make(chan struct{})}, trees: newFakeStore(),
 		enrollments: map[claim.Token]liveEnrollment{}, grants: map[claim.Token]string{},
+		sessionStore: ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: liveSessionsSecretKey},
 	}
 	fail := func(format string, args ...any) {
 		fmt.Printf("CHECK identity: FAIL: "+format+"\n", args...)
@@ -883,8 +854,8 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 		// taking the root issue's resident roles with it. Its role is its own tree's architect, the
 		// claim a tree's first launch is in the daemon.
 		{"orphan", "S4A-4", "S4A-4", claim.RoleArchitect},
-		// sessions is postgres-resume's own tree, launched once the runtime keeps sessions in the
-		// scratch database: its pod is the only one created under session_store postgres.
+		// sessions is postgres-resume's own tree: the one claim whose session the check writes into
+		// the table itself, dated before its pod's workspace, rather than letting the rig record it.
 		{"sessions", "S4A-5", "S4A-5", claim.RoleArchitect},
 		// root2 and child2 are two issues of one tree, each in a Sandbox and on a volume of its own
 		// (independent-provision).
@@ -904,6 +875,9 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 		// setup-negative is the throwaway issue the setup-negative check launches on a second
 		// runtime whose setup exits 7, then deletes.
 		{"setup-negative", "S4A-8", "S4A-8", claim.RoleArchitect},
+		// closed is the issue whose close takes its whole pod, disk included, and whose next launch
+		// brings a disk of its own while the agent carries on from the table (issue-suspend-resume).
+		{"closed", "S4A-9", "S4A-9", claim.RoleArchitect},
 	} {
 		token, err := claim.NewToken(env.claimProject, c.issue, c.role)
 		if err != nil {
@@ -911,7 +885,13 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 		}
 		r.claims = append(r.claims, &liveClaim{
 			token: token, tree: c.tree, issue: c.issue, role: c.role, name: c.name,
-			marker: ompSessionsDir + "/" + SandboxName(token) + ".marker",
+			// The marker sits at the root of the issue's volume: TreeRoot is mounted read-write in
+			// the pod's one container and seen by every role there (issuePod.launcherContainer), so the six
+			// roles of an issue share the one file, and it is the pod's own ephemeral disk, so it
+			// dies with the pod — the property this file's header claims. No pod mounts
+			// ompSessionsDir any more, which is why the marker is not there.
+			marker:  TreeRoot + "/" + SandboxName(token) + ".marker",
+			session: ompSessionsDir + "/" + SandboxName(token) + "-" + string(c.role) + ".jsonl",
 		})
 	}
 	r.claim("second-owner").repo = env.repoSecondOwner
@@ -970,7 +950,7 @@ func (r *liveRig) runtimeOptions(address string, ln *stream.Listener) Options {
 		GitHubCredential:      r.tokens.Credential,
 		Conns:                 ln,
 		Log:                   r.log,
-		SessionDSNKey:         r.sessionStore,
+		SessionStore:          r.sessionStore,
 		RepositoryCache:       liveRepositoryCache(),
 		Mapped:                r.mappedRepositories,
 	}
@@ -1103,35 +1083,127 @@ func (r *liveRig) kubectl(args ...string) (string, error) {
 	return out, err
 }
 
-// exec runs a command in a claim's main container, through the admin context.
+// roleEnter is the shell that runs a command inside one running role of an issue pod's one
+// container (`legion launcher role-init`), from `kubectl exec -c roles`: $1 the role, the rest the
+// command. It finds the role's role-init by its argv (argv[1] `launcher`, argv[2] `role-init`, then
+// `--role <role>` before the shim's `--`), refusing, exit 125, a role that runs none or two; enters
+// that role-init's user, mount, PID and IPC namespaces (uid 0 there, the container's runtime user
+// outside, with --preserve-credentials, since gVisor refuses the setgroups a plain nsenter makes),
+// where /proc is the role's own and role-init is its PID 1; and from there enters the user
+// namespace of the role's worker-shim (role-init's child, PPid 1, whose argv[1] is `worker-shim`:
+// role-init reaps every orphan of its namespace, so a process the agent detached is its child too,
+// and the word anywhere else in an argv is no shim), so the command runs as the role's own user
+// with the role's own mounts: its gh, private, state and agent-secrets directories at their fixed
+// paths, its home layer, its /tmp, and an empty roles directory. Pids it reads are the role's own,
+// and so are those it signals. With "pid" for the command it prints the role-init's pid in the
+// container's PID namespace instead, and runs nothing.
+const roleEnter = `role=$1; shift
+found=
+for d in /proc/[0-9]*; do
+  args=$(tr '\0' '\n' <"$d/cmdline" 2>/dev/null) || continue
+  [ "$(printf '%s\n' "$args" | sed -n 2,3p | tr '\n' ' ')" = "launcher role-init " ] || continue
+  [ "$(printf '%s\n' "$args" | sed -n '/^--$/q; /^--role$/{n;p;q;}')" = "$role" ] || continue
+  [ -z "$found" ] || { echo "role $role runs two role-inits, pids $found and ${d#/proc/}" >&2; exit 125; }
+  found=${d#/proc/}
+done
+[ -n "$found" ] || { echo "role $role runs no role-init in this container" >&2; exit 125; }
+[ "$1" != pid ] || { echo "$found"; exit 0; }
+exec nsenter -t "$found" -U -m -p -i --preserve-credentials -- sh -c '
+shim=
+for d in /proc/[0-9]*; do
+  [ "$(sed -n "s/^PPid:[[:space:]]*//p" "$d/status" 2>/dev/null)" = 1 ] || continue
+  [ "$(tr "\0" "\n" <"$d/cmdline" 2>/dev/null | sed -n 2p)" = worker-shim ] || continue
+  [ -z "$shim" ] || { echo "the role runs two worker-shims under its role-init" >&2; exit 125; }
+  shim=${d#/proc/}
+done
+[ -n "$shim" ] || { echo "the role runs no worker-shim under its role-init" >&2; exit 125; }
+exec nsenter -t "$shim" -U --preserve-credentials -- "$@"' role "$@"`
+
+// exec runs a command inside a claim's running role (roleEnter), through the admin context.
 func (r *liveRig) exec(c *liveClaim, command ...string) (string, error) {
-	out, err := r.kubectl(append([]string{"exec", SandboxName(c.token), "-c", string(c.role), "--"}, command...)...)
+	return r.execPod(c, append([]string{"sh", "-c", roleEnter, "role-enter", string(c.role)}, command...)...)
+}
+
+// rolePid is the pid of c's role's role-init in the issue pod's container.
+func (r *liveRig) rolePid(c *liveClaim) (string, error) {
+	return r.execPod(c, "sh", "-c", roleEnter, "role-enter", string(c.role), "pid")
+}
+
+// execPod runs a command in the claim's issue pod's one container, in the container's own view:
+// what every role shares (the issue's disk at TreeRoot, the markers among it), whether or not the
+// claim's role runs.
+func (r *liveRig) execPod(c *liveClaim, command ...string) (string, error) {
+	out, err := r.kubectl(append([]string{"exec", SandboxName(c.token), "-c", runtime.IssuePodContainer, "--"}, command...)...)
 	return strings.TrimSpace(out), err
 }
 
-// issuePVCs are the run's PersistentVolumeClaims labelled with issue, as the operator reads them:
-// `<name> <phase>` each, in name order, none when the issue has no volume. An issue's volume is
-// selected by the issue label its Sandbox's claim template put on it, never by the tree's: the
-// restricted runtime identity has no PVC verb, so this is an operator step.
-func (r *liveRig) issuePVCs(issue string) ([]string, error) {
-	out, err := r.kubectl("get", "pvc", "-l", labelProject+"="+r.env.project+","+labelIssue+"="+labelValue(issue),
-		"-o", `jsonpath={range .items[*]}{.metadata.name} {.status.phase}{"\n"}{end}`)
+// liveDisk is one issue pod's disk as the operator reads it. Nothing is selected by a label here:
+// the disk is a generic ephemeral volume declared in the pod's own template (issuePod.disk),
+// and the pinned Sandbox CRD declares that template's metadata a bare object, so the API server
+// prunes any label set there — an issue's disk carries none, and is found by its name alone. owner
+// is the claim's controlling owner as `<kind>/<name>`: a Pod, never the Sandbox that owned the
+// issue's volume before INFRA-80.
+type liveDisk struct {
+	name, phase, uid, owner string
+}
+
+// issueDisk reads c's issue pod's disk; found is false when there is none, which is what a pod
+// that has gone leaves behind, its disk deleted with it. The restricted runtime identity has no
+// PVC verb, so this is an operator step.
+func (r *liveRig) issueDisk(c *liveClaim) (disk liveDisk, found bool, err error) {
+	out, err := r.kubectl("get", "pvc", issueDiskName(c.token), "--ignore-not-found",
+		"-o", `jsonpath={.metadata.name} {.status.phase} {.metadata.uid} {.metadata.ownerReferences[?(@.controller==true)].kind}/{.metadata.ownerReferences[?(@.controller==true)].name}`)
 	if err != nil {
-		return nil, err
+		return liveDisk{}, false, err
 	}
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	lines = slices.DeleteFunc(lines, func(line string) bool { return line == "" })
-	slices.Sort(lines)
-	return lines, nil
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		return liveDisk{}, false, nil
+	}
+	if len(fields) != 4 {
+		return liveDisk{}, false, fmt.Errorf("the operator read %s as %q, want its name, phase, uid and owner", issueDiskName(c.token), strings.TrimSpace(out))
+	}
+	return liveDisk{name: fields[0], phase: fields[1], uid: fields[2], owner: fields[3]}, true, nil
+}
+
+// assertPodOwnedDisk holds c's disk to what an issue pod's disk is now: Bound, and owned by that
+// pod itself, so it is created with the pod and deleted with it. It returns the disk, whose uid a
+// check comparing a pod replacement's disk with the replaced one's keeps.
+func (r *liveRig) assertPodOwnedDisk(c *liveClaim) (liveDisk, error) {
+	disk, found, err := r.issueDisk(c)
+	if err != nil {
+		return liveDisk{}, err
+	}
+	if !found {
+		return liveDisk{}, fmt.Errorf("the issue pod %s has no disk %s", SandboxName(c.token), issueDiskName(c.token))
+	}
+	pod, err := r.getPod(SandboxName(c.token))
+	if err != nil {
+		return liveDisk{}, err
+	}
+	if disk.phase != "Bound" || disk.owner != "Pod/"+pod.Name {
+		return liveDisk{}, fmt.Errorf("the disk %s is %s owned by %s, want Bound owned by its own pod %s", disk.name, disk.phase, disk.owner, "Pod/"+pod.Name)
+	}
+	return disk, nil
+}
+
+// awaitDiskGone waits until c's issue pod's disk is gone, which is what a pod's own ephemeral
+// volume does when the pod goes: the kubelet's garbage collection follows the pod's ownership.
+func (r *liveRig) awaitDiskGone(c *liveClaim) error {
+	return r.poll(liveGoneLimit, "the disk "+issueDiskName(c.token)+" of issue "+c.issue+" to go with its pod", func() (bool, error) {
+		_, found, err := r.issueDisk(c)
+		return !found, err
+	})
 }
 
 // markerLines reads the marker with `test ! -e || cat`, not a bare `cat`: a marker a poll reads
 // before the stub agent has written to it does not exist yet, and a bare `cat`'s non-zero exit
 // would reach the caller as an error — a poll returns on the first error, never retrying — rather
 // than "not yet" (awaitRunning's own poll, the first launch of an issue: root at root-ready, root2
-// and child2 at independent-provision, an orphan's first launch).
+// and child2 at independent-provision, an orphan's first launch). It reads the container's view of
+// the marker's path (containerHomePath), so a stopped role's marker reads too.
 func (r *liveRig) markerLines(c *liveClaim) ([]string, error) {
-	out, err := r.exec(c, "sh", "-c", `test ! -e "$1" || cat -- "$1"`, "sh", c.marker)
+	out, err := r.execPod(c, "sh", "-c", `test ! -e "$1" || cat -- "$1"`, "sh", containerHomePath(c.marker))
 	if err != nil {
 		return nil, err
 	}
@@ -1141,7 +1213,8 @@ func (r *liveRig) markerLines(c *liveClaim) ([]string, error) {
 // roleIncarnations is markerLines filtered to one role's own "role:incarnation" entries, with the
 // role prefix stripped back to the bare incarnation: the marker is the issue pod's (SandboxName),
 // shared by every resident role that has started in it, so its raw lines also hold every sibling
-// role's own launches.
+// role's own launches. They are that pod's alone — the disk the marker sits on died with any pod
+// before it — so a check across a pod replacement reads the session table, never this.
 func roleIncarnations(lines []string, role claim.Role) []string {
 	prefix := string(role) + ":"
 	var own []string
@@ -1151,6 +1224,48 @@ func roleIncarnations(lines []string, role claim.Role) []string {
 		}
 	}
 	return own
+}
+
+// recordSession puts c's recorded session in the session table, as `legion sessions import` copies
+// one (ompsessions.Import), the first time it is asked and nothing after: the stub agent is no Oh
+// My Pi and writes no session of its own, so the harness records it where the daemon's would be, as
+// the machine recording a claim's session file does. It is called once c's pod runs (awaitRunning),
+// so the row is written after that pod provisioned its workspace and before any later pod's: a
+// resume in the same pod is told its workspace was not recreated, and a resume in a replacement pod
+// is (launcher.WorkspaceRecreatedVariable, from Import's own mtime).
+func (r *liveRig) recordSession(c *liveClaim) error {
+	if c.recorded {
+		return nil
+	}
+	content := `{"type":"session","version":3,"id":"` + string(c.token) + `"}` + "\n"
+	if err := r.writeSession(c.session, content, time.Now()); err != nil {
+		return fmt.Errorf("record %s's session %s in the table: %w", c.name, c.session, err)
+	}
+	c.recorded = true
+	return nil
+}
+
+// writeSession puts content in the scratch database's session table at path, last written at
+// written, as `legion sessions import` copies a session file (ompsessions.Import), through the
+// URL file the script wrote for the harness's own direct use (sessionDSNLocalFile, dialable from
+// the devbox this process runs on — never sessionDSNFile, the pod-advertised address a bridge-mode
+// devbox cannot resolve; liveEnv's doc has the reasoning).
+func (r *liveRig) writeSession(path, content string, written time.Time) error {
+	ctx, cancel := context.WithTimeout(r.ctx, time.Minute)
+	defer cancel()
+	conn, err := ompsessions.Connect(ctx, r.env.sessionDSNLocalFile)
+	if err != nil {
+		return fmt.Errorf("the scratch database (LEGION_E2E_SESSION_DSN_LOCAL_FILE=%s): %w", r.env.sessionDSNLocalFile, err)
+	}
+	defer conn.Close(context.Background())
+	outcome, err := ompsessions.Import(ctx, conn, path, []byte(content), written)
+	if err != nil {
+		return err
+	}
+	if outcome != ompsessions.Copied {
+		return fmt.Errorf("the session table already held %s (%s), want a fresh copy", path, outcome)
+	}
+	return nil
 }
 
 // ---- reads under the runtime identity ----------------------------------------------------------
@@ -1273,7 +1388,8 @@ func (r *liveRig) resumeWithPlugins(c *liveClaim, file string, plugins *runtime.
 
 // awaitRunning waits for the claim's current pod to run with its Sandbox Ready, then for its
 // shim's hello at the current generation, then for the stub agent's own marker line and setup
-// record. The hello only proves the shim dialed in before spawning its child (shim.go:204/317);
+// record, and records the claim's session in the table (recordSession) once all of it holds. The
+// hello only proves the shim dialed in before spawning its child (shim.go:204/317);
 // checkSetupRecord holds the setup line before the agent line and its cwd, uid and parent pid for
 // every successful role launch. A pod that runs and never says hello within one boot interval is a
 // network-path failure, named as one.
@@ -1321,6 +1437,9 @@ func (r *liveRig) awaitRunning(c *liveClaim, since time.Time) (registration, err
 		return registration{}, err
 	}
 	if err := r.checkSetupRecord(c); err != nil {
+		return registration{}, err
+	}
+	if err := r.recordSession(c); err != nil {
 		return registration{}, err
 	}
 	return reg, nil
@@ -1375,7 +1494,9 @@ func (r *liveRig) suspend(c *liveClaim) error {
 }
 
 // ensureRunning and ensureSuspended put a claim where a check starts from: nothing to do in a full
-// run, where the earlier checks left it there, and the same runtime calls in a development run.
+// run, where the earlier checks left it there, and the same runtime calls in a development run. A
+// claim that has run before comes back from its recorded session, which the table holds whatever
+// became of the pod that first ran it.
 func (r *liveRig) ensureRunning(c *liveClaim) error {
 	if c.state == stateRunning {
 		return nil
@@ -1385,7 +1506,7 @@ func (r *liveRig) ensureRunning(c *liveClaim) error {
 	if c.state == stateNone {
 		_, err = r.spawn(c, true)
 	} else {
-		_, err = r.resume(c, c.marker)
+		_, err = r.resume(c, c.session)
 	}
 	if err == nil {
 		_, err = r.awaitRunning(c, since)

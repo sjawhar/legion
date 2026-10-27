@@ -20,12 +20,14 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -170,10 +172,17 @@ func TestResolveBootConfigRefusesSignInSettingsItCannotUse(t *testing.T) {
 
 // A setting a release removed is refused, never silently ignored.
 func TestResolveBootConfigRefusesRemovedSettings(t *testing.T) {
-	for _, name := range []string{"DISPATCH_ALLOWED_LOGINS", "DISPATCH_APP_CLIENT_SECRET"} {
+	for _, name := range []string{"DISPATCH_ALLOWED_LOGINS", "DISPATCH_APP_CLIENT_SECRET", "COHERE_API_KEY", "DISPATCH_AGENT_SECRETS_TOKEN", "DISPATCH_AGENT_SECRETS_TOKEN_FILE"} {
 		_, err := resolveBootConfig(envGetter(signInEnvironment(map[string]string{name: "value"})))
 		if err == nil || !strings.Contains(err.Error(), name+" is no longer read") {
 			t.Errorf("%s set: err = %v, want a refusal naming it", name, err)
+		}
+	}
+	// Meaning search reaches Cohere through either place, and the refusal names both.
+	_, err := resolveBootConfig(envGetter(signInEnvironment(map[string]string{"COHERE_API_KEY": "value"})))
+	for _, want := range []string{"AWS Bedrock", "Azure AI Foundry", "DISPATCH_EMBEDDER"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("COHERE_API_KEY set: err = %v, want it to name %q", err, want)
 		}
 	}
 }
@@ -306,19 +315,19 @@ func TestResolveBootConfigLeavesAgentSecretsOffByDefault(t *testing.T) {
 		"DISPATCH_IDENTITY":                "header:X-Dispatch-User",
 		"DISPATCH_IDENTITY_HEADER_TRUSTED": "1",
 	}))
-	if err != nil || boot.AgentSecretsURL != "" || boot.AgentSecretsToken != "" {
+	if err != nil || boot.AgentSecretsURL != "" || boot.AgentSecretsTokenFile != "" {
 		t.Fatalf("boot=%#v err=%v, want the feature off", boot, err)
 	}
 }
 
-func TestResolveBootConfigAcceptsAgentSecretsURLAndToken(t *testing.T) {
+func TestResolveBootConfigAcceptsAgentSecretsURLAndTokenFile(t *testing.T) {
 	boot, err := resolveBootConfig(envGetter(map[string]string{
-		"DATABASE_URL":                     "postgres://dispatch",
-		"DISPATCH_AGENT_TOKEN":             "agent-token",
-		"DISPATCH_IDENTITY":                "header:X-Dispatch-User",
-		"DISPATCH_IDENTITY_HEADER_TRUSTED": "1",
-		"DISPATCH_AGENT_SECRETS_URL":       "https://broker.internal/",
-		"DISPATCH_AGENT_SECRETS_TOKEN":     "ui-bearer",
+		"DATABASE_URL":                              "postgres://dispatch",
+		"DISPATCH_AGENT_TOKEN":                      "agent-token",
+		"DISPATCH_IDENTITY":                         "header:X-Dispatch-User",
+		"DISPATCH_IDENTITY_HEADER_TRUSTED":          "1",
+		"DISPATCH_AGENT_SECRETS_URL":                "https://broker.internal/",
+		"DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": " /var/run/secrets/broker/token ",
 	}))
 	if err != nil {
 		t.Fatalf("resolve boot config: %v", err)
@@ -326,8 +335,10 @@ func TestResolveBootConfigAcceptsAgentSecretsURLAndToken(t *testing.T) {
 	if boot.AgentSecretsURL != "https://broker.internal" {
 		t.Fatalf("AgentSecretsURL = %q, want the trailing slash trimmed", boot.AgentSecretsURL)
 	}
-	if boot.AgentSecretsToken != "ui-bearer" {
-		t.Fatalf("AgentSecretsToken = %q, want ui-bearer", boot.AgentSecretsToken)
+	// The path is not read at boot: the client reads it on each call, since a projected token
+	// rotates, and in the cluster the file is there before the first call either way.
+	if boot.AgentSecretsTokenFile != "/var/run/secrets/broker/token" {
+		t.Fatalf("AgentSecretsTokenFile = %q, want the trimmed path", boot.AgentSecretsTokenFile)
 	}
 }
 
@@ -336,11 +347,11 @@ func TestResolveBootConfigAcceptsAgentSecretsURLAndToken(t *testing.T) {
 // call by appending a fixed path to this base.
 func TestResolveBootConfigRejectsAgentSecretsURLWithPathOrBadScheme(t *testing.T) {
 	base := map[string]string{
-		"DATABASE_URL":                     "postgres://dispatch",
-		"DISPATCH_AGENT_TOKEN":             "agent-token",
-		"DISPATCH_IDENTITY":                "header:X-Dispatch-User",
-		"DISPATCH_IDENTITY_HEADER_TRUSTED": "1",
-		"DISPATCH_AGENT_SECRETS_TOKEN":     "ui-bearer",
+		"DATABASE_URL":                              "postgres://dispatch",
+		"DISPATCH_AGENT_TOKEN":                      "agent-token",
+		"DISPATCH_IDENTITY":                         "header:X-Dispatch-User",
+		"DISPATCH_IDENTITY_HEADER_TRUSTED":          "1",
+		"DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": "/var/run/secrets/broker/token",
 	}
 	for _, badURL := range []string{"broker.internal:9090", "https://broker.internal/v1"} {
 		env := map[string]string{}
@@ -354,9 +365,9 @@ func TestResolveBootConfigRejectsAgentSecretsURLWithPathOrBadScheme(t *testing.T
 	}
 }
 
-// A broker URL with no token at all -- bare or file-backed -- must refuse to boot rather than
-// construct a client that authenticates with an empty bearer.
-func TestResolveBootConfigRequiresTokenWhenAgentSecretsURLSet(t *testing.T) {
+// A broker URL with no token file must refuse to boot rather than construct a client that
+// authenticates with an empty bearer.
+func TestResolveBootConfigRequiresTheAccountTokenFileWhenAgentSecretsURLSet(t *testing.T) {
 	_, err := resolveBootConfig(envGetter(map[string]string{
 		"DATABASE_URL":                     "postgres://dispatch",
 		"DISPATCH_AGENT_TOKEN":             "agent-token",
@@ -364,44 +375,8 @@ func TestResolveBootConfigRequiresTokenWhenAgentSecretsURLSet(t *testing.T) {
 		"DISPATCH_IDENTITY_HEADER_TRUSTED": "1",
 		"DISPATCH_AGENT_SECRETS_URL":       "https://broker.internal",
 	}))
-	if err == nil || !strings.Contains(err.Error(), "DISPATCH_AGENT_SECRETS_TOKEN") {
-		t.Fatalf("err = %v, want a token-required rejection", err)
-	}
-}
-
-// DISPATCH_AGENT_SECRETS_TOKEN_FILE wins over the bare variable, and a set-but-unreadable file
-// refuses to boot naming the path rather than silently falling back to the bare variable.
-func TestResolveBootConfigAgentSecretsTokenFileWinsOverBareVariable(t *testing.T) {
-	dir := t.TempDir()
-	tokenPath := dir + "/agent-secrets-token"
-	if err := os.WriteFile(tokenPath, []byte("  file-token\n"), 0o600); err != nil {
-		t.Fatalf("write token file: %v", err)
-	}
-	boot, err := resolveBootConfig(envGetter(map[string]string{
-		"DATABASE_URL":                      "postgres://dispatch",
-		"DISPATCH_AGENT_TOKEN":              "agent-token",
-		"DISPATCH_IDENTITY":                 "header:X-Dispatch-User",
-		"DISPATCH_IDENTITY_HEADER_TRUSTED":  "1",
-		"DISPATCH_AGENT_SECRETS_URL":        "https://broker.internal",
-		"DISPATCH_AGENT_SECRETS_TOKEN":      "bare-token",
-		"DISPATCH_AGENT_SECRETS_TOKEN_FILE": tokenPath,
-	}))
-	if err != nil {
-		t.Fatalf("resolve boot config: %v", err)
-	}
-	if boot.AgentSecretsToken != "file-token" {
-		t.Fatalf("AgentSecretsToken = %q, want the file's trimmed contents to win", boot.AgentSecretsToken)
-	}
-
-	if _, err := resolveBootConfig(envGetter(map[string]string{
-		"DATABASE_URL":                      "postgres://dispatch",
-		"DISPATCH_AGENT_TOKEN":              "agent-token",
-		"DISPATCH_IDENTITY":                 "header:X-Dispatch-User",
-		"DISPATCH_IDENTITY_HEADER_TRUSTED":  "1",
-		"DISPATCH_AGENT_SECRETS_URL":        "https://broker.internal",
-		"DISPATCH_AGENT_SECRETS_TOKEN_FILE": dir + "/missing",
-	})); err == nil || !strings.Contains(err.Error(), "DISPATCH_AGENT_SECRETS_TOKEN_FILE") {
-		t.Fatalf("unreadable file: err = %v, want a DISPATCH_AGENT_SECRETS_TOKEN_FILE rejection", err)
+	if err == nil || !strings.Contains(err.Error(), "DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE") {
+		t.Fatalf("err = %v, want a refusal naming DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE", err)
 	}
 }
 
@@ -589,10 +564,20 @@ func highestMigrationFile(t *testing.T) int {
 // they commit - and a probe that queues behind them is read as a dead process: the ALB fails
 // it at five seconds, ECS replaces the task, and every in-flight request of every other client
 // is cancelled. The probe therefore takes its connection from a pool of its own, and the short
-// client timeout here is what tells a queued probe from an answered one.
+// client timeout here is what tells a queued probe from an answered one. The shared pool here
+// holds four connections: the property holds at any size, and holding all of production's
+// sixty-four while the other packages' tests share the server would push a default Postgres
+// past its hundred.
 func TestHealthzAnswersWhileEveryPooledConnectionIsHeld(t *testing.T) {
-	database := storetest.Open(t)
 	ctx := context.Background()
+	config := storetest.Open(t).Pool.Config().Copy()
+	config.MaxConns = 4
+	shared, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("open a four-connection shared pool: %v", err)
+	}
+	database := &store.Store{Pool: store.NewPool(shared)}
+	t.Cleanup(database.Pool.Close)
 	for held := int32(0); held < database.Pool.Config().MaxConns; held++ {
 		connection, err := database.Pool.Acquire(ctx)
 		if err != nil {
@@ -879,20 +864,23 @@ func TestRebuildRefsRefusesWithoutServerURL(t *testing.T) {
 
 // An argument envoy-dispatch does not know is refused, never served: the server migrates the
 // database at boot, so `envoy-dispatch census` on an image that predates the subcommand would
-// otherwise apply the very migrations the census was to inspect.
+// otherwise apply the very migrations the census was to inspect. backfill-embeddings is one such
+// argument now: the server's embedding queue keeps coverage itself.
 func TestRunSubcommandRefusesAnUnknownSubcommand(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runSubcommand(context.Background(), []string{"cenus"}, envGetter(nil), &stdout, &stderr)
-	if code != 2 {
-		t.Fatalf("exit %d, want 2", code)
-	}
-	for _, want := range []string{`unknown subcommand "cenus"`, "census", "redeliver-webhooks"} {
-		if !strings.Contains(stderr.String(), want) {
-			t.Errorf("stderr %q lacks %q", stderr.String(), want)
+	for _, name := range []string{"cenus", "backfill-embeddings"} {
+		var stdout, stderr bytes.Buffer
+		code := runSubcommand(context.Background(), []string{name}, envGetter(nil), &stdout, &stderr)
+		if code != 2 {
+			t.Fatalf("%s: exit %d, want 2", name, code)
 		}
-	}
-	if strings.Contains(stderr.String(), "DATABASE_URL") {
-		t.Errorf("stderr %q reads like a boot, not a refusal", stderr.String())
+		for _, want := range []string{fmt.Sprintf("unknown subcommand %q", name), "census", "redeliver-webhooks"} {
+			if !strings.Contains(stderr.String(), want) {
+				t.Errorf("%s: stderr %q lacks %q", name, stderr.String(), want)
+			}
+		}
+		if strings.Contains(stderr.String(), "DATABASE_URL") || strings.Contains(stderr.String(), "backfill-embeddings,") {
+			t.Errorf("%s: stderr %q reads like a boot, or still lists backfill-embeddings", name, stderr.String())
+		}
 	}
 }
 
@@ -976,8 +964,8 @@ func TestCensusSubcommandExitsOneWhenAPendingMigrationsCensusCountsRows(t *testi
 
 func TestWriteRebuildRefsReport(t *testing.T) {
 	var output bytes.Buffer
-	writeRebuildRefsReport(&output, refs.Rebuild{Documents: 4, Asks: 3, Comments: 2, Messages: 1, Orphans: 5, Edges: 9})
-	const want = "rebuild-refs: documents=4 asks=3 comments=2 messages=1 orphans=5 edges=9\n"
+	writeRebuildRefsReport(&output, refs.Rebuild{Documents: 4, Asks: 3, Comments: 2, Messages: 1, Orphans: 5, Edges: 9, BlocksOwed: 4})
+	const want = "rebuild-refs: documents=4 asks=3 comments=2 messages=1 orphans=5 edges=9 blocks_owed=4\n"
 	if got := output.String(); got != want {
 		t.Fatalf("rebuild-refs output = %q, want %q", got, want)
 	}
@@ -1139,7 +1127,10 @@ func TestResolveBootConfigDevSignInRefusesRemoteNATS(t *testing.T) {
 // another machine's secrets broker requests as one.
 func TestResolveBootConfigDevSignInRefusesARemoteAgentSecretsBroker(t *testing.T) {
 	broker := func(brokerURL string) map[string]string {
-		return map[string]string{"DISPATCH_AGENT_SECRETS_URL": brokerURL, "DISPATCH_AGENT_SECRETS_TOKEN": "ui-token"}
+		return map[string]string{
+			"DISPATCH_AGENT_SECRETS_URL":                brokerURL,
+			"DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": "/var/run/secrets/broker/token",
+		}
 	}
 	for _, brokerURL := range []string{"https://broker.example.com", "http://10.0.0.5:13380"} {
 		if _, err := resolveBootConfig(devSignInEnvironment(broker(brokerURL))); err == nil || !strings.Contains(err.Error(), "DISPATCH_AGENT_SECRETS_URL") {
@@ -1247,9 +1238,10 @@ func TestDevSignInRefusesAnAppJSONKeyWhateverTheBase(t *testing.T) {
 		t.Errorf("a key in app.json without the flag: %v, want accepted", err)
 	}
 
+	_, throwaway := githubapptest.Key(t)
 	app, source, err = loadAppCredentials(envGetter(map[string]string{
 		"DISPATCH_APP_CLIENT_ID": "Iv1.env",
-		"DISPATCH_APP_PEM_B64":   base64.StdEncoding.EncodeToString([]byte("throwaway key")),
+		"DISPATCH_APP_PEM_B64":   base64.StdEncoding.EncodeToString([]byte(throwaway)),
 	}), dataDir)
 	if err != nil || app == nil {
 		t.Fatalf("loadAppCredentials from the environment: %+v, %v", app, err)
@@ -1288,7 +1280,9 @@ func TestListenAddressJoinsAnIPv6LoopbackHost(t *testing.T) {
 			t.Errorf("host %q port %q: listenAddress = %q, %v; want %q", tc.host, tc.port, got, err, tc.want)
 		}
 	}
-	for _, port := range []string{"0", "70000"} {
+	// 2^64+1000 overflows int: a check that ignores overflow accepts it, and only the bind, after
+	// NATS and the migrations, refuses it. It must be refused here, before anything connects.
+	for _, port := range []string{"0", "70000", "18446744073709552616"} {
 		if got, err := listenAddress(envGetter(map[string]string{"DISPATCH_LISTEN_HOST": "127.0.0.1", "DISPATCH_PORT": port})); err == nil || !strings.Contains(err.Error(), "DISPATCH_PORT") {
 			t.Errorf("port %q: listenAddress = %q, %v; want a refusal naming DISPATCH_PORT", port, got, err)
 		}

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -94,9 +95,9 @@ func (d *outboxDispatch) ListIssues(context.Context, string, []string) ([]dispat
 func (d *outboxDispatch) GetIssue(context.Context, string) (dispatch.Issue, error) {
 	return d.issue, d.getErr
 }
-func (d *outboxDispatch) SetStatus(_ context.Context, _ string, status string) error {
+func (d *outboxDispatch) SetStatus(_ context.Context, _ string, status string) (dispatch.Issue, error) {
 	d.statuses = append(d.statuses, status)
-	return d.statusErr
+	return dispatch.Issue{}, d.statusErr
 }
 func (d *outboxDispatch) HandOver(_ context.Context, issue dispatch.Issue, status string) error {
 	d.handOvers = append(d.handOvers, fmt.Sprintf("%s %s %v", issue.Key, status, issue.Labels))
@@ -111,6 +112,9 @@ func (d *outboxDispatch) PostMessage(_ context.Context, _ string, body string) e
 }
 func (d *outboxDispatch) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
 	return d.bodies, d.messageReadErr
+}
+func (d *outboxDispatch) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
+	return nil, nil
 }
 func (d *outboxDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return d.approval, d.approvalErr
@@ -760,6 +764,92 @@ func TestOutboxGateSeedRaisesTheGateToTheVersionDispatchHolds(t *testing.T) {
 	}
 }
 
+// The seed applies a changes request Dispatch shows on the version registered (or a later one),
+// with its reason and the review's place in the issue's event log, so a request whose own event
+// was lost still reaches the gate and its architect. The review's place names the fact, so a
+// second seed of one version that reads a newer review is a fact of its own, and a seed that reads
+// the same review again is not.
+func TestOutboxGateSeedAppliesAChangesRequestWithItsMark(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	handler := &outboxFactHandler{}
+	reason := "name the rollback path"
+	reviewed := time.Date(2026, 10, 23, 17, 0, 0, 0, time.UTC)
+	client := &outboxDispatch{approval: dispatch.Approval{State: "changes_requested", LatestVersion: 3, Version: new(3), Reason: &reason, At: reviewed, Seq: 9}}
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: record.NewStore(), dispatch: client, handlers: []intake.Handler{handler}}
+	seed := func() {
+		t.Helper()
+		if err := runner.execute(context.Background(), mustOutboxRow(t, "LEGION-208", record.GateSeed{ArtifactID: "artifact-208", Version: 3}, time.Now())); err != nil {
+			t.Fatalf("execute gate seed: %v", err)
+		}
+	}
+	seed()
+	seed()
+	first := intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactChangesRequested, Version: 3, Reason: reason,
+		Mark: record.EventMark{Seq: 9, At: reviewed}}
+	if got := handler.facts(); len(got) != 1 || got[0] != first {
+		t.Fatalf("gate facts after two seeds of one review = %#v, want the changes request once: %#v", got, first)
+	}
+	client.approval.Seq, client.approval.At = 12, reviewed.Add(time.Minute)
+	seed()
+	if got := handler.facts(); len(got) != 2 || got[1].(intake.DispatchArtifact).Mark.Seq != 12 {
+		t.Fatalf("gate facts after a seed that read a newer review = %#v, want that review as a second fact", got)
+	}
+}
+
+// A gate recorded above every version Dispatch holds for its document (a daemon that registered
+// the caller's version unchecked could record one) is reset by the next gate seed that reads
+// Dispatch below it, the seed a registration of the real version queues at the gate's version, and
+// the review the seed read there applies: approved, the gate opens at Dispatch's version; changes
+// requested, it stays closed there with the request told. Left above, every review of the real
+// latest version would be dropped as a review of an older one.
+func TestTheGateSeedResetsAGateAboveTheVersionDispatchHolds(t *testing.T) {
+	reason := "name the rollback path"
+	for _, tc := range []struct {
+		name     string
+		approval dispatch.Approval
+		open     bool
+		told     int
+	}{
+		{name: "approved at Dispatch's version", approval: dispatch.Approval{State: "approved", LatestVersion: 4, Version: new(4), Seq: 9}, open: true},
+		{name: "changes requested at Dispatch's version", approval: dispatch.Approval{State: "changes_requested", LatestVersion: 4, Version: new(4), Reason: &reason, Seq: 9}, told: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			ctx := context.Background()
+			putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Planning, Generation: 1,
+				Status: "in_progress", Rank: "U", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets"})
+			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+				return records.PutGate(ctx, tx, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 7})
+			}); err != nil {
+				t.Fatalf("seed the gate above Dispatch's version: %v", err)
+			}
+			engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories}, quietLogger())
+			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, dispatch: &outboxDispatch{approval: tc.approval},
+				handlers: []intake.Handler{engine}, now: time.Now}
+			if err := runner.execute(ctx, mustOutboxRow(t, "LEGION-208", record.GateSeed{ArtifactID: "artifact-208", Version: 7, Generation: 1}, time.Now())); err != nil {
+				t.Fatalf("execute gate seed: %v", err)
+			}
+			var gate *record.DesignGate
+			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+				var err error
+				gate, err = records.Gate(ctx, tx, "LEGION-208")
+				return err
+			}); err != nil || gate == nil {
+				t.Fatalf("read the gate: %#v, %v", gate, err)
+			}
+			open := gate.ApprovedVersion != nil && *gate.ApprovedVersion == gate.LatestVersion
+			if gate.LatestVersion != 4 || open != tc.open {
+				t.Fatalf("gate after the seed = %#v, want it at Dispatch's version 4 with open=%t", gate, tc.open)
+			}
+			var told int
+			if err := pool.QueryRow(ctx, `select count(*) from outbox where kind = 'notice' and issue = 'LEGION-208' and payload->>'kind' = 'design-changes-requested'`).Scan(&told); err != nil || told != tc.told {
+				t.Fatalf("design-changes-requested notices = %d, %v; want %d", told, err, tc.told)
+			}
+		})
+	}
+}
+
 func TestOutboxLingerAppliesExpirationAndReturnsHandlerFailure(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	handler := &outboxFactHandler{}
@@ -790,12 +880,24 @@ func TestOutboxWorkspaceRemovalUsesDeterministicLocationAndReturnsFailure(t *tes
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	row := mustOutboxRow(t, issue.Key, record.WorkspaceRemove{Linger: issue.Generation}, time.Now())
 	var removed workspace.Workspace
-	runner := &outbox{
+	var runner *outbox
+	runner = &outbox{
 		dispatchProject: "LEGION",
 		pool:            pool, records: records, supervisor: sup, project: "legion", log: quietLogger(),
 		stateDir: t.TempDir(),
-		remove: func(_ context.Context, got workspace.Workspace) error {
+		remove: func(_ context.Context, got workspace.Workspace, store sync.Locker) error {
 			removed = got
+			// The removal is handed its repository's store lock, the one its provisions are, not
+			// held: workspace.Remove takes it, and lets it go before it deletes the workspace's files.
+			shared, release := runner.provisions.stores.take(got.Clone)
+			defer release()
+			if store != sync.Locker(shared) {
+				t.Errorf("the removal was handed store lock %p, want its repository's %p", store, shared)
+			} else if !shared.TryLock() {
+				t.Error("the removal was handed its repository's store lock held, want it free for workspace.Remove to take")
+			} else {
+				shared.Unlock()
+			}
 			return nil
 		},
 	}
@@ -807,7 +909,7 @@ func TestOutboxWorkspaceRemovalUsesDeterministicLocationAndReturnsFailure(t *tes
 		t.Fatalf("removed workspace = %#v, want %#v", removed, want)
 	}
 
-	runner.remove = func(context.Context, workspace.Workspace) error { return errors.New("remove failed") }
+	runner.remove = func(context.Context, workspace.Workspace, sync.Locker) error { return errors.New("remove failed") }
 	if err := runner.execute(context.Background(), row); err == nil || !strings.Contains(err.Error(), "remove failed") {
 		t.Fatalf("workspace removal failure = %v, want remove failure", err)
 	}
@@ -1179,7 +1281,7 @@ func TestALingerExpiryRowAfterReadmissionActsOnNothing(t *testing.T) {
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
 		},
-		remove: func(context.Context, workspace.Workspace) error { removals++; return nil },
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error { removals++; return nil },
 	}
 	if err := runner.execute(ctx, mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleTester, Generation: 1, Phase: phase.Testing,
 		Task: "Carry on testing.", ResumeTask: true}, time.Now())); err != nil {
@@ -1230,7 +1332,7 @@ func TestAnEarlierLingersRowsActOnNothingInALaterLinger(t *testing.T) {
 	}
 	removals := 0
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, trees: outboxTreeStore(t, pool, root.Key), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(),
-		remove: func(context.Context, workspace.Workspace) error { removals++; return nil },
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error { removals++; return nil },
 	}
 	closeOf := func(linger uint64) record.OutboxRow {
 		return mustOutboxRow(t, child.Key, record.SuperviseRequest{Op: "tree_close", Tree: root.Key, Role: claim.RoleTester, Generation: child.Generation, Linger: linger}, time.Now())
@@ -1289,7 +1391,7 @@ func TestAWorkspaceIsRemovedOnlyOnceTheCloseRetiredEveryClaim(t *testing.T) {
 	removals := 0
 	trees := outboxTreeStore(t, pool, root.Key)
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, trees: trees, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(),
-		remove: func(context.Context, workspace.Workspace) error { removals++; return nil },
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error { removals++; return nil },
 	}
 	closeRow := mustOutboxRow(t, child.Key, record.SuperviseRequest{Op: "tree_close", Tree: root.Key, Role: claim.RoleTester, Generation: 1, Linger: 3}, time.Now())
 	removal := mustOutboxRow(t, child.Key, record.WorkspaceRemove{Linger: 3}, time.Now())
@@ -1470,7 +1572,7 @@ func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *tes
 			putOutboxIssue(t, pool, records, issue)
 			const head = "16973163"
 			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-				// The base branch requires no check, so the head's green settlement is all an approval waits for.
+				// The base branch requires no check, so the head's settlement gives no verdict, which an approval does not wait on.
 				return records.PutPullRequest(ctx, tx, record.PullRequest{Issue: issue.Key, Repo: "acme/widgets", Number: 118, Branch: "legion/LEGION-208", HeadSHA: head, CheckedHead: head, Failing: []string{}, Required: []string{}, State: record.PullRequestOpen})
 			}); err != nil {
 				t.Fatalf("put the pull request: %v", err)
@@ -1655,10 +1757,10 @@ func TestTerminalReplayAfterPersistedFailureHoldsOnceAndEmitsOneWorkerDiedNotice
 
 	engine := workflow.New(records, workflow.Config{Project: issue.Project, Repositories: testRepositories}, quietLogger())
 	restarted := &workflowRuntime{pool: pool, records: records, handlers: []intake.Handler{engine}, log: quietLogger()}
-	if err := restarted.replayTerminal(context.Background(), []supervise.Claim{persisted}); err != nil {
+	if err := restarted.replayTerminal(context.Background(), []supervise.Claim{persisted}, bootTimeout); err != nil {
 		t.Fatalf("replay persisted failure: %v", err)
 	}
-	if err := restarted.replayTerminal(context.Background(), []supervise.Claim{persisted}); err != nil {
+	if err := restarted.replayTerminal(context.Background(), []supervise.Claim{persisted}, bootTimeout); err != nil {
 		t.Fatalf("repeat replay persisted failure: %v", err)
 	}
 
@@ -1739,10 +1841,10 @@ func TestTerminalReplayAppliesPersistedReadyFactOnce(t *testing.T) {
 		Token: "legion-LEGION-208-planner", Issue: "LEGION-208", Role: claim.RolePlanner, Generation: 4, State: supervise.StateReady,
 	}
 
-	if err := restarted.replayTerminal(context.Background(), []supervise.Claim{persisted}); err != nil {
+	if err := restarted.replayTerminal(context.Background(), []supervise.Claim{persisted}, bootTimeout); err != nil {
 		t.Fatalf("replay persisted ready claim: %v", err)
 	}
-	if err := restarted.replayTerminal(context.Background(), []supervise.Claim{persisted}); err != nil {
+	if err := restarted.replayTerminal(context.Background(), []supervise.Claim{persisted}, bootTimeout); err != nil {
 		t.Fatalf("repeat replay persisted ready claim: %v", err)
 	}
 	if got := handler.facts(); len(got) != 1 || got[0] != (intake.ClaimReady{Issue: persisted.Issue, Role: persisted.Role, Launch: persisted.Generation}) {
@@ -1761,7 +1863,7 @@ func TestTheControllersTerminalStatesNeverReachTheWorkflow(t *testing.T) {
 	controller := supervise.Claim{Token: claim.ControllerToken("legion"), Project: "legion", Role: claim.RoleController, Generation: 2}
 	for _, state := range []supervise.ClaimState{supervise.StateReady, supervise.StateFailed} {
 		controller.State = state
-		if err := w.replayTerminal(context.Background(), []supervise.Claim{controller}); err != nil {
+		if err := w.replayTerminal(context.Background(), []supervise.Claim{controller}, bootTimeout); err != nil {
 			t.Fatalf("replay the controller's %s: %v", state, err)
 		}
 		w.terminal(controller, state)
@@ -1777,48 +1879,53 @@ func TestTheControllersTerminalStatesNeverReachTheWorkflow(t *testing.T) {
 }
 
 // The answer supervise asks for before it sends a queued task: is the issue still in the phase
-// the task was queued for. The role is not what is compared — one role runs several phases — and
-// a task of no phase never reaches this answer at all, which is supervise's own rule.
+// and run the task was queued for. The role is not what is compared — one role runs several
+// phases — and a task of no phase never reaches this answer at all, which is supervise's own rule.
 func TestPhaseHoldsAnswersFromTheIssuesCurrentPhase(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	putOutboxIssue(t, pool, records, record.Issue{
 		Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: "LEGION", Title: "phase holds",
-		Phase: phase.Implementing, Status: "in_progress", Rank: "00000",
+		Phase: phase.Implementing, Generation: 2, Status: "in_progress", Rank: "00000",
 	})
 	holds := (&workflowRuntime{pool: pool, records: records}).phaseHolds
 
 	for _, tc := range []struct {
-		name      string
-		issue     string
-		queuedFor phase.Phase
-		want      bool
+		name       string
+		issue      string
+		queuedFor  phase.Phase
+		generation uint64
+		want       bool
 	}{
-		{name: "the issue's own phase", issue: "LEGION-208", queuedFor: phase.Implementing, want: true},
-		{name: "a phase the issue has not reached", issue: "LEGION-208", queuedFor: phase.Testing, want: false},
+		{name: "the issue's own phase and run", issue: "LEGION-208", queuedFor: phase.Implementing, generation: 2, want: true},
+		{name: "a phase the issue has not reached", issue: "LEGION-208", queuedFor: phase.Testing, generation: 2, want: false},
 		// The implementer works implementing, retro and the production check: a task written for
 		// one of them is not the work of another, which the role alone cannot tell.
-		{name: "another phase of the same role", issue: "LEGION-208", queuedFor: phase.Retro, want: false},
+		{name: "another phase of the same role", issue: "LEGION-208", queuedFor: phase.Retro, generation: 2, want: false},
+		// A re-admission restarts the issue in the phase it stood in: the run that is over's task
+		// of that phase is not the new run's work.
+		{name: "the issue's phase of a run that is over", issue: "LEGION-208", queuedFor: phase.Implementing, generation: 1, want: false},
+		{name: "a task of no run in the issue's phase", issue: "LEGION-208", queuedFor: phase.Implementing, generation: 0, want: true},
 		// The workflow never deletes an issue, so no record means the claim is not the workflow's:
 		// an operator spawn, whose task the workflow has no standing to drop.
-		{name: "an issue the workflow never recorded", issue: "LEGION-999", queuedFor: phase.Implementing, want: true},
+		{name: "an issue the workflow never recorded", issue: "LEGION-999", queuedFor: phase.Implementing, generation: 1, want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := holds(context.Background(), tc.issue, tc.queuedFor)
+			got, err := holds(context.Background(), tc.issue, tc.queuedFor, tc.generation)
 			if err != nil {
 				t.Fatalf("phaseHolds: %v", err)
 			}
 			if got != tc.want {
-				t.Fatalf("phaseHolds(%s, %s) = %v, want %v", tc.issue, tc.queuedFor, got, tc.want)
+				t.Fatalf("phaseHolds(%s, %s, %d) = %v, want %v", tc.issue, tc.queuedFor, tc.generation, got, tc.want)
 			}
 		})
 	}
 
 	putOutboxIssue(t, pool, records, record.Issue{
 		Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: "LEGION", Title: "phase holds",
-		Phase: phase.Testing, Status: "testing", Rank: "00000",
+		Phase: phase.Testing, Generation: 2, Status: "testing", Rank: "00000",
 	})
-	implementing, err := holds(context.Background(), "LEGION-208", phase.Implementing)
+	implementing, err := holds(context.Background(), "LEGION-208", phase.Implementing, 2)
 	if err != nil {
 		t.Fatalf("phaseHolds after the phase moved: %v", err)
 	}
@@ -2036,7 +2143,7 @@ func TestAClosedTreeSetBackToTodoRelaunchesItsArchitect(t *testing.T) {
 			provisioned++
 			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
 		},
-		remove: func(context.Context, workspace.Workspace) error { removed++; return nil },
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error { removed++; return nil },
 	}
 
 	// The tree's architect ran on a session before the tree closed.
@@ -2112,7 +2219,7 @@ func TestAnEarlierGenerationsWorkspaceRemovalLeavesTheReadmittedTreesWorkspace(t
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
 		},
-		remove: func(context.Context, workspace.Workspace) error {
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error {
 			removals++
 			if busy {
 				return errors.New("jj workspace forget: the repository is locked")
@@ -2176,7 +2283,7 @@ func TestARuntimeThatProvisionsInItsPodsLeavesTheHostWithoutWorkspaces(t *testin
 			provisions++
 			return workspace.Workspace{}, nil
 		},
-		remove: func(context.Context, workspace.Workspace) error { removals++; return nil },
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error { removals++; return nil },
 	}
 
 	start := record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleArchitect, Generation: issue.Generation}

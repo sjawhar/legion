@@ -61,6 +61,10 @@ const (
 	// and the image probe, which wait out GitHub's and the cluster's transient trouble within
 	// retries of their own (appMintRetry, imageProbeRetry); the work after each has a budget anew.
 	bootTimeout = 30 * time.Second
+	// catchUpAttemptBound bounds one attempt of the boot's catch-up of the roots that run or wait on
+	// a person. Each root has bootTimeout of its own and the roots finished survive a retry, so this
+	// bound is no budget for the work, only the end of an attempt that would otherwise never return.
+	catchUpAttemptBound = time.Hour
 	// stopBudget bounds how long the daemon's stop waits for its own work, from the moment the stop
 	// begins (supervision.halt: at the signal, at serve's end, or when supervision fails to start,
 	// once the boot is recorded) until the daemon stamps its boot. The halt cancels every decision
@@ -121,6 +125,9 @@ type overrides struct {
 	// stopBudget is how long the daemon's stop waits for its own work once it begins; zero is
 	// stopBudget.
 	stopBudget time.Duration
+	// controllerFirstWake is how soon after the workflow runtime starts it applies its first
+	// controller tick (workflowRuntime.controllerFirstWake); zero is firstControllerTick.
+	controllerFirstWake time.Duration
 	// gate stands in for the plugin gate when runtime is replaced: nil is none, since a replaced
 	// runtime launches no Oh My Pi to gate. With the tmux runtime, the gate is always the real one.
 	gate func(ctx context.Context) error
@@ -183,8 +190,9 @@ type Build struct {
 // ctx decides one thing: how long the daemon serves. The boot record and its stamp are the
 // daemon's own bookkeeping and run on a context the shutdown did not cancel, so a signal that
 // arrives mid-startup still leaves a recorded, stamped boot rather than a row with no end. A
-// signal that arrives while the plugin gate, the GitHub App tokens' mint, or the image probe waits
-// ends the daemon there, cleanly: it has served nothing and records nothing.
+// signal that arrives while the plugin gate, the repository mapping read, the GitHub App tokens'
+// mint, or the image probe waits ends the daemon there, cleanly: it has served nothing and records
+// nothing.
 //
 // build is the binary's own build (Build), which the boot compares against the open production
 // checks of the repository it is built from.
@@ -247,14 +255,15 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 	if cfg.DispatchURL != "" {
 		log.Info("legion workflow boot stage", "stage", "store")
 	}
-	// The mapping read and the App mint wait out GitHub's and Dispatch's transient failures, which the
-	// boot budget does not bound, as it does not bound the plugin gate or the image probe: the work
-	// after them has a budget of its own.
+	// The mapping read waits out an unreachable Dispatch without limit, and the mapping's
+	// installation check and the App mint wait out GitHub's transient failures within appMintRetry;
+	// the boot budget bounds none of them, as it does not bound the plugin gate or the image probe:
+	// the work after them has a budget of its own.
 	workflow, err := openWorkflow(ctx, cfg, st, plan.project, plan.dispatchToken, plan.repositories, log, o.workflowTokens, o.githubAPI, build)
 	if err != nil {
 		st.Close()
 		if ctx.Err() != nil {
-			log.Info("legion daemon stopped before its GitHub App tokens were minted", "project", cfg.Project)
+			log.Info("legion daemon stopped before it read its repository mapping and minted its GitHub App tokens", "project", cfg.Project)
 			return nil
 		}
 		return err
@@ -263,12 +272,15 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		var cancelAfterMint context.CancelFunc
 		boot, cancelAfterMint = context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
 		defer cancelAfterMint()
+		workflow.controllerFirstWake = o.controllerFirstWake
 		plan.identity = workflow.identity
 		plan.repository = workflow.issueRepository
+		plan.ensureWorkspace = workflow.ensureWorkspace
 		// Only a daemon with the workflow configured has issue records to read a phase or a tree
 		// from; Stage 2's supervision runs on claims alone, where every delivery holds and every
 		// tree closes.
 		plan.phaseHolds, plan.treeClosable = workflow.phaseHolds, workflow.treeClosable
+		plan.taskConfirmed = workflow.taskConfirmed
 	}
 	if cfg.Runtime.Name == "tmux" {
 		executable, err := os.Executable()
@@ -363,6 +375,17 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 			err = bootprobe.Run(ctx, "list Dispatch issues for admission", readinessRetry, log,
 				readinessAttempt(workflow.reconcile, bootTimeout, dispatch.Unreachable))
 		}
+		// The catch-up of the roots that run or wait on a person is its own probe, after the
+		// reconcile that held them (holdForCatchUp). It reads Dispatch once or twice per root (the
+		// issue's latest sequence, its event log after the root's cursor, and the approval of a
+		// gate whose document the asks' mirror holds no request of), so it bounds each root by bootTimeout itself and keeps across
+		// retries the roots it finished (catchUpAwaiting); its attempt's own bound only stops a
+		// catch-up that would never end. The durable consumers start only after it, so no live
+		// fact meets a root still held.
+		if err == nil {
+			err = bootprobe.Run(ctx, "catch up the roots that run or wait on a person", readinessRetry, log,
+				readinessAttempt(workflow.catchUpAwaiting, catchUpAttemptBound, dispatch.Unreachable))
+		}
 		if err != nil {
 			s.stop()
 			listener.Close()
@@ -407,11 +430,14 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 	defer halting()
 	failed := make(chan error, 1)
 	lived := make(chan error, 1)
+	// The replay runs on ctx with a budget per fact (replayTerminal), not on starting: the boot's
+	// budget would end it on the number of facts no daemon applied.
+	var settle func() error
+	if workflow != nil {
+		settle = func() error { return workflow.replayTerminal(ctx, s.claims, bootTimeout) }
+	}
 	go func() {
-		err := s.start(starting)
-		if err == nil && workflow != nil {
-			err = workflow.replayTerminal(starting, s.claims)
-		}
+		err := s.start(starting, settle)
 		switch {
 		case ctx.Err() != nil:
 			// The signal came while the daemon booted, and cut its own steps short or would have: the
@@ -509,13 +535,18 @@ type plan struct {
 	// (workflowRuntime.issueRepository: its record's, or the project's default for an issue the
 	// workflow does not record); nil without a workflow.
 	repository func(ctx context.Context, issue string) (ghrepo.Repository, string, error)
+	// ensureWorkspace provisions an issue's workspace on the daemon's host when a launch finds it
+	// missing or not checked out (workflowRuntime.ensureWorkspace); nil without a workflow.
+	ensureWorkspace func(ctx context.Context, issue string, repo ghrepo.Repository, defaultBranch string) error
 	// repositories is the project's repository mapping as the workflow serves it, empty until the
 	// workflow reads it at boot: every role's gh bundle holds a directory for each of its owners.
 	repositories *repositories
 	// phaseHolds and treeClosable are the workflow's answers to the supervisor's two predicates;
 	// nil without a workflow, where every delivery holds and every tree closes.
-	phaseHolds   func(ctx context.Context, issue string, p phase.Phase) (bool, error)
+	phaseHolds   func(ctx context.Context, issue string, p phase.Phase, generation uint64) (bool, error)
 	treeClosable func(ctx context.Context, c supervise.Claim) (bool, error)
+	// taskConfirmed tells the workflow each agent that took its task; nil without a workflow.
+	taskConfirmed func(c supervise.Claim)
 	// tools are the git and jj boot resolved on the host, by name, for workspace provisioning;
 	// nil without a repository, and under a runtime whose agents run the worker image's own.
 	tools         map[string]string
@@ -704,7 +735,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 		return err
 	}
 	if p.newRuntime == nil {
-		env, err := gateEnvironment(os.Environ(), cfg.StateDir, providerEnvDir)
+		env, err := gateEnvironment(os.Environ(), cfg.StateDir, providerEnvDir, cfg.Runtime.Tmux)
 		if err != nil {
 			return err
 		}
@@ -788,9 +819,10 @@ func claimRepositoryOwner(issueOf func(context.Context, claim.Token) (string, er
 }
 
 // tmuxOptions translates the configuration into the tmux runtime's Options, all but the worker
-// stream and the GitHub credential function, which boot hands the factory.
+// stream and the GitHub credential function, which boot hands the factory: the `runtime.tmux`
+// block's pane variables, Oh My Pi overlays and take_over among them.
 func tmuxOptions(cfg config.Config, project string, launchers map[runtime.Backend]tmux.Launcher, providerEnvDir, dispatchTokenFile string, log *slog.Logger) tmux.Options {
-	return tmux.Options{
+	opts := tmux.Options{
 		Project:           project,
 		StateDir:          cfg.StateDir,
 		DaemonURL:         cfg.DaemonURL,
@@ -805,6 +837,10 @@ func tmuxOptions(cfg config.Config, project string, launchers map[runtime.Backen
 		ProviderEnvDir:    providerEnvDir,
 		Log:               log,
 	}
+	if block := cfg.Runtime.Tmux; block != nil {
+		opts.PaneEnv, opts.PiConfigFiles, opts.TakeOver = block.PaneEnv, block.PiConfigFiles, block.TakeOver
+	}
+	return opts
 }
 
 // reconfigureCloneCredential brings every shared clone an earlier daemon provisioned under the state
@@ -981,15 +1017,15 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			repositories: func() api.RepositoriesView { return p.repositories.view(nil) },
 			designGate:   cfg.Gates.Design, slackChannels: cfg.Projects[cfg.Project].SlackChannels,
 			mergeRules: cfg.Projects[cfg.Project].Merge, runtimeName: cfg.Runtime.Name, plugins: p.plugins,
-			backend: cfg.BackendFor,
+			backend: cfg.BackendFor, hostWorkspaces: !rt.ProvisionsWorkspaces(), ensureWorkspace: p.ensureWorkspace,
 		},
-		Identity:     adoptIdentity(p.identity, p.repository),
-		Secrets:      p.secretsEnroller,
-		PhaseHolds:   p.phaseHolds,
-		TreeClosable: p.treeClosable,
-		VolumeLost:   sup.volumeLost,
-		Clock:        p.clock,
-		Log:          log,
+		Identity:      adoptIdentity(p.identity, p.repository),
+		Secrets:       p.secretsEnroller,
+		PhaseHolds:    p.phaseHolds,
+		TreeClosable:  p.treeClosable,
+		TaskConfirmed: p.taskConfirmed,
+		Clock:         p.clock,
+		Log:           log,
 		Limits: supervise.Limits{
 			LaunchFailures: cfg.LaunchFailureLimit,
 			PromptFailures: cfg.PromptFailureLimit,
@@ -1017,10 +1053,16 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 
 // start supervises every claim the store holds. A claim with a live locator is re-adopted — its
 // process told to the runtime and observed from now on, never launched again. Once every claim has
-// its machine and the boot orphan reconciliation has run, hellos are resolved: a shim reconnecting
-// across the restart is admitted by a claim already supervised. An unrecorded launch is relaunched
-// only after that reconciliation proves any pre-crash pane absent or reaped; a failed listing
-// leaves it launch_uncertain until the bounded retry succeeds. The relaunches run after hellos are
+// its machine, the boot orphan reconciliation has run and settle (the workflow's terminal replay,
+// nil without a workflow) has applied the stored claims' ready and failure facts, hellos are
+// resolved: a shim reconnecting across the restart is admitted by a claim already supervised. The
+// boot settles before any hello is admitted because a restart brings every live shim back at once:
+// each admitted hello's second resolve, its machine's claim write and the facts that machine
+// then applies would compete with the replay for the database and the fact lock, and a boot
+// replaying a few hundred claims behind a few hundred hellos ran out of its budget and exited at
+// every restart while the shims kept redialing. An unrecorded launch is relaunched only
+// after that reconciliation proves any pre-crash pane absent or reaped; a failed listing leaves it
+// launch_uncertain until the bounded retry succeeds. The relaunches run after hellos are
 // resolved, on a goroutine of their own, so start returns, and the API serves, without waiting for
 // any (relaunchUnfinished): every re-adopted claim on another plugin contract is posted its boot
 // stale-plugin relaunch first (refreshStalePlugins), over every one before any of them is
@@ -1032,9 +1074,9 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 // launch a crash cut short, and by then the stop has retired it, so launchUnfinished would not
 // relaunch it: its ReleaseUncertainLaunch acts only on a launch-uncertain claim. Dropping that token
 // is a second guard beside that check, so boot does not report the retired claim as an unrecorded
-// launch. The steps before the relaunches run on boot, and the relaunches on the machines' context;
-// the daemon's stop ends both (run).
-func (s *supervision) start(boot context.Context) error {
+// launch. The steps before the relaunches run on boot, settle on budgets of its own, and the
+// relaunches on the machines' context; the daemon's stop ends all three (run).
+func (s *supervision) start(boot context.Context, settle func() error) error {
 	unfinished, err := s.supervisor.restore(boot, s.claims)
 	if err != nil {
 		return err
@@ -1051,6 +1093,11 @@ func (s *supervision) start(boot context.Context) error {
 	if !reconciled {
 		for _, token := range unfinished {
 			s.log.Warn("supervise: unrecorded launch remains uncertain; not relaunching", "claim", token)
+		}
+	}
+	if settle != nil {
+		if err := settle(); err != nil {
+			return err
 		}
 	}
 	close(s.supervisor.restored)
@@ -1205,7 +1252,7 @@ func (s *supervision) launchUnfinishedClaim(token claim.Token, m *supervise.Mach
 // relaunchUnfinished launches tokens' unfinished launches on a goroutine of its own, never on the
 // boot: at once when the boot reconciliation succeeded (reconciled), then on the normal orphan-sweep
 // cadence, until none is left or the daemon stops. A relaunched worker reaches the daemon only once
-// the daemon is up — a Sandbox pod's launchers dial it through its Service, which routes only to a
+// the daemon is up — a Sandbox pod's launcher dials it through its Service, which routes only to a
 // pod whose probes pass, so only once the API answers /healthz, and a shim's hello is resolved only
 // once restoration has closed — so a relaunch the boot waited on could not register: it spent its
 // whole launch budget, launch_failure_limit × worker_boot_timeout_seconds, with the API unanswered.
@@ -1339,6 +1386,11 @@ func (s *supervision) stop() {
 	})
 }
 
+// phaseRole is the role that works a phase (workflow.RoleFor), which the operator's retry of a
+// held phase checks (api.Options.RoleFor). It is named at package level because serve's own
+// workflow parameter hides the package there.
+var phaseRole = workflow.RoleFor
+
 // serve runs the API on the listener the daemon already took until ctx is done or the server
 // fails, and returns once it is closed: one goroutine serves, the other shuts down, and the
 // shutdown runs on a context of its own so a cancelled ctx still drains the connections it has.
@@ -1386,6 +1438,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Supervisor:         s.supervisor,
 		BootTokens:         s.tokens,
 		Project:            p.project,
+		DispatchProject:    cfg.Project,
 		OperatorToken:      p.operatorToken,
 		Controller:         st,
 		DesignGate:         cfg.Gates.Design,
@@ -1398,6 +1451,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Pool:               st.Pool(),
 		Handlers:           handlers,
 		PrepareRepository:  prepare,
+		RoleFor:            phaseRole,
 		Record:             records,
 		Dispatch:           client,
 		Tokens:             tokens,

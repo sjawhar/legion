@@ -98,7 +98,7 @@ const (
 // this very session holds, which touches Postgres's in-memory lock table and no relation at all;
 // and the close is a Terminate message and a socket close. It is the same five seconds
 // pglisten.DefaultPingTimeout gives the keepalive ping and the close of a connection that
-// listener gives up on (internal/dispatch/pglisten/listener.go), chosen there against this same
+// listener gives up on (internal/pglisten/listener.go), chosen there against this same
 // half-open connection.
 const teardownTimeout = 5 * time.Second
 

@@ -11,8 +11,10 @@ its key, and tagged with owner, tier, optional kind and optional max grant
 ([Concepts](/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret)).
 `agent-secrets secret` manages them. It reads and writes the store itself, under your own cloud
 sign-in, so that cloud's own IAM decides what you may do; the broker never writes a secret. After
-every write the CLI asks the broker to reread that one secret, so the change is served at once
-rather than at the broker's next read of the namespace. The examples on this page are AWS's; GCP's
+every write the CLI asks the broker to reread that one secret, and the broker that answers tells
+every other broker process serving the same database to reread it too, so the change is served
+across the whole deployment within seconds rather than at each process's next read of the
+namespace. The examples on this page are AWS's; GCP's
 backend differs only where this page calls it out.
 
 ## Before you start
@@ -76,9 +78,12 @@ gcloud auth revoke '<your email>'
 ```console
 $ agent-secrets secret create DEMO_DEPLOY_TOKEN --owner me --tier agent
 Value for DEMO_DEPLOY_TOKEN:
-created DEMO_DEPLOY_TOKEN (owner=ada@example.com, tier=agent)
-broker: serving DEMO_DEPLOY_TOKEN
+created DEMO_DEPLOY_TOKEN in AWS Secrets Manager account 111122223333 in us-east-1 (owner=ada@example.com, tier=agent)
+broker: serving DEMO_DEPLOY_TOKEN from AWS Secrets Manager account 111122223333 in us-east-1
 ```
+
+Every line names the store it wrote to or read, so a secret is never taken for one of the same
+name in another store.
 
 On GCP the same command writes as you on a dev box too: it uses your gcloud login where the
 machine's Application Default Credentials are its own identity, and so does every write below.
@@ -138,8 +143,8 @@ $ agent-secrets secret set DEMO_DEPLOY_TOKEN
 Value for DEMO_DEPLOY_TOKEN:
 agent-secrets secret set: a value of more than one line must be piped in: agent-secrets secret set DEMO_DEPLOY_TOKEN < FILE
 $ agent-secrets secret set DEMO_DEPLOY_TOKEN < key.pem
-set a new value of DEMO_DEPLOY_TOKEN
-broker: serving DEMO_DEPLOY_TOKEN
+set a new value of DEMO_DEPLOY_TOKEN in AWS Secrets Manager account 111122223333 in us-east-1
+broker: serving DEMO_DEPLOY_TOKEN from AWS Secrets Manager account 111122223333 in us-east-1
 ```
 Ctrl-C, Ctrl-\\, SIGTERM or SIGHUP at the prompt restores the foreground terminal and writes
 nothing, then ends the CLI by that signal. A shell reports 130, 131, 143 or 129 respectively.
@@ -233,16 +238,19 @@ NAME               OWNER            TIER   KIND          MAX_GRANT  VALUE  DELET
 DEMO_DEPLOY_TOKEN  ada@example.com  agent  -             -          yes    -        -
 DEMO_GITHUB_APP    ada@example.com  agent  github-app    -          yes    -        -
 DEMO_LOGIN         ada@example.com  human  google-login  1h         yes    -        -
+Every row is a secret in AWS Secrets Manager account 111122223333 in us-east-1.
 ```
 
+The last line goes to standard error, so the table stays one row per secret for a script.
 `VALUE` says whether a version of the secret carries `AWSCURRENT`, the label Secrets Manager reads
 a value from. The broker serves a secret only while one does, so a secret another tool created
 without a value shows `no` until someone runs `secret set` on it. A missing tag shows as `-`.
-`show` prints one secret's tags, dates and versions:
+`show` prints one secret's store, tags, dates and versions:
 
 ```console
 $ agent-secrets secret show DEMO_DEPLOY_TOKEN
 name: DEMO_DEPLOY_TOKEN
+store: AWS Secrets Manager account 111122223333 in us-east-1
 secret_name: example/agent-secrets/demo-deploy-token
 owner: ada@example.com
 tier: agent
@@ -260,8 +268,8 @@ Neither ever prints a value, and both take `--json`.
 ```console
 $ agent-secrets secret set DEMO_DEPLOY_TOKEN
 Value for DEMO_DEPLOY_TOKEN:
-set a new value of DEMO_DEPLOY_TOKEN
-broker: serving DEMO_DEPLOY_TOKEN
+set a new value of DEMO_DEPLOY_TOKEN in AWS Secrets Manager account 111122223333 in us-east-1
+broker: serving DEMO_DEPLOY_TOKEN from AWS Secrets Manager account 111122223333 in us-east-1
 ```
 
 `set` reads the value as `create` does: one line at a prompt with echo off, or all of standard
@@ -273,8 +281,8 @@ gets the new one.
 
 ```console
 $ agent-secrets secret retag DEMO_DEPLOY_TOKEN --tier human
-retagged DEMO_DEPLOY_TOKEN (owner=ada@example.com, tier=human)
-broker: serving DEMO_DEPLOY_TOKEN
+retagged DEMO_DEPLOY_TOKEN in AWS Secrets Manager account 111122223333 in us-east-1 (owner=ada@example.com, tier=human)
+broker: serving DEMO_DEPLOY_TOKEN from AWS Secrets Manager account 111122223333 in us-east-1
 ```
 
 Name `--owner`, `--tier`, `--kind`, `--github-owners`, `--max-grant` or a combination. A retag that
@@ -292,8 +300,8 @@ Run the removal and the other change as two retags:
 
 ```console
 $ agent-secrets secret retag DEMO_LOGIN --max-grant none
-retagged DEMO_LOGIN (removed max-grant)
-broker: serving DEMO_LOGIN
+retagged DEMO_LOGIN in AWS Secrets Manager account 111122223333 in us-east-1 (removed max-grant)
+broker: serving DEMO_LOGIN from AWS Secrets Manager account 111122223333 in us-east-1
 ```
 
 To make a stored secret a kind, retag it first, and only once the retag exits 0, showing
@@ -303,6 +311,56 @@ broker still serves the secret as stored, a grant of it releases its stored valu
 whose reread answers another kind than the one it wrote exits 1: the broker still sees the old
 tags; run the retag again, and store no value until it exits 0. A release that finds the secret
 retagged while it reads the store releases nothing and ends that grant.
+
+Exit 0 is the answer of the one broker process that served the reread, not of every process. That
+process tells the others over Postgres and they reread within seconds, so exit 0 is the usual case
+and the one below is the exception. Five log lines say a process may be behind, and only two of
+them name the secret:
+
+| Log line | Names a secret? | What it means |
+| --- | --- | --- |
+| `broker: the other pods were not told to reread a secret secret=… error=…` | **yes**, `secret` | The answering process's own `NOTIFY` failed, so no peer was told at all. Its 200 is unchanged. |
+| `broker: a notification's reread of a secret did not run secret=… sender=… error=…` | **yes**, `secret` and the peer that sent it | A peer was told and its reread failed. This is the strongest evidence available: a named process behind on a named secret. |
+| `broker: a Postgres listener has no connection; redialing channels=… error=… attempt=… wait_ms=…` | no | That process is outside the fan-out **for every name** while it redials, and catches nothing up when it reconnects. |
+| `broker: serving without the boot's catch-up policy load … error=…` | no | A booting process could not take its catch-up read, so a retag served while it was starting may not be in force there. |
+| `broker: binding before the reread listener has had an answer waited=…` | no | A booting process bound without its `LISTEN`, so notifications sent in that gap reached it not at all. |
+
+A process left behind serves the secret as stored, and a grant of it there releases the stored
+value raw.
+
+**The way to avoid the question is not to convert.** Create the secret with its kind from the
+start, under a name no agent holds a grant on, and store the App key or the Google login there.
+A name that was never served as an ordinary secret has no grant that can release a raw value, so
+none of what follows applies to it. Converting a name agents already hold grants on is what opens
+the window, and it is worth a new name to close it.
+
+Where you must convert, before you store an App key or a Google login:
+
+- Read the broker's log since the retag. **If any of those five lines appears, do not store yet** —
+  not only one naming your secret. Three of the five carry no secret at all, so a process that
+  logged one may be behind on yours and nothing in the line will say so.
+- Run the retag again and require another exit 0 with none of those lines after it. That says
+  **the answering process** has the new tags: its reread reads the one secret directly
+  (`DescribeSecret`, `GetSecret`) rather than through a listing, and the retag exits 1 unless the
+  kind it reads back is the one it wrote. On Secrets Manager that read answers a write at once;
+  on Secret Manager a single read is eventually consistent like the listing, which is why a retag
+  there can need running more than once.
+- **It says nothing about the peers, and no log line will.** A peer's reread reads the one name
+  too, so on Secret Manager it can succeed while still reading the old tags: the broker warns
+  only when that read returns an error, and a successful read of stale tags is not one. The
+  notification is asynchronous besides, so a healthy peer need not have applied the retag by the
+  time exit 0 is printed. Neither a second exit 0 nor a clean log establishes the peers — that is
+  the residual `dispatch://INFRA-375` tracks, and the reason the paragraph above recommends a new
+  name instead.
+- If you cannot read the log, wait at least five minutes after exit 0. That is the pod's own
+  reload interval, and the wait is **the right action rather than a guarantee**: the reload is
+  another listing read, and a store's listing lags a write by up to five minutes on Secrets
+  Manager and up to six hours on Secret Manager, so on Secret Manager five minutes is not a bound
+  at all. `dispatch://INFRA-375` tracks that
+  lag and the two ways to close it.
+
+Waiting costs nothing; storing early can hand the raw key to an agent through a process that still
+serves the secret as stored.
 
 A retag checks the tags it read. On GCP it writes against that read, so a retag another person
 wrote in between refuses it, with `another write changed the secret after this retag read it`,
@@ -330,8 +388,8 @@ uses a retag to end every session's automatic access to a secret.
 
 ```console
 $ agent-secrets secret delete DEMO_DEPLOY_TOKEN
-deleted DEMO_DEPLOY_TOKEN
-broker: DEMO_DEPLOY_TOKEN is deleted (restorable until 2026-11-05T20:22:33Z)
+deleted DEMO_DEPLOY_TOKEN in AWS Secrets Manager account 111122223333 in us-east-1
+broker: DEMO_DEPLOY_TOKEN is deleted in AWS Secrets Manager account 111122223333 in us-east-1 (restorable until 2026-11-05T20:22:33Z)
 ```
 
 `delete` schedules the deletion with a 30-day recovery window, the longest Secrets Manager allows,
@@ -370,33 +428,34 @@ standard error, so standard output stays one row per secret. `show` prints the s
 
 ```console
 $ agent-secrets secret restore DEMO_DEPLOY_TOKEN
-restored DEMO_DEPLOY_TOKEN
-broker: serving DEMO_DEPLOY_TOKEN
+restored DEMO_DEPLOY_TOKEN in AWS Secrets Manager account 111122223333 in us-east-1
+broker: serving DEMO_DEPLOY_TOKEN from AWS Secrets Manager account 111122223333 in us-east-1
 ```
 
 ## What the broker answers after a write
 
 After each write, the CLI asks the broker to reread the secret (`POST /v1/secrets/{name}/reread`)
-and prints its answer on a line of its own:
+and prints its answer on a line of its own, naming the store the secret is in:
 
 | Line | What it means |
 | --- | --- |
-| `broker: serving NAME` | The broker serves the secret as just written, as a stored secret. |
-| `broker: serving NAME (kind <kind>)` | The broker serves the secret as that kind: it mints from the stored value and never returns it. |
-| `broker: NAME is deleted (restorable until <date>)` | After a delete: the broker no longer serves it. |
-| `broker: refusing NAME (reason=<reason>)` | The broker leaves the secret out: `absent` (it found no such secret, or one scheduled for deletion), or one of the refusals [Operating the broker](/legion/broker/operate/#health-and-logs) lists, such as `no-current-value`. |
+| `broker: serving NAME from <store>` | The broker serves the secret as just written, as a stored secret. |
+| `broker: serving NAME from <store> (kind <kind>)` | The broker serves the secret as that kind: it mints from the stored value and never returns it. |
+| `broker: NAME is deleted in <store> (restorable until <date>)` | After a delete: the broker no longer serves it. |
+| `broker: refusing NAME from <store> (reason=<reason>)` | The broker leaves the secret out: `absent` (it found no such secret, or one scheduled for deletion), or one of the refusals [Operating the broker](/legion/broker/operate/#health-and-logs) lists, such as `no-current-value`. |
 
-The command exits 0 when the answer is what the write meant. It exits 1 when the answer contradicts
-the write, and says so on standard error: `the broker refuses NAME after the write (reason=…)`
-after a create, set, retag or restore, or `the broker still serves NAME after its delete`. The
-write itself stands in Secrets Manager either way, so fix what the reason names rather than
-repeating the write:
+`<store>` is the store the broker's settings name: `AWS Secrets Manager account <id> in <region>`,
+or `GCP Secret Manager project <number>`. The command exits 0 when the answer is what the write
+meant. It exits 1 when the answer contradicts the write, and says so on standard error: `the
+broker at <host> refuses NAME after the write to <store> (reason=…)` after a create, set, retag or
+restore, or `the broker at <host> still serves NAME after its delete in <store>`. The write itself
+stands in the store either way, so fix what the reason names rather than repeating the write:
 
 ```console
 $ agent-secrets secret retag DEMO_EMPTY_KEY --tier human
-retagged DEMO_EMPTY_KEY (owner=ada@example.com, tier=human)
-broker: refusing DEMO_EMPTY_KEY (reason=no-current-value)
-agent-secrets secret retag: the broker refuses DEMO_EMPTY_KEY after the write (reason=no-current-value)
+retagged DEMO_EMPTY_KEY in AWS Secrets Manager account 111122223333 in us-east-1 (owner=ada@example.com, tier=human)
+broker: refusing DEMO_EMPTY_KEY from AWS Secrets Manager account 111122223333 in us-east-1 (reason=no-current-value)
+agent-secrets secret retag: the broker at secrets.internal.example refuses DEMO_EMPTY_KEY after the write to AWS Secrets Manager account 111122223333 in us-east-1 (reason=no-current-value)
 ```
 
 Here the secret has no value; `secret set DEMO_EMPTY_KEY` gives it one, and the broker serves it.
@@ -415,7 +474,8 @@ Do not repeat the write. A new value is read at the next grant read anyway, and 
 restore, or a first value for a secret that had none is served on the first request naming it,
 since the broker rereads a name it does not serve before refusing it. A retag or a delete of a
 secret the broker serves takes effect at its next read of the namespace, within about ten minutes,
-or at once when you ask for the reread yourself:
+or at once when you ask for the reread yourself — one call, whichever process it reaches, since
+that process tells the others:
 
 ```sh
 curl -s -X POST "$AGENT_SECRETS_URL/v1/secrets/DEMO_DEPLOY_TOKEN/reread"

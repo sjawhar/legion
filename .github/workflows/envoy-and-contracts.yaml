@@ -157,6 +157,7 @@ jobs:
             contracts:
               - 'packages/contracts/**'
               - 'skills/dispatch/**'
+              - 'skills/dispatch-writing-specs/**'
               # The Go copies its tests hold the TypeScript to: src/dispatch-text-references.test.ts
               # and src/dispatch-href.test.ts read the Go reader's JSON tables, and
               # scripts/gen-go.test.ts checks the generated Go file is current.
@@ -175,11 +176,15 @@ jobs:
               - 'package.json'
               - 'bun.lock'
               - *bun_toolchain
+              # src/__tests__/dispatch-advice.test.ts holds every skill section a notice cites to a
+              # heading of that skill's SKILL.md.
+              - 'skills/**'
             envoy:
               - 'packages/envoy/**'
               - 'packages/proof-editor/**'
               - 'packages/contracts/**'
               - 'skills/dispatch/**'
+              - 'skills/dispatch-writing-specs/**'
               - 'go.work'
               - 'go.work.sum'
               # The Go builds run in workspace mode, where the daemon module's requirements raise
@@ -293,7 +298,7 @@ jobs:
               - 'scripts/pi-plugin-prepack.sh'
             # The private workspace package both Oh My Pi plugins import. Its tests stage each
             # plugin's skills through the prepack script and hold the two lists to a partition of
-            # skills/ (test/skills-partition.test.ts).
+            # skills/ and to the skill lists of release.yaml (test/skills-partition.test.ts).
             pi_shared:
               - 'packages/pi-shared/**'
               - 'packages/envoy-client/**'
@@ -303,10 +308,11 @@ jobs:
               - *bun_toolchain
               - 'skills/**'
               - 'scripts/pi-plugin-prepack.sh'
+              - '.github/workflows/release.yaml'
             # The Envoy plugin: its own sources, the workspace packages its bundle inlines, and the
             # Oh My Pi pin its real-binary test runs (extensions/dispatch-first-omp.test.ts),
             # installed through the mise install-jj leaves. Every skill and every daemon prompt:
-            # src/skills-guard.test.ts stages its four skills through the prepack script and resolves
+            # src/skills-guard.test.ts stages its five skills through the prepack script and resolves
             # their skill:// links across all of skills/, and its native-tool-name rule scans every
             # .md under skills/ and packages/daemon/internal/prompts, so a prompt that names a
             # Dispatch tool fails the pull request that writes it, not the next one to touch this
@@ -388,6 +394,7 @@ jobs:
               - 'packages/envoy/internal/contracts/**'
               - 'packages/envoy/internal/oidc/**'
               - 'packages/envoy/internal/pgmigrate/**'
+              - 'packages/envoy/internal/pglisten/**'
               - 'packages/envoy/internal/routing/**'
               - 'packages/envoy/internal/tests3/seaweedfs.go'
               # e2e/__tests__/local-instance-support.test.ts holds shellQuote to this table, which
@@ -549,7 +556,7 @@ jobs:
       # The release's pack (release.yaml's pi_envoy_build job), which is also this job's build: the
       # manifest pointed at the one bundle, then scripts/pi-plugin-prepack.sh, which bundles
       # envoy.ts, writes dist/THIRD_PARTY_NOTICES (failing the pack on a bundled package whose
-      # license cannot be determined) and stages this plugin's four skills. The listing shows the
+      # license cannot be determined) and stages this plugin's five skills. The listing shows the
       # tarball ships those and nothing of the Legion plugin's: no legion.js, no agents/, none of
       # its skills.
       - name: Pack pi-envoy
@@ -589,6 +596,8 @@ jobs:
       # is read from .omp-pin, the repository's one copy of it, installed through the mise
       # install-jj leaves at ~/.local/bin/mise (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
+      # scripts/skill-scenarios/rig.test.ts runs rig.sh judge-omp's container with the runner's own
+      # Docker, pulling its pinned ubuntu image from mirror.gcr.io.
       # scripts/skill-scenarios/daemon-pane.test.ts runs daemon-pane.go with `go run` inside packages/daemon.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -610,7 +619,7 @@ jobs:
       # The release's pack (release.yaml's pi_legion_build job), which is also this job's build: the
       # manifest pointed at the one bundle, then scripts/pi-plugin-prepack.sh, which bundles
       # legion.ts, writes dist/THIRD_PARTY_NOTICES (failing the pack on a bundled package whose
-      # license cannot be determined) and stages this plugin's eight skills. The listing shows the
+      # license cannot be determined) and stages this plugin's nine skills. The listing shows the
       # tarball ships those, its agents/, and nothing of the Envoy plugin's: no envoy.js, none of
       # its skills.
       - name: Pack pi-legion
@@ -818,8 +827,9 @@ jobs:
       - name: Check pmdoc fixtures are up to date
         run: bun run check
         working-directory: packages/envoy/internal/dispatch/pmdoc/gen
-      # Every image the tests here start: testnats.Image, testnats.HubImage (which testnats's own
-      # tests start) and tests3.Image, pulled first for the reason the action gives.
+      # Every image the tests here start: testnats.Image and testnats.HubImage, which the
+      # natslive step below runs the two-image matrix on, and tests3.Image, pulled first for the
+      # reason the action gives.
       - name: Pull test container images
         uses: ./.github/actions/pull-test-images
         with:
@@ -829,6 +839,13 @@ jobs:
             packages/envoy/internal/tests3/seaweedfs.go Image
       - name: Unit test envoy Go package
         run: go list ./... | grep -v /integration | xargs go test
+        working-directory: packages/envoy
+      # internal/testnats runs its server in the test process, so the untagged step above starts
+      # no container. The two-image matrix, which proves a rendered authorization on nats:2.10 and
+      # on the image the hub runs, is the one thing an in-process server cannot reproduce: it sits
+      # behind the natslive tag, and this step is where it runs (INFRA-250).
+      - name: Test the container-backed NATS matrix (natslive)
+        run: go test -tags natslive ./internal/testnats/
         working-directory: packages/envoy
       - name: Isolation test for dev-broker.sh (fakes docker/go/curl; no real Postgres or network)
         run: bash scripts/dev-broker.test.sh
@@ -846,7 +863,7 @@ jobs:
           sudo locale-gen en_US.UTF-8
           bash deploy/scripts/autodeploy_test.sh
         working-directory: packages/envoy
-      - name: Integration test envoy (testcontainers + NATS)
+      - name: Integration test envoy (a real NATS server, in the test process)
         run: go test ./internal/integration/ -timeout 300s -count=1
         working-directory: packages/envoy
       - name: Build envoy services
@@ -933,8 +950,8 @@ jobs:
   # fixtures under internal/dispatch/pmdoc/gen (envoy-go's own "Check pmdoc fixtures are up to
   # date" step), so this job needs Bun installed and its workspace linked the same way, though not
   # that freshness check itself - a stale fixture is envoy-go's failure to catch, not a race.
-  # delivery's and the bus's tests start NATS containers, so the job takes envoy-go's Ryuk setting
-  # and pulls that image first, for the reason .github/actions/pull-test-images gives.
+  # delivery's and the bus's NATS runs in the test process (internal/testnats), so the job needs
+  # no container runtime of its own.
   envoy-go-race:
     needs: changes
     if: needs.changes.outputs.envoy == 'true'
@@ -953,7 +970,6 @@ jobs:
           --health-retries 5
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
-      TESTCONTAINERS_RYUK_DISABLED: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -963,10 +979,6 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
-      - name: Pull the NATS test container image
-        uses: ./.github/actions/pull-test-images
-        with:
-          consts: packages/envoy/internal/testnats/nats.go Image
       - name: Race-test the document service, its API, pmdoc, delivery, the store, and the bus
         run: go test -race -timeout 30m ./internal/dispatch/docs/ ./internal/dispatch/api/ ./internal/dispatch/pmdoc/... ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/
         working-directory: packages/envoy
@@ -1012,9 +1024,8 @@ jobs:
   # them out, and they are a job of their own for the reason dispatch-memory is: envoy-go's unit
   # step runs under go test's default ten-minute package deadline, which the memory tests
   # already took red at 600 s (run 37116639565), and one row here waits out a durable hand-over
-  # or a maintenance loop's tick, tens of seconds each. The job takes envoy-go's Ryuk setting and
-  # pre-pulls testnats.Image, for the reason .github/actions/pull-test-images gives: with no
-  # DISPATCH_TEST_NATS_URL set, each run starts its NATS in a container of its own.
+  # or a maintenance loop's tick, tens of seconds each. Each row's NATS runs in its own test
+  # process (internal/testnats), so the job needs no container runtime of its own.
   dispatch-multiprocess:
     needs: changes
     if: needs.changes.outputs.envoy == 'true'
@@ -1033,7 +1044,6 @@ jobs:
           --health-retries 5
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
-      TESTCONTAINERS_RYUK_DISABLED: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1041,12 +1051,53 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
-      - name: Pull the NATS test container image
-        uses: ./.github/actions/pull-test-images
-        with:
-          consts: packages/envoy/internal/testnats/nats.go Image
       - name: Two-process tests of the Dispatch server
         run: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/dispatch
+        working-directory: packages/envoy
+
+  # The two-process tests of the secrets broker (packages/envoy/cmd/broker/multiprocess_test.go,
+  # INFRA-236): each row starts real cmd/broker binaries against one Postgres - which is what the
+  # broker's Deployment runs once it carries more than one replica - and drives them over real
+  # HTTP and their own logs. They race one refresh token and one device code against both
+  # processes, migrate one empty database with both at once, prove a retag read by one process is
+  # enforced by the other through the reread fan-out, and signal a process to watch it fail
+  # readiness while it serves a request out past the old shutdown budget.
+  #
+  # They build only under the `multiprocess` tag, so envoy-go's unit run leaves them out, and
+  # they could not run there in any case: that step runs under go test's default ten-minute
+  # package deadline, which the memory tests already took red at 600 s (run 37116639565), and the
+  # rows here wait out a migration race, a ten-second fan-out window and a twelve-second drain,
+  # tens of seconds each. A job of their own rather than a step in dispatch-multiprocess, whose
+  # Postgres service and shape this copies: that job is a required check, and adding the broker
+  # to it would mean renaming it. They need no NATS and no test-container pull - the broker
+  # starts nothing in a container - so neither step is here.
+  broker-multiprocess:
+    needs: changes
+    if: needs.changes.outputs.envoy == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      BROKER_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+      - name: Two-process tests of the secrets broker
+        run: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/broker
         working-directory: packages/envoy
 
   # The container smoke test, the envoy-infra plugin's live tests, and the image both run. Its own
@@ -1176,8 +1227,6 @@ jobs:
     if: needs.changes.outputs.envoy_e2e_local == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    env:
-      E2E_NATS_CONTAINER: envoy-e2e-nats-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1188,18 +1237,13 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
           cache-dependency-path: packages/envoy/go.sum
-      # The same bounded retry .github/actions/pull-test-images gives test images: a registry
-      # connection reset during the script's own implicit pull would fail the run for a reason
-      # outside it.
-      - name: Pull the NATS image the script starts
-        run: |
-          nats_image=$(sed -n 's/^docker run .* \([^ ]*nats:[^ ]*\) -js .*$/\1/p' scripts/e2e-local.sh)
-          [ -n "$nats_image" ] || { echo "::error::no nats image on the docker run line of scripts/e2e-local.sh"; exit 1; }
-          for attempt in 1 2 3; do
-            docker pull "$nats_image" && break
-            [ "$attempt" -lt 3 ] || exit 1
-            sleep 10
-          done
+      # scripts/e2e-local.test.sh drives the driver's refusals, which the acceptance run below
+      # never reaches: an unknown option, --help, and a NATS already holding the port, where the
+      # driver must refuse rather than run the acceptance against a server it did not start. It
+      # needs the bun and go this job already has, and it runs first because it is seconds
+      # (INFRA-250).
+      - name: Refusal test for e2e-local.sh
+        run: bash scripts/e2e-local.test.sh
         working-directory: packages/envoy
       - name: Local end-to-end acceptance
         run: bash scripts/e2e-local.sh

@@ -125,20 +125,29 @@ versions. Never add the module to the root `go.work`.
   `gcp:Dispatch` follows the same shape: `NewDispatch` refuses a seed in its own name first
   (`TestDispatchRefusesASeedInTheComponentName`); its resolver refuses a seed in every plain
   string input the component carries (`gcp.dispatchSeededInput`, one row each in
-  `TestDispatchRefusesAnNKeySeedInAPlainInput`); `tailnetAuthKey`, `signInClientSecret`,
-  `natsSeedSecret` and `agentSecretsTokenSecret` are checked for a seed once they resolve, before
-  any child takes them (`gcp.refuseDispatchSeedInSecret`, `gcp.refuseDispatchSeed`,
-  `TestConstructRefusesASeedInADispatchInput`); the two credentials `tailnetAuthKey` and
+  `TestDispatchRefusesAnNKeySeedInAPlainInput`, `azureFederationAudience` among them);
+  `tailnetAuthKey`, `signInClientSecret`, `natsSeedSecret` and the Azure embedder's Pulumi
+  inputs `azureEmbedEndpoint`, `azureEmbedDeployment`, `azureEmbedKeySecret`, `azureTenantId` and
+  `azureClientId` are checked for a seed once they resolve, before any child takes them
+  (`gcp.refuseDispatchSeedInSecret`, `gcp.refuseDispatchSeed`,
+  `TestConstructRefusesASeedInADispatchInput`, `TestConstructRefusesASeedInAnAzureInput`); the two
+  credentials `tailnetAuthKey` and
   `signInClientSecret` are also refused blank or whitespace-only then, through the one rule both
   run (`gcp.refuseDispatchSecret`, `TestDispatchRefusesABlankSecretOnceItResolves`), since neither
-  can work blank. No secret value is a `gcp:Dispatch` input beyond those two: the broker token
-  (`agentSecretsTokenSecret`, a Secret Manager resource path read through a second
-  SecretProviderClass, with its own per-secret accessor member) and the GitHub App key
+  can work blank. No secret value is a `gcp:Dispatch` input beyond those two: the broker relay
+  takes no credential at all, since `envoy-dispatch` presents its own ServiceAccount's projected
+  token, which the kubelet mints for `agentSecretsAudience` and nothing stores
+  (`TestDispatchStoresNoBrokerTokenWhenSet`); the Azure embedder's key (`azureEmbedKeySecret`, a
+  Secret Manager resource path read through a SecretProviderClass of its own,
+  `<hostname>-azure-embed-key`, with its own per-secret accessor member; the keyless form takes
+  only a tenant and a client id, and its token is projected into the pod) and the GitHub App key
   (`appPrivateKeySecretName` and `appPrivateKeySecretKey`, a Kubernetes Secret GKE SecretSync
   creates at run time, which the component never parses, creates or waits on) enter by reference,
   so their values never enter the component or Pulumi state
-  (`TestDispatchHoldsNoBrokerTokenOrAppKeyMaterial`); the GitHub App's four inputs come together,
-  each missing one named (`TestDispatchResolverRefusesInvalidInputs`); and `natsUrl` is checked
+  (`TestDispatchHoldsNoBrokerTokenOrAppKeyMaterial`,
+  `TestDispatchGrantsTheAzureKeyAccessorOnlyWithTheKeyForm`); the GitHub App's four inputs come
+  together, each missing one named, and the Azure inputs come with `azureEmbedEndpoint`, its quota
+  and exactly one credential form (`TestDispatchResolverRefusesInvalidInputs`); and `natsUrl` is checked
   inside the `ApplyT` that renders the listener container's environment, where core's `Env`
   refusals — which name core's own inputs, `natsUrls` and `socks5Proxy` — are mapped onto
   `natsUrl`, each a `core.InputError` naming it, wrapped with the component's type and name and
@@ -153,6 +162,17 @@ versions. Never add the module to the root `go.work`.
   `pulumi.WithMocks` never takes. The hub's cloud-config is built from plain inputs alone and holds
   no secret (`gcp/cloudconfig.go`, `vm`), so it is known at preview and never carries the auth key,
   which the VM fetches at boot.
+- **Integers.** Construct decodes a number into a Go `int` by conversion (Pulumi SDK v3.265.0
+  `go/pulumi/rpc.go`, `unmarshalOutput`: `SetInt(int64(v))`), so 2.5 would become 2 with no
+  error. `provider.New` therefore wraps every component's Construct with
+  `refuseFractionalIntegers` (`provider/integers.go`), which reads the served schema and refuses,
+  before the component's constructor runs, a number that is not a whole number within int64's
+  range wherever the schema types it `integer`: an input, an object type's property, an array
+  element or a map value. An integer input needs nothing more: `provider/integers_test.go` holds
+  the walk, and `TestConstructRefusesAFractionInEveryIntegerInput` (`provider/provider_test.go`)
+  sends a fraction to every integer input the served schema lists. Its refusal quotes the
+  component's name, so it leaves a name holding an nkey seed to the component's own refusal, which
+  stays first.
 - **Secrets.** Every input holding a secret carries `provider:"secret"`.
 - **Object types.** An object input type has an `Annotate` that sets its token
   (`a.SetToken("host", "Watchdog")`): generated SDKs append `Args` to an input type's name, so the
@@ -298,13 +318,18 @@ tag, so a plain `go test ./...`, as that `build` job runs it, starts none. Each 
 on a real server: its users connect, a client with no credential is refused, the grants hold),
 `seed/seed_live_test.go` (a generated seed connects, and a client without it is refused) and
 `core/permissions_live_test.go` (the listener, built from `packages/envoy/cmd/listener` under the
-root `go.work`, reaches `"status":"healthy"` as one user holding `HostPermissions`, a session as the
-same user receives a send, a role message and a publish to an ad-hoc topic, and the server refuses
-nothing the set allows; without the durable's consumer create, the listener never reaches
-`"status":"healthy"`; and, as a hub with a listener renders its users, the listener reaches
+root `go.work`, reaches `"status":"healthy"` as one user holding `HostPermissions` with
+`SubscribeAllTopics` on, a session as the same user receives a send, a role message and a publish
+to an ad-hoc topic, a session on a serving port at `127.0.0.1` receives that topic, published over
+NATS by another session, through the listener's subscription to every notification topic, and the
+server refuses nothing the set allows; without the durable's consumer create, the listener never
+reaches `"status":"healthy"`; as a hub with a listener renders its users, the listener reaches
 `"status":"healthy"` as a user holding `ListenerPermissions` while a session with no credential,
 the server's `no_auth_user` holding `SessionPermissions`, registers, receives a send, a role
-message and a publish to an ad-hoc topic, and is refused a publish to another session's subject; and a
+message and a publish to an ad-hoc topic, and is refused a publish to another session's subject;
+the listener holding `ListenerPermissions` with `SubscribeAllTopics` on exits 1 at its start with
+an ERROR naming `ENVOY_SUBSCRIBE_ALL_TOPICS`, the server's one refusal its subscription to
+`notifications.>` (`TestListenerPermissionsRefuseTheSubscriptionToEveryTopicOnRealServers`); and a
 user holding `SessionPermissions` alone publishes a reply and is refused a subscribe to `_INBOX.>`).
 `core/dispatch_permissions_live_test.go` also starts `testpg.Image`, builds and runs the real
 `envoy-dispatch` against `DispatchPermissions`, with the test client connected as a second user of

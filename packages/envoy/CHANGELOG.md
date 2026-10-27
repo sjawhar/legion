@@ -4,6 +4,249 @@
 
 ### Added
 
+- Each block of a Dispatch document is a node of the reference graph. A reference can name one
+  block, `dispatch://KEY/spec#b-<id>`, `dispatch://KEY/artifact/<slug>#b-<id>` or
+  `dispatch://PROJECT/artifact/<slug>#b-<id>`, the id percent-encoded as `text.EncodeBlockID` and
+  `encodeBlockId` write it, and so does a live document page's `#b-<id>`; `@v<N>` after the id
+  pins it to version N of the document. N is at most 9223372036854775807: a larger N is no
+  reference, `400 INVALID_REFERENCE` where the API is given one, and a pin past every version the
+  document has is `404 NOT_FOUND` `no version N of <document>`. A block id of any length is
+  written, by a seeded spec, an upload, an `insert`, a rebuild, an accepted suggestion or a
+  browser's edit; the graph keys a block by its id, so one longer than 256 bytes, decoded
+  (`text.MaxBlockIDBytes`), is no graph node: its version is written, a mention inside it starts
+  at the block holding it, the server logs a warning naming the document, the longest id's length
+  and the bound, and a read of its reference is `404 NOT_FOUND`. An ask block, a comment anchored
+  in a block and an ask anchored in one are written under a block id of any length, so a
+  settlement never fails on one. Text cites a reference, a block's or any other, only while its
+  block id is within that bound and the target id the graph stores its edge under
+  (`text.TargetID`: an issue's key, a document's `<KEY or PROJECT>/<slug>`, a block's
+  `<KEY or PROJECT>/<slug>#<block id>`, an ask's, a comment's or a message's id) holds at most
+  2048 bytes (`text.MaxTargetBytes`), since a slug or an item id has no bound of its own: past
+  either the text is written and cites nothing, and a live document page whose block is past them
+  names the document, one whose document or item is past them nothing. The bounds decide only
+  what the graph indexes: `GET /api/v1/references?to=|from=` and `GET /api/v1/block-links` read
+  the reference they are given whatever its length (`text.ParseRef`), so a node of any name is
+  read, and no reference's length answers `400`. A new artifact's name, and the reference key
+  `<owner>/<slug>` it gives the artifact, hold at most 2692 bytes: an upload past either is
+  `400 INVALID_ARTIFACT` naming the bound, and an artifact already stored past it keeps taking
+  versions and edits. A
+  mention written inside a block starts at the innermost block holding it: `GET /api/v1/references`
+  names that block as the source (`kind: "block"`, with
+  `block_id`, `document`, `changed_version` and `changed_at`, the version its text last changed
+  in), a node cited from two blocks of one document counts twice, a document's own read names the
+  block at each edge as `block`, and each block is `part_of` its document, which a document's read
+  lists only under `?kind=part_of`. A block reference's read carries the block's whole current
+  `text`; a pinned one also carries `pin`, the block's text at that version and whether it is
+  `unchanged`, `changed` or `removed` since. Deleting a block takes the links to it out of every
+  list, count, closure and outgoing list until a version restores its id.
+  `GET /api/v1/block-links?from=<document>&to=<document>` lists the links from the blocks of one
+  document to the blocks of another. `GET /api/v1/artifacts/{id}/references` keeps every source.
+  Migrations `0121`-`0126` add the block tables, the triggers that owe the index what any build
+  writes, and the seed of the comments, asks and issue messages already holding `#b-`, and
+  `0127`-`0128` rebuild the ask-block and block-anchor indexes over `block_id_key`, the id's
+  SHA-256, holding `asks` while its two indexes build and `comments` while its one does; the
+  server's block-index reconciliation (lease `block-index`, logged as `dispatch: block index`)
+  indexes every document and text owed, with no command run, and takes one more lease connection
+  per server, nine. `rebuild-refs` marks every document owed that index and prints `blocks_owed=`.
+  The dashboard titles a block link with the block's text, its hover card shows the document and,
+  for a pinned link, the version and how the block stands since, a pinned link opens that version,
+  and Referenced by shows one row per citing block, each linked to its block; on a document's page
+  each row also links the document's own block the edge meets (`block <id>`), so a source citing
+  two of its blocks is two rows. The dashboard draws a picture and opens a link an author names
+  whatever the length of its target's key; only bare text it links is held to the index's
+  bounds. A search hit for an ask links its typed block (`#b-<id>`) only while that block is a
+  graph node, and otherwise `?ask=<id>`, so `dispatch read` of the hit reads the ask.
+- `envoy-infra:gcp:Dispatch` takes `pprofPort`, which sets `DISPATCH_PPROF_PORT` on the app
+  Deployment's `envoy-dispatch` container alone, so a deployment turns on Dispatch's loopback-only
+  profiler through the component rather than by editing the Deployment, which the next update
+  would revert. Unset, nothing is rendered and the pod is the one it always was. The component
+  refuses, naming the input, a value outside 1-65535 and the ports the app pod already binds on its
+  loopback, `8766` and the `cloud-sql-proxy` sidecar's `5432`.
+- `envoy-infra:gcp:Dispatch` takes `appCpu` and `appMemory`, the Kubernetes quantities that size
+  the app Deployment's `envoy-dispatch` container as both its request and its limit: 1 CPU and
+  `4Gi` by default, the size it always had, so a deployment that sets neither renders the same pod.
+  The `cloud-sql-proxy` sidecar, the front door and the listener keep their sizes. The component
+  refuses, naming the input, a value that is not a quantity or is empty, a decimal exponent
+  outside `e-9` to `e18`, and a size at which GKE Autopilot would not run the app pod (the two
+  containers' sum) as rendered: below `500m` or `512Mi` or outside 1 to 6.5 GiB of memory per
+  CPU, which Autopilot raises, or above 30 CPU or `110Gi`, which it rejects. On a cluster without
+  Pod bursting Autopilot also rounds the pod's CPU up to a multiple of 250m.
+- `envoy-infra:gcp:Dispatch` takes `appPriorityClassName` and `appPdbMinAvailable`, which protect
+  the app Deployment's pods from being displaced, so a deployment sets both in its program rather
+  than by hand. `appPriorityClassName` is the app pod's `priorityClassName`, naming a PriorityClass
+  that already exists in the cluster; the component reads the class and the app Deployment waits
+  on the read, so a missing class fails the preview or update rather than leaving the one app pod
+  stopped and its replacement refused. `appPdbMinAvailable` registers a PodDisruptionBudget named
+  for the app, over its pods alone, with that `minAvailable` and Kubernetes' default
+  `unhealthyPodEvictionPolicy`, so a drain waits for the app. The front door and the listener are
+  unchanged, and with neither set the component renders what it always did. The component
+  refuses, naming the input, an `appPriorityClassName` that is empty, not a DNS subdomain or in
+  the reserved `system-` prefix, and an `appPdbMinAvailable` below 1 or above `replicas`.
+- Dispatch writes one access-log line per served request, so the callers behind a load spike can
+  be named: `dispatch: request` at INFO when the request ends, with the method, the route's own
+  pattern, the escaped request path, the caller (a person's email, a bearer's session, a personal
+  token's owner, a verified service-account subject, or the shared token with no owner to name),
+  the credential that named a session, the forwarded address and the user agent, the status, the
+  milliseconds it took and the response bytes. It covers every `/api/v1` route, the document and
+  delivery websockets, `/auth/*`, the GitHub proxy and the 404 of a path no route answers, still
+  writes its line when a handler panics, names the caller a websocket or stream was admitted as
+  however many heartbeats it lives, cuts every field a caller wrote to 256 bytes, and never
+  carries a token, a cookie, a query string, a request body or a response body. It is always on:
+  it costs about 2.6 µs and 12 allocations per request and makes no database call
+  (`internal/dispatch/api/access_log_bench_test.go`), and the question it answers is asked when a
+  deployment is already in trouble (`cmd/dispatch/README.md`, "Access log").
+- A release of a `github-app` secret can be narrowed: `POST /v1/grants/{id}/values` takes an
+  optional `github_app` body (`owner`, `repositories`, `read_only`) that mints the token of one
+  account `github-owners` lists alone, sent to GitHub as the `access_tokens` body, limited to
+  those repositories of the account (at most 100), to `contents: read` and `metadata: read`, or
+  to both; a token limited to repositories alone keeps every permission the App holds. It can
+  only narrow, applies to that release alone, and the answer names it as `github_app`, which the
+  broker releases only once GitHub's own answer shows the token holds no more, revoking at GitHub
+  a token whose answer holds more. A bad body, a `repositories` list present but empty among
+  them, is `400 INVALID_NARROWING`, a narrowing of a grant holding no `github-app` secret
+  `400 NARROWING_NOT_APPLICABLE`, one to an account its `github-owners` tag does not list
+  `403 NARROWING_OWNER_NOT_LISTED`, and one GitHub refuses (a repository the installation does not
+  reach) `422 NARROWING_REFUSED`; the last two are logged at WARN as `broker: narrowing refused`.
+  `agent-secrets`' exec form takes `--github-owner`, `--github-repo` and `--github-read-only`,
+  exits 2 on a narrowing the broker would refuse `INVALID_NARROWING` before it sends any request,
+  and runs its command only once the broker names the narrowing it applied, so deploy the broker
+  before any caller passes `--github-owner`.
+- Dispatch can serve the Go profiler: `DISPATCH_PPROF_PORT` set to a port serves
+  `net/http/pprof` on `127.0.0.1:<port>` alone, on a mux of its own, so a CPU profile of a busy
+  server is one `kubectl port-forward` and `go tool pprof` away. Unset or empty, nothing listens;
+  a value that is not a port 1-65535 refuses startup naming the variable, the profiler binds
+  before anything connects, and it closes at once on shutdown, delaying nothing. `DISPATCH_PORT`
+  is read by the same rule, so a value past the integer range, which the old check accepted and
+  only the bind refused (after NATS and the migrations had run), is refused at startup too.
+- Dispatch's meaning search embeds through AWS Bedrock (the default, unchanged) or Azure AI
+  Foundry, chosen by `DISPATCH_EMBEDDER`. Azure takes `DISPATCH_AZURE_EMBED_ENDPOINT`,
+  `DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE` (the deployment's quota, two thirds of which paces
+  background embedding), `DISPATCH_AZURE_EMBED_DEPLOYMENT` (default `embed-v-4-0`) and one
+  credential: the deployment's key (`DISPATCH_AZURE_EMBED_KEY` or `_FILE`), or a keyless sign-in
+  that exchanges a projected token with Microsoft Entra (`DISPATCH_AZURE_TENANT_ID`,
+  `DISPATCH_AZURE_CLIENT_ID`, `DISPATCH_AZURE_FEDERATED_TOKEN_FILE`). Boot refuses, naming the
+  setting, an unknown place, an Azure setting under Bedrock, and an Azure configuration missing its
+  endpoint or quota or holding both credentials, neither or part of the keyless one; a model
+  service or Entra that is down refuses no boot. Background embedding sends Azure at most 320,000
+  bytes of text a call, so a call of dense text (CJK, hex) finishes well inside the 60-second
+  request timeout instead of timing out and being split; Bedrock's batches are unchanged. Pacing
+  estimates 4 characters a token, which under-counts such text, so a backlog of it can meet
+  Azure's 429s, which the queue retries as throttles (INFRA-393).
+- The Dispatch server keeps meaning search's coverage itself: a coverage pass at boot and every 10
+  minutes embeds items written before the embedding triggers existed or with them off, repairs a
+  row whose text changed with the triggers off, drops every vector another embedder made and
+  re-admits a row that died under another embedder, with no lease, so every process may run it.
+  It drops and re-admits only once the configured embedder has answered (an embedding by this
+  process has succeeded, or a short canary text it embeds does); until then it leaves those rows in
+  place and logs one WARN naming the identity, the canary's error and how many it left, so a
+  misnamed Azure deployment or a refused credential drops no vector.
+  `GET /api/v1/search/coverage` reports the configured embedder's identity, place and model, and
+  in total and per kind the searchable items with a current vector, lacking one or failed, and the
+  oldest lacking item's wait (INFRA-393).
+- `agent-secrets` names the store it answered from, so no answer of its own is read as another
+  secrets CLI's about the same name: the broker `AGENT_SECRETS_URL` names, by host, and that
+  broker's store, read once from its public `GET /v1/settings` (`AWS Secrets Manager account <id>
+  in <region>`, or `GCP Secret Manager project <number>`), with the broker named alone where the
+  settings cannot be read. The injection form writes one line to standard error before it execs -
+  `agent-secrets: NAME, NAME from the broker at <host> (<store>)`, the names it injected and
+  nothing of their values; `request`, `status` and `self` print a `source:` line; `secret show`
+  prints a `store:` line and every row of `secret list` carries `store` in `--json` and a line
+  on standard error naming the store the table is from; `machine list` and `grant list` name
+  their broker the same way; and every refusal names where this CLI looked, from a denied request
+  to `UNKNOWN_SECRET` and a grant that released no value. `--json` output is unchanged for
+  `request`, `status`, `self`, `whoami`, `machine list` and `grant list`, which still print the
+  broker's own body verbatim and make no settings call; `secret list --json` and
+  `secret show --json` gain a `store` field. No line names a secret's version: the broker
+  releases a grant's values as names and values alone, and a session holds no sign-in of its own
+  to the store to read one with (`agent-secrets secret show`, which reads the store directly
+  under the person's own sign-in, lists each version as before).
+- A broker call that did not complete says what failed, rather than leaving a bare transport error
+  to read as a broker refusal: the host does not resolve, name resolution failed, the connection
+  was refused, no connection could be made (network or host unreachable, or any other dial error),
+  nothing answered in time, or a peer answered and then broke the exchange (TLS, an HTTP answer to
+  https, EOF or a reset after the request); any other error says only that the request failed. It
+  names the method and URL it tried, and that `AGENT_SECRETS_URL` named that address, so a session
+  that inherited a stale address reads a stale address. Such a message carries no `asked the
+  broker …` trailer: the broker refused nothing. A local helper refusal or dead helper socket names
+  that socket instead, since no broker was asked.
+- The `ask.opened` or `ask.answered` Dispatch's settlement appends when an edit restores a decision
+  block it retracted carries `restored: true`: the ask returns to the state it had, and the event
+  records no new answer, so a reader that takes an `ask.answered` for a person's answer can tell
+  the two apart. A restore the release before this one writes carries no mark - every one already
+  in the event log, and one written during a rollout or an image rollback - so a missing mark does
+  not prove a new answer.
+- Dispatch's approval read (`approval` on every document read) names the latest review's event
+  sequence, `seq`, beside its `at`: each review keeps the sequence of the `artifact.approved` or
+  `artifact.changes_requested` event it appended on its document's owner
+  (`artifact_reviews.event_seq`, migration 0120, written in the same transaction). The owner's row
+  lock orders those events as they commit, so `seq` places a review among them where `at`, its
+  transaction's start, cannot. Every read that picks a document's newest review now orders by that
+  sequence (`docs.ReviewOrder`), so two reviews written at once read back in the order they
+  committed. A review recorded before the migration reads with its `at` and no `seq`, and so does
+  every read the release before it serves during a rollout or a rollback, so a missing `seq` does
+  not prove an older review. A review the release before it writes while a rollout or a rollback
+  runs both releases gets its sequence too, from the migration's trigger at its commit, so it reads
+  as the newest review it is rather than ranking below every sequenced one. 0120 is additive (a
+  nullable column, a `not valid` check, an index in the reads' order and a trigger), so rolling
+  back past 0120 alone, to a build that already carries 0117, is an image rollback: the release
+  before it keeps writing reviews, and the trigger sequences each one. 0117's own rule still
+  forbids starting a release older than 0117. The index (`artifact_reviews_by_artifact_event_seq`)
+  is built in the migration's own transaction under the table lock it already holds, reading every
+  review once.
+- Dispatch's conversation view (`/agents/<id>/live`) shows the model and thinking level an Oh My
+  Pi session runs now, from the `settings` frame pi-envoy publishes, before any turn runs on them
+  and within about 20 seconds of a change made anywhere else (INFRA-195). Where the session runs
+  `/model` and `/effort` from Dispatch, each is a native picker in the header: the model picker
+  lists every model the session can use, grouped by provider, and the thinking picker the levels
+  `/effort` offers. On a focused picker the arrows and type-ahead only move its choice, `Enter`
+  switches to it, and leaving the picker without `Enter` puts it back on the reported value, as
+  the Agents issue picker's keyboard rule does. A pick is the person's own Send of
+  `/model <provider/id>` or `/effort <level>`, always as Send and stored under their name; while
+  it waits for the session's answer Send is disabled and the pickers are held, keeping focus, and
+  the line under the header quotes the session's reply, or says no answer came within 30 seconds
+  or that the message could not reach the session. The header
+  changes only when the session reports the new value. A session on an older pi-envoy shows the
+  last turn's model and asks to be restarted on a newer one; a session whose Oh My Pi cannot tell
+  its settings, or that runs neither built-in from Dispatch, says so. No route changes: an agent's
+  token is still refused on `POST /api/v1/agents/{id}/messages` (`403 HUMAN_ONLY`).
+- A Dispatch project imports its component model from any number of architecture sources, one
+  per repository, each on its own branch, and its model is every source's components together
+  (INFRA-391). `GET /api/v1/projects/{key}/architecture-sources` lists a project's sources (`[]`
+  with none); `PUT /api/v1/projects/{key}/architecture-sources/{owner}/{repo}` `{branch}` adds a
+  source, or changes the branch of the one it already is, after proving the GitHub App can read
+  the repository and that `branch` is the name of a branch it has (an exact
+  `git/ref/heads/{branch}` read): a missing branch, a commit SHA, a relative ref such as
+  `main~1`, `HEAD` or a `refs/` path is `409 SOURCE_ACCESS` naming the value and the repository,
+  as a credential problem is, and nothing is written;
+  `DELETE` on the same path removes that source and its components, and no other source's;
+  `POST …/architecture-sources/{owner}/{repo}/sync` imports one source and
+  `POST /api/v1/projects/{key}/architecture-sources/sync` every source, each attempted whatever
+  another's import did and each answering on its own row. A source row carries `components`, how
+  many components it projects; `GET /api/v1/projects/{key}/architecture` carries `sources` and
+  each component's `source` repository; `architecture.synced` and `architecture.sync_failed`
+  name the source's `repo` and `branch`. One source's failed import keeps that source's previous
+  components and touches no other source's. Component ids stay project-wide: an import whose
+  model holds an id another source of the project already has fails for that source alone,
+  naming the id and the repository that holds it, and an issue may name components of any
+  source of its project. Settings lists one row per source with its component count and its own
+  Refresh and Delete; the architecture page has a header line per source with its own Refresh,
+  and hatches only the components of a source that failed or is stale; a component's details
+  name its repository; an issue's component picker offers every source's components. Migration
+  `0117` adds `architecture_sources.id` and `components.source_id`: every existing source and
+  component reads `0`, so a project with one source keeps it, its components and every issue
+  attachment, and nothing re-imports.
+- A project's default assignee, the last step of an issue create's assignee chain: an issue created
+  with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
+  it, goes to the person the project names; nothing already filed, and no create that names an
+  assignee or `null`, changes. A default that no longer names a person who has signed in is
+  ignored rather than refused, so a create never fails on a stale one. A person sets it on the
+  Settings page through
+  `GET /api/v1/settings/project-default-assignees` and `PUT /api/v1/projects/{key}/default-assignee`
+  `{assignee}` (an email of someone who has signed in, or `null` to clear it; otherwise
+  `400 ASSIGNEE_NOT_ALLOWED`, and a body without `assignee`, or whose `assignee` is neither a
+  string nor null, is `400 INVALID_PROJECT`), which appends
+  `settings.project_default_assignee.updated`. Both routes are human-only and no agent command,
+  flag or route sets a project's default.
 - A release of a stored secret checks the policy again once it has read the store: a retag to a
   kind (`github-app` or `google-login`) the broker rereads while the release reads the secret
   releases nothing and ends the grant for good, as a kind change found before the read does, so a
@@ -222,13 +465,70 @@
   runs, as its own plugin reported it (envoy-client's `machineID()`), rather than whichever
   listener happened to register it. Sessions on separate machines registering through one shared
   listener previously all showed that listener's own `machine_id` as their machine. `machine_id`
-  keeps its routing meaning unchanged (the listener that owns the session's delivery,
-  `store.Registry.Match`, `session.go`'s `hostFor`); `host` is carried on `POST
+  still names the listener that owns the session's delivery (`store.Registry.Match`), the only
+  listener that delivers to it (the next entry), and `host` is where that listener reaches a
+  session on a serving port, unless the session runs on that listener's machine and it has a host
+  bridge.
+  `host` is carried on `POST
   /v1/interests/subscribe` (`subscribeBody.Host`, every subscribe and heartbeat), stored on the
   session entry (`session.SessionEntry.Host`), and returned from `GET /v1/sessions` and `GET
   /v1/roles/<role>`, falling back to `machine_id` (`SessionEntry.HostOrMachine`) for a session
   whose plugin predates the field. `GET /api/v1/agents` carries it through unchanged, with its
   own defensive fallback to `machine_id` for a listener that predates the field too.
+- A session on a serving port (the OpenCode plugin's way of being reached) receives a topic the
+  stream does not store, such as a team topic, when its machine's listener runs with
+  `ENVOY_SUBSCRIBE_ALL_TOPICS=1` (INFRA-122). Such a listener opens a second NATS client holding
+  one core queue subscription on `notifications.>`, in the group
+  `envoy-listener-live-<machine id, spaces as hyphens>` (`bus.ListenerLiveQueue`, so two listeners
+  of one machine deliver each message once); it leaves a subject under `notifications.role.` to the
+  role lane and one the stream stores to the durable, and fans every other notification topic out
+  to the sessions on its machine subscribed to it, by the same `POST
+  /session/<id>/prompt_async`. Such a topic is live: it reaches whoever is subscribed when it is
+  published, once, and is never retained or retried. Unset, empty or `0` leaves it off, as before;
+  any other value refuses startup naming the variable. Only a NATS user whose grant allows a
+  `notifications.>` subscribe (`HostPermissions`, a host's own user) may opt in: under the hub's
+  or Dispatch's listener grant the start ends with exit 1 and an ERROR naming
+  `ENVOY_SUBSCRIBE_ALL_TOPICS`. Both compose files set it. `/healthz` gains `live_topics`,
+  `subscribed` or `not_applicable`, and answers `503 {"status":"unhealthy","error":"live
+  subscription inactive"}` when the opt-in is on and the live subscription is gone or the server
+  refuses it (one restarted without the grant refuses the subscription the client re-sends, which
+  nats.go keeps valid, so `bus.Client.CoreSubOK` reads the server's refusal until the subscription
+  is sent again). Shutdown
+  drains the live client for up to 3 s between the HTTP stop and the main client's drain: 10 s +
+  3 s + 13 s = 26 s, inside every runtime's 30 s. envoy-infra renders it from
+  `core.ListenerConfig.SubscribeAllTopics`, set by the optional input `subscribeAllTopics` on
+  `host:Listener` and `aws:WebhookListener` and by `envoy-infra render webhook-listener-env
+  --subscribe-all-topics`; left unset, every existing rendering is unchanged.
+
+  Only the owning listener delivers to a session on a serving port. Its owner is the listener its
+  stored subscription names (the interest's `machine_id`, the one `store.Registry.Match` fans its
+  topics out on, which a re-registration through another listener keeps), else, with no
+  subscription stored, the listener it registered through (the session entry's `machine_id`); a
+  session neither names is every listener's. The owner reaches a session on its own machine at
+  `ENVOY_HOST_BRIDGE` when the bridge is set: one registered through it, or one whose recorded
+  `host` equals the owner's `ENVOY_MACHINE_ID` (compared without letter case), which a session
+  that stayed on the owner's machine and re-registered through another listener records.
+  Otherwise it reaches the session at the registration's recorded `host` when it is not empty,
+  otherwise at `host.docker.internal` for one registered through it, else at that listener's
+  machine id; a session that re-registered through another listener and records another host
+  runs on that machine, so the owner never uses its own bridge for it
+  (`session.Deliverer.hostFor`, an IPv6 literal bracketed). A listener without a bridge used to
+  dial `host.docker.internal` for every
+  session on its machine, whatever host it recorded, so a serving port bound to loopback alone was
+  never reached and every delivery to it failed. Another listener's session is now that listener's
+  to deliver: this one requests nothing and leaves an inbox message to the owner silently
+  (`session.ErrWrongMachine`, `HandleAgentResult.OwnedElsewhere`: no delivery, no `no_holder`
+  exception, no NAK, one DEBUG line), where it used to dial the session at the owning listener's
+  machine id. Every listener on the bus reads each inbox message from its own durable, so a second
+  listener that could reach the session would deliver the same message again; the owner always
+  has the message. A session that re-registers through another listener stays with the one its
+  stored subscription names, which matches its topics and delivers them. A session owned by a
+  listener that cannot reach its port is reached by nobody.
+  Since the recorded host now goes into the delivery URL, `POST
+  /v1/interests/subscribe` with `port` above 0 refuses a non-empty `host` that is neither an IP
+  literal nor a plain host name (letters, digits, `_`, `.`, `-`; `session.ValidHost`) with
+  `400 {"error":"host is not a host name or address","expected":["host"]}` and writes nothing. A
+  registration with no `host` (an older plugin) or no port is accepted as before.
 - `deploy/compose/single-node.compose.yml` runs Envoy on one machine: a JetStream NATS of its own
   (its data on the `nats-data` volume) and the listener, both on `127.0.0.1` only, with
   `deploy/compose/single-node.env.example` as its settings template. The site's Envoy page ("Running
@@ -548,6 +848,56 @@
 
 ### Changed
 
+- A rate-limited answer to any minter call, a release with no narrowing and a Google login's
+  refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
+  its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a
+  body naming a rate limit (GitHub's secondary limit, Google's `rateLimitExceeded`). A rate limit
+  is not the App owner's to fix. The release's answer is unchanged, `502 MINT_FAILED`.
+- An issue read with a route no longer calls the Envoy listener and decodes the whole live-session
+  list each time. Dispatch keeps one copy of that list per process, at most 5 s old, and one
+  listener call refreshes it for every issue read that asks while the call runs. A listener that
+  fails or does not answer is asked again only after 5 s, so the reads in that window read
+  `route_status: unknown` at once instead of each waiting up to 2 s. A `route_status` can
+  therefore be up to 5 s old; its values and the `503 ENVOY_UNAVAILABLE` of a `live` or
+  `no_holder` filter are unchanged.
+- **Breaking:** `envoy-dispatch backfill-embeddings` is removed: the server's coverage pass does
+  its work at boot and every 10 minutes, and an operator script that still runs it exits 2.
+  Migration `0119` drops its checkpoint table, `embeddings_backfill_progress`, in the same release,
+  since no server of any release reads it. Each vector now records its embedder's identity
+  (`us.cohere.embed-v4:0` on Bedrock, the value every stored vector already carries, and
+  `azure:<endpoint host>/<deployment>` on Azure), and search compares a query only with vectors of
+  its own identity: run one embedder configuration on every process of a deployment, since each
+  process's pass drops the others' vectors, and put a new model on Azure under a new deployment
+  name. A text with nothing to embed (empty or only white space) is settled with no vector rather
+  than retried until it dies, and a row that died that way is settled by the pass (INFRA-393).
+- **Breaking (local development):** `agent-secrets-devrelay` presents a listed caller's own
+  ServiceAccount token, read from `--account-token-file` (default
+  `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`), in place of the shared bearer the broker no longer takes. A
+  missing or empty file exits 1 naming it, before any request. `scripts/dev-broker.sh` starts
+  `dev-oidc-issuer`, a new local stand-in for a cluster's ServiceAccount token issuer (the Go
+  tests' `internal/oidc/oidctest` served on a loopback port), and its broker trusts it, lists
+  `system:serviceaccount:example-ns:example-dispatch` as its caller `dispatch` and turns the token
+  exchange on for `system:serviceaccount:example-ns:example-worker`; the issuer keeps both tokens in
+  the workdir and rewrites each before it lapses, and the script exports
+  `AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, so devrelay approves records and machine logins locally
+  again. The Dispatch e2e harness's broker token is `DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE`.
+- `DISPATCH_APP_PEM_B64` takes the GitHub App's private key as a plain PEM, as GKE SecretSync
+  copies it from Secret Manager, or as the base64 of a PEM, as before: a value holding `-----BEGIN`
+  is the PEM itself and any other is base64-decoded. Dispatch parses the key when it loads the
+  variable, so a key that does not parse stops boot with `DISPATCH_APP_PEM_B64: plain PEM:
+  <reason>` or `DISPATCH_APP_PEM_B64: base64 of a PEM: <reason>` (a value that is not base64 at
+  all, `DISPATCH_APP_PEM_B64: <reason>`), never quoting the key, where it stopped boot with
+  `parse GitHub App private key: <reason>`, naming neither the variable nor the form (INFRA-390).
+- A failed NATS reconnect attempt is logged, where it was silent: one WARN a minute per
+  connection, `envoy nats reconnect attempt failed`, naming the client, the servers it was
+  configured with and the error, with the first failure of an outage logged at once. nats.go
+  retries about once a second forever, so a broker that is down left no line at all in the
+  process's log, and thousands of identical lines would name the outage no better (INFRA-182).
+- A cache watcher that ends on its own logs `<cache> watcher stopped` at WARN, where it was an
+  ERROR. The ERROR is now `<cache> watcher was not repaired`, logged once with the bucket, the
+  recorded error and a `reason` of `repair failed` or `no repair within 1m0s`, and only when a
+  repair has failed or none has run within a minute, so a stop the self-health rebuild repairs a
+  moment later no longer raises one (INFRA-182).
 - **Breaking:** once any secret with a `kind` tag holds a value, roll the secrets broker forward,
   never back past this release. A broker before kinds reads no `kind` tag and would serve the
   secret's stored GitHub App key or refresh token as its value. `agent-secrets secret` writes
@@ -611,6 +961,34 @@
   image back. Only this release's API holds the depth limit, so an earlier release serving over
   `0113` can build a deeper chain again, and every read of that chain's issues fails (500) until an
   ancestor that still reads has its parent set to null.
+- **Breaking:** migration `0117` is a stop-the-world migration. Deploy it with no server of the
+  earlier release running, and never start a release older than `0117` over it again: stop the
+  earlier release, or scale it to zero, before this release boots (a Recreate rollout, never a
+  rolling one), and recover a failed deploy forward rather than by rolling the image back. Over
+  the new schema an earlier release's architecture-source save answers `500`, since no unique
+  index covers `project_key` alone; its import deletes every component of the project before
+  inserting one source's, so a model with components fails on the new `source_id` column and one
+  with none deletes every source's components; and its delete removes every source of the
+  project. Its census counts components whose project has no architecture source, which only
+  direct SQL writes; repair them on the release still serving with
+  `delete from components c where not exists (select 1 from architecture_sources s where s.project_key = c.project_key)`
+  and take the census again (`cmd/dispatch/README.md`, "Database migrations").
+- **Breaking:** the singular architecture source routes `PUT` and `DELETE
+  /api/v1/projects/{key}/architecture-source` are gone. A source is addressed by its repository
+  under `/api/v1/projects/{key}/architecture-sources/{owner}/{repo}`, and a project's sources are
+  listed at `/api/v1/projects/{key}/architecture-sources`; the `dispatch` CLI of this release uses
+  the new routes. Two singular routes are kept for `dispatch` clients older than this release,
+  each call logged at warn naming the route and the project:
+  `GET /api/v1/projects/{key}/architecture-source`, which those clients read on every issue
+  create, answers `200 null` when the project has no source, otherwise its first source's row,
+  `404` for an unknown project, and the list route replaces it;
+  `POST /api/v1/projects/{key}/architecture-source/sync`, which their `dispatch architecture-sync`
+  calls, imports every source as `POST …/architecture-sources/sync` does and answers one row: the
+  first source in the order they were added whose `last_error` is set, or the first source when
+  none failed. A project with no source is still `404 SOURCE_NOT_FOUND`, and a failure that could
+  not be recorded `500`; a credential or branch problem, once a `409 SOURCE_ACCESS`, is recorded
+  on its row and answers `200` with that `last_error`, which those clients print as
+  `Sync failed for …`. `POST …/architecture-sources/sync` replaces it.
 - **Breaking:** the Dispatch auto-deployer (`deploy/scripts/autodeploy.sh`) accepts `DATABASE_URL`
   in one form only, `postgres[ql]://<user>[:<password>]@<host>[:<port>]/<database>`, with an
   optional query of `sslmode`, `connect_timeout` and `application_name`.
@@ -722,6 +1100,12 @@
   pod in that namespace whose spec names no account runs as it and can get a token for the broker's
   audience, so the binding proves nothing about which pods are the service's. Bind each service to
   a dedicated account its pods set as `serviceAccountName` before taking this release.
+- `BROKER_SERVICES` may name one service for several accounts, one entry each, and a pod running
+  as any of them is that service's own session. Each account still proves one service, and an
+  account given twice is still refused, now naming the account and its one service when both
+  entries name the same service. Rollback: a broker before this release refuses a
+  `BROKER_SERVICES` that names a service twice at start-up (`must give each service once`), and
+  the broker is one pod, so roll the image back only together with the setting.
 - **Breaking:** a renewal (`POST /v1/enrollments/{id}/renew`) of an enrollment that has ended,
   lapsed or never existed answers `401 ENROLLMENT_NOT_LIVE` where it answered `401 PROOF_INVALID`;
   the renew route alone answers it, and every other session route still answers a not-live proof
@@ -1097,6 +1481,133 @@
 
 ### Fixed
 
+- Every `envoy-infra` component refuses a number in an integer input that is not a whole number
+  within the 64-bit integer range, at any depth (an object type's property, an array element, a
+  map value), naming the component and the input's path and never quoting a secret value, before
+  anything registers. Pulumi decoded such a number into the component's integer by conversion, so
+  a typed SDK or Pulumi YAML program sending `replicas: 2.5` got 2 replicas with no error, and one
+  past the range got whatever the conversion gave. The check reads the plugin's own schema, so an
+  integer input added later is covered with no list to keep.
+
+- Dispatch's event outbox publishes a backlog hundreds of times faster across a remote NATS hub.
+  It sent each envelope and waited for NATS to answer before it sent the next, then wrote the
+  answer to Postgres through the pool the API's requests queue for, so every destination of every
+  event cost a network round trip and a write: at a 150 ms round trip it published 1.7 to 1.9
+  events a second, and under load in production it fell up to about 29 minutes behind the events
+  being created. It now sends a whole claimed batch (100 events) before it waits for any answer
+  (`bus.Client.Window`), in id order, so NATS still takes each issue's events in order, and
+  writes the batch's outcome in one statement on a database pool of its own (`store.Pool.Outbox`):
+  540 events a second at a 150 ms round trip and 1,100 at 50 ms, with the API's pool busy
+  (`TestOutboxThroughputUnderRemoteLatency`). An event is still marked published only once NATS
+  accepted every destination of it. A publish NATS cannot take because the connection is down no
+  longer backs its event off behind the events after it: the batch stops and waits for the next
+  scan, so a backlog held up by an outage goes out in id order once NATS is back, where before the
+  first events of an issue reached the Legion daemon after later ones, which it drops as stale.
+  The shared database pool every request reads through holds 64 connections, from 16: under heavy
+  agent load the API held all sixteen and every other caller waited behind them.
+
+- A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
+  such as a session's answer to a model switch, without waiting for the stream's heartbeat.
+  Firefox opened the stream only once its first byte arrived, and a stream with no backlog and no
+  new event sent none until the first heartbeat, fifteen seconds later: until then the page stayed
+  "Reconnecting…" and skipped the refresh a reconnect owes every view. `GET /api/v1/events` now
+  sends an SSE comment, `: open`, with its headers, so the stream opens at once in every browser.
+
+- A person who edits a document in the browser while an agent's write to it is published is now
+  credited for the edit. ygo runs each change's observers after it unlocks the document, so the two
+  changes' observers could run in either order, and when the agent's ran first it counted the
+  browser's change as part of its own, which is credited to no one because the agent's write was
+  credited when it committed; the browser's own observer then found nothing new and credited no one
+  either. The edit was stored, sometimes inside the agent's version, but its author was on no
+  version and owed none. The room's observer now takes the room's changes one at a time in the order
+  they committed, from an update log ygo fills under the document's lock, so each change is
+  measured against the room the change before it left, whichever observer gets there first; a
+  deleted paragraph is credited too, and a heading id the editor derives still credits no one. The
+  ygo pin moves from `v1.51.3-sami.3` to `v1.51.3-sami.4`, which adds that log
+  (reearth/ygo#332).
+
+- A browser that opens a document while Dispatch closes that document's room now keeps getting the
+  document's edits. Dispatch closes a room when an issue closes, when it evicts a stale or failed
+  room, and at shutdown, and each close takes ygo a moment: it closes the browsers it found, waits
+  for them and makes the room's writes durable before it removes the room. A browser that connected
+  in that moment joined the room all the same, and ygo closed only the browsers it had found, so
+  that one stayed on a room the server no longer had: no later edit by anyone reached it, and
+  nobody saw its own edits, until it reconnected for some other reason. The ygo pin moves from
+  `v1.51.3-sami.1` to `v1.51.3-sami.3`, where a forced close also closes such a browser before it
+  returns, so the dashboard's usual reconnect takes it to the live room (reearth/ygo#331,
+  INFRA-403).
+
+- An agent woken by a Slack message now reads the words the message carries, wherever it carries
+  them. A Slack delivery's `text` is the message's own text and then every display string its
+  blocks and then its attachments hold — the strings under `pretext`, `author_name`,
+  `author_subname`, `title`, `text`, `alt_text`, `value` and `footer`, at any depth,
+  each object read with those names in that rank and then its remaining keys alphabetically, so a
+  section's own text precedes its fields and a button's label its hidden value — joined by line
+  feeds, and the summary shows the first line. Blocks come before attachments because Slack
+  renders a block as the message body and an attachment after it. An attachment's `fallback` is
+  read last of all, after everything else that attachment carries, and only when nothing in that
+  attachment said it already: it is the plain-text copy Slack shows where the attachment itself
+  cannot be shown, so a coloured alert whose `fallback` repeats its own section delivers that line
+  once, and one whose `fallback` says more delivers the attachment's body first. An app that
+  posts a formatted message leaves `text` empty and puts the words in `blocks` or `attachments`,
+  and such a wake used to carry a summary ending in `: ` and a payload with no words in it at all;
+  an image-only post now carries the `alt_text` Slack renders in the image's place. A string an
+  object has already shown under another of its own names is not shown twice; two objects saying
+  the same thing are two
+  things a reader sees, so a message whose fields read `Passed 3`, `Failed 0`, `Skipped 0` keeps
+  both counts of `0` and two attachments both reading `ok` keep both. A string equal to the
+  message's own text, or to one of its lines, is dropped wherever it sits,
+  and a `rich_text` block that says nothing that text does not say
+  already is left unread — that tree is the Slack client's structured copy of a person's words,
+  and it is the one block kind the walk knows by name, which is why a message composed in a client
+  reads as it did, the `&`, `<` and `>` its author typed included. An app's own rich text, which
+  Slack tells app authors to post beside a short `text` field, says more than that field and is
+  read like any other block, as is a `rich_text` block nested in one already read. The delivered
+  text is still cut at 2,048 runes and marked `body_truncated`, and a deleted message still
+  delivers nothing (INFRA-180).
+
+- A Dispatch reference read no longer fails while the database holds an edge a newer build wrote.
+  `GET /api/v1/references` (`?to=` and `?from=`) and `GET /api/v1/artifacts/{id}/references`
+  answered `500` on a row whose other end is a node kind the running build does not know, which a
+  person saw as "Referenced by unavailable." and an agent's `dispatch read` as one `unavailable`
+  row; the build now leaves that edge out and lists every edge it knows. The `referenced_by_count`
+  of an issue and of every ask leaves it out too, so a count is the number of rows its panel lists,
+  and a document's `outgoing` no longer lists a target of a kind no client reads. A build that adds
+  a node kind to the graph can therefore roll out while the older build still serves reads.
+- The architecture import no longer fails on a branch head whose commit GitHub answers with more
+  than the 1 MiB response cap, as a commit touching many files did. `githubapp.Client.Ref` asks
+  `GET /repos/{owner}/{repo}/commits/{branch}` for the SHA alone
+  (`Accept: application/vnd.github.sha`) and refuses an answer that is not one 40-hex SHA, which a
+  directory read at it would have imported as an empty model (INFRA-390).
+- `GET /v1/registry/<session_id>` is the listener's authoritative answer about one session, so a
+  session that is working is no longer read as gone while a listener's session cache refills. The
+  read goes through that cache to the session bucket: a 200 carries the same body a row of `GET
+  /v1/sessions` carries (`session_id`, `machine_id`, `host`, `dir`, `port`, `title`,
+  `capabilities`, `self_subscribed`, `topics`, `roles`, `updated_at`, `last_seen`), a 413 naming
+  its size or a 400 naming the key refuses an id NATS will not take as a KV key, `404
+  {"error":"no live session <id>"}` is only the bucket's word that it holds no key for that id,
+  and a read that did not answer is `503 {"error":"envoy: the message bus did not answer:
+  <reason>"}` with `Retry-After: 1`. Dispatch asks about the one session it holds the id of
+  instead of fetching every live session and scanning the answer, so three decisions no longer
+  turn on one listener's cache: a comment mention's `session:` target, a broadcast's recipients
+  (each selected recipient read by its own id, eight reads in flight under one five-second
+  budget, and a read that did not answer refuses the whole send `503 ENVOY_UNAVAILABLE` with
+  nothing written), and whether an issue's claim holder is still working (the claim is free only
+  on the bucket's 404; anything else is a 503, never a live session's claim taken without
+  `{"force": true}`).
+- A listener whose durable consumer was deleted and created again under it, so that the durable
+  delivers to some other subscription, reports itself unhealthy and binds the durable again
+  instead of receiving nothing while every check passed. `GET /healthz` answers `503`
+  `unhealthy` with `durable consumer unavailable: not bound to this listener's subscription`,
+  and the self-health monitor treats an unbound durable as terminal: it confirms the reading
+  with a second one, rebinds, and reports success only once the server itself reports this
+  listener bound (INFRA-182).
+- No NATS server URL the bus logs carries its userinfo: `envoy nats reconnected` and the refusal
+  of a NATS server that is not this machine's wrote the configured URL whole, and nats.go
+  authenticates with a URL's userinfo, a user name alone as a token and `user:password` as a
+  password, so `NATS_URLS=nats://user:password@host:4222` put the password in the process's log.
+  Each URL is now written without its userinfo, as `envoy nats reconnect attempt failed` writes
+  its servers (INFRA-182).
 - `agent-secrets secret` writes on a dev box under the person's own Google sign-in, with no setup
   but `gcloud auth login`, and never tells a person to run `gcloud auth application-default login`,
   which replaces a machine's own credentials for every program that uses them. A write under
@@ -1121,6 +1632,52 @@
   name the file), a machine's credentials it names are refused for a write rather than replaced,
   and a command printed for running again starts with `GOOGLE_APPLICATION_CREDENTIALS=…`, naming
   the file. The `--profile` refusal under the GCP store names the Google sign-in it uses instead.
+
+- With two `envoy-dispatch` processes on one database, a document whose room one process held
+  behind the durable head no longer answers every write with `503 DOC_SERVICE_UNAVAILABLE` for a
+  while, and a version named there no longer records text missing the other process's edit
+  (INFRA-218). A settlement the durable gate refused from such a room was retried on the same
+  room, which can never pass the gate, so its third refusal failed the room
+  (`document settlement failed 3 times`) and every transaction on the document was refused until
+  the eviction ran. The refusal now closes the room and settles it again from the reloaded one. A
+  named or snapshot version taken from a room behind the head rendered that room's text while
+  recording the stored head, so no later settlement versioned the other process's words, and it
+  listed the room's unstored browser edits, whose authors were listed again once the edit was
+  resent; it now renders the stored document and lists none of them, and neither does a version
+  that a write of its own renders over the stored document (an edit with a summary, an accepted
+  suggestion, an anchor's snapshot). The settlement's close and the stale-room evictor's both
+  reserve the room they checked, so a write that would open between the check and the close
+  answers 503, and the caller's retry lands on the reloaded room, instead of being forgotten with
+  the closed one; and neither closes a room that replaced the one it checked, including one ygo's
+  idle sweep retired and a load replaced before the close reached it. A write that opens while a
+  settlement is armed, fired or running takes the settlement over and arms it when it ends, so a
+  write that changed nothing no longer leaves the document's settlement to the one-minute
+  resumption.
+
+- A person who opens a Dispatch document while the service is force-closing that document's room
+  keeps the credit for what they type (INFRA-352). The service forces such a close when the room
+  fails, when another process's write leaves it behind the stored document, and when a test or the
+  browser-test harness asks, and it threw the room's in-memory record away once the close
+  returned. The browser registers before its room is loaded, the room that replaces the closed one
+  loads, and an edit typed in that room is credited, all while that record is still the one the
+  service holds, so the throw-away took the person's credit with it: the next version left them
+  off its author list. It also lost the issue's closed flag, credited the document's existing
+  decision blocks to whoever edited next, and left the settlement the new room had armed to run a
+  settle delay late. The close now keeps the record while anything holds it and forgets it when
+  nothing does, as every other end of a room does. Only a failed room's record still goes, since
+  it carries the failure, and the browsers that joined while it was evicted are handed to the
+  record registered in its place. A room that loads onto a kept record takes the latest edit
+  source the stored document names, none included, unless the record recorded a newer one, so
+  another process's edit that several browsers could have made is not credited to whoever edited
+  here before; the closed room's settlement failures end with its generation rather than once the
+  close returns, so they never wipe the failures of the room that replaced it, and an issue's
+  close ends them the same way; the close of a room behind the stored document carries the
+  service's own mark, so a closed issue no longer refuses it and such a room is closed rather than
+  left resident with text the store no longer holds until its idle minute runs out; and the
+  browser-test harness's quiesce drops the edit source of
+  the settlement it cancels, and once its closes have ended drops any source a reconnect or an
+  edit recorded meanwhile, so the record of a closed document it truncates away is not kept for
+  ever.
 
 - A burst of device logins no longer stalls the secrets broker's database pool. Each
   `POST /v1/oauth/device_authorization` held its provider transaction's pooled connection while

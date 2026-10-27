@@ -243,7 +243,7 @@ func replayDispatchDecision(input json.RawMessage) ([]byte, error) {
 	}
 	kind := DesignGateEventKind(strings.TrimPrefix(decoded.Event.Type, "artifact."))
 	version := fixtureVersion(decoded.Event.Payload)
-	after := ApplyDesignGateEvent(before.record(decoded.Event.Key), kind, version)
+	after := ApplyDesignGateEvent(before.record(decoded.Event.Key), kind, version, record.EventMark{})
 	if sameGate(before.record(decoded.Event.Key), after) {
 		return canonicalJSON(map[string]any{})
 	}

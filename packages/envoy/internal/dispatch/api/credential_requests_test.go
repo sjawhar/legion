@@ -6,23 +6,51 @@ package api
 
 import (
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-const credentialTestUIToken = "dispatch-ui-token"
+// credentialTestAccountToken stands in for Dispatch's own projected ServiceAccount token: what
+// the fake broker sees it present, since no fake verifies one.
+const credentialTestAccountToken = "dispatch-account-token"
+
+// accountTokenFile writes token to a file of the test's own directory, as a pod's projected
+// token volume holds it, and answers the path the client reads its bearer from.
+func accountTokenFile(t *testing.T, token string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte(token), 0o600); err != nil {
+		t.Fatalf("write the token file: %v", err)
+	}
+	return path
+}
 
 // newCredentialTestHandler mounts the real routes with AgentSecrets pointed at brokerURL ("" to
 // leave the feature off). It never shares newTestServer's testServerOptions on purpose: every
 // other API test leaves the feature off, and this file's tests are the only ones that need it on.
 func newCredentialTestHandler(t *testing.T, brokerURL string) http.Handler {
+	t.Helper()
+	tokenFile := ""
+	if brokerURL != "" {
+		tokenFile = accountTokenFile(t, credentialTestAccountToken)
+	}
+	return newCredentialTestHandlerReading(t, brokerURL, tokenFile)
+}
+
+// newCredentialTestHandlerReading is newCredentialTestHandler with the client reading its bearer
+// from tokenFile, for a test of a token file Dispatch cannot read.
+func newCredentialTestHandlerReading(t *testing.T, brokerURL, tokenFile string) http.Handler {
 	t.Helper()
 	database := storetest.Open(t)
 	documentService := docs.New(docs.Deps{
@@ -40,7 +68,7 @@ func newCredentialTestHandler(t *testing.T, brokerURL string) http.Handler {
 	}
 	if brokerURL != "" {
 		depsInput.AgentSecretsURL = brokerURL
-		depsInput.AgentSecretsToken = credentialTestUIToken
+		depsInput.AgentSecretsTokenFile = tokenFile
 	}
 	deps, err := NewDeps(depsInput)
 	if err != nil {
@@ -170,8 +198,8 @@ func TestCredentialRouteForwardsBrokerSuccessBodyAndAuth(t *testing.T) {
 	if response.Body.String() != `{"record_id":"rec1","state":"pending"}` {
 		t.Fatalf("body = %s, want the broker's body verbatim", response.Body.String())
 	}
-	if rig.lastAuth != "Bearer "+credentialTestUIToken {
-		t.Fatalf("broker saw Authorization = %q, want the configured UI token", rig.lastAuth)
+	if rig.lastAuth != "Bearer "+credentialTestAccountToken {
+		t.Fatalf("broker saw Authorization = %q, want Dispatch's own ServiceAccount token", rig.lastAuth)
 	}
 }
 
@@ -206,7 +234,7 @@ func TestCredentialRouteRelaysRequestBodyVerbatim(t *testing.T) {
 }
 
 // TestDecisionsNameTheCallerNeverTheBrowsersApprover pins the one thing Dispatch adds to a
-// decision: the broker trusts the approver field on the UI bearer's word, so approve, deny and
+// decision: the broker trusts the approver field on its listed caller's word, so approve, deny and
 // revoke must send the login Dispatch's own session resolved, canonical lowercase, and forward a
 // machine login's typed code — never an approver, or anything else, the browser put in its body.
 func TestDecisionsNameTheCallerNeverTheBrowsersApprover(t *testing.T) {
@@ -251,6 +279,43 @@ func TestCredentialRouteTransportFailureIsAgentSecretsUnavailable(t *testing.T) 
 	}](t, response)
 	if body.Code != "AGENT_SECRETS_UNAVAILABLE" {
 		t.Fatalf("code = %q, want AGENT_SECRETS_UNAVAILABLE", body.Code)
+	}
+}
+
+// A token file Dispatch cannot read stops the call before the broker is asked, so the answer
+// names Dispatch's own credential, never the unreachable broker 503 AGENT_SECRETS_UNAVAILABLE
+// would send the operator to, and the one log line it writes names the file to fix.
+func TestCredentialRouteWithAnUnreadableAccountTokenNamesDispatchsOwnCredential(t *testing.T) {
+	rig := newFakeBrokerRig(t)
+	missing := filepath.Join(t.TempDir(), "missing")
+	handler := newCredentialTestHandlerReading(t, rig.server.URL, missing)
+	previous := slog.Default()
+	logs := &storetest.LockedLog{}
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/credential-requests/rec1", nil, "alice")
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500: %s", response.Code, response.Body.String())
+	}
+	body := decodeBody[struct {
+		Code string `json:"code"`
+	}](t, response)
+	if body.Code != "AGENT_SECRETS_ACCOUNT_TOKEN_UNREADABLE" {
+		t.Fatalf("code = %q, want AGENT_SECRETS_ACCOUNT_TOKEN_UNREADABLE", body.Code)
+	}
+	if rig.lastAuth != "" {
+		t.Fatalf("the broker was called with Authorization %q, want no call at all", rig.lastAuth)
+	}
+	// The request's own access-log line is not the record this test is about.
+	var lines []string
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		if !strings.Contains(line, `msg="`+accesslog.Message+`"`) {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], "level=ERROR") || !strings.Contains(lines[0], "path="+missing) {
+		t.Fatalf("logged %q, want one ERROR line naming %s beside the access line", logs.String(), missing)
 	}
 }
 

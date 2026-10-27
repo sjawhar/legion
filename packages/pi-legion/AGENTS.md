@@ -2,8 +2,9 @@
 
 Tracked Oh My Pi extension package `@sjawhar/pi-legion`: the Legion entry (`extensions/legion.ts`),
 the Legion lifecycle modules (`src/`), the task agents Legion's prompts dispatch (`agents/`), and
-the eight Legion skills (`legion-architect`, `legion-controller`, `legion-oracle`, `legion-retro`,
-`legion-worker`, `ce-simplify-code`, `thermonuclear-code-quality`, `thermonuclear-deep-review`),
+the nine Legion skills (`legion-architect`, `legion-controller`, `legion-oracle`, `legion-retro`,
+`legion-worker`, `leading-a-work-stream`, `ce-simplify-code`, `thermonuclear-code-quality`,
+`thermonuclear-deep-review`),
 staged into `dist/skills` by `scripts/pi-plugin-prepack.sh` at the repository root. It is installed
 beside `@sjawhar/pi-envoy` (`packages/pi-envoy`), which every session loads for Envoy messaging and
 the Dispatch tools; the Legion daemon installs both into its Oh My Pi profile and a worker image
@@ -77,9 +78,9 @@ variables (`ENVOY_URL`, `ENVOY_NATS_URL`, `ENVOY_TOKEN_FILE`, read by `@legion/e
 `NATS_NKEY_SEED_FILE` when the daemon has a NATS nkey seed, and `DISPATCH_URL`/`DISPATCH_TOKEN_FILE`
 when the daemon has `dispatch_url` configured — and, beside the pane, the environment of a pod's
 `workspace-init provision` init container (`initEnvironment`, `internal/runtime/sandbox/manifest.go`:
-the image's `PATH`, `LEGION_EXPECT_ISSUE_VOLUME` when the issue's volume must already hold the clone
-or a retained session, `LEGION_WORKSPACE_RECOVERED_FROM` on a relaunch after that volume was lost,
-and the XDG base directories), which the image's own `legion`, built from the same commit as this
+the image's `PATH` and the XDG base directories, and nothing of a disk carried forward — the pod's
+disk is created with the pod and empty, so every provision is the first), which the image's own
+`legion`, built from the same commit as this
 plugin, reads. A change to any of these surfaces bumps the field and the
 daemon's `DaemonAPIVersion` (`internal/api/version.go`, whose doc comment is the contract's
 history) in the same commit: `packages/contracts/fixtures/daemon-api/version.json`, written by the
@@ -89,11 +90,27 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 35's `settings` on
+number is the one `DaemonAPIVersion` declares, last bumped by contract 40's `awaiting_person`
+phase and strict `waitingOn` issue view on `GET /legion/v1/state` (a root that gave its admission
+slot up while its architect waits on a person, and what it waits on; a 39 plugin rejects both),
+after contract 39's one-container issue pod (INFRA-208: a sandbox locator of an issue pod's role
+names container `roles`, and `settings` on `GET /legion/v1/state` gives
+`runtime.kubernetes.resources` as `{issue, controller}`), after contract 38's blocked issues on
+`GET /legion/v1/state` (INFRA-225: `admission.blocked` lists every root and child Legion is waiting
+to start behind an unfinished Dispatch issue, and `release_children` answers `started` and `held`
+beside `released`), after contract 37's pod-owned issue disk
+(INFRA-80: an issue's disk is a generic ephemeral volume its pod owns, created with the pod and
+deleted with it, so the init container above is no longer told `LEGION_EXPECT_ISSUE_VOLUME` and the
+lost-disk machinery that variable drove — `workspace-init`'s exit code 3, its recovery marker, the
+probe for an issue's retained sessions and `legion sessions mark-lost` — is gone, and
+`runtime.kubernetes.session_store` must name a store that keeps sessions in a database, `postgres`
+or `cloudsql-iam`), after contract 36's pull request `state`
+on `GET /legion/v1/state` (INFRA-229: `open`, `merged` or `closed`, always emitted, since a merged
+root's close now waits for the rest of its tree), after contract 35's `settings` on
 `GET /legion/v1/state` (LEGION-791: the daemon's resolved legion.yaml with every credential,
 credential source and credential file path left out, parsed loosely so a later legion.yaml key
 bumps nothing), after contract 34's shared issue scratch
-(INFRA-31: every role container of a Kubernetes pod, a workflow role's and the
+(INFRA-31: every role of a Kubernetes pod, a workflow role's and the
 controller's, told the issue's own `/legion/scratch/{tmp,cache,data,bun/install/cache}` through
 `TMPDIR`, `XDG_CACHE_HOME`, `XDG_DATA_HOME` and `BUN_INSTALL_CACHE_DIR`, beside the issue's
 `GOCACHE` and `GOMODCACHE` pair, with `XDG_STATE_HOME=/legion/scratch/state/<role>` the one
@@ -131,7 +148,7 @@ and `live` is gone from the capability status enum), after contract 20's control
 controller holds the review App's GitHub token like every role — `POST
 /legion/v1/controller/github-credential` answers the operator-launched controller's `legion
 controller start` the review App's gh files for the current controller capability, and the
-daemon-launched controller's pod gets the GitHub variables above like any role's container),
+daemon-launched controller's pod gets the GitHub variables above like any role of an issue pod),
 contract 19's token file (LEGION-631: the three routes that redeemed a grant for a GitHub or git
 credential and the grant request's `push` are gone, the pane
 gains the GitHub variables above and loses the absolute-path pins of its gh, git and jj, the
@@ -139,7 +156,8 @@ credential-helper variable and `LEGION_GRANT_FILE`; `POST /legion/v1/handoff/com
 `commit` and answers `note`; `POST /legion/v1/threads/resolve` is deleted), contract 18's
 independent issue pods, each on a volume of its own (LEGION-632: the init container's environment
 is the four surfaces above and nothing of a shared disk — no removable-workspaces list, no lock
-wait, no role or generation — and its volume expectation is `LEGION_EXPECT_ISSUE_VOLUME`), contract 17's `dispatch`
+wait, no role or generation — and its volume expectation is `LEGION_EXPECT_ISSUE_VOLUME`, the
+variable contract 37 removed), contract 17's `dispatch`
 command instructions in every daemon role prompt (LEGION-588), contract 16's `capabilities` list on
 `GET /legion/v1/state` (LEGION-578), contract 15's Sandbox locator in an issue's shared pod
 (LEGION-462), contract 14's daemon-launched controller pod (LEGION-592) and contract 13's `push`
@@ -180,8 +198,13 @@ steps — the task whose turn is running; or, once that turn ends and retires it
 is left serving, which is what answers for a worker woken by a notice; or, for a claim that has
 served no run at all, a task it holds that the agent may have read. A task the agent refused is
 not one it read, so it answers for none of them. `POST /legion/v1/handoff/complete` answers 409
-`HANDOFF_NO_RUN` to a claim that has taken no task at all, and the workflow refuses
-`HANDOFF_STALE_GENERATION` for a run the issue has left. The pane's `LEGION_GENERATION` is the
+`HANDOFF_NO_RUN` to a claim that has taken no task at all, and `HANDOFF_STALE_GENERATION` to a
+completion of a run the issue has left, naming the current run's queued task when the claim holds
+one. Both are refused before the fact is applied, so neither is recorded: the same call in that
+task's turn is applied. The workflow's own stale refusal, for an issue that moves between the
+route's read and the fact's transaction, is still recorded, and blocks no later call: its key
+carries the issue generation the route read, which the issue has left, so a retry is refused at the
+route and the new run's completion has another key. The pane's `LEGION_GENERATION` is the
 claim's launch counter and says nothing about the run; nothing reads it for this.
 Contract 7 adds `holdReason` to an issue on `/legion/v1/state`: `escalated` while an issue its
 architect escalated stays held in a tree that runs, absent otherwise (a tree that lingers or is
@@ -241,7 +264,7 @@ grant on `/grants` and posts it with the request, so no grant is written to the 
 keeps its claim for resumption.
 
 A daemon that sets `controller: daemon` launches the controller itself, in a Sandbox pod of its own
-whose one container, `controller`, runs `legion launcher` as an issue pod's role containers do: the
+whose one container, `controller`, runs `legion launcher` as an issue pod's `roles` container does: the
 launcher starts the session's shim and Oh My Pi with `LEGION_CONTROLLER=1` and
 `LEGION_BOOT_TOKEN_FILE`, the generation's boot token it wrote into its private directory from the
 daemon's start command (`controllerSession` in
@@ -368,10 +391,11 @@ there; `pending` is refused on a phase completion) and `summary` alone, no hando
 the daemon refuses it with `CHECK_NOT_OPEN`, `CHECK_LOOK_NOT_OPEN` or `CHECK_VERDICT_REQUIRED`
 (`packages/daemon/internal/api/handoff.go`). The daemon reads no
 handoff file and no branch head: it refuses `HANDOFF_NOT_NEW` (the commit is the one the role
-reported for its previous phase) and, for the merger's `ready: true`, runs READY's checks on the
-pull request's head, each refusal named in the merger's role prompt
+reported for its previous phase) and, for the merger's `ready: true`, reads the pull request's
+head on GitHub and refuses a packet the workflow must not take on, each refusal named in the
+merger's role prompt
 (`packages/daemon/internal/prompts/go/merger.md`); a refusal changed nothing, and the answer's
-`note` is what READY's checks said when they read no head, or the by-hand note
+`note` is the already-merged sentence, for a pull request merged before READY, or the by-hand note
 (`MANUAL_MERGE_REQUIRED:`) for a pull request a person merges. The
 operation mints its grant in-process and posts it with the request; nothing is written to the
 pane. A predecessor's handoff is read with `read` from the issue workspace. GitHub is the pane's
@@ -432,7 +456,7 @@ which hands both plugin entries to the Oh My Pi child by path.
 | Shared modules and the interface | `../pi-shared/` | `@legion/pi-shared`: the interface this entry reads (`interface`), the role-claim bridge, the injected-user-turn record, the subagent check, the host types and `toolSuccess`/`toolFailure`, and the Legion modules claude-envoy's MCP server shares with this entry: the daemon client (`daemon-client`), the claim boot (`legion-claim-core`), the `legion` tool's phase ops (`legion-phase-ops`), the handoff-commit lookup (`handoff-commit`) and the stale git lock note (`git-lock`); inlined into `dist/legion.js` by `bun build`. See `packages/pi-shared/AGENTS.md` |
 | Extension unit tests | `extensions/legion.test.ts` | Mocked Pi and NATS surface; every test starts from no `LEGION_*`/`ENVOY_*`/`DISPATCH_*` environment and sets only what it declares, except `ENVOY_CONFIG_FILE`, which the file points at an envoy.json that holds no section before it imports the Envoy entry (the entry picks its file at module load) and `beforeEach` sets again, with `OMP_PROFILE` and `PI_CODING_AGENT_DIR` unset, so no caller's envoy.json reaches a pane; each stubs `fetch` itself, and `afterEach` resets the process-wide interface (`resetEnvoyPluginInterfaceForTests`) so one test's bound Envoy instance or bootstrapped session never reaches the next. Pins the three Envoy-plugin refusals, that `/legion-claim-controller` answers the sentence without exiting, and that `register_gate`'s lookup reads the envoy.json the Envoy entry chose |
 | Both entries in one process | `extensions/legion-role-claim.test.ts`, `extensions/legion-phase-stall-omp.test.ts`, `extensions/legion-role-tools-omp.test.ts` | Test-only; the shipped sources never import the sibling. `legion-role-claim.test.ts` loads `../pi-envoy/extensions/envoy.ts` by relative path: the role claim through the interface with Legion initialised first. The two omp tests run through the harness's `runLegionPane` (`@legion/pi-shared/test/omp-harness`), which names both entries by path for the Oh My Pi child: the phase stall, and no role refused a tool, on the pinned Oh My Pi (`LEGION_TEST_OMP`) |
-| Shipped agents | `agents/`, `src/shipped-agents.test.ts` | The task agents Legion's prompts dispatch (`oracle`; the reviewer's pair `thermonuclear-deep-review` and `thermonuclear-code-quality`; `deep-worker`; the planner's `plan-gap-analyst` and `plan-reviewer`); each declares the name of its file and its model only as role aliases |
+| Shipped agents | `agents/`, `src/shipped-agents.test.ts` | The task agents Legion's prompts dispatch: `oracle`, the reviewer's pair `thermonuclear-deep-review` and `thermonuclear-code-quality`, `deep-worker`, and the planner's `plan-gap-analyst` and `plan-reviewer`. The root architect also runs the planner's two on its spec before every approval request. Each agent declares the name of its file, and its model only as role aliases. The planner's two carry `bash` and no edit or write tool. Oh My Pi has no per-agent command limit, so their prompts hold them to read-only commands |
 | Daemon contract pin | `src/daemon-api-version.test.ts` | Pins `legion.daemonApiVersion` to `packages/contracts/fixtures/daemon-api/version.json`, which the daemon's golden test writes |
 | Capability report | `src/capability-report.ts`, `src/capability-report.test.ts` | The six live capability checks a claim session runs at boot and sends with `claims/ready` (see Daemon contract): `measureCapabilities` over a `CapabilityHost` that wraps every Oh My Pi import and the two child commands (`dispatch read --issue <issue>`, `gh api graphql {viewer{login}}`), with the budgets (8 s a check, 10 s the report) and each row's detail strings; `ompCapabilityHost` is the production host, string-literal `import()` only. The test fakes the host; `extensions/legion.test.ts` substitutes one through `setLegionCapabilityHostForTests` |
 | Skills partition and its guard | `src/skills-guard.test.ts`, `scripts/pi-plugin-prepack.sh` (repository root) | The partition this package ships, staged as its prepack stages it, held to the size, name and link rules in `@legion/pi-shared/test/skills-guard`, with the daemon's prompts as linking roots and every `legion-worker` reference linked from somewhere |

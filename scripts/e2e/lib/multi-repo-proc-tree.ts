@@ -60,6 +60,8 @@ export interface FakeProcTreeOptions {
   duplicateAgent?: boolean;
   shimParent?: string;
   shimExe?: string | null;
+  /** The shim's own cmdline before its `--`, for a process that names worker-shim elsewhere. */
+  shimCommand?: string[];
 }
 
 export function fakeProcTree(
@@ -76,7 +78,13 @@ export function fakeProcTree(
   for (const shimPid of shimPids) {
     writeProcEntry(root, shimPid, {
       ppid: shimParent,
-      cmdline: ["legion", "worker-shim", "--connect", "tcp://x:1", "--", ...agentArgv],
+      cmdline: [
+        ...(opts.shimCommand ?? ["legion", "worker-shim"]),
+        "--connect",
+        "tcp://x:1",
+        "--",
+        ...agentArgv,
+      ],
       environ: roleEnviron,
       ...(shimExe === null ? {} : { exe: shimExe }),
     });

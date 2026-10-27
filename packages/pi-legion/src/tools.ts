@@ -4,7 +4,11 @@ import {
   type LegionGrant,
   type LegionPhase,
 } from "@legion/contracts/legion-api";
-import type { LegionDaemonClient } from "@legion/pi-shared/daemon-client";
+import {
+  type DaemonRestartRetry,
+  type LegionDaemonClient,
+  retryWhileDaemonRestarts,
+} from "@legion/pi-shared/daemon-client";
 import {
   type ClaimCapability,
   executePhaseOp,
@@ -142,9 +146,19 @@ export function createLegionTool(deps: {
    * looked up in Dispatch as a `dispatch` command's `--artifact` is; throws naming the reference
    * when none matches, or when it names two documents. */
   readonly resolveDocument: (issue: string, reference: string) => Promise<string>;
+  /** The clock `handoff_complete` and `sign_off` wait out a daemon restart on; a test's own. */
+  readonly restartClock?: Pick<DaemonRestartRetry, "now" | "sleep">;
 }): RegisteredTool {
-  const { pi, daemon, session, controllerGrant, onPhaseCompleted, handoffCommit, resolveDocument } =
-    deps;
+  const {
+    pi,
+    daemon,
+    session,
+    controllerGrant,
+    onPhaseCompleted,
+    handoffCommit,
+    resolveDocument,
+    restartClock,
+  } = deps;
   return {
     name: "legion",
     label: "legion",
@@ -157,12 +171,26 @@ export function createLegionTool(deps: {
       after:
         PHASE_OP_SENTENCES.requestBackwardMove +
         "sign_off is the architect's acceptance of an issue in accepting, moving it to retro; the daemon refuses it in every " +
-        "other phase (SIGNOFF_OUTSIDE_ACCEPTING). " +
+        "other phase (SIGNOFF_OUTSIDE_ACCEPTING), and issues still running beneath it do not hold it: a root's close waits " +
+        "for them instead. " +
         "The controller's read_state returns the daemon's whole state and set_status moves an issue to todo, backlog or icebox. ",
     }),
     defaultInactive: true,
     parameters: toolSchema(pi),
-    execute: async (_id, parameters, _signal, _onUpdate, context) => {
+    execute: async (_id, parameters, signal, onUpdate, context) => {
+      // The three writes the daemon applies at most once however often they arrive
+      // (handoff_complete, sign_off, register_gate) wait out its restart until the agent's abort.
+      // The retry notice goes out once as a partial result, which Oh My Pi shows in its TUI and
+      // RPC event stream; the model sees only the final result.
+      const restart: DaemonRestartRetry = {
+        ...restartClock,
+        ...(signal === undefined ? {} : { signal }),
+        onRetrying: (message) => {
+          if (typeof onUpdate === "function") {
+            onUpdate({ content: [{ type: "text", text: message }], details: {} });
+          }
+        },
+      };
       try {
         const active = session(context);
         const operation = requiredString(parameters, "legion", "op");
@@ -171,7 +199,7 @@ export function createLegionTool(deps: {
         }
         if (active.kind !== "controller" && isPhaseOp(operation)) {
           const answer = await executePhaseOp(
-            { daemon: daemon(), claim: active, handoffCommit },
+            { daemon: daemon(), claim: active, handoffCommit, restart },
             parameters
           );
           if (operation === "handoff_complete") onPhaseCompleted(context);
@@ -216,8 +244,19 @@ export function createLegionTool(deps: {
             const reference = requiredString(parameters, operation, "artifactId");
             const isId = LegionGateRegisterRequest.shape.artifactId.safeParse(reference).success;
             const artifactId = isId ? reference : await resolveDocument(issue, reference);
-            const grantId = await mintClaimGrant(client, active);
-            await client.gateRegister({ grantId, issue, artifactId, version });
+            // The fact is keyed by the gate's issue, generation, document, version and Dispatch
+            // sequence; a repeat after the sequence moved is a re-registration the gate absorbs.
+            await retryWhileDaemonRestarts(
+              "register_gate",
+              async () =>
+                client.gateRegister({
+                  grantId: await mintClaimGrant(client, active),
+                  issue,
+                  artifactId,
+                  version,
+                }),
+              restart
+            );
             return jsonSuccess({});
           }
           case "release_children": {
@@ -242,11 +281,13 @@ export function createLegionTool(deps: {
             return jsonSuccess({});
           }
           case "sign_off": {
-            const grantId = await mintClaimGrant(client, active);
-            await client.signOff({
-              grantId,
-              issue: requiredString(parameters, operation, "issue"),
-            });
+            // A repeat after a sign-off that landed finds the issue in retro and changes nothing.
+            const issue = requiredString(parameters, operation, "issue");
+            await retryWhileDaemonRestarts(
+              "sign_off",
+              async () => client.signOff({ grantId: await mintClaimGrant(client, active), issue }),
+              restart
+            );
             return jsonSuccess({});
           }
           case "close_root": {

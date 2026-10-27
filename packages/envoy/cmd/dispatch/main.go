@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -83,17 +84,22 @@ type bootConfig struct {
 	// service-account tokens. Both set or neither; empty means no verifier.
 	OIDCIssuer   string
 	OIDCAudience string
-	// AgentSecretsURL is DISPATCH_AGENT_SECRETS_URL, the secrets broker's UI-bearer API; empty
-	// means the credential-request feature is off. AgentSecretsToken is the resolved UI bearer
-	// (required when AgentSecretsURL is set).
-	AgentSecretsURL   string
-	AgentSecretsToken string
+	// AgentSecretsURL is DISPATCH_AGENT_SECRETS_URL, the secrets broker's API; empty means the
+	// credential-request feature is off. AgentSecretsTokenFile is
+	// DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE, the file holding Dispatch's own projected
+	// Kubernetes ServiceAccount token (required when AgentSecretsURL is set). The file is read
+	// by the broker client on each call, never here: a projected token rotates.
+	AgentSecretsURL       string
+	AgentSecretsTokenFile string
 	// FileStoreBucket is DISPATCH_FILE_STORE_BUCKET: the bucket uploaded files are stored in.
 	// Empty keeps them in Postgres.
 	FileStoreBucket string
 	// ListenAddr is the address the server binds, from DISPATCH_LISTEN_HOST and DISPATCH_PORT
 	// (listenAddress). The dev sign-in fence checks this value, so what it checks is what binds.
 	ListenAddr string
+	// PprofAddr is where the profiling listener binds, 127.0.0.1 and DISPATCH_PPROF_PORT
+	// (pprofAddress); empty, nothing listens.
+	PprofAddr string
 	// DevSignIn (DISPATCH_DEV_SIGNIN=1) mounts GET /auth/_dev/signin behind the dev sign-in
 	// fence; the signing key is then per process.
 	DevSignIn bool
@@ -109,6 +115,9 @@ type bootConfig struct {
 	InsecureCookie bool
 	// EnvoyToken is ENVOY_TOKEN, the bearer every Envoy listener call sends.
 	EnvoyToken string
+	// Embedder is where meaning search embeds text (DISPATCH_EMBEDDER and DISPATCH_AZURE_*),
+	// checked whole; newEmbedder builds its client.
+	Embedder embedderConfig
 }
 
 func main() {
@@ -159,6 +168,12 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	// The profiler binds first, before NATS, migrations and the rest of boot, so a slow or hung
+	// boot can be profiled and a port clash refuses the boot before anything connects.
+	if _, err := startPprof(ctx, boot.PprofAddr); err != nil {
+		slog.Error("dispatch: pprof", "error", err)
+		os.Exit(1)
+	}
 
 	var natsClient *bus.Client
 	if boot.NATSDisabled {
@@ -280,14 +295,13 @@ func main() {
 		slog.Info("dispatch: verifying service-account tokens", "issuer", boot.OIDCIssuer, "audience", boot.OIDCAudience)
 	}
 
-	// embedder is nil (meaning search off, search answers keyword-only and says so) when no AWS
-	// region/credentials reach this process at boot - a CI job or a devbox with no AWS_REGION set
-	// - which embed.New reports as an error rather than a reason to refuse to boot.
-	var embedder embed.Embedder
-	if client, err := embed.New(ctx); err != nil {
-		slog.Warn("dispatch: meaning search unavailable", "error", err)
-	} else {
-		embedder = client
+	// embedder is nil (meaning search off, search answers keyword-only and says so) when Bedrock,
+	// the default place, finds no AWS region/credentials at boot - a CI job or a devbox with no
+	// AWS_REGION set - which newEmbedder logs as a warning rather than a reason to refuse to boot.
+	embedder, err := newEmbedder(ctx, boot.Embedder)
+	if err != nil {
+		slog.Error("dispatch: build the embedder", "error", err)
+		os.Exit(1)
 	}
 
 	appCtx, err := routes.BuildAppContext(appContextOptions(boot, routes.AppContextOptions{
@@ -319,7 +333,7 @@ func main() {
 	// maintenance loop below either runs once overall or is deliberately per-process. The ones
 	// that must run once overall take a named lease on this pool for the length of their pass
 	// (duty.Exclusive): a lease is a session-level advisory lock on a connection of its own, so
-	// it needs a pool the shared one's sixteen request connections are not spent on. A boot that
+	// it needs a pool the shared one's request connections are not spent on. A boot that
 	// cannot open it is a boot whose loops would each run everywhere, so it ends here. Under that
 	// lease each pass is also recorded with its loop's own period (duty_passes, migration 0115),
 	// which is what makes a loop run once per period rather than once per process: two tickers
@@ -348,25 +362,30 @@ func main() {
 	}
 
 	if natsClient != nil {
+		outboxPool, err := database.Pool.Outbox()
+		if err != nil {
+			slog.Error("dispatch: open the events outbox's pool", "error", err)
+			os.Exit(1)
+		}
 		go outbox.Run(ctx, outbox.Deps{
-			Store:     database,
+			Store:     &store.Store{Pool: outboxPool},
 			Publisher: natsClient,
 			Broker:    broker,
 			Docs:      documentService,
 			Leases:    leases,
 		})
 	}
-	// embedqueue.Run no-ops when its own Deps.Embedder is nil, so this always starts: a later
-	// deploy that grants Bedrock credentials needs no other wiring change to pick up meaning
-	// search for existing content once a backfill (envoy-dispatch backfill-embeddings) runs.
+	// embedqueue.Run no-ops when its own Deps.Embedder is nil, so this always starts: the server's
+	// embedding queue keeps coverage itself, so a later deploy that gives meaning search a place
+	// to embed needs no other wiring change and no person-run step to cover existing content.
 	// It gets a rate-limited wrapper around the same client api.Deps holds unwrapped above
-	// (embedder, line 296's Embedder field): the write-time queue's poller and a backfill run are
-	// the only two embedqueue callers, and pacing only their calls - never a live search
-	// request's own query embedding, which always goes straight through the unwrapped client -
-	// is what keeps a saturating backfill from taking live search down with it (LEGION-549 round
-	// 5; embed.RateLimitedEmbedder's own doc comment has the AIMD mechanism and the headroom
-	// this leaves). A nil embedder (meaning search off) stays nil rather than becoming a non-nil
-	// wrapper around nothing, which embedqueue.Run's own nil check depends on.
+	// (embedder, BuildAppContext's Embedder option): the queue is the only embedqueue caller, and
+	// pacing only its calls - never a live search request's own query embedding, which always
+	// goes straight through the unwrapped client - is what keeps saturating background work from
+	// taking live search down with it (LEGION-549 round 5; embed.RateLimitedEmbedder's own doc
+	// comment has the AIMD mechanism and the headroom this leaves). A nil embedder (meaning
+	// search off) stays nil rather than becoming a non-nil wrapper around nothing, which
+	// embedqueue.Run's own nil check depends on.
 	var backgroundEmbedder embed.Embedder
 	if embedder != nil {
 		backgroundEmbedder = embed.NewRateLimitedEmbedder(embedder)
@@ -390,6 +409,11 @@ func main() {
 	// version write stored: every mention indexed before migration 0092, and each rebuild-refs
 	// inserts (LEGION-531).
 	go documentService.RunReferenceExcerptReconciliation(ctx, leases)
+	// The block index: each document version no block-aware write indexed - every document at
+	// migration 0121, each version a build without the block index writes during a roll, and each
+	// rebuild-refs marks - and each comment, ask and issue message citing a block (`#b-`) that such
+	// a build indexed without the block grammar.
+	go documentService.RunBlockIndexReconciliation(ctx, leases)
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
 	if err != nil {
@@ -587,6 +611,11 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		return bootConfig{}, err
 	}
 	boot.ListenAddr = listenAddr
+	pprofAddr, err := pprofAddress(env)
+	if err != nil {
+		return bootConfig{}, err
+	}
+	boot.PprofAddr = pprofAddr
 	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_SETTLE_DELAY")); raw != "" {
 		if !boot.TestHooksEnabled {
 			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_SETTLE_DELAY")
@@ -652,13 +681,14 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 			return bootConfig{}, fmt.Errorf("DISPATCH_AGENT_SECRETS_URL=%q (expected an absolute http(s) URL with no path)", agentSecretsURL)
 		}
 		boot.AgentSecretsURL = agentSecretsURL
-		boot.AgentSecretsToken, err = agentSecretsToken(env)
-		if err != nil {
-			return bootConfig{}, err
+		boot.AgentSecretsTokenFile = strings.TrimSpace(env.get("DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE"))
+		if boot.AgentSecretsTokenFile == "" {
+			return bootConfig{}, errors.New("DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE is required when DISPATCH_AGENT_SECRETS_URL is set: Dispatch calls the broker with its own projected Kubernetes ServiceAccount token")
 		}
-		if boot.AgentSecretsToken == "" {
-			return bootConfig{}, errors.New("DISPATCH_AGENT_SECRETS_TOKEN_FILE or DISPATCH_AGENT_SECRETS_TOKEN is required when DISPATCH_AGENT_SECRETS_URL is set")
-		}
+	}
+	boot.Embedder, err = resolveEmbedder(env)
+	if err != nil {
+		return bootConfig{}, err
 	}
 
 	if devSignIn {
@@ -857,7 +887,7 @@ func appContextOptions(boot bootConfig, built routes.AppContextOptions) routes.A
 	built.EnvoyToken = boot.EnvoyToken
 	built.GitHubAPIBase = boot.GitHubAPIBase
 	built.AgentSecretsURL = boot.AgentSecretsURL
-	built.AgentSecretsToken = boot.AgentSecretsToken
+	built.AgentSecretsTokenFile = boot.AgentSecretsTokenFile
 	built.TestHooksEnabled = boot.TestHooksEnabled
 	built.DevSignIn = boot.DevSignIn
 	return built
@@ -896,18 +926,14 @@ func validateDefaultProject(ctx context.Context, database *store.Store, project 
 	return nil
 }
 
-func parsePositiveInt(raw string) (int, error) {
-	n := 0
-	for _, r := range raw {
-		if r < '0' || r > '9' {
-			return 0, fmt.Errorf("not a positive integer: %q", raw)
-		}
-		n = n*10 + int(r-'0')
+// parsePort reads the port a setting names: decimal digits alone, 1-65535. The error names the
+// setting, so a refusal says which variable to fix.
+func parsePort(name, raw string) (int, error) {
+	port, err := strconv.Atoi(raw)
+	if err != nil || strings.TrimLeft(raw, "0123456789") != "" || port < 1 || port > 65535 {
+		return 0, fmt.Errorf("invalid %s %q: want a port number 1-65535", name, raw)
 	}
-	if n == 0 {
-		return 0, fmt.Errorf("not a positive integer: %q", raw)
-	}
-	return n, nil
+	return port, nil
 }
 
 // openFileStore is the uploaded-file store boot names, or nil when DISPATCH_FILE_STORE_BUCKET is
@@ -1025,14 +1051,8 @@ func listenAddress(env settingValues) (string, error) {
 	port := strings.TrimSpace(env.get("DISPATCH_PORT"))
 	if port == "" {
 		port = defaultListenPort
-	} else {
-		parsed, err := parsePositiveInt(port)
-		if err != nil {
-			return "", fmt.Errorf("invalid DISPATCH_PORT: %w", err)
-		}
-		if parsed > 65535 {
-			return "", fmt.Errorf("invalid DISPATCH_PORT: %q", port)
-		}
+	} else if _, err := parsePort("DISPATCH_PORT", port); err != nil {
+		return "", err
 	}
 	return net.JoinHostPort(host, port), nil
 }

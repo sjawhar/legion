@@ -16,7 +16,7 @@ import {
   textPrimaryOnSuccessCallout,
   textPrimaryOnSurface,
 } from "../../theme/classes";
-import { actorLabel, describeAskResolutionActor } from "../refs/actor";
+import { AgentName, AskResolutionLine } from "../refs/AgentName";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
@@ -49,7 +49,8 @@ export function AskEditHistory({ ask, edits }: { ask: Ask; edits: AskEdit[] }): 
                 </div>
                 <AskOptionList options={edit.previous.options} selected={[]} />
                 <p className="mt-1">
-                  Reworded by {actorLabel(edit.edited_by)} · <Timestamp at={edit.at} />
+                  Reworded by <AgentName actor={edit.edited_by} inline /> ·{" "}
+                  <Timestamp at={edit.at} />
                 </p>
               </div>
             ))}
@@ -164,7 +165,9 @@ function AnsweredAsk({
           <MarkdownBody markdown={ask.question} />
         </div>
       )}
-      <p className={`mt-1 text-xs ${calloutSuccessTimestampText}`}>{actorLabel(ask.author)}</p>
+      <p className={`mt-1 text-xs ${calloutSuccessTimestampText}`}>
+        <AgentName actor={ask.author} inline />
+      </p>
       {ask.kind === "approval" && documentLink ? (
         <p className={`mt-1 text-sm font-medium ${textPrimaryOnSuccessCallout}`}>
           <AskApprovalLink ask={ask} />
@@ -237,7 +240,9 @@ function ResolvedAsk({
       >
         {resolution.kind === "retracted" ? "Retracted" : "Resolved"}
       </span>
-      <p className={`mt-1 text-xs ${textMutedOnSurface}`}>{actorLabel(ask.author)}</p>
+      <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
+        <AgentName actor={ask.author} inline />
+      </p>
       {ask.kind === "approval" && documentLink ? (
         <p className={`mt-1 text-sm ${linkText} ${linkHoverText}`}>
           <AskApprovalLink ask={ask} />
@@ -246,7 +251,7 @@ function ResolvedAsk({
       <AskOptionList options={ask.options} selected={[]} />
       <AskEditHistory ask={ask} edits={edits} />
       <p className={`mt-2 text-xs ${textMutedOnSurface}`}>
-        Asked <Timestamp at={ask.created_at} /> · {describeAskResolutionActor(resolution)} -{" "}
+        Asked <Timestamp at={ask.created_at} /> · <AskResolutionLine resolution={resolution} /> -{" "}
         <MarkdownBody markdown={resolution.reason} variant="inline" />
       </p>
     </article>

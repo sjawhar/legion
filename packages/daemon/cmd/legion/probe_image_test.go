@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
+	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/capabilities/capabilitiestest"
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
@@ -148,6 +149,22 @@ func probeImage(args ...string) (int, string, string) {
 	return code, stdout.String(), stderr.String()
 }
 
+// With --role-namespaces the probe runs a role generation's namespaces first
+// (launcher.CheckRoleNamespaces, whose own test runs a whole generation) and refuses, exit 1,
+// naming the check, when it fails; here its layout cannot be made, since the directory named is a
+// file. Nothing of the image's launch probes runs: no Oh My Pi is named at all.
+func TestProbeImageRefusesWhenTheRoleNamespaceCheckFails(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LEGION_OMP_PATH", "")
+	code, stdout, stderr := probeImage("--plugin-root", t.TempDir(), "--envoy-plugin-root", t.TempDir(), "--role-namespaces", file)
+	if code != 1 || !strings.Contains(stderr, "legion probe-image: role namespaces: make the probe's layout") || stdout != "" {
+		t.Errorf("probe-image with a failing role-namespace check = %d, stdout %q, stderr %q; want exit 1 naming the check", code, stdout, stderr)
+	}
+}
+
 // tableLines are stdout's lines before the NATS user line and the OK line: the capability table.
 // Each is one row of capabilities.Table, rendered by its Line, so stdout is split on the row shape.
 func tableLines(stdout string) []string {
@@ -236,7 +253,7 @@ func TestProbeImageRefusesAnImageWhoseWorkspaceInitTakesNoDefaultBranch(t *testi
 // lastContractWithoutGhBundles is the last daemon API contract whose image carries no `gh`
 // wrapper at /opt/legion/bin/gh and whose `legion` has no `gh` or `git-credential` command: 29,
 // main's contract when this work took the number above it (pi-legion v10.5.0 declares it). A
-// role container of an image built at it runs the real gh on one owner's files, and its clone's
+// role of an image built at it runs the real gh on one owner's files, and its clone's
 // `legion git-credential` helper exits 2.
 const lastContractWithoutGhBundles = 29
 
@@ -297,6 +314,34 @@ func TestProbeImageWithSkipAgentModelsSaysSoOnTheOKLine(t *testing.T) {
 
 	if want := "\nprobe-image: OK (" + omp + ") session-storage=probed extensions=discovered agent-models=skipped" + capabilityMarks + thisBinarysContract + "\n"; code != 0 || !strings.HasSuffix(stdout, want) {
 		t.Fatalf("probe-image --skip-agent-models = %d %q %q, want the OK line %q", code, stdout, stderr, want)
+	}
+}
+
+// An image built for a deployment that turns Oh My Pi's browser off carries no Chromium: without
+// --skip-browser the probe refuses it on the browser row, and with the flag it passes, its table's
+// browser row unchecked and its OK line's capabilities mark browser-skipped, which the daemon's
+// probe Sandbox refuses (bootprobe.Capabilities is not CapabilitiesAll).
+func TestProbeImageWithSkipBrowserPassesAnImageWithNoBrowser(t *testing.T) {
+	omp := imageOmp(t)
+	img := inImage(t, thisBinarysContract, omp)
+	img.without(t, "chromium")
+
+	code, stdout, stderr := probeImage(img.flags("--skip-agent-models")...)
+	if code != 1 || !strings.HasSuffix(stderr, "legion probe-image: capability browser is missing: chromium is not on PATH, and PUPPETEER_EXECUTABLE_PATH names no executable\n") {
+		t.Fatalf("probe-image without --skip-browser = %d %q %q, want exit 1 on the browser row", code, stdout, stderr)
+	}
+
+	code, stdout, stderr = probeImage(img.flags("--skip-agent-models", "--skip-browser")...)
+
+	want := "\nprobe-image: OK (" + omp + ") session-storage=probed extensions=discovered agent-models=skipped capabilities=browser-skipped model-fallback=off daemon-api-version=" + thisBinarysContract + "\n"
+	if code != 0 || !strings.HasSuffix(stdout, want) {
+		t.Fatalf("probe-image --skip-browser = %d %q %q, want the OK line %q", code, stdout, stderr, want)
+	}
+	if row := "probe-image: capability browser: " + capabilities.StatusUnchecked + " (not checked (--skip-browser): "; !strings.Contains(stdout, row) {
+		t.Errorf("stdout = %q, want the browser row %q…", stdout, row)
+	}
+	if got := bootprobe.Capabilities(stdout); got != bootprobe.CapabilitiesBrowserSkipped {
+		t.Errorf("Capabilities(%q) = %q, want %q, which the daemon's probe refuses", stdout, got, bootprobe.CapabilitiesBrowserSkipped)
 	}
 }
 

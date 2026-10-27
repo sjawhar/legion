@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
+	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
@@ -46,7 +47,12 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // with none named, against this binary's own DaemonAPIVersion, which the plugin packed from the
 // same commit must declare. The load probe also holds every task agent the
 // prompts dispatch to its own model; the OK line says so (agent-models=resolved), or that the
-// build's probe, which has no operator model configuration, skipped it (--skip-agent-models). The
+// build's probe, which has no operator model configuration, skipped it (--skip-agent-models).
+// With --skip-browser, the build of an image for a deployment that turns Oh My Pi's browser off
+// (`browser.enabled: false`), which carries no Chromium, the capability check leaves the browser
+// row unchecked, and the OK line's capabilities mark says so (capabilities=browser-skipped, which
+// the daemon's probe Sandbox refuses: it never passes the flag, and passes only an image whose
+// whole capability list was checked). The
 // probe Sandbox starts it on the pod baseline's variables and overlay, with no state home of its
 // own: with --pod-safety, as a worker's shim starts Oh My Pi (podsafety.Apply: the turn-scoping
 // overlay named first in PI_CONFIG_FILES, written to a fresh temporary directory since the probe
@@ -60,7 +66,13 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // names a NATS nkey seed (a probe pod's NATS_NKEY_SEED_FILE, the providers Secret's key), that seed
 // is read as the daemon reads its own (natsauth.Seed) and must be a user's, and the line before the
 // OK line names that user's public key (bootprobe.NATSUserLine), never the seed, for the daemon to
-// compare with its own.
+// compare with its own. With --role-namespaces, which the probe Sandbox passes and the image build
+// does not (a build's container may not make the namespaces), it first runs one role generation as
+// an issue pod's launcher runs every role, its own `legion version` as the shim, over a layout of
+// its own in that directory (launcher.CheckRoleNamespaces), and refuses, exit 1, when the
+// namespaces, a mount role-init makes or the shim fails there. That layout's home is an empty
+// directory on the probe's volume carrying no mount, so the check does not make the overlay over
+// the image's own home, bind a home's volume back, or copy a config home.
 func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("probe-image", "usage: legion probe-image --plugin-root <dir> --envoy-plugin-root <dir> [flags]", stderr)
 	omp := flags.String("omp", "", "the OMP executable to probe (default: $LEGION_OMP_PATH)")
@@ -71,7 +83,9 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	podSafety := flags.Bool("pod-safety", false, "run the probes on a pod's baseline (internal/podsafety), as a pod's shim starts Oh My Pi")
 	providerEnvDir := flags.String("provider-env-dir", "", "a directory whose files NAME=contents the probes' Oh My Pi gets, as a worker's shim exports them")
 	skipAgentModels := flags.Bool("skip-agent-models", false, "leave the prompt-named task agents' models unresolved (the image build's probe)")
+	skipBrowser := flags.Bool("skip-browser", false, "leave the browser row unchecked: the build of an image for a deployment that turns Oh My Pi's browser off (browser.enabled: false), which carries no Chromium")
 	roleReferences := flags.String("role-references", "", "the task agents and skills the daemon's own role prompts name, resolved in place of the role prompts this binary embeds")
+	roleNamespaces := flags.String("role-namespaces", "", "run one role generation's namespaces (legion launcher role-init) over a layout of its own in this directory, on a volume of its own, and refuse when it fails; its home is an empty directory there, not the image's (the probe Sandbox passes it)")
 	if code, ok := parseFlags(flags, args); !ok {
 		return code
 	}
@@ -86,6 +100,16 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	if *envoyPluginRoot == "" {
 		fmt.Fprintln(stderr, "legion probe-image: --envoy-plugin-root is required: the Envoy plugin directory a pod loads as its other explicit extension, which the load probe loads the same way")
 		return 2
+	}
+	if *roleNamespaces != "" {
+		self, err := os.Executable()
+		if err == nil {
+			err = launcher.CheckRoleNamespaces(*roleNamespaces, self, "version")
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
+			return 1
+		}
 	}
 	// The role prompts a pod is handed: the daemon's, when it passes their references, else the
 	// ones this binary embeds.
@@ -170,7 +194,7 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	// and the provider keys' included — so a PATH or a PUPPETEER_EXECUTABLE_PATH the operator's pod
 	// env sets is checked as a worker's Oh My Pi would honour it. The table is printed whole even
 	// when a row is missing: the operator reads what was checked, then why it failed.
-	img := capabilities.Image{Launch: invocation, Env: environ, WorkDir: workDir}
+	img := capabilities.Image{Launch: invocation, Env: environ, WorkDir: workDir, SkipBrowser: *skipBrowser}
 	lines, err := capabilities.CheckImage(ctx, img)
 	for _, line := range lines {
 		fmt.Fprintln(stdout, line)
@@ -188,9 +212,13 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	if *skipAgentModels {
 		agentModels = bootprobe.AgentModelsSkipped
 	}
+	checked := bootprobe.CapabilitiesAll
+	if *skipBrowser {
+		checked = bootprobe.CapabilitiesBrowserSkipped
+	}
 	if natsUser != "" {
 		fmt.Fprintln(stdout, bootprobe.NATSUserLine(natsUser))
 	}
-	fmt.Fprintln(stdout, bootprobe.OKLine(invocation, expected, agentModels, modelFallback))
+	fmt.Fprintln(stdout, bootprobe.OKLine(invocation, expected, agentModels, checked, modelFallback))
 	return 0
 }

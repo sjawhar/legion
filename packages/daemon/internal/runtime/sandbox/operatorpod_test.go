@@ -14,7 +14,28 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 )
+
+// operatorRouteFixture is the Go live harnesses' operator pod (deploy/kubernetes/operator-route/
+// pod.yml) with its token audience filled in, as an operator and each live harness run fill in
+// their gateway's: config.ReadPodFile refuses the placeholder itself.
+func operatorRouteFixture(t *testing.T) Pod {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "..", "deploy", "kubernetes", "operator-route", "pod.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	filled := filepath.Join(t.TempDir(), "pod.yml")
+	if err := os.WriteFile(filled, bytes.ReplaceAll(raw, []byte("${MODEL_TOKEN_AUDIENCE}"), []byte("operator-audience")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture, err := config.ReadPodFile(filled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Pod(fixture)
+}
 
 // CheckPod refuses, naming both, an operator variable the runtime, the worker image, or every
 // launch sets, or one that places Oh My Pi's sessions; a volume Legion names; a mount at, under, or
@@ -38,6 +59,10 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		}
 		return "runtime.kubernetes.pod.volume_mounts[0].mount_path " + path + " overlaps " + owned + ", which Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's"
 	}
+	throughLinks := func(path, owned, spelled, against string) string {
+		return "runtime.kubernetes.pod.volume_mounts[0].mount_path " + path + " overlaps " + owned + " (spelled " + spelled + " against " + against +
+			", through the worker image's directory links), which Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's"
+	}
 	overlapsStateHome := func(path string) string {
 		return "runtime.kubernetes.pod.volume_mounts[0].mount_path " + path + " overlaps /home/legion/.local/state, which Legion reserves in the image's home directory: a mount may be neither at, under, nor above Legion's reserved state home"
 	}
@@ -58,20 +83,7 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		byOperator   = "runtime.kubernetes.pod.env sets"
 		byController = "Legion's runtime sets for the controller it launches, from the project's slack_channels alone"
 	)
-	// The operator route with its token audience filled in, as an operator and each live harness run
-	// fill in their gateway's: config.ReadPodFile refuses the placeholder itself.
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "..", "deploy", "kubernetes", "operator-route", "pod.yml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	filled := filepath.Join(t.TempDir(), "pod.yml")
-	if err := os.WriteFile(filled, bytes.ReplaceAll(raw, []byte("${MODEL_TOKEN_AUDIENCE}"), []byte("operator-audience")), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	fixture, err := config.ReadPodFile(filled)
-	if err != nil {
-		t.Fatal(err)
-	}
+	fixture := operatorRouteFixture(t)
 	for _, tc := range []struct {
 		name string
 		pod  Pod
@@ -108,12 +120,29 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		{name: "a tree's claim of the earlier layout", pod: Pod{Volumes: []corev1.Volume{
 			{Name: "share", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "tree-legion-share-share-1-architect"}}},
 		}}, want: "runtime.kubernetes.pod.volumes[0].persistent_volume_claim.name tree-legion-share-share-1-architect is a claim Legion makes for an issue's, a tree's or a repository cache's own volume: name a claim of your own"},
+		{name: "an issue pod's own disk", pod: Pod{Volumes: []corev1.Volume{
+			{Name: "share", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: SandboxName("legion-acme-acme-7-architect") + "-" + issueVolume}}},
+		}}, want: "runtime.kubernetes.pod.volumes[0].persistent_volume_claim.name legion-acme-acme-7-issue is a claim Legion makes for an issue's, a tree's or a repository cache's own volume: name a claim of your own"},
 		{name: "a mount at a path Legion mounts", pod: mountAt("/var/run/legion/launcher"), want: overlaps("/var/run/legion/launcher", "/var/run/legion/launcher", false)},
 		{name: "a mount under a path Legion mounts", pod: mountAt("/legion/operator"), want: overlaps("/legion/operator", "/legion", false)},
 		{name: "a mount above a path Legion mounts", pod: mountAt("/var/run/legion"), want: overlaps("/var/run/legion", "/var/run/legion/agent-secrets", false)},
-		{name: "a mount above the sessions Legion mounts", pod: mountAt("/home/legion/.omp/profiles/legion/agent"),
-			want: overlaps("/home/legion/.omp/profiles/legion/agent", "/home/legion/.omp/profiles/legion/agent/sessions", false)},
 		{name: "a mount at the root", pod: mountAt("/"), want: overlaps("/", "/home/legion/.config", false)},
+		{name: "a mount where an issue pod holds the home's volumes", pod: mountAt("/var/run/legion/home"),
+			want: overlaps("/var/run/legion/home", "/var/run/legion/home", false)},
+		{name: "a mount under where an issue pod holds the home's volumes", pod: mountAt("/var/run/legion/home/operator"),
+			want: overlaps("/var/run/legion/home/operator", "/var/run/legion/home", false)},
+		// The image's /var/run is a link to /run, so the kubelet mounts these where Legion mounts
+		// its own: each is refused, naming Legion's path and the spelling it reached.
+		{name: "a mount at the roles directory spelled through /run", pod: mountAt("/run/legion/roles"),
+			want: throughLinks("/run/legion/roles", "/var/run/legion/roles", "/run/legion/roles", "/run/legion/roles")},
+		{name: "a mount under the home's volumes spelled through /run", pod: mountAt("/run/legion/home/operator"),
+			want: throughLinks("/run/legion/home/operator", "/var/run/legion/home", "/run/legion/home/operator", "/run/legion/home")},
+		{name: "a mount under a role's private directory spelled through /run", pod: mountAt("/run/legion/roles/implementer/private"),
+			want: throughLinks("/run/legion/roles/implementer/private", "/var/run/legion/roles", "/run/legion/roles/implementer/private", "/run/legion/roles")},
+		{name: "a mount above Legion's paths spelled through /run", pod: mountAt("/run/legion"),
+			want: throughLinks("/run/legion", "/var/run/legion/agent-secrets", "/run/legion", "/run/legion/agent-secrets")},
+		{name: "a mount at the image's git spelled through /bin", pod: mountAt("/bin/git"),
+			want: "runtime.kubernetes.pod.volume_mounts[0].mount_path /bin/git overlaps /usr/bin/git (spelled /bin/git against /bin/git, through the worker image's directory links), which the worker image owns: a mount may be neither at, under, nor above one of the image's"},
 		{name: "a mount under a path the image owns", pod: mountAt("/opt/omp/bin"), want: overlaps("/opt/omp/bin", "/opt/omp", true)},
 		{name: "a mount over a database the image owns", pod: mountAt("/home/legion/.omp/profiles/legion/agent/agent.db"),
 			want: overlaps("/home/legion/.omp/profiles/legion/agent/agent.db", "/home/legion/.omp/profiles/legion/agent/agent.db", true)},
@@ -146,7 +175,7 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 			want: "provider_keys names FOO from the providers Secret's key NATS_NKEY_SEED, which the pod mounts as the launch secret NATS_NKEY_SEED: the shim would export that secret into Oh My Pi's environment as FOO"},
 		{name: "a provider key reading the session database's URL", keys: map[string]string{"DATABASE_URL": "SESSION_DSN"},
 			want: "provider_keys names DATABASE_URL from the providers Secret's key SESSION_DSN, which holds the session database's URL (runtime.kubernetes.session_dsn_secret): the shim would export that URL into Oh My Pi's environment as DATABASE_URL"},
-		{name: "the live harnesses' operator pod", pod: Pod(fixture), keys: map[string]string{"ANTHROPIC_API_KEY": "anthropic"}},
+		{name: "the live harnesses' operator pod", pod: fixture, keys: map[string]string{"ANTHROPIC_API_KEY": "anthropic"}},
 		{name: "an operator's own overlays, which the baseline composes with",
 			pod: Pod{Env: map[string]string{"PI_CONFIG_FILES": "/etc/operator/overlay.yml"}}},
 		// Dispatch's dashboard as people open it, which the dispatch command links to in place of the
@@ -158,7 +187,7 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 			want: `runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to "ftp://dispatch.example.org", which is not an http or https URL with no userinfo, a host that is a DNS name of ASCII letters, digits and hyphens, a dotted-quad IPv4 address or a bracketed IPv6 address, and any port from 1 to 65535: boot accepts only a dashboard address every agent's dispatch command reads`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := CheckPod(tc.pod, tc.keys, testOptions().Tools, []string{"ENVOY_TOKEN", "NATS_NKEY_SEED"}, []string{"NATS_NKEY_SEED"}, "SESSION_DSN")
+			err := CheckPod(tc.pod, tc.keys, testOptions().Tools, []string{"ENVOY_TOKEN", "NATS_NKEY_SEED"}, []string{"NATS_NKEY_SEED"}, postgresStore)
 			switch {
 			case tc.want == "" && err != nil:
 				t.Fatalf("CheckPod = %v, want no refusal", err)
@@ -185,7 +214,7 @@ func TestCheckPodHoldsDispatchPublicURLToTheAgentsRule(t *testing.T) {
 	}
 	check := func(value string) error {
 		return CheckPod(Pod{Env: map[string]string{"DISPATCH_PUBLIC_URL": value}}, nil, testOptions().Tools,
-			[]string{"ENVOY_TOKEN", "NATS_NKEY_SEED"}, []string{"NATS_NKEY_SEED"}, "SESSION_DSN")
+			[]string{"ENVOY_TOKEN", "NATS_NKEY_SEED"}, []string{"NATS_NKEY_SEED"}, postgresStore)
 	}
 	for _, value := range fixture.Valid {
 		if err := check(value); err != nil {
@@ -220,7 +249,7 @@ func TestTheRuntimeRefusesAnOperatorPodCollidingWithLegionsOwn(t *testing.T) {
 		}, "sandbox runtime: provider_keys names FOO from the providers Secret's key NATS_NKEY_SEED, which the pod mounts as the launch secret NATS_NKEY_SEED: the shim would export that secret into Oh My Pi's environment as FOO"},
 		{"the session database's URL key a providers secret", func(o *Options) {
 			o.LaunchSecrets, o.ProvidersSecrets = []string{"ENVOY_TOKEN", "NATS_NKEY_SEED"}, []string{"NATS_NKEY_SEED"}
-			o.SessionDSNKey = "NATS_NKEY_SEED"
+			o.SessionStore = ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "NATS_NKEY_SEED"}
 		}, "sandbox runtime: runtime.kubernetes.session_dsn_secret NATS_NKEY_SEED is the providers Secret's key the pod mounts as the launch secret NATS_NKEY_SEED: name a key of its own for the session database's URL"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

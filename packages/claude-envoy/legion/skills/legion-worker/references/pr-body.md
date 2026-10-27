@@ -24,8 +24,6 @@ later phase keeps it current rather than replacing it:
 
 ## Verification
 
-**CI:** `Tests` run <run-id> — jobs lint, typecheck, test all success at <head-sha>; `PR Title` run <run-id> — job pr-title success at <head-sha>.
-
 **Threads:** <n> resolved, 0 unresolved. Each answered and resolved individually by the implementer, the pull request's author, never in bulk (the reviewer names the bot threads it accepted; it resolves none itself):
 - Thread <node id>: fixed in <commit-sha> — <one line>; resolved at <head-sha>.
 - Thread <node id>: not a defect — <reason>; resolved at <head-sha>.
@@ -45,18 +43,10 @@ Verified the implementer's proof by <re-running its command | driving the same s
 **Production:** <what was checked in production, how, what was observed> — merge commit <sha>; woken by <event>.
 (written by the implementer from the production check after the merge closes the issue, naming what woke that look; `pending deploy of <sha>` until then)
 
-**Fast-follow:** <one named cleanup item and where it will land>, or "none".
+**Fast-follow:** "none", or one named cleanup item in a file this pull request does not touch, and where it will land.
 
 **Chain:** stacked on <base bookmark> frozen at <sha> / not stacked.
 ```
-
-The `CI` line names the runs GitHub started for the code head, by run id, with each run's state
-as GitHub shows it when the line is written: `success`, a failure, or `queued` / `in progress`
-at <head-sha>, or `no run yet` when GitHub has started none. The implementer writes it at its completion from one `gh run list --commit <head-sha>`
-and never waits for a run to finish to fill it in: the daemon reads every settlement itself, and a
-check or workflow the base branch requires that settles red sends the work back to `implementing`,
-before or after that completion. A later role that reads CI on GitHub updates the line's states to
-what it read.
 
 ## Never waiting on CI
 
@@ -67,7 +57,7 @@ Under the Go daemon a check or workflow the base branch requires that settles re
 before the completion or after it, sends the work back to `implementing` with the failing checks
 named, until `max_fix_attempts` is spent, when the architect decides. The one CI result an implementer waits for is a re-run: when its task names a red that
 failed on its own, it re-runs the failed jobs once (`gh run rerun <run-id> --failed`) and completes once
-the re-run settles green, woken by the pull request's checks event (`skill://envoy`, *Waiting for
+the re-run settles green, woken by the pull request's checks event (`skill://envoy`, *Wait for
 CI or a merge*: subscribe, then end the turn), never by a sleep loop. A completion while that red
 still stands is sent back, at once for a required check and at the daemon's next read of the runs
 (within two minutes) for a required workflow.
@@ -117,10 +107,11 @@ and the tester's proof below are both this proof.
   application, not CI again. Try to break the changed surface — wrong and boundary inputs, the
   second and the concurrent run, the party it must refuse — judge whether the implementer's tests
   would catch the ways it breaks, writing the red test for one that none would, and
-  read CI for everything static: lint, types and the unit and integration suites are CI's, cited
-  from the `CI` line, and no CI lane is rerun as evidence. A lane the line shows `queued` or
-  `in progress` is cited as such: the tester never waits for it, since a required red that settles
-  sends the work back from `testing` and the reviewer reads the head's checks before it approves.
+  read CI on GitHub at the head you are judging for everything static: lint, types and the unit
+  and integration suites are CI's, read there and recorded for no later step, and no CI lane is
+  rerun as evidence. A lane GitHub shows `queued` or `in progress` is read as such: the tester
+  never waits for it, since a required red that settles sends the work back from `testing` and
+  the reviewer reads the head's checks before it approves.
   A test handoff whose predecessor carried no proof is a test failure, not a gap for the tester to fill:
   record it in `failures` with `implementerProof.verdict: "rejected"`, complete the phase with
   `verdict: "fail"`, and the daemon returns the issue to the implementer — the agent that developed the change owns
@@ -133,13 +124,13 @@ and the tester's proof below are both this proof.
   tester names that missing surface as the blocker instead of passing the phase. Environment or
   secret-scrub evidence (e.g. "`LEGION_*`/`DISPATCH_*`/`ENVOY_*` unset") is recorded once, in
   `.legion/<issue>/test.json`, and only when the issue's acceptance criteria call for it — never
-  re-pasted into the PR body each round. After a conflict-forced rebase, compute the
+  re-pasted into the PR body each round. After a forward merge, compute the
   fingerprint (*The unchanged-diff check* in
   `skill://legion-worker/references/conflicts-and-rewrites.md`) at the head your `E2E` line
   names and at the new head. Equal: re-run only the
   bare gates — the repository's CI green at the new head and its smoke check — and change the
   `E2E` line's head to the new SHA with
-  `rebase re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only`; the
+  `forward-merge re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only`. The
   real-surface verification is not repeated. Different: a full test round.
 - **The implementer runs `skill://ce-simplify-code` once per pull request, in its first
   implementing round, after its own proof and before it completes that round, when the diff
@@ -149,12 +140,16 @@ and the tester's proof below are both this proof.
   the pull request's own diff at that head: nothing applied leaves the head as it is; applied →
   the implementer re-runs the repository's checks and its own proof on the applied head for the
   surface the simplify diff touched, since a refactor that "preserves behaviour" is a claim until
-  it is executed, and re-cites the `CI` line and `E2E (implementer)` there before it completes.
+  it is executed, and updates the `E2E (implementer)` line to that head before it completes.
   That cost is why 0-applied is the expected outcome and a pass that applies is spent sparingly.
   The reviewer's pair runs at the head each round reviews. Record both in the `Thermo` line.
 - **No deferrals** is the body's rule (*PR body, review, and the merge gate* in
-  `skill://legion-worker`): the `Fast-follow:` line holds naming, duplication, or wording cleanup
-  only. A base frozen for others to stack on is never rewritten (*Rewriting pushed commits* in
+  `skill://legion-worker`): a wording nit, and any clear fix in a file this pull request touches,
+  is made in the running round, because a later round costs a CI pass and a re-read of the whole
+  change (the operator's answer on that case: fix it while you are there, and defer no fix to
+  another issue). The `Fast-follow:` line reads
+  `none`, or names only cleanup in files this pull request does not touch.
+  A base frozen for others to stack on is never rewritten (*Rewriting pushed commits* in
   `skill://legion-worker/references/conflicts-and-rewrites.md`); the `Chain` line records it.
 - **GitHub refuses a pull request body over 65,536 characters.** Each verification round links its
   evidence (the run, the comment) rather than inlining it once the body passes about 48,000

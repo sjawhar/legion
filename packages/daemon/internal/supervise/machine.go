@@ -107,10 +107,6 @@ type Claim struct {
 	// Every relaunch resumes that recorded session and refuses another one.
 	Session     string
 	SessionFile string
-	// WorkspaceLost is a claim whose session was lost with the issue's volume it lived on — the one
-	// exception to resuming the agent a claim recorded. It records no session, and every launch
-	// recreates its workspace, fresh, until a new agent registers.
-	WorkspaceLost bool
 	// ServingGeneration is the issue generation of the last confirmed delivery this claim retired:
 	// the run it goes on working until another delivery of a run replaces it. It is the second of
 	// the three sources a completion is attributed from (api/handoff.go): the pending delivery
@@ -197,7 +193,7 @@ func (c Claim) treeRoot() bool { return claim.IsTreeArchitect(c.Role, c.Issue, c
 
 // Event is everything that reaches a machine. The set is sealed: RuntimeObservation,
 // StreamHello, StreamTurnStart, StreamTurnEnd, StreamClosed, StreamLateRefusal, PromptAcked,
-// PromptRefused, Timer, IssueVolumeLost, and the nine requests. The transition table has a row or a
+// PromptRefused, Timer, StalePlugin, and the nine requests. The transition table has a row or a
 // named ignore for every one of them in every state.
 type Event interface{ isEvent() }
 
@@ -289,17 +285,14 @@ type Deps struct {
 	// owner of the repository the issue works. Every delivery hands it to the agent's working copy
 	// before the task. nil, for a daemon with no workflow or no GitHub Apps, adopts nothing.
 	Identity func(ctx context.Context, role claim.Role, issue string) (runtime.GitIdentity, error)
-	// VolumeLost is told of a claim whose issue's volume was found lost as it relaunches that claim
-	// fresh, so the daemon can tell the issue's other claims (IssueVolumeLost): their sessions were
-	// on the same volume. nil tells no one.
-	VolumeLost func(c Claim)
-	// PhaseHolds says whether issue is still in phase: the workflow enqueues a task for the phase
-	// its issue was in, and the outbox refuses to start a role for a phase the issue has left
-	// (daemon/outbox.go), so a delivery queued before the phase moved on is that same staleness
-	// one step later and is dropped rather than sent. It is asked only about a delivery that names
-	// a phase; a task an operator delivered by hand names none and is never put to it, which the
-	// machine decides rather than this answer. nil holds every delivery.
-	PhaseHolds func(ctx context.Context, issue string, p phase.Phase) (bool, error)
+	// PhaseHolds says whether issue is still in phase p on run generation: the workflow enqueues a
+	// task for the phase and run its issue was in, and the outbox refuses to start a role for a
+	// phase the issue has left (daemon/outbox.go), so a delivery queued before the phase or the run
+	// moved on is that same staleness one step later and is dropped rather than sent. It is asked
+	// only about a delivery that names a phase; a task an operator delivered by hand names none and
+	// is never put to it, which the machine decides rather than this answer. generation is 0 for a
+	// task of no run. nil holds every delivery.
+	PhaseHolds func(ctx context.Context, issue string, p phase.Phase, generation uint64) (bool, error)
 	// TreeClosable answers whether the operator may close this claim's tree: false refuses the
 	// close, and an error is the read itself failing, which the caller sees as a failure rather
 	// than a refusal. It is asked for the operator's own close — the workflow's linger close is its
@@ -319,6 +312,12 @@ type Deps struct {
 	// means a stale claim is recorded and reported, never relaunched or refused — relaunching
 	// nothing it cannot build, and refusing nothing a relaunch is not already under way to fix.
 	PluginRelaunchable bool
+	// TaskConfirmed is told of each claim whose pending delivery a turn has just confirmed: the
+	// agent took the work the daemon gave it. The workflow decides what a root still owes its
+	// architect from that (admission's ReconcileAwaiting), so without it a root whose wait was
+	// held by an untaken task would wait for the next tick. Nil tells no one. It is called inside
+	// the machine's decision, so it returns at once.
+	TaskConfirmed func(c Claim)
 }
 
 func (d Deps) check() error {
@@ -421,6 +420,9 @@ type Machine struct {
 	// delivery it may already have sent, or a turn it saw start and may not have seen end. The
 	// machine asks the agent (get_state) before it acts on either.
 	askFirst bool
+	// unansweredAsks counts the asks in a row the agent left unanswered while askFirst stayed armed
+	// on a working claim (askTurnOver); from unansweredAsksWarn on, each one is logged at Warn.
+	unansweredAsks int
 	// held is the suspension held for the agent's turn (holdSuspension), nil for none.
 	held *RequestSuspend
 	// interrupt is the turn this claim was interrupted in for a start that takes over its issue's
@@ -964,6 +966,16 @@ func (m *Machine) backOff(ctx context.Context) error {
 	return nil
 }
 
+// start launches the claim's process for this try: a Resume of its recorded session, or a Spawn
+// when it records none. A Resume the runtime answers with runtime.ErrSessionFileMissing is the
+// operator's takeover of another runtime's claims (the tmux runtime's `runtime.tmux.take_over`): the
+// previous process was that runtime's, and its session is found nowhere this one runs the agent. It
+// would fail the same way on every try and wedge the claim until its launch budget ran out, so the
+// claim forgets the session and the same try spawns a fresh agent, which registers its own session;
+// the runtime has started nothing first. It is logged, never charged: the session stayed with the
+// runtime the operator moved the project off. Any other refusal of a Resume, a session file missing
+// elsewhere among them, is a launch failure the caller charges, and the claim keeps its session:
+// a fresh agent on a claim that had one is what the same-agent refusal exists to catch.
 func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, error) {
 	spec, err := m.deps.Specs.SpawnSpec(ctx, m.claim)
 	if err != nil {
@@ -975,7 +987,15 @@ func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, err
 		return m.deps.Runtime.Spawn(ctx, spec)
 	}
 	spec.ResumeSessionFile = m.claim.SessionFile
-	return m.deps.Runtime.Resume(ctx, m.previous, spec)
+	loc, err := m.deps.Runtime.Resume(ctx, m.previous, spec)
+	if !errors.Is(err, runtime.ErrSessionFileMissing) {
+		return loc, err
+	}
+	m.log.Warn("supervise: the session of the process another runtime ran is found nowhere this runtime runs the agent; taking the claim over with a fresh session",
+		"session", m.claim.Session, "sessionFile", m.claim.SessionFile, "error", err)
+	m.forgetSession()
+	spec.ResumeSessionFile = ""
+	return m.deps.Runtime.Spawn(ctx, spec)
 }
 
 // stopPrevious stops the process letGo moved into previous when a launch fails: the claim no longer
@@ -995,11 +1015,11 @@ func (m *Machine) stopPrevious(ctx context.Context) error {
 
 // died is the claim's process found gone — or found to be some other process — while it was
 // live: one launch failure, and the same session relaunched after it, or failed when the budget
-// is spent. A resume that found the issue's volume lost is the exception (relaunchFresh). A task whose
-// turn the process was running goes back to waiting first (interrupted), for the relaunch to send,
-// and a death with work outstanding is counted as one (chargeDeath), failing the claim at the limit.
-// A process that dies while a suspension is held leaves the claim suspended instead (endHeld). A
-// process that ended with a pod the daemon itself replaced is not a death at all (displaced).
+// is spent. A task whose turn the process was running goes back to waiting first (interrupted),
+// for the relaunch to send, and a death with work outstanding is counted as one (chargeDeath),
+// failing the claim at the limit. A process that dies while a suspension is held leaves the claim
+// suspended instead (endHeld). A process that ended with a pod the daemon itself replaced is not
+// a death at all (displaced).
 func (m *Machine) died(ctx context.Context, observation runtime.Observation) error {
 	m.log.Warn("supervise: process died", "incarnation", m.claim.Locator.Incarnation, "observed", string(observation.Kind),
 		"detail", observation.Detail)
@@ -1012,41 +1032,13 @@ func (m *Machine) died(ctx context.Context, observation runtime.Observation) err
 	if m.chargeDeath() {
 		return m.fail(ctx, "deaths with work outstanding ran out")
 	}
-	if observation.Kind == runtime.Gone && observation.WorkspaceLost {
-		return m.relaunchFresh(ctx)
-	}
 	return m.relaunchAfterFailure(ctx)
 }
 
-// relaunchFresh is a resume whose workspace-init found the issue's volume lost, the session file
-// with it: resuming again would fail the same way on every attempt until the budget ran out. It is
-// the one exception to the same-agent rule. The claim drops the session it recorded and relaunches
-// as a fresh session that recreates its workspace from the issue's branch, and the agent that
-// registers next is the session it resumes from then on. The volume ended the process, not the
-// launch, so no launch failure is charged; the fresh launch has no session to find missing, so it
-// cannot end this way again. The daemon is told first: the issue's other claims kept their sessions
-// on that volume.
-func (m *Machine) relaunchFresh(ctx context.Context) error {
-	m.log.Warn("supervise: the issue's volume was lost with the session; relaunching a fresh session", "session", m.claim.Session)
-	m.loseSession()
-	if m.deps.VolumeLost != nil {
-		m.deps.VolumeLost(copyClaim(m.claim))
-	}
-	return m.launch(ctx)
-}
-
-// loseSession drops the session the claim recorded, which lived on an issue's volume since lost:
-// the claim expects no session until a new agent registers, and its launches recreate the workspace.
-func (m *Machine) loseSession() {
-	m.forgetSession()
-	m.claim.WorkspaceLost = true
-}
-
-// forgetSession drops the session the claim recorded and any loss recorded with it, leaving the
-// claim as one no agent has registered for: the next launch is a fresh spawn that provisions its
-// workspace anew. The issue's close releases the volume the session lived on (table's issueClose).
+// forgetSession drops the session the claim recorded, leaving the claim as one no agent has
+// registered for: the next launch is a fresh spawn that provisions its workspace anew.
 func (m *Machine) forgetSession() {
-	m.claim.Session, m.claim.SessionFile, m.claim.WorkspaceLost = "", "", false
+	m.claim.Session, m.claim.SessionFile = "", ""
 }
 
 // fail puts the claim where nothing relaunches it: its timers stop, its locator goes, and the
@@ -1316,8 +1308,6 @@ func claimOf(ev Event) claim.Token {
 	case PromptRefused:
 		return ev.Claim
 	case Timer:
-		return ev.Claim
-	case IssueVolumeLost:
 		return ev.Claim
 	case StalePlugin:
 		return ev.Claim

@@ -54,7 +54,7 @@ func TestUsesCoreTransportForRoleLanesAndEveryNotificationTheStreamDoesNotCaptur
 	}
 }
 
-// streamCaptures reads each stream subject as a literal prefix and `.>`; a subject of any other
+// StreamCaptures reads each stream subject as a literal prefix and `.>`; a subject of any other
 // shape needs a matcher that splits tokens.
 func TestEveryStreamSubjectIsALiteralPrefixAndWildcard(t *testing.T) {
 	for _, subject := range streamSubjects {

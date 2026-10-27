@@ -39,7 +39,7 @@ func (s *Postgres) MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID
 	return tag.RowsAffected() == 1, nil
 }
 
-const issueColumns = `key, tree, project, title, parent, phase, generation, status, rank, handed_over, linger_until, held_from, last_dispatch_seq, ready_pending_version, coalesce(hold_reason, ''), dispatch_status, repo, default_branch, github_repo`
+const issueColumns = `key, tree, project, title, parent, phase, generation, status, rank, handed_over, taken_back, linger_until, held_from, last_dispatch_seq, ready_pending_version, coalesce(hold_reason, ''), dispatch_status, repo, default_branch, github_repo, awaiting_ask, awaiting_gate_version, coalesce(awaiting_artifact, ''), awaiting_answered_at, coalesce(awaiting_answered_by, ''), coalesce(awaiting_answered_detail, ''), awaiting_since_seq, awaiting_since, handout_seq, coalesce(declared_seq, 0), declared_at`
 
 func (s *Postgres) Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, error) {
 	issue, err := scanIssue(tx.QueryRow(ctx, "select "+issueColumns+" from issues where key = $1", key))
@@ -72,6 +72,35 @@ func (s *Postgres) Issues(ctx context.Context, tx pgx.Tx) ([]Issue, error) {
 	return issues, nil
 }
 
+// SlottedIssues is the record of each issue of project that holds an admission slot, in slot order
+// (index, then issue), in one read: what admission judges when it releases the slots a fact has
+// finished with (admit's releaseSlots), on every fact and under the one fact lock. The slots table
+// is shared by every project's daemon, so another project's slot is left out here rather than by
+// the caller, and no issue of another project, and no issue holding no slot, is read at all. It
+// selects issueColumns itself, so it reads every column scanIssue scans: the slots join is a
+// derived table whose columns are renamed, so no column of issueColumns is ambiguous.
+func (s *Postgres) SlottedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error) {
+	rows, err := tx.Query(ctx, `select `+issueColumns+` from issues
+		join (select index, issue from slots) slot (slot_index, slot_issue) on slot.slot_issue = issues.key
+		where issues.project = $1 order by slot.slot_index, slot.slot_issue`, project)
+	if err != nil {
+		return nil, fmt.Errorf("list the slotted issues of project %s: %w", project, err)
+	}
+	defer rows.Close()
+	issues := []Issue{}
+	for rows.Next() {
+		issue, err := scanIssue(rows)
+		if err != nil {
+			return nil, fmt.Errorf("read a slotted issue of project %s: %w", project, err)
+		}
+		issues = append(issues, *issue)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list the slotted issues of project %s: %w", project, err)
+	}
+	return issues, nil
+}
+
 func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
 	switch {
 	case issue.Repo == "":
@@ -90,19 +119,48 @@ func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
 	if issue.Hold != nil {
 		heldFrom, holdReason = string(issue.Hold.From), issue.Hold.Reason
 	}
+	var awaitingAsk, awaitingGate, awaitingArtifact, answeredAt, sinceSeq, since any
+	var answeredBy Answer
+	var answeredDetail string
+	if issue.Awaiting != nil {
+		if issue.Awaiting.Ask != "" {
+			awaitingAsk = issue.Awaiting.Ask
+		}
+		if issue.Awaiting.GateVersion != 0 {
+			awaitingGate = issue.Awaiting.GateVersion
+		}
+		if issue.Awaiting.Artifact != "" {
+			awaitingArtifact = issue.Awaiting.Artifact
+		}
+		if issue.Awaiting.AnsweredAt != nil {
+			answeredAt = *issue.Awaiting.AnsweredAt
+		}
+		answeredBy, answeredDetail = issue.Awaiting.AnsweredBy, issue.Awaiting.AnsweredDetail
+		sinceSeq, since = markValues(issue.Awaiting.Since)
+	}
 	// The update's condition keeps a recorded issue on the repository, default branch and GitHub
 	// spelling it was recorded with: a write naming others changes no row, and is refused below.
-	tag, err := tx.Exec(ctx, `insert into issues (key, tree, project, title, parent, phase, generation, status, rank, handed_over, linger_until, held_from, last_dispatch_seq, ready_pending_version, hold_reason, dispatch_status, repo, default_branch, github_repo)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, nullif($15::text, ''), $16, $17, $18, $19)
+	// handout_seq, declared_seq and declared_at are StartHandout's, TakeInThrough's, Declare's and
+	// ClearDeclared's alone, so a copy of the issue read before any of them never writes them back.
+	tag, err := tx.Exec(ctx, `insert into issues (key, tree, project, title, parent, phase, generation, status, rank, handed_over, taken_back, linger_until, held_from, last_dispatch_seq, ready_pending_version, hold_reason, dispatch_status, repo, default_branch, github_repo,
+		awaiting_ask, awaiting_gate_version, awaiting_artifact, awaiting_answered_at, awaiting_answered_by, awaiting_answered_detail, awaiting_since_seq, awaiting_since)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, nullif($16::text, ''), $17, $18, $19, $20, $21, $22, $23, $24, nullif($25::text, ''), nullif($26::text, ''), $27, $28)
 		on conflict (key) do update set tree = excluded.tree, project = excluded.project, title = excluded.title,
 		parent = excluded.parent, phase = excluded.phase, generation = excluded.generation,
-		status = excluded.status, rank = excluded.rank, handed_over = excluded.handed_over, linger_until = excluded.linger_until,
+		status = excluded.status, rank = excluded.rank, handed_over = excluded.handed_over, taken_back = excluded.taken_back,
+		linger_until = excluded.linger_until,
 		held_from = excluded.held_from, last_dispatch_seq = excluded.last_dispatch_seq,
-		ready_pending_version = excluded.ready_pending_version, hold_reason = excluded.hold_reason, dispatch_status = excluded.dispatch_status
+		ready_pending_version = excluded.ready_pending_version, hold_reason = excluded.hold_reason, dispatch_status = excluded.dispatch_status,
+		awaiting_ask = excluded.awaiting_ask, awaiting_gate_version = excluded.awaiting_gate_version,
+		awaiting_artifact = excluded.awaiting_artifact,
+		awaiting_answered_at = excluded.awaiting_answered_at, awaiting_answered_by = excluded.awaiting_answered_by,
+		awaiting_answered_detail = excluded.awaiting_answered_detail,
+		awaiting_since_seq = excluded.awaiting_since_seq, awaiting_since = excluded.awaiting_since
 		where issues.repo = excluded.repo and issues.default_branch = excluded.default_branch and issues.github_repo = excluded.github_repo`,
 		issue.Key, issue.Tree, issue.Project, issue.Title, issue.Parent, string(issue.Phase), int64(issue.Generation), issue.Status,
-		issue.Rank, issue.HandedOver, issue.LingerUntil, heldFrom, issue.LastDispatchSeq, issue.ReadyPendingVersion, string(holdReason), issue.DispatchStatus,
-		issue.Repo, issue.DefaultBranch, issue.GitHubRepo,
+		issue.Rank, issue.HandedOver, issue.TakenBack, issue.LingerUntil, heldFrom, issue.LastDispatchSeq, issue.ReadyPendingVersion, string(holdReason), issue.DispatchStatus,
+		issue.Repo, issue.DefaultBranch, issue.GitHubRepo, awaitingAsk, awaitingGate, awaitingArtifact, answeredAt, string(answeredBy), answeredDetail,
+		sinceSeq, since,
 	)
 	if err != nil {
 		return fmt.Errorf("put issue %s: %w", issue.Key, err)
@@ -123,6 +181,13 @@ func (s *Postgres) UnfilledIssues(ctx context.Context, tx pgx.Tx, project string
 
 func (s *Postgres) UnnamedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error) {
 	return s.issuesWhere(ctx, tx, "project = $1 and repo <> '' and github_repo = ''", project, "with no GitHub spelling of their repository")
+}
+
+func (s *Postgres) HandedOffWithoutPullRequest(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error) {
+	return s.issuesWhere(ctx, tx, "project = $1 and github_repo <> '' and phase = '"+string(phase.Implementing)+"'"+
+		" and key in (select issue from phases where role = '"+string(claim.RoleImplementer)+"' and handoff_commit <> '')"+
+		" and key not in (select issue from pull_requests where state in ('"+string(PullRequestOpen)+"', '"+string(PullRequestMerged)+"'))",
+		project, "in implementing with a recorded handoff and no open or merged pull request")
 }
 
 // issuesWhere is every record of project the condition selects, by key; what names them in an
@@ -218,10 +283,21 @@ func scanIssue(row scanner) (*Issue, error) {
 	var generation int64
 	var heldFrom *string
 	var holdReason string
+	var awaitingAsk *string
+	var awaitingGate *int
+	var awaitingArtifact string
+	var answeredAt *time.Time
+	var answeredBy, answeredDetail string
+	var sinceSeq *int64
+	var since, declaredAt *time.Time
 	if err := row.Scan(&issue.Key, &issue.Tree, &issue.Project, &issue.Title, &issue.Parent, &phaseValue, &generation, &issue.Status,
-		&issue.Rank, &issue.HandedOver, &issue.LingerUntil, &heldFrom, &issue.LastDispatchSeq, &issue.ReadyPendingVersion, &holdReason, &issue.DispatchStatus,
-		&issue.Repo, &issue.DefaultBranch, &issue.GitHubRepo); err != nil {
+		&issue.Rank, &issue.HandedOver, &issue.TakenBack, &issue.LingerUntil, &heldFrom, &issue.LastDispatchSeq, &issue.ReadyPendingVersion, &holdReason, &issue.DispatchStatus,
+		&issue.Repo, &issue.DefaultBranch, &issue.GitHubRepo, &awaitingAsk, &awaitingGate, &awaitingArtifact, &answeredAt, &answeredBy, &answeredDetail,
+		&sinceSeq, &since, &issue.HandoutSeq, &issue.DeclaredSeq, &declaredAt); err != nil {
 		return nil, err
+	}
+	if declaredAt != nil {
+		issue.DeclaredAt = declaredAt.UTC()
 	}
 	if generation < 0 {
 		return nil, fmt.Errorf("issue %s has negative generation %d", issue.Key, generation)
@@ -229,6 +305,20 @@ func scanIssue(row scanner) (*Issue, error) {
 	issue.Phase = phase.Phase(phaseValue)
 	if heldFrom != nil {
 		issue.Hold = &Hold{From: phase.Phase(*heldFrom), Reason: HoldReason(holdReason)}
+	}
+	if awaitingAsk != nil || awaitingGate != nil {
+		if answeredAt != nil {
+			utc := answeredAt.UTC()
+			answeredAt = &utc
+		}
+		issue.Awaiting = &Awaiting{Artifact: awaitingArtifact, AnsweredAt: answeredAt, AnsweredBy: Answer(answeredBy),
+			AnsweredDetail: answeredDetail, Since: scannedMark(sinceSeq, since)}
+		if awaitingAsk != nil {
+			issue.Awaiting.Ask = *awaitingAsk
+		}
+		if awaitingGate != nil {
+			issue.Awaiting.GateVersion = *awaitingGate
+		}
 	}
 	issue.Generation = uint64(generation)
 	return &issue, nil
@@ -589,10 +679,56 @@ func scanProductionCheck(row scanner) (*ProductionCheck, error) {
 	return &check, nil
 }
 
-func (s *Postgres) Gate(ctx context.Context, tx pgx.Tx, issue string) (*DesignGate, error) {
+// markValues is mark as its two nullable columns, a sequence and a time, each null when unknown.
+func markValues(mark EventMark) (seq, at any) {
+	if mark.Seq > 0 {
+		seq = mark.Seq
+	}
+	if !mark.At.IsZero() {
+		at = mark.At
+	}
+	return seq, at
+}
+
+// scannedMark is the EventMark markValues stored.
+func scannedMark(seq *int64, at *time.Time) EventMark {
+	var mark EventMark
+	if seq != nil {
+		mark.Seq = *seq
+	}
+	if at != nil {
+		mark.At = at.UTC()
+	}
+	return mark
+}
+
+const gateColumns = `issue, artifact_id, latest_version, approved_version, approved_seq, approved_at, told_changes_version, told_changes_reason, told_changes_seq, told_changes_at`
+
+// scanGate reads a gate row in the shape PutGate writes: an approval's mark only with the approval,
+// a told changes request's reason and mark only with its version. An older daemon, which knows none
+// of these columns, may clear a version and leave the rest, so the shape is the reader's and the
+// writer's to keep rather than a constraint that would refuse that daemon's write.
+func scanGate(row scanner) (DesignGate, error) {
 	var gate DesignGate
-	err := tx.QueryRow(ctx, `select issue, artifact_id, latest_version, approved_version from design_gates where issue = $1`, issue).
-		Scan(&gate.Issue, &gate.ArtifactID, &gate.LatestVersion, &gate.ApprovedVersion)
+	var approvedSeq, toldSeq *int64
+	var approvedAt, toldAt *time.Time
+	if err := row.Scan(&gate.Issue, &gate.ArtifactID, &gate.LatestVersion, &gate.ApprovedVersion, &approvedSeq, &approvedAt,
+		&gate.ToldChangesVersion, &gate.ToldChangesReason, &toldSeq, &toldAt); err != nil {
+		return DesignGate{}, err
+	}
+	if gate.ApprovedVersion != nil {
+		gate.ApprovedMark = scannedMark(approvedSeq, approvedAt)
+	}
+	if gate.ToldChangesVersion != nil {
+		gate.ToldChangesMark = scannedMark(toldSeq, toldAt)
+	} else {
+		gate.ToldChangesReason = ""
+	}
+	return gate, nil
+}
+
+func (s *Postgres) Gate(ctx context.Context, tx pgx.Tx, issue string) (*DesignGate, error) {
+	gate, err := scanGate(tx.QueryRow(ctx, `select `+gateColumns+` from design_gates where issue = $1`, issue))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -603,16 +739,15 @@ func (s *Postgres) Gate(ctx context.Context, tx pgx.Tx, issue string) (*DesignGa
 }
 
 func (s *Postgres) GatesForArtifact(ctx context.Context, tx pgx.Tx, artifactID string) ([]DesignGate, error) {
-	rows, err := tx.Query(ctx, `select issue, artifact_id, latest_version, approved_version from design_gates
-		where artifact_id = $1 order by issue`, artifactID)
+	rows, err := tx.Query(ctx, `select `+gateColumns+` from design_gates where artifact_id = $1 order by issue`, artifactID)
 	if err != nil {
 		return nil, fmt.Errorf("list design gates for artifact %s: %w", artifactID, err)
 	}
 	defer rows.Close()
 	var gates []DesignGate
 	for rows.Next() {
-		var gate DesignGate
-		if err := rows.Scan(&gate.Issue, &gate.ArtifactID, &gate.LatestVersion, &gate.ApprovedVersion); err != nil {
+		gate, err := scanGate(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan design gate for artifact %s: %w", artifactID, err)
 		}
 		gates = append(gates, gate)
@@ -623,16 +758,181 @@ func (s *Postgres) GatesForArtifact(ctx context.Context, tx pgx.Tx, artifactID s
 	return gates, nil
 }
 
+// PutGate writes the gate, keeping its shape itself: an approval's mark is written only with the
+// approval, and a told changes request's reason and mark only with its version (scanGate).
 func (s *Postgres) PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) error {
-	_, err := tx.Exec(ctx, `insert into design_gates (issue, artifact_id, latest_version, approved_version)
-		values ($1, $2, $3, $4)
+	approvedSeq, approvedAt := markValues(gate.ApprovedMark)
+	if gate.ApprovedVersion == nil {
+		approvedSeq, approvedAt = nil, nil
+	}
+	toldSeq, toldAt := markValues(gate.ToldChangesMark)
+	toldReason := gate.ToldChangesReason
+	if gate.ToldChangesVersion == nil {
+		toldSeq, toldAt, toldReason = nil, nil, ""
+	}
+	_, err := tx.Exec(ctx, `insert into design_gates (issue, artifact_id, latest_version, approved_version, approved_seq, approved_at,
+		told_changes_version, told_changes_reason, told_changes_seq, told_changes_at)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		on conflict (issue) do update set artifact_id = excluded.artifact_id,
-		latest_version = excluded.latest_version, approved_version = excluded.approved_version`,
-		gate.Issue, gate.ArtifactID, gate.LatestVersion, gate.ApprovedVersion)
+		latest_version = excluded.latest_version, approved_version = excluded.approved_version,
+		approved_seq = excluded.approved_seq, approved_at = excluded.approved_at,
+		told_changes_version = excluded.told_changes_version, told_changes_reason = excluded.told_changes_reason,
+		told_changes_seq = excluded.told_changes_seq, told_changes_at = excluded.told_changes_at`,
+		gate.Issue, gate.ArtifactID, gate.LatestVersion, gate.ApprovedVersion, approvedSeq, approvedAt,
+		gate.ToldChangesVersion, toldReason, toldSeq, toldAt)
 	if err != nil {
 		return fmt.Errorf("put design gate for %s: %w", gate.Issue, err)
 	}
 	return nil
+}
+
+const rootAskColumns = `issue, ask, coalesce(kind, ''), coalesce(artifact, ''), open, seq, coalesce(waiting_on, ''), waiting_on_seq,
+	coalesce(closed_by, ''), closed_seq, by_tree, person_seq, person_answer_seq`
+
+func scanRootAsk(row scanner) (RootAsk, error) {
+	var ask RootAsk
+	err := row.Scan(&ask.Issue, &ask.Ask, &ask.Kind, &ask.Artifact, &ask.Open, &ask.Seq, &ask.WaitingOn, &ask.WaitingOnSeq, &ask.ClosedBy,
+		&ask.ClosedSeq, &ask.ByTree, &ask.PersonSeq, &ask.PersonAnswerSeq)
+	return ask, err
+}
+
+func (s *Postgres) RootAsk(ctx context.Context, tx pgx.Tx, issue, ask string) (*RootAsk, error) {
+	row, err := scanRootAsk(tx.QueryRow(ctx, `select `+rootAskColumns+` from root_asks where issue = $1 and ask = $2`, issue, ask))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read ask %s of %s: %w", ask, issue, err)
+	}
+	return &row, nil
+}
+
+func (s *Postgres) PutRootAsk(ctx context.Context, tx pgx.Tx, ask RootAsk) error {
+	if _, err := tx.Exec(ctx, `insert into root_asks (issue, ask, kind, artifact, open, seq, waiting_on, waiting_on_seq, closed_by, closed_seq,
+		by_tree, person_seq, person_answer_seq)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		on conflict (issue, ask) do update set kind = excluded.kind, artifact = excluded.artifact, open = excluded.open, seq = excluded.seq,
+		waiting_on = excluded.waiting_on, waiting_on_seq = excluded.waiting_on_seq, closed_by = excluded.closed_by,
+		closed_seq = excluded.closed_seq, by_tree = excluded.by_tree,
+		person_seq = excluded.person_seq, person_answer_seq = excluded.person_answer_seq
+		where root_asks.seq <= excluded.seq and root_asks.waiting_on_seq <= excluded.waiting_on_seq
+		and root_asks.closed_seq <= excluded.closed_seq and root_asks.person_seq <= excluded.person_seq
+		and root_asks.person_answer_seq <= excluded.person_answer_seq`,
+		ask.Issue, ask.Ask, nullableText(ask.Kind), nullableText(ask.Artifact), ask.Open, ask.Seq, nullableText(ask.WaitingOn), ask.WaitingOnSeq,
+		nullableText(ask.ClosedBy), ask.ClosedSeq, ask.ByTree, ask.PersonSeq, ask.PersonAnswerSeq); err != nil {
+		return fmt.Errorf("put ask %s of %s: %w", ask.Ask, ask.Issue, err)
+	}
+	return nil
+}
+
+func (s *Postgres) RootAsks(ctx context.Context, tx pgx.Tx, issues []string) (map[string][]RootAsk, error) {
+	asks := make(map[string][]RootAsk, len(issues))
+	if len(issues) == 0 {
+		return asks, nil
+	}
+	rows, err := tx.Query(ctx, `select `+rootAskColumns+` from root_asks where issue = any($1) order by issue, ask`, issues)
+	if err != nil {
+		return nil, fmt.Errorf("read the asks of %d issues: %w", len(issues), err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		ask, err := scanRootAsk(rows)
+		if err != nil {
+			return nil, fmt.Errorf("read the asks of %d issues: %w", len(issues), err)
+		}
+		asks[ask.Issue] = append(asks[ask.Issue], ask)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the asks of %d issues: %w", len(issues), err)
+	}
+	return asks, nil
+}
+
+func (s *Postgres) StartHandout(ctx context.Context, tx pgx.Tx, issue string) error {
+	// A root recorded before the catch-up cursor existed gets one at its first handout from this
+	// release (caught_up_seq 0, read from the handout), since this release took in everything up to it.
+	if _, err := tx.Exec(ctx, `update issues i set declared_seq = null, declared_at = null, caught_up_seq = coalesce(i.caught_up_seq, 0),
+		handout_seq = greatest(i.handout_seq, i.last_dispatch_seq,
+		coalesce(i.awaiting_since_seq, 0),
+		coalesce((select c.claim_seq from dispatch_claims c where c.key = i.key), 0),
+		coalesce((select max(greatest(a.seq, a.waiting_on_seq, a.closed_seq, a.person_seq, a.person_answer_seq)) from root_asks a where a.issue = i.key), 0),
+		coalesce((select greatest(coalesce(g.approved_seq, 0), coalesce(g.told_changes_seq, 0)) from design_gates g where g.issue = i.key), 0))
+		where i.key = $1`, issue); err != nil {
+		return fmt.Errorf("start a handout to %s: %w", issue, err)
+	}
+	return nil
+}
+
+func (s *Postgres) RestartCaughtUp(ctx context.Context, tx pgx.Tx, issue string) error {
+	if _, err := tx.Exec(ctx, `update issues set caught_up_seq = 0 where key = $1`, issue); err != nil {
+		return fmt.Errorf("restart the catch-up cursor of %s: %w", issue, err)
+	}
+	return nil
+}
+
+func (s *Postgres) Declare(ctx context.Context, tx pgx.Tx, issue string, mark EventMark) error {
+	if mark.Seq <= 0 {
+		return fmt.Errorf("declare a hand-back of %s: the hand-back has no sequence", issue)
+	}
+	var at any
+	if !mark.At.IsZero() {
+		at = mark.At
+	}
+	// The time is the newest hand-back's: an older one keeps the newer's, and the same hand-back
+	// read again keeps the time it already had when this read gives none.
+	if _, err := tx.Exec(ctx, `update issues set declared_seq = greatest(coalesce(declared_seq, $2), $2),
+		declared_at = case when declared_seq is null or $2 > declared_seq then $3::timestamptz
+			when $2 = declared_seq then coalesce($3::timestamptz, declared_at) else declared_at end
+		where key = $1`, issue, mark.Seq, at); err != nil {
+		return fmt.Errorf("declare a hand-back of %s at %d: %w", issue, mark.Seq, err)
+	}
+	return nil
+}
+
+func (s *Postgres) TakeInThrough(ctx context.Context, tx pgx.Tx, issue string, seq int64) error {
+	if _, err := tx.Exec(ctx, `update issues set handout_seq = greatest(handout_seq, $2),
+		declared_at = case when declared_seq <= $2 then null else declared_at end,
+		declared_seq = case when declared_seq <= $2 then null else declared_seq end
+		where key = $1`, issue, seq); err != nil {
+		return fmt.Errorf("take in the hand-backs of %s through %d: %w", issue, seq, err)
+	}
+	return nil
+}
+
+func (s *Postgres) ClearDeclared(ctx context.Context, tx pgx.Tx, issue string) error {
+	if _, err := tx.Exec(ctx, `update issues set declared_seq = null, declared_at = null where key = $1`, issue); err != nil {
+		return fmt.Errorf("clear the hand-back of %s: %w", issue, err)
+	}
+	return nil
+}
+
+func (s *Postgres) CaughtUpSeq(ctx context.Context, tx pgx.Tx, issue string) (int64, bool, error) {
+	var seq *int64
+	if err := tx.QueryRow(ctx, `select caught_up_seq from issues where key = $1`, issue).Scan(&seq); err != nil {
+		return 0, false, fmt.Errorf("read the catch-up cursor of %s: %w", issue, err)
+	}
+	if seq == nil {
+		return 0, false, nil
+	}
+	return *seq, true, nil
+}
+
+func (s *Postgres) SetCaughtUp(ctx context.Context, tx pgx.Tx, issue string, seq int64) error {
+	if seq < 0 {
+		return fmt.Errorf("set the catch-up cursor of %s: sequence %d is negative", issue, seq)
+	}
+	if _, err := tx.Exec(ctx, `update issues set caught_up_seq = greatest(coalesce(caught_up_seq, 0), $2) where key = $1`, issue, seq); err != nil {
+		return fmt.Errorf("set the catch-up cursor of %s at %d: %w", issue, seq, err)
+	}
+	return nil
+}
+
+// nullableText is text, or SQL null when it is empty.
+func nullableText(text string) any {
+	if text == "" {
+		return nil
+	}
+	return text
 }
 
 func (s *Postgres) Slots(ctx context.Context, tx pgx.Tx) ([]Slot, error) {
