@@ -109,7 +109,12 @@ function setup(
   const handed: ConsumerFrame[] = [];
   const running: Promise<void>[] = [];
   const gaps: ConsumerGapNotice[] = [];
-  const failed: ConsumerFrame[] = [];
+  // The failure notices shown through the ledger (`liveFailed`).
+  const failed: Array<{
+    readonly subject: string;
+    readonly eventID: string | undefined;
+    readonly receivedAt: number;
+  }> = [];
   const logs: string[] = [];
   const state = {
     deliver: (_frame: ConsumerFrame): void | Promise<void> => undefined,
@@ -123,12 +128,16 @@ function setup(
         if (result instanceof Promise) running.push(result);
         return result;
       },
-      failed: (frame) => failed.push(frame),
       gap: (notice) => gaps.push(notice),
       log: (message) => logs.push(message),
     },
     publish: (reply, body) => replies.push([reply, body]),
-    ledger: options.ledger ?? { delivered: () => false },
+    ledger: {
+      delivered: (identity) => options.ledger?.delivered(identity) ?? false,
+      liveFailed: async (followed, envelope, _error, receivedAt) => {
+        failed.push({ subject: followed, eventID: envelope.event_id, receivedAt });
+      },
+    },
     now: () => clock.now,
     every: timers.every,
   };
@@ -246,7 +255,7 @@ describe("replies", () => {
 
     expect(repliesTo(replies, "_INBOX.a")).toEqual(["received", "nak"]);
     expect(repliesTo(replies, "_INBOX.c")).toEqual(["received", "done"]);
-    expect(seqs(failed)).toEqual([1]);
+    expect(failed).toEqual([{ subject: AGENT, eventID: "evt-1", receivedAt: T0 }]);
   });
 
   test("closing the session answers nak for every unsettled frame and any later one", () => {

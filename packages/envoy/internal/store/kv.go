@@ -53,8 +53,8 @@ type Registry struct {
 	// including delete tombstones. It prevents a delayed local write-through
 	// from replacing a newer watcher update.
 	cacheRevisions map[string]uint64
-	// index indexes the cache's topic patterns by subject token (subjectIndex), for Match and
-	// MatchAny. Every change to cache changes it too; nil until the first one.
+	// index indexes the cache's topic patterns by subject token (subjectIndex), for Match. Every
+	// change to cache changes it too; nil until the first one.
 	index *subjectIndex
 	// watcher feeds the cache from the interest bucket. Once it is ready the cache is consistent
 	// with the bucket, and Match answers every "is this session subscribed?" question without

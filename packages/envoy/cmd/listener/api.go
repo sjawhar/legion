@@ -199,6 +199,15 @@ func frameDeliveryMode(payload *string) (mode string, err error) {
 	return mode, nil
 }
 
+// envelopeDeliveryMode is frameDeliveryMode of item's payload, none when it has none.
+func envelopeDeliveryMode(item contracts.Envelope) (mode string, err error) {
+	var payload *string
+	if item.Payload != "" {
+		payload = &item.Payload
+	}
+	return frameDeliveryMode(payload)
+}
+
 // isDeliveryMode reports whether value is one of the three targeted-delivery modes. The list is
 // DELIVERY_CAPABILITIES in packages/contracts/src/dispatch-api.ts, spelled here as the Dispatch
 // server spells it in its own `validDelivery`: the two sides talk over HTTP, not a shared Go
@@ -518,11 +527,7 @@ func sendHandler(d *listenerDeps) http.HandlerFunc {
 			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no live session %s", targetSession))
 			return
 		}
-		var itemPayload *string
-		if item.Payload != "" {
-			itemPayload = &item.Payload
-		}
-		mode, deliveryErr := frameDeliveryMode(itemPayload)
+		mode, deliveryErr := envelopeDeliveryMode(item)
 		if deliveryErr != nil {
 			writeJSONError(w, http.StatusForbidden, fmt.Sprintf(
 				"session %s (%s) sent a delivery mode that cannot be read unambiguously", targetSession, target.Title,

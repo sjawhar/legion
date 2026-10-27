@@ -19,7 +19,6 @@ import {
 import {
   type ConsumerDelivery,
   type ConsumerFrame,
-  type ConsumerGapNotice,
   createConsumerDelivery,
 } from "@legion/envoy-client/consumer-delivery";
 import {
@@ -1383,7 +1382,7 @@ export default function envoyExtension(pi: PiApi): void {
     // `nak` once it is released with nothing recorded (the host dropped the frame unwritten: a
     // session change, an interrupt that withdrew a person's turn), so the listener sends it again.
     // A release while this call still runs answers only once the call returns: a throw is the
-    // relay's own to count (`ConsumerDeliveryHost.failed`).
+    // relay's own to count (its failure notice comes from `createConsumerDelivery`).
     let handing = true;
     let releasedWhileHanding = false;
     const claim: DeliveryClaim =
@@ -1896,13 +1895,13 @@ export default function envoyExtension(pi: PiApi): void {
     readonly sessionID: string;
     readonly delivery: ConsumerDelivery;
     subscription: Subscription | undefined;
+    /** The snapshot last appended (`persistRelay`): an unchanged one is not appended again. */
+    persisted: string;
   }
   let relay: Relay | undefined;
   // The session and the topics of the last registration answered `consumer`: the listener relays
   // those the stream stores (`streamStores`). Undefined on the core path.
   let relayedFor: { readonly sessionID: string; readonly topics: ReadonlySet<string> } | undefined;
-  // The consumer snapshot last appended (`persistRelay`): an unchanged one is not appended again.
-  let persistedRelay: string | undefined;
 
   const relaysCoreTopic = (topic: string): boolean =>
     relayedFor !== undefined && relayedFor.sessionID === sessionID && relayedFor.topics.has(topic);
@@ -1914,8 +1913,8 @@ export default function envoyExtension(pi: PiApi): void {
     if (owner === undefined || relay !== owner || transcriptSessionID() !== owner.sessionID) return;
     const data = { session_id: owner.sessionID, ...owner.delivery.snapshot() };
     const serialized = JSON.stringify(data);
-    if (serialized === persistedRelay) return;
-    persistedRelay = serialized;
+    if (serialized === owner.persisted) return;
+    owner.persisted = serialized;
     pi.appendEntry(CONSUMER_STATE_ENTRY, data);
   };
 
@@ -1938,14 +1937,7 @@ export default function envoyExtension(pi: PiApi): void {
       ledger,
       host: {
         deliver: (frame) => deliverRelayed(delivery, frame),
-        // A frame the host kept refusing: the session gets the notice a failed live frame gets.
-        failed: (frame, error) => {
-          const { envelope } = renderInbound(frame.data, id, frame.subject);
-          if (envelope !== undefined) {
-            void ledger.liveFailed(frame.subject, envelope, error, Date.now());
-          }
-        },
-        gap: (notice: ConsumerGapNotice) => tellReplayNotice(notice),
+        gap: tellReplayNotice,
         log: (message, error) =>
           logger.warn(
             `envoy: ${message}`,
@@ -1959,7 +1951,12 @@ export default function envoyExtension(pi: PiApi): void {
     });
     const restored = consumerSnapshot(entries, id);
     if (restored !== undefined) delivery.restore(restored);
-    return { sessionID: id, delivery, subscription: undefined };
+    return {
+      sessionID: id,
+      delivery,
+      subscription: undefined,
+      persisted: JSON.stringify({ session_id: id, ...delivery.snapshot() }),
+    };
   };
 
   // Subscribes the relay subject, unless it is open: a subscription on a connection the listener
@@ -1981,7 +1978,6 @@ export default function envoyExtension(pi: PiApi): void {
     if (relay?.sessionID !== id) {
       closeRelay();
       relay = createRelay(id, context.sessionManager.getEntries(), replay);
-      persistedRelay = JSON.stringify({ session_id: id, ...relay.delivery.snapshot() });
     }
     await subscribeRelay(relay, live);
   };
@@ -1993,7 +1989,6 @@ export default function envoyExtension(pi: PiApi): void {
     if (owner === undefined) return;
     relay = undefined;
     relayedFor = undefined;
-    persistedRelay = undefined;
     replay?.setConsumerMode(false);
     owner.delivery.close();
     const subscription = owner.subscription;
@@ -2008,11 +2003,7 @@ export default function envoyExtension(pi: PiApi): void {
   const pumpRelay = async (owner: Relay, subscription: Subscription): Promise<void> => {
     try {
       for await (const message of subscription) {
-        owner.delivery.receive({
-          data: message.data,
-          headers: message.headers,
-          reply: message.reply,
-        });
+        owner.delivery.receive(message);
       }
     } catch {
       // Iterator failure falls through to the resubscribe path below.

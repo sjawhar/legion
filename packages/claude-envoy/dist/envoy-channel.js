@@ -37244,6 +37244,7 @@ function dispatchDocumentSubject(project, slug, type) {
 function agentSubject(session) {
   return `${AGENT_TOPIC_PREFIX}${session}`;
 }
+var GHOSTWISPR_TOPIC_PREFIX = "notifications.ghostwispr.";
 
 // ../contracts/src/legion-roles.ts
 var LEGION_ROLES = [
@@ -39189,6 +39190,87 @@ function renderInbound(raw, sessionID, subject2) {
   };
 }
 
+// ../envoy-client/src/dispatch-subscribe.ts
+function followedAsk(details) {
+  if (typeof details !== "object" || details === null)
+    return null;
+  const { follows, issue: issue2, document } = details;
+  if (typeof follows !== "object" || follows === null)
+    return null;
+  const { ask } = follows;
+  if (typeof ask !== "string" || ask === "")
+    return null;
+  if (typeof issue2 === "string" && issue2 !== "")
+    return { ask, owner: issueTopic(issue2) };
+  if (typeof document !== "string")
+    return null;
+  const [project, slug] = document.split("/", 2);
+  if (!project || !slug)
+    return null;
+  return { ask, owner: { label: document, topic: documentTopicOf(project, slug).topic } };
+}
+function followNoticeText({ ask, owner }, topics) {
+  const subscribe = ownerSubscribeLine(owner, topics);
+  return `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop).${subscribe === null ? "" : ` ${subscribe}.`}`;
+}
+function ownerSubscribeLine(owner, topics) {
+  if (topics == null || topics.some((topic) => subscriptionCovers(topic, owner)))
+    return null;
+  return `For every event on ${owner.label}: envoy_subscribe ${owner.topic}`;
+}
+function subscriptionCovers(topic, owner) {
+  const base = owner.topic.slice(0, -".>".length).split(".");
+  for (const [index, part] of topic.split(".").entries()) {
+    if (part === ">")
+      return true;
+    if (index >= base.length || part !== "*" && part !== base[index])
+      return false;
+  }
+  return false;
+}
+function subscriptionRemovedTopics(raw, sessionID) {
+  let envelope2;
+  try {
+    envelope2 = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  if (typeof envelope2 !== "object" || envelope2 === null)
+    return;
+  const { source, payload } = envelope2;
+  if (source !== "dispatch" || typeof payload !== "string")
+    return;
+  let event;
+  try {
+    event = JSON.parse(payload);
+  } catch {
+    return;
+  }
+  const parsedEvent = DispatchEventSchema.safeParse(event);
+  if (!parsedEvent.success || parsedEvent.data.type !== "subscription.removed")
+    return;
+  const parsedPayload = SubscriptionRemovedEventPayloadSchema.safeParse(parsedEvent.data.payload);
+  if (!parsedPayload.success || parsedPayload.data.session_id !== sessionID)
+    return;
+  return parsedPayload.data.topics ?? [];
+}
+
+// ../envoy-client/src/stream-topics.ts
+var EXCEPTION_TOPIC_PREFIX = "notifications.envoy.exceptions.";
+var STREAM_SUBJECT_PREFIXES = [
+  AGENT_TOPIC_PREFIX,
+  DISPATCH_TOPIC_PREFIX,
+  "notifications.github.",
+  "notifications.slack.",
+  LEGION_NOTICE_TOPIC_PREFIX,
+  GHOSTWISPR_TOPIC_PREFIX,
+  "notifications.whatsapp.",
+  `${EXCEPTION_TOPIC_PREFIX}${AGENT_TOPIC_PREFIX}`
+];
+function streamStores(topic) {
+  return STREAM_SUBJECT_PREFIXES.some((prefix) => topic.length > prefix.length && topic.startsWith(prefix));
+}
+
 // ../envoy-client/src/envoy-config.ts
 import {
   chmodSync,
@@ -40075,6 +40157,751 @@ function sourceSession(sessionID) {
   return sessionID === undefined || sessionID === "" ? {} : { source_session: sessionID };
 }
 
+// ../envoy-client/src/replay.ts
+var REPLAY_LEDGER_TTL_MS = DELIVERY_DUPLICATE_WINDOW_MS;
+var REPLAY_LEDGER_LIMIT = 20000;
+var REPLAY_PAGES_PER_SWEEP = 20;
+var REPLAY_FAILURES_BEFORE_NOTICE = 3;
+var REPLAY_STATE_REFRESH_MS = 60 * 60 * 1000;
+var REPLAY_MAX_SUBJECTS = 32;
+var ROLE_FORWARD_KEY_PREFIX = "envoy.role.forward.";
+var ReplayLedgerEntrySchema = exports_external.object({
+  event_id: exports_external.string().min(1).optional(),
+  dedupe_key: exports_external.string().min(1).optional(),
+  at: exports_external.number()
+});
+var ReplayCursorSchema = exports_external.object({
+  since: exports_external.number().int().nonnegative().optional(),
+  after: exports_external.number().int().nonnegative().optional()
+});
+var ReplayPendingNoticeSchema = exports_external.enum([
+  "retention_gap",
+  "stream_moved_back",
+  "stream_recreated"
+]);
+var PENDING_NOTICE_MESSAGES = {
+  stream_recreated: "Envoy's notification stream was recreated, so messages published to this session while its connection was down before that may be lost.",
+  stream_moved_back: "Envoy's notification stream was restored to an earlier point, so messages published to this session while its connection was down may be shown again, and any published between that point and the restore are missing.",
+  retention_gap: "The notification stream no longer holds some messages published to this session while its connection was down: messages older than 72 hours may be missing."
+};
+var ReplayStateSchema = exports_external.object({
+  stream_id: exports_external.string().optional(),
+  stream_created: exports_external.string().optional(),
+  subjects: exports_external.record(exports_external.string(), ReplayCursorSchema),
+  notices: exports_external.array(exports_external.string()).optional()
+});
+var ReplaySnapshotSchema = exports_external.object({
+  state: ReplayStateSchema.optional(),
+  ledger: exports_external.array(ReplayLedgerEntrySchema)
+});
+function createReplayEngine(options) {
+  const { host, transport, dedupe } = options;
+  const now = options.now ?? Date.now;
+  const ledger = createLedger(now);
+  const cursors = new Map;
+  const cursorStarts = new Map;
+  let streamID;
+  let streamCreated;
+  const pending = new Set;
+  const failures = new Map;
+  let unwritten = [];
+  let writtenState;
+  let writtenShape;
+  let writtenAt;
+  let writes = Promise.resolve();
+  let epoch = 0;
+  let listenerNoticed;
+  const answered = new Set;
+  let running;
+  let rerun;
+  let consumerMode = false;
+  const safely = (what, call) => {
+    try {
+      call();
+    } catch (error48) {
+      try {
+        host.log(`replay: ${what} failed`, error48);
+      } catch {}
+    }
+  };
+  const log = (message, error48) => safely("log", () => host.log(message, error48));
+  const notify = (notice) => safely("notice", () => host.notify(notice));
+  const tell = (kind) => {
+    pending.delete(kind);
+    notify({ kind, message: PENDING_NOTICE_MESSAGES[kind] });
+  };
+  const sessionRead = (read) => () => {
+    try {
+      return read();
+    } catch {
+      return;
+    }
+  };
+  const currentSession = sessionRead(() => host.sessionID());
+  const writeSession = sessionRead(() => host.writeSessionID === undefined ? host.sessionID() : host.writeSessionID());
+  const bindTo = (sessionID, read) => {
+    if (sessionID === undefined || sessionID === "" || read() !== sessionID)
+      return;
+    const bound = epoch;
+    return { sessionID, alive: () => bound === epoch && read() === sessionID };
+  };
+  const bind = () => bindTo(currentSession(), currentSession);
+  const stateJSON = (afters = true) => {
+    const subjects = {};
+    for (const subject2 of [...cursors.keys()].sort()) {
+      const cursor = cursors.get(subject2) ?? {};
+      subjects[subject2] = {
+        ...cursor.since === undefined ? {} : { since: cursor.since },
+        ...!afters || cursor.after === undefined ? {} : { after: cursor.after }
+      };
+    }
+    return JSON.stringify({
+      ...streamID === undefined ? {} : { stream_id: streamID },
+      ...streamCreated === undefined ? {} : { stream_created: streamCreated },
+      subjects,
+      ...pending.size === 0 ? {} : { notices: [...pending].sort() }
+    });
+  };
+  const record2 = (identity) => {
+    const entry = ledger.record(identity);
+    if (entry !== undefined)
+      unwritten.push(entry);
+  };
+  const flush = (alive, atOnce = false) => {
+    writes = writes.then(async () => {
+      if (!alive())
+        return;
+      const json2 = stateJSON();
+      const delivered = unwritten;
+      if (json2 === writtenState && delivered.length === 0)
+        return;
+      const shape = stateJSON(false);
+      if (delivered.length === 0 && !atOnce && shape === writtenShape && writtenAt !== undefined && now() - writtenAt < REPLAY_STATE_REFRESH_MS) {
+        return;
+      }
+      unwritten = [];
+      const state = json2 === writtenState ? undefined : JSON.parse(json2);
+      try {
+        await host.write({
+          delivered,
+          state,
+          snapshot: () => ({ state: JSON.parse(json2), ledger: ledger.list() })
+        });
+        if (state !== undefined) {
+          writtenState = json2;
+          writtenShape = shape;
+          writtenAt = now();
+        }
+      } catch (error48) {
+        unwritten = [...delivered, ...unwritten];
+        log("replay: could not persist the replay state; the next write carries it", error48);
+      }
+    });
+    return writes;
+  };
+  const syncFollowed = () => {
+    const followed = new Set(host.followedSubjects());
+    for (const subject2 of [...cursors.keys()]) {
+      if (!followed.has(subject2)) {
+        cursors.delete(subject2);
+        cursorStarts.delete(subject2);
+      }
+    }
+    for (const subject2 of followed) {
+      if (!cursors.has(subject2))
+        cursors.set(subject2, {});
+    }
+  };
+  const failureNotice = (envelope2, publishedAt, error48, subject2) => ({
+    eventId: envelope2.event_id ?? "unknown",
+    sender: senderLabel(envelope2),
+    summary: envelope2.payload_summary ?? "unknown",
+    publishedAt,
+    error: error48,
+    readWith: envelope2.source === "dispatch" ? "dispatch read" : "envoy_inbox",
+    ...subject2 === undefined ? {} : { subject: subject2 },
+    envelope: envelope2
+  });
+  const showFailureNotice = async (notice, alive) => {
+    let queued;
+    try {
+      queued = await host.showFailureNotice(notice) === "queued";
+    } catch (error48) {
+      if (!alive())
+        return "stopped";
+      safely("failure notice warning", () => host.failureNoticeFailed(notice, error48));
+      return "hole";
+    }
+    if (!alive())
+      return "stopped";
+    if (queued)
+      return "hole";
+    record2(replayLedgerIdentity(notice.envelope));
+    await flush(alive);
+    return "done";
+  };
+  const handle = async (seq, buffered, alive) => {
+    const { message } = buffered;
+    const envelope2 = parseEnvelope(message.data);
+    if (envelope2 === undefined) {
+      log(`replay: skipping stored message ${seq} on ${message.subject}: not an Envoy envelope`);
+      return "done";
+    }
+    if (isRoleForward(envelope2))
+      return "done";
+    const identity = replayLedgerIdentity(envelope2);
+    if (ledger.has(identity)) {
+      failures.delete(seq);
+      return "done";
+    }
+    if (dedupe?.pending(envelope2) === true)
+      return "hole";
+    if (!alive())
+      return "stopped";
+    const giveUp = async (error49) => {
+      const handled = await showFailureNotice(failureNotice(envelope2, message.time, error49, message.subject), alive);
+      if (handled === "done")
+        failures.delete(seq);
+      return handled;
+    };
+    const failure = failures.get(seq);
+    if (failure !== undefined && failure.count >= REPLAY_FAILURES_BEFORE_NOTICE) {
+      return giveUp(failure.error);
+    }
+    const followed = buffered.subjects[0] ?? message.subject;
+    let outcome;
+    let error48 = "the host could not show it";
+    try {
+      outcome = await host.deliver({
+        envelope: envelope2,
+        data: message.data,
+        seq,
+        subject: message.subject,
+        followed,
+        time: message.time,
+        since: cursors.get(followed)?.since
+      });
+    } catch (thrown) {
+      outcome = "failed";
+      error48 = messageFor(thrown);
+    }
+    if (!alive())
+      return "stopped";
+    if (outcome === "shown") {
+      failures.delete(seq);
+      record2(identity);
+      await flush(alive);
+      return "done";
+    }
+    if (outcome === "suppressed") {
+      failures.delete(seq);
+      return "done";
+    }
+    if (outcome === "queued") {
+      failures.delete(seq);
+      return "hole";
+    }
+    const count = (failure?.count ?? 0) + 1;
+    failures.set(seq, { count, error: error48 });
+    if (count >= REPLAY_FAILURES_BEFORE_NOTICE)
+      return giveUp(error48);
+    log(`replay: could not show stored message ${seq} (${envelope2.event_id}): ${error48}`);
+    return "hole";
+  };
+  const listenerFailed = (error48) => {
+    if (error48 instanceof EnvoyApiError) {
+      const status = error48.details.status;
+      if (status === 404) {
+        if (listenerNoticed === "not_served")
+          return;
+        listenerNoticed = "not_served";
+        notify({
+          kind: "not_served",
+          message: "This session's Envoy listener does not serve replay (POST /v1/replay answered 404), so messages published while its connection is down are not recovered."
+        });
+        return;
+      }
+      if (status === 503 && error48.code === REPLAY_UNAVAILABLE_CODE || status === 401 || status === 403) {
+        const key = `unavailable:${status}:${error48.message}`;
+        if (listenerNoticed === key)
+          return;
+        listenerNoticed = key;
+        notify({
+          kind: "unavailable",
+          status,
+          error: error48.message,
+          message: `Envoy replay is unavailable (${status}: ${error48.message}), so messages published while this session's connection is down are not recovered until it answers.`
+        });
+        return;
+      }
+    }
+    log("replay: the listener's replay failed; the next trigger tries again", error48);
+  };
+  const streamReplaced = (stream) => {
+    if (stream.id === undefined) {
+      return streamCreated !== undefined && streamCreated !== "" && stream.created !== streamCreated;
+    }
+    return streamID !== undefined && streamID !== "" && stream.id !== streamID;
+  };
+  const streamMovedBack = (stream) => {
+    for (const cursor of cursors.values()) {
+      if (cursor.after !== undefined && cursor.after > stream.last_seq)
+        return true;
+    }
+    return false;
+  };
+  const sweepOnce = async () => {
+    const binding = bind();
+    if (binding === undefined)
+      return;
+    const { sessionID, alive } = binding;
+    syncFollowed();
+    const readings = new Map;
+    for (const [subject2, cursor] of cursors) {
+      readings.set(subject2, { read: cursor.after, more: true });
+    }
+    const buffer = new Map;
+    const holes = new Map;
+    let gapNoticed = false;
+    if (pending.size > 0) {
+      for (const kind of [...pending].sort()) {
+        if (kind === "retention_gap")
+          gapNoticed = true;
+        tell(kind);
+      }
+      await flush(alive);
+      if (!alive())
+        return;
+    }
+    if (consumerMode)
+      return;
+    for (let page = 0;page < REPLAY_PAGES_PER_SWEEP; page += 1) {
+      let handledAny = false;
+      const asking = [...readings].filter(([, reading]) => reading.more).sort(([, a], [, b]) => (a.read ?? -1) - (b.read ?? -1)).slice(0, REPLAY_MAX_SUBJECTS);
+      if (asking.length === 0)
+        break;
+      let response;
+      try {
+        response = await transport.replay({
+          sessionID,
+          subjects: asking.map(([subject2, reading]) => reading.read === undefined ? { subject: subject2 } : { subject: subject2, after: reading.read }),
+          ...options.maxMessages === undefined ? {} : { maxMessages: options.maxMessages }
+        });
+      } catch (error48) {
+        if (alive()) {
+          answered.clear();
+          listenerFailed(error48);
+        }
+        return;
+      }
+      if (!alive())
+        return;
+      listenerNoticed = undefined;
+      for (const result of response.subjects) {
+        if (result.refused === undefined)
+          answered.add(result.subject);
+        else
+          answered.delete(result.subject);
+      }
+      const { stream } = response;
+      const replaced = streamReplaced(stream);
+      streamID = stream.id ?? (replaced ? undefined : streamID);
+      streamCreated = stream.created;
+      if (replaced) {
+        const at = now();
+        for (const subject2 of cursors.keys()) {
+          cursors.set(subject2, { since: stream.last_seq, after: stream.last_seq });
+          cursorStarts.set(subject2, at);
+        }
+        failures.clear();
+        pending.add("stream_recreated");
+        await flush(alive);
+        if (!alive())
+          return;
+        tell("stream_recreated");
+        await flush(alive);
+        return;
+      }
+      if (streamMovedBack(stream)) {
+        const from = Math.max(0, stream.first_seq - 1);
+        for (const [subject2, cursor] of cursors) {
+          if (cursor.after === undefined)
+            continue;
+          cursors.set(subject2, { ...cursor, after: from });
+          const reading = readings.get(subject2);
+          if (reading !== undefined) {
+            reading.read = from;
+            reading.more = true;
+          }
+        }
+        buffer.clear();
+        holes.clear();
+        failures.clear();
+        pending.add("stream_moved_back");
+        await flush(alive, true);
+        if (!alive())
+          return;
+        tell("stream_moved_back");
+        await flush(alive);
+        if (!alive())
+          return;
+        continue;
+      }
+      for (const [, reading] of asking)
+        reading.more = false;
+      let gapped = false;
+      for (const result of response.subjects) {
+        const reading = readings.get(result.subject);
+        if (reading?.read === undefined || result.refused !== undefined)
+          continue;
+        if (reading.read >= stream.first_seq - 1)
+          continue;
+        gapped = true;
+        reading.read = stream.first_seq - 1;
+        const cursor = cursors.get(result.subject);
+        if (cursor?.after !== undefined && cursor.after < reading.read) {
+          cursors.set(result.subject, { ...cursor, after: reading.read });
+        }
+      }
+      if (gapped) {
+        if (!gapNoticed)
+          pending.add("retention_gap");
+        await flush(alive, true);
+        if (!alive())
+          return;
+        if (pending.has("retention_gap")) {
+          gapNoticed = true;
+          tell("retention_gap");
+          await flush(alive);
+        }
+      }
+      for (const result of response.subjects) {
+        const reading = readings.get(result.subject);
+        if (reading === undefined || result.refused !== undefined)
+          continue;
+        if (reading.read === undefined) {
+          const cursor = cursors.get(result.subject);
+          if (cursor !== undefined && cursor.after === undefined) {
+            cursors.set(result.subject, { since: result.next_after, after: result.next_after });
+            cursorStarts.set(result.subject, now());
+          }
+          reading.read = result.next_after;
+          continue;
+        }
+        for (const message of result.messages) {
+          if (message.seq <= reading.read)
+            continue;
+          const buffered = buffer.get(message.seq);
+          if (buffered === undefined) {
+            buffer.set(message.seq, { message, subjects: [result.subject] });
+          } else if (!buffered.subjects.includes(result.subject)) {
+            buffered.subjects.push(result.subject);
+          }
+        }
+        reading.read = Math.max(reading.read, result.next_after);
+        reading.more = result.more;
+      }
+      let bound = Number.POSITIVE_INFINITY;
+      for (const reading of readings.values()) {
+        if (reading.more && reading.read !== undefined)
+          bound = Math.min(bound, reading.read);
+      }
+      const ready = [...buffer.keys()].filter((seq) => seq <= bound).sort((a, b) => a - b);
+      for (const seq of ready) {
+        const buffered = buffer.get(seq);
+        if (buffered === undefined)
+          continue;
+        buffer.delete(seq);
+        if (!buffered.subjects.some((subject2) => cursors.has(subject2)))
+          continue;
+        const handled = await handle(seq, buffered, alive);
+        if (handled === "stopped")
+          return;
+        if (handled === "done")
+          handledAny = true;
+        if (handled === "hole") {
+          for (const subject2 of buffered.subjects) {
+            if (!holes.has(subject2))
+              holes.set(subject2, seq);
+          }
+        }
+      }
+      if (!alive())
+        return;
+      for (const [subject2, reading] of readings) {
+        const cursor = cursors.get(subject2);
+        if (cursor?.after === undefined || reading.read === undefined)
+          continue;
+        let after = Math.min(reading.read, bound);
+        const hole = holes.get(subject2);
+        if (hole !== undefined)
+          after = Math.min(after, hole - 1);
+        if (after > cursor.after)
+          cursors.set(subject2, { ...cursor, after });
+      }
+      await flush(alive, handledAny);
+      if (![...readings.values()].some((reading) => reading.more))
+        break;
+    }
+  };
+  const runSweep = async () => {
+    try {
+      await sweepOnce();
+    } catch (error48) {
+      log("replay: a sweep failed", error48);
+    }
+  };
+  const sweep = () => {
+    if (running === undefined) {
+      running = runSweep().finally(() => {
+        running = undefined;
+      });
+      return running;
+    }
+    rerun ??= running.then(() => {
+      rerun = undefined;
+      return sweep();
+    });
+    return rerun;
+  };
+  return {
+    sweep,
+    setConsumerMode(on) {
+      consumerMode = on;
+    },
+    async followedChanged() {
+      const alive = bind()?.alive;
+      if (alive === undefined)
+        return;
+      try {
+        syncFollowed();
+        await flush(alive);
+      } catch (error48) {
+        log("replay: could not take the followed subjects", error48);
+      }
+    },
+    delivered: (frame) => ledger.has(replayLedgerIdentity(frame)),
+    async recordDelivered(frame) {
+      const alive = bind()?.alive;
+      if (alive === undefined)
+        return;
+      record2(replayLedgerIdentity(frame));
+      await flush(alive);
+    },
+    async recordDeliveredFor(sessionID, frame) {
+      const alive = bindTo(sessionID, writeSession)?.alive;
+      if (alive === undefined)
+        return;
+      record2(replayLedgerIdentity(frame));
+      await flush(alive);
+    },
+    async liveFailed(followed, envelope2, error48, receivedAt) {
+      const started = cursorStarts.get(followed);
+      if (!isRoleForward(envelope2) && answered.has(followed) && cursors.get(followed)?.after !== undefined && (started === undefined || started <= receivedAt)) {
+        return;
+      }
+      const alive = bind()?.alive;
+      if (alive === undefined)
+        return;
+      try {
+        await showFailureNotice(failureNotice(envelope2, inboundTimestamp(envelope2.issued_at), messageFor(error48)), alive);
+      } catch (thrown) {
+        log("replay: could not report a failed live frame", thrown);
+      }
+    },
+    followedBefore: (topic, seq) => {
+      const since = cursors.get(topic)?.since;
+      return since !== undefined && seq > since;
+    },
+    restore(snapshot) {
+      epoch += 1;
+      ledger.restore(snapshot.ledger);
+      cursors.clear();
+      cursorStarts.clear();
+      streamID = snapshot.state?.stream_id;
+      streamCreated = snapshot.state?.stream_created;
+      pending.clear();
+      for (const kind of snapshot.state?.notices ?? []) {
+        const known = ReplayPendingNoticeSchema.safeParse(kind);
+        if (known.success)
+          pending.add(known.data);
+      }
+      for (const [subject2, cursor] of Object.entries(snapshot.state?.subjects ?? {})) {
+        cursors.set(subject2, { ...cursor });
+      }
+      writtenState = snapshot.state === undefined ? undefined : stateJSON();
+      writtenShape = snapshot.state === undefined ? undefined : stateJSON(false);
+      writtenAt = undefined;
+      unwritten = [];
+      failures.clear();
+      listenerNoticed = undefined;
+      answered.clear();
+    },
+    state: () => JSON.parse(stateJSON())
+  };
+}
+function replaySuppressed(rendered) {
+  return rendered.skip || rendered.malformedDelivery === true;
+}
+function replayedText(content, publishedAt) {
+  return `${content}
+Published at ${publishedAt} while this session's connection was down.`;
+}
+function failureNoticeFields(notice) {
+  const readWith = notice.readWith === "dispatch read" ? "Read it with the `dispatch read` command on the issue or ask it concerns." : "Read it with the envoy_inbox tool.";
+  return {
+    notice: "message not shown",
+    event_id: notice.eventId,
+    from: notice.sender,
+    summary: notice.summary,
+    published_at: notice.publishedAt,
+    ...notice.subject === undefined ? {} : { subject: notice.subject },
+    error: notice.error,
+    detail: `This session could not be shown this message, so it is not coming back on its own. ${readWith}`
+  };
+}
+var REPLAY_NOTICE_NAMES = {
+  stream_recreated: "stream recreated",
+  stream_moved_back: "stream moved back"
+};
+function replayNoticeFields(notice) {
+  return {
+    notice: REPLAY_NOTICE_NAMES[notice.kind] ?? "messages may be missing",
+    detail: notice.message
+  };
+}
+function envoyNoticeText(fields) {
+  return encode3({ envoy: fields });
+}
+var PRIVATE_STREAM_SUBJECTS = [
+  `${AGENT_TOPIC_PREFIX}>`,
+  `${LEGION_NOTICE_TOPIC_PREFIX}>`,
+  `${EXCEPTION_TOPIC_PREFIX}${AGENT_TOPIC_PREFIX}>`
+];
+function subjectsOverlap(a, b) {
+  const aTokens = a.split(".");
+  const bTokens = b.split(".");
+  for (let index = 0;index < aTokens.length && index < bTokens.length; index += 1) {
+    const aToken = aTokens[index];
+    const bToken = bTokens[index];
+    if (aToken === ">" || bToken === ">")
+      return true;
+    if (aToken !== "*" && bToken !== "*" && aToken !== bToken)
+      return false;
+  }
+  return aTokens.length === bTokens.length;
+}
+function reachesPrivateStreamSubject(ownAgentSubject, topic) {
+  if (!PRIVATE_STREAM_SUBJECTS.some((subject2) => subjectsOverlap(topic, subject2)))
+    return false;
+  return topic !== ownAgentSubject || /[*>]/.test(ownAgentSubject);
+}
+function replayFollowedSubjects(ownAgentSubject, topics, heldForRole = () => false) {
+  const followed = [...topics].filter((topic) => !topic.startsWith(ROLE_TOPIC_PREFIX) && !reachesPrivateStreamSubject(ownAgentSubject, topic) && !heldForRole(topic));
+  return [...new Set([ownAgentSubject, ...followed])];
+}
+function rememberedTopics(state) {
+  return Object.keys(state?.subjects ?? {}).filter((topic) => !topic.startsWith(AGENT_TOPIC_PREFIX) && !topic.startsWith(ROLE_TOPIC_PREFIX));
+}
+async function closeReplayedRemoval(frame, host) {
+  const closed = (subscriptionRemovedTopics(frame.data, host.sessionID) ?? []).filter((topic) => host.engine.followedBefore(topic, frame.seq) && host.close(topic));
+  if (closed.length === 0)
+    return closed;
+  const unregistering = host.unregister(closed);
+  await host.followedChanged();
+  await unregistering;
+  return closed;
+}
+function routeReplayNotice(notice, routes) {
+  if (notice.kind === "not_served" || notice.kind === "unavailable") {
+    routes.warn(notice.message);
+    return;
+  }
+  routes.card(envoyNoticeText(replayNoticeFields(notice)));
+}
+function isRoleForward(envelope2) {
+  return envelope2.dedupe_key?.startsWith(ROLE_FORWARD_KEY_PREFIX) === true || envelope2.topic?.startsWith(ROLE_TOPIC_PREFIX) === true;
+}
+function replayLedgerIdentity(frame) {
+  return {
+    ...frame.event_id === undefined || frame.event_id === "" ? {} : { event_id: frame.event_id },
+    ...frame.dedupe_key === undefined || !dedupeKeyNamesItsEvent(frame) ? {} : { dedupe_key: frame.dedupe_key }
+  };
+}
+function parseEnvelope(data) {
+  let parsed;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return;
+  }
+  const result = EnvelopeSchema.safeParse(parsed);
+  return result.success ? result.data : undefined;
+}
+function createLedger(now) {
+  let entries = new Set;
+  const byEvent = new Map;
+  const byKey = new Map;
+  const drop = (entry) => {
+    entries.delete(entry);
+    if (entry.event_id !== undefined && byEvent.get(entry.event_id) === entry) {
+      byEvent.delete(entry.event_id);
+    }
+    if (entry.dedupe_key !== undefined && byKey.get(entry.dedupe_key) === entry) {
+      byKey.delete(entry.dedupe_key);
+    }
+  };
+  const add = (entry) => {
+    if (entries.size >= REPLAY_LEDGER_LIMIT) {
+      const oldest = entries.values().next();
+      if (oldest.done !== true)
+        drop(oldest.value);
+    }
+    entries.add(entry);
+    if (entry.event_id !== undefined)
+      byEvent.set(entry.event_id, entry);
+    if (entry.dedupe_key !== undefined)
+      byKey.set(entry.dedupe_key, entry);
+  };
+  const expire = () => {
+    const at = now();
+    for (const entry of entries) {
+      if (at - entry.at < REPLAY_LEDGER_TTL_MS)
+        break;
+      drop(entry);
+    }
+  };
+  const has = (identity) => {
+    expire();
+    return identity.event_id !== undefined && byEvent.has(identity.event_id) || identity.dedupe_key !== undefined && byKey.has(identity.dedupe_key);
+  };
+  return {
+    has,
+    record(identity) {
+      if (identity.event_id === undefined && identity.dedupe_key === undefined)
+        return;
+      if (has(identity))
+        return;
+      const entry = { ...identity, at: now() };
+      add(entry);
+      return entry;
+    },
+    restore(restored) {
+      entries = new Set;
+      byEvent.clear();
+      byKey.clear();
+      const at = now();
+      const kept = restored.filter((entry) => at - entry.at < REPLAY_LEDGER_TTL_MS && (entry.event_id !== undefined || entry.dedupe_key !== undefined)).sort((a, b) => a.at - b.at);
+      for (const entry of kept)
+        add({ ...entry });
+    },
+    list() {
+      expire();
+      return [...entries];
+    }
+  };
+}
+
 // ../envoy-client/src/consumer-delivery.ts
 var DELIVER_SUBJECT_PREFIX = "notifications.envoy.deliver.";
 function deliverSubject(sessionID) {
@@ -40156,19 +40983,6 @@ var ConsumerDeliverySnapshotSchema = exports_external.object({
   resume: exports_external.object({ stream_id: exports_external.string().min(1), seq: exports_external.number().int().nonnegative() }).optional(),
   follows: exports_external.record(exports_external.string(), exports_external.number()).default({})
 });
-function subjectMatches(pattern, subject2) {
-  const wanted = pattern.split(".");
-  const tokens = subject2.split(".");
-  for (let index = 0;index < wanted.length; index += 1) {
-    if (wanted[index] === ">")
-      return tokens.length > index;
-    if (index >= tokens.length)
-      return false;
-    if (wanted[index] !== "*" && wanted[index] !== tokens[index])
-      return false;
-  }
-  return wanted.length === tokens.length;
-}
 function parseIdentity(data) {
   let parsed;
   try {
@@ -40226,7 +41040,7 @@ function createConsumerDelivery(options) {
       return Number.NEGATIVE_INFINITY;
     let earliest;
     for (const [topic, at] of follows) {
-      if (!expandSubscriptionTopics([topic]).some((pattern) => subjectMatches(pattern, subject2))) {
+      if (!expandSubscriptionTopics([topic]).some((pattern) => subjectsOverlap(pattern, subject2))) {
         continue;
       }
       if (earliest === undefined || at < earliest)
@@ -40254,11 +41068,8 @@ function createConsumerDelivery(options) {
     blocking = undefined;
     pump();
   };
-  const duplicate = (frame) => {
-    const identity = parseIdentity(frame.data);
-    return identity !== undefined && ledger.delivered(identity);
-  };
-  const failed = (entry, handle, error48) => {
+  const alreadyWritten = (identity) => identity !== undefined && ledger.delivered(identity);
+  const failed = (entry, error48) => {
     if (entry.settled)
       return;
     if (entry.frame.delivered < RELAY_ATTEMPTS_BEFORE_FAILED) {
@@ -40266,7 +41077,12 @@ function createConsumerDelivery(options) {
       settle(entry, "nak");
       return;
     }
-    safely("failure notice", () => host.failed(handle, error48));
+    safely("failure notice", () => {
+      const { subject: subject2, data } = entry.frame;
+      const { envelope: envelope2 } = renderInbound(data, sessionID, subject2);
+      if (envelope2 !== undefined)
+        ledger.liveFailed(subject2, envelope2, error48, now());
+    });
     settle(entry, "done");
   };
   const handOff = (entry) => {
@@ -40282,7 +41098,7 @@ function createConsumerDelivery(options) {
     try {
       result = host.deliver(handle);
     } catch (error48) {
-      failed(entry, handle, error48);
+      failed(entry, error48);
       release(entry);
       return;
     }
@@ -40291,7 +41107,7 @@ function createConsumerDelivery(options) {
       return;
     }
     result.then(() => release(entry), (error48) => {
-      failed(entry, handle, error48);
+      failed(entry, error48);
       release(entry);
     });
   };
@@ -40306,7 +41122,7 @@ function createConsumerDelivery(options) {
           return;
         if (entry.settled)
           continue;
-        if (duplicate(entry.frame)) {
+        if (alreadyWritten(entry.identity)) {
           settle(entry, "done");
           continue;
         }
@@ -40346,7 +41162,9 @@ function createConsumerDelivery(options) {
       return;
     }
     const since = followedAt(frame.subject);
-    if (since === undefined || frame.storedAtMs < since - FOLLOW_CLOCK_ALLOWANCE_MS || duplicate(frame)) {
+    const unfollowed = since === undefined || frame.storedAtMs < since - FOLLOW_CLOCK_ALLOWANCE_MS;
+    const identity = unfollowed ? undefined : parseIdentity(frame.data);
+    if (unfollowed || alreadyWritten(identity)) {
       send(frame.reply, "done");
       written = Math.max(written ?? 0, frame.streamSeq);
       return;
@@ -40354,6 +41172,7 @@ function createConsumerDelivery(options) {
     held.add(frame.streamSeq);
     const entry = {
       frame,
+      identity,
       late: frame.delivered > 1 || frame.storedAtMs < currentEpoch.startedAt,
       replies: [frame.reply],
       key,
@@ -41505,71 +42324,6 @@ async function readPictures(client, addresses, shown) {
     }
   }
   return { lines, images, shown: showing };
-}
-
-// ../envoy-client/src/dispatch-subscribe.ts
-function followedAsk(details) {
-  if (typeof details !== "object" || details === null)
-    return null;
-  const { follows, issue: issue2, document } = details;
-  if (typeof follows !== "object" || follows === null)
-    return null;
-  const { ask } = follows;
-  if (typeof ask !== "string" || ask === "")
-    return null;
-  if (typeof issue2 === "string" && issue2 !== "")
-    return { ask, owner: issueTopic(issue2) };
-  if (typeof document !== "string")
-    return null;
-  const [project, slug] = document.split("/", 2);
-  if (!project || !slug)
-    return null;
-  return { ask, owner: { label: document, topic: documentTopicOf(project, slug).topic } };
-}
-function followNoticeText({ ask, owner }, topics) {
-  const subscribe = ownerSubscribeLine(owner, topics);
-  return `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop).${subscribe === null ? "" : ` ${subscribe}.`}`;
-}
-function ownerSubscribeLine(owner, topics) {
-  if (topics == null || topics.some((topic) => subscriptionCovers(topic, owner)))
-    return null;
-  return `For every event on ${owner.label}: envoy_subscribe ${owner.topic}`;
-}
-function subscriptionCovers(topic, owner) {
-  const base = owner.topic.slice(0, -".>".length).split(".");
-  for (const [index, part] of topic.split(".").entries()) {
-    if (part === ">")
-      return true;
-    if (index >= base.length || part !== "*" && part !== base[index])
-      return false;
-  }
-  return false;
-}
-function subscriptionRemovedTopics(raw, sessionID) {
-  let envelope2;
-  try {
-    envelope2 = JSON.parse(raw);
-  } catch {
-    return;
-  }
-  if (typeof envelope2 !== "object" || envelope2 === null)
-    return;
-  const { source, payload } = envelope2;
-  if (source !== "dispatch" || typeof payload !== "string")
-    return;
-  let event;
-  try {
-    event = JSON.parse(payload);
-  } catch {
-    return;
-  }
-  const parsedEvent = DispatchEventSchema.safeParse(event);
-  if (!parsedEvent.success || parsedEvent.data.type !== "subscription.removed")
-    return;
-  const parsedPayload = SubscriptionRemovedEventPayloadSchema.safeParse(parsedEvent.data.payload);
-  if (!parsedPayload.success || parsedPayload.data.session_id !== sessionID)
-    return;
-  return parsedPayload.data.topics ?? [];
 }
 
 // ../envoy-client/src/search-answer.ts
@@ -44358,752 +45112,6 @@ function natsAuthOptions(seed) {
   return { authenticator: import_nats.nkeyAuthenticator(bytes) };
 }
 
-// ../envoy-client/src/replay.ts
-var REPLAY_LEDGER_TTL_MS = DELIVERY_DUPLICATE_WINDOW_MS;
-var REPLAY_LEDGER_LIMIT = 20000;
-var REPLAY_PAGES_PER_SWEEP = 20;
-var REPLAY_FAILURES_BEFORE_NOTICE = 3;
-var REPLAY_STATE_REFRESH_MS = 60 * 60 * 1000;
-var REPLAY_MAX_SUBJECTS = 32;
-var ROLE_FORWARD_KEY_PREFIX = "envoy.role.forward.";
-var ReplayLedgerEntrySchema = exports_external.object({
-  event_id: exports_external.string().min(1).optional(),
-  dedupe_key: exports_external.string().min(1).optional(),
-  at: exports_external.number()
-});
-var ReplayCursorSchema = exports_external.object({
-  since: exports_external.number().int().nonnegative().optional(),
-  after: exports_external.number().int().nonnegative().optional()
-});
-var ReplayPendingNoticeSchema = exports_external.enum([
-  "retention_gap",
-  "stream_moved_back",
-  "stream_recreated"
-]);
-var PENDING_NOTICE_MESSAGES = {
-  stream_recreated: "Envoy's notification stream was recreated, so messages published to this session while its connection was down before that may be lost.",
-  stream_moved_back: "Envoy's notification stream was restored to an earlier point, so messages published to this session while its connection was down may be shown again, and any published between that point and the restore are missing.",
-  retention_gap: "The notification stream no longer holds some messages published to this session while its connection was down: messages older than 72 hours may be missing."
-};
-var ReplayStateSchema = exports_external.object({
-  stream_id: exports_external.string().optional(),
-  stream_created: exports_external.string().optional(),
-  subjects: exports_external.record(exports_external.string(), ReplayCursorSchema),
-  notices: exports_external.array(exports_external.string()).optional()
-});
-var ReplaySnapshotSchema = exports_external.object({
-  state: ReplayStateSchema.optional(),
-  ledger: exports_external.array(ReplayLedgerEntrySchema)
-});
-function createReplayEngine(options) {
-  const { host, transport, dedupe } = options;
-  const now = options.now ?? Date.now;
-  const ledger = createLedger(now);
-  const cursors = new Map;
-  const cursorStarts = new Map;
-  let streamID;
-  let streamCreated;
-  const pending = new Set;
-  const failures = new Map;
-  let unwritten = [];
-  let writtenState;
-  let writtenShape;
-  let writtenAt;
-  let writes = Promise.resolve();
-  let epoch = 0;
-  let listenerNoticed;
-  const answered = new Set;
-  let running;
-  let rerun;
-  let consumerMode = false;
-  const safely = (what, call) => {
-    try {
-      call();
-    } catch (error48) {
-      try {
-        host.log(`replay: ${what} failed`, error48);
-      } catch {}
-    }
-  };
-  const log = (message, error48) => safely("log", () => host.log(message, error48));
-  const notify = (notice) => safely("notice", () => host.notify(notice));
-  const tell = (kind) => {
-    pending.delete(kind);
-    notify({ kind, message: PENDING_NOTICE_MESSAGES[kind] });
-  };
-  const sessionRead = (read) => () => {
-    try {
-      return read();
-    } catch {
-      return;
-    }
-  };
-  const currentSession = sessionRead(() => host.sessionID());
-  const writeSession = sessionRead(() => host.writeSessionID === undefined ? host.sessionID() : host.writeSessionID());
-  const bindTo = (sessionID, read) => {
-    if (sessionID === undefined || sessionID === "" || read() !== sessionID)
-      return;
-    const bound = epoch;
-    return { sessionID, alive: () => bound === epoch && read() === sessionID };
-  };
-  const bind = () => bindTo(currentSession(), currentSession);
-  const stateJSON = (afters = true) => {
-    const subjects = {};
-    for (const subject2 of [...cursors.keys()].sort()) {
-      const cursor = cursors.get(subject2) ?? {};
-      subjects[subject2] = {
-        ...cursor.since === undefined ? {} : { since: cursor.since },
-        ...!afters || cursor.after === undefined ? {} : { after: cursor.after }
-      };
-    }
-    return JSON.stringify({
-      ...streamID === undefined ? {} : { stream_id: streamID },
-      ...streamCreated === undefined ? {} : { stream_created: streamCreated },
-      subjects,
-      ...pending.size === 0 ? {} : { notices: [...pending].sort() }
-    });
-  };
-  const record2 = (identity) => {
-    const entry = ledger.record(identity);
-    if (entry !== undefined)
-      unwritten.push(entry);
-  };
-  const flush = (alive, atOnce = false) => {
-    writes = writes.then(async () => {
-      if (!alive())
-        return;
-      const json2 = stateJSON();
-      const delivered = unwritten;
-      if (json2 === writtenState && delivered.length === 0)
-        return;
-      const shape = stateJSON(false);
-      if (delivered.length === 0 && !atOnce && shape === writtenShape && writtenAt !== undefined && now() - writtenAt < REPLAY_STATE_REFRESH_MS) {
-        return;
-      }
-      unwritten = [];
-      const state = json2 === writtenState ? undefined : JSON.parse(json2);
-      try {
-        await host.write({
-          delivered,
-          state,
-          snapshot: () => ({ state: JSON.parse(json2), ledger: ledger.list() })
-        });
-        if (state !== undefined) {
-          writtenState = json2;
-          writtenShape = shape;
-          writtenAt = now();
-        }
-      } catch (error48) {
-        unwritten = [...delivered, ...unwritten];
-        log("replay: could not persist the replay state; the next write carries it", error48);
-      }
-    });
-    return writes;
-  };
-  const syncFollowed = () => {
-    const followed = new Set(host.followedSubjects());
-    for (const subject2 of [...cursors.keys()]) {
-      if (!followed.has(subject2)) {
-        cursors.delete(subject2);
-        cursorStarts.delete(subject2);
-      }
-    }
-    for (const subject2 of followed) {
-      if (!cursors.has(subject2))
-        cursors.set(subject2, {});
-    }
-  };
-  const failureNotice = (envelope2, publishedAt, error48, subject2) => ({
-    eventId: envelope2.event_id ?? "unknown",
-    sender: senderLabel(envelope2),
-    summary: envelope2.payload_summary ?? "unknown",
-    publishedAt,
-    error: error48,
-    readWith: envelope2.source === "dispatch" ? "dispatch read" : "envoy_inbox",
-    ...subject2 === undefined ? {} : { subject: subject2 },
-    envelope: envelope2
-  });
-  const showFailureNotice = async (notice, alive) => {
-    let queued;
-    try {
-      queued = await host.showFailureNotice(notice) === "queued";
-    } catch (error48) {
-      if (!alive())
-        return "stopped";
-      safely("failure notice warning", () => host.failureNoticeFailed(notice, error48));
-      return "hole";
-    }
-    if (!alive())
-      return "stopped";
-    if (queued)
-      return "hole";
-    record2(replayLedgerIdentity(notice.envelope));
-    await flush(alive);
-    return "done";
-  };
-  const handle = async (seq, buffered, alive) => {
-    const { message } = buffered;
-    const envelope2 = parseEnvelope(message.data);
-    if (envelope2 === undefined) {
-      log(`replay: skipping stored message ${seq} on ${message.subject}: not an Envoy envelope`);
-      return "done";
-    }
-    if (isRoleForward(envelope2))
-      return "done";
-    const identity = replayLedgerIdentity(envelope2);
-    if (ledger.has(identity)) {
-      failures.delete(seq);
-      return "done";
-    }
-    if (dedupe?.pending(envelope2) === true)
-      return "hole";
-    if (!alive())
-      return "stopped";
-    const giveUp = async (error49) => {
-      const handled = await showFailureNotice(failureNotice(envelope2, message.time, error49, message.subject), alive);
-      if (handled === "done")
-        failures.delete(seq);
-      return handled;
-    };
-    const failure = failures.get(seq);
-    if (failure !== undefined && failure.count >= REPLAY_FAILURES_BEFORE_NOTICE) {
-      return giveUp(failure.error);
-    }
-    const followed = buffered.subjects[0] ?? message.subject;
-    let outcome;
-    let error48 = "the host could not show it";
-    try {
-      outcome = await host.deliver({
-        envelope: envelope2,
-        data: message.data,
-        seq,
-        subject: message.subject,
-        followed,
-        time: message.time,
-        since: cursors.get(followed)?.since
-      });
-    } catch (thrown) {
-      outcome = "failed";
-      error48 = messageFor(thrown);
-    }
-    if (!alive())
-      return "stopped";
-    if (outcome === "shown") {
-      failures.delete(seq);
-      record2(identity);
-      await flush(alive);
-      return "done";
-    }
-    if (outcome === "suppressed") {
-      failures.delete(seq);
-      return "done";
-    }
-    if (outcome === "queued") {
-      failures.delete(seq);
-      return "hole";
-    }
-    const count = (failure?.count ?? 0) + 1;
-    failures.set(seq, { count, error: error48 });
-    if (count >= REPLAY_FAILURES_BEFORE_NOTICE)
-      return giveUp(error48);
-    log(`replay: could not show stored message ${seq} (${envelope2.event_id}): ${error48}`);
-    return "hole";
-  };
-  const listenerFailed = (error48) => {
-    if (error48 instanceof EnvoyApiError) {
-      const status = error48.details.status;
-      if (status === 404) {
-        if (listenerNoticed === "not_served")
-          return;
-        listenerNoticed = "not_served";
-        notify({
-          kind: "not_served",
-          message: "This session's Envoy listener does not serve replay (POST /v1/replay answered 404), so messages published while its connection is down are not recovered."
-        });
-        return;
-      }
-      if (status === 503 && error48.code === REPLAY_UNAVAILABLE_CODE || status === 401 || status === 403) {
-        const key = `unavailable:${status}:${error48.message}`;
-        if (listenerNoticed === key)
-          return;
-        listenerNoticed = key;
-        notify({
-          kind: "unavailable",
-          status,
-          error: error48.message,
-          message: `Envoy replay is unavailable (${status}: ${error48.message}), so messages published while this session's connection is down are not recovered until it answers.`
-        });
-        return;
-      }
-    }
-    log("replay: the listener's replay failed; the next trigger tries again", error48);
-  };
-  const streamReplaced = (stream) => {
-    if (stream.id === undefined) {
-      return streamCreated !== undefined && streamCreated !== "" && stream.created !== streamCreated;
-    }
-    return streamID !== undefined && streamID !== "" && stream.id !== streamID;
-  };
-  const streamMovedBack = (stream) => {
-    for (const cursor of cursors.values()) {
-      if (cursor.after !== undefined && cursor.after > stream.last_seq)
-        return true;
-    }
-    return false;
-  };
-  const sweepOnce = async () => {
-    const binding = bind();
-    if (binding === undefined)
-      return;
-    const { sessionID, alive } = binding;
-    syncFollowed();
-    const readings = new Map;
-    for (const [subject2, cursor] of cursors) {
-      readings.set(subject2, { read: cursor.after, more: true });
-    }
-    const buffer = new Map;
-    const holes = new Map;
-    let gapNoticed = false;
-    if (pending.size > 0) {
-      for (const kind of [...pending].sort()) {
-        if (kind === "retention_gap")
-          gapNoticed = true;
-        tell(kind);
-      }
-      await flush(alive);
-      if (!alive())
-        return;
-    }
-    if (consumerMode)
-      return;
-    for (let page = 0;page < REPLAY_PAGES_PER_SWEEP; page += 1) {
-      let handledAny = false;
-      const asking = [...readings].filter(([, reading]) => reading.more).sort(([, a], [, b]) => (a.read ?? -1) - (b.read ?? -1)).slice(0, REPLAY_MAX_SUBJECTS);
-      if (asking.length === 0)
-        break;
-      let response;
-      try {
-        response = await transport.replay({
-          sessionID,
-          subjects: asking.map(([subject2, reading]) => reading.read === undefined ? { subject: subject2 } : { subject: subject2, after: reading.read }),
-          ...options.maxMessages === undefined ? {} : { maxMessages: options.maxMessages }
-        });
-      } catch (error48) {
-        if (alive()) {
-          answered.clear();
-          listenerFailed(error48);
-        }
-        return;
-      }
-      if (!alive())
-        return;
-      listenerNoticed = undefined;
-      for (const result of response.subjects) {
-        if (result.refused === undefined)
-          answered.add(result.subject);
-        else
-          answered.delete(result.subject);
-      }
-      const { stream } = response;
-      const replaced = streamReplaced(stream);
-      streamID = stream.id ?? (replaced ? undefined : streamID);
-      streamCreated = stream.created;
-      if (replaced) {
-        const at = now();
-        for (const subject2 of cursors.keys()) {
-          cursors.set(subject2, { since: stream.last_seq, after: stream.last_seq });
-          cursorStarts.set(subject2, at);
-        }
-        failures.clear();
-        pending.add("stream_recreated");
-        await flush(alive);
-        if (!alive())
-          return;
-        tell("stream_recreated");
-        await flush(alive);
-        return;
-      }
-      if (streamMovedBack(stream)) {
-        const from = Math.max(0, stream.first_seq - 1);
-        for (const [subject2, cursor] of cursors) {
-          if (cursor.after === undefined)
-            continue;
-          cursors.set(subject2, { ...cursor, after: from });
-          const reading = readings.get(subject2);
-          if (reading !== undefined) {
-            reading.read = from;
-            reading.more = true;
-          }
-        }
-        buffer.clear();
-        holes.clear();
-        failures.clear();
-        pending.add("stream_moved_back");
-        await flush(alive, true);
-        if (!alive())
-          return;
-        tell("stream_moved_back");
-        await flush(alive);
-        if (!alive())
-          return;
-        continue;
-      }
-      for (const [, reading] of asking)
-        reading.more = false;
-      let gapped = false;
-      for (const result of response.subjects) {
-        const reading = readings.get(result.subject);
-        if (reading?.read === undefined || result.refused !== undefined)
-          continue;
-        if (reading.read >= stream.first_seq - 1)
-          continue;
-        gapped = true;
-        reading.read = stream.first_seq - 1;
-        const cursor = cursors.get(result.subject);
-        if (cursor?.after !== undefined && cursor.after < reading.read) {
-          cursors.set(result.subject, { ...cursor, after: reading.read });
-        }
-      }
-      if (gapped) {
-        if (!gapNoticed)
-          pending.add("retention_gap");
-        await flush(alive, true);
-        if (!alive())
-          return;
-        if (pending.has("retention_gap")) {
-          gapNoticed = true;
-          tell("retention_gap");
-          await flush(alive);
-        }
-      }
-      for (const result of response.subjects) {
-        const reading = readings.get(result.subject);
-        if (reading === undefined || result.refused !== undefined)
-          continue;
-        if (reading.read === undefined) {
-          const cursor = cursors.get(result.subject);
-          if (cursor !== undefined && cursor.after === undefined) {
-            cursors.set(result.subject, { since: result.next_after, after: result.next_after });
-            cursorStarts.set(result.subject, now());
-          }
-          reading.read = result.next_after;
-          continue;
-        }
-        for (const message of result.messages) {
-          if (message.seq <= reading.read)
-            continue;
-          const buffered = buffer.get(message.seq);
-          if (buffered === undefined) {
-            buffer.set(message.seq, { message, subjects: [result.subject] });
-          } else if (!buffered.subjects.includes(result.subject)) {
-            buffered.subjects.push(result.subject);
-          }
-        }
-        reading.read = Math.max(reading.read, result.next_after);
-        reading.more = result.more;
-      }
-      let bound = Number.POSITIVE_INFINITY;
-      for (const reading of readings.values()) {
-        if (reading.more && reading.read !== undefined)
-          bound = Math.min(bound, reading.read);
-      }
-      const ready = [...buffer.keys()].filter((seq) => seq <= bound).sort((a, b) => a - b);
-      for (const seq of ready) {
-        const buffered = buffer.get(seq);
-        if (buffered === undefined)
-          continue;
-        buffer.delete(seq);
-        if (!buffered.subjects.some((subject2) => cursors.has(subject2)))
-          continue;
-        const handled = await handle(seq, buffered, alive);
-        if (handled === "stopped")
-          return;
-        if (handled === "done")
-          handledAny = true;
-        if (handled === "hole") {
-          for (const subject2 of buffered.subjects) {
-            if (!holes.has(subject2))
-              holes.set(subject2, seq);
-          }
-        }
-      }
-      if (!alive())
-        return;
-      for (const [subject2, reading] of readings) {
-        const cursor = cursors.get(subject2);
-        if (cursor?.after === undefined || reading.read === undefined)
-          continue;
-        let after = Math.min(reading.read, bound);
-        const hole = holes.get(subject2);
-        if (hole !== undefined)
-          after = Math.min(after, hole - 1);
-        if (after > cursor.after)
-          cursors.set(subject2, { ...cursor, after });
-      }
-      await flush(alive, handledAny);
-      if (![...readings.values()].some((reading) => reading.more))
-        break;
-    }
-  };
-  const runSweep = async () => {
-    try {
-      await sweepOnce();
-    } catch (error48) {
-      log("replay: a sweep failed", error48);
-    }
-  };
-  const sweep = () => {
-    if (running === undefined) {
-      running = runSweep().finally(() => {
-        running = undefined;
-      });
-      return running;
-    }
-    rerun ??= running.then(() => {
-      rerun = undefined;
-      return sweep();
-    });
-    return rerun;
-  };
-  return {
-    sweep,
-    setConsumerMode(on) {
-      consumerMode = on;
-    },
-    async followedChanged() {
-      const alive = bind()?.alive;
-      if (alive === undefined)
-        return;
-      try {
-        syncFollowed();
-        await flush(alive);
-      } catch (error48) {
-        log("replay: could not take the followed subjects", error48);
-      }
-    },
-    delivered: (frame) => ledger.has(replayLedgerIdentity(frame)),
-    async recordDelivered(frame) {
-      const alive = bind()?.alive;
-      if (alive === undefined)
-        return;
-      record2(replayLedgerIdentity(frame));
-      await flush(alive);
-    },
-    async recordDeliveredFor(sessionID, frame) {
-      const alive = bindTo(sessionID, writeSession)?.alive;
-      if (alive === undefined)
-        return;
-      record2(replayLedgerIdentity(frame));
-      await flush(alive);
-    },
-    async liveFailed(followed, envelope2, error48, receivedAt) {
-      const started = cursorStarts.get(followed);
-      if (!isRoleForward(envelope2) && answered.has(followed) && cursors.get(followed)?.after !== undefined && (started === undefined || started <= receivedAt)) {
-        return;
-      }
-      const alive = bind()?.alive;
-      if (alive === undefined)
-        return;
-      try {
-        await showFailureNotice(failureNotice(envelope2, inboundTimestamp(envelope2.issued_at), messageFor(error48)), alive);
-      } catch (thrown) {
-        log("replay: could not report a failed live frame", thrown);
-      }
-    },
-    followedBefore: (topic, seq) => {
-      const since = cursors.get(topic)?.since;
-      return since !== undefined && seq > since;
-    },
-    restore(snapshot) {
-      epoch += 1;
-      ledger.restore(snapshot.ledger);
-      cursors.clear();
-      cursorStarts.clear();
-      streamID = snapshot.state?.stream_id;
-      streamCreated = snapshot.state?.stream_created;
-      pending.clear();
-      for (const kind of snapshot.state?.notices ?? []) {
-        const known = ReplayPendingNoticeSchema.safeParse(kind);
-        if (known.success)
-          pending.add(known.data);
-      }
-      for (const [subject2, cursor] of Object.entries(snapshot.state?.subjects ?? {})) {
-        cursors.set(subject2, { ...cursor });
-      }
-      writtenState = snapshot.state === undefined ? undefined : stateJSON();
-      writtenShape = snapshot.state === undefined ? undefined : stateJSON(false);
-      writtenAt = undefined;
-      unwritten = [];
-      failures.clear();
-      listenerNoticed = undefined;
-      answered.clear();
-    },
-    state: () => JSON.parse(stateJSON())
-  };
-}
-function replaySuppressed(rendered) {
-  return rendered.skip || rendered.malformedDelivery === true;
-}
-function replayedText(content, publishedAt) {
-  return `${content}
-Published at ${publishedAt} while this session's connection was down.`;
-}
-function failureNoticeFields(notice) {
-  const readWith = notice.readWith === "dispatch read" ? "Read it with the `dispatch read` command on the issue or ask it concerns." : "Read it with the envoy_inbox tool.";
-  return {
-    notice: "message not shown",
-    event_id: notice.eventId,
-    from: notice.sender,
-    summary: notice.summary,
-    published_at: notice.publishedAt,
-    ...notice.subject === undefined ? {} : { subject: notice.subject },
-    error: notice.error,
-    detail: `This session could not be shown this message, so it is not coming back on its own. ${readWith}`
-  };
-}
-var REPLAY_NOTICE_NAMES = {
-  stream_recreated: "stream recreated",
-  stream_moved_back: "stream moved back"
-};
-function replayNoticeFields(notice) {
-  return {
-    notice: REPLAY_NOTICE_NAMES[notice.kind] ?? "messages may be missing",
-    detail: notice.message
-  };
-}
-function envoyNoticeText(fields) {
-  return encode3({ envoy: fields });
-}
-var EXCEPTION_TOPIC_PREFIX = "notifications.envoy.exceptions.";
-var PRIVATE_STREAM_SUBJECTS = [
-  `${AGENT_TOPIC_PREFIX}>`,
-  `${LEGION_NOTICE_TOPIC_PREFIX}>`,
-  `${EXCEPTION_TOPIC_PREFIX}${AGENT_TOPIC_PREFIX}>`
-];
-function subjectsOverlap(a, b) {
-  const aTokens = a.split(".");
-  const bTokens = b.split(".");
-  for (let index = 0;index < aTokens.length && index < bTokens.length; index += 1) {
-    const aToken = aTokens[index];
-    const bToken = bTokens[index];
-    if (aToken === ">" || bToken === ">")
-      return true;
-    if (aToken !== "*" && bToken !== "*" && aToken !== bToken)
-      return false;
-  }
-  return aTokens.length === bTokens.length;
-}
-function reachesPrivateStreamSubject(ownAgentSubject, topic) {
-  if (!PRIVATE_STREAM_SUBJECTS.some((subject2) => subjectsOverlap(topic, subject2)))
-    return false;
-  return topic !== ownAgentSubject || /[*>]/.test(ownAgentSubject);
-}
-function replayFollowedSubjects(ownAgentSubject, topics, heldForRole = () => false) {
-  const followed = [...topics].filter((topic) => !topic.startsWith(ROLE_TOPIC_PREFIX) && !reachesPrivateStreamSubject(ownAgentSubject, topic) && !heldForRole(topic));
-  return [...new Set([ownAgentSubject, ...followed])];
-}
-function rememberedTopics(state) {
-  return Object.keys(state?.subjects ?? {}).filter((topic) => !topic.startsWith(AGENT_TOPIC_PREFIX) && !topic.startsWith(ROLE_TOPIC_PREFIX));
-}
-async function closeReplayedRemoval(frame, host) {
-  const closed = (subscriptionRemovedTopics(frame.data, host.sessionID) ?? []).filter((topic) => host.engine.followedBefore(topic, frame.seq) && host.close(topic));
-  if (closed.length === 0)
-    return closed;
-  const unregistering = host.unregister(closed);
-  await host.followedChanged();
-  await unregistering;
-  return closed;
-}
-function routeReplayNotice(notice, routes) {
-  if (notice.kind === "not_served" || notice.kind === "unavailable") {
-    routes.warn(notice.message);
-    return;
-  }
-  routes.card(envoyNoticeText(replayNoticeFields(notice)));
-}
-function isRoleForward(envelope2) {
-  return envelope2.dedupe_key?.startsWith(ROLE_FORWARD_KEY_PREFIX) === true || envelope2.topic?.startsWith(ROLE_TOPIC_PREFIX) === true;
-}
-function replayLedgerIdentity(frame) {
-  return {
-    ...frame.event_id === undefined || frame.event_id === "" ? {} : { event_id: frame.event_id },
-    ...frame.dedupe_key === undefined || !dedupeKeyNamesItsEvent(frame) ? {} : { dedupe_key: frame.dedupe_key }
-  };
-}
-function parseEnvelope(data) {
-  let parsed;
-  try {
-    parsed = JSON.parse(data);
-  } catch {
-    return;
-  }
-  const result = EnvelopeSchema.safeParse(parsed);
-  return result.success ? result.data : undefined;
-}
-function createLedger(now) {
-  let entries = new Set;
-  const byEvent = new Map;
-  const byKey = new Map;
-  const drop = (entry) => {
-    entries.delete(entry);
-    if (entry.event_id !== undefined && byEvent.get(entry.event_id) === entry) {
-      byEvent.delete(entry.event_id);
-    }
-    if (entry.dedupe_key !== undefined && byKey.get(entry.dedupe_key) === entry) {
-      byKey.delete(entry.dedupe_key);
-    }
-  };
-  const add = (entry) => {
-    if (entries.size >= REPLAY_LEDGER_LIMIT) {
-      const oldest = entries.values().next();
-      if (oldest.done !== true)
-        drop(oldest.value);
-    }
-    entries.add(entry);
-    if (entry.event_id !== undefined)
-      byEvent.set(entry.event_id, entry);
-    if (entry.dedupe_key !== undefined)
-      byKey.set(entry.dedupe_key, entry);
-  };
-  const expire = () => {
-    const at = now();
-    for (const entry of entries) {
-      if (at - entry.at < REPLAY_LEDGER_TTL_MS)
-        break;
-      drop(entry);
-    }
-  };
-  const has = (identity) => {
-    expire();
-    return identity.event_id !== undefined && byEvent.has(identity.event_id) || identity.dedupe_key !== undefined && byKey.has(identity.dedupe_key);
-  };
-  return {
-    has,
-    record(identity) {
-      if (identity.event_id === undefined && identity.dedupe_key === undefined)
-        return;
-      if (has(identity))
-        return;
-      const entry = { ...identity, at: now() };
-      add(entry);
-      return entry;
-    },
-    restore(restored) {
-      entries = new Set;
-      byEvent.clear();
-      byKey.clear();
-      const at = now();
-      const kept = restored.filter((entry) => at - entry.at < REPLAY_LEDGER_TTL_MS && (entry.event_id !== undefined || entry.dedupe_key !== undefined)).sort((a, b) => a.at - b.at);
-      for (const entry of kept)
-        add({ ...entry });
-    },
-    list() {
-      expire();
-      return [...entries];
-    }
-  };
-}
-
 // ../envoy-client/src/dispatch-config.ts
 var DEFAULT_SERVER_URL = "http://localhost:8766";
 function checkoutPair(checkout, serverUrl) {
@@ -45552,21 +45560,6 @@ function allowedAPIURL(value) {
   if (url2.protocol === "https:")
     return true;
   return url2.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url2.hostname);
-}
-
-// ../envoy-client/src/stream-topics.ts
-var STREAM_SUBJECT_PREFIXES = [
-  AGENT_TOPIC_PREFIX,
-  "notifications.dispatch.",
-  "notifications.github.",
-  "notifications.slack.",
-  LEGION_NOTICE_TOPIC_PREFIX,
-  "notifications.ghostwispr.",
-  "notifications.whatsapp.",
-  `notifications.envoy.exceptions.${AGENT_TOPIC_PREFIX}`
-];
-function streamStores(topic) {
-  return STREAM_SUBJECT_PREFIXES.some((prefix) => topic.length > prefix.length && topic.startsWith(prefix));
 }
 
 // ../envoy-client/src/tool-contract.ts
@@ -50125,6 +50118,7 @@ var CHANNEL_NOTIFICATION_METHOD = "notifications/claude/channel";
 var CHANNEL_INSTRUCTIONS = "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is priority, from_session identifies the origin session, and reply metadata names any correlation. Use the Envoy tools for Envoy actions, and reach Dispatch through the `dispatch` command in Bash (`dispatch --help` lists its commands; the `dispatch` skill teaches them). Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay.";
 var CHANNEL_INBOX_LIMIT = 50;
 var EMPTY_RECEIPT = new Uint8Array;
+var encoder2 = new TextEncoder;
 var ChannelMetaKey = /^[A-Za-z_][A-Za-z0-9_]*$/;
 var HANDOFF_POLL_MS = 250;
 var HANDOFF_FLUSH_TIMEOUT_MS = 1e4;
@@ -50452,19 +50446,13 @@ async function startChannelSession(options) {
       ledger: replay,
       host: {
         deliver: (frame) => deliverRelayed(owner, frame),
-        failed: (frame, error48) => {
-          const envelope2 = renderInbound(frame.data, sessionID, frame.subject).envelope;
-          if (envelope2 !== undefined) {
-            replay.liveFailed(frame.subject, envelope2, error48, Date.now());
-          }
-        },
         gap: tellNotice,
         log: (message, error48) => {
           process.stderr.write(`envoy-channel: ${message}${error48 === undefined ? "" : ` \u2014 ${messageFor(error48)}`}
 `);
         }
       },
-      publish: (reply, body) => options.connection.publish(reply, new TextEncoder().encode(body))
+      publish: (reply, body) => options.connection.publish(reply, encoder2.encode(body))
     });
     if (restored !== undefined)
       consumer.restore(restored);
@@ -50483,11 +50471,7 @@ async function startChannelSession(options) {
   const pumpRelay = async (owner, subscription) => {
     try {
       for await (const message of subscription) {
-        owner.delivery.receive({
-          data: message.data,
-          headers: message.headers,
-          reply: message.reply
-        });
+        owner.delivery.receive(message);
       }
     } catch (error48) {
       process.stderr.write(`envoy-channel: the relay subscription of ${owner.sessionID} stopped \u2014 ${messageFor(error48)}

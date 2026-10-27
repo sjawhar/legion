@@ -292,6 +292,13 @@ func (c *Client) Connected() bool {
 	return c.Conn != nil && c.Conn.Status() == nats.CONNECTED
 }
 
+// currentConn is the client's connection now, read under its lock.
+func (c *Client) currentConn() *nats.Conn {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Conn
+}
+
 // Subscribe creates the client's recoverable JetStream subscription. The client keeps one
 // JetStream subscription: a later call on the same subject replaces it, unsubscribing the handle
 // an earlier one returned, and a call on another subject is refused with ErrSubscriptionHeld.
@@ -759,9 +766,7 @@ func (c *Client) ensureConn() error {
 // gone.
 func (c *Client) ensureConnWithContext(ctx context.Context) error {
 	for {
-		c.mu.Lock()
-		conn := c.Conn
-		c.mu.Unlock()
+		conn := c.currentConn()
 		// A live connection serves even a stopped client: deliveries still in their handlers during
 		// Drain publish their receipts and exceptions through it.
 		if conn != nil && (conn.IsConnected() || conn.IsDraining()) {
@@ -903,9 +908,7 @@ func validSubject(subject string) bool {
 // would.
 func (c *Client) refused(err error, size int) error {
 	if errors.Is(err, nats.ErrMaxPayload) {
-		c.mu.Lock()
-		conn := c.Conn
-		c.mu.Unlock()
+		conn := c.currentConn()
 		return fmt.Errorf("%w: an envelope of %d bytes against the server's max payload of %d bytes",
 			ErrTooLarge, size, conn.MaxPayload())
 	}

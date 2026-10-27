@@ -53,14 +53,7 @@ func (d Deliverer) Deliver(item contracts.Envelope, interest store.Interest) err
 }
 
 func (d Deliverer) DeliverWithResult(item contracts.Envelope, interest store.Interest) (DeliveryResult, error) {
-	if d.Sessions == nil {
-		return DeliveryResult{}, fmt.Errorf("no session registry configured")
-	}
-	entry, err := d.Sessions.Get(interest.SessionID)
-	if err != nil {
-		return d.DeliverWithResultForEntry(item, interest, nil)
-	}
-	return d.DeliverWithResultForEntry(item, interest, &entry)
+	return d.withCurrentEntry(item, interest, d.DeliverWithResultForEntry)
 }
 
 // DeliverWithResultForEntry delivers through the session entry resolved for
@@ -71,19 +64,24 @@ func (d Deliverer) DeliverWithResultForEntry(item contracts.Envelope, interest s
 	if err != nil || !result.Push {
 		return result, err
 	}
-	return DeliveryResult{}, d.prompt(context.Background(), result.Entry, interest.SessionID, d.Text(item))
+	return DeliveryResult{}, d.Push(context.Background(), item, interest.SessionID, result.Entry)
 }
 
 // ResolveWithResult is Resolve for interest's session's current entry.
 func (d Deliverer) ResolveWithResult(item contracts.Envelope, interest store.Interest) (DeliveryResult, error) {
+	return d.withCurrentEntry(item, interest, d.Resolve)
+}
+
+// withCurrentEntry calls deliver with interest's session's current entry, nil when it has none.
+func (d Deliverer) withCurrentEntry(item contracts.Envelope, interest store.Interest, deliver func(contracts.Envelope, store.Interest, *SessionEntry) (DeliveryResult, error)) (DeliveryResult, error) {
 	if d.Sessions == nil {
 		return DeliveryResult{}, fmt.Errorf("no session registry configured")
 	}
 	entry, err := d.Sessions.Get(interest.SessionID)
 	if err != nil {
-		return d.Resolve(item, interest, nil)
+		return deliver(item, interest, nil)
 	}
-	return d.Resolve(item, interest, &entry)
+	return deliver(item, interest, &entry)
 }
 
 // Resolve decides DeliverWithResultForEntry's delivery of item to interest's session at entry

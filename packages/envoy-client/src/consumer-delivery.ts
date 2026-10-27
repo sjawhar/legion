@@ -1,7 +1,7 @@
 import { agentSubject } from "@legion/contracts";
 import { z } from "zod";
-import { DedupeIdentitySchema } from "./delivery";
-import type { ReplayEngine, ReplayNotice } from "./replay";
+import { type DedupeIdentity, DedupeIdentitySchema, renderInbound } from "./delivery";
+import { type ReplayEngine, type ReplayNotice, subjectsOverlap } from "./replay";
 import {
   type DeliveryAnswer,
   type DeliveryRequest,
@@ -57,10 +57,10 @@ export const FOLLOW_CLOCK_ALLOWANCE_MS = 2_000;
 
 /**
  * How many deliveries of one frame may fail in the host (its `deliver` threw) before the frame is
- * answered `done` and the host told (`ConsumerDeliveryHost.failed`) instead of `nak`: a frame the
- * host can never show must not come back every second forever.
+ * answered `done` and its failure notice shown (`ReplayEngine.liveFailed`) instead of `nak`: a
+ * frame the host can never show must not come back every second forever.
  */
-export const RELAY_ATTEMPTS_BEFORE_FAILED = 3;
+const RELAY_ATTEMPTS_BEFORE_FAILED = 3;
 
 /** What `decodeRelayFrame` reads headers through; a NATS message's `headers` is one. */
 export interface RelayHeaders {
@@ -94,7 +94,7 @@ export interface RelayFrame {
   readonly reply: string;
 }
 
-export type DecodedRelayFrame = { readonly frame: RelayFrame } | { readonly error: string };
+type DecodedRelayFrame = { readonly frame: RelayFrame } | { readonly error: string };
 
 const decoder = new TextDecoder();
 const DECIMAL = /^[0-9]+$/;
@@ -149,7 +149,7 @@ export function decodeRelayFrame(message: RelayMessage): DecodedRelayFrame {
 }
 
 /** A random string per plugin NATS connection: the registration's `delivery.epoch`. */
-export function newEpoch(): string {
+function newEpoch(): string {
   return crypto.randomUUID();
 }
 
@@ -159,7 +159,10 @@ export interface ConsumerEpoch {
   readonly startedAt: number;
 }
 
-/** A notice the session is told once: messages may be missing. A host shows it as #2228's. */
+/**
+ * A notice the session is told once: messages may be missing. A host shows it as it shows the
+ * replay engine's notice of the same kind.
+ */
 export type ConsumerGapNotice = Extract<
   ReplayNotice,
   { readonly kind: "retention_gap" | "stream_recreated" }
@@ -194,12 +197,10 @@ export interface ConsumerDeliveryHost {
   /**
    * Hands a frame to the session. Frames come in stream order, one at a time: the next waits until
    * this returns or the frame is released or settled. A throw on an unsettled frame answers `nak`,
-   * or, from its third delivery on, `done` and `failed`.
+   * or, from its third delivery on, `done` with the frame's failure notice (`ledger.liveFailed`).
    */
   deliver(frame: ConsumerFrame): void | Promise<void>;
-  /** The host gave up on a frame its `deliver` kept throwing on: it shows a failure notice. */
-  failed(frame: ConsumerFrame, error: unknown): void;
-  /** Tells the session once that messages may be missing (#2228's gap notice). */
+  /** Tells the session once that messages may be missing (the replay engine's gap notices). */
   gap(notice: ConsumerGapNotice): void;
   log(message: string, error?: unknown): void;
 }
@@ -209,8 +210,11 @@ export interface ConsumerDeliveryOptions {
   readonly host: ConsumerDeliveryHost;
   /** Publishes a reply body on a frame's reply subject (core NATS, no reply expected). */
   readonly publish: (reply: string, body: RelayReply) => void;
-  /** The persisted ledger of frames written (#2228's `ReplayEngine.delivered`). */
-  readonly ledger: Pick<ReplayEngine, "delivered">;
+  /**
+   * The persisted ledger of frames written (`ReplayEngine.delivered`), which also shows the failure
+   * notice of a frame given up on (`ReplayEngine.liveFailed`).
+   */
+  readonly ledger: Pick<ReplayEngine, "delivered" | "liveFailed">;
   readonly now?: () => number;
   /** Runs `callback` every `ms` until the returned stop runs; `setInterval` by default. */
   readonly every?: (ms: number, callback: () => void) => () => void;
@@ -264,18 +268,6 @@ export interface ConsumerDelivery {
   close(): void;
 }
 
-/** Whether a concrete subject matches a NATS pattern: `*` one token, `>` one or more trailing. */
-function subjectMatches(pattern: string, subject: string): boolean {
-  const wanted = pattern.split(".");
-  const tokens = subject.split(".");
-  for (let index = 0; index < wanted.length; index += 1) {
-    if (wanted[index] === ">") return tokens.length > index;
-    if (index >= tokens.length) return false;
-    if (wanted[index] !== "*" && wanted[index] !== tokens[index]) return false;
-  }
-  return wanted.length === tokens.length;
-}
-
 function parseIdentity(data: string) {
   let parsed: unknown;
   try {
@@ -296,6 +288,8 @@ function every(ms: number, callback: () => void): () => void {
 
 interface Entry {
   readonly frame: RelayFrame;
+  /** The frame's event identity, parsed once as it arrived. */
+  readonly identity: DedupeIdentity | undefined;
   readonly late: boolean;
   readonly replies: string[];
   readonly key: string;
@@ -355,7 +349,7 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
     if (subject === ownSubject) return Number.NEGATIVE_INFINITY;
     let earliest: number | undefined;
     for (const [topic, at] of follows) {
-      if (!expandSubscriptionTopics([topic]).some((pattern) => subjectMatches(pattern, subject))) {
+      if (!expandSubscriptionTopics([topic]).some((pattern) => subjectsOverlap(pattern, subject))) {
         continue;
       }
       if (earliest === undefined || at < earliest) earliest = at;
@@ -383,19 +377,22 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
     pump();
   };
 
-  const duplicate = (frame: RelayFrame): boolean => {
-    const identity = parseIdentity(frame.data);
-    return identity !== undefined && ledger.delivered(identity);
-  };
+  const alreadyWritten = (identity: DedupeIdentity | undefined): boolean =>
+    identity !== undefined && ledger.delivered(identity);
 
-  const failed = (entry: Entry, handle: ConsumerFrame, error: unknown) => {
+  const failed = (entry: Entry, error: unknown) => {
     if (entry.settled) return;
     if (entry.frame.delivered < RELAY_ATTEMPTS_BEFORE_FAILED) {
       log(`frame ${entry.frame.streamSeq} failed; it comes again`, error);
       settle(entry, "nak");
       return;
     }
-    safely("failure notice", () => host.failed(handle, error));
+    // The session gets the notice a failed live frame gets.
+    safely("failure notice", () => {
+      const { subject, data } = entry.frame;
+      const { envelope } = renderInbound(data, sessionID, subject);
+      if (envelope !== undefined) void ledger.liveFailed(subject, envelope, error, now());
+    });
     settle(entry, "done");
   };
 
@@ -412,7 +409,7 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
     try {
       result = host.deliver(handle);
     } catch (error) {
-      failed(entry, handle, error);
+      failed(entry, error);
       release(entry);
       return;
     }
@@ -423,7 +420,7 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
     result.then(
       () => release(entry),
       (error: unknown) => {
-        failed(entry, handle, error);
+        failed(entry, error);
         release(entry);
       }
     );
@@ -438,7 +435,7 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
         if (entry === undefined) return;
         if (entry.settled) continue;
         // Written while it waited (another copy of the event on another subject).
-        if (duplicate(entry.frame)) {
+        if (alreadyWritten(entry.identity)) {
           settle(entry, "done");
           continue;
         }
@@ -485,11 +482,9 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
     // Not followed (the agent subject always is), stored before its topic was followed, or
     // already written: answered done, and the resume point passes it.
     const since = followedAt(frame.subject);
-    if (
-      since === undefined ||
-      frame.storedAtMs < since - FOLLOW_CLOCK_ALLOWANCE_MS ||
-      duplicate(frame)
-    ) {
+    const unfollowed = since === undefined || frame.storedAtMs < since - FOLLOW_CLOCK_ALLOWANCE_MS;
+    const identity = unfollowed ? undefined : parseIdentity(frame.data);
+    if (unfollowed || alreadyWritten(identity)) {
       send(frame.reply, "done");
       written = Math.max(written ?? 0, frame.streamSeq);
       return;
@@ -498,6 +493,7 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
     held.add(frame.streamSeq);
     const entry: Entry = {
       frame,
+      identity,
       late: frame.delivered > 1 || frame.storedAtMs < currentEpoch.startedAt,
       replies: [frame.reply],
       key,

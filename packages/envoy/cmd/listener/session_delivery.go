@@ -99,12 +99,10 @@ type sessionRelay interface {
 type sessionDelivery struct {
 	consumers *bus.SessionConsumers
 	logger    *logging.Logger
-	// relay hears each registration that records consumer delivery; nil while no relay runs.
+	// relay hears each registration that records consumer delivery; nil while no relay runs. While
+	// it is nil a serving-port session's consumer is created and kept, and its answer says consumer,
+	// but its entry records no consumer delivery, so the durable path keeps pushing to its port.
 	relay sessionRelay
-	// servingPortRelayed is set once the relay serves serving-port sessions. Until then a serving
-	// port session's consumer is created and kept, and its answer says consumer, but its entry
-	// records no consumer delivery, so the durable path keeps pushing to its port.
-	servingPortRelayed bool
 	// now is the clock of the no-grant backoff; time.Now unless a test sets it.
 	now func() time.Time
 	// locks keeps the consumer calls made for one session one at a time: a registration's create or
@@ -211,7 +209,7 @@ func (m *sessionDelivery) register(ctx context.Context, body subscribeBody, topi
 			StreamID: streamID,
 			Gap:      &gap,
 		},
-		relayed: body.Port <= 0 || m.servingPortRelayed,
+		relayed: body.Port <= 0 || m.relay != nil,
 		epoch:   epoch,
 	}
 }
@@ -224,7 +222,7 @@ func coreDeliveryOutcome(reason string) sessionDeliveryOutcome {
 // refused is the core outcome of a consumer call for sessionID that failed with err. A refusal for
 // want of a grant starts the no-grant backoff (noGrantBackoff), or extends the episode running.
 func (m *sessionDelivery) refused(sessionID string, err error) sessionDeliveryOutcome {
-	if errors.Is(err, bus.ErrConsumerNotGranted) || errors.Is(err, bus.ErrPublishDenied) {
+	if consumerGrantRefused(err) {
 		m.grantMu.Lock()
 		m.noGrantUntil = m.now().Add(noGrantBackoff)
 		first := !m.noGrantLogged
@@ -239,6 +237,12 @@ func (m *sessionDelivery) refused(sessionID string, err error) sessionDeliveryOu
 	m.logger.Warn("session consumer call failed; the session stays on core delivery",
 		slog.String("session_id", sessionID), slog.String("error", err.Error()))
 	return coreDeliveryOutcome(deliveryReasonConsumerError)
+}
+
+// consumerGrantRefused reports whether err is the server's refusal of a consumer call for want of a
+// grant. bus.ErrConsumerNotGranted always wraps bus.ErrPublishDenied, so the one test covers both.
+func consumerGrantRefused(err error) bool {
+	return errors.Is(err, bus.ErrPublishDenied)
 }
 
 // grantRefused reports whether a refusal for want of a grant was met less than noGrantBackoff

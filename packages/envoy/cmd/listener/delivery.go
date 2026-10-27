@@ -569,11 +569,7 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 		message.finalize(false)
 		return
 	}
-	var itemPayload *string
-	if item.Payload != "" {
-		itemPayload = &item.Payload
-	}
-	mode, deliveryErr := frameDeliveryMode(itemPayload)
+	mode, deliveryErr := envelopeDeliveryMode(item)
 	if deliveryErr != nil {
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID:    sessionID,
@@ -629,26 +625,17 @@ func roleForwardCopyDelivery(cfg listenerDeliveryHandlerConfig, message delivery
 		return
 	}
 	entry, err := cfg.sessions.Get(holder)
-	if err != nil || entry.Port <= 0 || entry.Delivery == session.DeliveryConsumer {
+	if err != nil || entry.Delivery == session.DeliveryConsumer {
 		message.finalize(false)
 		return
 	}
-	interest, err := cfg.registry.Get(holder)
-	if err != nil {
-		interest = store.Interest{SessionID: holder}
-	}
-	if !cfg.deliverer.OwnsServingPort(interest, entry) || cfg.dedupeCache.Seen(item.DedupeKey, holder) || cfg.attemptCache.Seen(item.DedupeKey, holder) {
+	if !ownsServingPortSession(cfg, holder, entry) || cfg.dedupeCache.Seen(item.DedupeKey, holder) || cfg.attemptCache.Seen(item.DedupeKey, holder) {
 		message.finalize(false)
 		return
 	}
 	cfg.attemptCache.Record(item.DedupeKey, holder)
 	if cfg.servePorts != nil {
-		if handOverPush(cfg, servePortPush{item: item, sessionID: holder, settle: message.settle, forward: true, logLine: "listener role forward pushed"}) {
-			message.finalize(false)
-			return
-		}
-		cfg.messagesNAKed.Inc()
-		message.finalize(true)
+		handOverOrRetry(cfg, message, servePortPush{item: item, sessionID: holder, settle: message.settle, forward: true, logLine: "listener role forward pushed"})
 		return
 	}
 	if err := cfg.deliverer.Push(context.Background(), item, holder, entry); err != nil {
@@ -690,6 +677,17 @@ func handOverPush(cfg listenerDeliveryHandlerConfig, push servePortPush) bool {
 		clearAttempt: true,
 	})
 	return false
+}
+
+// handOverOrRetry hands push to its session's serving-port worker (handOverPush), or, when the
+// workers cannot take it, gives message back to the durable for a retry.
+func handOverOrRetry(cfg listenerDeliveryHandlerConfig, message deliveryMessage, push servePortPush) {
+	if handOverPush(cfg, push) {
+		message.finalize(false)
+		return
+	}
+	cfg.messagesNAKed.Inc()
+	message.finalize(true)
 }
 
 // finishRoleForward reports a role forward's outcome, err from its publish or its wait. A forward
@@ -778,12 +776,7 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 	}
 	result := handle(item, sessionID, cfg.machineID, interestPtr, cfg.deliverer)
 	if result.Push {
-		if handOverPush(cfg, servePortPush{item: item, sessionID: sessionID, settle: message.settle, logLine: "listener agent delivered", timer: deliveryTimer}) {
-			message.finalize(false)
-			return
-		}
-		cfg.messagesNAKed.Inc()
-		message.finalize(true)
+		handOverOrRetry(cfg, message, servePortPush{item: item, sessionID: sessionID, settle: message.settle, logLine: "listener agent delivered", timer: deliveryTimer})
 		return
 	}
 	if result.OwnedElsewhere {
@@ -857,11 +850,7 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 		message.finalize(false)
 		return
 	}
-	var itemPayload *string
-	if item.Payload != "" {
-		itemPayload = &item.Payload
-	}
-	mode, deliveryErr := frameDeliveryMode(itemPayload)
+	mode, deliveryErr := envelopeDeliveryMode(item)
 	resolve := cfg.deliverer.DeliverWithResultForEntry
 	if message.mode == durableDelivery && cfg.servePorts != nil {
 		resolve = cfg.deliverer.Resolve

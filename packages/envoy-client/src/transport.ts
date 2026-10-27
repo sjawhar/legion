@@ -160,10 +160,10 @@ export interface DeliveryRequest {
 }
 
 /** The reason a registration answer without a `delivery` field (an earlier listener) reads as. */
-export const DELIVERY_NOT_ANSWERED = "not_answered";
+const DELIVERY_NOT_ANSWERED = "not_answered";
 
 /** The reason an answer whose `delivery` field this build cannot read reads as. */
-export const DELIVERY_UNREADABLE = "unreadable_answer";
+const DELIVERY_UNREADABLE = "unreadable_answer";
 
 /** The delivery mode a registration answered: `core` when it answered none. */
 export function deliveryAnswerOf(result: Pick<SubscribeResult, "delivery">): DeliveryAnswer {

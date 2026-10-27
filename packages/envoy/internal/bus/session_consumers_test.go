@@ -128,6 +128,16 @@ func publishStored(t *testing.T, owner *Client, subject, body string) uint64 {
 	return ack.Sequence
 }
 
+// streamIDOf is the stream's identity, which a call that creates a consumer reports.
+func streamIDOf(t *testing.T, consumers *SessionConsumers) string {
+	t.Helper()
+	id, err := consumers.StreamID(context.Background())
+	if err != nil {
+		t.Fatalf("stream id: %v", err)
+	}
+	return id
+}
+
 // pullSession starts a pull of sessionID's consumer, stopped when the test ends.
 func pullSession(t *testing.T, consumers *SessionConsumers, sessionID string) *SessionPull {
 	t.Helper()
@@ -172,7 +182,7 @@ func TestEnsureCreatesTheConsumerWithTheSessionSettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure: %v", err)
 	}
-	if start != (SessionConsumerStart{Created: true, StartSeq: 1}) {
+	if start != (SessionConsumerStart{Created: true, StartSeq: 1, StreamID: streamIDOf(t, consumers)}) {
 		t.Fatalf("Ensure of a new consumer on an empty stream = %+v, want created at 1 with no gap", start)
 	}
 	info, err := consumers.Info(ctx, "ses_settings")
@@ -243,7 +253,7 @@ func TestRestartAtFloorNeverDeliversWhatTheStreamHeldBeforeTheConsumer(t *testin
 	if err != nil {
 		t.Fatalf("restart at floor: %v", err)
 	}
-	if start != (SessionConsumerStart{Created: true, StartSeq: last + 1}) {
+	if start != (SessionConsumerStart{Created: true, StartSeq: last + 1, StreamID: streamIDOf(t, consumers)}) {
 		t.Fatalf("RestartAtFloor of a consumer that delivered nothing = %+v, want created at %d with no gap", start, last+1)
 	}
 
@@ -381,7 +391,7 @@ func TestAStartBelowTheStreamsFirstSequenceIsAGap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("restart at floor: %v", err)
 	}
-	if start != (SessionConsumerStart{Created: true, StartSeq: gone[0], Gap: true}) {
+	if start != (SessionConsumerStart{Created: true, StartSeq: gone[0], Gap: true, StreamID: streamIDOf(t, consumers)}) {
 		t.Fatalf("RestartAtFloor below the stream's first sequence = %+v, want created at %d with a gap", start, gone[0])
 	}
 
@@ -389,7 +399,7 @@ func TestAStartBelowTheStreamsFirstSequenceIsAGap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure seeded: %v", err)
 	}
-	if seeded != (SessionConsumerStart{Created: true, StartSeq: gone[0], Gap: true}) {
+	if seeded != (SessionConsumerStart{Created: true, StartSeq: gone[0], Gap: true, StreamID: streamIDOf(t, consumers)}) {
 		t.Fatalf("Ensure seeded below the stream's first sequence = %+v, want created at %d with a gap", seeded, gone[0])
 	}
 	held, err := consumers.Ensure(ctx, "ses_held", []string{contracts.AgentSubject("ses_held")}, last+1)
@@ -412,7 +422,7 @@ func TestConsumerFiltersMustNotOverlap(t *testing.T) {
 	}
 	overlapping := []string{"notifications.github.o.r.>", "notifications.github.*.r.pull"}
 	_, err := consumers.create(ctx, "s-ses_overlapping", overlapping, 0)
-	if apiErrorCode(err) != jetstream.JSErrCodeOverlappingFilterSubjects {
+	if !errors.Is(err, jetstream.ErrOverlappingFilterSubjects) {
 		t.Fatalf("create with overlapping filters = %v, want the server's overlapping filters error", err)
 	}
 	if _, err := consumers.Ensure(ctx, "ses_overlapping", overlapping, 0); err != nil {

@@ -46,6 +46,9 @@ var ErrSessionConsumerNotFound = errors.New("bus: no session consumer")
 // (SessionConsumerName).
 var ErrNoSessionConsumerName = errors.New("bus: a session id no consumer can be named after")
 
+// ErrNoStreamID is returned for a stream that carries no StreamIDMetadataKey metadata (StreamID).
+var ErrNoStreamID = fmt.Errorf("bus: %s carries no %s metadata", Stream, StreamIDMetadataKey)
+
 // SessionConsumerName is the name of session sessionID's consumer on the stream, s-<sessionID>, and
 // whether it has one: a session id that is empty or holds a `.`, `*`, `>`, whitespace, `/` or `\`
 // would make no valid consumer name, or one that reaches into another API subject, so such a session
@@ -55,6 +58,16 @@ func SessionConsumerName(sessionID string) (string, bool) {
 		return "", false
 	}
 	return sessionConsumerPrefix + sessionID, true
+}
+
+// sessionConsumerNameOf is SessionConsumerName(sessionID), or ErrNoSessionConsumerName for a session
+// that can have no consumer.
+func sessionConsumerNameOf(sessionID string) (string, error) {
+	name, ok := SessionConsumerName(sessionID)
+	if !ok {
+		return "", fmt.Errorf("%w: %q", ErrNoSessionConsumerName, sessionID)
+	}
+	return name, nil
 }
 
 // ReduceFilterSubjects returns subjects as a set of consumer filters no two of which overlap, which
@@ -145,9 +158,6 @@ func (s *SessionConsumers) Close() { s.client.Close() }
 // Drain drains the connection, letting acks already sent reach the server, within timeout.
 func (s *SessionConsumers) Drain(timeout time.Duration) error { return s.client.Drain(timeout) }
 
-// Connected reports whether the connection is live.
-func (s *SessionConsumers) Connected() bool { return s.client.Connected() }
-
 // Publish publishes msg over core NATS on the connection, waiting for a connection nats.go is
 // replacing until ctx ends: a relay frame on a session's DeliverSubject, which the stream does not
 // store, so it travels on the connection the frame's message was pulled and is answered on.
@@ -155,10 +165,7 @@ func (s *SessionConsumers) Publish(ctx context.Context, msg *nats.Msg) error {
 	if err := s.client.ensureConnWithContext(ctx); err != nil {
 		return err
 	}
-	s.client.mu.Lock()
-	conn := s.client.Conn
-	s.client.mu.Unlock()
-	return conn.PublishMsg(msg)
+	return s.client.currentConn().PublishMsg(msg)
 }
 
 // SubscribeReplies subscribes handler over core NATS to subject, typically a reply-inbox wildcard,
@@ -170,10 +177,7 @@ func (s *SessionConsumers) SubscribeReplies(subject string, handler nats.MsgHand
 	if _, err := s.client.SubscribeCore(subject, handler); err != nil {
 		return err
 	}
-	s.client.mu.Lock()
-	conn := s.client.Conn
-	s.client.mu.Unlock()
-	return conn.Flush()
+	return s.client.currentConn().Flush()
 }
 
 // SessionConsumerStart is what Ensure or RestartAtFloor did to a session's consumer.
@@ -185,6 +189,9 @@ type SessionConsumerStart struct {
 	// Gap is set when StartSeq is below the stream's first sequence: messages the consumer would
 	// have delivered from StartSeq have aged out of the stream or been discarded.
 	Gap bool
+	// StreamID is the stream's identity (StreamIDMetadataKey) as the call read it, when it created
+	// the consumer; "" when the stream carries none.
+	StreamID string
 }
 
 // Ensure makes sessionID's consumer carry the session consumer settings and the filters subjects
@@ -210,7 +217,7 @@ func (s *SessionConsumers) Ensure(ctx context.Context, sessionID string, subject
 		if errors.Is(err, ErrSessionConsumerNotFound) {
 			start, err := s.create(ctx, name, filters, startSeq)
 			// A consumer that appeared since the info, created by another call, is updated instead.
-			if apiErrorCode(err) == jetstream.JSErrCodeConsumerExists && attempt == 0 {
+			if errors.Is(err, jetstream.ErrConsumerExists) && attempt == 0 {
 				continue
 			}
 			return start, err
@@ -278,18 +285,18 @@ func ackFloor(info *jetstream.ConsumerInfo) uint64 {
 
 // Info returns sessionID's consumer as the server reports it, or ErrSessionConsumerNotFound.
 func (s *SessionConsumers) Info(ctx context.Context, sessionID string) (*jetstream.ConsumerInfo, error) {
-	name, ok := SessionConsumerName(sessionID)
-	if !ok {
-		return nil, fmt.Errorf("%w: %q", ErrNoSessionConsumerName, sessionID)
+	name, err := sessionConsumerNameOf(sessionID)
+	if err != nil {
+		return nil, err
 	}
 	return s.info(ctx, name)
 }
 
 // Delete deletes sessionID's consumer; one the stream does not hold is no error.
 func (s *SessionConsumers) Delete(ctx context.Context, sessionID string) error {
-	name, ok := SessionConsumerName(sessionID)
-	if !ok {
-		return fmt.Errorf("%w: %q", ErrNoSessionConsumerName, sessionID)
+	name, err := sessionConsumerNameOf(sessionID)
+	if err != nil {
+		return err
 	}
 	return s.delete(ctx, name)
 }
@@ -302,7 +309,7 @@ func (s *SessionConsumers) StreamID(ctx context.Context) (string, error) {
 		return "", err
 	}
 	if state.id == "" {
-		return "", fmt.Errorf("bus: %s carries no %s metadata", Stream, StreamIDMetadataKey)
+		return "", ErrNoStreamID
 	}
 	return state.id, nil
 }
@@ -342,17 +349,14 @@ type SessionPull struct {
 // wait in the pull for Next; Stop ends it, and the server delivers any message it delivered and
 // was not acked for again once its ack wait has passed, or at a restart (RestartAtFloor).
 func (s *SessionConsumers) Pull(ctx context.Context, sessionID string) (*SessionPull, error) {
-	name, ok := SessionConsumerName(sessionID)
-	if !ok {
-		return nil, fmt.Errorf("%w: %q", ErrNoSessionConsumerName, sessionID)
+	name, err := sessionConsumerNameOf(sessionID)
+	if err != nil {
+		return nil, err
 	}
 	if err := s.client.ensureConnWithContext(ctx); err != nil {
 		return nil, err
 	}
-	s.client.mu.Lock()
-	conn := s.client.Conn
-	s.client.mu.Unlock()
-	js, err := jetstream.New(conn)
+	js, err := jetstream.New(s.client.currentConn())
 	if err != nil {
 		return nil, err
 	}
@@ -398,9 +402,9 @@ func (p *SessionPull) Stop() { p.messages.Stop() }
 // session that can have no consumer and a filter set that is empty, which would deliver the whole
 // stream.
 func sessionConsumerTarget(sessionID string, subjects []string) (string, []string, error) {
-	name, ok := SessionConsumerName(sessionID)
-	if !ok {
-		return "", nil, fmt.Errorf("%w: %q", ErrNoSessionConsumerName, sessionID)
+	name, err := sessionConsumerNameOf(sessionID)
+	if err != nil {
+		return "", nil, err
 	}
 	filters := ReduceFilterSubjects(subjects)
 	if len(filters) == 0 {
@@ -457,7 +461,7 @@ func (s *SessionConsumers) create(ctx context.Context, name string, filters []st
 	if _, err := s.upsert(ctx, name, config, "create"); err != nil {
 		return SessionConsumerStart{}, err
 	}
-	return SessionConsumerStart{Created: true, StartSeq: startSeq, Gap: startSeq < state.firstSeq}, nil
+	return SessionConsumerStart{Created: true, StartSeq: startSeq, Gap: startSeq < state.firstSeq, StreamID: state.id}, nil
 }
 
 // consumerAPI is the JetStream API subject of operation op on consumer name of the stream.
@@ -575,13 +579,4 @@ func (s *SessionConsumers) streamState(ctx context.Context) (sessionStreamState,
 		firstSeq: response.State.FirstSeq,
 		lastSeq:  response.State.LastSeq,
 	}, nil
-}
-
-// apiErrorCode is the JetStream error code err carries, or 0.
-func apiErrorCode(err error) jetstream.ErrorCode {
-	var apiErr *jetstream.APIError
-	if errors.As(err, &apiErr) {
-		return apiErr.ErrorCode
-	}
-	return 0
 }

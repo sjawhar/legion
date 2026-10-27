@@ -92,9 +92,7 @@ func (c *Client) requestConfirmed(ctx context.Context, subject string, data []by
 		return nil, err
 	}
 	deadline, _ := ctx.Deadline()
-	c.mu.Lock()
-	conn := c.Conn
-	c.mu.Unlock()
+	conn := c.currentConn()
 	inbox := conn.NewInbox()
 	replies, err := conn.SubscribeSync(inbox)
 	if err != nil {

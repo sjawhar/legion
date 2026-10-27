@@ -1,4 +1,12 @@
-import { AGENT_TOPIC_PREFIX, LEGION_NOTICE_TOPIC_PREFIX } from "@legion/contracts";
+import {
+  AGENT_TOPIC_PREFIX,
+  DISPATCH_TOPIC_PREFIX,
+  GHOSTWISPR_TOPIC_PREFIX,
+  LEGION_NOTICE_TOPIC_PREFIX,
+} from "@legion/contracts";
+
+/** The topic a failed delivery's report goes to is this prefix followed by the original topic. */
+export const EXCEPTION_TOPIC_PREFIX = "notifications.envoy.exceptions.";
 
 /**
  * The literal prefixes of the subjects the notification stream (`ENVOY_NOTIFICATIONS`) stores, as
@@ -9,13 +17,13 @@ import { AGENT_TOPIC_PREFIX, LEGION_NOTICE_TOPIC_PREFIX } from "@legion/contract
  */
 const STREAM_SUBJECT_PREFIXES = [
   AGENT_TOPIC_PREFIX,
-  "notifications.dispatch.",
+  DISPATCH_TOPIC_PREFIX,
   "notifications.github.",
   "notifications.slack.",
   LEGION_NOTICE_TOPIC_PREFIX,
-  "notifications.ghostwispr.",
+  GHOSTWISPR_TOPIC_PREFIX,
   "notifications.whatsapp.",
-  `notifications.envoy.exceptions.${AGENT_TOPIC_PREFIX}`,
+  `${EXCEPTION_TOPIC_PREFIX}${AGENT_TOPIC_PREFIX}`,
 ] as const;
 
 /**

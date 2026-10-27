@@ -153,14 +153,7 @@ func (w *servePortWorkers) stop(ctx context.Context) {
 	w.stopped = true
 	w.mu.Unlock()
 	w.cancel()
-	done := make(chan struct{})
-	go func() {
-		w.runs.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-ctx.Done():
+	if !waitWithin(ctx, &w.runs) {
 		w.cfg.logger.Warn("serving-port workers still running at shutdown")
 	}
 }
@@ -287,14 +280,24 @@ func (w *servePortWorkers) target(push servePortPush) (session.SessionEntry, ser
 	if takesStoredMessagesItself(entry) {
 		return entry, servePortSkip
 	}
-	interest, err := w.cfg.registry.Get(push.sessionID)
-	if err != nil {
-		interest = store.Interest{SessionID: push.sessionID}
-	}
-	if entry.Port <= 0 || !w.cfg.deliverer.OwnsServingPort(interest, entry) {
+	if !ownsServingPortSession(w.cfg, push.sessionID, entry) {
 		return entry, servePortGone
 	}
 	return entry, servePortPushIt
+}
+
+// ownsServingPortSession reports whether sessionID, of entry, is a serving-port session this
+// listener delivers to (session.Deliverer.OwnsServingPort), read from its stored interest row when
+// it has one.
+func ownsServingPortSession(cfg listenerDeliveryHandlerConfig, sessionID string, entry session.SessionEntry) bool {
+	if entry.Port <= 0 {
+		return false
+	}
+	interest, err := cfg.registry.Get(sessionID)
+	if err != nil {
+		interest = store.Interest{SessionID: sessionID}
+	}
+	return cfg.deliverer.OwnsServingPort(interest, entry)
 }
 
 // keepInProgress keeps every queued message in progress every servePortProgressInterval until the
@@ -308,15 +311,17 @@ func (w *servePortWorkers) keepInProgress() {
 			return
 		case <-ticker.C:
 		}
+		// One durable message's settle sits in the queue of every session it was pushed to; it is
+		// kept in progress once.
 		w.mu.Lock()
-		settles := make([]*durableSettle, 0, len(w.queues))
+		settles := make(map[*durableSettle]struct{}, len(w.queues))
 		for _, queue := range w.queues {
 			for _, push := range queue {
-				settles = append(settles, push.settle)
+				settles[push.settle] = struct{}{}
 			}
 		}
 		w.mu.Unlock()
-		for _, settle := range settles {
+		for settle := range settles {
 			settle.progress()
 		}
 	}

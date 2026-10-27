@@ -133,17 +133,7 @@ func (f *roleForwarder) outstanding() int {
 // drains, since the forwards and their exceptions are published through it. It reports whether all
 // were.
 func (f *roleForwarder) wait(ctx context.Context) bool {
-	done := make(chan struct{})
-	go func() {
-		f.pending.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-		return true
-	case <-ctx.Done():
-		return false
-	}
+	return waitWithin(ctx, &f.pending)
 }
 
 // startRoleForward is forwardRole over client: a forward to a holder that answers receipts waits

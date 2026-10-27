@@ -134,6 +134,7 @@ const CHANNEL_INSTRUCTIONS =
   "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is priority, from_session identifies the origin session, and reply metadata names any correlation. Use the Envoy tools for Envoy actions, and reach Dispatch through the `dispatch` command in Bash (`dispatch --help` lists its commands; the `dispatch` skill teaches them). Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay."
 const CHANNEL_INBOX_LIMIT = 50
 const EMPTY_RECEIPT = new Uint8Array()
+const encoder = new TextEncoder()
 const ChannelMetaKey = /^[A-Za-z_][A-Za-z0-9_]*$/
 /** How often the handoff file is checked for a `/clear`. */
 const HANDOFF_POLL_MS = 250
@@ -724,9 +725,9 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
    * `done` once the notifier resolved the write (`createChannelDelivery`) and the ledger recorded
    * the frame, at once for a frame skipped, suppressed (a late BTW), rejected (once the reply is
    * posted) or already shown. A write that fails throws, which the relay answers `nak`, so the
-   * listener sends the frame again (from its third delivery on, `done` and `failed`). The frame
-   * stops blocking the next one once it is queued: the write queue keeps the stream's order, and
-   * no frame waits on another's write longer than the queue makes it.
+   * listener sends the frame again (from its third delivery on, `done` with a failure notice). The
+   * frame stops blocking the next one once it is queued: the write queue keeps the stream's order,
+   * and no frame waits on another's write longer than the queue makes it.
    */
   const deliverRelayed = async (owner: Relay, frame: ConsumerFrame): Promise<void> => {
     // The session moved to another id (a `/clear`) or is shutting down: whoever takes it next
@@ -785,13 +786,6 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       ledger: replay,
       host: {
         deliver: (frame) => deliverRelayed(owner, frame),
-        // A frame the channel kept refusing: the session gets the notice a failed live frame gets.
-        failed: (frame, error) => {
-          const envelope = renderInbound(frame.data, sessionID, frame.subject).envelope
-          if (envelope !== undefined) {
-            void replay.liveFailed(frame.subject, envelope, error, Date.now())
-          }
-        },
         gap: tellNotice,
         log: (message, error) => {
           process.stderr.write(
@@ -799,7 +793,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
           )
         },
       },
-      publish: (reply, body) => options.connection.publish(reply, new TextEncoder().encode(body)),
+      publish: (reply, body) => options.connection.publish(reply, encoder.encode(body)),
     })
     if (restored !== undefined) consumer.restore(restored)
     const owner: Relay = {
@@ -819,12 +813,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   const pumpRelay = async (owner: Relay, subscription: ChannelTopicSubscription): Promise<void> => {
     try {
       for await (const message of subscription) {
-        // nats.js exposes a message's fields through prototype getters: read each by name.
-        owner.delivery.receive({
-          data: message.data,
-          headers: message.headers,
-          reply: message.reply,
-        })
+        owner.delivery.receive(message)
       }
     } catch (error) {
       process.stderr.write(

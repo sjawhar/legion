@@ -19,6 +19,7 @@ import {
 } from "./delivery";
 import { subscriptionRemovedTopics } from "./dispatch-subscribe";
 import { messageFor } from "./errors";
+import { EXCEPTION_TOPIC_PREFIX } from "./stream-topics";
 import {
   EnvoyApiError,
   type EnvoyClient,
@@ -1097,9 +1098,6 @@ export function envoyNoticeText(fields: Readonly<Record<string, string>>): strin
   return encode({ envoy: fields });
 }
 
-/** The topic a failed delivery's report goes to is this prefix followed by the original topic. */
-const EXCEPTION_TOPIC_PREFIX = "notifications.envoy.exceptions.";
-
 /**
  * The stream subjects whose topics carry one agent session's private payload: each session's
  * inbox, the Legion daemon's notices for a project's controller, and a failed delivery's report
@@ -1112,7 +1110,7 @@ const PRIVATE_STREAM_SUBJECTS = [
 ];
 
 /** Whether some subject matches both patterns, under NATS wildcard rules. */
-function subjectsOverlap(a: string, b: string): boolean {
+export function subjectsOverlap(a: string, b: string): boolean {
   const aTokens = a.split(".");
   const bTokens = b.split(".");
   for (let index = 0; index < aTokens.length && index < bTokens.length; index += 1) {

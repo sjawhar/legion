@@ -284,10 +284,14 @@ func (r *SessionRegistry) resetCache() {
 	r.notifyChanged(dropped...)
 }
 
-// applyWatched applies one entry the KV watcher delivered to the cache.
+// applyWatched applies one entry the KV watcher delivered to the cache. A revision the cache
+// already holds, such as the echo of the registry's own Put, is cached again but reported only when
+// it adds or drops the session's entry.
 func (r *SessionRegistry) applyWatched(entry nats.KeyValueEntry) {
 	var applied bool
 	r.mu.Lock()
+	cachedRevision := r.cacheRevisions[entry.Key()]
+	_, wasCached := r.cache[entry.Key()]
 	if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
 		applied = r.evictCachedSessionLocked(entry.Key(), entry.Revision())
 	} else {
@@ -299,8 +303,9 @@ func (r *SessionRegistry) applyWatched(entry nats.KeyValueEntry) {
 			applied = r.cacheSessionLocked(entry.Key(), item, r.expiryFor(entry.Created(), item.UpdatedAt), entry.Revision())
 		}
 	}
+	_, isCached := r.cache[entry.Key()]
 	r.mu.Unlock()
-	if applied {
+	if applied && (entry.Revision() > cachedRevision || isCached != wasCached) {
 		r.notifyChanged(entry.Key())
 	}
 }

@@ -121,9 +121,9 @@ type sessionRelays struct {
 	client    *bus.Client
 	machineID string
 	logger    *logging.Logger
-	// inbox is the listener's reply inbox: a frame's reply subject is inbox.<token>, and one
-	// subscription to inbox.> hears every reply.
-	inbox string
+	// replyPrefix is the listener's reply inbox and a dot: a frame's reply subject is
+	// replyPrefix<token>, and one subscription to the inbox's wildcard hears every reply.
+	replyPrefix string
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -180,7 +180,6 @@ func (r *relayRun) ended() bool {
 // relayFrame is a frame a NATS relay sent and the session has not answered with done or nak.
 type relayFrame struct {
 	run    *relayRun
-	token  string
 	acker  bus.SessionAcker
 	sentAt time.Time
 	// answered is set once the session sent any reply for the frame, under framesMu.
@@ -188,31 +187,31 @@ type relayFrame struct {
 }
 
 // startSessionRelays starts the relay of delivery's session consumers and makes it delivery's
-// relay, serving-port sessions included (sessionDelivery.servingPortRelayed). It relays nothing
-// until setOwned(true).
+// relay, serving-port sessions included (sessionDelivery.relay). It relays nothing until
+// setOwned(true).
 func startSessionRelays(delivery *sessionDelivery, sessions *session.SessionRegistry, registry *store.Registry, deliverer *session.Deliverer, client *bus.Client, machineID string, logger *logging.Logger) (*sessionRelays, error) {
+	inbox := nats.NewInbox()
 	m := &sessionRelays{
-		delivery:  delivery,
-		sessions:  sessions,
-		registry:  registry,
-		deliverer: deliverer,
-		client:    client,
-		machineID: machineID,
-		logger:    logger,
-		inbox:     nats.NewInbox(),
-		loopDone:  make(chan struct{}),
-		events:    map[string]relayEvent{},
-		wake:      make(chan struct{}, 1),
-		relays:    map[string]*relayRun{},
-		frames:    map[string]*relayFrame{},
+		delivery:    delivery,
+		sessions:    sessions,
+		registry:    registry,
+		deliverer:   deliverer,
+		client:      client,
+		machineID:   machineID,
+		logger:      logger,
+		replyPrefix: inbox + ".",
+		loopDone:    make(chan struct{}),
+		events:      map[string]relayEvent{},
+		wake:        make(chan struct{}, 1),
+		relays:      map[string]*relayRun{},
+		frames:      map[string]*relayFrame{},
 	}
-	if err := delivery.consumers.SubscribeReplies(m.inbox+".>", m.onReply); err != nil {
+	if err := delivery.consumers.SubscribeReplies(inbox+".>", m.onReply); err != nil {
 		return nil, err
 	}
 	m.ctx, m.cancel = context.WithCancel(context.Background())
 	m.stopChange = sessions.OnChange(m.onChange)
 	delivery.relay = m
-	delivery.servingPortRelayed = true
 	go m.loop()
 	return m, nil
 }
@@ -283,14 +282,7 @@ func (m *sessionRelays) stop(ctx context.Context) {
 		m.logger.Warn("session relay loop still running at shutdown")
 		return
 	}
-	stopped := make(chan struct{})
-	go func() {
-		m.runs.Wait()
-		close(stopped)
-	}()
-	select {
-	case <-stopped:
-	case <-ctx.Done():
+	if !waitWithin(ctx, &m.runs) {
 		m.logger.Warn("session relays still running at shutdown")
 	}
 }
@@ -331,8 +323,10 @@ func (m *sessionRelays) loop() {
 			if err != nil {
 				m.logger.Warn("session relays could not list the session cache", slog.String("error", err.Error()))
 			}
+			// A session whose entry is not on consumer delivery and that has no relay to stop needs
+			// nothing (wanted).
 			for _, entry := range entries {
-				if _, ok := events[entry.SessionID]; !ok {
+				if _, ok := events[entry.SessionID]; !ok && (entry.Delivery == session.DeliveryConsumer || m.relays[entry.SessionID] != nil) {
 					events[entry.SessionID] = relayCheck
 				}
 			}
@@ -409,9 +403,7 @@ func (m *sessionRelays) start(sessionID string, servingPort bool, previous <-cha
 	ctx, cancel := context.WithCancel(m.ctx)
 	run := &relayRun{sessionID: sessionID, servingPort: servingPort, cancel: cancel, done: make(chan struct{})}
 	m.relays[sessionID] = run
-	m.runs.Add(1)
-	go func() {
-		defer m.runs.Done()
+	m.runs.Go(func() {
 		defer close(run.done)
 		// A run replaced is always stopped first, so it returns promptly; the wait keeps two pulls
 		// of one consumer from overlapping.
@@ -419,7 +411,7 @@ func (m *sessionRelays) start(sessionID string, servingPort bool, previous <-cha
 			<-previous
 		}
 		m.relay(ctx, run)
-	}()
+	})
 }
 
 // relay runs one session's relay until it is stopped or pauses, restarting at the ack floor after a
@@ -473,7 +465,7 @@ func (m *sessionRelays) restart(ctx context.Context, run *relayRun) (bus.Session
 	case errors.Is(err, bus.ErrSessionConsumerNotFound) || errors.Is(err, bus.ErrNoSessionConsumerName):
 		m.logger.Info("session relay paused: the session has no consumer; its next registration creates one", slog.String("session_id", sessionID))
 		return bus.SessionConsumerStart{}, nil, relayEnded
-	case errors.Is(err, bus.ErrConsumerNotGranted) || errors.Is(err, bus.ErrPublishDenied):
+	case consumerGrantRefused(err):
 		m.delivery.refused(sessionID, err)
 		return bus.SessionConsumerStart{}, nil, relayEnded
 	default:
@@ -489,23 +481,17 @@ func (m *sessionRelays) restart(ctx context.Context, run *relayRun) (bus.Session
 // next restart, which the session's next registration makes.
 func (m *sessionRelays) relayNATS(ctx context.Context, run *relayRun) relayOutcome {
 	sessionID := run.sessionID
-	callCtx, cancel := context.WithTimeout(ctx, sessionConsumerCallTimeout)
-	streamID, err := m.delivery.consumers.StreamID(callCtx)
-	cancel()
-	if err != nil {
-		if ctx.Err() != nil {
-			return relayEnded
-		}
-		m.logger.Warn("session relay could not read the stream's identity; retrying", slog.String("session_id", sessionID), slog.String("error", err.Error()))
-		return relayRetry
-	}
 	start, pull, outcome := m.restart(ctx, run)
 	if pull == nil {
 		return outcome
 	}
 	defer pull.Stop()
+	if start.StreamID == "" {
+		m.logger.Warn("session relay could not read the stream's identity; retrying", slog.String("session_id", sessionID), slog.String("error", bus.ErrNoStreamID.Error()))
+		return relayRetry
+	}
 	defer m.forget(run)
-	gap := start.Gap
+	streamID, gap := start.StreamID, start.Gap
 	for {
 		next := ctx
 		cancelNext := context.CancelFunc(func() {})
@@ -544,7 +530,7 @@ func (m *sessionRelays) relayNATS(ctx context.Context, run *relayRun) relayOutco
 // of its own under the listener's reply inbox.
 func (m *sessionRelays) publishFrame(ctx context.Context, run *relayRun, msg bus.SessionMessage, streamID string, gap bool) error {
 	token := strconv.FormatUint(m.nextToken.Add(1), 36)
-	frame := &relayFrame{run: run, token: token, acker: msg.SessionAcker, sentAt: time.Now()}
+	frame := &relayFrame{run: run, acker: msg.SessionAcker, sentAt: time.Now()}
 	m.framesMu.Lock()
 	if run.outstanding == nil {
 		run.outstanding = map[string]*relayFrame{}
@@ -564,7 +550,7 @@ func (m *sessionRelays) publishFrame(ctx context.Context, run *relayRun, msg bus
 	}
 	return m.delivery.consumers.Publish(ctx, &nats.Msg{
 		Subject: bus.DeliverSubject(run.sessionID),
-		Reply:   m.inbox + "." + token,
+		Reply:   m.replyPrefix + token,
 		Header:  header,
 		Data:    msg.Data,
 	})
@@ -601,7 +587,7 @@ func (m *sessionRelays) forget(run *relayRun) {
 // its ack wait, done acks it and nak has the server deliver it again after relayNakDelay; done and
 // nak end the frame. A reply to a token no frame awaits, or with any other body, is ignored.
 func (m *sessionRelays) onReply(msg *nats.Msg) {
-	token, ok := strings.CutPrefix(msg.Subject, m.inbox+".")
+	token, ok := strings.CutPrefix(msg.Subject, m.replyPrefix)
 	if !ok {
 		return
 	}
@@ -729,18 +715,14 @@ func (m *sessionRelays) push(ctx context.Context, sessionID string, item contrac
 // advertise, which is reported as a delivery_failed exception. A message on the session's agent
 // subject, a role forward included, is never refused here.
 func (m *sessionRelays) refuseFollowedTopic(sessionID string, item contracts.Envelope) bool {
-	if strings.HasPrefix(item.Topic, contracts.AgentTopicPrefix) || strings.HasPrefix(item.Topic, contracts.RoleTopicPrefix) {
+	if isControlTopic(item.Topic) {
 		return false
 	}
 	if item.SourceSession == sessionID {
 		m.logger.DeliveryLog(slog.LevelInfo, "session relay skipped an echo", sessionID, item.Topic, item.EventID, "skipped")
 		return true
 	}
-	var payload *string
-	if item.Payload != "" {
-		payload = &item.Payload
-	}
-	mode, err := frameDeliveryMode(payload)
+	mode, err := envelopeDeliveryMode(item)
 	if err == nil && mode != "" {
 		if entry, lookupErr := m.sessions.Get(sessionID); lookupErr == nil && !hasCapability(entry.Capabilities, mode) {
 			err = errors.New("the session does not advertise delivery mode " + mode)
