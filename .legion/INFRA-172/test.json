@@ -2,19 +2,14 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-172",
-  "completed": "2026-10-27T03:59:30Z",
-  "testedHead": "01465b587809033acb71eb2814edce835e0fce3c (round 5; code 21f5db10c74f: splitAtEvenEscapedPipes appends a split-off last cell instead of goldmark's InsertAfter, and trims every row to the table width; 00428c9ff32c: doc-edit help says 'an odd run of backslashes')",
+  "completed": "2026-10-27T04:06:12Z",
+  "testedHead": "6483af7e472e79fc7dc981dfaaf9ccd82f442f4e (rebase re-check of 01465b58: ff9c859b merges main@origin c3d09eec)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 5: drove the reviewer's panic input and its fitting variants through the real dispatch CLI (upload and bare row insert) against a server rebuilt from 01465b58, re-ran the parity test and every earlier census check (8 passed, 2 skipped by design; $TMPDIR/infra172-test/r3/e2e-r5.txt), and ran a 50,000-document differential that varies row openings and endings at cd211658 and at the head ($TMPDIR/infra172-test/fuzz2b)."
+    "how": "Rebase re-check: fingerprint unchanged; round 5's independent verification at 01465b58 stands. Smoke at 6483af7e: the implementer's parity test passes on a server and SPA rebuilt from the merged tree."
   },
-  "failed": 1,
-  "failures": [
-    {
-      "criterion": "CI at the head (read on GitHub): the pull request must be mergeable for its required checks to run; round 5's code (21f5db10, 00428c9f) has no CI run",
-      "evidence": "gh pr view 2272 at 03:58Z: mergeable CONFLICTING, mergeStateStatus DIRTY. git merge-tree --write-tree main@origin 01465b58 (read-only): CONFLICT (content) packages/envoy/CHANGELOG.md, changed on main by 9b92ac143 (#2302, 'the outbox publishes each batch as one pipelined window'). gh api actions/runs?head_sha= for 01465b58, 00428c9f and 21f5db10: no workflow runs. The last code head with runs, cd211658, still had Tests and Legion Envoy and Contracts queued at 03:58Z; the required lint, typecheck and test have not been read green on any code head since 64772417. Same shape as round 3's failure 1: bring main in with a forward merge, then the checks run."
-    }
-  ],
+  "failed": 0,
+  "failures": [],
   "verifiedCriteria": [
     {
       "criterion": "A1",
@@ -112,6 +107,14 @@
       "observed": "upload and insert of '| a | b \\\\\\\\| \\\\|' refused as 3 cells under 2; fitting variants stored and read alike by the engine; 0 panics in 50,000 generated documents, 15,854 stored all reading in the engine as Go read them.",
       "headSha": "01465b587809033acb71eb2814edce835e0fce3c",
       "negativeControl": "the same 50,000 documents at cd211658: 5,877 panics ('panic: reading markdown: runtime error: invalid memory address or nil pointer dereference')."
+    },
+    {
+      "criterion": "Rebase re-check 01465b58 -> 6483af7e: the merged head still reads a mid-row \\\\| as the browser does and refuses what it refused",
+      "surface": "Dispatch's browser suite and the real dispatch command against a server and SPA rebuilt from 6483af7e on a rootless Postgres",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:5433/infra172_tester?sslmode=disable bun run e2e editor-paste zz-tester-pipes -g \"two backslashes|tester: CLI\" --project chromium",
+      "observed": "2 passed; fingerprint 4c40c69a at both heads",
+      "headSha": "6483af7e472e79fc7dc981dfaaf9ccd82f442f4e",
+      "negativeControl": "dispatch doc-edit replacing a cell's text with code `git log \\| wc -l` exits 1 naming the cell; upload of '| A | B |\\n| --- | --- |\\n| a \\\\\\\\| b | c |' exits 1 'a table row holding 3 cells where its table has 2'."
     }
   ],
   "round1Failures": [
@@ -153,5 +156,20 @@
     "Help text: dispatch doc-edit --help prints 'code whose text has an odd run of backslashes right before a | cannot be stored in a cell and is INVALID_OP, naming the cell', matching behaviour (code `a\\\\\\\\|b` is stored).",
     "All round 3 and 4 checks hold at 01465b58 (8 passed, 2 skipped by design)."
   ],
-  "testerGap": "Round 1's generated differential did not catch the reviewer's panic: every generated row closed with ' |', and the harness counted ErrPanic as a refusal. The round-5 harness varies row endings and counts panics separately; it finds 5,877 panics at cd211658 and none at the head."
+  "testerGap": "Round 1's generated differential did not catch the reviewer's panic: every generated row closed with ' |', and the harness counted ErrPanic as a refusal. The round-5 harness varies row endings and counts panics separately; it finds 5,877 panics at cd211658 and none at the head.",
+  "fingerprint": {
+    "before": "01465b587809033acb71eb2814edce835e0fce3c 4c40c69a34f8d1eb6ee35ae6cb83c0ff61ac3cc0545b869f909a1439a4b4f602",
+    "after": "6483af7e472e79fc7dc981dfaaf9ccd82f442f4e 4c40c69a34f8d1eb6ee35ae6cb83c0ff61ac3cc0545b869f909a1439a4b4f602",
+    "verdict": "unchanged: bare gates only (CI read on GitHub, smoke check); round-5 real-surface verification stands"
+  },
+  "round5Failures": [
+    {
+      "criterion": "CI at the head (read on GitHub): the pull request must be mergeable for its required checks to run; round 5's code (21f5db10, 00428c9f) has no CI run",
+      "resolution": "Fixed: ff9c859b merges main@origin c3d09eec; GitHub reports MERGEABLE (mergeStateStatus BLOCKED on review and checks), and workflows run at 6483af7e (Tests, Legion Envoy and Contracts, Docs, PR Title, Worker Image created 04:02Z)."
+    }
+  ],
+  "bareGates": {
+    "ci": "At 6483af7e, read 04:03Z: required lint, typecheck, test and pr-title queued (not yet green); the runs on the merge commit ff9c859b were cancelled by the handoff push. Read as queued, not waited for.",
+    "smoke": "cd packages/dispatch && bun run e2e editor-paste zz-tester-pipes -g \"two backslashes|tester: CLI\" --project chromium at 6483af7e (server and SPA rebuilt from the merged tree, rootless Postgres): 2 passed - the parity test, and the CLI refusal of code `git log \\| wc -l` in a cell (exit 1, twice) with plain and bare-pipe writes stored and an upload of '| a \\\\| b | c |' refused. Output $TMPDIR/infra172-test/r3/e2e-r6.txt."
+  }
 }
