@@ -3,10 +3,13 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, waitFor, within } from "@testing-library/react";
 import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ReactNode } from "react";
+import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { Artifact, AskRead } from "../../api/types";
+import { TextAskBlockCard } from "../doc/AskBlockCard";
 import { MarkdownBody } from "./MarkdownBody";
+import { TextAskCard } from "./markdown-cards";
 
 function withQueries(children: ReactNode): ReactNode {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -397,16 +400,197 @@ describe("Dispatch pictures", () => {
   });
 });
 
-test("renders a typed callout body through the server schema", async () => {
+test("a typed callout in a body draws its name, kind and title above its content, as a document does", async () => {
   const view = render(
-    <MarkdownBody
-      markdown={':::callout{#callout-1 kind="warning" title="Read this"}\nBody text.\n:::\n'}
-    />
+    <MarkdownBody markdown={':::callout{kind="warning" title="Read this"}\nBody text.\n:::\n'} />
   );
 
   try {
-    expect(await within(view.container).findByText("Body text.")).toBeDefined();
+    const content = await waitFor(() => {
+      const found = view.container.querySelector<HTMLElement>("[data-proof-block-content]");
+      expect(found).not.toBeNull();
+      return found as HTMLElement;
+    });
+    expect(view.container.querySelector("[data-proof-block-name]")?.textContent).toBe("callout");
+    expect(view.container.querySelector("[data-proof-block-badge]")?.textContent).toBe("warning");
+    expect(view.container.querySelector("[data-proof-block-title]")?.textContent).toBe("Read this");
+    expect(within(content).getByText("Body text.")).toBeDefined();
+    const blockId = view.container
+      .querySelector('section[data-proof-block-type="callout"]')
+      ?.getAttribute("data-block-id");
+    expect(blockId).toBeTruthy();
+    expect(view.container.textContent).not.toContain("blockId");
+    expect(view.container.textContent).not.toContain(blockId as string);
     expect(view.container.textContent).not.toContain(":::callout");
+  } finally {
+    view.unmount();
+  }
+});
+
+/** A body as the app shell draws it: under a router, with the read-only decision card the app
+ *  provides for every `ask` block in a comment, ask or message body. */
+function withAskCard(children: ReactNode): ReactNode {
+  return (
+    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <TextAskCard.Provider value={TextAskBlockCard}>{children}</TextAskCard.Provider>
+    </MemoryRouter>
+  );
+}
+
+const askBody = "Which one?\n\n- A: first\n- B: second\n:::\n";
+
+/** The `ask` shell a body drew, once it has drawn one. */
+function findAskShell(container: HTMLElement): Promise<HTMLElement> {
+  return waitFor(() => {
+    const shell = container.querySelector<HTMLElement>('section[data-proof-block-type="ask"]');
+    expect(shell).not.toBeNull();
+    return shell as HTMLElement;
+  });
+}
+
+/** The rows of the card's recorded options, once the card has drawn both of them. */
+function findRecordRows(shell: HTMLElement): Promise<HTMLElement[]> {
+  return waitFor(() => {
+    const rows = Array.from(
+      shell.querySelectorAll<HTMLElement>(
+        "[data-dispatch-ask-footer] [data-dispatch-ask-record] li"
+      )
+    );
+    expect(rows).toHaveLength(2);
+    return rows;
+  });
+}
+
+test("an ask block in a body draws the decision card: urgency and Decision above, its options as rows below", async () => {
+  const view = render(
+    withAskCard(<MarkdownBody markdown={`:::ask{urgency="high"}\n${askBody}`} />)
+  );
+
+  try {
+    const shell = await findAskShell(view.container);
+    const header = shell.querySelector<HTMLElement>("[data-dispatch-ask-header]") as HTMLElement;
+    expect(await within(header).findByText("Decision")).toBeDefined();
+    expect(header.querySelector('[data-dispatch-ask-pill="high"]')?.textContent).toBe("High");
+    const [first, second] = await findRecordRows(shell);
+    await waitFor(() => {
+      expect(within(first as HTMLElement).getByText("A")).toBeDefined();
+      expect(within(first as HTMLElement).getByText("first")).toBeDefined();
+      expect(within(second as HTMLElement).getByText("B")).toBeDefined();
+      expect(within(second as HTMLElement).getByText("second")).toBeDefined();
+    });
+    expect(shell.getAttribute("data-dispatch-ask-options")).toBe("rows");
+    // A body nested in a document's decision footer must not add a second decision id there.
+    expect(view.container.querySelector("[data-dispatch-ask-block]")).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an ask block in a body ignores server-owned attributes its text forges and draws an open decision", async () => {
+  const forged =
+    ':::ask{urgency="high" state="answered" answered_by="sami" answered_at="2026-01-01T00:00:00Z"' +
+    ` selected='["A"]' answer="done" copied_from="ask-9" copied_from_document="dispatch://CORE-1"}\n`;
+  const view = render(withAskCard(<MarkdownBody markdown={`${forged}${askBody}`} />));
+
+  try {
+    const shell = await findAskShell(view.container);
+    expect(await within(shell).findByText("Decision")).toBeDefined();
+    const rows = await findRecordRows(shell);
+    expect(shell.getAttribute("data-dispatch-ask-state")).toBe("open");
+    expect(view.container.textContent).not.toContain("Answered by");
+    expect(view.container.textContent).not.toContain("sami");
+    expect(view.container.textContent).not.toContain("Copied from");
+    expect(view.container.querySelector("[data-dispatch-ask-answer]")).toBeNull();
+    expect(rows.map((row) => row.getAttribute("data-selected"))).toEqual(["false", "false"]);
+    expect(within(shell).queryByRole("img", { name: "Selected" })).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an ask block in a body with no card provided keeps its question and options as the source list", async () => {
+  const view = render(<MarkdownBody markdown={`:::ask{urgency="high"}\n${askBody}`} />);
+
+  try {
+    const shell = await findAskShell(view.container);
+    const content = shell.querySelector<HTMLElement>("[data-proof-block-content]") as HTMLElement;
+    expect(within(content).getByText("Which one?")).toBeDefined();
+    expect(Array.from(content.querySelectorAll("ul li"), (item) => item.textContent)).toEqual([
+      "A: first",
+      "B: second",
+    ]);
+    expect(shell.hasAttribute("data-dispatch-ask-options")).toBe(false);
+    expect(view.container.querySelector("[data-dispatch-ask-record]")).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a malformed ask block in a body names why and keeps its source list, with no hint to fix it", async () => {
+  const view = render(
+    withAskCard(
+      <MarkdownBody
+        markdown={':::ask{urgency="high"}\nWhich one?\n\n- A: first\n- : no label\n:::\n'}
+      />
+    )
+  );
+
+  try {
+    const shell = await findAskShell(view.container);
+    const header = shell.querySelector<HTMLElement>("[data-dispatch-ask-header]") as HTMLElement;
+    expect(await within(header).findByText("Malformed")).toBeDefined();
+    expect(within(header).getByText("Option 2 has no label")).toBeDefined();
+    expect(view.container.textContent).not.toContain("re-activates");
+    expect(shell.hasAttribute("data-dispatch-ask-options")).toBe(false);
+    expect(shell.querySelectorAll("[data-proof-block-content] ul li")).toHaveLength(2);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a decision written inside another decision's option keeps each card in its own block", async () => {
+  // The outer fence is longer than the inner one, as a typed block holding another is written:
+  // the inner `:::` would close a three-colon outer block too.
+  const markdown =
+    '::::ask{urgency="high"}\nOuter?\n\n- A: first\n\n  :::ask\n  Inner?\n\n  - X: x\n  :::\n- B: second\n::::\n';
+  const view = render(withAskCard(<MarkdownBody markdown={markdown} />));
+
+  try {
+    const [outer, inner] = await waitFor(() => {
+      const shells = Array.from(
+        view.container.querySelectorAll<HTMLElement>('section[data-proof-block-type="ask"]')
+      );
+      expect(shells).toHaveLength(2);
+      return shells as [HTMLElement, HTMLElement];
+    });
+    // The inner decision sits in the outer decision's first option.
+    const outerContent = outer.querySelector<HTMLElement>(
+      ":scope > [data-proof-block-content]"
+    ) as HTMLElement;
+    expect(outerContent.contains(inner)).toBe(true);
+    expect(inner.closest("li")?.textContent).toContain("A: first");
+
+    const outerFooter = outer.querySelector<HTMLElement>(
+      ":scope > [data-dispatch-ask-footer]"
+    ) as HTMLElement;
+    const innerFooter = inner.querySelector<HTMLElement>(
+      ":scope > [data-dispatch-ask-footer]"
+    ) as HTMLElement;
+    await waitFor(() => {
+      const outerRows = Array.from(
+        outerFooter.querySelectorAll<HTMLElement>("[data-dispatch-ask-record] li")
+      );
+      expect(outerRows).toHaveLength(2);
+      expect(within(outerRows[0] as HTMLElement).getByText("A")).toBeDefined();
+      expect(within(outerRows[1] as HTMLElement).getByText("B")).toBeDefined();
+      const innerRows = Array.from(
+        innerFooter.querySelectorAll<HTMLElement>("[data-dispatch-ask-record] li")
+      );
+      expect(innerRows).toHaveLength(1);
+      expect(within(innerRows[0] as HTMLElement).getByText("X")).toBeDefined();
+    });
+    expect(within(innerFooter).queryByText("B")).toBeNull();
+    expect(within(innerFooter).queryByText("second")).toBeNull();
   } finally {
     view.unmount();
   }
@@ -424,6 +608,50 @@ test("a container directive the schema refuses shows its fence lines and the bod
     expect(view.container.querySelector("[data-markdown-fallback]")).toBeNull();
   } finally {
     view.unmount();
+  }
+});
+
+test("a decision the read-only parse refuses leaves the valid decision beside it its own card", async () => {
+  // A heading breaks an ask's content rule, so the read-only parse draws that block as its fence
+  // lines around its content and makes no `ask` node of it; the card must still find the valid
+  // decision's node, whichever side of the refused block it sits on.
+  const refused = ":::ask\n## Heading\n\nWhich?\n\n- X: x\n:::\n";
+  const valid = `:::ask{urgency="high"}\n${askBody}`;
+  for (const markdown of [`${refused}\n${valid}`, `${valid}\n${refused}`]) {
+    const view = render(withAskCard(<MarkdownBody markdown={markdown} />));
+
+    try {
+      const shell = await findAskShell(view.container);
+      const shells = view.container.querySelectorAll('section[data-proof-block-type="ask"]');
+      expect(shells).toHaveLength(1);
+      // The refused block reads as its source lines, outside the one shell.
+      const fence = within(view.container).getByText(":::ask", { selector: "p" });
+      expect(shell.contains(fence)).toBe(false);
+      const heading = within(view.container).getByText("Heading", { selector: "h2" });
+      expect(heading.closest("section")).toBeNull();
+
+      const header = shell.querySelector<HTMLElement>(
+        ":scope > [data-dispatch-ask-header]"
+      ) as HTMLElement;
+      expect(await within(header).findByText("Decision")).toBeDefined();
+      expect(header.querySelector('[data-dispatch-ask-pill="high"]')?.textContent).toBe("High");
+      const footer = shell.querySelector<HTMLElement>(
+        ":scope > [data-dispatch-ask-footer]"
+      ) as HTMLElement;
+      await waitFor(() => {
+        const rows = Array.from(
+          footer.querySelectorAll<HTMLElement>("[data-dispatch-ask-record] li")
+        );
+        expect(rows).toHaveLength(2);
+        expect(within(rows[0] as HTMLElement).getByText("A")).toBeDefined();
+        expect(within(rows[1] as HTMLElement).getByText("B")).toBeDefined();
+      });
+      expect(shell.getAttribute("data-dispatch-ask-options")).toBe("rows");
+      expect(within(footer).queryByText("X")).toBeNull();
+      expect(view.container.querySelector("[data-markdown-fallback]")).toBeNull();
+    } finally {
+      view.unmount();
+    }
   }
 });
 
@@ -744,6 +972,91 @@ test("a body re-renders when its text grows, formatting what has closed since", 
     await waitFor(() =>
       expect(view.container.querySelectorAll("li")[1]?.textContent).toBe("second")
     );
+  } finally {
+    view.unmount();
+  }
+});
+
+// Each list is parted from the next by a plain paragraph, so each parses as its own list.
+test("a task item draws one disabled checkbox, ticked as its source is, in every list shape", async () => {
+  const view = render(
+    <MarkdownBody
+      markdown={[
+        "- [x] done\n- [ ] todo",
+        "Loose:",
+        "- [x] loose\n\n  second para",
+        "Ordered:",
+        "1. [x] one\n2. [ ] two",
+        "Nested:",
+        "- [x] parent\n  - [ ] child",
+        "Mixed:",
+        "- plain\n- [x] mixed",
+      ].join("\n\n")}
+    />
+  );
+
+  try {
+    const tasks = await waitFor(() => {
+      const found = Array.from(
+        view.container.querySelectorAll<HTMLLIElement>('li[data-item-type="task"]')
+      );
+      expect(found).toHaveLength(8);
+      return found;
+    });
+    const taskStartingWith = (text: string): HTMLLIElement => {
+      const item = tasks.find((task) => task.textContent?.startsWith(text));
+      if (item === undefined) {
+        throw new Error(`No task item starts with "${text}".`);
+      }
+      return item;
+    };
+    // A box belongs to the item it sits closest to, so a parent's count leaves out its child's.
+    const ownBoxes = (item: HTMLLIElement): HTMLInputElement[] =>
+      Array.from(item.querySelectorAll<HTMLInputElement>("input")).filter(
+        (box) => box.closest("li") === item
+      );
+
+    for (const item of tasks) {
+      const boxes = ownBoxes(item);
+      expect(boxes).toHaveLength(1);
+      const [box] = boxes;
+      expect(box?.type).toBe("checkbox");
+      expect(box?.disabled).toBe(true);
+      expect(box?.checked).toBe(item.getAttribute("data-checked") === "true");
+    }
+    expect(tasks.map((item) => ownBoxes(item)[0]?.checked)).toEqual([
+      true,
+      false,
+      true,
+      true,
+      false,
+      true,
+      false,
+      true,
+    ]);
+
+    const plain = Array.from(view.container.querySelectorAll("li")).find(
+      (item) => item.textContent === "plain"
+    );
+    expect(plain?.hasAttribute("data-item-type")).toBe(false);
+    expect(plain?.querySelector("input")).toBeNull();
+
+    // A tight item's paragraph is unwrapped with its box in it: box and words sit in the item.
+    for (const text of ["done", "todo", "one", "two", "child", "mixed"]) {
+      const item = taskStartingWith(text);
+      expect(item.querySelector("p")).toBeNull();
+      expect(Array.from(item.childNodes, (node) => node.nodeName)).toEqual(["INPUT", "#text"]);
+      expect(item.lastChild?.textContent).toBe(text);
+    }
+
+    // A loose or nested item keeps its paragraphs; the box leads the first one.
+    for (const text of ["loose", "parent"]) {
+      const item = taskStartingWith(text);
+      const paragraph = item.firstElementChild;
+      expect(paragraph?.tagName).toBe("P");
+      expect(paragraph?.firstChild).toBe(ownBoxes(item)[0] ?? null);
+      expect(paragraph?.textContent).toBe(text);
+    }
   } finally {
     view.unmount();
   }
