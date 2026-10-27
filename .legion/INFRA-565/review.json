@@ -2,30 +2,25 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-565",
-  "completed": "2026-10-27T09:36:44Z",
-  "decision": "changes_requested",
-  "reviewedHead": "08952b8cf2dab419a11bdd6c9945b72087f9ab01",
+  "completed": "2026-10-27T11:41:02Z",
+  "round": 2,
+  "decision": "approved",
+  "reviewedHead": "d4771a0735f22a21bc3829f37c99997138ef6187",
   "critical": 0,
-  "important": 1,
-  "minor": 2,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "docs/solutions/integration-patterns/cut-source-text-by-mdast-offsets-from-the-text-micromark-counted-INFRA-529.md",
-      "description": "Lines 43-54 still cite read-only-directives.ts:189, :108-118, :28, :121-135 (that file is now 25 lines; the code moved to typed-block-drawing.ts), and lines 52-54 say default mode's remarkTypedBlocks still passes file.toString() unchanged and that no input changes, which this PR reverses (block-schema.ts:287 now reads markdownSource(file); \\ufeffhello\\n::a is refused again). Point the evidence at typed-block-drawing.ts and rewrite the last bullet."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/proof-editor/src/lib-headless.ts",
-      "description": "Lines 88-89: 'in both modes ... (see remarkUnfitTypedBlocks)' - read-only mode draws through remarkReadOnlyDirectives, and default mode installs remarkUnfitTypedBlocks only when blockSchema is given (lines 164-166). Name both transforms and the blockSchema condition."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/proof-editor/tests/typed-block-drawing.test.ts",
-      "description": "plainTextPasteEvent (:102), withHTMLElementGlobal (:78) and pastePlainText (:109) are copies of clipboard-paste-recovery.test.ts:17,35,23, and blocks (:41) plus the blocks.json loader (:17-22) copy read-only-directives.test.ts:35,283-288. Move them into shared tests modules (as tests/marks-editor.ts, tests/dom-window.ts already are) and import them from each suite."
-    }
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "roundOneFindings": [
+    "Stale cut-source-text…-INFRA-529.md: fixed in d4771a07; every citation checked against the file at d4771a07 (typed-block-drawing.ts:46-49, :129-139, :40, :142-156; block-schema.ts:287).",
+    "lib-headless.ts readOnly doc: fixed in d4771a07 (thread PRRT_kwDORFy7ds6woAf_, answered and accepted).",
+    "Duplicated test helpers: fixed in 80a5c2f2 (thread PRRT_kwDORFy7ds6woAgC, answered and accepted)."
   ],
-  "thermonuclear": "thermonuclear-deep-review: APPROVE at 08952b8c, one Minor (the stale doc above). thermonuclear-code-quality: CHANGES at 08952b8c (stale doc, duplicated test helpers, lib-headless doc wording).",
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. At 08952b8c every pull_request workflow (Tests, Legion Envoy and Contracts, Docs, Worker Image, PR Title) still queued at 2026-10-27T09:36Z; not a blocker for a changes request.",
-  "threads": "0 review threads on the pull request (gh api graphql)."
+  "judgedNotDefects": [
+    "Code-quality pass: blocks/runs share tests/block-schema-fixture.ts with serverBlockSchema; one helper module for the suites that read parses of the server schema, behaviour-neutral.",
+    "Code-quality pass: tests/paste.ts exports plainTextPasteEvent with no importer; harmless test-helper export, behaviour-neutral.",
+    "Code-quality pass: clipboard-paste-recovery.test.ts:11-15 comment overlaps paste.ts's doc; still accurate, behaviour-neutral."
+  ],
+  "thermonuclear": "thermonuclear-deep-review: APPROVE at d4771a07, no findings (proof-editor 144 pass, typecheck and lint clean, pmdoc gen check up to date, go test -run Escape ok). thermonuclear-code-quality: CHANGES at d4771a07 on three behaviour-neutral test-helper placement items, judged not defects above.",
+  "ci": "Required set lint, typecheck, test, pr-title: all completed success at CI head d4771a07 (read 2026-10-27T11:40Z); compare d4771a07...6f60f91a handoffsOnly true, 2 files.",
+  "threads": "Two threads, both mine, both answered with my reply and resolved by the implementer."
 }
