@@ -327,6 +327,31 @@ func lapsedExpiry(t *testing.T, database *store.Store) {
 	}
 }
 
+// HoldToken reads the token a hold's row records and whether a holder holds it live: no row is ""
+// and not held, a live hold is its token and held, and a lapsed row keeps its token, not held, so
+// a standby reads what the lapsed holder recorded before TryHold records its own.
+func TestHoldTokenReadsTheRowsTokenAndWhetherItIsLive(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	if token, held, err := HoldToken(ctx, database.Pool, holdName); err != nil || held || token != "" {
+		t.Fatalf("HoldToken with no row = %q, held %v, error %v; want \"\", not held", token, held, err)
+	}
+
+	opts := HoldOptions{TTL: 3 * time.Second, Renew: 500 * time.Millisecond, Margin: time.Second, Token: "deliver.live"}
+	mustTakeHold(t, database.Pool, uuid.New(), opts)
+	if token, held, err := HoldToken(ctx, database.Pool, holdName); err != nil || !held || token != "deliver.live" {
+		t.Fatalf("HoldToken of a live hold = %q, held %v, error %v; want %q, held", token, held, err, "deliver.live")
+	}
+
+	if _, err := database.Pool.Exec(ctx, `update duty_holds set holder = $2, expires_at = now() - interval '1 second' where name = $1`,
+		holdName, uuid.New()); err != nil {
+		t.Fatalf("rewrite the row as lapsed: %v", err)
+	}
+	if token, held, err := HoldToken(ctx, database.Pool, holdName); err != nil || held || token != "deliver.live" {
+		t.Fatalf("HoldToken of a lapsed row = %q, held %v, error %v; want %q, not held", token, held, err, "deliver.live")
+	}
+}
+
 // Options under which no renewal could be confirmed before the loss deadline are refused before
 // any statement is sent.
 func TestHoldRefusesOptionsNoRenewalCouldBeConfirmedUnder(t *testing.T) {

@@ -607,10 +607,11 @@ func (f *githubFake) Release() { f.once.Do(func() { close(f.release) }) }
 // URL is the origin DISPATCH_GITHUB_API_BASE names.
 func (f *githubFake) URL() string { return f.server.URL }
 
-// Each delivery durable admits one subscriber. With two processes reading one NATS, exactly one
-// of them binds each durable and the other stands by - an ordinary state, logged at INFO and
-// never as a failure - polling every two seconds, so the work resumes within seconds of the
-// holder dying rather than waiting for a deploy.
+// Each delivery durable is delivered from by one process: the one holding its hold. With two
+// processes reading one NATS, exactly one of them binds each durable and the other stands by - an
+// ordinary state, logged at INFO and never as a failure - polling every two seconds, so the work
+// resumes within seconds of the holder's hold lapsing when it dies, rather than waiting for a
+// deploy.
 func TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy(t *testing.T) {
 	pair := newPair(t)
 	seedDeliverySettings(t, pair.database)
@@ -636,7 +637,7 @@ func TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy(t *testing.T) {
 				durable, strings.Join(errorLines, "\n"))
 		}
 		if bound := standby.logLines(`msg="dispatch delivery: NATS consumer bound"`, "name="+durable); len(bound) > 0 {
-			t.Errorf("both processes bound %s, which admits one subscriber:\n%s", durable, strings.Join(bound, "\n"))
+			t.Errorf("both processes bound %s, which one process at a time delivers from:\n%s", durable, strings.Join(bound, "\n"))
 		}
 		if info, err := js.ConsumerInfo(bus.Stream, durable); err != nil {
 			t.Fatalf("read %s: %v", durable, err)
@@ -646,7 +647,9 @@ func TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy(t *testing.T) {
 	}
 
 	// The holder dies the way a task replaced mid-deploy or killed for memory does, with no
-	// chance to unsubscribe, and the process that was standing by takes the durable over.
+	// chance to unsubscribe or release its hold, and the process that was standing by takes the
+	// durable over once the dead holder's hold lapses: within the hold's 15 s TTL, one 2 s poll and
+	// a margin.
 	dying := holders["delivery-events"]
 	survivor := pair.other(dying)
 	if err := dying.Cmd.Process.Kill(); err != nil {
@@ -658,7 +661,7 @@ func TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy(t *testing.T) {
 		if holders[durable] != dying {
 			continue
 		}
-		survivor.waitForLog(t, 10*time.Second, `msg="dispatch delivery: NATS consumer bound"`, "name="+durable)
+		survivor.waitForLog(t, 25*time.Second, `msg="dispatch delivery: NATS consumer bound"`, "name="+durable)
 	}
 	t.Logf("the standby bound the dead holder's durables %v after it died", time.Since(handedOver))
 }

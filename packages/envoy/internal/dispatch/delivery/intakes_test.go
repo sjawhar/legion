@@ -124,9 +124,9 @@ func TestBothIntakesKeepTheirSubscriptions(t *testing.T) {
 }
 
 // TestAMessageInItsHandlerAtShutdownIsAcknowledged: a merged pull request whose GitHub fetch is
-// still running when ctx is cancelled is acknowledged once the fetch returns, because the intake's
-// client stays open until stop. deliver runs on the subscription's delivery goroutine under a
-// deadline of its own, so it outlives Run; a client closed as Run returned took the acknowledgement
+// still running when ctx is cancelled is acknowledged once the fetch returns, because the intake
+// stops delivering by draining its subscription and waits for the message in its handler before
+// Run returns and stop closes the client. A client closed as Run returned took the acknowledgement
 // down with it, and the message stayed outstanding until the ack wait handed it to the next
 // process.
 func TestAMessageInItsHandlerAtShutdownIsAcknowledged(t *testing.T) {
@@ -180,7 +180,8 @@ func TestAMessageInItsHandlerAtShutdownIsAcknowledged(t *testing.T) {
 		t.Fatalf("the intake never fetched the merged pull request: %s", consumer())
 	}
 	cancel()
-	// Run has returned once the durable loses its subscriber: Run unsubscribes as it ends.
+	// The intake stops delivering as ctx ends: the durable loses its subscriber at once, while the
+	// message in its handler is still running.
 	waitFor(t, 20*time.Second, func() bool {
 		info, err := publisher.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
 		return err == nil && !info.PushBound

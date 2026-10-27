@@ -207,11 +207,11 @@ func TestExclusiveLeavesThePeriodUnservedWhenShutdownCutsThePassShort(t *testing
 }
 
 // A period of zero or less is no period at all - mutual exclusion and nothing more - which is what
-// a delivery intake's consumer reconciliation takes: it runs on every bind poll rather than on a
-// ticker, and the throttle that spaces it is its own. There is one such lease per delivery
-// durable (delivery.consumerLease), and the name below is the events intake's, written out
-// because delivery imports duty and not the other way about. Every call runs while the lease is
-// free, and nothing is recorded for a later one to be judged by.
+// a delivery intake's take-over of its durable takes: a process makes it only while it holds the
+// durable's Hold and the durable does not deliver to it yet, not on a ticker. There is one such
+// lease per delivery durable (delivery.consumerLease), and the name below is the events intake's,
+// written out because delivery imports duty and not the other way about. Every call runs while
+// the lease is free, and nothing is recorded for a later one to be judged by.
 func TestExclusiveWithoutAPeriodRunsWheneverTheLeaseIsFree(t *testing.T) {
 	database := storetest.Open(t)
 	leases := leasesOf(t, database)
