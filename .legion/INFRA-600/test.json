@@ -2,43 +2,43 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-600",
-  "completed": "2026-10-27T07:24:00Z",
-  "round": 2,
-  "testedHead": "20fa840cbec2b62f1e36075376e8bbd5cf8f1065",
+  "completed": "2026-10-27T08:12:00Z",
+  "round": 3,
+  "testedHead": "32dd54588e035a307607a2af8dfb180cade2db4b",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove P6 independently on new scratch pull request #2382 at cf19465f (20fa840c plus an empty commit): closed while its runs were queued, Tests (closed pull request) run 40466219588 had cancel-tests skipped with no runner, and Tests 40466180534 was cancelled 3 s after the close with the tests-2382 annotation; no lint/typecheck/test check posted by the close. Round 1 verified P1-P5 at 4773bb61 on #2375; round 2's diff touches only tests-closed.yaml's concurrency and job if, plus comments and docs."
+    "how": "Re-ran its command: check-image-trigger-paths.sh on the real tree (exit 0, 4 image builds) and on a tar copy of the tree with ready_for_review removed from worker-image.yaml's types (exit 1, the error naming worker-image.yaml on.pull_request). Round 2's Actions proof (#2382 at 20fa840c) still holds: this round's workflow diff is comments only."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "2 Closed pull requests: closing cancels the waiting runs, the Tests canceller takes no runner and posts no required check, the closed runs skip every job",
-      "surface": "GitHub Actions in sjawhar/legion, scratch pull request https://github.com/sjawhar/legion/pull/2382",
-      "command": "gh pr create (07:16:54Z); gh pr close 2382 (closed_at 07:17:17Z); gh api repos/sjawhar/legion/actions/runs?head_sha=cf19465ff213fec4a5897d3951e3743a13d25655, /runs/<id>/jobs, /check-runs/122062019920/annotations, /commits/cf19465f.../check-runs",
-      "observed": "Tests (closed pull request) 40466219588 created 07:17:19Z, cancel-tests skipped, runner none; Tests 40466180534 cancelled 07:17:20Z ('Canceling since a higher priority waiting request for tests-2382 exists'); Envoy 40466180535, Docs 40466180665, Worker Image 40466180646 cancelled 07:17:21Z; closed runs 40466219353/40466219442/40466219434 skipped. Check runs: lint/typecheck/test cancelled (122062021463/122062020201/122062019920), cancel-tests skipped (122062152945), no new lint/typecheck/test. Final close 07:20:19Z: the four runs cancelled 07:20:23Z.",
-      "headSha": "20fa840cbec2b62f1e36075376e8bbd5cf8f1065",
-      "negativeControl": "At 4773bb61 the job-level cancel-tests waited for a runner after every close (round 1, #2375: job 122054224976 pending until a reopen cancelled it); at 20fa840c it is skipped with runner none."
+      "criterion": "Review round 1 Important: the image-trigger check admits the draft term only while every pull request trigger that runs the holder lists ready_for_review",
+      "surface": "the required lint job's check .github/scripts/check-image-trigger-paths.sh, run on the real tree and on a copy of the tree (jj file list | tar into $TMPDIR) with one workflow edited per run",
+      "command": "PATH=$TMPDIR/infra600/venv/bin:$PATH .github/scripts/check-image-trigger-paths.sh, once on the workspace and once per mutation in $TMPDIR/infra600/repo",
+      "observed": "Real tree exit 0. Refused (exit 1, each error naming the trigger): ready_for_review dropped from worker-image.yaml types (jobs.build); dropped from envoy-and-contracts.yaml (jobs.changes, the needed job); worker-image.yaml types line deleted (GitHub default); types: []; pull_request with no types added to release.yaml, the workflow_call caller (error names release.yaml on.pull_request); release.yaml on: rewritten as [push, pull_request, workflow_dispatch]; pull_request_target with no types added to worker-image.yaml. Accepted (exit 0): ready_for_review dropped with the draft term removed, leaving github.event.action != 'closed' alone; types: ready_for_review as a string.",
+      "headSha": "32dd54588e035a307607a2af8dfb180cade2db4b",
+      "negativeControl": "ready_for_review removed from worker-image.yaml types -> exit 1: 'jobs.build builds or calls an image and its if: skips a draft with `!github.event.pull_request.draft`, but .github/workflows/worker-image.yaml on.pull_request, which runs it, does not list ready_for_review in its types'; the reviewer's same edit at 20fa840c exited 0."
     },
     {
-      "criterion": "A reopen still gets its own full Tests run, and the quick-reopen race is documented (architect's option a)",
-      "surface": "GitHub Actions in sjawhar/legion, scratch pull request #2382; the workflow comments and docs/kubernetes.md at 20fa840c",
-      "command": "gh pr reopen 2382 (07:17:53Z); gh pr close + gh pr reopen 2 s apart twice (07:18:29/31Z, 07:19:18/20Z); gh api .../actions/runs?head_sha=cf19465f...; jj diff -r 20fa840cbec2",
-      "observed": "Reopen at 07:17:53Z queued fresh lint/typecheck/test (122062342570/122062342542/122062342321) in Tests 40466279938; the earlier closed run had already completed. In both 2 s cycles GitHub created the closed runs first (07:18:31Z, 07:19:20Z) and the reopened runs survived, so the race did not occur in these tries. The race is written in tests-closed.yaml, pr-and-main.yaml's concurrency comment, the closed-trigger comments of envoy-and-contracts, docs and worker-image, docs/kubernetes.md and the PR body residual, each saying push or wait a minute, and push or reopen again after a quick reopen; consistent with round 1's observed F1 (Envoy 40463925526 cancelled by closed run 40463967410, skipped checks left at the head).",
-      "headSha": "20fa840cbec2b62f1e36075376e8bbd5cf8f1065",
-      "negativeControl": "check-image-trigger-paths.sh with if: github.event.pull_request.draft on the build job exits 1 ('is narrowed by `github.event.pull_request.draft`, which this check cannot evaluate'); round 1 also saw 9 other narrowing variants refused."
+      "criterion": "Comment and docs corrections (review minors) and one home for the quick-reopen race and the lint job's triggers",
+      "surface": "the repository at 32dd5458",
+      "command": "jj diff -r 'f3ece5e98265|32dd54588e03' --git -- .github/workflows AGENTS.md docs, with non-comment workflow lines filtered out",
+      "observed": "Workflow diff is comments only (no non-comment line). The race now lives in tests-closed.yaml, which names all four workflows' closed runs, says Tests fails closed (cancelled) while Envoy/Docs/Worker Image keep skipped checks and no image, and says to push or wait a minute; docs.yaml, envoy-and-contracts.yaml, worker-image.yaml, pr-and-main.yaml and docs/kubernetes.md point to it. This matches round 1's observed F1 (Envoy 40463925526 cancelled by closed run 40463967410, skipped checks left). pr-and-main.yaml adds the conflicting-head caveat; worker-image.yaml's key comment now says only a running non-PR build is never cancelled and a pending one may be replaced at the same sha.",
+      "headSha": "32dd54588e035a307607a2af8dfb180cade2db4b",
+      "negativeControl": "At 20fa840c worker-image.yaml said 'a run never cancels a main, workflow_call or workflow_dispatch run', false for a pending run (reviewer's minor); at 32dd5458 it is gone."
     },
     {
-      "criterion": "1 Drafts skip, ready re-runs; 3 newer head cancels older image build (round 1, unchanged by round 2's diff)",
-      "surface": "GitHub Actions in sjawhar/legion, scratch pull request https://github.com/sjawhar/legion/pull/2375",
-      "command": "gh pr create --draft; gh pr ready 2375; gh pr ready --undo + push; push cbf6e85b over 26252d9d (round 1)",
-      "observed": "Draft runs 40463414385/40463414406/40463414585/40463414395 skipped with no runner; ready check runs 122053198001/122053198256/122053198371 queued with ids above the skips; 26252d9d's Worker Image 40463610232 cancelled ('worker-image-2375').",
-      "headSha": "4773bb61d04893cc7c6193f178bc6f1f467cd815",
-      "negativeControl": "Round 2's diff (jj diff -r 20fa840cbec2) touches no draft gate, no Worker Image concurrency key and no check script, only tests-closed.yaml's concurrency/if and comments/docs."
+      "criterion": "2 Closed pull requests, Tests canceller takes no runner (round 2, workflow behaviour unchanged since)",
+      "surface": "GitHub Actions in sjawhar/legion, scratch pull request https://github.com/sjawhar/legion/pull/2382 at 20fa840c",
+      "command": "gh pr close 2382 (07:17:17Z); gh pr reopen; gh api .../actions/runs?head_sha=cf19465f...",
+      "observed": "Tests (closed pull request) 40466219588 cancel-tests skipped with no runner; Tests 40466180534 cancelled 07:17:20Z (tests-2382); no lint/typecheck/test posted by the close; reopens got fresh Tests runs.",
+      "headSha": "20fa840cbec2b62f1e36075376e8bbd5cf8f1065",
+      "negativeControl": "At 4773bb61 cancel-tests waited for a runner after every close (job 122054224976)."
     }
   ],
-  "ciAtCodeHead": "Read on GitHub at 20fa840c at 07:21Z: Tests 40465663407, Docs 40465663384, Worker Image 40465663736, Legion Envoy and Contracts 40465663472 and PR Title 40466006364 all queued (runner pool busy); none settled.",
+  "ciAtCodeHead": "Read on GitHub at 32dd5458 at 08:10Z: Tests 40470234329, Docs 40470234297, Worker Image 40470234405, Legion Envoy and Contracts 40470234274 queued; PR Title 40470330016 queued. None settled.",
   "notes": [
-    "Scratch branch scratch/infra-600-t4 deleted; #2382 closed. Round 1's #2375 closed and its branch deleted."
+    "No scratch branch or pull request opened this round; the tree copy under $TMPDIR is outside the workspace."
   ]
 }
