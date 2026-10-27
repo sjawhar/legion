@@ -2,48 +2,48 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-571",
-  "completed": "2026-10-27T11:50:00Z",
-  "testedHead": "7ae2e23e7bb4 (code head); branch head e3677417a14c adds only .legion/",
-  "round": "6, a full round: main merged forward (b481cb62), owedCopiesQuery's ask check rewritten for Postgres 18's planner (834b17a9), dev-postgres.sh checks pg_dumpall's completion line (7ae2e23e)",
+  "completed": "2026-10-27T17:50:00Z",
+  "testedHead": "b76de444381c (code head); branch head 1954ccfc2519 adds only .legion/",
+  "round": "7, a full round: the conflict merge of main 2dbeca18 (2a5bbaad) changed the fingerprint b68aaee37ac2e07a -> 419a53c42cb82279, and b76de444 changes dev-postgres.test.sh only. Outside main's own code, the branch's diff moved only in daemon-go-postgres-16 (draft skip, cache restore, -timeout 20m, comments) and packages/dispatch/README.md's FAKE_*_PORT paragraph; no Go file of the branch changed",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its copied-ask plan test on fresh PGDG 18.6 and 16.15 clusters, and all 23 tests of copied_asks*_test.go. Re-ran dev-postgres.test.sh with 18.6 and 16.15 server binaries, on a plain PATH, and with GITHUB_ACTIONS=true. The implementer rewrote my two red cases (4cbf4534, db0a45bd) into one replay; mutations show it still pins both: counting tables without the row sum fails the cut-dump case, and dropping the completion-line check fails the whole, empty and cut cases."
+    "how": "Re-ran its pg-upgrade-run.sh with a server built at 1954ccfc (code = b76de444), the copied-ask tests on fresh 18.6 and 16.15, and dev-postgres.test.sh on 18.6 and 16.15, with the same results as its proof."
   },
   "failures": [],
   "failed": 0,
-  "ci": "At bc8cf8ad (run 40466398617), envoy-go printed 180006|0.8.7 and failed only TestCopiedAskQueriesAvoidSequentialScans (two subtests); envoy-go-race failed the same test. Green there: envoy-infra-go (testpg's tmpfs at /var/lib/postgresql), test (the daemon on 18), the Dispatch, Broker and Daemon Postgres 16 jobs, broker-multiprocess, dispatch-memory, dispatch-multiprocess, envoy-smoke, envoy-e2e-local, lint, typecheck. dispatch was cancelled. At 7ae2e23e (2026-10-27T11:43Z) every run was queued; not waited for. This push is handoff-only (skip-checks), so 7ae2e23e's run is not cancelled. The reviewer reads it there.",
+  "ci": "At 7ae2e23e (round 6's head) CI completed green: 'Legion Envoy and Contracts' run 40496449886 and 'Tests' run 40496449914. Postgres service version lines: envoy-go 180006|0.8.7; Dispatch, Broker and Daemon Postgres 16 jobs 160015|0.8.7. envoy-go, envoy-go-race, dispatch, dispatch-memory, dispatch-multiprocess, broker-multiprocess, envoy-infra-go, envoy-smoke, envoy-e2e-local, test, lint, typecheck and the three 16 jobs succeeded. At b76de444 (2026-10-27T17:43Z) runs were queued; not waited for. This push is handoff-only.",
   "proof": [
     {
-      "criterion": "The server's tests pass on 18: owedCopiesQuery reads asks through asks_block_id_unique on PostgreSQL 18 and 16, and the copied-ask behaviour is unchanged (spec acceptance 2's Go suite; review round 2 important finding)",
-      "surface": "Dispatch's docs package against fresh PGDG PostgreSQL 18.6 and 16.15 clusters (DISPATCH_TEST_DATABASE_URL)",
-      "command": "cd packages/envoy && env -u DISPATCH_TOKEN_FILE DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:556{18,16}/postgres?sslmode=disable go test ./internal/dispatch/docs/ -count=1 -run '^(<the 23 Test funcs of internal/dispatch/docs/copied_asks*_test.go>)$' -v",
-      "observed": "23 PASS on 18 and 23 PASS on 16, TestCopiedAskQueriesAvoidSequentialScans included; ok github.com/sjawhar/envoy/internal/dispatch/docs",
+      "criterion": "CI's Postgres service reports server version 18 and has the vector extension; the full Go suite passes on it (spec acceptance 2)",
+      "surface": "GitHub Actions on pull request #2364",
+      "command": "gh api repos/sjawhar/legion/commits/7ae2e23e7bb4/check-runs; gh run view 40496449886 --log and 40496449914 --log, grep for the 'Postgres service version' output",
+      "observed": "envoy-go prints 180006|0.8.7 and succeeds; envoy-go-race, dispatch and every other Postgres-service job succeed; the three Postgres 16 jobs print 160015|0.8.7 and succeed",
       "headSha": "7ae2e23e7bb4",
-      "negativeControl": "copied_asks.go put back to main's NOT EXISTS form (git show b481cb62): on 18, TestCopiedAskQueriesAvoidSequentialScans/the_asks_of_an_issue's_copies and /the_asks_of_a_project's_copies FAIL 'query plan sequentially scans asks; want asks_block_id_unique'; on 16 it passes, which is why CI's 16 job passed it at bc8cf8ad"
+      "negativeControl": "at bc8cf8ad (run 40466398617), before 834b17a9, envoy-go printed 180006|0.8.7 and failed TestCopiedAskQueriesAvoidSequentialScans: the 18 service catches a plan that only 18 makes"
     },
     {
-      "criterion": "A run that migrates a Postgres 16 database, upgrades it to 18 with pg_upgrade, then starts the server and runs a search and an issue creation, passes (spec acceptance 3, P5)",
+      "criterion": "A run that migrates a Postgres 16 database, upgrades it to 18 with pg_upgrade, then starts the server and runs a search and an issue creation, passes (spec acceptance 3)",
       "surface": "Dispatch server and dispatch CLI on local PGDG PostgreSQL 16.15 / 18.6 clusters with pgvector 0.8.7",
-      "command": "go build ./cmd/dispatch at e3677417 -> dispatch-head3; OLD=dispatch-old (main 7c1290a4) NEW=dispatch-head3 bash $TMPDIR/infra571-test/p5.sh (log p5-run3.log)",
-      "observed": "pg_upgrade exit 0; 18 180006; head server schema_version 129 with 30 rows 100..129 applied by its boot (main's migrations 121..129 included); dispatch search 'heron ledger' lists PGUP-1; dispatch issue --force creates PGUP-4; top-5 by <=> equal on 16 and 18; plan on 18 Index Scan using embeddings_cosine",
-      "headSha": "7ae2e23e7bb4",
-      "negativeControl": "pg_upgrade --check against a checksummed 18: exit 1 'old cluster does not use data checksums but the new one does'; against 18 without pgvector: could not load library \"$libdir/vector\""
+      "command": "go build ./cmd/dispatch at 1954ccfc -> dispatch-head4; OLD=dispatch-old (main 7c1290a4) NEW=dispatch-head4 bash $TMPDIR/infra571-test/p5.sh (log p5-run4.log); NEW=dispatch-head4 bash $TMPDIR/infra571-test/p3.sh (log p3-run4.log)",
+      "observed": "pg_upgrade exit 0; 18 180006; head server schema_version 134 with 35 rows 100..134 applied by its boot; dispatch search lists PGUP-1; dispatch issue --force creates PGUP-4; top-5 by <=> equal on 16 and 18, index scan kept. P3: restore with only the two expected errors, 134 migrations, boot on 18 applied 0, dispatch read PTHREE-1 returns its title",
+      "headSha": "b76de444381c",
+      "negativeControl": "pg_upgrade --check against a checksummed 18 and against 18 without pgvector: exit 1 each; the P3 dump into 18 without pgvector: 'extension \"vector\" is not available', no embeddings table"
     },
     {
-      "criterion": "Dispatch's dev Postgres runs 18 and its printed move moves a 16 Dispatch database onto 18 and refuses a failed, cut or empty dump before the old container stops (spec bullet 2; review round 2 minor finding; test rounds 3-5)",
-      "surface": "dev-postgres.sh's printed lines replayed on two real PostgreSQL clusters; real Dispatch pg_dumpall output; the SQL half on PGDG 16 and 18 with this head's server",
-      "command": "(pgenv 18|16) bash packages/envoy/scripts/dev-postgres.test.sh; env -i PATH=/usr/local/bin:/usr/bin:/bin [GITHUB_ACTIONS=true] bash packages/envoy/scripts/dev-postgres.test.sh; grep -c -x -- '-- PostgreSQL database cluster dump complete' on $TMPDIR/infra571-test/p3/dumpall.sql, on it cut after its last COPY and on it cut before the postgres database section; NEW=dispatch-head3 bash $TMPDIR/infra571-test/p3.sh",
-      "observed": "18 and 16: 12 PASS, 0 FAIL; plain PATH: move replay SKIP, exit 0; GITHUB_ACTIONS=true without binaries: 'FAIL: the move replay found no PostgreSQL server binaries', exit 1; completion line 1 for the whole dump, 0 for both cuts (round 5's residual, a dump cut before its indexes, now fails the check); P3: restore with only the two expected errors, 129 migrations, boot on 18 applied 0, dispatch read PTHREE-1 returns its title; dev-broker.test.sh passes",
-      "headSha": "7ae2e23e7bb4",
-      "negativeControl": "dev-postgres.sh with the count reduced to tables only: 'FAIL: a dump that stopped once its schema was written …'; with the completion-line check removed: the whole, empty and cut move cases and the paste case FAIL"
+      "criterion": "The server's tests pass on 18: copied asks read through asks_block_id_unique, behaviour unchanged, on 18 and 16",
+      "surface": "internal/dispatch/docs against fresh PGDG PostgreSQL 18.6 and 16.15 clusters",
+      "command": "cd packages/envoy && env -u DISPATCH_TOKEN_FILE DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:557{18,16}/postgres?sslmode=disable go test ./internal/dispatch/docs/ -count=1 -run '^(<the 23 Test funcs of copied_asks*_test.go>)$' -v",
+      "observed": "23 PASS on 18 and 23 PASS on 16",
+      "headSha": "b76de444381c",
+      "negativeControl": "round 6: main's NOT EXISTS form on 18 fails TestCopiedAskQueriesAvoidSequentialScans 'query plan sequentially scans asks'"
     },
     {
-      "criterion": "The component test expects POSTGRES_18 when databaseVersion is unset, and the given value when it is set (spec acceptance 1); the pinned 18 image's mount (P4)",
-      "surface": "envoy-infra gcp:Dispatch unit tests; Kubernetes Jobs of the pinned image",
-      "command": "round 2 runs, still valid: git diff --name-only 95693430..7ae2e23e touches neither packages/envoy/infra nor the image digest; CI's envoy-infra-go passed at bc8cf8ad",
-      "observed": "P1 tests PASS; Job 180006|0.8.7 with the mount at /var/lib/postgresql",
-      "headSha": "95693430d97d",
-      "negativeControl": "defaultDispatchDatabaseVersion = POSTGRES_16: both tests FAIL naming 16; mount at /var/lib/postgresql/data: the entrypoint refuses, exit 1"
+      "criterion": "dev-postgres.sh's printed move refuses a failed, cut or empty dump before the old container stops and tells a lost restore from a whole one (spec bullet 2; test rounds 3-6)",
+      "surface": "dev-postgres.sh's printed lines replayed on two real PostgreSQL clusters by dev-postgres.test.sh",
+      "command": "(pgenv 18|16) bash packages/envoy/scripts/dev-postgres.test.sh",
+      "observed": "exit 0, 12 PASS on 18.6 and on 16.15",
+      "headSha": "b76de444381c",
+      "negativeControl": "dev-postgres.sh with the count reduced to tables only (no row sum): 'FAIL: a dump that stopped once its schema was written: … differ from what they printed before the dump'"
     }
   ]
 }
