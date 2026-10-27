@@ -2,28 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-528",
-  "completed": "2026-10-27T07:45:46Z",
-  "decision": "changes_requested",
-  "reviewedHead": "the handoff head this commit makes (code: merge 25fba83e57509f251052e760cb2e60370da6baa9)",
-  "round": "New round: unchanged-diff fingerprint at my last review 1e95f76f was 0bbefab2…, at cf9aab61 is 314ca169… (changed: two lines of packages/proof-editor/AGENTS.md, from the forward merge of main b08a56bc, #2303 INFRA-529).",
+  "completed": "2026-10-27T10:03:42Z",
+  "decision": "approved",
+  "reviewedHead": "the handoff head this commit makes (code 59dacf3affbab5b0b955708b2932163fcec64dd5)",
+  "scope": "Narrowed by the INFRA-138 architect (envoy 83cba049): the lone-CR line end in the open-fence probe, the directive test case, and A1; correctness defects still block; anything else to Fast-follow, owned by INFRA-532.",
   "critical": 0,
-  "important": 1,
-  "minor": 1,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/dispatch/web/src/features/refs/mermaid-diagrams.ts:150",
-      "description": "The open-fence probe finds the last line by the last \\n only, but CommonMark (and micromark, and INFRA-529's drawDirective) also ends a line at a lone \\r. A body using lone-\\r line endings that is streaming a mermaid fence inside a quote or list item gets a probe line without the quote/list lead, the probe ends the container, the fence reads as closed, and the half-written diagram is drawn (a refusal flashed each frame). Reproduced: MarkdownBody.test.tsx's 'still open inside a quote' case with the quote body written with \\r line endings fails at the head (expected 1 figure, got 2). Fix: take the last line after the last \\n or \\r, and add the \\r case to that test."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/web/src/features/refs/MarkdownBody.test.tsx:959",
-      "description": "No unit case puts a mermaid fence inside a ::: directive, which the merged INFRA-529 read-only parsing now draws. Both thermonuclear reviews measured the behaviour correct (31 and 15 bodies: open inside unclosed directive stays code, closed draws); a case `:::note` + open fence stays code and the same body closed draws would lock it in. Ask for it in this round, since the round already requests changes."
-    }
-  ],
-  "merge": "Resolution correct: git merge-tree 725db66a b08a56bc differs from the merge tree only in the two conflicted files; biome.json keeps all three un-ignores (read-only-directives.ts, mermaid-svg.ts, mermaid-render.ts); packages/proof-editor/AGENTS.md says Twelve (9 + 1 main + 2 branch) with 12 table rows, keeps main's Sixteen kinds of edit, and lists all three files. Nothing changed between 95dd30e9 and 725db66a but .legion/ and docs/solutions.",
-  "ci": "Not waited on: a REQUEST_CHANGES stands whatever CI says.",
-  "threads": "5 threads, all mine from round 1, each answered in round 2 and resolved; no new thread since.",
-  "thermonuclear": "Both at 25fba83e: deep review APPROVE (merge resolution and directive/mermaid interaction sound; test gap and a style-text hardening note, minor); code quality APPROVE with the lone-\\r probe finding, labelled minor there and judged important here because it changes behaviour.",
-  "fastFollow": "unchanged from round 2: split the Mermaid cases out of MarkdownBody.test.tsx, refuseLate via stopRenderer, three comment and doc corrections"
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "verified": {
+    "loneCr": "mermaid-diagrams.ts:151 cuts the last line after the last LF or CR; a trailing lone CR plus the appended \\n is one CRLF line end. Deep review: 15 line-end cases against the real engine all match CommonMark; the new lone-CR quote/list case fails with the old line (implementer's control, code-quality mutation A).",
+    "normalization": "59dacf3a normalizes each block's source /\\r\\n?/g to LF for the cache key and the worker request (a lone-CR diagram was refused by beautiful-mermaid, found by the implementer on the real surface and approved by the architect). The cache, requests, settle, refuseLate, dropAbandoned and the cancel all use the same normalized key; each draw keeps its own pre; a CR in a fence can only be a line end. The lone-CR draw case fails with the normalization removed.",
+    "directiveTest": "MarkdownBody.test.tsx:1022: I removed the open-fence blocks.pop() in a scratch run (then restored it) and the case fails (Expected length: 0, Received length: 1).",
+    "A1": "e2e/mermaid.e2e.ts rows for a comment, an Inbox ask, a message, a reply, a refusal, a markup label and another language; 32 passed in four projects at 54d81fe8 (tester) and 59dacf3a (implementer); the tester's 13 lone-CR/CRLF bodies on the real surface came out as expected."
+  },
+  "ci": "Required lint, typecheck, test, pr-title all completed success at the CI head 2b03e5f2; compare 2b03e5f2...dbd0bf6e handoffsOnly true (2 files).",
+  "threads": "7 threads, all mine; the two from round 3 answered and accepted in this round (PRRT_kwDORFy7ds6wlr5G, PRRT_kwDORFy7ds6wlr5H), the five from round 1 answered in round 2; all resolved by the implementer.",
+  "thermonuclear": "Both at 59dacf3a code: deep review APPROVE (no finding at any severity); code quality APPROVE (no correctness finding; fast-follow only).",
+  "fastFollow": "For INFRA-532: the directive case runs the top-level path (the read-only engine reads :::note as a paragraph) and uses a 50 ms sleep for its negative; reuse the drawn-diagram-first pattern and say so. Replace the sources Map in drawMermaidDiagrams with [pre, source] pairs. Plus round 2's items."
 }
