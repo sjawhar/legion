@@ -1,11 +1,13 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -190,8 +192,8 @@ func (s *roleSend) failed(err error) {
 func (s *roleSend) timedOut(lastForward error) {
 	reason := unconfirmedReason(lastForward)
 	writeJSON(s.w, http.StatusGatewayTimeout, roleSendFailure{
-		Error: fmt.Sprintf("role %s: event %s was not confirmed by its holder within %s (%s)",
-			s.role, s.item.EventID, publishDeliveryWindow, reason),
+		Error: fmt.Sprintf("role %s: event %s was not confirmed by its holder %s within %s (%s)",
+			s.role, s.item.EventID, cmp.Or(s.holder, "(none)"), publishDeliveryWindow, reason),
 		Reason:    reason,
 		EventID:   s.item.EventID,
 		DedupeKey: s.item.DedupeKey,
@@ -421,9 +423,15 @@ func sendToTopic(ctx context.Context, w http.ResponseWriter, d *listenerDeps, it
 			slog.String("elapsed", time.Since(arrived).String()))
 	}
 	notConfirmed := func(delivered []string, undelivered []undeliveredRecipient) {
+		// The error names each session, since a client that shows only the error (envoy-client's
+		// EnvoyApiError) must still tell its agent which sessions did not take the message.
+		named := make([]string, len(undelivered))
+		for i, recipient := range undelivered {
+			named[i] = fmt.Sprintf("%s (%s)", recipient.SessionID, recipient.Reason)
+		}
 		writeJSON(w, http.StatusGatewayTimeout, topicSendFailure{
-			Error: fmt.Sprintf("%d of %d sessions subscribed to %s did not confirm event %s within %s",
-				len(undelivered), len(recipients), item.Topic, item.EventID, publishDeliveryWindow),
+			Error: fmt.Sprintf("%d of %d sessions subscribed to %s did not confirm event %s within %s: %s",
+				len(undelivered), len(recipients), item.Topic, item.EventID, publishDeliveryWindow, strings.Join(named, ", ")),
 			Reason:      "not_confirmed",
 			EventID:     item.EventID,
 			DedupeKey:   item.DedupeKey,
