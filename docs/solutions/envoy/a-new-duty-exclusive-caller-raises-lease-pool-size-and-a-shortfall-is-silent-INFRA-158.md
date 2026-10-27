@@ -28,11 +28,13 @@ related_issues:
 ## Evidence
 
 - In sjawhar/legion#2233, the ask repair (lease `issue-ask-repair`, `api.RunIssueAskRepair`) became
-  the ninth caller, and `leasePoolSize` went from 8 to 9. The comment there states that the headroom
-  is zero.
-- The twelfth forward merge of that pull request recounted nine production callers on the merged tree:
+  the ninth caller, and `leasePoolSize` went from 8 to 9.
+- Main's sjawhar/legion#2210 then added the block-index reconciliation (lease `block-index`,
+  `docs.RunBlockIndexReconciliation`), and each side of the fourteenth forward merge (4440fc7b) held
+  `leasePoolSize` at 9. That merge recounted ten production callers on the merged tree, and
+  `leasePoolSize` went from 9 to 10. The comment there states that the headroom is zero. The ten:
   - the ask repair, the suggestion outcomes, the architecture import;
-  - the delivery reconcile, the reference excerpts, the document compaction;
+  - the delivery reconcile, the reference excerpts, the block index, the document compaction;
   - the webhook redelivery sweep;
   - one per delivery durable through `delivery/intake.go`, which makes two.
 - The size appears only in `pool.go`. Neither `duty/` nor `packages/envoy/AGENTS.md` mentions it.
