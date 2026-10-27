@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-530",
+  "completed": "2026-10-27T05:18:17Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2307",
+  "round3": {
+    "reason": "the daemon returned the issue to implementing: the head moved from 81613a9f (READY's head) to 113b8d72, which no review approved",
+    "cause": "113b8d72 is GitHub's update-branch merge of main (with #2317, baadccdc) into legion/INFRA-530 at 05:15:45Z, requested by the controller through session 01a16962 (INFRA-138 architect, 05:16Z); no code change from this role",
+    "fingerprint": "f98d891a (approved head) 10032dfcdebbcda1ae265372a0a7b22c89cd249b5f4190fcb8d6c4abec0444c3; 81613a9f the same; 113b8d72 the same: unchanged, bare gates only",
+    "bareGates": "at 113b8d72: go vet ./internal/dispatch/pmdoc/ clean; the four pmdoc tests PASS with the browser engine compared (no skip); packages/dispatch bun run lint and bun run typecheck pass",
+    "retro": "retro already ran: its docs/solutions commit c4f03650 and the .legion/INFRA-530/ removal 81613a9f are in the head; this handoff adds .legion/INFRA-530/ back, so the next retro removes it again",
+    "prComment": "https://github.com/sjawhar/legion/pull/2307#issuecomment-6434412166"
+  },
+  "proof": [
+    {
+      "criterion": "rebase re-check after GitHub's update-branch merge of main: the change is unchanged",
+      "surface": "the pull request's diff against its fork point (jj fingerprint excluding .legion and docs/solutions), plus the pmdoc tests that compare Go with the browser editor's engine",
+      "command": "jj diff --from 'fork_point(\"main\"@origin | <head>)' --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, for f98d891a, 81613a9f and 113b8d72; go test ./internal/dispatch/pmdoc -run 'TestLinkifyGuardLinksWhatGoldmarkLinks|TestAnEmailAutolinkIsAMailLinkInGoAndTheEngine|TestEmailReadingsThatDifferAreRecorded|TestRenderKeepsStoredMarkdownThatReadsBack' -count=1 -v",
+      "observed": "rebase re-check 81613a9f -> 113b8d72: fingerprint 10032dfc... at all three heads, unchanged, bare gates only; four tests PASS",
+      "headSha": "113b8d72cd311f5e1217420fd9ccffafcfb91164",
+      "negativeControl": "the same pmdoc tests at the tests-only commit 5158fd92 (no fix) fail on all 7 autolink rows and the 3 linkify rows: Go href a@b.test vs engine mailto:a@b.test"
+    },
+    {
+      "criterion": "A1 stores, renders and opens: a bare email written through the API is stored as a mailto: link, shown with that href in the editor and a past version, and opened as mailto:",
+      "surface": "Dispatch spec page /issues/<KEY>/spec in a real browser (chromium and iphone) against the real Go Dispatch server and Postgres 17 + pgvector",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- email-links.e2e.ts",
+      "observed": "at 8a431a76 (same fingerprint as this head): 2 passed; stored [first@b.test](mailto:first@b.test) and [second@b.test](mailto:second@b.test); hrefs mailto:<addr>; window.open received mailto:second@b.test then mailto:first@b.test. Evidence: https://github.com/sjawhar/legion/pull/2307#issuecomment-6431659126",
+      "headSha": "8a431a763f9e9cb8a99b9cea2383a626a453671e",
+      "negativeControl": "at 5158fd92 (no fix): 2 failed, stored 'Write to [first@b.test](first@b.test) for access.'; window.open received http://127.0.0.1:18777/issues/CORE-1/second@b.test"
+    }
+  ],
+  "filesChanged": [],
+  "deviations": [
+    "No code change this round: the head move was GitHub's update-branch merge of main; the PR diff is unchanged."
+  ]
+}
