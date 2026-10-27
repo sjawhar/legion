@@ -23,9 +23,13 @@
   current key among its own) logs `dispatch: register this server process` at ERROR, naming the
   other process and the rotation steps, and exits 1 before it serves: a process that minted a key
   in its data dir refuses beside any live process, and so does a pod rolled with a changed secret
-  beside pods that hold only the old key, which stalls the roll while the old pods serve. The
-  registry's pool is one more Postgres connection per process, and its prune one more lease
-  connection, ten (INFRA-555).
+  beside pods that hold only the old key, which stalls the roll while the old pods serve. A
+  process whose heartbeat lapsed (frozen, cut from the database) or whose row was pruned checks
+  its keys again before it counts as live once more, and beside a live process whose keys it does
+  not share logs `dispatch: this server process no longer shares its signing keys with a live
+  server process` at ERROR, stops serving after its HTTP drain, and exits 1. The registry's pool
+  is one more Postgres connection per process, and its prune one more lease connection, ten
+  (INFRA-555).
 - Dispatch's `/healthz` reports `fleet_commit`, the commit of the latest announcement that every
   live server process serves one build (`null` when there is none, or before this process's
   announcer has first read it; up to one five-second pass behind), and `signin` and

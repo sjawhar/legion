@@ -498,9 +498,13 @@ func main() {
 	// process with 1 here, before anything is served, so a roll stalls on the new pod while the old
 	// ones keep serving. The registration's heartbeat runs until shutdown deregisters it, after the
 	// HTTP drain (shutdown), so a draining process counts as live until its last request is
-	// answered. The prune loop deletes what processes that died without deregistering left behind,
-	// once overall under its lease. The announcer starts only now, so its first pass counts this
-	// process among the live ones and never announces a build the fleet is rolling away from.
+	// answered. A heartbeat that lapsed (the process frozen, or cut from the database) or whose
+	// row was pruned checks the keys again before the process counts as live once more; beside a
+	// live process whose keys it does not share it refuses (registration.Lost), and serving stops
+	// as at a signal and ends the process with 1 once drained (serveUntilStopped). The prune loop
+	// deletes what processes that died without deregistering left behind, once overall under its
+	// lease. The announcer starts only now, so its first pass counts this process among the live
+	// ones and never announces a build the fleet is rolling away from.
 	if _, err := database.Pool.Healthy(ctx); err != nil {
 		slog.Error("dispatch: probe the database", "error", err)
 		os.Exit(1)
@@ -517,8 +521,8 @@ func main() {
 	slog.Info("dispatch: registered this server process", "instance", registration.ID)
 	go processes.RunPrune(ctx, database.Pool, leases)
 	go announcer.Run(ctx)
-	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool, waitDelivery, deregisterAfterDrain(registration)); err != nil {
-		slog.Error("dispatch: serve", "error", err)
+	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool, waitDelivery,
+		deregisterAfterDrain(registration), registration.Lost()); err != nil {
 		os.Exit(1)
 	}
 }

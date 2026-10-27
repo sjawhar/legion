@@ -311,7 +311,10 @@ one. Three things have to be true first; Dispatch checks the first for you.
   it, and a server whose keys a running server does not share refuses to start: it logs why,
   naming the other server and the steps of [changing the session key](#changing-the-session-key),
   and exits before it serves anything. A rolling update to a changed key stalls the same way on the
-  first new server while the old ones keep serving.
+  first new server while the old ones keep serving. A server that stopped reporting in for longer
+  than 15 seconds (frozen, or cut off from the database) is not counted meanwhile, so it checks its
+  keys again before it counts once more: beside a running server whose keys it does not share, it
+  logs why, finishes the requests it is answering, and exits 1.
 - **Give every server the same embedder settings.** Each stored vector records the embedder that
   made it, and each server drops the vectors another embedder made and embeds that text again, so
   two servers set up differently keep replacing each other's work. A rollout that changes the
