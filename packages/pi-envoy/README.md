@@ -3,9 +3,9 @@
 `@sjawhar/pi-envoy` is the Oh My Pi extension for Envoy messaging and the `dispatch` command,
 the plugin every session loads. It shares the Envoy HTTP client, tool contract, envelope parsing,
 and subject helpers with the other Legion adapters while keeping OMP's direct NATS subscriptions
-and Pi steering delivery local (inbound messages steer an in-flight turn instead of queueing behind
-it). The Legion lifecycle — the entry a Legion pane boots a root architect, a phase worker or the
-controller with — is the separate plugin `@sjawhar/pi-legion` (`packages/pi-legion`), installed
+and Pi delivery local (an inbound message reaches an in-flight turn at its next step instead of
+waiting for it to end). The Legion lifecycle — the entry a Legion pane boots a root architect, a
+phase worker or the controller with — is the separate plugin `@sjawhar/pi-legion` (`packages/pi-legion`), installed
 beside this one in a Legion deployment; it reaches this plugin through the in-process interface
 described in `packages/pi-shared/AGENTS.md`.
 
@@ -49,7 +49,7 @@ set -g set-clipboard on
 ## Development install
 
 This package declares one OMP extension entry in `package.json`, `extensions/envoy.ts`: Envoy
-messaging, subscriptions, steering delivery, and the Dispatch tools. For local development, link
+messaging, subscriptions, inbound delivery, and the Dispatch tools. For local development, link
 the entry into OMP:
 
 ```sh

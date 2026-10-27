@@ -59,8 +59,19 @@ export interface SessionContext {
     readonly getEntries: () => readonly unknown[];
   };
   readonly setInterval: (callback: () => void, intervalMs: number) => void;
+  /**
+   * The host's `ctx.isIdle()`: `!session.isStreaming`, false while a turn runs and while a prompt
+   * is set up or recovered, read live from a context kept since `session_start`.
+   */
+  readonly isIdle?: () => boolean;
   /** The host's managed one-shot timer: a throw or rejection is contained, cleared on shutdown. */
   readonly setTimeout: (callback: () => void | Promise<void>, delayMs: number) => void;
+  /**
+   * The host's `ctx.mode` (`ExtensionMode`): how the process was launched, an RPC host (every
+   * Legion pane), a terminal, or a one-shot `-p` run printing text or JSON. Absent on a host that
+   * predates it.
+   */
+  readonly mode?: "tui" | "rpc" | "json" | "print";
   /**
    * Oh My Pi 18.3 on: one side turn on the session's model over a snapshot of its conversation,
    * never added to the transcript. The host sends `promptText` as given. A context kept from
@@ -147,6 +158,20 @@ export interface RetryFallbackAppliedEvent {
   readonly to: string;
   readonly role: string;
   readonly reason?: string;
+}
+
+/** Post-run auto-compaction ended (`shared-events.ts` in the host); `aborted` is an interrupt
+ * during it, which leaves no aborted assistant message behind. Only the field read is typed. */
+export interface AutoCompactionEndEvent {
+  readonly aborted: boolean;
+}
+
+/** A retry saga ended (`shared-events.ts` in the host); an abort during its backoff or credential
+ * wait ends it with `success: false` and `finalError` "Retry cancelled". Only the fields read are
+ * typed. */
+export interface AutoRetryEndEvent {
+  readonly success: boolean;
+  readonly finalError?: string;
 }
 
 /** A message entering the session: a user prompt (the daemon's RPC `prompt` among them), a custom
@@ -252,6 +277,19 @@ export interface PiEventContract {
     readonly event: RetryFallbackAppliedEvent;
     readonly result: undefined;
   };
+  /** An automatic compaction started, between a run's steps, after its last, before a prompt or
+   *  on an idle host; it carries nothing an extension reads here. */
+  readonly auto_compaction_start: { readonly event: unknown; readonly result: undefined };
+  /** A compaction committed, automatic, manual or an extension's; it carries nothing an extension
+   *  reads here. */
+  readonly session_compact: { readonly event: unknown; readonly result: undefined };
+  /** Post-run auto-compaction ended, finished, skipped or interrupted. */
+  readonly auto_compaction_end: {
+    readonly event: AutoCompactionEndEvent;
+    readonly result: undefined;
+  };
+  /** A retry saga ended, succeeded, exhausted or cancelled. */
+  readonly auto_retry_end: { readonly event: AutoRetryEndEvent; readonly result: undefined };
   /** Every provider request the session's agent loop sends, each turn and each tool round. */
   readonly context: { readonly event: ContextEvent; readonly result: ContextEventResult };
   /** Every input before it runs: the host's typed-input ingress, `sendUserInput` included. */
@@ -417,7 +455,10 @@ export interface PiApi {
           readonly details?: Readonly<Record<string, unknown>>;
         }
       | { readonly type: string },
-    options?: { readonly deliverAs: "steer" | "aside"; readonly triggerTurn: boolean }
+    options?: {
+      readonly deliverAs: "steer" | "aside" | "nextTurn" | "followUp";
+      readonly triggerTurn: boolean;
+    }
   ) => void;
   /**
    * Sends a user prompt, exactly as Enter at the terminal does: idle, it starts a turn; streaming,

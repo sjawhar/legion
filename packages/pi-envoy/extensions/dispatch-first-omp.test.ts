@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { DISPATCH_FIRST_MARKER } from "@legion/envoy-client/dispatch-first";
 import {
   type Cleanup,
+  isSummarization,
   messageStream,
   ompRoot,
   type Request,
@@ -25,13 +26,6 @@ const cleanup: Cleanup = [];
 afterEach(async () => {
   for (const step of cleanup.splice(0).reverse()) await step();
 });
-
-/** Whether a Messages request is one of a compaction's summary calls, sent under their own system prompt. */
-function isSummarization(request: Request): boolean {
-  return JSON.stringify(request.body.system ?? null).includes(
-    "Summarize user–AI coding-assistant conversations"
-  );
-}
 
 /** How many times a Messages request carries the injected skill. */
 function markers(request: Request): number {

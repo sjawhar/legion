@@ -310,8 +310,9 @@ jobs:
               - 'scripts/pi-plugin-prepack.sh'
               - '.github/workflows/release.yaml'
             # The Envoy plugin: its own sources, the workspace packages its bundle inlines, and the
-            # Oh My Pi pin its real-binary test runs (extensions/dispatch-first-omp.test.ts),
-            # installed through the mise install-jj leaves. Every skill and every daemon prompt:
+            # Oh My Pi pin its real-binary tests run (extensions/dispatch-first-omp.test.ts and
+            # card-delivery-omp.test.ts), installed through the mise install-jj leaves. Every skill
+            # and every daemon prompt:
             # src/skills-guard.test.ts stages its five skills through the prepack script and resolves
             # their skill:// links across all of skills/, and its native-tool-name rule scans every
             # .md under skills/ and packages/daemon/internal/prompts, so a prompt that names a
@@ -529,6 +530,12 @@ jobs:
     needs: changes
     if: needs.changes.outputs.pi_envoy == 'true'
     runs-on: ubuntu-24.04
+    # The NATS server extensions/card-delivery-omp.test.ts delivers Envoy cards and a person's Send
+    # through (LEGION_TEST_NATS_URL on the test step), on the image the envoy-client job pulls.
+    services:
+      nats:
+        image: mirror.gcr.io/library/nats:2.10
+        ports: ["4222:4222"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -537,9 +544,10 @@ jobs:
       # Only for the mise it leaves at ~/.local/bin/mise, which install-omp installs the pin through:
       # nothing in this package drives jj.
       - uses: ./.github/actions/install-jj
-      # extensions/dispatch-first-omp.test.ts runs the pinned Oh My Pi against stand-ins
-      # (packages/pi-shared/test/omp-harness.ts) and refuses on GitHub Actions without one. The pin
-      # is read from .omp-pin, the repository's one copy of it (.github/actions/install-omp).
+      # extensions/dispatch-first-omp.test.ts and card-delivery-omp.test.ts run the pinned Oh My Pi
+      # against stand-ins (packages/pi-shared/test/omp-harness.ts) and refuse on GitHub Actions
+      # without one. The pin is read from .omp-pin, the repository's one copy of it
+      # (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
       - run: bun install --frozen-lockfile
       - name: Build contracts for pi-envoy
@@ -554,6 +562,8 @@ jobs:
       - name: Test pi-envoy
         run: bun run test
         working-directory: packages/pi-envoy
+        env:
+          LEGION_TEST_NATS_URL: nats://127.0.0.1:4222
       # The release's pack (release.yaml's pi_envoy_build job), which is also this job's build: the
       # manifest pointed at the one bundle, then scripts/pi-plugin-prepack.sh, which bundles
       # envoy.ts, writes dist/THIRD_PARTY_NOTICES (failing the pack on a bundled package whose

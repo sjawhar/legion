@@ -110,6 +110,7 @@ import {
   type AgentStreamSettingsState,
   modelReference,
 } from "../src/agent-stream";
+import { CardWake } from "../src/card-wake";
 import { transcriptPictures, withDeliveredPictures } from "../src/delivery-pictures";
 import { withDispatchFirst } from "../src/dispatch-first";
 import {
@@ -1135,9 +1136,6 @@ export default function envoyExtension(pi: PiApi): void {
     // also reaches the issue's own topic (every subscriber, not just the
     // removed session), so this only fires for a removal naming us.
     for (const topic of subscriptionRemovedTopics(raw, sessionID) ?? []) closeIntentionally(topic);
-    // Steering: mid-turn the message is injected at the next tool boundary
-    // instead of waiting for the turn to finish; idle it still starts a turn
-    // (triggerTurn), so wake-on-message behavior is unchanged.
     const dedupeIdentity = ClaimIdentitySchema.safeParse(rendered.envelope);
     const claim = rendered.skip
       ? undefined
@@ -1205,12 +1203,15 @@ export default function envoyExtension(pi: PiApi): void {
               true,
               shown
             );
+            // How a card goes, and why, is the wake's (`../src/card-wake`), which records a
+            // startup card before the host has it.
+            const { details, ...options } = cardWake.deliveryFor(
+              rendered.delivery?.mode === "aside",
+              activeSessionContext
+            );
             pi.sendMessage(
-              { customType: "envoy-message", content: card.content, display: true },
-              {
-                deliverAs: rendered.delivery?.mode === "aside" ? "aside" : "steer",
-                triggerTurn: true,
-              }
+              { customType: "envoy-message", content: card.content, display: true, details },
+              options
             );
             markPicturesShown(shownPictures(sessionID), card.shown);
           } else {
@@ -1586,9 +1587,25 @@ export default function envoyExtension(pi: PiApi): void {
   pi.on("message_update", async (event) => {
     recordAgentStreamMessage(event.message, true);
   });
-  pi.on("message_end", async (event) => {
-    recordAgentStreamMessage(event.message, false);
+
+  // How a card goes, and the wake for one the host folds into the context with no turn
+  // (`../src/card-wake`). A card the host's dispose flushes at shutdown wakes nothing.
+  const cardWake = new CardWake({
+    now: () => Date.now(),
+    sendMessage: (message, options) => pi.sendMessage(message, options),
   });
+
+  pi.on("message_end", async (event, context) => {
+    const { message } = event;
+    if (!shuttingDown) cardWake.messageEnd(message, context);
+    recordAgentStreamMessage(message, false);
+  });
+  // The host asks whether any extension handles `session_before_compact`, which turns its
+  // background compaction off, but never these two: handling them changes nothing it does.
+  pi.on("auto_compaction_start", async () => cardWake.autoCompactionStart());
+  pi.on("session_compact", async () => cardWake.sessionCompact());
+  pi.on("auto_compaction_end", async (event) => cardWake.autoCompactionEnd(event));
+  pi.on("auto_retry_end", async (event) => cardWake.autoRetryEnd(event));
 
   // A turn runs on the model and level set when it starts, and a retry's fallback moves the session
   // onto another model: either can follow a change no event announced. A subagent's instance knows
@@ -2696,6 +2713,8 @@ export default function envoyExtension(pi: PiApi): void {
     reason: SessionSwitchReason | undefined,
     context: SessionContext
   ): Promise<void> => {
+    // The cards a check was armed for belong to the session the host left.
+    cardWake.cancel();
     if (await isSubagent(context)) return;
     const host = context.sessionManager.getSessionId();
     noteMove(host, { kind: reason });
@@ -2729,7 +2748,10 @@ export default function envoyExtension(pi: PiApi): void {
     if (!(await isSubagent(context))) bindDispatchSession(context.sessionManager.getSessionId());
     await rebind(reason, context);
   };
-  pi.on("session_switch", (event, context) => rebindDispatch(event.reason, context));
+  pi.on("session_switch", (event, context) => {
+    cardWake.sessionSwitch(event);
+    return rebindDispatch(event.reason, context);
+  });
   pi.on("session_branch", (_event, context) => rebindDispatch(undefined, context));
   pi.on("session_tree", (_event, context) => rebind(undefined, context));
   // Oh My Pi emits these before it moves its session manager: the session the host leaves and
@@ -2737,6 +2759,7 @@ export default function envoyExtension(pi: PiApi): void {
   // a session the host has yet to give an id have nothing to leave. A switch another extension
   // cancels changes nothing: the host's id never moves, so the announcement teaches nothing.
   const announce = (reason: SessionSwitchReason | undefined, context: SessionContext): void => {
+    cardWake.cancel();
     const from = context.sessionManager.getSessionId();
     // An earlier announcement whose move came with no event and no pass since is learned from now,
     // before this one replaces it.
@@ -2749,6 +2772,7 @@ export default function envoyExtension(pi: PiApi): void {
 
   pi.on("session_shutdown", async (_event, context) => {
     shuttingDown = true;
+    cardWake.cancel();
     if (publishedInterface !== undefined) {
       const bound = publishedInterface.roleClaim.instances.indexOf(claimInstance);
       if (bound !== -1) publishedInterface.roleClaim.instances.splice(bound, 1);
@@ -2861,6 +2885,7 @@ export default function envoyExtension(pi: PiApi): void {
   // switch went ahead (`runUnderAnnouncement`).
   pi.on("agent_start", async (_event, context) => {
     runSeq += 1;
+    cardWake.agentStart();
     runUnderAnnouncement =
       announced?.from === context.sessionManager.getSessionId() ? announced : undefined;
   });
@@ -2900,6 +2925,7 @@ export default function envoyExtension(pi: PiApi): void {
   // ACP host, but a client that defers agent-initiated turns gets the steer queued as hidden
   // next-turn context instead of a turn of its own, consumed when the user next prompts.
   pi.on("agent_end", async (event, context) => {
+    cardWake.agentEnd(context);
     const id = context.sessionManager.getSessionId();
     // A person's direct message sent through `pi.sendUserMessage` and not yet seen as a user
     // message by the end of the run is not looked for again; one sent as typed input is, by its tag,

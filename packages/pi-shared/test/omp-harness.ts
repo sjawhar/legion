@@ -337,8 +337,11 @@ export function spawnInteractive(
   };
 }
 
-/** The Anthropic Messages stream for one scripted reply. */
-export function messageStream(blocks: readonly Block[], id: string): string {
+/**
+ * The Anthropic Messages stream for one scripted reply. `inputTokens` is the input usage its
+ * `message_start` reports, which a caller raises to push the session past a compaction threshold.
+ */
+export function messageStream(blocks: readonly Block[], id: string, inputTokens = 5): string {
   const events: [string, unknown][] = [
     [
       "message_start",
@@ -352,7 +355,7 @@ export function messageStream(blocks: readonly Block[], id: string): string {
           content: [],
           stop_reason: null,
           stop_sequence: null,
-          usage: { input_tokens: 5, output_tokens: 1 },
+          usage: { input_tokens: inputTokens, output_tokens: 1 },
         },
       },
     ],
@@ -461,6 +464,20 @@ export function toolResultsIn(request: Request): ToolResult[] {
       ];
     });
   });
+}
+
+/** A `tool_use` block calling tool `name` with `input`, and the one-line intent (`i`) every Oh My
+ *  Pi tool requires, which no case reads. */
+export function call(name: string, input: Record<string, unknown>): Block {
+  return { type: "tool_use", name, input: { i: "Running the case's step", ...input } };
+}
+
+/** Whether a Messages request is one of a compaction's summary calls, which the host sends under
+ *  their own system prompt: a host that rewords that prompt is fixed here. */
+export function isSummarization(request: Request): boolean {
+  return JSON.stringify(request.body.system ?? null).includes(
+    "Summarize user–AI coding-assistant conversations"
+  );
 }
 
 /** Which Legion pane `runLegionPane` runs, and what its stand-in answers beyond the runner's routes. */

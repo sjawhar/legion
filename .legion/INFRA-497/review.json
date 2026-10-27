@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-497",
+  "completed": "2026-10-27T01:20:22Z",
+  "round": 2,
+  "decision": "changes_requested",
+  "reviewedCodeHead": "149e44bbf1d9bebc758f5a15b323794d67b9b834",
+  "critical": 0,
+  "important": 3,
+  "minor": 6,
+  "keyFindings": [
+    {"severity": "important", "file": "packages/pi-envoy/src/card-wake.ts", "description": "#runActive (203, set 289, cleared only at agentEnd 294) stays true after a run the host aborts behind #disconnectFromAgent: newSession/switchSession (agent-session.ts:10280-10282, 11906-11907) and manual /compact (session-maintenance.ts:1201-1202) disconnect first, so that run's agent_end never reaches extensions, and cancel() (310) leaves the flag set. The next prompt's setup card then gets no setup marker (232), and an Esc in that setup folds it under the latch with #interrupted false, so the wake starts the stopped turn: round-1 finding 1 returns in that state."},
+    {"severity": "important", "file": "packages/pi-envoy/extensions/envoy.ts", "description": "Wiring untested in the default suite: deleting the auto_compaction_end handler (1603), cardWake.cancel() on shutdown (2768), cardWake.messageEnd (1600) or cardWake.agentStart() (2881) leaves envoy.test.ts green (866/0, code-quality pass); auto_retry_end (1604) and the cancel on switch are covered nowhere, so a regression of the interrupt paths passes CI."},
+    {"severity": "important", "file": "packages/pi-envoy/src/card-wake.ts", "description": "Cleanup: targetedAside/startup/setup on the marker (117-135) answer one question split across deliveryFor and messageEnd; one `wake` value decided in deliveryFor removes two fields and the three-way branch."},
+    {"severity": "minor", "file": "packages/pi-envoy/src/card-wake.ts", "description": "Busy-check drop (349) unpinned: a no-op there leaves all 41 card-wake tests green."},
+    {"severity": "minor", "file": "packages/pi-envoy/src/card-wake.ts", "description": "Header: a setup card is read after the run's first model response, not 'at the first step' (51-52; tester saw it in request 2); the header omits the willContinue gap after agent_end that AGENTS.md accepts."},
+    {"severity": "minor", "file": "packages/pi-envoy/src/card-wake.ts", "description": "'RPC mode's alone' (70) and AGENTS.md:60: ACP also passes mode 'rpc' (acp-agent.ts:2732); harmless since ACP defers agent-initiated turns, but the docs are wrong."},
+    {"severity": "minor", "file": "packages/pi-envoy/extensions/card-delivery-omp.test.ts", "description": "Plain `bun test` in packages/pi-envoy (what root AGENTS.md names) with both variables set still loads envoy.test.ts's nats mock in the same process; only a comment points to `bun run test`."},
+    {"severity": "minor", "file": "packages/pi-shared/test/omp-harness.ts", "description": "call() (379) takes an intent no test reads; two INTENT constants exist for it."},
+    {"severity": "minor", "file": "packages/pi-envoy/extensions/envoy.ts", "description": "Nits: 2876-2877 describes CardWake's counter; card-wake.ts 345 computes pending before the busy return."}
+  ],
+  "roundOneThreads": "10 threads answered by the implementer at 149e44bb; 9 confirmed fixed by the reviewer; PRRT_kwDORFy7ds6wf2qw (setup interrupt) stands in the state above.",
+  "verification": "Reviewer ran `bun run test` in packages/pi-envoy at 149e44bb with the pinned omp v18.12.2-sami.20261026-135627 and nats-server 2.10.29: 979 pass 0 fail, then card-delivery-omp.test.ts in its own process 9 pass 0 fail.",
+  "ci": "All runs for 149e44bb were cancelled by an operator bot at ~01:05Z; the reviewer re-ran Tests (40428423115) and Legion Envoy and Contracts (40428423137) once; both queued at review time.",
+  "thermonuclear": "Both run once at 149e44bb: deep review CHANGES (runActive stuck, ACP doc, plain bun test), code quality CHANGES (marker flags, wiring tests, busy drop, header, call intent, nits). The reviewer's open question (a card marked setup between pi-envoy's agentEnd and the host going idle) was settled: only microtasks follow a terminal settle (agent-session.ts:5351 to #endInFlight), so no card can land there; the willContinue gap is a documented trade-off."
+}

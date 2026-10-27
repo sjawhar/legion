@@ -24,7 +24,7 @@
     "prepack": "../../scripts/pi-plugin-prepack.sh",
     "postpack": "rm -rf dist/skills",
     "typecheck": "bunx tsc --noEmit",
-    "test": "bun test",
+    "test": "bun test --path-ignore-patterns=extensions/card-delivery-omp.test.ts && bun test ./extensions/card-delivery-omp.test.ts",
     "lint": "bunx biome lint extensions/ src/"
   },
   "devDependencies": {
