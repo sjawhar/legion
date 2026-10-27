@@ -9,7 +9,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
-import { type AskBlockHost, askBlockFacts, askBlockShell } from "../doc/typed-block-drawing";
+import { type AskBlockHost, applyAskBlockShell, askShellSlots } from "../doc/typed-block-drawing";
 import { collectPictureAnchors, DispatchPicture, type PictureAnchor } from "./DispatchPicture";
 import { TextAskCard } from "./markdown-cards";
 import { renderWithEngine, type SoftBreaks } from "./markdown-engine";
@@ -28,20 +28,15 @@ const NO_PICTURES: readonly PictureAnchor[] = [];
 /** The same, for a body with no decision card to mount. */
 const NO_ASK_HOSTS: readonly AskBlockHost[] = [];
 
-/** An `ask` shell a body drew and the host its card mounts into. */
-interface AskShellHost {
-  readonly shell: HTMLElement;
-  readonly host: AskBlockHost;
-}
-
 /**
  * A host for each `ask` shell `paint` drew under `element` (`renderAskBlockShell`), paired in
- * document order with the parsed document's `ask` nodes, each with the shell it came from. A
- * surface that drew no shell for them (`MarkdownPreview` paints one line of inline content) gets
- * none: the shells must match the nodes one for one, every one with both slots, or no card is
- * mounted. It writes nothing; the caller folds each shell's source option list.
+ * document order with the parsed document's `ask` nodes. A surface that drew no shell for them
+ * (`MarkdownPreview` paints one line of inline content) gets none: the shells must match the
+ * nodes one for one, every one with its three slots (`askShellSlots`), or no card is mounted and
+ * nothing is written. Once every shell has paired, it writes each through `applyAskBlockShell`,
+ * and only there, because a card is mounted into it.
  */
-function collectAskHosts(element: HTMLElement, parsed: ProseMirrorNode): readonly AskShellHost[] {
+function collectAskHosts(element: HTMLElement, parsed: ProseMirrorNode): readonly AskBlockHost[] {
   const shells = element.querySelectorAll<HTMLElement>('section[data-proof-block-type="ask"]');
   if (shells.length === 0) {
     return [];
@@ -56,17 +51,24 @@ function collectAskHosts(element: HTMLElement, parsed: ProseMirrorNode): readonl
   if (nodes.length !== shells.length) {
     return [];
   }
-  const collected: AskShellHost[] = [];
+  const paired: {
+    readonly content: HTMLElement;
+    readonly host: AskBlockHost;
+    readonly shell: HTMLElement;
+  }[] = [];
   for (const [index, node] of nodes.entries()) {
     const shell = shells[index];
-    const header = shell?.querySelector<HTMLElement>(":scope > [data-dispatch-ask-header]");
-    const footer = shell?.querySelector<HTMLElement>(":scope > [data-dispatch-ask-footer]");
-    if (header === null || header === undefined || footer === null || footer === undefined) {
+    const slots = shell === undefined ? undefined : askShellSlots(shell);
+    if (shell === undefined || slots === undefined) {
       return [];
     }
-    collected.push({ host: { footer, header, key: index, node }, shell });
+    const { content, footer, header } = slots;
+    paired.push({ content, host: { footer, header, key: index, node }, shell });
   }
-  return collected;
+  for (const { content, host, shell } of paired) {
+    applyAskBlockShell(shell, content, host.node);
+  }
+  return paired.map(({ host }) => host);
 }
 
 /** How a surface fills its element from the parsed document: `MarkdownBody` serializes the whole
@@ -161,15 +163,8 @@ export function useRenderedMarkdown(
         paint(element, parsed, engine.serializer);
         if (Card !== undefined) {
           const collected = collectAskHosts(element, parsed);
-          // A mounted card renders the options as rows, so the shell folds its source option
-          // list where `askBlockShell` says so (not while malformed), as `AskBlockView` does.
-          for (const { host, shell } of collected) {
-            if (askBlockShell(askBlockFacts(host.node)).foldsOptions) {
-              shell.dataset.dispatchAskOptions = "rows";
-            }
-          }
           if (collected.length > 0) {
-            hosts = collected.map(({ host }) => host);
+            hosts = collected;
           }
         }
       }
