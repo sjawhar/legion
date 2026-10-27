@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-547",
+  "completed": "2026-10-27T06:44:00Z",
+  "headTested": "92616eb2b259c43860ec271d0e38d9a07e775f01",
+  "codeHead": "5f593338042f8ad26106633af90a0c43dac54f15",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran its command at the code head: cd packages/envoy && go test -tags serverchange -count=1 -timeout 15m -v -run TestServerChange ./cmd/listener -> --- PASS: TestServerChange (71.77s), sent 1m1.682s, 8 disruptions (4 lame duck, 4 kill), role sent 247 received live 247, ad-hoc 247/247, captured 181 live + 66 only by replay, errored 0. Re-ran its negative control independently: a git archive of sjawhar/legion#2228's tip 3ea454d3 with the head's server_change_test.go and testnats cluster.go/nats.go copied in (plus a one-line bus.UsesCoreTransport export the test names) -> --- FAIL: TestServerChange (72.12s), assertion 1: role messages 26, 48, 81, 102, 103, 139, 160, 205, 206, 229 and 67 ad-hoc messages answered 200 and never received. The doc greps print what the proof says (AGENTS.md line 2028, envoy-listener.md line 7; base a2a6afc9: 2, 0, 0)."
+  },
+  "failed": 2,
+  "failures": [
+    {
+      "criterion": "(plan, gap finding 8, and packages/envoy/AGENTS.md line 2028 as this change writes it) both confirmed sends are answered once each recipient confirmed or once 4 s from the request's arrival have passed (publishDeliveryWindow), inside envoy-client's 5 s attempt",
+      "evidence": "An ad-hoc topic sent while the listener's NATS connection is reconnecting (its server stopped) is answered 500 {\"error\":\"bus: waiting for NATS to reconnect: context deadline exceeded\"} after 5.0 s: sendToTopic's d.client.Publish(item) (confirmed.go:446) goes through bus.PublishCoreTo, which waits up to its own 5 s for the reconnect (internal/bus/nats.go PublishCoreTo, context.WithTimeout(context.Background(), 5*time.Second)) instead of the send's deadline. envoy-client's attempt (transport.ts DEFAULT_TIMEOUT_MS 5000) aborts before the answer arrives and retries, so the agent sees a client timeout after about 10 s rather than the listener's answer. Reproduced on the real binary: listener host-b on a stopped nats-server, POST /v1/messages/publish {topic: notifications.team.t1} -> HTTP 500 after 5.038 s. Red test, commit b1fbd1f1dfa02fc01982579d43127bf8d2bcb724: cd packages/envoy && go test -count=4 -run TestPublishRouteAnswersAnAdHocTopicInsideItsWindowWhileTheServerIsDown ./cmd/listener -> 4 of 4 FAIL: 'status 500 after 5.00s, want an error inside 4.5s; body {\"error\":\"bus: waiting for NATS to reconnect: context deadline exceeded\"}'. The role path in the same state answers inside the window (500 from the first claim read in 36 ms, as the AGENTS.md row documents)."
+    },
+    {
+      "criterion": "CI green at the head under test (read on GitHub)",
+      "evidence": "gh pr view 2370 reports mergeable CONFLICTING; GitHub builds no merge ref for it, so no workflow has ever run on this branch: gh api repos/sjawhar/legion/actions/runs?branch=legion/INFRA-547 -> total_count 0, and check-runs for 5f593338 -> total_count 0. git merge-tree --write-tree main@origin(448a4100) 92616eb2 -> CONFLICT (content) in packages/claude-envoy/CHANGELOG.md and packages/envoy/AGENTS.md. The implementer's resume reintegrates main with a merge (skill://legion-worker/references/conflicts-and-rewrites.md) so CI can run on the merge result; lint, types, envoy-go, the daemon suites and listener-server-change are unread until then."
+    }
+  ],
+  "proof": [
+    {
+      "criterion": "A role message through the sending listener is received by the holder or its sender's call errs",
+      "surface": "two real envoy-listener binaries (ENVOY_MACHINE_ID host-a and host-b) on one nats-server 2.10.29 with JetStream, session stand-ins on their own NATS connections that receipt a forward as envoy-client's expectsLaneReceipt does, driven with curl over the listeners' HTTP API",
+      "command": "POST http://127.0.0.1:18092/v1/messages/publish (host-b) {topic: notifications.role.scratch-live|scratch-silent|nobody-holds, source: agent, idempotency_key}; holder registered and claimed through host-a",
+      "observed": "confirming holder: 200 with holder ses_holder1 in 43 ms, one frame under envoy.role.forward.publish.k-live-1 with Nats-Msg-Id envoy.role.forward.publish.k-live-1:notifications.agent.ses_holder1; silent holder: 504 {reason receipt_timeout, holder ses_silent1, attempts 2} in 4.047 s, two frames with one event_id, and POST /v1/replay of its agent subject shows one stored copy per message; holder with no NATS subscription: 504 receipt_timeout in 4.05 s; repeat of k-live-1: 200, no second frame; source_session = holder: 200, no frame; 50 concurrent sends to the confirming holder (both listeners) beside 50 to the silent one: 50 x 200 (max 0.53 s, 50 distinct frames) and 50 x 504 (max 4.18 s); after a nats-server stop and restart the first send is 200 in 40 ms",
+      "headSha": "5f593338042f8ad26106633af90a0c43dac54f15",
+      "negativeControl": "unclaimed role -> 404 {reason unclaimed}; btw payload to a holder that does not advertise btw -> 403 {reason capability, holder ses_silent1}, nothing forwarded; topic notifications.agent.ses_holder1 -> 400 'cannot publish to agent topics'"
+    },
+    {
+      "criterion": "The same holds for an ad-hoc topic message sent through /v1/messages/publish to a subscribed session",
+      "surface": "same rig",
+      "command": "POST http://127.0.0.1:18092/v1/messages/publish {topic: notifications.team.t1, idempotency_key: k-adhoc-1}, with ses_holder1 (confirms) and ses_silent1 (never confirms) both self_subscribed on host-a",
+      "observed": "504 {reason not_confirmed, delivered [ses_holder1], undelivered [{ses_silent1, receipt_timeout}]} in 4.039 s; ses_holder1 got the core copy and one forward with event_id and dedupe_key unchanged, Nats-Msg-Id publish.k-adhoc-1:notifications.agent.ses_holder1",
+      "headSha": "5f593338042f8ad26106633af90a0c43dac54f15",
+      "negativeControl": "with the hub stopped the ad-hoc send answers 500 after 5.04 s, past the 4 s window: failure 1"
+    },
+    {
+      "criterion": "Messages sent every 250 ms for at least 60 s arrive or err while the holder's server is lame-ducked and force-killed (role, ad-hoc, captured); every repeat carries its first id",
+      "surface": "the real envoy-listener binary, two processes over a three-server in-process nats-server cluster (TestServerChange)",
+      "command": "cd packages/envoy && go test -tags serverchange -count=1 -timeout 15m -v -run TestServerChange ./cmd/listener",
+      "observed": "--- PASS: TestServerChange (71.77s); 8 disruptions, stand-in reconnected after 2.0-2.1 s each time; role 247/247 live, ad-hoc 247/247 live, captured 181 live + 66 only by replay, errored 0; 66 messages of each kind sent while the stand-in was disconnected",
+      "headSha": "5f593338042f8ad26106633af90a0c43dac54f15",
+      "negativeControl": "the same test on base 3ea454d3 -> --- FAIL: assertion 1: role messages 26, 48, 81, 102, 103, 139, 160, 205, 206, 229 and 67 ad-hoc messages answered 200 and never received"
+    },
+    {
+      "criterion": "(plan) the Legion daemon handles each answer",
+      "surface": "the daemon's real notify.HTTPPublisher (a throwaway test, removed after the run) against the host-b listener binary",
+      "command": "ZZ_LISTENER_URL=http://127.0.0.1:18092 go test -count=1 -v -run TestZZTesterSmoke ./internal/notify",
+      "observed": "live holder: nil in 6 ms; silent holder: ErrNotDelivered{receipt_timeout, ses_silent1} in 4.002 s; unclaimed: ErrNoHolder; btw to a non-advertising holder: ErrRefusedByHolder{ses_silent1}",
+      "headSha": "5f593338042f8ad26106633af90a0c43dac54f15",
+      "negativeControl": "the 404 for an unclaimed role is ErrNoHolder and neither of the two new errors"
+    }
+  ]
+}
