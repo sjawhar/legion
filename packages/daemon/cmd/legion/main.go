@@ -868,3 +868,4 @@ func main() {
 	defer stop()
 	os.Exit(run(ctx, os.Args, os.Stdout, os.Stderr))
 }
+// Scratch change for INFRA-584: a Go change runs lint's Go notices step.
