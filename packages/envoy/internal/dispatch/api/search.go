@@ -386,6 +386,14 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// Where each ask hit stands is read for this route alone: the write-time suggestions share
+	// the ranking (runFusedSearch) but never show it. TookMS counts the read.
+	started := time.Now()
+	if err := s.attachAskStates(r.Context(), s.deps.Store.Pool, response.Results); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	response.TookMS += time.Since(started).Milliseconds()
 	WriteJSON(w, http.StatusOK, response)
 }
 
@@ -467,9 +475,6 @@ func (s *server) runFusedSearchQuery(ctx context.Context, q, project string, lim
 	if err != nil {
 		return model.SearchResponse{}, err
 	}
-	if err := s.attachAskStates(ctx, s.deps.Store.Pool, response.Results); err != nil {
-		return model.SearchResponse{}, err
-	}
 	response.TookMS = time.Since(started).Milliseconds()
 	return response, nil
 }
@@ -491,9 +496,6 @@ func (s *server) runMeaningSearch(ctx context.Context, q, project string, limit,
 
 	response, err := scanSearchRows(rows, q, limit, offset)
 	if err != nil {
-		return model.SearchResponse{}, err
-	}
-	if err := s.attachAskStates(ctx, s.deps.Store.Pool, response.Results); err != nil {
 		return model.SearchResponse{}, err
 	}
 	response.TookMS = time.Since(started).Milliseconds()

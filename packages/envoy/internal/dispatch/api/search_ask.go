@@ -2,14 +2,14 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 // attachAskStates sets Ask, in place, on every ask hit of a search page: the ask's state, its
-// answer and its resolution, read from its row as docs.ScanAsk decodes them. A resolved ask's
+// answer and its resolution, read from its row through docs.ScanAsk. A resolved ask's
 // answer is the last one its ask.answered events recorded (loadAskAnswersByAsk), since a row
 // that document settlement retracted while it was answered keeps its answer nowhere else; those
 // events are read only when the page holds a resolved ask. One query reads every ask hit's row,
@@ -28,37 +28,21 @@ func (s *server) attachAskStates(ctx context.Context, q queryer, results []model
 		return nil
 	}
 
-	rows, err := q.Query(ctx, `select id::text, state, answer, resolution from asks where id = any($1::uuid[])`, askIDs)
+	rows, err := q.Query(ctx, `select `+docs.AskColumns+` from asks a where a.id = any($1::uuid[])`, askIDs)
 	if err != nil {
 		return fmt.Errorf("load search ask states: %w", err)
 	}
 	defer rows.Close()
 	var resolvedIDs []string
 	for rows.Next() {
-		var id string
-		var state model.SearchAsk
-		var answer, resolution []byte
-		if err := rows.Scan(&id, &state.State, &answer, &resolution); err != nil {
+		ask, err := docs.ScanAsk(rows)
+		if err != nil {
 			return fmt.Errorf("scan search ask state: %w", err)
 		}
-		if len(answer) > 0 {
-			var value model.AskAnswer
-			if err := json.Unmarshal(answer, &value); err != nil {
-				return fmt.Errorf("decode search ask answer: %w", err)
-			}
-			state.Answer = &value
+		if ask.State == "resolved" {
+			resolvedIDs = append(resolvedIDs, ask.ID)
 		}
-		if len(resolution) > 0 {
-			var value model.AskResolution
-			if err := json.Unmarshal(resolution, &value); err != nil {
-				return fmt.Errorf("decode search ask resolution: %w", err)
-			}
-			state.Resolution = &value
-		}
-		if state.State == "resolved" {
-			resolvedIDs = append(resolvedIDs, id)
-		}
-		results[indexByID[id]].Ask = &state
+		results[indexByID[ask.ID]].Ask = &model.SearchAsk{State: ask.State, Answer: ask.Answer, Resolution: ask.Resolution}
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("load search ask states: %w", err)

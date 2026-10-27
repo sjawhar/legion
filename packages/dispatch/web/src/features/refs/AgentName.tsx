@@ -271,7 +271,7 @@ const RESOLUTION_VERB: Record<AskResolution["kind"], string> = {
  *  for callers that render its reason with their own markup. `agent="static"` names the agent
  *  without its link, for a host that is itself one control (a listbox option). */
 export function AskResolutionLine({
-  agent = "link",
+  agent,
   resolution,
 }: {
   agent?: "link" | "static";
