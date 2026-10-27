@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-650",
+  "completed": "2026-10-27T15:16:03Z",
+  "plan": "dispatch://INFRA-650/artifact/plan-md",
+  "summary": "In packages/envoy/internal/dispatch/api/references.go loadArtifactsByRefKey, decode created_by only on the first row of each ref_key (map presence) and memo author-list bytes to decoded []model.Actor per request (string(bytes) key, slices.Clip, shared, failures never stored, same error texts); delete decodeArtifactReference, keep loadArtifactsByRefKey's name. F7/R14-R17/F8 stay with INFRA-651. The load test's seed has no references, so the plan first builds a throwaway production-shaped reference seed (refseed) through Dispatch's API, then measures.",
+  "tasks": [
+    {"id": 1, "title": "Code change and regression test", "files": ["packages/envoy/internal/dispatch/api/references.go", "packages/envoy/internal/dispatch/api/references_test.go", "packages/envoy/CHANGELOG.md"], "detail": "Postgres test: three documents of another project cited by one issue, 1/40/3217 versions inserted by SQL, >=12 distinct author lists incl. JSON null, [], two-actor, origin, owner, service, repeated across versions and documents, distinct created_by per document; oracle = s.loadVersions per member and a direct created_by select, json.Marshal equality; assert null and [] encodings. Passes at base and at head. Run: cd packages/envoy && go vet ./internal/dispatch/... && go test ./internal/dispatch/api/ -run 'Reference' -count=1, then go test ./internal/dispatch/... with DISPATCH_TEST_DATABASE_URL set."},
+    {"id": 2, "title": "refseed: production-shaped references in the load-test seed", "detail": "Throwaway, under $TMPDIR/infra650/refseed, attached to INFRA-650 as infra650-refseed.tgz with README and sha256. After stack.sh seed: reset; 1000 target documents ref-target-<n>.md on LGB/LGC/LGD issues with version counts drawn (fixed RNG seed) from dispatch://INFRA-650/artifact/infra650-production-references-sample-jsonl, written via POST /api/v1/issues/{key}/artifacts by session actors with origin (~231 bytes per author list), 1-3 writers per target from a pool of 600; each LGA issue gets references.md citing dispatch://<KEY>/artifact/ref-target-<n>-md, member count from the sample (i mod 160); wait outbox + block backfill, stop Dispatch, vacuum analyze, swap the database in as dispatch_seed. Shape check over the 400 LGA issues: mean rows within 25% of 3187, distinct-author share 3-12%, author bytes per row within 25% of 231."},
+    {"id": 3, "title": "Base and head builds", "detail": "git archive of the base commit and of the committed head into $TMPDIR/infra650/src-base and src-head, each overlaid with packages/envoy/loadtest from legion/INFRA-589 be8e6cb457e1 (or its newest head, named). LOADTEST_ROOT=$TMPDIR/infra650/lt. Seed once with base, then refseed. Re-measure if a rebase brings changes to api/references.go, refs/ or the response path."},
+    {"id": 4, "title": "Byte identity at real size", "detail": "On the augmented seed, base then head Dispatch each on a fresh reset: GET /api/v1/issues/{key}/references for all 1000 issues, record status, ETag, body sha256; diff exit 0. Negative control: a deliberately broken head (memo keyed on the document) differs."},
+    {"id": 5, "title": "Merge rule runs", "detail": "run-step.sh <name> --events 4 --sessions 400 --requests 60, default route mix routes-2026-10-26-1719Z.txt, --rng-seed 1; calibration run at base, fall back to --events 2 --sessions 200 --requests 30 for all six runs if box busy > 90% or req/s below 95%. Three base and three head runs alternating, each from reset, box busy before < 10%. CPU = resources.cpu_cores_mean.dispatch. Spread = max(base)-min(base). D = base decode cores from go tool pprof -top -nodecount=1000000 -nodefraction=0 -edgefraction=0 '-show_from=api\\.\\(\\*server\\)\\.loadArtifactsByRefKey' '-focus=encoding/json\\.Unmarshal' base-*/cpu.pprof over the three windows; E = 0.80 x D. Merge if every head CPU < every base CPU; else if E < spread, merge if head share <= 0.6 x base share (merged profiles per side); else write-up on INFRA-512. jq verdict over the six summary.json files quoted in the PR body with all commits and refseed sha256."},
+    {"id": 6, "title": "Pull request and handoff", "detail": "PR body carries Dispatch: INFRA-650; E2E (implementer) line = tasks 4 and 5 on the local stack; simplify pass; implement.json proof per acceptance line."},
+    {"id": 7, "title": "Production check after the merge", "detail": "Before merge: fresh ETag + body sha256 for the 160 sample keys against production. After production runs the merge commit: refetch; equal ETag must mean equal sha256 (a difference with equal ETag is explained as a rename or is a defect). Parent deliverable 3: 60 s production CPU profile via kubectl -n dispatch port-forward to the profiler port and Cloud Monitoring CPU, as dispatch://INFRA-514/artifact/production-profile-2026-10-27-md section 7; decode share under loadArtifactsByRefKey beside R13's 6.71%; posted on the PR, Production: line names the merge commit."}
+  ],
+  "acceptance": [
+    {"criterion": "Every member's creator and version authors equal the document's own reads, nil and [] kept apart, at production's largest member", "surface": "Dispatch Postgres test suite (local and CI envoy Go job)", "check": "Task 1 test green at base and head"},
+    {"criterion": "References answers and ETags byte-identical at real size", "surface": "Local Dispatch stack with the refseed-augmented load-test seed", "check": "Task 4 diff over 1000 issues exits 0; broken-head control differs"},
+    {"criterion": "Merge rule of the shared context on INFRA-589's route mix", "surface": "packages/envoy/loadtest run-step.sh on the augmented seed", "check": "Task 5 jq verdict and pprof shares in the PR body"},
+    {"criterion": "No resident memory added", "surface": "Code review and Task 5 tables", "check": "memo is a local of loadArtifactsByRefKey, no package-level state; heap in use p50 at head not above base"},
+    {"criterion": "Production answers unchanged and the decode cheaper", "surface": "Production Dispatch", "check": "Task 7 sha256-at-equal-ETag comparison and live profile share"}
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase rules, push, PR body template and proof definition (references/pr-body.md), simplify pass, production check (references/merge-gate.md)",
+      "dispatch: attaching infra650-refseed.tgz to the issue and any write-up on INFRA-512",
+      "ce-simplify-code: the simplify pass the PR body's Thermo line records",
+      "asd-ste100: the PR body and messages to the architect are read by teammates"
+    ],
+    "test": [
+      "legion-worker: tester rules, re-running the implementer's proof and adding an E2E (tester) line with a negative control",
+      "dispatch: downloading infra650-refseed.tgz and the production sample from the issue",
+      "asd-ste100: the test handoff and PR lines are read by teammates"
+    ],
+    "review": [
+      "legion-worker: review rules, review threads and the merge gate (references/review-threads.md, references/merge-gate.md)",
+      "ce-simplify-code: judging whether the change is the simplest correct form"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "The load-test seed has no dispatch:// references, so every closure is empty, loadArtifactsByRefKey returns before its query, and the merge rule can only fail.", "answer": "Task 2 builds refseed, a production-shaped reference seed written through Dispatch's API, with a shape check against the measured production sample; recorded as spec departure 1."},
+      {"finding": "'Expected 0.012 of 0.19 cores' is R13's production cost, not F2's gain, and has no meaning in load-test units; the share fallback mixes cores and share; focus regex unstable if decodeArtifactReference is renamed.", "answer": "Task 5 defines E = 0.80 x base decode cores on the load test, the fallback as head share <= 0.6 x base share over merged profiles per side, and a focus of encoding/json.Unmarshal under loadArtifactsByRefKey, whose name the change keeps; production's 0.0105 cores reported beside it; spec departure 2."},
+      {"finding": "The CPU comparison has no machine-checkable definition (which number, write noise, run count, Postgres version).", "answer": "Task 5 uses resources.cpu_cores_mean.dispatch, the 1x step flags with a stated 0.5x fallback, exactly three runs per side alternating, box busy before < 10%, and a jq verdict; Postgres is the load test's own 16.2 (spec departure 3)."},
+      {"finding": "'Responses byte-identical' has no check; real size for this route is members and version rows; production data cannot be committed to a public repository.", "answer": "Three layers: Task 1 synthetic real-size Postgres test with a per-row oracle; Task 4 base-vs-head sha256 and ETag diff over 1000 issues on the augmented seed; Task 7 production sha256-at-equal-ETag comparison."},
+      {"finding": "Parent deliverable 3 asks for production CPU from Cloud Monitoring and a live profile after deploy; the child spec omits it.", "answer": "Task 7 includes it, following dispatch://INFRA-514/artifact/production-profile-2026-10-27-md section 7."},
+      {"finding": "Equivalence edge cases: jsonb null vs [], first-row detection, shared pointers, error texts, pgx buffer reuse for the memo key, request-local memory.", "answer": "The change detects the first row by map presence, keys by string(bytes) copy (no unsafe), stores slices.Clip, never stores failures, keeps both error texts, documents the read-only invariant, keeps the memo local; Task 1's test covers null, [], repeats across versions and documents."},
+      {"finding": "Overlap with INFRA-651 and F7 (the by-value map).", "answer": "This change leaves F7, R14-R17 and F8 to INFRA-651, which builds on this branch; refseed is attached to the issue for INFRA-651 to reuse; whether it becomes part of the committed load test goes to the architect."},
+      {"finding": "The load-test package is not on main, so base and head builds need an overlay and named commits.", "answer": "Task 3 exports base and committed head with git archive, overlays packages/envoy/loadtest from be8e6cb457e1 (or its newest head), seeds once with base, and names every commit in the PR body."},
+      {"finding": "Claims checked: 'jsonb normalises' and '~94% hits' are inferences that affect only memo hit rate.", "answer": "Correctness does not depend on them; refseed's shape check measures the distinct-author share on the actual seed."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": [
+    {
+      "spec": "Acceptance: Merge rule of the shared context, on INFRA-589's route mix.",
+      "plan": "Runs INFRA-589's route mix and step flags on INFRA-589's seed plus production-shaped references written by a throwaway refseed program through Dispatch's API, identical for base and head.",
+      "evidence": "INFRA-589's seed (sjawhar/legion#2369 at be8e6cb457e1, seed.go and events.go) writes no dispatch:// reference; refs.Closure excludes an issue's own documents (refs/closure.go:47); loadArtifactsByRefKey returns before its query on an empty closure (references.go:314-316). Production's answers: p50 158 members, 2,205 version rows, 1.02 MB (dispatch://INFRA-650/artifact/infra650-production-references-sample-jsonl).",
+      "outcome": {"kind": "changed", "scope": "The merge rule's input seed gains references; the route mix, step flags and rule are unchanged."}
+    },
+    {
+      "spec": "Acceptance: Expected 0.012 of 0.19 cores, measured.",
+      "plan": "The merge rule's expected gain on the load test is 0.80 x base decode CPU measured on the load test; the share fallback is head share <= 0.6 x base share; production's 0.0105-core estimate is reported beside it.",
+      "evidence": "0.012 is R13's whole production cost (dispatch-cpu-read-rows.md R13, 0.0126 cores); F2's gain is 0.0105 cores at a measured ratio of 0.80 (F2). The load test's request rate and closure sizes differ from production's 03:23-04:34Z window, so a production core figure has no fixed meaning on the 2-core load-test box.",
+      "outcome": {"kind": "changed", "acceptance": "Expected gain read in load-test units for the merge rule; production figure reported, not used as the threshold."}
+    },
+    {
+      "spec": "Running system: the Dispatch server run locally against Postgres 17 with pgvector.",
+      "plan": "Uses the load test's own stack, which installs Postgres 16.2 with pgvector from the pgserver wheel (stack.sh setup), the same for base and head.",
+      "evidence": "loadtest README 'Requirements' and 'The stack': stack.sh setup installs Postgres 16.2 from the pgserver wheel; changing it would modify INFRA-589's harness.",
+      "outcome": {"kind": "changed", "scope": "Postgres 16.2 for the load-test runs instead of 17."}
+    }
+  ],
+  "decisionsForArchitect": [
+    "Whether refseed should become part of the committed load test (INFRA-589's package, once it lands), so every later change measures the references route; INFRA-651 needs the same input and can use the attached copy as is."
+  ]
+}
