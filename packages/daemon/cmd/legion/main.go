@@ -511,6 +511,7 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fmt.Fprintf(stdout, "legion %s on %s — schema %d, boot %d started %s (first boot %s)\n",
 		state.Daemon.Project, address, state.Daemon.SchemaVersion, state.Daemon.Boots,
 		state.Daemon.StartedAt.Format(time.RFC3339), state.Daemon.FirstBootAt.Format(time.RFC3339))
+	fmt.Fprintln(stdout, repositoriesSummary(state.Repositories))
 	fmt.Fprintf(stdout, "admission: %d active, %d waiting, cap %d; %d issues\n",
 		len(state.Admission.Active), len(state.Admission.Waiting), state.Admission.Cap, len(state.Issues))
 	fmt.Fprintln(stdout, blockedSummary(state.Admission.Blocked))
@@ -534,6 +535,31 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprintf(stdout, "issue %s:\n%s\n", key, record)
 	}
 	return 0
+}
+
+// repositoriesSummary is the one line an operator reads for the project's repository mapping
+// (api.RepositoriesView): the repositories the daemon serves, and every mapped repository it
+// leaves out with why — a GitHub App not installed on it, or an installation read GitHub
+// refused, which leaves that one repository out and serves the rest. A left-out repository
+// admits none of its issues, so without this line a daemon serving less of its mapping than the
+// project maps reads as healthy.
+func repositoriesSummary(repos api.RepositoriesView) string {
+	served := make([]string, len(repos.Mapped))
+	for i, mapped := range repos.Mapped {
+		served[i] = mapped.Repo
+	}
+	line := fmt.Sprintf("repositories: %d served", len(served))
+	if len(served) > 0 {
+		line += " — " + strings.Join(served, ", ")
+	}
+	if len(repos.Refused) == 0 {
+		return line + "; none left out"
+	}
+	left := make([]string, len(repos.Refused))
+	for i, refusal := range repos.Refused {
+		left[i] = refusal.Repo + ": " + refusal.Reason
+	}
+	return fmt.Sprintf("%s; %d left out — %s", line, len(left), strings.Join(left, "; "))
 }
 
 // blockedSummary is the one line an operator reads for the issues Legion is waiting to start

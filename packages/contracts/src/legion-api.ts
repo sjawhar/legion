@@ -421,9 +421,10 @@ const legionCacheView = z.strictObject({
 /** `api.RepositoriesView` — the project's repository mapping as the daemon serves it: the owners
  * its roles' credentials span, each repository it serves (as GitHub names it, `default` the
  * project's default in Dispatch, `cache` its repository cache under the Kubernetes runtime), each
- * mapped repository it leaves out with `reason`, a GitHub App not installed on it, and the `caches`
- * of repositories the mapping no longer names. Every list sorted and never null (contracts 31,
- * 32). */
+ * mapped repository it leaves out with `reason` — a GitHub App not installed on it, or an
+ * installation read GitHub refused, which leaves that repository out and serves the rest — and
+ * the `caches` of repositories the mapping no longer names. Every list sorted and never null
+ * (contracts 31, 32). */
 const legionRepositories = z.strictObject({
   owners: z.array(nonEmptyString),
   mapped: z.array(

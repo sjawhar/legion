@@ -48,9 +48,12 @@ type mappedRepository struct {
 }
 
 // refusedRepository is a mapped repository Legion leaves out, as Dispatch maps it, and why.
+// Unread is one left out because its installation read failed rather than because an App is not
+// installed on it: Legion does not know what the Apps hold there, and reads it again (checkMapping).
 type refusedRepository struct {
 	Repo   string
 	Reason string
+	Unread bool
 }
 
 func newRepositories(project string) *repositories {
@@ -137,18 +140,20 @@ func (r *repositories) Refused() []refusedRepository {
 }
 
 // lookup is the served repository resolved names, in any spelling, or why Legion does not serve
-// it: left out (leftOut) with its reason, or not mapped to the project at all.
-func (r *repositories) lookup(resolved string) (mapped mappedRepository, refusal string, leftOut bool) {
+// it: left out (leftOut) with its reason, unread when that reason is an installation read that
+// failed rather than an App that is not installed (refusedRepository.Unread), or not mapped to
+// the project at all.
+func (r *repositories) lookup(resolved string) (mapped mappedRepository, refusal string, leftOut, unread bool) {
 	key := strings.ToLower(resolved)
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if mapped, ok := r.accepted[key]; ok {
-		return mapped, "", false
+		return mapped, "", false, false
 	}
 	if refused, ok := r.refused[key]; ok {
-		return mappedRepository{}, refused.Reason, true
+		return mappedRepository{}, refused.Reason, true, refused.Unread
 	}
-	return mappedRepository{}, fmt.Sprintf("%s is not mapped to project %s in Dispatch", resolved, r.project), false
+	return mappedRepository{}, fmt.Sprintf("%s is not mapped to project %s in Dispatch", resolved, r.project), false, false
 }
 
 // view is the mapping as the daemon's state shows it, with caches, the Kubernetes runtime's
@@ -214,17 +219,33 @@ func listMapping(ctx context.Context, client dispatch.Client) ([]dispatch.RepoPr
 // checkMapping checks, for each repository mappings maps to project, that both GitHub Apps are
 // installed on it (installs, under each App's JWT; per repository, since an installation on an
 // owner may cover only some of its repositories). A repository an App is not installed on is
-// refused, naming the App; any read that fails is an error that fails the whole check, so nothing
-// is left out on a guess. Accepted repositories carry Dispatch's spelling until nameAccepted reads
-// GitHub's. The installation reads run at once, mappingReads at a time, so a check takes about as
-// long as its slowest read rather than the sum of them.
+// refused, naming the App. A repository whose installation read failed is refused the same way
+// (refusedRepository.Unread), naming the App, the repository and what GitHub answered, and every
+// other repository of the mapping is still served: one repository's failed read is that
+// repository's trouble, not the project's. Refusing the whole mapping for it held 343 agent
+// owners offline for 28 minutes on 2026-10-27, when GitHub refused one mapped repository's
+// installation read with a 401 (the daemon's JWT carried an expiry 600 s ahead on a host clock
+// 1.3 s fast) and the daemon crash-looped at boot rather than serving the repositories it could
+// read. A read cut off by the check's own bound (appMintAttempt) is a failed read too.
+//
+// The check fails whole only when it would serve nothing: no repository accepted and at least one
+// refused for a read that failed — a mapping the daemon never managed to read, rather than one it
+// read and found no serveable repository in, which boots serving none (loadMapping). That error
+// carries every failed read's own failure, so GitHub's own trouble (appauth.TransientError) is
+// still recognized and retried on the App mint's schedule.
+//
+// Accepted repositories carry Dispatch's spelling until nameAccepted reads GitHub's. The
+// installation reads run at once, mappingReads at a time, so a check takes about as long as its
+// slowest read rather than the sum of them, and one read's failure cancels no other read.
 func checkMapping(ctx context.Context, mappings []dispatch.RepoProject, project string, installs appauth.Installations) ([]mappedRepository, []refusedRepository, error) {
 	type mapped struct {
 		mapping dispatch.RepoProject
 		repo    ghrepo.Repository
 		parse   error
-		// installed is each App's answer, in appauth.Roles order.
+		// installed is each App's answer and failed its read's failure, in appauth.Roles order: a
+		// read leaves one or the other.
 		installed []bool
+		failed    []error
 	}
 	var entries []mapped
 	for _, mapping := range mappings {
@@ -232,9 +253,10 @@ func checkMapping(ctx context.Context, mappings []dispatch.RepoProject, project 
 			continue
 		}
 		repo, err := ghrepo.Parse("the repository Dispatch maps to "+project, mapping.Repo)
-		entries = append(entries, mapped{mapping: mapping, repo: repo, parse: err, installed: make([]bool, len(appauth.Roles))})
+		entries = append(entries, mapped{mapping: mapping, repo: repo, parse: err,
+			installed: make([]bool, len(appauth.Roles)), failed: make([]error, len(appauth.Roles))})
 	}
-	group, read := errgroup.WithContext(ctx)
+	var group errgroup.Group
 	group.SetLimit(mappingReads)
 	for _, m := range entries {
 		if m.parse != nil {
@@ -242,43 +264,56 @@ func checkMapping(ctx context.Context, mappings []dispatch.RepoProject, project 
 		}
 		for index, role := range appauth.Roles {
 			group.Go(func() error {
-				installed, err := installs.InstalledOn(read, role, m.repo)
-				if err != nil {
-					return fmt.Errorf("check the %s App's installation on %s: %w", role, m.repo, err)
-				}
-				m.installed[index] = installed
+				m.installed[index], m.failed[index] = installs.InstalledOn(ctx, role, m.repo)
 				return nil
 			})
 		}
 	}
-	if err := group.Wait(); err != nil {
-		return nil, nil, err
-	}
+	// Every read answers into its own entry, so the group reports nothing: a read that failed is
+	// its repository's refusal, not the mapping's.
+	_ = group.Wait()
 	var accepted []mappedRepository
 	var refused []refusedRepository
+	var unread []error
 	for _, m := range entries {
 		if m.parse != nil {
 			refused = append(refused, refusedRepository{Repo: m.mapping.Repo, Reason: m.parse.Error()})
 			continue
 		}
-		var missing []string
+		var missing, unreadable []string
 		for index, role := range appauth.Roles {
-			if !m.installed[index] {
+			switch {
+			case m.failed[index] != nil:
+				unreadable = append(unreadable, fmt.Sprintf("the %s App's installation on %s could not be read: %v", role, m.repo, m.failed[index]))
+				unread = append(unread, fmt.Errorf("check the %s App's installation on %s: %w", role, m.repo, m.failed[index]))
+			case !m.installed[index]:
 				missing = append(missing, string(role))
 			}
 		}
-		switch len(missing) {
-		case 0:
-		case 1:
-			refused = append(refused, refusedRepository{Repo: m.mapping.Repo, Reason: fmt.Sprintf("the %s App is not installed on %s", missing[0], m.repo)})
-			continue
+		switch {
+		case len(unreadable) > 0:
+			if len(missing) > 0 {
+				unreadable = append(unreadable, missingApps(missing, m.repo))
+			}
+			refused = append(refused, refusedRepository{Repo: m.mapping.Repo, Reason: strings.Join(unreadable, "; "), Unread: true})
+		case len(missing) > 0:
+			refused = append(refused, refusedRepository{Repo: m.mapping.Repo, Reason: missingApps(missing, m.repo)})
 		default:
-			refused = append(refused, refusedRepository{Repo: m.mapping.Repo, Reason: fmt.Sprintf("the %s Apps are not installed on %s", strings.Join(missing, " and "), m.repo)})
-			continue
+			accepted = append(accepted, mappedRepository{Repo: m.repo, Default: m.mapping.Default})
 		}
-		accepted = append(accepted, mappedRepository{Repo: m.repo, Default: m.mapping.Default})
+	}
+	if len(accepted) == 0 && len(unread) > 0 {
+		return nil, nil, errors.Join(unread...)
 	}
 	return accepted, refused, nil
+}
+
+// missingApps is the refusal of repo, which the Apps missing names are not installed on.
+func missingApps(missing []string, repo ghrepo.Repository) string {
+	if len(missing) == 1 {
+		return fmt.Sprintf("the %s App is not installed on %s", missing[0], repo)
+	}
+	return fmt.Sprintf("the %s Apps are not installed on %s", strings.Join(missing, " and "), repo)
 }
 
 // mappingReads is how many of a mapping read's GitHub reads run at once.
@@ -315,11 +350,24 @@ func nameAccepted(ctx context.Context, accepted []mappedRepository, named *defau
 // daemon into a supervisor that restarts it straight back into the same refusal, and the API does
 // not listen until the read passes, so the daemon serves nothing meanwhile. The installation check
 // (checkMapping) is run again after a failure GitHub reports as its own trouble
-// (appauth.TransientError) on the App mint's schedule. A project with no repository mapped refuses
-// the boot too. One whose every mapped repository lacks an App boots serving none, each left out
-// and reported: it admits nothing, saying why on each issue, until an App is installed and a read
-// of the mapping finds it, one the next mapping change or an issue held for it asks for
-// (requestMappingRead). nameMapping, once the Apps' tokens are minted, reads GitHub's spelling.
+// (appauth.TransientError) on the App mint's schedule, and it fails only when no repository of
+// the mapping is serveable, so that retry is now the whole mapping's, never one repository's.
+//
+// A project with no repository mapped refuses the boot. One whose every mapped repository lacks
+// an App boots serving none, each left out and reported, and so does one whose every mapped
+// repository failed its installation read while at least one other is served: it admits nothing
+// on a left-out repository, saying why on each issue, until an App is installed, or GitHub
+// answers the read, and a read of the mapping finds it.
+//
+// A repository refused for this pass recovers with no person: the next read of the mapping serves
+// it. Three things ask for one, and the first needs nobody — an admission-bound todo event on
+// that repository (a Dispatch event of the issue, or release_children's child) is held back and
+// asks for the read itself (prepareUnrecorded → awaitMappingRead → requestMappingRead →
+// refreshOnMappingChange → refreshMapping), so the refusal is read again the moment it would cost
+// an admission; Dispatch's settings.repo_project.updated asks for the same read (mappingChange);
+// and the next boot reads the mapping afresh. Nothing else polls GitHub for it: a repository
+// nothing is waiting on costs nothing while it is left out.
+// nameMapping, once the Apps' tokens are minted, reads GitHub's spelling.
 func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 	var mappings []dispatch.RepoProject
 	err := bootprobe.Run(ctx, "repository mapping read", readinessRetry, w.log, readinessAttempt(func(ctx context.Context) error {
@@ -895,12 +943,12 @@ func (w *workflowRuntime) prepareUnrecorded(ctx context.Context, issue intake.Di
 	if issue.Status != "todo" || issue.ResolvedRepo == "" {
 		return issue, nil
 	}
-	mapped, refusal, _ := w.repositories.lookup(issue.ResolvedRepo)
+	mapped, refusal, _, _ := w.repositories.lookup(issue.ResolvedRepo)
 	if refusal != "" && await && admissionBound(issue) {
 		if err := w.awaitMappingRead(issue, held); err != nil {
 			return issue, err
 		}
-		mapped, refusal, _ = w.repositories.lookup(issue.ResolvedRepo)
+		mapped, refusal, _, _ = w.repositories.lookup(issue.ResolvedRepo)
 	}
 	if refusal != "" {
 		return issue, nil
@@ -914,9 +962,9 @@ func (w *workflowRuntime) prepareUnrecorded(ctx context.Context, issue intake.Di
 // Legion does not serve it. A served repository whose default branch was never read is an error:
 // its event's preparation (prepareRepository) did not run.
 func (w *workflowRuntime) ResolveRepository(resolved string) (workflow.Resolution, error) {
-	mapped, refusal, leftOut := w.repositories.lookup(resolved)
+	mapped, refusal, leftOut, unread := w.repositories.lookup(resolved)
 	if refusal != "" {
-		return workflow.Resolution{Refusal: refusal, LeftOut: leftOut}, nil
+		return workflow.Resolution{Refusal: refusal, LeftOut: leftOut, Unread: unread}, nil
 	}
 	read, ok := w.defaultBranches.Kept(mapped.Repo.String())
 	if !ok {

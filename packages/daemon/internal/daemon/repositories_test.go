@@ -33,12 +33,15 @@ import (
 )
 
 // installations answers each App's installation on each repository, by "<role> <owner/name>";
-// a repository it does not name is installed for both Apps, and fail answers an error. delay is
-// how long each read takes, as a GitHub that answers slowly; reads wait it out side by side.
+// a repository it does not name is installed for both Apps. fail answers an error for every read,
+// and failOn answers a named "<role> <owner/name>" read with its own error, as GitHub refusing one
+// repository's read does (the 2026-10-27 401). delay is how long each read takes, as a GitHub that
+// answers slowly; reads wait it out side by side.
 type installations struct {
 	mu      sync.Mutex
 	missing map[string]bool
 	fail    error
+	failOn  map[string]error
 	asked   []string
 	delay   time.Duration
 }
@@ -55,6 +58,9 @@ func (i *installations) InstalledOn(ctx context.Context, role appauth.AppRole, r
 	defer i.mu.Unlock()
 	key := string(role) + " " + repo.String()
 	i.asked = append(i.asked, key)
+	if err, ok := i.failOn[key]; ok {
+		return false, err
+	}
 	if i.fail != nil {
 		return false, i.fail
 	}
@@ -134,9 +140,12 @@ func TestTheMappingServesOnlyRepositoriesBothAppsAreInstalledOn(t *testing.T) {
 	}
 }
 
-// A repository both Apps lack names both; an installation read that fails is no answer, and fails
-// the whole read rather than leaving the repository out on a guess.
-func TestTheMappingNamesEveryMissingAppAndFailsOnAFailedRead(t *testing.T) {
+// A repository both Apps lack names both. A repository whose installation read fails is left out
+// the same way — not an error that fails the whole read — while every repository the check could
+// read is served: one repository's failed read is that repository's trouble, not the mapping's.
+// This case asserted the old rule, where any failed read failed the whole read; the new rule
+// serves the readable repositories (the fix for the 2026-10-27 boot refusal).
+func TestTheMappingNamesEveryMissingAppAndLeavesOutAFailedRead(t *testing.T) {
 	client := &mappingDispatch{mappings: []dispatch.RepoProject{{Repo: "acme/gadgets", Project: "LEGION"}}}
 	installs := &installations{missing: map[string]bool{"implement acme/gadgets": true, "review acme/gadgets": true}}
 	accepted, refused, err := readMapping(context.Background(), client, "LEGION", installs)
@@ -144,9 +153,80 @@ func TestTheMappingNamesEveryMissingAppAndFailsOnAFailedRead(t *testing.T) {
 		t.Fatalf("readMapping = %#v, %#v, %v; want acme/gadgets left out naming both Apps", accepted, refused, err)
 	}
 
-	installs = &installations{fail: &appauth.TransientError{Err: errors.New("GitHub answered 502")}}
-	if _, _, err := readMapping(context.Background(), client, "LEGION", installs); err == nil || !strings.Contains(err.Error(), "acme/gadgets") {
-		t.Fatalf("readMapping with a failed installation read = %v, want an error naming acme/gadgets", err)
+	// acme/widgets reads cleanly, acme/gadgets' implement read fails transiently: acme/widgets is
+	// served and acme/gadgets is left out as an unread repository, naming the App and the failure,
+	// with no error.
+	client = &mappingDispatch{mappings: []dispatch.RepoProject{{Repo: "acme/widgets", Project: "LEGION", Default: true}, {Repo: "acme/gadgets", Project: "LEGION"}}}
+	installs = &installations{failOn: map[string]error{"implement acme/gadgets": &appauth.TransientError{Err: errors.New("GitHub answered 502")}}}
+	accepted, refused, err = readMapping(context.Background(), client, "LEGION", installs)
+	if err != nil || len(accepted) != 1 || accepted[0].Repo != ghrepo.MustParse("acme/widgets") {
+		t.Fatalf("readMapping = %#v, %#v, %v; want acme/widgets served", accepted, refused, err)
+	}
+	if len(refused) != 1 || refused[0].Repo != "acme/gadgets" || !refused[0].Unread ||
+		!strings.Contains(refused[0].Reason, "the implement App's installation on acme/gadgets could not be read") ||
+		!strings.Contains(refused[0].Reason, "GitHub answered 502") {
+		t.Fatalf("Refused = %#v, want acme/gadgets left out as unread, naming the implement App and GitHub's 502", refused)
+	}
+}
+
+// The incident of 2026-10-27: a 401 on one mapped repository's installation read held 343 agent
+// owners offline for about 28 minutes, because the daemon refused its whole boot rather than
+// serving the repositories it could read. Now a failed read leaves only that repository out,
+// naming the App, the repository and what GitHub answered, so it reaches legion state's
+// repositories.refused; the boot serves every other repository and continues; and the refused
+// repository's issues resolve to an unread refusal that recovers with no person on the next read.
+func TestAFailedInstallationReadRefusesOnlyThatRepository(t *testing.T) {
+	gone := errors.New(`read whether the implement App is installed on acme/gadgets failed (401): "'Expiration time' claim ('exp') is too far in the future"`)
+	w := &workflowRuntime{dispatch: &mappingDispatch{mappings: []dispatch.RepoProject{
+		{Repo: "acme/widgets", Project: "LEGION", Default: true},
+		{Repo: "acme/gadgets", Project: "LEGION"},
+		{Repo: "zeta/tools", Project: "LEGION"},
+	}}, dispatchProject: "LEGION",
+		installs:     &installations{failOn: map[string]error{"implement acme/gadgets": gone}},
+		repositories: newRepositories("LEGION"), log: quietLogger()}
+	if err := w.loadMapping(context.Background()); err != nil {
+		t.Fatalf("loadMapping = %v, want it to serve the readable repositories and leave acme/gadgets out", err)
+	}
+	if got := w.repositories.Accepted(); len(got) != 2 || got[0] != ghrepo.MustParse("acme/widgets") || got[1] != ghrepo.MustParse("zeta/tools") {
+		t.Fatalf("Accepted = %v, want acme/widgets and zeta/tools served", got)
+	}
+	refused := w.repositories.Refused()
+	if len(refused) != 1 || refused[0].Repo != "acme/gadgets" || !refused[0].Unread ||
+		!strings.Contains(refused[0].Reason, "the implement App's installation on acme/gadgets could not be read") ||
+		!strings.Contains(refused[0].Reason, "401") {
+		t.Fatalf("Refused = %#v, want acme/gadgets left out as unread, naming the implement App and GitHub's 401", refused)
+	}
+	// legion state --json carries it under repositories.refused with its reason.
+	if view := w.repositories.view(nil); len(view.Refused) != 1 || view.Refused[0].Repo != "acme/gadgets" || !strings.Contains(view.Refused[0].Reason, "401") {
+		t.Fatalf("state's repositories.refused = %#v, want acme/gadgets with GitHub's 401", view.Refused)
+	}
+	// An issue of acme/gadgets is not served; it resolves to the refusal, marked unread, which
+	// recovers with no person on the next read of the mapping.
+	res, err := (&workflowRuntime{repositories: w.repositories}).ResolveRepository("acme/gadgets")
+	if err != nil || !res.LeftOut || !res.Unread || !strings.Contains(res.Refusal, "401") {
+		t.Fatalf("ResolveRepository(acme/gadgets) = %#v, %v; want it left out as unread with GitHub's 401", res, err)
+	}
+}
+
+// A mapping whose every repository fails its installation read refuses the boot: the daemon read
+// nothing it could serve, which is the one case a failed read is still fatal (a mapping whose
+// every repository is definitely missing an App boots serving none, kept by the empty-mapping
+// test). The refusal carries each failed read's own failure.
+func TestTheBootIsRefusedWhenEveryRepositorysReadFails(t *testing.T) {
+	gadgets := errors.New("read whether the implement App is installed on acme/gadgets failed (401)")
+	tools := errors.New("read whether the review App is installed on zeta/tools failed (401)")
+	w := &workflowRuntime{dispatch: &mappingDispatch{mappings: []dispatch.RepoProject{
+		{Repo: "acme/gadgets", Project: "LEGION"},
+		{Repo: "zeta/tools", Project: "LEGION"},
+	}}, dispatchProject: "LEGION",
+		installs:     &installations{failOn: map[string]error{"implement acme/gadgets": gadgets, "review zeta/tools": tools}},
+		repositories: newRepositories("LEGION"), log: quietLogger()}
+	err := w.loadMapping(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "acme/gadgets") || !strings.Contains(err.Error(), "zeta/tools") {
+		t.Fatalf("loadMapping = %v, want the boot refused naming both repositories' failed reads", err)
+	}
+	if got := w.repositories.Accepted(); len(got) != 0 {
+		t.Fatalf("Accepted = %v, want none served", got)
 	}
 }
 

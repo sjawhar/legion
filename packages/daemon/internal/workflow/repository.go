@@ -24,14 +24,16 @@ type Repositories interface {
 
 // Resolution is the repository an issue is recorded on: Repo and DefaultBranch when Legion serves
 // it, with GitHubRepo, GitHub's spelling of Repo that Envoy's event subjects carry, or Refusal, why
-// it does not. LeftOut is a mapped repository Legion leaves out for a GitHub App not installed on
-// it, which Refusal names.
+// it does not. LeftOut is a mapped repository Legion leaves out, which Refusal names: a GitHub App
+// is not installed on it, or, with Unread, its installation read failed and Legion does not know
+// what the Apps hold there until it reads the mapping again.
 type Resolution struct {
 	Repo          string
 	DefaultBranch string
 	GitHubRepo    string
 	Refusal       string
 	LeftOut       bool
+	Unread        bool
 }
 
 // resolvesToNone is the refusal of an issue whose repository Dispatch resolves to none: neither it
@@ -74,9 +76,14 @@ const setRepositoryHint = "the issue header's Repository picker, or dispatch iss
 // resolved, resolves to none or to one Legion does not serve (refused). It says it once per
 // resolution (record.RepoNote), so a repeated event of the issue says nothing again, and reports
 // whether it said it now. A child's refusal is also told to its tree's architect (refuseChild).
+// A repository left out because its installation read failed (Resolution.Unread) asks for no
+// install: Legion reads that installation again, and the note says when.
 func (e *Engine) RefuseRecording(ctx context.Context, tx pgx.Tx, key, resolved string, refused Resolution) (bool, error) {
 	note := "Legion did not admit this issue: " + refused.Refusal + ". Set its repository (" + setRepositoryHint + ") and move it to todo again."
-	if refused.LeftOut {
+	switch {
+	case refused.Unread:
+		note = "Legion did not admit this issue: " + refused.Refusal + ". Legion reads that installation again whenever an issue of " + resolved + " comes up for admission, when the repository mapping changes in Dispatch, and at its next boot: move the issue to todo again, or set another repository (" + setRepositoryHint + ")."
+	case refused.LeftOut:
 		note = "Legion did not admit this issue: " + refused.Refusal + ". Install it on " + resolved + ", or set another repository (" + setRepositoryHint + "), and move the issue to todo again."
 	}
 	return e.noteOnce(ctx, tx, key, resolved, note)

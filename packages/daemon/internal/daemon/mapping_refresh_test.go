@@ -162,7 +162,7 @@ func TestAFailedRefreshServesNothingUntilARetrySubscribesIt(t *testing.T) {
 				if err := w.refreshMapping(ctx); err == nil {
 					t.Fatal("the failed snapshot did not fail the read")
 				}
-				if _, _, leftOut := w.repositories.lookup("zeta/tools"); !leftOut {
+				if _, _, leftOut, _ := w.repositories.lookup("zeta/tools"); !leftOut {
 					t.Fatal("the failed refresh published zeta/tools as served")
 				}
 				if filters := githubFilterSubjects(t, stream); slices.Contains(filters, "notifications.github.zeta.tools.>") {
@@ -473,7 +473,7 @@ func TestAnAdmissionWhosePreparationFailedIsPreparedAsDispatchNowShowsIt(t *test
 					t.Fatalf("the first delivery = %v, want it held for the mapping", err)
 				}
 				testwait.Eventually(t, "the mapping read the held event asked for", func() bool {
-					_, refusal, _ := w.repositories.lookup("zeta/tools")
+					_, refusal, _, _ := w.repositories.lookup("zeta/tools")
 					return refusal == ""
 				})
 			}

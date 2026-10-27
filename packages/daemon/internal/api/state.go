@@ -60,8 +60,9 @@ type State struct {
 	Capabilities []CapabilityState `json:"capabilities"`
 	// Repositories is the project's repository mapping as the daemon serves it: the owners its
 	// roles' credentials span, each repository it serves with its cache, each mapped repository it
-	// leaves out with why (a GitHub App not installed on it), and the caches of repositories the
-	// mapping no longer names. Never null: a daemon with no workflow serves none.
+	// leaves out with why (a GitHub App not installed on it, or an installation read GitHub
+	// refused), and the caches of repositories the mapping no longer names. Never null: a daemon
+	// with no workflow serves none.
 	Repositories RepositoriesView `json:"repositories"`
 	// Settings is the daemon's resolved legion.yaml with every credential, credential source and
 	// credential file path left out, keyed as the file is (SettingsOf). Required, never null
@@ -108,7 +109,9 @@ type CacheView struct {
 	RetainedUntil time.Time `json:"retainedUntil,omitzero"`
 }
 
-// RefusedRepositoryView is a mapped repository the daemon leaves out, as Dispatch maps it, and why.
+// RefusedRepositoryView is a mapped repository the daemon leaves out, as Dispatch maps it, and
+// why: a GitHub App is not installed on it, or its installation read failed, naming the App, the
+// repository and what GitHub answered. Either way the rest of the mapping is served.
 type RefusedRepositoryView struct {
 	Repo   string `json:"repo"`
 	Reason string `json:"reason"`
