@@ -6,11 +6,15 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/capabilities/capabilitiestest"
+	"github.com/sjawhar/legion/daemon/internal/procgroup"
 )
 
 // fakeOmp answers the two Oh My Pi commands the checks run as this pod's omp answers them, by
@@ -443,6 +447,45 @@ func TestCheckImageStopsWithItsContext(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("CheckImage under an ended context = %v, want it to wrap context.Canceled", err)
 	}
+}
+
+// A command that exits on its own inside its budget did not time out, however long
+// procgroup.WaitDelay then holds the run open for a child still holding its output pipe. The
+// budget here is half of WaitDelay, so every such run returns past its deadline: a run that read
+// a timeout from the deadline having passed would report "timed out" for a check whose command
+// answered inside the last WaitDelay of commandTimeout, in place of what it answered.
+func TestRunReportsTheCommandsOwnExitWhenAChildHoldsItsOutputPastTheBudget(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "lingering.pid")
+	t.Cleanup(func() { killPIDFile(t, pidFile) })
+	img := Image{Env: []string{"PATH=" + os.Getenv("PATH")}, WorkDir: t.TempDir()}
+	budget := procgroup.WaitDelay / 2
+
+	started := time.Now()
+	r := img.runWithin(context.Background(), budget, "sh", "-c", `echo 1.2.3; sleep 30 & echo $! >"$1"; exit 0`, "sh", pidFile)
+	elapsed := time.Since(started)
+
+	if elapsed < budget {
+		t.Fatalf("the run returned after %s, inside its %s budget: nothing held the pipe past the deadline, so this run proves nothing", elapsed, budget)
+	}
+	if r.err != nil || r.exit != 0 || strings.TrimSpace(r.stdout) != "1.2.3" {
+		t.Errorf("run = exit %d, error %v, stdout %q after %s; want exit 0, no error, and the answer: the command exited on its own inside its %s budget",
+			r.exit, r.err, r.stdout, elapsed, budget)
+	}
+}
+
+// killPIDFile kills the process named by the PID pidFile holds, left running past a test's own
+// assertions by design (a backgrounded sleep standing in for a command's own lingering child).
+func killPIDFile(t *testing.T, pidFile string) {
+	t.Helper()
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		return
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		return
+	}
+	_ = syscall.Kill(pid, syscall.SIGKILL)
 }
 
 // ReadModelFallback is the JSON's value, on or off, read through the launch as a shell fragment,

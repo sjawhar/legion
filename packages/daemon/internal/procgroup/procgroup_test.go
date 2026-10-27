@@ -1,12 +1,15 @@
 package procgroup
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // Configure's Cancel runs in the race window between ctx firing and the process finishing on its
@@ -17,7 +20,7 @@ import (
 // the kill syscall must be translated, not passed through.
 func TestConfigureCancelMapsESRCHToErrProcessDone(t *testing.T) {
 	cmd := exec.CommandContext(context.Background(), "true")
-	Configure(cmd)
+	killed := Configure(cmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start a trivial command: %v", err)
 	}
@@ -29,6 +32,52 @@ func TestConfigureCancelMapsESRCHToErrProcessDone(t *testing.T) {
 	if err := cmd.Cancel(); !errors.Is(err, os.ErrProcessDone) {
 		t.Fatalf("Cancel() on an already-finished command = %v, want an error equivalent to os.ErrProcessDone", err)
 	}
+	if killed() {
+		t.Error("killed() = true after a Cancel that found nothing left to signal")
+	}
+}
+
+// killed is true when the end of the command's context made Cancel signal its group, and false
+// for a command whose own process exited first, though WaitDelay then held Run open past the
+// context's deadline for a child still holding the command's output pipe. The second case's
+// deadline is half of WaitDelay, so its Run always returns past it: a caller that read a timeout
+// from the deadline having passed would call that command's own exit a timeout.
+func TestKilledIsWhetherTheContextsEndSignaledTheGroup(t *testing.T) {
+	t.Run("cut off by its deadline", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "sleep", "30")
+		killed := Configure(cmd)
+
+		err := cmd.Run()
+
+		if !killed() {
+			t.Errorf("killed() = false for a command its deadline cut off (Run = %v)", err)
+		}
+	})
+	t.Run("exited before its deadline, a child holding its pipe past it", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), WaitDelay/2)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "sh", "-c", "sleep 30 & exit 0")
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		killed := Configure(cmd)
+
+		err := cmd.Run()
+		// The backgrounded sleep is still in the command's own process group, which outlives the
+		// reaped leader while it does.
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+
+		if ctx.Err() == nil {
+			t.Fatalf("Run = %v returned inside the deadline: nothing held the pipe past it, so this run proves nothing", err)
+		}
+		if killed() {
+			t.Errorf("killed() = true for a command that exited on its own before its deadline (Run = %v)", err)
+		}
+		if !errors.Is(err, exec.ErrWaitDelay) {
+			t.Errorf("Run = %v, want exec.ErrWaitDelay: the leader exited 0 and the sleep held the pipe past WaitDelay", err)
+		}
+	})
 }
 
 // Err is the one place both execRunner and the boot gate's probe runner read a command's real

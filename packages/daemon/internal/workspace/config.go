@@ -193,7 +193,7 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 	// leaving Wait (and so Run) never returning. procgroup.Configure's Setpgid plus Cancel signals
 	// the whole process group instead, killing the helper too; after that, Wait normally returns
 	// an ordinary *exec.ExitError for the signaled process.
-	procgroup.Configure(child)
+	killed := procgroup.Configure(child)
 	var stdout, stderr bytes.Buffer
 	child.Stdout = &stdout
 	child.Stderr = &stderr
@@ -203,10 +203,7 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 		return result, runErr
 	}
 	result.ExitCode = child.ProcessState.ExitCode()
-	var exited *exec.ExitError
-	if errors.As(err, &exited) {
-		result.TimedOut = errors.Is(bounded.Err(), context.DeadlineExceeded)
-	}
+	result.TimedOut = killed() && errors.Is(bounded.Err(), context.DeadlineExceeded)
 	return result, nil
 }
 

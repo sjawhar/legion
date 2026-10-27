@@ -809,7 +809,7 @@ func (g pluginGate) run(ctx context.Context, script string, args ...string) (ran
 	cmd.Stdin = g.stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	procgroup.Configure(cmd)
+	killed := procgroup.Configure(cmd)
 	job.attach(cmd)
 	started := time.Now()
 	err := cmd.Run()
@@ -833,7 +833,7 @@ func (g pluginGate) run(ctx context.Context, script string, args ...string) (ran
 		stdout:   stdout.String(),
 		output:   stderr.String() + "\n" + stdout.String(),
 		tail:     tail,
-		timedOut: errors.Is(attempt.Err(), context.DeadlineExceeded),
+		timedOut: killed(),
 		elapsed:  time.Since(started),
 	}, nil
 }

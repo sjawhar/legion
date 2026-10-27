@@ -328,7 +328,7 @@ func envMap(env []string) map[string]string {
 }
 
 // ran is one command's run: its exit code, what it printed, and the error when it could not run
-// to an exit of its own — it never started, or commandTimeout killed it.
+// to an exit of its own — it never started, or its budget killed it.
 type ran struct {
 	exit           int
 	stdout, stderr string
@@ -360,19 +360,24 @@ func (img Image) launch(ctx context.Context, args string) ran {
 // leaves it holding the pipes (procgroup). Its stdin is empty: nothing a check runs may wait on
 // a terminal.
 func (img Image) run(ctx context.Context, name string, args ...string) ran {
-	attempt, cancel := context.WithTimeout(ctx, commandTimeout)
+	return img.runWithin(ctx, commandTimeout, name, args...)
+}
+
+// runWithin is run with budget in place of commandTimeout.
+func (img Image) runWithin(ctx context.Context, budget time.Duration, name string, args ...string) ran {
+	attempt, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	cmd := exec.CommandContext(attempt, name, args...)
 	cmd.Env = img.Env
 	cmd.Dir = img.WorkDir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	procgroup.Configure(cmd)
+	killed := procgroup.Configure(cmd)
 	err := cmd.Run()
 	r := ran{stdout: stdout.String(), stderr: stderr.String()}
 	switch {
-	case ctx.Err() == nil && errors.Is(attempt.Err(), context.DeadlineExceeded):
-		r.err = fmt.Errorf("timed out after %s", commandTimeout)
+	case ctx.Err() == nil && killed():
+		r.err = fmt.Errorf("timed out after %s", budget)
 	case procgroup.Err(err) != nil:
 		r.err = procgroup.Err(err)
 	default:

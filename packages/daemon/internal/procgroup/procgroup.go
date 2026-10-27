@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -34,10 +35,18 @@ const WaitDelay = time.Second
 // reparented, after exec.CommandContext's own kill ends only the direct child — leaving Wait, and
 // so Run, never returning.
 //
+// It returns killed, which reports, once Run or Wait has returned, whether the end of cmd's
+// context made Cancel signal the group. A caller reads a timeout from killed, never from the
+// context's deadline having passed by the time Run returned: once Wait has seen cmd's own process
+// exit, WaitDelay can hold Run open up to WaitDelay longer for a child still holding cmd's pipes,
+// and a deadline that passes then ends nothing. The command exited on its own, and its exit is
+// its answer.
+//
 // Call Configure before setting any of the caller's own SysProcAttr fields (a terminal foreground
 // job's Ctty, for one): it replaces cmd.SysProcAttr whole, and the caller's own fields need to
 // land on the same struct afterward.
-func Configure(cmd *exec.Cmd) {
+func Configure(cmd *exec.Cmd) (killed func() bool) {
+	var signaled atomic.Bool
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
@@ -50,9 +59,11 @@ func Configure(cmd *exec.Cmd) {
 			// the process already finished on its own" — an error equivalent to os.ErrProcessDone.
 			return os.ErrProcessDone
 		}
+		signaled.Store(err == nil)
 		return err
 	}
 	cmd.WaitDelay = WaitDelay
+	return signaled.Load
 }
 
 // Err turns cmd.Run's error into what a caller should propagate: nil whenever cmd has its own

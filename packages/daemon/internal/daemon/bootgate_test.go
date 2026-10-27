@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/procgroup"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 )
@@ -300,7 +301,7 @@ legion="LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://$installed/di
 with_envoy="LEGION_ENVOY_INTERFACE=1\nLEGION_ENVOY_LOADED_FROM=file://$envoy/dist/envoy.js?mtime=1\n"
 case "$step" in
 yes) printf "$legion$with_envoy" >&2; exit 0 ;;
-yes-then-linger) printf "$legion$with_envoy" >&2; sleep 3 & echo $! >"$dir/lingering.pid"; exit 0 ;;
+yes-then-linger) printf "$legion$with_envoy" >&2; sleep 30 & echo $! >"$dir/lingering.pid"; exit 0 ;;
 yes-elsewhere) printf "LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://$HOME/elsewhere/dist/legion.js?mtime=1\nLEGION_PLUGIN_ENVOY_INTERFACE=1\n$with_envoy" >&2; exit 0 ;;
 yes-unowned) printf "LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://$HOME/unowned/legion.js\nLEGION_PLUGIN_ENVOY_INTERFACE=1\n$with_envoy" >&2; exit 0 ;;
 # No pi-envoy; a skill asked for is missing too, so a test can see which refusal wins.
@@ -518,16 +519,21 @@ func TestTheLoadProbeRunsWhatAPaneRunsAndPassesOnTheLoadedMarker(t *testing.T) {
 }
 
 // Exit 0 with LEGION_PLUGIN_LOADED=yes already written is an answer, whatever the launch started
-// that is still running when Oh My Pi itself exits: a process it left behind (sleep 3 &, standing
+// that is still running when Oh My Pi itself exits: a process it left behind (sleep 30 &, standing
 // in for whatever a real tmux pane's launch can leave running) holds the probe's output pipe open
-// past procgroup.WaitDelay, but the probe already answered before that, and must not be retried
-// for it. Attempts is capped at 1 so a reintroduced regression (treating the lingering child as a
-// transient non-answer) fails fast with this test's own message, instead of retrying until go
-// test's own timeout ends the run.
+// past procgroup.WaitDelay, but the probe already answered before that, and must neither be
+// retried for it nor wait for it. Attempts is capped at 1 so a reintroduced regression (treating
+// the lingering child as a transient non-answer) fails fast with this test's own message, instead
+// of retrying until go test's own timeout ends the run; and the child must still be running when
+// the gate returns, so a gate that waited for it to close the pipe fails here too. With one
+// attempt, a budget kill fails the test, so the budget is wide: it only has to outlast the fake's
+// own exit on a loaded box. An exit inside the budget whose pipe is held past it is
+// TestAProbeThatExitsWithinItsBudgetIsNotCutOffByAChildHoldingItsPipePastIt's.
 func TestTheLoadProbePassesOnTheFirstAttemptEvenWhenALingeringChildHoldsTheOutputPipe(t *testing.T) {
 	f := newFakeOmp(t, "yes-then-linger")
 	gate, _ := gateUnder(t, f, contractCurrent)
 	gate.retry.Attempts = 1
+	gate.timeout = 10 * time.Second
 	t.Cleanup(func() { killPIDFile(t, filepath.Join(f.dir, "lingering.pid")) })
 
 	if err := gate.verify(context.Background()); err != nil {
@@ -536,6 +542,38 @@ func TestTheLoadProbePassesOnTheFirstAttemptEvenWhenALingeringChildHoldsTheOutpu
 
 	if n := f.attempts(t); n != 1 {
 		t.Fatalf("Oh My Pi ran %d times, want once: a lingering descendant is not a reason to retry an answer already given", n)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(f.read(t, "lingering.pid")))
+	if err != nil {
+		t.Fatalf("read the lingering child's PID: %v", err)
+	}
+	if err := syscall.Kill(pid, 0); err != nil {
+		t.Errorf("the lingering child (PID %d) was gone when the gate returned (%v): the gate waited for it to close the probe's output pipe", pid, err)
+	}
+}
+
+// A probe that exits on its own inside its budget was not cut off by it, however long
+// procgroup.WaitDelay then holds the run open for a child the probe left holding its output pipe.
+// The budget here is half of WaitDelay, so every such run returns past its deadline: a run that
+// read "timed out" from the deadline having passed would call this answer a budget kill, and a load
+// probe whose Oh My Pi answered yes inside the last WaitDelay of slow_command_timeout_seconds would
+// be retried, and refused once its retries ran out.
+func TestAProbeThatExitsWithinItsBudgetIsNotCutOffByAChildHoldingItsPipePastIt(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "lingering.pid")
+	t.Cleanup(func() { killPIDFile(t, pidFile) })
+	gate := pluginGate{env: map[string]string{"PATH": os.Getenv("PATH")}, workDir: t.TempDir(), timeout: procgroup.WaitDelay / 2}
+
+	r, err := gate.run(context.Background(), `echo answered >&2; sleep 30 & echo $! >"$1"; exit 0`, pidFile)
+
+	if err != nil {
+		t.Fatalf("run = %v, want the probe's own exit", err)
+	}
+	if r.elapsed < gate.timeout {
+		t.Fatalf("the run returned after %s, inside its %s budget: nothing held the pipe past the deadline, so this run proves nothing", r.elapsed, gate.timeout)
+	}
+	if r.timedOut || r.exit != 0 || !strings.Contains(r.stderr, "answered") {
+		t.Errorf("run = exit %d, timed out %t, stderr %q after %s; want exit 0, not timed out, and the answer: the probe exited on its own inside its %s budget",
+			r.exit, r.timedOut, r.stderr, r.elapsed, gate.timeout)
 	}
 }
 
