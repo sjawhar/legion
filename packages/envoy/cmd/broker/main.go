@@ -399,7 +399,8 @@ func main() {
 	}
 	slog.Info("broker listening", "addr", listener.Addr().String())
 
-	enr := &enroll.Service{Store: st, Lease: time.Duration(cfg.LeaseSeconds) * time.Second, Pod: pod, ServiceLogins: cfg.ServiceLogins}
+	lease, sweep := time.Duration(cfg.LeaseSeconds)*time.Second, time.Duration(cfg.SweepSeconds)*time.Second
+	enr := &enroll.Service{Store: st, Lease: lease, Pod: pod, ServiceLogins: cfg.ServiceLogins}
 	enr.Chain = enroll.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	reqMachine := newRequestMachine(cfg, st, current, secretStore, enr.Replay)
 	credentialLifetime := time.Duration(cfg.LauncherCredentialSeconds) * time.Second
@@ -470,7 +471,7 @@ func main() {
 	}
 	sweeper := &requests.Sweeper{
 		Enrollments: enr, Machine: reqMachine, MachineLogins: mach, OAuth: oauthStore,
-		Interval: time.Duration(cfg.SweepSeconds) * time.Second, Wake: waker,
+		Interval: sweep, Wake: waker,
 	}
 	go sweeper.Run(ctx)
 
@@ -518,6 +519,14 @@ func main() {
 	// makes the watchdog's exit line true: a decision that finds it open is one taken before
 	// srv.Serve could have answered a single request.
 	close(serveStarted)
+	// The serving clock starts only now, beside srv.Serve: a beat says a broker is serving, and a
+	// boot that fails above (the OAuth secret, the exchange's issuers, the provider) answers
+	// nothing, so a fleet crash-looping there must read as no broker serving rather than have its
+	// leases that run out swept. It beats on serving, not ctx: this pod still answers renewals
+	// through its drain, so it is still a broker serving, and a gap in the beats there would read
+	// as an outage.
+	clock := &enroll.ServingClock{Enrollments: enr, Interval: sweep, NotServingAfter: config.NotServingSweeps * sweep}
+	go clock.Run(serving)
 	go func() {
 		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("broker: serve", "error", err)

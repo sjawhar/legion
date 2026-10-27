@@ -309,7 +309,7 @@ func TestSessionDelete_WriteThroughRemovesImmediately(t *testing.T) {
 	if err := reg.Put("ses_wd", SessionEntry{Port: 8, MachineID: "m1"}); err != nil {
 		t.Fatalf("put: %v", err)
 	}
-	if err := reg.Delete("ses_wd"); err != nil {
+	if err := reg.Delete(context.Background(), "ses_wd"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	// Write-through delete must remove from cache synchronously.

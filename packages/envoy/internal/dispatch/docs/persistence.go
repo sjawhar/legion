@@ -250,7 +250,7 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	// before its event, as an answer marking this document a copy owed does (owedCopiesOf), and
 	// Ledger.Commit's later recordLatestEditSource waits on nothing.
 	if include && (len(authors) > 0 || lastActor != nil) {
-		if err := markUpdateOwedBy(ctx, tx, room, lastActor); err != nil {
+		if err := markUpdateOwedBy(ctx, tx, room, lastActor, anyPerson(authors)); err != nil {
 			return 0, err
 		}
 	} else if err := markUpdateOwed(ctx, tx, room); err != nil {
