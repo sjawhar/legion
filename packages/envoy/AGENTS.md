@@ -2112,8 +2112,14 @@ from a reuse:
   a file - otherwise met net/http's close of a connection with its body unread as a reset, and
   dropped the answer with it (FinalReview4 L2; the browser suite's 20 MB in-flight upload row).
   Both reads, the drain's and the layer's, are bounded at `bodyDrainLimit` (a minute), a read
-  deadline through `http.ResponseController.SetReadDeadline` lifted when the read ends: a body that
-  stops arriving gets its answer as it stood, with `Connection: close`, and the connection closes.
+  deadline through `http.ResponseController.SetReadDeadline` lifted only once the body has reached
+  its end: a body that stops arriving gets its answer as it stood, with `Connection: close`, and
+  the connection closes as soon as the answer is out. A read that failed, or stopped at the limit,
+  leaves the deadline in place, because net/http reads on after the answer, up to 256 KiB more of
+  a `Content-Length` body that leaves that little unread (its discard before the answer's header,
+  and its `Close` of the body once the handler returns): lifted, those reads let a stalled 100 KB
+  body hold its connection open after its answer, and withheld the answer to one that stalled just
+  past the limit (`TestADrainStopsWaitingForABodyThatStalls`).
   A body past the limit is answered as the limit answers it, in place of the early answer and
   without its `Idempotency-Key` and `Retry-After` (`413 CAP_EXCEEDED` on the three upload routes,
   `413 REQUEST_TOO_LARGE` on every other), and the connection closes, so a client that sends past

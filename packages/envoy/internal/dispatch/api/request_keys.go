@@ -908,7 +908,8 @@ func answerHeldKey(w http.ResponseWriter, r *http.Request, key string, held held
 // The body is read for at most drainTime (readFor): one that stops arriving is answered 409
 // KEY_IN_FLIGHT, which is what the key said, and the connection closes after it. A body past the
 // route's limit is answered as its route answers one (bodyTooLarge), unkeyed, as a request whose
-// body is past the limit runs unkeyed.
+// body is past the limit runs unkeyed. Either keeps the read's deadline for net/http's own reads
+// after the answer; only a body read to its end lifts it.
 func (s *server) answerDrainedRepeat(
 	w http.ResponseWriter, r *http.Request, method, pattern string, wildcards []string, login, key string, replay keyedReplay,
 ) {
@@ -922,7 +923,6 @@ func (s *server) answerDrainedRepeat(
 	writeRequestFields(digest, r, method, pattern, wildcards)
 	lift := s.readFor(w)
 	size, err := digestKeyedBody(r.Body, digest, r.Header.Get("Content-Type"), limit)
-	lift()
 	switch {
 	case err != nil:
 		w.Header().Set("Connection", "close")
@@ -934,6 +934,7 @@ func (s *server) answerDrainedRepeat(
 		writeError(w, tooLarge.code, tooLarge.status, tooLarge.message)
 		return
 	}
+	lift()
 	w.Header().Set(contracts.IdempotencyKeyHeader, key)
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), keyedBookkeeping)
 	defer cancel()

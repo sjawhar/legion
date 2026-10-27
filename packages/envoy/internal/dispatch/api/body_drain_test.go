@@ -92,11 +92,11 @@ func (b *heldBackBody) answer() (*http.Response, []byte) {
 	return response, answer
 }
 
-// closedByServer reports whether the server closed the connection after its answer: the next read
-// meets the connection's end.
-func (b *heldBackBody) closedByServer() bool {
+// closedByServer reports whether the server closed the connection within wait of the call: the
+// next read meets the connection's end.
+func (b *heldBackBody) closedByServer(wait time.Duration) bool {
 	b.t.Helper()
-	if err := b.connection.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err := b.connection.SetReadDeadline(time.Now().Add(wait)); err != nil {
 		b.t.Fatal(err)
 	}
 	_, err := b.reader.ReadByte()
@@ -511,45 +511,99 @@ func TestARepeatFoundInFlightIsJudgedOnceItsBodyHasArrived(t *testing.T) {
 	}
 }
 
-// INFRA-258 (FinalReview5 L3, gate-fixes S21). A drain is bounded in time as well as in bytes: a
-// body that stops arriving is waited for at most bodyDrainLimit, and then the answer goes out as it
-// stood, with the connection closed after it, rather than the request held open for as long as its
-// client cares to. Both drains: the one every early answer waits behind (drainBeforeAnswer), here
-// an upload to a closed issue, and the keyed layer's reading of a repeat found in flight.
+// INFRA-258. A drain is bounded in time as well as in bytes: a body that stops arriving is waited
+// for at most bodyDrainLimit, and then the answer goes out as it stood, with the connection closed
+// after it, rather than the request held open for as long as its client cares to. Both drains: the
+// one every early answer waits behind (drainBeforeAnswer), here an upload to a closed issue and a
+// message pressed by another login, and the keyed layer's reading of a repeat found in flight.
+//
+// The drain's deadline stays on the connection once a drain ends short of the body's end, whether
+// its read failed or the body ran past the route's limit: net/http itself reads on after the
+// answer, up to 256 KiB more of a body whose Content-Length leaves that little unread (its discard
+// before the answer's header, and its Close of the body once the handler returns), and a deadline
+// lifted there let a client that stalled hold the connection open after its answer - with the
+// answer withheld too, where the body ran past the limit. So a 100 KB body that stalls is closed as
+// soon as its answer is out, and a body that stalls just past the limit is answered 413 within the
+// deadline and closed after it, as a 4 MiB body, of which net/http reads nothing more, always was.
 func TestADrainStopsWaitingForABodyThatStalls(t *testing.T) {
+	const drainLimit = time.Second
 	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{files: filestest.NewMemory()})
-	served.drainReadLimit = time.Second
+	served.drainReadLimit = drainLimit
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 	open := createArtifactIssue(t, handler)
 	closed := createClosedIssue(t, handler)
 	toOpen := "/api/v1/issues/" + open.Key + "/artifacts"
+	toClosed := "/api/v1/issues/" + closed.Key + "/artifacts"
+	message := "/api/v1/issues/" + open.Key + "/messages"
 	holdKeyInFlight(t, database, "held", toOpen, "digest")
+	holdKeyInFlight(t, database, "held-message", message, "digest")
+	const multipart, jsonBody = "multipart/form-data; boundary=x", "application/json"
+	const jsonLimit = int(maxJSONRequestBytes)
+	opening := []byte("--x\r\n")
+	pastTheLimit := bytes.Repeat([]byte("a"), jsonLimit+1)
 	for _, stalled := range []struct {
-		name, target, key, code string
+		name, target, contentType, key, login string
+		size                                  int
+		sent                                  []byte
+		status                                int
+		code                                  string
 	}{
-		{name: "an upload to a closed issue", target: "/api/v1/issues/" + closed.Key + "/artifacts", code: "ISSUE_CLOSED"},
-		{name: "a repeat whose first upload still runs", target: toOpen, key: "held", code: contracts.IdempotencyKeyInFlight},
+		{
+			name: "a 4 MiB upload to a closed issue", target: toClosed, contentType: multipart,
+			size: 4 << 20, sent: opening, status: http.StatusConflict, code: "ISSUE_CLOSED",
+		},
+		{
+			name: "a 100 KB upload to a closed issue", target: toClosed, contentType: multipart,
+			size: 100_000, sent: opening, status: http.StatusConflict, code: "ISSUE_CLOSED",
+		},
+		{
+			name: "a 4 MiB repeat whose first upload still runs", target: toOpen, contentType: multipart, key: "held",
+			size: 4 << 20, sent: opening, status: http.StatusConflict, code: contracts.IdempotencyKeyInFlight,
+		},
+		{
+			name: "a 100 KB repeat whose first upload still runs", target: toOpen, contentType: multipart, key: "held",
+			size: 100_000, sent: opening, status: http.StatusConflict, code: contracts.IdempotencyKeyInFlight,
+		},
+		{
+			name: "a message pressed by another login that stalls past the JSON limit", target: message, contentType: jsonBody,
+			login: "bob", size: jsonLimit + 100_000, sent: pastTheLimit,
+			status: http.StatusRequestEntityTooLarge, code: "REQUEST_TOO_LARGE",
+		},
+		{
+			name: "a repeat of a message whose first still runs that stalls past the JSON limit", target: message,
+			contentType: jsonBody, key: "held-message", size: jsonLimit + 100_000, sent: pastTheLimit,
+			status: http.StatusRequestEntityTooLarge, code: "REQUEST_TOO_LARGE",
+		},
 	} {
 		t.Run(stalled.name, func(t *testing.T) {
 			header := http.Header{}
-			header.Set("Content-Type", "multipart/form-data; boundary=x")
+			header.Set("Content-Type", stalled.contentType)
 			header.Set("X-Dispatch-User", "alice")
 			if stalled.key != "" {
 				header.Set(contracts.IdempotencyKeyHeader, stalled.key)
 			}
+			if stalled.login != "" {
+				header.Set(contracts.DispatchLoginHeader, stalled.login)
+			}
 			started := time.Now()
-			body := sendPartOfBody(t, server.Listener.Addr().String(), stalled.target, header, 4<<20, []byte("--x\r\n"))
+			body := sendPartOfBody(t, server.Listener.Addr().String(), stalled.target, header, stalled.size, stalled.sent)
 			response, answer := body.answer()
 			elapsed := time.Since(started)
-			if response.StatusCode != http.StatusConflict || refusalCode(answer) != stalled.code {
-				t.Fatalf("status=%d body=%s, want 409 %s", response.StatusCode, answer, stalled.code)
+			if response.StatusCode != stalled.status || refusalCode(answer) != stalled.code {
+				t.Fatalf("status=%d body=%s, want %d %s", response.StatusCode, answer, stalled.status, stalled.code)
 			}
-			if elapsed < time.Second || elapsed > 10*time.Second {
+			if elapsed > 10*time.Second {
 				t.Fatalf("answered %v after the body stalled, want once the drain's second was up", elapsed)
 			}
-			if !response.Close || !body.closedByServer() {
-				t.Fatalf("the answer to a stalled body left the connection open (Connection: %q)", response.Header.Get("Connection"))
+			if stalled.status == http.StatusConflict && elapsed < drainLimit {
+				t.Fatalf("answered %v after the body stalled, want once the drain's second was up", elapsed)
+			}
+			if !response.Close {
+				t.Fatal("the answer to a stalled body did not say Connection: close")
+			}
+			if !body.closedByServer(drainLimit) {
+				t.Fatalf("the connection was still open %v after the answer to a stalled %d-byte body", drainLimit, stalled.size)
 			}
 		})
 	}
@@ -604,7 +658,7 @@ func TestAnEarlyAnswerToAClientWaitingToContinueAsksForNoBody(t *testing.T) {
 			if response.StatusCode != http.StatusConflict || refusalCode(answer) != early.code {
 				t.Fatalf("status=%d body=%s, want 409 %s", response.StatusCode, answer, early.code)
 			}
-			if !response.Close || !body.closedByServer() {
+			if !response.Close || !body.closedByServer(5*time.Second) {
 				t.Fatalf("the refusal left open a connection whose body was never sent (Connection: %q)", response.Header.Get("Connection"))
 			}
 		})

@@ -37,11 +37,18 @@ func (s *server) drainTime() time.Duration {
 
 // readFor bounds a drain of the body of the request w answers to drainTime from now, a read
 // deadline on its connection (http.ResponseController.SetReadDeadline), past which a read fails
-// and the drain ends; it answers what lifts the bound once the drain is done. Lifted, the body has
-// no deadline, which is what a request's body has on this server, whose http.Server sets no
-// ReadTimeout (cmd/dispatch); a deadline left in place would end the read net/http keeps on an idle
-// connection once the body has ended, and cancel the request's context under its answer. A writer
-// with no connection of its own (a test's recorder) bounds nothing.
+// and the drain ends; it answers what lifts the bound, which the drain calls only once the body has
+// reached its end. Lifted, the connection has no read deadline, which is what it has between
+// requests on this server, whose http.Server sets no ReadTimeout (cmd/dispatch): a deadline left in
+// place there would end the read net/http keeps on an idle connection once the body has ended, and
+// cancel the request's context under its answer. A drain that ends short of the body's end - its
+// read failed, or the body ran past the route's limit - leaves the deadline in place, since net/http
+// reads on after the answer itself: it discards up to 256 KiB more of a body whose Content-Length
+// leaves that little unread before it writes the answer's header, and again when it closes the body
+// once the handler returns. With the deadline those reads end where the drain's did and the
+// connection closes; lifted, a client that stopped sending would hold the connection open after its
+// answer, and withhold the answer itself where its body ran past the limit. A writer with no
+// connection of its own (a test's recorder) bounds nothing.
 func (s *server) readFor(w http.ResponseWriter) (lift func()) {
 	controller := http.NewResponseController(w)
 	if err := controller.SetReadDeadline(time.Now().Add(s.drainTime())); err != nil {
@@ -143,7 +150,8 @@ type drainingWriter struct {
 // begin drains what is left of the body, once, before the first byte of the answer, whose status
 // is status. A read that fails - the drain's time up, the client gone, a connection that broke -
 // leaves the answer to be written as it was, and the connection to close after it, the rest of the
-// body unread: net/http would otherwise read on for it once the answer is written.
+// body unread. Only a body that ended lifts the drain's deadline (readFor); one that failed or ran
+// past the limit keeps it for net/http's own reads after the answer.
 func (w *drainingWriter) begin(status int) {
 	if w.begun {
 		return
@@ -155,10 +163,10 @@ func (w *drainingWriter) begin(status int) {
 	}
 	lift := w.readFor(w.ResponseWriter)
 	_, err := io.CopyN(io.Discard, body, w.limit-body.read+1)
-	lift()
 	switch {
 	case errors.Is(err, io.EOF):
 		// The body ended inside the limit: the answer stands.
+		lift()
 		return
 	case err != nil:
 		w.ResponseWriter.Header().Set("Connection", "close")

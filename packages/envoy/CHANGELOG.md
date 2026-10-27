@@ -53,8 +53,9 @@
   answer, met the closed connection as a reset and dropped the answer. A body past the limit is
   answered `413` in that answer's place and the connection closes, except a `401`, which stands.
   Both reads of a body Dispatch does not keep wait at most a minute: a body that stops arriving is
-  given its answer with `Connection: close`. An `Expect: 100-continue` request answered early is
-  never asked for its body. A
+  given its answer with `Connection: close`, and the connection closes as soon as that answer is
+  out, however little of the body was left to come. An `Expect: 100-continue` request answered
+  early is never asked for its body. A
   repeat whose first request committed a write but whose answer was lost (its lease lapsed, or it
   ended in a 5xx or a panic after committing) is `409 KEY_COMMITTED`, with no `Retry-After`: the
   write landed and is not run again, and the client reads what it wrote; every transaction a keyed
