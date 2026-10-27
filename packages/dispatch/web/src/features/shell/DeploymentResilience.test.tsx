@@ -6,6 +6,7 @@ import {
   DeploymentResilience,
   importWhenOnline,
   installChunkFailureRecovery,
+  spendChunkReload,
 } from "./DeploymentResilience";
 
 function withOnLine<T>(onLine: boolean, run: () => Promise<T>): Promise<T> {
@@ -44,6 +45,14 @@ afterEach(() => {
   recoveryUninstalls.clear();
 });
 
+/** The tab's recorded recovery reloads, under the key `web/index.html`'s inline script shares. */
+function storedChunkReloads(): unknown {
+  const value = window.sessionStorage.getItem("dispatch.chunk-reloads");
+  return value === null ? null : JSON.parse(value);
+}
+
+const minute = 60_000;
+
 test("warms the block schema and headless Markdown renderer once after the first paint", async () => {
   const warm = spyOn(markdownEngine, "warmMarkdownRenderer").mockResolvedValue(undefined);
   const view = render(<DeploymentResilience />);
@@ -56,25 +65,98 @@ test("warms the block schema and headless Markdown renderer once after the first
   }
 });
 
-test("a Vite preload error reloads once per session and always reaches its importer", async () => {
+test("Vite preload errors reload the page three times in five minutes, then not, and always reach their importer", () => {
   window.sessionStorage.clear();
   installChunkFailureRecoveryForTest();
+  const start = 1_800_000_000_000;
+  let now = start;
+  const dateNow = spyOn(Date, "now").mockImplementation(() => now);
   const reload = spyOn(window.location, "reload").mockImplementation(() => undefined);
-  const view = render(<DeploymentResilience />);
-  const first = new Event("vite:preloadError", { cancelable: true });
-  const second = new Event("vite:preloadError", { cancelable: true });
+  const failAt = (time: number) => {
+    now = time;
+    const failure = new Event("vite:preloadError", { cancelable: true });
+    window.dispatchEvent(failure);
+    return failure.defaultPrevented;
+  };
 
   try {
-    window.dispatchEvent(first);
-    window.dispatchEvent(second);
+    const prevented = [
+      failAt(start),
+      failAt(start + minute),
+      failAt(start + 2 * minute),
+      failAt(start + 4 * minute),
+    ];
 
-    expect(first.defaultPrevented).toBe(false);
-    expect(second.defaultPrevented).toBe(false);
-    expect(reload).toHaveBeenCalledTimes(1);
-    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBe("true");
+    expect(prevented).toEqual([false, false, false, false]);
+    expect(reload).toHaveBeenCalledTimes(3);
+    expect(storedChunkReloads()).toEqual([start, start + minute, start + 2 * minute]);
   } finally {
     reload.mockRestore();
-    view.unmount();
+    dateNow.mockRestore();
+    window.sessionStorage.clear();
+  }
+});
+
+test("a failure after the oldest recovery reload has left the five minutes reloads again", () => {
+  window.sessionStorage.clear();
+  const start = 1_800_000_000_000;
+
+  try {
+    expect([
+      spendChunkReload(start),
+      spendChunkReload(start + minute),
+      spendChunkReload(start + 2 * minute),
+      spendChunkReload(start + 5 * minute - 1),
+    ]).toEqual([true, true, true, false]);
+    expect(storedChunkReloads()).toEqual([start, start + minute, start + 2 * minute]);
+
+    // Five minutes after the first reload it has left the window, and only the other two count.
+    expect(spendChunkReload(start + 5 * minute)).toBe(true);
+    expect(storedChunkReloads()).toEqual([start + minute, start + 2 * minute, start + 5 * minute]);
+    expect(spendChunkReload(start + 5 * minute + 1)).toBe(false);
+  } finally {
+    window.sessionStorage.clear();
+  }
+});
+
+test("a stored value that does not parse as a list of times reads as no reloads and is overwritten", () => {
+  const now = 1_800_000_000_000;
+  const stored = ["true", "not json", "{}", '"3"', `[null, "x", ${now}]`].map((value) => {
+    window.sessionStorage.clear();
+    window.sessionStorage.setItem("dispatch.chunk-reloads", value);
+    return { reloads: spendChunkReload(now), value, after: storedChunkReloads() };
+  });
+  window.sessionStorage.clear();
+
+  expect(stored).toEqual([
+    { reloads: true, value: "true", after: [now] },
+    { reloads: true, value: "not json", after: [now] },
+    { reloads: true, value: "{}", after: [now] },
+    { reloads: true, value: '"3"', after: [now] },
+    // The one time the list holds counts; the entries that are not times are dropped.
+    { reloads: true, value: `[null, "x", ${now}]`, after: [now, now] },
+  ]);
+});
+
+test("the once-only key of earlier builds is neither read nor written", () => {
+  window.sessionStorage.clear();
+  // A page of an earlier build in this tab already spent its one reload.
+  window.sessionStorage.setItem("dispatch.reloaded-for-chunk", "true");
+  installChunkFailureRecoveryForTest();
+  const reload = spyOn(window.location, "reload").mockImplementation(() => undefined);
+
+  try {
+    window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
+
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBe("true");
+    // Nor written: a reload with the old key absent leaves it absent.
+    window.sessionStorage.removeItem("dispatch.reloaded-for-chunk");
+    window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
+    expect(reload).toHaveBeenCalledTimes(2);
+    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBeNull();
+  } finally {
+    reload.mockRestore();
     window.sessionStorage.clear();
   }
 });
@@ -92,7 +174,7 @@ test("a chunk that fails while the page is being left does not reload over the n
 
     expect(whileLeaving.defaultPrevented).toBe(false);
     expect(reload).not.toHaveBeenCalled();
-    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBeNull();
+    expect(storedChunkReloads()).toBeNull();
 
     // A page the back/forward cache restores is shown again, and its own failures reload it.
     window.dispatchEvent(new Event("pageshow"));
@@ -100,7 +182,7 @@ test("a chunk that fails while the page is being left does not reload over the n
 
     expect(afterReturning.defaultPrevented).toBe(false);
     expect(reload).toHaveBeenCalledTimes(1);
-    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBe("true");
+    expect(storedChunkReloads()).toHaveLength(1);
   } finally {
     window.dispatchEvent(new Event("pageshow"));
     reload.mockRestore();
@@ -123,7 +205,7 @@ test("a navigation to another document marks the page as left where the browser 
     navigate(false);
     failChunk();
     expect(reload).not.toHaveBeenCalled();
-    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBeNull();
+    expect(storedChunkReloads()).toBeNull();
 
     // A route change inside the app stays in this document, so the page's failures reload it.
     window.dispatchEvent(new Event("pageshow"));
@@ -152,7 +234,7 @@ test("a link answered with a download does not mark the page as left", () => {
     navigation.dispatchEvent(navigateEvent(false, ""));
     window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
     expect(reload).toHaveBeenCalledTimes(1);
-    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBe("true");
+    expect(storedChunkReloads()).toHaveLength(1);
   } finally {
     window.dispatchEvent(new Event("pageshow"));
     Reflect.deleteProperty(window, "navigation");
@@ -177,7 +259,7 @@ test("a page shown after a download marks a later navigation to that URL as leav
     window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
 
     expect(reload).not.toHaveBeenCalled();
-    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBeNull();
+    expect(storedChunkReloads()).toBeNull();
   } finally {
     window.dispatchEvent(new Event("pageshow"));
     Reflect.deleteProperty(window, "navigation");
@@ -289,7 +371,7 @@ test("a chunk that fails while the browser is offline is not a stale deployment:
 
     expect(failure.defaultPrevented).toBe(false);
     expect(reload).not.toHaveBeenCalled();
-    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBeNull();
+    expect(storedChunkReloads()).toBeNull();
   } finally {
     reload.mockRestore();
     Reflect.deleteProperty(navigator, "onLine");

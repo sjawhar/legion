@@ -78,7 +78,7 @@ test("signing out revokes the session on the server and returns to the sign-in p
   await context.close();
 });
 
-test("a page chunk that fails again after the session's one reload shows the failed download", async ({
+test("a page chunk that fails on every load reloads three times and then shows the failed download", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -95,8 +95,9 @@ test("a page chunk that fails again after the session's one reload shows the fai
 
   try {
     await page.goto(`/issues/${issue.key}`);
-    // The first failure reloads the page once; the second, with that reload spent, stays.
-    await expect.poll(() => loads).toBe(2);
+    // Each of the first three failures reloads the page; the fourth, with the tab's three reloads
+    // of the last five minutes spent, stays.
+    await expect.poll(() => loads).toBe(4);
     const box = page.getByTestId("error-boundary");
     await expect(box).toContainText("Failed to fetch dynamically imported module");
     await expect(box).not.toContainText("Cannot read properties of undefined");
@@ -211,14 +212,14 @@ test("a chunk that fails after a Download link was followed reloads the page", a
   }
 });
 
-/** The entry chunk the page at `/` names: the module script Vite writes into index.html. */
-async function entryChunkPath(): Promise<string> {
+/** The path of the asset the page at `/` names in `pattern`'s first group. */
+async function pageAssetPath(pattern: RegExp, what: string): Promise<string> {
   const html = await (await fetch(new URL("/", baseUrl))).text();
-  const entry = /<script\b[^>]*\btype="module"[^>]*\bsrc="([^"]+)"/u.exec(html)?.[1];
-  if (entry === undefined) {
-    throw new Error(`the page names no module script: ${html}`);
+  const asset = pattern.exec(html)?.[1];
+  if (asset === undefined) {
+    throw new Error(`the page names no ${what}: ${html}`);
   }
-  return new URL(entry, baseUrl).pathname;
+  return new URL(asset, baseUrl).pathname;
 }
 
 /**
@@ -230,7 +231,11 @@ async function missEntryChunk(
   page: Page,
   missing: (request: number) => boolean | Promise<boolean>
 ) {
-  const entry = await entryChunkPath();
+  // The entry chunk: the module script Vite writes into index.html.
+  const entry = await pageAssetPath(
+    /<script\b[^>]*\btype="module"[^>]*\bsrc="([^"]+)"/u,
+    "module script"
+  );
   const counts = { documents: 0, entryRequests: 0 };
   page.on("request", (request) => {
     if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
@@ -275,9 +280,9 @@ test("a page whose entry chunk is missing once reloads and renders the app", asy
   }
 });
 
-// The entry's reload is the session's one reload, so a page whose entry chunk never loads reloads
-// once and then stays blank rather than reloading for ever.
-test("a page whose entry chunk is missing on every load reloads once and stops", async ({
+// The entry's reloads come from the tab's budget, so a page whose entry chunk never loads reloads
+// three times and then stays blank rather than reloading for ever.
+test("a page whose entry chunk is missing on every load reloads three times and stops", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium", "the recovery does not depend on the layout");
@@ -287,19 +292,19 @@ test("a page whose entry chunk is missing on every load reloads once and stops",
 
   try {
     await page.goto("/", { waitUntil: "commit" });
-    await expect.poll(() => counts.entryRequests).toBe(2);
-    // Long enough for a reload the second miss started to have asked for the page again.
+    await expect.poll(() => counts.entryRequests).toBe(4);
+    // Long enough for a reload the fourth miss started to have asked for the page again.
     await page.waitForTimeout(1_000);
-    expect(counts).toEqual({ documents: 2, entryRequests: 2 });
+    expect(counts).toEqual({ documents: 4, entryRequests: 4 });
     await expect(page.locator("#root")).toBeEmpty();
   } finally {
     await context.close();
   }
 });
 
-// One budget for the whole session: a page chunk's failure that already reloaded the page leaves
-// none for the entry chunk, so the two recoveries cannot hand the page back and forth.
-test("a missing entry chunk after a page chunk spent the session's reload stays", async ({
+// One budget for the whole tab: a page chunk's failures that already reloaded the page three times
+// leave none for the entry chunk, so the two recoveries cannot hand the page back and forth.
+test("a missing entry chunk after a page chunk spent the tab's reloads stays", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium", "the recovery does not depend on the layout");
@@ -313,17 +318,169 @@ test("a missing entry chunk after a page chunk spent the session's reload stays"
 
   try {
     await page.goto(`/issues/${issue.key}`, { waitUntil: "commit" });
-    // The issue page's code failed, reloaded the page once, and failed again.
-    await expect.poll(() => ({ ...counts })).toEqual({ documents: 2, entryRequests: 2 });
+    // The issue page's code failed, reloaded the page three times, and failed again.
+    await expect.poll(() => ({ ...counts })).toEqual({ documents: 4, entryRequests: 4 });
     await expect(page.getByTestId("error-boundary")).toBeVisible();
 
     entryMissing = true;
     await page.reload({ waitUntil: "commit" });
-    await expect.poll(() => counts.entryRequests).toBe(3);
+    await expect.poll(() => counts.entryRequests).toBe(5);
     // Long enough for a reload the miss started to have asked for the page again.
     await page.waitForTimeout(1_000);
-    expect(counts).toEqual({ documents: 3, entryRequests: 3 });
+    expect(counts).toEqual({ documents: 5, entryRequests: 5 });
     await expect(page.locator("#root")).toBeEmpty();
+  } finally {
+    await context.close();
+  }
+});
+
+// The inline script and the bundle's own handler spend one budget between them: a page whose entry
+// chunk is missing twice reloads twice, and its route's chunk failing after that reloads it once
+// more and then stays. The broadcasts page's chunk imports nothing the entry does not already, so
+// Vite inserts no preload link for it and only the bundle's handler sees it fail.
+test("an entry chunk's reloads and a page chunk's share the tab's three", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the recovery does not depend on the layout");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  await page.route(/\/assets\/BroadcastsPage-[^/]+\.js$/u, (route) => route.abort());
+  const counts = await missEntryChunk(page, (request) => request <= 2);
+
+  try {
+    await page.goto("/agents/broadcasts", { waitUntil: "commit" });
+    await expect.poll(() => ({ ...counts })).toEqual({ documents: 4, entryRequests: 4 });
+    await expect(page.getByTestId("error-boundary")).toContainText(
+      "Failed to fetch dynamically imported module"
+    );
+    // Long enough for a reload the last failure started to have asked for the page again.
+    await page.waitForTimeout(1_000);
+    expect(counts).toEqual({ documents: 4, entryRequests: 4 });
+  } finally {
+    await context.close();
+  }
+});
+
+// The main stylesheet is linked after the inline recovery script, so one a server that never built
+// it fails to serve reloads the page as a missing entry chunk does, rather than leaving the app
+// running unstyled.
+test("a page whose main stylesheet fails once reloads and renders styled", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the recovery does not depend on the layout");
+  const stylesheet = await pageAssetPath(
+    /<link\b[^>]*\brel="stylesheet"[^>]*\bhref="([^"]+)"/u,
+    "stylesheet"
+  );
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  const counts = await missEntryChunk(page, () => false);
+  let stylesheetRequests = 0;
+  await page.route(
+    (url) => url.pathname === stylesheet,
+    async (route) => {
+      stylesheetRequests += 1;
+      if (stylesheetRequests === 1) {
+        await route.abort();
+        return;
+      }
+      await route.continue();
+    }
+  );
+
+  try {
+    await page.goto("/", { waitUntil: "commit" });
+    await expect(page.getByText("Signed in as alice")).toBeVisible();
+    // The stylesheet's preflight takes away the browser's own 8px margin around the body.
+    await expect
+      .poll(() => page.evaluate(() => getComputedStyle(document.body).margin))
+      .toBe("0px");
+    expect({ ...counts, stylesheetRequests }).toEqual({
+      documents: 2,
+      entryRequests: 2,
+      stylesheetRequests: 2,
+    });
+  } finally {
+    await context.close();
+  }
+});
+
+/** Records reloads `minutesAgo` by the page's clock as the tab's recovery reloads, and returns
+ *  their times. */
+function recordTabReloads(page: Page, minutesAgo: number[]): Promise<number[]> {
+  return page.evaluate((ages) => {
+    const now = Date.now();
+    const times = ages.map((age) => now - age * 60_000);
+    window.sessionStorage.setItem("dispatch.chunk-reloads", JSON.stringify(times));
+    return times;
+  }, minutesAgo);
+}
+
+/** The tab's recorded recovery reloads. */
+function tabReloads(page: Page): Promise<number[] | null> {
+  return page.evaluate(() =>
+    JSON.parse(window.sessionStorage.getItem("dispatch.chunk-reloads") ?? "null")
+  );
+}
+
+/** Adds a script of this build that the server never had, as a replaced deployment's would fail. */
+async function failBuildScript(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const script = document.createElement("script");
+    script.src = "/assets/index-missing.js";
+    document.head.append(script);
+  });
+}
+
+// The budget renews: a reload counts against the tab for five minutes, so a tab that spent all
+// three long ago recovers from the next deployment. This tab also holds the once-only key an
+// earlier build's page spends in the same tab, which this build neither reads nor writes.
+test("a tab whose three reloads are older than five minutes reloads for a new failure", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the recovery does not depend on the layout");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  const counts = await missEntryChunk(page, () => false);
+
+  try {
+    await page.goto("/");
+    await expect(page.getByText("Signed in as alice")).toBeVisible();
+    const spent = await recordTabReloads(page, [8, 7, 6]);
+    await page.evaluate(() => window.sessionStorage.setItem("dispatch.reloaded-for-chunk", "true"));
+
+    await failBuildScript(page);
+    await expect.poll(() => counts.documents).toBe(2);
+    await expect(page.getByText("Signed in as alice")).toBeVisible();
+    // The three old reloads have left the window; the new one is all the tab now holds.
+    const reloads = await tabReloads(page);
+    expect(reloads).toHaveLength(1);
+    expect(reloads?.[0]).toBeGreaterThan(Math.max(...spent));
+  } finally {
+    await context.close();
+  }
+});
+
+// Three reloads in the last five minutes spend the tab's budget, whatever the failure: a page
+// whose assets keep failing stops reloading rather than reloading for ever.
+test("a tab that reloaded three times in the last five minutes does not reload for a new failure", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the recovery does not depend on the layout");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  const counts = await missEntryChunk(page, () => false);
+
+  try {
+    await page.goto("/");
+    await expect(page.getByText("Signed in as alice")).toBeVisible();
+    const spent = await recordTabReloads(page, [3, 2, 1]);
+
+    await failBuildScript(page);
+    // Long enough for a reload the failure started to have asked for the page again.
+    await page.waitForTimeout(1_000);
+    expect(counts).toEqual({ documents: 1, entryRequests: 1 });
+    expect(await tabReloads(page)).toEqual(spent);
   } finally {
     await context.close();
   }
@@ -400,9 +557,9 @@ for (const leaving of ["beforeunload", "pagehide"]) {
   });
 }
 
-// The recovery is for this build's own scripts. A script another origin serves (a browser
+// The recovery is for this build's own assets. A script another origin serves (a browser
 // extension's, or a third party's) is not this build's, whatever its path, so its failure to load
-// neither reloads a page the reader is using nor spends the session's one reload.
+// neither reloads a page the reader is using nor spends the tab's budget.
 test("a script from another origin that fails under an /assets/ path leaves the page alone", async ({
   browser,
 }, testInfo) => {
@@ -429,9 +586,7 @@ test("a script from another origin that fails under an /assets/ path leaves the 
     // Long enough for a reload the failure started to have asked for the page again.
     await page.waitForTimeout(1_000);
     expect(counts).toEqual({ documents: 1, entryRequests: 1 });
-    expect(
-      await page.evaluate(() => window.sessionStorage.getItem("dispatch.reloaded-for-chunk"))
-    ).toBeNull();
+    expect(await tabReloads(page)).toBeNull();
   } finally {
     await context.close();
   }
