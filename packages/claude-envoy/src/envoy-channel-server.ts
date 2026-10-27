@@ -1,4 +1,4 @@
-import { unwatchFile, watchFile } from "node:fs"
+import { type Stats, unwatchFile, watchFile } from "node:fs"
 import { rm } from "node:fs/promises"
 import {
   agentSubject,
@@ -913,8 +913,17 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   // at the next heartbeat minutes later. The hook replaces the file by rename,
   // which a directory watch reports only as its temporary file, so the file is
   // polled by path; the first tick picks up a file written before polling began.
+  //
+  // `watchFile` also calls the listener, with every stat field zeroed, when the file
+  // is missing as polling begins and when it is removed. A missing file names no id
+  // to adopt, and the request below already covers startup: a tick there would be a
+  // second one for the same moment, and in an outage one more attempt than the
+  // bounded retry allows.
+  const handoffFileChanged = (current: Stats): void => {
+    if (current.ino !== 0) requestHeartbeat()
+  }
   if (handoffFile !== undefined) {
-    watchFile(handoffFile, { interval: HANDOFF_POLL_MS }, requestHeartbeat)
+    watchFile(handoffFile, { interval: HANDOFF_POLL_MS }, handoffFileChanged)
     requestHeartbeat()
   }
 
@@ -957,7 +966,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       if (shuttingDown) return
       shuttingDown = true
       clearInterval(heartbeatTimer)
-      if (handoffFile !== undefined) unwatchFile(handoffFile, requestHeartbeat)
+      if (handoffFile !== undefined) unwatchFile(handoffFile, handoffFileChanged)
       await forwarder.close()
       await serialized(() => options.client.unregisterSession(identity.id)).catch(
         (error: unknown) => {

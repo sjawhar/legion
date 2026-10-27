@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import { rm } from "node:fs/promises"
 import { EnvoyApiError } from "@legion/envoy-client/transport"
 import { startChannelSession } from "../src/envoy-channel-server"
-import { SessionIdentity, sessionHandoffFile, writeSessionHandoff } from "../src/session-identity"
+import { SessionIdentity } from "../src/session-identity"
 import {
   directSubject,
   FakeNats,
@@ -291,11 +291,10 @@ test("a persistent reconciliation failure retries once immediately, then waits f
       throw new Error("listener degraded")
     },
   })
-  // A handoff file naming the session's own current id triggers one heartbeat at
-  // startup (adoptHandoff no-ops, `next === identity.id`) without waiting out the
-  // 10 s interval below, which otherwise contributes no tick in this test's window.
-  const handoff = sessionHandoffFile(stateDirectory, 991)
-  await writeSessionHandoff(handoff, "ses_claude")
+  // A handoff pid makes startup request one heartbeat without waiting out the 10 s
+  // interval below, which otherwise contributes no tick in this test's window. No
+  // handoff file exists, so that tick's adoptHandoff no-ops, and the watcher's
+  // zeroed-stat callback for the missing file must not request a second tick.
   const session = await startChannelSession(
     sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
       connection: nats,
@@ -307,7 +306,7 @@ test("a persistent reconciliation failure retries once immediately, then waits f
 
   try {
     // One at startup (`syncRegisteredInterests`, swallowed there), one from the
-    // heartbeat the handoff poke triggers, one bounded immediate retry (N2) — then
+    // heartbeat the handoff pid requests, one bounded immediate retry (N2) — then
     // the outage guard must hold with no interval tick due for 10 s.
     await waitFor(
       async () => getInterestAttempts >= 3,
