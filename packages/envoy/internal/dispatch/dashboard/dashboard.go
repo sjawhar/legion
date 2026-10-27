@@ -26,6 +26,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 // KeepNewest is how many of the most recently started builds Prune keeps beside the live ones: a
@@ -308,8 +309,14 @@ func NewStore(pool *store.Pool) *Store {
 }
 
 // GetAsset returns the bytes stored under key, or routes.ErrAssetNotFound when no build published
-// that path.
+// that path. The key is a Postgres text parameter, which cannot hold a NUL byte or invalid UTF-8:
+// Postgres refuses such a key (SQLSTATE 22021) rather than finding no row, and that refusal would
+// be a store failure for a name no build can hold, since every stored path is a text value. Such a
+// key is answered as missing without asking.
 func (s *Store) GetAsset(ctx context.Context, key string) ([]byte, error) {
+	if !text.Storable(key) {
+		return nil, routes.ErrAssetNotFound
+	}
 	var content []byte
 	err := s.pool.QueryRow(ctx, `select content from dashboard_assets where path = $1`, key).Scan(&content)
 	if errors.Is(err, pgx.ErrNoRows) {

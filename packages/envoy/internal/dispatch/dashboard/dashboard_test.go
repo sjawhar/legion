@@ -149,6 +149,15 @@ func TestPublishStoresEveryFileOfTheBuild(t *testing.T) {
 	}
 }
 
+// A key no text value can hold — invalid UTF-8, as a request for /assets/%ff.js decodes to, or a
+// NUL byte — is an asset no build published, never a store failure: Postgres refuses such a
+// parameter (SQLSTATE 22021), and the router answers a store failure with a 502 and an ERROR.
+func TestGetAssetOfAKeyNoTextCanHoldIsNotFound(t *testing.T) {
+	assets := NewStore(storetest.Open(t).Pool)
+	requireNoAsset(t, assets, "assets/\xff.js")
+	requireNoAsset(t, assets, "assets/foo\x00.js")
+}
+
 // A process restarted on a build already stored writes no asset: it neither reads nor sends a file
 // (a file changed on disk since is never compared, so nothing is logged) and leaves every asset
 // row as it was, and it renews only the build's last start, on the database's clock.

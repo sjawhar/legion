@@ -44,6 +44,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 	"github.com/sjawhar/envoy/internal/oidc"
 )
 
@@ -517,9 +518,10 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusInternalServerError, "stat failed")
 		return
 	}
-	// The store's key is a Postgres text parameter, which cannot carry a NUL byte: asking it would
-	// answer a store failure for a name no build can hold, so such a path is a plain miss.
-	if isRetainedAssetPath(normalized) && r.ctx.AssetStore != nil && !strings.ContainsRune(normalized, 0) {
+	// The store's key is a Postgres text parameter, which cannot carry a NUL byte or invalid UTF-8
+	// (a path such as /assets/%ff.js): asking it would take a reservation and answer a store
+	// failure for a name no build can hold, so such a path is a plain miss.
+	if isRetainedAssetPath(normalized) && r.ctx.AssetStore != nil && text.Storable(normalized) {
 		r.serveRetainedAsset(w, req, strings.TrimPrefix(normalized, "/"))
 		return
 	}
