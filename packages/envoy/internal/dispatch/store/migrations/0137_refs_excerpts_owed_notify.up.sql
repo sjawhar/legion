@@ -1,4 +1,4 @@
--- 0132_refs_excerpts_owed_notify.up.sql
+-- 0137_refs_excerpts_owed_notify.up.sql
 -- Every artifact mention left owed an excerpt (excerpt_version null) announces itself on
 -- dispatch_excerpts_owed at commit, which wakes the reference excerpt reconciliation
 -- (docs.Service.RunReferenceExcerptReconciliation) in every process through its shared listener,

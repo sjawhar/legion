@@ -28,6 +28,7 @@ import (
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/webhook"
+	"github.com/sjawhar/envoy/listenfd"
 )
 
 // listenerDeps holds the NATS-dependent resources, all open. main builds the /v1 handlers over it
@@ -579,7 +580,9 @@ func openV1Routes(gate *startingGate, ready *listenerDeps, machineID string, log
 }
 
 func main() {
-	// Phase 1: Load config (synchronous, fast).
+	// Phase 1: Load config (synchronous, fast). With ENVOY_LISTEN_FD, Load inspects the inherited
+	// socket and takes its address as cfg's, so the API auth fence below judges the address that
+	// serves; Phase 2 adopts it.
 	cfg, err := config.Load(9020)
 	if err != nil {
 		log.Fatal(err)
@@ -594,7 +597,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := validateListenerAPIAuth(cfg.ListenHost, apiToken, os.Getenv("ENVOY_API_ALLOW_UNAUTHENTICATED"), apiVerifier); err != nil {
+	if err := validateListenerAPIAuth(cfg, apiToken, os.Getenv("ENVOY_API_ALLOW_UNAUTHENTICATED"), apiVerifier); err != nil {
 		log.Fatal(err)
 	}
 	logger.Info("listener API auth: " + describeListenerAPIAuth(apiToken, oidcIssuer))
@@ -606,11 +609,15 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Phase 2: Bind HTTP port deterministically in main goroutine before
-	// any NATS work begins. This guarantees /healthz is reachable as soon
-	// as Serve starts, regardless of NATS connection latency.
-	addr := cfg.ListenAddress()
-	ln, err := net.Listen("tcp", addr)
+	// Phase 2: Serve on the socket the listener inherited (ENVOY_LISTEN_FD) or bind its address,
+	// in the main goroutine before any NATS work begins, so /healthz is reachable as soon as Serve
+	// starts, whatever the NATS connection's latency.
+	var ln net.Listener
+	if cfg.ListenSocket != nil {
+		ln, err = listenfd.Adopt(*cfg.ListenSocket)
+	} else {
+		ln, err = net.Listen("tcp", cfg.ListenAddress())
+	}
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -675,7 +682,7 @@ func main() {
 	mux.Handle("/v1", v1Handler)
 	mux.Handle("/v1/", v1Handler)
 
-	// Phase 4: Start HTTP server (port already bound via net.Listen).
+	// Phase 4: Start HTTP server on the listener Phase 2 holds.
 	server := newHTTPServer(mux)
 	fatal := make(chan error, 1)
 	go func() {
@@ -684,7 +691,9 @@ func main() {
 		}
 	}()
 	listeningAt := time.Now()
-	logger.Info("envoy-listener listening", slog.String("addr", addr))
+	// The address ln is bound to, whether inherited or bound here, so the line names the port a
+	// kernel chose (PORT=0 or a socket a harness opened on port 0).
+	logger.Info("envoy-listener listening", slog.String("addr", ln.Addr().String()))
 
 	// Phase 5: Connect to NATS (main goroutine — log.Fatal is safe here). The listener owns
 	// ENVOY_NOTIFICATIONS: this start reconciles the stream (bus.ConnectOwningStream).
@@ -935,7 +944,7 @@ func main() {
 	// a pass in flight before it drains NATS (kvLoopsDone).
 	kvLoopsCtx, kvLoopsCancel := context.WithCancel(context.Background())
 	kvLoopsDone := []<-chan struct{}{
-		registry.StartReaper(kvLoopsCtx, func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, 10*time.Minute),
+		registry.StartReaper(kvLoopsCtx, func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, store.InterestReapGrace),
 		registry.StartRoleClaimReaper(kvLoopsCtx, func(sessionID string) bool { return roleHolderMayBeLive(logger, sessions, sessionID) }, 5*time.Minute, sessions.TTL()),
 	}
 
