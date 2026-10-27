@@ -431,30 +431,31 @@ func TestAFailingPublisherIsRetriedOncePerTick(t *testing.T) {
 }
 
 // A CI bucket deleted and created again holds none of the old bucket's records, and the store
-// empties its cache for it, so the loop forgets what it knew of the old records too: the records
-// it held back are no longer counted, and a record it queued to settle is never attempted, even
-// once its debounce has run out. The pass after the recreate counts only what the new bucket
-// holds; a loop that kept its old queue and held set would count the old records with the new.
+// empties its cache for it, so the loop forgets what it knew of the old records too. The pass after
+// the recreate counts as held only the new bucket's record, not the two the old bucket's pass held
+// back, and keeps no queued deadline for the old bucket's waiting record: its queue is empty.
 func TestARecreatedBucketForgetsTheOldBucketsRecords(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	store := openStore(t, conn)
 	pub := &recPub{}
 	logger := logging.New("test")
-	const debounce = time.Second
+	// Long enough that the waiting record never falls due while the test runs.
+	const debounce = time.Hour
+	z := testSummarizer(store, debounce)
 	stamped := func(st *State) { st.Schema = recordSchema }
 	past := time.Now().Add(-debounce - handoverGrace - time.Minute).UnixMilli()
 	putHeadGatedRecord(t, store, head{"example-org", "example-repo", "70", "01d070000000000000000000000000000000beef"}, past, nil)
 	putHeadGatedRecord(t, store, head{"example-org", "example-repo", "71", "01d071000000000000000000000000000000beef"}, past, nil)
 	queuedAt := time.Now().UnixMilli()
 	putHeadGatedRecord(t, store, head{"example-org", "example-repo", "72", "9e0e72000000000000000000000000000000beef"}, queuedAt, stamped)
-	due := queuedAt + debounce.Milliseconds()
 
-	if held := runSummaryTick(store, pub, debounce, logger); held != 2 {
+	held, next, queued := z.pass(pub, logger, time.Now().UnixMilli())
+	if held != 2 {
 		t.Fatalf("the pass over the old bucket held back %d records, want 2", held)
 	}
-	if at := time.Now().UnixMilli(); at >= due {
-		t.Fatalf("the first pass ended at %d, once the waiting record fell due at %d, so it never queued it", at, due)
+	if due := queuedAt + debounce.Milliseconds(); !queued || next != due {
+		t.Fatalf("the pass over the old bucket left next %d queued %v, want the waiting record queued at %d", next, queued, due)
 	}
 	if got := pub.count(); got != 0 {
 		t.Fatalf("the pass over the old bucket published %d settlements, want none", got)
@@ -478,10 +479,12 @@ func TestARecreatedBucketForgetsTheOldBucketsRecords(t *testing.T) {
 		t.Fatalf("the cache after the recreate holds %d records, want only the new bucket's %s", len(cached), fresh.key())
 	}
 
-	// Past the old waiting record's deadline, a queue entry the loop kept for it would come due.
-	time.Sleep(time.Until(time.UnixMilli(due + 50)))
-	if held := runSummaryTick(store, pub, debounce, logger); held != 1 {
+	held, next, queued = z.pass(pub, logger, time.Now().UnixMilli())
+	if held != 1 {
 		t.Fatalf("the pass over the recreated bucket held back %d records, want 1, the new bucket's", held)
+	}
+	if queued {
+		t.Fatalf("the pass over the recreated bucket left a deadline queued at %d, want an empty queue", next)
 	}
 	if got := pub.count(); got != 0 {
 		t.Fatalf("the pass over the recreated bucket published %d settlements, want none", got)
