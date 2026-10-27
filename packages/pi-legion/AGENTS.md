@@ -359,7 +359,10 @@ lane before the role claim, nor on the controller topic before the subscription,
 message is queued ahead of both. Not after the role claim: the listener forwards a card on the
 role's lane as soon as it records the role, and that card can reach the session before the role
 claim's own answer does, starting its turn first (`extensions/controller-start-omp.test.ts` saw it
-on the real binary). A role claim refused after the send leaves the start message sent.
+on the real binary). The `legion` tool answers for the session from its registration on, so the
+start turn's `read_state` and `set_status` work while the role claim runs; a role claim refused
+after the send leaves the start message sent and the session registered, its grants minted with
+the registration's secret.
 
 That order holds only outside Oh My Pi's startup, so the operator's controller claims nothing at
 `session_start` (`handleSessionStart` in `src/controller-session.ts` returns for it; the session is
@@ -374,23 +377,30 @@ Oh My Pi runs command-line words after its startup, once the TUI listens, and th
 
 | When the command runs | What it does |
 | --- | --- |
-| The operator's controller (`LEGION_CONTROLLER=1`, not the daemon's) whose claim has not succeeded in this process | Runs the whole claim: reads and validates `LEGION_CONTROLLER_START_MESSAGE` before any daemon call, reads the daemon's state, registers on `claims/register`, sets `startupTurn` to `{session, sentAt: now}` and sends the start message as the session's first turn — or, when the operator already started a turn (`isIdle()` false), as a follow-up behind that turn (`deliverAs: "followUp"`), which starts no turn of its own — then claims the Envoy role and subscribes to the controller topic |
-| That claim is refused at any step | Logs it (`[legion] the controller claim failed: …`) and shows one warning notice naming the refusal and `/legion-claim-controller`, which claims again and sends the start message once the claim succeeds; the command itself does not fail |
+| The operator's controller (`LEGION_CONTROLLER=1`, not the daemon's) that has not sent its start message in this process | Runs the whole claim: reads and validates `LEGION_CONTROLLER_START_MESSAGE` before any daemon call, reads the daemon's state, registers on `claims/register` (from here on the `legion` tool answers for the session with the registration's secret), sets `startupTurn` to `{session, sentAt: now}` for the session current at the send and sends the start message as the session's first turn — or, when the operator already started a turn (`isIdle()` false), sets no mark and sends it as a follow-up behind that turn (`deliverAs: "followUp"`), which starts no turn of its own — then claims the Envoy role and subscribes to the controller topic |
+| That claim is refused before the send | Logs it (`[legion] the controller claim failed: …`, through `logger`) and shows one warning notice naming the refusal and `/legion-claim-controller`, which claims again and sends the start message once the claim succeeds; the command itself does not fail |
+| That claim is refused after the send (the role claim or the subscription) | Logs it the same way and shows one warning that the claim failed after the start message was sent: the start turn has the controller's registration, and `/legion-claim-controller` claims the role and its wakes again, sending nothing more |
+| The start message was sent in this process but the claim that sent it, or a later one, did not finish | A warning naming `/legion-claim-controller`; the command claims nothing |
 | The claim already succeeded in this process (the command run again), the session is the daemon-launched controller, or it is a hand-started session | An info notice that there is nothing to do |
-| The command's own claim is still running (Oh My Pi reads the terminal while it runs, so the operator can type the command again) | Waits for that claim, then decides again by the rows above |
+| Another claim is still running (Oh My Pi reads the terminal while it runs, so the operator can type the command again) | Waits for that claim, then decides by the rows above |
 
 A claim run any other way — `/legion-claim-controller`, a re-claim after a session change — sends a
-message still unsent the same way, setting the mark right before the send. The message goes out
-once per process (`startMessageSent`): a retried claim after a failure past the send, and a
-later `/legion-claim-controller`, send nothing more. Claims run one at a time, each waiting for the
-one in flight: every registration replaces the controller secret the daemon holds, so a
-`/legion-claim-controller` typed while the command's claim runs registers after it, and the
-session keeps the secret the daemon issued last. `startupTurn` names the session until its
-first run starts: that session's first `agent_start` (the start turn, or the operator's turn the
-start message follows) clears it, and so does its `session_shutdown`; a `task` subagent's run,
-under its own session id, clears nothing. The daemon-launched controller keeps its whole claim at
-`session_start`: it sends no start message, sets the mark with `sentAt` now right before
-`claims/ready`, after which the daemon delivers its start prompt, and exits on any failure.
+message still unsent the same way, marking the session the same way. The message goes out once per
+process (`startMessageSent`): a retried claim after a failure past the send, and a later
+`/legion-claim-controller`, send nothing more. Claims run one at a time, each waiting for the one in
+flight, and a claim that has to wait says so in one info notice (the daemon client sets no request
+timeout, so a hung claim is otherwise silent): every registration replaces the controller secret
+the daemon holds, so a `/legion-claim-controller` typed while the command's claim runs registers
+after it, and the session keeps the secret the daemon issued last. A re-claim after a session change
+refused past its registration says the session keeps that registration; the next navigation, even
+one that changes nothing, claims again while the last claim is unfinished. `startupTurn` names the
+session until its first run starts: that session's first `agent_start` (the start turn) clears it,
+and so does its `session_shutdown`; a `task` subagent's run, under its own session id, clears
+nothing. A start message queued behind the operator's turn is never marked: that run's one
+`agent_start` has already fired, and Oh My Pi drains the follow-up inside the same run. The
+daemon-launched controller keeps its whole claim at `session_start`: it sends no start message,
+sets the mark with `sentAt` now right before `claims/ready`, after which the daemon delivers its
+start prompt, and exits on any failure.
 
 ## Session titles
 

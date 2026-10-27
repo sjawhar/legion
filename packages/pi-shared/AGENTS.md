@@ -42,14 +42,17 @@ publishes nothing, so the first publisher wins. The object carries:
   tagged custom messages (the `skill-prompt` a `/skill:` creates) against that record.
 - `bootstrappedSession` — the transcript of the session this process bootstrapped as its Legion
   identity (`src/subagent-session.ts`).
-- `startupTurn` — `{session, sentAt}`: the session whose first turn a start that runs after Oh My
-  Pi's startup owns, and when that start was sent (milliseconds since the epoch, undefined until
-  sent). The Legion entry sets both (`markStartupTurnSent`, `src/startup-turn.ts`): the operator's
-  controller right before it sends its start message, from the claim `/legion-controller-start`
-  runs after Oh My Pi's startup (or a later `/legion-claim-controller`), and the daemon-launched
-  controller right before `claims/ready`. That session's first `agent_start`, and its
-  `session_shutdown`, clear both (`clearStartupTurn`; `packages/pi-legion/AGENTS.md`, "The
-  controller's start turn"). The Envoy entry does not read it yet; a later pi-envoy change uses it.
+- `startupTurn` — `{session, sentAt}` or undefined: the session whose first turn a start that runs
+  after Oh My Pi's startup owns, and when that start was sent (milliseconds since the epoch). The
+  Legion entry sets it (`markStartupTurnSent`, `src/startup-turn.ts`): any claim that sends the
+  operator's controller its start message to an idle session, right before the send (the claim
+  `/legion-controller-start` runs after Oh My Pi's startup, a later `/legion-claim-controller`, or
+  a re-claim after a session change), and the daemon-launched controller right before
+  `claims/ready`. A start message queued as a follow-up behind a turn the operator already started
+  sets nothing: that run, the session's first, has already started. That session's first
+  `agent_start`, and its `session_shutdown`, clear it (`clearStartupTurn`;
+  `packages/pi-legion/AGENTS.md`, "The controller's start turn"). The Envoy entry does not read it
+  yet; a later pi-envoy change uses it.
 
 Every consumer resolves the object at each use through `envoyPluginInterface()`; nothing caches it
 at module scope, and `resetEnvoyPluginInterfaceForTests()` is the one test seam.

@@ -867,12 +867,20 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   message once the registration is in, right before the Envoy role claim and the controller-topic
   subscription, so neither can deliver anything ahead of it (a card the listener forwards as soon
   as it records the role can reach the session before the role claim's answer does), as a
-  follow-up when the operator already started a turn, naming the session in the plugin interface's
-  new `startupTurn` with `sentAt` set right before the send. A refusal anywhere in that claim is
-  logged and shown as one warning naming the refusal and `/legion-claim-controller`, which claims
-  again and sends the start message, if still unsent, once its claim succeeds; run again after a
-  successful claim, or in any other session, the command says there is nothing to do. A claim from
-  `/legion-claim-controller` or a re-claim after a session change sends
+  follow-up when the operator already started a turn. The session is the controller to the
+  `legion` tool from its registration on, so the start turn's `read_state` and `set_status` work
+  while the role claim runs and after it fails. A send to an idle session names the session
+  current at the send in the plugin interface's new `startupTurn` (`{session, sentAt}` or
+  undefined) right before the send; a follow-up behind the operator's turn sets nothing, since that
+  run's one `agent_start` has already fired. A refusal anywhere in that claim is logged and shown
+  as one warning naming the refusal and `/legion-claim-controller`: refused before the send, that
+  command claims again and sends the start message once its claim succeeds; refused after it (the
+  role claim or the subscription), the warning says the start message was sent and the start turn
+  has the registration, and that command claims the role and its wakes again, sending nothing
+  more. Run again after a successful claim, or in any other session, the command says there is
+  nothing to do; run again after a claim that failed past the send, it names
+  `/legion-claim-controller` and claims nothing. A claim that has to wait for one in flight says so
+  in one notice. A claim from `/legion-claim-controller` or a re-claim after a session change sends
   the start message the same way when it is still unsent, and the message still goes out once per
   process. The session's first `agent_start` and its `session_shutdown` clear the mark. The
   daemon-launched controller still claims at `session_start`, sends no start message of its own and
