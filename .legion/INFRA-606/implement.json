@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-10-27T14:06:30Z",
+  "completed": "2026-10-27T17:27:30Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -23,11 +23,11 @@
     },
     {
       "criterion": "Mention delivery runs off the request path, in order, with a test that a slow listener does not delay the comment's response (architect's bound: lookup cut at 250 ms).",
-      "surface": "POST /api/v1/issues/LGA-5/comments on the load-test stack with Dispatch's ENVOY_URL through 'loadgen proxy -rtt 500ms' (LOADTEST_ENVOY_RTT=500ms stack.sh reset), 3 live steer-capable sessions mentioned",
-      "command": "proof3.sh head + proof3-report.py, 5 mentioned and 5 unmentioned comments alternating; raw output in dispatch://INFRA-606/artifact/infra606-surface-proofs-tar-gz (proofs/3-mentions-head.txt). Go tests: comment_delivery_sender_test.go (blocked send, order, cross-recipient, concurrent lookups, never-answering lookup, recovery, overflow) and cmd/dispatch/shutdown_test.go.",
-      "observed": "Unmentioned p50 0.094 s, 3 mentions p50 0.653 s (0.629-0.690 s, about one 500 ms round trip); the 201 lists the 3 deliveries pending; the 3 comment.delivery events (sent) are created 1.04-1.20 s after the response.",
-      "headSha": "153513a38b9d59c275cc4c1ec95d55407b37046d",
-      "negativeControl": "Base c3d09eec: 3 mentions p50 5.406 s (5.38-5.51 s) against 0.091 s unmentioned; the deliveries are already 'sent' inside the 201, their events created 2.2/1.1/0.04 s before the response ended (proofs/3-mentions-base.txt)."
+      "surface": "POST /api/v1/issues/{key}/comments on the load-test stack, Dispatch built from the workspace at the head, Dispatch's ENVOY_URL through 'loadgen proxy -rtt 30s' (a listener that answers no lookup)",
+      "command": "lat.sh head (5 comments per shape: no mention; one mention on an unrouted issue; mention = route; route to another session; three mentions, route to another session); raw output in dispatch://INFRA-606/artifact/infra606-round2-proofs-tar-gz (lat-head-blackhole.txt). Go: TestAListenerThatAnswersNoLookupDelaysARoutedCommentByOneTimeoutAtMost (tester's red test, unmodified) plus comment_delivery_sender_test.go.",
+      "observed": "no mention 0.087-0.154 s; unrouted 0.356-0.379 s; mention = route 0.353-0.366 s; route to another session 0.358-0.415 s; three mentions with a route to another session 0.374-0.442 s: one 250 ms timeout plus about 0.1 s whatever the shape. Round 1 measured deliveries as comment.delivery events 1.0-1.2 s after the 201 at a 500 ms listener.",
+      "headSha": "a248dad3a60b25025dfb661baeb45c7afef12f4b",
+      "negativeControl": "Round 1's head 153513a3 under the same silent listener: 0.61-0.72 s on a routed issue (the route's lookup after the mentions'); base c3d09eec takes 5.4 s p50 with 3 mentions at a 500 ms listener."
     },
     {
       "criterion": "Agent-stream viewers hold a bounded number of bytes, not whole messages.",
@@ -52,6 +52,22 @@
       "observed": "The three architecture files state the 256-event / 1 MiB catch-up and header rule, the relay as the one reader with start and stop, the hub on its feed, the mention sender's lanes, drain, recovery and 250 ms lookup bound, Stream[T], and the 8 MiB viewer budget; the grep finds no stale mention; check-private-names passes on 5,347 files.",
       "headSha": "153513a38b9d59c275cc4c1ec95d55407b37046d",
       "negativeControl": "At base c3d09eec, cmd/dispatch/AGENTS.md:140-143 and packages/dispatch/AGENTS.md:247 still describe the 1,000-event replay pages and the replay cap, which the head no longer has."
+    },
+    {
+      "criterion": "Mention delivery, in order and not lost: a process killed during mention sends does not strand them (architect's ruling on the tester's finding, overruling plan Decision 8 on this point).",
+      "surface": "The load-test stack with Dispatch's ENVOY_URL through a 2 s round-trip proxy; stack.sh restart-dispatch with a SIGKILL of the old process 0.3 s into the drain",
+      "command": "SETTLE=80 mention.sh head kill9 (8 comments x 3 session mentions, then SIGKILL, new process); raw output in dispatch://INFRA-606/artifact/infra606-round2-proofs-tar-gz (kill9-head.txt, m-head-kill9/). Go: TestSIGKILLWithMentionSendsInFlightHandsEachRecipientTheCommentOnceTheClaimLapses (real process, cmd/dispatch) and TestMentionRecoverySendsAnAttemptAKilledProcessHeldOnceItsClaimLapses.",
+      "observed": "After the kill 3 attempts pending with a live claim and 21 unclaimed; after the new process and the claim lapse all 24 attempts are 'sent' at attempt 1; c1's three resent sends are marked duplicate by the listener, so each of ses-a, ses-b, ses-c holds c1..c8 once.",
+      "headSha": "a248dad3a60b25025dfb661baeb45c7afef12f4b",
+      "negativeControl": "Round 1's head 153513a3 (tester's run of the same script): the 3 in-flight attempts of c2 stay pending for good, and every recipient gets c1 and c3..c8 but never c2."
+    },
+    {
+      "criterion": "The Stage 3 production audit proves a run wrote nothing outside its project: it reads every event since its baseline, including events that belong to no issue (architect's ruling).",
+      "surface": "production_dispatch_audit (scripts/e2e/lib/operator-dispatch.sh) against the load-test stack's Dispatch built from the head, which serves GET /api/v1/events/log",
+      "command": "audit-proof/audit.sh rig|clean|norout (tester's audit.sh with the removed prod_since line dropped); raw output in dispatch://INFRA-606/artifact/infra606-round2-proofs-tar-gz (rig.out, clean.out, norout.out). Go: events_log_test.go.",
+      "observed": "rig: 233 events read from the baseline; the rig session's comment on LGA-31 and its project document artifact.created (issue_key null) are both flagged, exit 1. clean: 1,101 events, control true, no rig event, exit 0.",
+      "headSha": "a248dad3a60b25025dfb661baeb45c7afef12f4b",
+      "negativeControl": "norout (a Dispatch answering 404 on the log route): 'production Dispatch could not be read for the audit', exit 1. Round 1's head: the tester's audit.sh flags only the comment and lets the artifact.created pass."
     }
   ],
   "filesChanged": [
@@ -86,13 +102,17 @@
     "packages/envoy/internal/dispatch/api/delivery_live_hub_intake.go",
     "packages/envoy/internal/dispatch/api/delivery_live_hub_test.go",
     "packages/envoy/internal/dispatch/api/delivery_live_hub_worker.go",
+    "packages/envoy/internal/dispatch/api/envoy_resolve.go",
     "packages/envoy/internal/dispatch/api/event_stream_relay.go",
     "packages/envoy/internal/dispatch/api/event_stream_relay_test.go",
     "packages/envoy/internal/dispatch/api/events.go",
+    "packages/envoy/internal/dispatch/api/events_log_test.go",
     "packages/envoy/internal/dispatch/api/message_delivery.go",
     "packages/envoy/internal/dispatch/api/routes_table.go",
+    "packages/envoy/internal/dispatch/api/routes_table_test.go",
     "packages/envoy/internal/dispatch/api/server.go",
     "packages/envoy/internal/dispatch/api/server_test.go",
+    "packages/envoy/internal/dispatch/api/storable_text_test.go",
     "packages/envoy/internal/dispatch/events/broker.go",
     "packages/envoy/internal/dispatch/events/stream.go",
     "packages/envoy/internal/dispatch/events/stream_test.go",
@@ -109,19 +129,26 @@
     "The SSE live loop dedupes on one rising id; an overflowed subscription re-subscribes before cancelling the old one and catches up within the replay bounds, while a generation end (reset, test hook, shutdown) still ends the response so the browser reconnects.",
     "Pending comment_deliveries rows are inserted in the comment's transaction with claimed_at null so a queued send left at SIGTERM is recoverable; the sender claims them with claimCommentDeliveryAttempt(initial=true).",
     "A timed-out mention lookup carries no suppression, except that a route string equal to the timed-out mention's target suppresses the route copy (architect's decision); differing strings resolving to one session get two copies (tests pin both).",
-    "The delivery hub records what each event touched while a view's read is in flight and re-checks it against the installed answer, so an event during a read is not lost and an unrelated session write causes no second recompute."
+    "The delivery hub records what each event touched while a view's read is in flight and re-checks it against the installed answer, so an event during a read is not lost and an unrelated session write causes no second recompute.",
+    "The route lookup runs in a goroutine beside resolveMentionTargets; on a ROUTE_CHANGED retry the mentions are kept and only the new route is looked up (comment_create.go resolveCommentLookups).",
+    "Recovery waits only for live claims taken before the sender's first read (the database's now()), so a busy sender never reschedules for its own claims; a claim of a process killed after this one started is recovered by that process's own restart.",
+    "GET /api/v1/events/log pages the whole log by id for any authenticated caller, the same audience the SSE stream already serves."
   ],
   "deviations": [
     "The restart scenario (T1) is built on legion/INFRA-589 and attached as dispatch://INFRA-606/artifact/infra606-restart-scenario-patch; it lands in this PR in the next implementing round, after INFRA-589 merges (architect's decision A, Envoy 2026-10-27T14:03Z), with at least five runs per side per step.",
     "The plan's expectation that Dispatch CPU in the minute after the restart falls below base was not observed beyond run-to-run noise at two runs per side; recorded as measured in the PR body.",
     "Added beyond the plan: the spec's API-3 line (an overflowed SSE subscriber is caught up from the database instead of closed) and a hub race fix (an event during a view's read).",
     "X-Dispatch-Event-Replay: complete is set by this PR server-side (INFRA-492's client reads it); INFRA-492's architect was told the rule over Envoy.",
-    "Mention lookups are bounded at 250 ms (architect's amendment) and the issue-route lookup in the comment request uses the same bound.",
-    "No partial index for the recovery pass's comment_deliveries query: it runs once per process start (and after a queue overflow drains); a new migration would collide with main's numbering."
+    "No partial index for the recovery pass's comment_deliveries query: it runs once per process start (and after a queue overflow drains); a new migration would collide with main's numbering.",
+    "New read route GET /api/v1/events/log (not in the plan): the only way the Stage 3 audit can read events that belong to no issue once the stream's replay is bounded.",
+    "Recovery of attempts a killed process held: one extra pass when the newest such claim lapses (architect's ruling; plan Decision 8 dropped this). Order across a crash is not kept: the resumed comment can reach its recipient after later ones."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
     "TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves cannot run on this pod's Postgres (byte-order collation only; the pgserver build has no ICU); CI runs it.",
-    "internal/dispatch/files needs Docker and internal/dispatch/pmdoc needs node_modules; neither is touched by this change."
-  ]
+    "internal/dispatch/files needs Docker and internal/dispatch/pmdoc needs node_modules; neither is touched by this change.",
+    "The NUL-refusal test raced the fixture mention's asynchronous send (a comment.delivery event landing between its table snapshots); it now waits for the send to settle."
+  ],
+  "round": 2,
+  "answersTest": "e51834f2a28ef3a6a8e160e7a3ae19ac1eb613de"
 }
