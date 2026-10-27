@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-548",
+  "completed": "2026-10-27T05:56:42Z",
+  "decision": "changes_requested",
+  "reviewedHead": "3ddd3f2a89b091ef06b3ab1a54086a1cbe8b331a",
+  "codeHead": "28355e2e6dba95c8641c1c93eea895ec5afe5a54",
+  "critical": 0,
+  "important": 2,
+  "minor": 5,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "patches/nats@2.29.3.patch",
+      "description": "A session that wrote more than its socket can buffer while the path was frozen never reconnects: on the stale-ping disconnect nats.js 2.29.3 _closed(undefined, true) awaits _send(empty frame), whose socket.write callback never fires behind unacknowledged data, so closed() never resolves and the dial loop never runs. Reproduced by the reviewer on natsd from this tree with natsConnectionOptions and a proxy that stops reading on freeze: 0 B published after the freeze reconnects at 30.0 s, 4 MiB published: stale at 30.0 s, no reconnect within 90 s. pi-envoy publishes agent-stream frames on this connection while a viewer is attached (extensions/envoy.ts:1785-1788). The stall proxy reads and discards on freeze (stall-proxy.ts:22-23), so the kernel keeps acknowledging and no suite reaches this path. Fix the patch (do not wait unbounded for the flush on an internal close; destroy the socket) and add a row whose proxy stops reading and whose client publishes after the freeze."
+    },
+    {
+      "severity": "important",
+      "file": ".github/workflows/envoy-and-contracts.yaml",
+      "description": "envoy_session_stall (line 266) and claude_plugin (line 294) do not list patches/**; bun.lock names the patch only by path, so a patch-only change runs neither the stall suites that test it nor claude-envoy check-dist (the committed dist inlines the patched nats). pi-envoy's release path list (release.yaml Determine next version) also omits it, so a patch-only change ships no pi-envoy release."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy-client/src/testing/envoy-stack.ts",
+      "description": "Cleanup: module-level built/running/release reference count shares one build across concurrent stacks no caller starts; build into the stack's own work dir."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/claude-envoy/tests/envoy-channel-stall.test.ts",
+      "description": "Cleanup: the two claude tests duplicate the channel-server start-up and have drifted; the freeze scenario is copied between pi-envoy and claude-envoy, and REPLAYED copies replayedText's marker."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy-client/src/__tests__/nats-stall.test.ts",
+      "description": "Cleanup: the hung-redial test builds its own blackhole server where stallNext already makes that connection."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy-client/package.json",
+      "description": "Cleanup: ./nats-auth stays a public export with no production importer, a second way to dial NATS without the ping options; ./testing/* starts a second test-helper export convention beside pi-shared's ./test/*."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/claude-envoy/src/envoy-channel-server.ts",
+      "description": "Not a defect, recorded as a risk: daemon-launched Claude Code panes load the plugin with --plugin-dir (packages/daemon/internal/runtime/tmux/claude.go:112), so every Legion Claude pane registers plugin_version source; the docs page says source is checked by hand at the move."
+    }
+  ],
+  "thermonuclear": {
+    "head": "3ddd3f2a",
+    "deepReview": "Verdict: CHANGES at 3ddd3f2a (two Medium: the flush wait on a stale close, patches/** missing from CI and release filters)",
+    "codeQuality": "Verdict: CHANGES at 3ddd3f2a (CI filter correctness-relevant; the rest cleanup-only)"
+  },
+  "ci": "Required checks lint, typecheck, test, pr-title at code head 28355e2e were still queued at 05:36Z; the compare 28355e2e...3ddd3f2a changes only .legion/. A request for changes does not wait on CI.",
+  "proofLines": "E2E (implementer) and E2E (tester) both present in the PR body at 28355e2e."
+}
