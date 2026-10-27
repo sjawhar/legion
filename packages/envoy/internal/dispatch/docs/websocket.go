@@ -91,44 +91,53 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 	return a.StoreUpdateContext(context.Background(), room, update)
 }
 
-// StoreUpdateContext appends a room's update with the in-flight credit its update observer
-// recorded (AppendUpdateWithCredit), and with that observer's record of which room instance the
-// update was made in (documentUpdateClass.cursor): the append is gated on that instance standing
-// at the durable head, and advances it when it commits (appendUpdate). An update that never
-// reaches the store - its room failed, or a live write or a settlement already made it durable -
-// lands its credit here instead: the room drops it with the update, which the browser resends.
+// StoreUpdateContext stores one of a room's updates, which ygo's persistence worker hands on one
+// call per update, in order, with the in-flight credit its update observer recorded and that
+// observer's record of which room instance the update was made in (documentUpdateClass.cursor):
+// every append is gated on that instance standing at the durable head, and advances it as it
+// commits (AppendUpdatesWithCredit). It returns nil only once the update is durable, so ygo's flush
+// still means every update it held is stored.
+//
+// How is room_appends.go's. An update another append of the room already stored is only consumed.
+// One the room's queued updates can go with lingers for them, at most roomAppendLinger from its
+// recording, and then goes in one transaction with the updates the room recorded after it
+// (appendBatch). Any other goes alone once its suppression slot check has passed, as every update
+// did before batches (appendAlone). Either way its append stores only what no other append of the
+// room stored (storeUpdates). An update that never reaches the store - its room failed, or a live
+// write or a settlement already made it durable - lands its credit here instead: the room drops
+// it with the update, which the browser resends.
 func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room string, update []byte) error {
 	if a.service.roomFailed(room) {
-		// The failed room's update is dropped and its browser resends it to the room that
-		// replaces this one, but its class is taken all the same, so the work the record counts
-		// for it ends here. Left counted, it would be an append no callback can ever finish:
-		// the record - or the one registered in its place, which carries the updates the room's
-		// persistence never took (handOverFailedRoomLocked) - would wait on it for ever, so its
-		// settlement would retry without end, never closing a room behind the head
-		// (reloadRoomBehindHead), and the record would never be released (unusedLocked).
-		class, counted, found := a.service.consumeUpdateClass(room, update)
-		if found && class.durable {
-			a.service.finishDurableAppend(room, counted)
+		a.dropUpdate(room, update)
+		return nil
+	}
+	plan, members, linger, wait := a.service.planRoomAppend(room, update, true)
+	if linger != nil {
+		timer := time.NewTimer(wait)
+		select {
+		case <-linger:
+		case <-timer.C:
 		}
-		class.credit.landed()
+		timer.Stop()
+		if a.service.roomFailed(room) {
+			a.dropUpdate(room, update)
+			return nil
+		}
+		plan, members, _, _ = a.service.planRoomAppend(room, update, false)
+	}
+	switch plan {
+	case appendStored:
+		a.service.consumeUpdateClass(room, update)
 		return nil
+	case appendAlone:
+		// The class, if any, is marked handed (planRoomAppend) before the slot check, so no
+		// batch takes a slot's update once its slot has left.
+		if a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
+			a.dropUpdate(room, update)
+			return nil
+		}
 	}
-	class, counted, found := a.service.consumeUpdateClass(room, update)
-	if found && class.durable {
-		defer a.service.finishDurableAppend(room, counted)
-	}
-	defer class.credit.landed()
-	if a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
-		return nil
-	}
-	if _, err := a.store.AppendUpdateWithCredit(withRoomCursor(ctx, class.cursor), room, update, class.contentChanged, class.credit); err != nil {
-		a.service.failRoom(room, err)
-		return err
-	}
-	if found && class.durable && class.contentChanged {
-		a.service.scheduleSettleAfterAppend(room)
-	}
-	return nil
+	return a.storeUpdates(ctx, room, update, members)
 }
 
 func (a *servicePersistenceAdapter) Compact(ctx context.Context, room string) error {
@@ -621,7 +630,7 @@ func (s *Service) observeAskBlocksForUpdate(room string, tree *pmdoc.Node) {
 // otherwise the edit cannot be pinned on a single peer and no older actor may stand in for it.
 //
 // The credit goes to F, the room's in-flight credits, until the edit's append lands it
-// (AppendUpdateWithCredit): the returned UpdateCredit is how that append reaches it. This takes
+// (AppendUpdatesWithCredit): the returned UpdateCredit is how that append reaches it. This takes
 // no advisory lock and touches no database: nothing reads F without holding state.mu.
 func (s *Service) creditContentChange(room string, origin any, hold *roomHold) *UpdateCredit {
 	if _, published := origin.(*liveWriteOrigin); published {

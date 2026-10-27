@@ -1303,7 +1303,7 @@ func listenForDocumentChanges(t *testing.T, database *store.Store) <-chan string
 }
 
 // A browser's append commits inside the session lock it took the document under, and advances its
-// room's cursor before it drops that lock (appendUpdate). Between the two the store stands one
+// room's cursor before it drops that lock (AppendUpdatesWithCredit). Between the two the store stands one
 // past the room, which is what a notification read through the pool sees - this process's own
 // write, read as another process's. The evictor reads the room again under that lock before it
 // closes anything (roomBehindDurableHead), where the append has either dropped the lock, cursor

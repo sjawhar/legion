@@ -277,15 +277,15 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 // A difference the first read sees is not the answer, for the reason the stale-room evictor reads
 // twice as well (documentChanged): every durable writer of this process advances the room's
 // cursor inside the document's advisory lock, after the commit that raised the head
-// (PgVersioned.appendUpdate, Ledger.takeRoomCursors), so a reader holding no lock lands between a
-// browser append's commit and its cursor advance and reads a healthy room as one another process
-// left behind. The confirmation takes that lock in the caller's own transaction, which holds it
-// until the transaction ends, as an upload and a conditional edit already hold it from before
-// their fork read (ReplaceText, ApplyOps): under it no write of this process sits between its
-// commit and its cursor, and no append lands between the cursor read and the head read beside it.
-// It costs that lock only where the cheap read saw a difference, which a healthy room under its
-// own browsers' writes sees rarely and a room another process left behind sees once and then
-// always.
+// (PgVersioned.AppendUpdatesWithCredit, Ledger.takeRoomCursors), so a reader holding no lock
+// lands between a browser append's commit and its cursor advance and reads a healthy room as one
+// another process left behind. The confirmation takes that lock in the caller's own transaction,
+// which holds it until the transaction ends, as an upload and a conditional edit already hold it
+// from before their fork read (ReplaceText, ApplyOps): under it no write of this process sits
+// between its commit and its cursor, and no append lands between the cursor read and the head read
+// beside it. It costs that lock only where the cheap read saw a difference, which a healthy room
+// under its own browsers' writes sees rarely and a room another process left behind sees once and
+// then always.
 //
 // Why the false verdict is worth a lock. It sent the write down the cold path (forkLive), which
 // reads the stored document - and the store of a room still writing is behind the room by

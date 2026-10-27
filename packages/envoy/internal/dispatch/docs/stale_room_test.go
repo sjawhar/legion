@@ -1407,7 +1407,7 @@ func TestABrowserAppendQueuedBehindThisProcessesWriteIsNotRefused(t *testing.T) 
 
 // A browser's append raises the document's head when it commits and takes that version into its
 // room's cursor a moment later, both inside the document's advisory lock
-// (PgVersioned.appendUpdate). A write that reads the cursor and the head without that lock lands
+// (PgVersioned.AppendUpdatesWithCredit). A write that reads the cursor and the head without that lock lands
 // between the two and reads a healthy room as one another process left behind, so it forks from
 // the stored document rather than from the room (forkLive). The store of a room still writing
 // holds less than that room - what its persistence worker has not appended yet - and takes what

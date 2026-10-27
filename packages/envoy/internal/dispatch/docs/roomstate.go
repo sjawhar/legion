@@ -60,9 +60,24 @@ type roomState struct {
 	// for names it, so the state holds it until one commits (settleRoomWithin). Closing persists
 	// it on the pending-settlement row before clearing it (SetIssueClosed), so that row carries it
 	// through a room release or restart. The authors themselves are in F and R, never only here.
-	unsettled      bool
+	unsettled bool
+	// updateClasses is what the room's update observer recorded for each update the room's
+	// persistence has yet to take, in the order the room recorded them, and pendingUpdates counts
+	// its durable classes whose update no call of the room's persistence has taken yet;
+	// queuedBytes is the bytes of their updates, which a batch of the room's browser appends is
+	// bounded by (roomAppendBatchBytes). A class stays queued while the call that took it runs its
+	// append, alone or in a batch, and a class another call's batch stored stays queued, marked
+	// stored, until ygo's own call for its update consumes it (room_appends.go).
 	updateClasses  []documentUpdateClass
 	pendingUpdates int
+	queuedBytes    int
+	// appendLinger is the channel a lingering browser append of the room waits on, made by the
+	// first one to linger and closed, then dropped, to end every linger at once: when something
+	// asks the room's appends to go now (flushRoomAppends, which also records appendsFlushed, so
+	// an update recorded before that ask no longer lingers), when the queue reaches a batch's cap
+	// (recordUpdateClass), and when the record is handed over (handOverFailedRoomLocked).
+	appendLinger   chan struct{}
+	appendsFlushed time.Time
 	settle         *time.Timer
 	unrecorded     map[pmdoc.MarkRef]time.Time
 	durableAppends atomic.Int64
@@ -102,16 +117,27 @@ type roomState struct {
 }
 
 // documentUpdateClass is what the room's update observer recorded for one update, which its
-// persistence takes (consumeUpdateClass): whether it changed the content, whether it is durable
-// work the room's state waits on, the browser edit's in-flight credit, nil for an update no
-// browser edit credited, and cursor, the durable version the room instance the update was made in
-// stands at, which gates and then takes in the update's own append (StoreUpdateContext).
+// persistence takes (consumeUpdateClass): the update itself, the very slice ygo hands every
+// observer of the commit (sameUpdate), whether it changed the content, whether it is durable work
+// the room's state waits on, the browser edit's in-flight credit, nil for an update no browser
+// edit credited, and cursor, the durable version the room instance the update was made in stands
+// at, which gates and then takes in the update's own append (StoreUpdateContext). recorded is when
+// a durable class was recorded, which its batch lingers from (roomAppendLinger). handed marks a
+// class whose update's own call has taken it and runs its append, alone or in a batch: the class
+// stays queued for that append to find and mark, and no other call's batch takes it, but it is no
+// longer pending (pendingUpdates), as a class consumed at the start of its call is not. stored
+// marks a class an append of the room's browser updates committed: its own call's, which consumes
+// it next, or another call's batch, which leaves ygo's call for it only to consume it
+// (room_appends.go).
 type documentUpdateClass struct {
 	update         []byte
 	contentChanged bool
 	durable        bool
+	handed         bool
+	stored         bool
 	credit         *UpdateCredit
 	cursor         *roomCursor
+	recorded       time.Time
 }
 
 // lockState returns room's state locked, creating it when the service holds none.
@@ -229,22 +255,28 @@ func (s *Service) handOverFailedRoomLocked(room string, state *roomState) {
 	}
 	successor := newRoomState()
 	maps.Copy(successor.connected, state.connected)
-	// Only the updates still waiting for the room's persistence move, with the appends they
-	// count. An append already in flight finishes on the record that counted it
-	// (finishDurableAppend takes the record consumeUpdateClass answered), so its count stays
-	// where it is.
+	// Only the classes still queued move, with the appends they count: one waiting for its call,
+	// and one whose call has taken it and runs its append (handed), whose append then finishes
+	// on the record that holds the class when it ends (roomAppend.committed, or
+	// finishDurableAppend on the record consumeUpdateClass answers). A class a batch already
+	// stored moves with its stored mark, which ygo's late call for it reads, but counts no
+	// append: the batch finished that count at its commit.
 	carried := int64(0)
 	for _, class := range state.updateClasses {
-		if class.durable {
+		if class.durable && !class.stored {
 			carried++
 		}
 	}
 	successor.updateClasses = state.updateClasses
 	successor.pendingUpdates = state.pendingUpdates
+	successor.queuedBytes = state.queuedBytes
 	successor.durableAppends.Store(carried)
 	state.updateClasses = nil
 	state.pendingUpdates = 0
+	state.queuedBytes = 0
 	state.durableAppends.Add(-carried)
+	// A browser append lingering on this record looks the queue up again on the successor.
+	state.wakeAppendLingerLocked()
 	s.rooms.CompareAndSwap(room, state, successor)
 }
 
@@ -263,14 +295,25 @@ func (s *Service) unusedLocked(state *roomState) bool {
 // persistence that takes it next (consumeUpdateClass). Only a durable class is work the room's
 // state waits on: a repair's update is recorded for the room instance it names alone, and its
 // writer, not the room's persistence, is what makes it durable.
+//
+// The class keeps update itself, the slice ygo hands this observer and then the room's
+// persistence, with no copy: a lagging room's queue holds no second copy of every update in it,
+// and the persistence finds the class by that slice (consumeUpdateClass). A queue that reaches a
+// batch's cap ends the linger of the room's browser append, whose batch has nothing more to wait
+// for.
 func (s *Service) recordUpdateClass(room string, update []byte, class documentUpdateClass) {
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
-	class.update = append([]byte(nil), update...)
-	state.updateClasses = append(state.updateClasses, class)
+	class.update = update
 	if class.durable {
+		class.recorded = time.Now()
 		state.pendingUpdates++
 		state.durableAppends.Add(1)
+	}
+	state.updateClasses = append(state.updateClasses, class)
+	state.queuedBytes += len(update)
+	if len(state.updateClasses) >= roomAppendBatchUpdates || state.queuedBytes >= roomAppendBatchBytes {
+		state.wakeAppendLingerLocked()
 	}
 }
 
@@ -278,24 +321,53 @@ func (s *Service) recordUpdateClass(room string, update []byte, class documentUp
 // stands among the room's recorded updates, and the record it took it from. ygo fires a
 // transaction's observers after the transaction has released the document's lock, so two peers'
 // updates reach persistence in the order their read loops hand them on, which need not be the
-// order the room recorded them in.
+// order the room recorded them in. Which class is update's is findUpdateClassLocked's rule.
 func (s *Service) consumeUpdateClass(room string, update []byte) (documentUpdateClass, *roomState, bool) {
 	state := s.lockExistingState(room)
 	if state == nil {
 		return documentUpdateClass{contentChanged: true}, nil, false
 	}
 	defer s.unlockState(room, state)
-	for index, class := range state.updateClasses {
-		if !bytes.Equal(class.update, update) {
-			continue
-		}
-		state.updateClasses = append(state.updateClasses[:index], state.updateClasses[index+1:]...)
-		if class.durable {
-			state.pendingUpdates--
-		}
-		return class, state, true
+	index := findUpdateClassLocked(state.updateClasses, update)
+	if index < 0 {
+		return documentUpdateClass{contentChanged: true}, nil, false
 	}
-	return documentUpdateClass{contentChanged: true}, nil, false
+	class := state.updateClasses[index]
+	if index == 0 {
+		// The usual case, the queue's oldest class: its slot is cleared, so the array the queue
+		// keeps holds no update the room has already stored.
+		state.updateClasses[0] = documentUpdateClass{}
+		state.updateClasses = state.updateClasses[1:]
+	} else {
+		state.updateClasses = slices.Delete(state.updateClasses, index, index+1)
+	}
+	state.queuedBytes -= len(class.update)
+	if class.durable && !class.handed {
+		state.pendingUpdates--
+	}
+	return class, state, true
+}
+
+// findUpdateClassLocked is the index in queue of the class recorded for update, -1 for none. The
+// class is the one recorded with the very slice update is (sameUpdate): ygo hands the room's
+// observer and its persistence the slice it encoded at the commit, so that is the same commit,
+// where equal bytes need not be - two commits that change nothing encode alike, and each takes its
+// own class. The search runs from the queue's oldest class, the one ygo's in-order persistence
+// usually hands on, so the usual match is the first comparison. Only an update no class holds the
+// slice of - a copy, as a test can hand on - falls back to the first class with the same bytes.
+// Its caller holds the queue's state.mu.
+func findUpdateClassLocked(queue []documentUpdateClass, update []byte) int {
+	for index := range queue {
+		if sameUpdate(queue[index].update, update) {
+			return index
+		}
+	}
+	for index := range queue {
+		if bytes.Equal(queue[index].update, update) {
+			return index
+		}
+	}
+	return -1
 }
 
 func (s *Service) hasPendingUpdates(room string) bool {
@@ -335,12 +407,13 @@ func (s *Service) hasDurableAppend(room string) bool {
 // publishes into is the room the evictor would close.
 //
 // The other writers of this process take the document's lock and are ordered by that
-// confirmation instead, so they are not asked about here. A browser's append (appendUpdate,
-// under withRoomLock) and a settlement (settleRoomWithin, under lockSettlementCursor) each either
-// advance the instance's cursor before they drop the lock or are refused by the gate on a room
-// behind the head (ErrRoomBehindHead), and a cursor moves only by the version after the one it
-// stands at (advanceRoomCursor), so a room the confirmation finds behind is one none of them can
-// bring back to the head.
+// confirmation instead, so they are not asked about here. A batch of a room's browser updates
+// (PgVersioned.AppendUpdatesWithCredit, under the document's session lock on its own connection)
+// and a settlement (settleRoomWithin, under lockSettlementCursor) each either advance the
+// instance's cursor, once for each version they stored, before they drop the lock, or are refused
+// by the gate on a room behind the head (ErrRoomBehindHead), and a cursor moves only by the
+// version after the one it stands at (advanceRoomCursor), so a room the confirmation finds behind
+// is one none of them can bring back to the head.
 func (s *Service) hasOpenLiveWrite(room string) bool {
 	state := s.lockExistingState(room)
 	if state == nil {

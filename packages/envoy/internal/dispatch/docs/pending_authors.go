@@ -330,7 +330,8 @@ type roomCursor struct {
 //
 //   - the room's load, which starts the cursor at the head it read and the versions this process
 //     appended while it ran (keepInstance, roomLoad);
-//   - a browser append that committed, inside the lock it holds (PgVersioned.appendUpdate);
+//   - a room's batch of browser updates that committed, once per version, inside the lock it
+//     holds (PgVersioned.AppendUpdatesWithCredit);
 //   - a live write's commit, for the versions its publish is about to apply to the room
 //     (Ledger.takeRoomCursors), and that publish itself (publishLiveUpdate);
 //   - settlement's own repair append, its superseded path included (settleRoomWithin);

@@ -253,8 +253,8 @@ func (e *staleRoomEvictor) notified(ctx context.Context) func(channel, artifactI
 // Every append notifies, this process's own included: the statement cannot tell who will hear it.
 // The room's cursor is what tells them apart - the durable version the resident instance holds
 // every update through (roomCursor). This process's own write advances it before it drops the
-// document's advisory lock: a browser's append inside the session lock it appended under
-// (appendUpdate), a transaction's write before the commit that drops its lock
+// document's advisory lock: a batch of browser updates inside the session lock it appended under
+// (AppendUpdatesWithCredit), a transaction's write before the commit that drops its lock
 // (Ledger.takeRoomCursors), a settlement's own repair likewise (settleRoomWithin). The publish
 // of a committed write records its version again as it lands in the room (publishLiveUpdate).
 // Another process's write advances no cursor here, so its room stands behind the head.

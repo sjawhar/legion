@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -694,4 +695,177 @@ func TestABatchStopsAtASuppressedUpdateAndAtAnotherRoomInstance(t *testing.T) {
 		waitForNoLiveDocument(t, service, artifactID)
 	}
 	t.Logf("%d rounds in %s", rounds, time.Since(started).Round(time.Millisecond))
+}
+
+// countingBurstStore holds the room's appends against gates as burstStore does, and keeps how many
+// updates each append of the room was handed, in the order the appends reached it.
+type countingBurstStore struct {
+	burstStore
+	counted sync.Mutex
+	handed  []int
+}
+
+func (s *countingBurstStore) AppendUpdatesWithCredit(ctx context.Context, room string, updates []BrowserUpdate) (persistence.Version, error) {
+	if room == s.room {
+		s.counted.Lock()
+		s.handed = append(s.handed, len(updates))
+		s.counted.Unlock()
+	}
+	return s.burstStore.AppendUpdatesWithCredit(ctx, room, updates)
+}
+
+// Two calls of one room instance can run at the same time, one storing its update with the update
+// recorded after it as a batch, the other storing that later update alone, as a call that finds a
+// suppression slot of the room queued does. ygo serialises its calls for one room instance, but
+// what the store holds must not rest on that: the later update is stored once whichever append
+// takes the document's lock first. The two updates are recorded and handed to the room's
+// persistence here as the room's own observer and ygo's worker do, and the store holds each append
+// as it arrives, so the test decides the order. The batch taken first and committing first stores
+// both, and the lone update's append then finds its update stored and stores nothing. The lone
+// update committing first, the batch finds its member gone with that call and stores its own
+// alone. The lone update's call taken first, the batch stops before the update another call has
+// taken. Each way every update is stored once, and the room's record ends every count it held.
+func TestALoneUpdateAndABatchHoldingItStoreItOnce(t *testing.T) {
+	cases := []struct {
+		name string
+		// loneFirst makes the lone update's call before the batch's, which is otherwise first.
+		loneFirst bool
+		// let is the order the held appends are let go in, each an index of the order the appends
+		// reached the store; handed is how many updates each append was handed, in that order of
+		// arrival; stored is which update, as an index of updates, is at each version after the
+		// head.
+		let    []int
+		handed []int
+		stored []int
+	}{
+		{name: "the batch commits first while the lone update waits", let: []int{0, 1}, handed: []int{2, 1}, stored: []int{0, 1}},
+		{name: "the lone update commits first while the batch waits", let: []int{1, 0}, handed: []int{2, 1}, stored: []int{1, 0}},
+		{name: "the lone update's call is taken before the batch", loneFirst: true, let: []int{1, 0}, handed: []int{1, 1}, stored: []int{0, 1}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			database := storetest.Open(t)
+			artifactID := createDocument(t, database, "# First")
+			gates := []*heldAppendGate{
+				{entered: make(chan struct{}), release: make(chan struct{})},
+				{entered: make(chan struct{}), release: make(chan struct{})},
+			}
+			t.Cleanup(func() {
+				for _, gate := range gates {
+					gate.let()
+				}
+			})
+			appends := &countingBurstStore{burstStore: burstStore{VersionedStore: NewPgVersioned(database), room: artifactID, gates: gates}}
+			service := newShutdownTestService(t, database, appends)
+			seedServiceText(t, service, artifactID, "First.\n")
+			settleCurrentGeneration(t, service, artifactID)
+			if err := service.warmLiveDocument(ctx, artifactID); err != nil {
+				t.Fatalf("load the document's room: %v", err)
+			}
+			waitForLandedAppends(t, service, artifactID)
+			live := service.srv.GetDoc(artifactID)
+			before := storedHead(t, database, artifactID)
+
+			// Both updates are a retired instance's, standing at the head, as ygo's stranded
+			// persistence hands them on; the resident room takes neither.
+			retired := &roomCursor{through: before}
+			updates := make([][]byte, 2)
+			for index := range updates {
+				_, updates[index] = peerEdit(t, live, appendBlocks(t, fmt.Sprintf("Concurrent %d.\n", index)))
+				service.recordUpdateClass(artifactID, updates[index], documentUpdateClass{contentChanged: true, durable: true, cursor: retired})
+			}
+			record := service.room(artifactID)
+			adapter := &servicePersistenceAdapter{store: service.persistence, service: service}
+			appends.armed.Store(true)
+
+			// A slot finished with an update that is neither of the two: a call that finds it
+			// queued goes alone, and the slot check lets its update through to the store.
+			queueSlot := func() *suppressSlot {
+				slot := service.prepareSuppressedPersistence(artifactID)
+				service.finishSuppressedPersistence(slot, paragraphUpdate())
+				return slot
+			}
+			// arrived is the index of the update each held append was made for, in the order the
+			// appends reached the store, and returned each call's answer by update.
+			var arrived []int
+			returned := []chan error{make(chan error, 1), make(chan error, 1)}
+			call := func(index int, what string) {
+				gate := gates[len(arrived)]
+				arrived = append(arrived, index)
+				go func() { returned[index] <- adapter.StoreUpdateContext(ctx, artifactID, updates[index]) }()
+				select {
+				case <-gate.entered:
+				case err := <-returned[index]:
+					t.Fatalf("%s returned (%v) before it reached the store", what, err)
+				case <-time.After(roomWait(t)):
+					t.Fatalf("%s never reached the store", what)
+				}
+			}
+			if test.loneFirst {
+				slot := queueSlot()
+				call(1, "the lone update's call")
+				service.cancelSuppressedPersistence(artifactID, slot)
+				call(0, "the batch's call")
+			} else {
+				call(0, "the batch's call")
+				slot := queueSlot()
+				call(1, "the lone update's call")
+				service.cancelSuppressedPersistence(artifactID, slot)
+			}
+			for _, held := range test.let {
+				gates[held].let()
+				select {
+				case err := <-returned[arrived[held]]:
+					if err != nil {
+						t.Fatalf("the call for update %d: %v", arrived[held], err)
+					}
+				case <-time.After(roomWait(t)):
+					t.Fatalf("the call for update %d never returned once its append was let go", arrived[held])
+				}
+			}
+
+			appends.counted.Lock()
+			handed := slices.Clone(appends.handed)
+			appends.counted.Unlock()
+			if !slices.Equal(handed, test.handed) {
+				t.Errorf("the appends were handed %v updates, want %v", handed, test.handed)
+			}
+			if failure := service.roomFailure(artifactID); failure != nil {
+				t.Fatalf("the room failed: %v", failure)
+			}
+			for index, update := range updates {
+				rows, err := database.Pool.Query(ctx, `
+					select version from doc_updates where artifact_id = $1 and version > $2 and update = $3 order by version
+				`, artifactID, before, update)
+				if err != nil {
+					t.Fatalf("read update %d's rows: %v", index, err)
+				}
+				versions, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+				if err != nil {
+					t.Fatalf("read update %d's rows: %v", index, err)
+				}
+				want := []int64{before + 1 + int64(slices.Index(test.stored, index))}
+				if !slices.Equal(versions, want) {
+					t.Errorf("update %d is stored at versions %v, want %v", index, versions, want)
+				}
+			}
+			if head := storedHead(t, database, artifactID); head != before+2 {
+				t.Errorf("the store's head is %d, want %d: one row for each update", head, before+2)
+			}
+			record.mu.Lock()
+			queued, pending, durable := len(record.updateClasses), record.pendingUpdates, record.durableAppends.Load()
+			record.mu.Unlock()
+			if queued != 0 || pending != 0 || durable != 0 {
+				t.Errorf("the room's record holds %d queued classes, %d pending updates and %d durable appends, want none", queued, pending, durable)
+			}
+
+			// The resident room never took the retired instance's updates, so it stands behind the
+			// head; it goes before the service's cleanup settles it.
+			if err := service.Evict(ctx, artifactID); err != nil {
+				t.Fatalf("evict the room: %v", err)
+			}
+			waitForNoLiveDocument(t, service, artifactID)
+		})
+	}
 }

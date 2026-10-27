@@ -66,11 +66,13 @@ type Deps struct {
 }
 
 // VersionedStore is Dispatch's transactional extension of ygo's durable room
-// store. AppendUpdateWithCredit is the one way a room's own update reaches the store: it appends
-// the update, classified as content or not, with the browser edit's in-flight credit, which it
-// takes and lands under the document's advisory lock (UpdateCredit). Document writes that join an
-// API transaction use AppendUpdateTx, classifying the update the way the room's update observer
-// classifies a live one. RebuildTx replaces an unreadable history inside the rebuild's
+// store. AppendUpdatesWithCredit is the one way a room's own updates reach the store: it appends
+// them in one transaction, each classified as content or not, with each browser edit's in-flight
+// credit, which it takes and lands under the document's advisory lock (UpdateCredit); the room's
+// own call hands it one update and marks its context with the room's side of the append, through
+// which it stores the room's queued updates with that one (room_appends.go). Document writes that
+// join an API transaction use AppendUpdateTx, classifying the update the way the room's update
+// observer classifies a live one. RebuildTx replaces an unreadable history inside the rebuild's
 // transaction, through the same persistence boundary as its preflight load. Head is the version
 // Load would fold up to now, which says whether a state loaded earlier is still the stored one.
 // DocumentStamp names the stored state a read of the document meets now, and LoadDocument is that
@@ -80,7 +82,7 @@ type Deps struct {
 // that wraps a PgVersioned by embedding it passes it on with no code of its own.
 type VersionedStore interface {
 	persistence.VersionedPersistence
-	AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error)
+	AppendUpdatesWithCredit(ctx context.Context, room string, updates []BrowserUpdate) (first persistence.Version, err error)
 	AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error)
 	RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error)
 	Head(ctx context.Context, room string) (persistence.Version, error)
@@ -289,6 +291,9 @@ type Service struct {
 	// reads holds the renderings of the documents cold reads served, each under the stored state
 	// it was rendered from (coldRead).
 	reads *documentReads
+	// appendFigures counts what the rooms' browser append transactions did (room_appends.go), for
+	// the room figures.
+	appendFigures roomAppendFigures
 }
 
 type artifactOwner struct {
@@ -620,8 +625,11 @@ func New(deps Deps) *Service {
 	adapter := &servicePersistenceAdapter{store: persist, service: service}
 	srv := websocket.NewServerWithPersistence(adapter)
 	srv.HocuspocusFraming = true
-	// Transactional server-side edits suppress one automatic ygo write and
-	// append it inside the API transaction, so persistence stays per update.
+	// Transactional server-side edits suppress one automatic ygo write and append it inside the API
+	// transaction, so ygo hands the room's persistence each update on its own, one call per update,
+	// and each update is stored as a row of its own. The calls are grouped at the store instead: an
+	// update's call takes the room's queued updates with it into one transaction, a row each
+	// (room_appends.go), so the suppression slots still match one update apiece.
 	srv.PersistCoalesceWindow = -1
 	srv.CompactEvery = 200
 	// The rooms decode under maxUpdateItems, the queue every decode of document bytes takes (see
@@ -2564,7 +2572,9 @@ func (s *Service) issueOpen(ctx context.Context, q Queryer, artifactID string) (
 // waitForPendingUpdates waits until the room has handed persistence every update its update
 // observer recorded, from every peer and the service alike. It counts the room, not a writer: a
 // peer still writing keeps it waiting for as long as the room stores more slowly than it writes.
+// It asks the room's appends to go first (flushRoomAppends), so it waits out no batch's linger.
 func (s *Service) waitForPendingUpdates(ctx context.Context, room string) error {
+	s.flushRoomAppends(room)
 	for s.hasPendingUpdates(room) {
 		select {
 		case <-ctx.Done():
@@ -2578,7 +2588,10 @@ func (s *Service) waitForPendingUpdates(ctx context.Context, room string) error 
 	return nil
 }
 
+// waitForDurableAppends waits until every durable append the room's record counts has landed,
+// asking the room's appends to go first (flushRoomAppends), as waitForPendingUpdates does.
 func (s *Service) waitForDurableAppends(ctx context.Context, room string) error {
+	s.flushRoomAppends(room)
 	for s.hasDurableAppend(room) {
 		select {
 		case <-ctx.Done():
