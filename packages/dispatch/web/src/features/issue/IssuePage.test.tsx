@@ -664,24 +664,123 @@ test("IssuePage cancels an unsubscribe confirmation without calling the mutation
   }
 });
 
+const prTitleOnPullRequest = { check_suite_id: 10, event: "pull_request", name: "PR Title" };
+
 for (const fixture of [
   {
-    checkRuns: [{ conclusion: "success", status: "completed" }],
+    checkRuns: [{ check_suite: { id: 10 }, conclusion: "success", status: "completed" }],
     checks: "success",
+    name: "success checks",
+    workflowRuns: [prTitleOnPullRequest],
   },
   {
-    checkRuns: [{ conclusion: "failure", status: "completed" }],
+    checkRuns: [{ check_suite: { id: 10 }, conclusion: "failure", status: "completed" }],
     checks: "failure",
+    name: "failure checks",
+    workflowRuns: [prTitleOnPullRequest],
   },
   {
-    checkRuns: [{ conclusion: null, status: "in_progress" }],
+    checkRuns: [{ check_suite: { id: 10 }, conclusion: null, status: "in_progress" }],
     checks: "pending",
+    name: "pending checks",
+    workflowRuns: [prTitleOnPullRequest],
+  },
+  // A run a newer run of the same check, workflow and event replaced does not count, as GitHub's
+  // merge reads it.
+  {
+    checkRuns: [
+      { check_suite: { id: 10 }, conclusion: "cancelled", id: 1, status: "completed" },
+      { check_suite: { id: 11 }, conclusion: "success", id: 3, status: "completed" },
+      { check_suite: { id: 12 }, conclusion: "success", id: 2, name: "lint", status: "completed" },
+    ],
+    checks: "success",
+    name: "a cancelled check its newer run passed",
+    workflowRuns: [
+      prTitleOnPullRequest,
+      { ...prTitleOnPullRequest, check_suite_id: 11 },
+      { check_suite_id: 12, event: "pull_request", name: "CI" },
+    ],
+  },
+  // A failed run of one event still blocks beside a passing run of the same check on another.
+  {
+    checkRuns: [
+      { check_suite: { id: 10 }, conclusion: "failure", id: 1, status: "completed" },
+      { check_suite: { id: 11 }, conclusion: "success", id: 2, status: "completed" },
+    ],
+    checks: "failure",
+    name: "a check failed for one event and passed for another",
+    workflowRuns: [
+      prTitleOnPullRequest,
+      { ...prTitleOnPullRequest, check_suite_id: 11, event: "pull_request_review" },
+    ],
+  },
+  // GitHub leaves a run whose event it does not evaluate out of a pull request's checks (an inline
+  // review comment's run on sjawhar/legion#2234 and #2059): its failure or wait does not count.
+  {
+    checkRuns: [
+      { check_suite: { id: 10 }, conclusion: "success", id: 1, status: "completed" },
+      { check_suite: { id: 11 }, conclusion: "failure", id: 2, status: "completed" },
+      { check_suite: { id: 12 }, conclusion: null, id: 3, status: "queued" },
+    ],
+    checks: "success",
+    name: "a failed and a waiting check of an event GitHub does not evaluate",
+    workflowRuns: [
+      prTitleOnPullRequest,
+      { ...prTitleOnPullRequest, check_suite_id: 11, event: "pull_request_review_comment" },
+      { ...prTitleOnPullRequest, check_suite_id: 12, event: "workflow_dispatch" },
+    ],
+  },
+  // A check run no workflow run made (an external App's) is its name and App: the App's newer run
+  // replaces its older one.
+  {
+    checkRuns: [
+      {
+        app: { id: 50 },
+        check_suite: { id: 20 },
+        conclusion: "failure",
+        id: 1,
+        status: "completed",
+      },
+      {
+        app: { id: 50 },
+        check_suite: { id: 21 },
+        conclusion: "success",
+        id: 2,
+        status: "completed",
+      },
+    ],
+    checks: "success",
+    name: "an external App's failed check its newer run passed",
+    workflowRuns: [prTitleOnPullRequest],
+  },
+  // The same check name from two Apps is two checks: one App's failure still blocks.
+  {
+    checkRuns: [
+      {
+        app: { id: 50 },
+        check_suite: { id: 20 },
+        conclusion: "failure",
+        id: 1,
+        status: "completed",
+      },
+      {
+        app: { id: 51 },
+        check_suite: { id: 21 },
+        conclusion: "success",
+        id: 2,
+        status: "completed",
+      },
+    ],
+    checks: "failure",
+    name: "one check name failed for one external App and passed for another",
+    workflowRuns: [prTitleOnPullRequest],
   },
 ]) {
-  test(`IssuePage renders a merged pull request with ${fixture.checks} checks`, async () => {
+  test(`IssuePage renders a merged pull request with ${fixture.name}`, async () => {
     const restore = stubIssuePage(
       issueWithExternalLink("https://github.com/owner/repository/pull/7")
     );
+    const checkRuns = fixture.checkRuns.map((run) => ({ id: 1, name: "pr-title", ...run }));
     const githubRest = spyOn(api, "githubRest").mockImplementation(async (path) => {
       if (path === "repos/owner/repository/pulls/7") {
         return new Response(
@@ -694,8 +793,13 @@ for (const fixture of [
           { headers: { "Content-Type": "application/json" } }
         );
       }
-      if (path === "repos/owner/repository/commits/abcdef/check-runs") {
-        return new Response(JSON.stringify({ check_runs: fixture.checkRuns }), {
+      if (path === "repos/owner/repository/commits/abcdef/check-runs?per_page=100&page=1") {
+        return new Response(JSON.stringify({ check_runs: checkRuns }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (path === "repos/owner/repository/actions/runs?head_sha=abcdef&per_page=100&page=1") {
+        return new Response(JSON.stringify({ workflow_runs: fixture.workflowRuns }), {
           headers: { "Content-Type": "application/json" },
         });
       }
@@ -708,7 +812,7 @@ for (const fixture of [
     try {
       await screen.findByText("Merge native Dispatch");
       expect(screen.getByText("merged")).toBeDefined();
-      expect(screen.getByText(`checks: ${fixture.checks}`)).toBeDefined();
+      expect(await screen.findByText(`checks: ${fixture.checks}`)).toBeDefined();
     } finally {
       view.unmount();
       githubRest.mockRestore();

@@ -107,6 +107,22 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.gateRegistered(ctx, tx, fact)
 	case intake.DispatchArtifact:
 		return e.dispatchArtifact(ctx, tx, fact)
+	case intake.GateAboveDispatch:
+		return e.gateAboveDispatch(ctx, tx, fact)
+	case intake.GateRequestFound:
+		return e.gateRequestFound(ctx, tx, fact)
+	case intake.CatchUpApplied:
+		return e.catchUpApplied(ctx, tx, fact)
+	case intake.DispatchAskOpened:
+		return e.dispatchAskOpened(ctx, tx, fact)
+	case intake.DispatchAskClosed:
+		return e.dispatchAskClosed(ctx, tx, fact)
+	case intake.DispatchAskReply:
+		return e.dispatchAskReply(ctx, tx, fact)
+	case intake.DispatchApprovalMoved:
+		return e.dispatchApprovalMoved(ctx, tx, fact)
+	case intake.DispatchAskRestored:
+		return e.dispatchAskRestored(ctx, tx, fact)
 	case intake.HandoffComplete:
 		return e.handoff(ctx, tx, fact)
 	case intake.PullRequestOpened:
@@ -195,7 +211,10 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 	// An event carries the whole issue, so it writes a status only when its status differs from the
 	// one Dispatch showed at the event before it. One that does not is an edit — a rank, title or
 	// label change — made while a status the daemon queued has not reached Dispatch, whoever made it.
-	if fact.Status == issue.DispatchStatus {
+	// A route's own write (intake.DispatchIssue.StatusMove) is a status Dispatch confirmed the daemon
+	// wrote, applied ahead of events the consumer has not delivered, so it is a move whatever the
+	// record last saw Dispatch show.
+	if fact.Status == issue.DispatchStatus && !fact.StatusMove {
 		return intake.Result{}, e.keepStatus(ctx, tx, *issue, fact)
 	}
 	if reasserted, err := e.sessionStatusWrite(ctx, tx, *issue, fact); err != nil || reasserted {
@@ -219,9 +238,11 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 // sessionStatusWrite takes a lifecycle status change written by a session whose write the workflow
 // does not act on. A session holding a claim in the issue's tree is an agent, never a human move,
 // since a phase ends only by its completion (the `legion` tool's `handoff_complete`) and a tree only by the
-// architect's sign-off. Any other session on the root of an admitted tree — another tree's agent, or
-// one outside Legion that took the issue for its own — has no part in the running tree it would end
-// or park, so the tree's architect is told who wrote what. Either way the workflow does not react:
+// architect's sign-off. Any other session on the root of a running tree — one holding its admission
+// slot, or one waiting on a person, whose tree stays live while it gave its slot back — another
+// tree's agent, or one outside Legion that took the issue for its own, has no part in the tree it
+// would end or park, so the tree's architect is told who wrote what (held until a waiting root's
+// architect resumes). Either way the workflow does not react:
 // the observation is recorded with the status kept (keepStatus), and the daemon re-asserts its own
 // status through the outbox. A person's move and the daemon's own write carry no session
 // (intake.DispatchIssue.ActorSession): they are the workflow's to act on.
@@ -234,7 +255,8 @@ func (e *Engine) sessionStatusWrite(ctx context.Context, tx pgx.Tx, issue record
 		return false, err
 	}
 	if !agent {
-		if admitted, err := e.admittedRoot(ctx, tx, issue); err != nil || !admitted {
+		waiting := claim.IsTreeRoot(issue.Key, issue.Tree) && issue.AwaitingPerson() && !issue.Lingers()
+		if admitted, err := e.admittedRoot(ctx, tx, issue); err != nil || !admitted && !waiting {
 			return false, err
 		}
 	}
@@ -448,7 +470,7 @@ func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, f
 	if err != nil {
 		return err
 	}
-	if gate != nil && classify.DesignGateOpen(*gate) {
+	if gate != nil && classify.DesignGateOpen(*gate) && !root.AwaitingPerson() {
 		return e.gateOpened(ctx, tx, child)
 	}
 	return nil
@@ -744,6 +766,11 @@ func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMo
 // signOff is the architect's acceptance of a reviewed head: it moves the issue from accepting to
 // retro and starts the implementer there, told the review's handoff and the pull request as the
 // approval told it before acceptance existed. Outside accepting it changes nothing and says so.
+// Nothing beneath the issue holds it: the acceptance is of the issue's own reviewed head, and the
+// tree's order is kept at the close instead, where a root whose pull request merged while any
+// other issue of its tree is still in the workflow waits in awaiting_merge until the last of them
+// is done or parked (closeMerged). Holding the acceptance as well kept an approved pull request out
+// of retro, READY and the merge queue for as long as any issue beneath it ran.
 func (e *Engine) signOff(ctx context.Context, tx pgx.Tx, fact intake.SignOff) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || issue == nil {
@@ -751,13 +778,6 @@ func (e *Engine) signOff(ctx context.Context, tx pgx.Tx, fact intake.SignOff) (i
 	}
 	if issue.Phase != phase.Accepting {
 		return refused("SIGNOFF_OUTSIDE_ACCEPTING", fmt.Sprintf("%s is in phase %s, not accepting; this sign-off changed nothing", issue.Key, issue.Phase)), nil
-	}
-	running, err := e.openBeneath(ctx, tx, *issue)
-	if err != nil {
-		return intake.Result{}, err
-	}
-	if len(running) > 0 {
-		return refused("SIGNOFF_CHILD_IN_WORKFLOW", fmt.Sprintf("%s still has %s beneath it in the workflow; this sign-off changed nothing. Accept %s once the last of them closes, or take one out of the workflow with park_child", issue.Key, strings.Join(running, ", "), issue.Key)), nil
 	}
 	review, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
 	if err != nil {
@@ -930,7 +950,7 @@ func (e *Engine) row(from phase.Phase, trigger TriggerKind, target phase.Phase, 
 // would hold its slot with nothing left to start it — StartUnblockedChildren starts children, and
 // the state's `blocked` names no slotted root — so it would be neither started nor reported.
 func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record.Issue, gate record.DesignGate) error {
-	if !classify.DesignGateOpen(gate) {
+	if root.AwaitingPerson() || !classify.DesignGateOpen(gate) {
 		return nil
 	}
 	members, err := e.treeMembers(ctx, tx, root)
@@ -1011,12 +1031,14 @@ func (e *Engine) StartUnblockedChildren(ctx context.Context, tx pgx.Tx, issues [
 	return nil
 }
 
-// treeStartsChildren says whether tree starts a child of its own now: its root is recorded, the
-// tree is live, and its design gate is open — the two conditions enterChild and
-// advanceAdmittedTree between them stand for.
+// treeStartsChildren says whether tree starts a child of its own now: its root is recorded, not
+// waiting on a person (a root whose wait a person's approval answered, opening its gate, starts its
+// children with its resume, advanceAdmittedTree, once it has its slot again), the tree is live, and
+// its design gate is open — the conditions enterChild and advanceAdmittedTree between them stand
+// for.
 func (e *Engine) treeStartsChildren(ctx context.Context, tx pgx.Tx, tree string) (bool, error) {
 	root, err := e.store.Issue(ctx, tx, tree)
-	if err != nil || root == nil {
+	if err != nil || root == nil || root.AwaitingPerson() {
 		return false, err
 	}
 	live, err := record.TreeLive(ctx, e.store, tx, *root)
@@ -1131,52 +1153,6 @@ func (e *Engine) treeMembers(ctx context.Context, tx pgx.Tx, root record.Issue) 
 		}
 	}
 	return members, nil
-}
-
-// openBeneath is the sorted keys of the issues under issue — its children, their children, and so
-// on — that are still in the workflow (InWorkflow). It reads the tree's members once and walks
-// down the recorded parent column from issue, which is the right candidate set because every issue
-// of a tree keeps the root's key in its tree field and its own parent's key in parent. The walk
-// must be downward and never over the flat tree: every member names the root in its tree field, so
-// an issue held for any member of its tree would wait for the root, which is waiting for it. Its
-// three termination rules are the ones the daemon's upward walk already carries (api/architect.go,
-// owns): a visited set, since parent is plain nullable text with no foreign key, rewritten from
-// every Dispatch observation, so a cycle is possible and would otherwise spin inside the fact's
-// transaction; only issues the tree lists are followed, so a parent recorded in another tree is
-// never reached; and an issue whose parent is empty, or names a key the tree does not hold, is
-// beneath nothing.
-func (e *Engine) openBeneath(ctx context.Context, tx pgx.Tx, issue record.Issue) ([]string, error) {
-	members, err := e.treeMembers(ctx, tx, issue)
-	if err != nil {
-		return nil, err
-	}
-	// The index holds each child's place in members rather than its record: an Issue is a wide
-	// struct, and the walk reads only its key and whether it is in the workflow.
-	children := map[string][]int{}
-	for index, member := range members {
-		if member.Parent != nil && *member.Parent != "" {
-			children[*member.Parent] = append(children[*member.Parent], index)
-		}
-	}
-	running := []string{}
-	seen := map[string]bool{issue.Key: true}
-	for frontier := []string{issue.Key}; len(frontier) > 0; {
-		current := frontier[len(frontier)-1]
-		frontier = frontier[:len(frontier)-1]
-		for _, index := range children[current] {
-			child := members[index]
-			if seen[child.Key] {
-				continue
-			}
-			seen[child.Key] = true
-			frontier = append(frontier, child.Key)
-			if InWorkflow(child) {
-				running = append(running, child.Key)
-			}
-		}
-	}
-	slices.Sort(running)
-	return running, nil
 }
 
 func (e *Engine) gateForIssue(ctx context.Context, tx pgx.Tx, issue record.Issue) (*record.DesignGate, error) {

@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -198,7 +200,10 @@ func TestHandOverOfALabelledIssueWritesTheStatusAtItsSequence(t *testing.T) {
 	}
 }
 
-func TestSetStatusSendsDaemonActor(t *testing.T) {
+// SetStatus writes as the daemon's own session and answers the issue as Dispatch's PATCH leaves it:
+// the issue's fields at the top level, beside Dispatch's write advice, at the sequence of the event
+// the write made.
+func TestSetStatusSendsDaemonActorAndAnswersTheWrittenIssue(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPatch || r.URL.Path != "/api/v1/issues/LEGION-4" {
 			t.Fatalf("request = %s %s, want PATCH /api/v1/issues/LEGION-4", r.Method, r.URL.Path)
@@ -215,12 +220,21 @@ func TestSetStatusSendsDaemonActor(t *testing.T) {
 		if body.Status != "testing" || body.Actor.Kind != "session" || body.Actor.ID != "legion-daemon:LEGION" {
 			t.Fatalf("status request = %#v, want testing from legion-daemon:LEGION", body)
 		}
-		writeJSON(t, w, map[string]string{"status": "testing"})
+		writeJSON(t, w, map[string]any{
+			"key": "LEGION-4", "title": "Widget", "status": "testing", "parent": "LEGION-1", "rank": "B", "labels": []string{"Legion"},
+			"last_seq": 12, "resolved_repo": "acme/widgets", "blocked_by": []string{"LEGION-2"}, "claim": nil,
+			"advice": map[string]any{"suggestions": []any{}},
+		})
 	}))
 	defer server.Close()
 
-	if err := New(server.URL, dispatchToken).SetStatus(context.Background(), "LEGION-4", "testing"); err != nil {
+	written, err := New(server.URL, dispatchToken).SetStatus(context.Background(), "LEGION-4", "testing")
+	if err != nil {
 		t.Fatalf("set status: %v", err)
+	}
+	if written.Key != "LEGION-4" || written.Status != "testing" || written.LastSeq != 12 || written.Parent == nil || *written.Parent != "LEGION-1" ||
+		!written.HandedOver || written.ResolvedRepo != "acme/widgets" || len(written.BlockedBy) != 1 || written.Claim != nil || written.ClaimUnread {
+		t.Fatalf("written issue = %#v, want LEGION-4 as the PATCH answered it, at sequence 12", written)
 	}
 }
 
@@ -261,30 +275,157 @@ func TestPostMessageSendsBodyWithoutAnUnsupportedIdempotencyKey(t *testing.T) {
 	}
 }
 
+// The artifact read carries the approval Dispatch derives, the latest review's time and its event's
+// sequence (none from a Dispatch that predates the sequence).
 func TestApprovalReturnsCurrentDocumentApproval(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/artifacts/artifact-6" {
-			t.Fatalf("request = %s %s, want GET /api/v1/artifacts/artifact-6", r.Method, r.URL.Path)
-		}
 		assertBearer(t, r)
-		writeJSON(t, w, map[string]any{
-			"id":        "artifact-6",
-			"issue_key": "LEGION-6",
-			"approval": map[string]any{
-				"state":          "approved",
-				"latest_version": 3,
-				"version":        3,
-			},
-		})
+		if r.Method != http.MethodGet {
+			t.Fatalf("request = %s %s, want GET", r.Method, r.URL.Path)
+		}
+		switch r.URL.Path {
+		case "/api/v1/artifacts/artifact-6":
+			writeJSON(t, w, map[string]any{"id": "artifact-6", "issue_key": "LEGION-6", "approval": map[string]any{
+				"state": "approved", "latest_version": 3, "version": 3, "at": "2026-10-23T18:00:00.123456Z", "seq": 12}})
+		case "/api/v1/artifacts/artifact-7":
+			writeJSON(t, w, map[string]any{"id": "artifact-7", "issue_key": "LEGION-7", "approval": map[string]any{
+				"state": "awaiting", "latest_version": 4, "version": 3, "at": "2026-10-23T17:00:00Z"}})
+		case "/api/v1/artifacts/artifact-8":
+			writeJSON(t, w, map[string]any{"id": "artifact-8", "issue_key": "LEGION-8", "approval": map[string]any{"state": "draft", "latest_version": 1}})
+		default:
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
 	}))
 	defer server.Close()
+	client := New(server.URL, dispatchToken)
 
-	approval, err := New(server.URL, dispatchToken).Approval(context.Background(), "artifact-6")
+	approval, err := client.Approval(context.Background(), "artifact-6")
 	if err != nil {
 		t.Fatalf("read approval: %v", err)
 	}
-	if approval.IssueKey != "LEGION-6" || approval.State != "approved" || approval.LatestVersion != 3 || approval.Version == nil || *approval.Version != 3 {
-		t.Fatalf("approval = %#v, want LEGION-6's document approved at version 3", approval)
+	if approval.IssueKey != "LEGION-6" || approval.State != "approved" || approval.LatestVersion != 3 || approval.Version == nil || *approval.Version != 3 || approval.ApprovedLatest() != 3 ||
+		!approval.At.Equal(time.Date(2026, 10, 23, 18, 0, 0, 123456000, time.UTC)) || approval.Seq != 12 {
+		t.Fatalf("approval = %#v, want LEGION-6's document approved at version 3 by the review at sequence 12", approval)
+	}
+	awaiting, err := client.Approval(context.Background(), "artifact-7")
+	if err != nil {
+		t.Fatalf("read awaiting approval: %v", err)
+	}
+	if awaiting.State != "awaiting" || awaiting.ApprovedLatest() != 0 ||
+		!awaiting.At.Equal(time.Date(2026, 10, 23, 17, 0, 0, 0, time.UTC)) || awaiting.Seq != 0 {
+		t.Fatalf("awaiting approval = %#v, want an open request, its review's time and no sequence", awaiting)
+	}
+	draft, err := client.Approval(context.Background(), "artifact-8")
+	if err != nil {
+		t.Fatalf("read draft approval: %v", err)
+	}
+	if !draft.At.IsZero() || draft.Seq != 0 {
+		t.Fatalf("draft approval = %#v, want no review time or sequence", draft)
+	}
+}
+
+// While an approval request is open the artifact read names it and whose turn it waits on; once a
+// review answered it, the ask Dispatch still names is no open request, and the read names none.
+func TestApprovalNamesOnlyAnOpenRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/artifacts/artifact-7":
+			writeJSON(t, w, map[string]any{"id": "artifact-7", "issue_key": "LEGION-7", "approval": map[string]any{
+				"state": "awaiting", "latest_version": 4, "ask_id": "ask-approval", "waiting_on": "agent"}})
+		case "/api/v1/artifacts/artifact-9":
+			writeJSON(t, w, map[string]any{"id": "artifact-9", "issue_key": "LEGION-9", "approval": map[string]any{
+				"state": "changes_requested", "latest_version": 4, "version": 4, "reason": "why", "ask_id": "ask-answered"}})
+		default:
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := New(server.URL, dispatchToken)
+	awaiting, err := client.Approval(context.Background(), "artifact-7")
+	if err != nil {
+		t.Fatalf("read awaiting approval: %v", err)
+	}
+	if awaiting.AskID != "ask-approval" || awaiting.WaitingOn != "agent" {
+		t.Fatalf("awaiting approval = %#v, want the open request ask-approval waiting on the agent", awaiting)
+	}
+	answered, err := client.Approval(context.Background(), "artifact-9")
+	if err != nil {
+		t.Fatalf("read answered approval: %v", err)
+	}
+	if answered.AskID != "" || answered.WaitingOn != "" {
+		t.Fatalf("answered approval = %#v, want no open request named", answered)
+	}
+}
+
+// The list and the detail carry the issue's claim, which the daemon keeps as `<kind>:<id>`; null
+// reads as nobody. A claim naming no actor is unread, as the decoder takes it on an issue event:
+// not nobody, but a claim the daemon cannot name.
+func TestReadsCarryTheClaimHolder(t *testing.T) {
+	claimed := map[string]any{"actor": map[string]any{"kind": "user", "id": "alice"}, "at": "2026-10-23T18:00:00Z"}
+	actorless := map[string]any{"actor": map[string]any{"kind": "user"}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/issues":
+			writeJSON(t, w, []map[string]any{
+				{"key": "LEGION-1", "status": "todo", "rank": "a", "claim": claimed},
+				{"key": "LEGION-2", "status": "todo", "rank": "b", "claim": nil},
+				{"key": "LEGION-3", "status": "todo", "rank": "c", "claim": actorless},
+			})
+		case "/api/v1/issues/LEGION-1":
+			writeJSON(t, w, map[string]any{"key": "LEGION-1", "status": "todo", "rank": "a", "claim": claimed})
+		case "/api/v1/issues/LEGION-2":
+			writeJSON(t, w, map[string]any{"key": "LEGION-2", "status": "todo", "rank": "b", "claim": nil})
+		case "/api/v1/issues/LEGION-3":
+			writeJSON(t, w, map[string]any{"key": "LEGION-3", "status": "todo", "rank": "c", "claim": actorless})
+		default:
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := New(server.URL, dispatchToken)
+
+	listed, err := client.ListIssues(context.Background(), "LEGION", nil)
+	if err != nil {
+		t.Fatalf("list issues: %v", err)
+	}
+	if len(listed) != 3 || listed[0].ClaimedBy != "user:alice" || listed[0].ClaimUnread || listed[1].ClaimedBy != "" || listed[1].ClaimUnread ||
+		listed[2].ClaimedBy != "" || !listed[2].ClaimUnread {
+		t.Fatalf("listed claims = %#v, want user:alice, then nobody, then an unread claim", listed)
+	}
+	detail, err := client.GetIssue(context.Background(), "LEGION-1")
+	if err != nil {
+		t.Fatalf("get issue: %v", err)
+	}
+	if got := detail.Claim.Holder(); got != "user:alice" || detail.ClaimUnread {
+		t.Fatalf("detail claim = %q (unread %t), want user:alice", got, detail.ClaimUnread)
+	}
+	unclaimed, err := client.GetIssue(context.Background(), "LEGION-2")
+	if err != nil {
+		t.Fatalf("get issue: %v", err)
+	}
+	if unclaimed.Claim != nil || unclaimed.ClaimUnread {
+		t.Fatalf("detail claim = %#v (unread %t), want nobody", unclaimed.Claim, unclaimed.ClaimUnread)
+	}
+	unread, err := client.GetIssue(context.Background(), "LEGION-3")
+	if err != nil {
+		t.Fatalf("get issue: %v", err)
+	}
+	if unread.Claim != nil || !unread.ClaimUnread {
+		t.Fatalf("detail claim = %#v (unread %t), want an unread claim", unread.Claim, unread.ClaimUnread)
+	}
+}
+
+// A changes request counts only on Dispatch's latest version: a newer version supersedes it.
+func TestChangesRequestedLatestNamesOnlyTheLatestVersion(t *testing.T) {
+	reason := "name the rollback path"
+	if version, got := (Approval{State: "changes_requested", LatestVersion: 4, Version: new(4), Reason: &reason}).ChangesRequestedLatest(); version != 4 || got != reason {
+		t.Fatalf("changes requested on the latest version = %d %q, want 4 with the reason", version, got)
+	}
+	if version, _ := (Approval{State: "changes_requested", LatestVersion: 5, Version: new(4)}).ChangesRequestedLatest(); version != 0 {
+		t.Fatalf("changes requested on an older version = %d, want 0", version)
+	}
+	if version, got := (Approval{State: "changes_requested", LatestVersion: 4, Version: new(4)}).ChangesRequestedLatest(); version != 4 || got == "" {
+		t.Fatalf("changes requested with no reason = %d %q, want 4 with Dispatch's default reason", version, got)
 	}
 }
 
@@ -310,7 +451,7 @@ func TestClientReturnsDispatchErrorFor5xx(t *testing.T) {
 	}))
 	defer server.Close()
 
-	err := New(server.URL, dispatchToken).SetStatus(context.Background(), "LEGION-10", "testing")
+	_, err := New(server.URL, dispatchToken).SetStatus(context.Background(), "LEGION-10", "testing")
 	var dispatchErr *Error
 	if !errors.As(err, &dispatchErr) {
 		t.Fatalf("set status error = %T %v, want *dispatch.Error", err, err)
@@ -501,5 +642,51 @@ func TestAnUnknownFieldRefusalIsRiddenOutUntilDispatchKnowsTheField(t *testing.T
 		if _, permanent := PermanentRefusal(refused); !permanent {
 			t.Fatalf("PermanentRefusal(%q) = not permanent; want it permanent", message)
 		}
+	}
+}
+
+// The boot catch-up reads an issue's event log after a sequence, oldest first, page after page
+// until a short page, each event as Dispatch served it; a page that does not ascend past the last
+// sequence read is refused rather than read again.
+func TestEventsAfterPagesTheIssuesEventLogInOrder(t *testing.T) {
+	var afters []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/issues/LEGION-1/events" || r.URL.Query().Get("limit") != "200" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.String())
+		}
+		after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
+		afters = append(afters, r.URL.Query().Get("after"))
+		count := 200
+		if after >= 200 {
+			count = 3
+		}
+		page := make([]map[string]any, 0, count)
+		for seq := after + 1; seq <= after+int64(count); seq++ {
+			page = append(page, map[string]any{"seq": seq, "type": "comment.created", "issue_key": "LEGION-1"})
+		}
+		writeJSON(t, w, page)
+	}))
+	defer server.Close()
+
+	events, err := New(server.URL, dispatchToken).EventsAfter(context.Background(), "LEGION-1", 7)
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	if !reflect.DeepEqual(afters, []string{"7", "207"}) || len(events) != 203 {
+		t.Fatalf("pages after %v gave %d events, want pages after 7 and 207 giving 203", afters, len(events))
+	}
+	var last struct {
+		Seq int64 `json:"seq"`
+	}
+	if err := json.Unmarshal(events[len(events)-1], &last); err != nil || last.Seq != 210 {
+		t.Fatalf("last event = %s (%v), want seq 210", events[len(events)-1], err)
+	}
+
+	stuck := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, []map[string]any{{"seq": 7, "type": "comment.created"}})
+	}))
+	defer stuck.Close()
+	if _, err := New(stuck.URL, dispatchToken).EventsAfter(context.Background(), "LEGION-1", 7); err == nil || !strings.Contains(err.Error(), "non-ascending") {
+		t.Fatalf("a page at the sequence already read = %v, want refused", err)
 	}
 }

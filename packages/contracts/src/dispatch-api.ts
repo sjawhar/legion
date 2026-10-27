@@ -327,9 +327,10 @@ export interface Issue {
 export type IssueRouteStatus = (typeof ISSUE_ROUTE_STATUSES)[number];
 
 /**
- * Every issue read (the detail, the list, the pinned list) resolves this from one listener read
- * per request. It is stored nowhere and is never on an event payload, which is why it is not a
- * field of `Issue`. Both are null when the issue has no route.
+ * Every issue read (the detail, the list, the pinned list) resolves this from the server's copy
+ * of the listener's session list, at most 5 s old. It is stored in no table and is never on an
+ * event payload, which is why it is not a field of `Issue`. Both are null when the issue has no
+ * route.
  */
 export interface IssueRouteReach {
   readonly route_status: IssueRouteStatus | null;

@@ -7,6 +7,23 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- Daemon API contract 40: a root whose architect asked a person a question and handed the turn
+  back gives its admission slot up in the new phase `awaiting_person`, its architect suspended with
+  its session kept, and the person's answer, or the spec's design gate standing open, puts it at
+  the front of the waiting line, where the next free slot resumes the same session. `legion state`
+  and the controller's `read_state` carry the phase and the issue's `waitingOn`: the question
+  (`kind: "ask"`, `ask`) or, for the gate waits of a later release, the spec version (`kind:
+  "gate"`, `gateVersion`, `artifactId`), when the wait began (`since`, Dispatch's time of the
+  hand-back), and, once the wait was answered, `answeredAt` and `answeredBy` (how it was
+  answered, not always by a person). The controller receives the new `awaiting-person` notice. A
+  39 plugin's strict state reader refuses this state, so install this release with a `legion`
+  built from the same commit. The `legion-architect` skill opens a question on the root and ends
+  its turn after handing it back; it takes a resume task that says "this resume is your
+  design-approved wake" as its `design-approved` wake, since a waiting root gets no
+  `design-approved` notice, and its `design-changes-requested` row says a waiting root's resume
+  task, not a notice, names the changes request. The `legion-controller` skill reads the
+  `awaiting-person` wake and a waiting root as no reason to label or admit anything.
+
 - A ninth Legion skill, `leading-a-work-stream`, rebuilt from dotfiles
   `feb1271d4f5021f2e0b9b22b7496a300e6f46790`: a `SKILL.md` and seven references (daily plan,
   decision rights, direction and coaching, Dispatch upkeep, sources, the speed tick, the record of
@@ -32,6 +49,26 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   factual claim in the spec against the code, the docs or a command, resolves each finding of the
   fresh-reader check, and requests approval once. `dispatch-writing-specs`, "Approval", says the
   same for every spec.
+- A root spec gets a cross review before every approval request. `legion-architect`'s step 3 runs
+  two fresh reviews: `plan-gap-analyst` for its gaps, and `plan-reviewer`, told that the document
+  is a spec, for each factual claim. The architect verifies with a command, or removes, each claim
+  either review marks unverified, and the request's `--summary` ends with one sentence that gives
+  both reviews' results. The root and sub-architect role prompts say the same. Self-review alone
+  did not stop false claims: an architect requested approval, then again minutes later because a
+  claim was false.
+- `plan-reviewer` reviews a spec as well as a plan. In its spec mode it checks each factual claim
+  against the code, the docs or a read-only command, and marks each claim verified, false or
+  unverified, with the file and line or the command and its output. It also checks that the spec
+  names the standard practice and its sources, or says why none applies.
+- `plan-gap-analyst` and `plan-reviewer` get `bash`, so they check live state themselves (read-only
+  `kubectl`, `gh`, `curl`, `dispatch read`) and stop marking such a claim unverified. Oh My Pi has
+  no per-agent command limit, so each agent's prompt holds it to read-only commands. Oh My Pi no
+  longer labels the two agents read-only in the task tool's agent list.
+- `legion-architect`: before it designs, an architect researches how the problem is normally
+  solved: the standard practice, and how two or three well-regarded projects solve it, from web
+  search and their docs or code. It writes what it found in the spec with links, designs the
+  standard way unless it has a reason not to, and treats a sharp departure from the standard as a
+  sign to fix the underlying problem.
 - `legion-controller`'s daily report names each issue by its `dispatch://` link and what it does for
   the reader, as `dispatch-writing-specs` now says, in place of its key and title.
 
@@ -41,7 +78,6 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   or needs what only that person can provide. A finding outside the tree is always an ask. A cost
   or risk the person would weigh is now also a reason for a new version of an approved spec. The
   deployment's owner said Legion's architects asked him too many questions that did not need him.
-
 - Daemon API contract 38 (INFRA-225): Legion admits no root and starts no child while Dispatch
   shows it blocked by an issue that is not `done`, and says what it is waiting for. `legion state`
   and the controller's `read_state` carry `admission.blocked`, every root and child Legion is
@@ -171,6 +207,131 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   exits Oh My Pi, so the daemon relaunches it. The operator-launched controller is unchanged.
 
 ### Changed
+
+- The `legion` tool's description no longer names a `SIGNOFF_CHILD_IN_WORKFLOW` refusal: the daemon
+  accepts an architect's `sign_off` of an issue whatever still runs beneath it, and keeps the tree's
+  order at the root's close instead, where a root whose pull request merged waits in
+  `awaiting_merge` for the rest of its tree. The architect skill accepts a root's own pull request
+  on its own evidence; the integration child still runs last, and the root closes after it.
+
+- A finding outside a role's own issue takes the first of three steps that fits. A
+  defect with a clear fix in code the role's own tree touches or depends on is fixed in that
+  tree's own pull request, while the role is there. Any other clear defect goes to the controller
+  over Envoy with its evidence, and the controller gives it to the running tree whose code it is,
+  filing a Legion root with the `legion` label only when no tree owns that code.
+  A `dispatch ask` to a person is now only for a finding that needs a person's authority, taste or
+  risk appetite, with one
+  recommendation. The role posts the evidence on the report issue as a comment whose first line is
+  `Clear defect from <role>`, and the controller replies `Handed dispatch://<KEY>` or
+  `Filed dispatch://<KEY>` under it. An issue it files carries the line `Filed for Legion from
+  <role> on <issue>: <evidence>`, and the
+  controller's triage admits a labelled root that carries it and that one of its own sessions
+  filed. At every start the controller takes each evidence comment no reply follows yet. It files
+  the issue with `--repo` naming the repository where the fix belongs, since without it Dispatch
+  records the project's default repository and the daemon would start the work there. The
+  controller's rule never to label work nobody asked for names as its one exception a clear defect
+  no running tree owns: such a fix is "how" inside work a person already wants, as `STRATEGY.md`
+  puts the split. The design follows the deciding facts of the operator's answers on four such
+  cases: 2026-10-25, on filing a clear architectural defect ("This should not have been asked of
+  me. You found a clear architectural issue. Fix it. Done."); 2026-10-25, on where three children
+  belong ("This did not need to be an ask for me."); 2026-10-26, on the design gate ("you and your
+  agents keep deferring fixes to other issues instead of just fixing it while you're there"); and
+  2026-10-23, to agents that had filed 78 of a project's 158 issues ("Maybe stop manufacturing
+  work I didn't ask for?"). Step 1 answers the last of those: the fix lands in the tree that is
+  already in the code, so no new issue is made for it.
+  `legion-worker/references/findings.md` holds the three steps. `legion-controller` (its "Free
+  slots", triage row, report wake and daily-report text), `legion-architect`, `legion-worker`,
+  the production check's `fail` in `merge-gate.md`, `dispatch`, `dispatch-first`,
+  `skills/AGENTS.md`, and the daemon's role prompts and production-check task say the same. The
+  learning `docs/solutions/legion/fix-a-clear-defect-where-you-are-…-ask-only-for-a-decision.md` supersedes
+  the #2130 learning that made every finding an ask. This reverses part of #2130: the owner had to
+  approve every clear defect by hand.
+- Every rule above sits on #2197's rewrite of the Legion skills, which merged first
+  and rewrote `legion-architect`, `legion-worker`, `legion-controller` and `legion-retro` with
+  their references. The merge takes #2197's text in each conflicted file, and the
+  rules return in the fewest words beside it: the clear-defect exception beside #2197's "a
+  problem outside the tree is a `dispatch ask`" sentence, the spec's two reviews in
+  `legion-architect/references/design-gate.md`, the acceptance hold in its `acceptance.md`, the
+  forward-merge triggers in `legion-worker/references/conflicts-and-rewrites.md`, and the
+  controller's clear-defect filing and catch-up in
+  `legion-controller/references/finding-asks.md`.
+- The reviewer waits for its own prose head's required checks to be green before it approves.
+  The daemon marks any push by the review App beyond `.legion/` a planned red
+  (`classify.ApplyPush`), and `RedSendsBack` ignores a planned red, so nothing sends that head
+  back: the reviewer's own read is the only one, and GitHub then holds the merge under the base
+  branch's required checks. `merge-gate.md`, the reviewer's role prompt, its core part and the Go
+  part say the one order: push the prose fix, wait for green, approve that head. Two claims that a
+  later red sends the issue back are corrected for this one head. In the round after a READY
+  refusal the reviewer fixes no prose itself, since that round's approval needs the tester's `E2E`
+  line to name the head with only `.legion/` changed since.
+- A finding no controller takes ends where a live reader handles it. The controller
+  topic is a live wake, and a publish to it with no live holder fails (`no holder for role …`) and
+  delivers nothing, so `envoy_publish`'s own answer tells the role. The role then makes the
+  finding an ask, on the first of three places that holds: the report issue when it is open, with
+  the evidence comment as the ask's `--ref` and an `Asked dispatch://…` reply under that comment;
+  the role's own issue when the report issue is missing or closed, its reference sent to the
+  tree's architect, whose acceptance (`legion-architect`, section 6) waits until the ask is
+  resolved or answered with the controller's `Filed`/`Not filed` reply under it, so the issue
+  cannot close and hide it, since the controller's own project listing drops an open ask on a
+  closed issue (`asks.go`'s `listOpenAsks` takes `i.closed_at is null`); and, when the role's own
+  issue is closed too (a production check),
+  the report issue, which the role reopens or creates with `dispatch issue-update --status
+  icebox`, never the controller-only `legion({op: "set_status"})` that would refuse a phase
+  worker (`pi-legion/src/tools.ts`'s `OPERATIONS`); a closed issue takes that reopening status
+  only by itself (`api/issue_patch.go`). Every finding ask's question opens
+  `Finding from <role>`, or `Clear defect from <role>` for a clear defect, which is how the
+  acceptance and the controller find one. At every start the controller's catch-up
+  (`legion-controller/references/finding-asks.md`) takes a clear-defect ask as its hand-over says,
+  moves an own-issue decision ask to the report issue, and acts on an answered finding ask of an
+  issue in `needs_review`, reading that list as one snapshot before it acts on any issue in it:
+  `dispatch issues --project <P> --status needs_review --all`, which reads every match in one
+  request. Offset paging would skip an issue whose status changes between reads, which the
+  acceptance its own reply releases does. The controller's triage, finished-issue and owner-audit
+  listings read with `--all` too. Its reply (`Filed`, `Handed` or `Not filed:`) releases the held
+  acceptance; an answered ask whose answer is `Hand it to the owning tree` is handed over as a
+  clear defect. The catch-up's two `curl` reads land in a variable before `jq` sees them, and
+  `jq -n 'input …'` fails on an empty body, so a dead connection or an empty reply admits nothing.
+  The planner's core prompt now matches
+  the headless part composed with it: a clear defect goes to whoever coordinates the project's
+  work, and a finding that needs a decision is an ask (`roles_test.go` pins both sentences and
+  forbids the old one).
+- `legion-worker`: a role requests a secret from the agent-secrets broker only to use it for its
+  own issue's work, never to find out whether it exists or resolves, since a request for a secret
+  its role does not hold reaches a person's Inbox. A planner read the rule to check
+  for credentials before reporting a read unreachable as leave to probe a key an e2e script named,
+  and the owner got an approval request for it.
+- `leading-a-work-stream`, "What a lead does": a lead keeps the stream's record of what each agent
+  accepted and reads it against the agents' issues and open asks at each check-in. An item that is
+  neither done, in progress, nor an open ask is dropped work, and the lead has its owner record it
+  at once. Agents sat on blockers outside Dispatch and dropped work, and leads did not
+  catch it.
+- The reviewer fixes a prose-only finding itself — wording, a count, a tense, a citation — in its
+  own commit on the pull request and lists it in its review, and sends the work back only for a
+  finding that touches code or behaviour. On one issue, six of nine review rounds were
+  one- or two-line prose fixes, each costing a full implement-test-review cycle. The reviewer
+  pushes that commit before it submits the round's review and approves the head the push made: a
+  change pushed above an approved head leaves the approval standing for nothing and the round goes
+  stuck (`classify.ApprovalStands`, `workflow`'s `stuckApprovedOtherCode`, and the cases "the
+  approval, then a code push" and "a push since the approved head changed code, then an approval
+  of the head" in `workflow/review_test.go`). The daemon moves nothing for such a push and counts
+  no fix attempt or round, but it sends nothing back for a red at a head the review App pushed
+  (`PlannedRed`), so the reviewer reads that head's checks itself. The architect reads the
+  reviewer's prose commits at its acceptance, which is no new round: the reviewer's own text had
+  no other reader. `legion-worker`, `merge-gate.md`, `legion-architect` and the reviewer's role
+  prompt say the same.
+- The base is merged forward only when the pull request conflicts, when the change needs something
+  that exists only on the base (a fix for its only red check among them), or after a retarget.
+  A merge without a conflict makes a new head, reruns CI and can void a review.
+  One tree merged main forward five times in a day, four of
+  them needlessly, and each merge cost a full round. Before racing another tree on shared files, a
+  role asks that tree on Envoy when its next push lands. After any forward merge the branch is
+  built and its proof run again at the merge head, since a merge with no text conflict can still
+  break it: one tree's merge changed a function's arity under the branch's own callers. Whether
+  the merge needs a new tester round is judged per file: the exemption holds only when the
+  resolution changes no line the pull request itself changed, which is what the unchanged-diff
+  fingerprint measures. The operation is named a forward merge throughout, never a rebase, and the
+  PR comment's format is now `forward merge <old> → <new>; fingerprint <before> → <after>;
+  unchanged|changed`, the tester's line `forward-merge re-check <old> → <new>: …`.
 
 - `legion-architect`, `legion-worker` and `legion-controller` point to
   `skill://dispatch-writing-specs` for a spec's outline, its questions, its approval and
@@ -690,6 +851,19 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Fixed
 
+- The `legion-worker` skill: `HANDOFF_STALE_GENERATION` is no longer one of the refusals the
+  daemon records. The daemon now refuses a completion of a run the issue has left before it applies
+  any fact and names the current run's queued task, so the worker ends the turn and calls
+  `handoff_complete` again at the same commit in that task's turn, which is applied.
+- The `legion` tool's `handoff_complete`, `sign_off` and `register_gate` wait out a daemon restart
+  instead of failing on the first refused connection: a connection refused, reset or closed before
+  a response, or a 502 or 503 from a proxy (a body that is not the daemon's refusal), is retried
+  with backoff from 0.5 s to 30 s for up to 10 minutes or until the agent aborts, each attempt with
+  a fresh grant; an abort during a wait sends no further attempt. The retry notice goes out once as
+  a partial result, which Oh My Pi shows in its TUI and RPC event stream; the model sees only the
+  final result. The daemon applies each of the three at most once however often it arrives. Every
+  answer the daemon gives, a 4xx or 409 or its own coded 502/503, is passed on at once; after an
+  attempt whose connection dropped, that refusal says the dropped attempt may have been applied.
 - The `legion-architect` skill was 51,256 bytes, over Oh My Pi's 51,200-byte spill threshold, so it
   reached an architect with its middle cut out; its Wake routing table moves unchanged to
   `skill://legion-architect/references/wake-routing.md` (INFRA-376).
