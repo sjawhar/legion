@@ -208,7 +208,11 @@ func copiedAskSourcesQuery(owner artifactOwner) (string, string) {
 // owedCopiesQuery reads owner's other documents, the document settled being $2, whose latest
 // version holds an ask block opener of the pairs ($1 block id, $4 LIKE pattern for its opener)
 // with no ask of its own under that id, read through asks_block_id_unique as copiedAskSourcesQuery
-// reads it, and returns the value it binds as $3.
+// reads it, and returns the value it binds as $3. The ask is looked for by a scalar subquery,
+// `(select … limit 1) is null`, not by NOT EXISTS: Postgres may run a NOT EXISTS as a hashed
+// subplan, whose hash table it builds from a full scan of asks (Postgres 18 does even with
+// sequential scans disabled), while it runs a scalar subquery once per candidate document and
+// block, each run one probe of the index.
 func owedCopiesQuery(owner artifactOwner) (string, string) {
 	documents, ownerKey := ownerDocuments(owner)
 	return `
@@ -220,11 +224,12 @@ func owedCopiesQuery(owner artifactOwner) (string, string) {
 		) latest on true
 		where ` + documents + ` and d.id <> $2 and exists (
 			select 1 from unnest($1::text[], $4::text[]) as copied(block_id, pattern)
-			where latest.markdown like copied.pattern and not exists (
+			where latest.markdown like copied.pattern and (
 				select 1 from asks a
 				where a.block_artifact_id = d.id and block_id_key(a.block_id) = block_id_key(copied.block_id)
 					and a.block_id = copied.block_id
-			)
+				limit 1
+			) is null
 		)
 		order by d.id
 	`, ownerKey
