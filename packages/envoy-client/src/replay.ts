@@ -692,10 +692,10 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
 
   // Whether the answer's stream replaced the one the cursors were read on. An answer with an id is
   // judged by it alone: a stored id that differs is a new stream, and a creation time that changed
-  // is not, since a cluster's servers report different ones and a leader election or a restore
-  // changes it. A state stored before ids (a creation time, no id) takes the answer's id, unless a
-  // cursor stands past the stream's end, which only a new stream explains. An answer without an id
-  // is judged by its creation time.
+  // is not, since a restore changes it, and after a clustered restore a cluster's servers can
+  // report different ones, so a later leader election can change it too. A state stored before
+  // ids (a creation time, no id) takes the answer's id, unless a cursor stands past the stream's
+  // end, which only a new stream explains. An answer without an id is judged by its creation time.
   const streamReplaced = (stream: ReplayResult["stream"]): boolean => {
     if (stream.id === undefined) {
       return (

@@ -46,8 +46,9 @@ type replayRequest struct {
 }
 
 // replayStream is the stream the answer was read from. id is its bus.StreamIDMetadataKey, which a
-// backup and restore and a leader election keep; created is STREAM.INFO's Created, which either
-// can change, and which a cluster's servers report differently. id is omitted for a stream without
+// backup and restore, a reconcile and a leader election keep; created is STREAM.INFO's Created,
+// which a restore changes, and which, after a clustered restore, the servers can report
+// differently, so a later leader election can change it too. id is omitted for a stream without
 // one.
 type replayStream struct {
 	ID       string `json:"id,omitempty"`

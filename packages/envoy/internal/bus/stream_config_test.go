@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"maps"
 	"net"
 	"reflect"
 	"slices"
@@ -742,14 +743,22 @@ func TestEnsureStreamWithConfigCreatesTheStreamWithAFreshID(t *testing.T) {
 }
 
 // A deployed stream without an id gets one on the next start, even when nothing else about it
-// differs from the binary's configuration, and keeps the rest of its configuration and metadata.
+// differs from the binary's configuration, and keeps the rest of its configuration and metadata:
+// settings the binary's configuration does not choose (here limits and a description; in a
+// cluster, the stream's replicas) stay as deployed.
 func TestEnsureStreamWithConfigGivesADeployedStreamWithoutAnIDOne(t *testing.T) {
 	js := streamTestJetStream(t)
 	deployed := *streamCfg
+	deployed.Description = "deployed by operations"
+	deployed.MaxMsgs = 100_000
+	deployed.MaxBytes = 64 << 20
+	deployed.MaxMsgsPerSubject = 1_000
+	deployed.Discard = nats.DiscardNew
 	deployed.Metadata = map[string]string{"owner": "operations"}
 	if _, err := js.AddStream(&deployed); err != nil {
 		t.Fatalf("create the stream without an id: %v", err)
 	}
+	before := deployedStream(t, js).Config
 
 	if err := ensureStreamWithConfig(js, streamCfg); err != nil {
 		t.Fatalf("ensure stream: %v", err)
@@ -760,11 +769,11 @@ func TestEnsureStreamWithConfigGivesADeployedStreamWithoutAnIDOne(t *testing.T) 
 	if id == "" {
 		t.Fatalf("stream metadata = %v, want an id", info.Config.Metadata)
 	}
-	if info.Config.Metadata["owner"] != "operations" {
-		t.Fatalf("stream metadata = %v, want owner kept", info.Config.Metadata)
-	}
-	if !slices.Equal(info.Config.Subjects, streamCfg.Subjects) || info.Config.MaxAge != streamCfg.MaxAge || info.Config.Duplicates != streamCfg.Duplicates {
-		t.Fatalf("stream config = %+v, want subjects, retention and duplicate window unchanged", info.Config)
+	want := before
+	want.Metadata = maps.Clone(before.Metadata)
+	want.Metadata[StreamIDMetadataKey] = id
+	if !reflect.DeepEqual(info.Config, want) {
+		t.Fatalf("stream config = %+v, want the deployed one with only the id added: %+v", info.Config, want)
 	}
 	if err := ensureStreamWithConfig(js, streamCfg); err != nil {
 		t.Fatalf("second start: %v", err)

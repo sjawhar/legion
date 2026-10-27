@@ -141,7 +141,7 @@ function createStream(clock: { now: number }) {
     identify(streamID: string | undefined) {
       id = streamID;
     },
-    /** The stream's creation time moves on, as a leader election or a restore moves it. */
+    /** The stream's creation time moves on, as a restore moves it. */
     restamp(newCreated: string) {
       created = newCreated;
     },
@@ -596,7 +596,7 @@ describe("replay sweep", () => {
     const first = envelope();
     stream.publish(AGENT, first);
     await engine.sweep();
-    // A leader election or a restore moves the creation time; the stream is the same one.
+    // A restore moves the creation time; the stream is the same one.
     stream.restamp("2026-10-26T00:00:00Z");
     const next = envelope();
     stream.publish(AGENT, next);

@@ -346,7 +346,8 @@ not when the frames queued before it finished delivering. One card that starts n
 the stream was recreated, so messages from before it may be lost, or that a cursor fell behind the
 stream's oldest message, so messages older than 72 hours may be missing. The stream is recreated
 when the listener's `stream.id` differs from the stored `stream_id`; a `created` that moved under
-the same id (a leader election, a restore) is the same stream, and an answer without an id is
+the same id (a restore, or a leader election after a clustered restore) is the same stream, and
+an answer without an id is
 judged by `created`. It is a steer with
 `triggerTurn: false`, so like an inert card it is handed only while the host is settled: raised
 while a turn streams, it is held, and the first settled heartbeat hands it, so no extra model turn

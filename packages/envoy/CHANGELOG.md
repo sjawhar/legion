@@ -19,9 +19,12 @@
   answered subject the deployed stream does not retain is `refused: "not_retained"`; a subject
   without a cursor gets the stream's last sequence to start one. The answer's `stream` names the
   stream's `id`, the `envoy_stream_id` metadata the listener and Dispatch's server set once (on the
-  stream they create, or on a deployed one without it, whose other metadata every start keeps),
-  which a backup and restore and a leader election keep where `created` changes. One answer holds
-  at most 32 subjects, 500 messages (100 by default), 2 MiB and 5 s of reading, and says `more` for
+  stream they create, or on a deployed one without it, whose other metadata every start keeps; a
+  deployed stream that needs no other change gets the id alone, its replicas and every other
+  setting kept as deployed), which a backup and restore, a reconcile and a leader election keep,
+  while a restore changes `created`, and after a clustered restore the servers can report
+  different `created` times, so a later leader election can change it too. One answer holds at
+  most 32 subjects, 500 messages (100 by default), 2 MiB and 5 s of reading, and says `more` for
   a subject it cut short. NATS refusing the read is `503 {"code":"REPLAY_UNAVAILABLE"}` naming
   NATS's error; a listener without the route answers 404, which a session reads as "does not
   replay". A `session_id` that is not one literal NATS token (`.`, `*`, `>`, whitespace or a

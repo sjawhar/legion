@@ -47,8 +47,9 @@
   its subject's cursor started included, stamped when it arrived even behind a slow delivery),
   shows one card naming it and how to read it, where a
   failed injection was only logged before. A recreated stream (its `stream.id` changed, or, from a
-  listener that answers no id, its creation time; a leader election or a restore moves the
-  creation time under the same id, and that is no recreation) or a cursor older than the stream's
+  listener that answers no id, its creation time; a restore moves the creation time under the same
+  id, as can a leader election after a clustered restore, and that is no recreation) or a cursor
+  older than the stream's
   oldest message is said once as a card, also after a restart that came before it was said; a
   listener without the route (404) or unable to read the
   stream (503 `REPLAY_UNAVAILABLE`, 401, 403) is said once as a warning, and live delivery goes

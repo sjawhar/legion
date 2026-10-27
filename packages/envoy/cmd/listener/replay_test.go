@@ -745,8 +745,8 @@ func TestReplayReportsARecreatedStream(t *testing.T) {
 	}
 }
 
-// The answer names the stream's id, its bus.StreamIDMetadataKey, which a backup and restore and a
-// leader election keep where they change created; a stream without one answers no id at all.
+// The answer names the stream's id, its bus.StreamIDMetadataKey, which a backup and restore keeps
+// where it changes created; a stream without one answers no id at all.
 func TestReplayAnswersTheStreamsID(t *testing.T) {
 	rig := newReplayRig(t)
 	agent := contracts.AgentSubject(replaySession)

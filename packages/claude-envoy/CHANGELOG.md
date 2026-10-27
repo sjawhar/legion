@@ -20,8 +20,9 @@
   included, stamped when it arrived even behind a slow delivery), is replaced by a notice naming
   it, its fields rendered in TOON as a live card's are,
   so a sender's multi-line summary cannot add a field of its own. A recreated stream (its
-  `stream.id` changed, or, from a listener that answers no id, its creation time; a leader
-  election or a restore moves the creation time under the same id, and that is no recreation) or
+  `stream.id` changed, or, from a listener that answers no id, its creation time; a restore moves
+  the creation time under the same id, as can a leader election after a clustered restore, and
+  that is no recreation) or
   a cursor older than the stream's oldest message is said once as a card, also by a channel
   started again after one that stopped before saying it; a listener
   without the route, or unable to read the stream, is said once on stderr. A BTW that reaches

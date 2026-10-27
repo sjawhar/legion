@@ -19,10 +19,11 @@ const Stream = "ENVOY_NOTIFICATIONS"
 
 // StreamIDMetadataKey is the stream configuration's metadata key holding the stream's identity:
 // set once, when the stream is created or when a start first finds it without one, and never
-// changed after. It lives in the configuration, so a backup and restore of the stream carries it,
-// and every server of a cluster reports the same value, which the stream's Created time does not:
-// a leader and its followers report different times, and a leader election or a restore changes
-// it. POST /v1/replay answers it as stream.id (cmd/listener/replay.go).
+// changed after. It lives in the configuration, so a backup and restore, a reconcile and a leader
+// election all keep it. The stream's Created time is no identity: a restore changes it, and after
+// a clustered restore the servers can report different Created times (per nats-server's clustered
+// restore code), so it can change again at a later leader election. POST /v1/replay answers the
+// key's value as stream.id (cmd/listener/replay.go).
 const StreamIDMetadataKey = "envoy_stream_id"
 
 // The JetStream KV buckets Envoy's stores keep, each named for what it holds.
@@ -343,7 +344,10 @@ func (r streamReconciliation) log() {
 // ensureStreamWithConfig creates the stream with cfg, under a fresh StreamIDMetadataKey, or
 // reconciles the deployed one towards cfg: subjects (reconcileSubjects), retention and duplicate
 // window. The deployed stream's metadata is kept as it is, its StreamIDMetadataKey included; a
-// stream without that key gets one (deployedStreamID).
+// stream without that key gets one (deployedStreamID). A stream whose subjects, retention and
+// duplicate window already match cfg but that has no key gets only the key: the update writes the
+// stream's own configuration back with the key added, so its replicas, storage, limits and every
+// other setting stay as they are.
 //
 // Every bus.ConnectOwningStream caller runs this on the one stream, and JetStream's stream update
 // has no compare-and-swap, so two starts can each read the stream before either writes. A stream
@@ -368,23 +372,22 @@ func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) er
 		return err
 	}
 	reconciliation := reconcileSubjects(info.Config.Subjects, cfg.Subjects)
-	desired := *cfg
-	desired.Subjects = reconciliation.subjects
-	desired.Metadata = maps.Clone(info.Config.Metadata)
-	identified := desired.Metadata[StreamIDMetadataKey] != ""
-	if !identified {
-		if desired.Metadata == nil {
-			desired.Metadata = map[string]string{}
+	if info.Config.MaxAge == cfg.MaxAge &&
+		info.Config.Duplicates == cfg.Duplicates &&
+		slices.Equal(info.Config.Subjects, reconciliation.subjects) {
+		if info.Config.Metadata[StreamIDMetadataKey] == "" {
+			identified := info.Config
+			identified.Metadata = identifiedMetadata(info)
+			if _, err = js.UpdateStream(&identified); err != nil {
+				return err
+			}
 		}
-		desired.Metadata[StreamIDMetadataKey] = deployedStreamID(info.Created)
-	}
-	if identified &&
-		info.Config.MaxAge == desired.MaxAge &&
-		info.Config.Duplicates == desired.Duplicates &&
-		slices.Equal(info.Config.Subjects, desired.Subjects) {
 		reconciliation.log()
 		return nil
 	}
+	desired := *cfg
+	desired.Subjects = reconciliation.subjects
+	desired.Metadata = identifiedMetadata(info)
 	migratingRoleLanes := streamCapturesRoleLanes(info.Config.Subjects) && !streamCapturesRoleLanes(desired.Subjects)
 	if err := migrateRoleLanesOffStream(js, &info.Config, &desired); err != nil {
 		return err
@@ -397,6 +400,19 @@ func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) er
 		return purgeLegacyRoleMessages(js)
 	}
 	return nil
+}
+
+// identifiedMetadata is a copy of the deployed stream's metadata that holds a StreamIDMetadataKey:
+// the stream's own when it has one, deployedStreamID otherwise.
+func identifiedMetadata(info *nats.StreamInfo) map[string]string {
+	metadata := maps.Clone(info.Config.Metadata)
+	if metadata == nil {
+		metadata = map[string]string{}
+	}
+	if metadata[StreamIDMetadataKey] == "" {
+		metadata[StreamIDMetadataKey] = deployedStreamID(info.Created)
+	}
+	return metadata
 }
 
 // deployedStreamID is the StreamIDMetadataKey a start gives a deployed stream that has none: 16
