@@ -2,33 +2,33 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-141",
-  "completed": "2026-10-27T04:05:00Z",
-  "round": "forward merge after the daemon reported #2167 CONFLICTING against main 9b92ac14 (#2302); the architect's ruling of 03:35Z: merge, keep both sides, change nothing else. The CI router (#2316) had not merged (.github/workflows/ci.yaml absent on main), so the envoy-go-race edits stay in envoy-and-contracts.yaml",
+  "completed": "2026-10-27T04:23:47Z",
+  "round": "review 5662141896 at 6e790433, on the forward merge 7ce88c70 of main 9b92ac14 (#2302); the architect's ruling of 04:16Z: three items in internal/bus only; main not merged (MERGEABLE, and #2317's daemon admission fix reaches this PR's checks through GitHub's merge ref)",
   "proof": [
     {
-      "criterion": "The merged head builds and every suite this PR touches passes against main's pipelined publish window",
-      "surface": "go build, go vet and go test of packages/envoy on the merge 7ce88c70 (main 9b92ac14 + 105932bd), NATS in-process",
-      "command": "cd packages/envoy && go build ./... && go vet ./...; go test -count=1 ./internal/bus/... ./internal/store ./internal/kvwatch/... ./internal/session/... ./internal/webhook/... ./internal/cistore/... ./internal/integration/...; CGO_ENABLED=1 go test -race -count=1 ./internal/bus/; go test -count=1 ./internal/dispatch/outbox/; go test ./cmd/listener -count=1 -skip '<the four testpg tests>' -timeout 25m",
-      "observed": "build and vet clean, gofmt clean; ok internal/bus 229.974s (and 235.436s under -race), store 30.489s, kvwatch 62.332s, session 7.574s, webhook 4.573s, cistore 12.241s, integration 97.693s, dispatch/outbox 2.478s, cmd/listener 407.998s",
-      "headSha": "7ce88c7038e853b8ba46de6e0a1f5b2764474ab9",
-      "negativeControl": "the merge as jj produced it, before the async.go adaptation, did not compile: 'internal/bus/async.go:166:46: cannot use w.conn (variable of type *nats.Conn) as context.Context value in argument to w.client.publishConfirmed' (main's window.republish called the deadline signature this branch replaced)"
+      "criterion": "Item 1: a test pins flushWindowElapsedError: a spent flush window keeps errWindowElapsed's exact text, satisfies errors.Is(err, errFlushWindowElapsed), and a publish window answers it ErrUnavailable",
+      "surface": "go test of internal/bus against the in-process NATS: TestASpentFlushWindowKeepsItsTextAndIsUnavailableToAWindow (internal/bus/flush_window_elapsed_test.go) pins a real window's connection, publishes, and runs confirmFlushed with a spent deadline, then window.answered",
+      "command": "cd packages/envoy && go test ./internal/bus -count=5 -run '^TestASpentFlushWindowKeepsItsTextAndIsUnavailableToAWindow$'; CGO_ENABLED=1 go test -race -count=3 -run <same> ./internal/bus; go test -count=1 ./internal/bus/ ./internal/dispatch/outbox/",
+      "observed": "ok (5 of 5, and 3 of 3 under -race); internal/bus ok 232.602s, internal/dispatch/outbox ok 2.538s",
+      "headSha": "73008a116047d62301c97ca5a20c3a89c919c26c",
+      "negativeControl": "go test -overlay, workspace untouched. The reviewer's mutant (Error() other text, Unwrap() nil) fails three assertions: 'a spent flush window reads \"bus: publish to notifications.team.spent-flush-window: spent\", want \"bus: window elapsed before the publish to …\"', '… is not errFlushWindowElapsed', '… want ErrUnavailable'. The text-only mutant fails the first; the unwrap-only mutant fails the second and third. In the test itself, the same publish and flush with 5 s left is confirmed (nil)."
     },
     {
-      "criterion": "The conflict resolution keeps both sides: main's errFlushWindowElapsed sentinel for its window, and this branch's spent-window text and context-bounded publishes",
-      "surface": "packages/envoy/internal/bus/confirm.go (flushWindowElapsedError: errWindowElapsed's text, Unwrap errFlushWindowElapsed), nats.go (publishJetStream and publishCoreTo keep WithTimeout(ctx, publishBound)), async.go (republish passes a context with publishAcknowledgementTimeout)",
-      "command": "go test -count=1 ./internal/bus/... (publish_ended_context_test asserts the old text; main's window tests read errFlushWindowElapsed through window.answered); unchanged-diff fingerprint before and after the merge",
-      "observed": "internal/bus ok; fingerprint 6c78c2e4… → 45592817…, changed by exactly the three resolved files, posted in https://github.com/sjawhar/legion/pull/2167#issuecomment-6433333275",
-      "headSha": "7ce88c7038e853b8ba46de6e0a1f5b2764474ab9",
-      "negativeControl": "taking main's confirmFlushed line alone changes the spent-window text this branch keeps for log filters; taking this branch's alone drops the sentinel window.answered reads, so a spent flush window in an outbox batch would no longer be answered ErrUnavailable"
+      "criterion": "Items 2 and 3: each 5 s bound's comment states only what that constant bounds, and publishConfirmed's comment names every caller",
+      "surface": "internal/bus/async.go publishAcknowledgementTimeout (each send of a publish window: its wait for a connection, a core send's flush and confirmation, a JetStream send's acknowledgement via PublishAsyncTimeout), internal/bus/nats.go publishBound (Publish, PublishCoreTo, PublishReportingDuplicate, and publishJetStream/publishCoreTo for a caller with no deadline of its own), internal/bus/confirm.go ('every caller', at both places): checked against every use of each constant (rg publishBound|publishAcknowledgementTimeout) and the three callers of publishConfirmed (publishCoreTo, RequestCoreTo, window.republish)",
+      "command": "cd packages/envoy && go build ./... && go vet ./internal/bus && gofmt -l internal",
+      "observed": "build and vet clean, gofmt prints nothing. The two constants stay separate: they bound different callers and the architect allowed either",
+      "headSha": "73008a116047d62301c97ca5a20c3a89c919c26c",
+      "negativeControl": "at 6e790433 publishAcknowledgementTimeout's comment said it bounds one publish and publishBound's said every publisher with no deadline relies on it, which contradict each other since the outbox sends through the window; confirm.go said 'both callers' where there are three"
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/bus/confirm.go — flushWindowElapsedError joins the two sides of the conflict",
-    "packages/envoy/internal/bus/nats.go — the two conflicted bounds keep this branch's caller-context form",
-    "packages/envoy/internal/bus/async.go — window.republish adapted to publishConfirmed's context signature"
+    "packages/envoy/internal/bus/flush_window_elapsed_test.go — new test",
+    "packages/envoy/internal/bus/async.go, nats.go, confirm.go — comments only"
   ],
   "deviations": [
-    "publishBound (this branch) and publishAcknowledgementTimeout (main) are both 5 s and bound one publish; I kept both to change nothing beyond the conflict."
+    "Correction of the previous round's handoff: it said main's window tests read errFlushWindowElapsed through window.answered and so covered the resolution. They did not: the reviewer's mutant passed ./internal/bus and ./internal/dispatch/outbox. The new test is that coverage.",
+    "A go test run added lines to go.work.sum as a side effect; I restored the file, so the commit changes internal/bus only."
   ],
   "openQuestions": []
 }
