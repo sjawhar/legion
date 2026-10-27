@@ -872,11 +872,10 @@ func TestHandoffCompleteAcceptsACompletionFromATurnNoDeliveryBacks(t *testing.T)
 	}
 }
 
-// A refusal is recorded as processed, under the key the route builds. That key has to name the
-// run the completion is attributed to: a completion of the run that is over is refused, and
-// without the run in the key the new run's completion of the same phase at the same commit takes
-// that key, is answered ALREADY_RECORDED, never reaches the workflow, and leaves the phase
-// stalled behind a worker that was told its report was received.
+// A completion of the run that is over is refused before any fact is applied, so nothing is
+// recorded under its key: the retry at the same commit is refused the same way (never answered
+// ALREADY_RECORDED, which would tell the worker it was received), and the new run's completion of
+// the same phase at the same commit reaches the workflow.
 func TestAStaleCompletionDoesNotTakeTheNewRunsKey(t *testing.T) {
 	h := newHarness(t)
 	github := newHandoffGitHub(t)
@@ -900,14 +899,22 @@ func TestAStaleCompletionDoesNotTakeTheNewRunsKey(t *testing.T) {
 		t.Fatal("no machine for the tester")
 	}
 	ctx := context.Background()
-	complete := func() int {
+	complete := func() *httptest.ResponseRecorder {
 		t.Helper()
-		return h.complete(HandoffCompleteRequest{GrantID: tester.grant(t), Summary: "tests pass", Verdict: "pass", Commit: headSHA}).Code
+		return h.complete(HandoffCompleteRequest{GrantID: tester.grant(t), Summary: "tests pass", Verdict: "pass", Commit: headSHA})
 	}
 
-	// The worker is still on generation 1's task while the issue has moved to 2: refused.
-	if code := complete(); code != http.StatusConflict {
-		t.Fatalf("the stale completion = %d, want 409", code)
+	// The worker is still on generation 1's task while the issue has moved to 2: refused, and the
+	// same call again is refused the same way.
+	for attempt := 1; attempt <= 2; attempt++ {
+		refused(t, complete(), http.StatusConflict, "HANDOFF_STALE_GENERATION")
+	}
+	var stored int
+	if err := h.store.Pool().QueryRow(ctx, "select count(*) from processed_events where event_id like 'handoff:LEGION-208:%'").Scan(&stored); err != nil {
+		t.Fatalf("count the recorded completions: %v", err)
+	}
+	if stored != 0 {
+		t.Fatalf("the stale completions left %d processed_events rows, want 0", stored)
 	}
 	// Generation 2's task is delivered and its turn starts; the same report is now the new run's.
 	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: tester.token}); err != nil {
@@ -917,11 +924,15 @@ func TestAStaleCompletionDoesNotTakeTheNewRunsKey(t *testing.T) {
 	if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: tester.token, Task: "the task", ID: id, Generation: 2}); err != nil {
 		t.Fatalf("deliver generation 2's task: %v", err)
 	}
+	// Queued but not yet started, generation 2's task is the one the refusal points the worker to.
+	if message := refused(t, complete(), http.StatusConflict, "HANDOFF_STALE_GENERATION"); !strings.Contains(message, id) || !strings.Contains(message, "same commit") {
+		t.Fatalf("the refusal with generation 2's task queued = %q, want it to name %s and the retry at the same commit", message, id)
+	}
 	if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: tester.token, DeliveryID: id}); err != nil {
 		t.Fatalf("start generation 2's turn: %v", err)
 	}
-	if code := complete(); code != http.StatusOK {
-		t.Fatalf("the new run's completion = %d, want 200", code)
+	if recorder := complete(); recorder.Code != http.StatusOK {
+		t.Fatalf("the new run's completion = %d, want 200; body %s", recorder.Code, recorder.Body)
 	}
 
 	var runs []uint64
@@ -930,8 +941,8 @@ func TestAStaleCompletionDoesNotTakeTheNewRunsKey(t *testing.T) {
 			runs = append(runs, completion.Generation)
 		}
 	}
-	if len(runs) != 2 || runs[0] != 1 || runs[1] != 2 {
-		t.Fatalf("the workflow saw runs %v, want [1 2]", runs)
+	if len(runs) != 1 || runs[0] != 2 {
+		t.Fatalf("the workflow saw runs %v, want [2]", runs)
 	}
 }
 
@@ -1209,8 +1220,8 @@ func TestAnOperatorsTaskLeavesTheRunTheClaimIsServing(t *testing.T) {
 // A confirmation a busy refusal takes back names a turn the delivery never had: the pane was
 // working something else, which is the sequence this branch saw live at `d9194522`. The next
 // run's task has not been taken, so a completion arriving in that foreign turn is still the old
-// run's — and the workflow refuses it, rather than crediting the new run with a completion of a
-// task nobody has read.
+// run's — and the route refuses it as stale, rather than crediting the new run with a completion
+// of a task nobody has read.
 func TestATakenBackConfirmationDoesNotMoveTheRunTheClaimIsServing(t *testing.T) {
 	github := newHandoffGitHub(t)
 	h, facts := newHandoffHarness(t, github, nil, nil)
@@ -1244,13 +1255,15 @@ func TestATakenBackConfirmationDoesNotMoveTheRunTheClaimIsServing(t *testing.T) 
 		t.Fatalf("pending after the refusal = %+v, want it waiting unconfirmed", p)
 	}
 
-	if recorder := h.complete(HandoffCompleteRequest{GrantID: tester.grant(t), Summary: "tests pass", Verdict: "pass", Commit: headSHA}); recorder.Code != http.StatusOK {
-		t.Fatalf("handoff = %d; body %s", recorder.Code, recorder.Body)
+	// The completion is the old run's, so it is refused as stale before any fact is applied:
+	// crediting the new run would accept a completion of a task the worker has not read. The
+	// refusal points the worker to the new run's task, which it has not read yet.
+	message := refused(t, h.complete(HandoffCompleteRequest{GrantID: tester.grant(t), Summary: "tests pass", Verdict: "pass", Commit: headSHA}), http.StatusConflict, "HANDOFF_STALE_GENERATION")
+	if waiting := machine.Claim().Pending; !strings.Contains(message, "generation 1's") || !strings.Contains(message, waiting.ID) {
+		t.Fatalf("the refusal = %q, want it to attribute the completion to run 1 and name the waiting task %s", message, waiting.ID)
 	}
-	// The workflow refuses generation 1 against an issue on 2; crediting the new run would accept
-	// a completion of a task the worker has not read.
-	if completion := lastCompletion(t, facts); completion.Generation != 1 {
-		t.Fatalf("completion generation = %d, want the old run's 1", completion.Generation)
+	if recorded := facts.recorded(); len(recorded) != 0 {
+		t.Fatalf("the stale completion reached the workflow as %+v, want no fact", recorded)
 	}
 }
 
@@ -1270,8 +1283,9 @@ func TestHandoffCompleteRefusesACompletionFromAClaimThatTookNoTask(t *testing.T)
 // The run a completion belongs to is the run of the task the worker is working, and the daemon
 // reads it from the delivery that turn confirmed rather than from the pane: a live worker is
 // handed the next run's task without being relaunched, so its own environment still names the run
-// it was launched for. The engine refuses a completion of a run the issue has left
-// (TestACompletionFromAnInterruptedRunIsRefused); what this route owes is the attribution.
+// it was launched for. The route refuses a completion attributed to a run the issue has left, and
+// its refusal names that run; the engine's own guard (TestACompletionFromAnInterruptedRunIsRefused)
+// covers an issue that moves between the route's read and the fact's transaction.
 func TestHandoffCompleteCarriesTheRunOfTheTaskBeingWorked(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -1322,7 +1336,15 @@ func TestHandoffCompleteCarriesTheRunOfTheTaskBeingWorked(t *testing.T) {
 				tester.replaceRegistration(t)
 			}
 
-			if recorder := h.complete(HandoffCompleteRequest{GrantID: tester.grant(t), Summary: "tests pass", Verdict: "pass", Commit: headSHA}); recorder.Code != http.StatusOK {
+			request := HandoffCompleteRequest{GrantID: tester.grant(t), Summary: "tests pass", Verdict: "pass", Commit: headSHA}
+			if delivered != 2 {
+				// A completion attributed to the run that is over is refused before the workflow.
+				if message := refused(t, h.complete(request), http.StatusConflict, "HANDOFF_STALE_GENERATION"); !strings.Contains(message, fmt.Sprintf("generation %d's", delivered)) {
+					t.Fatalf("the refusal = %q, want it to attribute the completion to run %d", message, delivered)
+				}
+				return
+			}
+			if recorder := h.complete(request); recorder.Code != http.StatusOK {
 				t.Fatalf("handoff = %d; body %s", recorder.Code, recorder.Body)
 			}
 			if completion := lastCompletion(t, facts); completion.Generation != delivered {

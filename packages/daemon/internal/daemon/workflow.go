@@ -356,10 +356,14 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc nat
 }
 
 // phaseHolds answers supervise's Deps.PhaseHolds from the issue record: a task carries the phase
-// it was queued for, so once the issue is in another phase a delivery still queued for that one is
-// finished work and is dropped rather than sent. The phase is compared, not the role that works
-// it: one role runs several phases — the implementer runs implementing, retro and the production
-// check — and a task written for the first is not the work of the third.
+// and the run (generation) it was queued for, so once the issue is in another phase, or on another
+// run, a delivery still queued for that one is finished work and is dropped rather than sent. The
+// phase is compared, not the role that works it: one role runs several phases — the implementer
+// runs implementing, retro and the production check — and a task written for the first is not the
+// work of the third. The run is compared because a re-admission can restart the issue in the phase
+// it stood in: an operator suspension keeps a claim's queued task (supervise's settle), so without
+// it the operator's resume would send the run that is over's task into the new run, ahead of the
+// new run's own. A task of no run (generation 0) is held to its phase alone.
 //
 // A delivery of no phase holds here. Only the workflow names one, so an operator's delivery made
 // by hand through the API is not dropped for the phase its issue is in: the operator asked for
@@ -375,7 +379,7 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc nat
 // A claim on an issue the daemon does not record holds too. The workflow never deletes an issue,
 // so there is no record only for a claim the workflow never made — the operator's own spawn, whose
 // issue key need not be an issue key at all.
-func (w *workflowRuntime) phaseHolds(ctx context.Context, key string, queuedFor phase.Phase) (bool, error) {
+func (w *workflowRuntime) phaseHolds(ctx context.Context, key string, queuedFor phase.Phase, generation uint64) (bool, error) {
 	issue, err := w.recordedIssue(ctx, key)
 	if err != nil {
 		return false, fmt.Errorf("read %s for the phase of its task: %w", key, err)
@@ -383,7 +387,7 @@ func (w *workflowRuntime) phaseHolds(ctx context.Context, key string, queuedFor 
 	if issue == nil {
 		return true, nil
 	}
-	return issue.Phase == queuedFor, nil
+	return issue.Phase == queuedFor && (generation == 0 || generation == issue.Generation), nil
 }
 
 // treeClosable answers supervise's Deps.TreeClosable: a tree a workflow issue backs closes when
