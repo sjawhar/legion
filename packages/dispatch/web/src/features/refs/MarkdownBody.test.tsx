@@ -880,6 +880,93 @@ describe("Mermaid diagrams", () => {
     }
   });
 
+  // The live view re-paints a turn on every frame while text after a finished diagram streams:
+  // each paint cancels the draw and asks for the same source again in one commit, so the source
+  // the worker is drawing keeps its place and its draw.
+  test("a body re-painted while the worker draws its source neither stops the worker nor sends the source again", async () => {
+    await warmMarkdownRenderer();
+    resetMermaidDiagrams(60_000);
+    const sent: MermaidRequest[] = [];
+    FakeWorker.answer = (request) => {
+      sent.push(request);
+      return undefined;
+    };
+    // Holds the page's listener, so the test sends the answer once the re-paints are done.
+    const listeners: ((event: unknown) => void)[] = [];
+    class HeldWorker extends FakeWorker {
+      override addEventListener(type: string, listener: (event: unknown) => void): void {
+        super.addEventListener(type, listener);
+        if (type === "message") listeners.push(listener);
+      }
+    }
+    globalThis.Worker = HeldWorker as unknown as typeof Worker;
+    const diagram = fence("sequenceDiagram\n  Alice->>Bob: Streamed");
+    const view = render(<MarkdownBody markdown={diagram} />);
+    try {
+      await waitFor(() => expect(sent).toHaveLength(1));
+      for (const after of ["More", "More text", "More text after it"]) {
+        view.rerender(<MarkdownBody markdown={`${diagram}\n${after}`} />);
+        await Bun.sleep(10);
+      }
+      expect(FakeWorker.created.map((worker) => worker.terminated)).toEqual([false]);
+      expect(sent).toHaveLength(1);
+      expect(figuresIn(view.container)).toHaveLength(0);
+
+      for (const listener of listeners) listener({ data: answerMermaidRequest(sent[0]) });
+      await waitFor(() =>
+        expect(diagramIn(figuresIn(view.container)[0] ?? view.container)?.textContent).toContain(
+          "Streamed"
+        )
+      );
+      expect(view.container.textContent).toContain("More text after it");
+      expect(sent).toHaveLength(1);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // The time limit is a minute here, so the next body's diagram drawing within `waitFor`'s second
+  // proves it never waited for the source no body shows.
+  test("unmounting the only body whose source the worker is drawing stops the worker, caches nothing, and a fresh worker draws the next", async () => {
+    await warmMarkdownRenderer();
+    resetMermaidDiagrams(60_000);
+    const sent: string[] = [];
+    FakeWorker.answer = (request) => {
+      sent.push(request.source);
+      return request.source.includes("Stuck") ? undefined : answerMermaidRequest(request);
+    };
+    const stuck = fence("sequenceDiagram\n  Stuck->>Bob: Hi");
+    const left = render(<MarkdownBody markdown={stuck} />);
+    try {
+      await waitFor(() => expect(sent).toHaveLength(1));
+    } finally {
+      left.unmount();
+    }
+    const next = render(<MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: Next")} />);
+    try {
+      await waitFor(() =>
+        expect(diagramIn(figuresIn(next.container)[0] ?? next.container)?.textContent).toContain(
+          "Next"
+        )
+      );
+      // Terminating the worker is what stops a real layout.
+      expect(FakeWorker.created.map((worker) => worker.terminated)).toEqual([true, false]);
+    } finally {
+      next.unmount();
+    }
+    // Nothing was cached for the stopped source: the same body mounted again shows it as code and
+    // asks the worker for it again.
+    const back = render(<MarkdownBody markdown={stuck} />);
+    try {
+      expect(figuresIn(back.container)).toHaveLength(0);
+      await waitFor(() =>
+        expect(sent.filter((source) => source.includes("Stuck"))).toHaveLength(2)
+      );
+    } finally {
+      back.unmount();
+    }
+  });
+
   test("a worker that fails to start leaves every block as code, logs once, and is tried again once the window is online", async () => {
     await warmMarkdownRenderer();
     FakeWorker.startFails = true;
