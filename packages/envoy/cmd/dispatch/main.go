@@ -84,6 +84,10 @@ type bootConfig struct {
 	// api.DeliveryResumeInterval, unless DISPATCH_TEST_DELIVERY_RESUME_INTERVAL, under the test
 	// hooks, sets another.
 	DeliveryResumeInterval time.Duration
+	// RouteRosterTTL is how long a stored listener answer serves issue reads' route_status, zero
+	// for the server's own five seconds; only DISPATCH_TEST_ROUTE_ROSTER_TTL, under the test hooks,
+	// sets it.
+	RouteRosterTTL time.Duration
 	// OIDCIssuer and OIDCAudience configure verification of projected
 	// service-account tokens. Both set or neither; empty means no verifier.
 	OIDCIssuer   string
@@ -639,6 +643,16 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		}
 		boot.DeliveryResumeInterval = interval
 	}
+	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_ROUTE_ROSTER_TTL")); raw != "" {
+		if !boot.TestHooksEnabled {
+			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_ROUTE_ROSTER_TTL")
+		}
+		ttl, err := time.ParseDuration(raw)
+		if err != nil || ttl <= 0 {
+			return bootConfig{}, fmt.Errorf("DISPATCH_TEST_ROUTE_ROSTER_TTL=%q (expected a positive Go duration)", raw)
+		}
+		boot.RouteRosterTTL = ttl
+	}
 	identityMode := strings.TrimSpace(env.get("DISPATCH_IDENTITY"))
 	if err := checkSignInSettings(boot, identityMode); err != nil {
 		return bootConfig{}, err
@@ -902,6 +916,7 @@ func appContextOptions(boot bootConfig, built routes.AppContextOptions) routes.A
 	built.AgentSecretsURL = boot.AgentSecretsURL
 	built.AgentSecretsTokenFile = boot.AgentSecretsTokenFile
 	built.TestHooksEnabled = boot.TestHooksEnabled
+	built.RouteRosterTTL = boot.RouteRosterTTL
 	built.DevSignIn = boot.DevSignIn
 	return built
 }

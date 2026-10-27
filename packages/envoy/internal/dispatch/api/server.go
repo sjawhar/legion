@@ -3,6 +3,7 @@ package api
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -110,6 +111,11 @@ type Deps struct {
 	// (whileCallerResolves), each closing once the caller no longer resolves, and a delivery
 	// socket pings its page and sends it a heartbeat frame.
 	StreamHeartbeat time.Duration
+	// RouteRosterTTL replaces how long a stored listener answer serves issue reads
+	// (routeRosterTTL, issue_route_status.go). Zero keeps five seconds; only a test process sets
+	// another (cmd/dispatch: DISPATCH_TEST_ROUTE_ROSTER_TTL, under the test hooks), so a row that
+	// reads two processes inside one answer's life needs no timing window.
+	RouteRosterTTL time.Duration
 }
 
 // defaultStreamHeartbeat is StreamHeartbeat when DepsInput leaves it zero.
@@ -154,6 +160,9 @@ type DepsInput struct {
 	// (Deps.StreamHeartbeat). Zero keeps fifteen seconds; a test proving a connection closes
 	// sets a short one.
 	StreamHeartbeat time.Duration
+	// RouteRosterTTL replaces the five seconds a stored listener answer serves issue reads; see
+	// Deps.RouteRosterTTL.
+	RouteRosterTTL time.Duration
 }
 
 // NewDeps parses boot configuration once and returns API dependencies.
@@ -213,6 +222,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		Lifetime:         input.Lifetime,
 		TestHooksEnabled: input.TestHooksEnabled,
 		StreamHeartbeat:  heartbeat,
+		RouteRosterTTL:   input.RouteRosterTTL,
 	}, nil
 }
 
@@ -255,8 +265,9 @@ type server struct {
 	// Only a test sets it, so a budget that ends before every selected session is read is the
 	// test's choice rather than a race against five seconds of wall clock (INFRA-249).
 	broadcastResolveBudget time.Duration
-	// rosters is the process's copy of the listener's live-session list that issue reads judge
-	// routes against (issue_route_status.go). Only register gives it non-zero TTLs.
+	// rosters is how this process reads and refreshes the stored listener answer every process's
+	// issue reads judge routes against (issue_route_status.go). Only register gives it non-zero
+	// TTLs.
 	rosters rosterCache
 	// deliveryHub keeps the open Delivery and Pipeline pages current (LEGION-690); nil on a server
 	// with no Lifetime (register), which mounts no GET /ws/delivery.
@@ -336,7 +347,9 @@ func (s *server) waitBackground() {
 // must not dial or read the nil Store: whatever reaches the database or the network starts
 // later, from a handler or the relay's first subscriber.
 func register(mux *http.ServeMux, deps Deps) *server {
-	s := &server{deps: deps, rosters: rosterCache{ttl: routeRosterTTL, silenceTTL: routeRosterSilenceTTL}}
+	s := &server{deps: deps, rosters: rosterCache{
+		ttl: cmp.Or(deps.RouteRosterTTL, routeRosterTTL), silenceTTL: routeRosterSilenceTTL,
+	}}
 	s.eventRelay = newEventStreamRelay(s, s.lifetime())
 	if deps.Lifetime != nil {
 		s.deliveryHub = newDeliveryHub(s, deps.Lifetime, deliveryHubClock{})

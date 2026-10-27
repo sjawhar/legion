@@ -228,11 +228,11 @@ const (
 	RouteUnknown = "unknown"
 )
 
-// IssueRouteReach is whether an issue's route reaches anyone: resolved on read from the server's
-// copy of the listener's session list, at most 5 s old, stored in no table, and never part of an
-// event payload, which is why it sits beside Issue in a read response rather than in it. Both
-// fields are null for an issue with no route; RouteHolder names the session only when
-// RouteStatus is RouteLive.
+// IssueRouteReach is whether an issue's route reaches anyone: resolved on read from the one stored
+// copy of the listener's session list every server process judges by, at most 5 s old, never
+// stored on the issue and never part of an event payload, which is why it sits beside Issue in a
+// read response rather than in it. Both fields are null for an issue with no route; RouteHolder
+// names the session only when RouteStatus is RouteLive.
 type IssueRouteReach struct {
 	RouteStatus *string `json:"route_status"`
 	RouteHolder *string `json:"route_holder"`

@@ -114,6 +114,9 @@ type AppContextOptions struct {
 	// files in Postgres. See api.DepsInput.
 	Files            files.Store
 	TestHooksEnabled bool
+	// RouteRosterTTL replaces how long a stored listener answer serves issue reads; zero keeps the
+	// server's five seconds. See api.Deps.RouteRosterTTL.
+	RouteRosterTTL time.Duration
 	// DevSignIn mounts GET /auth/_dev/signin, which issues the session cookie for any person
 	// named with no sign-in issuer exchange, and makes the whole router refuse a request whose Host
 	// is not the dashboard origin. cmd/dispatch sets it from DISPATCH_DEV_SIGNIN behind its boot
@@ -166,6 +169,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		AgentSecretsTokenFile: opts.AgentSecretsTokenFile,
 		Files:                 opts.Files,
 		TestHooksEnabled:      opts.TestHooksEnabled,
+		RouteRosterTTL:        opts.RouteRosterTTL,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("BuildAppContext: %w", err)

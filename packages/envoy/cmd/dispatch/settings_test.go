@@ -1437,6 +1437,27 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			refusedWith(t, map[string]string{"DISPATCH_TEST_DELIVERY_RESUME_INTERVAL": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
 		},
+		"DISPATCH_TEST_ROUTE_ROSTER_TTL": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{}); boot.RouteRosterTTL != 0 {
+				t.Errorf("DISPATCH_TEST_ROUTE_ROSTER_TTL unset: RouteRosterTTL = %v, want 0 (the server's own five seconds)", boot.RouteRosterTTL)
+			}
+			const longTTL = time.Minute
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":            "1",
+				"DISPATCH_TEST_ROUTE_ROSTER_TTL": longTTL.String(),
+			})
+			if boot.RouteRosterTTL != longTTL {
+				t.Errorf("DISPATCH_TEST_ROUTE_ROSTER_TTL: RouteRosterTTL = %v, want %v", boot.RouteRosterTTL, longTTL)
+			}
+			if options := appContextOptions(boot, routes.AppContextOptions{}); options.RouteRosterTTL != longTTL {
+				t.Errorf("DISPATCH_TEST_ROUTE_ROSTER_TTL: the router is handed RouteRosterTTL = %v, want %v", options.RouteRosterTTL, longTTL)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_ROUTE_ROSTER_TTL": invalid},
+					fmt.Sprintf("DISPATCH_TEST_ROUTE_ROSTER_TTL=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_ROUTE_ROSTER_TTL": "1m"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
 	}
 	for _, row := range settings {
 		test, ok := cases[row.Name]

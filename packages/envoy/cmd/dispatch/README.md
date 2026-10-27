@@ -412,6 +412,15 @@ What the two processes share, and what each keeps to itself:
   runs the delivery resume loop next (`api/delivery_resume.go`, every ten seconds), once its claim
   is a minute old, under its own attempt number and idempotency key, so the session is handed it
   once. An attempt older than an hour is left for a person's Retry.
+- Route status comes from one stored listener answer. Every issue read judges its `route_status`
+  against the `route_roster` row (migration `0122`), the listener's last live-session list, so
+  both processes read a route the same way and a `route_status` page read on either is cut from
+  the same answer. A process that finds the row older than five seconds by the database's clock
+  asks the listener once, however many of its reads wait, and stores the answer, unless the other
+  process stored one from a later call; a listener that did not answer is stored too, so every
+  process reads `unknown` for the next five seconds together (`api/issue_route_status.go`). A
+  refresh of the answer between two page reads can still move issues across a page boundary, as
+  any change does under offset paging.
 - Seven periodic maintenance loops run once per period across the processes, not once per process.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a
   process whose tick lands inside another's pass logs a skip; and, under that lease, each pass is
@@ -836,6 +845,17 @@ first, without reading every settled attempt. They are plain `create index`, as 
 each build holds its table's lock while it reads the rows, which the census bounds by its 1 GiB
 limit. The census answers `0`. `0121` is additive, so rolling back past it is an image rollback
 alone.
+
+Migration `0122_route_roster` creates `route_roster`, one row (its `id` checked `true`, as
+`embeddings_rate_limit`'s is) holding the listener's last answer to `GET /v1/sessions` that every
+process judges issue reads' `route_status` against: whether it answered, the sessions it listed
+with only their `session_id`, `roles` and `last_seen`, when the call was sent and until when the
+answer serves reads, both by the database's clock (`api/issue_route_status.go`). An answer is
+written only over one sent earlier, so a slow call never replaces a later call's answer. It is a
+new table, so nothing existing is read, locked or rewritten, and the census answers `0`. The
+release before it neither reads nor writes the table and keeps its per-process copy of the list
+while both serve, so only processes of this release agree on a route; rolling back past it is an
+image rollback alone.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
