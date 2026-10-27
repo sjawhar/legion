@@ -796,3 +796,24 @@ func TestDispatchCertificateBudgetWritesOnlyItsTwoAnnotations(t *testing.T) {
 	}
 	require.ElementsMatch(t, []string{"legion.dev/certificate-claims", "legion.dev/front-door-nodes"}, keys)
 }
+
+// An epoch the gate did not write itself, with a leading zero or more digits than the shell's
+// integers hold, is skipped as malformed, like a non-numeric one, in both annotations: the pass
+// still decides, here taking the third claim beside the two live ones. Shell arithmetic reads a
+// leading zero as octal and fails on 8 or 9, and dash fails on an overflow; either error ends the
+// gate's background subshell, which nothing restarts, so no pod reading that ledger would ever
+// advertise again. The negative control is TestDispatchCertificateBudgetClaims, whose epochs are
+// well formed.
+func TestDispatchCertificateBudgetSkipsAMalformedEpoch(t *testing.T) {
+	malformed := fmt.Sprintf("08/%sother8 0177/%sother9 99999999999999999999999/%sother10", frontDoorTestPod, frontDoorTestPod, frontDoorTestPod)
+	l := newFrontDoorLedger(t, malformed+" "+gateClaimsAt(time.Hour, 2*time.Hour))
+	l.nodes = fmt.Sprintf("09/%sgone/ngoneCNTRL", frontDoorTestPod)
+	p := newGatePod(t, frontDoorTestPod+"a")
+	ok, out := p.gate(t, l)
+	require.True(t, ok, out)
+	require.NotContains(t, out, "Illegal number")
+	require.NotContains(t, out, "arithmetic")
+	require.Equal(t, 1, l.claimWrites, out)
+	require.Contains(t, l.claims, "/"+p.name)
+	require.True(t, registeredIn(l, p), l.nodes)
+}
