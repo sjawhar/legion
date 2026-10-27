@@ -99,7 +99,7 @@ it, and any other change to the head voids it.
   `REQUEST_CHANGES` when the code is at fault, and your own commit to fix when your prose broke
   it. The architect reads your prose commits at its acceptance (*The architect's acceptance*,
   below), and that read is no new round. A round after a READY refusal is the one exception. Its
-  approval needs the tester's `E2E` line to name the head with only `.legion/` changed since. So
+  approval needs the tester's `E2E` line to name the head with only `.legion/<issue>/` changed since. So
   there you fix no prose yourself, and you name each prose finding in a `REQUEST_CHANGES`.
 
 A reviewer's phase ends with its completion, not with its review. Every round writes a handoff
@@ -110,7 +110,7 @@ whatever CI says and the issue leaves reviewing with it. The approval waits on n
 handoff-only commit either: it ends the round whatever CI says there, since the round reads no CI
 verdict, and a red the daemon reads later — at that commit or any above it — is the code's red
 and resumes the implementer from wherever the issue is (reviewing, retro or merging) without the
-reviewer. A head your own push changed beyond `.legion/` is the exception. The daemon marks it a
+reviewer. A head your own push changed beyond `.legion/<issue>/` is the exception. The daemon marks it a
 planned red and sends nothing back for it, so wait for its checks yourself (*Fix a prose-only
 finding yourself*, above). A review of a head the handoff push then replaces names a head the pull
 request no longer has. The daemon moves the issue once both are in — the decision GitHub reports
@@ -131,7 +131,7 @@ reviewing until you finish.
   controller takes it"). The acceptance asks no `Production:` line of anyone: that line is written
   after the close (*The production check after the close*, below).
   CI red at the head in `accepting` returns the issue to `implementing` as it does in review. A
-  head the review App pushed beyond `.legion/` is the exception: the daemon marks it a planned red
+  head the review App pushed beyond `.legion/<issue>/` is the exception: the daemon marks it a planned red
   and acts on it nowhere, and GitHub holds the merge under the base branch's own rules.
 
 ## Retro

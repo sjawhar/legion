@@ -17,7 +17,7 @@ When it prints `true`, run `jj -R "$LEGION_WORKSPACE" new @-`; otherwise `@` hol
 resumed edits, so run `jj -R "$LEGION_WORKSPACE" new`. Never `jj describe` or `jj split` the
 working-copy commit you found at the turn's start. Do not move a bookmark you do
 not own. Put only your logical paths in `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`.
-Push your commits as the daemon part below says: a push that touches only `.legion/` ends its
+Push your commits as the daemon part below says: a push that touches only `.legion/<issue>/` ends its
 head's message with the trailer, and one that also carries other files does not.
 
 ## Two checks on the plan
