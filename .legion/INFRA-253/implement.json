@@ -2,16 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-253",
-  "completed": "2026-10-27T04:13:49Z",
+  "completed": "2026-10-27T04:29:54Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2229",
-  "codeHead": "9c51021b0b9dda25f493d0d68b29acd2897c63ee",
+  "codeHead": "e93c81da7e02f60585f4494d16d03c77054a9598",
   "proof": [
     {
-      "criterion": "After the forward merge of main ef3a531d (#2270, CPU and memory limits on docker runs): the Stage 1 live proof still serves the daemon on a keeper's socket through LEGION_LISTEN_FD, restarts on the same port, and passes its holder check",
+      "criterion": "After the forward merge of main baadccdc (#2270's docker limits, then #2317's fix for the daemon admission tests): the Stage 1 live proof still serves the daemon on a keeper's socket through LEGION_LISTEN_FD, restarts on the same port, and passes its holder check",
       "surface": "pod, the real legion daemon under tmux 3.5a with the pod's Postgres",
       "command": "LEGION_E2E_PG_DSN=<pod pg> bash scripts/e2e/stage1-skeleton.sh",
-      "observed": "stage 1 e2e: PASS; bash -n passes and shellcheck finds 0 findings, as at both parents; bun test scripts/e2e/lib 648 pass, 2 Docker-only nats-stream fails",
-      "headSha": "9c51021b0b9dda25f493d0d68b29acd2897c63ee",
+      "observed": "stage 1 e2e: PASS at this head; go test ./internal/admit -run TestApplyFact 9 pass (the five that failed on main with 'got 20 and 31' among them), ./internal/record passes, ./internal/daemon/... -run Admission 4 pass",
+      "headSha": "e93c81da7e02f60585f4494d16d03c77054a9598",
       "negativeControl": "a tmux first on PATH that is a script is refused before the daemon starts ('real_bin_path: mise which tmux failed'), as Stage 1 intends; the holder check's own control (keeper left out of the allowed set → exit 1) is recorded in the earlier entry"
     },
     {
@@ -147,7 +147,8 @@
     "Generation 3: forward merge of main 6cdb9995 for a GitHub-reported conflict in packages/envoy/CHANGELOG.md, scripts/e2e/stage2-tmux-supervision.sh and scripts/e2e/stage3-devbox-workflow.sh. Fingerprint 4faa5738 → 69bcdf6c: stage3's held-port start_daemon now carries #2242's `env -u LEGION_OMP_PATH` and its daemon_runs_the_pinned_omp check, with the log offset taken before start_kept; stage2 keeps the keeper stops beside #2242's box-login teardown and python3 in the tool list; no new server in main's changes starts on a released port.",
     "Forward merge of main fab8de3510 for a GitHub-reported conflict in scripts/e2e/claude-backend-tmux.sh (#2206's model route). Fingerprint 69bcdf6c → c5e74ae2: only the required-tool line pair moved, since #2206 dropped hawk-token from it (now required under the gateway route alone); the PR's ss → python3 change is unchanged and every held-port start is untouched.",
     "Forward merge of main 1357b95c27 (#2264, DISPATCH_PPROF_PORT) for a GitHub-reported conflict in cmd/dispatch main.go, settings.go, settings_test.go, README.md and CHANGELOG.md, both sides kept. Fingerprint c5e74ae2 → 890278d4: #2264's TestPprofServesTheIndexOnLoopbackAndStopsWithTheContext used a listen-and-close port (freeLoopbackPort); it now starts pprof on 127.0.0.1:0 and checks the reported address, and freeLoopbackPort is removed. Real binary: pprof binds its own loopback address, never the inherited socket, and a DISPATCH_PPROF_PORT equal to the held socket's port exits 1 naming DISPATCH_PPROF_PORT, address already in use.",
-    "Forward merge of main ef3a531d (#2270) for a GitHub-reported conflict in scripts/e2e/stage1-skeleton.sh's cleanup: the keeper stop and #2270's `docker rm -f -v` both kept. Fingerprint unchanged (890278d4). Retro's docs/solutions/ files stay; .legion/INFRA-253/ is written again here, so READY needs retro's removal again."
+    "Forward merge of main ef3a531d (#2270) for a GitHub-reported conflict in scripts/e2e/stage1-skeleton.sh's cleanup: the keeper stop and #2270's `docker rm -f -v` both kept. Fingerprint unchanged (890278d4). Retro's docs/solutions/ files stay; .legion/INFRA-253/ is written again here, so READY needs retro's removal again.",
+    "Forward merge of main baadccdc for #2317's fix of the daemon admission tests #2289 broke, the only red in the required test job at 9c51021b; no conflict, fingerprint unchanged (890278d4)."
   ],
   "openQuestions": [
     "envoy-smoke at the code head is the first run of SCM_RIGHTS into a host-network container (plan risk 6); if it fails the plan says report to the architect, no fallback.",
@@ -157,7 +158,7 @@
     "The Dispatch memory tests that reset peak memory need write access to /proc/<pid>/clear_refs, which gVisor pods refuse; CI's dispatch-memory job is their surface (the same failure on the base harness).",
     "WebKit and Firefox Playwright projects cannot launch in the pod (missing system libraries, no root); CI's dispatch job runs them."
   ],
-  "round": 10,
+  "round": 11,
   "notRunEndToEnd": [
     "stage3-devbox-workflow.sh, stage3-4b13b-acceptance.sh, claude-backend-tmux.sh, dispatch-user-turns.sh, and stage2-tmux-supervision.sh from model-turn-through-the-route on: the devbox has no working model route. Their changed functions ran against real processes: rig.sh start_held/keep_port/start_kept/report_port/held_only_by with the real envoy-listener, envoy-dispatch (env -i, DISPATCH_LISTEN_FD=3), run-server.sh, nats-server -p -1 and legion start on a keeper, in the pod; the keeper daemon path is Stage 1's (pod and CI PASS); the stage3/4b13b cleanup with keeper stops runs in smoke-cleanup.test.ts and stage3-4b13b-notes.test.ts (pod, CI); stage2's gate checks, architect-registers-and-is-ready and envoy-role-held passed on the devbox with the two gate strings patched.",
     "lib/bridge-tunnel.sh (stage4a bridge mode): no cluster with pods/portforward and no devbox result; ran in the pod against a stub kubectl that binds :0 and stub chisel (port read from the Forwarding line, port-forward and chisel restarted on a new port, bridge_stop leaves nothing).",
