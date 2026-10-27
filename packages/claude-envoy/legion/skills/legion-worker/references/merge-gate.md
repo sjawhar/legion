@@ -121,8 +121,8 @@ reviewing until you finish.
 
 - Between the reviewer's approval and retro the issue sits in `accepting` (Dispatch status
   `needs_review`), where no worker is started: the tree's architect reads the evidence (the
-  tester's handoff, the PR body's `E2E (implementer)` and `E2E (tester)` lines, the reviewer's
-  approval of the head by SHA, and for a parent that every child is done) and accepts with the
+  tester's handoff, the PR body's `E2E (implementer)` and `E2E (tester)` lines and the reviewer's
+  approval of the head by SHA; children still running do not hold it) and accepts with the
   `legion` tool's `sign_off`, which moves the issue to retro, or sends it back to `implementing`
   or `testing` with `request_backward_move` and a reason, which reaches the started worker's task
   as its `Reason:` line and counts a review round. The architect also reads the reviewer's own

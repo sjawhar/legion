@@ -208,6 +208,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The `legion` tool's description no longer names a `SIGNOFF_CHILD_IN_WORKFLOW` refusal: the daemon
+  accepts an architect's `sign_off` of an issue whatever still runs beneath it, and keeps the tree's
+  order at the root's close instead, where a root whose pull request merged waits in
+  `awaiting_merge` for the rest of its tree. The architect skill accepts a root's own pull request
+  on its own evidence; the integration child still runs last, and the root closes after it.
+
 - A finding outside a role's own issue takes the first of three steps that fits. A
   defect with a clear fix in code the role's own tree touches or depends on is fixed in that
   tree's own pull request, while the role is there. Any other clear defect goes to the controller
@@ -845,6 +851,19 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Fixed
 
+- The `legion-worker` skill: `HANDOFF_STALE_GENERATION` is no longer one of the refusals the
+  daemon records. The daemon now refuses a completion of a run the issue has left before it applies
+  any fact and names the current run's queued task, so the worker ends the turn and calls
+  `handoff_complete` again at the same commit in that task's turn, which is applied.
+- The `legion` tool's `handoff_complete`, `sign_off` and `register_gate` wait out a daemon restart
+  instead of failing on the first refused connection: a connection refused, reset or closed before
+  a response, or a 502 or 503 from a proxy (a body that is not the daemon's refusal), is retried
+  with backoff from 0.5 s to 30 s for up to 10 minutes or until the agent aborts, each attempt with
+  a fresh grant; an abort during a wait sends no further attempt. The retry notice goes out once as
+  a partial result, which Oh My Pi shows in its TUI and RPC event stream; the model sees only the
+  final result. The daemon applies each of the three at most once however often it arrives. Every
+  answer the daemon gives, a 4xx or 409 or its own coded 502/503, is passed on at once; after an
+  attempt whose connection dropped, that refusal says the dropped attempt may have been applied.
 - The `legion-architect` skill was 51,256 bytes, over Oh My Pi's 51,200-byte spill threshold, so it
   reached an architect with its middle cut out; its Wake routing table moves unchanged to
   `skill://legion-architect/references/wake-routing.md` (INFRA-376).
