@@ -498,10 +498,10 @@ jobs:
               - 'packages/contracts/**'
               - 'package.json'
               - 'bun.lock'
-              # check-dist rebuilds the committed dist/THIRD_PARTY_NOTICES.
+              # The build writes dist/THIRD_PARTY_NOTICES.
               - 'scripts/third-party-notices.ts'
-              # scripts/build.ts, which check-dist and tests/dist-fresh.test.ts run, builds only under
-              # the Bun .bun-version pins, since the committed bundle depends on it.
+              # scripts/build.ts, which the job's build step and tests/dist-fresh.test.ts run,
+              # builds only under the Bun .bun-version pins, since the bundle depends on it.
               - *bun_toolchain
               # tests/dispatch-first-hook.test.ts reads the skill through the plugin's skills/ link
               # and holds the hook's context to Claude Code's 10,000-character cap.
@@ -511,8 +511,8 @@ jobs:
               - '.claude-plugin/marketplace.json'
               # The MCP server's bundle inlines the daemon client and handoff-commit lookup from
               # pi-shared, and scripts/build.ts generates legion/ from pi-legion's agents and the
-              # skills the prepack script stages for it, so check-dist and
-              # tests/legion-plugin-fresh.test.ts go stale with any of them.
+              # skills the prepack script stages for it, so the job's build and the tests, which
+              # build dist/ and legion/ fresh, read every one of them.
               - 'packages/pi-shared/**'
               - 'packages/pi-legion/agents/**'
               - 'skills/**'
@@ -995,9 +995,14 @@ jobs:
       - name: Typecheck Claude Envoy plugin
         run: bun run typecheck
         working-directory: packages/claude-envoy
-      - name: Check the committed bundle is fresh
-        run: bun run check-dist
+      # A pull request never commits dist/ or legion/ (main's Rebuild Claude Envoy plugin workflow
+      # does), so this builds them from the head's source into CI's own checkout, and the pack step
+      # packs this build.
+      - name: Build the plugin from source
+        run: bun run build -- --in-place
         working-directory: packages/claude-envoy
+      - name: Check the built plugin names nothing private
+        run: .github/scripts/check-private-names.sh packages/claude-envoy/dist packages/claude-envoy/legion
       - name: Test Claude Envoy plugin
         run: bun run test
         working-directory: packages/claude-envoy
