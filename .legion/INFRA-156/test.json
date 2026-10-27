@@ -2,64 +2,69 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-156",
-  "completed": "2026-10-27T10:32:00Z",
-  "headTested": "e7927e03ac2eed57bee770f75a7d8dbdcedcafa8",
-  "fingerprint": "68aba2dc3b6fc097816f16b21d4acf44a1c0c8551b40764c1a8f24609c4e29e4",
+  "completed": "2026-10-27T11:00:30Z",
+  "headTested": "02903bfa5cfafabc1bceb3d0e38abcd9d3a474ec",
+  "fingerprint": "98c0d33d7fec0dda3474e55f2f4f2ccb0561aa383810c979cb4277008dd33aa9",
   "provider": "Anthropic (anthropic/claude-opus-5-5), the model that answered this testing session",
-  "outcome": "No product defect found on the real surface. The phase moves back to implementing because GitHub reports sjawhar/legion#2394 CONFLICTING with main 719aae243906 (biome.json, packages/proof-editor/AGENTS.md), so no CI ran at this head; the architect directed request_backward_move instead of handoff_complete.",
+  "outcome": "Pass. No defect found at 02903bfa; the conflict with main is resolved (GitHub: MERGEABLE). CI at 02903bfa was queued when read (Tests, Legion Envoy and Contracts, Worker Image, Docs queued; PR Title pending); not waited for.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surface independently: a real Dispatch server built from a git archive of e7927e03 in $TMPDIR/infra156-tester (scratch schema adding requirement and claim{serves: block[] targets [requirement], cites: block[]}), local Postgres 17 + pgvector, real migrations. The implementer's steps 2-4, the retype steps and the serves=\"\" control are steps 1, 5 and 12 of t.py; every one observed as the implementer recorded (201; ?kind=serves lists c1; mentions empty; block-links serves c1->r1; paragraph and callout pointers 400 INVALID_MARKDOWN; edit insert 400 INVALID_OP attributes; ?kind=nope 400 INVALID_KIND; retype hides and shows; empty value removes the edge)."
+    "how": "First round: drove the same surface independently at e7927e03 (its steps are steps 1, 5 and 12 of t.py, every result as recorded). This round: its proof now names f530ab46 (the code head under 02903bfa); re-ran the same steps with t.py against a server built from 02903bfa on a database first migrated by main: all as recorded."
   },
-  "failures": [
-    {
-      "criterion": "CI green at the head under test (read on GitHub, not rerun)",
-      "evidence": "gh pr view 2394 --repo sjawhar/legion --json mergeable -> CONFLICTING; git merge-tree --write-tree e7927e03ac2e 719aae243906 -> CONFLICT (content) in biome.json and packages/proof-editor/AGENTS.md; gh api repos/sjawhar/legion/commits/<sha>/check-runs returns zero check runs at e7927e03ac2e and at 3fc86bea41ac. Not a product defect: the implementer merges main forward (jj new legion/INFRA-156 main@origin), keeps the migration after main's highest, posts the before/after fingerprints and changes nothing else. After that merge: fingerprint equal to 68aba2dc… means bare gates only (CI green at the new head and the smoke check); different means a re-test of what changed."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
       "criterion": "A3 (server): a test block type declaring a block-pointer attribute accepts a valid block reference and refuses a malformed one",
       "surface": "real Dispatch server process (run-server.sh, go build of a git archive of the head with a scratch blocks.json), local Postgres 17 + pgvector, real migrations, over HTTP",
-      "command": "python3 $TMPDIR/infra156-tester/t.py (posted in https://github.com/sjawhar/legion/pull/2394#issuecomment-6439576707), sections 1-2",
+      "command": "python3 $TMPDIR/infra156-tester/t.py (posted in https://github.com/sjawhar/legion/pull/2394#issuecomment-6439576707), sections 1-2; re-run at 02903bfa: python3 t.py http://127.0.0.1:8792 -> 80/80 (https://github.com/sjawhar/legion/pull/2394#issuecomment-6440214585)",
       "observed": "one and two canonical refs, @v1 and @v9223372036854775807 accepted (201, one edge per ref); 19 malformed values refused 400 INVALID_MARKDOWN naming attribute \"serves\": doubled/leading/trailing space, tab, U+FEFF, repeat, lower-case hex, needless %31, unencoded _, artifact/spec spelling, @v0, @v01, @v9223372036854775808, document ref, issue ref, dashboard URL, trailing junk, comma list, lower-case key. Go and contracts' parseBlockPointerValue agree on 19 further edge values.",
-      "headSha": "e7927e03ac2eed57bee770f75a7d8dbdcedcafa8",
+      "headSha": "02903bfa5cfafabc1bceb3d0e38abcd9d3a474ec",
       "negativeControl": "serves=\"dispatch://TST-4/spec#b-r1\\tdispatch://TST-4/spec#b-r2\" -> 400 INVALID_MARKDOWN 'is not a block reference as Dispatch writes one', no version written"
     },
     {
       "criterion": "A3 (server): a block of a type the attribute does not allow is refused",
       "surface": "same server: upload route (agent and human cookie), POST /api/v1/artifacts/{id}/edits, dispatch doc-edit CLI, POST /api/v1/artifacts/{id}/rebuild on a real unloadable history",
-      "command": "t.py sections 1, 4, 7, 8, 9, 13b; dispatch doc-edit --issue TST-4 --artifact checks.md --ops-json <insert claim>; curl POST .../rebuild after setting the document's one doc_updates row to \\xff",
+      "command": "t.py sections 1, 4, 7, 8, 9, 13b; dispatch doc-edit --issue TST-4 --artifact checks.md --ops-json <insert claim>; curl POST .../rebuild after setting the document's one doc_updates row to \\xff; re-run at 02903bfa (rebuild, CLI, t.py) (https://github.com/sjawhar/legion/pull/2394#issuecomment-6440214585)",
       "observed": "pointers at a paragraph, a callout (same document, other issue, project document), a pinned callout, a same-document callout in the same upload, a target retyped to callout in the same edit batch, and a paragraph retyped into a claim each refused (400 INVALID_MARKDOWN, or INVALID_OP field attributes on edits/CLI) naming the type and 'it points only at requirement'; rebuild with a claim at callout k1 -> 400 INVALID_MARKDOWN, then at r1 -> 200 removed_updates 1; untargeted cites accepts a callout and a paragraph",
-      "headSha": "e7927e03ac2eed57bee770f75a7d8dbdcedcafa8",
+      "headSha": "02903bfa5cfafabc1bceb3d0e38abcd9d3a474ec",
       "negativeControl": "the same pointers at a requirement are accepted (201/200) and listed as serves edges"
     },
     {
       "criterion": "A3: a saved block of that type makes a link named by the attribute; R3 limit holds on reads",
       "surface": "same server: GET /api/v1/references (?to, ?from, ?kind), GET /api/v1/block-links, dispatch read --ref; rebuild-refs subcommand and the block-index pass",
-      "command": "t.py sections 1, 5, 10, 11, 15; dispatch read --ref dispatch://TST-4/spec#b-r1; delete pointer block_refs rows then dispatch-e2e rebuild-refs; restart with targets [requirement, callout]",
+      "command": "t.py sections 1, 5, 10, 11, 15; dispatch read --ref dispatch://TST-4/spec#b-r1; delete pointer block_refs rows then dispatch-e2e rebuild-refs; restart with targets [requirement, callout]; re-run at 02903bfa: t.py 80/80 on a database migrated by main at 2e8c68cd (schema 129) then upgraded by the head to 130, existing mention edges unchanged (https://github.com/sjawhar/legion/pull/2394#issuecomment-6440214585)",
       "observed": "serves edges listed on ?kind=serves, ?from, ?to, block-links and dispatch read ('serves block dispatch://TST-4/artifact/checks-md#b-cli1'); a pointer at an absent block is accepted and unlisted, hidden while that block is a callout, listed once a requirement, hidden again when retyped back; after 24 concurrent pointer writes and retypes the edge is listed iff the target is a requirement; rebuild-refs + block-index restore identical (from, kind, to, to_types) rows; after a targets widening the stale row stays hidden until the citing document's next index, then lists (as packages/envoy/AGENTS.md:1941-1943 documents)",
-      "headSha": "e7927e03ac2eed57bee770f75a7d8dbdcedcafa8",
+      "headSha": "02903bfa5cfafabc1bceb3d0e38abcd9d3a474ec",
       "negativeControl": "?kind=nope -> 400 INVALID_KIND naming cites, serves; ?kind=SERVES -> 400"
     },
     {
       "criterion": "R3 schema: the attribute's name is the link kind and the limit names real types",
       "surface": "the dispatch server binary booted with eight variant schemas",
       "command": "bash $TMPDIR/infra156-tester/variants.sh",
-      "observed": "child_of and mentions -> panic 'named after a structural edge kind'; Serves and ser-ves -> 'must match ^[a-z][a-z0-9_]*$'; targets [nope] -> 'neither a type the schema declares nor a built-in block'; targets on a string attribute -> 'only a block[] attribute may carry'; non-empty block[] default -> refused; targets [paragraph, callout] boots",
-      "headSha": "e7927e03ac2eed57bee770f75a7d8dbdcedcafa8",
+      "observed": "child_of and mentions -> panic 'named after a structural edge kind'; Serves and ser-ves -> 'must match ^[a-z][a-z0-9_]*$'; targets [nope] -> 'neither a type the schema declares nor a built-in block'; targets on a string attribute -> 'only a block[] attribute may carry'; non-empty block[] default -> refused; targets [paragraph, callout] boots. Not rebuilt at 02903bfa: the schema code is unchanged by the merges (diff of branch diffs touches only the migration number and docs).",
+      "headSha": "02903bfa5cfafabc1bceb3d0e38abcd9d3a474ec",
       "negativeControl": "each of the seven bad schemas stops the server at init with exit 2"
     },
     {
       "criterion": "A3 (editor): typed-block commands accept a valid pointer and refuse a malformed one or a same-document block of a disallowed type",
       "surface": "the proof-editor library (createTypedBlockCommands with documentRef, createHeadlessProof) from the head's packages",
-      "command": "bun test src/tests/zz-tester.test.ts (throwaway, in the $TMPDIR copy only)",
-      "observed": "9/9: insertTypedBlock and retypeBlock at a same-document callout refused with the document unchanged; pinned same-document pointer refused; project documentRef refuses its own callout and accepts its requirement; untargeted cites accepts a callout; a held pointer is not refused while adding a paragraph beside it is; a two-pointer value round-trips through markdown",
-      "headSha": "e7927e03ac2eed57bee770f75a7d8dbdcedcafa8",
+      "command": "bun test src/tests/zz-tester.test.ts (throwaway, in the $TMPDIR copy only); re-run at 02903bfa with one more check (10/10)",
+      "observed": "9/9: insertTypedBlock and retypeBlock at a same-document callout refused with the document unchanged; pinned same-document pointer refused; project documentRef refuses its own callout and accepts its requirement; untargeted cites accepts a callout; a held pointer is not refused while adding a paragraph beside it is; a two-pointer value round-trips through markdown; at 02903bfa also main's read-only parse path: a canonical serves value parses as the claim, a doubled-space value is shown as text",
+      "headSha": "02903bfa5cfafabc1bceb3d0e38abcd9d3a474ec",
       "negativeControl": "setBlockAttributes serves values with a trailing space, a repeat, a lower-case key, an unencoded _, @v0, a number and a bare string each throw naming \"serves\"; a tab in markdown is refused on parse"
+    },
+    {
+      "criterion": "Migration 0130_block_pointer_links applies on a database at main's 0129 and keeps existing edges",
+      "surface": "main's Dispatch server at 2e8c68cd then the head's server on the same Postgres database",
+      "command": "boot dispatch-main (2e8c68cd) on fresh dispatch_tester2, seed project UPG, issue UPG-1 citing its callout, notes.md citing it; stop; boot the head's dispatch-e2e on the same DB; GET /healthz; GET /api/v1/references?to=dispatch://UPG-1/spec%23b-k1",
+      "observed": "schema_version 129 -> 130; block_refs.to_types column present; 2 existing rows kept, to_types null; the same two mentions edges listed before and after",
+      "headSha": "02903bfa5cfafabc1bceb3d0e38abcd9d3a474ec",
+      "negativeControl": "a pointer to a callout on the upgraded database is refused 400 INVALID_MARKDOWN (t.py 1f)"
     }
   ],
   "defectsFoundByBreaking": [],
-  "redTests": []
+  "redTests": [],
+  "previousHeadTested": "e7927e03ac2eed57bee770f75a7d8dbdcedcafa8",
+  "fingerprintCheck": "changed: 68aba2dc3b6fc097816f16b21d4acf44a1c0c8551b40764c1a8f24609c4e29e4 (e7927e03) -> 98c0d33d7fec0dda3474e55f2f4f2ccb0561aa383810c979cb4277008dd33aa9 (02903bfa). The diff of the two branch diffs is only the migration renumber 0129_block_pointer_links -> 0130_block_pointer_links (files and doc lines naming it) and the packages/proof-editor/AGENTS.md counts; re-tested what that touches (migration upgrade from main, the whole HTTP suite, rebuild, CLI, editor including main's read-only parse path)."
 }
