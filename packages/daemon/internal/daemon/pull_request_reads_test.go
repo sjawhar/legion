@@ -132,12 +132,13 @@ func TestThePassFollowsAHeadWhoseSynchronizeHasNotArrived(t *testing.T) {
 	}
 }
 
-// A reviewer approves the head it read, then pushes its handoff (.legion/ only) and completes. With
-// the push webhook still in the backlog, a head followed alone would leave the approval judged
-// against a head no known push reaches from it, and the round stuck for nothing. So the pass also
-// applies the push, when GitHub's comparison shows it changed only .legion/, and the approval
-// stands for the new head; a push that changed code is left to its webhook, and an approval of the
-// head before it does not stand for the code above it.
+// A reviewer approves the head it read, then pushes its handoff (.legion/<issue>/ only) and
+// completes. With the push webhook still in the backlog, a head followed alone would leave the
+// approval judged against a head no known push reaches from it, and the round stuck for nothing. So
+// the pass also applies the push, when GitHub's comparison shows it changed only the issue's own
+// .legion/<issue>/, and the approval stands for the new head; a push that changed code, or another
+// issue's handoffs, is left to its webhook, and an approval of the head before it does not stand
+// for what is above it.
 func TestThePassFollowsAHandoffPushSoAnApprovalBeneathItStands(t *testing.T) {
 	read := time.Date(2026, 10, 26, 20, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
@@ -146,8 +147,9 @@ func TestThePassFollowsAHandoffPushSoAnApprovalBeneathItStands(t *testing.T) {
 		stands  bool
 		pushes  int
 	}{
-		{"the push changed only .legion/", ".legion/CAPTURE-1/review.json", true, 1},
+		{"the push changed only the issue's handoffs", ".legion/CAPTURE-1/review.json", true, 1},
 		{"the push changed code", ".legion/CAPTURE-1/review.json,src/widget.go", false, 0},
+		{"the push changed another issue's handoffs", ".legion/CAPTURE-2/review.json", false, 0},
 		{"GitHub has no comparison", "", false, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -219,6 +221,7 @@ func TestHandoffPushTakesOnlyAComparisonThatProvesTheCodeUnchanged(t *testing.T)
 		{"a list GitHub may have cut", `{"status":"ahead","files":[` + legionFiles(compareFilesCap) + `]}`, false},
 		{"a rename into .legion/ from code", `{"status":"ahead","files":[{"filename":".legion/CAPTURE-1/widget.go","previous_filename":"src/widget.go"}]}`, false},
 		{"code changed", `{"status":"ahead","files":[{"filename":"src/widget.go"}]}`, false},
+		{"another issue's handoffs", `{"status":"ahead","files":[{"filename":".legion/CAPTURE-2/review.json"}]}`, false},
 		{"no files", `{"status":"ahead","files":[]}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -231,8 +234,9 @@ func TestHandoffPushTakesOnlyAComparisonThatProvesTheCodeUnchanged(t *testing.T)
 			}))
 			t.Cleanup(server.Close)
 			github := githubrest.Client{Token: "token", API: githubrest.RepositoryAPI(server.URL, ghrepo.MustParse("acme/widgets"))}
-			pr := record.PullRequest{Repo: "acme/widgets", Number: 86, Branch: "legion/CAPTURE-1", HeadSHA: "code"}
-			push, handoff, err := handoffPush(context.Background(), github, pr, "handoff")
+			pr := record.PullRequest{Issue: "CAPTURE-1", Repo: "acme/widgets", Number: 86, Branch: "legion/CAPTURE-1", HeadSHA: "code"}
+			push, notHandoff, err := handoffPush(context.Background(), github, pr, pr.HeadSHA, "handoff")
+			handoff := notHandoff == ""
 			if err != nil {
 				t.Fatalf("handoffPush: %v", err)
 			}
