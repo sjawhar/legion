@@ -4,6 +4,19 @@
 
 ### Added
 
+- `SessionAnswer` and `SessionAnswersResponse`, the body of
+  `GET /api/v1/agents/{session_id}/answers` (`{session_id, since, total, items}`): each item is an
+  ask's current answer, a comment or a message a person wrote that Dispatch delivered to the
+  session, with its `relation` (one of `SESSION_ANSWER_RELATIONS`), time, author, full text, an
+  answer's choices and whether it replaced an earlier one, the ask it answers, its owner, its
+  `dispatch://` reference and its deep link; mirrored in Go as `model.SessionAnswer` and
+  `model.SessionAnswersResponse` (INFRA-148).
+- `dispatch_answers` (`dispatch answers`), with no arguments: every answer and comment a person
+  wrote to this session in the last 72 hours, newest first, in full, the command the per-request
+  list names when it leaves older items out (INFRA-148).
+- `dispatch doc-read --help` says that after the document it lists each open anchored comment
+  under the passage it is anchored to, with its author, time and full text and every reply in its
+  thread (INFRA-148).
 - `dispatch doc-edit --help` says the spec, not every document, holds no progress or status, and that a record of open items or progress is a document of its own.
 
 - `actorAttribution(actor)`, the part of an actor's label after its name: ` (for <owner>)` for a

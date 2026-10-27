@@ -1033,6 +1033,65 @@ type MyRepliesResponse struct {
 	Offset int          `json:"offset"`
 }
 
+// SessionAnswer kinds: an ask's current answer (its ID is the ask's), a comment, or a message.
+const (
+	SessionAnswerKindAnswer  = "answer"
+	SessionAnswerKindComment = "comment"
+	SessionAnswerKindMessage = "message"
+)
+
+// SessionAnswer relations: what an item is to the session Dispatch delivered it to, spelled as
+// SESSION_ANSWER_RELATIONS in packages/contracts/src/dispatch-api.ts spells them.
+const (
+	SessionAnswerRelationAnsweredYourAsk        = "answered_your_ask"
+	SessionAnswerRelationRepliedOnYourAsk       = "replied_on_your_ask"
+	SessionAnswerRelationRepliedInCommentThread = "replied_in_a_comment_thread"
+	SessionAnswerRelationCommentedOnDocument    = "commented_on_a_document"
+	SessionAnswerRelationCommentedOnIssue       = "commented_on_an_issue"
+	SessionAnswerRelationMentionedYou           = "mentioned_you"
+	SessionAnswerRelationSentYouMessage         = "sent_you_a_message"
+	SessionAnswerRelationRepliedToYourMessage   = "replied_to_your_message"
+)
+
+// SessionAnswerAsk is the ask a session answer item answers or replies in, with the session's
+// whole question.
+type SessionAnswerAsk struct {
+	ID       string `json:"id"`
+	Question string `json:"question"`
+}
+
+// SessionAnswer is one thing a person wrote that Dispatch delivered to a session, on
+// GET /api/v1/agents/{session_id}/answers: an ask's current answer, a comment at its current
+// body, or a message, each (Kind, ID) once. Author is always a user. Text is the person's words in
+// full ("" for an answer that chose options only). Selected and Replaced are an answer's, each
+// omitted when empty or false; EditedAt is an edited comment's; Ask is set on an answer and on a
+// reply in an ask's thread. Owner and Ref are nil for a direct message, which is on no issue and
+// has no dispatch:// address; Href is then /agents/<session>/live.
+type SessionAnswer struct {
+	Kind     string            `json:"kind"`
+	Relation string            `json:"relation"`
+	ID       string            `json:"id"`
+	At       time.Time         `json:"at"`
+	EditedAt *time.Time        `json:"edited_at,omitempty"`
+	Author   Actor             `json:"author"`
+	Text     string            `json:"text"`
+	Selected []string          `json:"selected,omitempty"`
+	Replaced bool              `json:"replaced,omitempty"`
+	Ask      *SessionAnswerAsk `json:"ask,omitempty"`
+	Owner    *OpenAskOwner     `json:"owner"`
+	Ref      *string           `json:"ref"`
+	Href     string            `json:"href"`
+}
+
+// SessionAnswersResponse is what people wrote to one session since Since, newest first by At,
+// then by ID. Total counts every item in the window, also when max_chars stopped Items early.
+type SessionAnswersResponse struct {
+	SessionID string          `json:"session_id"`
+	Since     time.Time       `json:"since"`
+	Total     int             `json:"total"`
+	Items     []SessionAnswer `json:"items"`
+}
+
 // AskResolution records why a question no longer needs a human answer.
 type AskResolution struct {
 	Kind   string    `json:"kind"`

@@ -982,6 +982,83 @@ export interface MyRepliesResponse {
   readonly offset: number;
 }
 
+/** What a `SessionAnswer` is to the session Dispatch delivered it to, one snake_case wire value per
+ *  relation, each spelling the phrase a reader prints: a person answered the session's ask,
+ *  replied in its ask's thread, replied in a comment thread it wrote in, commented on a document it
+ *  wrote, commented on an issue routed to it, mentioned it, sent it a message (direct, on an issue,
+ *  or a broadcast's copy), or replied to its message. Mirrored in Go as the
+ *  `model.SessionAnswerRelation*` constants. */
+export const SESSION_ANSWER_RELATIONS = [
+  "answered_your_ask",
+  "replied_on_your_ask",
+  "replied_in_a_comment_thread",
+  "commented_on_a_document",
+  "commented_on_an_issue",
+  "mentioned_you",
+  "sent_you_a_message",
+  "replied_to_your_message",
+] as const;
+
+export type SessionAnswerRelation = (typeof SESSION_ANSWER_RELATIONS)[number];
+
+/** One thing a person wrote that Dispatch delivered to a session, on
+ *  `GET /api/v1/agents/{session_id}/answers`: an ask's current answer, a comment at its current
+ *  body, or a message. The list holds each `(kind, id)` once, whichever ways it reached the
+ *  session. Mirrors `model.SessionAnswer`. */
+export interface SessionAnswer {
+  /** `answer` is an ask's current answer, `comment` a comment (a reply in an ask's thread
+   *  included), `message` a message. */
+  readonly kind: "answer" | "comment" | "message";
+  /** What the item is to the session. */
+  readonly relation: SessionAnswerRelation;
+  /** The ask's id for an answer, else the comment's or the message's id. */
+  readonly id: string;
+  /** When the person wrote it (RFC 3339, UTC): the current answer's time, or the comment's or the
+   *  message's creation. The window and the order both read it. */
+  readonly at: string;
+  /** When a comment's body was last edited; absent on a comment never edited, and on an answer or
+   *  a message. */
+  readonly edited_at?: string;
+  /** The person who wrote it: the list carries nothing an agent or the system wrote. */
+  readonly author: Extract<Actor, { readonly kind: "user" }>;
+  /** The person's words in full, never cut: the answer's text (`""` when the answer chose options
+   *  only), the comment's current body, or the message's body. */
+  readonly text: string;
+  /** An answer's chosen option labels, in the order the person chose them; absent when it chose
+   *  none, and on a comment or a message. */
+  readonly selected?: string[];
+  /** `true` on an answer when the ask has more than one answer, so this one replaced an earlier
+   *  one; absent otherwise. */
+  readonly replaced?: true;
+  /** The ask the item answers or replies in, with the session's whole question (a reader cuts
+   *  it): present on an answer and on a reply in an ask's thread, absent otherwise. */
+  readonly ask?: { readonly id: string; readonly question: string };
+  /** The issue (key and title) or the project document holding the item; null for a direct
+   *  message, which is on no issue. */
+  readonly owner: OpenAskOwner | null;
+  /** The item's `dispatch://` address (`dispatch://KEY/ask/ID`, `dispatch://KEY/comment/ID`,
+   *  `dispatch://KEY/message/ID`, or `dispatch://PROJECT/artifact/SLUG/ask/ID` and `/comment/ID`
+   *  on a project document); null for a direct message, which has no address. */
+  readonly ref: string | null;
+  /** Relative Dispatch deep link to the item, as `DISPATCH_HREF_REFERENCES` lists the shapes, or
+   *  `/agents/SESSION/live` for a direct message. */
+  readonly href: string;
+}
+
+/** `GET /api/v1/agents/{session_id}/answers`: what people wrote to one session since `since`,
+ *  newest first. Mirrors `model.SessionAnswersResponse`. */
+export interface SessionAnswersResponse {
+  readonly session_id: string;
+  /** The window's start the server applied (RFC 3339, UTC): the request's `since`, or 72 hours
+   *  before the read when it named none. */
+  readonly since: string;
+  /** How many items the window holds, `max_chars` notwithstanding. */
+  readonly total: number;
+  /** Newest first by `at`, then by `id`. With `max_chars`, the list stops after the item whose
+   *  `text` takes the running sum of text lengths past it, so it can be shorter than `total`. */
+  readonly items: SessionAnswer[];
+}
+
 export interface AskOption {
   readonly label: string;
   readonly description?: string;
