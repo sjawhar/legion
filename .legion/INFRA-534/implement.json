@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-534",
+  "completed": "2026-10-27T05:05:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2360",
+  "proof": [
+    {
+      "criterion": "A1: a document written through the API shows the same strike as a comment (the spec's three cases)",
+      "surface": "Dispatch issue page in a real browser (chromium, iphone) on the real Dispatch server and Postgres: live spec editor, past version (?v=1), Conversation tab comment, and GET /api/v1/issues/<KEY>/artifacts/spec/text",
+      "command": "cd packages/dispatch && . /legion/scratch/harness-534/env.sh && DATABASE_URL=\"$DB_URL\" bun run e2e -- e2e/strikethrough.e2e.ts --reporter=list (runs: https://github.com/sjawhar/legion/pull/2360#issuecomment-6434123854)",
+      "observed": "8 passed: every view shows 'Plain ~a~~ text.' and 'Plain ~~a~ text.' with no <del>, <del>~</del> in 'Plain ~ end.', <del>b</del> in the control; stored text holds 'Plain &#126;a&#126;&#126; text.', 'Plain &#126;&#126;a&#126; text.', 'Plain ~~&#126;~~ end.'",
+      "headSha": "5d3a48a0aaa77f886ddadba7e949be4199170021",
+      "negativeControl": "Same test file in a git archive of the fork point 4bbb2a9c: 6 failed, 2 passed; editor and past version strike 'a' (text 'Plain a~ text.', struck ['a']), stored text 'Plain ~~a~~&#126; text.' and 'Plain ~~~ end.'; only the comment tests pass"
+    },
+    {
+      "criterion": "A1: each case reads the same in Go and the headless engine; no reading regresses and correctly stored renderings keep their bytes",
+      "surface": "pmdoc readers (Parse, ParseRendering, ParseFragment, ParseInline) against the headless engine (remark-gfm via gen/differential.ts), and the pmdoc differential over 30,085 documents",
+      "command": "cd packages/envoy && go test ./internal/dispatch/pmdoc -run 'TestTildeRuns|TestTildeReadings|TestRenderKeepsTildes|TestRenderKeepsImageAltText|TestRenderKeepsStoredMarkdown|TestParseMatchesMilkdownForFixtures' -count=1 -v; cd internal/dispatch/pmdoc/gen && bash differential.sh --base 4bbb2a9c1db3daf897ba5af8406ca159078163e5 --corpus delimiters.jsonl --corpus urls.jsonl",
+      "observed": "all pass, no skips; differential GATE regressions 0, misreads 0, churn 0, engine-tree regressions 0, engine-tree churn 0, panics 0, lost fixed points 0; fixed 903, engine-tree fixed 15",
+      "headSha": "5d3a48a0aaa77f886ddadba7e949be4199170021",
+      "negativeControl": "TestTildeRuns at the fork point 4bbb2a9c: FAIL on 19 rows, e.g. 'Plain ~a~~ text.' Go reads struck 'a' where the engine reads text, 'Plain ~\\~~ end.' Go reads '~~~' where the engine strikes '~'"
+    },
+    {
+      "criterion": "Parse stays linear on mixed runs",
+      "surface": "ParseRendering / Parse",
+      "command": "cd packages/envoy && go test ./internal/dispatch/pmdoc -count=1 -run 'TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText/Parse' -v",
+      "observed": "every two-part shape (~~a/a~, ~a/a~~, ~~a/a*, *a/a~, label, *~a/~*, **a/a*a, a**a*a/a*a**a) at most 0.71 s at 1023 KiB, growth 7-10.8x for 8x input",
+      "headSha": "5d3a48a0aaa77f886ddadba7e949be4199170021",
+      "negativeControl": "At the fork point ParseRendering of ~~a/a*, *a/a~ and *~a/~* at 1023 KiB did not return within 1 minute, and **a/a*a took 100 s at 437 KiB"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/pmdoc/delimiters.go (new: pmdoc's own delimiter list and pairing, micromark and goldmark modes, opener buckets)",
+    "packages/envoy/internal/dispatch/pmdoc/emphasis.go (tildeParser replaces strikethroughGuard; emphasisParser pushes to the list, CloseBlock; flankingOnly renamed goldmarkRules)",
+    "packages/envoy/internal/dispatch/pmdoc/nesting.go (imageNesting keeps label bottoms and pairs a formed label)",
+    "packages/envoy/internal/dispatch/pmdoc/parse.go (goldmarkBlockReader, goldmarkMarkdown, parseByGoldmarkRules, nested image alt text)",
+    "packages/envoy/internal/dispatch/pmdoc/render_inline.go, escape.go (writer and alt text read back under goldmark's rules too)",
+    "packages/envoy/internal/dispatch/pmdoc/strikethrough_test.go, escape_test.go, linear_test.go, fixtures_test.go, testdata/corpus/strikethrough-run-lengths.md, testdata/fixtures.json",
+    "packages/envoy/internal/dispatch/pmdoc/gen/delimiter-corpus.ts (new)",
+    "packages/dispatch/e2e/strikethrough.e2e.ts (new)",
+    "packages/envoy/AGENTS.md, packages/envoy/CHANGELOG.md"
+  ],
+  "trickyParts": [
+    "escapedTilde counts backslashes only inside the text node goldmark appended before the parser call, so a backslash a bare URL took is not an escape (micromark reads it as the URL's).",
+    "nearestOpener files openers in buckets by (rule-of-three length mod 3, can close); ruleLength is the remaining length for */_ and the written length for ~, matching what CalcComsumption reads. Checked equivalent to the plain walk on 200,000 random inputs (2.7M closer lookups, 0 mismatches) before the walk was removed.",
+    "Inside a pair a pass of the other group runs at once; depth is bounded because the outer pair already removed its own group's runs."
+  ],
+  "deviations": [
+    "Corpus row ~~~a~~~ became b ~~~a~~~ (a line starting ~~~ is a fence in both readers).",
+    "parseImage now adds a nested image's alt text to the outer alt (the engine's reading); the differential flagged it once strikes formed.",
+    "Rule-of-three bucket lookup added: emphasis pairing was quadratic at main on **a then a*a (100 s at 437 KiB); fixed here since this pull request owns the pairing code.",
+    "INFRA-535's planner role had no holder for the three recorded readings; they are in TestTildeReadingsThatDifferAreRecorded and the report to the architect."
+  ],
+  "openQuestions": []
+}
