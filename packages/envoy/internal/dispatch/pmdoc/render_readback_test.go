@@ -391,6 +391,8 @@ func TestURLReadingsAgreeWithTheEngine(t *testing.T) {
 		{"See <http://e.test/a\\\\b now.\n", false},
 		{"www.e.test*b*\n", false},
 		{"`www.e.test_\n", false},
+		// A www address inside a link label that never forms a link (INFRA-534's corpus).
+		{"y [.a www.a.com/x]\\(u) z\n", false},
 	}
 	plain := func(text string) *Node {
 		return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: text}}}}}
