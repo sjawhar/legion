@@ -1146,20 +1146,25 @@ func lockTables(t *testing.T, database *store.Store, tables ...string) pgx.Tx {
 	return gate
 }
 
-// Every maintenance loop that must run once overall takes a named lease for the length of its
-// pass, so the second process's tick finds it held and skips instead of doing the same work
-// beside it. Each loop observed here is held inside its own first statement while the other
-// process's tick fires - by a table lock this test takes, or by the GitHub listing the fake
-// holds - which is the only way two processes' passes are made to overlap on purpose rather than
-// by luck.
+// Every leased maintenance loop takes a named lease for the length of its pass, so the second
+// process's attempt finds it held and skips instead of doing the same work beside it. Each loop
+// observed here is held inside its own first statement while the other process's attempt fires -
+// by a table lock this test takes, or by the GitHub listing the fake holds - which is the only way
+// two processes' passes are made to overlap on purpose rather than by luck.
 //
-// Two of the six leases are observable here inside a window a test can wait out:
-// reference-excerpts and webhook-redelivery, whose first pass is immediate (suggestion-outcomes,
-// a woken loop whose first pass is immediate too, has a row of its own below). The other three
-// are not, and this row says so rather than pretending: document-compaction's ticker is 24 h;
-// architecture-import's and delivery-reconcile's first pass is jittered uniformly over
-// SyncInterval/ReconcileInterval (5 min) and each process draws its own, so whether their passes
-// ever overlap is a coin toss no test should turn into a flake.
+// Two of the six leases are observable here inside a window a test can wait out, and they keep
+// different rules once the hold lets go. webhook-redelivery is a timer loop whose first pass is
+// immediate: its window is served once across the two processes, by whichever took the lease.
+// reference-excerpts is a woken loop (docs.RunReferenceExcerptReconciliation) that runs a pass at
+// start and again on the pglisten.Hub wake after its first LISTEN: the process that found the
+// lease held retries (every two seconds, its HeldRetry) until it runs a pass of its own, because
+// the other's pass may have read before whatever woke it, so after the release each process runs
+// at least one pass and no count is held to one. suggestion-outcomes, a woken loop too, has a row
+// of its own below. The other three are not observable, and this row says so rather than
+// pretending: document-compaction's ticker is 24 h; architecture-import's and
+// delivery-reconcile's first pass is jittered uniformly over SyncInterval/ReconcileInterval
+// (5 min) and each process draws its own, so whether their passes ever overlap is a coin toss no
+// test should turn into a flake.
 func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	pair := newPair(t)
 	fake := startGitHubFake(t)
@@ -1187,8 +1192,16 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	if err := gate.Rollback(context.Background()); err != nil {
 		t.Fatalf("release the table the passes are waiting on: %v", err)
 	}
-	waitForLease(t, pair, leaseRan, "reference-excerpts", 60*time.Second)
-	requireLeasedOnce(t, pair, "reference-excerpts")
+	// The process that skipped retries a little over two seconds after each skip; a minute is
+	// room for the held pass to finish and for that retry to run a pass of its own.
+	deadline := time.Now().Add(60 * time.Second)
+	for countLease(pair.a, leaseRan, "reference-excerpts") == 0 || countLease(pair.b, leaseRan, "reference-excerpts") == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("both processes did not each run a reference-excerpt pass of their own within 60s:\nA:\n%s\nB:\n%s",
+				pair.a.Output.String(), pair.b.Output.String())
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	for _, unobserved := range []struct{ lease, why string }{
 		{"document-compaction", "its ticker is 24 h, so no pass is due inside any window a test can wait out"},
 		{"architecture-import", "its first pass is jittered over SyncInterval (5 min) and each process draws its own"},

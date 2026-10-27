@@ -40,6 +40,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/startup"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/pglisten"
 )
 
 const (
@@ -329,16 +330,42 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Two envoy-dispatch processes serve one Postgres and one NATS (INFRA-66), so each periodic
-	// maintenance loop below either runs once overall or is deliberately per-process. The ones
-	// that must run once overall take a named lease on this pool for the length of their pass
-	// (duty.Exclusive): a lease is a session-level advisory lock on a connection of its own, so
-	// it needs a pool the shared one's request connections are not spent on. A boot that
-	// cannot open it is a boot whose loops would each run everywhere, so it ends here. Under that
-	// lease each pass is also recorded with its loop's own period (duty_passes, migration 0115),
-	// which is what makes a loop run once per period rather than once per process: two tickers
-	// started minutes apart almost never meet inside a pass, so the lease alone would exclude
-	// nothing.
+	// Two envoy-dispatch processes serve one Postgres and one NATS (INFRA-66), so each background
+	// loop below either runs once overall or is deliberately per-process. The ones that must run
+	// once overall take a named lease on this pool for the length of their pass (duty.Exclusive):
+	// a lease is a session-level advisory lock on a connection of its own, so it needs a pool the
+	// shared one's request connections are not spent on. A boot that cannot open it is a boot
+	// whose loops would each run everywhere, so it ends here.
+	//
+	// The loops come in three shapes (INFRA-607), so that a database nobody writes costs them
+	// nothing except where GitHub gives them nothing to wake on:
+	//   - woken loops, which run a pass at start and then only when a Postgres notification on the
+	//     shared listener below says their work may have changed, or when a due time their last
+	//     pass asked for comes round: the embedding queue (embedqueue.WakeChannel), the reference
+	//     excerpts (docs.ExcerptsOwedChannel), the suggestion outcomes (api.EventsChannel) and the
+	//     delivery settings both intakes route by (delivery.SettingsChannel). The two leased ones,
+	//     reference-excerpts and suggestion-outcomes, take their lease with no period
+	//     (duty.RunWoken): a process that finds it held retries until a pass of its own runs, since
+	//     the other process's pass may have read before the change that woke this one.
+	//   - boot passes, which run once at start: the embedding coverage pass (embedqueue.Run starts
+	//     it, and repeats only its identity steps while another identity's rows remain) and the
+	//     task progress reconciliation (retrying, briefly, rows another writer held).
+	//   - timers that stay, because GitHub has no feed of what they would miss - a webhook that
+	//     never arrived, a delivery that failed, a source's branch head: the delivery reconcile
+	//     and the architecture import every 5 minutes, each waiting its interval plus up to a tenth
+	//     again drawn afresh every period (duty.RunJittered), so two processes' ticks drift apart
+	//     rather than staying in step; and the webhook redelivery sweep every 2 minutes, on a plain
+	//     ticker. Under the lease each of these passes is recorded with its loop's own period
+	//     (duty_passes, migration 0115), which is what makes it run once per period rather than
+	//     once per process: two tickers started minutes apart almost never meet inside a pass, so
+	//     the lease alone would exclude nothing.
+	//
+	// The shared listener is one pglisten.Hub per process, on one held connection of the store's
+	// listener pool, carrying every woken loop's channel. Every wake is registered before it runs
+	// (a channel added later would never be LISTENed on), and no loop waits for it: each runs its
+	// boot pass whether or not the hub has connected. Postgres does not replay a notification sent
+	// while nothing listened, so the hub signals every wake after each successful LISTEN, and a
+	// change made while it was redialing (backing off up to 30 s) is caught up then.
 	//
 	// Deliberately NOT leased, in three classes:
 	//   - already claims its own work, so two processes never do one unit of it twice: the
@@ -349,12 +376,14 @@ func main() {
 	//   - per-process by design, because each serves this process's own connections or memory:
 	//     the settlement resumption (it arms this process's rooms, and docs/resume.go says it
 	//     runs on an interval precisely because a rolling deploy overlaps two processes), the
-	//     delivery live hub and its listener (migration 0107_events_notify.up.sql states that
-	//     purpose), the event stream relay, the document rooms' timers, and the stale-room
-	//     evictor (it closes the rooms resident in this process that the other process's writes
-	//     left behind the durable head, so it has to run wherever a room is resident).
+	//     shared wake listener (each process's loops wait on their own), the delivery live hub
+	//     and its listener (migration 0107_events_notify.up.sql states that purpose), the event
+	//     stream relay, the document rooms' timers, and the stale-room evictor (it closes the
+	//     rooms resident in this process that the other process's writes left behind the
+	//     durable head, so it has to run wherever a room is resident).
 	//   - a boot one-shot already serialised by an advisory lock or idempotent: the migrations,
-	//     retirePlainRefreshTokens, restoreDecidedWordings and SeedRepoProjects above.
+	//     retirePlainRefreshTokens, restoreDecidedWordings and SeedRepoProjects above, and the
+	//     embedding coverage pass (two processes' passes at once leave what one leaves).
 	leases, err := database.Pool.Leases()
 	if err != nil {
 		slog.Error("dispatch: open the lease pool for the maintenance loops", "error", err)
@@ -390,7 +419,23 @@ func main() {
 	if embedder != nil {
 		backgroundEmbedder = embed.NewRateLimitedEmbedder(embedder)
 	}
-	go embedqueue.Run(ctx, embedqueue.Deps{Store: database, Embedder: backgroundEmbedder})
+
+	// The shared listener (see the loop comment above). A wake is registered only for a loop that
+	// will read it: with no embedder embedqueue.Run returns at once, and without NATS or the
+	// GitHub App no intake starts to route by the settings, so neither channel is LISTENed on.
+	wakes := &pglisten.Hub{Owner: "dispatch background wakes", Dial: database.Pool.Listener}
+	var embeddingsWake, settingsWake <-chan struct{}
+	if backgroundEmbedder != nil {
+		embeddingsWake = wakes.Wake(embedqueue.WakeChannel)
+	}
+	excerptsWake := wakes.Wake(docs.ExcerptsOwedChannel)
+	eventsWake := wakes.Wake(api.EventsChannel)
+	if natsClient != nil && appCtx.GitHub() != nil {
+		settingsWake = wakes.Wake(delivery.SettingsChannel)
+	}
+	go wakes.Run(ctx)
+
+	go embedqueue.Run(ctx, embedqueue.Deps{Store: database, Embedder: backgroundEmbedder, Wake: embeddingsWake})
 	// A settlement a shutdown cut short, here or in the task this one replaces, runs without
 	// anyone opening its document.
 	go documentService.RunSettlementResumption(ctx)
@@ -399,17 +444,18 @@ func main() {
 	// browsers reconnect and re-sync instead of reading text the store no longer holds.
 	go documentService.RunStaleRoomEviction(ctx)
 	// LEGION-550: resolves write_suggestions outcomes off the write path, from the events written
-	// since its last pass.
-	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, leases, nil)
+	// since its last pass, woken by every event commit whichever process made it.
+	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, leases, eventsWake)
 	// Issues whose spec's task count is not their latest version's - every row the migration that
 	// added the count columns found, and any the task this one replaces versions while both run -
-	// are counted again, at start and on an interval, so their progress shows without anyone
-	// editing them (LEGION-542).
+	// are counted again once at start, so their progress shows without anyone editing them
+	// (LEGION-542). Every version write records its count in its own transaction, so no timer
+	// follows: only rows another writer held during the pass are retried, briefly.
 	go documentService.RunTaskProgressReconciliation(ctx)
 	// The references route serves each document mention's stored excerpt; this fills the ones no
 	// version write stored: every mention indexed before migration 0092, and each rebuild-refs
-	// inserts (LEGION-531).
-	go documentService.RunReferenceExcerptReconciliation(ctx, leases, nil)
+	// inserts (LEGION-531), woken by the refs trigger that announces each mention left owed.
+	go documentService.RunReferenceExcerptReconciliation(ctx, leases, excerptsWake)
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
 	if err != nil {
@@ -438,7 +484,7 @@ func main() {
 		connectIntake := func(name string) (*bus.Client, error) {
 			return bus.Connect(envoyConfig.Envoy.NatsURLs, bus.WithEnvironment(env.lookup), bus.WithName(name))
 		}
-		stopIntakes, err := delivery.StartIntakes(ctx, connectIntake, database.Pool, appCtx.GitHub(), broker, nil)
+		stopIntakes, err := delivery.StartIntakes(ctx, connectIntake, database.Pool, appCtx.GitHub(), broker, settingsWake)
 		if err != nil {
 			slog.Error("dispatch delivery: connect NATS", "error", err)
 			os.Exit(1)
