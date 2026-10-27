@@ -23,7 +23,9 @@ type Publisher interface {
 // 422, which a redelivery sweep takes as terminal, and its error says why. Any other failure may
 // pass on a redelivery, so it is a 503; `github publish failed` is the line an alert pages on. A
 // stream at its byte limit (bus.ErrStreamFull) is such a failure: it takes the redelivery once age
-// has made room.
+// has made room, on a clustered stream too, where the server acknowledges a redelivery under the
+// refused delivery's MsgId as a duplicate it does not hold and the bus publishes it once more
+// without the id (bus.ErrNotStored); until then that is a 503 as well.
 func deliveryFailed(w http.ResponseWriter, action string, err error) {
 	if errors.Is(err, bus.ErrRefused) {
 		log.Printf("%s refused: %v", action, err)

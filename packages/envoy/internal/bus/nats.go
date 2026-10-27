@@ -941,8 +941,9 @@ var ErrInvalidKey error = refusal("not a key nats.go accepts")
 // stored ones (streamCfg). It is not an ErrRefused: the same publish is taken once age has made
 // room or an operator raised the limit, so a caller retries it as any other failure, and the
 // webhook listener answers it 503, which GitHub redelivers. On a clustered stream, a retry under
-// the same MsgId can be acknowledged a duplicate of the refused message instead (ErrNotStored).
-// The error still matches nats-server's *nats.APIError.
+// the same MsgId is acknowledged a duplicate of the refused message instead (ErrNotStored), and
+// goes once more without the id, which the stream stores once it has room. The error still
+// matches nats-server's *nats.APIError.
 var ErrStreamFull = errors.New("stream " + Stream + " is full")
 
 // jsStreamStoreFailed is nats-server's code for a message the stream did not store
@@ -964,22 +965,27 @@ func streamFull(err error) error {
 	return err
 }
 
-// ErrNotStored is the error of a JetStream publish the server acknowledged as a duplicate with no
-// sequence: a repeat of a message id the stream holds no message for. A clustered nats-server
-// (v2.10.29 among them) records a message id at sequence 0 before its store runs, and keeps that
-// record when the store refuses the message, as a full stream's does (ErrStreamFull), so every
-// later publish under the id within the duplicate window is acknowledged `{"seq":0,
-// "duplicate":true}` though nothing was stored; a repeat of a message still being stored is
-// acknowledged the same way. It is not an ErrRefused and never a success: a caller retries it as
-// any other failure. A repeat of a message that was in flight gets the stored message's sequence on
-// a later retry. The record of a refused message stays on the stream's leader until the duplicate
-// window has passed, so that message is stored only once the stream has room and its leader has
-// changed (`nats stream cluster step-down ENVOY_NOTIFICATIONS`), whose new leader holds no such
-// record.
+// ErrNotStored names a JetStream acknowledgement of a duplicate with no sequence: a repeat of a
+// message id the stream holds no message for. A clustered nats-server (v2.10.29 among them)
+// records a message id at sequence 0 before its store runs, and keeps that record on the stream's
+// leader, a purge notwithstanding, for the whole duplicate window when the store refuses the
+// message, as a full stream's does (ErrStreamFull), so every later publish under the id is
+// acknowledged `{"seq":0,"duplicate":true}` though nothing was stored; a repeat of a message still
+// being stored is acknowledged the same way. Publish and a window's send answer that
+// acknowledgement by sending the same envelope once more without its id, which no record matches:
+// the publish succeeds once that send is stored, at a sequence of its own, and otherwise fails
+// with an error wrapping ErrNotStored and that send's own error (ErrStreamFull while the stream is
+// still full), which is not an ErrRefused and never a success, so a caller retries it as any other
+// failure. The stream's MsgId drops no copy sent without the id: such a send stores a second copy
+// of a message that was still being stored, and once a refused message is stored without its id,
+// every later publish under that id stores another copy for as long as the leader keeps the record
+// (the duplicate window, or until the leader changes). A consumer of the stream sees each copy and
+// must drop the repeat itself.
 var ErrNotStored = errors.New("stream " + Stream + " acknowledged a duplicate of a message it does not hold")
 
 // notStored is ErrNotStored for ack, a JetStream acknowledgement, when it names a duplicate with no
-// sequence, and nil for one that names the message's sequence.
+// sequence, and nil for one that names the message's sequence. Its caller then sends the envelope
+// again without its id.
 func notStored(ack *nats.PubAck) error {
 	if ack.Duplicate && ack.Sequence == 0 {
 		return ErrNotStored
@@ -1067,7 +1073,8 @@ func (c *Client) PublishWithin(ctx context.Context, item contracts.Envelope) err
 // nothing new": the reconnect retry below republishes after a failure that may
 // have landed, so the very publish that put the message on the subject can come
 // back a duplicate. A duplicate acknowledged with no sequence, of a message the
-// stream does not hold, is ErrNotStored, never true.
+// stream does not hold (ErrNotStored), is never true: the envelope goes once more
+// without its MsgId (publishJetStream), and a store of that is false.
 func (c *Client) PublishReportingDuplicate(item contracts.Envelope) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), publishBound)
 	defer cancel()
@@ -1092,6 +1099,12 @@ func (c *Client) PublishReportingDuplicateWithin(ctx context.Context, item contr
 // keeps the parent's deadline when that is the earlier one; publishBound is what bounds a caller
 // that passed none. The acknowledgement wait is still taken from publishAcknowledgementClock, the
 // seam a test uses to expire that bound without spending it.
+//
+// An acknowledgement of a duplicate with no sequence (ErrNotStored) names an id the server holds
+// at sequence 0 with no message under it, which on a clustered nats-server 2.10 lasts the whole
+// duplicate window once a full stream refused the message. So the same envelope goes once more,
+// within the same bound, without the MsgId: stored, the publish succeeds; refused, its error wraps
+// ErrNotStored and that send's own error.
 //
 // A ctx that has already ended never puts the message on the wire here, and that protection is
 // the dependency's rather than this repository's: js.Publish under nats.Context is a request, and
@@ -1119,23 +1132,36 @@ func (c *Client) publishJetStream(ctx context.Context, item contracts.Envelope) 
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return false, err
 	}
+	// publish sends data under options, once more if the connection had closed, and names a
+	// refusal as the ErrTooLarge or ErrStreamFull it is.
+	publish := func(options ...nats.PubOpt) (*nats.PubAck, error) {
+		ack, err := c.JS().Publish(item.Topic, data, options...)
+		if err != nil && errors.Is(err, nats.ErrConnectionClosed) {
+			if err := c.ensureConnWithContext(ctx); err != nil {
+				return nil, err
+			}
+			ack, err = c.JS().Publish(item.Topic, data, options...)
+		}
+		if err != nil {
+			return nil, streamFull(c.refused(err, len(data)))
+		}
+		return ack, nil
+	}
 	options := []nats.PubOpt{nats.Context(ctx)}
 	if contracts.DedupeKeyNamesTheUpstreamEvent(item) {
 		options = append(options, nats.MsgId(item.DedupeKey+":"+item.Topic))
 	}
-	js := c.JS()
-	ack, err := js.Publish(item.Topic, data, options...)
-	if err != nil && errors.Is(err, nats.ErrConnectionClosed) {
-		if err := c.ensureConnWithContext(ctx); err != nil {
-			return false, err
-		}
-		ack, err = c.JS().Publish(item.Topic, data, options...)
-	}
+	ack, err := publish(options...)
 	if err != nil {
-		return false, streamFull(c.refused(err, len(data)))
+		return false, err
 	}
 	if err := notStored(ack); err != nil {
-		return false, err
+		// The server holds the id at sequence 0 and no message under it, so the same envelope
+		// goes once more without the id, which no duplicate record can match.
+		if _, sendErr := publish(nats.Context(ctx)); sendErr != nil {
+			return false, fmt.Errorf("%w, and its publish without its id failed: %w", err, sendErr)
+		}
+		return false, nil
 	}
 	return ack.Duplicate, nil
 }

@@ -45,9 +45,11 @@ type Sender interface {
 // Each send goes on the transport Publish would use (usesCoreTransport), under the same MsgId. An
 // outcome decided before anything was sent is in the channel when PublishAsync returns: a refusal
 // (ErrRefused), or ErrUnavailable. Otherwise the answer comes within publishAcknowledgementTimeout:
-// a JetStream acknowledgement (the JetStream context's PublishAsyncTimeout), ErrNotStored when it
-// names a duplicate with no sequence, or a core publish's own flush, confirmed as PublishCoreTo
-// confirms one (confirmFlushed). A core publish that its own flush cannot confirm because another
+// a JetStream acknowledgement (the JetStream context's PublishAsyncTimeout), or a core publish's
+// own flush, confirmed as PublishCoreTo confirms one (confirmFlushed). A JetStream acknowledgement
+// of a duplicate with no sequence (ErrNotStored) has the envelope sent once more without its
+// MsgId, as Publish does, and that send's acknowledgement, within another such timeout, answers
+// for it (sendJetStream). A core publish that its own flush cannot confirm because another
 // publish on the connection changed its last error in the meantime is published again alone on the
 // window's connection, which answers for it: once every core flush of the window has returned, and
 // one such republish at a time, so that another of the window's denials cannot land during it and
@@ -194,7 +196,11 @@ func (w *window) flushed() {
 }
 
 // sendJetStream publishes data, item's encoding, to the stream and returns what waits for its
-// acknowledgement.
+// acknowledgement. An acknowledgement of a duplicate with no sequence (ErrNotStored) has the
+// envelope sent once more without its MsgId, as publishJetStream does, while the window's
+// connection is still current: the answer is that send's, and a failure of it still wraps
+// ErrNotStored. The resend goes out after the window's later sends, so the stream stores it after
+// them.
 func (w *window) sendJetStream(item contracts.Envelope, data []byte) (func() error, error) {
 	var options []nats.PubOpt
 	if contracts.DedupeKeyNamesTheUpstreamEvent(item) {
@@ -205,17 +211,40 @@ func (w *window) sendJetStream(item contracts.Envelope, data []byte) (func() err
 		return nil, w.unsent(err, len(data))
 	}
 	return func() error {
-		select {
-		case ack := <-future.Ok():
-			return notStored(ack)
-		case err := <-future.Err():
-			if !w.current() || errors.Is(err, nats.ErrDisconnected) || errors.Is(err, nats.ErrAsyncPublishTimeout) ||
-				errors.Is(err, nats.ErrNoResponders) {
-				return fmt.Errorf("bus: %w: %w", ErrUnavailable, err)
-			}
-			return streamFull(err)
+		err := w.acknowledged(future)
+		if !errors.Is(err, ErrNotStored) {
+			return err
 		}
+		if !w.current() {
+			return fmt.Errorf("bus: %w: %w, and the window's connection was lost or reconnected before the publish to %q was sent without its id", ErrUnavailable, err, item.Topic)
+		}
+		future, sendErr := w.js.PublishMsgAsync(&nats.Msg{Subject: item.Topic, Data: data})
+		if sendErr == nil {
+			sendErr = w.acknowledged(future)
+		} else {
+			sendErr = w.unsent(sendErr, len(data))
+		}
+		if sendErr != nil {
+			return fmt.Errorf("%w, and its publish without its id failed: %w", err, sendErr)
+		}
+		return nil
 	}, nil
+}
+
+// acknowledged waits for future's acknowledgement and names what it came to: nil for a message the
+// stream stored or holds, ErrNotStored, ErrUnavailable when the connection failed or NATS gave no
+// answer, or the server's refusal, a full stream's as ErrStreamFull.
+func (w *window) acknowledged(future nats.PubAckFuture) error {
+	select {
+	case ack := <-future.Ok():
+		return notStored(ack)
+	case err := <-future.Err():
+		if !w.current() || errors.Is(err, nats.ErrDisconnected) || errors.Is(err, nats.ErrAsyncPublishTimeout) ||
+			errors.Is(err, nats.ErrNoResponders) {
+			return fmt.Errorf("bus: %w: %w", ErrUnavailable, err)
+		}
+		return streamFull(err)
+	}
 }
 
 // unsent names nats.go's refusal to send a message of size bytes: ErrUnavailable when the

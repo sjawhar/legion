@@ -960,19 +960,25 @@
   non-integer is refused at load naming the variable, and a limit above what the server can
   reserve is refused at create or update, the start then stopping with an error naming
   `ENVOY_STREAM_MAX_BYTES=<n>` (INFRA-546).
-- A JetStream publish the server acknowledges as a duplicate with no sequence now fails with
-  `bus.ErrNotStored` (`stream ENVOY_NOTIFICATIONS acknowledged a duplicate of a message it does not
-  hold`), through `Publish`, `PublishReportingDuplicate` and a window's send, where it was taken
-  as published. A clustered nats-server (v2.10.29 among them) records a publish's `Nats-Msg-Id` at
-  sequence 0 before it stores the message and keeps that record when a full stream refuses it, so
-  every retry under the id (a GitHub redelivery, a Dispatch outbox retry) was acknowledged
-  `{"seq":0,"duplicate":true}` though the stream never stored the message. It is not a
+- A JetStream publish the server acknowledges as a duplicate with no sequence (`bus.ErrNotStored`,
+  `stream ENVOY_NOTIFICATIONS acknowledged a duplicate of a message it does not hold`) is now sent
+  once more without its `Nats-Msg-Id`, through `Publish`, `PublishReportingDuplicate` and a
+  window's send, where it was taken as published. A clustered nats-server (v2.10.29 among them)
+  records a publish's `Nats-Msg-Id` at sequence 0 before it stores the message and keeps that
+  record on the stream's leader for the 72-hour duplicate window, a purge notwithstanding, when a
+  full stream refuses it, so every retry under the id (a GitHub redelivery, a Dispatch outbox
+  retry) was acknowledged `{"seq":0,"duplicate":true}` though the stream never stored the message.
+  The send without the id is stored as soon as the stream has room, with no leader step-down, and
+  the publish succeeds; while the stream is still full it is refused too, and the publish fails
+  with an error wrapping `bus.ErrNotStored` and the send's own error (`stream ENVOY_NOTIFICATIONS
+  acknowledged a duplicate of a message it does not hold, and its publish without its id failed:
+  stream ENVOY_NOTIFICATIONS is full: nats: maximum bytes exceeded`), which is not a
   `bus.ErrRefused` and is retried as `bus.ErrStreamFull` is: the webhook listener answers 503, the
-  outbox backs off, the send routes answer 500. A retry of a message still being stored, answered
-  the same way, gets the message's sequence on a later retry. The record of a refused message stays
-  on the stream's leader for the 72-hour duplicate window, a purge notwithstanding, so that message
-  is stored only once the stream has room and its leader has changed
-  (`nats stream cluster step-down ENVOY_NOTIFICATIONS`) (INFRA-546).
+  outbox backs off, the send routes answer 500. The stream drops no repeat of a message sent
+  without its id: a retry of a message still being stored, also acknowledged a duplicate with no
+  sequence, stores a second copy, and once a refused message is stored, every later publish under
+  its id stores another while the leader keeps the record, so the stream's consumers see each copy
+  (INFRA-546).
 - Every update of `ENVOY_NOTIFICATIONS` a start sends now starts from the deployed configuration
   and changes only what Envoy owns: the subjects (reconciled as before), the 72-hour age and
   duplicate window, the replicas (the deployed count or the setting, whichever is more), the byte

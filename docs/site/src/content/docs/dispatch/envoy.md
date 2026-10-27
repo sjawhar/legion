@@ -308,12 +308,16 @@ setting in every program first, then run `nats stream edit <stream> --replicas=<
 `nats stream edit ENVOY_NOTIFICATIONS --max-bytes=<n>` (`-1` for none); otherwise the next pass
 puts it back.
 
-On a clustered NATS, a message the full stream refused can stay refused after the stream has
-room: the server keeps the refused message's id on the stream's leader for 72 hours, a purge
-notwithstanding, and its sender's retry fails with
-`stream ENVOY_NOTIFICATIONS acknowledged a duplicate of a message it does not hold`. Once the
-stream has room, `nats stream cluster step-down ENVOY_NOTIFICATIONS` moves the stream to a new
-leader, and the next retry stores the message.
+On a clustered NATS (nats-server v2.10.29 among them), the server keeps the id of a message the
+full stream refused on the stream's leader for 72 hours, a purge notwithstanding, and
+acknowledges every retry under that id as a duplicate it does not hold. Envoy then publishes the
+same message once more without its id, so the retry is stored as soon as the stream has room,
+with no operator step. While the stream is still full, that publish is refused too, and the
+retry fails with `stream ENVOY_NOTIFICATIONS acknowledged a duplicate of a message it does not
+hold, and its publish without its id failed: stream ENVOY_NOTIFICATIONS is full: nats: maximum
+bytes exceeded`, which is retried as a full stream is. The stream drops no repeat of a message
+stored without its id, so a later publish under the same id stores another copy, which the
+stream's consumers see.
 
 ### With Pulumi
 

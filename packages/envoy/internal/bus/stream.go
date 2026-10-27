@@ -212,7 +212,9 @@ func StreamCaptures(topic string) bool {
 // that promise. A full stream refuses a new message (DiscardNew) rather than drop a stored one, so a
 // stored message leaves only by age: the stream holds every message it took for the whole window,
 // byte limit or not, and the promise holds. The refused publish's sender gets ErrStreamFull, which
-// is not an ErrRefused: the same publish is taken once age has made room.
+// is not an ErrRefused: the same publish is taken once age has made room, on a clustered stream
+// too, where a retry under the refused message's MsgId is acknowledged a duplicate with no sequence
+// and the bus sends it once more without the id (ErrNotStored).
 var streamCfg = &nats.StreamConfig{
 	Name:       Stream,
 	Subjects:   streamSubjects,
