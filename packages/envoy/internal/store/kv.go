@@ -786,7 +786,7 @@ const (
 // becomes live again.
 func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (int, error) {
 	now := r.now().UnixMilli()
-	graceMs := graceWindow.Milliseconds()
+	allowanceMs := graceWindow.Milliseconds() + InterestRefreshAge.Milliseconds()
 
 	r.mu.RLock()
 	var stale []string
@@ -794,7 +794,7 @@ func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (i
 		if isAlive(sid) {
 			continue // session still alive
 		}
-		if now-item.UpdatedAt <= graceMs+InterestRefreshAge.Milliseconds() {
+		if now-item.UpdatedAt <= allowanceMs {
 			continue // within grace window plus refresh age
 		}
 		stale = append(stale, sid)
@@ -864,11 +864,10 @@ func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Dur
 }
 
 // StartReaper runs Reap in a background goroutine at the given interval until ctx ends, and returns
-// a channel closed once it has returned: a pass in flight when ctx ends finishes first. Each pass
-// deletes the interest of a dead session whose row was last written more than graceWindow plus
-// InterestRefreshAge ago, as Reap says. A pass lists the bucket through watchers whose consumers
-// nats.go creates and deletes, so the listener's shutdown waits for it before it drains NATS
-// (kvwatch.Watcher.End says what a drain does to such a delete).
+// a channel closed once it has returned: a pass in flight when ctx ends finishes first. A pass
+// lists the bucket through watchers whose consumers nats.go creates and deletes, so the listener's
+// shutdown waits for it before it drains NATS (kvwatch.Watcher.End says what a drain does to such
+// a delete).
 func (r *Registry) StartReaper(ctx context.Context, isAlive func(string) bool, interval, graceWindow time.Duration) <-chan struct{} {
 	return everyInterval(ctx, interval, func() {
 		count, err := r.Reap(isAlive, graceWindow)

@@ -1131,7 +1131,6 @@ func TestReaperGraceWindow(t *testing.T) {
 	defer cleanup()
 
 	reg, kv := coldRegistry(t, conn)
-	// No goroutine runs yet, so the clock is set without the lock.
 	fixed := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
 	reg.now = func() time.Time { return fixed }
 
