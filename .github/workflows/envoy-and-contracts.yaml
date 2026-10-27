@@ -1156,6 +1156,50 @@ jobs:
         run: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/broker
         working-directory: packages/envoy
 
+  # Production's Cloud SQL instance runs Postgres 16 until dispatch://INFRA-572's apply moves it to
+  # 18, and it also holds the secrets broker's database, so until then the broker's Go suite also
+  # runs here on the pgvector-on-16 image production's database matches; dispatch://INFRA-573
+  # deletes this job then. The packages are every one whose tests reach BROKER_TEST_DATABASE_URL
+  # (through storetest, the rig, or the variable itself) but internal/dispatch/api, which
+  # dispatch-go-postgres-16 runs: the broker binary, the agent-secrets CLI and its dev relay, and
+  # the broker's internal tree. Then the two-process tests, as broker-multiprocess runs them. None
+  # starts a container or runs Bun, so the job sets up Go alone, as broker-multiprocess does.
+  broker-go-postgres-16:
+    name: Broker Go suite on production's Postgres 16 (until INFRA-572)
+    needs: changes
+    if: needs.changes.outputs.envoy == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      BROKER_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+      - name: Postgres service version
+        run: |
+          docker exec "${{ job.services.postgres.id }}" psql -U postgres -Atc "select current_setting('server_version_num'), coalesce((select default_version from pg_available_extensions where name = 'vector'), 'no vector')"
+      - name: Unit test the secrets broker's Go packages on Postgres 16
+        run: go test -count=1 ./cmd/agent-secrets/... ./cmd/agent-secrets-devrelay/... ./cmd/broker/... ./internal/broker/...
+        working-directory: packages/envoy
+      - name: Two-process tests of the secrets broker on Postgres 16
+        run: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/broker
+        working-directory: packages/envoy
+
   # The container smoke test, the envoy-infra plugin's live tests, and the image both run. Its own
   # job, gated on envoy_image rather than envoy: the image is built from the Dispatch SPA and the
   # Bun workspace as well as the Go sources, so a Dispatch-only change changes the image and must

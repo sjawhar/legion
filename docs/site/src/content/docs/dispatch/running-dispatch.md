@@ -160,9 +160,10 @@ with Docker, Bun, and Go installed:
    ```
 
    It runs a container named `dispatch-pg` on `127.0.0.1:55432` from a pinned image, pgvector on
-   PostgreSQL 18, which Dispatch's migrations need, and starts or reuses that container when it is
-   already there. A `dispatch-pg` made from another image or PostgreSQL major is refused, with the
-   commands that dump its databases and restore them into a new container on the right one.
+   PostgreSQL 18 (Dispatch's migrations need its `vector` extension, and 18 is the version
+   Dispatch's tests and dev databases run), and starts or reuses that container when it is already
+   there. A `dispatch-pg` made from another image or PostgreSQL major is refused, with the commands
+   that dump its databases and restore them into a new container on the right one.
 
 2. Build the web app:
 

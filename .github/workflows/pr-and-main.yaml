@@ -356,3 +356,82 @@ jobs:
 
       - name: Stage 1 live proof
         run: bash scripts/e2e/stage1-skeleton.sh
+
+  # Production's Cloud SQL instance runs Postgres 16 until dispatch://INFRA-572's apply moves it to
+  # 18, and it also holds the Legion daemon's databases, so until then the daemon's Go suite also
+  # runs here on the pgvector-on-16 image production's database matches; dispatch://INFRA-573
+  # deletes this job then. Not a required check. Its steps are the ones the test job's "Test the Go
+  # daemon" step needs, copied from that job: Bun and the workspace (the plugin-pack and pi-legion
+  # transition-table tests run bun), Go, tmux, jj, Oh My Pi, uv, the NATS images and user namespaces.
+  daemon-go-postgres-16:
+    name: Daemon Go suite on production's Postgres 16 (until INFRA-572)
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # The daemon's unit tests' Postgres and the broker rig its agentsecrets contract tests drive.
+      LEGION_TEST_PG_DSN: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      BROKER_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      # The runner VM is discarded after the job, so Ryuk would only be one more image pull.
+      TESTCONTAINERS_RYUK_DISABLED: "true"
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/daemon/go.mod
+          cache-dependency-path: packages/daemon/go.sum
+
+      # The tmux runtime's tests drive a real tmux server, and the daemon refuses to start without it.
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux
+
+      # The workspace and boundary tests drive the worker image's jj; install-omp uses its mise.
+      - uses: ./.github/actions/install-jj
+
+      # internal/podsafety and the pod agent's argv test run the pinned Oh My Pi (.omp-pin).
+      - uses: ./.github/actions/install-omp
+
+      # internal/runtime/sandbox's uv link-mode test runs the worker image's uv.
+      - uses: ./.github/actions/install-uv
+
+      # testnats.Image and Envoy's HubImage, pulled first for the reason the action gives.
+      - name: Pull the NATS test container images
+        uses: ./.github/actions/pull-test-images
+        with:
+          consts: |
+            packages/daemon/internal/testnats/nats.go Image
+            packages/envoy/internal/testnats/nats.go HubImage
+
+      # internal/launcher's role-namespace tests need unprivileged user namespaces (see the test job).
+      - name: Allow unprivileged user namespaces (the launcher's role-namespace tests)
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          unshare --user --map-root-user true
+
+      # The server's version and the pgvector version it offers, read from the service itself.
+      - name: Postgres service version
+        run: |
+          docker exec "${{ job.services.postgres.id }}" psql -U postgres -Atc "select current_setting('server_version_num'), coalesce((select default_version from pg_available_extensions where name = 'vector'), 'no vector')"
+
+      - name: Test the Go daemon on Postgres 16
+        run: go test -count=1 ./...
+        working-directory: packages/daemon

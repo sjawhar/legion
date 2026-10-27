@@ -121,19 +121,20 @@ Its inputs are the harness's own. `DATABASE_URL`, when set, is used as given: it
 `127.0.0.1`, `localhost`, `[::1]` or a Unix socket directory, and it is truncated and reseeded on
 every start. Unset, the command runs `packages/envoy/scripts/dev-postgres.sh`, which creates,
 starts or reuses the `dispatch-pg` container, and creates database `dispatch_local` in it once.
-That script runs the container from its pinned image, pgvector on PostgreSQL 18, since Dispatch's
-migrations need the `vector` extension and Dispatch runs on PostgreSQL 18. It refuses a
-`dispatch-pg` on any other image or major and prints the commands that dump its databases and
-restore them into a new container on the pinned image, quoted so they paste as they read. The
-harness ports (`DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`, `PLAIN_HTTP_PORT`, `FAKE_GITHUB_PORT`,
-`FAKE_BROKER_PORT`) move the instance, and the command refuses before anything starts when one is
-taken. psql runs without `PGHOSTADDR` (`e2e/psql.ts`), and a Ctrl-C ends a psql in flight too.
+That script runs the container from its pinned image, pgvector on PostgreSQL 18, the version
+Dispatch's tests and dev databases run; Dispatch's migrations need its `vector` extension. It
+refuses a `dispatch-pg` on any other image or major and prints the commands that dump its
+databases and restore them into a new container on the pinned image, quoted so they paste as they
+read. The harness ports (`DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`, `PLAIN_HTTP_PORT`,
+`FAKE_GITHUB_PORT`, `FAKE_BROKER_PORT`) move the instance, and the command refuses before anything
+starts when one is taken. psql runs without `PGHOSTADDR` (`e2e/psql.ts`), and a Ctrl-C ends a psql
+in flight too.
 
 A spec runs against the instance with the printed command, which sets
 `DISPATCH_E2E_REUSE_SERVERS=1` and the same `DATABASE_URL`; each spec empties the database and the
 fake Envoy, so restart the command to reseed it. `bun run build:web` while it runs refreshes the
-SPA, which the server reads from `web/dist` on each request. `docker rm -f dispatch-pg` removes the
-container and every database in it.
+SPA, which the server reads from `web/dist` on each request. `docker rm -f -v dispatch-pg` removes
+the container, its anonymous data volume and every database in it.
 
 ## Acceptance run against the deployed image
 
