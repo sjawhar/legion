@@ -985,8 +985,8 @@ func TestCensusSubcommandExitsOneWhenAPendingMigrationsCensusCountsRows(t *testi
 
 func TestWriteRebuildRefsReport(t *testing.T) {
 	var output bytes.Buffer
-	writeRebuildRefsReport(&output, refs.Rebuild{Documents: 4, Asks: 3, Comments: 2, Messages: 1, Orphans: 5, Edges: 9})
-	const want = "rebuild-refs: documents=4 asks=3 comments=2 messages=1 orphans=5 edges=9\n"
+	writeRebuildRefsReport(&output, refs.Rebuild{Documents: 4, Asks: 3, Comments: 2, Messages: 1, Orphans: 5, Edges: 9, BlocksOwed: 4})
+	const want = "rebuild-refs: documents=4 asks=3 comments=2 messages=1 orphans=5 edges=9 blocks_owed=4\n"
 	if got := output.String(); got != want {
 		t.Fatalf("rebuild-refs output = %q, want %q", got, want)
 	}

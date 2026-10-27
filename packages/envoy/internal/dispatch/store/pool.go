@@ -267,18 +267,19 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 // (duty.Exclusive). One connection per caller that can be inside Exclusive at the same moment is
 // the whole requirement, and it is a caller and not a lease that needs one: Exclusive takes its
 // connection before it learns whether the lease is held, so a pass that skips because the other
-// process holds the lease holds a connection for that round trip too. INFRA-66 leases eight names
-// - the document compaction, the suggestion-outcome sweep, the reference-excerpt reconciliation,
-// the GitHub webhook redelivery sweep, the architecture import, the delivery reconcile and one
-// per delivery durable for the consumers' reconciliation (delivery.consumerLease, a name each for
-// delivery-events and delivery-jobs) - taken by eight callers, since each delivery intake takes
-// its own durable's name from a bind poll of its own, so eight callers can be inside Exclusive at
-// once. Eight connections are exactly those eight: the headroom is zero, not one, and the next
-// leased loop added here makes a ninth caller that waits for a connection rather than failing,
-// for as long as the longest pass then holding one. They cannot come from the shared pool:
-// a lease is held for the whole pass, which is minutes for the compaction, and the shared pool's
-// sharedPoolSize connections are what every request reads through.
-const leasePoolSize = 8
+// process holds the lease holds a connection for that round trip too. Nine names are leased - the
+// document compaction, the suggestion-outcome sweep, the reference-excerpt reconciliation, the
+// block-index reconciliation, the GitHub webhook redelivery sweep, the architecture import, the
+// delivery reconcile and one per delivery durable for the consumers' reconciliation
+// (delivery.consumerLease, a name each for delivery-events and delivery-jobs) - taken by nine
+// callers, since each delivery intake takes its own durable's name from a bind poll of its own,
+// so nine callers can be inside Exclusive at once. Nine connections are exactly those nine: the
+// headroom is zero, not one, and the next leased loop added here makes a tenth caller that waits
+// for a connection rather than failing, for as long as the longest pass then holding one. They
+// cannot come from the shared pool: a lease is held for the whole pass, which is minutes for the
+// compaction, and the shared pool's sharedPoolSize connections are what every request reads
+// through.
+const leasePoolSize = 9
 
 // Leases is where a periodic maintenance loop takes the connection it holds its lease on, so that
 // only one process runs each pass (duty.Exclusive). The lease is a session-level advisory lock, so

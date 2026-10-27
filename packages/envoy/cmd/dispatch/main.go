@@ -409,6 +409,11 @@ func main() {
 	// version write stored: every mention indexed before migration 0092, and each rebuild-refs
 	// inserts (LEGION-531).
 	go documentService.RunReferenceExcerptReconciliation(ctx, leases)
+	// The block index: each document version no block-aware write indexed - every document at
+	// migration 0121, each version a build without the block index writes during a roll, and each
+	// rebuild-refs marks - and each comment, ask and issue message citing a block (`#b-`) that such
+	// a build indexed without the block grammar.
+	go documentService.RunBlockIndexReconciliation(ctx, leases)
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
 	if err != nil {

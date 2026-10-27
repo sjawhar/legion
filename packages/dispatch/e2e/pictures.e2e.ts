@@ -1,18 +1,22 @@
 import { expect, type Locator, type Page, type Response, test } from "@playwright/test";
 
+import type { ArtifactUploadResponse } from "../web/src/api/types";
+import { REF_PREVIEW_OPEN_DELAY_MS } from "../web/src/features/refs/ref-preview-timing";
 import { agentRow, setLiveSessions } from "./agents";
 import {
   createAsk,
+  createComment,
   createIssue,
   createIssueArtifact,
   createProject,
+  dashboardOrigin,
   editArtifact,
   getArtifact,
   getIssueArtifactText,
 } from "./api";
 import { documentEditor, openSpec, typeAtEnd } from "./editor";
 import { resetDatabase } from "./seed";
-import { pastePicture } from "./sends";
+import { ONE_PIXEL_PNG, pastePicture } from "./sends";
 import { asUser } from "./users";
 
 // A picture pasted into a message, an ask's answer or a direct message is uploaded and written as
@@ -349,6 +353,112 @@ test("a picture line the browser cannot draw, or that pins no version, shows a l
     // resolves afresh - opens what it names.
     await versionedLink.click();
     await expect(page).toHaveURL(`/issues/${issue.key}/artifacts/notes-md?v=1`);
+  } finally {
+    await alice.close();
+  }
+});
+
+// A picture's source and a link's target are nodes their author named, so each is drawn and
+// opened whatever the length of its name: a reference key past the 2048 bytes text cites
+// (MAX_REFERENCE_TARGET_BYTES), yet within the 2692 a new upload's key holds, still loads from its
+// version's bytes and opens its document's dashboard page. The same document's page URL or
+// `dispatch://` reference left as text (bare, in angle brackets, or a link whose words are its
+// target) is text, which the server cites only within those bytes, so it stays the plain link it is.
+test("a long-named picture in a comment draws, its link to a long-named document opens it, and the bare page URL stays a plain link", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Long names" });
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const pictureName = `${"a".repeat(2600)}.png`;
+    const upload = await page.request.post(`/api/v1/issues/${issue.key}/artifacts`, {
+      headers: { Origin: dashboardOrigin },
+      multipart: {
+        file: {
+          buffer: Buffer.from(ONE_PIXEL_PNG, "base64"),
+          mimeType: "image/png",
+          name: pictureName,
+        },
+        name: pictureName,
+      },
+    });
+    expect(upload.status(), await upload.text()).toBeLessThan(300);
+    const pictureSlug = ((await upload.json()) as ArtifactUploadResponse).artifact.slug;
+    // Words, so the link's title - the document's name - wraps in the column.
+    const design = await createIssueArtifact(issue.key, {
+      content: "# Design\n\nThe long-named design.\n",
+      name: `${"design ".repeat(372)}.md`,
+    });
+    const designSlug = design.artifact.slug;
+    for (const slug of [pictureSlug, designSlug]) {
+      const keyBytes = Buffer.byteLength(`${issue.key}/${slug}`);
+      expect(keyBytes).toBeGreaterThan(2048);
+      expect(keyBytes).toBeLessThanOrEqual(2692);
+    }
+    const designTarget = `dispatch://${issue.key}/artifact/${designSlug}`;
+    const path = `/issues/${issue.key}/artifacts/${designSlug}`;
+    const bareUrl = `${dashboardOrigin}${path}`;
+    // A block of a short-named document whose id is past the 256 bytes a block reference names.
+    const blockTarget = `dispatch://${issue.key}/spec#b-${"b".repeat(257)}`;
+    const comment = await createComment(issue.key, {
+      body: `![shot](dispatch://${issue.key}/artifact/${pictureSlug}@v1)\n\nSee [design](${designTarget}).\n\nBare: ${bareUrl}\n\nAngle: <${designTarget}>\n\nSelf: [${designTarget}](${designTarget})\n\nBlock: <${blockTarget}>`,
+    });
+
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const turn = page.locator(`[data-turn="comment:${comment.id}"]`);
+    await turn.getByRole("button", { name: "Expand thread" }).click();
+    const thread =
+      testInfo.project.name === "iphone" ? page.getByRole("dialog", { name: "Thread" }) : turn;
+
+    // The source is asserted before the picture is waited on: one the browser cannot fetch
+    // (`dispatch://…`) would fail as an image that never loads rather than naming its source.
+    const src = `/api/v1/issues/${issue.key}/artifacts/${pictureSlug}/versions/1`;
+    const shot = thread.getByRole("img", { name: "shot" });
+    await expect(shot).toHaveAttribute("src", src);
+    await expectDrawn(shot, src);
+
+    // The link is found by the target its author wrote, which it keeps whatever it shows.
+    const link = thread
+      .locator("p", { hasText: "See" })
+      .locator(`a[data-dispatch-href="${designTarget}"]`);
+    await expect(link).toHaveAttribute("href", path);
+    // Asserted once the author's link is drawn, in the same pass: the bare URL's words are the URL
+    // and it keeps its href, never the document's name and route a reference link would show.
+    const bare = thread.locator("p", { hasText: "Bare:" }).getByRole("link");
+    await expect(bare).toHaveAttribute("href", bareUrl);
+    await expect(bare).toHaveText(bareUrl);
+    await expect(bare).not.toHaveAttribute("data-dispatch-ref");
+    // The `dispatch://` forms of text past the bounds are their words alone: no link to click,
+    // and nothing the hover card opens on (`[data-dispatch-ref]`, `[data-dispatch-href]`).
+    for (const [label, words] of [
+      ["Angle:", designTarget],
+      ["Self:", designTarget],
+      ["Block:", blockTarget],
+    ] as const) {
+      const paragraph = thread.locator("p", { hasText: label });
+      await expect(paragraph).toHaveText(`${label} ${words}`);
+      await expect(paragraph.getByRole("link")).toHaveCount(0);
+      await expect(paragraph.locator("[data-dispatch-href],[data-dispatch-ref]")).toHaveCount(0);
+      if (testInfo.project.name !== "iphone") {
+        await paragraph.hover();
+        await page.waitForTimeout(2 * REF_PREVIEW_OPEN_DELAY_MS);
+        await expect(page.getByRole("tooltip")).toHaveCount(0);
+      }
+    }
+    await page.mouse.move(0, 0);
+    // The link reads as the document's name, so it wraps past the window's height; the click lands
+    // on its last line, clear of the composer pinned above the conversation.
+    const lastLine = await link.evaluate((anchor) => {
+      const box = anchor.getBoundingClientRect();
+      const lines = [...anchor.getClientRects()].filter((line) => line.width > 0);
+      const line = lines[lines.length - 1] ?? box;
+      return { x: line.left + line.width / 2 - box.left, y: line.top + line.height / 2 - box.top };
+    });
+    await link.click({ position: lastLine });
+    await expect(page).toHaveURL(path);
+    await expect(documentEditor(page)).toContainText("The long-named design.");
   } finally {
     await alice.close();
   }

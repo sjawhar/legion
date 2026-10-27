@@ -11,8 +11,9 @@ import (
 // The reads a settlement makes for its copied ask blocks run at every settlement of a copy, which
 // never gets an ask row of its own. Each must reach the owner's documents through an index - the
 // issue's through artifacts_issue_key, a project's unlinked documents through
-// artifacts_project_documents, and read events through events_ask_payload_id, never scanning a
-// table that grows with every document or event. So must the restoration of a decided ask's
+// artifacts_project_documents, each document's asks under a block id through
+// asks_block_id_unique, and read events through events_ask_payload_id, never scanning a
+// table that grows with every document, ask or event. So must the restoration of a decided ask's
 // wording, which every settlement of a document holding one runs over its decided asks, reaching
 // them through their primary key, and which the boot runs over every decided ask (a null $1).
 func TestCopiedAskQueriesAvoidSequentialScans(t *testing.T) {
@@ -48,6 +49,11 @@ func TestCopiedAskQueriesAvoidSequentialScans(t *testing.T) {
 		// The lateral read of each candidate's latest version: its unique (artifact_id, number).
 		{"the latest versions of an issue's copies", copiesOnIssue, "artifact_versions", "artifact_versions_artifact_id_number_key", []any{blocks, document, issueKey, patterns}},
 		{"the latest versions of a project's copies", copiesOnProject, "artifact_versions", "artifact_versions_artifact_id_number_key", []any{blocks, document, projectKey, patterns}},
+		// Each candidate document's asks under the block ids.
+		{"the asks of an issue's copy sources", sourcesOfIssue, "asks", "asks_block_id_unique", []any{blocks, document, issueKey}},
+		{"the asks of a project's copy sources", sourcesOfProject, "asks", "asks_block_id_unique", []any{blocks, document, projectKey}},
+		{"the asks of an issue's copies", copiesOnIssue, "asks", "asks_block_id_unique", []any{blocks, document, issueKey, patterns}},
+		{"the asks of a project's copies", copiesOnProject, "asks", "asks_block_id_unique", []any{blocks, document, projectKey, patterns}},
 		{"what a copied ask asked and decided", copiedAskHistoryQuery, "events", "events_ask_payload_id", []any{[]string{"ask-id"}}},
 		{"a settlement's decided asks", decidedWordingRestore, "asks", "asks_pkey", []any{[]string{document}}},
 		{"a settlement's decided asks' events", decidedWordingRestore, "events", "events_ask_payload_id", []any{[]string{document}}},
