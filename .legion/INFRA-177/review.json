@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-177",
+  "completed": "2026-10-27T10:18:55Z",
+  "round": 1,
+  "headReviewed": "e9d6f8f4631b767d1ba14e6a2a82d0a160ebf0e4 (code head df07d9e3b8cd; e230f79b and e9d6f8f4 add only .legion/INFRA-177/)",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 4,
+  "minor": 5,
+  "ci": "Read at 10:03Z: required lint, typecheck, test, pr-title; CI head df07d9e3 (compare df07d9e3...e9d6f8f4: handoffsOnly true, 2 files); every run still queued (GitHub had 172 queued runs repo-wide). A request for changes does not wait on CI.",
+  "thermonuclear": "deep-review: Verdict CHANGES at e9d6f8f4 (1 Medium: the cutover's second import run moves heads with no carry; 5 Minor). code-quality: Verdict CHANGES at e9d6f8f4 (6 cleanup-only findings).",
+  "keyFindings": [
+    {"severity": "important", "file": "docs/kubernetes.md", "description": "Cutover steps 2 and 4 misstate what the removal push does. Under the new daemon (step 4) any removal push voids an approval not yet completed (ApprovalStands needs the head itself -> stuckApprovedOtherCode), clears the tester's planned-red mark (AdvancePullRequestHead/ApplyPush set PlannedRed from the implement App's push -> standingRed sends testing back), and counts a fix attempt on a red head. Under the old daemon (step 2) a removal of another issue's .legion/<OTHER>/ is a code push (old HandoffPath), so 'keeps its verdict and its approval' is not true for such branches. State the effects, or have the import refuse the removal push on testing/reviewing issues and print why."},
+    {"severity": "important", "file": "packages/daemon/internal/handoffimport/handoffimport.go", "description": "move() reads every 422 from the ref update as 'the branch moved'. A ruleset or validation 422 is retried three times and reported as 'moved under the removal commit 3 times; run the import again', hiding GitHub's real answer. Tell a moved branch by reading the head again (or by GitHub's not-a-fast-forward message) and report any other 422 with its body."},
+    {"severity": "important", "file": "PR body", "description": "The PR adds refusals (HANDOFF_RECORD_REQUIRED, HANDOFF_RECORD_NOT_FOUND, HANDOFF_RECORD_MISMATCH, HANDOFF_SESSION_MISMATCH, DISPATCH_READ_FAILED on completion, Dispatch's HANDOFF_FORBIDDEN/HANDOFF_INPUT/CAP_EXCEEDED), makes commit optional and adds handoffId/handoffVersion at the daemon API boundary (contract 41), and removes READY_HEAD_CARRIES_HANDOFFS, but the body has no '## Contract change census' with search commands, every hit's disposition and the rollout line."},
+    {"severity": "important", "file": "packages/daemon/internal/workflow/effects.go", "description": "The next worker's task names 'Handoff: <word> version <n>' but its command reads the newest record, so any later write to the phase (the import's check-then-write at step 4, or a stray rewrite) makes the next role read a body the daemon never accepted. Put --version <n> in the command the task names."},
+    {"severity": "minor", "file": "packages/daemon/internal/api/ready.go", "description": "unreviewedChange walks the files twice and adds a 'path != \"\"' guard that lets a file GitHub lists with no name pass, where the old loop refused it. One loop, no guard."},
+    {"severity": "minor", "file": "packages/daemon/internal/phase/phase.go", "description": "phase.FileBacked has no production caller left (its doc 'a handoff file its role writes and commits' is false after the cutover), and api.recordWriters is a second copy of workflow.RoleFor for the four handoff phases, with workflow.handoffWord inverting the pair a third way. One table of word and writer; delete FileBacked and recordWriters' tie test."},
+    {"severity": "minor", "file": "packages/daemon/internal/handoffimport/handoffimport.go", "description": "readState copies cmd/legion's get (request, ReadAll, non-200), and branch.head copies ghbranch.Create's ref read; handoff_records_live_test.go re-implements startScratchDispatchOn. Reuse the existing helpers."},
+    {"severity": "minor", "file": "packages/claude-envoy/src/envoy-channel-server.ts", "description": "Lines 1132-1133 say the dispatch command never reads ENVOY_SESSION_ID; dispatch-cli.ts:187 now does. Fix the comment."},
+    {"severity": "minor", "file": "PR body", "description": "Change line 4 says the import 'copies every in-flight branch's .legion/ files'; it copies the four phase files of the issue's own directory and removes the rest of .legion/ without copying it."}
+  ],
+  "declined": [
+    "code-quality 2 (clear phases.last_handoff in migration 0059): the mixed meaning is transitional and documented; rewriting data in a migration adds rollback surface for no behaviour.",
+    "code-quality 6 (serve --version from the server): the list-then-read is correct with the routes the plan fixed; not a defect.",
+    "deep-review security hardening (self-asserted session on a handoff write, unbounded handoff list): same trust model as every Dispatch write and as a pushed .legion/ file before; no exploit path beyond what a worker's App token already allowed."
+  ]
+}
