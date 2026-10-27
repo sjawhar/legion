@@ -2,11 +2,20 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-571",
-  "completed": "2026-10-27T06:00:42Z",
+  "completed": "2026-10-27T06:43:19Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2364",
-  "codeHead": "95693430d97d",
+  "codeHead": "e365a3b4fc81",
   "round2": "Tester verdict fail (test.json): PR CONFLICTING with main 448a4100 (#2270 CPU/memory limits on every docker run), so no CI ran. Fix: forward merge 95693430 (jj new legion/INFRA-571 main@origin), every conflicting site keeps main's --cpus/--memory and this PR's pg18 image and /var/lib/postgresql mount; main's two new /var/lib/postgresql/data mounts on the 18 image (internal/testpg testcontainers tmpfs, stage4a-sandbox-runtime.sh session database) moved to /var/lib/postgresql; dev-postgres.test.sh's printed-run expectations gain --cpus 2 --memory 2g. Fingerprint 783d3cbe… -> 78722ecf… (changed), posted as https://github.com/sjawhar/legion/pull/2364#issuecomment-6434963164. GitHub now reports MERGEABLE.",
+  "round3": "Reviewer changes_requested at dab48bfa (code 95693430): 1 important (16-lane coverage), 2 minor (dev-postgres rm -v; stopped-container race and no restored-data check). Fixed in e365a3b4: broker-go-postgres-16 (envoy-and-contracts.yaml: ./cmd/agent-secrets/... ./cmd/agent-secrets-devrelay/... ./cmd/broker/... ./internal/broker/... plus -tags multiprocess ./cmd/broker) and daemon-go-postgres-16 (pr-and-main.yaml: go test -count=1 ./... in packages/daemon with the test job's prerequisites), both on the 0.8.7-pg16 digest with the Dispatch lane's naming and comment; dev-postgres.sh prints a pg_isready wait after starting a stopped container, a database listing before the dump and after the restore (gating the removal), docker rm -v / docker rm -f -v; its header, packages/dispatch/README.md and running-dispatch.md say 18 is the version Dispatch's tests and dev databases run (production stays 16 until INFRA-572). Threads PRRT_kwDORFy7ds6wkllh, PRRT_kwDORFy7ds6wkllk, PRRT_kwDORFy7ds6wkllo answered and resolved at e365a3b4.",
   "proof": [
+    {
+      "criterion": "Until INFRA-572, CI runs the broker's and the daemon's Postgres-backed suites on production's Postgres 16 (INFRA-148 architect decision, review round 1 finding)",
+      "surface": "the new lanes' Postgres-backed packages on a PGDG PostgreSQL 16.15 cluster in the pod (scram-sha-256 over TCP, as CI's service), plus actionlint on the two workflows; the full lanes run on GitHub at e365a3b4",
+      "command": "MAJOR=16 bash /legion/scratch/tmp/infra571/p6-run.sh setup scram brokerstore daemon stop (tree exported from e365a3b4; logs /legion/scratch/tmp/infra571/logs/p16-e365a3b4); go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/envoy-and-contracts.yaml .github/workflows/pr-and-main.yaml",
+      "observed": "server_version_num 160015; internal/broker/store 15 pass 0 skip; daemon internal/store 113 pass 0 skip; no database left; actionlint exit 0; the 16 digest appears only in the three (until INFRA-572) jobs and dev-postgres.test.sh's old-image fixture",
+      "headSha": "e365a3b4fc81",
+      "negativeControl": "broker/store's IAM sign-in test refuses a trust-auth cluster by its own message ('Open without the token minter signed in to a role that has a password; the test proves nothing'), so the run uses scram-sha-256 as CI's password-protected service does"
+    },
     {
       "criterion": "CI's Postgres service reports 18 with vector and the full Go suite passes on it (P7) can run: the pull request merges cleanly with main",
       "surface": "GitHub pull request #2364 mergeability",
@@ -71,7 +80,8 @@
     "The simplify review found pgmigrate's touched-table read copied a vertical tab raw into text its \\s regexes read; whitespace tokens are now written as one space each (offsets unchanged), with a test that fails without it."
   ],
   "deviations": [
-    "INFRA-148 architect decision (2026-10-27T02:57Z, Envoy 104ad3ba9a186908202650e3e5d85229, plan.md v2 Decision 5 / Task 6b) overrules the plan's 'no 16 lane': job dispatch-go-postgres-16 keeps Dispatch's Go suite on mirror.gcr.io/pgvector/pgvector@sha256:7b822b0a... until INFRA-572; INFRA-573 removes it. It is the only remaining pin of the old digest.",
+    "INFRA-148 architect decision (2026-10-27T02:57Z, Envoy 104ad3ba9a186908202650e3e5d85229, plan.md v2 Decision 5 / Task 6b) overrules the plan's 'no 16 lane': job dispatch-go-postgres-16 keeps Dispatch's Go suite on mirror.gcr.io/pgvector/pgvector@sha256:7b822b0a... until INFRA-572; INFRA-573 removes it.",
+    "INFRA-148 architect decision (2026-10-27T06:27Z, Envoy 3b952f86e0a952026611401b044170e2), accepting review round 1's finding: production's Postgres 16 instance also holds the secrets broker's and the five Legion daemon databases, so broker-go-postgres-16 and daemon-go-postgres-16 also run on the 0.8.7-pg16 digest until INFRA-572, named '(until INFRA-572)' with the Dispatch lane's comment; INFRA-573 deletes all three. These three jobs are the only CI pins of the old digest.",
     "Task 9: Envoy message to notifications.role.legion-infra-infra-63-architect, id 3f811d399f633f67e140c867c9be4585, 2026-10-27T02:58:51Z, naming gcp/dispatch.go:25 only (dispatch_cloud.go untouched), dispatch_test.go:129 + TestDispatchInstanceRunsTheDatabaseVersion, README.md:140,151-152 + one paragraph, CHANGELOG [Unreleased] Changed, and the unset-stack upgrade risk.",
     "README/CHANGELOG say Cloud SQL makes the instance unavailable during the upgrade (Google's page's word), not 'restarts'; the pin wording is 'moves to this release or later'.",
     "dev-postgres.sh's put-back text adds 'docker rm -f dispatch-pg' before the rename back, since the new container holds the name after step 5.",
