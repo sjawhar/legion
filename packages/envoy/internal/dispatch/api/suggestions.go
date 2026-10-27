@@ -3,6 +3,7 @@ package api
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
@@ -57,12 +58,53 @@ const relatedEFSearch = `set local hnsw.ef_search = 400`
 
 var (
 	// relatedKeywordQuery is the check's stage 1: search's keyword query (searchQueryBody) over the
-	// chosen lexemes (relatedQOpener), so it ranks exactly as search does.
-	relatedKeywordQuery = relatedQOpener + searchQueryBody
+	// chosen lexemes, its keyword arms ranked by the chosen lexemes' weights
+	// (relatedCoordinationQuery). Parameters: searchQueryBody's $1-$8, then $9 the lexemes and $10
+	// their idf.
+	relatedKeywordQuery = relatedCoordinationQuery(searchQueryBody, 9)
 	// relatedMeaningQuery is the check's stage 2: search's meaning query, which fuses the same
-	// keyword arms with the meaning arms, over the same lexemes and the text's embedding.
-	relatedMeaningQuery = relatedQOpener + searchQueryMeaningBody
+	// keyword arms, ranked the same way, with the meaning arms, over the same lexemes and the
+	// text's embedding. Parameters: searchQueryMeaningBody's $1-$11, then $12 the lexemes and $13
+	// their idf.
+	relatedMeaningQuery = relatedCoordinationQuery(searchQueryMeaningBody, 12)
 )
+
+// relatedArmAliases names the item each of searchKeywordLegsSQL's five arms ranks (an issue, a
+// document's version, a comment, an ask, a message), each by ts_rank_cd(<alias>.search, q.tsq).
+var relatedArmAliases = []string{"i", "v", "c", "k", "m"}
+
+// relatedCoordinationQuery is body, one of search's two query bodies, under relatedQOpener with
+// each keyword arm ranked by idf-weighted coordination in place of ts_rank_cd: the sum of the idf
+// of every chosen lexeme the item holds, so an item holding three of the text's rare words
+// outranks one repeating one of them, which cover density favours. On a project's closed
+// duplicates it listed more of the issues they were closed into than ts_rank_cd over the same
+// terms or the old 40-word OR query (TestRelatedRecallOnDuplicates). ts_rank_cd, normalised into
+// [0, 1) and scaled by a thousandth, only orders items holding the same lexemes. Each lexeme is
+// tested with @@ against a tsquery of its own, a binary search of the item's sorted vector, not by
+// unnesting the vector, which costs a document's whole length. The rest of body (the meaning
+// arms, the per-kind windows, the RRF over lists and kinds, the page) is search's own.
+//
+// It panics unless each arm's rank occurs in body exactly once and no other ts_rank_cd is left, so
+// an edit of search's arms cannot leave one of the check's arms ranked as search ranks it: the
+// package fails to initialise instead.
+//
+// Parameters: body's, then $lexemes the chosen lexemes and $lexemes+1 their idf, in one order.
+func relatedCoordinationQuery(body string, lexemes int) string {
+	for _, alias := range relatedArmAliases {
+		rank := "ts_rank_cd(" + alias + ".search, q.tsq)"
+		if found := strings.Count(body, rank); found != 1 {
+			panic(fmt.Sprintf("dispatch: search's query body holds %q %d times, the related-item check wants it once", rank, found))
+		}
+		body = strings.Replace(body, rank, "((select sum(w.idf) from term_weights w where "+alias+".search @@ w.tq) + 0.001 * ts_rank_cd("+alias+".search, q.tsq, 32))", 1)
+	}
+	if found := strings.Count(body, "ts_rank_cd("); found != len(relatedArmAliases) {
+		panic(fmt.Sprintf("dispatch: search's query body ranks %d arms by ts_rank_cd, the related-item check reranks %d", found, len(relatedArmAliases)))
+	}
+	return relatedQOpener + fmt.Sprintf(`term_weights as (
+  select quote_literal(w.lexeme)::tsquery as tq, w.idf from unnest($%d::text[], $%d::float8[]) w(lexeme, idf)
+),
+`, lexemes, lexemes+1) + body
+}
 
 // The check's outcomes and search modes, as Suggestions and related_checks hold them.
 const (
@@ -508,10 +550,11 @@ func (s *server) relatedMeaningSearch(
 }
 
 // relatedSearch runs one of the check's two queries with the parameters search passes its own
-// ($1 the chosen lexemes as a tsquery, $4 the first term for the snippet window); meaning is the
-// meaning query's further three ($9 the vector, $10 searchMeaningFloor, $11 the embedder's
-// identity), none for the keyword query. An empty tsquery (no term chosen) matches nothing, so the
-// meaning query then ranks by meaning alone.
+// ($1 the chosen lexemes as a tsquery, $4 the first term for the snippet window), then meaning,
+// the meaning query's further three ($9 the vector, $10 searchMeaningFloor, $11 the embedder's
+// identity), none for the keyword query, then the chosen lexemes and their idf, the keyword
+// arms' weights. An empty tsquery (no term chosen) matches nothing, so the meaning query then
+// ranks by meaning alone.
 func (s *server) relatedSearch(
 	ctx context.Context, q queryer, query, project string, picked relatedTerms, meaning ...any,
 ) (model.SearchResponse, error) {
@@ -519,8 +562,14 @@ func (s *server) relatedSearch(
 	if len(picked.Terms) > 0 {
 		snippetTerm = cmp.Or(picked.Terms[0].Surface, picked.Terms[0].Lexeme)
 	}
-	args := append([]any{picked.TSQuery, project, suggestionSearchDepth, snippetTerm, headlineOptions,
-		0, contracts.SearchKindDepth, searchFusionK}, meaning...)
+	lexemes := make([]string, len(picked.Terms))
+	weights := make([]float64, len(picked.Terms))
+	for index, term := range picked.Terms {
+		lexemes[index], weights[index] = term.Lexeme, term.IDF
+	}
+	args := []any{picked.TSQuery, project, suggestionSearchDepth, snippetTerm, headlineOptions,
+		0, contracts.SearchKindDepth, searchFusionK}
+	args = append(append(args, meaning...), lexemes, weights)
 	rows, err := q.Query(ctx, query, args...)
 	if err != nil {
 		return model.SearchResponse{}, err

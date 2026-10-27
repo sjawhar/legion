@@ -46,8 +46,8 @@ const searchTermStatsLease = "search-term-stats"
 
 // relatedQOpener is the related-item check's q in place of search's (searchQOpener): the chosen
 // lexemes as a tsquery already built (relatedTerms.TSQuery), never re-stemmed through
-// websearch_to_tsquery, and no own_key, since no issue key is the whole text. Prefixed to
-// searchQueryBody or searchQueryMeaningBody, the check ranks exactly as search does.
+// websearch_to_tsquery, and no own_key, since no issue key is the whole text.
+// relatedCoordinationQuery opens the check's two queries with it.
 const relatedQOpener = `
 with q as (select $1::tsquery as tsq, $4::text as term, ''::text as own_key),
 `
@@ -240,7 +240,10 @@ type relatedTerm struct {
 	// punctuation trimmed), or empty where no single word of the title yields it.
 	Surface string
 	DF      int
-	Score   float64
+	// IDF is the lexeme's idf as the picker weighed it, and its weight in the check's keyword
+	// rank (relatedCoordinationQuery); Score is the text's tf of it times IDF.
+	IDF   float64
+	Score float64
 }
 
 // relatedTerms is what pickRelatedTerms chose for a text.
@@ -483,7 +486,8 @@ func (s *server) pickRelatedTerms(
 		// text repeats lowest.
 		n := float64(max(picked.Items, candidate.DF))
 		df := float64(candidate.DF)
-		candidate.Score = float64(candidate.tf) * math.Log(1+(n-df+0.5)/(df+0.5))
+		candidate.IDF = math.Log(1 + (n-df+0.5)/(df+0.5))
+		candidate.Score = float64(candidate.tf) * candidate.IDF
 	}
 	slices.SortFunc(candidates, func(a, b relatedCandidate) int {
 		return cmp.Or(cmp.Compare(b.Score, a.Score), cmp.Compare(a.DF, b.DF), strings.Compare(a.Lexeme, b.Lexeme))

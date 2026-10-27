@@ -118,6 +118,41 @@ func TestRelatedCheckListsTheRareWordMatchNotTheCommonWordMatches(t *testing.T) 
 	}
 }
 
+// An item holding three of the text's rare words once each is listed above one repeating a
+// fourth, as rare, eight times, by both of the check's queries: an item ranks by the summed idf
+// of the chosen words it holds, where ts_rank_cd's cover density counted every repetition and
+// listed the repeater first. The meaning stage answers here with no item near the text's
+// meaning, so its order is its keyword arms'.
+func TestRelatedCheckRanksMoreChosenWordsAboveOneRepeated(t *testing.T) {
+	for _, stage := range []struct {
+		name    string
+		options testServerOptions
+		search  string
+	}{
+		{"keywords only", testServerOptions{}, "keywords_only"},
+		{"meaning and keywords", testServerOptions{embedder: &fakeEmbedder{}}, "meaning_and_keywords"},
+	} {
+		t.Run(stage.name, func(t *testing.T) {
+			handler, database, deps := newTestServer(t, stage.options)
+			createSuggestionProject(t, handler, "COORD")
+			for index := range 5 {
+				createSearchIssue(t, handler, "COORD", fmt.Sprintf("Unrelated filler issue %d", index), "")
+			}
+			repeater := createSearchIssue(t, handler, "COORD", strings.Repeat("Marmot ", 8), "")
+			holder := createSearchIssue(t, handler, "COORD", "Zymurgy ledger quokka", "")
+			refreshTermStats(t, database, "COORD")
+
+			suggestions := directServer(deps).relatedCheck(context.Background(), relatedInput{project: "COORD", text: "Zymurgy ledger quokka marmot"})
+			if suggestions.Search != stage.search {
+				t.Fatalf("suggestions = %+v, want searched by %s", suggestions, stage.search)
+			}
+			if got := relatedOwnerKeys(suggestions.Related); !slices.Equal(got, []string{holder, repeater}) {
+				t.Fatalf("related = %v, want %s (three chosen words once each) above %s (one chosen word eight times)", got, holder, repeater)
+			}
+		})
+	}
+}
+
 // meaningServer is a server with embedder configured, and the direct server a test runs the check
 // on.
 func meaningServer(t *testing.T, embedder *fakeEmbedder) (http.Handler, *store.Store, *server) {

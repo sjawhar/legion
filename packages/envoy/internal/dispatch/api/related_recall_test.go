@@ -5,10 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
 	"net/http"
 	"os"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -296,57 +294,14 @@ func recallPick(ctx context.Context, srv *server, project, text, title, exclude 
 	return srv.pickRelatedTerms(ctx, srv.deps.Store.Pool, project, text, title, relatedExclusion{issueKey: exclude})
 }
 
-// recallNewSearch runs one of the check's keyword queries over the picked terms, with extra its
-// parameters past search's own; nothing when no term was picked.
-func recallNewSearch(ctx context.Context, srv *server, project string, picked relatedTerms, query string, extra ...any) ([]model.SearchResult, error) {
+// recallNewSearch runs the check's keyword query (relatedKeywordQuery) over the picked terms;
+// nothing when no term was picked.
+func recallNewSearch(ctx context.Context, srv *server, project string, picked relatedTerms) ([]model.SearchResult, error) {
 	if picked.NoLexemes || len(picked.Terms) == 0 {
 		return nil, nil
 	}
-	response, err := srv.relatedSearch(ctx, srv.deps.Store.Pool, query, project, picked, extra...)
+	response, err := srv.relatedSearch(ctx, srv.deps.Store.Pool, relatedKeywordQuery, project, picked)
 	return response.Results, err
-}
-
-// recallArmRank is the rank each of searchKeywordLegsSQL's five arms gives its item: ts_rank_cd
-// of the item's vector against q's tsquery.
-var recallArmRank = regexp.MustCompile(`ts_rank_cd\((\w+)\.search, q\.tsq\)`)
-
-// recallCoordinationQuery is the check's keyword query (relatedKeywordQuery) with each keyword
-// arm ranked by idf-weighted coordination in place of ts_rank_cd, measured against it because
-// INFRA-568's plan (decision 3) names it the fallback should the new terms not beat the old
-// query: the sum of the idf of every chosen lexeme the item holds, so an item holding the text's
-// two rarest words outranks one repeating a commoner word, which cover density favours.
-// ts_rank_cd, normalised into [0, 1) and scaled by a thousandth, only orders items holding the
-// same lexemes. Each lexeme is tested with @@ against a tsquery of its own, a binary search of the
-// item's sorted vector, not by unnesting the vector, which costs a document's whole length. The
-// other CTEs, the RRF over kinds and the page are searchQueryBody's own.
-//
-// Parameters: relatedKeywordQuery's, then $9 the chosen lexemes and $10 their idf, in one order
-// (recallWeights).
-func recallCoordinationQuery(t *testing.T) string {
-	t.Helper()
-	if arms := len(recallArmRank.FindAllStringIndex(searchKeywordLegsSQL, -1)); arms != 5 || !strings.Contains(searchQueryBody, searchKeywordLegsSQL) {
-		t.Fatalf("searchQueryBody holds %d keyword arms ranked by ts_rank_cd, want 5", arms)
-	}
-	arms := recallArmRank.ReplaceAllString(searchKeywordLegsSQL,
-		`((select sum(w.idf) from term_weights w where ${1}.search @@ w.tq) + 0.001 * ts_rank_cd(${1}.search, q.tsq, 32))`)
-	return `
-with q as (select $1::tsquery as tsq, $4::text as term, ''::text as own_key),
-term_weights as (
-  select quote_literal(w.lexeme)::tsquery as tq, w.idf from unnest($9::text[], $10::float8[]) w(lexeme, idf)
-),
-` + strings.Replace(searchQueryBody, searchKeywordLegsSQL, arms, 1)
-}
-
-// recallWeights is the picked terms as recallCoordinationQuery's $9 and $10: each lexeme and its
-// idf as pickRelatedTerms weighed it.
-func recallWeights(picked relatedTerms) ([]string, []float64) {
-	lexemes := make([]string, len(picked.Terms))
-	idf := make([]float64, len(picked.Terms))
-	for index, term := range picked.Terms {
-		n, df := float64(max(picked.Items, term.DF)), float64(term.DF)
-		lexemes[index], idf[index] = term.Lexeme, math.Log(1+(n-df+0.5)/(df+0.5))
-	}
-	return lexemes, idf
 }
 
 // recallRank is the 1-based position of the target's first item (the issue, its spec or anything
@@ -383,12 +338,11 @@ func recallListed(ctx context.Context, srv *server, project, query string, resul
 // does the related-item check list the earlier-filed issue (the target), searching with the
 // later-filed one's text as it was filed (the query) against every other issue of its project?
 // The query is the closed issue (forward) or, when the issue it was closed into was filed later,
-// that issue (reversed). It runs the old 40-word OR query and the new terms under both rankings,
-// search's ts_rank_cd and idf-weighted coordination (recallCoordinationQuery, an experiment
-// only), under identical post-processing, and prints for each pair its wording and direction,
-// where the target ranked among each search's results and whether it was listed, then each
-// ranking's count per wording and over every pair. DISPATCH_RECALL_REQUIRE_NO_LOSS=1 fails it if
-// the check's own ranking lists fewer targets than the old query.
+// that issue (reversed). It runs the old 40-word OR query and the check's keyword query under
+// identical post-processing, and prints for each pair its wording and direction, where the target
+// ranked among each search's results and whether it was listed, then each query's count per
+// wording and over every pair. DISPATCH_RECALL_REQUIRE_NO_LOSS=1 fails it if the check lists
+// fewer targets than the old query.
 func TestRelatedRecallOnDuplicates(t *testing.T) {
 	path := os.Getenv("DISPATCH_RECALL_CORPUS")
 	if path == "" {
@@ -400,9 +354,8 @@ func TestRelatedRecallOnDuplicates(t *testing.T) {
 	}
 	srv, database, _ := loadRecallCorpus(t, corpus)
 	ctx := context.Background()
-	coordination := recallCoordinationQuery(t)
 
-	rankings := []string{"old 40-word OR query", "new terms + ts_rank_cd", "new terms + idf coordination"}
+	rankings := []string{"old 40-word OR query", "the check's keyword query"}
 	// listed[wording][ranking] counts the pairs whose target that ranking's search listed; pairs
 	// counts each wording's pairs.
 	listed := map[string][]int{}
@@ -414,16 +367,12 @@ func TestRelatedRecallOnDuplicates(t *testing.T) {
 		if err != nil {
 			t.Fatalf("pick terms for %s: %v", pair.Query, err)
 		}
-		lexemes, weights := recallWeights(picked)
 		searches := make([][]model.SearchResult, len(rankings))
 		if searches[0], err = recallOldSearch(ctx, srv, corpus.project, text); err != nil {
 			t.Fatalf("old query for %s: %v", pair.Query, err)
 		}
-		if searches[1], err = recallNewSearch(ctx, srv, corpus.project, picked, relatedKeywordQuery); err != nil {
-			t.Fatalf("new terms by ts_rank_cd for %s: %v", pair.Query, err)
-		}
-		if searches[2], err = recallNewSearch(ctx, srv, corpus.project, picked, coordination, lexemes, weights); err != nil {
-			t.Fatalf("new terms by coordination for %s: %v", pair.Query, err)
+		if searches[1], err = recallNewSearch(ctx, srv, corpus.project, picked); err != nil {
+			t.Fatalf("the check's keyword query for %s: %v", pair.Query, err)
 		}
 		if listed[pair.Wording] == nil {
 			listed[pair.Wording] = make([]int, len(rankings))
@@ -548,7 +497,7 @@ func TestRelatedCheckLatencyOnRecallCorpus(t *testing.T) {
 			if err != nil {
 				return nil, picked, err
 			}
-			results, err := recallNewSearch(ctx, srv, corpus.project, picked, relatedKeywordQuery)
+			results, err := recallNewSearch(ctx, srv, corpus.project, picked)
 			return results, picked, err
 		}
 		results, picked, err := stageOne()
