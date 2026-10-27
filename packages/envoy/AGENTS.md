@@ -186,15 +186,19 @@ the signal with some still running (`httpDrainBeforeDocuments`, `dispatch: settl
 requests still in flight`), and gets `documentShutdownTimeout`, 5 s more than its drain budget
 (14 s total - the reserve outlasting a settlement still committing when the budget ends, not only
 reading back what did), so it is done 5 s before the runtime's kill. The database pool closes once
-every request has answered and no connection of the shared or document-rooms pool is in use.
-While the database answers, nothing but the runtime's kill bounds that wait, as with the deferred
-close of the pool this replaced: a write still waiting on a lock commits and is answered if it
-finishes before the kill. The database has stopped answering once three health probes in a row
+every request has answered and no connection of the shared, document-rooms or room-appends pool is
+in use. While the database answers, nothing but the runtime's kill bounds that wait, as with the
+deferred close of the pool this replaced: a write still waiting on a lock commits and is answered if
+it finishes before the kill. The database has stopped answering once three health probes in a row
 (`silentProbes`, each `store.Pool.Healthy`'s two seconds) have failed with no connection of those
-two pools taken back while they ran; a probe that answers, or a connection taken back, starts the
+pools taken back while they ran; a probe that answers, or a connection taken back, starts the
 count again. Then Dispatch exits without the connections waiting on it (`dispatch: exit with
 database connections still in use once the database stopped answering`), and the database rolls
 back what they held open; with nothing in flight over HTTP that is about 21 s after the signal.
+Closing the pool waits by the same rule (`closePool`): a connection taken after the pools were seen
+idle, such as ygo's persistence worker compacting a room as it exits, holds `store.Pool.Close`
+until it comes back or the probes say the database has stopped answering. `store.Pool.Close`
+closes the health probe's pool last, so the probe answers for as long as the close waits.
 
 An issue's task counts (`issues.tasks_done`, `tasks_total`, `tasks_version`, added by the
 `issue_task_progress` migration; LEGION-542) are the `- [ ]` / `- [x]` items of its primary

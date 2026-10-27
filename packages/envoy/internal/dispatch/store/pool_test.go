@@ -434,6 +434,66 @@ func TestRoomAppendsIsAPoolOfItsOwnThatUseCounts(t *testing.T) {
 	}
 }
 
+// Close waits for every connection in use to come back, and the health probe answers for as long
+// as it waits: a caller waiting on Close (cmd/dispatch's closePool) asks it whether the connection
+// it waits on will ever come back. Use keeps counting that connection, and once Close has returned
+// the health probe's pool has closed too.
+func TestHealthyAnswersWhileCloseWaitsForAConnectionInUse(t *testing.T) {
+	database := openTestStore(t)
+	ctx := context.Background()
+	// The health probe reads the applied schema version, so the database must have one.
+	if err := database.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	held, err := database.Pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire a shared connection: %v", err)
+	}
+	released := false
+	defer func() {
+		if !released {
+			held.Release()
+		}
+	}()
+
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		database.Pool.Close()
+	}()
+	// Close refuses the other separate pools from the moment it begins.
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := database.Pool.Rooms(); errors.Is(err, ErrPoolClosed) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Close never began")
+		}
+	}
+	if _, err := database.Pool.Healthy(ctx); err != nil {
+		t.Fatalf("health probe while Close waits for a connection in use: %v, want an answer", err)
+	}
+	if use := database.Pool.Use(); use.InUse != 1 {
+		t.Fatalf("Use counts %d connections in use while Close waits for the one held, want 1", use.InUse)
+	}
+	select {
+	case <-closed:
+		t.Fatal("Close returned with a connection still in use")
+	default:
+	}
+
+	held.Release()
+	released = true
+	select {
+	case <-closed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close did not return once the connection in use came back")
+	}
+	if _, err := database.Pool.Healthy(ctx); !errors.Is(err, ErrPoolClosed) {
+		t.Fatalf("health probe after Close: %v, want ErrPoolClosed", err)
+	}
+}
+
 // A refusal is keyed and logged by the call site that asked for the connection: one caller
 // tripping the guard in a loop logs its stack once, and another caller still logs its own.
 // Leaving Begin's guard to BeginTx, instead of to the unexported begin both entry points share,

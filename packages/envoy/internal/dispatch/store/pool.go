@@ -138,7 +138,10 @@ type Pool struct {
 	listen      *pgxpool.Pool
 	leases      *pgxpool.Pool
 	outbox      *pgxpool.Pool
-	closed      bool
+	// closed refuses every separate pool but the health probe's from the moment Close begins;
+	// healthClosed refuses that one too, once Close has closed every other pool (Healthy).
+	closed       bool
+	healthClosed bool
 }
 
 // NewPool wraps an open pgx pool.
@@ -244,6 +247,11 @@ func (p *Pool) RoomAppends() (*pgxpool.Pool, error) {
 // The version is read from schema_migrations on every call rather than remembered from this
 // process's own Migrate, so it reports what the database holds: a deploy check compares it with
 // the highest migration in the commit the image was built from.
+//
+// It answers while Close waits for the connections still in use, so a caller waiting on Close
+// (cmd/dispatch's shutdown) can tell a database still finishing work from one that has stopped
+// answering; once Close has closed every other pool it closes this one and Healthy refuses
+// (ErrPoolClosed).
 func (p *Pool) Healthy(ctx context.Context) (int, error) {
 	health, err := p.separate(&p.health, healthPoolSize, "health probe", "")
 	if err != nil {
@@ -340,7 +348,7 @@ func (p *Pool) Outbox() (*Pool, error) {
 func (p *Pool) separate(field **pgxpool.Pool, size int32, name, applicationName string) (*pgxpool.Pool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.closed {
+	if p.healthClosed || (p.closed && field != &p.health) {
 		return nil, ErrPoolClosed
 	}
 	if *field != nil {
@@ -368,7 +376,10 @@ func (p *Pool) separate(field **pgxpool.Pool, size int32, name, applicationName 
 }
 
 // Close releases every connection the pool holds, the document rooms, their appends and the health
-// probe included.
+// probe included, and returns once every connection in use has come back. It closes the health
+// probe's pool last, after every other pool has closed: Healthy answers for as long as Close waits,
+// and Use keeps counting the closing pools' connections. No other separate pool opens or is handed
+// out once Close has begun.
 func (p *Pool) Close() {
 	p.mu.Lock()
 	if p.closed {
@@ -376,8 +387,7 @@ func (p *Pool) Close() {
 		return
 	}
 	p.closed = true
-	separates := []*pgxpool.Pool{p.rooms, p.roomAppends, p.health, p.listen, p.leases, p.outbox}
-	p.rooms, p.roomAppends, p.health, p.listen, p.leases, p.outbox = nil, nil, nil, nil, nil, nil
+	separates := []*pgxpool.Pool{p.rooms, p.roomAppends, p.listen, p.leases, p.outbox}
 	p.mu.Unlock()
 	for _, separate := range separates {
 		if separate != nil {
@@ -385,6 +395,13 @@ func (p *Pool) Close() {
 		}
 	}
 	p.pool.Close()
+	p.mu.Lock()
+	p.healthClosed = true
+	health := p.health
+	p.mu.Unlock()
+	if health != nil {
+		health.Close()
+	}
 }
 
 // Config returns a copy of the pool's configuration.
