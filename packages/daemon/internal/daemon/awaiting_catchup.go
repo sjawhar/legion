@@ -28,12 +28,15 @@ import (
 // what it missed.
 //
 // Each root keeps a cursor (record.Store.CaughtUpSeq): the boot reads only the events after it,
-// and raises it to the issue's latest sequence it read. A root recorded before the cursor existed
-// has none: its first catch-up replays nothing and only sets the cursor, since a daemon of an
-// earlier release applied everything before it live, and a replay of that history through this
-// release's handlers would read old hand-backs as new. A root recorded since starts at 0 and reads
-// from its last handout. A gate whose document has no approval request in the asks' mirror — one an
-// earlier release registered before the mirror existed, or one whose request the daemon never saw
+// and raises it to the issue's latest sequence it read. A root recorded before the cursor existed,
+// and given no work by this release since, has none: its first catch-up replays nothing and only
+// sets the cursor, since a daemon of an earlier release applied everything before it live, and a
+// replay of that history through this release's handlers would read old hand-backs as new. A root
+// recorded since, or handed work by this release since (an admission, a re-admission, a resume:
+// record.Store.StartHandout), starts at 0 and reads from its last handout; a re-admission sets the
+// cursor back to 0, so a new generation never replays the old one's tail. A gate whose document
+// has no approval request in the asks' mirror — one an earlier release registered before the
+// mirror existed, or one whose request the daemon never saw
 // an event of — has the request Dispatch shows open on its document mirrored, which declares the
 // architect's hand-back when the request waits on the person (workflow's gateRequestFound).
 
@@ -290,6 +293,13 @@ func (w *workflowRuntime) catchUpRoot(ctx context.Context, root catchUpRoot) err
 // catchUpFrom is the sequence a root's event log is read after, and whether it is read at all: its
 // cursor; for a cursor of 0, its last handout, as the record already holds everything before it;
 // and no read for a root with no cursor, whose first catch-up after the deploy replays nothing.
+//
+// A cursor below the root's last handout (a resume after its last catch-up) is read from the
+// cursor, not from the handout: the handout is the highest sequence the record held, not proof
+// that every event below it arrived, since the durable stream may deliver out of order. Replaying
+// the events between the two is safe: a hand-back at or below the handout declares nothing, a
+// review placed before the wait began answers nothing, and a changes request already told is not
+// told again (its processed key is per generation, and a re-admission restarts the cursor).
 func catchUpFrom(root catchUpRoot) (int64, bool) {
 	switch {
 	case !root.hasCursor:
@@ -327,8 +337,10 @@ func (w *workflowRuntime) bindGateRequest(ctx context.Context, root catchUpRoot,
 // read. Each fact's id names the event's sequence and the root's generation, so a second catch-up
 // of the same event is dropped as processed. An event of a type the catch-up does not read is
 // passed over before it is decoded (an issue's own events are the boot listing's), and one the
-// decoder refuses is logged and passed over too, so one unreadable event never stops the rest of a
-// root's catch-up at every boot.
+// decoder refuses or the handlers fail on is logged and passed over too, so one event never stops
+// the rest of a root's catch-up at every boot. Passing over loses nothing: every event the window
+// holds was either applied live before, or is still unacknowledged on the durable Dispatch
+// consumer, which retries it once the catch-up ends. Only the boot's own end (ctx) stops it.
 func (w *workflowRuntime) catchUpWindow(ctx context.Context, root catchUpRoot, from int64) (int64, error) {
 	events, err := w.dispatch.EventsAfter(ctx, root.issue.Key, from)
 	if err != nil {
@@ -362,7 +374,10 @@ func (w *workflowRuntime) catchUpWindow(ctx context.Context, root catchUpRoot, f
 			continue
 		}
 		if err := w.applyCatchUp(ctx, fmt.Sprintf("event:%s:%d:%d", root.issue.Key, root.issue.Generation, header.Seq), fact); err != nil {
-			return 0, err
+			if ctx.Err() != nil {
+				return 0, err
+			}
+			w.log.Error("boot catch-up passed over an event its handlers failed on", "issue", root.issue.Key, "seq", header.Seq, "type", header.Type, "error", err)
 		}
 	}
 	return read, nil

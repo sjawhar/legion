@@ -733,8 +733,13 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	}
 	// A generation that ended takes what its architect handed back with it: the re-admission is a
 	// handout, so an ask.opened or a hand-back of the old run, delivered late, at or below what the
-	// record holds now, declares nothing in this one.
+	// record holds now, declares nothing in this one. Its catch-up cursor starts again too, so the
+	// next boot reads from this handout rather than replaying the old generation's tail, whose
+	// changes requests the new generation would tell again.
 	if err := a.store.StartHandout(ctx, tx, stored.Key); err != nil {
+		return fmt.Errorf("record re-admission %s: %w", stored.Key, err)
+	}
+	if err := a.store.RestartCaughtUp(ctx, tx, stored.Key); err != nil {
 		return fmt.Errorf("record re-admission %s: %w", stored.Key, err)
 	}
 	// A child leaving its old tree, carried or fresh, takes its hand-over fence with it: left behind,

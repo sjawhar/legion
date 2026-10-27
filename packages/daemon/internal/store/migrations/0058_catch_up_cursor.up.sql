@@ -5,13 +5,16 @@
 -- issue's event log through (the daemon's catch-up of the roots at admitted or awaiting_person).
 -- A boot reads only the events after it, applies them through the live handlers with the root held
 -- out of admission's decision, then decides the root once and raises the cursor to the sequence it
--- read through. It is never lowered.
+-- read through. Only a re-admission lowers it, back to 0, so a new generation never replays the
+-- old one's tail.
 --
--- An issue recorded before this migration has no cursor (null): its first catch-up after the
--- deploy replays nothing, and sets the cursor to the issue's latest sequence on Dispatch, since
--- every event before it reached a daemon of an earlier release live, and that release's record is
--- what this release decides from. An issue recorded after it starts at 0, which the catch-up reads
--- as no cursor yet: it reads from the root's last handout (issues.handout_seq), as the record
--- already holds everything before it.
+-- An issue recorded before this migration has no cursor (null) until this release first gives it
+-- work or catches it up. A catch-up of a root still with no cursor replays nothing and sets the
+-- cursor to the issue's latest sequence on Dispatch, since every event before it reached a daemon
+-- of an earlier release live, and that release's record is what this release decides from. The
+-- daemon's first handout to it (an admission, a re-admission, a resume) sets it to 0 instead,
+-- since this release took in everything up to that handout. An issue recorded after this
+-- migration starts at 0. A cursor of 0 means no catch-up yet: the catch-up reads from the root's
+-- last handout (issues.handout_seq), as the record already holds everything before it.
 alter table issues add column caught_up_seq bigint check (caught_up_seq >= 0);
 alter table issues alter column caught_up_seq set default 0;

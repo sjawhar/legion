@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -577,4 +578,54 @@ func TestAHeldChildDoesNotStartWhileItsRootWaitsOnAPerson(t *testing.T) {
 		t.Fatalf("the child = %s, want it admitted until its root resumes", got)
 	}
 	assertOutboxKinds(t, pool, []string{})
+}
+
+// A root waiting on its design gate when the operator switches gates.design to off is not left
+// suspended: no approval request counts with the gate off, so the next admission pass moves the wait
+// to a question of the tree still with the person, or, with none, answers it, and the architect
+// resumes told to register its spec, which opens the gate.
+func TestAGateWaitIsDecidedOnceTheGateIsSwitchedOff(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		question bool
+	}{
+		{name: "nothing else with the person"},
+		{name: "a question still with the person", question: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			root := askRoot()
+			root.Phase = phase.AwaitingPerson
+			root.Awaiting = &record.Awaiting{GateVersion: 3, Artifact: "artifact-208", Since: record.EventMark{Seq: 5}}
+			seedIssue(t, pool, root)
+			seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 3})
+			seedRecord(t, pool, func(tx pgx.Tx) error {
+				return record.NewStore().PutRootAsk(context.Background(), tx, record.RootAsk{Issue: "LEGION-208", Ask: "ask-approval", Kind: record.AskApproval,
+					Artifact: "artifact-208", Open: true, Seq: 5, WaitingOn: "human", WaitingOnSeq: 5, ByTree: true})
+			})
+			if tc.question {
+				seedQuestion(t, pool, "ask-q", 4)
+			}
+			engine := testEngine(config.DesignGateOff, nil)
+			seedRecord(t, pool, func(tx pgx.Tx) error {
+				scoped, _ := intake.WithCommitHooks(context.Background())
+				_, _, err := engine.ReconcileAwaiting(scoped, tx, "LEGION", []record.Issue{recordedRoot(t, pool)}, nil, nil)
+				return err
+			})
+			got := recordedRoot(t, pool)
+			if tc.question {
+				if got.Awaiting == nil || got.Awaiting.Ask != "ask-q" || got.Awaiting.GateVersion != 0 || got.Answered() || got.Awaiting.Since.Seq != 5 {
+					t.Fatalf("wait = %#v, want it moved to ask-q from 5, unanswered", got.Awaiting)
+				}
+				return
+			}
+			if !got.Answered() || got.Awaiting.AnsweredBy != record.AnsweredByApproval {
+				t.Fatalf("wait = %#v, want it answered", got.Awaiting)
+			}
+			task := resumeTask("LEGION-208", *got.Awaiting, &record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 3}, nil, false)
+			if !strings.Contains(task, "when your spec is registered") || strings.Contains(task, "register_gate") {
+				t.Fatalf("resume task = %q, want it to say the gate opens when the spec is registered, with no approval advice", task)
+			}
+		})
+	}
 }

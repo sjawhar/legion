@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -970,4 +971,149 @@ func TestAGateSeedAnswersAGateWaitOnlyWhenTheRequestIsWithTheAgent(t *testing.T)
 	if got := readIssue(t, pool, "CAPTURE-100"); !got.Answered() || got.Awaiting.AnsweredBy != record.AnsweredByVersion {
 		t.Fatalf("root after a seed showing the request with the agent = %#v, want it answered by the version", got)
 	}
+}
+
+// applyLive applies events as the durable Dispatch consumer delivers them after the boot's
+// catch-up: each decoded by the live decoder and applied through the live handlers under an event
+// id of its own, never the catch-up's.
+func applyLive(t *testing.T, w *workflowRuntime, events ...json.RawMessage) {
+	t.Helper()
+	for i, event := range events {
+		fact, _, err := intake.DecodeDispatchEvent(w.dispatchProject, "CAPTURE-100", event)
+		if err != nil || fact == nil {
+			t.Fatalf("decode live event %d: %v (fact %v)", i, err, fact)
+		}
+		if _, err := intake.ApplyFact(context.Background(), w.pool, "dispatch", fmt.Sprintf("live-%d", i), fact, w.handlers...); err != nil {
+			t.Fatalf("apply live event %d: %v", i, err)
+		}
+	}
+}
+
+// A root recorded before the cursor existed that this release then gives work (its admission, a
+// re-admission or a resume) gets a cursor at that handout: everything up to it is this release's
+// own. At its next outage the boot reads from that handout, so a question opened and answered while
+// the daemon was down is applied with the root held and decided once, and the durable consumer's
+// redelivery of the same window after the catch-up suspends nothing and gives no slot away.
+func TestARootRecordedBeforeTheCursorGetsOneAtItsFirstHandout(t *testing.T) {
+	window := []json.RawMessage{askOpened(7, "ask-q1"), askClosed(9, "answered", "ask-q1", "question", alice)}
+	client := &awaitingDispatch{issue: dispatch.Issue{Key: "CAPTURE-100", LastSeq: 9}, events: window}
+	pool, w := catchUpRig(t, client, 1)
+	seedCatchUp(t, pool, func(ctx context.Context, tx pgx.Tx, records *record.Postgres) error {
+		if err := records.PutIssue(ctx, tx, captureRoot(phase.Admitted, nil)); err != nil {
+			return err
+		}
+		// The row predates migration 0058; then this release admits the root.
+		if _, err := tx.Exec(ctx, `update issues set caught_up_seq = null where key = 'CAPTURE-100'`); err != nil {
+			return err
+		}
+		if err := records.StartHandout(ctx, tx, "CAPTURE-100"); err != nil {
+			return err
+		}
+		if err := records.PutSlot(ctx, tx, record.Slot{Issue: "CAPTURE-100", Index: 0, AdmittedAt: catchUpClock()}); err != nil {
+			return err
+		}
+		if err := records.PutIssue(ctx, tx, record.Issue{Key: "CAPTURE-200", Tree: "CAPTURE-200", Project: "CAPTURE", Title: "next", Phase: phase.Admitted,
+			Generation: 1, Status: "todo", Rank: "B", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", LastDispatchSeq: 1}); err != nil {
+			return err
+		}
+		return seedCaptureArchitect(ctx, tx, true)
+	})
+	if err := bootCatchUp(t, w); err != nil {
+		t.Fatalf("catch up: %v", err)
+	}
+	afters := slices.Clone(client.afters)
+	applyLive(t, w, window...)
+	if got := assertCaptureKeptItsSlot(t, pool); got.DeclaredSeq != 0 {
+		t.Fatalf("declared_seq = %d, want the answered hand-back taken in", got.DeclaredSeq)
+	}
+	if !slices.Equal(afters, []int64{catchUpHandout}) {
+		t.Fatalf("event log read after %v, want one read after the handout %d", afters, catchUpHandout)
+	}
+}
+
+// A re-admission starts the root's catch-up cursor again: the new generation's next boot reads
+// from the re-admission's handout, never the old generation's tail, so a changes request a person
+// gave in the old generation is not told to the new one's architect, whose processed marker is
+// per generation.
+func TestAReadmittedRootsCatchUpReadsFromItsReadmission(t *testing.T) {
+	const readmittedAt int64 = 50
+	client := &awaitingDispatch{issue: dispatch.Issue{Key: "CAPTURE-100", LastSeq: readmittedAt + 1},
+		events: []json.RawMessage{specChanges(20, 3, "name the rollback path")}}
+	pool, w := catchUpRig(t, client, 1)
+	lingers := time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
+	seedCatchUp(t, pool, func(ctx context.Context, tx pgx.Tx, records *record.Postgres) error {
+		root := captureRoot(phase.Done, nil)
+		root.Status, root.DispatchStatus, root.LingerUntil = "done", "done", &lingers
+		if err := records.PutIssue(ctx, tx, root); err != nil {
+			return err
+		}
+		// Generation 1 was caught up through 10 at some boot.
+		return records.SetCaughtUp(ctx, tx, root.Key, 10)
+	})
+	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "reopen", intake.DispatchIssue{Key: "CAPTURE-100", ResolvedRepo: "acme/widgets",
+		Seq: readmittedAt, Type: "issue.updated", Status: "todo", Title: "root", Rank: "A", HandedOver: true}, w.handlers...); err != nil {
+		t.Fatalf("reopen the root: %v", err)
+	}
+	seedCatchUp(t, pool, func(ctx context.Context, tx pgx.Tx, records *record.Postgres) error {
+		got, err := records.Issue(ctx, tx, "CAPTURE-100")
+		if err != nil {
+			return err
+		}
+		if got.Generation != 2 || got.Phase != phase.Admitted {
+			t.Fatalf("reopened root = %#v, want generation 2, admitted", got)
+		}
+		if cursor, set, err := records.CaughtUpSeq(ctx, tx, "CAPTURE-100"); err != nil || !set || cursor != 0 {
+			t.Errorf("catch-up cursor after the re-admission = %d (set %t, %v), want 0", cursor, set, err)
+		}
+		// The new generation's architect registers version 4 of the spec.
+		return records.PutGate(ctx, tx, record.DesignGate{Issue: "CAPTURE-100", ArtifactID: "artifact-root", LatestVersion: 4})
+	})
+	if err := bootCatchUp(t, w); err != nil {
+		t.Fatalf("catch up: %v", err)
+	}
+	if notices := captureNotices(t, pool); slices.ContainsFunc(notices, func(n string) bool { return strings.Contains(n, "design-changes-requested") }) {
+		t.Errorf("notices = %v, want no changes request of the old generation told", notices)
+	}
+	if !slices.Equal(client.afters, []int64{readmittedAt}) {
+		t.Errorf("event log read after %v, want one read after the re-admission's handout %d", client.afters, readmittedAt)
+	}
+}
+
+// failingFact fails the ask opening at seq, as a handler that refuses one event would.
+type failingFact struct{ seq int64 }
+
+func (f failingFact) Apply(_ context.Context, _ pgx.Tx, fact intake.Fact) (intake.Result, error) {
+	if opened, ok := fact.(intake.DispatchAskOpened); ok && opened.Mark.Seq == f.seq {
+		return intake.Result{}, errors.New("this event fails to apply")
+	}
+	return intake.Result{}, nil
+}
+
+// One event the handlers fail on is logged and passed over: the rest of the root's window is still
+// applied and its cursor moves past it, so the same event does not stop that root's catch-up at
+// every later boot. The durable consumer still holds the event, unacknowledged, for a live retry.
+func TestAnEventThatFailsToApplyDoesNotStopTheCatchUp(t *testing.T) {
+	client := &awaitingDispatch{issue: dispatch.Issue{Key: "CAPTURE-100", LastSeq: 11},
+		events: []json.RawMessage{askOpened(7, "ask-broken"), askOpened(9, "ask-q"), askClosed(11, "answered", "ask-q", "question", alice)}}
+	pool, w := catchUpRig(t, client, 1)
+	w.handlers = append([]intake.Handler{failingFact{seq: 7}}, w.handlers...)
+	cursor := catchUpHandout
+	slottedCapture(t, pool, nil, &cursor)
+	if err := bootCatchUp(t, w); err != nil {
+		t.Fatalf("catch up: %v", err)
+	}
+	seedCatchUp(t, pool, func(ctx context.Context, tx pgx.Tx, records *record.Postgres) error {
+		ask, err := records.RootAsk(ctx, tx, "CAPTURE-100", "ask-q")
+		if err != nil {
+			return err
+		}
+		if ask == nil || ask.Open {
+			t.Fatalf("ask-q after the catch-up = %#v, want it mirrored closed by the answer after the failing event", ask)
+		}
+		got, set, err := records.CaughtUpSeq(ctx, tx, "CAPTURE-100")
+		if err != nil || !set || got != 11 {
+			t.Fatalf("catch-up cursor = %d (set %t, %v), want 11, past the failing event", got, set, err)
+		}
+		return nil
+	})
 }
