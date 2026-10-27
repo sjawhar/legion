@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-641",
+  "completed": "2026-10-27T15:08:25Z",
+  "plan": "dispatch://INFRA-641/artifact/plan-md",
+  "summary": "Fix X2 in packages/envoy/internal/dispatch/pmdoc. (1) position.go len16: range over the string, +1 unit per rune and +1 more above U+FFFF (as api/server.go:803), allocation-free and exactly equal to len(utf16.Encode([]rune(s))). (2) walk.go: walk fills one pre-order []int of subtree sizes bottom-up, following walkNode's descent rule (text, leaf, nil, doc, other), with the size rule written once and shared with nodeSize; walkNode reads sizes by pre-order index; visit order, path, early stop and nil handling unchanged; no pool, no cache on Node; walk's doc comment says visitors must not change Text/Children of unvisited nodes. (3) splice.go insertAt visitor returns at once for pos outside [start,end] (exact), so childBoundary runs only on ancestors of pos. Then tests, corpus equivalence, micro-benchmark, merge rule on INFRA-639's replay, suites, changelog.",
+  "tasks": [
+    "1. len16 in position.go; position_test.go: TestLen16CountsTheUnitsUTF16EncodingWrites (edge table incl. invalid bytes, ED A0 80, F4 90 80 80, truncated sequences, NUL, U+FFFF, U+10000, U+10FFFF) vs reference len(utf16.Encode([]rune(s))); FuzzLen16 seeded with the table; AllocsPerRun == 0.",
+    "2. Sized walk in walk.go; new walk_test.go with a frozen reference copy of today's walkNode/nodeSize/len16; TestWalkVisitsEveryNodeWithTodaysRange over testdata/corpus/*.md, fixtures.json, synthetic edge trees (astral, empty texts, mark-split text, every leaf type, text/leaf with children, nil child, non-doc root, MaxTreeDepth chain, wide doc) and a generated >=400 KB depth>=10 doc; early stop at several k; Size equal; failure messages never print text; BenchmarkPositionedWalk (real-size, depth 5 vs 20 same node count) with ReportAllocs.",
+    "3. insertAt early return in splice.go:180-192; existing insert/edit tests lock it; throwaway comparison at every position of every corpus doc against a test-local copy of today's visitor, then removed.",
+    "4. Opt-in TestWalkMatchesTodaysWalkOnACorpus (PMDOC_WALK_CORPUS dir of .md): Parse, Update into Y fragment, proofComment marks on every 50th text node, Read; visits, len16 per text node and Size equal to the reference on both trees; logs counts only. Corpus: every LINUX spec fetched read-only under $TMPDIR/x2-corpus with dispatch issues/doc-read; never committed. Negative control: break len16 or the +2 once, record the first-mismatch line, restore.",
+    "5. Micro-benchmark base vs head from a git archive export: go test -run '^$' -bench BenchmarkPositionedWalk -benchmem -count 8; benchstat golang.org/x/perf/cmd/benchstat@v0.0.0-20261009192801-be2c69fb417e.",
+    "6. Merge rule on LINUX's replay from C (main if INFRA-639's replay merged, else legion/INFRA-639 at the commit its implementer reports working): git archive C as base, C + this PR's diff as head; seed once with base; six interleaved run-step.sh runs; box_busy_before < 10%, no exited process; figure = Dispatch CPU-s over the replay (per committed write if commits differ); pass when every head run < every base run, else the profile-share route (len16 + nodeSize + sizing function cum, plus walkNode flat) by at least half the expected gain (~61% of base CPU without X1 in C, ~10% with it); alloc_space reported; PR names C and the diff fingerprint.",
+    "7. gofmt, go vet, go test pmdoc (and -race), docs and api with DISPATCH_TEST_DATABASE_URL on a local pgserver Postgres (no docker in the pod).",
+    "8. packages/envoy/CHANGELOG.md Unreleased / Changed entry with measured numbers.",
+    "9. ce-simplify-code once, PR body per legion-worker pr-body.md with 'Dispatch: INFRA-641'."
+  ],
+  "acceptance": [
+    {"criterion": "Merge rule on LINUX's replay (expected 4.4 cores alone, 0.26 after X1; allocation falls)", "surface": "packages/envoy/loadtest/run-step.sh at C with INFRA-639's replay inputs, local Dispatch + Postgres + NATS", "check": "plan task 6"},
+    {"criterion": "Identical sizes and positions over every node of all LINUX specs, astral characters and empty texts included", "surface": "go test over the real specs", "check": "cd packages/envoy && PMDOC_WALK_CORPUS=$TMPDIR/x2-corpus go test ./internal/dispatch/pmdoc -run TestWalkMatchesTodaysWalkOnACorpus -count=1 -v: 0 mismatches with counts; plus TestWalkVisitsEveryNodeWithTodaysRange"},
+    {"criterion": "len16 equal to today's for every string and allocation-free", "surface": "go test", "check": "go test ./internal/dispatch/pmdoc -run Len16 -count=1; go test ./internal/dispatch/pmdoc -run '^$' -fuzz FuzzLen16 -fuzztime 60s (tester 5 min)"},
+    {"criterion": "Visible behaviour unchanged; no resident memory", "surface": "pmdoc, docs, api suites; diff reading", "check": "plan task 7; no sync.Pool or Node cache in the diff"},
+    {"criterion": "insertAt results unchanged", "surface": "go test; tester's doc-edit inserts at boundaries via the Dispatch API on the load-test stack, base vs head", "check": "plan task 3"},
+    {"criterion": "Each walk measures each subtree once", "surface": "benchmark", "check": "plan task 5: allocs/op and ns/op fall; head ns/op flat between depth 5 and 20 at equal node count"}
+  ],
+  "dependencies": [
+    "INFRA-639 (LINUX replay in the load test) must be runnable before the merge-rule task; tasks 1-5 and 7-9 do not wait. If it is not, the implementer tells the architect and waits for INFRA-639's implementer; it does not complete implementing without the merge rule.",
+    "INFRA-640 (X1) touches different files; whichever merges first, the other's measurement names its own base."
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: proof on a production-like surface, PR body, simplify pass, push rules",
+      "ce-simplify-code: the one simplify pass on the PR's diff",
+      "dispatch: reading the LINUX corpus with dispatch issues/doc-read, and any write-up on INFRA-512",
+      "envoy: asking INFRA-639's implementer for its replay commit and reporting to the architect"
+    ],
+    "test": [
+      "legion-worker: re-running the implementer's proof, the E2E (tester) line and test.json",
+      "dispatch: the tester's own read-only fetch of the LINUX corpus"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md for the approval and references/pr-body.md for Look at first and Not proven / risk"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "The merge rule's input (INFRA-639's LINUX replay) does not exist yet and the load test (PR #2369) is not on main.", "answer": "Task 6 measures from the commit C that carries the replay (main or legion/INFRA-639), as the spec's fallback says; tasks 1-5 and 7-9 proceed; the implementer waits for INFRA-639 and tells the architect rather than measuring with throwaway tools or merging without it (those would be the architect's call)."},
+      {"finding": "Expected gains are modelled production cores, the base (with or without X1) is not chosen, and the changed function's share is undefined.", "answer": "Task 6 converts the gain to the load test's units for each base (about 61% of base CPU without X1, about 10% with it, from ranking section 4.1), names the profile share (len16, nodeSize and the sizing function cum, plus walkNode flat) and its pprof command, and the base is whatever C is at measurement, named in the PR."},
+      {"finding": "Which CPU figure decides, and the load test's Postgres (16.2 pgserver) differs from the spec's Postgres 17 debs.", "answer": "The figure is Dispatch CPU-seconds over the replay as INFRA-639 reports it, per committed write when commits differ; the Postgres is the load test's, the same for both sides, recorded (departure 2)."},
+      {"finding": "The 77% allocation figure is from the bench, and the sizes slice adds bytes; a sync.Pool may count as resident memory.", "answer": "Allocation is reported (alloc_space medians) beside the merge rule, not a separate gate, and 77% is quoted only when C lacks X1; no pool and no cache on Node; benchmark quotes B/op and allocs/op; one []int of 8 bytes per visited node per walk."},
+      {"finding": "Once the change lands there is nothing to compare against; the visitor contract includes order, path and early stop.", "answer": "walk_test.go keeps a frozen reference copy of today's walkNode/nodeSize/len16 and compares every visit's (node pointer, path, pos, end), early stops at several k, and Size."},
+      {"finding": "The 1,157-spec proof needs an opt-in test, a stated tree source, no spec text in public logs, and committed synthetic edge cases.", "answer": "Task 4: PMDOC_WALK_CORPUS opt-in test, trees both parsed and read back from a Y fragment with proofComment marks; logs counts only; task 2 commits synthetic astral, empty-text, leaf, nil-child, non-doc-root, nested cases."},
+      {"finding": "len16 feeds CRDT offsets and needs machine-checkable equality incl. invalid bytes, encoded surrogates, above-U+10FFFF and truncated sequences; utf16.RuneLen returns -1 for surrogates.", "answer": "Task 1: edge-case table and FuzzLen16 against the reference, AllocsPerRun == 0; RuneLen not used."},
+      {"finding": "childBoundary keeps insertAt at nodes x depth; in scope or not?", "answer": "In scope (departure 1): an exact early return in insertAt's visitor for pos outside [start,end]; existing tests plus a throwaway all-positions comparison on the corpus."},
+      {"finding": "The pre-order index must follow walkNode's descent rule exactly (text/leaf with children, nil child, non-doc root).", "answer": "Design 2 shares one size rule between nodeSize and the sizing pass; task 2's synthetic cases include each of these."},
+      {"finding": "Precomputed sizes add a rule that visitors must not change sizes during the walk.", "answer": "Design 4 adds that sentence to walk's doc comment; no positioned-walk visitor writes Text or Children today."},
+      {"finding": "Fit with siblings X1 (INFRA-640) and INFRA-649: re-measuring if X1 merges in between, anything exposed.", "answer": "Nothing is exported; the measurement names its base; main is taken in only on a real conflict, and a conflict in walk.go, position.go or splice.go repeats task 6."},
+      {"finding": "No changelog entry mentioned.", "answer": "Task 8 adds one under Unreleased / Changed in packages/envoy/CHANGELOG.md."},
+      {"finding": "The spec's '48% of all bytes' has no source; the replay report says 47% (104 of 222 GB).", "answer": "Noted; the plan and PR quote 47% from the replay report and the measured figures of this change."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": [
+    {
+      "spec": "Count UTF-16 units without allocating and compute subtree sizes once per walk (pmdoc/position.go len16, pmdoc/walk.go walkNode/nodeSize).",
+      "plan": "Also makes insertAt's walk visitor (pmdoc/splice.go:180-192) return at once for nodes whose range [start,end] cannot hold the insertion position, so childBoundary no longer sums nodeSize over every visited node's children.",
+      "evidence": "splice.go:185 calls childBoundary for every visited node and splice.go:234-249 sums nodeSize over its children: O(nodes x depth) on every doc-edit insert. childBoundary can only match inside [start+1,end-1] for a non-doc node and [0,end] for doc, and the inline condition lies inside it too, so the return is exact.",
+      "outcome": {"kind": "changed", "scope": "Adds pmdoc/splice.go's insertAt visitor to the change; acceptance and settled decisions unchanged."}
+    },
+    {
+      "spec": "The Dispatch server run locally against Postgres 17 with pgvector (from unpacked .debs).",
+      "plan": "Uses the Postgres the load test itself installs (pgserver wheel: Postgres 16.2 with pgvector), the same for base and head runs, recorded from meta.json.",
+      "evidence": "INFRA-589's load test README (Requirements and 'The database'): stack.sh setup installs Postgres 16.2 and pgvector from the pgserver wheel; the spec also says the change is driven by that one load test.",
+      "outcome": {"kind": "unchanged"}
+    }
+  ]
+}
