@@ -39,7 +39,9 @@ func (s *Postgres) MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID
 	return tag.RowsAffected() == 1, nil
 }
 
-const issueColumns = `key, tree, project, title, parent, phase, generation, status, rank, handed_over, taken_back, linger_until, held_from, last_dispatch_seq, ready_pending_version, coalesce(hold_reason, ''), dispatch_status, repo, default_branch, github_repo, awaiting_ask, awaiting_gate_version, coalesce(awaiting_artifact, ''), awaiting_answered_at, coalesce(awaiting_answered_by, ''), coalesce(awaiting_answered_detail, ''), awaiting_since_seq, awaiting_since, handout_seq, coalesce(declared_seq, 0), declared_at`
+// issueColumns reads an empty ancestry as NULL, so a record with none scans as a nil Ancestry, as
+// it was written.
+const issueColumns = `key, tree, project, title, parent, phase, generation, status, rank, handed_over, taken_back, linger_until, held_from, last_dispatch_seq, ready_pending_version, coalesce(hold_reason, ''), dispatch_status, repo, default_branch, github_repo, awaiting_ask, awaiting_gate_version, coalesce(awaiting_artifact, ''), awaiting_answered_at, coalesce(awaiting_answered_by, ''), coalesce(awaiting_answered_detail, ''), awaiting_since_seq, awaiting_since, handout_seq, coalesce(declared_seq, 0), declared_at, nullif(ancestry, '{}'), handed_over_from`
 
 func (s *Postgres) Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, error) {
 	issue, err := scanIssue(tx.QueryRow(ctx, "select "+issueColumns+" from issues where key = $1", key))
@@ -53,21 +55,66 @@ func (s *Postgres) Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, er
 }
 
 func (s *Postgres) Issues(ctx context.Context, tx pgx.Tx) ([]Issue, error) {
-	rows, err := tx.Query(ctx, "select "+issueColumns+" from issues order by key")
+	issues, err := queryIssues(ctx, tx, "select "+issueColumns+" from issues order by key")
 	if err != nil {
 		return nil, fmt.Errorf("list issues: %w", err)
+	}
+	return issues, nil
+}
+
+func (s *Postgres) QueuedRootsUnder(ctx context.Context, tx pgx.Tx, key string) ([]Issue, error) {
+	issues, err := queryIssues(ctx, tx, "select "+issueColumns+` from issues
+		where status = 'todo' and handed_over and key = tree and $1 = any(ancestry)
+		order by key`, key)
+	if err != nil {
+		return nil, fmt.Errorf("list the queued roots whose chain holds %s: %w", key, err)
+	}
+	return issues, nil
+}
+
+// queryIssues is every issue record query selects with args, in its order.
+func queryIssues(ctx context.Context, tx pgx.Tx, query string, args ...any) ([]Issue, error) {
+	rows, err := tx.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
 	}
 	defer rows.Close()
 	issues := []Issue{}
 	for rows.Next() {
 		issue, err := scanIssue(rows)
 		if err != nil {
-			return nil, fmt.Errorf("list issues: %w", err)
+			return nil, err
+		}
+		issues = append(issues, *issue)
+	}
+	return issues, rows.Err()
+}
+
+// SlottedIssues is the record of each issue of project that holds an admission slot, in slot order
+// (index, then issue), in one read: what admission judges when it releases the slots a fact has
+// finished with (admit's releaseSlots), on every fact and under the one fact lock. The slots table
+// is shared by every project's daemon, so another project's slot is left out here rather than by
+// the caller, and no issue of another project, and no issue holding no slot, is read at all. It
+// selects issueColumns itself, so it reads every column scanIssue scans: the slots join is a
+// derived table whose columns are renamed, so no column of issueColumns is ambiguous.
+func (s *Postgres) SlottedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error) {
+	rows, err := tx.Query(ctx, `select `+issueColumns+` from issues
+		join (select index, issue from slots) slot (slot_index, slot_issue) on slot.slot_issue = issues.key
+		where issues.project = $1 order by slot.slot_index, slot.slot_issue`, project)
+	if err != nil {
+		return nil, fmt.Errorf("list the slotted issues of project %s: %w", project, err)
+	}
+	defer rows.Close()
+	issues := []Issue{}
+	for rows.Next() {
+		issue, err := scanIssue(rows)
+		if err != nil {
+			return nil, fmt.Errorf("read a slotted issue of project %s: %w", project, err)
 		}
 		issues = append(issues, *issue)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list issues: %w", err)
+		return nil, fmt.Errorf("list the slotted issues of project %s: %w", project, err)
 	}
 	return issues, nil
 }
@@ -114,8 +161,10 @@ func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
 	// handout_seq, declared_seq and declared_at are StartHandout's, TakeInThrough's, Declare's and
 	// ClearDeclared's alone, so a copy of the issue read before any of them never writes them back.
 	tag, err := tx.Exec(ctx, `insert into issues (key, tree, project, title, parent, phase, generation, status, rank, handed_over, taken_back, linger_until, held_from, last_dispatch_seq, ready_pending_version, hold_reason, dispatch_status, repo, default_branch, github_repo,
-		awaiting_ask, awaiting_gate_version, awaiting_artifact, awaiting_answered_at, awaiting_answered_by, awaiting_answered_detail, awaiting_since_seq, awaiting_since)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, nullif($16::text, ''), $17, $18, $19, $20, $21, $22, $23, $24, nullif($25::text, ''), nullif($26::text, ''), $27, $28)
+		awaiting_ask, awaiting_gate_version, awaiting_artifact, awaiting_answered_at, awaiting_answered_by, awaiting_answered_detail, awaiting_since_seq, awaiting_since,
+		ancestry, handed_over_from)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, nullif($16::text, ''), $17, $18, $19, $20, $21, $22, $23, $24, nullif($25::text, ''), nullif($26::text, ''), $27, $28,
+		coalesce($29::text[], '{}'), $30)
 		on conflict (key) do update set tree = excluded.tree, project = excluded.project, title = excluded.title,
 		parent = excluded.parent, phase = excluded.phase, generation = excluded.generation,
 		status = excluded.status, rank = excluded.rank, handed_over = excluded.handed_over, taken_back = excluded.taken_back,
@@ -126,12 +175,13 @@ func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
 		awaiting_artifact = excluded.awaiting_artifact,
 		awaiting_answered_at = excluded.awaiting_answered_at, awaiting_answered_by = excluded.awaiting_answered_by,
 		awaiting_answered_detail = excluded.awaiting_answered_detail,
-		awaiting_since_seq = excluded.awaiting_since_seq, awaiting_since = excluded.awaiting_since
+		awaiting_since_seq = excluded.awaiting_since_seq, awaiting_since = excluded.awaiting_since,
+		ancestry = excluded.ancestry, handed_over_from = excluded.handed_over_from
 		where issues.repo = excluded.repo and issues.default_branch = excluded.default_branch and issues.github_repo = excluded.github_repo`,
 		issue.Key, issue.Tree, issue.Project, issue.Title, issue.Parent, string(issue.Phase), int64(issue.Generation), issue.Status,
 		issue.Rank, issue.HandedOver, issue.TakenBack, issue.LingerUntil, heldFrom, issue.LastDispatchSeq, issue.ReadyPendingVersion, string(holdReason), issue.DispatchStatus,
 		issue.Repo, issue.DefaultBranch, issue.GitHubRepo, awaitingAsk, awaitingGate, awaitingArtifact, answeredAt, string(answeredBy), answeredDetail,
-		sinceSeq, since,
+		sinceSeq, since, issue.Ancestry, issue.HandedOverFrom,
 	)
 	if err != nil {
 		return fmt.Errorf("put issue %s: %w", issue.Key, err)
@@ -152,6 +202,13 @@ func (s *Postgres) UnfilledIssues(ctx context.Context, tx pgx.Tx, project string
 
 func (s *Postgres) UnnamedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error) {
 	return s.issuesWhere(ctx, tx, "project = $1 and repo <> '' and github_repo = ''", project, "with no GitHub spelling of their repository")
+}
+
+func (s *Postgres) HandedOffWithoutPullRequest(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error) {
+	return s.issuesWhere(ctx, tx, "project = $1 and github_repo <> '' and phase = '"+string(phase.Implementing)+"'"+
+		" and key in (select issue from phases where role = '"+string(claim.RoleImplementer)+"' and handoff_commit <> '')"+
+		" and key not in (select issue from pull_requests where state in ('"+string(PullRequestOpen)+"', '"+string(PullRequestMerged)+"'))",
+		project, "in implementing with a recorded handoff and no open or merged pull request")
 }
 
 // issuesWhere is every record of project the condition selects, by key; what names them in an
@@ -257,7 +314,7 @@ func scanIssue(row scanner) (*Issue, error) {
 	if err := row.Scan(&issue.Key, &issue.Tree, &issue.Project, &issue.Title, &issue.Parent, &phaseValue, &generation, &issue.Status,
 		&issue.Rank, &issue.HandedOver, &issue.TakenBack, &issue.LingerUntil, &heldFrom, &issue.LastDispatchSeq, &issue.ReadyPendingVersion, &holdReason, &issue.DispatchStatus,
 		&issue.Repo, &issue.DefaultBranch, &issue.GitHubRepo, &awaitingAsk, &awaitingGate, &awaitingArtifact, &answeredAt, &answeredBy, &answeredDetail,
-		&sinceSeq, &since, &issue.HandoutSeq, &issue.DeclaredSeq, &declaredAt); err != nil {
+		&sinceSeq, &since, &issue.HandoutSeq, &issue.DeclaredSeq, &declaredAt, &issue.Ancestry, &issue.HandedOverFrom); err != nil {
 		return nil, err
 	}
 	if declaredAt != nil {
@@ -354,7 +411,7 @@ func scanPhase(row scanner) (PhaseRow, error) {
 
 const pullRequestColumns = `issue, repo, number, branch, head_sha, head_updated_at,
 	failing, cancelled, fix_attempts, blocked_attempts, check_runs,
-	generation, snapshot, pushes, head_counted, head_counted_before, planned_red, review_seen, review_seen_at, state,
+	generation, snapshot, pushes, head_counted, head_counted_before, head_counted_from, head_arrived_from, planned_red, review_seen, review_seen_at, state,
 	checked_head, required, required_workflows, required_workflows_head, mergeability, merge_sha`
 
 func (s *Postgres) PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*PullRequest, error) {
@@ -445,15 +502,16 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 	}
 	_, err = tx.Exec(ctx, `insert into pull_requests (issue, repo, number, branch, head_sha, head_updated_at,
 		failing, cancelled, fix_attempts, blocked_attempts, check_runs, generation, snapshot, pushes,
-		head_counted, head_counted_before, planned_red, review_seen, review_seen_at, state, checked_head, required,
+		head_counted, head_counted_before, head_counted_from, head_arrived_from, planned_red, review_seen, review_seen_at, state, checked_head, required,
 		required_workflows, required_workflows_head, mergeability, merge_sha)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
 		on conflict (issue) do update set repo = excluded.repo, number = excluded.number, branch = excluded.branch,
 		head_sha = excluded.head_sha, head_updated_at = excluded.head_updated_at,
 		failing = excluded.failing, cancelled = excluded.cancelled, fix_attempts = excluded.fix_attempts,
 		blocked_attempts = excluded.blocked_attempts, check_runs = excluded.check_runs,
 		generation = excluded.generation, snapshot = excluded.snapshot,
 		pushes = excluded.pushes, head_counted = excluded.head_counted, head_counted_before = excluded.head_counted_before,
+		head_counted_from = excluded.head_counted_from, head_arrived_from = excluded.head_arrived_from,
 		planned_red = excluded.planned_red, review_seen = excluded.review_seen,
 		review_seen_at = excluded.review_seen_at, state = excluded.state, checked_head = excluded.checked_head,
 		required = excluded.required, required_workflows = excluded.required_workflows,
@@ -461,7 +519,7 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 		merge_sha = excluded.merge_sha`,
 		pr.Issue, pr.Repo, pr.Number, pr.Branch, pr.HeadSHA, pr.HeadUpdatedAt,
 		failing, cancelled, pr.FixAttempts, pr.BlockedAttempts, checkRuns,
-		pr.Generation, pr.Snapshot, pushes, pr.HeadCounted, pr.HeadCountedBefore, pr.PlannedRed,
+		pr.Generation, pr.Snapshot, pushes, pr.HeadCounted, pr.HeadCountedBefore, pr.HeadCountedFrom, pr.HeadArrivedFrom, pr.PlannedRed,
 		pr.ReviewSeen.ID, pr.ReviewSeen.SubmittedAt, pr.State, pr.CheckedHead, required,
 		workflows, pr.WorkflowsHead, pr.Mergeability, pr.MergeSHA,
 	)
@@ -513,11 +571,13 @@ func clearGeneration(ctx context.Context, tx pgx.Tx, where, issues, key, describ
 		"delete from pull_requests where " + where + " and state <> 'open'",
 		// An open pull request is kept across a new generation, but the last one's reading of it is
 		// not: its counters and its checks settlement are of a head nobody has judged since, and the
-		// review round's decision goes with the phases below. Its pushes stay, each a fact about two
-		// commits, and so does its newest review, which orders every review it will have, and the
-		// checks its base branch requires, which belong to the base, not the generation.
-		"update pull_requests set fix_attempts = 0, blocked_attempts = 0, head_counted = '', head_counted_before = '', " +
-			"planned_red = false, checked_head = '', failing = '[]'::jsonb, cancelled = '[]'::jsonb, " +
+		// review round's decision goes with the phases below, and so does where its head arrived
+		// from, which a late push would otherwise read the old generation's planned mark off. Its
+		// pushes stay, each a fact about two commits, and so does its newest review, which orders
+		// every review it will have, and the checks its base branch requires, which belong to the
+		// base, not the generation.
+		"update pull_requests set fix_attempts = 0, blocked_attempts = 0, head_counted = '', head_counted_before = '', head_counted_from = '', " +
+			"head_arrived_from = '', planned_red = false, checked_head = '', failing = '[]'::jsonb, cancelled = '[]'::jsonb, " +
 			"check_runs = '[]'::jsonb where " + where,
 		"delete from design_gates where " + where,
 		"update phases set handoff_commit = '', rounds = 0, verdict = '', summary = '', decision = null, merge_note = '' where " + where,
@@ -536,7 +596,7 @@ func scanPullRequest(row scanner) (*PullRequest, error) {
 	var failing, cancelled, checkRuns, pushes, required, workflows []byte
 	if err := row.Scan(&pr.Issue, &pr.Repo, &pr.Number, &pr.Branch, &pr.HeadSHA, &pr.HeadUpdatedAt,
 		&failing, &cancelled, &pr.FixAttempts, &pr.BlockedAttempts, &checkRuns, &pr.Generation, &pr.Snapshot,
-		&pushes, &pr.HeadCounted, &pr.HeadCountedBefore, &pr.PlannedRed, &pr.ReviewSeen.ID, &pr.ReviewSeen.SubmittedAt, &pr.State,
+		&pushes, &pr.HeadCounted, &pr.HeadCountedBefore, &pr.HeadCountedFrom, &pr.HeadArrivedFrom, &pr.PlannedRed, &pr.ReviewSeen.ID, &pr.ReviewSeen.SubmittedAt, &pr.State,
 		&pr.CheckedHead, &required, &workflows, &pr.WorkflowsHead, &pr.Mergeability, &pr.MergeSHA); err != nil {
 		return nil, err
 	}
@@ -813,13 +873,23 @@ func (s *Postgres) RootAsks(ctx context.Context, tx pgx.Tx, issues []string) (ma
 }
 
 func (s *Postgres) StartHandout(ctx context.Context, tx pgx.Tx, issue string) error {
-	if _, err := tx.Exec(ctx, `update issues i set declared_seq = null, declared_at = null, handout_seq = greatest(i.handout_seq, i.last_dispatch_seq,
+	// A root recorded before the catch-up cursor existed gets one at its first handout from this
+	// release (caught_up_seq 0, read from the handout), since this release took in everything up to it.
+	if _, err := tx.Exec(ctx, `update issues i set declared_seq = null, declared_at = null, caught_up_seq = coalesce(i.caught_up_seq, 0),
+		handout_seq = greatest(i.handout_seq, i.last_dispatch_seq,
 		coalesce(i.awaiting_since_seq, 0),
 		coalesce((select c.claim_seq from dispatch_claims c where c.key = i.key), 0),
 		coalesce((select max(greatest(a.seq, a.waiting_on_seq, a.closed_seq, a.person_seq, a.person_answer_seq)) from root_asks a where a.issue = i.key), 0),
 		coalesce((select greatest(coalesce(g.approved_seq, 0), coalesce(g.told_changes_seq, 0)) from design_gates g where g.issue = i.key), 0))
 		where i.key = $1`, issue); err != nil {
 		return fmt.Errorf("start a handout to %s: %w", issue, err)
+	}
+	return nil
+}
+
+func (s *Postgres) RestartCaughtUp(ctx context.Context, tx pgx.Tx, issue string) error {
+	if _, err := tx.Exec(ctx, `update issues set caught_up_seq = 0 where key = $1`, issue); err != nil {
+		return fmt.Errorf("restart the catch-up cursor of %s: %w", issue, err)
 	}
 	return nil
 }
@@ -856,6 +926,27 @@ func (s *Postgres) TakeInThrough(ctx context.Context, tx pgx.Tx, issue string, s
 func (s *Postgres) ClearDeclared(ctx context.Context, tx pgx.Tx, issue string) error {
 	if _, err := tx.Exec(ctx, `update issues set declared_seq = null, declared_at = null where key = $1`, issue); err != nil {
 		return fmt.Errorf("clear the hand-back of %s: %w", issue, err)
+	}
+	return nil
+}
+
+func (s *Postgres) CaughtUpSeq(ctx context.Context, tx pgx.Tx, issue string) (int64, bool, error) {
+	var seq *int64
+	if err := tx.QueryRow(ctx, `select caught_up_seq from issues where key = $1`, issue).Scan(&seq); err != nil {
+		return 0, false, fmt.Errorf("read the catch-up cursor of %s: %w", issue, err)
+	}
+	if seq == nil {
+		return 0, false, nil
+	}
+	return *seq, true, nil
+}
+
+func (s *Postgres) SetCaughtUp(ctx context.Context, tx pgx.Tx, issue string, seq int64) error {
+	if seq < 0 {
+		return fmt.Errorf("set the catch-up cursor of %s: sequence %d is negative", issue, seq)
+	}
+	if _, err := tx.Exec(ctx, `update issues set caught_up_seq = greatest(coalesce(caught_up_seq, 0), $2) where key = $1`, issue, seq); err != nil {
+		return fmt.Errorf("set the catch-up cursor of %s at %d: %w", issue, seq, err)
 	}
 	return nil
 }

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -220,6 +221,9 @@ func (d *pilotDispatch) HandOver(context.Context, dispatch.Issue, string) error 
 func (d *pilotDispatch) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
 	return nil, nil
 }
+func (d *pilotDispatch) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
+	return nil, nil
+}
 func (d *pilotDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
@@ -262,6 +266,9 @@ func (d *filteringDispatch) HandOver(context.Context, dispatch.Issue, string) er
 	return nil
 }
 func (d *filteringDispatch) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
+	return nil, nil
+}
+func (d *filteringDispatch) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
 	return nil, nil
 }
 func (d *filteringDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
@@ -649,9 +656,13 @@ func TestPollHoldReleaseRetriesAFailedClosingPass(t *testing.T) {
 // its own transaction, running the commit hooks it registered once that commits.
 func reconcileAdmission(t *testing.T, pool *pgxpool.Pool, admission *admit.Admission, summaries []dispatch.IssueSummary, target int64, position intake.DispatchConsumerPosition) {
 	t.Helper()
+	listed := make([]intake.DispatchIssue, len(summaries))
+	for i, summary := range summaries {
+		listed[i] = intake.ListedIssue(summary)
+	}
 	scoped, committed := intake.WithCommitHooks(context.Background())
 	if err := pgx.BeginFunc(scoped, pool, func(tx pgx.Tx) error {
-		return admission.Reconcile(scoped, tx, summaries, target, position)
+		return admission.Reconcile(scoped, tx, listed, target, position)
 	}); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
