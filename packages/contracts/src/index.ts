@@ -13,3 +13,4 @@ export * from "./repo";
 export * from "./slack";
 export * from "./subject";
 export * from "./tool-schema";
+// INFRA-583 scratch probe A: a comment in packages/contracts/src only.
