@@ -13,13 +13,12 @@ import (
 
 // A person's edit notice is a row, not a timer: a process killed while the notice is still inside
 // its quiet window leaves it to the next process on the same database, which sends it once the
-// window ends.
+// window ends. Both processes take one DISPATCH_SIGNING_KEY, as every process of a deployment
+// does: the killed process's registry row is still live when the second starts, and a key the
+// second minted in its own data dir would refuse its start (processes.Register).
 func TestEditNoticeRestart(t *testing.T) {
 	database := storetest.Open(t)
-	// Both processes carry one signing key: the killed process's registry row stays live for the
-	// live window after the kill, and a second process whose key set it does not share refuses to
-	// start (processes.Register).
-	options := dispatchOptions{SigningKey: "edit-notice-restart-signing-key", Env: map[string]string{"DISPATCH_TEST_EDIT_NOTICE_QUIET": "3s"}}
+	options := dispatchOptions{SigningKey: "edit-notice-restart-key", Env: map[string]string{"DISPATCH_TEST_EDIT_NOTICE_QUIET": "3s"}}
 	first := startDispatchProcessWith(t, database.Pool.Config().ConnString(), options)
 	first.waitHealthy(t)
 	key, artifactID := first.createIssue(t)

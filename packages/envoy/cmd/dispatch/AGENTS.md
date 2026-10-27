@@ -17,7 +17,14 @@ migrations"), then binds its port, registers the process in the registry of
 live server processes (`internal/dispatch/processes`, migration `0130`: a key
 set a live process does not share both ways refuses the start, exiting 1
 before anything is served), and starts HTTP serving; shutdown deregisters it
-once HTTP has drained. The Postgres store contains people,
+once HTTP has drained. A process whose heartbeat lapsed (frozen, cut from the
+database) or whose row was pruned checks its keys again before it counts as
+live once more; beside a live process whose keys it does not share, its
+heartbeat refuses (`processes.Registration.Lost`), and `serveUntilStopped`
+logs `dispatch: this server process no longer shares its signing keys with a
+live server process` at ERROR, stops serving as at SIGTERM (listener closed,
+requests in flight answered, row deleted) and returns the refusal, so the
+process exits 1. The Postgres store contains people,
 native issues, artifacts, document updates, and the event outbox.
 A migration must leave the release before it able to read and write the
 schema, since two processes serve one database through a rolling update: a

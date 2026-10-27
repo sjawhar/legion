@@ -311,7 +311,10 @@ one. Three things have to be true first; Dispatch checks the first for you.
   it, and a server whose keys a running server does not share refuses to start: it logs why,
   naming the other server and the steps of [changing the session key](#changing-the-session-key),
   and exits before it serves anything. A rolling update to a changed key stalls the same way on the
-  first new server while the old ones keep serving.
+  first new server while the old ones keep serving. A server that stopped reporting in for longer
+  than 15 seconds (frozen, or cut off from the database) is not counted meanwhile, so it checks its
+  keys again before it counts once more: beside a running server whose keys it does not share, it
+  logs why, finishes the requests it is answering, and exits 1.
 - **Give every server the same embedder settings.** Each stored vector records the embedder that
   made it, and each server drops the vectors another embedder made and embeds that text again, so
   two servers set up differently keep replacing each other's work. A rollout that changes the
@@ -327,12 +330,12 @@ one. Three things have to be true first; Dispatch checks the first for you.
   rather than rolling it (Kubernetes `strategy: Recreate`), until a single-publisher lock lands.
 
 A second server also costs connections, and Postgres counts them per server. Each server opens up
-to 64 connections for requests, up to 10 for the periodic work it runs once across the servers, up
+to 64 connections for requests, up to 11 for the periodic work it runs once across the servers, up
 to 4 for loading documents, one for the health check, and one for the events outbox, and it holds
 four more open for as long as it runs: one each for the three things that wait on Postgres
 notifications, which are delivery, the live event stream, and closing a document session another
 server has written to, and one for its entry in the list of running servers, which it renews every
-five seconds. That is 84 connections for one server at its ceiling, and twice that for two, past a
+five seconds. That is 85 connections for one server at its ceiling, and twice that for two, past a
 default Postgres's limit of 100. Check the database's connection
 limit before you start the second server: a limit sized for one server, with whatever else uses
 that database counted in, is the thing that runs out.

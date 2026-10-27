@@ -27,9 +27,9 @@ type connectOpts struct {
 	publishAcknowledgementClock AcknowledgementClock
 	reconnectErrClock           func() time.Time
 	environment                 func(string) (string, bool)
+	reconnectWaitTick           func()
 	background                  bool
 	silentCutDetection          bool
-	reconnectWaitTick           func()
 }
 
 // connectionSettings is what every connection of a client applies after envoy's own options

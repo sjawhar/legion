@@ -73,26 +73,37 @@ func deregisterAfterDrain(registration *processes.Registration) func() {
 }
 
 // serveUntilStopped serves on listener until ctx ends, then stops Dispatch (shutdown), deregistering
-// it once HTTP has drained. It returns the error that ended serving when serving failed, which
-// cancels ctx.
+// it once HTTP has drained. Two things end serving before the signal does, each logged at ERROR and
+// returned once shutdown has run, so main exits 1 and a supervisor never reads either as a clean
+// stop: serving failed, or the registry refused to count this process as live again beside a live
+// process whose signing keys it does not share (lost, processes.Registration.Lost). Either cancels
+// ctx, so the stop is the one a signal makes: the listener closes at once, the requests in flight
+// are answered, and the registry's row is deleted.
 func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *http.Server, listener net.Listener,
-	addr string, documentService *docs.Service, pool *store.Pool, waitDelivery, deregister func()) error {
+	addr string, documentService *docs.Service, pool *store.Pool, waitDelivery, deregister func(), lost <-chan error) error {
 	serveErr := make(chan error, 1)
 	go func() {
 		slog.Info("dispatch: listening", "addr", addr)
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("dispatch: serve", "error", err)
 			serveErr <- err
 			cancel()
 		}
 	}()
-	<-ctx.Done()
+	var refused error
+	select {
+	case <-ctx.Done():
+	case refused = <-lost:
+		slog.Error("dispatch: this server process no longer shares its signing keys with a live server process", "error", refused)
+		cancel()
+	}
 	slog.Info("dispatch: shutting down")
 	shutdown(server, documentService, pool, waitDelivery, deregister)
 	select {
 	case err := <-serveErr:
 		return err
 	default:
-		return nil
+		return refused
 	}
 }
 

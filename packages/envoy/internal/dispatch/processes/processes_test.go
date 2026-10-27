@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -137,7 +139,7 @@ func TestLiveCountsAHeartbeatWithinFifteenSecondsOfTheDatabaseClock(t *testing.T
 }
 
 // The heartbeat keeps a registered process live: a row the database dates past the live window
-// is live again within a heartbeat.
+// is live again within a heartbeat, since no live process disagrees with its key set.
 func TestTheHeartbeatKeepsARegisteredProcessLive(t *testing.T) {
 	setInterval(t, &HeartbeatInterval, 100*time.Millisecond)
 	database := storetest.Open(t)
@@ -318,6 +320,224 @@ func TestTwoRegistrationsAtOnceWithKeysOfTheirOwnAreSerialised(t *testing.T) {
 	if got := liveIDs(t, database); len(got) != 1 {
 		t.Errorf("live = %v, want the one registration accepted", got)
 	}
+}
+
+// underRegistryLock runs change in one transaction holding the registry's lock, so no heartbeat
+// lands between its statements: a row aged and a peer added there are what the next heartbeat
+// finds together.
+func underRegistryLock(t *testing.T, database *store.Store, change func(tx pgx.Tx)) {
+	t.Helper()
+	tx, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("open the transaction holding the registry's lock: %v", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(context.Background(), `select pg_advisory_xact_lock($1)`, registryLock); err != nil {
+		t.Fatalf("take the registry's lock: %v", err)
+	}
+	change(tx)
+	if err := tx.Commit(context.Background()); err != nil {
+		t.Fatalf("commit the registry change: %v", err)
+	}
+}
+
+// lapse dates the row's heartbeat past the live window, as a process frozen or cut from the
+// database for that long leaves it.
+func lapse(t *testing.T, tx pgx.Tx, id string) {
+	t.Helper()
+	tag, err := tx.Exec(context.Background(),
+		`update server_processes set heartbeat_at = now() - make_interval(secs => $2) where instance = $1`,
+		id, (LiveWindow + time.Second).Seconds())
+	if err != nil || tag.RowsAffected() != 1 {
+		t.Fatalf("lapse process %s's heartbeat: %v (%d rows)", id, err, tag.RowsAffected())
+	}
+}
+
+// prunedRow deletes the row, as the prune loop does once its heartbeat is PruneAge old.
+func prunedRow(t *testing.T, tx pgx.Tx, id string) {
+	t.Helper()
+	tag, err := tx.Exec(context.Background(), `delete from server_processes where instance = $1`, id)
+	if err != nil || tag.RowsAffected() != 1 {
+		t.Fatalf("delete process %s's row: %v (%d rows)", id, err, tag.RowsAffected())
+	}
+}
+
+// livePeer writes the row of a live process holding setting straight into the registry, past
+// Register's check, as a process registered while ours had dropped out of Live leaves it.
+func livePeer(t *testing.T, tx pgx.Tx, setting string) string {
+	t.Helper()
+	var id string
+	if err := tx.QueryRow(context.Background(), `
+		insert into server_processes (instance, commit, dashboard_build, signing_keys)
+		values (gen_random_uuid(), 'c9', 'build-c9', $1)
+		returning instance::text`, fingerprints(t, setting)).Scan(&id); err != nil {
+		t.Fatalf("add a live peer holding %q: %v", setting, err)
+	}
+	return id
+}
+
+// waitForLive waits up to 10 s of heartbeats for id to be live again.
+func waitForLive(t *testing.T, database *store.Store, id, what string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !slices.Contains(liveIDs(t, database), id) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s was not live again within 10 s of heartbeats", what)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// requireNotLost fails when the registration's heartbeat has reported a refusal.
+func requireNotLost(t *testing.T, registration *Registration, what string) {
+	t.Helper()
+	select {
+	case err := <-registration.Lost():
+		t.Fatalf("%s reported a refusal: %v", what, err)
+	default:
+	}
+}
+
+// requireRefusal waits up to 10 s for the registration's heartbeat to report a refusal naming the
+// peer and the rotation advice, then requires that, a few heartbeats later, nothing made the
+// process live again.
+func requireRefusal(t *testing.T, database *store.Store, registration *Registration, peer, what string) {
+	t.Helper()
+	var refusal error
+	select {
+	case refusal = <-registration.Lost():
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s reported no refusal within 10 s of heartbeats; live = %v", what, liveIDs(t, database))
+	}
+	if !errors.Is(refusal, ErrKeySetMismatch) {
+		t.Fatalf("%s reported %v, want ErrKeySetMismatch", what, refusal)
+	}
+	for _, part := range []string{peer, "commit c9", "DISPATCH_SIGNING_KEY", "add the new key second"} {
+		if !strings.Contains(refusal.Error(), part) {
+			t.Errorf("the refusal %q does not say %q", refusal, part)
+		}
+	}
+	time.Sleep(5 * HeartbeatInterval)
+	if got := liveIDs(t, database); slices.Contains(got, registration.ID) || !slices.Equal(got, []string{peer}) {
+		t.Errorf("live = %v after %s was refused, want the peer %s alone", got, what, peer)
+	}
+}
+
+// A process whose heartbeat lapsed beside a process registered meanwhile with a key set it does
+// not share is refused by its next heartbeat, which reports it (Lost) and records nothing; beside a
+// process that shares its keys it rejoins, and its row is the one it registered.
+func TestALapsedHeartbeatChecksTheKeysAgainBeforeTheProcessCountsAsLive(t *testing.T) {
+	setInterval(t, &HeartbeatInterval, 50*time.Millisecond)
+	for _, c := range []struct {
+		name, peer string
+		refused    bool
+	}{
+		{name: "beside a peer with a key of its own", peer: "K9", refused: true},
+		{name: "beside a peer that does not hold my current key", peer: "K0", refused: true},
+		{name: "beside a peer with the same key set", peer: "K1 K0"},
+		{name: "beside a peer in the rotation's middle", peer: "K0 K1"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			database := storetest.Open(t)
+			registration := mustRegister(t, database, "c1", "K1 K0")
+			var peer string
+			underRegistryLock(t, database, func(tx pgx.Tx) {
+				lapse(t, tx, registration.ID)
+				peer = livePeer(t, tx, c.peer)
+			})
+			if c.refused {
+				requireRefusal(t, database, registration, peer, "a lapsed process beside a peer holding "+c.peer)
+				if !rowExists(t, database, registration.ID) {
+					t.Error("the refused process's lapsed row is gone; the refusal must record nothing")
+				}
+				return
+			}
+			waitForLive(t, database, registration.ID, "a lapsed process beside a peer holding "+c.peer)
+			requireNotLost(t, registration, "a lapsed process beside a peer holding "+c.peer)
+			live, err := Live(context.Background(), database.Pool)
+			if err != nil {
+				t.Fatalf("read the live processes: %v", err)
+			}
+			for _, p := range live {
+				if p.ID == registration.ID && (p.Commit != "c1" || !slices.Equal(p.SigningKeys, fingerprints(t, "K1 K0"))) {
+					t.Errorf("the rejoined row = %+v, want commit c1 and the fingerprints of K1 then K0", p)
+				}
+			}
+		})
+	}
+}
+
+// A process whose row was pruned is written again by its next heartbeat, as it registered, when no
+// live process disagrees with its key set; beside one that does, the heartbeat reports the refusal
+// and writes nothing.
+func TestAPrunedRowIsWrittenAgainUnlessALivePeerDoesNotShareTheKeys(t *testing.T) {
+	setInterval(t, &HeartbeatInterval, 50*time.Millisecond)
+	t.Run("no live peer disagrees", func(t *testing.T) {
+		database := storetest.Open(t)
+		registration := mustRegister(t, database, "c1", "K1 K0")
+		underRegistryLock(t, database, func(tx pgx.Tx) {
+			prunedRow(t, tx, registration.ID)
+			livePeer(t, tx, "K0 K1")
+		})
+		waitForLive(t, database, registration.ID, "a process whose row was pruned")
+		requireNotLost(t, registration, "a process whose row was pruned")
+		live, err := Live(context.Background(), database.Pool)
+		if err != nil {
+			t.Fatalf("read the live processes: %v", err)
+		}
+		for _, p := range live {
+			if p.ID == registration.ID && (p.Commit != "c1" || p.DashboardBuild != "build-c1" ||
+				!slices.Equal(p.SigningKeys, fingerprints(t, "K1 K0"))) {
+				t.Errorf("the row written again = %+v, want commit c1, dashboard build-c1 and the fingerprints of K1 then K0", p)
+			}
+		}
+	})
+	t.Run("a live peer does not share the keys", func(t *testing.T) {
+		database := storetest.Open(t)
+		registration := mustRegister(t, database, "c1", "K1 K0")
+		var peer string
+		underRegistryLock(t, database, func(tx pgx.Tx) {
+			prunedRow(t, tx, registration.ID)
+			peer = livePeer(t, tx, "K9")
+		})
+		requireRefusal(t, database, registration, peer, "a process whose row was pruned, beside a peer with a key of its own")
+		if rowExists(t, database, registration.ID) {
+			t.Error("the refused process's row was written again")
+		}
+	})
+}
+
+// A live row's heartbeat stamps it and checks nothing: the keys were checked when the process
+// registered, and every process registered since checked its own against them. A peer that
+// disagrees, written past Register's check, refuses nothing while this process's row stays live.
+func TestALiveRowsHeartbeatChecksNoPeer(t *testing.T) {
+	setInterval(t, &HeartbeatInterval, 50*time.Millisecond)
+	database := storetest.Open(t)
+	registration := mustRegister(t, database, "c1", "K1 K0")
+	underRegistryLock(t, database, func(tx pgx.Tx) { livePeer(t, tx, "K9") })
+
+	heartbeat := func() time.Time {
+		var at time.Time
+		if err := database.Pool.QueryRow(context.Background(),
+			`select heartbeat_at from server_processes where instance = $1`, registration.ID).Scan(&at); err != nil {
+			t.Fatalf("read process %s's heartbeat: %v", registration.ID, err)
+		}
+		return at
+	}
+	// Three heartbeats stamped after the peer was written.
+	last := heartbeat()
+	deadline := time.Now().Add(10 * time.Second)
+	for stamped := 0; stamped < 3; {
+		if time.Now().After(deadline) {
+			t.Fatalf("the live process's heartbeat stamped its row %d times in 10 s, want 3", stamped)
+		}
+		if at := heartbeat(); at.After(last) {
+			last = at
+			stamped++
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	requireNotLost(t, registration, "a live process beside a disagreeing peer")
 }
 
 // The dashboard build is the page's ETag value: the first 16 bytes of the SHA-256 of index.html,

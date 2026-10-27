@@ -48,12 +48,15 @@ var (
 	PruneInterval = time.Minute
 )
 
-// heartbeatTimeout bounds one heartbeat update, well inside HeartbeatInterval so that a database
-// that has stopped answering costs a heartbeat and not the loop: the next tick tries again.
+// heartbeatTimeout bounds one heartbeat's transaction, well inside HeartbeatInterval so that a
+// database that has stopped answering costs a heartbeat and not the loop: the next tick tries
+// again.
 const heartbeatTimeout = 2 * time.Second
 
 // registryLock is the transaction advisory lock Register takes before it reads the live rows, so
 // two processes booting at once are serialised and the second one's read sees the first one's row.
+// Every heartbeat takes it too, so a process whose heartbeat lapsed and a process registering
+// meanwhile are serialised the same way (Registration.renew).
 // It is a single 64-bit key ("DPROCREG"): every other single-key advisory lock of the server is
 // either a hashtext, which Postgres widens from 32 bits and so never reaches this value, or one of
 // three fixed keys of their own (the migration runner's 8150001 in store/store.go, the events'
@@ -66,8 +69,9 @@ const registryLock int64 = 0x4450524F43524547
 const pruneLease = "server-processes"
 
 // ErrKeySetMismatch is Register refusing to start a process beside a live process whose signing
-// key set does not share this process's both ways. The error Register returns wraps it and names
-// the other process.
+// key set does not share this process's both ways, or a heartbeat refusing to count a process that
+// had dropped out of Live as live again beside one (Registration.Lost). The error wraps it and
+// names the other process.
 var ErrKeySetMismatch = errors.New("this process's signing key set does not match a live server process's")
 
 // Instance is what a process registers: the build it serves and the keys it signs and verifies
@@ -133,11 +137,16 @@ func Live(ctx context.Context, db Querier) ([]Process, error) {
 type Registration struct {
 	// ID is the row's instance id.
 	ID string
+	// instance is what the row was registered with, kept so a heartbeat that finds the row gone
+	// can write it again.
+	instance Instance
 	// pool is the registry's own one-connection pool, which Register opens and Deregister closes
 	// (Register says why it is not the shared pool).
 	pool    *pgxpool.Pool
 	stop    context.CancelFunc
 	stopped chan struct{}
+	// lost carries the heartbeat's refusal (Lost); it holds one value and is sent at most once.
+	lost chan error
 }
 
 // Register records this process in the registry and starts its heartbeat, unless a live process's
@@ -149,7 +158,9 @@ type Registration struct {
 //
 // The read and the insert are one transaction under registryLock, so two processes booting at once
 // are serialised: the second reads the first's row and is refused if the two do not share. A row
-// whose heartbeat is older than LiveWindow is a process gone, and refuses nothing.
+// whose heartbeat is older than LiveWindow is a process gone, and refuses nothing; should that
+// process resume, its heartbeat checks its keys against this one before it counts as live again
+// (Registration.renew).
 //
 // The registry's statements, the heartbeat above all, run on a pool of one connection of its own,
 // opened here from the shared pool's configuration and closed by Deregister. Not the shared pool,
@@ -176,7 +187,7 @@ func Register(ctx context.Context, pool *store.Pool, instance Instance) (*Regist
 		return nil, err
 	}
 	beating, stop := context.WithCancel(context.Background())
-	registration := &Registration{ID: id, pool: own, stop: stop, stopped: make(chan struct{})}
+	registration := &Registration{ID: id, instance: instance, pool: own, stop: stop, stopped: make(chan struct{}), lost: make(chan error, 1)}
 	go registration.heartbeat(beating)
 	return registration, nil
 }
@@ -246,7 +257,8 @@ func describe(peer Process) string {
 
 // heartbeat stamps the row's heartbeat_at every HeartbeatInterval until ctx ends. It runs for as
 // long as the process serves, through its HTTP drain, so a draining process counts as live until
-// its last request is answered and Deregister ends it.
+// its last request is answered and Deregister ends it. It ends early, once, when a beat refuses
+// to count this process as live again (beat); Lost delivers that refusal.
 func (r *Registration) heartbeat(ctx context.Context) {
 	defer close(r.stopped)
 	ticker := time.NewTicker(HeartbeatInterval)
@@ -256,30 +268,106 @@ func (r *Registration) heartbeat(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			r.beat(ctx)
+			if refusal := r.beat(ctx); refusal != nil {
+				r.lost <- refusal
+				return
+			}
 		}
 	}
 }
 
-// beat is one heartbeat, bounded by heartbeatTimeout. A failure is logged and the next tick tries
-// again; a process whose heartbeats keep failing for LiveWindow drops out of Live while it still
-// serves, which is the cost of a registry measured on the database's clock. A row that is gone -
-// pruned after PruneAge without a heartbeat - is not written again, since that would skip the key
-// check Register makes; the line says so.
-func (r *Registration) beat(ctx context.Context) {
+// Lost delivers, at most once, the error wrapping ErrKeySetMismatch with which a heartbeat refused
+// to count this process as live again beside a live process whose key set it does not share
+// (beat). The heartbeat has stopped by then and recorded nothing: the process no longer counts as
+// live, and must stop serving, since each of the two would refuse the cookies the other mints.
+func (r *Registration) Lost() <-chan error { return r.lost }
+
+// beat is one heartbeat, bounded by heartbeatTimeout. It returns the refusal renew reports, and
+// nil otherwise. A failure is logged and the next tick tries again; a process whose heartbeats
+// keep failing for LiveWindow drops out of Live while it still serves, which is the cost of a
+// registry measured on the database's clock, and renew checks its keys again before it counts as
+// live once more.
+func (r *Registration) beat(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, heartbeatTimeout)
 	defer cancel()
-	tag, err := r.pool.Exec(ctx, `update server_processes set heartbeat_at = now() where instance = $1`, r.ID)
+	refusal, err := r.renew(ctx)
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return
+		if !errors.Is(err, context.Canceled) {
+			slog.Error("dispatch: server process heartbeat", "instance", r.ID, "error", err)
 		}
-		slog.Error("dispatch: server process heartbeat", "instance", r.ID, "error", err)
-		return
+		return nil
 	}
-	if tag.RowsAffected() == 0 {
-		slog.Error("dispatch: server process heartbeat found this process's registry row gone; it no longer counts as live", "instance", r.ID)
+	return refusal
+}
+
+// renew is beat's transaction, under registryLock. A row still live is stamped and nothing else is
+// read: the key check was made when it was registered or last rejoined, and every process that
+// registered since has checked its keys against this one. A row that had dropped out of Live -
+// the process frozen, or cut from the database, for longer than LiveWindow - or that is gone,
+// pruned after PruneAge, is a process that any registrant meanwhile counted as gone, so renew
+// makes Register's check again before it writes the row: against every live process, it rejoins
+// (logged at WARN) when each shares this process's key set, and otherwise records nothing and
+// returns the refusal, the first result. The second is a failure to reach a decision.
+//
+// Whether the row is live is measured with clock_timestamp() read after the lock is held, not the
+// transaction's now(). A registrant measures liveness with its own transaction's now(), which is
+// never later than the moment this transaction acquires the lock the registrant held, so a row the
+// registrant counted as gone is one this transaction counts as lapsed too: a process never stamps
+// itself live again past a registrant that did not check its keys against it.
+func (r *Registration) renew(ctx context.Context) (refusal error, err error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
 	}
+	// A no-op once the transaction has committed.
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock($1)`, registryLock); err != nil {
+		return nil, err
+	}
+	var live bool
+	err = tx.QueryRow(ctx, `
+		select heartbeat_at > clock_timestamp() - make_interval(secs => $2)
+		from server_processes where instance = $1`, r.ID, LiveWindow.Seconds()).Scan(&live)
+	gone := errors.Is(err, pgx.ErrNoRows)
+	if err != nil && !gone {
+		return nil, err
+	}
+	if live {
+		if _, err := tx.Exec(ctx, `update server_processes set heartbeat_at = now() where instance = $1`, r.ID); err != nil {
+			return nil, err
+		}
+		return nil, tx.Commit(ctx)
+	}
+	peers, err := Live(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	for _, peer := range peers {
+		if peer.ID == r.ID {
+			// Live by the transaction's now(), lapsed by the clock read under the lock.
+			continue
+		}
+		if err := keySetsShared(peer, r.instance.SigningKeys); err != nil {
+			return fmt.Errorf("this server process's heartbeat lapsed, and it cannot count as live again: %w", err), nil
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into server_processes (instance, commit, dashboard_build, signing_keys)
+		values ($1, $2, $3, $4)
+		on conflict (instance) do update set heartbeat_at = now()`,
+		r.ID, r.instance.Commit, r.instance.DashboardBuild, r.instance.SigningKeys); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	row := "lapsed"
+	if gone {
+		row = "gone"
+	}
+	slog.Warn("dispatch: this server process's heartbeat had lapsed; it shares its signing keys with every live server process and rejoined the registry",
+		"instance", r.ID, "row", row)
+	return nil, nil
 }
 
 // Deregister stops the heartbeat, deletes the row and closes the registry's pool. It is called

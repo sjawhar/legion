@@ -437,7 +437,13 @@ with a minted key refuses beside any live process, and a process refuses beside 
 that share one data directory share its key and start. A pod rolled with a changed secret beside
 pods that hold only the old key refuses the same way, so the roll stalls on the new pod while the
 old ones keep serving. Each step of a rotation (Identity, above) passes the check beside processes
-still on the step before.
+still on the step before. A process whose heartbeat lapsed (frozen, or cut from the database, for
+longer than the live window) or whose row was pruned drops out of the registry while it runs, so a
+process started meanwhile is checked without it; the first one checks its keys again before it
+counts as live once more, and beside a live process whose keys it does not share it logs
+`msg="dispatch: this server process no longer shares its signing keys with a live server process"`
+at ERROR, stops serving as a SIGTERM stops it (the listener closes at once, the requests in flight
+are answered, its row is deleted), and exits 1.
 
 **Every migration leaves the release before it able to read and write the schema** (Database
 migrations, below): a rolling update runs the old build and the new build against one database at
@@ -455,7 +461,7 @@ What the two processes share, and what each keeps to itself:
   event committed on either process reaches every open stream with no reconnect.
 - The two delivery durables keep their shape. NATS admits one binder; the second process stands
   by, asking every two seconds, and takes the durable over within seconds of the holder dying.
-- Eight periodic maintenance loops run once per period across the processes, not once per process.
+- Nine periodic maintenance loops run once per period across the processes, not once per process.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a
   process whose tick lands inside another's pass logs a skip; and, under that lease, each pass is
   recorded in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick
@@ -473,7 +479,11 @@ What the two processes share, and what each keeps to itself:
   within 15 seconds of the database's `now()`; it deletes its row once its HTTP drain has ended, so
   a draining process counts as live until its last request is answered. A row a process left
   behind (killed, its node lost) is deleted 10 minutes after its last heartbeat by the prune loop,
-  under the lease `server-processes`. Operator subcommands never register.
+  under the lease `server-processes`. A process whose heartbeat lapsed (frozen, cut from the
+  database) or whose row was pruned checks its keys again, under the registry's lock, before it
+  counts as live once more: it writes its row again, logging that it rejoined at WARN, when every
+  live process shares its key set, and otherwise stops, after draining, and exits 1 (the signing
+  key precondition, above). Operator subcommands never register.
 - A sign-in started on one process completes on the other: its state travels in the browser's
   signed `dispatch_oauth_state` cookie, not in a process (Identity, above), given one
   `DISPATCH_SERVER_URL` on every process.
