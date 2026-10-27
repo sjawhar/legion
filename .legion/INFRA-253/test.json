@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-253",
-  "completed": "2026-10-27T04:25:00Z",
-  "headSha": "9c51021b0b9dda25f493d0d68b29acd2897c63ee",
+  "completed": "2026-10-27T04:45:00Z",
+  "headSha": "e93c81da7e02f60585f4494d16d03c77054a9598",
   "generation": 3,
-  "rebaseRecheck": "rebase re-check e067b440 → 9c51021b: fingerprint unchanged, bare gates only. 9c51021b is the implementer's forward merge of main for a GitHub-reported conflict, on top of retro's docs/solutions commit (1457792189cd) and its removal of .legion/INFRA-253/ (36a2d2c6040f), both of which the fingerprint's fileset leaves out. Fingerprint (fork_point(main@origin | head) .. head, --context 0, '~(.legion | docs/solutions)', @@ and index lines dropped): 890278d4f5b253ac1b1405ccfc0aa9f94276f8d28d369ca71035efe70b497555 at both heads. The round at e067b440 drove the real surfaces (Dispatch on a held socket beside DISPATCH_PPROF_PORT, the pprof-port refusal, Stage 1). Retro removed that round's handoff, and this file records it again.",
+  "rebaseRecheck": "rebase re-check 9c51021b → e93c81da: fingerprint unchanged, bare gates only. e93c81da merges main for its fix to the daemon admission tests (#2317), a red check main has fixed, which the merge rule allows. Fingerprint (fork_point(main@origin | head) .. head, --context 0, '~(.legion | docs/solutions)', @@ and index lines dropped): 890278d4f5b253ac1b1405ccfc0aa9f94276f8d28d369ca71035efe70b497555 at both heads, the same as at e067b440, where the last full round drove the real surfaces. Bare gates: Stage 1 smoke at e93c81da → `stage 1 e2e: PASS`. CI at e93c81da is queued (see ciAtHead). Earlier: rebase re-check e067b440 → 9c51021b, fingerprint unchanged, Stage 1 PASS.",
   "implementerProof": {
     "verdict": "verified",
     "how": "No code changed since e067b440 (unchanged fingerprint). Earlier rounds verified the implementer's real-surface proofs by re-running them; the record is on #2229's E2E (tester) line."
@@ -14,11 +14,11 @@
   "failed": 0,
   "proof": [
     {
-      "criterion": "Bare gate after a conflict-forced merge: the Stage 1 live proof at the new head",
-      "surface": "pod: the real legion built at 9c51021b, under tmux 3.5a, with Postgres 17",
+      "criterion": "Bare gate after a merge of main: the Stage 1 live proof at the new head",
+      "surface": "pod: the real legion built at e93c81da, under tmux 3.5a, with Postgres 17",
       "command": "LEGION_E2E_PG_DSN=<pod pg> bash scripts/e2e/stage1-skeleton.sh",
       "observed": "`stage 1 e2e: PASS`, including the keeper restart and the check that only the daemon and keeper hold the listening socket",
-      "headSha": "9c51021b0b9dda25f493d0d68b29acd2897c63ee",
+      "headSha": "e93c81da7e02f60585f4494d16d03c77054a9598",
       "negativeControl": "the run's own first check: a DSN to a port with no Postgres is refused, naming the host and not the password"
     },
     {
@@ -38,6 +38,6 @@
       "negativeControl": "A1b's deterministic control: HoldPort mutated to release before Start fails TestHeldPortStaysHeldUntilItsProcessServes"
     }
   ],
-  "ciAtHead": "9c51021b at 04:23Z: Tests 40448506200, Legion Envoy and Contracts 40448506142, Docs 40448506218 and Worker Image 40448506123 are queued or pending. Retro's head 36a2d2c6's runs were cancelled by this push. e067b440, read job by job: every job success (Tests; Docs; Worker Image; every Legion Envoy and Contracts job, envoy-smoke, dispatch, dispatch-memory, dispatch-multiprocess, envoy-go, envoy-go-race, envoy-infra-go and envoy-e2e-local included). The reviewer and merger must read every job at 9c51021b.",
+  "ciAtHead": "e93c81da at 04:43Z: Tests 40449990997, Legion Envoy and Contracts 40449991030, Docs 40449991143 and Worker Image 40449990948 are queued or pending. 9c51021b's runs were cancelled by this push. e067b440, read job by job: every job success, envoy-smoke and dispatch included. The reviewer and merger must read every job at e93c81da.",
   "devbox": "Unchanged since the last round: at 46502a84, stage2 PASS (23/23, restart-readopts included) and claude-backend PASS (9/9). stage3 has reached no restart checkpoint in four runs, each failing for a cause outside this PR, and a re-run waits for a quiet Actions queue. stage3-4b13b and dispatch-user-turns take only the gateway route and are not run."
 }
