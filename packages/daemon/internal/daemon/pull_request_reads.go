@@ -179,13 +179,21 @@ func (w *workflowRuntime) readUnrecordedPullRequests(ctx context.Context) {
 		}
 		return
 	}
-	// Only the opened facts this pass found declined again are kept, so the set holds no pull
-	// request that has gone; a pass cut short keeps every one it did not reach.
-	declined, complete := map[string]bool{}, false
+	// The set keeps, by issue, the opened this pass found declined again, so it holds no pull
+	// request that has gone. An issue this pass did not read - its list failed, or GitHub's rate
+	// limit or the end of ctx cut the pass short before it - keeps what the last pass learned.
+	declined, complete := map[string]string{}, false
+	keep := func(issue string) {
+		if seen, ok := w.unrecordedOpened[issue]; ok {
+			declined[issue] = seen
+		}
+	}
 	defer func() {
 		if !complete {
-			for seen := range w.unrecordedOpened {
-				declined[seen] = true
+			for issue := range w.unrecordedOpened {
+				if _, read := declined[issue]; !read {
+					keep(issue)
+				}
 			}
 		}
 		w.unrecordedOpened = declined
@@ -209,6 +217,7 @@ func (w *workflowRuntime) readUnrecordedPullRequests(ctx context.Context) {
 				return
 			}
 			w.log.Error("list the open pull requests on an issue's branch; a later pass looks again", attributes...)
+			keep(issue.Key)
 			continue
 		}
 		if !found {
@@ -216,8 +225,8 @@ func (w *workflowRuntime) readUnrecordedPullRequests(ctx context.Context) {
 		}
 		prior, repo := recorded[issue.Key], w.heardSpelling(issue.GitHubRepo)
 		seen := fmt.Sprintf("%s#%d@%s:%s:%d:%s", repo, pull.Number, pull.Head.SHA, pull.UpdatedAt.Format(time.RFC3339Nano), issue.Generation, recordState(prior))
-		if w.unrecordedOpened[seen] {
-			declined[seen] = true
+		if w.unrecordedOpened[issue.Key] == seen {
+			declined[issue.Key] = seen
 			continue
 		}
 		fact := intake.PullRequestOpened{Repo: repo, Number: pull.Number, Branch: branch, HeadSHA: pull.Head.SHA, Body: pull.Body,
@@ -241,7 +250,7 @@ func (w *workflowRuntime) readUnrecordedPullRequests(ctx context.Context) {
 		if after == nil || after.State != record.PullRequestOpen || after.Number != pull.Number {
 			w.log.Info("workflow: the workflow did not record the open pull request; it is applied again once GitHub's pull request, the issue's generation or its record changes",
 				"repo", repo, "pullRequest", pull.Number, "issue", issue.Key)
-			declined[seen] = true
+			declined[issue.Key] = seen
 		}
 	}
 	complete = true
@@ -270,10 +279,12 @@ func (w *workflowRuntime) heardSpelling(repo string) string {
 	return repo
 }
 
-// openPullRequestOn is the open pull request of repo whose head is branch in repo itself (GET
+// openPullRequestOn is the open pull request of repo on branch (GET
 // /pulls?head=<owner>:<branch>&state=open), and whether there is one. The list's filter is not
-// taken on trust: only a pull request whose head is branch counts. The workflow keeps one pull
-// request per branch and assumes one is open at a time, so of two it takes the first GitHub lists.
+// taken on trust: a listed pull request counts only when its head.ref is branch, the same identity
+// the webhook path reads (intake's decodePullRequest takes head_ref alone), whichever repository
+// the head lives in. The workflow keeps one pull request per branch and assumes one is open at a
+// time, so of two it takes the first GitHub lists.
 func (w *workflowRuntime) openPullRequestOn(ctx context.Context, repo, branch string) (githubPullRequest, bool, error) {
 	repository, err := ghrepo.Parse("the issue's repository", repo)
 	if err != nil {

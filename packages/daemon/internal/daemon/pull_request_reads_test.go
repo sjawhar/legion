@@ -223,6 +223,7 @@ func TestHandoffPushTakesOnlyAComparisonThatProvesTheCodeUnchanged(t *testing.T)
 		{"code changed", `{"status":"ahead","files":[{"filename":"src/widget.go"}]}`, false},
 		{"another issue's handoffs", `{"status":"ahead","files":[{"filename":".legion/CAPTURE-2/review.json"}]}`, false},
 		{"no files", `{"status":"ahead","files":[]}`, false},
+		{"no file list", `{"status":"ahead"}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -276,13 +277,7 @@ func TestAFailedComparisonStillReadsThePullRequest(t *testing.T) {
 func TestAnOpenedTheWorkflowDoesNotRecordIsAppliedOnceWhileNothingChanges(t *testing.T) {
 	opened := time.Date(2026, 10, 26, 19, 30, 0, 0, time.UTC)
 	pool := isolatedOutboxPool(t)
-	seedUnrecorded(t, pool, "handoff")
-	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		return record.NewStore().PutPullRequest(context.Background(), tx, record.PullRequest{State: record.PullRequestClosed, Issue: "CAPTURE-1", Repo: "acme/widgets",
-			Number: 86, Branch: "legion/CAPTURE-1", HeadSHA: "handoff", HeadUpdatedAt: opened.Add(time.Hour), Failing: []string{}})
-	}); err != nil {
-		t.Fatalf("seed the closed pull request: %v", err)
-	}
+	seedDeclinedOpened(t, pool, opened)
 	var logs syncBuffer
 	var listed atomic.Int32
 	w := requiredRuntime(pool, pullRequestStandIn(t, "handoff", opened, "", &listed).URL, slog.New(slog.NewTextHandler(&logs, nil)))
@@ -308,6 +303,57 @@ func TestAnOpenedTheWorkflowDoesNotRecordIsAppliedOnceWhileNothingChanges(t *tes
 	}
 	if got := headReads(t, pool, "opened-read"); got != 2 {
 		t.Fatalf("the pass applied %d opened facts in all, want 2", got)
+	}
+}
+
+// seedDeclinedOpened records CAPTURE-1 in implementing with its implementer's handoff and its pull
+// request 86 closed at a clock an hour after opened, so an opened of 86 at opened is late and the
+// workflow declines it.
+func seedDeclinedOpened(t *testing.T, pool *pgxpool.Pool, opened time.Time) {
+	t.Helper()
+	seedUnrecorded(t, pool, "handoff")
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		return record.NewStore().PutPullRequest(context.Background(), tx, record.PullRequest{State: record.PullRequestClosed, Issue: "CAPTURE-1", Repo: "acme/widgets",
+			Number: 86, Branch: "legion/CAPTURE-1", HeadSHA: "handoff", HeadUpdatedAt: opened.Add(time.Hour), Failing: []string{}})
+	}); err != nil {
+		t.Fatalf("seed the closed pull request: %v", err)
+	}
+}
+
+// A pass that does not read an issue's branch learns nothing about its declined opened, so it keeps
+// what the pass before it learned: a list GitHub fails for that issue, and a pass GitHub's rate
+// limit cuts short before it reaches the issue, leave the next pass skipping the same opened.
+func TestAPassThatDoesNotReadTheBranchKeepsTheDeclinedOpened(t *testing.T) {
+	opened := time.Date(2026, 10, 26, 19, 30, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name   string
+		status int
+	}{
+		{"a list GitHub fails", http.StatusBadGateway},
+		{"a pass the rate limit cuts short", http.StatusTooManyRequests},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			seedDeclinedOpened(t, pool, opened)
+			var listed, lists atomic.Int32
+			github := pullRequestStandIn(t, "handoff", opened, "", &listed)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/repos/acme/widgets/pulls" && lists.Add(1) == 2 {
+					http.Error(w, `{"message":"failed"}`, tc.status)
+					return
+				}
+				github.Config.Handler.ServeHTTP(w, r)
+			}))
+			t.Cleanup(server.Close)
+			w := requiredRuntime(pool, server.URL, quietLogger())
+			for range 3 {
+				w.readRequiredChecks(context.Background())
+			}
+			if lists.Load() != 3 || headReads(t, pool, "opened-read") != 1 {
+				t.Fatalf("three passes, the second's list failed, listed %d times and applied %d opened facts, want 3 and 1",
+					lists.Load(), headReads(t, pool, "opened-read"))
+			}
+		})
 	}
 }
 
