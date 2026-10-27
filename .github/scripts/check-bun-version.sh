@@ -28,9 +28,9 @@
 #   6. an `env:` naming an `INPUT_*` variable at workflow, job, `container:` or step level — an
 #      action reads its inputs from `INPUT_*`, either way,
 #   7. a job `container:` or `services:` image on `oven/bun` whose tag is not the pinned one,
-#   8. that wrapper missing, or not holding exactly one setup-bun step whose only input is
-#      `bun-version-file: .bun-version` — it is checked for what it is, not only for what other
-#      files are not,
+#   8. that wrapper missing, or not holding exactly one setup-bun step whose inputs are
+#      `bun-version-file: .bun-version` and at most `no-cache`, which selects no Bun version —
+#      it is checked for what it is, not only for what other files are not,
 #   9. a `FROM oven/bun` (case-insensitive) whose tag does not come from `${BUN_VERSION}`, an
 #      `ARG BUN_VERSION` default that disagrees with the pin, or a Dockerfile `RUN` (backslash
 #      continuations joined) that installs Bun,
@@ -41,7 +41,7 @@
 # printed with its file and line; the only non-zero exit is a named problem.
 #
 # Run from anywhere: .github/scripts/check-bun-version.sh
-# CI runs it in the lint job of pr-and-main.yaml, and its tests in that workflow's test job.
+# CI runs it in ci.yaml's lint job, and its tests in ci.yaml's test job.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -336,8 +336,8 @@ for workflow in workflows:
             )
 
 # The wrapper is judged for what it is, not only for what other files are not: a wrapper that is
-# deleted, repointed at a fork, duplicated, or given a second input would otherwise leave every
-# other rule satisfied while CI installed something else.
+# deleted, repointed at a fork, duplicated, or given an input beyond `no-cache` would otherwise
+# leave every other rule satisfied while CI installed something else.
 if not SETUP_ACTION.is_file():
     problems.append(
         f"::error file={SETUP_ACTION}::{SETUP_ACTION} is missing: it is the one place Bun is "
@@ -357,7 +357,9 @@ else:
     line, step = wrapper_setup_steps[0]
     uses = str(step.get("uses"))
     options = step.get("with") if isinstance(step.get("with"), dict) else {}
-    extra = sorted(key for key in options if key != "bun-version-file")
+    # `no-cache` only says whether setup-bun caches the binary it downloads; it names no version,
+    # so the pin holds whatever its value.
+    extra = sorted(key for key in options if key not in {"bun-version-file", "no-cache"})
     if not uses.lower().startswith("oven-sh/setup-bun@"):
         problems.append(
             f"{SETUP_ACTION}:{line}: the wrapper runs {one_line(uses)}, not oven-sh/setup-bun@<ref>"

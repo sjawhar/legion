@@ -10,9 +10,13 @@ description: >-
   in 60 runs against 2 in 60 on the pinned version, same tree, four cores). Raising Bun means
   editing .bun-version and the two Dockerfile ARG BUN_VERSION defaults together.
 
+  Off main the Bun binary cache is neither read nor written, so a pull request run writes no
+  Actions cache entry.
+
 runs:
   using: composite
   steps:
     - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       with:
         bun-version-file: .bun-version
+        no-cache: ${{ github.ref != 'refs/heads/main' }}
