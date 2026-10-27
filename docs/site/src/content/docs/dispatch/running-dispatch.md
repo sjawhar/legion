@@ -58,11 +58,12 @@ handed each server's host name unresolved.
 Dispatch's server creates and updates the `ENVOY_NOTIFICATIONS` stream as the Envoy listener
 does, so give it the listener's `ENVOY_NATS_REPLICAS` and `ENVOY_STREAM_MAX_BYTES`
 ([Running the listener](/legion/dispatch/envoy/#running-the-listener)): it creates the stream and
-its webhook redelivery bucket with that many copies, raises one it finds with fewer, and with no
-byte limit of its own keeps the one the stream has. The copies and the limit stay put only when
-every Envoy program of the deployment carries the same values, so a clustered deployment sets both
-in every listener and in Dispatch's server. Like the listener, it reads the stream again every 30
-seconds and puts back copies and a limit a start with other settings took away
+its webhook redelivery bucket with that many copies, raises one it finds with fewer, raises a
+smaller byte limit, or none, to its own, never lowers either, and with no byte limit of its own
+keeps the one the stream has. The stream holds the most copies and the largest limit any Envoy
+program of the deployment carries, so a clustered deployment sets both alike in every listener and
+in Dispatch's server. Like the listener, it reads the stream again every 30 seconds and raises
+copies and a limit a start with other settings lowered
 ([Keeping the stream](/legion/dispatch/envoy/#keeping-the-stream)).
 
 People sign in through a Cognito sign-in pool or with Google directly by default, and Dispatch

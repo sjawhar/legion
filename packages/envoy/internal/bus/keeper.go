@@ -101,10 +101,11 @@ func (c *Client) awaitKeeper() {
 
 // keepStream puts back what cfg, this binary's stream with the deployment's settings, asks of the
 // stream and a concurrent start or an operator took away. It writes keptStream: the stream as it
-// read it, with copies below cfg's count raised to it, a byte limit other than cfg's set to cfg's
-// when cfg sets one, a missing StreamIDMetadataKey added, the age, the duplicate window and discard
-// set to cfg's (the same in every release, ownedStream), and each of cfg's subjects the stream lacks
-// added unless it captures a role lane or overlaps a deployed subject (keptSubjects). It never
+// read it, with copies below cfg's count raised to it, a byte limit below cfg's, or none, raised to
+// cfg's when cfg sets one, a missing StreamIDMetadataKey added, the age, the duplicate window and
+// discard set to cfg's (the same in every release, ownedStream), and each of cfg's subjects the
+// stream lacks added unless it captures a role lane or overlaps a deployed subject (keptSubjects).
+// It never lowers the copies or the byte limit, so an operator's raise of either stands, and never
 // removes or replaces a subject: only a start does, since two releases with different subject lists
 // would otherwise switch the stream back and forth every period. Its write still carries every
 // other field as it read it, the other subjects included, so a concurrent write that lands between
@@ -136,10 +137,11 @@ func keepStream(js nats.JetStreamContext, cfg *nats.StreamConfig) ([]string, err
 }
 
 // restoredFields names each field kept differs in from deployed, with its old and new value:
-// `replicas 1 -> 3`, `max_bytes -1 -> 2000000`, `max_age 73h0m0s -> 72h0m0s`,
-// `duplicate_window 1m0s -> 72h0m0s`, `discard DiscardOld -> DiscardNew`,
-// `envoy_stream_id added as <id>`, `subjects added notifications.x.>`. kept's subjects are
-// deployed's with the keeper's additions after them (keptSubjects).
+// `replicas 1 -> 3`, `max_bytes -1 -> 2000000` or `max_bytes 1000000 -> 2000000`,
+// `max_age 73h0m0s -> 72h0m0s`, `duplicate_window 1m0s -> 72h0m0s`,
+// `discard DiscardOld -> DiscardNew`, `envoy_stream_id added as <id>`,
+// `subjects added notifications.x.>`. The copies and the byte limit only ever rise (ownedStream).
+// kept's subjects are deployed's with the keeper's additions after them (keptSubjects).
 func restoredFields(deployed, kept *nats.StreamConfig) []string {
 	var restored []string
 	if kept.Replicas != deployed.Replicas {

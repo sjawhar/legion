@@ -44,14 +44,14 @@ type Sender interface {
 // Each send goes on the transport Publish would use (usesCoreTransport), under the same MsgId. An
 // outcome decided before anything was sent is in the channel when PublishAsync returns: a refusal
 // (ErrRefused), or ErrUnavailable. Otherwise the answer comes within publishAcknowledgementTimeout:
-// a JetStream acknowledgement (the JetStream context's PublishAsyncTimeout), or a core publish's own
-// flush, confirmed as PublishCoreTo confirms one (confirmFlushed). A core publish that its own
-// flush cannot confirm because another publish on the connection changed its last error in the
-// meantime is published again alone on the window's connection, which answers for it: once every
-// core flush of the window has returned, and one such republish at a time, so that another of the
-// window's denials cannot land during it and leave it unconfirmed too. A republish costs a round
-// trip of its own, so a batch in which one denial left many sends unconfirmed takes that many
-// round trips more.
+// a JetStream acknowledgement (the JetStream context's PublishAsyncTimeout), ErrNotStored when it
+// names a duplicate with no sequence, or a core publish's own flush, confirmed as PublishCoreTo
+// confirms one (confirmFlushed). A core publish that its own flush cannot confirm because another
+// publish on the connection changed its last error in the meantime is published again alone on the
+// window's connection, which answers for it: once every core flush of the window has returned, and
+// one such republish at a time, so that another of the window's denials cannot land during it and
+// leave it unconfirmed too. A republish costs a round trip of its own, so a batch in which one
+// denial left many sends unconfirmed takes that many round trips more.
 func (c *Client) Window() Sender {
 	w := &window{client: c}
 	w.settled = sync.NewCond(&w.mu)
@@ -203,8 +203,8 @@ func (w *window) sendJetStream(item contracts.Envelope, data []byte) (func() err
 	}
 	return func() error {
 		select {
-		case <-future.Ok():
-			return nil
+		case ack := <-future.Ok():
+			return notStored(ack)
 		case err := <-future.Err():
 			if !w.current() || errors.Is(err, nats.ErrDisconnected) || errors.Is(err, nats.ErrAsyncPublishTimeout) ||
 				errors.Is(err, nats.ErrNoResponders) {

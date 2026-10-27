@@ -134,10 +134,11 @@ owns `ENVOY_NOTIFICATIONS` on whichever server that resolves to, and refuses one
 machine's unless `ENVOY_ALLOW_REMOTE_NATS=1` says the run means it (every deployment sets it). It
 creates and reconciles the stream at the deployment's `ENVOY_NATS_REPLICAS` and
 `ENVOY_STREAM_MAX_BYTES`, two settings table rows (`dispatchStreamOptions`), and the webhook
-redelivery bucket at the first; its client's keeper puts the stream's copies, byte limit and
-`envoy_stream_id` back and raises that bucket every 30 seconds after (`bus.WithKeptBuckets`).
-Both hold only when every Envoy program of the deployment carries the same values, so a clustered
-deployment sets both here and in every envoy-listener; what a start and the keeper do with them is
+redelivery bucket at the first; its client's keeper raises the stream's copies and byte limit back
+to them, never lowering either, puts `envoy_stream_id` back and raises that bucket every 30
+seconds after (`bus.WithKeptBuckets`). The stream holds the most copies and the largest limit any
+Envoy program of the deployment carries, so a clustered deployment sets both alike here and in
+every envoy-listener; what a start and the keeper do with them is
 `packages/envoy/AGENTS.md`'s "Operational notes". A
 present `DISPATCH_SERVER_URL` overrides merged `dispatch.serverUrl`; it must be an absolute `http`
 or `https` URL with no path, and is the exact browser origin

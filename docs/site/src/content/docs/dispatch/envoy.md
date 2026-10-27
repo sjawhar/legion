@@ -254,7 +254,7 @@ verify it as [Running Dispatch](/legion/dispatch/running-dispatch/) shows.
 | `ENVOY_HOST_BRIDGE` | Where the listener reaches a session on its own machine that registered a serve port: one registered through it, or one whose recorded host is the listener's own `ENVOY_MACHINE_ID` (letter case ignored), as a session that stayed on that machine and re-registered through another listener records. Unset, it uses the host the session registered with, then `host.docker.internal`. A session that re-registered through another listener and records another host is reached at that host, else that listener's machine id, never through the bridge. A listener delivers only to the sessions it owns: a session's owner is the listener its stored subscription names (the one it first subscribed through), else the one it last registered through; any other session is its owner's to deliver. |
 | `ENVOY_SUBSCRIBE_ALL_TOPICS` | Set to `1` to have the listener also deliver every topic the stream does not store, such as a team topic, to the sessions on its machine that registered a serve port. Only a NATS user allowed to subscribe to `notifications.>` (a host's own user) may set it; under any other the listener exits at start with an error naming the variable. |
 | `ENVOY_NATS_REPLICAS` | The deployment's replica count, a whole number from 1 to 5; default `1`. The listener creates the `ENVOY_NOTIFICATIONS` stream and its buckets with this many copies and raises one it finds with fewer, at start and every 30 seconds after ([Keeping the stream](#keeping-the-stream)). More than 1 needs a clustered NATS: a single server refuses it, and the listener then exits at start with an error naming the variable. Any other value refuses startup. Give every Envoy program of a deployment the same value: a clustered deployment sets it in every listener and in Dispatch's server. |
-| `ENVOY_STREAM_MAX_BYTES` | The `ENVOY_NOTIFICATIONS` stream's size limit, a positive whole number of bytes. Once the stream holds that much it refuses every new message and keeps every one it holds, which leaves only when it is 72 hours old, and the sender gets an error it can retry: the listener answers a GitHub webhook `503`, which Dispatch's redelivery sweep has GitHub send again (five times, over about half an hour); Dispatch's outbox retries its event; an agent's send or publish fails with `stream ENVOY_NOTIFICATIONS is full`. Size the limit above what the stream takes in 72 hours at its busiest, with room to spare. Unset, the listener creates the stream with no limit and keeps a limit the stream already has; set, it puts its limit back every 30 seconds when it finds another. A limit larger than the NATS server can reserve makes the listener exit at start with an error naming the variable. Give every Envoy program of a deployment the same value: a clustered deployment sets it in every listener and in Dispatch's server. |
+| `ENVOY_STREAM_MAX_BYTES` | The `ENVOY_NOTIFICATIONS` stream's size limit, a positive whole number of bytes. Once the stream holds that much it refuses every new message and keeps every one it holds, which leaves only when it is 72 hours old, and the sender gets an error it can retry: the listener answers a GitHub webhook `503`, which Dispatch's redelivery sweep has GitHub send again (five times, over about half an hour); Dispatch's outbox retries its event; an agent's send or publish fails with `stream ENVOY_NOTIFICATIONS is full`. Size the limit above what the stream takes in 72 hours at its busiest, with room to spare. Unset, the listener creates the stream with no limit and keeps a limit the stream already has; set, it raises a smaller limit, or none, to its own at start and every 30 seconds, and never lowers one ([Keeping the stream](#keeping-the-stream)). A limit larger than the NATS server can reserve makes the listener exit at start with an error naming the variable. Give every Envoy program of a deployment the same value: a clustered deployment sets it in every listener and in Dispatch's server. |
 | `ENVOY_WEBHOOKS` | Which webhook routes to mount, for example `github,slack`. |
 | `ENVOY_GITHUB_WEBHOOK_SECRET` | Required with `github`: the webhook secret. |
 | `ENVOY_REVIEWER_APP_ID` | Required with `github`: the id of the GitHub App that posts reviews. |
@@ -276,21 +276,24 @@ naming the bucket and the variable:
 
 ### Keeping the stream
 
-The copies and the size limit stay where the settings put them only when every Envoy program of
-a deployment carries the same `ENVOY_NATS_REPLICAS` and `ENVOY_STREAM_MAX_BYTES`, so a clustered
-deployment sets both in every listener and in Dispatch's server. A start never writes fewer copies
-than it found, but JetStream's stream update has no compare-and-swap: a start with other settings,
-or none, or another subject list, that reads the stream before another start writes it and writes
-after puts the old subjects, copies, limit and metadata back.
+Every Envoy program of a deployment carries `ENVOY_NATS_REPLICAS` and `ENVOY_STREAM_MAX_BYTES`, so
+a clustered deployment sets both in every listener and in Dispatch's server. A start never writes
+fewer copies or a smaller limit than it found, so an operator's raise of either stands, and
+programs with different values do not fight: the most copies and the largest limit stand. But
+JetStream's stream update has no compare-and-swap: a start with other settings, or none, or
+another subject list, that reads the stream before another start writes it and writes after puts
+the old subjects, copies, limit and metadata back.
 
 So every program that owns the stream, each listener and Dispatch's server, reads it again every
-30 seconds and puts back copies below its `ENVOY_NATS_REPLICAS`, a limit other than its
-`ENVOY_STREAM_MAX_BYTES` (when set), a missing `envoy_stream_id`, and the 72-hour age and
+30 seconds and puts back copies below its `ENVOY_NATS_REPLICAS`, a limit below its
+`ENVOY_STREAM_MAX_BYTES` or none (when set), a missing `envoy_stream_id`, and the 72-hour age and
 duplicate window and the discard policy (the same in every release), and adds back each subject
 its own build carries that the stream lacks, unless it overlaps a subject the stream has or is a
 role lane. It logs a WARN line `envoy nats keeper restored the stream` with, for example,
 `restored="replicas 1 -> 3, max_bytes -1 -> 2000000, envoy_stream_id added as <id>, subjects added notifications.legion.>"`.
-It only adds subjects and never removes or replaces one, so two releases with different subject
+It never lowers the copies or the limit, so raising the limit of a full stream with
+`nats stream edit ENVOY_NOTIFICATIONS --max-bytes=<n>` takes effect at once and stays. It only
+adds subjects and never removes or replaces one, so two releases with different subject
 lists do not switch the stream back and forth, and a subject a concurrent write dropped comes
 back within 30 seconds from the keeper of the release that carries it. A stream that still
 carries a role-lane subject is left to a start, which moves the role lanes off. It also raises
@@ -300,10 +303,17 @@ or `envoy nats keeper could not raise a bucket` and is tried again 30 seconds la
 stops the program.
 
 During a rollout with mixed settings the stream can therefore sit below the setting for up to 30
-seconds after the last start. Two programs with different limits each restore their own every 30
-seconds, which their WARN lines show. To lower the copies or remove the limit, change the setting
-in every program first, then run `nats stream edit <stream> --replicas=<n>` or
-`nats stream edit ENVOY_NOTIFICATIONS --max-bytes=-1`; otherwise the next pass puts it back.
+seconds after the last start. To lower the copies, or to lower or remove the limit, change the
+setting in every program first, then run `nats stream edit <stream> --replicas=<n>` or
+`nats stream edit ENVOY_NOTIFICATIONS --max-bytes=<n>` (`-1` for none); otherwise the next pass
+puts it back.
+
+On a clustered NATS, a message the full stream refused can stay refused after the stream has
+room: the server keeps the refused message's id on the stream's leader for 72 hours, a purge
+notwithstanding, and its sender's retry fails with
+`stream ENVOY_NOTIFICATIONS acknowledged a duplicate of a message it does not hold`. Once the
+stream has room, `nats stream cluster step-down ENVOY_NOTIFICATIONS` moves the stream to a new
+leader, and the next retry stores the message.
 
 ### With Pulumi
 

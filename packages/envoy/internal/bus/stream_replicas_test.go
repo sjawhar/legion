@@ -229,8 +229,10 @@ func TestEnsureKeyValueRaisesAnR1BucketToThreeCopiesChangingNothingElse(t *testi
 	}
 }
 
-// A stream created with a byte limit has it and refuses new messages once full; a later start
-// that sets no limit keeps the deployed one, and one that sets another writes that.
+// A stream created with a byte limit has it and refuses new messages once full. A later start
+// that sets no limit keeps the deployed one, one that sets a larger one raises it to that, and one
+// that sets a smaller one, as a program still set to the old limit after a raise, keeps the larger
+// deployed limit and writes nothing: a start never lowers it.
 func TestTheStreamTakesTheDeploymentsByteLimitAndKeepsADeployedOne(t *testing.T) {
 	cluster, js := startClusterJetStream(t)
 	startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(testStreamMaxBytes))
@@ -247,6 +249,32 @@ func TestTheStreamTakesTheDeploymentsByteLimitAndKeepsADeployedOne(t *testing.T)
 	startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(2*testStreamMaxBytes))
 	if got := testnats.AwaitSettledStream(t, js, Stream).Config.MaxBytes; got != 2*testStreamMaxBytes {
 		t.Fatalf("stream byte limit = %d after a start setting %d, want that", got, 2*testStreamMaxBytes)
+	}
+
+	counting := &countingJetStream{JetStreamContext: js}
+	cfg := parseConnectOptions([]ConnectOption{WithReplicas(3), WithStreamMaxBytes(testStreamMaxBytes)}).streamConfig()
+	if err := ensureStreamWithConfig(counting, &cfg); err != nil {
+		t.Fatalf("start setting %d: %v", testStreamMaxBytes, err)
+	}
+	if writes := counting.written(); len(writes) != 0 {
+		t.Fatalf("a start setting a smaller limit wrote %v, want nothing", writes)
+	}
+	if got := testnats.AwaitSettledStream(t, js, Stream).Config.MaxBytes; got != 2*testStreamMaxBytes {
+		t.Fatalf("stream byte limit = %d after a start setting %d, want the deployed %d", got, testStreamMaxBytes, 2*testStreamMaxBytes)
+	}
+}
+
+// A start that sets a byte limit gives it to a deployed stream with none.
+func TestAStartGivesItsByteLimitToAStreamWithNone(t *testing.T) {
+	cluster, js := startClusterJetStream(t)
+	startOnCluster(t, cluster, WithReplicas(3))
+	if got := testnats.AwaitSettledStream(t, js, Stream).Config.MaxBytes; got > 0 {
+		t.Fatalf("created stream byte limit = %d, want none", got)
+	}
+
+	startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(testStreamMaxBytes))
+	if got := testnats.AwaitSettledStream(t, js, Stream).Config.MaxBytes; got != testStreamMaxBytes {
+		t.Fatalf("stream byte limit = %d after a start setting %d, want that", got, testStreamMaxBytes)
 	}
 }
 

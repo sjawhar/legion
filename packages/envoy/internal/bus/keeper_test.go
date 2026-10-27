@@ -358,6 +358,54 @@ func TestTheKeeperRestoresWhatAnOperatorTookAwayAndKeepsAForeignSubject(t *testi
 	}
 }
 
+// An operator's raise of the byte limit, as of a full stream, stands: the keepers of two programs
+// whose setting is the old limit leave the raised limit as it is over several periods, logging
+// nothing, and a start with that setting writes nothing. Once an operator lowers the limit below
+// the setting, the keeper raises it back to the setting and logs it.
+func TestTheKeeperKeepsAnOperatorsRaiseOfTheByteLimitAndRaisesALowerOne(t *testing.T) {
+	cluster, js := startClusterJetStream(t)
+	logs := captureLogs(t)
+	settings := []ConnectOption{WithReplicas(3), WithStreamMaxBytes(keeperByteLimit), withKeepInterval(testKeepInterval)}
+	startOnCluster(t, cluster, settings...)
+	info := testnats.AwaitSettledStream(t, js, Stream)
+
+	raise := info.Config
+	raise.MaxBytes = 4 * keeperByteLimit
+	if _, err := js.UpdateStream(&raise); err != nil {
+		t.Fatalf("operator raise: %v", err)
+	}
+	raised := testnats.AwaitSettledStream(t, js, Stream).Config
+	if raised.MaxBytes != raise.MaxBytes {
+		t.Fatalf("stream byte limit = %d after the operator's raise, want %d", raised.MaxBytes, raise.MaxBytes)
+	}
+	unchanged := func(info *nats.StreamInfo) bool { return reflect.DeepEqual(info.Config, raised) }
+	heldFor(t, js, Stream, "the operator's raise", 6, unchanged)
+
+	counting := &countingJetStream{JetStreamContext: js}
+	cfg := parseConnectOptions(settings).streamConfig()
+	if err := ensureStreamWithConfig(counting, &cfg); err != nil {
+		t.Fatalf("start with the old limit: %v", err)
+	}
+	if writes := counting.written(); len(writes) != 0 {
+		t.Fatalf("a start with the old limit wrote %v, want nothing", writes)
+	}
+	startOnCluster(t, cluster, settings...)
+	heldFor(t, js, Stream, "the operator's raise", 6, unchanged)
+	if logged := restoredLog(t, logs); logged != "" {
+		t.Fatalf("the keepers restored %q over the operator's raise, want nothing", logged)
+	}
+
+	lower := raised
+	lower.MaxBytes = keeperByteLimit / 2
+	if _, err := js.UpdateStream(&lower); err != nil {
+		t.Fatalf("operator lowering: %v", err)
+	}
+	awaitKept(t, js, Stream, "the byte limit", func(info *nats.StreamInfo) bool { return info.Config.MaxBytes == keeperByteLimit })
+	if want, logged := fmt.Sprintf("max_bytes %d -> %d", lower.MaxBytes, keeperByteLimit), restoredLog(t, logs); !strings.Contains(logged, want) {
+		t.Fatalf("the keeper's lines restored %q, want %q among them", logged, want)
+	}
+}
+
 // The keeper raises a bucket its program names (WithKeptBuckets) back to the deployment's copies
 // after an operator lowered it, changing nothing else about it, and logs the raise. A bucket it
 // does not name stays lowered. A named bucket that does not exist, as one a program opens only

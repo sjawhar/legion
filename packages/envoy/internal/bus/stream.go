@@ -372,9 +372,10 @@ func (r streamReconciliation) log() {
 //     copies than it read, so a program whose setting is lower (an older setting, or one restarted
 //     before the others) leaves a raised stream it reads as it is, though not one raised after its
 //     read (below); lowering is an operator step that needs every program's setting lowered first;
-//   - the byte limit, cfg's when it sets one and the deployed limit otherwise, so a program that
-//     sets none keeps the limit it read (below for one set after its read), and removing one is an
-//     operator step that needs every program's setting removed first;
+//   - the byte limit, the deployed limit or cfg's when that is more, cfg's on a stream with none
+//     and the deployed one when cfg sets none: a start never writes a lower limit than it read, so
+//     an operator's raise stands, and lowering or removing one is an operator step that needs
+//     every program's setting lowered or removed first;
 //   - the metadata, the deployed metadata kept as it is, its StreamIDMetadataKey included; a stream
 //     without that key gets one (identifiedMetadata).
 //
@@ -388,15 +389,16 @@ func (r streamReconciliation) log() {
 // later write wins. A start can therefore lose to a concurrent start with other settings: one that
 // read the stream before this start's write and writes after it puts back the subjects, the
 // copies, the byte limit and the metadata it read. The client this start returns keeps the stream
-// (keepStream): within one keeper period it puts back the copies, the byte limit and
-// StreamIDMetadataKey its settings ask for and the age, the duplicate window and discard, and adds
-// back each of its own subjects the stream lost that overlaps none the stream carries, so the race
-// ends where every program's settings agree. That steady state needs every program of
-// a deployment to carry the same ENVOY_NATS_REPLICAS and ENVOY_STREAM_MAX_BYTES: two programs with
-// different byte limits would each restore their own every period. One race shows even with the
-// same settings: nats-server can leave one of two replica changes proposed at once unanswered (seen
-// with v2.10.29, TestTwoStartsRaisingOneStreamAtOnceBothSucceed), so an update whose answer never
-// came succeeds when the stream, read again, needs nothing more from this start (updateStream). A
+// (keepStream): within one keeper period it raises the copies and the byte limit to what its
+// settings ask for where the stream holds less, puts back StreamIDMetadataKey, the age, the
+// duplicate window and discard, and adds back each of its own subjects the stream lost that
+// overlaps none the stream carries, so the race ends at the most copies and the largest byte limit
+// any program asks for. Programs of a deployment with different ENVOY_NATS_REPLICAS or
+// ENVOY_STREAM_MAX_BYTES therefore do not fight over the stream: neither is ever lowered, and the
+// largest stands. One race shows even with the same settings: nats-server can leave one of two
+// replica changes proposed at once unanswered (seen with v2.10.29,
+// TestTwoStartsRaisingOneStreamAtOnceBothSucceed), so an update whose answer never came succeeds
+// when the stream, read again, needs nothing more from this start (updateStream). A
 // stream one start creates first is reconciled by the other, keeping the id it was created with
 // (AddStream answers ErrStreamNameAlreadyInUse, as its config's id differs). Two that both find no
 // id write the same one, derived from what both read.
@@ -460,18 +462,21 @@ func keptStream(info *nats.StreamInfo, cfg *nats.StreamConfig) nats.StreamConfig
 
 // ownedStream is the deployed configuration info describes with every setting this binary owns
 // but the subjects set from cfg, as both a start (reconciledStream) and the keeper (keptStream)
-// write it: the replicas, the deployed count or cfg's when that is more; the byte limit, cfg's when
-// it sets one and the deployed limit otherwise; the age, the duplicate window and discard, cfg's;
-// and the metadata with a StreamIDMetadataKey (identifiedMetadata). The age, the window and discard
-// are compiled into the binary, not deployment settings (streamCfg), and every release that runs a
-// keeper compiles the same three (72 hours, 72 hours, DiscardNew), so the keeper writing them puts
-// back only what an operator changed. A release that changed one would have its keeper and an
-// older release's each put their own value back every period while both run.
+// write it: the replicas, the deployed count or cfg's when that is more; the byte limit, the
+// deployed limit or cfg's when that is more, cfg's on a stream with none and the deployed one when
+// cfg sets none; the age, the duplicate window and discard, cfg's; and the metadata with a
+// StreamIDMetadataKey (identifiedMetadata). Neither the copies nor the byte limit is ever lowered,
+// so an operator's raise of either stands; lowering one is an operator step once every program's
+// setting is lowered. The age, the window and discard are compiled into the binary, not deployment
+// settings (streamCfg), and every release that runs a keeper compiles the same three (72 hours, 72
+// hours, DiscardNew), so the keeper writing them puts back only what an operator changed. A release
+// that changed one would have its keeper and an older release's each put their own value back
+// every period while both run.
 func ownedStream(info *nats.StreamInfo, cfg *nats.StreamConfig) nats.StreamConfig {
 	owned := info.Config
 	owned.Replicas = max(info.Config.Replicas, cfg.Replicas)
 	if cfg.MaxBytes > 0 {
-		owned.MaxBytes = cfg.MaxBytes
+		owned.MaxBytes = max(info.Config.MaxBytes, cfg.MaxBytes)
 	}
 	owned.MaxAge = cfg.MaxAge
 	owned.Duplicates = cfg.Duplicates

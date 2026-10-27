@@ -860,19 +860,35 @@
   listener answers GitHub 503 and Dispatch's redelivery sweep has GitHub redeliver it, Dispatch's
   outbox retries the event on its backoff, the CI store settles again on a later tick, and
   `/v1/messages/send` and `/v1/messages/publish` answer 500 naming the error. Unset, the stream is
-  created with no byte limit and a start keeps a deployed limit. The limit stays put only when
-  every program of a deployment carries the same value, a clustered deployment setting it in every
-  envoy-listener and in the Dispatch server: a start that leaves it unset can still put back the
-  limit it read over another's (below), and programs with different limits each restore their own
-  every 30 seconds. Removing a limit is an operator step that needs every program's setting
-  removed first (`nats stream edit ENVOY_NOTIFICATIONS --max-bytes=-1`). 0, a negative number or a
+  created with no byte limit and a start keeps a deployed limit. Neither a start nor the keeper
+  (below) ever lowers a deployed limit, as for the copies: each raises a smaller limit, or none, to
+  its setting and keeps a larger one, so an operator's raise of a full stream
+  (`nats stream edit ENVOY_NOTIFICATIONS --max-bytes=<n>`) stands, and programs with different
+  limits do not fight over the stream: the largest stands. A concurrent start can still put back
+  the smaller limit it read over another's (below) until that program's keeper raises it again.
+  Lowering or removing a limit is an operator step that needs every program's setting lowered or
+  removed first (`--max-bytes=<n>`, or `--max-bytes=-1` for none). 0, a negative number or a
   non-integer is refused at load naming the variable, and a limit above what the server can
   reserve is refused at create or update, the start then stopping with an error naming
   `ENVOY_STREAM_MAX_BYTES=<n>` (INFRA-546).
+- A JetStream publish the server acknowledges as a duplicate with no sequence now fails with
+  `bus.ErrNotStored` (`stream ENVOY_NOTIFICATIONS acknowledged a duplicate of a message it does not
+  hold`), through `Publish`, `PublishReportingDuplicate` and a window's send, where it was taken
+  as published. A clustered nats-server (v2.10.29 among them) records a publish's `Nats-Msg-Id` at
+  sequence 0 before it stores the message and keeps that record when a full stream refuses it, so
+  every retry under the id (a GitHub redelivery, a Dispatch outbox retry) was acknowledged
+  `{"seq":0,"duplicate":true}` though the stream never stored the message. It is not a
+  `bus.ErrRefused` and is retried as `bus.ErrStreamFull` is: the webhook listener answers 503, the
+  outbox backs off, the send routes answer 500. A retry of a message still being stored, answered
+  the same way, gets the message's sequence on a later retry. The record of a refused message stays
+  on the stream's leader for the 72-hour duplicate window, a purge notwithstanding, so that message
+  is stored only once the stream has room and its leader has changed
+  (`nats stream cluster step-down ENVOY_NOTIFICATIONS`) (INFRA-546).
 - Every update of `ENVOY_NOTIFICATIONS` a start sends now starts from the deployed configuration
   and changes only what Envoy owns: the subjects (reconciled as before), the 72-hour age and
   duplicate window, the replicas (the deployed count or the setting, whichever is more), the byte
-  limit (the setting when set, else the deployed one) and `DiscardNew`. Every other deployed field
+  limit (the deployed one or the setting, whichever is more; the setting on a stream with none, the
+  deployed one when unset) and `DiscardNew`. Every other deployed field
   (`MaxMsgsPerSubject`, `MaxMsgSize`, placement, compression and the rest) is kept beside the
   metadata, `envoy_stream_id` included, where an update that changed subjects, age or window wrote
   this binary's configuration over them, its replica count scaling a replicated stream down to the
@@ -883,7 +899,7 @@
   settings, or another subject list, that reads the stream before another start's write and writes
   after it puts the old subjects, copies, byte limit and metadata back. Every 30 seconds each
   program's keeper reads the stream again and puts back copies below its `ENVOY_NATS_REPLICAS`, a
-  byte limit other than its `ENVOY_STREAM_MAX_BYTES` (when set), a missing `envoy_stream_id`, the
+  byte limit below its `ENVOY_STREAM_MAX_BYTES` or none (when set), a missing `envoy_stream_id`, the
   72-hour age and duplicate window and `DiscardNew` (compiled into every release alike, logged as
   `discard DiscardOld -> DiscardNew` when it puts it back), and adds
   back each subject its binary compiles that the stream lacks, unless it overlaps a subject the

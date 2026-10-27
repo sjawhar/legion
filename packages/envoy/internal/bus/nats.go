@@ -109,9 +109,8 @@ func ParseNATSReplicas(raw string) (int, error) {
 // ParseStreamMaxBytes reads StreamMaxBytesEnvVar, the stream's byte limit: unset or blank is 0,
 // which sets no limit (a deployed stream keeps the one it has), and otherwise a positive whole
 // number of bytes. 0, a negative number or a word is refused naming the variable and the value.
-// envoy-listener (config.Load) and envoy-dispatch read the setting through it. Every program of a
-// deployment carries the same value: programs with different limits each put their own back every
-// keeper period (ConnectOwningStream).
+// envoy-listener (config.Load) and envoy-dispatch read the setting through it. A deployed limit is
+// never lowered (WithStreamMaxBytes), so programs with different limits leave the largest.
 func ParseStreamMaxBytes(raw string) (int64, error) {
 	value := strings.TrimSpace(raw)
 	if value == "" {
@@ -135,13 +134,14 @@ func WithReplicas(n int) ConnectOption {
 }
 
 // WithStreamMaxBytes sets the deployment's byte limit, StreamMaxBytesEnvVar, for the stream
-// ConnectOwningStream ensures: the stream's MaxBytes at create and at every reconcile, and put back
-// by the client's keeper when it finds the stream with another (keepStream). A full stream refuses
-// a new publish (ErrStreamFull) and keeps every stored message, which leaves only by age, so the
-// limit must sit above what the stream takes in its age. 0, the default, sets none: the stream is
-// created with no byte limit, and a deployed stream keeps the limit it has (ensureStreamWithConfig).
-// Every program of a deployment carries the same limit: two with different ones each put their own
-// back every period.
+// ConnectOwningStream ensures: the stream's MaxBytes at create, and the limit a deployed stream with
+// a smaller one or none is raised to, at the start (ensureStreamWithConfig) and by the client's
+// keeper after it (keepStream). Neither ever lowers a deployed limit, so an operator's raise of a
+// full stream stands and programs with different limits leave the largest; lowering one is an
+// operator step once every program's setting is lowered. A full stream refuses a new publish
+// (ErrStreamFull) and keeps every stored message, which leaves only by age, so the limit must sit
+// above what the stream takes in its age. 0, the default, sets none: the stream is created with no
+// byte limit, and a deployed stream keeps the limit it has.
 func WithStreamMaxBytes(n int64) ConnectOption {
 	return func(o *connectOpts) { o.streamMaxBytes = n }
 }
@@ -930,8 +930,9 @@ var ErrInvalidKey error = refusal("not a key nats.go accepts")
 // holds its byte limit (WithStreamMaxBytes): a full stream refuses new messages rather than drop
 // stored ones (streamCfg). It is not an ErrRefused: the same publish is taken once age has made
 // room or an operator raised the limit, so a caller retries it as any other failure, and the
-// webhook listener answers it 503, which GitHub redelivers. The error still matches nats-server's
-// *nats.APIError.
+// webhook listener answers it 503, which GitHub redelivers. On a clustered stream, a retry under
+// the same MsgId can be acknowledged a duplicate of the refused message instead (ErrNotStored).
+// The error still matches nats-server's *nats.APIError.
 var ErrStreamFull = errors.New("stream " + Stream + " is full")
 
 // jsStreamStoreFailed is nats-server's code for a message the stream did not store
@@ -951,6 +952,29 @@ func streamFull(err error) error {
 		return fmt.Errorf("%w: %w", ErrStreamFull, err)
 	}
 	return err
+}
+
+// ErrNotStored is the error of a JetStream publish the server acknowledged as a duplicate with no
+// sequence: a repeat of a message id the stream holds no message for. A clustered nats-server
+// (v2.10.29 among them) records a message id at sequence 0 before its store runs, and keeps that
+// record when the store refuses the message, as a full stream's does (ErrStreamFull), so every
+// later publish under the id within the duplicate window is acknowledged `{"seq":0,
+// "duplicate":true}` though nothing was stored; a repeat of a message still being stored is
+// acknowledged the same way. It is not an ErrRefused and never a success: a caller retries it as
+// any other failure. A repeat of a message that was in flight gets the stored message's sequence on
+// a later retry. The record of a refused message stays on the stream's leader until the duplicate
+// window has passed, so that message is stored only once the stream has room and its leader has
+// changed (`nats stream cluster step-down ENVOY_NOTIFICATIONS`), whose new leader holds no such
+// record.
+var ErrNotStored = errors.New("stream " + Stream + " acknowledged a duplicate of a message it does not hold")
+
+// notStored is ErrNotStored for ack, a JetStream acknowledgement, when it names a duplicate with no
+// sequence, and nil for one that names the message's sequence.
+func notStored(ack *nats.PubAck) error {
+	if ack.Duplicate && ack.Sequence == 0 {
+		return ErrNotStored
+	}
+	return nil
 }
 
 // maxSubjectBytes bounds a subject the bus publishes on, or a KV call builds from a key. The server
@@ -1014,7 +1038,8 @@ func (c *Client) Publish(item contracts.Envelope) error {
 // True means "the stream already held this MsgId", not "this call published
 // nothing new": the reconnect retry below republishes after a failure that may
 // have landed, so the very publish that put the message on the subject can come
-// back a duplicate.
+// back a duplicate. A duplicate acknowledged with no sequence, of a message the
+// stream does not hold, is ErrNotStored, never true.
 func (c *Client) PublishReportingDuplicate(item contracts.Envelope) (bool, error) {
 	if usesCoreTransport(item.Topic) {
 		return false, c.PublishCore(item)
@@ -1053,6 +1078,9 @@ func (c *Client) publishJetStream(item contracts.Envelope) (bool, error) {
 	}
 	if err != nil {
 		return false, streamFull(c.refused(err, len(data)))
+	}
+	if err := notStored(ack); err != nil {
+		return false, err
 	}
 	return ack.Duplicate, nil
 }
