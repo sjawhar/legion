@@ -252,7 +252,7 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 	if err != nil {
 		return nil, err
 	}
-	js, err := nc.JetStream(nats.MaxWait(10 * time.Second))
+	js, err := nc.JetStream(nats.MaxWait(10*time.Second), nats.PublishAsyncTimeout(publishAcknowledgementTimeout))
 	if err != nil {
 		nc.Close()
 		return nil, err
@@ -737,7 +737,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		js, err := nc.JetStream(nats.MaxWait(10 * time.Second))
+		js, err := nc.JetStream(nats.MaxWait(10*time.Second), nats.PublishAsyncTimeout(publishAcknowledgementTimeout))
 		if err != nil {
 			nc.Close()
 			return err
@@ -903,7 +903,7 @@ func (c *Client) publishJetStream(item contracts.Envelope) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	ctx, cancel := c.publishAcknowledgementClock.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := c.publishAcknowledgementClock.WithTimeout(context.Background(), publishAcknowledgementTimeout)
 	defer cancel()
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return false, err
@@ -945,7 +945,7 @@ func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), publishAcknowledgementTimeout)
 	defer cancel()
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return err

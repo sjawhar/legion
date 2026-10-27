@@ -282,6 +282,16 @@ gate_registered() {
   daemon_state | jq -e --arg issue "$1" --arg artifact "$2" \
     '.issues[$issue].designGate.artifactId == $artifact and .issues[$issue].designGate.currentVersion > 0'
 }
+# wait_for_architect ISSUE waits for a root's architect to register. While its pane runs, its
+# endpoints are checked here. With the design gate armed, the root may already wait on a person
+# (awaiting_person) by the time a proof looks: the daemon suspended the architect at the end of the
+# turn that registered its closed gate, keeping its session, and the pane watcher checked that pane
+# when it launched.
+architect_up_or_awaiting() { issue_worker_live "$1" architect || issue_phase "$1" awaiting_person; }
+wait_for_architect() {
+  until_true 300 "architect on $1 to register, or its root to wait on a person already" architect_up_or_awaiting "$1"
+  if issue_worker_live "$1" architect >/dev/null 2>&1; then assert_claim_endpoints "$1" architect; fi
+}
 # architect_registers_gate ISSUE LABEL waits for a root's architect to register its gate on its
 # own. Nobody prompts it: its first turn is the daemon's catch-up notice, from which it writes the
 # spec (requesting approval when the design gate is armed) and registers the gate. The registration
@@ -290,18 +300,83 @@ gate_registered() {
 architect_registers_gate() {
   local issue=$1 label=$2 artifact
   artifact=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
-  wait_for_worker "$issue" architect
+  wait_for_architect "$issue"
   until_true 300 "$label architect to be given its catch-up notice" notice_delivered "$issue" architect "$(notice_needle catch-up "$issue")"
   until_true 900 "$label architect to register primary artifact $artifact on its own" gate_registered "$issue" "$artifact"
 }
-# drive_gate ISSUE LABEL: the architect registers the gate on its own, then the proof's human
-# approves the registered version and the daemon moves the issue to planning.
+
+# ---- a root waiting on a person (gates.design armed) ----------------------------------------------
+# A root at admitted whose architect registers a closed gate, with no worker running in its tree,
+# enters awaiting_person: legion state shows waitingOn {kind: "gate", gateVersion} with no
+# answeredAt, the root holds no slot (no .slot, absent from .admission.active), and the daemon
+# suspends its architect at the end of that turn, keeping its session. The person's review answers
+# the wait (waitingOn.answeredAt), and the answered root takes the next free slot ahead of roots
+# that never ran: at planning when an approval opened the gate, at admitted with the same architect
+# session resumed when changes were requested. A slot free at the answer is taken in the same
+# transaction, so the answer reads as answeredAt or as the root holding a slot again. Nothing of
+# the root's tree advances until it holds a slot.
+root_awaits_gate() {
+  daemon_state | jq -e --arg issue "$1" '.issues[$issue] as $i
+    | $i.phase == "awaiting_person" and $i.waitingOn.kind == "gate" and ($i.waitingOn.gateVersion // 0) > 0
+      and $i.waitingOn.answeredAt == null and $i.slot == null and (.admission.active | index($issue)) == null'
+}
+root_answered() {
+  daemon_state | jq -e --arg issue "$1" '.issues[$issue] as $i
+    | ($i.phase == "awaiting_person" and $i.waitingOn.answeredAt != null) or ($i.phase != "awaiting_person" and $i.slot != null)'
+}
+root_holds_slot() {
+  daemon_state | jq -e --arg issue "$1" '.issues[$issue] as $i
+    | $i.phase != "awaiting_person" and $i.slot != null and (.admission.active | index($issue)) != null'
+}
+# A timeout in the waits below prints the root and the admission state as legion state shows them.
+awaiting_issue=
+report_awaiting() {
+  note "$awaiting_issue in legion state: $(daemon_state | jq -c --arg issue "$awaiting_issue" '{admission, phase: .issues[$issue].phase,
+    slot: .issues[$issue].slot, waitingOn: .issues[$issue].waitingOn, architect: .issues[$issue].architect.state}')"
+}
+# await_gate_wait ISSUE LABEL: once ISSUE's architect registered its closed gate, the root waits on a
+# person at that gate with no slot, and its architect is suspended once its turn ends (bounded by the
+# turn budget, phase_seconds). The caller's timeout hook is restored afterwards.
+await_gate_wait() {
+  local issue=$1 label=$2 hook=$timeout_hook
+  awaiting_issue=$issue
+  timeout_hook=report_awaiting
+  until_true 120 "$label root $issue to wait on a person at its gate (awaiting_person, waitingOn.kind gate, no slot)" root_awaits_gate "$issue"
+  until_true "$phase_seconds" "$label architect of $issue to be suspended while its root waits on a person" issue_worker_state "$issue" architect suspended
+  timeout_hook=$hook
+  note "$issue waits on a person at gate version $(daemon_state | jq -r --arg issue "$issue" '.issues[$issue].waitingOn.gateVersion') with no admission slot; its architect is suspended"
+}
+# await_root_slot ISSUE LABEL [SECONDS] waits for ISSUE to hold an admission slot again, out of
+# awaiting_person: phase_seconds unless SECONDS says, for a run where the slot comes back only when
+# another root gives its own up.
+await_root_slot() {
+  local issue=$1 label=$2 limit=${3:-$phase_seconds} hook=$timeout_hook
+  awaiting_issue=$issue
+  timeout_hook=report_awaiting
+  until_true "$limit" "$label root $issue to hold an admission slot again" root_holds_slot "$issue"
+  timeout_hook=$hook
+}
+# await_answered_slot ISSUE LABEL [SECONDS]: the person's review answered ISSUE's wait, and the root
+# then holds a slot again (await_root_slot's SECONDS).
+await_answered_slot() {
+  local issue=$1 label=$2 limit=${3:-} hook=$timeout_hook
+  awaiting_issue=$issue
+  timeout_hook=report_awaiting
+  until_true 120 "the person's review to answer $label root $issue (waitingOn.answeredAt, or a slot already back)" root_answered "$issue"
+  timeout_hook=$hook
+  await_root_slot "$issue" "$label" "$limit"
+}
+# drive_gate ISSUE LABEL [SECONDS]: the architect registers the gate on its own and its root waits on
+# a person without a slot; the proof's human approves the registered version, the root takes a slot
+# back (await_answered_slot's SECONDS), and the daemon moves it to planning.
 drive_gate() {
-  local issue=$1 label=$2
+  local issue=$1 label=$2 limit=${3:-}
   architect_registers_gate "$issue" "$label"
+  await_gate_wait "$issue" "$label"
   gate_artifact=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.artifactId')
   gate_version=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.currentVersion')
   dispatch_human POST "artifacts/$gate_artifact/reviews" '{"state":"approved"}' >/dev/null
+  await_answered_slot "$issue" "$label" "$limit"
   wait_for_phase "$issue" planning
   wait_for_worker "$issue" planner
 }
@@ -584,7 +659,7 @@ merge_when_clean_read() {
         autoMergeRequest { enabledAt mergeMethod } mergeQueueEntry { position state } } } }' \
     --jq '.data.repository.pullRequest | .state, .mergeStateStatus, .headRefOid, .headRefName, (.mergeCommit.oid // ""),
       (.autoMergeRequest.enabledAt // ""), (.autoMergeRequest.mergeMethod // ""), (.mergeQueueEntry.position // ""), (.mergeQueueEntry.state // "")' || true)
-  pull_request_state= pull_request_merge_state= pull_request_head= pull_request_head_ref= pull_request_merge_commit= pull_request_armed=
+  pull_request_state='' pull_request_merge_state='' pull_request_head='' pull_request_head_ref='' pull_request_merge_commit='' pull_request_armed=''
   [ "${#fields[@]}" -eq 9 ] || return 0
   pull_request_state=${fields[0]} pull_request_merge_state=${fields[1]} pull_request_head=${fields[2]}
   pull_request_head_ref=${fields[3]} pull_request_merge_commit=${fields[4]}
@@ -597,7 +672,7 @@ merge_when_clean() {
   local bound=${MERGE_WHEN_CLEAN_BOUND:-300} poll=${MERGE_WHEN_CLEAN_POLL:-0.5}
   local started=$SECONDS beat=$SECONDS polls=0 armed="" flag delete_branch=""
   for flag in "$@"; do [ "$flag" != --delete-branch ] || delete_branch=1; done
-  merge_when_clean_by= merge_when_clean_commit=
+  merge_when_clean_by='' merge_when_clean_commit=''
   note "waiting up to ${bound}s for $repo_name#$pr to merge: merged, enqueued or auto-merge armed is left to land; the proof human merges by hand only once it reads CLEAN with nothing armed"
   while ((SECONDS - started < bound)); do
     polls=$((polls + 1))

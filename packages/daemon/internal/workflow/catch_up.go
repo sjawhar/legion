@@ -58,14 +58,12 @@ func (e *Engine) claimReady(ctx context.Context, tx pgx.Tx, fact intake.ClaimRea
 // catchUp is root's tree as the record holds it: whether a hand-over created the root at this
 // generation, and whether its old root's gate came with it, the design gate policy and the root's
 // gate, and every issue of the tree in key order. With it come the keys, in key order, of the
-// tree's issues waiting for the architect's acceptance now: each in accepting, still in the
-// workflow, with nothing beneath it in the workflow, so that signOff would accept it. No worker
-// runs in accepting, and the one phase-finished notice that moved an issue there is ended
-// undelivered when the architect's claim has failed (the outbox's notice), so a retried architect
-// learns of the wait from its catch-up alone; the reason names these keys so that the catch-up,
-// which a revived architect reads as the tree already running, says what is the architect's own
-// to do. An issue with work still beneath it is not named: its sign-off is refused until that
-// work leaves, and the child's close tells the architect then (child-closed).
+// tree's issues waiting for the architect's acceptance: each in accepting and still in the
+// workflow. No worker runs in accepting, and the one phase-finished notice that moved an issue
+// there is ended undelivered when the architect's claim has failed (the outbox's notice), so a
+// retried architect learns of the wait from its catch-up alone; the reason names these keys so
+// that the catch-up, which a revived architect reads as the tree already running, says what is
+// the architect's own to do.
 func (e *Engine) catchUp(ctx context.Context, tx pgx.Tx, root record.Issue) (record.CatchUp, []string, error) {
 	catchUp := record.CatchUp{Generation: root.Generation, Gate: record.CatchUpGate{Policy: string(e.cfg.DesignGate)}}
 	handed, err := e.store.HandedOverRoot(ctx, tx, root.Key)
@@ -94,7 +92,7 @@ func (e *Engine) catchUp(ctx context.Context, tx pgx.Tx, root record.Issue) (rec
 			listed.Parent = *issue.Parent
 		}
 		catchUp.Issues = append(catchUp.Issues, listed)
-		if issue.Phase == phase.Accepting && InWorkflow(issue) && len(openBeneathIn(issues, issue.Key)) == 0 {
+		if issue.Phase == phase.Accepting && InWorkflow(issue) {
 			awaiting = append(awaiting, issue.Key)
 		}
 	}

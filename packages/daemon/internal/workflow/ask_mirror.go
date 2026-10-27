@@ -24,8 +24,9 @@ import (
 // into awaiting_person themselves: admission's every pass decides that from the record alone
 // (ReconcileAwaiting). A hand-back is an event that gives the person the turn of an ask the root can
 // wait on (withHuman), newer than the turn the row held (handsTurn): a question a session of the
-// root's tree opened, or a reply of such a session that leaves such a question with the person. A
-// person's act still answers a wait it follows the moment it arrives (personAnswered): an answer is
+// root's tree opened, or a reply of such a session that leaves such a question, or an approval
+// request of the root's closed, armed design gate's document, with the person (the gate's
+// registration declares too, gateRegistered). A person's act still answers a wait it follows the moment it arrives (personAnswered): an answer is
 // a durable fact, and the root takes the next free slot on it. When an ask of the wait leaves the
 // person by any other act, the wait moves to what is still with them, and is answered only once
 // nothing is (itemLeft). These decisions read the record beside the row (the gate's document,
@@ -285,8 +286,8 @@ func (e *Engine) closer(ctx context.Context, tx pgx.Tx, root record.Issue, actor
 // is ever restored; a closed approval request never reopens, so the moved-request rule that could
 // give it the agent's turn never applies here.) A person's act personAct names is recorded, and
 // answers the root's wait (personAnswered). A session of the root's own tree leaving a question that
-// tree opened with the person hands it back (declare), unless a newer turn of the ask is already
-// recorded (handsTurn). Any other reply that takes an ask of the root's wait away from the person —
+// tree opened, or an approval request of the root's closed, armed design gate's document, with the
+// person hands it back (declare), unless a newer turn of the ask is already recorded (handsTurn). Any other reply that takes an ask of the root's wait away from the person —
 // a session's progress note handing it to the agent's turn — moves the wait (itemLeft).
 func (e *Engine) dispatchAskReply(ctx context.Context, tx pgx.Tx, fact intake.DispatchAskReply) (intake.Result, error) {
 	root, err := e.recordedRoot(ctx, tx, fact.Key)
@@ -321,6 +322,12 @@ func (e *Engine) dispatchAskReply(ctx context.Context, tx pgx.Tx, fact intake.Di
 			return intake.Result{}, nil
 		}
 		return intake.Result{}, e.declare(ctx, tx, *root, fact.Mark, "question "+fact.Ask+" handed back")
+	case inTree && fact.WaitingOn == "human":
+		gate, err := e.store.Gate(ctx, tx, root.Key)
+		if err != nil || !after.GateRequestOf(gateRequestArtifact(gate, e.armed())) || !change.handsTurn(before) {
+			return intake.Result{}, err
+		}
+		return intake.Result{}, e.declare(ctx, tx, *root, fact.Mark, "approval request "+fact.Ask+" handed back")
 	}
 	return intake.Result{}, e.itemLeft(ctx, tx, *root, before, after, record.AnsweredByTurn, fact.Ask)
 }
@@ -329,8 +336,9 @@ func (e *Engine) dispatchAskReply(ctx context.Context, tx pgx.Tx, fact intake.Di
 // past the version handed to the person, as Dispatch does, from the request's own ask.edited event:
 // whichever request of whichever document it is, bound by any registration or none, and whatever
 // order it arrives in beside the request's other events and the gate's registration. It says
-// nothing of whether the request is open, and records no person's act. A root never waits on an
-// approval request in this release (withHuman), so the move changes no wait.
+// nothing of whether the request is open, and records no person's act. It answers no wait here: the
+// version's own artifact.version event answers a root waiting on its gate (answerAwaitedGate), and
+// a root at admitted finds the request no longer with the person at the next pass (withHuman).
 func (e *Engine) dispatchApprovalMoved(ctx context.Context, tx pgx.Tx, fact intake.DispatchApprovalMoved) (intake.Result, error) {
 	root, err := e.recordedRoot(ctx, tx, fact.Key)
 	if err != nil || root == nil {
