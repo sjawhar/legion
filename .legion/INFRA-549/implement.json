@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-549",
-  "completed": "2026-10-27T08:40:52Z",
+  "completed": "2026-10-27T09:22:38Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2371",
-  "headSha": "22e1c3aef576556ee672cb14e2c97539495ca0f6",
+  "headSha": "f589463471e3f9d0c9dca4a732c9a427c2cb4006",
   "proof": [
+    {
+      "criterion": "Review round 2 (threads PRRT_kwDORFy7ds6wndgk, -gp, -gv): the docs, the depends-on comment and the CHANGELOG say what the code does; the depends-on order holds without a session user.",
+      "surface": "The component under Pulumi mocks and the helm v3.20.2 render of the vendored chart; the README, docs/nats-hub.md and CHANGELOG text read against the code",
+      "command": "cd packages/envoy/infra && go test -count=1 -run 'TestClusteredNatsHub|TestTailnetService' ./gcp/ && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHubChart$' ./gcp/",
+      "observed": "ok (111.8 s) and ok (11.2 s). TestClusteredNatsHubRollsThePodsOnlyForASessionUserOrStoreChange now holds the StatefulSet's depends-on equal with and without a session user; the render asserts the depends-on names the ConfigMap holding nats.conf and auth.conf. README step 5 pins maxFileStoreGb from the pods' max-file-store annotation so the recreated StatefulSet adopts the pods; step 6 raises it as a rolling update; the list of pod-template changes names the store limit. gcp/tailnet_service.go and its test are identical to legion/INFRA-560@origin (6151bc54).",
+      "headSha": "f589463471e3f9d0c9dca4a732c9a427c2cb4006",
+      "negativeControl": "go test -overlay with the depends-on set only when a session user exists -> the roll test fails: 'the StatefulSet is applied after the ConfigMap without a session user'."
+    },
     {
       "criterion": "Review finding 1 (thread PRRT_kwDORFy7ds6wmI-h): a change of the file store's limit must not leave the servers refusing every later reload, a users change's included; users are applied by the reloader and the pods roll for what nats-server cannot reload.",
       "surface": "Three local nats-server v2.15.1 processes with the real reloader and exporter on the helm v3.20.2 render of the component's values, and the component under Pulumi mocks",
@@ -70,7 +78,8 @@
     "packages/envoy/infra/gcp/clusteredhub_kube.go, clusteredhub_kube_test.go, clusteredhub_live_test.go, README.md, docs/nats-hub.md: the StatefulSet carries config.kubernetes.io/depends-on naming the chart ConfigMap <name>-config (round 2)",
     "packages/envoy/infra/gcp/tailnet_service.go, tailnet_service_test.go: advertiser trap and nap (round 3; sent to INFRA-560 to copy byte for byte)",
     "packages/envoy/infra/gcp/clusteredhub_kube.go, clusteredhub_kube_test.go, clusteredhub_live_test.go, clusteredhub_tailnet.go, testdata/clustered-hub-tailnet-pod.golden: store-limit annotation, live phase (f), grace comment (round 3)",
-    "packages/envoy/infra/README.md, docs/nats-hub.md, packages/envoy/CHANGELOG.md: what rolls the pods; the listener build INFRA-557's take-over requires (round 3)"
+    "packages/envoy/infra/README.md, docs/nats-hub.md, packages/envoy/CHANGELOG.md: what rolls the pods; the listener build INFRA-557's take-over requires (round 3)",
+    "packages/envoy/infra/README.md, docs/nats-hub.md, packages/envoy/CHANGELOG.md, gcp/clusteredhub_kube.go (comment), gcp/clusteredhub_kube_test.go, gcp/clusteredhub_live_test.go: review round 2 text fixes and the no-session-user depends-on pin (round 4)"
   ],
   "trickyParts": [
     "Chart children are not registered under Pulumi mocks, so the chart's values are pinned by mock tests and their effect by the natslive helm render; the StatefulSet's Protect transform is tested by calling it directly.",
@@ -89,6 +98,6 @@
   "openQuestions": [
     "The README's disk-growth procedure (orphan-delete the StatefulSet, state delete, recreate) and the PromQL for fewer than three current copies are documented from Kubernetes and exporter behaviour but not exercised on a cluster; the live proof on GKE is dispatch://INFRA-551's."
   ],
-  "round": 3,
-  "reviewRound": 1
+  "round": 4,
+  "reviewRound": 2
 }
