@@ -51,8 +51,9 @@ fi
 # the container runs, since Docker keeps every image a container uses.
 container_image_id="$(docker container inspect -f '{{.Image}}' "$container")"
 pinned_image_id="$(docker image inspect -f '{{.Id}}' "$image" 2>/dev/null || true)"
+running="$(docker container inspect -f '{{.State.Running}}' "$container")"
 if [ "$container_image_id" = "$pinned_image_id" ]; then
-  if [ "$(docker container inspect -f '{{.State.Running}}' "$container")" != "true" ]; then
+  if [ "$running" != "true" ]; then
     docker start "$container" >/dev/null
   fi
   printf '%s\n' "DATABASE_URL=$database_url"
@@ -64,7 +65,7 @@ backup="$container-$(printf '%s' "${container_image_id#sha256:}" | cut -c1-12)"
 dump="${TMPDIR:-/tmp}/$backup.sql"
 steps=()
 # pg_dumpall reads from a running server: a stopped container is started first, as it is.
-if [ "$(docker container inspect -f '{{.State.Running}}' "$container")" != "true" ]; then
+if [ "$running" != "true" ]; then
   steps+=("  $(quote docker start "$container")")
 fi
 steps+=(

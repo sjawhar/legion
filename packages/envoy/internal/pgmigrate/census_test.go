@@ -50,6 +50,27 @@ func TestTouchedTablesFindsEveryStatementFormTheMigrationsUse(t *testing.T) {
 	}
 }
 
+// Postgres 17+ reads a vertical tab as whitespace between words (scan.l's space), so a migration
+// whose words a \v separates touches the same tables as the one written with spaces.
+func TestTouchedTablesReadsVerticalTabAsSpace(t *testing.T) {
+	for _, sql := range []string{
+		"alter table messages add column y integer;",
+		"create index i on events (id);",
+		"insert into notes (body) values ('x');",
+		"update comments c set turn = 'human' where true;",
+		"lock table asks in access exclusive mode;",
+	} {
+		want := TouchedTables(sql)
+		if len(want) == 0 {
+			t.Fatalf("TouchedTables(%q) names nothing", sql)
+		}
+		vertical := strings.ReplaceAll(sql, " ", "\v")
+		if got := TouchedTables(vertical); !slices.Equal(got, want) {
+			t.Errorf("TouchedTables(%q) = %v, want %v", vertical, got, want)
+		}
+	}
+}
+
 // CensusTables does not need the foreign-key catalog for a migration that writes no row, so a
 // pure DDL migration stays readable when its caller cannot query that catalog.
 func TestCensusTablesSkipsForeignKeysForAMigrationThatDoesNotWriteRows(t *testing.T) {

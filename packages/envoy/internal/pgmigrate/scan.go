@@ -183,7 +183,7 @@ func quoteContinues(text string, i int) (int, bool) {
 		case c == '\n' || c == '\r':
 			newline = true
 			i++
-		case c == ' ' || c == '\t' || c == '\f' || c == '\v':
+		case isSQLSpace(c):
 			i++
 		case c == '-' && i+1 < len(text) && text[i+1] == '-':
 			i = endOfLineComment(text, i)
