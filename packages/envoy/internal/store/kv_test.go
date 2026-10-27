@@ -55,6 +55,33 @@ func TestMatch_FiltersByMachineID(t *testing.T) {
 	}
 }
 
+// MatchAll is Match without the machine filter: a sender confirming delivery to every subscribed
+// session must find the ones registered through another machine's listener, by an exact topic or
+// a wildcard alike, and none whose patterns miss the topic.
+func TestMatchAll_ReturnsMatchingSessionsOnEveryMachine(t *testing.T) {
+	r := &Registry{cache: map[string]Interest{
+		"ses_b_exact": {SessionID: "ses_b_exact", MachineID: "machine-B", Topics: []string{"notifications.team.deploy"}},
+		"ses_a_star":  {SessionID: "ses_a_star", MachineID: "machine-A", Topics: []string{"notifications.team.*"}},
+		"ses_a_other": {SessionID: "ses_a_other", MachineID: "machine-A", Topics: []string{"notifications.team.review"}},
+		"ses_b_chev":  {SessionID: "ses_b_chev", MachineID: "machine-B", Topics: []string{"notifications.slack.>", "notifications.>"}},
+		"ses_b_slack": {SessionID: "ses_b_slack", MachineID: "machine-B", Topics: []string{"notifications.slack.>"}},
+	}}
+
+	got := r.MatchAll("notifications.team.deploy")
+	ids := make([]string, len(got))
+	for i, item := range got {
+		ids[i] = item.SessionID
+	}
+	want := []string{"ses_a_star", "ses_b_chev", "ses_b_exact"}
+	if strings.Join(ids, ",") != strings.Join(want, ",") {
+		t.Fatalf("MatchAll(notifications.team.deploy) = %v, want %v in SessionID order", ids, want)
+	}
+
+	if got := r.MatchAll("notifications.agent.ses_x.extra.tokens"); len(got) != 1 || got[0].SessionID != "ses_b_chev" {
+		t.Fatalf("MatchAll of a topic only notifications.> matches = %v, want [ses_b_chev]", got)
+	}
+}
+
 func TestMatch_WildcardPatterns(t *testing.T) {
 	r := &Registry{cache: map[string]Interest{
 		"ses_exact":   {SessionID: "ses_exact", MachineID: "m1", Topics: []string{"notifications.github.sjawhar.legion.pr"}},

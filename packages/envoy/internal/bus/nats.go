@@ -968,13 +968,22 @@ func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 var ErrReceiptTimeout = errors.New("bus: no receipt inside the request window")
 
 // RequestCoreTo delivers item directly to subject and waits for an empty
-// receiver receipt. Agent subjects are captured by the notification stream,
-// whose non-empty JetStream publish acknowledgement is not a receiver receipt.
-// The flush is bounded by the same window as the receipt wait, so the call
-// never outlives timeout by the client's default 10 s flush. A forward the
-// server denied returns at once; one publishConfirmed cannot confirm for
-// another reason still waits, since a receipt proves it was delivered, and
-// returns that reason instead of ErrReceiptTimeout if none arrives.
+// receiver receipt: a reply with no data and no header field. Agent subjects
+// are captured by the notification stream, whose non-empty JetStream publish
+// acknowledgement is not a receiver receipt, and the server's no-responders
+// answer carries a Status header, so neither is one either. The forward
+// carries a Nats-Msg-Id of item's dedupe key and subject, so a sender that
+// forwards one envelope again until a receipt arrives leaves the stream one
+// copy per message and recipient, however many attempts it makes; every
+// attempt still reaches the core subscribers on subject. Because the forward
+// has headers, the server hands its replies to this client with a header
+// block, empty for a receipt, so the receipt is told by its header holding no
+// field rather than by its having none. The flush is bounded by the same
+// window as the receipt wait, so the call never outlives timeout by the
+// client's default 10 s flush. A forward the server denied returns at once;
+// one publishConfirmed cannot confirm for another reason still waits, since a
+// receipt proves it was delivered, and returns that reason instead of
+// ErrReceiptTimeout if none arrives.
 func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout time.Duration) error {
 	if err := checkSubject(subject); err != nil {
 		return err
@@ -996,7 +1005,9 @@ func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout 
 		return err
 	}
 	defer receipt.Unsubscribe()
-	err = c.publishConfirmed(conn, &nats.Msg{Subject: subject, Reply: inbox, Data: data}, deadline, conn.PublishMsg)
+	forward := &nats.Msg{Subject: subject, Reply: inbox, Data: data, Header: nats.Header{}}
+	forward.Header.Set(nats.MsgIdHdr, item.DedupeKey+":"+subject)
+	err = c.publishConfirmed(conn, forward, deadline, conn.PublishMsg)
 	if err != nil && !errors.Is(err, errPublishUnconfirmed) {
 		return err
 	}
@@ -1013,7 +1024,7 @@ func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout 
 			}
 			return err
 		}
-		if len(response.Data) == 0 && response.Header == nil {
+		if len(response.Data) == 0 && len(response.Header) == 0 {
 			return nil
 		}
 	}
