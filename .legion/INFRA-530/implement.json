@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-530",
+  "completed": "2026-10-27T10:26:05Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2307",
+  "round4": {
+    "reason": "the daemon returned the issue to implementing: head a06e8cd6 conflicted with main (GitHub mergeable false, dirty) and ran no checks",
+    "conflict": "forward merge of legion/INFRA-530 (a06e8cd6) with main@origin 1b8d5c13 in 412048cb; the one conflict was packages/envoy/CHANGELOG.md ### Fixed against main's broker-outage entry (#2269), resolved by keeping both entries, this one first",
+    "fingerprint": "a06e8cd6 10032dfcdebbcda1ae265372a0a7b22c89cd249b5f4190fcb8d6c4abec0444c3 -> 412048cb 10032dfcdebbcda1ae265372a0a7b22c89cd249b5f4190fcb8d6c4abec0444c3: unchanged, bare gates only",
+    "mainNearTheChange": "main changed parse.go only in ParseForWrite's doc comment (block-id length), plus proof-editor read-only directives and the version view (ProofDocument.tsx); because the latter touch the past-version view this test drives, the browser test was run again at 412048cb as well as the bare gates",
+    "bareGates": "at 412048cb: go vet ./internal/dispatch/pmdoc/ clean; the four pmdoc tests PASS with the browser engine compared (no skip); packages/dispatch bun run lint and bun run typecheck pass",
+    "retro": "retro already ran twice; its docs/solutions commit c4f03650 is in the head; this handoff adds .legion/INFRA-530/ back, so the next retro removes it again"
+  },
+  "proof": [
+    {
+      "criterion": "rebase re-check after the forward merge with main: the change is unchanged and still holds",
+      "surface": "the pull request's diff against its fork point (jj fingerprint excluding .legion and docs/solutions); Dispatch spec page /issues/<KEY>/spec, live editor and past-version view, in a real browser against the real Go Dispatch server and Postgres 17 + pgvector",
+      "command": "jj diff --from 'fork_point(\"main\"@origin | <head>)' --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum for a06e8cd6 and 412048cb; source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- email-links.e2e.ts",
+      "observed": "fingerprint 10032dfc... at both heads; e2e 2 passed (chromium 5.5s, iphone 4.2s): stored [first@b.test](mailto:first@b.test) and [second@b.test](mailto:second@b.test), hrefs mailto:<addr> in the editor and the version view, window.open received mailto:second@b.test then mailto:first@b.test",
+      "headSha": "412048cbc7bac74489aadaf5c4262b81b57e0eb1",
+      "negativeControl": "at the tests-only commit 5158fd92 (no fix): e2e 2 failed with stored 'Write to [first@b.test](first@b.test) for access.' and window.open received http://127.0.0.1:18777/issues/CORE-1/second@b.test; the merge before resolution held conflict markers in packages/envoy/CHANGELOG.md (conflict=true), after it conflict=false"
+    },
+    {
+      "criterion": "A1 stores: Go reads an email autolink as a mailto: link, as the browser engine does",
+      "surface": "Go pmdoc Parse compared row by row with the browser editor's engine",
+      "command": "cd packages/envoy && go test ./internal/dispatch/pmdoc -run 'TestLinkifyGuardLinksWhatGoldmarkLinks|TestAnEmailAutolinkIsAMailLinkInGoAndTheEngine|TestEmailReadingsThatDifferAreRecorded|TestRenderKeepsStoredMarkdownThatReadsBack' -count=1 -v",
+      "observed": "four tests PASS at 412048cb, engine compared, no skip",
+      "headSha": "412048cbc7bac74489aadaf5c4262b81b57e0eb1",
+      "negativeControl": "at 5158fd92 (no fix) TestAnEmailAutolinkIsAMailLinkInGoAndTheEngine fails on all 7 rows: Go href a@b.test vs engine mailto:a@b.test"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/CHANGELOG.md (conflict resolution only)"
+  ],
+  "deviations": [
+    "The browser test was re-run although the fingerprint is unchanged, because main changed the read-only directive handling of the past-version view the test drives."
+  ]
+}
