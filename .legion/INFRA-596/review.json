@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-596",
+  "completed": "2026-10-27T10:18:11Z",
+  "decision": "changes_requested",
+  "reviewedHead": "ed6e58b80eac8148b789ffe1339a78d690c9e74a",
+  "codeHead": "86599d457b94b92107eabc08b1700865f2613d23",
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection: none. CI head 86599d457b94 (newest pull_request run); compare to ed6e58b8 handoffsOnly true, 2 files. All required checks queued at 10:18Z; a REQUEST_CHANGES does not wait on them.",
+  "thermonuclear": "Pair ran once at ed6e58b8: deep-review CHANGES (2 Medium, 2 Minor), code-quality CHANGES (1 correctness, 11 cleanup). Both independently found finding 1. Deep review ran outbox, deliveryaudit, api (Comment|Mention|Suppress|Document|Claim) Go tests and the two bun suites: all pass; claude-envoy dist matches a fresh build.",
+  "critical": 0,
+  "important": 3,
+  "minor": 3,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/outbox/publisher.go:234,298 / recipients.go:226-236,276-283",
+      "description": "resolveCommentRecipients runs before any send and a failed query sets item.failure, which settle backs off before the event's owner topic is published. On main a failed author lookup ran after the owner topic was sent, so the issue subject still got the event in id order (scanBatch's own comment: an event backed off reaches its issue subject after later events, which the Legion daemon drops as stale). And settle checks item.failure before ctx.Err(), so a stopping process backs these events off (attempts+1, ERROR) where every other event is released (TestAnOutboxStoppedMidBatchMarksTheAnsweredAndReleasesTheRest's contract). The claimed 'backs off only the events that needed it' has no test."
+    },
+    {
+      "severity": "important",
+      "file": "skills/dispatch/SKILL.md:48",
+      "description": "The rewrite dropped '(--route '' on release)' while still recommending --route session:<your id>. Releasing a claim does not clear issues.route, and publishClaimant/primaryAuthorsIssueOf skip whenever a route is set, so a stale self-route sends every later person's comment to the released session and never to the next claimant or the spec's writers."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/outbox/THROUGHPUT.md:45-46",
+      "description": "The before/after load was measured at 4c3eb5caf, before ccc0e3b5 added loadPrimaryDocumentAuthors, and the comment-replies load uses claimed issues only, so the second batch query never runs. The PR body's 'no measurable cost' does not cover the head; re-measure at the corrective head with unclaimed, unrouted issues in the load."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/site/src/content/docs/dispatch/for-agents.md:182 and packages/envoy/CHANGELOG.md:1445-1447",
+      "description": "'A comment that mentions you arrives once, as the mention' and 'in an ask's thread too, so a mentioned session hears the comment once' are false for an ask follower: publishFollowerRoutes never reads suppressed_authors (packages/envoy/AGENTS.md says so), and validateCommentMentions allows mentions on ask replies."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/CHANGELOG.md:1447-1448",
+      "description": "'the reopen that a reply makes in the same transaction tells no session twice' contradicts publisher_comment_recipients_test.go:210-214, where the root author gets both the reopen and the reply; AGENTS.md's 'no new session twice' is accurate."
+    },
+    {
+      "severity": "minor",
+      "file": "PR #2366 body, Change bullet 1",
+      "description": "'A routed issue still reaches only its route' is false: on a routed issue a person's reply also reaches the thread's sessions and the thread document's sessions (publishAuthorRoutes ignores the route; test case 'a routed issue reaches the route's holder and the thread's sessions')."
+    }
+  ],
+  "fastFollow": "Deduplicate the outbox recipient routing: one resolver-computed claim-recipient list sharing publishAuthorRoutes' actor/suppression filter, one keyed-sessions loader, drop publishClaimant's unreachable actor skip and its forced-notify test cases; split report.ts by its banner sections with a first-match class chain.",
+  "contractCensus": "Not required: getComments(issue, artifact?) -> getComments(issue) is a method of the unpublished workspace package @legion/envoy-client, bundled into the plugins; its three callers (dispatch-execute.ts:2216, 3381, 4043) are updated. suppressed_authors keeps its name and type and widens in meaning; its only readers are publishClaimant and publishAuthorRoutes."
+}
