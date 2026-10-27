@@ -1,9 +1,11 @@
 package webhook
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/id"
@@ -20,6 +22,12 @@ func stringValue(value any) string {
 	return text
 }
 
+// slackAnswerBudget bounds a Slack event's publishes, counted from the handler's start. Slack takes
+// an event it has no answer to within 3 s as failed and retries it, so a publish the bus does not
+// answer is answered 503 inside that window, with half a second left for the answer's way back,
+// rather than at the bus's own 5 s bound.
+const slackAnswerBudget = 2500 * time.Millisecond
+
 // SlackHandler returns the HTTP handler for Slack webhook events.
 func SlackHandler(secret string, publisher Publisher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -27,6 +35,8 @@ func SlackHandler(secret string, publisher Publisher) http.HandlerFunc {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
+		ctx, cancel := context.WithTimeout(r.Context(), slackAnswerBudget)
+		defer cancel()
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 		if err != nil {
 			http.Error(w, "invalid body", http.StatusBadRequest)
@@ -53,7 +63,7 @@ func SlackHandler(secret string, publisher Publisher) http.HandlerFunc {
 				if err := item.Validate(); err != nil {
 					continue
 				}
-				if err := publisher.Publish(item); err != nil {
+				if err := publisher.PublishWithin(ctx, item); err != nil {
 					deliveryFailed(w, "slack publish", err)
 					return
 				}
