@@ -243,19 +243,22 @@ type Server struct {
 	log        *logCapture
 	relay      *relay
 	url        string
+	// name is the server_name StartCluster gives a member, "" for a lone server.
+	name string
 
 	mu        sync.Mutex
 	srv       *natsserver.Server
 	jetStream bool
 	monitor   string
-	// name is the name the server gave its clients at its latest start, kept while it is
-	// stopped.
-	name string
 }
 
 // URL is the server's client URL, which stays the same across every Stop and Start: it names the
 // relay's port, not the server's own.
 func (s *Server) URL() string { return s.url }
+
+// Name is the server_name of a cluster member (StartCluster), the name JetStream reports it by in
+// a stream's or a consumer's cluster information. A lone server has none and answers "".
+func (s *Server) Name() string { return s.name }
 
 // MonitorURL is the server's monitoring endpoint, where /varz and /connz are. The monitoring
 // listener is the server's own rather than the relay's, so a Stop and a Start give it a new port
@@ -294,18 +297,9 @@ func (s *Server) detach() *natsserver.Server {
 	return srv
 }
 
-// Name is the name the server gives its clients, which nats.go reports as ConnectedServerName: the
-// server_name its configuration sets, which every start keeps, or else an ID each start makes up.
-// A stopped server keeps the name of its latest start.
-func (s *Server) Name() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.name
-}
-
 // LameDuck shuts the server down as an operator's lame-duck signal does: the server stops
 // accepting clients, hands off the JetStream leaderships it holds, and closes its clients over its
-// configured lame_duck_duration, so they move to the other servers they know rather than all at
+// lame-duck window (rigLameDuck), so they move to the other servers they know rather than all at
 // once. It returns once the server has shut down, keeping its store and URL for a later Start as
 // Stop does. A stopped server does nothing.
 func (s *Server) LameDuck(t testing.TB) {
@@ -434,6 +428,31 @@ func (s *Server) address() (string, error) {
 	return addr.String(), nil
 }
 
+// clusterAddress is where the server listens for routes at this moment, which its route relay
+// dials (StartCluster). A stopped server has none, as address says.
+func (s *Server) clusterAddress() (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.srv == nil {
+		return "", errors.New("the NATS server is stopped")
+	}
+	addr := s.srv.ClusterAddr()
+	if addr == nil {
+		return "", errors.New("the NATS server has no route address")
+	}
+	return addr.String(), nil
+}
+
+// natsServer is the running nats-server, or nil while the server is stopped.
+func (s *Server) natsServer() *natsserver.Server {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.srv
+}
+
+// running reports whether the server is running: started and not stopped since.
+func (s *Server) running() bool { return s.natsServer() != nil }
+
 // hostOnlyConfig is the configuration of a server a test starts with none of its own:
 // nats-server warns on an empty configuration file ("config has no values or is empty"), and the
 // host it names here is the one this rig imposes on every server anyway. The file is never empty,
@@ -504,7 +523,6 @@ func (s *Server) launch(t testing.TB) {
 	defer s.mu.Unlock()
 	s.srv = srv
 	s.jetStream = opts.JetStream
-	s.name = srv.Name()
 	if addr := srv.MonitorAddr(); addr != nil {
 		s.monitor = "http://" + addr.String()
 	}
@@ -807,20 +825,6 @@ func gatePorts(text string) (first, count int, err error) {
 // ephemeral range, relaying to srv, and closes it when the test ends.
 func StartGate(t testing.TB, srv *Server) *Gate {
 	t.Helper()
-	listener := listenInGateBand(t)
-	if listener == nil {
-		return nil
-	}
-	g := &Gate{t: t, server: strings.TrimPrefix(srv.URL(), "nats://"), address: listener.Addr().String()}
-	g.relay = newRelay(listener, g.target)
-	t.Cleanup(g.Close)
-	return g
-}
-
-// listenInGateBand listens on a free port of the band gatePorts chooses from this machine's
-// ephemeral range, and fails the test when it finds none.
-func listenInGateBand(t testing.TB) net.Listener {
-	t.Helper()
 	// An unreadable file is empty text, which gatePorts reads as the fallback range.
 	text, _ := os.ReadFile(ephemeralRangePath)
 	first, count, err := gatePorts(string(text))
@@ -828,13 +832,19 @@ func listenInGateBand(t testing.TB) net.Listener {
 		t.Fatalf("choose a gate port: %v", err)
 		return nil
 	}
+	g := &Gate{t: t, server: strings.TrimPrefix(srv.URL(), "nats://")}
 	var last error
 	for range 100 {
-		listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", first+rand.IntN(count)))
-		if err == nil {
-			return listener
+		address := fmt.Sprintf("127.0.0.1:%d", first+rand.IntN(count))
+		listener, err := net.Listen("tcp", address)
+		if err != nil {
+			last = err
+			continue
 		}
-		last = err
+		g.address = address
+		g.relay = newRelay(listener, g.target)
+		t.Cleanup(g.Close)
+		return g
 	}
 	t.Fatalf("hold a gate port: %v", last)
 	return nil

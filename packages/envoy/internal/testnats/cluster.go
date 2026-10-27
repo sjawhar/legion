@@ -1,113 +1,167 @@
 package testnats
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// StartCluster runs n NATS servers with JetStream that form one cluster, as a hub's servers do,
-// and returns them once every server has a route to every other and JetStream has a meta leader
-// that every server follows. Each is a server this package's start makes, behind a relay of its
-// own, so its URL survives Stop and Start; a stopped server started again rejoins the cluster,
-// because its route port, written into its configuration, is the same at every start. Each has
-// the rig's short lame duck (rigLameDuck), so Server.LameDuck takes seconds.
+// Cluster is n nats-servers in this test process, routed to each other with JetStream clustered
+// across them, as a replicated hub runs. Each member is a Server start made, so Stop and Start work
+// on one member as on a lone server: a restart keeps the member's store, its client URL and its
+// route URL.
+type Cluster struct {
+	Servers []*Server
+}
+
+// StartCluster runs a cluster of n servers with JetStream, each with a store of its own, shut down
+// when the test ends, and returns it once JetStream answers on every member with a meta leader that
+// knows all n (AwaitReady).
 //
-// The route ports come from the band below the machine's ephemeral range that gates take theirs
-// from (gatePorts), where no :0 bind can be handed one while its server is down. The servers
-// advertise no client URLs (no_advertise), so a client reaches only the relay URLs a test gives
-// it and never a server's own port, which a restart changes. The cluster's name is its first
-// route port's, which no other cluster running on the machine can hold at the same time, so two
-// clusters whose ports meet across a restart refuse each other's routes rather than merge.
-func StartCluster(t testing.TB, n int) []*Server {
+// A member's routes, like its clients, go through a relay this process owns: the member listens
+// for routes on a port it picks at each start, and advertises the relay's port, which it holds for
+// the test's life, as its route URL. Every member's configuration names every relay's port as a
+// route, its own included (nats-server ignores a route to itself, and counts the routes to size
+// the JetStream meta group when it bootstraps). So no port is chosen by binding and releasing it,
+// which another process could take in between, and a member restarted on a new route port is still
+// found where its peers' configurations say. Members do not advertise their own client ports, so a
+// client reaches each one only through its relay, and a stopped member's URL refuses as a stopped
+// lone server's does.
+func StartCluster(t testing.TB, n int) *Cluster {
 	t.Helper()
 	if n < 2 {
-		t.Fatalf("a cluster needs at least two servers, asked for %d", n)
-		return nil
+		t.Fatalf("a cluster needs at least 2 servers, not %d", n)
 	}
-	// Every route port is held until all are chosen, so no two servers draw the same one; each is
-	// freed for its server to listen on.
+	members := make([]atomic.Pointer[Server], n)
+	routes := make([]string, n)
 	listeners := make([]net.Listener, n)
-	for i := range listeners {
-		listeners[i] = listenInGateBand(t)
-		if listeners[i] == nil {
-			return nil
+	for i := range n {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("hold member %d's route port: %v", i, err)
+		}
+		listeners[i] = listener
+		routes[i] = listener.Addr().String()
+		member := &members[i]
+		routeRelay := newRelay(listener, func() (string, error) {
+			server := member.Load()
+			if server == nil {
+				return "", errors.New("the NATS server has not started")
+			}
+			return server.clusterAddress()
+		})
+		t.Cleanup(routeRelay.Close)
+	}
+	cluster := &Cluster{Servers: make([]*Server, n)}
+	for i := range n {
+		server := start(t, clusterConfig(i, routes), []string{"-js"})
+		server.name = memberName(i)
+		members[i].Store(server)
+		cluster.Servers[i] = server
+	}
+	cluster.AwaitReady(t)
+	return cluster
+}
+
+// clusterConfig is the configuration of member i of a cluster whose route relays listen at routes.
+func clusterConfig(i int, routes []string) string {
+	urls := make([]string, len(routes))
+	for j, route := range routes {
+		urls[j] = fmt.Sprintf("%q", "nats-route://"+route)
+	}
+	return fmt.Sprintf(`server_name: %q
+jetstream {}
+cluster {
+  name: "envoy-test"
+  listen: "127.0.0.1:-1"
+  advertise: %q
+  no_advertise: true
+  routes: [ %s ]
+}
+`, memberName(i), routes[i], strings.Join(urls, ", "))
+}
+
+// memberName is member i's server_name.
+func memberName(i int) string { return fmt.Sprintf("n%d", i+1) }
+
+// Name is member i's server_name (Server.Name).
+func (c *Cluster) Name(i int) string { return c.Servers[i].Name() }
+
+// Member is the index of the member whose server_name is name, or -1 when none has it.
+func (c *Cluster) Member(name string) int {
+	for i := range c.Servers {
+		if c.Name(i) == name {
+			return i
 		}
 	}
-	routes := make([]string, n)
-	for i, listener := range listeners {
-		routes[i] = listener.Addr().String()
-		_ = listener.Close()
-	}
-	name := "testnats-" + strings.TrimPrefix(routes[0], "127.0.0.1:")
-	servers := make([]*Server, n)
-	for i := range servers {
-		servers[i] = start(t, clusterConfig(name, fmt.Sprintf("%s-s%d", name, i+1), routes[i], routes), []string{"-js"})
-	}
-	awaitCluster(t, servers)
-	return servers
+	return -1
 }
 
-// clusterConfig is the configuration of the cluster server serverName, whose routes listen on
-// listen, in the cluster clusterName whose servers' routes listen on routes.
-func clusterConfig(clusterName, serverName, listen string, routes []string) string {
-	var config strings.Builder
-	fmt.Fprintf(&config, "host: 127.0.0.1\nserver_name: %q\n", serverName)
-	fmt.Fprintf(&config, "cluster {\n  name: %q\n  listen: %q\n  no_advertise: true\n  routes: [\n", clusterName, listen)
-	for _, route := range routes {
-		fmt.Fprintf(&config, "    %q\n", "nats-route://"+route)
+// URLs are the members' client URLs, each the same for the test's life.
+func (c *Cluster) URLs() []string {
+	urls := make([]string, len(c.Servers))
+	for i, server := range c.Servers {
+		urls[i] = server.URL()
 	}
-	config.WriteString("  ]\n}\n")
-	return config.String()
+	return urls
 }
 
-// awaitCluster waits, within connectTimeout, until every server runs, has a route to each of the
-// others and follows a JetStream meta leader one of them is, and fails the test naming what each
-// server lacked when that does not happen. A test that stops and starts a cluster server calls it
-// to wait for the server to rejoin.
-func awaitCluster(t testing.TB, servers []*Server) {
+// URL is every member's client URL in one, comma-separated, as nats.go takes a server list: a
+// client connects to whichever member answers and reconnects to another.
+func (c *Cluster) URL() string { return strings.Join(c.URLs(), ",") }
+
+// AwaitReady waits, within connectTimeout, until one running member leads the JetStream meta group,
+// that leader counts every running member, and no stopped one, as an online peer, every running
+// member is current with it, and JetStream answers an account info request on every running
+// member. A test calls it after it starts a stopped member again, or after it stops one, before it
+// asks JetStream for anything that needs the meta group.
+func (c *Cluster) AwaitReady(t testing.TB) {
 	t.Helper()
 	deadline := time.Now().Add(connectTimeout)
-	for {
-		lacking := clusterLacks(servers)
-		if lacking == "" {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the cluster did not form within %s: %s", connectTimeout, lacking)
-			return
+	var err error
+	for time.Now().Before(deadline) {
+		if err = c.metaReady(); err == nil {
+			break
 		}
 		time.Sleep(retryInterval)
 	}
+	if err != nil {
+		t.Fatalf("the JetStream cluster was not ready within %s: %v", connectTimeout, err)
+	}
+	for _, server := range c.Servers {
+		if server.running() {
+			Connect(t, server.URL()).Close()
+		}
+	}
 }
 
-// clusterLacks names what keeps servers from being one formed cluster, or returns "" when nothing
-// does.
-func clusterLacks(servers []*Server) string {
-	var lacks []string
-	leaders := 0
-	for _, server := range servers {
-		server.mu.Lock()
-		srv := server.srv
-		server.mu.Unlock()
+// metaReady reports why the meta group is not ready yet, or nil when it is.
+func (c *Cluster) metaReady() error {
+	leaders, running := 0, 0
+	var online []string
+	for i, server := range c.Servers {
+		srv := server.natsServer()
 		if srv == nil {
-			lacks = append(lacks, server.Name()+" is stopped")
 			continue
 		}
-		if routes := srv.NumRemotes(); routes != len(servers)-1 {
-			lacks = append(lacks, fmt.Sprintf("%s has routes to %d servers, want %d", server.Name(), routes, len(servers)-1))
-		}
+		running++
 		if !srv.JetStreamIsCurrent() {
-			lacks = append(lacks, server.Name()+" does not follow a current JetStream meta leader")
+			return fmt.Errorf("member %s is not current with the meta group", c.Name(i))
 		}
 		if srv.JetStreamIsLeader() {
 			leaders++
+			online = srv.JetStreamClusterPeers()
 		}
 	}
 	if leaders != 1 {
-		lacks = append(lacks, fmt.Sprintf("%d servers are JetStream meta leader, want 1", leaders))
+		return fmt.Errorf("%d running members lead the meta group, want 1", leaders)
 	}
-	return strings.Join(lacks, "; ")
+	if len(online) != running {
+		return fmt.Errorf("the meta leader counts %d members online (%v), want the %d running", len(online), online, running)
+	}
+	return nil
 }
