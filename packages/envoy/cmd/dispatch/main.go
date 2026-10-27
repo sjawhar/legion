@@ -350,9 +350,10 @@ func main() {
 	//     the settlement resumption (it arms this process's rooms, and docs/resume.go says it
 	//     runs on an interval precisely because a rolling deploy overlaps two processes), the
 	//     delivery live hub and its listener (migration 0107_events_notify.up.sql states that
-	//     purpose), the event stream relay, the document rooms' timers, and the stale-room
-	//     evictor (it closes the rooms resident in this process that the other process's writes
-	//     left behind the durable head, so it has to run wherever a room is resident).
+	//     purpose), the event stream relay, the document rooms' timers, and the room-sync
+	//     listener (it serves the rooms resident in this process - today it closes the ones the
+	//     other process's writes left behind the durable head - and its connection is this
+	//     process's membership, so it has to run in every process).
 	//   - a boot one-shot already serialised by an advisory lock or idempotent: the migrations,
 	//     retirePlainRefreshTokens, restoreDecidedWordings and SeedRepoProjects above.
 	leases, err := database.Pool.Leases()
@@ -389,10 +390,13 @@ func main() {
 	// A settlement a shutdown cut short, here or in the task this one replaces, runs without
 	// anyone opening its document.
 	go documentService.RunSettlementResumption(ctx)
-	// INFRA-66: a document written by the other envoy-dispatch process is announced over
-	// Postgres, and the room this process holds for it closes within that round trip, so its
-	// browsers reconnect and re-sync instead of reading text the store no longer holds.
-	go documentService.RunStaleRoomEviction(ctx)
+	// INFRA-66, INFRA-556: the document rooms' room-sync listener, on a connection of its own
+	// whose name makes this process a member (docs/room_sync.go). A document written by another
+	// envoy-dispatch process is announced over Postgres, and the room this process holds for it
+	// closes within that round trip, so its browsers reconnect and re-sync instead of reading text
+	// the store no longer holds. It stops with ctx, like the loops beside it; the service's NOTIFY
+	// sender stays open until documentService.Shutdown has drained the rooms.
+	go documentService.RunRoomSync(ctx)
 	// LEGION-550: resolves write_suggestions outcomes off the write path, on its own schedule.
 	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, api.SuggestionSweepInterval, leases)
 	// Issues whose spec's task count is not their latest version's - every row the migration that

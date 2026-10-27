@@ -224,22 +224,22 @@ func (p *Pool) Healthy(ctx context.Context) (int, error) {
 	return version, nil
 }
 
-// listenerPoolSize bounds the pool Listener takes its connections from. Three permanent
-// listeners dial through it - the delivery hub, the event stream relay and the stale-room
-// evictor - and each connection is hijacked as soon as it is opened, so it leaves with its
-// caller and the pool holds none between dials: what one bounds is dials in flight, not
-// connections held. A listener redialling while another dials waits that dial out, which is
-// what a loop that dials and then waits for notifications for the life of the process can
-// afford.
+// listenerPoolSize bounds the pool Listener and Dedicated take their connections from. Four
+// permanent connections dial through it - the delivery hub's and the event stream relay's
+// listeners, and the document rooms' room-sync listener and NOTIFY sender - and each connection
+// is hijacked as soon as it is opened, so it leaves with its caller and the pool holds none
+// between dials: what one bounds is dials in flight, not connections held. A caller redialling
+// while another dials waits that dial out, which is what a loop that dials and then waits for
+// notifications for the life of the process can afford, and what the sender's first send after
+// a failure can afford too.
 const listenerPoolSize = 1
 
 // Listener returns one connection of its own for LISTEN, from a one-connection pool opened from the
 // shared pool's configuration and hijacked, so it holds no shared connection. The caller closes it.
-// The delivery hub (api/delivery_live_hub.go), the event stream relay (api/event_stream_relay.go)
-// and the document rooms' stale-room evictor (docs/stale_room.go) each hold one for as long as
-// they wait for notifications, which is the life of the process: a connection of the shared pool
-// held that long would be one fewer for every request, and a LISTEN on a pooled connection would
-// end when the pool recycled it.
+// The delivery hub (api/delivery_live_hub.go) and the event stream relay (api/event_stream_relay.go)
+// each hold one for as long as they wait for notifications, which is the life of the process: a
+// connection of the shared pool held that long would be one fewer for every request, and a LISTEN
+// on a pooled connection would end when the pool recycled it.
 func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 	listen, err := p.separate(&p.listen, listenerPoolSize, "listener")
 	if err != nil {
@@ -250,6 +250,29 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 		return nil, err
 	}
 	return conn.Hijack(), nil
+}
+
+// Dedicated returns one connection of its own, as Listener does, that pg_stat_activity names
+// applicationName. The caller closes it. It is outside the nested-acquire guard
+// (ErrNestedAcquire) for the reason the other separate pools are: a connection that belongs to no
+// shared-pool caller cannot close the cycle the guard prevents, so a request holding one of the
+// shared pool's transactions may use one. The document rooms (docs/room_sync.go) hold two: the
+// room-sync listener, whose name is how every Dispatch process reads which processes are
+// listening, and the NOTIFY sender, which a request inside a transaction sends through.
+func (p *Pool) Dedicated(ctx context.Context, applicationName string) (*pgx.Conn, error) {
+	conn, err := p.Listener(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := conn.Exec(ctx, `select set_config('application_name', $1, false)`, applicationName); err != nil {
+		// Bounded, so a connection that went half-open between its dial and this statement
+		// cannot hold the caller in its Terminate.
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = conn.Close(closeCtx)
+		return nil, fmt.Errorf("name the connection %s: %w", applicationName, err)
+	}
+	return conn, nil
 }
 
 // leasePoolSize bounds the pool a periodic maintenance loop takes its once-overall lease on

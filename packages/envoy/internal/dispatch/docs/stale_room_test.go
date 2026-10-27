@@ -797,7 +797,7 @@ func TestARoomReservedForTheInstanceItReplacedIsTriedAgain(t *testing.T) {
 		t.Fatalf("the close reserved for the first instance = %v, %v, want false and no error", closed, err)
 	}
 	now = now.Add(evictor.wakeIn())
-	evictor.woke(ctx)()
+	evictor.woke(ctx)
 	waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
 	if wake := evictor.wakeIn(); wake != 0 {
 		t.Fatalf("the evictor left a window armed (wakeIn = %s) once it closed the replacement", wake)

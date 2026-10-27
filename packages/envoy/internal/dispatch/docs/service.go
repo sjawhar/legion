@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
@@ -264,6 +265,14 @@ type Service struct {
 	reads *documentReads
 	// hooks is the test hooks' state (testhooks_rooms.go), nil unless Deps.TestHooks is set.
 	hooks *testHooks
+	// processID names this process to the other envoy-dispatch processes on its database: it is
+	// minted once, when the service is built at boot, and is what the room-sync listener's
+	// connection carries as its application_name (roomSyncMembers) and what this process stamps
+	// on what it sends them (room_sync.go).
+	processID string
+	// roomSyncSender is this process's NOTIFY connection to those processes, opened at its first
+	// send and closed by Shutdown (roomSyncSender).
+	roomSyncSender *roomSyncSender
 }
 
 type artifactOwner struct {
@@ -588,7 +597,9 @@ func New(deps Deps) *Service {
 		timers:            make(map[uint64]*time.Timer),
 		unrecordedMarkTTL: unrecordedMarkTTL,
 		reads:             newDocumentReads(documentReadBudget),
+		processID:         uuid.NewString(),
 	}
+	service.roomSyncSender = newRoomSyncSender(service)
 	if deps.TestHooks {
 		service.hooks = newTestHooks()
 	}
@@ -673,6 +684,8 @@ const ShutdownDrainBudget = 9 * time.Second
 // whether it settled or was left to resume; once the caller's deadline has passed it cannot read
 // that back, and its error names those documents.
 func (s *Service) Shutdown(ctx context.Context) error {
+	// Last, whichever way Shutdown returns: closing a room may yet have something to send.
+	defer s.roomSyncSender.close()
 	// loadedRoom is a room as Shutdown found it: the generation its settlement runs at, and
 	// whether an editor was connected.
 	type loadedRoom struct {

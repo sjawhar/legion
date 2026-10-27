@@ -5,22 +5,396 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/pglisten"
 )
 
+// Room sync is how the envoy-dispatch processes on one Postgres learn of each other's document
+// work (INFRA-556). Postgres is the only channel between them (the message bus can be down while
+// the server serves), so each process holds two connections of its own beside its pools:
+//
+//   - one LISTEN connection (roomSync), on every channel below, named in pg_stat_activity as
+//     roomSyncApplicationPrefix and the process's id (Service.processID). Holding it is what
+//     makes a process a member (roomSyncMembers): a process that dies drops it with its socket,
+//     so membership needs no heartbeat and nothing to collect.
+//   - one NOTIFY connection (roomSyncSender), which sends what a process announces outside a
+//     transaction of its own. It is not a connection of the shared pool, so a request holding one
+//     of that pool's transactions sends through it without taking a second (store.ErrNestedAcquire).
+//
+// A document's durable change is still announced inside the transaction that made it
+// (notifyDocumentChanged, appendUpdateTxClass), not through the sender: Postgres delivers it only
+// if that transaction commits, which is the guarantee a listener reading the head relies on.
+
 // documentChangedChannel carries the artifact id of a document whose stored history has just
-// changed, to every envoy-dispatch process. Two processes serve one Postgres (INFRA-66) and do
-// not share a live document: a room resident in one of them never receives the other's updates,
-// so without this a reader sits on text another process replaced until the room leaves at
-// roomIdleTimeout. The process that holds a room for that document closes it instead
-// (staleRoomEvictor), and the browser reconnects and re-syncs from the durable document.
+// changed, to every envoy-dispatch process. Its payload is the bare artifact id, which is what
+// every build that listens on it reads. A process whose room for that document is now behind the
+// stored head closes it (staleRoomEvictor), and the browser reconnects and re-syncs from the
+// durable document.
 const documentChangedChannel = "dispatch_doc_changed"
+
+// The room-sync channels beside documentChangedChannel. Each has a slot in roomSync.handlers;
+// a slot with no handler drops what arrives on its channel.
+const (
+	// documentAwarenessChannel carries a room's awareness (cursors, presence) between processes.
+	documentAwarenessChannel = "dispatch_doc_awareness"
+	// issueOpenChangedChannel carries the key of an issue that was closed or reopened.
+	issueOpenChangedChannel = "dispatch_issue_open_changed"
+	// documentQueryChannel carries one process's question about a room to every other member,
+	// and documentAnswerChannel each member's answer to it.
+	documentQueryChannel  = "dispatch_doc_query"
+	documentAnswerChannel = "dispatch_doc_answer"
+)
+
+// roomSyncApplicationPrefix and roomSyncSenderApplicationPrefix begin the application_name of a
+// process's room-sync LISTEN connection and of its NOTIFY sender; each is followed by the
+// process's id. The membership query matches the listener's prefix, space included, so the
+// sender ("dispatch-room-sync-sender ...") is never counted as a member. Postgres truncates an
+// application_name past 63 bytes, and the sender's, a 36-byte uuid included, is 62.
+const (
+	roomSyncApplicationPrefix       = "dispatch-room-sync "
+	roomSyncSenderApplicationPrefix = "dispatch-room-sync-sender "
+)
+
+// roomSyncMembersStatement reads every process that holds a room-sync LISTEN connection to this
+// database. Every Dispatch process connects as one database role, so each sees the others'
+// application_name.
+const roomSyncMembersStatement = `
+	select application_name from pg_stat_activity
+	where datname = current_database() and application_name like '` + roomSyncApplicationPrefix + `%'
+	order by application_name`
+
+// roomSyncMembers returns the ids (Service.processID) of the processes whose room-sync listener
+// holds a connection right now, this process's own included while its listener does. It reads
+// through q, so a caller inside a transaction passes that transaction and takes no second
+// connection of the pool. A process whose listener is redialing is not a member until its next
+// LISTEN stands.
+func roomSyncMembers(ctx context.Context, q Queryer) ([]string, error) {
+	rows, err := q.Query(ctx, roomSyncMembersStatement)
+	if err != nil {
+		return nil, fmt.Errorf("read the room-sync members: %w", err)
+	}
+	names, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("read the room-sync members: %w", err)
+	}
+	members := make([]string, 0, len(names))
+	for _, name := range names {
+		members = append(members, strings.TrimPrefix(name, roomSyncApplicationPrefix))
+	}
+	return members, nil
+}
+
+// roomSyncHandler is one room-sync channel and what runs its notifications. Every func runs on
+// the channel's own goroutine (roomSyncLane), never on the listener's, so a handler that waits -
+// on a lock, on the database - delays only its own channel's notifications, and the listener
+// keeps reading and pinging its connection.
+type roomSyncHandler struct {
+	channel string
+	// notified runs once per notification on channel, in the order they arrived; nil drops them.
+	notified func(ctx context.Context, payload string)
+	// connected runs after each LISTEN stands, ahead of every notification that connection
+	// carries; nil for a channel with nothing to catch up.
+	connected func(ctx context.Context)
+	// nextWake and woke are a clock on the lane's goroutine: nextWake is how long until the
+	// handler next wants woke run when no notification comes first, zero for never. Both or
+	// neither.
+	nextWake func() time.Duration
+	woke     func(ctx context.Context)
+}
+
+// roomSync is a process's room-sync listener: one pglisten.Listener on one dedicated connection
+// for every room-sync channel. OnNotify only queues a notification on its channel's lane; the
+// handlers run there (handlers).
+type roomSync struct {
+	service *Service
+	// evictor decides documentChangedChannel's notifications: it closes a room another
+	// process's write left behind the stored head.
+	evictor *staleRoomEvictor
+	// dial, listenIdle, pingTimeout and backoff are the listener's (pglisten.Listener); dial is
+	// the store's Dedicated connection named for this process's membership, and a test sets them
+	// otherwise before run.
+	dial                    func(ctx context.Context) (*pgx.Conn, error)
+	listenIdle, pingTimeout time.Duration
+	backoff                 func(attempt int) time.Duration
+	// awareness, issueOpenChanged, query and answer handle the four channels beside
+	// documentChangedChannel (handlers): documentAwarenessChannel, issueOpenChangedChannel,
+	// documentQueryChannel and documentAnswerChannel. Nil drops that channel's notifications, and
+	// nothing sets them yet outside tests.
+	awareness, issueOpenChanged, query, answer func(ctx context.Context, payload string)
+	// listening runs after each LISTEN's connected work has run (connected). Nil outside tests: a
+	// test waits on it before the write whose notification it expects, since a notification sent
+	// before the LISTEN reaches nobody.
+	listening func()
+}
+
+func newRoomSync(service *Service) *roomSync {
+	name := roomSyncApplicationPrefix + service.processID
+	return &roomSync{
+		service: service,
+		evictor: newStaleRoomEvictor(service),
+		dial: func(ctx context.Context) (*pgx.Conn, error) {
+			return service.store.Pool.Dedicated(ctx, name)
+		},
+	}
+}
+
+// RunRoomSync holds this process's room-sync listener until ctx ends, and returns once it and
+// every handler running off it have stopped. It is per-process by design: it serves the rooms
+// resident in this process, and its connection is this process's membership (roomSyncMembers).
+func (s *Service) RunRoomSync(ctx context.Context) {
+	newRoomSync(s).run(ctx)
+}
+
+// handlers is every channel the room-sync listener LISTENs on and what runs each one's
+// notifications: the one place a channel is tied to its handler.
+func (r *roomSync) handlers() []roomSyncHandler {
+	return []roomSyncHandler{
+		{
+			channel:   documentChangedChannel,
+			notified:  r.evictor.notified,
+			connected: r.connected,
+			nextWake:  r.evictor.wakeIn,
+			woke:      r.evictor.woke,
+		},
+		{channel: documentAwarenessChannel, notified: r.awareness},
+		{channel: issueOpenChangedChannel, notified: r.issueOpenChanged},
+		{channel: documentQueryChannel, notified: r.query},
+		{channel: documentAnswerChannel, notified: r.answer},
+	}
+}
+
+// connected is what runs after each LISTEN stands, on documentChangedChannel's lane: every
+// notification sent while the listener had no connection reached nobody and is never sent again,
+// so each room this process has loaded is examined again (staleRoomEvictor.sweep). The test hook
+// runs after it, so a test that waits on the hook waits for the sweep too.
+func (r *roomSync) connected(ctx context.Context) {
+	r.evictor.sweep(ctx)
+	if r.listening != nil {
+		r.listening()
+	}
+}
+
+// run listens until ctx ends, then waits for every lane to return. Each handler with work to do
+// gets a lane of its own; a channel whose handler is all nil gets none, and the listener drops its
+// notifications as they arrive.
+func (r *roomSync) run(ctx context.Context) {
+	ctx = store.WithTransactionTracking(ctx)
+	handlers := r.handlers()
+	channels := make([]string, 0, len(handlers))
+	lanes := make(map[string]*roomSyncLane, len(handlers))
+	var running sync.WaitGroup
+	for _, handler := range handlers {
+		channels = append(channels, handler.channel)
+		if handler.notified == nil && handler.connected == nil && handler.woke == nil {
+			continue
+		}
+		lane := newRoomSyncLane(handler)
+		lanes[handler.channel] = lane
+		running.Add(1)
+		go func() {
+			defer running.Done()
+			lane.run(ctx)
+		}()
+	}
+	listener := &pglisten.Listener{
+		Owner:       "dispatch",
+		Dial:        r.dial,
+		Channels:    channels,
+		ListenIdle:  r.listenIdle,
+		PingTimeout: r.pingTimeout,
+		Backoff:     r.backoff,
+		OnConnected: func() {
+			for _, lane := range lanes {
+				if connected := lane.handler.connected; connected != nil {
+					lane.push(connected)
+				}
+			}
+		},
+		OnNotify: func(channel, payload string) {
+			lane := lanes[channel]
+			if lane == nil || lane.handler.notified == nil {
+				return
+			}
+			notified := lane.handler.notified
+			lane.push(func(ctx context.Context) { notified(ctx, payload) })
+		},
+	}
+	listener.Run(ctx)
+	running.Wait()
+}
+
+// roomSyncLane runs one channel's work in arrival order on a goroutine of its own. Its queue has
+// no bound, so the listener never waits on a handler: it is as long as the notifications the
+// handler has yet to reach.
+type roomSyncLane struct {
+	handler roomSyncHandler
+	mu      sync.Mutex
+	queue   []func(context.Context)
+	// ready holds a token while queue may be non-empty; push never blocks on it.
+	ready chan struct{}
+}
+
+func newRoomSyncLane(handler roomSyncHandler) *roomSyncLane {
+	return &roomSyncLane{handler: handler, ready: make(chan struct{}, 1)}
+}
+
+func (l *roomSyncLane) push(work func(context.Context)) {
+	l.mu.Lock()
+	l.queue = append(l.queue, work)
+	l.mu.Unlock()
+	select {
+	case l.ready <- struct{}{}:
+	default:
+	}
+}
+
+func (l *roomSyncLane) pop() func(context.Context) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.queue) == 0 {
+		return nil
+	}
+	work := l.queue[0]
+	l.queue[0] = nil
+	l.queue = l.queue[1:]
+	return work
+}
+
+// run does the lane's work until ctx ends: everything queued, in order, and the handler's wake
+// whenever its clock comes due with nothing queued.
+func (l *roomSyncLane) run(ctx context.Context) {
+	for ctx.Err() == nil {
+		if work := l.pop(); work != nil {
+			work(ctx)
+			continue
+		}
+		var timer *time.Timer
+		var wake <-chan time.Time
+		if l.handler.nextWake != nil && l.handler.woke != nil {
+			if wait := l.handler.nextWake(); wait > 0 {
+				timer = time.NewTimer(wait)
+				wake = timer.C
+			}
+		}
+		select {
+		case <-ctx.Done():
+		case <-l.ready:
+		case <-wake:
+			l.handler.woke(ctx)
+		}
+		if timer != nil {
+			timer.Stop()
+		}
+	}
+}
+
+// errRoomSyncSenderClosed is a Notify after the document service shut down.
+var errRoomSyncSenderClosed = errors.New("the room-sync sender is closed")
+
+// roomSyncSender is the process's NOTIFY connection: a dedicated connection of its own, opened at
+// the first send and opened again after one fails. Sends go one at a time, in the order they take
+// their turn. It never touches the shared pool, so a request inside one of that pool's
+// transactions can send through it, and what it sends is delivered at once rather than at that
+// transaction's commit.
+type roomSyncSender struct {
+	dial func(ctx context.Context) (*pgx.Conn, error)
+	// turn holds a token while a send or the close owns conn; waiting for it honours the
+	// caller's ctx, which a mutex would not.
+	turn   chan struct{}
+	conn   *pgx.Conn
+	closed bool
+}
+
+// newRoomSyncSender builds service's sender, named for its process; the store is reached at the
+// first send, not here.
+func newRoomSyncSender(service *Service) *roomSyncSender {
+	name := roomSyncSenderApplicationPrefix + service.processID
+	return &roomSyncSender{
+		dial: func(ctx context.Context) (*pgx.Conn, error) {
+			return service.store.Pool.Dedicated(ctx, name)
+		},
+		turn: make(chan struct{}, 1),
+	}
+}
+
+// Notify sends payload on channel through the sender's connection. A send that fails on a
+// connection an earlier send opened is sent once more on a new one: that connection may have
+// died while idle, and the error is the first anyone hears of it. A refusal from Postgres itself
+// (a payload over its limit) keeps the connection and is not retried.
+func (s *roomSyncSender) Notify(ctx context.Context, channel, payload string) error {
+	select {
+	case s.turn <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-s.turn }()
+	if s.closed {
+		return errRoomSyncSenderClosed
+	}
+	reused := s.conn != nil
+	err := s.send(ctx, channel, payload)
+	if err != nil && reused && s.conn == nil && ctx.Err() == nil {
+		// The connection failed rather than Postgres refusing the send (send keeps the
+		// connection for a refusal), so this is the first anyone heard of its death.
+		err = s.send(ctx, channel, payload)
+	}
+	return err
+}
+
+// send is one attempt, on the turn's holder. A connection that fails for any reason but a refusal
+// of this one statement is closed and forgotten, so the next attempt dials.
+func (s *roomSyncSender) send(ctx context.Context, channel, payload string) error {
+	if s.conn == nil {
+		conn, err := s.dial(ctx)
+		if err != nil {
+			return fmt.Errorf("open the room-sync sender's connection: %w", err)
+		}
+		s.conn = conn
+	}
+	if _, err := s.conn.Exec(ctx, `select pg_notify($1, $2)`, channel, payload); err != nil {
+		if !statementRefused(s.conn, err) {
+			s.drop()
+		}
+		return fmt.Errorf("notify %s: %w", channel, err)
+	}
+	return nil
+}
+
+// statementRefused is whether err is Postgres refusing one statement on conn, which stays usable:
+// an ERROR the server sent, on a connection still open. A FATAL or PANIC is the server ending the
+// session (an administrator's pg_terminate_backend, a restart), and anything else is the socket.
+func statementRefused(conn *pgx.Conn, err error) bool {
+	var refused *pgconn.PgError
+	return errors.As(err, &refused) && refused.Severity == "ERROR" && !conn.IsClosed()
+}
+
+// drop closes the connection within pglisten's ping timeout, so a half-open socket's Terminate
+// cannot hold the turn.
+func (s *roomSyncSender) drop() {
+	if s.conn == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), pglisten.DefaultPingTimeout)
+	defer cancel()
+	_ = s.conn.Close(ctx)
+	s.conn = nil
+}
+
+// close closes the connection and refuses every later send. Service.Shutdown calls it once the
+// rooms are drained, the last point the document service sends anything.
+func (s *roomSyncSender) close() {
+	s.turn <- struct{}{}
+	defer func() { <-s.turn }()
+	s.closed = true
+	s.drop()
+}
 
 // notifyDocumentChangedStatement names the channel itself, not a parameter, so the statement
 // reads as what it is; the artifact id is the parameter, because it is a value.
@@ -65,38 +439,29 @@ func notifyDocumentChanged(ctx context.Context, tx pgx.Tx, room string) error {
 const staleRoomEvictInterval = 2 * time.Second
 
 // staleRoomEvictor closes the rooms this process holds for documents another process has written.
-// It holds one LISTEN connection on documentChangedChannel and does its whole decision on that
-// connection's goroutine, and that decision is two reads of max(version), not one: an unlocked
+// It decides documentChangedChannel's notifications on that channel's lane (roomSync.handlers),
+// one goroutine of its own, and that decision is two reads of max(version), not one: an unlocked
 // read through the pool, which holds nothing, and - for a room that read finds behind - a second
 // read under the document's advisory xact lock (roomBehindDurableHead), which waits for whatever
-// writer holds that lock, the other process's append among them. pglisten calls OnNotify inline
-// on its one listener goroutine, so one such wait is every other room's notification waiting too.
+// writer holds that lock, the other process's append among them. Every decision runs on that one
+// lane - each notification, the sweep after each LISTEN, and each wake - so no two decisions of
+// the evictor ever run side by side, and one such wait is every other room's document-changed
+// notification waiting too. The listener's own goroutine waits for none of it: it only queues.
 //
-// This comment used to call the whole decision "a map lookup and one indexed read of max(version)",
-// and that cheapness is what justifies deciding on the listener goroutine at all. The comment was
-// the wrong one of the two: the locked confirmation is real and it stays, because without it a
-// write of this process's own, between its commit and its own cursor advance, reads as another
-// process's and a healthy room is closed mid-write (documentChanged). What the code had wrong was
-// the order - it took that lock before it asked the interval (staleRoomEvictInterval), so a burst
-// on the other process paid for one locked confirmation per notification only to be refused
-// afterwards. The interval is asked first now, so the notifications that reach the lock are the
-// ones an eviction can follow; the eviction itself is a room close, which is rare and is work the
+// The locked confirmation is real and it stays, because without it a write of this process's
+// own, between its commit and its own cursor advance, reads as another process's and a healthy
+// room is closed mid-write (documentChanged). The interval (staleRoomEvictInterval) is asked
+// before it, so a burst on the other process does not pay for one locked confirmation per
+// notification only to be refused afterwards: the notifications that reach the lock are the ones
+// an eviction can follow, and the eviction itself is a room close, which is rare and is work the
 // close must do anyway.
 type staleRoomEvictor struct {
 	service *Service
-	// dial, listenIdle, pingTimeout and backoff are the listener's (pglisten.Listener); dial is
-	// the store's own Listener, and a test sets them otherwise before run.
-	dial                    func(ctx context.Context) (*pgx.Conn, error)
-	listenIdle, pingTimeout time.Duration
-	backoff                 func(attempt int) time.Duration
 	// now is the clock the interval is measured on, the service's; a test moves its own.
 	now func() time.Time
-	// listening runs after each LISTEN succeeds and the sweep that follows it (connected), and
-	// handled after each notification is decided. Nil outside tests: a test waits on listening
-	// before the write whose notification it expects, since a notification sent before the LISTEN
-	// reaches nobody, and reads handled to know that notification was decided, and how.
-	listening func()
-	handled   func(artifactID string, evicted bool)
+	// handled runs after each notification is decided. Nil outside tests: a test reads it to
+	// know that notification was decided, and how.
+	handled func(artifactID string, evicted bool)
 
 	mu sync.Mutex
 	// evicted is when each room was last evicted, holding only the rooms evicted within the
@@ -120,7 +485,6 @@ type staleRoomEvictor struct {
 func newStaleRoomEvictor(service *Service) *staleRoomEvictor {
 	return &staleRoomEvictor{
 		service:  service,
-		dial:     service.store.Pool.Listener,
 		now:      service.now,
 		evicted:  map[string]time.Time{},
 		deferred: map[string]time.Time{},
@@ -128,66 +492,29 @@ func newStaleRoomEvictor(service *Service) *staleRoomEvictor {
 	}
 }
 
-// RunStaleRoomEviction closes each room this process holds whose document another envoy-dispatch
-// process has written, until ctx ends. It is per-process by design: it serves the rooms resident
-// in this process, which are this process's own browsers' (cmd/dispatch's loop list says so).
-func (s *Service) RunStaleRoomEviction(ctx context.Context) {
-	newStaleRoomEvictor(s).run(ctx)
+// sweep re-examines every room this process has loaded; it runs after each LISTEN stands
+// (roomSync.connected). It covers the listener's own window rather than leaving the room behind
+// to its idle timeout - roomIdleTimeout is how long a room stays resident after its last peer
+// leaves, so a room with a browser in it never reaches it. The notifications sent while the
+// listener had no connection - a redial backs off as far as thirty seconds
+// (pglisten.RedialBackoff) - each reached nobody, nothing sends them again, and a document nobody
+// writes again notifies nobody again. service.roomLoads is every room this process has loaded,
+// and nothing here takes an entry out of it: an entry goes when its document is collected and not
+// before (keepInstance), so this ranges over every room loaded since the last collection. An
+// entry whose room has gone costs the interval's lookup and the server's (mayEvict, srv.GetDoc)
+// and no database read, since the head is read only for a room that is still resident.
+func (e *staleRoomEvictor) sweep(ctx context.Context) {
+	e.service.roomLoads.Range(func(room, _ any) bool {
+		e.documentChanged(ctx, room.(string))
+		return true
+	})
 }
 
-// run listens until ctx ends, and covers the listener's own two windows here rather than leaving
-// the room behind to its idle timeout: roomIdleTimeout is how long a room stays resident after
-// its last peer leaves, so a room with a browser in it never reaches it, and the reader of a room
-// left behind would hold text the store replaced for as long as that tab stayed open. The
-// notifications sent while the listener had no connection reach nobody and are never sent again,
-// so every room this process has loaded is re-examined after each LISTEN succeeds (connected);
-// and a notification the interval refused is re-examined when that room's window ends, on this
-// same goroutine, through the wait's deadline (wakeIn, woke).
-func (e *staleRoomEvictor) run(ctx context.Context) {
-	ctx = store.WithTransactionTracking(ctx)
-	listener := &pglisten.Listener{
-		Owner:       "dispatch",
-		Dial:        e.dial,
-		Channels:    []string{documentChangedChannel},
-		ListenIdle:  e.listenIdle,
-		PingTimeout: e.pingTimeout,
-		Backoff:     e.backoff,
-		OnConnected: e.connected(ctx),
-		OnNotify:    e.notified(ctx),
-		NextWake:    e.wakeIn,
-		OnWake:      e.woke(ctx),
-	}
-	listener.Run(ctx)
-}
-
-// connected is the listener's OnConnected: every room this process has loaded, re-examined after
-// each LISTEN stands. It is what covers the notifications sent while the listener had no
-// connection - a redial backs off as far as thirty seconds (pglisten.RedialBackoff) - because
-// each of those reached nobody, nothing sends them again, and a document nobody writes again
-// notifies nobody again. service.roomLoads is every room this process has loaded, and nothing
-// here takes an entry out of it: an entry goes when its document is collected and not before
-// (keepInstance), so this ranges over every room loaded since the last collection. An entry
-// whose room has gone costs the interval's lookup and the server's (mayEvict, srv.GetDoc) and no
-// database read, since the head is read only for a room that is still resident.
-//
-// The test hook runs after the sweep, so a test that waits on it waits for the sweep too.
-func (e *staleRoomEvictor) connected(ctx context.Context) func() {
-	return func() {
-		e.service.roomLoads.Range(func(room, _ any) bool {
-			e.documentChanged(ctx, room.(string))
-			return true
-		})
-		if e.listening != nil {
-			e.listening()
-		}
-	}
-}
-
-// woke is the listener's OnWake: the rooms waiting to be re-examined, re-examined on the
-// listener's own goroutine once their windows have passed. Nothing else would re-examine them -
-// every notification inside the window is refused, the last of a burst is one of those, and a
-// document nobody writes again notifies nobody again - so without this the refusal is a
-// notification dropped.
+// woke is the lane's wake (roomSyncHandler.woke, asked of wakeIn): the rooms waiting to be
+// re-examined, re-examined on the lane once their windows have passed. Nothing else would
+// re-examine them - every notification inside the window is refused, the last of a burst is one
+// of those, and a document nobody writes again notifies nobody again - so without this the
+// refusal is a notification dropped.
 //
 // This is inside the interval's rule, not around it: the rule is the least time between two
 // evictions of one room (staleRoomEvictInterval), and a room re-examined here has waited out
@@ -199,22 +526,18 @@ func (e *staleRoomEvictor) connected(ctx context.Context) func() {
 // window, and armRetry gives it another, further out for each attempt in a row, so the next wake
 // tries it again, and a room that goes on getting no answer is tried once a minute rather than
 // every window for the life of the process (staleRoomRetryBackoffMax).
-func (e *staleRoomEvictor) woke(ctx context.Context) func() {
-	return func() {
-		for _, room := range e.dueRooms() {
-			e.documentChanged(ctx, room)
-		}
+func (e *staleRoomEvictor) woke(ctx context.Context) {
+	for _, room := range e.dueRooms() {
+		e.documentChanged(ctx, room)
 	}
 }
 
-// notified is the listener's OnNotify: each notification's artifact id, decided on the
-// listener's own goroutine.
-func (e *staleRoomEvictor) notified(ctx context.Context) func(channel, artifactID string) {
-	return func(_, artifactID string) {
-		evicted := e.documentChanged(ctx, artifactID)
-		if e.handled != nil {
-			e.handled(artifactID, evicted)
-		}
+// notified is documentChangedChannel's handler: each notification's artifact id, decided on the
+// lane.
+func (e *staleRoomEvictor) notified(ctx context.Context, artifactID string) {
+	evicted := e.documentChanged(ctx, artifactID)
+	if e.handled != nil {
+		e.handled(artifactID, evicted)
 	}
 }
 
@@ -420,11 +743,10 @@ func (e *staleRoomEvictor) mayEvict(artifactID string) bool {
 	return false
 }
 
-// wakeIn is the listener's NextWake: how long until the earliest room waiting to be re-examined
-// may be - one the interval refused, or one armed again after an attempt that reached no verdict
-// - and zero, never, so the listener waits out its idle period, while none waits. The scan is of
-// those rooms, at most one entry per room resident here, on a loop that already spends a round
-// trip per round.
+// wakeIn is the lane's clock (roomSyncHandler.nextWake): how long until the earliest room waiting
+// to be re-examined may be - one the interval refused, or one armed again after an attempt that
+// reached no verdict - and zero, never, while none waits. The scan is of those rooms, at most one
+// entry per room resident here, once each time the lane runs out of queued notifications.
 func (e *staleRoomEvictor) wakeIn() time.Duration {
 	now := e.now()
 	e.mu.Lock()
@@ -500,22 +822,10 @@ func (e *staleRoomEvictor) recordEviction(artifactID string) {
 // process. At the ceiling it costs one wake a minute instead, which is as often as a room
 // nothing is writing to needs looking at.
 //
-// Twice pglisten.DefaultListenIdle, rather than a figure of its own, because the listener's idle
-// period is the other cadence in play: a lone room re-armed at the ceiling asks for a wake past
-// the point where that listener's ping falls due, so the wake costs the connection nothing. The
-// ping does not depend on that. The listener keeps it on the time since its connection last
-// proved a round trip and cuts a wake short where the ping falls due, whatever ended the wait
-// (pglisten.Listener.waitFor, listen) - which is where the invariant has to live, because no
-// ceiling here could carry it: wakeIn returns the minimum over every deferred room, and rooms
-// armed at their own times hold that minimum under the idle period for ever however far out
-// each room's own window is. Three rooms twenty seconds apart, at this ceiling, ask for a wake
-// every twenty seconds between them.
-//
-// Nothing needed this before armRetry, which is worth keeping: the deferred set drained whenever
-// the notifications stopped - every window in it was one a notification opened, and a
-// re-examination that reached a verdict took it out - so a wake implied traffic had just
-// arrived, and traffic is a connection proving itself.
-const staleRoomRetryBackoffMax = 2 * pglisten.DefaultListenIdle
+// The wake is a timer on documentChangedChannel's lane (roomSyncLane.run), not on the listener's
+// goroutine, so it neither cuts short nor stands in for the listener's ping: that ping keeps to
+// the time since the connection last proved a round trip whatever the lane does.
+const staleRoomRetryBackoffMax = time.Minute
 
 // staleRoomRetryBackoff is the wait before the attempt-th re-examination in a row of one room
 // whose attempts keep reaching no verdict (from 1): one staleRoomEvictInterval, doubling to
@@ -541,20 +851,18 @@ func staleRoomRetryBackoff(attempt int) time.Duration {
 //
 // The first window is one staleRoomEvictInterval from now, rather than the window that has just
 // passed: wakeIn asks for the shortest wait there is for a window already behind it, so a room
-// re-armed at that moment would have the listener re-run the whole decision as fast as it loops
-// for as long as whatever failed keeps failing. On the interval, a room that goes on failing is
+// re-armed at that moment would have the lane re-run the whole decision as fast as it loops for
+// as long as whatever failed keeps failing. On the interval, a room that goes on failing is
 // retried as often as a burst's notifications are refused and no oftener. Each attempt in a row
 // after the first is further out than the last (staleRoomRetryBackoff), to a ceiling that bounds
 // one room's retry rate and nothing besides: a room that keeps getting no answer costs one wake a
 // minute instead of one every staleRoomEvictInterval for the life of the process
-// (staleRoomRetryBackoffMax). It carries nothing for the listener's ping, which hangs on the time
-// since that connection last proved a round trip, cuts any wake short where it falls due and
-// fires there whatever ended the wait (pglisten.Listener.waitFor, listen). The count is the
-// room's own and ends at that room's next verdict (reachedVerdict), so the ordinary case - one
-// read that failed, answered at the next window - is armed one interval out every time.
+// (staleRoomRetryBackoffMax). The count is the room's own and ends at that room's next verdict
+// (reachedVerdict), so the ordinary case - one read that failed, answered at the next window - is
+// armed one interval out every time.
 //
-// Through the evictor's one mutex, on the listener's own goroutine, like every other decision
-// here: nothing is armed from a timer or a goroutine of its own.
+// Through the evictor's one mutex, on the lane, like every other decision here: nothing is armed
+// from a timer or a goroutine of its own.
 func (e *staleRoomEvictor) armRetry(artifactID string) {
 	now := e.now()
 	e.mu.Lock()
