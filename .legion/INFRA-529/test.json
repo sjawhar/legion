@@ -2,24 +2,38 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-529",
-  "completed": "2026-10-27T01:41:00Z",
-  "testedHead": "f6ed29f12c62aa27770790fe8c630e09ea47c86d",
-  "codeHead": "0f615248199dd925883a649fcf7e8e3c7a108546",
+  "completed": "2026-10-27T02:06:00Z",
+  "round": 2,
+  "testedHead": "1ade3f306d31505b7e4246191f298de6ee6f11e8",
+  "codeHead": "f213a0a6b23ee6552bc124c9ba28363d8cd8f292",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's command on the tester lane (port 28777, database dispatch_infra529_tester): cd packages/dispatch && . /legion/harness/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts unknown-directive.e2e.ts --project chromium -> '✓ e2e/unknown-directive.e2e.ts:19:1 … (2.5s)', the comment, message and ask cards render formatted with the fence lines as text, at f6ed29f12c62."
+    "how": "Re-ran the implementer's command on the tester lane (port 28777, database dispatch_infra529_tester) at 1ade3f306d31: cd packages/dispatch && . /legion/harness/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts unknown-directive.e2e.ts --project chromium -> '✓ 1 … :19:1 (4.0s)', '✓ 2 … :52:1 Conversation keeps every line of a typed block whose content breaks its rule, drawn as text (3.0s)', '2 passed (18.6s)'."
   },
-  "failed": 1,
-  "failures": [
+  "failed": 0,
+  "failures": [],
+  "proof": [
     {
-      "criterion": "A1 / the change's goal: a displayed body holding a colon-fenced block Dispatch does not know shows its text formatted instead of losing it. The read-only engine must not drop words the base showed.",
-      "evidence": "Browser (Chromium, real Go server + Postgres, tester lane, head f6ed29f12c62): a comment with body 'Lead **bold**\\n\\n::::ask\\nQ?\\n\\n- a\\n\\n:::note\\nx\\n:::\\n::::\\n' shows only 'Lead bold' with its thread expanded; 'Q?', 'a', ':::note', 'x', ':::' are gone and there is no data-markdown-fallback. Cause: the server's ask takes 'paragraph+ bullet_list?'; drawDirective puts the note's fence paragraphs after the list, ProseMirror refuses that content, and Milkdown drops the whole ask (MilkdownError createNodeInParserFail 'Cannot create node for ask', logged, not thrown). The default engine throws 'unknown typed block \"note\"' for the same body, so before this change the card fell back to its raw text and no word was lost. Other inputs with the same mechanism: an unknown directive holding a list or a heading inside an ask (':::note' children are spliced into the ask). Red test, own commit ee272bb6d857: packages/proof-editor/tests/read-only-directives.test.ts 'read-only keeps every line of a typed block whose content a drawn directive would break'; cd packages/proof-editor && bun test tests/read-only-directives.test.ts -> 'Expected to contain: \"Which option?\" Received: \"Lead\"', 14 pass, 1 fail. Related, already in the plan's out-of-scope list: a known ask holding a heading (':::ask\\n# H\\n:::') is dropped the same way in both modes; the plan's note says Milkdown 'does not throw', which is true, but the ask's text is lost, not shown."
+      "criterion": "A1: a comment, message and ask with bold text and a :::note block show the bold formatted and the note's lines as text",
+      "surface": "Dispatch Conversation tab, Chromium, real Go Dispatch server and Postgres 17 + pgvector in the issue pod (tester lane, port 28777, database dispatch_infra529_tester)",
+      "command": "cd packages/dispatch && . /legion/harness/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts unknown-directive.e2e.ts --project chromium",
+      "observed": "✓ 1 [chromium] › e2e/unknown-directive.e2e.ts:19:1 › Conversation renders comment, message and ask bodies holding an unknown container directive as formatted markdown with the fence lines as text (4.0s)",
+      "headSha": "1ade3f306d31505b7e4246191f298de6ee6f11e8",
+      "negativeControl": "Round 1: the same spec on base 7f7edb8de3e3 fails (implementer's run, https://github.com/sjawhar/legion/pull/2303#issuecomment-6431409111); the default (not read-only) engine still throws 'unknown typed block \"note\"' for the A1 body."
+    },
+    {
+      "criterion": "The read-only engine never drops text: the round-1 defect (an ask holding a list then an unknown :::note) and a known ask holding a heading keep every line",
+      "surface": "Dispatch Conversation tab, Chromium, same lane",
+      "command": "Same command (row 2, e2e/unknown-directive.e2e.ts:52:1), plus a throwaway spec posting the round-1 body 'Lead **bold**\\n\\n::::ask\\nQ?\\n\\n- a\\n\\n:::note\\nx\\n:::\\n::::\\n' and a valid ':::callout{kind=\"warning\"}' body as comments, thread expanded",
+      "observed": "Row 2 ✓ (3.0s). Probe: the round-1 comment now shows 'Lead bold', '::::ask', 'Q?', 'a' (a <ul>), ':::note', 'x', ':::', '::::', no data-markdown-fallback (round 1 showed only 'Lead bold'); the valid callout still renders as <section class=\"proof-typed-block proof-typed-block-callout\" data-proof-block-attr-kind=\"warning\"> with 'body' strong.",
+      "headSha": "1ade3f306d31505b7e4246191f298de6ee6f11e8",
+      "negativeControl": "Fit check bypassed in packages/proof-editor/src/read-only-directives.ts:117 (condition reduced to '!refused'), SPA rebuilt, row 2 re-run: '✘ 2 … (17.8s)', 'Expected substring: \"::::ask\" Received string: \"Ssession:e2e-dire…just nowLead bold\"'. Source restored; jj status clean."
     }
   ],
   "probed": [
-    "Engine (read-only, server schema, 'space' and 'line'): empty closed/unclosed :::note; unclosed last line ending ':' or ' :::'; closing fence with trailing spaces; CRLF; longer open/close fences; nested unknown in unknown (closed, and outer unclosed); fenced code inside an unclosed note; heading ending '::'; label only; attribute value holding ':'; attribute 'onclick' (drawn as text only); directive after a paragraph line; unclosed in a blockquote; in a nested list; known callout in a quote; unknown wrapping a known callout; Pandoc '::: {.callout}'; '::youtube{id=1}'; ':callout{#x}'; lone ':::'; closing fence followed by '---'; no trailing newline; trailing blank lines; ':::ask' with no attributes; table ending ':::|'; indented code ending ':::'; '::: trailing' (not a fence). All drew as the plan says.",
-    "Raw HTML inside a note (':::note\\n<img src=x>\\n:::') still throws (whole-body fallback): INFRA-342, out of scope, unchanged.",
-    "Browser: Pandoc '::: {.callout}' body renders on one line with 'b' strong; a quoted list item holding ':::warn' shows ':::warn', 'inside', ':::' as text with 'b' strong."
+    "Engine (read-only, server schema) inside an ask: thematic break, fenced code, blockquote, table, two lists, list then paragraph, label with heading, refused attribute with heading -> drawn as text with every word kept; reference definition, task list, only a list, empty ask, empty callout, inline HTML, callout in ask, ask in callout -> stay typed with every word kept; ask with heading inside a blockquote and inside a list item -> drawn, words kept; five-deep callout > ask > note -> words kept. No input lost a word or threw.",
+    "The tester's round-1 red test (ee272bb6d857) is unchanged: 0 removed lines in jj diff ee272bb6d857..1ade3f306d31 of tests/read-only-directives.test.ts.",
+    "Default mode: lib-headless.ts changes only the readOnly branch (passes the ProseMirror schema), so the pmdoc generators' refusals are unchanged."
   ],
-  "ci": "Read on GitHub at code head 0f615248199d: build, changes, lint, test, typecheck and pr-title queued (not yet run); handoff head f6ed29f12c62 carries skip-checks. Not waited for."
+  "ci": "Read on GitHub at code head f213a0a6b23e: build, changes, lint, test, typecheck and pr-title queued (not yet run); not waited for."
 }
