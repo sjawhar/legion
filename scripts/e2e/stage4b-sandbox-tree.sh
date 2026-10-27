@@ -1045,6 +1045,7 @@ session_copy() {
   # Every name is derived before any is written, so a key whose name a later key also derives is
   # known to collide before either is copied. An empty name is no array subscript, and it, `.` and
   # `..` are refused below whatever else derives them.
+  # shellcheck disable=SC2001 # sed pairs hex digits per line; ${hex//??/…} would pair across newlines
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     printf -v path '%b' "$line"
