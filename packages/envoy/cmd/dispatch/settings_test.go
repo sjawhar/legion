@@ -320,11 +320,20 @@ func appContextFor(boot bootConfig, built routes.AppContextOptions) (*routes.App
 	return routes.BuildAppContext(appContextOptions(boot, built))
 }
 
+// testPeople is a people store over a fresh test database, with the pool it writes through, so a
+// test can date a confirmation back in SQL (ageConfirmation): the store dates every confirmation
+// by the database's clock.
+type testPeople struct {
+	*store.PgPeopleStore
+	pool *store.Pool
+}
+
 // peopleStore is a people store over a fresh test database, for a case whose requests record people,
 // sealing refresh tokens under the signing key appContextFor gives the router, as main does.
-func peopleStore(t *testing.T) auth.PeopleStore {
+func peopleStore(t *testing.T) testPeople {
 	t.Helper()
-	return store.NewPgPeopleStore(storetest.Open(t).Pool, testSigningKey, nil)
+	pool := storetest.Open(t).Pool
+	return testPeople{PgPeopleStore: store.NewPgPeopleStore(pool, testSigningKey, nil), pool: pool}
 }
 
 // currentSessions is a session store holding every login's session at generation 0, as a fresh
@@ -447,21 +456,15 @@ func whoamiAfter(handler http.Handler, signIn *httptest.ResponseRecorder) *httpt
 	return response
 }
 
-// ageConfirmation dates email's last confirmation two hours back, so their next request finds it
-// older than the hour.
-func ageConfirmation(t *testing.T, people auth.PeopleStore, email string) {
+// ageConfirmation dates email's last confirmation two hours back by the database's clock, so their
+// next request finds it older than the hour.
+func ageConfirmation(t *testing.T, people testPeople, email string) {
 	t.Helper()
 	membership, found, err := people.Membership(context.Background(), email)
 	if err != nil || !found || membership.RefreshToken == "" {
 		t.Fatalf("the membership of %s: %+v, found %t, %v; want a refresh token", email, membership, found, err)
 	}
-	if membership.Subject != "" {
-		if err := people.ConfirmSubject(context.Background(), email, membership.Subject, membership.RefreshToken, time.Now().Add(-2*time.Hour)); err != nil {
-			t.Fatal(err)
-		}
-		return
-	}
-	if err := people.Confirm(context.Background(), email, membership.RefreshToken, time.Now().Add(-2*time.Hour)); err != nil {
+	if _, err := people.pool.Exec(context.Background(), `update people set confirmed_at = now() - interval '2 hours' where email = $1`, email); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1127,7 +1130,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			// with a new key put first, it still opens a refresh token sealed under the key before.
 			t.Run("people store", func(t *testing.T) {
 				database := storetest.Open(t)
-				if err := store.NewPgPeopleStore(database.Pool, auth.SingleSigningKey("table-key"), nil).SignIn(context.Background(), "alice@example.com", "refresh-sealed", time.Now()); err != nil {
+				if err := store.NewPgPeopleStore(database.Pool, auth.SingleSigningKey("table-key"), nil).SignIn(context.Background(), "alice@example.com", "refresh-sealed"); err != nil {
 					t.Fatal(err)
 				}
 				people, key, err := openPeople(resolveWith(t, map[string]string{"DISPATCH_SIGNING_KEY": "new-key table-key"}), t.TempDir(), database.Pool, nil)

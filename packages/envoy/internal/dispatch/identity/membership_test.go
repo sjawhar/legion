@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
@@ -38,8 +37,8 @@ type membershipRig struct {
 	now        time.Time
 }
 
-// newMembershipRig signs memberEmail in through a fake pool at rig.now, as the sign-in callback
-// does, and returns the membership that renews it.
+// newMembershipRig signs memberEmail in through a fake pool at rig.now, the people store's clock,
+// as the sign-in callback does, and returns the membership that renews it.
 func newMembershipRig(t *testing.T) *membershipRig {
 	t.Helper()
 	return newMembershipRigFor(t, GroupRule{Group: memberGroup}, "", memberClaims(memberGroup), "")
@@ -59,9 +58,9 @@ func googleMemberClaims() map[string]any {
 	}
 }
 
-// newDomainMembershipRig signs memberEmail in with Google for memberDomain at rig.now, as the
-// sign-in callback does, recording the account's subject, and returns the membership that renews
-// it.
+// newDomainMembershipRig signs memberEmail in with Google for memberDomain at rig.now, the people
+// store's clock, as the sign-in callback does, recording the account's subject, and returns the
+// membership that renews it.
 func newDomainMembershipRig(t *testing.T) *membershipRig {
 	t.Helper()
 	return newMembershipRigFor(t, DomainRule{Domain: memberDomain}, memberDomain, googleMemberClaims(), "google-subject")
@@ -89,7 +88,10 @@ func newMembershipRigFor(t *testing.T, rule SignInRule, hostedDomain string, cla
 		sessions: sessions,
 		now:      time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC),
 	}
-	if err := rule.WriteSignIn(context.Background(), rig.people, memberEmail, subject, session.RefreshToken, rig.now); err != nil {
+	// rig.now is the people store's clock, which stands in for the database's: it dates each
+	// confirmation and measures its age, and Membership reads no clock of its own.
+	rig.people.now = func() time.Time { return rig.now }
+	if err := rule.WriteSignIn(context.Background(), rig.people, memberEmail, subject, session.RefreshToken); err != nil {
 		t.Fatalf("record sign-in: %v", err)
 	}
 	rig.membership = &Membership{
@@ -97,7 +99,6 @@ func newMembershipRigFor(t *testing.T, rule SignInRule, hostedDomain string, cla
 		Sessions: rig.sessions,
 		SignIn:   flow,
 		Rule:     rule,
-		Now:      func() time.Time { return rig.now },
 	}
 	return rig
 }
@@ -163,7 +164,7 @@ func TestDomainMembershipEndsTheSessionOfARowWithNoSubject(t *testing.T) {
 		t.Fatal(err)
 	}
 	rig.people.mu.Lock()
-	rig.people.people[memberEmail] = auth.PersonMembership{RefreshToken: membership.RefreshToken, ConfirmedAt: membership.ConfirmedAt}
+	rig.people.people[memberEmail] = testPerson{RefreshToken: membership.RefreshToken, ConfirmedAt: membership.ConfirmedAt}
 	rig.people.mu.Unlock()
 	rig.now = rig.now.Add(2 * time.Hour)
 	refreshes := rig.issuer.Refreshes()
@@ -388,7 +389,7 @@ func TestDomainMembershipWhoseRefreshFailsAfterAnotherAccountSignedInLeavesThatA
 	rig.now = rig.now.Add(2 * time.Hour)
 	var newGeneration int64
 	rig.membership.SignIn = refresherFunc(func(ctx context.Context, _ string) (oidc.Session, error) {
-		if err := rig.people.SignInSubject(ctx, memberEmail, "google-subject-B", "refresh-B", rig.now); err != nil {
+		if err := rig.people.SignInSubject(ctx, memberEmail, "google-subject-B", "refresh-B"); err != nil {
 			t.Errorf("the new account's sign-in: %v", err)
 		}
 		generation, err := rig.sessions.EnsureSession(ctx, memberEmail)

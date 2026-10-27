@@ -156,11 +156,10 @@ func TestDocumentSocketClosesOnceItsPersonNoLongerResolves(t *testing.T) {
 			// The pool drops the group before the confirmation lapses, so the first refresh after
 			// the hour is the one that finds the person outside it.
 			rig.pool.UpdateGrants(func(claims map[string]any) { claims["cognito:groups"] = []string{"other-group"} })
-			membership, found, err := rig.people.Membership(context.Background(), rig.email)
-			if err != nil || !found {
+			if _, found, err := rig.people.Membership(context.Background(), rig.email); err != nil || !found {
 				t.Fatalf("the member's membership: found %t, %v", found, err)
 			}
-			if err := rig.people.Confirm(context.Background(), rig.email, membership.RefreshToken, time.Now().Add(-2*time.Hour)); err != nil {
+			if _, err := rig.database.Pool.Exec(context.Background(), `update people set confirmed_at = now() - interval '2 hours' where email = $1`, rig.email); err != nil {
 				t.Fatalf("date the confirmation two hours back: %v", err)
 			}
 		},
@@ -265,7 +264,7 @@ func newDocumentSocketRig(t *testing.T, heartbeat time.Duration) *documentSocket
 	rig.database = database
 	rig.people = store.NewPgPeopleStore(database.Pool, testSigningKey, nil)
 	rig.sessions = store.NewPgSessionStore(database.Pool)
-	if err := rig.people.SignIn(ctx, rig.email, signIn.RefreshToken, time.Now()); err != nil {
+	if err := rig.people.SignIn(ctx, rig.email, signIn.RefreshToken); err != nil {
 		t.Fatalf("record the sign-in: %v", err)
 	}
 	if rig.generation, err = rig.sessions.EnsureSession(ctx, rig.email); err != nil {
@@ -332,7 +331,7 @@ func TestASignInIssuerOutageAnswersTheAPIAndTheDocumentSocket503AndKeepsTheSessi
 	if err != nil || !found {
 		t.Fatalf("the member's membership: found %t, %v", found, err)
 	}
-	if err := rig.people.Confirm(ctx, rig.email, signedIn.RefreshToken, time.Now().Add(-2*time.Hour)); err != nil {
+	if _, err := rig.database.Pool.Exec(ctx, `update people set confirmed_at = now() - interval '2 hours' where email = $1`, rig.email); err != nil {
 		t.Fatalf("date the confirmation two hours back: %v", err)
 	}
 	rig.pool.FailToken(http.StatusServiceUnavailable, "")
