@@ -42,7 +42,9 @@ func (s *fakeAssetStore) GetAsset(_ context.Context, key string) ([]byte, error)
 
 // A local miss under /assets/ is answered from the asset store, and nothing else is: a local file
 // wins, pages and other paths never consult it, and a router with no store answers every asset
-// miss with a plain 404. Only a hit carries the immutable header.
+// miss with a plain 404. Only a hit carries the immutable header. A path no file can have (a NUL
+// byte, a name too long, a file where a directory must be) is a miss like any other, except that
+// a NUL byte is never asked of the store, whose Postgres key cannot carry one.
 func TestStaticHandlerRetainedAssets(t *testing.T) {
 	const retained = "console.log('previous build')"
 	for _, tc := range []struct {
@@ -78,6 +80,23 @@ func TestStaticHandlerRetainedAssets(t *testing.T) {
 			status: http.StatusNotFound, keys: []string{"assets/never-retained.js"},
 		},
 		{
+			name: "NUL in an asset name", path: "/assets/foo%00.js",
+			store:  &fakeAssetStore{assets: map[string]string{"assets/foo\x00.js": retained}},
+			status: http.StatusNotFound,
+		},
+		{
+			name: "NUL in an asset name, no store", path: "/assets/foo%00.js",
+			status: http.StatusNotFound,
+		},
+		{
+			name: "asset name too long", path: "/assets/" + strings.Repeat("a", 300) + ".js", store: &fakeAssetStore{},
+			status: http.StatusNotFound, keys: []string{"assets/" + strings.Repeat("a", 300) + ".js"},
+		},
+		{
+			name: "asset below a file", path: "/assets/current.js/more.js", store: &fakeAssetStore{},
+			status: http.StatusNotFound, keys: []string{"assets/current.js/more.js"},
+		},
+		{
 			name: "store failure", path: "/assets/previous-build.js",
 			store:  &fakeAssetStore{err: errors.New("object store unavailable")},
 			status: http.StatusBadGateway, keys: []string{"assets/previous-build.js"},
@@ -97,8 +116,20 @@ func TestStaticHandlerRetainedAssets(t *testing.T) {
 			status: http.StatusNotFound,
 		},
 		{
+			name: "NUL in a non-asset file", path: "/previous-build%00.js", store: &fakeAssetStore{},
+			status: http.StatusNotFound,
+		},
+		{
 			name: "page", path: "/issues/CORE-1",
 			store:  &fakeAssetStore{assets: map[string]string{"issues/CORE-1": retained}},
+			status: http.StatusOK, body: "<!doctype html>", cacheControl: pageCacheControl,
+		},
+		{
+			name: "NUL in a page", path: "/issues/CORE-1%00", store: &fakeAssetStore{},
+			status: http.StatusOK, body: "<!doctype html>", cacheControl: pageCacheControl,
+		},
+		{
+			name: "page name too long", path: "/" + strings.Repeat("a", 300), store: &fakeAssetStore{},
 			status: http.StatusOK, body: "<!doctype html>", cacheControl: pageCacheControl,
 		},
 	} {
@@ -162,6 +193,38 @@ func TestStaticHandlerRetainedAssets(t *testing.T) {
 				t.Errorf("store asked for %q, want %q", keys, tc.keys)
 			}
 		})
+	}
+}
+
+// A stat the filesystem itself fails, here in a directory the server may not search, is a 500 and
+// never a miss: a build the server cannot read is not a file that is not there, so neither the
+// store nor the SPA shell answers for it.
+func TestStaticHandlerAnswers500WhenTheFilesystemFails(t *testing.T) {
+	webDist := t.TempDir()
+	locked := filepath.Join(webDist, "assets", "locked")
+	if err := os.MkdirAll(locked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	if _, err := os.Stat(filepath.Join(locked, "chunk.js")); !errors.Is(err, os.ErrPermission) {
+		t.Skipf("stat in a directory with no permissions answered %v, not a permission error (running as root?)", err)
+	}
+	store := &fakeAssetStore{}
+	handler, context := newTestRouter(t)
+	context.WebDistDir = webDist
+	context.AssetStore = store
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/assets/locked/chunk.js", nil))
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("unreadable build: status %d body %q, want 500", recorder.Code, recorder.Body.String())
+	}
+	if len(store.keys) != 0 {
+		t.Fatalf("store asked for %q, want nothing", store.keys)
 	}
 }
 

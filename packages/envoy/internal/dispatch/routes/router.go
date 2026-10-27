@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 	"unicode"
 
@@ -510,11 +511,13 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 		serveFile(w, req, candidate)
 		return
 	}
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err != nil && !isMissingFile(err) {
 		writeError(w, http.StatusInternalServerError, "stat failed")
 		return
 	}
-	if isRetainedAssetPath(normalized) && r.ctx.AssetStore != nil {
+	// The store's key is a Postgres text parameter, which cannot carry a NUL byte: asking it would
+	// answer a store failure for a name no build can hold, so such a path is a plain miss.
+	if isRetainedAssetPath(normalized) && r.ctx.AssetStore != nil && !strings.ContainsRune(normalized, 0) {
 		r.serveRetainedAsset(w, req, strings.TrimPrefix(normalized, "/"))
 		return
 	}
@@ -523,6 +526,15 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	servePage(w, req, filepath.Join(r.ctx.WebDistDir, "index.html"))
+}
+
+// isMissingFile reports whether os.Stat's err means no file is there: the path does not exist,
+// or the path itself is one no file can have — a NUL byte in it (EINVAL), a name too long
+// (ENAMETOOLONG), or a file where a directory must be (ENOTDIR). Those are a request's own
+// spelling, answered as a miss; any other error (EACCES, EIO) is the filesystem failing.
+func isMissingFile(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.EINVAL) ||
+		errors.Is(err, syscall.ENAMETOOLONG) || errors.Is(err, syscall.ENOTDIR)
 }
 
 // isRetainedAssetPath reports whether normalized names a file below an asset root: the only paths
