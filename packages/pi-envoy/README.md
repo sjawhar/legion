@@ -325,7 +325,9 @@ its gated write is refused by the CLI in `block` mode with the form to send; a c
 Dispatch write, such as a commit message or a search pattern that names one, runs and posts
 nothing. A literal call whose last command gives no argument vector is refused in `block` mode. A
 gate that did not load still writes the record and mints nothing, so the CLI refuses every gated
-write it would have reviewed.
+write it would have reviewed where the session set `OMP_ASKGATE=block`; at the warn default it
+posts them with a warning and an `unmarked` entry, and the gate refuses each literal call either
+way.
 
 **Where the gate binds.** AskGate binds only in a session that has Dispatch, judged at load from
 the session's own envoy.json and the variables over it (`DISPATCH_URL` and the other Dispatch
@@ -358,9 +360,11 @@ AskGate ignores any other value of `OMP_ASKGATE`, `off` included, and the first 
 notice that names `askgate.enabled` as the switch. The gate writes the checks' mode into its store
 at each main-agent `bash` or `eval` call, where the CLI reads it, and a store with no mode is warn.
 pi-envoy also writes `OMP_ASKGATE=block` into the store with the session's record, so a session
-that chose block stays at block when its gate does not load.
-Two refusals follow neither mode: no model role and a gate that did not load refuse in both modes,
-since neither can review anything, and a gate that cannot review is no off switch.
+that chose block that way stays at block when its gate does not load. An `experiments` arm does
+not: the gate reads the arm, so a session that chose block through it alone has no mode on disk
+until the gate's first main-agent `bash` or `eval` call, and none at all when the gate does not
+load. Two other refusals follow neither mode: no model role, and a gate that did not load, which
+refuses each literal call it would review in both modes, since neither can review anything.
 
 **The model.** The gate asks the session's `askgate` model role (`modelRoles.askgate`). When that
 role is not set, it asks the `default` role. A model that answers with an error passes the request

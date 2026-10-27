@@ -1851,9 +1851,11 @@ function renderUnreadable({ file }: UnreadableCommand, mode: Mode): string {
  * OMP_ASKGATE_TIMEOUT_MS that is no positive integer, or a handler ceiling too short for a
  * verdict. Only `askgate.enabled: false` turns AskGate off, so none is an off switch: each literal
  * write of the main agent the gate would review (`scopedCommand`, `scopedDevice`) is refused in
- * both modes, naming the error and the switch, and recorded as `load-failed`. It mints no marker,
- * so the CLI refuses every other gated write of a process that acts as the session, a subagent's
- * included, since the session's record stays live. Every other call runs.
+ * both modes, naming the error and the switch, and recorded as `load-failed`. It mints no marker
+ * and records no mode, so every other gated write of a process that acts as the session, a
+ * subagent's included, meets the CLI's marker check: refused where the session chose block
+ * (`OMP_ASKGATE=block`, which `bindDispatchSession` writes beside the record), and at the warn
+ * default posted with a warning and an `unmarked` entry. Every other call runs.
  */
 export function loadFailureGate(
   error: unknown,

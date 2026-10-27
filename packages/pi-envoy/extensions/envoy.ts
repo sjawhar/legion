@@ -630,8 +630,11 @@ export default function envoyExtension(pi: PiApi): void {
   // (`@legion/envoy-client/askgate-marker`): written, while the gate is bound, for each session id
   // this top-level instance binds (`bindDispatchSession`; a subagent's instance binds none), and
   // kept for every one of them until shutdown, since a shell or kernel started before a switch
-  // still acts as the session it started in. A gate that did not load mints no marker, so the CLI
-  // refuses each gated write it would have reviewed.
+  // still acts as the session it started in. A gate that did not load mints no marker and records
+  // no mode, so the CLI refuses each gated write it would have reviewed only where the mode is
+  // block: `OMP_ASKGATE=block`, which `bindDispatchSession` writes beside the record. At the warn
+  // default the CLI posts such a write with a warning and an `unmarked` entry, and `loadFailureGate`
+  // refuses each literal call either way.
   const askgateOwner: AskgateOwner | undefined =
     askgateFile === null ? undefined : selfOwner(sessionStateRoot(process.env));
   const askgateRecords = new Set<string>();
