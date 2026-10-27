@@ -36,3 +36,4 @@ trap 'rm -rf "$scratch"' EXIT
 mv "$scratch/notices" "$out"
 
 # scratch INFRA-520 worker-image
+# scratch INFRA-520 worker-image head B
