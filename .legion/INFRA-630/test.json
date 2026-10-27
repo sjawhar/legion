@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-630",
+  "completed": "2026-10-27T16:57:00Z",
+  "headTested": "85120d98fbad3dff0c6a1c917cafe2b73dff57c5",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's own script, bash $TMPDIR/infra630/pushbuilt-proof.sh, from the workspace at 28d5314a (code head 85120d98): push-built exit 0, pushed=true, origin main gained one github-actions[bot] commit 0a038fc0 over base 85ae9fd4 touching only dist/dispatch.js, dist/envoy-channel.js, dist/session-hook.js, check-dist at it passes; main-moved negative: exit 0, origin unchanged at cad98276, stub gh logged 'workflow run claude-envoy-rebuild.yaml --repo example/repo --ref main', no pushed=true. Then drove the same surface independently (crafted tars, a real fetch/push race, below)."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "1. From the head, two branches changing different plugin sources merge in either order with no conflict; the same with rebuilt files conflict",
+      "surface": "git merge-tree --write-tree in a scratch clone of the head ($TMPDIR/infra630-t/c), builds with bun packages/claude-envoy/scripts/build.ts --in-place on Bun 1.3.14",
+      "command": "bash $TMPDIR/infra630-t/crit1.sh (branches from 85120d98: A/B reword 'Create a native Dispatch issue for newly tracked work.' and 'Create a project only when a person asks for one;' in packages/contracts/src/dispatch-tools.ts; Ar/Br the same plus the in-place build committed; S1/S2 skills/legion-worker vs skills/legion-architect SKILL.md; C1/C2 contracts/src/actor-label.ts vs envoy-client/src/ask-answer.ts); gh pr diff 2423 --name-only | grep -E '^packages/claude-envoy/(dist|legion)/'",
+      "observed": "A B and B A: exit 0; S1 S2, S2 S1, C1 C2, C2 C1: exit 0; the PR diff lists nothing under dist/ or legion/ (grep exit 1)",
+      "headSha": "85120d98fbad3dff0c6a1c917cafe2b73dff57c5",
+      "negativeControl": "the same pair with rebuilt files committed (what every PR had to do before): Ar Br and Br Ar both exit 1, CONFLICT (content) in packages/claude-envoy/dist/dispatch.js, envoy-channel.js and session-hook.js"
+    },
+    {
+      "criterion": "2. PR CI still fails when the plugin's sources do not build or its tests fail",
+      "surface": "the exact commands of the required test job's 'Build the Claude Code plugin from source' step and the claude-envoy job's 'Build the plugin from source' and 'Test Claude Envoy plugin' steps, on a broken tree in the scratch clone (the plan's local fallback; GitHub's runners had every check of 85120d98 queued, so no scratch PR run could be read without waiting)",
+      "command": "append 'export const broken = (;' to packages/envoy-client/src/ask-answer.ts; bun packages/claude-envoy/scripts/build.ts --out $TMPDIR/infra630-t/runner/claude-envoy (repo root); cd packages/claude-envoy && bun run build -- --in-place. Then restore and break line 13 of packages/claude-envoy/tests/send-arguments.test.ts; bun run build -- --in-place && bun run test",
+      "observed": "test-job build: 'error: Unexpected ; at .../envoy-client/src/ask-answer.ts:30:24', exit 1; claude-envoy build: same error, 'script \"build\" exited with code 1', exit 1; broken assertion: '(fail) parses a destination and a multiword message', 194 pass 2 fail, exit 1",
+      "headSha": "85120d98fbad3dff0c6a1c917cafe2b73dff57c5",
+      "negativeControl": "the unbroken head through the same steps: --out build exit 0, in-place build leaves git status empty (bytes equal main's), bun run test 196 pass 2 skip 0 fail"
+    },
+    {
+      "criterion": "3. The extended release-credential check and the script tests pass, and they refuse the deploy key or dependency code in the wrong job",
+      "surface": ".github/scripts shell checks as the lint and test jobs run them, PyYAML from $TMPDIR/pyyaml-venv first on PATH",
+      "command": "bash .github/scripts/check-release-credentials.sh; bash .github/scripts/check-release-credentials.test.sh; bash .github/scripts/release-push.test.sh; python $TMPDIR/infra630-t/crit3-mut.py (9 mutations of claude-envoy-rebuild.yaml, each checked in a copy of .github)",
+      "observed": "'9 credentialed job(s) and 9 build job(s) across 4 workflows keep credentials out of jobs that run dependency code', exit 0; 237 passed 0 failed; 419 passed 0 failed",
+      "headSha": "85120d98fbad3dff0c6a1c917cafe2b73dff57c5",
+      "negativeControl": "every mutation exit 1 naming the job: DEPLOY_KEY in the build job's install step; DEPLOY_KEY at push job level ('job 'push' names secrets.DEPLOY_KEY at env.DEPLOY_KEY'); cache-mode none removed; push job runs bun; push job uses setup-bun; build job contents: write; build job tripwire removed; push if: without always(); the deploy key on a step that runs gh workflow run instead of push-built"
+    },
+    {
+      "criterion": "4 (before the merge; production verdict is the implementer's after the merge): push-built lands a differing build as one github-actions[bot] commit touching only dist/ and legion/, refuses a tar it must not land, and never lands over a main that moved",
+      "surface": "release-push.sh push-built, the rebuild workflow's push step, against a local bare origin reached through the deploy-key URL (insteadOf), with the real build tar of a simulated contracts merge",
+      "command": "bash $TMPDIR/infra630-t/pb-neg.sh (11 crafted variants of the real tar, each in a fresh checkout of base); bash $TMPDIR/infra630-t/pb-race.sh (a git wrapper lands a commit on origin main between push-built's fetch and its push); the build job's steps emulated verbatim on the clean head and on a head with a skills edit",
+      "observed": "race: push rejected (fetch first), then '::notice title=Nothing pushed; a fresh run started::main moved from 85ae9fd4… to bc17e625…', exit 0, origin main is the racer's commit, gh logged 'workflow run claude-envoy-rebuild.yaml --repo example/repo --ref main', no pushed=true. Build-job emulation: clean head changed=false, private-name check 60 files clean; skills edit changed=true with only legion/skills/legion-worker/SKILL.md modified; every built file is tracked (no gitignored output)",
+      "headSha": "85120d98fbad3dff0c6a1c917cafe2b73dff57c5",
+      "negativeControl": "each crafted tar exit 1 with origin unchanged and the checkout clean: symlink dist/evil.js ('is a symlink'), dist/../../../evil.js (''..' component'), chmod +x and g+s on dist/dispatch.js ('has the mode -rwxr-xr-x' / '-rw-r-Sr--'), missing dist/session-title-hook.js ('lacks'), empty legion/agents ('holds no file under legion/agents/'), 'legion/skills/a b.md', a top-level other/, ./dist prefix, a hard link ('is a hard link')"
+    },
+    {
+      "criterion": "Plan: no build mode rewrites the tracked files by default, and --out refuses a directory inside the repository and gives a runnable copy outside",
+      "surface": "bun packages/claude-envoy/scripts/build.ts from a shell in the scratch clone",
+      "command": "build.ts with: no args; --out; --out=<dir>; --in-place --out <dir>; --out <dir> extra; --out <symlink to a missing path in the repo>; --out <symlinked ancestor into the repo>/newdir; --out <non-empty dir>; --out <file>; --out ./packages/../../outside-rel; (from the package) --out ../../packages/x; --out <repo root>; --out <repo>/.git/x; then $OUT/bin/dispatch --help and diff -r against the committed dist/ and legion/",
+      "observed": "--out ./packages/../../outside-rel: exit 0, a copy with no symlinks, bin/dispatch mode 755 printing the usage, dist/ and legion/ byte-identical to the committed ones; git status of the clone empty after every run, nothing created under packages/",
+      "headSha": "85120d98fbad3dff0c6a1c917cafe2b73dff57c5",
+      "negativeControl": "no mode, bare --out, --out=, two modes, an extra arg: usage, exit 2; symlinked ancestor, ../../packages/x, repo root, .git/x: 'refusing --out: … is inside the repository', exit 1; non-empty dir: 'exists and is not empty'; file: 'exists and is not a directory'; a dangling symlink into the repo: EEXIST from mkdir, exit 1, nothing written"
+    }
+  ],
+  "ci": "Read on GitHub for 85120d98 (the code head; 28d5314a is handoff-only) at 16:55Z: every check queued — Tests (lint, typecheck, test) run 40543251009, Legion Envoy and Contracts 40543251110, Rebuild Claude Envoy plugin 40543251233 (its own build job), Worker Image, Docs, PR Title. Not waited for.",
+  "observations": [
+    "The hourly run's red step measures staleness from the base commit's time, not from when a push run was queued: with a runner backlog over 30 minutes (every check of this head sat queued for 15+ minutes), a scheduled run that replaces a still-pending push run in the main concurrency group repairs the copy and ends red saying a push run missed it. A false alarm, not a lost repair; for the reviewer to weigh.",
+    "build.ts --out on a dangling symlink fails with a raw EEXIST stack from mkdir rather than a 'refusing --out' line; it writes nothing, so no consumer-visible harm."
+  ]
+}
