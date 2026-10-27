@@ -621,7 +621,9 @@ in the same collection, and the listing goes once the document is collected (`ke
 instance's replica or none, never its successor's. `TestReadsOfALiveDocumentRunBesideItsPeers` runs
 each of these reads while a websocket peer types, until 50 of its runs have overlapped one of the
 peer's updates, and CI's `envoy-go-race` job runs the `docs` and `api` packages under `-race`, which
-reports a walk of the live tree beside a write; the unit tests' own step runs without it.
+reports a walk of the live tree beside a write; the unit tests' own step runs without it. The race
+job runs only when a file its `envoy_go_race` filter in `.github/workflows/envoy-and-contracts.yaml`
+names changes; see Critical conventions for what keeps that filter current.
 
 Writes to one room never meet each other unlocked. A browser's update reaches the room as ygo
 applies it, inside one Yjs transaction under the document's lock (`sync.ApplySyncMessage`,
@@ -2111,6 +2113,7 @@ from and that ask's document.
 - Every KV bucket is opened through `bus.EnsureKeyValue` or `bus.OpenKeyValue`, whose handle checks its keys as the bus checks a subject (`bus.ErrRefused`), since a KV call builds its subjects from the key: a key that would take one past the server's 4 KiB protocol line, or holding an empty token, is refused before anything is sent, and nats.go's own refusal of a key outside its key alphabet (`ses:bad`), which it makes on every read, write, delete and watch before sending anything, is named the refusal it is (`bus.ErrInvalidKey`, naming the key). A write is held to the longest subject its key makes (a watcher's create request), so a key written now stays readable, watchable and deletable; any other call only to its own subject, so a key an earlier build stored past that bound still lists and deletes. The stores skip a key they cannot read or rewrite, with a WARN whose `error` names it (or, past the bound, its size), rather than fail a start, a sweep or a caller's own request, and the reapers delete it. No build writes a key outside the alphabet, but a direct bucket write can store one, and an earlier build's bare-string role claim can name one as its holder; no KV call deletes it either, so the reapers skip it with that WARN every cycle until an operator purges it by hand with the purge nats.go would send for it, `nats pub '$KV.<bucket>.<key>' '' -H 'KV-Operation:PURGE' -H 'Nats-Rollup:sub'`. That removes every revision of the key, every listener's cache drops it at once, and the purge marker it leaves is collected as any other (the interest bucket's marker collection, `nats kv compact <bucket>` for the others). A JetStream purge filtered to the subject (`nats req '$JS.API.STREAM.PURGE.KV_<bucket>' '{"filter":"$KV.<bucket>.<key>"}'`) leaves no marker, but nothing a watcher sees, so a listener's interest cache keeps the key, and its reaper keeps warning, until the listener restarts.
 - A failed control delivery or a terminal capability refusal during generic fanout emits `notifications.envoy.exceptions.<original-topic>`. Control exceptions keep their ordinary transport: a role lane's `notifications.envoy.exceptions.notifications.role.<role>` takes core NATS because no stream subject captures it (`usesCoreTransport`), and an agent subject's `notifications.envoy.exceptions.notifications.agent.<id>` is the one exception subject the stream captures, so it keeps JetStream. A fanout refusal's original topic is never a control topic, since `listenerDeliveryHandler` sends a `notifications.role.` topic to `roleTopicDelivery` and a `notifications.agent.` topic to `agentSubjectDelivery` and only what remains to `fanoutDelivery`, the one place `fanoutRefusal` is set; its exception subject is therefore never one the stream captures either, so `bus.usesCoreTransport` already routes it over core NATS and the explicit `client.PublishCore` in `publishDeliveryException` now only restates the routing rule's own answer for every reachable input. The payload preserves `original_topic`, `event_id`, `reason` (one of `no_holder`, `delivery_failed`, `receipt_timeout`), `recipient_session` when a recipient is known (the receiving session, not `source_session`; omitted rather than empty when unknown), `payload_summary`, the original machine `payload`, `dedupe_key`, `source`, and `source_session`; the exception lane is not recursively exceptional. Each refusal records its recipient before publishing its exception, so an identical redelivery emits at most one exception during the attempt-cache window and never NAKs the original envelope. An API publish to an unheld role is rejected synchronously with 404 instead.
 - **Source-specific vs generic ingestion**: Envoy has two ingestion paths: listener-hosted webhook handlers behind the listener's starting gate (`internal/webhook/{github,slack,ghostwispr}.go`, `startingGate` in `cmd/listener/main.go`) and the generic MCP bridge (`cmd/mcp/`). The MCP bridge connects to any MCP server that publishes resources, so it's the low-maintenance default for new sources. Building source-specific webhook logic adds maintenance burden — consider whether the cost justifies the benefit over the generic MCP bridge before adding custom source-specific logic to Envoy. When using the MCP bridge, Envoy should stay naive about the message content — the MCP server owns the domain logic.
+- Five Go jobs of `.github/workflows/envoy-and-contracts.yaml` run only when a file their own filter there names changes: `dispatch-memory` (`dispatch_memory`), `dispatch-multiprocess` (`dispatch_multiprocess`), `broker-multiprocess` (`broker_multiprocess`), `envoy-go-race` (`envoy_go_race`) and `envoy-infra-go` (`envoy_infra_go`). Each filter lists the packages the job's command compiles with its build tags, the packages of each binary its tests build, and the files its tests read. Any change that makes a job's command, or a binary its tests build, compile a new package or read a new file - production code included, not only a test - adds that package or file to that job's filter in the same pull request: the pull request that adds the import still runs the job, so nothing else reports the filter falling behind. `envoy-go`, gated by the broad `envoy` filter, runs every untagged unit test of the `packages/envoy` module on every Envoy change (`internal/integration` in a step of its own in that job), so it also runs the untagged tests of every other job's packages in that module; `packages/envoy/infra` is a module of its own, which that `go test` does not reach, so envoy-infra's unit tests run only in `envoy-infra-go` and nothing else backs up the `envoy_infra_go` filter when it falls behind.
 
 ## Security
 
@@ -2508,6 +2511,23 @@ the synchronous listener call records the sent or failed attempt instead of blin
   has no delivery route, so the same author routes above are the only way an involved session
   learns about a human reply, resolution, reopening, or edit on its ask or comment thread, or a
   human's new comment on a document it wrote.
+- `artifact.human_edited` goes to the issue's route and to each session the document credits,
+  never to a person. Dispatch appends it once a document has been quiet for 30 seconds after a
+  person's last settled browser version (`document_edit_notices`, migration 0129, swept every 5 s
+  under the `edit-notices` lease by `docs.RunEditNotices`); its actor is the last person the
+  window knows edited, and its payload names the document, the two versions the quiet window spans, each person
+  who edited, and the unified diff of the two versions, cut at its last line end within 4,096
+  bytes (`ArtifactHumanEditedEventPayload` in `packages/contracts/src/dispatch-api.ts`). The
+  document is the payload's `artifact_id`, and its sessions are read as a comment's are
+  (`loadDocumentSessionAuthors`). That person is the sender of a version's latest edit
+  (`docs.latestEditSource`): the room's in-flight browser credits and the version's own write,
+  newest first, then `doc_settlements_pending.last_person`, which every landed append and commit
+  keeps by one rule (`docs.latestPersonOf`): a person sender sets it, a two-peer edit (no known
+  sender, a person credited) clears it, and an agent's edit leaves it. A version whose latest edit
+  names no person names nobody new (`docs.holdEditNotice`): an open window keeps its actor and
+  gains the version, its people and a new due time; with no window open the version holds a row
+  with no actor and no due time, and the next version that names a person sends one notice
+  covering both.
 - Dispatch project events use `notifications.dispatch.project.<PROJECT>.<type>` and are retained in JetStream. They have no issue route; project, repository-setting, and user-interface state consumers refresh from the event stream.
 - Direct agent topics use `notifications.agent.<session_id>`.
 - Role topics use `notifications.role.<role>` and are normally published to,
@@ -3379,7 +3399,11 @@ set, and not itself required at startup), `BROKER_LEASE_SECONDS` (default 900, m
 mints its credential for this long, and each refresh of its device login moves its expiry to this
 long from then; past it the machine logs in again, new key, new code, new human approval),
 `BROKER_SWEEP_SECONDS` (default 5, max 60 —
-`requests.Sweeper`'s tick interval, the poller's replacement), `BROKER_DRAIN_SECONDS` (default 5,
+`requests.Sweeper`'s tick interval, the poller's replacement, and also `enroll.ServingClock`'s beat
+interval, a gap of more than three beats counting as no broker serving; `config.Load` refuses
+`2*BROKER_LEASE_SECONDS <= 9*BROKER_SWEEP_SECONDS`, since a live session renews with at least two
+thirds of its lease left and a lease that ran out inside a three-sweep gap would be ended rather
+than given back), `BROKER_DRAIN_SECONDS` (default 5,
 min 0, max 120 — how long a stopping process goes on serving while `/healthz` answers 503; it is
 configuration rather than a constant because the right value is the cluster's EndpointSlice
 propagation time, which lives in the deployment's own repository, and 0 is for a local run), and
@@ -3580,8 +3604,12 @@ person's login with no `login_hint`, or `anyone`, a replayed `jti`) is `400 REQU
 before the token verifies (`refuseAddress`), whatever account the token claims, since a refused
 token signature makes the verifier fetch the issuer's keys again; a verified account then spends
 an `account:<subject>` bucket of the per-login limit (`refuseAccount`), the same address-then-key
-pair the device-code route spends. Behind a proxy, `BROKER_TRUSTED_PROXY_HEADER` keys the address
-bucket on the caller's own address. Read `routes()` for the current, authoritative route list.
+pair the device-code route spends. A token login the broker could not complete (5xx, such as the
+database being away) gives back what it spent of both buckets, since the daemon retries it every
+few seconds through an outage and the broker decided nothing about the token; a refused
+credential (any 4xx) keeps them spent. Behind a proxy, `BROKER_TRUSTED_PROXY_HEADER` keys the
+address bucket on the caller's own address. Read `routes()` for the current, authoritative route
+list.
 
 The RFC 8693 token exchange is the token endpoint's other grant (`POST /v1/oauth/token`,
 `oauth.Provider.exchangeGrant`): a caller presents the platform identity it already holds and
@@ -4017,11 +4045,44 @@ revoked and its pending requests cancelled and dropped from the approver's list,
 `enrollment.expired` audit row and one log line each; then it expires overdue pending
 `agent_secret` requests (waking each one's owner through the Envoy wake seam) and overdue pending
 machine logins. It reads fresh from Postgres every time, so a restart resumes exactly where the
-rows are. Lapsed means what proof lookup means by not live (`lease_expires_at` no later than
-Postgres's `now()`), so a session that keeps renewing is never ended, and rows a concurrent renew
+rows are. Lapsed means what proof lookup means by not live (`enrollment_lease_live`, below, is
+false), so a session that keeps renewing is never ended, and rows a concurrent renew
 or revoke holds are left to the next tick. Each ended enrollment's live grants are found through
 `grants_enrollment_live` (migration 0008), so a backlog of lapsed enrollments costs one index
 lookup each rather than a scan of `grants`.
+
+Time no broker was serving does not count against a lease. A session renews only through a
+broker, so while every broker process is down, or none can reach the database, no lease can be
+renewed. Migration 0019 adds `broker_serving`, one row per broker process (`process`, a random id
+the process draws, `last_serving_at`, `not_serving_after`), and the SQL function
+`enrollment_lease_live(lease)`, the one liveness test for a lease at every site that asks (proof
+lookup, `Renew`, `EndLapsed`, a grant's values): a lease is live while it has not run out, and also
+when the latest row (greatest `last_serving_at`) is further back than its `not_serving_after` and
+the lease was still running at that row's `last_serving_at`. It reads the rows without a lock.
+`enroll.ServingClock` (`internal/broker/enroll/serving.go`), started in `cmd/broker`'s `main` beside
+`srv.Serve`, so a boot that fails before it serves records no beat, beats on its own row every
+`BROKER_SWEEP_SECONDS` on every serving broker, with a threshold of three sweeps. Each beat is
+bounded by one sweep: a deadline, and `lock_timeout`, `statement_timeout` and
+`idle_in_transaction_session_timeout` set for its transaction, so a beat held up on its row fails
+and logs the WARN (`timed_out=true`) while the other brokers keep the latest row current. While a
+broker is serving one statement writes the beater's own row, locking only it. A beat that finds a
+longer gap takes an advisory lock, reads the latest row again, gives that gap back to every
+unrevoked lease that was still running at the latest beat, capped at now plus
+`BROKER_LEASE_SECONDS`, and logs INFO `broker: gave back the time no broker was serving ...`; a
+second broker that waited on the lock finds no gap, so two brokers beating at once give it back
+once. Until then such a lease stays live, so the sweeper never ends it. A beat deletes rows more
+than an hour behind the latest. A revoked enrollment, and one whose
+lease ran out while a broker was serving, stays ended, and a renewal with another pod's or service
+account's token is still refused 403 `POD_IDENTITY_MISMATCH` and moves the lease not at all. Its
+limits: a broker that runs but pods cannot reach (ingress, DNS, a NetworkPolicy, a stale
+`AGENT_SECRETS_URL`) still counts as serving, so leases still end then; grant lifetimes and
+pending requests still run on wall-clock time; the table starts empty, so the first
+deploy restores nothing; and a pod whose renewer already exited 76 stays without one until it is
+relaunched. `internal/broker/enroll/serving_test.go`,
+`internal/broker/api/renew_liveness_test.go`, `cmd/broker/serving_start_test.go` and
+`cmd/broker/outage_test.go`
+(`TestABrokerOutageLongerThanALease`, the real broker and `agent-secrets` binaries across an outage
+longer than a lease) test it.
 
 Tests: `cd packages/envoy && go vet ./... && go test ./internal/broker/... ./cmd/broker/...
 ./cmd/agent-secrets/... ./cmd/agent-secrets-devrelay/... ./cmd/dev-oidc-issuer/...`. The Postgres-backed tests skip, rather
@@ -4044,7 +4105,9 @@ on the pod it reaches, and a signalled process failing readiness while it serves
 past the old ten-second shutdown budget. CI's `broker-multiprocess` job runs them —
 `go test -tags multiprocess -count=1 -timeout 20m ./cmd/broker` in `packages/envoy` — in a job of
 its own, since each row waits out tens of seconds and `envoy-go`'s unit step runs under go test's
-default ten-minute package deadline. Every client-facing
+default ten-minute package deadline. The job runs only when a file its `broker_multiprocess` filter
+in `.github/workflows/envoy-and-contracts.yaml` names changes; see Critical conventions for what
+keeps that filter current. Every client-facing
 lane's own test mounts the real broker handlers (`api.Register` with real, Postgres-backed services)
 rather than a hand-rolled fake standing in for broker behavior — `internal/broker/api/api_test.go`,
 `internal/broker/e2e/e2e_test.go`, and `cmd/agent-secrets-devrelay/main_test.go` all wire real
