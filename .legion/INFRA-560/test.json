@@ -2,31 +2,28 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-560",
-  "completed": "2026-10-27T11:15:32Z",
-  "round": 5,
+  "completed": "2026-10-27T11:30:49Z",
+  "round": 6,
   "implementerProof": {
     "verdict": "verified",
-    "how": "The conflict merge 728b5e29 changes this pull request's own diff in one line only. With the fingerprint procedure, d5e89e64 (6f5055a0) becomes 7b60706a (728b5e29), and a diff of the two normalized diffs shows only the packages/envoy/AGENTS.md 'Health endpoints' line, where main's wording replaced the old. The component code is the same as in round 4, so rounds 3-4's preview, schema validation and script runs stand. I rebuilt the server and listener from the merged code and ran them live (proof). The implementer's bare gates match what I observed. The merge itself brought in main's leasePoolSize 10, which makes the merged text's connection count false (failure 1)."
+    "how": "cde9232f adds store.ConnectionsPerProcess (pool.go:306). It sums the pools 64+4+1+10+1 plus permanentListeners 3, which is 83. The gcp constants compute dispatchDefaultTierRollingReplicas = (500-3)/83 - 1 = 4, since 5 x 83 = 415 <= 497 < 6 x 83 = 498. TestDispatchConnectionsPerPodIsTheServers pins both. I checked the count against the code. The only non-test Postgres openers in the server are store.go:55 (the shared pool) and pool.go:340 (the separate pools: rooms, health, listener, leases, outbox); census.go's connection is a separate subcommand. Pool.Listener has exactly three non-test callers: api/delivery_live_hub.go:328, api/event_stream_relay.go:123 and docs/stale_room.go:123. README.md:194-203, CHANGELOG.md:939, dispatch.go:27 and :71 and pool.go:157-165 now name the constants or the bound of 4, and no stale 82 remains."
   },
-  "failed": 1,
-  "failures": [
-    {
-      "criterion": "Spec BG-12: the default database tier fits a Dispatch at more than one pod, and the pool comment names the right figures. The child's rule: every comment and document it touches is true of the code.",
-      "evidence": "The merge brought in main's 1b8d5c13 (#2269), which raised leasePoolSize from 9 to 10 (packages/envoy/internal/dispatch/store/pool.go:282 at 728b5e29). One server pod now opens 64 + 4 + 1 + 10 + 1 + 3 = 83 connections. The merged text still says 82 and the totals built on it: pool.go:162 ('82 in all', a few lines above the constants that sum to 83), dispatch.go:29, :32 ('82 x 6 is 492, so up to 5 replicas roll') and :77, README.md:200-201 ('82 in all', 'Six pods open 492, inside 500 with 8 to spare') and :233, and CHANGELOG.md:938 ('six app pods at the 82 connections'). At 83, six pods open 498. That leaves 2 of the 500, not 8. PostgreSQL reserves superuser_reserved_connections slots (default 3, postgresql.org/docs/16/runtime-config-connection.html) for superusers only, and Dispatch's Cloud SQL user is not a superuser [INFERENCE: Cloud SQL keeps that default]. If so, 5 replicas while rolling can exceed the slots Dispatch may use, and the claim 'up to 5 replicas roll inside 500' needs a recount, not only new digits. No red test: the defect is in comments and documents, and a test that reads source text is not allowed. The fix is to recount and rewrite those six places, and to decide whether the default tier or the stated replica bound changes."
-    }
-  ],
+  "failed": 0,
+  "failures": [],
+  "roundFiveFailure": "Resolved: the stale 82 / 492 / '5 replicas' figures are gone, and the bound is computed from the server's own pools with the superuser slots taken out.",
+  "changedSince": "Round 5 tested code head 728b5e29. Round 6 (cde9232f) changes comments, docs, two constant blocks (gcp dispatch.go and store pool.go, neither read at run time by the server or by what the component renders) and one test. No golden or rendered object changes, so round 5's live server and listener run and rounds 3-4's preview, schema and script results stand.",
   "proof": [
     {
-      "criterion": "Liveness fails only when the process does not answer; the server closes a connection older than 60 s after its next response (after the merge of main's listener and dispatch changes)",
-      "surface": "the real envoy-dispatch and envoy-listener built at the head from the merged code, on a fresh Postgres 16.2 + pgvector database (migrated from empty to schema_version 129) and a fresh nats-server 2.11.9 -js store",
-      "command": "$TMPDIR/t560/ServerBinaryRound5: run_server.sh, probe.sh (curl /livez and /healthz through Postgres stopped or frozen and NATS killed), connage.py 18796, shutdown_inflight.py, run_listener.sh plus lprobe.sh and hzdist.py with NATS killed for 45 s and 70 s",
-      "observed": "/healthz 200 with commit 728b5e29-probe and schema_version 129. Server /livez 204 in about 1 ms in every state, and /healthz 503 in each outage, back to 200 after each restart. Connection: absent at 0 s and 30 s, 'close' at 61.5 s followed by EOF, and aged Upgrade requests untouched. The in-flight response at SIGTERM carries Connection: close, and the process exits 1.63 s later with rc 0. The listener accepts on its port 0.08 s after spawn. Its /livez answers 404 within 0.009 s in 265 samples with NATS down, and its /healthz 503 at 3.0-4.7 s, under the 6 s readiness timeout. Both listeners stayed up through the 45 s and 70 s outages",
-      "headSha": "728b5e297fb5371b5807ae4e9b1f15c4ae316aac",
-      "negativeControl": "in round 1, a server built from base 819dc283d answered /livez 404 and never closed an aged connection"
+      "criterion": "Spec BG-12: the default database tier fits a Dispatch at more than one pod, and every comment and document that sizes it is true of the server's pools",
+      "surface": "the server's pool constants and the component's default-tier bound, through the repository's test, run at the head and against a mutation of the head",
+      "command": "cd packages/envoy/infra && go test ./gcp/ -run 'TestDispatchConnectionsPerPodIsTheServers|TestDispatchDatabaseTierReachesTheInstance|TestDispatchProxyContainerDefaultsToOneCPUAnd2Gi' -count=1 -v",
+      "observed": "All three PASS at the head. ConnectionsPerProcess = 83 = dispatchConnectionsPerPod, the bound is 4, and (4+1) x 83 = 415 <= 497 < (5+1) x 83 = 498. README.md:197-202 states 3 superuser slots, ConnectionsPerProcess and 4 replicas rolling",
+      "headSha": "cde9232f880b",
+      "negativeControl": "leasePoolSize temporarily raised to 11 (reverted with jj restore): FAIL 'expected: 84 actual: 83 … dispatchConnectionsPerPod must be envoy-dispatch's store.ConnectionsPerProcess'"
     }
   ],
   "observations": [
-    "CI at 90f9f929 was queued when read (2026-10-27T11:15Z), and 728b5e29 has no check runs of its own. No head of this PR has had settled CI yet.",
+    "CI at dc28412d was queued when read (2026-10-27T11:30Z). No head of this PR has had settled CI yet; the reviewer reads it.",
     "Unchanged from earlier rounds: hand-edited claim ledgers with tabs, newlines or escaped quotes between entries are undercounted; kube() has no --max-time (the architect left that out)."
   ]
 }
