@@ -26,10 +26,27 @@ const ATX_HEADING = /^#{1,6}(?:[ \t]|$)/;
 const SETEXT_UNDERLINE = /^(?:=+|-+)[ \t]*$/;
 const THEMATIC_BREAK = /^([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
 const ITEM_MARKER = /^(?:([-*+])|(\d{1,9})[.)])(?=[ \t]|$)/;
-const LINK_DEFINITION = /^\[[^\]]+\]:/;
-/** HTML blocks of CommonMark kinds 1 to 6, the ones that may interrupt a paragraph. */
-const HTML_BLOCK_START =
-  /^<(?:(?:script|pre|style|textarea)(?:[ \t>]|$)|!--|\?|![A-Za-z]|!\[CDATA\[|\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t]|\/?>|$))/i;
+/** A link reference definition: its destination, if on this line, and what follows it. */
+const LINK_DEFINITION = /^\[[^\]]+\]:[ \t]*(?:(<[^>]*>|[^ \t]+)[ \t]*)?(.*)$/;
+/** A link destination at the start of a definition's second line, and what follows it. */
+const LINK_DESTINATION = /^(?:<[^>]*>|[^ \t]+)[ \t]*(.*)$/;
+const TITLE_CLOSERS: Partial<Record<string, string>> = { '"': '"', "'": "'", "(": ")" };
+/** A GFM table delimiter row, trimmed, if it holds a `|`: micromark reads `---` as an underline. */
+const DELIMITER_ROW = /^\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?$/;
+/** CommonMark HTML block kinds 1 to 5: what starts each and the text that ends it. */
+const HTML_BLOCKS: readonly (readonly [RegExp, RegExp])[] = [
+  [/^<(?:script|pre|style|textarea)(?:[ \t>]|$)/i, /<\/(?:script|pre|style|textarea)>/i],
+  [/^<!--/, /-->/],
+  [/^<\?/, /\?>/],
+  [/^<![A-Za-z]/, />/],
+  [/^<!\[CDATA\[/, /\]\]>/],
+];
+/** HTML block kind 6, which like kinds 1 to 5 may interrupt a paragraph; a blank line ends it. */
+const HTML_BLOCK_TAG =
+  /^<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t]|\/?>|$)/i;
+/** HTML block kind 7: a complete open or closing tag alone on the line; a blank line ends it. */
+const HTML_TAG_LINE =
+  /^<(?!\/?(?:script|pre|style|textarea)\b)(?:[A-Za-z][A-Za-z0-9-]*(?:[ \t]+[A-Za-z_:][\w.:-]*(?:[ \t]*=[ \t]*(?:[^ \t"'=<>`]+|'[^']*'|"[^"]*"))?)*[ \t]*\/?|\/[A-Za-z][A-Za-z0-9-]*[ \t]*)>[ \t]*$/i;
 
 /**
  * Text a continuation line may not start with, because it would open a block or end the
@@ -40,15 +57,31 @@ const CONTINUATION_BLOCK_START =
 
 const SENTENCE_MARKS = ".!?";
 const SENTENCE_CLOSERS = ")]\"'*_”’";
-const SENTENCE_START = /^(?:[A-Z0-9`["“]|\*\*)/;
-const ABBREVIATIONS = ["e.g.", "i.e.", "etc.", "vs.", "cf.", "ex.", "eg.", "ie.", "No.", "Fig."];
+const SENTENCE_START = /^(?:[\p{Lu}a-z0-9`["“]|\*\*)/u;
+const ABBREVIATIONS = [
+  "e.g.",
+  "E.g.",
+  "i.e.",
+  "I.e.",
+  "etc.",
+  "vs.",
+  "cf.",
+  "ex.",
+  "eg.",
+  "ie.",
+  "No.",
+  "Fig.",
+  "Mr.",
+  "Dr.",
+  "U.S.",
+];
 const LETTER_OR_DIGIT = /[\p{L}\p{N}]/u;
-/** Text up to a `.` that is a list marker, not a sentence end: `1.`, `- 12.`. */
-const LIST_MARKER_PREFIX = /^[ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)*\d{1,9}\.$/;
+/** Text up to a `.` that numbers an item or heading, not a sentence end: `1.`, `- 12.`, `## 3.`. */
+const LIST_MARKER_PREFIX = /^[ \t]*(?:#{1,6}[ \t]+)?(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)*\d{1,9}\.$/;
 /** The whitespace `tr -s '[:space:]' ' '` folds. */
 const WHITESPACE_RUN = /[ \t\n\v\f\r]+/g;
 
-type LineKind = "blank" | "fence" | "code" | "table" | "text" | "other";
+type LineKind = "blank" | "fence" | "code" | "table" | "heading" | "html" | "text" | "other";
 
 interface Paragraph {
   first: number;
@@ -88,10 +121,16 @@ interface ItemMarker {
   contentColumn: number;
 }
 
+/** What the next line of a link reference definition may still hold. */
+type DefinitionTail = "destination" | "title" | { closer: string };
+
 type BlockStart =
   | { type: "item"; marker: ItemMarker }
   | { type: "fence"; fence: Fence }
-  | { type: "code" | "table" | "html" | "other" };
+  /** `end` is the text whose line ends the block, undefined when the start line already did. */
+  | { type: "html"; end: RegExp | undefined }
+  | { type: "definition"; tail: DefinitionTail | undefined }
+  | { type: "code" | "table" | "heading" | "other" };
 
 interface Finding {
   line: number;
@@ -129,17 +168,47 @@ function parseItemMarker(line: string, at: number): ItemMarker | undefined {
   };
 }
 
+/** Index of the first `char` at or after `from` that no backslash escapes, or -1. */
+function unescapedIndex(text: string, char: string, from: number): number {
+  for (let at = from; at < text.length; at++) {
+    if (text[at] === "\\") at++;
+    else if (text[at] === char) return at;
+  }
+  return -1;
+}
+
+/** How many cells a table row holds: an outer `|` on either side does not separate two. */
+function tableCells(row: string): number {
+  const text = row.trim();
+  let cells = 1;
+  for (let at = unescapedIndex(text, "|", 0); at !== -1; at = unescapedIndex(text, "|", at + 1)) {
+    cells++;
+  }
+  if (text.startsWith("|")) cells--;
+  if (text.length > 1 && text.endsWith("|") && !text.endsWith("\\|")) cells--;
+  return cells;
+}
+
+/** What may follow a link reference definition whose line holds `rest` after its destination. */
+function definitionTail(rest: string): DefinitionTail | undefined {
+  if (rest === "") return "title";
+  const closer = TITLE_CLOSERS[rest.charAt(0)];
+  return closer !== undefined && unescapedIndex(rest, closer, 1) === -1 ? { closer } : undefined;
+}
+
 /**
  * The block the line opens at `at`, `rel` columns past its container's content column, or
  * undefined for paragraph text. `interrupts` is set when the line would otherwise continue an open
- * paragraph in the same container, which only some blocks may interrupt.
+ * paragraph in the same container, which only some blocks may interrupt; `next` is the line after
+ * it, which makes it a table header when it is a delimiter row.
  */
 function blockStart(
   line: string,
   at: number,
   rel: number,
   inParagraph: boolean,
-  interrupts: boolean
+  interrupts: boolean,
+  next: string | undefined
 ): BlockStart | undefined {
   const rest = line.slice(at);
   if (rel >= 4) return inParagraph ? undefined : { type: "code" };
@@ -148,7 +217,7 @@ function blockStart(
   if (fence && !(run.startsWith("`") && (fence[2] ?? "").includes("`"))) {
     return { type: "fence", fence: { char: run.charAt(0), length: run.length } };
   }
-  if (ATX_HEADING.test(rest)) return { type: "other" };
+  if (ATX_HEADING.test(rest)) return { type: "heading" };
   if (interrupts && SETEXT_UNDERLINE.test(rest)) return { type: "other" };
   if (THEMATIC_BREAK.test(rest)) return { type: "other" };
   const marker = parseItemMarker(line, at);
@@ -156,18 +225,36 @@ function blockStart(
     return { type: "item", marker };
   }
   if (rest.startsWith(">")) return { type: "other" };
-  if (rest.startsWith("|")) return { type: "table" };
-  if (rest.startsWith("<") && (!inParagraph || HTML_BLOCK_START.test(rest))) {
-    return { type: "html" };
+  // A table starts only at a header the next line's delimiter row matches, as in micromark: a
+  // `|`-led line without one is paragraph text. A table header may interrupt a paragraph.
+  const delimiter = next?.trim() ?? "";
+  if (
+    delimiter.includes("|") &&
+    DELIMITER_ROW.test(delimiter) &&
+    tableCells(rest) === tableCells(delimiter)
+  ) {
+    return { type: "table" };
   }
-  if (!inParagraph && LINK_DEFINITION.test(rest)) return { type: "other" };
+  if (rest.startsWith("<")) {
+    const kind = HTML_BLOCKS.find(([opens]) => opens.test(rest));
+    if (kind) return { type: "html", end: kind[1].test(rest) ? undefined : kind[1] };
+    if (HTML_BLOCK_TAG.test(rest) || (!inParagraph && HTML_TAG_LINE.test(rest))) {
+      return { type: "html", end: BLANK };
+    }
+  }
+  const definition = inParagraph ? null : LINK_DEFINITION.exec(rest);
+  if (definition) {
+    const destination = definition[1];
+    const tail = destination === undefined ? "destination" : definitionTail(definition[2] ?? "");
+    return { type: "definition", tail };
+  }
   return undefined;
 }
 
 /**
  * Sorts each line into the block it belongs to, CommonMark-style: fences, indented code, tables,
- * paragraphs (lazy continuation lines included), list items and the lines that are none of
- * these. Check and write both read the document through this.
+ * HTML blocks, link reference definitions, paragraphs (lazy continuation lines included), list
+ * items and the lines that are none of these. Check and write both read the document through this.
  */
 function scanBlocks(source: readonly string[]): Blocks {
   const lines: LineInfo[] = [];
@@ -175,7 +262,10 @@ function scanBlocks(source: readonly string[]): Blocks {
   const open: ListItem[] = [];
   let paragraph: Paragraph | undefined;
   let fence: Fence | undefined;
-  let continues: "table" | "html" | undefined;
+  /** What ends the open HTML block; for BLANK (kinds 6 and 7) the blank line is outside it. */
+  let html: RegExp | undefined;
+  let definition: DefinitionTail | undefined;
+  let table = false;
 
   const info = (kind: LineKind, itemStart = false): LineInfo => ({ kind, itemStart });
 
@@ -189,21 +279,30 @@ function scanBlocks(source: readonly string[]): Blocks {
       case "fence":
         fence = start.fence;
         return info("fence");
-      case "table":
-        continues = "table";
-        return info("table");
       case "html":
-        continues = "html";
+        html = start.end;
+        return info("html");
+      case "definition":
+        definition = start.tail;
         return info("other");
+      case "table":
+        table = true;
+        return info("table");
       case "code":
-        return info("code");
+      case "heading":
+        return info(start.type);
       default:
         return info("other");
     }
   };
 
   // A marker line may hold nested markers, then any block, then paragraph text.
-  const openItems = (index: number, line: string, first: ItemMarker): LineInfo => {
+  const openItems = (
+    index: number,
+    line: string,
+    first: ItemMarker,
+    next: string | undefined
+  ): LineInfo => {
     let marker = first;
     for (;;) {
       const item = { first: index, last: index, contentColumn: marker.contentColumn };
@@ -211,7 +310,7 @@ function scanBlocks(source: readonly string[]): Blocks {
       items.push(item);
       if (marker.empty) return info("other", true);
       const at = marker.contentStart + indentLength(line.slice(marker.contentStart));
-      const inner = blockStart(line, at, at - marker.contentColumn, false, false);
+      const inner = blockStart(line, at, at - marker.contentColumn, false, false, next);
       if (inner?.type === "item") {
         marker = inner.marker;
         continue;
@@ -221,8 +320,7 @@ function scanBlocks(source: readonly string[]): Blocks {
     }
   };
 
-  const blockLine = (index: number, line: string): LineInfo => {
-    if (continues === "html") return info("other");
+  const blockLine = (index: number, line: string, next: string | undefined): LineInfo => {
     const at = indentLength(line);
     let matched = 0;
     while (matched < open.length && at >= (open[matched]?.contentColumn ?? 0)) matched++;
@@ -233,10 +331,17 @@ function scanBlocks(source: readonly string[]): Blocks {
       at,
       at - container,
       inParagraph,
-      inParagraph && matched === open.length
+      inParagraph && matched === open.length,
+      next
     );
-    if (start === undefined || (start.type === "code" && continues === "table")) {
-      if (continues === "table") return info("table");
+    // Inside a table, indented text and a delimiter row are rows too.
+    if (
+      table &&
+      (start === undefined || start.type === "code" || DELIMITER_ROW.test(line.trim()))
+    ) {
+      return info("table");
+    }
+    if (start === undefined) {
       if (paragraph) {
         paragraph.last = index;
         return { kind: "text", itemStart: false, paragraph };
@@ -247,21 +352,59 @@ function scanBlocks(source: readonly string[]): Blocks {
     // A table line inside a paragraph keeps the paragraph's items open, as a lazy line would.
     if (!(start.type === "table" && inParagraph)) open.length = matched;
     paragraph = undefined;
-    continues = undefined;
-    return start.type === "item" ? openItems(index, line, start.marker) : openBlock(start);
+    table = false;
+    return start.type === "item" ? openItems(index, line, start.marker, next) : openBlock(start);
+  };
+
+  /** Whether the line goes on with the link reference definition above it, a title or its rest. */
+  const continuesDefinition = (tail: DefinitionTail, line: string): boolean => {
+    const text = line.trim();
+    definition = undefined;
+    if (tail === "destination") {
+      definition = definitionTail(LINK_DESTINATION.exec(text)?.[1] ?? "");
+      return true;
+    }
+    if (tail === "title") {
+      const closer = TITLE_CLOSERS[text.charAt(0)];
+      if (closer === undefined) return false;
+      const end = unescapedIndex(text, closer, 1);
+      if (end === -1) definition = { closer };
+      // Text after the closing quote makes it no title: the line is a paragraph's.
+      return end === -1 || isBlank(text.slice(end + 1));
+    }
+    if (unescapedIndex(text, tail.closer, 0) === -1) definition = tail;
+    return true;
   };
 
   for (const [index, line] of source.entries()) {
+    // A fence or HTML block inside a list item ends with the item.
+    const innermost = open.at(-1);
+    if (
+      (fence || html) &&
+      innermost &&
+      !isBlank(line) &&
+      indentLength(line) < innermost.contentColumn
+    ) {
+      fence = undefined;
+      html = undefined;
+    }
     if (fence) {
       const run = FENCE_CLOSE.exec(line)?.[1] ?? "";
       if (run.startsWith(fence.char) && run.length >= fence.length) fence = undefined;
       lines.push(info("fence"));
+    } else if (html && (html !== BLANK || !isBlank(line))) {
+      if (html.test(line)) html = undefined;
+      lines.push(info("html"));
     } else if (isBlank(line)) {
       paragraph = undefined;
-      continues = undefined;
+      html = undefined;
+      definition = undefined;
+      table = false;
       lines.push(info("blank"));
+    } else if (definition !== undefined && continuesDefinition(definition, line)) {
+      lines.push(info("other"));
     } else {
-      lines.push(blockLine(index, line));
+      lines.push(blockLine(index, line, source[index + 1]));
     }
     if (!isBlank(line)) for (const item of open) item.last = index;
   }
@@ -338,8 +481,10 @@ function proseMask(line: string): boolean[] {
 
 /**
  * The index of each space on the line that separates two sentences (R1): a sentence mark, its
- * closers, then this one space, then a sentence start. Check mode reports these and `--write`
- * turns them into line breaks.
+ * closers, then this one space, then a sentence start. A sentence that starts with a lowercase
+ * word (`ygo's`, `envoy-dispatch`) follows only a bare `.`, maybe emphasised: after `?`, `!`, a
+ * quote, a parenthesis or an ellipsis such a word goes on with the sentence (`asks "why?" and`,
+ * `./... in`). Check mode reports these and `--write` turns them into line breaks.
  */
 function sentenceBreaks(line: string): number[] {
   const prose = proseMask(line);
@@ -355,6 +500,10 @@ function sentenceBreaks(line: string): number[] {
     const before = sentence.charAt(sentence.length - (abbreviation?.length ?? 0) - 1);
     if (abbreviation !== undefined && !LETTER_OR_DIGIT.test(before)) continue;
     if (LIST_MARKER_PREFIX.test(sentence)) continue;
+    const lowercase = /[a-z]/.test(line.charAt(space + 1));
+    if (lowercase && (!/^\.[*_]*$/.test(line.slice(mark, space)) || sentence.endsWith(".."))) {
+      continue;
+    }
     breaks.push(space);
   }
   return breaks;
@@ -497,9 +646,12 @@ function check(text: string): Finding[] {
     const info = blocks.lines[index];
     if (info === undefined || info.kind === "fence" || info.kind === "code") continue;
     // R1 reads a paragraph whole, so a code span a line break cuts in two still masks its text.
+    // Outside paragraphs it reads only headings and table rows, never lines `--write` keeps as
+    // they are for another reason: HTML blocks, link reference definitions, quotes.
     const paragraph = info.paragraph;
     if (paragraph === undefined) {
-      for (const space of sentenceBreaks(line)) {
+      const prose = info.kind === "heading" || info.kind === "table";
+      for (const space of prose ? sentenceBreaks(line) : []) {
         findings.push({ line: index, rule: 1, message: excerpt(line, space) });
       }
     } else if (paragraph.first === index) {
