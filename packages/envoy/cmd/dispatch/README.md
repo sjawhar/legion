@@ -921,6 +921,40 @@ when it opened, and keeps null without one; another ask with `artifact_id` set, 
 `block_artifact_id` null takes the highest version of its document created at or before it, as
 `0133` reads a comment's. Its census answers `0` for the same reasons.
 
+Migration `0135_item_blocks` creates the tables behind the blocks of a comment or message as graph
+nodes (`packages/envoy/AGENTS.md`, "References form one graph"): `comment_blocks`,
+`message_blocks`, `comment_block_texts`, `comment_block_state`, `message_block_state`,
+`comment_block_refs` and `message_block_refs`, each with a foreign key to `comments` or `messages`
+that cascades, with their indexes, among them the partial `comment_block_state_owed` and
+`message_block_state_owed` through which the block-index reconciliation reads what is owed. It
+adds the nullable `replies_to_block` to `comments` and to `messages`, a catalog change that
+rewrites and scans no row, with a partial index on each. It creates the trigger function
+`item_blocks_owe`, which no trigger calls until `0136`, and re-states the `graph_edges` view with
+six more arms: a current block's `part_of` edge to its comment or message, the links a current
+block holds, and a reply's `replies_to` edge to the block it names, under the storage kinds
+`comment_block` and `message_block`, which a build without them skips as unknown kinds. Adding the
+columns holds `comments` and `messages` `ACCESS EXCLUSIVE`, and re-stating the view holds
+`graph_edges` `ACCESS EXCLUSIVE`, for the migration's short transaction, so every read and write of
+a comment or message, and every reference read, waits behind it. It writes no row: the state rows
+are seeded by `0136` and `0137`, after their triggers. It refuses and rewrites no existing row;
+its census answers `0`.
+
+Migration `0136_comments_item_blocks_trigger` attaches `item_blocks_owe` to `comments`, `after
+insert or update of body`: a comment any build writes is owed a block index
+(`comment_block_state.owed_at`), which a block-aware build clears by indexing the comment in the
+same transaction, so a comment a build without the index writes during the roll, or after a
+rollback, stays owed until the reconciliation indexes it. In the same transaction it then owes an
+index to every comment already stored, reading `comments` once. The trigger takes
+`SHARE ROW EXCLUSIVE` on `comments` alone until the commit, so a comment write waits behind it,
+while a read does not, and no comment is written between the trigger and the seed. Its census
+answers `0`: the one table it writes is `0135`'s, which holds no row at deploy, and the rows it
+inserts are new work owed, not a rewrite.
+
+Migration `0137_messages_item_blocks_trigger` does the same for `messages`, `after insert`, a direct
+message included (a message is never edited), and owes an index to every message already stored,
+reading `messages` once. Its trigger takes `SHARE ROW EXCLUSIVE` on `messages` alone, so a message
+write waits behind it while a read does not. Its census answers `0` for the same reasons.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
