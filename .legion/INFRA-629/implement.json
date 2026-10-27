@@ -2,15 +2,23 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-629",
-  "completed": "2026-10-27T16:34:00Z",
+  "completed": "2026-10-27T17:02:16Z",
   "pr": "https://github.com/sjawhar/legion/pull/2419",
   "proof": [
     {
+      "criterion": "Tester round 1, failures 1 and 2: a fragment gets the release of the commit that added that very file (glob characters in its name), and a release tag pushed between fold_build and fold_publish does not fail the run or lose the fragment",
+      "surface": "release-push.sh fold-plan / fold-notes / push-fold on a real clone of sjawhar/legion with its real tags, changie v1.26.0, a local bare origin through the deploy-key path (the tester's own repro scripts), and the tester's red tests in release-push.test.sh",
+      "command": "PATH=$TMPDIR/infra629/bin:$PATH bash $TMPDIR/t629/s1.sh 0bcd639c45ab77b00c886000ba3e1c2eb4436041; ... $TMPDIR/t629/s3.sh 0bcd639c45ab77b00c886000ba3e1c2eb4436041; bash .github/scripts/release-push.test.sh (log: https://github.com/sjawhar/legion/pull/2419#issuecomment-6448249906)",
+      "observed": "s1: fold-plan put packages/pi-legion/.changes/unreleased/INFRA-1-[a].yaml under 99.0.0 and INFRA-1-a.yaml under 99.1.0, and push-fold landed both under their own releases. s3: with legion-envoy-v99.0.0 tagged between fold-notes and push-fold, push-fold printed '::notice title=Fold deferred::packages/envoy 99.0.0 is not folded in this run and its fragments stay on main ...', folded and pushed the pi-legion group, exit 0. release-push.test.sh 406 passed, 0 failed, the tester's two checks among them, unmodified (their lines are unchanged since b512ada67210).",
+      "headSha": "0bcd639c45ab77b00c886000ba3e1c2eb4436041",
+      "negativeControl": "A missing notes file for a main@ group (its label depends only on the base) is still refused: 'fold_refused \"a notes file missing\"' passes ('notes lacks side_main@<12 hex>.md', exit 1, origin untouched); a version group's notes path that is a dangling symlink is refused as 'is not a regular file', not deferred."
+    },
+    {
       "criterion": "2. The release scripts' own shell tests prove the fold: given fragments, the released package's CHANGELOG.md gains them under the version heading, every old line stays in order, the fragments are gone, and push-fold's checks accept exactly that commit and refuse anything else",
       "surface": "release-push.sh fold-plan, fold-notes (changie v1.26.0) and push-fold on a real clone of sjawhar/legion with its real tags, landing on a local bare origin through the deploy-key insteadOf path, with a stub gh",
-      "command": "PATH=$TMPDIR/infra629/bin:$PATH bash $TMPDIR/infra629/proof.sh f0673226e1889a4c0d4aa5e88e959ad7e02e9a62 (log: https://github.com/sjawhar/legion/pull/2419#issuecomment-6447603300); bash .github/scripts/release-push.test.sh; PATH=<changie v1.26.0>:$PATH bash .github/scripts/changelog-fold.test.sh",
+      "command": "PATH=$TMPDIR/infra629/bin:$PATH bash $TMPDIR/infra629/proof.sh 0bcd639c45ab77b00c886000ba3e1c2eb4436041 (log: https://github.com/sjawhar/legion/pull/2419#issuecomment-6448249906); bash .github/scripts/release-push.test.sh; PATH=<changie v1.26.0>:$PATH bash .github/scripts/changelog-fold.test.sh",
       "observed": "Origin's main got one commit by github-actions[bot], 'chore: fold changelog fragments [skip ci]': pi-legion/CHANGELOG.md gained '## [99.0.0] - 2026-10-27' (### Added then ### Fixed, a multi-line body's continuation lines and second paragraph indented two spaces) directly above '## Before changelog fragments'; contracts/CHANGELOG.md gained '## [main@<12 hex>] - 2026-10-27'; the three fragments were deleted and nothing else changed; no gh call. A second fold built on the same base after the first landed pushed nothing, printed '::notice title=Nothing pushed::main moved ...' and called 'gh workflow run changelog-fold.yaml --ref main --repo sjawhar/legion'. release-push.test.sh 393 passed, 0 failed; changelog-fold.test.sh 12 passed, 0 failed.",
-      "headSha": "f0673226e1889a4c0d4aa5e88e959ad7e02e9a62",
+      "headSha": "0bcd639c45ab77b00c886000ba3e1c2eb4436041",
       "negativeControl": "Notes with '## [1.0.0] - 2000-01-01' appended to pi-legion_99.0.0.md: push-fold exit 1, '::error::release-push.sh push-fold: ... holds a line starting '## '; the heading is push-fold's to write', origin's main unchanged, working tree clean. A throwaway copy of release-push.sh whose insert_block appends at the end: changelog-fold.test.sh 11 passed, 1 failed (the placement check)."
     },
     {
@@ -25,8 +33,8 @@
   "filesChanged": [
     ".github/actions/install-changie/action.yml (new)",
     "packages/{claude-envoy,contracts,envoy,envoy-client,envoy-plugin,pi-envoy,pi-legion}/.changie.yaml (new, identical)",
-    ".github/scripts/release-push.sh (fold-plan, fold-notes, push-fold, land_on_main, check_hand_over shared with handed)",
-    ".github/scripts/release-push.test.sh (55 new cases)",
+    ".github/scripts/release-push.sh (fold-plan, fold-notes, push-fold, land_on_main, check_hand_over shared with handed; round 2: --literal-pathspecs on the fragment's git log, deferral of a version group with no notes)",
+    ".github/scripts/release-push.test.sh (new cases; round 2 adds three deferral cases after the tester's two red tests)",
     ".github/scripts/changelog-fold.test.sh (new)",
     ".github/workflows/changelog-fold.yaml (new)",
     ".github/workflows/pr-and-main.yaml (test job: install-changie, changelog-fold.test.sh)",
@@ -51,12 +59,14 @@
     "check-release-credentials rule 7 (pin the workflow-level concurrency group) was dropped: with land_on_main two runs cannot both land a fold, so the group only saves wasted runs. The group is changelog-fold-${{ github.ref }}.",
     "changelog-fold.yaml gained a pull_request trigger (paths: the workflow, release-push.sh, install-changie, packages/*/.changie.yaml; not .changes/**) so fold_build runs on GitHub before the merge on the PR's merge commit; fold_publish runs on main only.",
     "Each package's fragments for one release share one notes file per (package, label); fold-plan prints tab-separated lines <package-dir> <label> <date> <path>; specs are <package-dir>[=<tag-prefix>] arguments.",
-    "Simplify pass: 5 applied, 1 skipped (git --sort=v:refname for the lowest release tag would order a tag prefix ending in digits differently from sort -V)."
+    "Simplify pass: 5 applied, 1 skipped (git --sort=v:refname for the lowest release tag would order a tag prefix ending in digits differently from sort -V).",
+    "Round 2: push-fold defers, rather than refuses, a version-labelled group whose notes file does not exist at all (its release tag was pushed after the build planned); its fragments stay for a later run (the release's completion starts one, the daily run is the backstop). A missing main@ group's notes stay a refusal. Known limit: a new tag of a LOWER version than an existing one, pushed between the jobs on a commit holding already-planned fragments, would re-label a group and push-fold refuses (exit 1); release tags only go up."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
     "The fold_publish half (the deploy-key push to GitHub and gh workflow run) first executes on main after the merge; its script path is covered by release-push.test.sh and the real-clone proof with a local bare origin and a stub gh. The same deploy_key_env mechanism already pushes push-main's bump commits on main.",
     "Open pull requests that touch the same scripts: #2358 (INFRA-576) and #2316 (INFRA-520) edit release-push.test.sh and check-release-credentials.sh/.test.sh; INFRA-630 adds land_on_main's twin (whichever merges second takes the other's from main).",
     "Remaining 'Unreleased' hits outside CHANGELOG.md and docs/plans: AGENTS.md's new bullet (names the old heading on purpose), docs/solutions unchanged-diff-fingerprint:105, LEGION-247 forward-merge note :43 and a-name-a-package-stops-shipping :58 (dated records), packages/dispatch/e2e/agent-view.e2e.ts:78 (a chat fixture), daemon Go test names about unreleased child issues."
-  ]
+  ],
+  "round": 2
 }
