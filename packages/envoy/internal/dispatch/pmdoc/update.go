@@ -190,14 +190,14 @@ func updateElement(txn *crdt.Transaction, element *crdt.YXmlElement, want *Node)
 // and it writes the default back into the live document for any node it edits. A table cell with
 // no alignment holds "none": the default, left, would turn an unaligned column left-aligned at its
 // first edit, while "none" it keeps and writes unaligned, as the tree's null is written. A code
-// block with no language and an image with no title hold "", that editor's default and its value
-// for none.
+// block with no language and an image with no title, no link or no link title hold "", that
+// editor's default and its value for none.
 // readElement reads each back as null (treeAttrs).
 var liveNulls = map[string]map[string]any{
 	"table_cell":   {"alignment": "none"},
 	"table_header": {"alignment": "none"},
 	"code_block":   {"language": ""},
-	"image":        {"title": ""},
+	"image":        {"title": "", "link": "", "linkTitle": ""},
 }
 
 // liveAttrs is node's attributes as the live document holds them (liveNulls).

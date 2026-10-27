@@ -156,10 +156,11 @@ const (
 	// request may hold.
 	rawHTMLWeight = 2
 	// imageWeight is an image: the Proof tree makes it a node of its own carrying its source, its
-	// alt text and its title as attributes, and the live document an element with all three,
-	// splitting its textblock's text, so it costs what a block does. Weighed as one inline node, the
-	// heaviest document of `![](u)` the limit admitted held 327 to 383 MiB to store, and four cold
-	// reads of it at once up to 1,044 MiB.
+	// alt text, its title, its link and its link title as attributes, and the live document an
+	// element with all five, splitting its textblock's text, so it costs what a block does. A link
+	// around the whole image weighs one inline node more. Weighed as one inline node, the heaviest
+	// document of `![](u)` the limit admitted held 327 to 383 MiB to store, and four cold reads of
+	// it at once up to 1,044 MiB.
 	imageWeight = 3
 	// footnoteReferenceWeight is a footnote reference: a node of its own carrying its label as an
 	// attribute, and an element with it in the live document. Weighed as one inline node, the

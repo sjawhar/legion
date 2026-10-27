@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/yuin/goldmark/util"
 )
 
 type renderer struct {
@@ -35,6 +37,13 @@ type renderer struct {
 	// bareEmptyCode writes an empty code block in a typed block in a list item as its fences alone,
 	// and wroteBlankEmptyCode records one written with a line between them (emptyCodeWrittenBare).
 	bareEmptyCode, wroteBlankEmptyCode bool
+	// lineTally is the running tally of the line being written, from start to end
+	// (writtenLineTally), and truncatedTo the lowest length a truncate set since it was read on.
+	lineTally struct {
+		start, end int
+		tally      rowTally
+	}
+	truncatedTo int
 	// spanBudget is how many more empty cells the tables' spans may add: maxSpanCells, or none in
 	// a spanless render (renderSpanless).
 	spanBudget   int
@@ -135,6 +144,15 @@ func render(doc *Node, spanCells int) (r *renderer, err error) {
 	if r.err == nil && r.wroteBlankEmptyCode && holdsBrowserOnlyShape(r.b.Bytes()) {
 		r = renderBlocks(doc, labels, true, spanCells)
 	}
+	// An image's title or link title holding a line feed is written as the server has always
+	// written it, the line feed as it is, wherever both readers read that back as held - Go's and
+	// the browser editor's engine, which draws the past-version view - so a title the server
+	// already stores keeps its bytes. Elsewhere both titles' line feeds are written `&#10;`, which
+	// reads back as the line feed anywhere. That is judged as the image is written, one line the
+	// title creates at a time (rawTitleLinesHold), never by reading the document back: reading it
+	// back once for each such image was quadratic in them, and even once costs Go's parse of the
+	// whole document, superlinear in a long title, and a second render where it disagrees
+	// (INFRA-190).
 	if r.err != nil {
 		return nil, r.err
 	}
@@ -142,7 +160,8 @@ func render(doc *Node, spanCells int) (r *renderer, err error) {
 }
 
 // renderBlocks writes doc's blocks, an empty code block in a typed block in a spread list item as
-// its fences alone when bareEmptyCode says so, its tables' spans adding at most spanCells cells.
+// its fences alone when bareEmptyCode says so, and its tables' spans adding at most spanCells
+// cells.
 func renderBlocks(doc *Node, labels footnoteLabelSet, bareEmptyCode bool, spanCells int) *renderer {
 	r := &renderer{footnoteLabels: labels, bareEmptyCode: bareEmptyCode, spanBudget: spanCells}
 	r.blocks(doc.Children, "")
@@ -778,6 +797,11 @@ func isAngleURLLink(node *Node, marks []Mark, escapePipes bool) bool {
 	return false
 }
 
+// linkTail writes the end of a text link after its text: the destination and title.
+func linkTail(destination, title string, escapePipes bool) string {
+	return "](" + escapeLinkDestination(destination, escapePipes) + titleSuffix(title, escapePipes) + ")"
+}
+
 func escapeLinkDestination(href string, escapePipes bool) string {
 	if escapePipes {
 		href = escapeTableLinkDestination(href)
@@ -786,6 +810,123 @@ func escapeLinkDestination(href string, escapePipes bool) string {
 		return "<" + href + ">"
 	}
 	return href
+}
+
+// escapeDecodedLinkDestination writes a destination held decoded - an image's source or a linked
+// image's link, whose character references and backslash escapes Parse read (decodeDestination) -
+// so that goldmark and the browser editor's parser read it back as it is, escaping only what
+// either would otherwise read differently: a backslash before ASCII punctuation, before a
+// character written as a reference or at the end, an ampersand opening a reference
+// decodeDestination decodes, a `<` opening the destination, a pipe in a table cell, and in angle
+// brackets every angle bracket. A tab, line feed, form feed or carriage return is a numeric
+// character reference, which reads back as the character. One holding a space, a parenthesis or
+// another control character, which only angle brackets hold as written, is written in them.
+// Anything else is written as it is, as escapeLinkDestination writes a source.
+func escapeDecodedLinkDestination(destination string, escapePipes bool) string {
+	var written strings.Builder
+	written.Grow(len(destination) + 2)
+	angle := strings.ContainsAny(destination, " ()") || strings.IndexFunc(destination, func(char rune) bool {
+		return char < ' ' && !isReferencedControl(byte(char)) || char == 0x7f
+	}) >= 0
+	if angle {
+		written.WriteByte('<')
+	}
+	for index := range len(destination) {
+		char := destination[index]
+		switch {
+		case char == '\\' && (index+1 == len(destination) || isASCIIPunctuation(destination[index+1]) || isReferencedControl(destination[index+1])):
+			written.WriteByte('\\')
+		case char == '<' && (angle || index == 0), char == '>' && angle, char == '|' && escapePipes:
+			written.WriteByte('\\')
+		case char == '&' && opensDecodedReference(destination[index:]):
+			written.WriteByte('\\')
+		case isReferencedControl(char):
+			written.WriteString("&#" + strconv.Itoa(int(char)) + ";")
+			continue
+		}
+		written.WriteByte(char)
+	}
+	if angle {
+		written.WriteByte('>')
+	}
+	return written.String()
+}
+
+// isReferencedControl reports whether char is a control character escapeDecodedLinkDestination
+// writes as a numeric character reference: one decodeDestination reads such a reference back as,
+// where it reads any other control character's as U+FFFD.
+func isReferencedControl(char byte) bool {
+	return char == '\t' || char == '\n' || char == '\f' || char == '\r'
+}
+
+// decodedReference is a character reference opening a value, as decodeDestination finds one.
+var decodedReference = regexp.MustCompile(`^` + destinationReferencePattern)
+
+// opensDecodedReference reports whether value opens with a character reference decodeDestination
+// decodes: a numeric one, or a named one whose name an HTML entity has. `&foo;` it keeps as written.
+func opensDecodedReference(value string) bool {
+	reference := decodedReference.FindString(value)
+	if reference == "" {
+		return false
+	}
+	if reference[1] == '#' {
+		return true
+	}
+	_, ok := util.LookUpHTML5EntityByName(reference[1 : len(reference)-1])
+	return ok
+}
+
+// decodedTitleSuffix writes a title held decoded - an image's title or a linked image's link
+// title, read by decodedTitleOrNil - so that it reads back as it is: as titleSuffix writes a
+// text link's, every backslash doubled, a double quote and a pipe in a table cell escaped, and
+// besides an ampersand opening a reference decodeDestination decodes escaped. A carriage return,
+// which only a reference puts in a title and a write reads as a line feed, is written as that
+// reference. A line feed is written as it is when rawLineFeeds is set, as titleSuffix writes it,
+// so a title the server already stores keeps its bytes; otherwise it is written `&#10;`, which
+// decodedTitleOrNil and the browser editor's parser read back as the line feed, where the block
+// around it cannot hold it: a line feed ends a heading or a table row, a blank line ends a
+// paragraph, and a line of the title can open a block or lose its indentation (rawTitleLinesHold
+// judges which as the image is written).
+func decodedTitleSuffix(title string, escapePipes, rawLineFeeds bool) string {
+	if title == "" {
+		return ""
+	}
+	var written strings.Builder
+	written.Grow(len(title) + 3)
+	written.WriteString(" \"")
+	for index := range len(title) {
+		char := title[index]
+		switch {
+		case char == '\\' || char == '"' || char == '|' && escapePipes:
+			written.WriteByte('\\')
+		case char == '&' && opensDecodedReference(title[index:]):
+			written.WriteByte('\\')
+		case char == '\r':
+			written.WriteString("&#13;")
+			continue
+		case char == '\n' && !rawLineFeeds:
+			written.WriteString("&#10;")
+			continue
+		}
+		written.WriteByte(char)
+	}
+	written.WriteByte('"')
+	return written.String()
+}
+
+// imageSyntax writes an image whose label is written as alt, inside its link's syntax when it has
+// a link. Its source, title, link and link title are held decoded (decodeDestination,
+// decodedTitleOrNil), each escaped so it reads back as it is held; rawLineFeeds is passed to
+// decodedTitleSuffix for both titles, so one image's titles are both written raw or both `&#10;`.
+func imageSyntax(n *Node, alt string, escapePipes, rawLineFeeds bool) string {
+	src, _ := n.Attrs["src"].(string)
+	title, _ := n.Attrs["title"].(string)
+	image := "![" + alt + "](" + escapeDecodedLinkDestination(src, escapePipes) + decodedTitleSuffix(title, escapePipes, rawLineFeeds) + ")"
+	if link, _ := n.Attrs["link"].(string); link != "" {
+		linkTitle, _ := n.Attrs["linkTitle"].(string)
+		image = "[" + image + "](" + escapeDecodedLinkDestination(link, escapePipes) + decodedTitleSuffix(linkTitle, escapePipes, rawLineFeeds) + ")"
+	}
+	return image
 }
 
 func titleSuffix(title string, escapePipes bool) string {

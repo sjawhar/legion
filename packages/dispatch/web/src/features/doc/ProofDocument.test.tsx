@@ -3,6 +3,7 @@ import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import { type Node as ProseMirrorNode, Schema } from "prosemirror-model";
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
+import { watchLinkClicks } from "../../__tests__/link-clicks";
 import {
   answerTextReadsWithTheSeededText,
   artifact,
@@ -199,6 +200,58 @@ test("ProofDocument opens a hover card for a dispatch:// link in the live editor
   }
 });
 
+test("ProofDocument navigates in-app from a picture linked to a dispatch:// target, under the picture's node selection", async () => {
+  const { editors, sync, view } = renderProofDocument();
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    const root = editors[0]?.root;
+    if (root === undefined) throw new Error("editor root missing");
+    // What the picture view draws for `[![x](a.png)](dispatch://CORE-2)` (the schema's anchor,
+    // href sanitized to "" and the target in data-dispatch-href, as a text link's), beside a text
+    // link and a picture linked elsewhere.
+    act(() => {
+      root.innerHTML =
+        '<p><a href="" data-dispatch-href="dispatch://CORE-2" contenteditable="false"><img alt="x" src="https://example.com/a.png"></a>' +
+        ' <a href="" data-dispatch-href="dispatch://CORE-3">a text link</a>' +
+        ' <a href="https://ci.example/build" contenteditable="false"><img alt="build" src="https://example.com/badge.svg"></a></p>';
+    });
+    const followed = watchLinkClicks(root);
+    const route = () => within(view.container).getByTestId("current-route").textContent;
+    const before = route();
+    const picture = within(root).getByRole("img", { name: "x" });
+    const linkedPicture = picture.parentElement;
+    if (linkedPicture === null) throw new Error("the picture has no link");
+    // Clicking an atom picture makes ProseMirror's node selection: a non-collapsed DOM selection
+    // around the picture.
+    const range = document.createRange();
+    range.selectNode(linkedPicture);
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+
+    // A drag-selection ending on a text link is no click on it.
+    fireEvent.click(within(root).getByText("a text link"));
+    expect(followed()).toBe(true);
+    expect(route()).toBe(before);
+    // A modifier click is the browser's and the editor's.
+    fireEvent.click(picture, { ctrlKey: true });
+    expect(followed()).toBe(true);
+    expect(route()).toBe(before);
+    // A picture linked elsewhere is not the app's to navigate.
+    fireEvent.click(within(root).getByRole("img", { name: "build" }));
+    expect(followed()).toBe(true);
+    expect(route()).toBe(before);
+
+    fireEvent.click(picture);
+    expect(followed()).toBe(false);
+    expect(route()).toBe("/issues/CORE-2");
+  } finally {
+    window.getSelection()?.removeAllRanges();
+    view.unmount();
+  }
+});
+
 test("ProofDocument reports connection status and pending edits through the toolbar bag", async () => {
   const { editors, pending, rerender, status, sync, toolbar, view } = renderProofDocument();
 
@@ -208,7 +261,13 @@ test("ProofDocument reports connection status and pending edits through the tool
     act(() => status("connected"));
     await waitFor(() => expect(toolbar.current?.connection).toBe("connected"));
     act(() => {
-      pending({ count: 2, readOnly: false, rebuiltAt: undefined, stored: true });
+      pending({
+        count: 2,
+        readOnly: false,
+        rebuiltAt: undefined,
+        stored: true,
+        strippedAt: undefined,
+      });
       status("offline");
     });
     await waitFor(() =>
@@ -217,6 +276,7 @@ test("ProofDocument reports connection status and pending edits through the tool
         readOnly: false,
         rebuiltAt: undefined,
         stored: true,
+        strippedAt: undefined,
       })
     );
     await waitFor(() => expect(toolbar.current?.connection).toBe("offline"));

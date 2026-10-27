@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -25,19 +26,23 @@ type diffDump struct {
 	Parse string          `json:"parse,omitempty"`
 	// Write is ParseForWrite's refusal: what an upload of the document is answered.
 	Write string `json:"write,omitempty"`
-	// Render is Tree's rendering, the markdown the document is stored as, and ReadsBack whether
-	// Parse reads it back as Tree.
-	Render    *string `json:"render"`
-	RenderErr string  `json:"render_err,omitempty"`
-	ReadsBack bool    `json:"reads_back"`
+	// Render is Tree's rendering, the markdown the document is stored as, ReadsBack whether Parse
+	// reads it back as Tree, and WriteReadsBack whether ParseForWrite, the reading every later
+	// write of the stored document makes, does too.
+	Render         *string `json:"render"`
+	RenderErr      string  `json:"render_err,omitempty"`
+	ReadsBack      bool    `json:"reads_back"`
+	WriteReadsBack bool    `json:"write_reads_back"`
 	// FixedPoint is whether Render is the document's markdown byte for byte: reading the
 	// document and writing it back gives back what was read.
 	FixedPoint bool `json:"fixed_point"`
 	// EngineRender is the rendering of the engine's reading of the document, the tree a browser
-	// holds, and EngineReadsBack whether Parse reads it back as that tree.
-	EngineRender    *string `json:"engine_render"`
-	EngineRenderErr string  `json:"engine_render_err,omitempty"`
-	EngineReadsBack bool    `json:"engine_reads_back"`
+	// holds, and EngineReadsBack and EngineWriteReadsBack whether Parse and ParseForWrite read it
+	// back as that tree.
+	EngineRender         *string `json:"engine_render"`
+	EngineRenderErr      string  `json:"engine_render_err,omitempty"`
+	EngineReadsBack      bool    `json:"engine_reads_back"`
+	EngineWriteReadsBack bool    `json:"engine_write_reads_back"`
 	// Panics names each step that panicked, recovered or not.
 	Panics []string `json:"panics,omitempty"`
 }
@@ -102,63 +107,74 @@ func diffStep(dump *diffDump, name string, step func() error) (err error) {
 // diffTree decodes the engine's ProseMirror JSON as Go holds the document where the two differ only
 // in what the browser editor does not store: a mark on a hard break or an image, which the engine's
 // reader keeps and the editor's store (y-prosemirror) drops, as Go's schema does by holding marks on
-// text alone. An image's link is one such mark, which the editor shows until the document is
-// reloaded (LEGION-365); TestDifferentialCompare counts those documents apart. Each short table
-// body row is padded to its header's width as Parse pads it, the documented canonicalisation. No
-// revision is judged by these.
+// text alone. A link around one whole image is the image's link attribute, which both store; a link
+// the engine holds as a mark on an image (one holding more than the bare image, or no address) is
+// one such mark, which the editor shows until the document is reloaded (LEGION-365).
+// TestDifferentialCompare counts both kinds apart. Each short table body row is padded to its
+// header's width as Parse pads it, the documented canonicalisation. No revision is judged by these.
 func diffTree(reading *diffReading) *Node {
 	doc, _ := diffTreeLinkingImages(reading)
 	return doc
 }
 
-// diffTreeLinkingImages is diffTree, also reporting whether the engine's reading links an image.
-func diffTreeLinkingImages(reading *diffReading) (*Node, bool) {
+// diffImageLinks is how the engine's reading of a document links its images. whole: an image
+// carries a non-empty link attribute, a link around one whole image, which the editor stores.
+// marked: an image carries a link mark, a shape whose link the editor drops as before (LEGION-365).
+type diffImageLinks struct{ whole, marked bool }
+
+// diffTreeLinkingImages is diffTree, also reporting how the engine's reading links its images.
+func diffTreeLinkingImages(reading *diffReading) (*Node, diffImageLinks) {
 	if reading == nil || reading.Err != "" || reading.PM == nil {
-		return nil, false
+		return nil, diffImageLinks{}
 	}
 	var generic any
 	if err := json.Unmarshal(reading.PM, &generic); err != nil {
-		return nil, false
+		return nil, diffImageLinks{}
 	}
-	linksImage := dropUnstoredMarks(generic)
+	links := dropUnstoredMarks(generic)
 	raw, err := json.Marshal(generic)
 	if err != nil {
-		return nil, linksImage
+		return nil, links
 	}
 	doc, err := FromJSON(raw)
 	if err != nil {
-		return nil, linksImage
+		return nil, links
 	}
 	padShortRows(doc)
-	return doc, linksImage
+	return doc, links
 }
 
-// dropUnstoredMarks removes, in decoded ProseMirror JSON, every mark on a hard break or an image,
-// and reports whether one it removed was an image's link.
-func dropUnstoredMarks(value any) (linksImage bool) {
+// dropUnstoredMarks removes, in decoded ProseMirror JSON, every mark on a hard break or an image (a
+// mark on an image is never stored), and reports whether an image carried a non-empty link
+// attribute and, apart, whether one carried a link mark it removed.
+func dropUnstoredMarks(value any) (links diffImageLinks) {
 	node, ok := value.(map[string]any)
 	if !ok {
-		return false
+		return links
 	}
 	switch node["type"] {
 	case "hardbreak":
 		delete(node, "marks")
 	case "image":
+		attrs, _ := node["attrs"].(map[string]any)
+		if link, _ := attrs["link"].(string); link != "" {
+			links.whole = true
+		}
 		marks, _ := node["marks"].([]any)
 		for _, mark := range marks {
 			if m, ok := mark.(map[string]any); ok && m["type"] == "link" {
-				linksImage = true
+				links.marked = true
 			}
 		}
 		delete(node, "marks")
 	}
 	children, _ := node["content"].([]any)
 	for _, child := range children {
-		if dropUnstoredMarks(child) {
-			linksImage = true
-		}
+		inner := dropUnstoredMarks(child)
+		links.whole = links.whole || inner.whole
+		links.marked = links.marked || inner.marked
 	}
-	return linksImage
+	return links
 }
 
 // padShortRows gives every short body row of every table under node the cells Parse pads it with,
@@ -232,11 +248,11 @@ func TestDifferentialDump(t *testing.T) {
 		}
 		if tree != nil {
 			dump.Tree, _ = withoutBlockIDs(tree).JSON()
-			dump.Render, dump.RenderErr, dump.ReadsBack = diffRender(&dump, "render", tree)
+			dump.Render, dump.RenderErr, dump.ReadsBack, dump.WriteReadsBack = diffRender(&dump, "render", tree)
 			dump.FixedPoint = dump.Render != nil && *dump.Render == source.MD
 		}
 		if engineTree := diffTree(read.MD); engineTree != nil {
-			dump.EngineRender, dump.EngineRenderErr, dump.EngineReadsBack = diffRender(&dump, "engine render", engineTree)
+			dump.EngineRender, dump.EngineRenderErr, dump.EngineReadsBack, dump.EngineWriteReadsBack = diffRender(&dump, "engine render", engineTree)
 		}
 		line, err := json.Marshal(dump)
 		if err != nil {
@@ -246,22 +262,25 @@ func TestDifferentialDump(t *testing.T) {
 	}
 }
 
-// diffRender renders tree and reports whether Parse reads the rendering back as tree.
-func diffRender(dump *diffDump, name string, tree *Node) (*string, string, bool) {
+// diffRender renders tree and reports whether Parse, and whether ParseForWrite, reads the
+// rendering back as tree.
+func diffRender(dump *diffDump, name string, tree *Node) (*string, string, bool, bool) {
 	var markdown string
 	if err := diffStep(dump, name, func() (err error) { markdown, err = Render(tree); return err }); err != nil {
-		return nil, err.Error(), false
+		return nil, err.Error(), false, false
 	}
-	var back *Node
-	if err := diffStep(dump, name+" read back", func() (err error) { back, err = Parse(markdown); return err }); err != nil {
-		return &markdown, "", false
-	}
-	return &markdown, "", StripAnchorMarks(tree).Equal(back)
+	want := StripAnchorMarks(tree)
+	var back, written *Node
+	readsBack := diffStep(dump, name+" read back", func() (err error) { back, err = Parse(markdown); return err }) == nil && want.Equal(back)
+	writeReadsBack := diffStep(dump, name+" write read back", func() (err error) { written, err = ParseForWrite(markdown, nil); return err }) == nil && want.Equal(written)
+	return &markdown, "", readsBack, writeReadsBack
 }
 
 // diffSide is what one revision does with one document.
 type diffSide struct {
 	dump diffDump
+	// tree is what it reads the document as, nil where it refuses it.
+	tree *Node
 	// stores: the write is taken and the tree renders, with nothing panicking.
 	stores bool
 	// correct: it stores the document as the engine reads it, in markdown both readers read back
@@ -274,6 +293,9 @@ type diffSide struct {
 	// Why correct fails: the tree differs from the engine's reading, or the engine reads the
 	// rendering back otherwise (Go's read-back is in dump).
 	ReadsAsEngine, EngineReadsBack bool
+	// imagesHeld: Go's Parse and the engine both read the rendering back with the tree's images,
+	// each with its source, alt, titles and link, in document order.
+	imagesHeld bool
 }
 
 // diffRenderings is the engine's reading of one revision's two renderings of a document.
@@ -285,19 +307,52 @@ type diffRenderings struct {
 
 func judge(dump diffDump, source *Node, reading diffRenderings) diffSide {
 	side := diffSide{dump: dump}
-	var tree *Node
 	if dump.Tree != nil {
-		tree, _ = FromJSON(dump.Tree)
+		side.tree, _ = FromJSON(dump.Tree)
 	}
+	tree := side.tree
 	side.stores = dump.Write == "" && tree != nil && dump.Render != nil && len(dump.Panics) == 0
 	engineBack := diffTree(reading.Render)
 	side.EngineReadsBack = tree != nil && engineBack != nil && StripAnchorMarks(tree).Equal(engineBack)
 	side.ReadsAsEngine = tree != nil && source != nil && tree.Equal(source)
 	side.correct = side.stores && side.ReadsAsEngine && dump.ReadsBack && side.EngineReadsBack
 	side.engineOnly = side.stores && dump.ReadsBack && !side.EngineReadsBack
+	if side.stores && engineBack != nil {
+		goBack, err := Parse(*dump.Render)
+		images := diffImages(tree)
+		side.imagesHeld = err == nil && diffSameImages(diffImages(goBack), images) && diffSameImages(diffImages(engineBack), images)
+	}
 	engineRenderBack := diffTree(reading.EngineRender)
 	side.renders = source != nil && dump.EngineRender != nil && dump.EngineReadsBack && engineRenderBack != nil && source.Equal(engineRenderBack) && len(dump.Panics) == 0
 	return side
+}
+
+// diffImages is doc's images in document order. The differential's own helpers are named apart
+// from the package's, since differential.sh builds this file into every revision it compares.
+func diffImages(doc *Node) []*Node {
+	var images []*Node
+	Walk(doc, func(node *Node) bool {
+		if node.Type == "image" {
+			images = append(images, node)
+		}
+		return true
+	})
+	return images
+}
+
+// diffSameImages reports whether two lists of images hold the same images in order, each with the
+// same source, alt, title, link and link title, an absent one the same as an empty one.
+func diffSameImages(a, b []*Node) bool {
+	return slices.EqualFunc(a, b, func(x, y *Node) bool {
+		for _, field := range []string{"src", "alt", "title", "link", "linkTitle"} {
+			first, _ := x.Attrs[field].(string)
+			second, _ := y.Attrs[field].(string)
+			if first != second {
+				return false
+			}
+		}
+		return true
+	})
 }
 
 // differs reports whether two renderings differ, one missing counting as a difference.
@@ -341,12 +396,15 @@ func TestDifferentialCompare(t *testing.T) {
 			break
 		}
 		documents++
-		source, linksImage := diffTreeLinkingImages(read.MD)
+		source, links := diffTreeLinkingImages(read.MD)
 		if source == nil {
 			counts["engine cannot read"]++
 		}
-		if linksImage {
-			counts["engine links an image"]++
+		if links.whole {
+			counts["engine links a whole image"]++
+		}
+		if links.marked {
+			counts["engine holds an image's link as a mark (LEGION-365)"]++
 		}
 		var sides [2]diffSide
 		for index := range sides {
@@ -358,13 +416,45 @@ func TestDifferentialCompare(t *testing.T) {
 			sides[index] = judge(dump, source, reading)
 		}
 		base, head := sides[0], sides[1]
-		// A linked image is stored without its link at both revisions, as the editor stores it
-		// (LEGION-365); these are the documents that loss reaches.
-		if linksImage && base.stores {
-			counts["base stores a linked image without its link (LEGION-365)"]++
+		if base.stores && !head.stores {
+			flag("refused write", sides)
 		}
-		if linksImage && head.stores {
-			flag("head stores a linked image without its link (LEGION-365)", sides)
+		// A link around one whole image is stored as the image's link attributes, as the editor
+		// stores it; head keeps it when it stores the document as the engine reads it. A document
+		// both revisions refuse while reading it - Go's Parse finds its markdown outside the Proof
+		// schema before anything is written, so no write of it is taken at either - loses no link
+		// it ever had, and is counted apart, ungated; one head reads and then refuses to store is
+		// a lost link, since the refusal is the writer's. So is one
+		// Go's reader reads otherwise than the engine at both revisions - its author's source,
+		// read two ways at base already, which the server takes as Go reads it (R2) - but only
+		// where head's stored bytes hold the images Go read: Go's reader and the engine both read
+		// them back with every image, its titles and its link, as Go read it (imagesHeld). Bytes
+		// either reader reads with an image otherwise lose the link the server took, whatever the
+		// source said; a difference elsewhere in the document is the base's, which writes it too.
+		if links.whole {
+			switch {
+			case head.correct:
+				counts["linked image kept"]++
+			case !base.stores && !head.stores && base.dump.Parse != "" && head.dump.Parse != "":
+				flag("linked image in a write both refuse while reading it", sides)
+			case !base.ReadsAsEngine && !head.ReadsAsEngine && head.imagesHeld:
+				flag("linked image in a document Go reads otherwise than the engine at both revisions", sides)
+			default:
+				flag("lost whole-image link", sides)
+			}
+		}
+		// A link the engine holds as a mark on an image is stored without it at both revisions, as
+		// the editor stores it (LEGION-365); these are the documents that loss reaches. Where it is
+		// the document's only kind of linked image, head stores the document as base does.
+		if links.marked && base.stores {
+			counts["base stores an image under a link mark without the link (LEGION-365)"]++
+		}
+		if links.marked && head.stores {
+			flag("head stores an image under a link mark without the link (LEGION-365)", sides)
+		}
+		if links.marked && !links.whole && base.stores &&
+			(head.tree == nil || !base.tree.Equal(head.tree) || differs(base.dump.Render, head.dump.Render)) {
+			flag("changed linked image", sides)
 		}
 		for index, name := range []string{"base", "head"} {
 			side := sides[index]
@@ -397,14 +487,33 @@ func TestDifferentialCompare(t *testing.T) {
 		case lost:
 			flag("lost fixed point of a misread", sides)
 		}
-		if base.correct && differs(base.dump.Render, head.dump.Render) {
-			flag("churn", sides)
+		// Churn is head writing other bytes for a document base stores correctly - as the engine
+		// reads it, in bytes Go and the engine read back as held - in bytes a write reads back as
+		// held too: such bytes are kept, and others are written only where the base's do not read
+		// back as held (a title's carriage return written raw, which every later write reads as a
+		// line feed, is written `&#13;`). Bytes of base's that only Parse reads back as held, and
+		// the bytes of a document base does not store correctly (one the engine misreads at base),
+		// which head may write otherwise, are counted apart, ungated.
+		if differs(base.dump.Render, head.dump.Render) {
+			switch {
+			case base.correct && base.dump.WriteReadsBack:
+				flag("churn", sides)
+			case base.correct:
+				flag("churn of base bytes a write reads otherwise", sides)
+			case base.stores:
+				flag("rewritten bytes of a document base stores incorrectly", sides)
+			}
 		}
 		if base.renders && !head.renders {
 			flag("engine-tree regression", sides)
 		}
 		if base.renders && differs(base.dump.EngineRender, head.dump.EngineRender) {
-			flag("engine-tree churn", sides)
+			switch {
+			case base.dump.EngineWriteReadsBack:
+				flag("engine-tree churn", sides)
+			default:
+				flag("engine-tree churn of base bytes a write reads otherwise", sides)
+			}
 		}
 		if !base.renders && head.renders {
 			flag("engine-tree fixed", sides)
@@ -427,6 +536,9 @@ func TestDifferentialCompare(t *testing.T) {
 		{"engine-tree churn (base renders the engine's tree correctly, head's bytes differ)", "engine-tree churn"},
 		{"head panics (recovered or not)", "head panic"},
 		{"lost fixed points (base reads the markdown as the engine and writes it back as read, head does not)", "lost fixed point"},
+		{"head refuses a write the base takes", "refused write"},
+		{"head loses a whole-image link (the engine links a whole image, head does not store it correctly)", "lost whole-image link"},
+		{"head changes a linked image the base stored (a link mark on an image only; tree or bytes differ)", "changed linked image"},
 	} {
 		fmt.Fprintf(&summary, "GATE %-86s %d\n", line.label, counts[line.key])
 	}
@@ -439,7 +551,7 @@ func TestDifferentialCompare(t *testing.T) {
 		fmt.Fprintf(&summary, "  %s: %d\n", key, counts[key])
 	}
 	fmt.Print(summary.String())
-	for _, gate := range []string{"regression", "misread", "churn", "engine-tree regression", "engine-tree churn", "head panic", "lost fixed point"} {
+	for _, gate := range []string{"regression", "misread", "churn", "engine-tree regression", "engine-tree churn", "head panic", "lost fixed point", "refused write", "lost whole-image link", "changed linked image"} {
 		if counts[gate] > 0 {
 			t.Errorf("%d %s; see %s", counts[gate], gate, os.Getenv("PMDOC_DIFF_REPORT"))
 		}

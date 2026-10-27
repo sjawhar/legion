@@ -213,6 +213,27 @@ test("a Dispatch picture shows as its thumbnail beside its caption, a link only 
   }
 });
 
+test("a linked picture in a preview is inert, as a text link is", async () => {
+  const testWindow = window as unknown as HappyDOMWindow;
+  const pageBefore = window.location.href;
+  testWindow.happyDOM.setURL("https://dispatch.test/issues/CORE-1/conversation");
+  const markdown =
+    "[![build](https://example.com/badge.svg)](https://ci.example/build) and [![shot.png](dispatch://CORE-1/artifact/shot-png@v1)](https://ci.example/build)";
+  const { preview, view } = renderPreview({ lines: 1, markdown });
+  try {
+    await waitFor(() => expect(preview().querySelectorAll("img")).toHaveLength(2));
+    expect(preview().querySelector("a")).toBeNull();
+    const [badge, shot] = Array.from(preview().querySelectorAll("img"));
+    expect(badge?.getAttribute("src")).toBe("https://example.com/badge.svg");
+    expect(badge?.closest("[data-markdown-link]")?.tagName).toBe("SPAN");
+    expect(shot?.getAttribute("src")).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/1");
+    expect(shot?.closest("[data-markdown-link]")?.tagName).toBe("SPAN");
+  } finally {
+    view.unmount();
+    testWindow.happyDOM.setURL(pageBefore);
+  }
+});
+
 test("a lead is the app's own words: syntax and a reference in it stay literal while the body formats", async () => {
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
   // A session titles itself; its title is the lead of every quote of its messages.

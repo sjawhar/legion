@@ -4,6 +4,13 @@
 
 ### Added
 
+- `DOCUMENT_EDITOR_SCHEMA_VERSION` (1), the version of the node schema the document editor's own
+  code builds, generated into Go as `contracts.DocumentEditorSchemaVersion`. The dashboard sends it
+  on the document websocket as `editor_schema` and in its Hocuspocus token,
+  `<schema_version>:<editor_schema>`, and Dispatch admits an editor read-write only when it matches,
+  so an editor built before the image's `link` and `linkTitle` attributes cannot strip them. Raise
+  it whenever the editor's built-in node schema gains an attribute an editor without it would strip
+  on edit (INFRA-190).
 - `dispatch doc-edit --help` says the spec, not every document, holds no progress or status, and that a record of open items or progress is a document of its own.
 
 - `actorAttribution(actor)`, the part of an actor's label after its name: ` (for <owner>)` for a

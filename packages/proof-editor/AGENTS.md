@@ -30,7 +30,7 @@ pin changes nothing in the table; it changes what `node_modules/proof-sdk-upstre
 | `src/lib.css` | The editor stylesheet |
 | `src/tests/*.test.ts` | The suites that came with those files |
 
-Nine files under `src/` are legion's own rather than copies, so the file-by-file audit below does
+Ten files under `src/` are legion's own rather than copies, so the file-by-file audit below does
 not reach them:
 
 | File | What it is |
@@ -43,9 +43,10 @@ not reach them:
 | `src/record-mark-history.ts` | The plugin that keeps the composer's own record-mark writes out of undo history in both undo managers, so neither undo nor redo writes one back: a write of `proofComment`, `proofSuggestion` or `dispatchAsk` steps that takes nothing from another record (it removes no span, as a creation over another record's mark does not since the three declare `excludes: ''`, or puts back what it removes, as upstream's suggestion restamp does), and `removeRecordMark`'s removal; any other removal of a record mark keeps its undo step (LEGION-363, LEGION-458); it is also biome-checked |
 | `src/record-mark-retype.ts` | Retyping a provisional record mark for the margin composer's Comment / Suggest / Ask switch, and the precise span-by-span removal behind the handle's `removeMark`, over text and inline atoms such as an image alike (LEGION-363); it is also biome-checked |
 | `src/record-mark-target.ts` | Which mark a click or a hover in the document names: of the mark spans around the target, the record mark whose range is the smallest, the innermost span's among marks the same size, since which of two overlapping record marks nests inside the other follows the order they were made in (LEGION-458); it is also biome-checked |
+| `src/editor/schema/linked-image.ts` | Linked images: an image that is also a link (`[![x](i.png)](https://u.com)`, a README badge) keeps its link as the image's `link` and `linkTitle` attributes, since y-prosemirror stores no mark on an inline atom (INFRA-190). `remarkLinkedImages` reads a link whose children are exactly one image, with a non-empty destination, as that image carrying the link (after reference resolution and the dispatch-mark spans; every other link around an image stays a link mark); the extended image schema writes it back as the link around the image and draws it as an `<img data-link data-link-title>`, wrapped in the link's anchor only when Milkdown's `sanitizeLinkHref` allows the target or it is `dispatch://` (with the link mark's `data-dispatch-href`); the extended link mark leaves an anchor around one image to the image's parse rule, so a paste carries the attributes and no link mark; it is also biome-checked |
 | `src/tests/harness.ts` | The `bun test` registration the copied suites call instead of their own `test()` tally |
 
-Fifteen kinds of edit are allowed in the copied files, and no others: the import specifiers of
+Sixteen kinds of edit are allowed in the copied files, and no others: the import specifiers of
 upstream modules; `bun test` registration in the suites (`src/tests/harness.ts` replaces each
 file's own `test()` tally and its `process.exit` tail); `src/tests/headless-no-dom.test.ts`,
 whose entry named the fork's built `dist/headless.js` and now names `../lib-headless.js` — its
@@ -77,12 +78,15 @@ so a click on text two record marks cover opens the narrower one (LEGION-458);
 `src/dispatch-action-bar.ts`'s Comment / Suggest / Ask buttons and its exported
 `commentOnSelection` taking one path, `ActionBarController.act`, which marks nothing for an empty
 or stale range or a read-only view, with `src/lib.ts` exposing `commentOnSelection` on the handle
-for Dispatch's `Ctrl+Alt+M` (LEGION-680); and annotations, casts and assertions that make a file
-type-check, each of which erases before runtime (below).
+for Dispatch's `Ctrl+Alt+M` (LEGION-680); `src/lib.ts` and `src/lib-headless.ts` installing the
+linked-image schemas and remark transform from `./editor/schema/linked-image` — the browser after
+`remarkDispatchMarksPlugin`, the headless parser after `remarkInlineLinks` (INFRA-190); and
+annotations, casts and assertions that make a file type-check, each of which erases before
+runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
 24a5fc94 root:src/<file>`; every file in the copied-files table has that counterpart, and the
-only lines that differ should be the fifteen kinds.
+only lines that differ should be the sixteen kinds.
 
 `scripts/`, `tests/` and `upstream/` are legion's own. `scripts/` and `tests/` are linted and
 type-checked like any other package's; `upstream/` is generated, and Biome is off over it the
@@ -180,5 +184,6 @@ would reorder the copy's imports. `upstream/` is excluded the same way, for the 
 it is tsc's output, not source. Anything legion writes here — `scripts/`, `tests/`,
 `src/collab-cursor-plugin.ts`, `src/editor-highlights.ts`, `src/editor/schema/uuid.ts`, `src/trailing-newline-input.ts`,
 `src/record-mark-history.ts`, `src/record-mark-retype.ts`, `src/record-mark-target.ts`,
+`src/editor/schema/linked-image.ts`,
 `src/tests/harness.ts` — follow the
 repo's conventions and are checked.

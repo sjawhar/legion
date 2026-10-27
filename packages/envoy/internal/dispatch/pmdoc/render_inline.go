@@ -136,7 +136,7 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 			break
 		}
 		for _, spelling := range spellings {
-			r.b.Truncate(from)
+			r.truncate(from)
 			fusedAgain := r.writeInlineRun(nodes, prefix, context, spelling)
 			if r.err == nil && !(spelling.keepOpen && fusedAgain) && r.runReadsBack(from, prefix, nodes, inlineMarkdown) &&
 				(!flankingToo || r.runReadsBack(from, prefix, nodes, flankingOnlyMarkdown)) {
@@ -144,7 +144,7 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 			}
 		}
 	}
-	r.b.Truncate(from)
+	r.truncate(from)
 	r.b.WriteString(written)
 }
 
@@ -208,6 +208,64 @@ func keepingOpen(active, marks, following []Mark) []Mark {
 		}
 	}
 	return ordered
+}
+
+// isLinkedImage reports whether node is an image written inside its link's syntax, opening with
+// the link's `[`.
+func isLinkedImage(node *Node) bool {
+	link, _ := node.Attrs["link"].(string)
+	return node.Type == "image" && link != ""
+}
+
+// opensLinkNext reports whether the writer puts a link's `[` right after nodes[index]'s text,
+// written under next in spelling: a linked image's, which closes every mark first, so only after
+// text under none, or the link the next text, written under following, opens first, with every mark
+// of next still open and so no closer written before it. Any other mark opened first writes its own
+// delimiter before the `[`.
+//
+// A www link following writes bare (isBareWWWLink) is refused bare after the text's `!` or a code
+// span's backtick (refusesWWWAfter), and the writer writes its marks again with the link. Only a
+// text ending in `!` asks.
+func opensLinkNext(nodes []*Node, index int, next, following []Mark, escapePipes bool, spelling runSpelling) bool {
+	if index+1 >= len(nodes) {
+		return false
+	}
+	after := nodes[index+1]
+	if after.Type != "text" {
+		return len(next) == 0 && isLinkedImage(after)
+	}
+	if sharedMarks(next, following) != len(next) {
+		return false
+	}
+	if !spelling.angleURLs && isBareWWWLink(after, visibleMarks(after.Marks), escapePipes) && refusesWWWAfter(following[len(next):], nodes, index+1) {
+		following = writtenMarks(after, escapePipes, false)
+		if spelling.keepOpen {
+			var further []Mark
+			if index+2 < len(nodes) {
+				further = writtenMarks(nodes[index+2], escapePipes, true)
+			}
+			following = keepingOpen(next, following, further)
+		}
+		if sharedMarks(next, following) != len(next) {
+			return false
+		}
+	}
+	return len(following) > len(next) && following[len(next)].Type == "link"
+}
+
+// refusesWWWAfter reports whether the writer refuses nodes[at]'s www link bare (wwwMayFollow)
+// after a text ending in `!`, with opened the marks written open between them: right after the `!`,
+// or after a code span's unpadded backtick fence. A strong, emphasis or strikethrough opener ends
+// in a `*` or `~` a www URL may follow.
+func refusesWWWAfter(opened []Mark, nodes []*Node, at int) bool {
+	if len(opened) == 0 {
+		return true
+	}
+	if opened[len(opened)-1].Type != "inlineCode" {
+		return false
+	}
+	_, padded := inlineCodeFence(nodes, at)
+	return !padded
 }
 
 // writesBareURL reports whether nodes write a link as its bare URL (isBareURLLink, isBareWWWLink),
@@ -389,7 +447,7 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				if !bareHere || !isBareWWWLink(n, visibleMarks(n.Marks), escapePipes) || r.wwwMayFollow() {
 					break
 				}
-				r.b.Truncate(before)
+				r.truncate(before)
 				active, position, fused, bareHere = beforeActive, beforePosition, beforeFused, false
 				r.inlineCodeFence, r.inlineCodePadded, r.labelBrackets = beforeFence, beforePadded, beforeLabel
 			}
@@ -419,19 +477,20 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				label = r.labelBrackets
 			}
 			r.writeInlineText(n, &position, prefix, escapeContext{
-				footnoteLabels: r.footnoteLabels,
-				tableCell:      escapePipes,
-				urlSchemes:     !hasLink,
-				label:          label,
-				followed:       index+1 < len(nodes) || len(next) > 0,
-				delimiters:     spelling.escapes,
-				afterBareURL:   spelling.afterBareURL && followsBareURL(nodes, index, escapePipes),
-				heading:        context.heading,
-				marked:         len(next) > 0,
-				opener:         adjacentDelimiter(next[common:]),
-				closer:         adjacentDelimiter(next[sharedMarks(next, following):]),
-				flankFirst:     flankFirst,
-				flankLast:      flankLast,
+				footnoteLabels:   r.footnoteLabels,
+				tableCell:        escapePipes,
+				urlSchemes:       !hasLink,
+				label:            label,
+				followed:         index+1 < len(nodes) || len(next) > 0,
+				delimiters:       spelling.escapes,
+				afterBareURL:     spelling.afterBareURL && followsBareURL(nodes, index, escapePipes),
+				heading:          context.heading,
+				marked:           len(next) > 0,
+				opener:           adjacentDelimiter(next[common:]),
+				closer:           adjacentDelimiter(next[sharedMarks(next, following):]),
+				flankFirst:       flankFirst,
+				flankLast:        flankLast,
+				beforeLinkOpener: strings.HasSuffix(n.Text, "!") && opensLinkNext(nodes, index, next, following, escapePipes, spelling),
 			})
 		case "hardbreak":
 			r.closeMarks(active, escapePipes)
@@ -450,10 +509,22 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 		case "image":
 			r.closeMarks(active, escapePipes)
 			active = nil
-			src, _ := n.Attrs["src"].(string)
-			alt, _ := n.Attrs["alt"].(string)
 			title, _ := n.Attrs["title"].(string)
-			r.writeSyntax("![" + imageAlt(alt, context) + "](" + escapeLinkDestination(src, escapePipes) + titleSuffix(title, escapePipes) + ")")
+			linkTitle, _ := n.Attrs["linkTitle"].(string)
+			alt, _ := n.Attrs["alt"].(string)
+			writtenAlt := imageAlt(alt, context)
+			// A title's line feed is written as it is, so a title the server already stores keeps
+			// its bytes, wherever every line it creates opens as text alone can, which both Go's
+			// reader and the browser editor's engine read as the paragraph's continuation
+			// (rawTitleLinesHold), and as `&#10;` in both titles elsewhere: in a heading or a
+			// table cell, whose line it would end, and wherever a line it creates opens otherwise.
+			image := imageSyntax(n, writtenAlt, escapePipes, false)
+			if !context.tableCell && !context.heading && (strings.Contains(title, "\n") || strings.Contains(linkTitle, "\n")) {
+				if raw := imageSyntax(n, writtenAlt, escapePipes, true); r.rawTitleLinesHold(raw, prefix != "") {
+					image = raw
+				}
+			}
+			r.writeSyntax(image)
 			position.atLineStart, position.atTextStart = false, false
 		case "html":
 			r.closeMarks(active, escapePipes)
@@ -513,7 +584,7 @@ func (r *renderer) endLine(continues bool) {
 		}
 	}
 	tail := line[candidate.at-lineFrom+width:]
-	r.b.Truncate(candidate.at)
+	r.truncate(candidate.at)
 	r.b.WriteString(escape)
 	r.b.WriteString(tail)
 }
@@ -608,6 +679,13 @@ func (r *renderer) takesCodeLineIndent(rest string) bool {
 		}
 	}
 	return taken > 0
+}
+
+// truncate cuts what is written back to length, recording it for the line tally
+// (writtenLineTally), which reads on from where it stopped only while nothing before that changed.
+func (r *renderer) truncate(length int) {
+	r.truncatedTo = min(r.truncatedTo, length)
+	r.b.Truncate(length)
 }
 
 func (r *renderer) writeSyntax(value string) {

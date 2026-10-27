@@ -94,14 +94,17 @@ func TestParseRefusesAFootnoteDefinitionInsideAnotherOrATypedBlock(t *testing.T)
 	}
 }
 
-// A linked image is read as the browser editor stores it: the image without the link, which the
-// editor's store keeps on text alone (LEGION-365). A refusal would leave a document the editor
-// holds unsavable, so the link's text around the image keeps its link and the write is taken.
-func TestParseReadsALinkedImageAsTheEditorStoresIt(t *testing.T) {
+// A link around one whole image is kept as the image's link and link title, as the browser editor
+// stores it (INFRA-190). A link around an image and text keeps its link on the text alone, since
+// the editor's store keeps a mark on text only, and a mark around the linked image is lost; each
+// write is taken, since a refusal would leave a document the editor holds unsavable.
+func TestParseKeepsALinkedImagesLink(t *testing.T) {
 	for _, test := range []struct{ linked, stored string }{
-		{"[![x](i.png)](https://u.com)\n", "![x](i.png)\n"},
+		{"[![x](i.png)](https://u.com)\n", "[![x](i.png)](https://u.com)\n"},
+		{"[![x](i.png)](https://u.com \"t\")\n", "[![x](i.png)](https://u.com \"t\")\n"},
+		{"[a ![x](i.png) b](https://u.com)\n", "[a ](https://u.com)![x](i.png)[ b](https://u.com)\n"},
 		{"see [a ![x](i.png) b](https://u.com \"t\") now\n", "see [a ](https://u.com \"t\")![x](i.png)[ b](https://u.com \"t\") now\n"},
-		{"- **[![x](i.png)](https://u.com)**\n", "- ![x](i.png)\n"},
+		{"- **[![x](i.png)](https://u.com)**\n", "- [![x](i.png)](https://u.com)\n"},
 	} {
 		got, err := ParseForWrite(test.linked, nil)
 		if err != nil {
@@ -112,9 +115,179 @@ func TestParseReadsALinkedImageAsTheEditorStoresIt(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Parse(%q): %v", test.stored, err)
 		}
-		if !got.Equal(want) {
-			markdown, _ := Render(got)
-			t.Errorf("ParseForWrite(%q) reads as %q, want what %q reads as", test.linked, markdown, test.stored)
+		markdown, err := Render(got)
+		if err != nil {
+			t.Fatalf("Render(ParseForWrite(%q)): %v", test.linked, err)
+		}
+		if !got.Equal(want) || markdown != test.stored {
+			t.Errorf("ParseForWrite(%q) reads as %q, want %q", test.linked, markdown, test.stored)
+		}
+	}
+}
+
+// A linked image's link is its destination as CommonMark reads it, character references and
+// backslash escapes decoded, as the browser editor stores it and as the image's own src is read:
+// a link written through the documents API must open the address the live editor's view, a past
+// version and a comment all draw for the same markdown, and must read back so (INFRA-190).
+func TestParseDecodesALinkedImagesLinkAsTheEditorReadsIt(t *testing.T) {
+	for _, test := range []struct{ markdown, link string }{
+		{"[![x](i.png)](https://u.com/?a=1&amp;b=2)\n", "https://u.com/?a=1&b=2"},
+		{"[![x](i.png)](https://u.com/a\\*b)\n", "https://u.com/a*b"},
+		{"[![x](i.png)](https://u.com/\\)x)\n", "https://u.com/)x"},
+	} {
+		got, err := ParseForWrite(test.markdown, nil)
+		if err != nil {
+			t.Errorf("ParseForWrite(%q) = %v, want the write taken", test.markdown, err)
+			continue
+		}
+		image := got.Children[0].Children[0]
+		if link, _ := image.Attrs["link"].(string); image.Type != "image" || link != test.link {
+			t.Errorf("ParseForWrite(%q) image link = %q, want %q", test.markdown, link, test.link)
+			continue
+		}
+		markdown, err := Render(got)
+		if err != nil {
+			t.Fatalf("Render(ParseForWrite(%q)): %v", test.markdown, err)
+		}
+		again, err := Parse(markdown)
+		if err != nil || !again.Equal(got) {
+			t.Errorf("Render wrote %q, which does not read back as the stored tree (err %v)", markdown, err)
+		}
+	}
+}
+
+// A destination's escapes and character references are decoded in one pass, as the browser
+// editor's parser decodes them: an escaped `&` opens no reference, a reference wants its `;`, and
+// a number naming a control character is U+FFFD. An image's source is read the same way.
+func TestParseDecodesALinkedImagesLinkInOnePassAsTheEditorReadsIt(t *testing.T) {
+	for _, test := range []struct{ markdown, src, link string }{
+		{"[![x](i.png)](https://u.com/?a=1\\&amp;b=2)\n", "i.png", "https://u.com/?a=1&amp;b=2"},
+		{"[![x](i.png)](https://u.com/?a=1&copy=2&amp;b=3)\n", "i.png", "https://u.com/?a=1&copy=2&b=3"},
+		{"[![x](i.png)](https://u.com/&ampx;&#1;&#X41;)\n", "i.png", "https://u.com/&ampx;\uFFFDA"},
+		{"[![x](i\\&amp;&copy=.png)](u)\n", "i&amp;&copy=.png", "u"},
+		{"| h |\n| - |\n| [![x](i.png)](https://u.com/a\\|b\\\\\\|c&amp;d) |\n", "i.png", "https://u.com/a|b\\|c&d"},
+	} {
+		got, err := Parse(test.markdown)
+		if err != nil {
+			t.Errorf("Parse(%q): %v", test.markdown, err)
+			continue
+		}
+		var image *Node
+		Walk(got, func(node *Node) bool {
+			if node.Type == "image" {
+				image = node
+			}
+			return image == nil
+		})
+		if image == nil || image.Attrs["src"] != test.src || image.Attrs["link"] != test.link {
+			t.Errorf("Parse(%q) image = %v, want src %q and link %q", test.markdown, image, test.src, test.link)
+		}
+	}
+}
+
+// A link to a `javascript:` address spelled with a character reference, an escape or mixed case
+// is stored as the address it names, so every view checks the scheme the browser would follow and
+// draws no link to it (linked-image.ts in @legion/proof-editor).
+func TestParseStoresAnEncodedJavascriptLinkAsTheAddressItNames(t *testing.T) {
+	for _, test := range []struct{ markdown, link string }{
+		{"[![x](i.png)](javascript&#58;window.__pwned=1)\n", "javascript:window.__pwned=1"},
+		{"[![x](i.png)](javascript\\:window.__pwned=1)\n", "javascript:window.__pwned=1"},
+		{"[![x](i.png)](JaVaScRiPt:window.__pwned=1)\n", "JaVaScRiPt:window.__pwned=1"},
+		{"[![x](i.png)](&#x6A;avascript:window.__pwned=1)\n", "javascript:window.__pwned=1"},
+	} {
+		got, err := ParseForWrite(test.markdown, nil)
+		if err != nil {
+			t.Errorf("ParseForWrite(%q) = %v, want the write taken", test.markdown, err)
+			continue
+		}
+		if image := got.Children[0].Children[0]; image.Type != "image" || image.Attrs["link"] != test.link {
+			t.Errorf("ParseForWrite(%q) = %v, want an image linked to %q", test.markdown, image, test.link)
+		}
+	}
+}
+
+// An image whose source escapes the `&` of a character reference (`i\&amp;.png`) is a write the
+// server took before INFRA-190, and the change adds no refusal (R2): the source is held as the
+// editor reads it, `i&amp;.png`, so it must be written back so that it reads as that again, with
+// the `&` escaped, for a plain image and for a linked one alike.
+func TestParseTakesAnImageWhoseSourceEscapesAReferencesAmpersand(t *testing.T) {
+	for _, test := range []struct{ markdown, src string }{
+		{"![x](i\\&amp;.png)\n", "i&amp;.png"},
+		{"[![x](i\\&amp;.png)](https://u.com)\n", "i&amp;.png"},
+		{"![x](i.png?a=1\\&copy;)\n", "i.png?a=1&copy;"},
+	} {
+		got, err := ParseForWrite(test.markdown, nil)
+		if err != nil {
+			t.Errorf("ParseForWrite(%q) = %v, want the write taken, as before INFRA-190", test.markdown, err)
+			continue
+		}
+		image := got.Children[0].Children[0]
+		if src, _ := image.Attrs["src"].(string); image.Type != "image" || src != test.src {
+			t.Errorf("ParseForWrite(%q) image src = %q, want %q", test.markdown, src, test.src)
+		}
+	}
+}
+
+// A linked image whose link title holds a line break the context cannot hold as written - a blank
+// line, or any line break in a heading or a table cell - is a write the server took before
+// INFRA-190 (it dropped the link), and the change adds no refusal (R2): the link title is held
+// decoded, so it must be written back so that it reads as that again, and the link kept (R1).
+func TestParseTakesALinkedImageWhoseLinkTitleHoldsALineBreak(t *testing.T) {
+	for _, test := range []struct{ markdown, linkTitle string }{
+		{"[![x](i.png)](https://u.com \"a&#10;&#10;b\")\n", "a\n\nb"},
+		{"# [![x](i.png)](https://u.com \"a&#10;b\")\n", "a\nb"},
+		{"| a |\n| - |\n| [![x](i.png)](https://u.com \"a&#10;b\") |\n", "a\nb"},
+		{"Head [![x](i.png)](https://u.com \"a\nb\")\n===\n", "a\nb"},
+	} {
+		got, err := ParseForWrite(test.markdown, nil)
+		if err != nil {
+			t.Errorf("ParseForWrite(%q) = %v, want the write taken, as before INFRA-190", test.markdown, err)
+			continue
+		}
+		var image *Node
+		Walk(got, func(node *Node) bool {
+			if node.Type == "image" {
+				image = node
+			}
+			return image == nil
+		})
+		if image == nil || image.Attrs["link"] != "https://u.com" || image.Attrs["linkTitle"] != test.linkTitle {
+			t.Errorf("ParseForWrite(%q) image = %v, want link %q and link title %q", test.markdown, image, "https://u.com", test.linkTitle)
+		}
+	}
+}
+
+// A title line that Go's reader (goldmark) opens an HTML block at, and the title-line allow-list
+// admits as text, must not be written raw: `<meta` (a block tag in goldmark's list, not in
+// CommonMark's or the allow-list's), `</ div>` (goldmark reads a space after `</` and still takes
+// the block tag) and `<pre/>` or `<pre` and a form feed (goldmark's raw-element opening). Written
+// raw, the stored markdown reads back otherwise in Go and the write is refused, where the base
+// took a linked image's write (it dropped the link): R2. An image's own title holding such a line
+// is refused at the base too; it is the same writer's defect, so it is taken here as well.
+func TestParseTakesAnImageTitleLineGoReadsAsAnHTMLBlock(t *testing.T) {
+	for _, prefix := range []string{"", "x | ", "- ", "> "} {
+		for _, line := range []string{"<meta", `<META x=\"1\">`, "</ div>", "</ p", "<pre/>", "<script/>x", "<pre\fx"} {
+			title := "a&#10;" + line + "&#10;z"
+			for _, markdown := range []string{
+				prefix + "[![x](i.png)](https://u.com \"" + title + "\")\n",
+				prefix + "![x](i.png \"" + title + "\")\n",
+			} {
+				got, err := ParseForWrite(markdown, nil)
+				if err != nil {
+					t.Errorf("ParseForWrite(%q) = %v, want the write taken", markdown, err)
+					continue
+				}
+				var image *Node
+				Walk(got, func(node *Node) bool {
+					if node.Type == "image" {
+						image = node
+					}
+					return image == nil
+				})
+				if image == nil || strings.HasPrefix(markdown, prefix+"[") && image.Attrs["link"] != "https://u.com" {
+					t.Errorf("ParseForWrite(%q) image = %v, want the image and its link kept", markdown, image)
+				}
+			}
 		}
 	}
 }

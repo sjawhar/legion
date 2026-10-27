@@ -1,5 +1,5 @@
 import type { HocuspocusProvider } from "@hocuspocus/provider";
-import { DOCUMENT_SCHEMA_CLOSE_CODE } from "@legion/contracts";
+import { DOCUMENT_EDITOR_SCHEMA_VERSION, DOCUMENT_SCHEMA_CLOSE_CODE } from "@legion/contracts";
 import type { Awareness } from "y-protocols/awareness";
 import type { Doc } from "yjs";
 
@@ -22,6 +22,9 @@ export function pendingNotice(
   }
   if (pending.rebuiltAt !== undefined) {
     return `Edits saved in this browser at ${new Date(pending.rebuiltAt).toLocaleString()} could not be applied: the document was rebuilt since.`;
+  }
+  if (pending.strippedAt !== undefined) {
+    return `Edits saved in this browser at ${new Date(pending.strippedAt).toLocaleString()} could not be applied: an older version of Dispatch made them, and they would remove an image's link.`;
   }
   if (pending.readOnly && pending.count > 0) {
     return `${savedEdits(pending.count)} saved in this browser can't be sent: this document is read-only.`;
@@ -139,10 +142,16 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
         }
       }
     };
+    // The server admits this tab read-write only when both versions are its own: the document
+    // schema fetched at run time, and the editor schema compiled into this bundle, which an older
+    // bundle cannot present however recently it fetched the document schema.
     const websocket = new HocuspocusProviderWebsocket({
       WebSocketPolyfill,
       connect: false,
-      parameters: { schema_version: callbacks.schemaVersion },
+      parameters: {
+        editor_schema: DOCUMENT_EDITOR_SCHEMA_VERSION,
+        schema_version: callbacks.schemaVersion,
+      },
       url: wsUrl(artifactId),
     });
     const notifySynced = () => {
@@ -192,7 +201,7 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
       // Each document owns its socket. A transport's destroy closes this provider and then the
       // websocket itself, so its connection checker and reconnect attempt cannot outlive it.
       preserveConnection: false,
-      token: String(callbacks.schemaVersion),
+      token: `${callbacks.schemaVersion}:${DOCUMENT_EDITOR_SCHEMA_VERSION}`,
       websocketProvider: websocket,
     });
     const awareness = provider.awareness;

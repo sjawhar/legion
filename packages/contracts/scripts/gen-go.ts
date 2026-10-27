@@ -5,6 +5,7 @@ import { AGENT_STREAM_SUBJECT_PREFIX } from "../src/agent-stream";
 import {
   DEFAULT_ISSUE_PAGE_LIMIT,
   DELIVERY_DUPLICATE_WINDOW_MS,
+  DOCUMENT_EDITOR_SCHEMA_VERSION,
   DOCUMENT_SCHEMA_CLOSE_CODE,
   DOCUMENT_SCHEMA_CLOSE_REASON,
   ISSUE_TITLE_MAX,
@@ -176,6 +177,13 @@ const ProjectNameMax = ${PROJECT_NAME_MAX}
 // reading of it cannot drift apart.
 const DocumentSchemaCloseCode = ${DOCUMENT_SCHEMA_CLOSE_CODE}
 const DocumentSchemaCloseReason = ${JSON.stringify(DOCUMENT_SCHEMA_CLOSE_REASON)}
+
+// DocumentEditorSchemaVersion is the version of the node schema the document editor's own code
+// builds, which the dashboard sends as editor_schema and in its Hocuspocus token; the document
+// websocket admits an editor read-write only when it equals this. Generated from
+// DOCUMENT_EDITOR_SCHEMA_VERSION in packages/contracts so the editor bundle and the server's
+// admission cannot drift apart.
+const DocumentEditorSchemaVersion = ${DOCUMENT_EDITOR_SCHEMA_VERSION}
 
 func NowMillis() int64 {
 	return time.Now().UnixMilli()

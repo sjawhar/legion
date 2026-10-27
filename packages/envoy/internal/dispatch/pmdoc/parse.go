@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/yuin/goldmark"
@@ -833,9 +834,11 @@ func parseImage(image *ast.Image, source []byte, footnotes map[int]string) (*Nod
 		}
 	}
 	return &Node{Type: "image", Attrs: Attrs{
-		"src":   unescapeMarkdownText(image.Destination),
-		"alt":   text.String(),
-		"title": titleOrNil(image.Title),
+		"src":       decodeDestination(image.Destination),
+		"alt":       text.String(),
+		"title":     decodedTitleOrNil(image.Title),
+		"link":      nil,
+		"linkTitle": nil,
 	}}, nil
 }
 
@@ -949,6 +952,24 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 			if tableCell {
 				href = string(util.UnescapePunctuations(current.Destination))
 			}
+			// A link around one whole image, and nothing else, is that image's link: the browser
+			// editor stores it as the image's link and linkTitle attributes, since its store
+			// (y-prosemirror) keeps a mark on text alone (INFRA-190). The link is stored decoded,
+			// its character references and backslash escapes read as the image's source is and as
+			// that editor reads it, so every view checks the scheme of the address it would open.
+			// Any other link holding an image - beside text or whitespace, around a marked image,
+			// or with no destination - marks its text and leaves the image without it, as that
+			// editor reads it.
+			if image, ok := current.FirstChild().(*ast.Image); ok && current.ChildCount() == 1 && len(current.Destination) > 0 {
+				node, err := parseImage(image, source, footnotes)
+				if err != nil {
+					return nil, nil, err
+				}
+				node.Attrs["link"] = decodeDestination(current.Destination)
+				node.Attrs["linkTitle"] = decodedTitleOrNil(current.Title)
+				children = append(children, node)
+				continue
+			}
 			content, err := within(current, Mark{Type: "link", Attrs: Attrs{"href": href, "title": titleOrNil(current.Title)}})
 			if err != nil {
 				return nil, nil, err
@@ -965,9 +986,9 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 		case *extensionast.TaskCheckBox:
 			continue
 		case *ast.Image:
-			// An image is read without the marks around it, a link among them: the browser
-			// editor's store (y-prosemirror) keeps a mark on text alone, so the editor stores a
-			// linked image without its link as well (LEGION-365).
+			// An image is read without the marks around it: the browser editor's store
+			// (y-prosemirror) keeps a mark on text alone, so the editor stores an image without its
+			// marks as well. A link around the whole image alone is read above, as its attributes.
 			image, err := parseImage(current, source, footnotes)
 			if err != nil {
 				return nil, nil, err
@@ -1015,6 +1036,60 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 
 func unescapeMarkdownText(value []byte) string {
 	return html.UnescapeString(string(util.UnescapePunctuations(value)))
+}
+
+// destinationReferencePattern is a character reference in a destination or title, as the browser
+// editor's parser finds one there (micromark's decodeString): the reference's name or number.
+const destinationReferencePattern = `&(#(?:[0-9]{1,7}|[xX][0-9A-Fa-f]{1,6})|[0-9A-Za-z]{1,31});`
+
+// destinationEscapeOrReference is a backslash escape or a character reference in a destination or
+// title, as the browser editor's parser finds them there: the escaped punctuation, or the
+// reference's name or number.
+var destinationEscapeOrReference = regexp.MustCompile(`\\([!-/:-@\[-` + "`" + `{-~])|` + destinationReferencePattern)
+
+// decodeDestination is an image's source or title, or a linked image's link or link title, as the
+// browser editor's parser reads it, its backslash escapes and character references decoded in one
+// pass, each spelling read once: `\&amp;` is `&amp;`. A name no HTML entity has, a reference
+// without its `;` (`&copy=1`), and an `&` opening neither stay as written, and a number naming a
+// control character, a surrogate, a noncharacter or nothing is U+FFFD, as that parser reads them.
+// unescapeMarkdownText, which decodes the escapes and then the references it finds in what they
+// left, reads both of the first two otherwise.
+func decodeDestination(destination []byte) string {
+	return destinationEscapeOrReference.ReplaceAllStringFunc(string(destination), func(match string) string {
+		if match[0] == '\\' {
+			return match[1:]
+		}
+		name := match[1 : len(match)-1]
+		if name[0] != '#' {
+			if entity, ok := util.LookUpHTML5EntityByName(name); ok {
+				return string(entity.Characters)
+			}
+			return match
+		}
+		base, digits := 10, name[1:]
+		if digits[0] == 'x' || digits[0] == 'X' {
+			base, digits = 16, digits[1:]
+		}
+		code, _ := strconv.ParseInt(digits, base, 32)
+		return string(referencedCharacter(code))
+	})
+}
+
+// referencedCharacter is the character a numeric character reference names, as the browser
+// editor's parser decodes one (micromark's decodeNumericCharacterReference): U+FFFD for a C0
+// control other than a tab, line feed, form feed or carriage return, for DEL and the C1 controls,
+// a surrogate, a noncharacter, or a number past U+10FFFF.
+func referencedCharacter(code int64) rune {
+	switch {
+	case code < 9 || code == 11 || code > 13 && code < 32,
+		code > 126 && code < 160,
+		code > 0xD7FF && code < 0xE000,
+		code > 0xFDCF && code < 0xFDF0,
+		code&0xFFFF == 0xFFFF || code&0xFFFF == 0xFFFE,
+		code > 0x10FFFF:
+		return '\uFFFD'
+	}
+	return rune(code)
 }
 
 func parseTextValue(value []byte, marks []Mark) string {
@@ -1102,6 +1177,16 @@ func titleOrNil(title []byte) any {
 		return nil
 	}
 	return unescapeMarkdownText(title)
+}
+
+// decodedTitleOrNil is an image's title or a linked image's link title as the browser editor's
+// parser reads it, decoded in one pass as decodeDestination decodes a destination, or nil when it
+// has none.
+func decodedTitleOrNil(title []byte) any {
+	if len(title) == 0 {
+		return nil
+	}
+	return decodeDestination(title)
 }
 
 func parseAnchorMark(value string) (Mark, bool) {

@@ -184,7 +184,7 @@ func closeMark(mark Mark, escapePipes bool) string {
 	if mark.Type == "link" {
 		href, _ := mark.Attrs["href"].(string)
 		title, _ := mark.Attrs["title"].(string)
-		return "](" + escapeLinkDestination(href, escapePipes) + titleSuffix(title, escapePipes) + ")"
+		return linkTail(href, title, escapePipes)
 	}
 	return openMark(mark)
 }

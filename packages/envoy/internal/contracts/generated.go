@@ -218,6 +218,13 @@ const ProjectNameMax = 80
 const DocumentSchemaCloseCode = 4409
 const DocumentSchemaCloseReason = "DOC_SCHEMA"
 
+// DocumentEditorSchemaVersion is the version of the node schema the document editor's own code
+// builds, which the dashboard sends as editor_schema and in its Hocuspocus token; the document
+// websocket admits an editor read-write only when it equals this. Generated from
+// DOCUMENT_EDITOR_SCHEMA_VERSION in packages/contracts so the editor bundle and the server's
+// admission cannot drift apart.
+const DocumentEditorSchemaVersion = 1
+
 func NowMillis() int64 {
 	return time.Now().UnixMilli()
 }

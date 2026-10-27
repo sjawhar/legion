@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import type { EditorView } from "@milkdown/kit/prose/view";
+import { withHTMLElementGlobal } from "./dom-window";
 import { withMarksEditor } from "./marks-editor";
 
 // LEGION-566. Milkdown's own `parser` plugin builds `parserCtx`'s ParserState once, at boot, and
@@ -24,24 +25,6 @@ function pastePlainText(view: EditorView, text: string): void {
   view.someProp("handlePaste", (handlePaste) =>
     handlePaste(view, plainTextPasteEvent(text), undefined as never)
   );
-}
-
-/** `@milkdown/preset-gfm`'s `table_header_row.parseDOM` checks `dom instanceof HTMLElement` at
- *  runtime (a plain paste's DOM round-trip parses a table's own serialized DOM back into a
- *  slice), and `withDomWindow` exposes only `document` and `window` from happy-dom's window onto
- *  `globalThis`, not its `HTMLElement` - so a table paste throws `HTMLElement is not defined`
- *  without it. Scoped to the one call that needs it, restored after, the same save/restore shape
- *  `withDomWindow` itself uses. */
-function withHTMLElementGlobal<T>(run: () => T): T {
-  const scope = globalThis as { HTMLElement?: unknown; window: { HTMLElement: unknown } };
-  const previous = scope.HTMLElement;
-  scope.HTMLElement = scope.window.HTMLElement;
-  try {
-    return run();
-  } finally {
-    if (previous === undefined) delete scope.HTMLElement;
-    else scope.HTMLElement = previous;
-  }
 }
 
 test("a refused paste leaves the next paste's text intact instead of poisoning every later one", async () => {

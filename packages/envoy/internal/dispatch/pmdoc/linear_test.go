@@ -183,6 +183,169 @@ func TestRenderIsLinearOnRunsFootnoteLabelsAndLineFeeds(t *testing.T) {
 	}
 }
 
+// A document of many images whose titles hold a line feed their paragraph cannot hold as written
+// (a blank line) renders in time linear in the image count. Render writes such a title as it is,
+// reads the whole document back, and writes the document again with one more title `&#10;` for
+// each image it finds misread, so n such images took n whole-document reads: 2,000 of them (56 KB,
+// far inside one write's element limit) took about 2.5 minutes to render in a pod at ad3351ac,
+// where 2,000 images with plain titles took 0.04 s. The bound is far above a linear
+// render's time and far below the quadratic one's.
+func TestRenderIsLinearInImagesWhoseTitlesHoldABlankLine(t *testing.T) {
+	const images = 2000
+	doc := &Node{Type: "doc"}
+	for range images {
+		doc.Children = append(doc.Children, &Node{Type: "paragraph", Children: []*Node{{Type: "image", Attrs: Attrs{
+			"src": "i.png", "alt": "x", "title": "a\n\nb", "link": nil, "linkTitle": nil,
+		}}}})
+	}
+	const deadline = 30 * time.Second
+	what := fmt.Sprintf("rendering %d images whose titles hold a blank line", images)
+	_, onTime, _, err := runWithDeadline(what, deadline, func() (time.Duration, error) {
+		started := time.Now()
+		_, err := Render(doc)
+		return time.Since(started), err
+	})
+	if !onTime {
+		t.Fatalf("%s took more than %s, want time linear in the image count", what, deadline)
+	}
+	if err != nil {
+		t.Fatalf("%s: %v", what, err)
+	}
+}
+
+// Many images whose titles hold a blank line, all in one paragraph, render in time linear in the
+// image count. Each title's line feeds are judged where the image is written, against the lines
+// they create alone (rawTitleLinesHold); a judgement that read the paragraph, or the line, written so
+// far for each image would be quadratic in one paragraph however many paragraphs the document has,
+// which the test of one image per paragraph above cannot see. The bound is the one above, far above
+// a linear render's time.
+func TestRenderIsLinearInImagesWhoseTitlesHoldABlankLineInOneParagraph(t *testing.T) {
+	const images = 2000
+	paragraph := &Node{Type: "paragraph"}
+	for range images {
+		paragraph.Children = append(paragraph.Children, &Node{Type: "image", Attrs: Attrs{
+			"src": "i.png", "alt": "x", "title": "a\n\nb", "link": nil, "linkTitle": nil,
+		}})
+	}
+	doc := &Node{Type: "doc", Children: []*Node{paragraph}}
+	const deadline = 30 * time.Second
+	what := fmt.Sprintf("rendering %d images whose titles hold a blank line in one paragraph", images)
+	_, onTime, _, err := runWithDeadline(what, deadline, func() (time.Duration, error) {
+		started := time.Now()
+		_, err := Render(doc)
+		return time.Since(started), err
+	})
+	if !onTime {
+		t.Fatalf("%s took more than %s, want time linear in the image count", what, deadline)
+	}
+	if err != nil {
+		t.Fatalf("%s: %v", what, err)
+	}
+}
+
+// Many images whose titles hold a line feed their list items hold as written render in time linear
+// in the image count, every title's line feed kept as it is. Each is judged where it is written
+// (rawTitleLinesHold): a check that read the document back, or wrote it again, once for each such
+// image would be quadratic in them, as render was before (INFRA-190). The bound is the one above,
+// far above a linear render's time.
+func TestRenderIsLinearInImagesWhoseTitlesItKeepsRaw(t *testing.T) {
+	const images = 2000
+	list := &Node{Type: "bullet_list", Attrs: Attrs{"spread": false}}
+	for range images {
+		list.Children = append(list.Children, &Node{Type: "list_item", Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "image", Attrs: Attrs{
+			"src": "i.png", "alt": "x", "title": "a\nb", "link": nil, "linkTitle": nil,
+		}}}}}})
+	}
+	doc := &Node{Type: "doc", Children: []*Node{list}}
+	const deadline = 30 * time.Second
+	what := fmt.Sprintf("rendering %d list items whose image titles hold a line feed", images)
+	var markdown string
+	_, onTime, _, err := runWithDeadline(what, deadline, func() (time.Duration, error) {
+		started := time.Now()
+		var err error
+		markdown, err = Render(doc)
+		return time.Since(started), err
+	})
+	if !onTime {
+		t.Fatalf("%s took more than %s, want time linear in the image count", what, deadline)
+	}
+	if err != nil {
+		t.Fatalf("%s: %v", what, err)
+	}
+	if raw := strings.Count(markdown, `![x](i.png "a`+"\n"+`b")`); raw != images {
+		t.Fatalf("%s wrote %d titles with the line feed as it is, want all %d", what, raw, images)
+	}
+}
+
+// Many images in one paragraph whose titles each hold a delimiter row, and a blank line after it,
+// so each is written `&#10;` and the paragraph's line grows, render in time linear in the line:
+// each delimiter row is judged under the whole line written before it (makesTable), which the
+// renderer's running tally of the line reads once (writtenLineTally). Reading the line afresh for
+// each title would be quadratic in it. The bound is far above a linear render's time.
+func TestRenderIsLinearInTitlesJudgedUnderOneLongLine(t *testing.T) {
+	const images = 24000
+	paragraph := &Node{Type: "paragraph"}
+	for range images {
+		paragraph.Children = append(paragraph.Children, &Node{Type: "text", Text: "x "}, &Node{Type: "image", Attrs: Attrs{
+			"src": "i.png", "alt": "x", "title": "a\n-|-\n\nb", "link": nil, "linkTitle": nil,
+		}})
+	}
+	doc := &Node{Type: "doc", Children: []*Node{paragraph}}
+	const deadline = 30 * time.Second
+	what := fmt.Sprintf("rendering %d images whose titles hold a delimiter row on one line", images)
+	var markdown string
+	took, onTime, _, err := runWithDeadline(what, deadline, func() (time.Duration, error) {
+		started := time.Now()
+		var err error
+		markdown, err = Render(doc)
+		return time.Since(started), err
+	})
+	if !onTime {
+		t.Fatalf("%s took more than %s, want time linear in the line", what, deadline)
+	}
+	if err != nil {
+		t.Fatalf("%s: %v", what, err)
+	}
+	if got := strings.Count(markdown, `"a&#10;-|-&#10;&#10;b"`); got != images || strings.Contains(markdown, "\n-|-") {
+		t.Fatalf("%s wrote %d titles `&#10;`, want all %d", what, got, images)
+	}
+	t.Logf("%s took %s", what, took)
+}
+
+// An image whose title holds 100,000 lines, in a list item where each is a lazy continuation line,
+// renders in time linear in the title, every line feed kept as it is. Each line is judged by itself,
+// read alone (rawTitleLinesHold); a judgement that read the document back once, as render did to
+// check its raw titles, costs Go's parse of the whole title, superlinear in its lines. The bound is
+// far above a linear render's time.
+func TestRenderIsLinearInTheLinesOfARawImageTitle(t *testing.T) {
+	const lines = 100_000
+	title := "a" + strings.Repeat("\nl", lines)
+	doc := &Node{Type: "doc", Children: []*Node{{Type: "bullet_list", Attrs: Attrs{"spread": false}, Children: []*Node{
+		{Type: "list_item", Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "image", Attrs: Attrs{
+			"src": "i.png", "alt": "x", "title": title, "link": nil, "linkTitle": nil,
+		}}}}}},
+	}}}}
+	const deadline = 30 * time.Second
+	what := fmt.Sprintf("rendering a list item whose image title holds %d lines", lines)
+	var markdown string
+	took, onTime, _, err := runWithDeadline(what, deadline, func() (time.Duration, error) {
+		started := time.Now()
+		var err error
+		markdown, err = Render(doc)
+		return time.Since(started), err
+	})
+	if !onTime {
+		t.Fatalf("%s took more than %s, want time linear in the title's lines", what, deadline)
+	}
+	if err != nil {
+		t.Fatalf("%s: %v", what, err)
+	}
+	if want := `- ![x](i.png "` + title + `")` + "\n"; markdown != want {
+		t.Fatalf("%s wrote %d bytes, %d of them `&#10;`, want the title's line feeds as they are", what, len(markdown), strings.Count(markdown, "&#10;"))
+	}
+	t.Logf("%s took %s", what, took)
+}
+
 // A table whose every row holds an escaped pipe in a code span parses in time linear in its size,
 // up to the 1 MiB a document may be. goldmark's table transformer checked every code span's text
 // against every escaped pipe in the document: on one machine at a load of about 300, 16 KiB of such

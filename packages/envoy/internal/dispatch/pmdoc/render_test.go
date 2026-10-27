@@ -3,6 +3,7 @@ package pmdoc
 import (
 	"html"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -432,6 +433,434 @@ func TestRenderEscapesImageDelimiters(t *testing.T) {
 		got, _ := back.JSON()
 		want, _ := doc.JSON()
 		t.Fatalf("Parse(Render())\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// A linked image is written inside its link's syntax, its title spelled as a text link's and its
+// link, held decoded, escaped so it reads back as it is, and reads back with its link and link
+// title (INFRA-190).
+func TestRenderWritesALinkedImageInsideItsLink(t *testing.T) {
+	image := func(title, link, linkTitle any) *Node {
+		return &Node{Type: "image", Attrs: Attrs{"src": "i.png", "alt": "x", "title": title, "link": link, "linkTitle": linkTitle}}
+	}
+	paragraph := func(children ...*Node) *Node {
+		return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: children}}}
+	}
+	inCell := func(img *Node) *Node {
+		doc, err := Parse("| h |\n| - |\n| ![x](i.png) |\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		doc.Children[0].Children[1].Children[0].Children[0].Children = []*Node{img}
+		return doc
+	}
+	for _, test := range []struct {
+		name string
+		doc  *Node
+		want string
+	}{
+		{"both titles", paragraph(image("t", "https://u.com", "lt")), `[![x](i.png "t")](https://u.com "lt")` + "\n"},
+		{"neither title", paragraph(image(nil, "https://u.com", nil)), "[![x](i.png)](https://u.com)\n"},
+		{"a destination needing angle brackets", paragraph(image(nil, "https://u.com/a (b)", nil)), "[![x](i.png)](<https://u.com/a (b)>)\n"},
+		{"quotes and backslashes in titles", paragraph(image(`say "hi"`, "https://u.com", `a\b`)), `[![x](i.png "say \"hi\"")](https://u.com "a\\b")` + "\n"},
+		{"a table cell with a pipe in the link", inCell(image(nil, "https://u.com/a|b", "c|d")), "| h |\n| --- |\n| [![x](i.png)](https://u.com/a\\|b \"c\\|d\") |\n"},
+		{"an ampersand opening a character reference", paragraph(image(nil, "https://u.com/?a=1&amp;b=2", nil)), "[![x](i.png)](https://u.com/?a=1\\&amp;b=2)\n"},
+		{"an ampersand opening none", paragraph(image(nil, "https://u.com/?a=1&b=2", nil)), "[![x](i.png)](https://u.com/?a=1&b=2)\n"},
+		{"an asterisk", paragraph(image(nil, "https://u.com/a*b", nil)), "[![x](i.png)](https://u.com/a*b)\n"},
+		{"an unbalanced closing parenthesis", paragraph(image(nil, "https://u.com/)x", nil)), "[![x](i.png)](<https://u.com/)x>)\n"},
+		{"backslashes before punctuation, a letter and the end", paragraph(image(nil, `https://u.com/a\*b\c\`, nil)), "[![x](i.png)](https://u.com/a\\\\*b\\c\\\\)\n"},
+		{"angle brackets", paragraph(image(nil, "<https://u.com/<a>>", nil)), "[![x](i.png)](\\<https://u.com/<a>>)\n"},
+		{"spaces and angle brackets", paragraph(image(nil, "https://u.com/a b<c>", nil)), "[![x](i.png)](<https://u.com/a b\\<c\\>>)\n"},
+		{"control characters", paragraph(image(nil, "https://u.com/a\tb\nc", nil)), "[![x](i.png)](https://u.com/a&#9;b&#10;c)\n"},
+		{"a table cell with a pipe, a backslash and a character reference in the link", inCell(image(nil, `https://u.com/a\|b&amp;c`, nil)), "| h |\n| --- |\n| [![x](i.png)](https://u.com/a\\\\\\|b\\&amp;c) |\n"},
+		{"after text ending in !", paragraph(&Node{Type: "text", Text: "wow!"}, image(nil, "https://u.com", nil)), "wow\\![![x](i.png)](https://u.com)\n"},
+		{"after bold text ending in !", paragraph(&Node{Type: "text", Text: "wow!", Marks: []Mark{{Type: "strong", Attrs: Attrs{"marker": "*"}}}}, image(nil, "https://u.com", nil)), "**wow!**[![x](i.png)](https://u.com)\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			markdown, err := Render(test.doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if markdown != test.want {
+				t.Fatalf("Render() = %q, want %q", markdown, test.want)
+			}
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !back.Equal(test.doc) {
+				got, _ := back.JSON()
+				want, _ := test.doc.JSON()
+				t.Fatalf("Parse(%q)\n got: %s\nwant: %s", markdown, got, want)
+			}
+		})
+	}
+}
+
+// An image's source, title, link and link title are held decoded, as the browser editor's parser
+// reads them, and each is written so it reads back as it is held: Go's Parse and ParseForWrite
+// take the rendering as the tree, and the editor's engine reads the same image, for references
+// with a name an HTML entity has and without one, numeric ones, backslashes, angle brackets,
+// parentheses, spaces, quotes, control characters, non-ASCII text, pipes and line breaks whose
+// next line could open a block - those that can interrupt a paragraph and those that cannot (an
+// HTML block of type 7 such as `<span>`, an ordered list item not starting at 1, an empty list
+// item, a link reference definition), which a lazy continuation line opens in the engine but not
+// in Go - in every block the writer writes an image in: a paragraph, a level 1 and a level 2
+// heading (written ATX), a table cell, a bullet and an ordered list item, a block quote, a list
+// item in a block quote, a typed block and a footnote definition.
+//
+// And a document the base wrote is not churned: wherever the base's spelling of the same
+// document - its image written by escapeLinkDestination and titleSuffix, the base's own writers,
+// a title's line feed as it is - reads back as held in Go and in the engine both, the writer
+// writes those bytes. A title's line feed is so written as it is in a paragraph, a list item or a
+// block quote, as the server stores it, and as `&#10;` in a heading, a table cell, and wherever
+// the raw line feed does not read back as held in either reader.
+func TestRenderWritesEachImageFieldSoItReadsBackAsHeld(t *testing.T) {
+	common := []string{
+		"&amp;", "i&amp;.png", "&copy;", "a&copy;b", "&foo;", "a&foo;b", "&#", "a&#b", "&#65;", "&#x41;", "&#X41;x",
+		"&amp", "&copy=1", "&&amp;", `\&amp;`, `\&foo;`, `\`, `a\b`, `a\*b`, `\\`, `a\`, `a\\`, `\|`, "a|b", "|",
+		"<", ">", "<a", "a<b>c", "a>", "(", ")", "a(b)c", "a)b", "a b", " a ", "a b<c>", "<a b>", "é ü 日本 \u00a0",
+		"a\tb", "a\nb", "a\rb", "a\fb", "a\x01b", "a\x7fb", "a\vb", `a\` + "\tb", `a\` + "\nb", "&#10;", `\&#9;`,
+		"https://u.com/?a=1&amp;b=2&c=3", "javascript&#58;x",
+		"a\n\nb", "\n", "a\n", "\na", "a\n  b", "a\n\tb", "a \nb", "a\n# b", "a\n===", "a\n---", "a\n- b",
+		"a\n1. b", "a\n> b", "a\n```", "a\n|b", "a\n\n\nb",
+		"a\n<span>\nz", "a\n</span>\nz", "a\n<b>", "a\n<x-y>\nz", "a\n<div>\nz", "a\n<!-- c -->\nz",
+		"a\n2. b", "a\n10) b", "a\n-\nb", "a\n+ b", "a\n* b", "a\n[l]: /u", "a\n[l]: /u\nz", "a\n~~~", "a\n***",
+		"a\n</script>\nz", "a\n</pre>\nz", "a\n</style>\nz", "a\n</SCRIPT>\nz", "a\n</textarea>\nz", "a\n<script>\nz",
+		"a\n<pre>\nz", "a\n<?x?>\nz", "a\n<!DOCTYPE x>\nz", "a\n<![CDATA[x]]>\nz", "a\n<a href=\"u\">\nz", "a\n<b>c\nz",
+		"a\n<http://x.test>\nz", "a\n<1>\nz", "a\n$$\nz", "a\n[^1]: x\nz", "a\n:::note\nz", "a\n- [ ] b",
+		// Every other CommonMark and GFM block start, and the start and end conditions of the seven
+		// HTML block kinds, as a title's later line.
+		"a\n## b", "a\n#", "a\n=", "a\n___", "a\n- - -", "a\n````\nz", "a\n~~~x\nz", "a\n    code", "a\n- [x] b",
+		"a\n1) b", "a\n1.", "a\n| a | b |", "a\n| - | - |", "a\n:- | -:", "a\n[^n]:x", "a\n<script>x\nz",
+		"a\n<STYLE>\nz", "a\n<textarea>\nz", "a\n<TEXTAREA>\nz", "a\n</PRE>\nz", "a\n</textarea >\nz",
+		"a\n<!-- c\nz", "a\n-->\nz", "a\nc -->\nz", "a\n<?x\nz", "a\n?>\nz", "a\n<!X y\nz", "a\n<!x>\nz",
+		"a\n<![CDATA[\nz", "a\n]]>\nz", "a\n<div\nz", "a\n</div>\nz", "a\n<DIV class=\"x\">\nz", "a\n<table>\nz",
+		"a\n</p>\nz", "a\n<x-y z=\"1\"/>\nz", "a\n</x-y>\nz", "a\n<a>b</a>\nz", "a\n</b> c\nz", "a\n<\nz",
+		"a\n<!\nz", "a\n&amp;\nz", "a\n\\- b\nz", "a\n\"b\"\nz", "a\n10\nz", "a\n10.5\nz", "a\nb\n", "a\né\nz",
+		// Each line class the allow-list admits (opensAsText), beside the block start it is told
+		// apart from, in the middle of a title, where no `")` ends the line.
+		"a\n#b\nz", "a\n####### b\nz", "a\n#\tb\nz", "a\n-b\nz", "a\n--\nz", "a\n-\tb\nz", "a\n*b\nz", "a\n**\nz",
+		"a\n* * *\nz", "a\n+b\nz", "a\n_b\nz", "a\n__\nz", "a\n===\nz", "a\n=\nz", "a\n=b\nz", "a\n-|-\nz",
+		"a\n:-\nz", "a\n:b\nz", "a\n::b\nz", "a\n:::\nz", "a\n``b\nz", "a\n```\nz", "a\n```b\nz", "a\n~~b~~\nz",
+		"a\n|b|\nz", "a\n|-|\nz", "a\n[b]\nz", "a\n[b]: /u \"t\"\nz", "a\n[^b]\nz", "a\n[^b]: c\nz",
+		"a\n<b x=\"1\">c\nz", "a\n< b\nz", "a\n<=\nz", "a\n<1@x.test>\nz", "a\n<!1\nz", "a\n<!-\nz", "a\n<b/>\nz",
+		"a\n<B>\nz", "a\n</B>\nz", "a\n<b >\nz", "a\n<b\nz", "a\n<bx\nz", "a\n<Div>\nz", "a\n</TEXTAREA>\nz",
+		"a\n<x:y>\nz", "a\n<b c>\nz", "a\n<b c='d' e>\nz", "a\n<b c=d>\nz", "a\n<b c=\"d>\nz", "a\n<span> \nz",
+		"a\n1.\nz", "a\n1)\nz", "a\n1. b\nz", "a\n01. b\nz", "a\n2) b\nz", "a\n1234567890. b\nz", "a\n1.b\nz",
+		"a\n{b}\nz", "a\n%b\nz", "a\n\u00a0b\nz", "a\n\u3000b\nz", "a\n!b\nz", "a\n'b'\nz", "a\n(b)\nz",
+		"a\n@b\nz", "a\n]b\nz", "a\n}\nz", "a\n$b$\nz", "a\n.b\nz", "a\n,b\nz",
+		"a\n| - |\n| - |\nz", "a\nb|c\n-|-\nz", "a\n| b | c |\n| - | - |\nz", "a\n:::b\nz", "a\n::: \nz",
+		"a\n</script> c\nz", "a\n<script>\nz", "a\n<!--\nz", "a\n<!-- c -->\nz",
+		"a\n::{b}\nz", "a\n:b{c}\nz", "a\n:b c\nz", "a\n\u00a0:::b{}\nz", "a\n\u00a0# b\nz", "a\n\u3000- b\nz",
+		// The shapes the tester's fuzz corpora hold: an empty bullet marker, a tag name not ended
+		// as a block's, a delimiter row under a wider line.
+		"a\n+\nz", "a\n*\nz", "a\n-\nz", "a\n+ \nz", "a\n<div", "a\n<pre", "a\n<div\"x\nz", "a\n<pre/\nz",
+		"a\n<div/>\nz", "a\n<pre>\nz", "a\n<div >\nz", "a | b\n| - |\nz", "a | b\n-:\nz", "a\n| |\n*\nz",
+		// The fuzz corpus's (fuzz.ts): a backtick run whose info holds a backtick, a fence of tildes
+		// whose info holds one, a self-closing tag followed by an indented definition.
+		"a\n``` a`b\nz", "a\n``` a`b", "a\n~~~ a`b\nz", "a\n```` x`\nz", "a\n<b/>\n [l]: /u\nz",
+		// HTML lines only Go's reader (goldmark's parser/html_block.go) opens a block at: `meta`,
+		// in goldmark's block tags only; spaces after `</`; a raw element's opening followed by
+		// `/>` or a form feed. And the forms around them both readers read alike.
+		"a\n<meta\nz", "a\n<META x=\"1\">\nz", "a\n</meta>\nz", "a\n</ div>\nz", "a\n</ p\nz", "a\n</  DIV\nz",
+		"a\n<pre/>\nz", "a\n<script/>x\nz", "a\n<pre\fx\nz", "a\n<style\tx>\nz", "a\n<textarea/>\nz",
+		"a\n<div\tx=\"1\">\nz", "a\n<div\fx\nz", "a\n<metax>\nz", "a\n</ b>\nz", "a\n< /div>\nz",
+		"a\n<a b=c/d>\nz", "a\n<a b=c/>\nz", "a\n#\fb\nz", "a\n-\fb\nz", "a\n1.\fb\nz",
+	}
+	titles := []string{`"`, `say "hi"`, `\"`, `a\"b`, "'", `"\`, `a"`}
+	image := func(src string, title any, link, linkTitle any) *Node {
+		return &Node{Type: "image", Attrs: Attrs{"src": src, "alt": "x", "title": title, "link": link, "linkTitle": linkTitle}}
+	}
+	// Each context is a source holding `![x](i.png)`, the path of child indexes from the doc to
+	// the textblock holding it and the type of each node on that path.
+	contexts := []struct {
+		name, source string
+		path         []int
+		types        []string
+	}{
+		{"a paragraph", "![x](i.png)\n", []int{0}, []string{"paragraph"}},
+		{"a level 1 heading", "# ![x](i.png)\n", []int{0}, []string{"heading"}},
+		{"a level 2 heading", "## ![x](i.png)\n", []int{0}, []string{"heading"}},
+		{"a table cell", "| h |\n| - |\n| ![x](i.png) |\n", []int{0, 1, 0, 0}, []string{"table", "table_row", "table_cell", "paragraph"}},
+		{"a bullet list item", "- ![x](i.png)\n", []int{0, 0, 0}, []string{"bullet_list", "list_item", "paragraph"}},
+		{"an ordered list item", "1. ![x](i.png)\n", []int{0, 0, 0}, []string{"ordered_list", "list_item", "paragraph"}},
+		{"a block quote", "> ![x](i.png)\n", []int{0, 0}, []string{"blockquote", "paragraph"}},
+		{"a list item in a block quote", "> - ![x](i.png)\n", []int{0, 0, 0, 0}, []string{"blockquote", "bullet_list", "list_item", "paragraph"}},
+		{"a task item", "- [ ] ![x](i.png)\n", []int{0, 0, 0}, []string{"bullet_list", "list_item", "paragraph"}},
+		{"a nested list item", "- a\n  - ![x](i.png)\n", []int{0, 0, 1, 0, 0}, []string{"bullet_list", "list_item", "bullet_list", "list_item", "paragraph"}},
+		{"a block quote in a list item", "- > ![x](i.png)\n", []int{0, 0, 1, 0}, []string{"bullet_list", "list_item", "blockquote", "paragraph"}},
+		// A paragraph line over 4 KiB before the image, the header a title's delimiter row is
+		// judged under: three cells, wider than a one- or two-cell delimiter row, and two cells.
+		{"a paragraph after a long three-cell line", "p | q | " + strings.Repeat("x", 5000) + " ![x](i.png)\n", []int{0}, []string{"paragraph"}},
+		{"a paragraph after a long two-cell line", "p | " + strings.Repeat("x", 5000) + " ![x](i.png)\n", []int{0}, []string{"paragraph"}},
+		{"a typed block", ":::callout{#callout-1 kind=\"note\"}\n![x](i.png)\n:::\n", []int{0, 0}, []string{"callout", "paragraph"}},
+		{"a footnote definition", "[^1]\n\n[^1]: ![x](i.png)\n", []int{1, 0}, []string{"footnote_definition", "paragraph"}},
+	}
+	// place parses a context's source and swaps img in for its image, after checking the image
+	// ends the textblock the path names, after nothing or one text.
+	place := func(source string, path []int, types []string, img *Node) *Node {
+		doc, err := Parse(source)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", source, err)
+		}
+		block := doc
+		for depth, index := range path {
+			if index >= len(block.Children) || block.Children[index].Type != types[depth] {
+				got, _ := doc.JSON()
+				t.Fatalf("Parse(%q) = %s, want a %s at depth %d", source, got, types[depth], depth)
+			}
+			block = block.Children[index]
+		}
+		last := len(block.Children) - 1
+		if last < 0 || block.Children[last].Type != "image" || last > 0 && block.Children[0].Type != "text" {
+			got, _ := doc.JSON()
+			t.Fatalf("Parse(%q) = %s, want one image ending its %s", source, got, block.Type)
+		}
+		block.Children[last] = img
+		return doc
+	}
+	// base is the base's spelling of the document a context writes with img in it: the context's
+	// rendering with a plain image, that image written as the base wrote one. The base never wrote
+	// a link or a link title - it dropped an image's link - so for those fields there is no base
+	// spelling to keep, and the property is vacuous.
+	base := func(contextIndex int, img *Node) string {
+		context := contexts[contextIndex]
+		template, err := Render(place(context.source, context.path, context.types, image("i.png", nil, nil, nil)))
+		if err != nil {
+			t.Fatalf("Render(%s with a plain image): %v", context.name, err)
+		}
+		const plain = "![x](i.png)"
+		if strings.Count(template, plain) != 1 {
+			t.Fatalf("Render(%s with a plain image) = %q, want %q in it once", context.name, template, plain)
+		}
+		src, _ := img.Attrs["src"].(string)
+		title, _ := img.Attrs["title"].(string)
+		cell := context.name == "a table cell"
+		return strings.Replace(template, plain, "![x]("+escapeLinkDestination(src, cell)+titleSuffix(title, cell)+")", 1)
+	}
+	type row struct {
+		name  string
+		doc   *Node
+		image *Node
+		// base is the base's spelling of doc, empty for a field the base never wrote.
+		base string
+	}
+	var rows []row
+	for _, field := range []string{"src", "title", "link", "linkTitle"} {
+		values := common
+		if field == "title" || field == "linkTitle" {
+			values = append(append([]string{}, common...), titles...)
+		}
+		for _, value := range values {
+			var img func() *Node
+			switch field {
+			case "src":
+				img = func() *Node { return image(value, nil, nil, nil) }
+			case "title":
+				img = func() *Node { return image("i.png", value, nil, nil) }
+			case "link":
+				img = func() *Node { return image("i.png", nil, value, nil) }
+			case "linkTitle":
+				img = func() *Node { return image("i.png", nil, "https://u.com", value) }
+			}
+			for contextIndex, context := range contexts {
+				placed := img()
+				test := row{field + " " + strconv.Quote(value) + " in " + context.name, place(context.source, context.path, context.types, placed), placed, ""}
+				if field == "src" || field == "title" {
+					test.base = base(contextIndex, placed)
+				}
+				rows = append(rows, test)
+			}
+		}
+	}
+	// The engine reads every rendering, and then every base spelling, in one run.
+	markdowns := make([]string, len(rows), 2*len(rows))
+	baseReading := make([]int, len(rows))
+	for index, test := range rows {
+		markdown, err := Render(test.doc)
+		if err != nil {
+			t.Fatalf("%s: Render: %v", test.name, err)
+		}
+		markdowns[index] = markdown
+		baseReading[index] = -1
+		if test.base != "" {
+			baseReading[index] = len(markdowns)
+			markdowns = append(markdowns, test.base)
+		}
+	}
+	readings := engineReadings(t, markdowns)
+	// engineImage is the first image the engine reads, or nil.
+	engineImage := func(reading *Node) *Node {
+		var image *Node
+		Walk(reading, func(node *Node) bool {
+			if node.Type == "image" {
+				image = node
+			}
+			return image == nil
+		})
+		return image
+	}
+	compared := 0
+	for index, test := range rows {
+		t.Run(test.name, func(t *testing.T) {
+			markdown := markdowns[index]
+			want, _ := test.doc.JSON()
+			if back, err := Parse(markdown); err != nil || !back.Equal(test.doc) {
+				got, _ := back.JSON()
+				t.Errorf("Parse(%q) = %s (%v)\nwant: %s", markdown, got, err, want)
+			}
+			if back, err := ParseForWrite(markdown, nil); err != nil || !back.Equal(test.doc) {
+				got, _ := back.JSON()
+				t.Errorf("ParseForWrite(%q) = %s (%v)\nwant: %s", markdown, got, err, want)
+			}
+			if engine := engineImage(readings[index]); engine == nil || !engine.Equal(test.image) {
+				got, _ := readings[index].JSON()
+				t.Errorf("the engine reads %q as %s, want its image %v", markdown, got, test.image.Attrs)
+			}
+			// The base's bytes read back as held when they read so as the rendering must:
+			// Parse and ParseForWrite take them as the tree, and the engine reads the image.
+			if test.base == "" {
+				return
+			}
+			if back, err := Parse(test.base); err != nil || !back.Equal(test.doc) {
+				return
+			}
+			if back, err := ParseForWrite(test.base, nil); err != nil || !back.Equal(test.doc) {
+				return
+			}
+			if engine := engineImage(readings[baseReading[index]]); engine == nil || !engine.Equal(test.image) {
+				return
+			}
+			compared++
+			if markdown != test.base {
+				t.Errorf("Render() = %q, want the base's bytes %q, which read back as held", markdown, test.base)
+			}
+		})
+	}
+	t.Logf("%d rows; the base's bytes read back as held, and are the writer's, in %d of them", len(rows), compared)
+	// A title's line feed is written as it is in a paragraph, a list item and a block quote, as the
+	// server stores it, and as `&#10;` in a heading and a table cell, whose line it would end, and
+	// where a blank line would end the paragraph.
+	for _, test := range []struct {
+		context, title, linkTitle, want string
+	}{
+		{"a paragraph", "a\nb", "", "![x](i.png \"a\nb\")\n"},
+		{"a paragraph", "", "a\nb", "[![x](i.png)](https://u.com \"a\nb\")\n"},
+		{"a block quote", "a\nb", "", "> ![x](i.png \"a\nb\")\n"},
+		{"a block quote", "", "a\nb", "> [![x](i.png)](https://u.com \"a\nb\")\n"},
+		{"a bullet list item", "a\nb", "", "- ![x](i.png \"a\nb\")\n"},
+		{"a bullet list item", "", "a\nb", "- [![x](i.png)](https://u.com \"a\nb\")\n"},
+		{"a level 1 heading", "a\nb", "", "# ![x](i.png \"a&#10;b\")\n"},
+		{"a level 1 heading", "", "a\nb", "# [![x](i.png)](https://u.com \"a&#10;b\")\n"},
+		{"a table cell", "a\nb", "", "| h |\n| --- |\n| ![x](i.png \"a&#10;b\") |\n"},
+		{"a table cell", "", "a\nb", "| h |\n| --- |\n| [![x](i.png)](https://u.com \"a&#10;b\") |\n"},
+		{"a block quote", "a\n\nb", "", "> ![x](i.png \"a&#10;&#10;b\")\n"},
+	} {
+		img := image("i.png", nil, nil, nil)
+		if test.title != "" {
+			img.Attrs["title"] = test.title
+		}
+		if test.linkTitle != "" {
+			img.Attrs["link"], img.Attrs["linkTitle"] = "https://u.com", test.linkTitle
+		}
+		for _, context := range contexts {
+			if context.name != test.context {
+				continue
+			}
+			if markdown, err := Render(place(context.source, context.path, context.types, img)); err != nil || markdown != test.want {
+				t.Errorf("Render(title %q, link title %q in %s) = %q (%v), want %q", test.title, test.linkTitle, context.name, markdown, err, test.want)
+			}
+		}
+	}
+}
+
+// A `!` ending text right before a `[` the writer puts after it - a linked image's, or a link's the
+// next text opens first, a www link's the writer refuses bare after the `!` included - is escaped,
+// where it would open an image; a `!` before anything else is written as it is. Go and the browser
+// editor's engine both read each rendering back as the tree, its link a link and not an image.
+func TestRenderEscapesABangBeforeALinksBracket(t *testing.T) {
+	tests := []struct {
+		name, markdown, want string
+		images               int
+	}{
+		{"text before a link", "wow\\![a](u)\n", "wow\\![a](u)\n", 0},
+		// The link is written outermost, so the bold closes before its `[`.
+		{"bold text before a link inside the bold", "**wow\\![a](u)**\n", "**wow!**[**a**](u)\n", 0},
+		{"text before a bold link", "wow\\!**[a](u)**\n", "wow\\![**a**](u)\n", 0},
+		{"text and a space before a link", "wow! [a](u)\n", "wow! [a](u)\n", 0},
+		{"text before a linked image", "wow\\![![x](i.png)](u)\n", "wow\\![![x](i.png)](u)\n", 1},
+		{"text ending a paragraph", "wow!\n", "wow!\n", 0},
+		// The bare URL after the www link stays bare: the first spelling reads back.
+		{"text before a www link", "wow\\![www.a.test](http://www.a.test) see https://x.com/a\n", "wow\\![www.a.test](http://www.a.test) see https://x.com/a\n", 0},
+		{"text before a www link in code", "wow\\![`www.a.test`](http://www.a.test) see https://x.com/a\n", "wow\\![`www.a.test`](http://www.a.test) see https://x.com/a\n", 0},
+	}
+	docs := make([]*Node, len(tests))
+	rendered := make([]string, len(tests))
+	for index, test := range tests {
+		doc, err := Parse(test.markdown)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", test.markdown, err)
+		}
+		images := 0
+		Walk(doc, func(node *Node) bool {
+			if node.Type == "image" {
+				images++
+			}
+			return true
+		})
+		if images != test.images {
+			t.Fatalf("Parse(%q) reads %d images, want %d", test.markdown, images, test.images)
+		}
+		docs[index] = doc
+		if rendered[index], err = Render(doc); err != nil {
+			t.Fatalf("Render(Parse(%q)): %v", test.markdown, err)
+		}
+	}
+	readings := engineReadings(t, rendered)
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if rendered[index] != test.want {
+				t.Errorf("Render(Parse(%q)) = %q, want %q", test.markdown, rendered[index], test.want)
+			}
+			back, err := Parse(rendered[index])
+			if err != nil || !back.Equal(docs[index]) {
+				got, _ := back.JSON()
+				want, _ := docs[index].JSON()
+				t.Errorf("Go reads %q back as %s (%v)\nwant: %s", rendered[index], got, err, want)
+			}
+			if engine := readings[index]; engine == nil || !engine.Equal(docs[index]) {
+				got, _ := engine.JSON()
+				t.Errorf("the engine reads %q back as %s", rendered[index], got)
+			}
+		})
+	}
+}
+
+// The first spelling of a run escapes a `!` before the `[` it writes next, inside marks it keeps
+// open as well, and before a www link it writes as an explicit link because a `!` stands before it,
+// and leaves one alone where a closer or a delimiter opener stands between.
+func TestTheFirstSpellingEscapesABangBeforeALinksBracket(t *testing.T) {
+	for _, test := range []struct {
+		markdown string
+		spelling runSpelling
+		want     string
+	}{
+		{"**wow\\![a](u)**\n", runSpelling{keepOpen: true}, "**wow\\![a](u)**"},
+		{"**wow\\![a](u)**\n", runSpelling{}, "**wow!**[**a**](u)"},
+		{"wow\\![www.a.test](http://www.a.test)\n", runSpelling{}, "wow\\![www.a.test](http://www.a.test)"},
+		{"wow\\![`www.a.test`](http://www.a.test)\n", runSpelling{}, "wow\\![`www.a.test`](http://www.a.test)"},
+		{"wow!*[www.a.test](http://www.a.test)*\n", runSpelling{}, "wow!*www.a.test*"},
+	} {
+		doc, err := Parse(test.markdown)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", test.markdown, err)
+		}
+		r := &renderer{}
+		r.writeInlineRun(doc.Children[0].Children, "", inlineContext{startsLine: true}, test.spelling)
+		if got := r.b.String(); got != test.want {
+			t.Errorf("writeInlineRun(Parse(%q), %+v) = %q, want %q", test.markdown, test.spelling, got, test.want)
+		}
 	}
 }
 
@@ -911,4 +1340,227 @@ func TestRenderWritesAnEmptyTaskItemAsAnEmptyItem(t *testing.T) {
 	if first := back.Children[0].Children[0]; len(first.Children[0].Children) != 0 {
 		t.Fatalf("%q reads back with the first item holding %q", markdown, first.Children[0].Children[0].Text)
 	}
+}
+
+// An image whose title holds a line feed, in a list item or a block quote, is stored today with
+// the line feed as it is (the next line is the paragraph's lazy continuation), and reads back as
+// held, so no write after INFRA-190 changes those bytes (R3): the title's line feed stays raw
+// wherever the block holds it, not only in a top-level paragraph.
+func TestRenderKeepsAStoredImageTitlesLineFeedInAListItemOrBlockQuote(t *testing.T) {
+	for _, markdown := range []string{
+		"- ![x](i.png \"a\nb\")\n",
+		"1. ![x](i.png \"a\nb\")\n",
+		"> ![x](i.png \"a\nb\")\n",
+		"- > ![x](i.png \"a\nb\")\n",
+	} {
+		doc, err := ParseForWrite(markdown, nil)
+		if err != nil {
+			t.Errorf("ParseForWrite(%q) = %v, want the write taken", markdown, err)
+			continue
+		}
+		got, err := Render(doc)
+		if err != nil {
+			t.Errorf("Render(ParseForWrite(%q)) = %v", markdown, err)
+			continue
+		}
+		if got != markdown {
+			t.Errorf("Render(ParseForWrite(%q)) = %q, want the stored bytes kept", markdown, got)
+		}
+	}
+}
+
+// A linked image in a list item, a block quote or a footnote definition whose link title has a line
+// that is an inline HTML tag (`<span>`, `</span>`, `<b>`, `<x-y>`) is written so that the browser
+// editor's engine reads it back as held. Written raw, that line is a lazy continuation Go reads as
+// the title's, but the engine reads it as an HTML block that ends the paragraph: the past-version
+// view, which reads the stored markdown with the engine, then draws `[`, the picture, and
+// `](https://… "a` as text and the link is lost (INFRA-190 round 8; the base stored such an image
+// without its link, which both parsers read back).
+func TestRenderWritesALazyHTMLTagTitleLineSoTheEngineReadsItBack(t *testing.T) {
+	var markdowns []string
+	var held [][]*Node
+	for _, prefix := range []string{"- ", "1. ", "> ", "- > ", "- a\n  - ", "x[^1]\n\n[^1]: "} {
+		for _, line := range []string{"<span>", "</span>", "<b>", "<x-y>"} {
+			source := prefix + "[![x](i.png)](https://u.com \"a&#10;" + line + "&#10;z\")\n"
+			doc, err := ParseForWrite(source, nil)
+			if err != nil {
+				t.Fatalf("ParseForWrite(%q): %v", source, err)
+			}
+			markdown, err := Render(doc)
+			if err != nil {
+				t.Fatalf("Render(ParseForWrite(%q)): %v", source, err)
+			}
+			markdowns = append(markdowns, markdown)
+			held = append(held, documentImages(doc))
+		}
+	}
+	for index, reading := range engineReadings(t, markdowns) {
+		var read []*Node
+		if reading != nil {
+			read = documentImages(reading)
+		}
+		if len(read) != len(held[index]) || len(read) == 0 || !sameImageFields(read[0], held[index][0]) {
+			got := "nothing"
+			if reading != nil {
+				json, _ := reading.JSON()
+				got = string(json)
+			}
+			t.Errorf("the engine reads %q as %s, want its linked image %v", markdowns[index], got, held[index][0].Attrs)
+		}
+	}
+}
+
+// A linked image in a list item, a task item, a block quote or a footnote definition whose link
+// title has a line that is the closing tag of a raw HTML element (`</script>`, `</pre>`,
+// `</style>`, any case) is written so that the browser editor's engine reads it back as held. Read
+// alone, such a line is a paragraph in Go's reader, as CommonMark has it (a closing tag of those
+// names opens no HTML block), so the judgement of a lazy line by Go's reading of it alone keeps it
+// raw; the engine reads it as an HTML block that ends the paragraph, and the past-version view
+// draws `[`, the picture and `](https://… "a` as text, the link lost (INFRA-190, the tester's fuzz
+// at 166cdd6c).
+func TestRenderWritesALazyClosingRawTagTitleLineSoTheEngineReadsItBack(t *testing.T) {
+	var markdowns []string
+	var held [][]*Node
+	for _, prefix := range []string{"- ", "- [ ] ", "1. ", "> ", "- a\n  - ", "x[^1]\n\n[^1]: "} {
+		for _, line := range []string{"</script>", "</pre>", "</style>", "</SCRIPT>"} {
+			source := prefix + "[![x](i.png)](https://u.com \"a&#10;" + line + "&#10;z\")\n"
+			doc, err := ParseForWrite(source, nil)
+			if err != nil {
+				t.Fatalf("ParseForWrite(%q): %v", source, err)
+			}
+			markdown, err := Render(doc)
+			if err != nil {
+				t.Fatalf("Render(ParseForWrite(%q)): %v", source, err)
+			}
+			markdowns = append(markdowns, markdown)
+			held = append(held, documentImages(doc))
+		}
+	}
+	for index, reading := range engineReadings(t, markdowns) {
+		var read []*Node
+		if reading != nil {
+			read = documentImages(reading)
+		}
+		if len(read) != len(held[index]) || len(read) == 0 || !sameImageFields(read[0], held[index][0]) {
+			got := "nothing"
+			if reading != nil {
+				json, _ := reading.JSON()
+				got = string(json)
+			}
+			t.Errorf("the engine reads %q as %s, want its linked image %v", markdowns[index], got, held[index][0].Attrs)
+		}
+	}
+}
+
+// A title line feed before a delimiter row is judged under the whole written line before it, its
+// header, however long: where the header is wider than the delimiter row neither reader makes a
+// table, and the base's raw bytes, which both readers hold, are written as they are; where it is no
+// wider, the title is written `&#10;`. A header over 4 KiB was once taken to make a table unread,
+// which wrote `&#10;` for a title main keeps raw (the reviewer's finding on INFRA-190).
+func TestRenderJudgesATitlesDelimiterRowUnderALongHeaderLine(t *testing.T) {
+	long := strings.Repeat("x", 5000)
+	tests := []struct{ name, source, want string }{
+		{"a wider header, an image title", "p | q | " + long + ` ![a](i "a` + "\n|-|\n" + `b")` + "\n", ""},
+		{"a wider header, a link title", "p | q | " + long + ` [![a](i)](u "a` + "\n|-|\n" + `b")` + "\n", ""},
+		{"a header no wider, an image title", "p | " + long + ` ![a](i "a` + "&#10;-|-&#10;" + `b")` + "\n", "p | " + long + ` ![a](i "a&#10;-|-&#10;b")` + "\n"},
+		{"a header no wider, a link title", "p | " + long + ` [![a](i)](u "a` + "&#10;-|-&#10;" + `b")` + "\n", "p | " + long + ` [![a](i)](u "a&#10;-|-&#10;b")` + "\n"},
+	}
+	markdowns := make([]string, len(tests))
+	held := make([][]*Node, len(tests))
+	for index, test := range tests {
+		doc, err := ParseForWrite(test.source, nil)
+		if err != nil {
+			t.Fatalf("%s: ParseForWrite: %v", test.name, err)
+		}
+		markdown, err := Render(doc)
+		if err != nil {
+			t.Fatalf("%s: Render: %v", test.name, err)
+		}
+		want := test.want
+		if want == "" {
+			want = test.source
+		}
+		if markdown != want {
+			t.Errorf("%s: Render() = %q, want %q", test.name, markdown[len(markdown)-40:], want[len(want)-40:])
+		}
+		if back, err := ParseForWrite(markdown, nil); err != nil || !back.Equal(doc) {
+			t.Errorf("%s: Go reads the rendering back otherwise (%v)", test.name, err)
+		}
+		markdowns[index], held[index] = markdown, documentImages(doc)
+	}
+	for index, reading := range engineReadings(t, markdowns) {
+		var read []*Node
+		if reading != nil {
+			read = documentImages(reading)
+		}
+		if len(read) != len(held[index]) || !sameImageFields(read[0], held[index][0]) {
+			t.Errorf("%s: the engine reads the rendering with images %v, want %v", tests[index].name, read, held[index])
+		}
+	}
+}
+
+// A title whose lines write two table delimiter rows, one under the other, in a paragraph whose
+// first line is wider than them, is written `&#10;`: Go's reader takes only the paragraph's first
+// delimiter row, which under a wider header makes no table, but the browser editor's engine reads
+// the second row's line before it, the first, as a header, so the raw title makes a table there
+// and the images are lost (the tester's fuzz document f513). Go and the engine both read the
+// writing back with every image held.
+func TestRenderWritesADelimiterRowUnderADelimiterRowSoTheEngineReadsItBack(t *testing.T) {
+	tests := []struct{ source, want string }{
+		{"a | b ![x](i.png \"a&#10;| - |&#10;| - |&#10;z\")\n", "a | b ![x](i.png \"a&#10;| - |&#10;| - |&#10;z\")\n"},
+	}
+	markdowns := make([]string, len(tests))
+	held := make([][]*Node, len(tests))
+	for index, test := range tests {
+		doc, err := ParseForWrite(test.source, nil)
+		if err != nil {
+			t.Fatalf("ParseForWrite(%q): %v", test.source, err)
+		}
+		markdown, err := Render(doc)
+		if err != nil {
+			t.Fatalf("Render(ParseForWrite(%q)): %v", test.source, err)
+		}
+		if markdown != test.want {
+			t.Errorf("Render(ParseForWrite(%q)) = %q, want %q", test.source, markdown, test.want)
+		}
+		if back, err := ParseForWrite(markdown, nil); err != nil || !back.Equal(doc) {
+			t.Errorf("Go reads %q back otherwise (%v)", markdown, err)
+		}
+		markdowns[index], held[index] = markdown, documentImages(doc)
+	}
+	for index, reading := range engineReadings(t, markdowns) {
+		var read []*Node
+		if reading != nil {
+			read = documentImages(reading)
+		}
+		if len(read) != len(held[index]) || !sameImageFields(read[0], held[index][0]) {
+			got, _ := reading.JSON()
+			t.Errorf("the engine reads %q as %s, want its image %v", markdowns[index], got, held[index][0].Attrs)
+		}
+	}
+}
+
+// documentImages is doc's images in document order.
+func documentImages(doc *Node) []*Node {
+	var images []*Node
+	Walk(doc, func(node *Node) bool {
+		if node.Type == "image" {
+			images = append(images, node)
+		}
+		return true
+	})
+	return images
+}
+
+// sameImageFields reports whether two images hold the same source, alt, title, link and link
+// title, an absent one the same as an empty one.
+func sameImageFields(a, b *Node) bool {
+	for _, field := range []string{"src", "alt", "title", "link", "linkTitle"} {
+		first, _ := a.Attrs[field].(string)
+		second, _ := b.Attrs[field].(string)
+		if first != second {
+			return false
+		}
+	}
+	return true
 }

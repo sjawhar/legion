@@ -1,0 +1,106 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-190",
+  "completed": "2026-10-26T23:00:00Z",
+  "round": 9,
+  "headSha": "e17a2d4c40f77bde6cebce56a1a8044d15f7ca62",
+  "codeHeadSha": "d0cc087570fb47eebace29183275a446c4ba98d7",
+  "fullRoundReason": "Code changed since round 8 (3463a524 HTML rules of both readers, 0b2381a2 fuzz tag family, d0cc0875 gate), so this is a full round.",
+  "ci": "At d0cc087570fb (read 2026-10-26T22:47Z with gh run list): PR Title 40409677910 success, Docs 40409678141 success, Worker Image 40409678223 success; Tests 40409677608 in progress; Legion Envoy and Contracts 40409677700 queued. Not waited on; no lane rerun here.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran at code head d0cc0875 from a fresh git archive (tester/head-g11), tester lane: round 8's real-API cases are all taken with the link kept (tester/live-g11.out); every red test of rounds 2-8 passes, the generated test included; linked-images.e2e.ts chromium + iphone 16 passed (tester/e2e-head-g11.log); differential.sh --base d1f4b8a6 over the deployment's export, fuzz.ts and my corpora: every GATE 0 (tester/diff-g11.log). fuzz.ts now reaches round 8's class: with only titles-r6 added, it alone gives 73 of 82 refused writes at 7270f77d (tester/strength-g11-7270.log)."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "R2: no refusal is added; a linked image whose title line goldmark reads as an HTML block (round 8's failure) is taken and keeps its link",
+      "surface": "the documents API of the real Go Dispatch server built from the head, on the harness Postgres (harness/live.sh)",
+      "command": "bash /legion/scratch/tmp/infra190/harness/live.sh tester/head-g11 tg11 tester/cases-g4.jsonl (13 cases: link title and image title 'a&#10;<meta&#10;z', '</ div>', '<pre/>', '<META x=\"1\">', top level and in a list item, plus a control)",
+      "observed": "all 13 HTTP 201; each link title stored with &#10; and the link kept, e.g. [![x](i.png)](https://u.com \"a&#10;<meta&#10;z\"); the image-title cases main refuses are taken too; control 'a\\nb\\nz' kept raw",
+      "headSha": "d0cc087570fb47eebace29183275a446c4ba98d7",
+      "negativeControl": "the same cases at 7270f77d answered HTTP 400 INVALID_MARKDOWN in 7 of 8 linked cases (round 8, tester/live-tg4head.out); main d1f4b8a6 answers 201 but stores ![x](i.png), dropping the link"
+    },
+    {
+      "criterion": "A3/R1: a linked image is imported, saved, reloaded and opened in the live and past-version views, for a Dispatch picture, a dispatch:// link and a comment",
+      "surface": "Dispatch in Playwright Chromium and the iPhone profile against the real Go server, the production SPA bundle and Postgres",
+      "command": "cd tester/head-g11/packages/dispatch && bunx playwright test --config e2e/playwright.config.ts linked-images.e2e.ts --project chromium --project iphone",
+      "observed": "16 passed (3.4m), log tester/e2e-head-g11.log",
+      "headSha": "d0cc087570fb47eebace29183275a446c4ba98d7",
+      "negativeControl": "the same spec copied into main d1f4b8a6 (harness/base-main, chromium): 6 failed 2 passed, the picture-in-link assertions not found (tester/e2e-base-g11.log)"
+    },
+    {
+      "criterion": "A4 (R2, R3): the differential reports 0 regressions, misreads, churn, lost links and refused writes against main",
+      "surface": "the pmdoc differential: main and head Go builds against the browser editor's engine over the deployment's export, the committed fuzz corpus, the in-repo corpora and the tester's rebuilt corpora",
+      "command": "bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base d1f4b8a64a964d962d1a2991fd6b926a39cd0756 --head d0cc087570fb --corpus tester/corpora --corpus /legion/scratch/tmp/infra190/export/deployment.jsonl --out tester/diff-g11",
+      "observed": "exit 0; 13,334 documents; every GATE 0; linked image kept 7,088; ungated: 140 'linked image in a write both refuse while reading it', 4 'Go reads otherwise than the engine at both revisions', 1 carriage-return row, 6 entity rows",
+      "headSha": "d0cc087570fb47eebace29183275a446c4ba98d7",
+      "negativeControl": "the same differential (head's gates) at 7270f77d over the committed fuzz corpus and titles-r6: GATE head refuses a write the base takes 82, lost whole-image links 82, exit 1"
+    },
+    {
+      "criterion": "The title-line allow-list admits as text only lines both readers continue the paragraph at (the class rounds 6-8 failed on)",
+      "surface": "pmdoc's opensAsText at the head, judged against Go's reader (ParseRendering) and the browser editor's engine (engineReadings) on real documents",
+      "command": "throwaway TestZZTesterSweep in tester/head-g11 (removed after): 34,044 lines starting '<' (every tag name of both readers' lists and 17 more, three cases, '<', '</', '</ ', '</  ', '</\\t', 27 suffixes incl. form feed, '/', '/>', attributes; declarations, comments, CDATA, PIs), each the second line of 'x', '- x' and '> x'; every admitted line compared with 'y' by block shape",
+      "observed": "61,554 admitted rows; Go breaks 0, engine breaks 0",
+      "headSha": "d0cc087570fb47eebace29183275a446c4ba98d7",
+      "negativeControl": "the same sweep at 7270f77d admits 80,040 rows and Go breaks 18,492 of them (e.g. '</ address'), tester/sweep-g4.log"
+    }
+  ],
+  "checked": [
+    "The architect's probe of the 140 'both refuse while reading it' rows (envoy e30f3585): all 140 are committed-fuzz documents; base.dump.Parse (main's Parse of the source itself, differential_test.go:242) refuses every one before any write: 138 'block HTML is not accepted by Proof' (each source has a raw title line starting '<', which the source itself opens as an HTML block), fuzz:2353 a footnote label with whitespace, fuzz:3927 a malformed directive. Real API, 40 of them POSTed: HTTP 400 INVALID_MARKDOWN at main and at the head alike (tester/live-g11both-*.out). A write head reads and then refuses is counted a lost link: at 7270f77d the 82 refused writes are flagged 'lost whole-image link', not this class.",
+    "Cited sources checked against the code, not the citation: goldmarkHTMLType1, Types2To5, Type6, Type7 and goldmarkAttribute are goldmark v1.8.6 parser/html_block.go lines 79-96 and raw_html.go line 52 with the leading '[ ]{0,3}' and line-ending groups dropped; goldmark's two-step Open (type 7 for a block tag, else type 6 for a block tag) is reproduced; goldmarkBlockTags equals allowedBlockTags (micromark's 62 block names plus meta, diffed); micromarkBlockNames and micromarkRawNames equal micromark-util-html-tag-name 2.0.1's htmlBlockNames and htmlRawNames (diffed by import); micromarkHTMLFlowOpens follows html-flow.js tagName (raw only without '/' or a closing slash, block names with '/' only as '/>', kind 7 only at a lazy line) and completeTagLine's unquoted value excludes '/', as completeAttributeValueUnquoted does. The sweep above is the executed check.",
+    "Four 'Go reads otherwise than the engine' rows unchanged from round 8 (each keeps every image and link in both readers' reading of head's bytes)."
+  ],
+  "previousRounds": [
+    {
+      "round": 8,
+      "headSha": "7270f77dba4fd97b29753962f77d9dea3cab0f31",
+      "verdict": "fail",
+      "failure": "The allow-list admitted title lines goldmark opens an HTML block at (<meta, '</ div>', <pre/>, <pre + form feed), so those writes were refused (red test TestParseTakesAnImageTitleLineGoReadsAsAnHTMLBlock, b3358e38). Fixed at 3463a524 and verified in round 9."
+    },
+    {
+      "round": 7,
+      "headSha": "166cdd6c5af46da1d518fec36d212088b0ab9f57",
+      "verdict": "fail",
+      "failure": "A lazy link-title line closing a raw element (</script>, </pre>, </style>) was written raw and the engine read it as HTML (red test TestRenderWritesALazyClosingRawTagTitleLineSoTheEngineReadsItBack, 4f6b13c9). Fixed by the allow-list (e9ed11f2..7270f77d) and verified in round 8: that red test passes."
+    },
+    {
+      "round": 6,
+      "headSha": "3ee687b69b0e54819f5862a5fb7c8b385a5956fb",
+      "verdict": "fail",
+      "failure": "A lazy inline-HTML-tag line (<span>, </span>, <b>, <x-y>) in a linked image's link title was stored raw, which the editor's engine reads as an HTML block (red test TestRenderWritesALazyHTMLTagTitleLineSoTheEngineReadsItBack, 3d0237aa). Fixed at 5e221be0 and verified in round 7: that red test passes and those shapes are written &#10;."
+    },
+    {
+      "round": 5,
+      "headSha": "999f2d4b98c7060dc38f0b90c69c29abdb6d19b3",
+      "verdict": "fail",
+      "failure": "Render re-parsed and re-rendered the whole document once per misread raw title, quadratic (red test TestRenderIsLinearInImagesWhoseTitlesHoldABlankLine, e39b6dd5). Fixed at 3ee687b6 and verified in round 6: 2,000 such images render in 0.04 s and the red test passes."
+    },
+    {
+      "round": 4,
+      "headSha": "733ebfdbd51b2e227203bbd0a71ff6cabc761900",
+      "verdict": "fail",
+      "failure": "An image title's line feed in a list item or block quote was written &#10;, so stored documents changed their bytes (R3; red test TestRenderKeepsAStoredImageTitlesLineFeedInAListItemOrBlockQuote, 47d7f3f1). Fixed at ad3351ac and verified in round 5: the red test passes and the differential's churn gate is 0."
+    },
+    {
+      "round": 3,
+      "headSha": "18e756469fe4cc53056f32750f035a737b55ae84",
+      "verdict": "fail",
+      "failure": "A linked image whose link title holds a line break its block cannot hold raw was refused (R2; red test TestParseTakesALinkedImageWhoseLinkTitleHoldsALineBreak, 0c119da9). Fixed at 733ebfdb and verified in round 4: the four writes now answer HTTP 201 with the link kept, and the red test passes."
+    },
+    {
+      "round": 2,
+      "headSha": "48eebf71e19204987b556774b9fe705c97329243",
+      "verdict": "fail",
+      "failure": "An image whose source escapes a reference's '&' was refused (R2; red test TestParseTakesAnImageWhoseSourceEscapesAReferencesAmpersand, b9246afc). Fixed at 437ef2a9 and verified in this round on the real API."
+    },
+    {
+      "round": 1,
+      "headSha": "6a206afc8f7a06b773823a0d40709777d673acde",
+      "verdict": "fail",
+      "failure": "A linked image's link was stored as written, not decoded as the editor reads it (red test TestParseDecodesALinkedImagesLinkAsTheEditorReadsIt, 80ac2d84fc67). Fixed at f91b263c and verified in round 2."
+    }
+  ]
+}

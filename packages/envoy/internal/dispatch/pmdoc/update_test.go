@@ -16,7 +16,7 @@ import (
 // author the tree as, schema defaults applied, but for the null attributes whose default is not
 // null: a table cell with no alignment holds "none", since that editor gives an absent alignment
 // the default, left, and writes it back when the cell is edited, and a code block with no
-// language and an image with no title hold "", that editor's own default.
+// language and an image with no title, link or link title hold "", that editor's own default.
 func TestUpdateFromEmptyEqualsAuthoredByBrowser(t *testing.T) {
 	for _, fx := range loadFixtures(t) {
 		t.Run(fx.Name, func(t *testing.T) {
@@ -53,7 +53,7 @@ func TestUpdateFromEmptyEqualsAuthoredByBrowser(t *testing.T) {
 }
 
 // asTheLiveDocumentHoldsIt is doc with each table cell's null alignment written "none", and each
-// code block's null language and image's null title "".
+// code block's null language and image's null title, link and link title "".
 func asTheLiveDocumentHoldsIt(doc *Node) *Node {
 	out := *doc
 	set := func(name string, value any) {
@@ -74,6 +74,8 @@ func asTheLiveDocumentHoldsIt(doc *Node) *Node {
 		set("language", "")
 	case "image":
 		set("title", "")
+		set("link", "")
+		set("linkTitle", "")
 	}
 	out.Children = make([]*Node, len(doc.Children))
 	for index, child := range doc.Children {
@@ -240,14 +242,15 @@ func genScript(script string, args ...string) *exec.Cmd {
 }
 
 // Every null attribute Go writes into the live document survives the browser editor: loaded as its
-// sync plugin loads it, with a header cell, a body cell and a code block typed into and an image's
-// alt text edited, written back as that plugin writes them, the document reads back with each
-// attribute as written. The plugin writes an edited node back with the attributes the editor
+// sync plugin loads it, with a header cell, a body cell and a code block typed into and each
+// image's alt text edited, written back as that plugin writes them, the document reads back with
+// each attribute as written. The plugin writes an edited node back with the attributes the editor
 // holds, schema defaults included: an unaligned column comes back left unless the live document
-// holds "none", and a code block with no language and an image with no title come back holding ""
-// unless the read gives "" back as null (liveNulls).
+// holds "none", and a code block with no language and an image with no title, link or link title
+// come back holding "" unless the read gives "" back as null (liveNulls). A linked image the editor
+// edits keeps its link and link title.
 func TestNullAttributesSurviveABrowserEdit(t *testing.T) {
-	written, err := Parse("| a | b | c |\n| --- | :---: | ---: |\n| d | e | f |\n\n```\ncode\n```\n\n![alt](src.png) tail\n")
+	written, err := Parse("| a | b | c |\n| --- | :---: | ---: |\n| d | e | f |\n\n```\ncode\n```\n\n![alt](src.png) tail [![x](i.png)](https://u.com \"t\")\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,10 +276,10 @@ func TestNullAttributesSurviveABrowserEdit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "| ax | b | c |\n| --- | :---: | ---: |\n| dy | e | f |\n\n```\ncodez\n```\n\n![alt2](src.png) tail\n"; markdown != want {
+	if want := "| ax | b | c |\n| --- | :---: | ---: |\n| dy | e | f |\n\n```\ncodez\n```\n\n![alt2](src.png) tail [![x2](i.png)](https://u.com \"t\")\n"; markdown != want {
 		t.Fatalf("after the browser editor's edits, the document renders %q, want %q", markdown, want)
 	}
-	for _, attr := range []struct{ node, name string }{{"code_block", "language"}, {"image", "title"}} {
+	for _, attr := range []struct{ node, name string }{{"code_block", "language"}, {"image", "title"}, {"image", "link"}, {"image", "linkTitle"}} {
 		node := firstNodeOfType(tree, attr.node)
 		if node == nil {
 			t.Fatalf("no %s in the edited tree", attr.node)

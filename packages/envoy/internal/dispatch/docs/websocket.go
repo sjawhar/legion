@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -294,23 +295,37 @@ func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) 
 	connection.actor = actor
 	connection.added = true
 	s.addConnection(room, connection.id, actor)
+	query := r.URL.Query()
 	return websocket.ConnectionConfig{
-		ReadOnly: schemaReadOnly(open, r.URL.Query().Get("schema_version")),
+		ReadOnly: schemaReadOnly(open, query.Get("schema_version"), query.Get("editor_schema")),
 	}, true
 }
 
-func schemaReadOnly(open bool, clientSchemaVersion string) bool {
-	return !open || clientSchemaVersion != fmt.Sprintf("%d", pmdoc.SchemaVersion())
+// schemaReadOnly reports whether a connection is admitted read-only. It is writable only while the
+// issue is open and the editor presents both the document schema version the server publishes
+// (blocks.json, which a browser fetches at run time and so can present new from old code) and the
+// node schema version its own code was built with (contracts.DocumentEditorSchemaVersion, compiled
+// into the bundle): an editor whose code lacks a node attribute would strip it from every element
+// it rewrites. Each is compared as its exact decimal text, so a missing or altered value is
+// read-only.
+func schemaReadOnly(open bool, schemaVersion, editorSchema string) bool {
+	return !open ||
+		schemaVersion != strconv.Itoa(pmdoc.SchemaVersion()) ||
+		editorSchema != strconv.Itoa(contracts.DocumentEditorSchemaVersion)
 }
 
 // authorizeSchemaVersion confirms the existing HTTP-authorized connection's schema admission
-// through Hocuspocus's authenticated scope, which is the provider's client-visible signal.
-func (s *Service) authorizeSchemaVersion(room, clientSchemaVersion string) (websocket.ConnectionConfig, error) {
+// through Hocuspocus's authenticated scope, which is the provider's client-visible signal. Its
+// answer overrides the upgrade's. The token is `<schema>:<editor>`, the two versions the upgrade
+// reads from the query; any other shape, the bare `<schema>` an editor built before the editor
+// schema existed sends among them, is read-only.
+func (s *Service) authorizeSchemaVersion(room, token string) (websocket.ConnectionConfig, error) {
 	open, err := s.issueOpen(context.Background(), s.queryFrom(context.Background()), room)
 	if err != nil {
 		return websocket.ConnectionConfig{}, err
 	}
-	return websocket.ConnectionConfig{ReadOnly: schemaReadOnly(open, clientSchemaVersion)}, nil
+	schemaVersion, editorSchema, _ := strings.Cut(token, ":")
+	return websocket.ConnectionConfig{ReadOnly: schemaReadOnly(open, schemaVersion, editorSchema)}, nil
 }
 
 // ActorHeader is the header a document websocket's bearer names its session in, as the JSON of a

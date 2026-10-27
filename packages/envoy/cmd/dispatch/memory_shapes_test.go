@@ -123,12 +123,12 @@ type admittedShape struct {
 
 // heaviestAdmittedShapes are the heaviest documents of the shapes that cost the most memory per
 // element - italic spans, delimiter runs, table cells, headings, list items, hard breaks, inline
-// HTML, images, footnote references, and the empty list items, quotes and footnote definitions the
-// Proof tree gives an empty paragraph each - that the element limit admits, each found by the
-// parser the server writes with. Images and footnote references weighed one element each, and the
-// heaviest document of them held 304 and 376 MiB to store. Empty callouts are not among them: an
-// upload of the most the limit admits is refused 500 by the search index of its version, whose
-// block ids make a vector past PostgreSQL's 1 MiB (LEGION-505).
+// HTML, images and linked images, footnote references, and the empty list items, quotes and
+// footnote definitions the Proof tree gives an empty paragraph each - that the element limit
+// admits, each found by the parser the server writes with. Images and footnote references weighed
+// one element each, and the heaviest document of them held 304 and 376 MiB to store. Empty
+// callouts are not among them: an upload of the most the limit admits is refused 500 by the search
+// index of its version, whose block ids make a vector past PostgreSQL's 1 MiB (LEGION-505).
 func heaviestAdmittedShapes(t *testing.T) []admittedShape {
 	t.Helper()
 	repeated := func(unit string) func(int) string {
@@ -153,6 +153,7 @@ func heaviestAdmittedShapes(t *testing.T) []admittedShape {
 		{"HTML spans", repeated("<b>a</b>")},
 		{"autolinks", repeated("<https://a.example> ")},
 		{"images", repeated("![](u)")},
+		{"linked images", repeated("[![](u)](v)")},
 		{"footnote references", func(units int) string { return strings.Repeat("[^a]", units) + "\n\n[^a]: note" }},
 		{"empty list items", repeated("-\n")},
 		{"empty quotes", repeated(">\n\n")},

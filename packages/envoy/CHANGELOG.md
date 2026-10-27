@@ -785,6 +785,22 @@
 
 ### Changed
 
+- **Breaking:** roll Dispatch forward, never back past this release, once a document holds a
+  linked image. A link around one whole image and nothing else (`[![x](i.png)](https://u.com
+  "t")`, a README badge) is now stored as the image's `link` and `linkTitle` attributes and read
+  back unchanged through the documents API and the editor, where it was stored without its link
+  (LEGION-365); every place Dispatch draws the image opens the link, an unsafe address (such as
+  `javascript:`) drawn with no link. A server before this release deletes from the live document
+  every attribute its tree lacks at the next write, so it would strip these links. The document
+  schema the server publishes (`/api/v1/schema/blocks`) is version 3 (INFRA-190).
+- Dispatch admits a document websocket read-write only when it presents both the document schema
+  version (`schema_version`) and the editor schema the dashboard bundle was built with
+  (`editor_schema`, `contracts.DocumentEditorSchemaVersion`), in the query and as the Hocuspocus
+  token `<schema_version>:<editor_schema>`, which still overrides the query's answer. A bundle
+  built before the image's `link` and `linkTitle` attributes sends neither the editor schema nor a
+  token of that shape, so it is read-only even after it fetches the current schema version, and an
+  edit it sends cannot strip a linked image's link. Any other token, the bare `<schema_version>`
+  included, is read-only, as is a closed issue's document to every bundle (INFRA-190).
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a

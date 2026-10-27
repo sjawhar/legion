@@ -13,6 +13,11 @@ export interface PendingState {
   readOnly: boolean;
   /** When the oldest dropped row was saved before a document rebuild. */
   rebuiltAt: number | undefined;
+  /**
+   * When the oldest row dropped for removing an image's link was saved: an editor built before
+   * the image kept its link made it. Undefined until a first sync drops one.
+   */
+  strippedAt: number | undefined;
   /** Whether this browser has an IndexedDB store for these edits. */
   stored: boolean;
 }
@@ -118,6 +123,57 @@ function addsParking(scratch: Y.Doc, update: Uint8Array): boolean {
   return addsMissingClient || addsPendingDeletes(beforeDeletes, scratch.store.pendingDs);
 }
 
+/** The image attributes that hold its link, which an editor built before them strips. */
+const IMAGE_LINK_KEYS = ["link", "linkTitle"] as const;
+
+/**
+ * Whether `transaction` deleted an image's `link` or `linkTitle` key. y-prosemirror's
+ * `updateYFragment` removes from an element it rewrites every attribute its schema lacks, and that
+ * is the only way an editor deletes either key: an editor built before the image kept its link
+ * makes such a row by editing the image's paragraph, and an editor that knows them never does.
+ * `changed` names only types that existed before the transaction, with the keys it changed; a key
+ * it changed that the image no longer holds is one it deleted.
+ */
+function deletesImageLink(transaction: Y.Transaction): boolean {
+  for (const [type, keys] of transaction.changed) {
+    if (
+      type instanceof Y.XmlElement &&
+      type.nodeName === "image" &&
+      IMAGE_LINK_KEYS.some((key) => keys.has(key) && type.getAttribute(key) === undefined)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Applies a restored row to `scratch` and says why the live document must not take it: the row
+ * parks (`addsParking`), or it deletes an image's link (`deletesImageLink`). Undefined when the
+ * live document may take it.
+ */
+function refusal(scratch: Y.Doc, update: Uint8Array): "parks" | "strips-link" | undefined {
+  let stripsLink = false;
+  const watch = (transaction: Y.Transaction) => {
+    stripsLink ||= deletesImageLink(transaction);
+  };
+  scratch.on("afterTransaction", watch);
+  try {
+    if (addsParking(scratch, update)) {
+      return "parks";
+    }
+  } finally {
+    scratch.off("afterTransaction", watch);
+  }
+  return stripsLink ? "strips-link" : undefined;
+}
+
+/** The clients whose items or deletes `update` carries. */
+function writersOf(update: Uint8Array): Set<number> {
+  const { structs, ds } = Y.decodeUpdate(update);
+  return new Set([...structs.map((struct) => struct.id.client), ...ds.clients.keys()]);
+}
+
 export function startPendingSync({
   doc,
   onChange,
@@ -127,6 +183,7 @@ export function startPendingSync({
   let destroyed = false;
   let readOnly = false;
   let rebuiltAt: number | undefined;
+  let strippedAt: number | undefined;
   let lastState: PendingState | undefined;
   let nextOrdinal = 0;
   let reporting: Promise<void> | undefined;
@@ -166,12 +223,14 @@ export function startPendingSync({
           readOnly,
           rebuiltAt,
           stored: edits !== undefined,
+          strippedAt,
         };
         if (
           lastState === undefined ||
           lastState.count !== state.count ||
           lastState.readOnly !== state.readOnly ||
           lastState.rebuiltAt !== state.rebuiltAt ||
+          lastState.strippedAt !== state.strippedAt ||
           lastState.stored !== state.stored
         ) {
           lastState = state;
@@ -361,15 +420,32 @@ export function startPendingSync({
         }
         // Every row is judged and applied in one synchronous pass, so the scratch copy stays the
         // live document's equal: it takes each row the live document takes, and is copied afresh
-        // only after a row it refused, whose parked structs would otherwise hide the next stale
-        // row from the same lost history. One document encode, plus one per refused row.
+        // only after a row it refused, which it took and the live document did not: its parked
+        // structs would otherwise hide the next stale row from the same lost history. One document
+        // encode, plus one per refused row.
+        // A row refused for stripping a link leaves a gap in its client's clock, so every later
+        // row of that client parks: those rows are the stripping edit's continuation, typed in the
+        // same tab, and are reported with it, not as a history the server rebuilt.
         let scratch = scratchOf(doc);
+        const strippingClients = new Set<number>();
         const handled: PendingKey[] = [];
         const rerecorded: Promise<void>[] = [];
         for (const row of restored) {
           handled.push(row.key);
-          if (addsParking(scratch, row.update)) {
-            rebuiltAt = Math.min(rebuiltAt ?? row.at, row.at);
+          const refused = refusal(scratch, row.update);
+          if (refused !== undefined) {
+            const clients = writersOf(row.update);
+            if (
+              refused === "strips-link" ||
+              (clients.size > 0 && [...clients].every((client) => strippingClients.has(client)))
+            ) {
+              strippedAt = Math.min(strippedAt ?? row.at, row.at);
+              for (const client of clients) {
+                strippingClients.add(client);
+              }
+            } else {
+              rebuiltAt = Math.min(rebuiltAt ?? row.at, row.at);
+            }
             scratch = scratchOf(doc);
             continue;
           }

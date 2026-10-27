@@ -27,6 +27,7 @@ import (
 	ygsync "github.com/reearth/ygo/sync"
 
 	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -345,7 +346,7 @@ func requireAnswered(t *testing.T, upload uploadResult) {
 // whole document - and closes once the room has sent it.
 func (p *memoryServer) loadOverWebsocket(t *testing.T, artifactID string) {
 	t.Helper()
-	address := "ws" + strings.TrimPrefix(p.base, "http") + "/ws/doc/" + artifactID + "?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
+	address := "ws" + strings.TrimPrefix(p.base, "http") + "/ws/doc/" + artifactID + "?" + docstest.AdmissionQuery(pmdoc.SchemaVersion())
 	connection, answer, err := gws.DefaultDialer.Dial(address, http.Header{"X-Dispatch-User": {"alice"}})
 	if err != nil {
 		t.Fatalf("connect to the document's room: %v (%#v)", err, answer)

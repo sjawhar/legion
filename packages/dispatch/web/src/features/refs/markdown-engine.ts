@@ -1,5 +1,10 @@
 import type { HeadlessProofEditor, SoftBreaks } from "@legion/proof-editor/headless";
-import { DOMSerializer, type Node as ProseMirrorNode, type Schema } from "prosemirror-model";
+import {
+  type DOMOutputSpec,
+  DOMSerializer,
+  type Node as ProseMirrorNode,
+  type Schema,
+} from "prosemirror-model";
 import { useLayoutEffect, useState } from "react";
 
 import type { BlockSchema } from "../../api/types";
@@ -54,6 +59,20 @@ const engines = new Map<number, Promise<MarkdownEngine>>();
  *  throws no longer evicts it - the headless editor drops only its own refused parser. */
 let readyEngine: MarkdownEngine | undefined;
 
+/** The attributes of the anchor Proof's `image` DOM wraps a picture in, for an image whose `link`
+ *  the schema draws (`linked-image.ts` in `@legion/proof-editor`: the sanitized `href`, the
+ *  `title`, `data-dispatch-href` for a `dispatch://` link); `undefined` for an image with no link
+ *  or an unsafe one, which the schema draws with no anchor. */
+function linkAttributes(drawn: DOMOutputSpec): Record<string, unknown> | undefined {
+  if (!Array.isArray(drawn) || drawn[0] !== "a") {
+    return undefined;
+  }
+  const attrs: unknown = drawn[1];
+  return typeof attrs === "object" && attrs !== null && !Array.isArray(attrs)
+    ? (attrs as Record<string, unknown>)
+    : {};
+}
+
 /**
  * Proof's DOM serializer, except for a picture whose address is a Dispatch reference
  * (`pictureReference` in `routes.ts`, the reading `pictureView` shares): the browser cannot fetch
@@ -64,6 +83,12 @@ let readyEngine: MarkdownEngine | undefined;
  * (`useRenderedMarkdown`). One that pins no version, or names something other than an artifact,
  * is a reference like any other and becomes a link `collectReferenceAnchors` titles. A picture on
  * another website, or an address that is no reference, is serialized as Proof serializes it.
+ *
+ * A picture with a link (`[![x](i)](u)`, the image's `link` attribute) is Proof's own DOM for it:
+ * the `<img>` in the link's anchor, or in none for an unsafe link. A Dispatch picture with a link
+ * is that same anchor around a `<span data-dispatch-picture data-picture-in-link>` placeholder,
+ * pinned or not, so no anchor sits in another and the picture opens its link, never the
+ * artifact's page; `DispatchPicture` shows a short-form fallback in it, not a `RefLink`.
  */
 function pictureSerializer(schema: Schema): DOMSerializer {
   const base = DOMSerializer.fromSchema(schema);
@@ -80,6 +105,24 @@ function pictureSerializer(schema: Schema): DOMSerializer {
           return image(node);
         }
         const { named, route } = picture;
+        const link =
+          typeof node.attrs.link === "string" && node.attrs.link !== ""
+            ? linkAttributes(image(node))
+            : undefined;
+        if (link !== undefined) {
+          return [
+            "a",
+            link,
+            [
+              "span",
+              {
+                "data-dispatch-picture": buildDispatchReference(route),
+                "data-picture-caption": picture.caption,
+                "data-picture-in-link": "",
+              },
+            ],
+          ];
+        }
         if (named?.version === undefined) {
           return ["a", { href: picture.source }];
         }

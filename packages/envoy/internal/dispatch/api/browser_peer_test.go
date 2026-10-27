@@ -53,7 +53,10 @@ func (s *servedSockets) done(id string) <-chan struct{} {
 // syncedPeer is a writable document connection that behaves as the SPA's provider does: it
 // applies every update the room sends, and reconnects with the document it kept.
 type syncedPeer struct {
-	wsURL      string
+	wsURL string
+	// query is the admission query of the dashboard bundle the peer stands for; empty is a current
+	// dashboard's (docstest.AdmissionQuery), which the room lets write.
+	query      string
 	sockets    *servedSockets
 	headers    http.Header
 	artifactID string
@@ -65,14 +68,21 @@ type syncedPeer struct {
 }
 
 // connectBrowserPeer connects alice's browser to artifactID's room, through a document server of
-// its own over documentService.
+// its own over documentService, with the admission query a current dashboard sends.
 func connectBrowserPeer(t *testing.T, documentService *docs.Service, artifactID string) *syncedPeer {
+	t.Helper()
+	return connectBrowserPeerWith(t, documentService, artifactID, "")
+}
+
+// connectBrowserPeerWith connects as connectBrowserPeer does, sending query, the admission query of
+// the dashboard bundle the peer stands for.
+func connectBrowserPeerWith(t *testing.T, documentService *docs.Service, artifactID, query string) *syncedPeer {
 	t.Helper()
 	sockets := &servedSockets{finished: make(map[string]chan struct{})}
 	server := httptest.NewServer(sockets.serve(documentService.ServeHTTP))
 	t.Cleanup(server.Close)
 	peer := &syncedPeer{
-		wsURL: "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/doc/" + artifactID, sockets: sockets,
+		wsURL: "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/doc/" + artifactID, query: query, sockets: sockets,
 		headers: http.Header{"X-Dispatch-User": []string{"alice"}}, artifactID: artifactID, doc: crdt.New(),
 	}
 	peer.connect(t)
@@ -84,7 +94,11 @@ func (p *syncedPeer) connect(t *testing.T) {
 	socketID := strconv.FormatInt(p.sockets.next.Add(1), 10)
 	headers := p.headers.Clone()
 	headers.Set(socketHeader, socketID)
-	conn := docstest.Dial(t, p.wsURL+"?schema_version="+strconv.Itoa(pmdoc.SchemaVersion()), headers, p.artifactID, p.doc)
+	query := p.query
+	if query == "" {
+		query = docstest.AdmissionQuery(pmdoc.SchemaVersion())
+	}
+	conn := docstest.Dial(t, p.wsURL+"?"+query, headers, p.artifactID, p.doc)
 	p.mu.Lock()
 	p.conn = conn
 	p.socketID = socketID

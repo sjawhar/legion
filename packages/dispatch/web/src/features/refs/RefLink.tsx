@@ -123,6 +123,9 @@ export function linkifyDispatchRefs(root: HTMLElement): void {
  * portal a `RefLink` in to render the resolved title. An external link, or an href that fails to
  * parse as a reference, is left untouched, and so is a picture's link (`data-dispatch-picture`,
  * the engine's `pictureSerializer`), whose content is a `DispatchPicture` rather than a title.
+ * A linked picture's anchor (`[![x](i)](dispatch://CORE-1)`: one holding an `<img>` or a
+ * Dispatch picture's placeholder) gets the route and `data-dispatch-ref` too, but keeps the
+ * picture: it is not cleared and gets no title, so it is not among the answered anchors.
  *
  * `@legion/proof-editor`'s Markdown link serializer sanitizes a `dispatch://` href to `""`
  * (Milkdown's link sanitizer only allows http/https/mailto/tel/ftp — a document strangers can
@@ -149,6 +152,9 @@ export function collectReferenceAnchors(
     anchor.setAttribute("href", buildReferencePath(route));
     const reference = buildDispatchReference(route);
     anchor.setAttribute("data-dispatch-ref", reference);
+    if (anchor.querySelector("img, [data-dispatch-picture]") !== null) {
+      continue;
+    }
     const text = anchor.textContent ?? "";
     anchor.replaceChildren();
     targets.push({ anchor, key: `${reference}:${index}`, route, text });
