@@ -1,0 +1,157 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-523",
+  "completed": "2026-10-27T17:51:04Z",
+  "proof": [
+    {
+      "criterion": "A1: the catalog lists every job attempt in the window that failed with a later attempt of that job",
+      "surface": "GitHub Actions API and dispatch://INFRA-523/artifact/rerun-catalog-md (version 2)",
+      "command": "python3 /legion/scratch/tmp/infra523/rerun-measure.py --from 2026-10-19T23:50:00Z --to 2026-10-26T23:50:00Z --cache /legion/scratch/tmp/infra523/rm-cache --list; job ids compared with the catalog's table",
+      "observed": "109 job ids in the list, 109 in the catalog, no difference either way (row 109, job 121887314493, issue.e2e.ts:697, added with its cause; two later chance failures noted under the table)",
+      "headSha": "5bcf850e9c3c5b5a398fb3549d834a1298635753",
+      "negativeControl": "the catalog as first attached (version 1) lacked job 121887314493: the same comparison printed it as 'in list not catalog'"
+    },
+    {
+      "criterion": "A2 T1: the event-log cursor check reads one log when the log is reset mid-check (product)",
+      "surface": "packages/envoy go test against Postgres 17 in the issue pod",
+      "command": "go test -count=150 -run '^TestEventStreamRelayRecoversWhenTheEventLogIsReset$' ./internal/dispatch/api/ with two busy loops (final-verify.sh at 72b51120; Envoy code unchanged since)",
+      "observed": "ok, 150 of 150; TestEventCursorCheckReadsOneLogWhenTheLogIsResetMidCheck passes",
+      "headSha": "72b51120bf4d2cb225febecb7c1b80cf153f5ea8",
+      "negativeControl": "the old two-statement eventCursorCheck restored: the new test failed 3 of 3 with 'a reset during the check answered newest id 3 ..., cursor's row no row; want the old log's answer ... or the new log's ..., not two logs in one answer'"
+    },
+    {
+      "criterion": "A2 T2: a leased loop's late tick is counted in the period it was due in (product)",
+      "surface": "packages/envoy go test against Postgres 17 in the issue pod",
+      "command": "go test -race -count=30 -run '^TestALoneRunnerMakesAPassOnEveryTick$' ./internal/dispatch/api/ and go test -count=30 -run '^TestExclusiveCountsALateTickInThePeriodItWasDueIn$' ./internal/dispatch/duty/, both with two busy loops",
+      "observed": "ok 30 of 30 (every run 'ran 10, skipped 0' at the worker's run) and ok 30 of 30",
+      "headSha": "72b51120bf4d2cb225febecb7c1b80cf153f5ea8",
+      "negativeControl": "the subtraction of the time since due removed (main's bucketing): the boundary test failed 3 of 3 with 'the tick due one period after a late one was refused ... a lone loop lost that period'"
+    },
+    {
+      "criterion": "A2 T3, T4: broadcast deliveries are awaited; hub tests run at noon UTC",
+      "surface": "packages/envoy go test in the issue pod",
+      "command": "go test -count=100 -run '^TestBodiesAreCappedOnEveryWriteRoute$' and -count=50 -run '^TestAPresetViewSendsItsOldestPullRequestLeavingWithoutAReadingTheDatabase$' ./internal/dispatch/api/, two busy loops (worker also ran 300 of the first)",
+      "observed": "ok 100 of 100 and ok 50 of 50",
+      "headSha": "72b51120bf4d2cb225febecb7c1b80cf153f5ea8",
+      "negativeControl": "the hub clock set to midnight minus 1.5 s with main's test body: 'the expiry's delta removes [], want acme/widgets#1' (the CI text)"
+    },
+    {
+      "criterion": "A2 T5: pmdoc linearity tests separate linear from quadratic under -race and in gVisor",
+      "surface": "packages/envoy go test in the issue pod (gVisor)",
+      "command": "CGO_ENABLED=1 go test -race -count=10 -run '^Test(UpdateIsLinearInTheBlockCount|RenderIsLinearOnRunsFootnoteLabelsAndLineFeeds)$' ./internal/dispatch/pmdoc/ with two busy loops; go test -count=30 -run Linear ./internal/dispatch/pmdoc/",
+      "observed": "20 PASS 0 FAIL (ratios 2.2-2.6 against 4); 6 tests x 30 PASS 0 FAIL; main's code in the same pod fails TestUpdateIsLinear (+Inf times 0s) and TestBareURLShapes",
+      "headSha": "570bc8a3f8613bb84d52afb4fb840daab2155e0a",
+      "negativeControl": "mutant `_ = frag.Children()` before frag.Delete failed 3 of 3 (10.8x, 9.1x, 10.5x); a strings.Count per character in freeDelimiterRuns failed 3 of 3 (38x against 24)"
+    },
+    {
+      "criterion": "A2 T6-T9: the outbox lane starts woken (product); restart, quiet-stop and intake tests wait on the stored state",
+      "surface": "packages/daemon go test with Postgres 17 and nats-server 2.10.29 in the issue pod",
+      "command": "CGO_ENABLED=1 go test -race -count=50 for the four lane tests, the restart test and the four quiet-stop tests (incl. TestRunRecordsAnOperatorSuspensionWhoseProcessExitsWithinTheDrain, run 40479108388) with two busy loops and a parallel go test ./internal/workflow/ loop; go test -count=50 -run '^TestConsume' ./internal/intake/",
+      "observed": "ok (826 s) and ok (379 s) for the daemon tests; ok (1588 s) for intake",
+      "headSha": "0c29233a50f4d8cf78c50325ef1bd2c7c894d384",
+      "negativeControl": "the diagnosis's forced-order probe on main: all four lane tests fail with the CI texts (e.g. 'status writes after the failed claim = 1, want none'), the widened launch fails 'spawned 2 times across the restart', the widened watcher fails 'the stop logged ... controller not registered', the 3xAckWait handler fails the intake wait; each passes with the fix"
+    },
+    {
+      "criterion": "A2 T10, T11: login status is one snapshot; a refused tmux spawn rewrites no live file and secret files are replaced whole (product)",
+      "surface": "packages/daemon go test in the issue pod with a real tmux 3.5a",
+      "command": "CGO_ENABLED=1 go test -race -count=300 -run '^TestARefusedProofLogsInAgain$' ./internal/agentsecrets/; PATH=<tmux>:$PATH go test -count=10 -run '^TestRealTmuxSplitsIntoTheIssueWindow$' ./internal/runtime/tmux/ (two busy loops, at 72b51120 after the merge and simplify); go test -count=20 -run '^TestARewrittenSecretFileIsNeverReadEmptyOrShort$' ./internal/runtime/",
+      "observed": "ok 300; ok 10 (the tester's secret files byte-identical after the refused spawn); ok 20",
+      "headSha": "72b51120bf4d2cb225febecb7c1b80cf153f5ea8",
+      "negativeControl": "a 20 ms sleep between the old two loads: 5 of 5 fail 'no token login yet'; the old truncate-then-write WriteSecretFiles: the reader test fails 20 of 20 'read 0 bytes that are neither value whole'; the old spawn order: the real-tmux test fails 2 of 2"
+    },
+    {
+      "criterion": "A2 T12-T14: launcher dial deadline, gc kill in its repack, bridge state read inside a held turn",
+      "surface": "packages/daemon go test in the issue pod",
+      "command": "CGO_ENABLED=1 go test -race -test.cpu=1 -count=300 -run '^TestAGenerationWhoseSessionDatabaseNeverAnswersIsRefusedWhileTheDaemonWaits$' ./internal/launcher/ with six busy loops; go test -count=20 -run '^TestFetchKeepsAFeedAfterGitGC' ./internal/workspace/ and -count=1000 of the two bridge tests with two busy loops",
+      "observed": "ok 300 (454 s) at 72b51120; ok 20; ok 1000",
+      "headSha": "72b51120bf4d2cb225febecb7c1b80cf153f5ea8",
+      "negativeControl": "proofTimeout set to StopGrace: 'generation 1's proof dial was given 1.999974228s, past half the 2s stop grace' (2 of 2); planted packed-refs.lock through foreignFeed: the CI text 'it holds packed-refs.lock, which no fetch writes'; bridge reporting isStreaming false: 'isStreaming during the turn is false'"
+    },
+    {
+      "criterion": "A2 T15, T16, T24, T27: web tests wait for the committed status, the recorded attempt, the wide layout and the read mark",
+      "surface": "packages/dispatch bun test and Playwright (chromium, webkit) against the real Dispatch stack in the issue pod",
+      "command": "vv-stress 1500 reruns; bunx playwright test --config e2e/playwright.config.ts --project=chromium -g 'agent-view-settings' --repeat-each=50; -g 'issue header keeps every control' --repeat-each=50 with two busy loops; --project=webkit -g 'withdraws its report' --repeat-each=30",
+      "observed": "1500 pass 0 fail; 500 passed, 0 MESSAGE_NOT_FOUND; 50 passed; 60 passed",
+      "headSha": "8fc28fe66fe146c9d7eb10f779fccb0ce7de0a25",
+      "negativeControl": "setHighlightMissing(false): 3 of 3 'Unable to find role=status'; 1 s delay in the fake Envoy: the old test 2 failed (rows :520, :700, MESSAGE_NOT_FOUND), the new 30 passed; 1 s delay in useMediaQuery: the old test 3 failed at issue.e2e.ts:766; mark hidden on pointerdown: the old webkit test 2 of 3 failed at :615"
+    },
+    {
+      "criterion": "A2 T17, T18 and the reconciliation flake: claude-envoy waits name their step; one heartbeat per trigger",
+      "surface": "packages/claude-envoy bun test in the issue pod",
+      "command": "bun test --timeout=15000 tests/envoy-channel-handoff.test.ts -t 'a role claim that fails at startup' --rerun-each 3000 with two busy loops and a parallel full-package loop; 200 full-package runs; --rerun-each 2000 of 'a persistent reconciliation failure' under two busy loops; --rerun-each 720 of 'follows the session id'",
+      "observed": "3000 pass 0 fail and 0 failures of that test in 200 suites (cause not found; the step is now named); 2000 pass 0 fail; 720 pass 0 fail",
+      "headSha": "87ea73a55d4cb3064c204eed09dd89a2c2bc89af",
+      "negativeControl": "a wait made unsatisfiable prints 'timed out waiting for the heartbeat reclaiming the held role (holder now ...; claims [...]; ...)' instead of bun's timeout; the reconciliation guard removed: 24 of 700 fail 'Received: 4'; before the fix 97 of 2000 failed"
+    },
+    {
+      "criterion": "Bun-under-gVisor workaround (architect's request): the queryTmux bound test holds in a pod and still fails a missing timeout or a SIGTERM kill",
+      "surface": "packages/claude-envoy bun test in the issue pod (gVisor)",
+      "command": "bun test --timeout=15000 tests/session-title.test.ts -t 'ignores SIGTERM' --rerun-each 60",
+      "observed": "60 pass 0 fail (before: about half failed at 5 s)",
+      "headSha": "117ffae4e3fe66ae46278548d2ade214eb4a637a",
+      "negativeControl": "killSignal SIGTERM in queryTmux: 2 of 5 fail on the got-term file (the rest are Bun sending no signal); no timeout: 3 of 3 fail with the stub's answer"
+    },
+    {
+      "criterion": "A2 T19, T20: the worker image needs no Dockerfile frontend image and installs CodeGraph from a committed lockfile",
+      "surface": "bun 1.3.14 frozen installs and omp 18.12.2 in the issue pod; BuildKit's own frontend parser",
+      "command": "bun install --frozen-lockfile --ignore-scripts twice in scratch copies of packages/daemon/docker/omp-plugins; omp plugin link in a scratch HOME with the npm registry pointed at a dead address; BuildKit v0.33.1 and v0.34.1 frontend/dockerfile parse of worker.Dockerfile",
+      "observed": "identical node_modules (diff -r exit 0, 19,334 files); link exit 0 and omp plugin list names @bopstack/pi-codegraph@0.1.1 with no network; the file parses with the built-in frontend (only RUN --mount=type=secret and COPY --chmod used)",
+      "headSha": "a094ba9ea8c1f8527e267ca83ba836a39102252f",
+      "negativeControl": "a bowser integrity hash changed in bun.lock: 'Integrity check failed for tarball: bowser', exit 1; a dependency added to package.json: 'lockfile had changes, but lockfile is frozen', exit 1"
+    },
+    {
+      "criterion": "T25: the merge gate re-runs only the failed and cancelled jobs (with their dependents), never the whole run (text in skills/legion-worker/references/merge-gate.md, its claude-envoy copy and the reviewer prompt, commit d022f396)",
+      "surface": "GitHub Actions, scratch pull request #2408 (Tests run 40521376914)",
+      "command": "gh run cancel 40521376914; gh run rerun 40521376914 --failed; gh api repos/sjawhar/legion/actions/runs/40521376914/attempts/2/jobs",
+      "observed": "attempt 2: lint and test re-queued; typecheck a copy with attempt 1's started_at 15:12:33Z and completed_at 15:13:45Z",
+      "headSha": "20432e53310bb5d21d9e098017991ca8cbeb56fd",
+      "negativeControl": "gh run rerun 40521376914 (whole run): attempt 3 re-queued all three jobs, typecheck included"
+    },
+    {
+      "criterion": "T26: the internal/dispatch/api suite spends less time waiting",
+      "surface": "packages/envoy go test -json alone in the issue pod",
+      "command": "go test -json -count=1 -timeout 0 ./internal/dispatch/api/ at main 1b859ea3 (export under /legion/scratch/tmp/infra523-impl/main-1b859ea3) and at d022f396",
+      "observed": "main 1125.4 s (1,055 tests), head 1057.6 s (1,056 tests); the nine changed tests 191.7 s -> 73.9 s; per-test figures in the pull request body",
+      "headSha": "d022f3964002da0c41f110b94c6de4f6a7363ee2",
+      "negativeControl": "each changed test failed its mutant after the change (G1 no growth bound: 7 rows fail; C2 the new version's blocks not checked: 8 rows fail; C4 carry ignores who answered: fails; T1 no listener prefix: fails)"
+    },
+    {
+      "criterion": "Found in the whole-module run: TestAHealthyRoomUnderWritesIsNeverRefused judges at least 20 writes, not a fixed window",
+      "surface": "packages/envoy go test against Postgres 17 in the issue pod",
+      "command": "go test -count=10 -v -run '^TestAHealthyRoomUnderWritesIsNeverRefused$' ./internal/dispatch/docs/; go test -count=1 ./internal/dispatch/docs/ alone at d022f396",
+      "observed": "10 of 10 pass (80-84 rounds, 21-22 writes each); the docs package ok in 831.2 s",
+      "headSha": "d022f3964002da0c41f110b94c6de4f6a7363ee2",
+      "negativeControl": "the old fixed 3 s window: 1 of 6 runs short of writes on main (51 rounds, 14 writes), 4 of 6 with a background database clone loading Postgres ('41 rounds ... 12 writes, too few to say anything')"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/api/delivery_live_events.go and _test.go (T1)",
+    "packages/envoy/internal/dispatch/duty/{exclusive,ticker}.go and every leased caller (T2), incl. docs/block_index.go and docs/edit_notices.go from main",
+    "packages/envoy/internal/dispatch/api/{server,broadcasts,events,agent_stream,delivery_live_hub,issue_route_status}.go (T22 Lifetime required)",
+    "packages/envoy/internal/logtest/logtest.go (new) and 40+ Envoy test files (T21)",
+    "packages/envoy/internal/dispatch/store/storetest/locks.go (T23); docs/room_residency_test.go (window by writes)",
+    "packages/envoy/internal/cputest/cputest.go, internal/dispatch/pmdoc/linear_*.go (T5)",
+    "packages/envoy/internal/dispatch/docs/service.go (SettleNow, T26)",
+    "packages/daemon/internal/daemon/outbox_lanes.go (T6), agentsecrets/client.go (T10), runtime/secretfiles.go and runtime/tmux/spawn.go (T11), and their tests; launcher, workspace, claudebridge, daemon and intake tests (T7-T9, T12-T14)",
+    "packages/claude-envoy/src/envoy-channel-server.ts, dist/envoy-channel.js, package.json, tests",
+    "packages/dispatch/e2e/{agent-view-settings,deep-links,issue}.e2e.ts, web/src/features/doc/VersionView.test.tsx",
+    "packages/daemon/docker/worker.Dockerfile, packages/daemon/docker/omp-plugins/{package.json,bun.lock}, docs/kubernetes.md, one docs/solutions note"
+  ],
+  "trickyParts": [
+    "Rig for the tester: Postgres 17 + pgvector on 127.0.0.1:55499 (`. /legion/scratch/tmp/infra523-docsmp/env.sh`; template1 recreated UTF8/ICU as CI's); daemon tests use LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:55499/daemon_t6t9?sslmode=disable (the shared postgres database holds Dispatch tables), LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 and LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:18222 (nats-server -js running); tmux 3.5a wrapper at /legion/scratch/tmp/infra523-daemonb/tmuxdeb/bin; WebKit rig /legion/scratch/tmp/infra523-impl/webkit-rig/env.sh; e2e env /legion/scratch/tmp/infra523-impl/webtests-env.sh",
+    "Pod-only failures on the unchanged base (gVisor, not this change): Envoy agent-secrets/broker helper tests (SO_PEERPIDFD), cmdtest port range, seaweedfs S3 test, broker/store IAM test (trust-auth rig); daemon tmux TestNewRefusesLaunchersItCannotRun and TestNewRefusesAnOperatorPaneVariableTheRuntimeOwns (tmux not in /usr/bin); three daemon tests needing Docker",
+    "Every code push cancels the previous push's CI runs (concurrency); read CI at the head d022f396"
+  ],
+  "deviations": [
+    "T17's target test never failed in 3,000 loaded runs plus 200 full suites: its cause is not found; the permanent instrumentation names the step if CI hits it (architect agreed, 2026-10-27).",
+    "T12: the test's stop grace is 2 s instead of 400 ms: generation 1's bound is read from its dial's deadline (no race), and generation 2's real local dial failed once in 300 runs under six busy loops at 200 ms.",
+    "T20: `omp plugin link` does not run omp's own extension load check that `omp plugin install <npm spec>` ran; `legion probe-image` still certifies the codegraph capability as before.",
+    "T25's text left this pull request at 5bcf850e and came back at d022f396 (the review rule was withdrawn); it now says --failed takes the failed and cancelled jobs' dependents and drops `--job <id>` alone, per INFRA-657's planner.",
+    "T26's background clone of the next test's database was removed (29bfc579): it saved about 75 s but loaded Postgres during every test and made TestAHealthyRoomUnderWritesIsNeverRefused fail 4 of 6.",
+    "Added beyond the plan: the claude-envoy reconciliation flake (product: a missing handoff file triggered a second heartbeat), the queryTmux test workaround for Bun under gVisor (with dispatch://INFRA-523/artifact/bun-spawnsync-timeout-issue-md), the deep-links WebKit flake (run 40463123196), and TestRunRecordsAnOperatorSuspension (covered by T8)."
+  ],
+  "openQuestions": [
+    "Possible product issue seen in the deep-links trace, not changed: the read mark removes the 'New' mark about 1 s after a conversation opens and moves the cards up about 24 px, so a person's click that straddles that moment can miss its link."
+  ]
+}
