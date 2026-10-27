@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-521",
+  "completed": "2026-10-27T13:58:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2313",
+  "headSha": "42256ccb3d5a9775a173c208dc5cda9ea99bc5af",
+  "round": 5,
+  "proof": [
+    {
+      "criterion": "Required test check green at the READY head with no code change (the red was a chance failure outside this change)",
+      "surface": "GitHub Actions, Tests workflow, job test, on PR #2313 head 42256ccb",
+      "command": "gh run rerun 40479108388 --failed -R sjawhar/legion; read via the PR checks settlement",
+      "observed": "Attempt 1 of job test failed only TestRunRecordsAnOperatorSuspensionWhoseProcessExitsWithinTheDrain (packages/daemon/internal/daemon/inflight_test.go:619, quietStop seeing a 'controller not registered' WARN during the stop), in code this PR does not touch. The re-run (job 122183889471) passed; the head's settlement shows build, changes, dispatch, envoy-smoke, lint, pr-title, test and typecheck all green. The architect sent the flaky test to INFRA-523.",
+      "headSha": "42256ccb3d5a9775a173c208dc5cda9ea99bc5af",
+      "negativeControl": "The same job at the same head failed on attempt 1 and passed on attempt 2 with no code change between them, so the failure does not depend on this diff; main's own Tests runs from 07:10Z to 10:38Z passed."
+    },
+    {
+      "criterion": "3. the dispatch job's browser step with all 223 @phone tests; every phone test passes under iphone",
+      "surface": "GitHub Actions, Legion Envoy and Contracts run 40479108788, job dispatch 122133785614, step Browser-test dispatch dashboard",
+      "command": "gh api repos/sjawhar/legion/actions/jobs/122133785614 (step started_at/completed_at); gh run view 40479108788 --job 122133785614 --log | bun $TMPDIR/infra521/parse-log.ts",
+      "observed": "Browser step 11:40:25Z to 12:16:21Z = 35.9 min (base median 45.3 min over 10 main jobs). Under iphone: 223 passed, 0 skipped, 0 failed, 8.1 min of iphone time. chromium 773 passed, 25 skipped; webkit 51/2; webkit-iphone 11; firefox 51/2; firefox-download-navigation 1; chromium-plain-http 4. This is the first CI run of the full 223-test selection.",
+      "headSha": "42256ccb3d5a9775a173c208dc5cda9ea99bc5af",
+      "negativeControl": "Base run 40400116211 at main 2c66134f, read by the same parser: iphone 654 passed + 132 skipped = 786 tests in 16.0 min, so the 223 is the grep's selection, not a parser that misses lines."
+    }
+  ],
+  "filesChanged": [],
+  "deviations": [
+    "No code change this round, as the architect directed: the round only re-ran the failed test job at the READY head."
+  ],
+  "openQuestions": []
+}
