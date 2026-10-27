@@ -2,50 +2,50 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-158",
-  "completed": "2026-10-27T13:40:00Z",
-  "round": 16,
+  "completed": "2026-10-27T15:12:00Z",
+  "round": 17,
   "generation": 4,
-  "head": "fd3bfa69b2ef",
+  "head": "ef8afb2f1aa0",
   "verdictProvider": "No subagent judged anything in this round; the tester's own session ran every check, so no provider or model needs naming.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Ran the implementer's three new tests at the head (pass) and at b3855fb2 (TestAClosedDocumentsPasteKeepingItsSourcesIDTakesNoRow and TestBlockIndexRereadsALiveAheadDocumentWhoseIssueCloses fail there). Drove both fixes on the real surface, below."
+    "how": "Drove the review round 11 interleaving on the real surface at the head and at fd3bfa69 (below). The implementer's unit test uses a test-only hook; the surface run reaches the same window by holding the document state tables."
   },
   "failed": 0,
   "failures": [],
   "knownLimits": [
-    "A person's edit made inside the edit-notice window before a close gets no notice: main's #2137 rule, ruled main's accepted behaviour by the architect (Envoy d37afb29).",
+    "A person's edit inside the edit-notice window before a close gets no notice: main's #2137 rule, ruled main's accepted behaviour (Envoy d37afb29).",
     "In the deploy order, an original copy of a repeated paragraph left unmatched is dated to the reopen's version (architect's accepted limit, Envoy 3d1ba166).",
-    "Dispatch's web app gives a pasted block a fresh id. Pasted text and a pasted whole block both did, with versions refused. So the review's duplicate-id paste is not reachable through the browser, and the implementer's tests are its proof."
+    "A decision block written into a comment reads only its own attributes, on main and on the head alike, so a close does not change it."
   ],
   "proof": [
     {
-      "criterion": "Review finding 1: an unsettled paste at a close whose settlement fails records no version block deleted while that version holds it, plain or retyped, also after the reopen",
-      "surface": "dispatch:local, head; Chromium as alice; resolve.sh and honest.sh",
-      "command": "PA-4 and PA-5 ('## Plan / Foo. / Foo. / Other.') indexed while open; versions refused by trigger; BLOCKCOPY=Other. paste.ts copies the 'Foo.' block after 'Other.' (PA-5 then types ' retyped'); daemonclose; drop the trigger; dispatch-e2e rebuild-refs; tick; resolve.sh and honest.sh; alice reopens; resolve.sh and honest.sh",
-      "observed": "Closed: both 'Foo.' copies, 'Other.' and the heading resolve at v1 under their own ids, and the pasted blocks answer No block; honest.sh is clean. After the reopen: the pastes are v2, the version-1 blocks stay v1, and no deletion row exists. The browser gave each paste a fresh id (54ea64dd, 19a50757, cde9e278 beside their sources), so the duplicate-id case is proven by TestClosedVersionBlocksCountsOnlyTheFirstHolderOfAnID and TestAClosedDocumentsPasteKeepingItsSourcesIDTakesNoRow, which pass at the head.",
-      "headSha": "fd3bfa69b2ef",
-      "negativeControl": "At b3855fb2, TestAClosedDocumentsPasteKeepingItsSourcesIDTakesNoRow fails: 'block fc4dceee-… is dated 0 with text \"\" (deleted true) at version 1, want version 1 with version 1's text \"Foo.\"'"
+      "criterion": "Review round 11: a reopen between the block index's unlocked listing and its lock, then a re-close with no new mark, still has the next tick index the closed document",
+      "surface": "dispatch:local; race-case.sh on the head (race_h8b) and on fd3bfa69 (race_n8b)",
+      "command": "RC-1 indexed; versions refused; type.ts; daemonclose; rebuild-refs; psql holds doc_updates, doc_snapshots and doc_checkpoints in access-exclusive mode for 45 s; wait for the tick to block (pg_stat_activity wait_event_type=Lock); alice PATCH reopens; the hold ends; daemonclose again; wait 65 s",
+      "observed": "The tick blocked after 12 s, its listing having read RC-1 closed. The reopen answered 200 in 0.056 s. The tick after the hold logged live_ahead=1. marked_at stayed 14:28:22.06914 across the re-close. The next tick logged documents=1 owed_documents=0 live_ahead=0, and the document is indexed at v1.",
+      "headSha": "ef8afb2f1aa0",
+      "negativeControl": "fd3bfa69 with the same interleaving (the reopen took 0.026 s): the next tick logs owed_documents=1 live_ahead=1 and the document stays version null"
     },
     {
-      "criterion": "Review finding 2: a document the loop cached as live ahead while open is indexed on the tick after its issue closes, with no new pending mark",
-      "surface": "dispatch:local; the same cache-case.sh on the head and on b3855fb2",
-      "command": "cache-case.sh head cache_h7 and cache-case.sh base-b385 cache_n7: CA-1 indexed, versions refused, type.ts, rebuild-refs, a tick logs live_ahead=1, daemonclose CA-1 (settlement fails), then wait 65 s",
-      "observed": "Head: marked_at did not move (13:05:18.413588 before and after); the next tick logged documents=1 owed_documents=0 live_ahead=0, and the document is indexed at v1.",
-      "headSha": "fd3bfa69b2ef",
-      "negativeControl": "b3855fb2: the same steps leave owed_documents=1 live_ahead=1 and version null; TestBlockIndexRereadsALiveAheadDocumentWhoseIssueCloses fails there ('second tick … LiveAhead:1, OwedDocuments:1')"
+      "criterion": "The merge's TextAskBlockCard rowResolution: comment decision cards render as on main, open and closed; on a closed issue the spec's withdrawn ask names the closer; resolved, retracted and answered asks render as on main",
+      "surface": "One database (card_h8) served by the head's server with the head's web app (8797) and with main aaf24e34's web app (8799); textcard.ts in Chromium as alice, printing each card's text and taking a screenshot",
+      "command": "seed.ts CD 1; a comment with three decision blocks (open; state=answered answered_by=bob; state=resolved); textcard.ts on both ports; alice closes CD-1; textcard.ts on both ports again",
+      "observed": "Open: every card's text is identical, and the conversation screenshots are byte-identical (md5 663c1846… for both). Closed: the comment's three cards are unchanged and identical on both. The head's spec shows 'Withdrawn … Withdrawn when alice closed the issue' on each withdrawn ask, while main's web shows 'Resolved … undefined by alice'. The resolved, retracted and answered asks render the same on both.",
+      "headSha": "ef8afb2f1aa0",
+      "negativeControl": "Main's web app on the closed issue cannot name the withdrawal ('undefined by alice'), so the comparison sees the branch's own change where it exists"
     },
     {
-      "criterion": "Regressions after the matcher moved file: the deploy order (count rule, equal-count control, ask states), the four tester red tests, and the browser suites whole",
-      "surface": "dispatch:local, head, on databases written by main 1357b95c; go test; Dispatch's Playwright harness on chromium and iphone",
-      "command": "deploy-check.sh dep_r7, dep_q7 and dep_h7; go test -run of 196f5a85's, 2f3a9b7f's, 44cf9cac's and c12da9a2's tests; bunx playwright test close-withdraws-asks offline-edits doc margin ask-blocks references unknown-directive --project chromium --project iphone",
-      "observed": "dep_r7: all 4 'Same.' answer No block and 'Other.' is v1. dep_q7: every 'Same.' and 'Other.' are v1, and 'Fresh line.' answers No block. dep_h7: withdrawn=15, documents=6 owed_documents=0, 12 of 12 per issue. honest.sh is clean on all. The four red tests pass. Suites: 242 passed, 6 skipped, 0 failed (24.2 minutes).",
-      "headSha": "fd3bfa69b2ef",
+      "criterion": "Regressions: the deploy order, the four tester red tests and the browser suites whole after the merge",
+      "surface": "dispatch:local, head, on databases written by main 1357b95c; go test; main's new harness (bun e2e/run.ts) on chromium and iphone",
+      "command": "deploy-check.sh dep_r8, dep_q8 and dep_h8; go test -run of the four red tests; bun e2e/run.ts -- bunx playwright test close-withdraws-asks offline-edits doc margin ask-blocks references unknown-directive text-typed-blocks task-items --project chromium --project iphone",
+      "observed": "dep_r8: the 4 copies of 'Same.' answer No block and 'Other.' is v1. dep_q8: every 'Same.' and 'Other.' are v1. dep_h8: withdrawn=15, documents=6 owed_documents=0, 12 of 12 per issue. honest.sh is clean on all. The four red tests pass. Suites: 258 passed, 6 skipped, 0 failed (28.7 minutes).",
+      "headSha": "ef8afb2f1aa0",
       "negativeControl": "6c7b9483 dated the typed 'Same.' to version 1 on dep_r's seed shape (round 14)"
     }
   ],
-  "ci": "At fd3bfa69: Tests 40507706495, Docs 40507706559, Legion Envoy and Contracts 40507706514 and Worker Image 40507710494 are queued. At b3855fb2: Tests 40495427442 and Docs 40495427322 succeeded.",
+  "ci": "At ef8afb2f: Worker Image 40519156734 and Legion Envoy and Contracts 40519156779 are in progress, and Tests 40519157011 and Docs 40519156923 are pending.",
   "evidenceComments": [
-    "https://github.com/sjawhar/legion/pull/2233#issuecomment-6442995080"
+    "https://github.com/sjawhar/legion/pull/2233#issuecomment-6445095848"
   ]
 }
