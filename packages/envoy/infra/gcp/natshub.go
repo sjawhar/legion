@@ -285,7 +285,11 @@ func newSettings(args *NatsHubArgs) (settings, error) {
 	if args.Subnetwork != nil && args.Network == nil {
 		return settings{}, errors.New("subnetwork is set without network; the firewall needs the network the subnetwork belongs to")
 	}
-	auth, err := authorization(args.Hostname, args.Users, args.Listener, args.SessionUser)
+	var hubListener *listenerUser
+	if args.Listener != nil {
+		hubListener = &listenerUser{machineID: args.Hostname, nkey: args.Listener.NKey, input: "listener.nkey"}
+	}
+	auth, err := authorization(args.Users, hubListener, args.SessionUser)
 	if err != nil {
 		return settings{}, err
 	}
@@ -473,26 +477,36 @@ func selectedUserKind(where string, u NATSUserArgs) (userKind, error) {
 	return selected, nil
 }
 
-// authorization maps the hub's users onto core's. Each of users is a keyed user with a seed, whose
-// permissions are its host's set when it names a machine id, Dispatch's set when it names a
-// Dispatch machine id, the daemon's set when daemon is true, and its own when it names
-// permissions. The listener's user follows them, named hostname, with the listener's set for
-// that machine and a seed; the session user comes last, with the session's set and no seed, as
-// the authorization's noAuthUser. A hub needs users or a listener: with the session user alone,
-// no client could hold more than a session's grant, and no listener could run. core validates the
-// rest when it renders, a seed in a name or a rule entry first. Each machine id, of either kind,
-// passes core's shared machine-id rule and names a listener durable and queue group. An id whose
-// durable repeats another user's, of either kind, or the hub's own listener's
-// (bus.ListenerDurable turns a space into a hyphen, so "a b" and "a-b" collide) is refused as a
-// core.InputError naming the later input. The hub's own refusals name a user by its index alone:
-// they come before core has read the names, so quoting one could quote a seed.
-func authorization(hostname string, users []NATSUserArgs, l *HubListenerArgs, session *SessionUserArgs) (core.Authorization, error) {
+// listenerUser is the Envoy listener a hub renders a NATS user for: the listener's machine id,
+// which names the user and its grant, the public key of its seed, and the input that key came
+// from, which a refusal names.
+type listenerUser struct {
+	machineID string
+	nkey      string
+	input     string
+}
+
+// authorization maps a hub's users onto core's, for both hubs, gcp:NatsHub and
+// gcp:ClusteredNatsHub, so the two render one grant for the same users. Each of users is a keyed
+// user with a seed, whose permissions are its host's set when it names a machine id, Dispatch's
+// set when it names a Dispatch machine id, the daemon's set when daemon is true, and its own when
+// it names permissions. The listener's user follows them, named after the listener's machine id,
+// with the listener's set for that machine and a seed; the session user comes last, with the
+// session's set and no seed, as the authorization's noAuthUser. A hub needs users or a listener:
+// with the session user alone, no client could hold more than a session's grant, and no listener
+// could run. core validates the rest when it renders, a seed in a name or a rule entry first. Each
+// machine id, of either kind, passes core's shared machine-id rule and names a listener durable
+// and queue group. An id whose durable repeats another user's, of either kind, or the hub's own
+// listener's (bus.ListenerDurable turns a space into a hyphen, so "a b" and "a-b" collide) is
+// refused as a core.InputError naming the later input. The hub's own refusals name a user by its
+// index alone: they come before core has read the names, so quoting one could quote a seed.
+func authorization(users []NATSUserArgs, l *listenerUser, session *SessionUserArgs) (core.Authorization, error) {
 	if len(users) == 0 && l == nil {
 		return core.Authorization{}, errors.New("users: at least one user is required, or a listener")
 	}
 	durables := map[string]string{}
 	if l != nil {
-		durables[bus.ListenerDurable(hostname)] = "the hub's own listener"
+		durables[bus.ListenerDurable(l.machineID)] = "the hub's own listener"
 	}
 	auth := core.Authorization{Users: make([]core.User, 0, len(users)+2)}
 	for i, u := range users {
@@ -524,12 +538,12 @@ func authorization(hostname string, users []NATSUserArgs, l *HubListenerArgs, se
 		})
 	}
 	if l != nil {
-		if l.NKey == "" {
-			return core.Authorization{}, errors.New("listener.nkey is required")
+		if l.nkey == "" {
+			return core.Authorization{}, fmt.Errorf("%s is required", l.input)
 		}
-		perms := core.ListenerPermissions(hostname)
+		perms := core.ListenerPermissions(l.machineID)
 		auth.Users = append(auth.Users, core.User{
-			Name: hostname, NKey: l.NKey, Publish: &perms.Publish, Subscribe: &perms.Subscribe, HasSeed: true,
+			Name: l.machineID, NKey: l.nkey, Publish: &perms.Publish, Subscribe: &perms.Subscribe, HasSeed: true,
 			Label: "listener",
 		})
 	}
