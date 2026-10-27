@@ -2,35 +2,35 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-527",
-  "completed": "2026-10-27T04:32:00Z",
+  "completed": "2026-10-27T05:45:00Z",
+  "round": 2,
   "decision": "changes_requested",
-  "reviewedCodeHead": "89bf76b8ae03fe5ddf87c1a83c754fc3e3a9868a",
+  "reviewedCodeHead": "146a10cdeffd229402365f01d5f9ca963e3f92d4",
   "critical": 0,
-  "important": 2,
+  "important": 1,
   "minor": 2,
+  "roundOneFindings": {
+    "PRRT_kwDORFy7ds6wi-zl (forced colors)": "CSS fixed at 146a10cd: under forced colors the system draws the box (appearance: auto, mask: none). Tester's screenshots and the deep-review probe show checked and unchecked native boxes differ. Accepted.",
+    "PRRT_kwDORFy7ds6wi-zu (colour pin)": "Fixed at 146a10cd: the tick is a mask hole, no colour literal remains (the only %23 left in styles.css is url(%23tick)); styles-css-pin.test.ts 36 pass. Accepted."
+  },
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/dispatch/web/src/styles.css",
-      "description": "Under forced colors (Windows High Contrast) the appearance:none box shows a ticked and an unticked item the same: the browser forces the fill to the system background and keeps the url() tick, whose fixed colour (white in light, slate-900 in dark) then matches that background. Seen in Chromium with emulateMedia forcedColors 'active' in light and dark (throwaway probe of the head's CSS rules); adding '@media (forced-colors: active) { .dispatch-markdown [data-markdown-task-checkbox] { appearance: auto } }' made the native box draw a visible tick in the same probe. This is the issue's own defect for high-contrast readers."
-    },
-    {
-      "severity": "important",
-      "file": "packages/dispatch/web/src/styles.css",
-      "description": "Lines 471 and 481 put two hand-written colours (%23ffffff, %230f172b) inside percent-encoded SVG data URIs. styles-css-pin.test.ts's exhaustiveness pattern /#[0-9a-fA-F]{6}\\b|rgb\\(...\\)/ does not see '%23', so the colours skip the pin gate that packages/dispatch/AGENTS.md (styles-css-pin.test.ts paragraph) and the test's own comment say every hand-written colour must pass."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/web/src/styles.css",
-      "description": "Line 535 pointer-events: none lost its explaining clause in 89bf76b8; every other unusual declaration in the block is explained."
+      "file": "packages/dispatch/e2e/task-items.e2e.ts",
+      "description": "expectBoxesLookDifferent (lines 84-118), the forced-colors rows' regression check, compares the two boxes' element shots pixel by pixel at the same coordinates. An element shot is cut to whole CSS pixels around a 13.125 px box, so two boxes that look alike but sit at different fractional positions shift by one row and their borders alone can pass the 10% threshold; at DPR 3 a fractional offset can also make the shots differ in size and fail sameSize with the fix in place. Evidence: the tester's negative control (forced-colors block removed) passed once in chromium dark with both boxes drawn as empty outlines, then failed 3 of 3; the deep-review probe of the head's CSS measured 0.102-0.122 strong pixels (pass) at DPR 1 for identical empty boxes, and 42x42 vs 42x45 shots at DPR 3 offset 0.9 with the fix."
     },
     {
       "severity": "minor",
       "file": "packages/dispatch/e2e/task-items.e2e.ts",
-      "description": "The ticked/unticked/disabled/list-style assertions repeat between the two rows, and the iphone Thread-dialog ternary now has three copies (task-items, theme, held-sends). Cleanup only."
+      "description": "Line 202 scrollIntoViewIfNeeded is dead: a locator screenshot scrolls the element into view itself."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/e2e/task-items.e2e.ts",
+      "description": "Lines 142-143 repeat conversationThreadScope's doc; line 87-88 names a CSP Dispatch does not send."
     }
   ],
-  "ci": "Required set (main rulesets): lint, typecheck, test, pr-title; branch protection off. CI head 89bf76b8ae03 (newest pull_request run); compare to 9eff5063 handoffsOnly true, 2 files. All checks queued at 04:11Z; not awaited, since this round requests changes.",
-  "thermonuclear": "Pair run at 89bf76b8ae03: deep-review approve with two minors (forced-colors, WebKit list semantics), code-quality changes (colour-pin bypass) with two minors.",
-  "threads": "0 review threads on the pull request."
+  "ci": "Required set (main rulesets): lint, typecheck, test, pr-title; branch protection off. CI head 146a10cdeffd (newest pull_request run); compare to 36d12d2c handoffsOnly true, 2 files. At 05:28Z lint/typecheck/test/pr-title/changes/build queued, one earlier pr-title cancelled; not awaited, since this round requests changes.",
+  "thermonuclear": "Pair run at 146a10cd: deep-review changes (the pixel check above; CSP comment minor); code-quality changes on two minors only; both found the CSS correct (mask valid, Lightning CSS emits -webkit-mask for the build targets, appearance: auto draws a native box under forced colors).",
+  "threads": "2 threads, both mine from round 1, both answered as fixed and accepted."
 }
