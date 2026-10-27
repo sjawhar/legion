@@ -4,8 +4,24 @@
 
 ### Added
 
+- Daemon API contract 40: `LEGION_WORKFLOW_PHASES` gains `awaiting_person`, after `admitted`, a
+  root that gave its admission slot up while its architect waits on a person's answer, and the
+  state issue view gains `waitingOn`, present only in that phase: `kind: "ask"` with the question's
+  `ask`, or `kind: "gate"` with `gateVersion` and `artifactId` for a root waiting on its spec's
+  approval, `since`, when the
+  wait began, and `answeredAt` with `answeredBy` (`LEGION_WAIT_ANSWERS`, the act that answered it,
+  not always a person's) once the wait was answered, the two always together. `LEGION_PHASE_BACKWARD_TARGETS` is unchanged:
+  no backward move reaches the new phase. A contract-39 reader refuses a state carrying either
+  addition.
+
 - `dispatch doc-edit --help` says the spec, not every document, holds no progress or status, and that a record of open items or progress is a document of its own.
 
+- `actorAttribution(actor)`, the part of an actor's label after its name: ` (for <owner>)` for a
+  session a personal token attributed to a human, ` (as <namespace>/<name>)` for one a service
+  token authenticated, else `""` (always for a user or system). `actorLabel` is now `actorName`
+  followed by it, with the same output as before, so a reader that draws the name and the
+  attribution apart (the Dashboard's `AgentName`) takes the attribution from the one rule
+  instead of cutting it out of the label (INFRA-440).
 - `SearchCoverage`, `SearchCoverageKinds` and `SearchCoverageCounts`, the body of
   `GET /api/v1/search/coverage`: the configured embedder's identity, place (`bedrock` or `azure`)
   and model, and per kind and in total how many searchable items have a current vector, lack one or

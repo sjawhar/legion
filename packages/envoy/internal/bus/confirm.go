@@ -50,20 +50,40 @@ func (c *Client) publishConfirmed(ctx context.Context, conn *nats.Conn, msg *nat
 	if err := publish(msg); err != nil {
 		return c.refused(err, len(msg.Data))
 	}
+	return confirmFlushed(conn, msg.Subject, before, deadline)
+}
+
+// errFlushWindowElapsed is wrapped by confirmFlushed's answer when its deadline had passed before
+// the flush began, so whether the publish landed is unknown (flushWindowElapsedError).
+var errFlushWindowElapsed = errors.New("window elapsed before the publish was flushed")
+
+// flushWindowElapsedError is confirmFlushed's answer when its deadline had passed before the
+// flush began: errWindowElapsed's text, wrapping errFlushWindowElapsed so a window can tell it
+// apart (window.answered).
+type flushWindowElapsedError struct{ subject string }
+
+func (e flushWindowElapsedError) Error() string { return errWindowElapsed(e.subject).Error() }
+
+func (flushWindowElapsedError) Unwrap() error { return errFlushWindowElapsed }
+
+// confirmFlushed flushes conn within deadline and confirms that the server accepted the core
+// publish to subject made on it after before was observed (confirmPublished).
+func confirmFlushed(conn *nats.Conn, subject string, before connState, deadline time.Time) error {
 	remaining := time.Until(deadline)
 	if remaining <= 0 {
-		return errWindowElapsed(msg.Subject)
+		return flushWindowElapsedError{subject: subject}
 	}
 	if err := conn.FlushTimeout(remaining); err != nil {
-		return fmt.Errorf("bus: flush publish to %q: %w", msg.Subject, err)
+		return fmt.Errorf("bus: flush publish to %q: %w", subject, err)
 	}
-	return confirmPublished(conn, msg.Subject, before)
+	return confirmPublished(conn, subject, before)
 }
 
 // errWindowElapsed is the error of a core publish to subject whose window ran out before it could
 // be flushed. Its text is the one this error had before the spent-window check moved ahead of the
 // publish, so anything that matches it - a deployed log filter, an operator's search - still does,
-// and every site that reports a spent window returns it.
+// and every site that reports a spent window returns it, or after the publish returns
+// flushWindowElapsedError, which carries the same text.
 func errWindowElapsed(subject string) error {
 	return fmt.Errorf("bus: window elapsed before the publish to %q was flushed", subject)
 }

@@ -21,11 +21,14 @@ const issueKey = z.string().regex(DISPATCH_KEY_PATTERN);
 const timestamp = z.iso.datetime({ offset: true });
 
 /** `api.Phase` — the state an admitted issue sits in, in the transition table's own order. Not
- * the role working it: `workers` is keyed by role (`LEGION_ROLES`). `accepting` is the architect's
- * acceptance between the reviewer's approval and retro: no worker runs it. The merge closes the
- * issue (`done`); the production check after it is no phase (`check` on the issue record). */
+ * the role working it: `workers` is keyed by role (`LEGION_ROLES`). `awaiting_person` is a root
+ * that gave its admission slot up while its architect waits on a person's answer (`waitingOn` on
+ * the issue record). `accepting` is the architect's acceptance between the reviewer's approval and
+ * retro: no worker runs it. The merge closes the issue (`done`); the production check after it is
+ * no phase (`check` on the issue record). */
 export const LEGION_WORKFLOW_PHASES = [
   "admitted",
+  "awaiting_person",
   "planning",
   "implementing",
   "testing",
@@ -207,6 +210,49 @@ const legionCheckView = z.strictObject({
   last: z.boolean(),
 });
 
+/** `record.Answer` — the act that ended a root's wait on a person: a person's answer on the awaited
+ * ask (`ask`), its retraction by Dispatch's settlement (`retracted`) or its close by someone who is
+ * not a person (`closed`), a person's act on another ask (`reply`), a session handing the last
+ * question back to the agent's turn (`turn`), a person's review of the spec (`approved`,
+ * `changes_requested`), or a spec version newer than the one waited on (`version`). */
+export const LEGION_WAIT_ANSWERS = [
+  "ask",
+  "retracted",
+  "closed",
+  "reply",
+  "turn",
+  "approved",
+  "changes_requested",
+  "version",
+] as const;
+
+/** The fields every `waitingOn` shape shares: `since`, Dispatch's time of the hand-back the wait
+ * began at (absent when unknown), and `answeredAt` with `answeredBy` once the wait was answered
+ * (`answeredBy` names how, not always by a person), when the root waits at the front of
+ * admission's waiting line for its slot. */
+const legionWaitTimes = {
+  since: timestamp.optional(),
+  answeredAt: timestamp.optional(),
+  answeredBy: z.enum(LEGION_WAIT_ANSWERS).optional(),
+};
+
+/** `api.WaitingOnView` — what an `awaiting_person` root waits on from a person: `ask`, the oldest
+ * question of its tree still with the person, or `gate`, a spec version (`gateVersion` of document
+ * `artifactId`) a person has not reviewed. Contract 40 carries both shapes, and a daemon writes either. */
+const legionWaitingOn = z
+  .discriminatedUnion("kind", [
+    z.strictObject({ kind: z.literal("ask"), ask: nonEmptyString, ...legionWaitTimes }),
+    z.strictObject({
+      kind: z.literal("gate"),
+      gateVersion: z.number().int().positive(),
+      artifactId: nonEmptyString,
+      ...legionWaitTimes,
+    }),
+  ])
+  .refine((wait) => (wait.answeredAt === undefined) === (wait.answeredBy === undefined), {
+    message: "answeredAt and answeredBy appear together",
+  });
+
 /** `api.PendingStatusWrite` — one `dispatch_status` effect the outbox has not finished, due now or
  * backing off after a failed attempt: `nextAt` is the earliest it can run, and `attempts` and
  * `lastError` say why it is still pending. An issue's writes run in the order they were made, so a
@@ -246,8 +292,9 @@ const legionHeldOutboxRow = z.strictObject({
 });
 
 /** `api.Issue` — `workers` is keyed by role and partial: a phase that has not run has no entry
- * (Zod's plain `record` over an enum demands every key). `check` is the issue's open production
- * check, present only on a `done` issue while the check is open. */
+ * (Zod's plain `record` over an enum demands every key). `waitingOn` is present only in
+ * `awaiting_person`; `check` is the issue's open production check, present only on a `done` issue
+ * while the check is open. */
 const legionIssue = z.strictObject({
   key: nonEmptyString,
   generation: z.number().int().nonnegative(),
@@ -266,6 +313,7 @@ const legionIssue = z.strictObject({
   pullRequest: legionPullRequestView.optional(),
   designGate: legionGateView.optional(),
   slot: legionSlotView.optional(),
+  waitingOn: legionWaitingOn.optional(),
   check: legionCheckView.optional(),
 });
 

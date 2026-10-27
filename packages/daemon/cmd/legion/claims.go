@@ -19,15 +19,16 @@ import (
 
 // claimsCommands is the operator's hand on the daemon's claims, one subcommand per operator route
 // and the one list of them `legion claims --help` names (internal/api/operator.go). retry relaunches
-// a failed architect on its session with fresh budgets. close is the tree's close, through its root
-// claim, for a tree no workflow issue backs: the root, then every other claim of the tree.
+// a failed claim: an architect on its session with fresh budgets, a phase worker through its issue's
+// held phase; with --failed, every failed claim. close is the tree's close, through its root claim,
+// for a tree no workflow issue backs: the root, then every other claim of the tree.
 var claimsCommands = map[string]command{
 	"spawn":   runClaimsSpawn,
 	"deliver": runClaimsDeliver,
 	"suspend": runClaimsSuspend,
 	"resume":  claimRequest("resume"),
 	"stop":    claimRequest("stop"),
-	"retry":   claimRequest("retry"),
+	"retry":   runClaimsRetry,
 	"close":   claimRequest("close"),
 	"list":    runClaimsList,
 }
@@ -169,6 +170,57 @@ func claimRequest(request string) command {
 		}
 		return c.send(ctx, op, http.MethodPost, "/"+url.PathEscape(*token)+"/"+request, nil, printClaim)
 	}
+}
+
+// runClaimsRetry retries --claim, or with --failed every claim the daemon holds failed, in the
+// order the daemon lists them: an architect is relaunched on its session with fresh budgets, a
+// phase worker whose issue holds its phase is relaunched through that phase's retry, and the daemon
+// refuses the rest, naming why (api's retryClaim). Under --failed each retried claim prints its
+// line as --claim prints it, each refusal is reported naming its claim, and the command fails once
+// any was refused, having asked for every one.
+func runClaimsRetry(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	c := newClaimsCall("retry", stdout, stderr)
+	token := c.flags.String("claim", "", "the claim's token (this, or --failed)")
+	failed := c.flags.Bool("failed", false, "retry every claim the daemon holds failed")
+	if code, ok := c.parse(args); !ok {
+		return code
+	}
+	if (*token == "") != *failed {
+		if *failed {
+			fmt.Fprintf(c.stderr, "%s: --claim and --failed each name what to retry; give one\n", c.name)
+		} else {
+			fmt.Fprintf(c.stderr, "%s: --claim is required, or --failed\n", c.name)
+		}
+		c.flags.Usage()
+		return 2
+	}
+	op, ok := c.connect()
+	if !ok {
+		return 1
+	}
+	if !*failed {
+		return c.send(ctx, op, http.MethodPost, "/"+url.PathEscape(*token)+"/retry", nil, printClaim)
+	}
+	_, answer, ok := c.request(ctx, op, http.MethodGet, claimsRoute, nil)
+	if !ok {
+		return 1
+	}
+	var list api.OperatorClaims
+	if err := decodeAnswer(answer, &list); err != nil {
+		fmt.Fprintf(c.stderr, "%s: read the answer %s%s served: %v\n", c.name, op.base, claimsRoute, err)
+		return 1
+	}
+	code := 0
+	for _, held := range list.Claims {
+		if supervise.ClaimState(held.State) != supervise.StateFailed {
+			continue
+		}
+		if c.send(ctx, op, http.MethodPost, "/"+url.PathEscape(string(held.Token))+"/retry", nil, printClaim) != 0 {
+			fmt.Fprintf(c.stderr, "%s: %s was not retried\n", c.name, held.Token)
+			code = 1
+		}
+	}
+	return code
 }
 
 // suspendPoll is how often runClaimsSuspend reads the claims while a suspension is held.

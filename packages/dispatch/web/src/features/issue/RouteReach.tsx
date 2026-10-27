@@ -2,20 +2,24 @@ import type { ReactNode } from "react";
 
 import type { IssueRouteReach } from "../../api/types";
 import { calloutWarningBg, calloutWarningBorder, calloutWarningText } from "../../theme/classes";
+import { AgentName, useAgentText } from "../refs/AgentName";
+import { sessionOfAddress } from "../refs/routes";
 
 type RoutedIssue = IssueRouteReach & { readonly route: string | null };
 
 /**
  * The warning an issue carries wherever it is shown - the issue header, a List row, a Board
  * card - when its route reaches nobody: `route_status` is `no_holder`, meaning a role nobody
- * running holds, or a session that is not running, at the moment of the read. The server resolves the status on every
- * issue read, so this names it and judges nothing. A route that reaches a live session, an
+ * running holds, or a session that is not running, as of the server's copy of the listener's
+ * session list, at most 5 s old. The server resolves the status on every issue read, so this
+ * names it and judges nothing. A route that reaches a live session, an
  * unrouted issue, and a route the listener could not judge (`unknown`) render nothing here, so
  * healthy routes stay quiet and a listener restart does not mark every card.
  *
  * `showRoute` names the route in the label, for the header, where the marker sits in the state
- * row rather than beside the route. A session id is long, so only the route ellipsizes and the
- * verdict stays whole, the rule `ClaimChip` follows for a holder's name.
+ * row rather than beside the route: a role as its address, a session by `AgentName`. A name can
+ * be long, so only the route ellipsizes and the verdict stays whole, the rule `ClaimChip`
+ * follows for a holder's name.
  */
 export function UnreachableRouteMarker({
   issue,
@@ -27,8 +31,13 @@ export function UnreachableRouteMarker({
   if (issue.route === null || issue.route_status !== "no_holder") {
     return null;
   }
-  const role = issue.route.startsWith("role:");
-  const explanation = `${role ? `No running session holds ${issue.route} right now` : `${issue.route} is not running right now`}, so this issue's messages reach nobody at the moment. A session that is restarting or moving between boxes drops out of the listener for minutes and comes back under the same id, so this is a vacancy only when it is still true on a read ten minutes later; then staff the role, re-route it to a live holder, or clear the route and assign it.`;
+  return <UnreachableRoute route={issue.route} showRoute={showRoute} />;
+}
+
+function UnreachableRoute({ route, showRoute }: { route: string; showRoute: boolean }): ReactNode {
+  const text = useAgentText();
+  const sessionId = sessionOfAddress(route);
+  const explanation = `${sessionId === undefined ? `No running session holds ${route} right now` : `${text.sessionText(sessionId, undefined)} is not running right now`}, so this issue's messages reach nobody at the moment. A session that is restarting or moving between boxes drops out of the listener for minutes and comes back under the same id, so this is a vacancy only when it is still true on a read ten minutes later; then staff the role, re-route it to a live holder, or clear the route and assign it.`;
   return (
     <span
       className={`inline-flex min-w-0 max-w-full items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold ${calloutWarningBorder} ${calloutWarningBg} ${calloutWarningText}`}
@@ -39,9 +48,18 @@ export function UnreachableRouteMarker({
       <span aria-hidden="true" className="shrink-0">
         ⚠
       </span>
-      {showRoute ? <span className="min-w-0 truncate">{issue.route}:</span> : null}
+      {showRoute ? (
+        <span className="min-w-0 truncate">
+          {sessionId === undefined ? (
+            route
+          ) : (
+            <AgentName inline sessionId={sessionId} storedTitle={undefined} />
+          )}
+          :
+        </span>
+      ) : null}
       <span className="shrink-0">
-        {role ? "Nobody holds it right now" : "Not running right now"}
+        {sessionId === undefined ? "Nobody holds it right now" : "Not running right now"}
       </span>
       <span className="sr-only">. {explanation}</span>
     </span>

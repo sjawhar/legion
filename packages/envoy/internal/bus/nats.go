@@ -259,7 +259,7 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 	if err != nil {
 		return nil, err
 	}
-	js, err := nc.JetStream(nats.MaxWait(10 * time.Second))
+	js, err := nc.JetStream(nats.MaxWait(10*time.Second), nats.PublishAsyncTimeout(publishAcknowledgementTimeout))
 	if err != nil {
 		nc.Close()
 		return nil, err
@@ -747,7 +747,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		js, err := nc.JetStream(nats.MaxWait(10 * time.Second))
+		js, err := nc.JetStream(nats.MaxWait(10*time.Second), nats.PublishAsyncTimeout(publishAcknowledgementTimeout))
 		if err != nil {
 			nc.Close()
 			return err

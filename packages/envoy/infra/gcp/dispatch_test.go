@@ -2,6 +2,7 @@ package gcp_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -135,6 +136,99 @@ func TestDispatchSettingsApplyDefaults(t *testing.T) {
 	require.Equal(t, `{"TCP":{"443":{"HTTPS":true}},"Web":{"example-dispatch.example-tailnet.ts.net:443":{"Handlers":{"/":{"Proxy":"http://example-dispatch.dispatch.svc.cluster.local:8766"}}}}}`, settings.ServeConfig)
 }
 
+// Unset, appCpu and appMemory are the 1 CPU and 4Gi the app container always had, as requests and
+// limits of envoy-dispatch, so a deployment that sets neither sees no change to its pod
+// (TestDispatchPodMatchesGolden pins the whole template).
+func TestDispatchAppContainerDefaultsToOneCPUAnd4Gi(t *testing.T) {
+	settings, err := gcp.ResolveDispatch(dispatchArgs())
+	require.NoError(t, err)
+	require.Equal(t, "1", settings.AppCPU)
+	require.Equal(t, "4Gi", settings.AppMemory)
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	container := podContainer(t, deploymentPodTemplate(t, m, "example-dispatch"), "envoy-dispatch")
+	require.Equal(t, appResources("1", "4Gi"), container["resources"])
+}
+
+// The quantity forms Kubernetes reads are taken as written, up to Autopilot's bounds for the pod:
+// with cloud-sql-proxy's 200m and 256Mi, 300m and 256Mi make the 500m and 512Mi floor, 29800m
+// and 112384Mi the 30 CPU and 110Gi ceiling, and 800m and 6400Mi exactly 6.5 GiB per CPU. A
+// decimal exponent inside e-9 to e18 is valued exactly, its mantissa included.
+func TestDispatchAcceptsAppResourcesWithinAutopilotsBounds(t *testing.T) {
+	for _, row := range []struct{ cpu, memory string }{
+		{"300m", "512Mi"},
+		{"300m", "256Mi"},
+		{"1.5", "6Gi"},
+		{"2", "8589934592"},
+		{"4", "16G"},
+		{"29800m", "112384Mi"},
+		{"2e0", "0.5e10"},
+		{"800m", "6400Mi"},
+		{"1", "4500000k"},
+		{"1000000000e-9", "0.000000004e18"},
+	} {
+		t.Run(row.cpu+"/"+row.memory, func(t *testing.T) {
+			args := dispatchArgs()
+			args.AppCpu = pulumi.StringRef(row.cpu)
+			args.AppMemory = pulumi.StringRef(row.memory)
+			settings, err := gcp.ResolveDispatch(args)
+			require.NoError(t, err)
+			require.Equal(t, row.cpu, settings.AppCPU)
+			require.Equal(t, row.memory, settings.AppMemory)
+		})
+	}
+}
+
+// Unset, pprofPort renders no DISPATCH_PPROF_PORT, so Dispatch starts no profiler and a deployment
+// that leaves it unset renders the pod it always had (TestDispatchPodMatchesGolden pins it).
+func TestDispatchRendersNoProfilerByDefault(t *testing.T) {
+	settings, err := gcp.ResolveDispatch(dispatchArgs())
+	require.NoError(t, err)
+	require.Zero(t, settings.PprofPort)
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	require.NotContains(t, containerEnv(t, podContainer(t, deploymentPodTemplate(t, m, "example-dispatch"), "envoy-dispatch")), "DISPATCH_PPROF_PORT")
+}
+
+// pprofPort sets DISPATCH_PPROF_PORT on the envoy-dispatch container alone, where Dispatch serves
+// its profiler on 127.0.0.1 at that port: the app's pod template is the default's with that one
+// variable added to that one container, and the front door's and the listener's pods match their
+// goldens.
+func TestDispatchPprofPortReachesTheAppContainerAlone(t *testing.T) {
+	defaults, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	for _, port := range []int{1, 6060, 65535} {
+		t.Run(strconv.Itoa(port), func(t *testing.T) {
+			args := dispatchArgs()
+			args.PprofPort = pulumi.IntRef(port)
+			settings, err := gcp.ResolveDispatch(args)
+			require.NoError(t, err)
+			require.Equal(t, port, settings.PprofPort)
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+
+			got := deploymentPodTemplate(t, m, "example-dispatch")
+			require.Equal(t, strconv.Itoa(port), containerEnv(t, podContainer(t, got, "envoy-dispatch"))["DISPATCH_PPROF_PORT"])
+			want := deploymentPodTemplate(t, defaults, "example-dispatch")
+			app := podContainer(t, want, "envoy-dispatch")
+			app["env"] = append(app["env"].([]any), map[string]any{"name": "DISPATCH_PPROF_PORT", "value": strconv.Itoa(port)})
+			require.Equal(t, want, got)
+			requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
+			requirePodGolden(t, m, "example-dispatch-tailnet", "dispatch-tailnet-pod.golden")
+		})
+	}
+}
+
+// A pprofPort Dispatch would refuse, or one the app pod already binds, is refused by the resolver
+// before the component registers, so nothing beyond the test's providers exists.
+func TestDispatchRefusesAPprofPortBeforeRegistering(t *testing.T) {
+	args := dispatchArgs()
+	args.PprofPort = pulumi.IntRef(70000)
+	m, err := runDispatch(t, args, true)
+	require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: pprofPort 70000 must be a port number 1-65535")
+	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
+}
+
 // Above one replica the operator has accepted two overlapping envoy-dispatch processes, so the
 // Deployment rolls a new pod up before taking an old one down.
 func TestDispatchSeveralReplicasRollWithoutGoingUnavailable(t *testing.T) {
@@ -223,6 +317,67 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		{name: "an invalid app private key secret name", edit: func(a *gcp.DispatchArgs) { setApp(a); a.AppPrivateKeySecretName = "Example_Key" }, err: []string{"appPrivateKeySecretName", "DNS subdomain"}},
 		{name: "an invalid app private key secret key", edit: func(a *gcp.DispatchArgs) { setApp(a); a.AppPrivateKeySecretKey = "bad/key" }, err: []string{"appPrivateKeySecretKey", "must match"}},
 		{name: "fewer than one replica", edit: func(a *gcp.DispatchArgs) { a.Replicas = pulumi.IntRef(0) }, err: []string{"replicas", "at least 1"}},
+		{name: "a pprof port of 0", edit: func(a *gcp.DispatchArgs) { a.PprofPort = pulumi.IntRef(0) }, err: []string{"pprofPort 0", "1-65535", "leave it unset"}},
+		{name: "a negative pprof port", edit: func(a *gcp.DispatchArgs) { a.PprofPort = pulumi.IntRef(-1) }, err: []string{"pprofPort -1", "1-65535"}},
+		{name: "a pprof port past 65535", edit: func(a *gcp.DispatchArgs) { a.PprofPort = pulumi.IntRef(65536) }, err: []string{"pprofPort 65536", "1-65535"}},
+		{name: "a pprof port on envoy-dispatch's own port", edit: func(a *gcp.DispatchArgs) { a.PprofPort = pulumi.IntRef(8766) }, err: []string{"pprofPort 8766", "envoy-dispatch"}},
+		{name: "a pprof port on cloud-sql-proxy's port", edit: func(a *gcp.DispatchArgs) { a.PprofPort = pulumi.IntRef(5432) }, err: []string{"pprofPort 5432", "cloud-sql-proxy"}},
+		{name: "an empty app priority class", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("") }, err: []string{"appPriorityClassName is empty", "leave it unset for no priority class"}},
+		{name: "an app priority class that is no DNS subdomain", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("Example_Priority") }, err: []string{`appPriorityClassName "Example_Priority"`, "DNS subdomain"}},
+		{name: "an app priority class with trailing whitespace", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("example-priority ") }, err: []string{`appPriorityClassName "example-priority "`, "DNS subdomain"}},
+		{name: "an app priority class longer than 253 characters", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef(strings.Repeat("a.", 127) + "a") }, err: []string{"appPriorityClassName", "DNS subdomain"}},
+		{name: "a system cluster-critical app priority class", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("system-cluster-critical") }, err: []string{`appPriorityClassName "system-cluster-critical"`, "reserves for its own system components"}},
+		{name: "a system node-critical app priority class", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("system-node-critical") }, err: []string{`appPriorityClassName "system-node-critical"`, "reserves for its own system components"}},
+		{name: "a disruption budget of no pod", edit: func(a *gcp.DispatchArgs) { a.AppPdbMinAvailable = pulumi.IntRef(0) }, err: []string{"appPdbMinAvailable 0", "from 1 to replicas (1)", "leave it unset for no PodDisruptionBudget"}},
+		{name: "a negative disruption budget", edit: func(a *gcp.DispatchArgs) { a.AppPdbMinAvailable = pulumi.IntRef(-1) }, err: []string{"appPdbMinAvailable -1", "from 1 to replicas (1)"}},
+		{name: "a disruption budget above the default replica count", edit: func(a *gcp.DispatchArgs) { a.AppPdbMinAvailable = pulumi.IntRef(2) }, err: []string{"appPdbMinAvailable 2", "from 1 to replicas (1)"}},
+		{name: "a disruption budget above the replica count", edit: func(a *gcp.DispatchArgs) {
+			a.Replicas = pulumi.IntRef(3)
+			a.AppPdbMinAvailable = pulumi.IntRef(4)
+		}, err: []string{"appPdbMinAvailable 4", "from 1 to replicas (3)"}},
+		{name: "an app CPU that is not a quantity", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("two") }, err: []string{`appCpu "two"`, "Kubernetes quantity"}},
+		{name: "an app CPU with a memory suffix in the wrong case", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("1gi") }, err: []string{`appCpu "1gi"`, "Kubernetes quantity"}},
+		{name: "an app memory that is not a quantity", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("4 GiB") }, err: []string{`appMemory "4 GiB"`, "Kubernetes quantity"}},
+		{name: "an empty app CPU", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("") }, err: []string{"appCpu is empty", "leave it unset for 1"}},
+		{name: "an empty app memory", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("") }, err: []string{"appMemory is empty", "leave it unset for 4Gi"}},
+		{name: "a negative app CPU", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("-1") }, err: []string{`appCpu "-1"`, "at least 300m", "less than 500m", "Autopilot raises it"}},
+		{name: "an app CPU below Autopilot's pod floor", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("250m") }, err: []string{`appCpu "250m"`, "at least 300m", "cloud-sql-proxy's 200m", "less than 500m", "Autopilot raises it"}},
+		{name: "an app memory below Autopilot's pod floor", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("500m")
+			a.AppMemory = pulumi.StringRef("128Mi")
+		}, err: []string{`appMemory "128Mi"`, "at least 256Mi", "cloud-sql-proxy's 256Mi", "less than 512Mi", "Autopilot raises it"}},
+		{name: "an app CPU above Autopilot's pod ceiling", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("30")
+			a.AppMemory = pulumi.StringRef("64Gi")
+		}, err: []string{`appCpu "30"`, "at most 29800m", "above 30", "rejects"}},
+		{name: "an app memory above Autopilot's pod ceiling", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("20")
+			a.AppMemory = pulumi.StringRef("110Gi")
+		}, err: []string{`appMemory "110Gi"`, "at most 112384Mi", "above 110Gi", "rejects"}},
+		{name: "app CPU raised without memory to match", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("8") }, err: []string{`appCpu "8"`, `appMemory "4Gi"`, "between 1 and 6.5 GiB of memory per CPU"}},
+		{name: "app memory raised without CPU to match", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("32Gi") }, err: []string{`appCpu "1"`, `appMemory "32Gi"`, "between 1 and 6.5 GiB of memory per CPU"}},
+		{name: "app memory just above 6.5 GiB per CPU", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("800m")
+			a.AppMemory = pulumi.StringRef("6401Mi")
+		}, err: []string{`appCpu "800m"`, `appMemory "6401Mi"`, "between 1 and 6.5 GiB of memory per CPU"}},
+		{name: "an app CPU with leading whitespace", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef(" 1") }, err: []string{`appCpu " 1"`, "Kubernetes quantity"}},
+		{name: "an app CPU with trailing whitespace", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("1 ") }, err: []string{`appCpu "1 "`, "Kubernetes quantity"}},
+		{name: "an app memory with leading whitespace", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef(" 4Gi") }, err: []string{`appMemory " 4Gi"`, "Kubernetes quantity"}},
+		{name: "an app memory with a trailing line break", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("4Gi\n") }, err: []string{`appMemory "4Gi\n"`, "Kubernetes quantity"}},
+		// Kubernetes reads this as 100 CPU: the mantissa makes up for the exponent.
+		{name: "an app CPU whose exponent a small mantissa makes up for", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("0.000000000000000000000000000000000001e38")
+		}, err: []string{`appCpu "0.000000000000000000000000000000000001e38"`, "decimal exponent outside e-9 to e18"}},
+		// Kubernetes reads this as 4 CPU, a size the pod could have with 6Gi.
+		{name: "an app CPU of 4 written with a large exponent", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("0.0000000000000000000000000000000000004e37")
+			a.AppMemory = pulumi.StringRef("6Gi")
+		}, err: []string{`appCpu "0.0000000000000000000000000000000000004e37"`, "decimal exponent outside e-9 to e18"}},
+		// Kubernetes reads this as 10 CPU.
+		{name: "an app CPU whose negative exponent a long mantissa makes up for", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("10000000000000000000000000000000000000000e-39")
+		}, err: []string{`appCpu "10000000000000000000000000000000000000000e-39"`, "decimal exponent outside e-9 to e18"}},
+		{name: "an app memory with an exponent past int's range", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("1e99999999999999999999") }, err: []string{`appMemory "1e99999999999999999999"`, "decimal exponent outside e-9 to e18"}},
 		{name: "an Azure endpoint without its quota", edit: func(a *gcp.DispatchArgs) {
 			setAzureKey(a)
 			a.AzureEmbedTokensPerMinute = nil
@@ -320,6 +475,9 @@ func TestDispatchRefusesAnNKeySeedInAPlainInput(t *testing.T) {
 		{"a seed inside the sign-in domain", "signInDomain", func(a *gcp.DispatchArgs) { a.SignInDomain = lower + ".example.com" }},
 		{"a seed in the database version", "databaseVersion", func(a *gcp.DispatchArgs) { a.DatabaseVersion = pulumi.StringRef(seed) }},
 		{"a seed in the database tier", "databaseTier", func(a *gcp.DispatchArgs) { a.DatabaseTier = pulumi.StringRef(seed) }},
+		{"a seed as the app CPU", "appCpu", func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef(seed) }},
+		{"a seed as the app memory", "appMemory", func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef(seed) }},
+		{"a seed as the app priority class", "appPriorityClassName", func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef(lower) }},
 		{"a seed as the namespace", "namespace", func(a *gcp.DispatchArgs) { a.Namespace = pulumi.StringRef(lower) }},
 		{"a seed in an allowed namespace", "allowedNamespaces[1]", func(a *gcp.DispatchArgs) { a.AllowedNamespaces = []string{"envoy", lower} }},
 		{"a seed inside the agent secrets URL", "agentSecretsUrl", func(a *gcp.DispatchArgs) { a.AgentSecretsUrl = "https://" + lower + ".internal.example" }},
@@ -1333,4 +1491,153 @@ func TestDispatchAzureLeavesTheOtherWorkloadsUnchanged(t *testing.T) {
 			requirePodGolden(t, m, "example-dispatch-tailnet", "dispatch-tailnet-pod.golden")
 		})
 	}
+}
+
+// appResources is a container's resources as the component renders them: equal requests and limits.
+func appResources(cpu, memory string) map[string]any {
+	values := map[string]any{"cpu": cpu, "memory": memory}
+	return map[string]any{"requests": values, "limits": values}
+}
+
+// appCpu and appMemory size the app's envoy-dispatch container and nothing else: the app's pod
+// template is the default's with that one container's resources changed, so cloud-sql-proxy keeps
+// its 200m and 256Mi, and the front door's and the listener's pods match their goldens.
+func TestDispatchAppResourcesReachEnvoyDispatchAlone(t *testing.T) {
+	defaults, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	args := dispatchArgs()
+	args.AppCpu = pulumi.StringRef("2")
+	args.AppMemory = pulumi.StringRef("8Gi")
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+
+	got := deploymentPodTemplate(t, m, "example-dispatch")
+	require.Equal(t, appResources("2", "8Gi"), podContainer(t, got, "envoy-dispatch")["resources"])
+	want := deploymentPodTemplate(t, defaults, "example-dispatch")
+	podContainer(t, want, "envoy-dispatch")["resources"] = appResources("2", "8Gi")
+	require.Equal(t, want, got)
+	proxy := got["spec"].(map[string]any)["initContainers"].([]any)[0].(map[string]any)
+	require.Equal(t, "cloud-sql-proxy", proxy["name"])
+	require.Equal(t, appResources("200m", "256Mi"), proxy["resources"])
+	requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
+	requirePodGolden(t, m, "example-dispatch-tailnet", "dispatch-tailnet-pod.golden")
+}
+
+// A size Autopilot would raise or reject is refused by the resolver, before the component
+// registers, so nothing beyond the test's providers exists.
+func TestDispatchRefusesAppResourcesBeforeRegistering(t *testing.T) {
+	args := dispatchArgs()
+	args.AppCpu = pulumi.StringRef("100m")
+	m, err := runDispatch(t, args, true)
+	require.ErrorContains(t, err, `envoy-infra:gcp:Dispatch example-dispatch: appCpu "100m" must be at least 300m`)
+	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
+}
+
+const (
+	podDisruptionBudgetType = "kubernetes:policy/v1:PodDisruptionBudget"
+	priorityClassType       = "kubernetes:scheduling.k8s.io/v1:PriorityClass"
+)
+
+// Unset, appPriorityClassName and appPdbMinAvailable leave the component as it was before they
+// existed: no PodDisruptionBudget, no PriorityClass read, and an app pod naming no priority class
+// (TestDispatchPodMatchesGolden pins the whole template).
+func TestDispatchRegistersNoBudgetOrPriorityClassUnset(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	require.Zero(t, countRegistrations(m, podDisruptionBudgetType))
+	require.Zero(t, countRegistrations(m, priorityClassType))
+	require.NotContains(t, deploymentPodTemplate(t, m, "example-dispatch")["spec"], "priorityClassName")
+}
+
+// requireKubernetesChild asserts that r is a child of the component on its own Kubernetes
+// provider, waiting on the cluster, as AGENTS.md has every Kubernetes child do.
+func requireKubernetesChild(t *testing.T, r pulumitest.Registration) {
+	t.Helper()
+	require.Equal(t, "urn:pulumi:s::p::"+dispatchType+"::example-dispatch", r.RPC.GetParent())
+	require.Contains(t, r.RPC.GetProvider(), "pulumi:providers:kubernetes::example-dispatch-kubernetes::")
+	require.Contains(t, r.RPC.GetDependencies(), "urn:pulumi:s::p::"+dispatchType+"$gcp:container/cluster:Cluster::example-dispatch")
+}
+
+// appPriorityClassName reaches the app's pod and nothing else: its template is the default's with
+// priorityClassName added, and the front door's and the listener's pods match their goldens. The
+// component creates no PriorityClass; it reads the named one, and the app Deployment waits on
+// that read, so a class the cluster lacks fails the update before any pod is replaced.
+func TestDispatchAppPriorityClassReachesTheAppPodAlone(t *testing.T) {
+	defaults, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	for _, class := range []string{"example-priority", "example.priority"} {
+		t.Run(class, func(t *testing.T) {
+			args := dispatchArgs()
+			args.AppPriorityClassName = pulumi.StringRef(class)
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+
+			want := deploymentPodTemplate(t, defaults, "example-dispatch")
+			want["spec"].(map[string]any)["priorityClassName"] = class
+			require.Equal(t, want, deploymentPodTemplate(t, m, "example-dispatch"))
+			requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
+			requirePodGolden(t, m, "example-dispatch-tailnet", "dispatch-tailnet-pod.golden")
+
+			read := m.Named(t, priorityClassType, "example-dispatch-priority-class")
+			require.Equal(t, class, read.ID)
+			require.Nil(t, read.RPC, "the PriorityClass is read, never registered")
+			require.Equal(t, "urn:pulumi:s::p::"+dispatchType+"::example-dispatch", read.ReadRPC.GetParent())
+			require.Contains(t, read.ReadRPC.GetProvider(), "pulumi:providers:kubernetes::example-dispatch-kubernetes::")
+			require.Contains(t, read.ReadRPC.GetDependencies(), "urn:pulumi:s::p::"+dispatchType+"$gcp:container/cluster:Cluster::example-dispatch")
+			deps := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").RPC.GetDependencies()
+			require.Contains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$"+priorityClassType+"::example-dispatch-priority-class")
+			require.ElementsMatch(t, append(defaults.Types(), priorityClassType), m.Types())
+		})
+	}
+}
+
+// appPdbMinAvailable registers one PodDisruptionBudget, named for the app, in its namespace,
+// selecting the app's pods by the label the app Deployment's own selector matches, and no other
+// workload's, with Kubernetes' default unhealthyPodEvictionPolicy. It is a Kubernetes child of the
+// component like every other, and the app's pod template is unchanged.
+func TestDispatchAppPdbCoversTheAppPods(t *testing.T) {
+	defaults, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	for _, row := range []struct {
+		replicas, minAvailable int
+		namespace              string
+	}{{1, 1, ""}, {3, 2, ""}, {3, 3, ""}, {1, 1, "example-namespace"}} {
+		t.Run(fmt.Sprintf("%d of %d in %q", row.minAvailable, row.replicas, row.namespace), func(t *testing.T) {
+			args := dispatchArgs()
+			args.Replicas = pulumi.IntRef(row.replicas)
+			args.AppPdbMinAvailable = pulumi.IntRef(row.minAvailable)
+			namespace := "dispatch"
+			if row.namespace != "" {
+				args.Namespace = pulumi.StringRef(row.namespace)
+				namespace = row.namespace
+			}
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+
+			registration := m.Named(t, podDisruptionBudgetType, "example-dispatch")
+			requireKubernetesChild(t, registration)
+			budget := registration.Inputs.Mappable()
+			require.Equal(t, map[string]any{"name": "example-dispatch", "namespace": namespace}, budget["metadata"])
+			require.Equal(t, map[string]any{
+				"minAvailable": float64(row.minAvailable),
+				"selector":     map[string]any{"matchLabels": map[string]any{"app": "example-dispatch"}},
+			}, budget["spec"])
+			deploymentSpec := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").Inputs.Mappable()["spec"].(map[string]any)
+			require.Equal(t, deploymentSpec["selector"], budget["spec"].(map[string]any)["selector"])
+			if row.namespace == "" {
+				require.Equal(t, deploymentPodTemplate(t, defaults, "example-dispatch"), deploymentPodTemplate(t, m, "example-dispatch"))
+				require.ElementsMatch(t, append(defaults.Types(), podDisruptionBudgetType), m.Types())
+			}
+		})
+	}
+}
+
+// A budget the app's replica count cannot meet is refused by the resolver, before the component
+// registers, so nothing beyond the test's providers exists.
+func TestDispatchRefusesAnAppPdbBeforeRegistering(t *testing.T) {
+	args := dispatchArgs()
+	args.AppPdbMinAvailable = pulumi.IntRef(2)
+	m, err := runDispatch(t, args, true)
+	require.ErrorContains(t, err, `envoy-infra:gcp:Dispatch example-dispatch: appPdbMinAvailable 2 must be from 1 to replicas (1)`)
+	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
 }
