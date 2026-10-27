@@ -908,7 +908,7 @@
   front door and the listener), read once, with all three Deployments waiting on the read and the
   same refusals; a program that sets `appPriorityClassName` sets `priorityClassName` instead.
 - `envoy-infra:gcp:Dispatch` defaults `databaseTier` to `db-custom-4-15360` (4 vCPU, 15 GB), whose
-  default `max_connections` of 500 holds six app pods at the 81 connections each pod's pools open,
+  default `max_connections` of 500 holds six app pods at the 82 connections each pod's pools open,
   so up to 5 replicas roll inside it; the previous `db-custom-1-3840` (100 connections) holds one
   pod and no roll. It defaults the `cloud-sql-proxy` sidecar to 1 CPU and `2Gi`, the proxy's own
   sidecar example's size for one pod's pools, through whose TLS every database call passes; with

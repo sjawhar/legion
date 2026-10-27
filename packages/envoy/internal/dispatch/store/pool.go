@@ -159,7 +159,7 @@ func NewPool(pool *pgxpool.Pool) *Pool {
 // memory - 100 from 3.75 GB, 500 from 15 GB (https://cloud.google.com/sql/docs/postgres/flags,
 // max_connections) - and every server pod opens up to the sum of its pools: this one,
 // roomsPoolSize, healthPoolSize, leasePoolSize, outboxPoolSize and the connections the listener
-// pool dials and hands off, one per permanent listener, 81 in all. That sum times the pod count,
+// pool dials and hands off, one per permanent listener, 82 in all. That sum times the pod count,
 // plus one pod during a rolling update, must stay under max_connections, so raising a pool or
 // the pod count is checked against it: read SHOW max_connections on the instance before raising
 // a pool.
