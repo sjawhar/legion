@@ -2,41 +2,39 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-172",
-  "completed": "2026-10-27T01:26:30Z",
+  "completed": "2026-10-27T03:36:00Z",
   "decision": "changes_requested",
-  "reviewedCodeHead": "647724175d3c155dce009933b29b527a1f8e75c0 (code as of a6ecbc12/2e326959; 30d6bc60 adds only .legion/)",
+  "round": 2,
+  "reviewedCodeHead": "cd211658b124bb73422a92a8e6009e2fb3a85123 (aef61f9e adds only .legion/); a new round, not a fingerprint confirmation: code changed (96976206, 20dedb36) and main was merged in (87fa023f)",
   "critical": 0,
-  "important": 2,
-  "minor": 3,
+  "important": 1,
+  "minor": 2,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/docs/edits.go:1244",
-      "description": "refuseCodePipeInTableCell goes through replacementBroke, which exempts the whole document-level block when TableCodePipeError already fails on it before the write. API edits run on the live tree, which keeps a browser-left code `a\\|b` after settlement, so a later replace, delete or accepted suggestion that puts code holding `\\|` into another cell of that table (or another table in the same list or quote) is accepted and stored with that `|` taken out of the code. Reproduced at 30d6bc60 with a throwaway applyAlone test: stored `| `a\\`\\|`b` | `<code>\\`\\|`<code>` |`, no refusal. The PR body and CHANGELOG (packages/envoy/CHANGELOG.md:1340) say such writes are refused. Fix: refuse when the block after the write holds an offending code span the block before did not (compare per cell, e.g. (row, column, code) of every offending cell), keeping the exemption only for writes that add none."
-    },
-    {
-      "severity": "important",
-      "file": "PR #2272 body",
-      "description": "No `## Contract change census`. The PR adds a refusal at the Dispatch HTTP API (TableCodePipeError on doc-edit replace, delete by quote and accepted suggestion) and widens one (a row whose cells exceed the table once `\\\\|` ends a cell, on upload and table-row insert; insert_test.go:140), and a header wider than its delimiter by the new rule now makes no table. The census must list the search commands (in-repo writers of a mid-row `\\\\|` and the stored-document census), each hit with its disposition (the 8 rewritten documents among them), and the rollout line (immediate refusal, naming the data loss or misread it closes)."
+      "file": "packages/envoy/internal/dispatch/pmdoc/table.go:422",
+      "description": "New panic on untrusted markdown. splitAtEvenEscapedPipes adds a split-off cell with row.InsertAfter(row, cell, next). When cell is the row's last child, goldmark's InsertAfter calls InsertBefore(self, nil, ...), which adds 1 to childCount and then AppendChild adds 1 again (goldmark ast.go:376-384, 353-366), so row.ChildCount() exceeds the real cell count. keepEscapedClosingPipes' guard `written > row.ChildCount()` (table.go:652) then lets its loop walk past the last cell and dereference nil. Reproduced at aef61f9e with a throwaway test: Parse(\"| h | i |\\n| --- | --- |\\n| a | b \\\\\\\\| \\\\|\\n\") returns ErrPanic (logged at ERROR with a stack); the same row without the escaped closing pipe gets the ErrSchema wide-row refusal; the base b6d8fa2a parses it with no error. The deep review saw 27 panics in 4,000 random rows at the head, 0 at the base. Census item 2 says such rows are refused. Fix: AppendChild when cell.NextSibling() == nil, InsertBefore(row, cell.NextSibling(), next) otherwise (or count cells by walking siblings), and add the row as a regression case expecting the wide-row ErrSchema."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/pmdoc/escape.go:825-835",
-      "description": "altReadsBack's comment says Parse reads a `|` after an even run of backslashes in a cell as escaped, now false; the pipeAfterEvenBackslashes guard is dead (both thermonuclear agents removed it in a scratch copy and saw no behaviour change). Delete the sentence and guard; move pipeAfterEvenBackslashes into table_test.go, its only other user."
+      "file": "packages/contracts/src/dispatch-tools.ts:910",
+      "description": "The doc-edit help says code whose text has a backslash right before a | is INVALID_OP; only an odd run is refused, and code `a\\\\|b` is stored (edits_test.go:1561). Say an odd run of backslashes; regenerate claude-envoy dist."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/pmdoc/render_table.go:216",
-      "description": "tableCodePipe.Error lays the table out on a fresh span budget, while GET /blocks uses spansBefore(doc, table); the doc comment says the cell is named as GET /blocks places it. They differ only once earlier tables spend maxSpanCells."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/pmdoc/render_table.go:84",
-      "description": "The browser-edit path stores the `|` as text after the code rather than refusing, against the spec decision's wording 'refused on write'. Accepted: a CRDT edit has no refusal channel and every character is kept; the documents and PR body name it. Recorded in Not proven / risk for the architect."
+      "file": "packages/envoy/internal/dispatch/pmdoc/table.go:406,439",
+      "description": "The split flag and the TableCell.Alignment write are dead: pmdoc's parseTableRow takes each cell's alignment from the table's Alignments by index (parse.go:790, 809), and nothing reads TableCell.Alignment. The loop's one job is trimming the row to the table's width, by walking siblings (not ChildCount, given the finding above). Same loop as the fix, so fix it there."
     }
   ],
-  "ci": "Required set lint, typecheck, test, pr-title (rulesets). CI head 64772417 (compare to 30d6bc60: handoffsOnly true, 1 file). Tests and Legion Envoy and Contracts runs were cancelled at 01:04Z with no newer push; re-run once (gh run rerun 40429689006, 40429689263); lint/typecheck/test queued at 01:25Z. Not read green this round; a REQUEST_CHANGES does not wait on it. The architect notes main is red on pi-envoy's skills-guard test since #2273 (01:07Z): main's red, not this PR's.",
-  "localChecks": "go test ./internal/dispatch/pmdoc/ at 30d6bc60 on this pod: only TestUpdateIsLinearInTheBlockCount fails (a timing test the implementer recorded failing at the base on this pod too).",
-  "thermonuclear": "At 30d6bc60: deep review CHANGES (Medium: the block-wide exemption; Minors as above), code quality CHANGES (stale altReadsBack comment and dead guard). Both found parse/render fixed points over hand-built table shapes and linear time on hostile rows.",
-  "documents": "architecture-assessment.md v4 and refactor-order.md v5 carry no open comment or ask; Open asks on INFRA-172: none. A1-A7 as the tester verified; not re-litigated."
+  "judgedNotDefects": [
+    "refuseCodePipeInTableCell's four positional strings: style, no behaviour.",
+    "codeSpanText groups a code span by writtenMarks while inlineCodeFence takes every adjacent code node: a drift risk only; both agents' probes of adjacent code under different marks and links read back correctly. Unifying it changes an older path's fences.",
+    "TableCodePipe's header on a full span budget: documented, differs only after earlier tables spend maxSpanCells; Unwrap used by a test only.",
+    "Tester observation: a refusal beside adjacent browser-left code quotes the merged span text; conservative and correct."
+  ],
+  "round1Threads": "PRRT_kwDORFy7ds6whGWi and PRRT_kwDORFy7ds6whGWn: the implementer's fixes in 96976206 verified (TableCodePipes multiset across changedBlocks on replace, delete, accept; header comment); both resolved by the implementer.",
+  "census": "Present. Re-ran the source-literal search at aef61f9e: 23 hits, equal to the body's list. Rollout immediate refusal naming the misread and data loss: accepted. Item 2 is false for the panic row until the fix.",
+  "ci": "Required set lint, typecheck, test, pr-title. CI head cd211658 (compare to aef61f9e: handoffsOnly true, 1 file); lint, typecheck, test, pr-title queued at 03:30Z; not read green. A REQUEST_CHANGES does not wait on it.",
+  "thermonuclear": "At aef61f9e: deep review CHANGES (the panic; Minor the help wording), code quality CHANGES (dead Alignment write and split flag, help wording, style items judged not defects). claude-envoy check-dist: dist matches a fresh build (both agents).",
+  "documents": "No open comments or asks on architecture-assessment.md or refactor-order.md; INFRA-172 has no open ask."
 }
