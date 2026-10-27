@@ -127,6 +127,13 @@ The hub refuses these before it registers anything, with an error naming the inp
 takes, whatever its cloud, and `nkey` is named as `aws:NatsService`'s users name it, so the two
 components spell a user's key and rules alike.
 
+`ListenerPermissions`, and through it `HostPermissions` and `DispatchPermissions`, holds the
+notification stream's stored-message get, `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS`: the
+read-only read the listener's `POST /v1/replay` makes to return the retained notifications a
+session missed while its NATS subscription was down. It can create, change or delete nothing.
+`SessionPermissions` does not hold it, so the session user reads what it missed only through a
+listener.
+
 `nkey` is the public key `envoy-infra seed generate` prints, and the seed stays in the secret
 store it wrote (see [NATS seeds](../README.md#nats-seeds)): a host's listener reads it from there
 into its `seed` with the hub's `natsUrl` as its `natsUrls`, and a Legion daemon reads its own. In the authorization `core`
@@ -196,9 +203,11 @@ which the listener allows only on a loopback address (`packages/envoy/cmd/listen
 the tailnet's policy for port 9020 is the only thing that decides who may call it, and a caller
 gets the whole API with no credential: it can publish to any topic outside the agent topics with
 a `source` of its choosing, under the listener's user's publish grant (Dispatch, GitHub, Slack,
-Legion and role notifications included), claim a role, list every session and delete one. That
-holds whether or not the hub has a `sessionUser`, so a hub without one still has an open bus for
-any device the policy lets reach 9020: grant 9020 only to devices that may act as any agent.
+Legion and role notifications included), claim a role, list every session and delete one, and
+read any session's stored inbox for the last 72 hours by naming its id (`POST /v1/replay`: the
+listener does not check that the session is live or that the caller is that session). That holds
+whether or not the hub has a `sessionUser`, so a hub without one still has an open bus for any
+device the policy lets reach 9020: grant 9020 only to devices that may act as any agent.
 
 Because the API takes no bearer, a web page open on any device the policy lets reach 9020 could
 otherwise post to it: a browser sends a cross-site form without asking. The listener refuses any
@@ -503,9 +512,13 @@ holds the cloud-config, so a change to anything the cloud-config is rendered fro
 new template. So does a plugin release that changes the rendering itself: the release that added
 `listener` and `sessionUser` renamed the secret fetcher and gives every hub a Serve configuration,
 so upgrading to it replaces every existing hub's VM once, with the outage below, even a hub that
-sets neither input. This release renders `ENVOY_ALLOWED_HOSTS` into the listener's unit, so moving
-to it replaces the VM of every hub that runs a listener, once, with that same outage, and replaces
-no hub without one: the cloud-config is the instance template's `user-data`, and a template cannot
+sets neither input. The release that rendered `ENVOY_ALLOWED_HOSTS` into the listener's unit
+replaced, once and with that same outage, the VM of every hub that runs a listener, and no hub
+without one. This release adds `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS` to
+`ListenerPermissions`, and so to `HostPermissions` and `DispatchPermissions`, which changes the
+rendered users of every hub with a `listener`, a `machineId` user or a `dispatchMachineId` user:
+moving such a hub to it replaces its VM once, with the outage below, and a hub with none of them
+keeps its VM. The cloud-config is the instance template's `user-data`, and a template cannot
 change. The group then replaces its VM at once (`PROACTIVE`, minimal action `REPLACE`), deleting
 it before it creates the next (`RECREATE`, no surge, at most one unavailable). NATS is down from
 the old VM's stop until the new one's `nats` unit starts, and its clients reconnect then. The new
