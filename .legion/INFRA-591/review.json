@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-591",
+  "completed": "2026-10-27T14:55:20Z",
+  "decision": "changes_requested",
+  "reviewedHead": "401b5db6a448187dfb9e8efa578dcada21a0e2d1",
+  "ciHead": "26a15dcf333e",
+  "critical": 0,
+  "important": 4,
+  "minor": 4,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/api/events.go:122; packages/envoy/internal/dispatch/api/delivery_live_hub_intake.go:82",
+      "description": "The relay's first start (Horizon.Await) runs before the SSE headers are written, and the hub's readCursors awaits the horizon before close(h.ready). So a fresh process sends no headers to the first SSE client, computes no Delivery view and drains no delivery-change intake until every transaction that holds an xid anywhere on the instance has ended. There is no bound. CI evidence: envoy-go at 26a15dcf333e (run 40497171591, job 122194201037) timed out in internal/dispatch/api after 10 min. TestSSEReplaysThenStreamsCommittedEvent missed its 2 s connect deadline at server_test.go:1289, and httptest.Server.Close then blocked on the handler. Reproduced locally on Postgres 16.2: one xid held in database postgres gives the same failure and the same 45 s hang; without the held xid the test passes in 2.01 s."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/events/horizon.go:190",
+      "description": "Safe joins an observation already in flight, and that observation can have taken its snapshot before the caller's commit. Its A is at or below H, so Pending() is false: the relay and the hub arm no gap re-read, and an event that committed above H waits for the next unrelated commit. Await already refuses such a flight; Safe needs the same rule."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/api/references.go:90",
+      "description": "GET /references?since= uses Safe. On a process where nothing else observes, the first since read after boot or after a Reset gets H=0 and returns no mentions. Every later read stops at the previous read's observation, however old. The route docs promise 'typically milliseconds'."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/events/horizon.go:373",
+      "description": "When the pending list is full (64), each new observation overwrites the newest slot. Under transactions that overlap without a break, the kept observations bunch up, and H can trail by up to about 2x the open-transaction length. Raise the cap or thin the list by time."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/server.go:349",
+      "description": "Any Pool.Horizon error makes the Horizon fall back to the shared pool, with nothing logged, and sync.Once keeps that choice for the process lifetime. The comment justifies the fallback only for a closed store."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/events/horizon.go:306",
+      "description": "warnStall runs on the runner's goroutine after close(done), which is the relay, the hub or a references handler. During a stall it adds up to 2 s once every 30 s."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/delivery_live_hub_intake.go:223",
+      "description": "The hub's gap re-read runs eventCursorCheck's two shared-pool queries at each tick (every 10-250 ms) while a gap is open. The relay skips that check on a gap re-read so that it uses no shared connection."
+    },
+    {
+      "severity": "minor",
+      "file": ".dispatch/architecture/dispatch-events.md:11",
+      "description": "The stated cost names transactions open when the event was written. The proof actually waits for every xid holder at the X of the first observation that sees the event, which can include transactions that began after the commit and non-event xid holders such as SELECT ... FOR UPDATE. The PR body says the same in its Change bullet."
+    }
+  ],
+  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality at 401b5db6: both CHANGES; findings adjudicated above",
+  "notes": "Required checks (lint, typecheck, test, pr-title) are green at CI head 26a15dcf333e, and 401b5db6 changes only .legion/ since then. Two checks that are not required are red: envoy-go (above) and dispatch. dispatch failed on an unrelated web unit-test timeout ('names mounted at staggered times plus a polled useAgents caller fetch at most once per 15 s'), so the Playwright browser suite did not run at this head. I queued a rerun of both failed jobs."
+}
