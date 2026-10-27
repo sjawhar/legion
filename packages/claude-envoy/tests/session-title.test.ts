@@ -399,9 +399,19 @@ test.skipIf(!hasTmux)(
 test("queryTmux is bounded even by a tmux that ignores SIGTERM", () => {
   const directory = mkdtempSync(join(tmpdir(), "title-tmux-"))
   const marker = join(directory, "ran")
-  writeFileSync(join(directory, "tmux"), `#!/bin/sh\ntrap "" TERM\ntouch ${marker}\nsleep 5\n`, {
-    mode: 0o755,
-  })
+  const gotTerm = join(directory, "got-term")
+  // The stub notes a SIGTERM and carries on, as a tmux that ignores it would, and would otherwise
+  // run five seconds. It also ends by itself after two, printing an answer: Bun 1.3.14 under gVisor
+  // sometimes never sends the kill a timed-out execFileSync owes (it waits for the child to exit and
+  // reports ETIMEDOUT with no signal; dispatch://INFRA-523/artifact/bun-spawnsync-timeout-issue-md),
+  // and a pod's run of this test then waited the whole five seconds. That end proves nothing by
+  // itself: an answer back means no timeout fired before it, and a got-term file means the kill
+  // was SIGTERM. The sleep's output goes nowhere, so a sleep the kill orphans holds no pipe.
+  writeFileSync(
+    join(directory, "tmux"),
+    `#!/bin/sh\ntrap 'touch ${gotTerm}' TERM\ntouch ${marker}\ntimeout -s KILL 2 sleep 5 >/dev/null 2>&1\necho survived\n`,
+    { mode: 0o755 },
+  )
   // A child of its own, so the stub is first on the PATH it starts with: execFileSync looks
   // `tmux` up on the PATH the process was launched with. The child times its own call and prints
   // the milliseconds beside the answer, because what is bounded is `queryTmux`, not Bun's
@@ -417,10 +427,11 @@ test("queryTmux is bounded even by a tmux that ignores SIGTERM", () => {
       { env: { ...process.env, PATH: `${directory}:${process.env["PATH"] ?? ""}` } },
     )
     const [answer, elapsed] = child.stdout.toString().split(" ")
+    // The one-second timeout fired before the stub's own end, and the call reports no answer.
     expect(answer).toBe("undefined")
     expect(existsSync(marker)).toBe(true)
-    // The stub ignores TERM and would sleep five seconds: the call waits out the one-second
-    // timeout, then is killed rather than waited for.
+    // The kill is SIGKILL, which the stub cannot note or ignore, never SIGTERM.
+    expect(existsSync(gotTerm)).toBe(false)
     expect(Number(elapsed)).toBeGreaterThanOrEqual(1_000)
     expect(Number(elapsed)).toBeLessThan(3_000)
   } finally {
