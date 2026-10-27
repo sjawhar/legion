@@ -2,36 +2,31 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-568",
-  "completed": "2026-10-27T14:13:12Z",
+  "completed": "2026-10-27T17:27:43Z",
   "decision": "changes_requested",
-  "reviewedCodeHead": "247b43fd729285f19cae2c206225d7bb4ec02c7d",
+  "round": 2,
+  "reviewedCodeHead": "34719431fb67217a2543823859988fe35b868b24",
   "critical": 0,
-  "important": 2,
-  "minor": 1,
+  "important": 1,
+  "minor": 0,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/related_terms.go:479",
-      "description": "The match-budget test breaks out of the score-ordered loop, so the first candidate whose df would pass relatedMatchBudget (3,000) drops every lower-scored candidate after it, rare words included. A mid-df word the text repeats outranks df-1 words (tf x idf); reproduced with N=20,000, deploy df 1,800 x30, rollout df 1,500 x20, quokka df 1, xanthan df 2: picked only 'deploy'. When N/10 > 3,000 (N > 30,000) a single allowed word with df > 3,000 that scores first leaves zero terms, and the check answers 'searched ... and found nothing' without searching. Fix: skip the over-budget candidate (continue) and stop only at relatedTermLimit; add a test where a high-tf mid-df term outranks tf-1 rare terms (TestRelatedTermsStopAtTheMatchBudget uses tf 1 everywhere, so it cannot tell break from continue)."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/suggestions.go:476",
-      "description": "bounded is derived from r.Context(), so a client that disconnects (Ctrl-C, a browser leaving the page) during the check is answered and recorded as reason 'timeout' ('did not answer within 5s') at :389, :399, :476 and :522; recordRelatedChecks writes it through WithoutCancel. The records route counts reason timeout as skipped_for_time, the figure production acceptance P1 reads. Fix: record timeout only when the allowance's deadline fired (context.DeadlineExceeded with the parent still live) and give a parent cancellation its own reason in 0130's check constraint."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/embedqueue/coverage.go:64",
-      "description": "The issue source re-implements 0131's issue_embedding_spec as an inline lateral join; the comment says the coverage text is the trigger's byte for byte, but only a copy keeps it so. Call issue_embedding_text(i.title, issue_embedding_spec(i.key)) from issues i."
+      "file": "CI: required check `test` (run 40535572374, job 122299778736) at code head 34719431",
+      "description": "The required `test` check is red: in the step 'Test the concurrent packages under the race detector' (`go test -count=1 -race ./internal/daemon/ ...` in packages/daemon), TestOneDeployRunWithTwoApplyingJobsWakesTwoLooks failed with 'check_wake_test.go:767: timed out waiting for the look's start row resuming the implementer', and the package then hit its 10-minute test timeout. This pull request does not change packages/daemon. The same family of check_wake deploy-run tests failed on five other pull requests' runs in the same hour (40534383268, 40534377471, 40532994176, 40532235789, plus a tmux test in 40534074894). main 2df3353c's push run passed. A red required check is never approved, and the code itself has no standing finding."
     }
   ],
-  "verified": {
-    "ci": "Required checks (rulesets: lint, typecheck, test, pr-title; no branch protection) at CI head 5f77669b are queued, not run; the runs at cdfddb65 and 6bc3a488 were cancelled. A request for changes does not wait on them.",
-    "e2eLines": "Both E2E (implementer) and E2E (tester) lines are present in the pull request body.",
-    "threads": "No review threads and no bot findings on the pull request (gh api graphql).",
-    "contractCensus": "Not required: no existing input is refused, no field is made required, removed or renamed; DispatchClient.issue() gains a created field, Suggestions and WriteSuggestion gain optional fields, and missing/answered_by/answered_at are kept for older clients.",
-    "thermonuclear": "deep-review and code-quality ran at 7a05af26 (code head 247b43fd): CHANGES each; the budget break reproduced by an overlay test at $TMPDIR/rev568/deep/budget_probe_test.go.",
-    "tests": "go test ./internal/dispatch/api -run 'Related|Suggestion|DecisionBlock|WriteAdvice' ok (93 pass, 2 corpus-gated skips); embedqueue ok; docs ok with -timeout 40m; bun test envoy-client 933 pass, contracts 294 pass; tsc clean."
+  "threads": {
+    "PRRT_kwDORFy7ds6wuPIJ": "accepted: fixed in fe5f66eb (budget skips with continue; two tests)",
+    "PRRT_kwDORFy7ds6wuPIP": "accepted: fixed in fe5f66eb (cancelled reason through WithTimeoutCause; verified for decision blocks and the meaning stage by overlay tests)",
+    "PRRT_kwDORFy7ds6wuPIT": "accepted: fixed in 110627e7 (coverage calls issue_embedding_spec)"
   },
-  "fastFollow": "Build the check's keyword arms by passing the rank expression into search's keyword legs (as searchPageAndTailSQL takes its legs) instead of rewriting searchQueryBody/searchQueryMeaningBody text at init with a panic guard (suggestions.go:88-123); deferred because it changes search.go, which INFRA-569 also edits."
+  "verified": {
+    "roundChanges": "fe5f66eb (budget continue, cancelled reason, 0135 constraint), 110627e7 (searchKeywordLegs(rank), no text rewrite or panic guard, coverage through issue_embedding_spec), merges a529e99b and 34719431 (migrations 0135/0136, README and CHANGELOG conflicts only; no stale 0130/0131 reference to this branch's migrations; main is still at the merge base 2df3353c).",
+    "sqlIdentity": "deep-review dumped searchQuery, searchQueryMeaning, relatedKeywordQuery and relatedMeaningQuery at d2fd3cd4 and 34719431: byte-identical (5,611 / 10,735 / 6,104 / 11,229 bytes).",
+    "tests": "go test ./internal/dispatch/api -run 'TestRelatedTerms|TestRelatedCheckBounds|TestDecisionBlock|TestMigration|TestSearch' ok; ./internal/dispatch/store ok; ./internal/dispatch/embedqueue ok.",
+    "ci": "Required set from the rulesets: lint, typecheck, test, pr-title; no branch protection. At code head 34719431: lint success, typecheck success, pr-title success (run 40537669934), test failure (run 40535572374). The compare from 34719431 to 19a825b2 changes only .legion/ (2 files).",
+    "thermonuclear": "deep-review: APPROVE at 19a825b2, no Medium or High finding; it ran overlay tests for allowance expiry vs cancellation (decision-block shared allowance gives timeout, a parent cancel gives cancelled, a cancel in the meaning stage gives cancelled). code-quality: last round's (a) and (b) resolved; two low items that change no behaviour, judged not defects (one helper for the two WithTimeoutCause sites; a dead timedOut argument at suggestions.go:518-519).",
+    "e2eLines": "E2E (implementer) and E2E (tester) present in the pull request body."
+  }
 }
