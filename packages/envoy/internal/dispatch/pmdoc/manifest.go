@@ -2,6 +2,7 @@ package pmdoc
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -299,6 +300,25 @@ func eachElement(nodes []*Node, yield func(Element) bool) bool {
 		}
 	}
 	return true
+}
+
+// unknownBeside is err, Validate's refusal of doc, a tree read from a document. Where err refuses a
+// known element's shape and doc also holds an element this build does not know, it is the refusal
+// of the first such element in document order instead (ErrUnknownElement): a repair of the shape
+// replaces the document whole, and would delete what a newer build wrote.
+func unknownBeside(doc *Node, err error) error {
+	if errors.Is(err, ErrUnknownElement) {
+		return err
+	}
+	var unknown Element
+	if eachElement([]*Node{doc}, func(element Element) bool {
+		_, declared := element.Versions()
+		unknown = element
+		return declared
+	}) {
+		return err
+	}
+	return unknownElement(fmt.Errorf("%w: %s, in a tree also refused as %v", ErrSchema, unknown, err))
 }
 
 // refuseUncreatable is the refusal of a write that makes nodes holding an element this build reads

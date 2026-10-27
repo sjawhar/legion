@@ -474,14 +474,23 @@ the issue had closed, among others - a writer's failed or cancelled commit, a fa
 or load, a history that did not decode), which says nothing of this request.
 `DOCUMENT_UNLOADABLE` (409) is a stored history this request itself could not decode
 (`docs.ErrDocumentUnloadable`), the one state `POST /api/v1/artifacts/{id}/rebuild` repairs and the
-one code the dashboard offers that rebuild for. `DOC_SCHEMA` is a tree outside the schema: one the
-document holds is a `docs.OutsideSchemaError`, which `treeOf` and `documentMarkdown` classify where
-they read or render a document's tree, so every route that starts from it - `GET /text`,
-`GET /blocks`, `POST /edits`, `POST /versions` - answers 409 with its one message, while a schema
-refusal of a tree a write itself produced is a 500 (`producedSchemaError`). Both are taken after
-the refusals that name the caller's own input or a missing block, so an ask block the renderer
-refused stays `400 INVALID_ASK_BLOCK`. Anything else is `INTERNAL`, as `writeHandlerError` answers
-it. Only a request that has gone away fails, decided by that request's
+one code the dashboard offers that rebuild for; its message says what a rebuild discards (every
+edit after the latest saved version) and that a person decides. `DOC_NEWER_CONTENT` (409) is a tree
+the document holds with an element this build does not know (`pmdoc.ErrUnknownElement`: a node,
+mark or typed block the manifest does not name, an undeclared attribute or an unlisted enum value),
+which a newer build wrote while two builds serve one database. It is a `docs.NewerContentError`,
+classified where `treeOf` and `documentMarkdown` classify a tree outside the schema, and it is not
+`ErrDocSchema`: a replacement from markdown, a rebuild and settlement all refuse or skip it rather
+than repair it, since a repair would delete the element, and the document socket closes with
+`4425`, which the provider reconnects on. A tree that holds such an element beside a known element
+in a broken shape is this code (`pmdoc` reads the unknown one first). `DOC_SCHEMA` is a tree outside
+the schema: one the document holds is a `docs.OutsideSchemaError`, which `treeOf` and
+`documentMarkdown` classify where they read or render a document's tree, so every route that starts
+from it - `GET /text`, `GET /blocks`, `POST /edits`, `POST /versions` - answers 409 with its one
+message, while a schema refusal of a tree a write itself produced is a 500 (`producedSchemaError`).
+Both are taken after the refusals that name the caller's own input or a missing block, so an ask
+block the renderer refused stays `400 INVALID_ASK_BLOCK`. Anything else is `INTERNAL`, as
+`writeHandlerError` answers it. Only a request that has gone away fails, decided by that request's
 own context rather than the error, since a room a writer's cancelled commit failed carries that
 writer's `context.Canceled` in its cause. Nor does that read wait for a failed room's recovery
 (`docs.WithoutRecoveryWait`): it is `DOC_SERVICE_UNAVAILABLE` at once, where `GET /text`,

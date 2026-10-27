@@ -43,7 +43,7 @@ func readDocument(frag *crdt.YXmlFragment, readDelta textDeltaReader, copyAttrs 
 	}
 	doc := &Node{Type: "doc", Children: children}
 	if err := doc.Validate(); err != nil {
-		return nil, err
+		return nil, unknownBeside(doc, err)
 	}
 	return doc, nil
 }

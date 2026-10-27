@@ -5,6 +5,8 @@ import { AGENT_STREAM_SUBJECT_PREFIX } from "../src/agent-stream";
 import {
   DEFAULT_ISSUE_PAGE_LIMIT,
   DELIVERY_DUPLICATE_WINDOW_MS,
+  DOCUMENT_NEWER_CONTENT_CLOSE_CODE,
+  DOCUMENT_NEWER_CONTENT_CLOSE_REASON,
   DOCUMENT_SCHEMA_CLOSE_CODE,
   DOCUMENT_SCHEMA_CLOSE_REASON,
   ISSUE_TITLE_MAX,
@@ -176,6 +178,14 @@ const ProjectNameMax = ${PROJECT_NAME_MAX}
 // reading of it cannot drift apart.
 const DocumentSchemaCloseCode = ${DOCUMENT_SCHEMA_CLOSE_CODE}
 const DocumentSchemaCloseReason = ${JSON.stringify(DOCUMENT_SCHEMA_CLOSE_REASON)}
+
+// DocumentNewerContentCloseCode and DocumentNewerContentCloseReason close a document websocket
+// whose room holds an element this build cannot read, before any sync. The Hocuspocus provider
+// reconnects on the code. Generated from DOCUMENT_NEWER_CONTENT_CLOSE_CODE and
+// DOCUMENT_NEWER_CONTENT_CLOSE_REASON in packages/contracts so the server's close and the
+// dashboard's reading of it cannot drift apart.
+const DocumentNewerContentCloseCode = ${DOCUMENT_NEWER_CONTENT_CLOSE_CODE}
+const DocumentNewerContentCloseReason = ${JSON.stringify(DOCUMENT_NEWER_CONTENT_CLOSE_REASON)}
 
 func NowMillis() int64 {
 	return time.Now().UnixMilli()

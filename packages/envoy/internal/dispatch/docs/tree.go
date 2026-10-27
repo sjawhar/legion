@@ -25,10 +25,19 @@ var (
 	// every route answers it alike (OutsideSchemaError).
 	ErrDocOutsideSchema = errors.New("document is outside the Proof schema; replace the document from markdown to repair it")
 	// ErrDocumentUnloadable is a document whose stored history does not decode, so nothing can read
-	// or open it. A rebuild from its latest saved version restores it (RebuildDocument).
-	ErrDocumentUnloadable = errors.New("the document's stored history cannot load; rebuild it from its latest saved version")
-	ErrDocumentLive       = errors.New("document is live")
-	ErrDocumentLoads      = errors.New("this document loads; nothing to rebuild — if it is outside the schema, replace it from markdown to repair it")
+	// or open it. A rebuild from its latest saved version (RebuildDocument) restores it and discards
+	// every edit made after that version, so a person decides it.
+	ErrDocumentUnloadable = errors.New("the document's stored history cannot load. A rebuild from the latest saved version discards every edit made after that version. A person decides whether to rebuild the document")
+	// ErrDocumentLive is a rebuild refused because the document is resident in this server.
+	ErrDocumentLive = errors.New("document is live")
+	// ErrDocumentLoads is a rebuild refused because the document's stored history loads. Its message
+	// names what each repair discards and leaves the choice to a person.
+	ErrDocumentLoads = errors.New("this document's stored history loads, so Dispatch refused the rebuild. A rebuild discards every edit made after the latest saved version. A replacement from markdown discards the current content. A person decides whether to do either")
+	// ErrDocNewerContent is the tree a document holds refused because it holds an element this
+	// build does not know (pmdoc.ErrUnknownElement): two builds serve one database during a
+	// release, and a newer build wrote it. It is not ErrDocSchema: no repair applies, and a
+	// replacement from markdown would delete the element (NewerContentError).
+	ErrDocNewerContent = errors.New("this Dispatch process's build cannot read an element of this document. During a release, another build may serve the document. Try again in one minute. If you replace the document, the replacement deletes that element")
 )
 
 // OutsideSchemaError is ErrDocOutsideSchema with the refusal that names what is wrong. treeOf and
@@ -49,13 +58,33 @@ func (e *OutsideSchemaError) Is(target error) bool {
 
 func (e *OutsideSchemaError) Unwrap() error { return e.Cause }
 
+// NewerContentError is ErrDocNewerContent with the refusal that names the element. treeOf and
+// documentMarkdown classify a document's tree by it where they read or render it, as they do an
+// OutsideSchemaError, so every route answers it alike. An operation that would repair a tree
+// outside the schema refuses it as it refuses any other error.
+type NewerContentError struct{ Cause error }
+
+func (e *NewerContentError) Error() string {
+	return ErrDocNewerContent.Error() + " (" + e.Cause.Error() + ")"
+}
+
+// Is makes it ErrDocNewerContent alone: not ErrDocSchema or ErrDocOutsideSchema, which a repair
+// answers.
+func (e *NewerContentError) Is(target error) bool { return target == ErrDocNewerContent }
+
+func (e *NewerContentError) Unwrap() error { return e.Cause }
+
 // documentSchemaError classifies err from reading, rendering or walking the tree a document holds -
 // a walk inside a write's transaction included, since a peer can have deepened that tree past the
-// schema's depth bound after the write read it: a schema refusal is an OutsideSchemaError, and any
-// other error is returned as it is.
+// schema's depth bound after the write read it: a refusal of an element this build does not know
+// is a NewerContentError, any other schema refusal is an OutsideSchemaError, and any other error is
+// returned as it is.
 func documentSchemaError(err error) error {
-	if err == nil || errors.Is(err, ErrDocOutsideSchema) {
+	if err == nil || errors.Is(err, ErrDocOutsideSchema) || errors.Is(err, ErrDocNewerContent) {
 		return err
+	}
+	if errors.Is(err, pmdoc.ErrUnknownElement) {
+		return &NewerContentError{Cause: err}
 	}
 	if errors.Is(err, ErrDocSchema) || errors.Is(err, pmdoc.ErrSchema) {
 		return &OutsideSchemaError{Cause: err}
@@ -513,9 +542,12 @@ func (r *renderedReplica) updateChangesMarkdown(room string) (bool, *pmdoc.Node)
 	markdown, tree, err := renderDocumentForUpdate(r.doc)
 	if err != nil {
 		r.markdown = nil
-		if errors.Is(err, ErrDocOutsideSchema) {
+		switch {
+		case errors.Is(err, ErrDocOutsideSchema):
 			slog.Warn("dispatch: updated document outside Proof schema", "room", room, "error", err)
-		} else {
+		case errors.Is(err, ErrDocNewerContent):
+			slog.Warn("dispatch: updated document holds an element this build cannot read", "room", room, "error", err)
+		default:
 			slog.Error("dispatch: read updated document", "room", room, "error", err)
 		}
 		return true, nil

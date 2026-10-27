@@ -37035,7 +37035,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_read",
     example: { issue: "DSP-1" },
-    description: "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "issue plus artifact (one of its documents), or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` + "--events N lists the last N, and --all-events every one. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
+    description: "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "issue plus artifact (one of its documents), or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOC_NEWER_CONTENT` (this Dispatch " + "build cannot read an element of the document; try again in one minute), `DOCUMENT_UNLOADABLE` (the " + "document's stored history cannot load; a person decides whether to rebuild it) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` + "--events N lists the last N, and --all-events every one. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -39222,9 +39222,22 @@ function asErrorShape(value) {
 function isJson(response) {
   return response.headers.get("content-type")?.includes("application/json") ?? false;
 }
-function isNoRoute(error48) {
+function answersNoRoute(error48) {
   return error48 instanceof DispatchServiceError && error48.status === 404 && error48.code === "NOT_FOUND" && error48.message.startsWith("no route for ");
 }
+var NO_ROUTE_RETRY_DELAYS_MS = [1000, 2000, 4000];
+var NO_ROUTE_ROLLING_RELEASE_MESSAGE = "The Dispatch process that answered does not offer this action yet, because a new release of " + "Dispatch is in progress. Try again in one minute.";
+
+class DispatchNoRouteError extends DispatchServiceError {
+  constructor() {
+    super("NOT_FOUND", 404, NO_ROUTE_ROLLING_RELEASE_MESSAGE);
+  }
+}
+var sleep = (ms) => {
+  const { promise: promise2, resolve } = Promise.withResolvers();
+  setTimeout(resolve, ms);
+  return promise2;
+};
 var ISSUE_EVENTS_PAGE_MAX = 200;
 var DISPATCH_TOOL_DEADLINE_MS = 60000;
 function requestSignal(signal) {
@@ -39318,11 +39331,13 @@ class DispatchClient {
   #baseUrl;
   #resolvedIssues = new Map;
   #signal;
-  constructor(baseUrl, token, fetchImpl = fetch, signal) {
+  #sleep;
+  constructor(baseUrl, token, fetchImpl = fetch, signal, wait = sleep) {
     this.token = token;
     this.fetchImpl = fetchImpl;
     this.#baseUrl = baseUrl.replace(/\/+$/, "");
     this.#signal = requestSignal(signal);
+    this.#sleep = wait;
   }
   async issue(input) {
     return this.#json("POST", ["api", "v1", "issues"], input);
@@ -39439,7 +39454,7 @@ class DispatchClient {
     try {
       return await this.#json("GET", ["api", "v1", "projects", project, "architecture-sources"]);
     } catch (error48) {
-      if (!isNoRoute(error48))
+      if (!(error48 instanceof DispatchNoRouteError))
         throw error48;
     }
     try {
@@ -39469,7 +39484,7 @@ class DispatchClient {
         "sync"
       ]);
     } catch (error48) {
-      if (!isNoRoute(error48))
+      if (!(error48 instanceof DispatchNoRouteError))
         throw error48;
     }
     const source = await this.#json("POST", [
@@ -39573,17 +39588,18 @@ class DispatchClient {
   }
   async fileVersion(id, version2) {
     const url2 = this.#url(["api", "v1", "artifacts", id, "versions", String(version2)]);
-    const response = await this.fetchImpl(url2, {
+    return this.#send(url2, {
       method: "GET",
       headers: { Accept: "*/*", Authorization: `Bearer ${this.token}` },
       signal: this.#signal
+    }, async (response) => {
+      if (!response.ok)
+        return this.#response("GET", url2, response);
+      return {
+        mime: response.headers.get("Content-Type") ?? "application/octet-stream",
+        bytes: new Uint8Array(await response.arrayBuffer())
+      };
     });
-    if (!response.ok)
-      return this.#response("GET", url2, response);
-    return {
-      mime: response.headers.get("Content-Type") ?? "application/octet-stream",
-      bytes: new Uint8Array(await response.arrayBuffer())
-    };
   }
   async artifactBlocks(id) {
     return this.#json("GET", ["api", "v1", "artifacts", id, "blocks"]);
@@ -39662,13 +39678,30 @@ class DispatchClient {
     if (body !== undefined)
       headers["Content-Type"] = "application/json";
     const url2 = this.#url(path, query);
-    const response = await this.fetchImpl(url2, {
+    return this.#send(url2, {
       method,
       headers,
       signal: this.#signal,
       ...body === undefined ? {} : { body: JSON.stringify(body) }
-    });
-    return { status: response.status, payload: await this.#response(method, url2, response) };
+    }, async (response) => ({
+      status: response.status,
+      payload: await this.#response(method, url2, response)
+    }));
+  }
+  async#send(url2, init, read) {
+    for (const delay of [...NO_ROUTE_RETRY_DELAYS_MS, undefined]) {
+      const response = await this.fetchImpl(url2, init);
+      try {
+        return await read(response);
+      } catch (error48) {
+        if (!answersNoRoute(error48))
+          throw error48;
+        if (delay === undefined)
+          break;
+      }
+      await this.#sleep(delay * (0.75 + Math.random() * 0.5));
+    }
+    throw new DispatchNoRouteError;
   }
   async#upload(path, input) {
     if ("content" in input)
@@ -39684,13 +39717,12 @@ class DispatchClient {
   }
   async#form(method, path, body) {
     const url2 = this.#url(path);
-    const response = await this.fetchImpl(url2, {
+    return this.#send(url2, {
       method,
       headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
       body,
       signal: this.#signal
-    });
-    return this.#response(method, url2, response);
+    }, (response) => this.#response(method, url2, response));
   }
   #url(path, query) {
     const url2 = new URL(`${path.map((segment) => encodeURIComponent(segment)).join("/")}`, `${this.#baseUrl}/`);
@@ -41776,7 +41808,7 @@ async function executeDispatchTool(input) {
     throw new ToolInputError(input.tool, checked.problems);
   const ownerArguments = checked.owner;
   const pictures = checked.pictures;
-  const dispatchClient = () => new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
+  const dispatchClient = () => new DispatchClient(configUrl, configToken, fetchImpl, input.signal, input.sleep);
   if (input.tool === "dispatch_open_asks") {
     const client2 = dispatchClient();
     const project = optionalString(ownerArguments.args, "project");
@@ -44811,7 +44843,7 @@ function daemonUnreachable(error48) {
 async function retryWhileDaemonRestarts(label, call, options = {}) {
   const { signal } = options;
   const now = options.now ?? Date.now;
-  const sleep = options.sleep ?? ((ms, abort) => {
+  const sleep2 = options.sleep ?? ((ms, abort) => {
     const wait = Promise.withResolvers();
     const timer = setTimeout(wait.resolve, ms);
     abort?.addEventListener("abort", () => {
@@ -44852,7 +44884,7 @@ async function retryWhileDaemonRestarts(label, call, options = {}) {
         options.onRetrying?.(message);
       }
       if (!signal?.aborted)
-        await sleep(Math.min(delay, remaining), signal);
+        await sleep2(Math.min(delay, remaining), signal);
       delay = Math.min(delay * 2, DAEMON_RESTART_MAX_DELAY_MS);
     }
   }

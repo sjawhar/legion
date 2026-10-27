@@ -716,6 +716,7 @@ export interface AnchorPosition {
   readonly anchor_block_error?:
     | "DOC_SERVICE_UNAVAILABLE"
     | "DOC_SCHEMA"
+    | "DOC_NEWER_CONTENT"
     | "DOCUMENT_UNLOADABLE"
     | "INTERNAL";
 }
@@ -2481,6 +2482,24 @@ export const DOCUMENT_SCHEMA_CLOSE_CODE = 4409;
  *  that document answer (`409 DOC_SCHEMA`). Generated into Go as
  *  `contracts.DocumentSchemaCloseReason`. */
 export const DOCUMENT_SCHEMA_CLOSE_REASON = "DOC_SCHEMA";
+
+/**
+ * The close code the document websocket (`/ws/doc/{room}`) refuses a room with when the tree it
+ * holds has an element that this Dispatch process's build cannot read: a newer build wrote it while
+ * two builds serve one database during a release. It completes the upgrade and closes with this
+ * code, and `DOCUMENT_NEWER_CONTENT_CLOSE_REASON`, before any sync, so a browser editor never
+ * receives a tree it would write back without that element. The pinned `@hocuspocus/provider`
+ * (2.15) stops reconnecting only on 4401 and 1009 (`HocuspocusProviderWebsocket.ts` `onClose`), so
+ * it reconnects on this code with its backoff, and a later attempt can reach a build that reads the
+ * document. 425 is HTTP's "Too Early". Generated into Go as
+ * `contracts.DocumentNewerContentCloseCode`.
+ */
+export const DOCUMENT_NEWER_CONTENT_CLOSE_CODE = 4425;
+
+/** The reason the document websocket closes with `DOCUMENT_NEWER_CONTENT_CLOSE_CODE`: the code reads
+ *  of that document answer (`409 DOC_NEWER_CONTENT`). Generated into Go as
+ *  `contracts.DocumentNewerContentCloseReason`. */
+export const DOCUMENT_NEWER_CONTENT_CLOSE_REASON = "DOC_NEWER_CONTENT";
 
 export interface ArtifactRebuildReport {
   readonly head: number;

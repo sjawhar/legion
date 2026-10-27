@@ -135,7 +135,7 @@ func (s *server) anchorBlock(ctx context.Context, anchor *model.Anchor) (model.A
 	case code == codeDocServiceUnavailable:
 	case errors.Is(err, pmdoc.ErrTargetNotFound):
 		return model.AnchorPosition{}, nil
-	case code == codeDocSchema, code == codeDocumentUnloadable:
+	case code == codeDocSchema, code == codeDocNewerContent, code == codeDocumentUnloadable:
 	default:
 		code = codeInternal
 	}

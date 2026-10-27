@@ -788,14 +788,24 @@ checks every socket itself, so such a read admits at most a socket the server re
 admission's own read alone decides, and only an admission opens anything: a `409 DOC_SCHEMA` read
 shows the repair message and a markdown upload under the document's own name (whatever the picked
 file is called) that repairs it, `409 DOCUMENT_UNLOADABLE` offers the rebuild from the latest
-version, and any other failure says the document could not load. A blocked admission is admitted
+version, and any other failure says the document could not load. A `409 DOC_NEWER_CONTENT` read is
+a tree holding an element this build of Dispatch cannot read, which a newer build wrote during a
+release: nothing here repairs it, and a replacement would delete that element, so the page offers
+no upload or rebuild. It says "This document holds content this version of Dispatch cannot show
+yet. It reloads in a minute." and admits again on its own after 0, 1, 2, 4 and 8 seconds, then
+once a minute, until a read succeeds; `isDocumentNewerContent` errors are retried like any
+transient failure (`isRetryableQueryError`). A blocked admission is admitted
 again by the next successful read of the text - the refetch a repair upload's or a rebuild's
 invalidation makes - so a repair reconnects the editor. After admission the provider owns
 reconnects, and the server is what stops one into an unreadable room: it closes the socket with
 code `4409` (`DOCUMENT_SCHEMA_CLOSE_CODE` in `packages/contracts`) before any sync, and
 `connection.ts` stops the provider and calls `onOutsideSchema`, where `ProofDocument` tears the
 editor down and admits again after 0, 1, 2, 4 and 8 seconds for successive refusals; the sixth in a
-row stops reconnecting and asks for a reload, and a socket that syncs ends the run. Later refetches
+row stops reconnecting and asks for a reload, and a socket that syncs ends the run. A room holding
+an element this build cannot read closes with code `4425` (`DOCUMENT_NEWER_CONTENT_CLOSE_CODE`)
+instead, which `connection.ts` leaves to the provider: `@hocuspocus/provider` 2.15 stops only on
+4401 and 1009, so it reconnects with its backoff and can reach a build that reads the document.
+Later refetches
 of the text - every `artifact.version` event and every reconnect of the event stream refresh it -
 leave a connected editor alone whether they succeed or fail, so an outage that answers them 500 or
 503 keeps the editor and the edits it holds.

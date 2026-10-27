@@ -33,6 +33,27 @@ var ErrSchema = errors.New("outside Proof schema")
 // inline HTML only.
 var ErrBlockHTML = fmt.Errorf("%w: block HTML is not accepted by Proof", ErrSchema)
 
+// ErrUnknownElement marks a schema refusal (ErrSchema) of an element this build does not know: a
+// node, mark or typed block its manifest does not name, an attribute a typed block does not
+// declare, or a value an enum attribute does not list. Two builds serve one database during a
+// release, so a newer build can have written it. A reader tells it from a known element in a
+// broken shape, which is ErrSchema alone.
+var ErrUnknownElement = errors.New("element this build does not know")
+
+// unknownElementError is a refusal of an element this build does not know: err, which names it,
+// is also ErrUnknownElement, and keeps its own message.
+type unknownElementError struct{ err error }
+
+func (e unknownElementError) Error() string { return e.err.Error() }
+
+func (e unknownElementError) Is(target error) bool { return target == ErrUnknownElement }
+
+func (e unknownElementError) Unwrap() error { return e.err }
+
+// unknownElement is err, a refusal of an element this build does not know, marked as
+// ErrUnknownElement.
+func unknownElement(err error) error { return unknownElementError{err: err} }
+
 var yattrMarkSuffix = regexp.MustCompile(`^(.*)--[a-zA-Z0-9+/=]{8}$`)
 
 // sortMarks puts marks in one order whatever order they arrive in: by type, then, for two marks of
@@ -93,7 +114,7 @@ func validateNode(n *Node, depth int) error {
 	}
 	if !nodeTypes[n.Type] {
 		if _, typed := typedBlock(n.Type); !typed {
-			return fmt.Errorf("%w: node %q", ErrSchema, n.Type)
+			return unknownElement(fmt.Errorf("%w: node %q", ErrSchema, n.Type))
 		}
 	}
 	if n.Type != "text" && len(n.Marks) != 0 {
@@ -101,7 +122,7 @@ func validateNode(n *Node, depth int) error {
 	}
 	for _, m := range n.Marks {
 		if !markTypes[m.Type] {
-			return fmt.Errorf("%w: mark %q", ErrSchema, m.Type)
+			return unknownElement(fmt.Errorf("%w: mark %q", ErrSchema, m.Type))
 		}
 		if err := attrNestingError("mark", m.Type, m.Attrs, maxMarkAttrNesting); err != nil {
 			return err
@@ -189,13 +210,13 @@ func undeclaredAttributes(typeName string, attrs Attrs, declared map[string]Bloc
 	case 0:
 		return nil
 	case 1:
-		return fmt.Errorf("%w: typed block %q does not declare attribute %q", ErrSchema, typeName, names[0])
+		return unknownElement(fmt.Errorf("%w: typed block %q does not declare attribute %q", ErrSchema, typeName, names[0]))
 	}
 	sort.Strings(names)
 	for index, name := range names {
 		names[index] = fmt.Sprintf("%q", name)
 	}
-	return fmt.Errorf("%w: typed block %q does not declare attributes %s", ErrSchema, typeName, strings.Join(names, ", "))
+	return unknownElement(fmt.Errorf("%w: typed block %q does not declare attributes %s", ErrSchema, typeName, strings.Join(names, ", ")))
 }
 
 func validateTypedBlock(n *Node, typ BlockTypeSchema) error {
@@ -240,7 +261,7 @@ func validateTypedBlock(n *Node, typ BlockTypeSchema) error {
 			continue
 		}
 		if err := validateAttributeValue(definition, value); err != nil {
-			return fmt.Errorf("%w: typed block %q attribute %q: %v", ErrSchema, n.Type, name, err)
+			return fmt.Errorf("%w: typed block %q attribute %q: %w", ErrSchema, n.Type, name, err)
 		}
 	}
 	// A block an earlier build wrote may lack an attribute added since: it reads with the

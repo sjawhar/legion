@@ -213,7 +213,7 @@ func validateAttributeValue(attr BlockAttributeSchema, value any) error {
 				return nil
 			}
 		}
-		return fmt.Errorf("must be one of %s, got %q", strings.Join(attr.Choices, ", "), text)
+		return unknownElement(fmt.Errorf("must be one of %s, got %q", strings.Join(attr.Choices, ", "), text))
 	case "string[]":
 		switch items := value.(type) {
 		case []string:

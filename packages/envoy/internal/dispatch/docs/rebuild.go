@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
@@ -63,7 +65,11 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	// (ErrRoomBehindHead): its settlement closes the room (reloadRoomBehindHead), and its
 	// browser's append fails it outright, and either way the reload reads the rebuilt document.
 	if s.srv.GetDoc(artifactID) != nil {
-		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s is live in this server; close its editors and retry two minutes later, or replace it from markdown instead", ErrDocumentLive, artifactID)
+		latest, err := savedVersionNumber(ctx, tx, artifactID)
+		if err != nil {
+			return RebuildReport{}, VersionResult{}, err
+		}
+		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s is open in this Dispatch process, or its last editor left it less than two minutes ago, so Dispatch refused the rebuild. A rebuild discards every edit made after saved version %d. A replacement from markdown discards the current content. A person decides whether to do either", ErrDocumentLive, artifactID, latest)
 	}
 	loaded, err := s.persistence.Load(ctx, artifactID)
 	if err != nil {
@@ -71,7 +77,11 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	}
 	validationErr := validateUpdate(loaded.Update)
 	if validationErr == nil {
-		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s", ErrDocumentLoads, artifactID)
+		latest, err := savedVersionNumber(ctx, tx, artifactID)
+		if err != nil {
+			return RebuildReport{}, VersionResult{}, err
+		}
+		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w (document %s, latest saved version %d)", ErrDocumentLoads, artifactID, latest)
 	}
 	// The owner row before the room lock the write below takes, as every writer that takes both
 	// does (lockDocumentRoom). Held, it also keeps the open asks the replacement must keep, and
@@ -140,4 +150,16 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	}
 	report.SourceVersion = written.version.Number
 	return report, VersionResult{Version: written.version, Wrote: true, Changes: written.changes}, nil
+}
+
+// savedVersionNumber is the number of artifactID's latest saved version, which a refused rebuild
+// names: a rebuild discards every edit made after it.
+func savedVersionNumber(ctx context.Context, tx pgx.Tx, artifactID string) (int, error) {
+	var number int
+	if err := tx.QueryRow(ctx, `
+		select coalesce(max(number), 0) from artifact_versions where artifact_id = $1
+	`, artifactID).Scan(&number); err != nil {
+		return 0, fmt.Errorf("read latest document version number: %w", err)
+	}
+	return number, nil
 }

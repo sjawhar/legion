@@ -1191,6 +1191,24 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	s.settleRoomWithin(context.Background(), room, generation)
 }
 
+// skipUnreadableSettlement reports whether err stops a settlement at a document whose tree it cannot
+// read, and logs it: a tree outside the Proof schema, which a replacement from markdown repairs, or
+// a tree holding an element this build does not know (ErrDocNewerContent), which a newer build
+// wrote while two builds serve one database. The settlement writes no version and records no
+// failure, and the document stays unsettled for a later settlement - a repair's, or one on a build
+// that reads the element.
+func skipUnreadableSettlement(room string, err error) bool {
+	switch {
+	case errors.Is(err, ErrDocNewerContent):
+		slog.Warn("dispatch: settle document holding an element this build cannot read; no version written", "room", room, "error", err)
+	case errors.Is(err, ErrDocSchema):
+		slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
+	default:
+		return false
+	}
+	return true
+}
+
 // settleRoomWithin settles room under parent. A timer's settlement runs under no deadline; the one
 // Shutdown runs gets its drain budget. When parent ends first the settlement's database work is
 // cancelled and its transaction rolls back, and nothing retries it or counts it as a failure: the
@@ -1388,8 +1406,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// the generation.
 	read, credit, err := s.readSettlementTree(state, owed, doc, room, s.afterSettleAuthorsTake)
 	if err != nil {
-		if errors.Is(err, ErrDocSchema) {
-			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
+		if skipUnreadableSettlement(room, err) {
 			return
 		}
 		retry(err)
@@ -1447,8 +1464,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		})
 		keep(slot, update)
 		if err != nil {
-			if len(slots) == 0 && errors.Is(err, ErrDocSchema) {
-				slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
+			if len(slots) == 0 && skipUnreadableSettlement(room, err) {
 				return
 			}
 			abandon(err)
@@ -1571,8 +1587,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	}
 	markdown, offsets, err := renderTreeWithOffsets(versioned)
 	if err != nil {
-		if len(slots) == 0 && errors.Is(err, ErrDocSchema) {
-			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
+		if len(slots) == 0 && skipUnreadableSettlement(room, err) {
 			return
 		}
 		abandon(err)

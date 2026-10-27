@@ -182,12 +182,34 @@ func (s *Service) takePreload(room string) (persistence.LoadResult, bool) {
 // repair state rather than as a dropped connection to retry.
 const documentSchemaCloseCode = contracts.DocumentSchemaCloseCode
 
+// documentNewerContentCloseCode closes a document websocket whose room holds an element this
+// build does not know (DOCUMENT_NEWER_CONTENT_CLOSE_CODE in packages/contracts). A newer build
+// wrote it while two builds serve one database, and a browser editor would drop it and write the
+// result back. The pinned @hocuspocus/provider 2.15 stops reconnecting only on 4401 and 1009
+// (packages/dispatch/node_modules/@hocuspocus/provider/src/HocuspocusProviderWebsocket.ts:493-529,
+// onClose), and a socket closed before any message rejects its connection attempt, which the
+// provider retries with its backoff (:265-288). So it reconnects on this code, and a later attempt
+// can reach a build that reads the document.
+const documentNewerContentCloseCode = contracts.DocumentNewerContentCloseCode
+
 // refuseOutsideSchema completes the upgrade only to close it with documentSchemaCloseCode before
 // anything of the document is sent: a browser reads a close code, never the status of a refused
-// upgrade. The zero upgrader keeps the same-origin rule ygo's own upgrade applies with no
-// AllowedOrigins configured.
+// upgrade.
 func refuseOutsideSchema(w http.ResponseWriter, r *http.Request, room string, cause error) {
 	slog.Warn("dispatch: refuse a document socket outside Proof schema; a replacement from markdown repairs it", "room", room, "error", cause)
+	refuseSocket(w, r, documentSchemaCloseCode, contracts.DocumentSchemaCloseReason)
+}
+
+// refuseNewerContent completes the upgrade only to close it with documentNewerContentCloseCode
+// before anything of the document is sent.
+func refuseNewerContent(w http.ResponseWriter, r *http.Request, room string, cause error) {
+	slog.Warn("dispatch: refuse a document socket holding an element this build cannot read; the provider reconnects", "room", room, "error", cause)
+	refuseSocket(w, r, documentNewerContentCloseCode, contracts.DocumentNewerContentCloseReason)
+}
+
+// refuseSocket completes the upgrade only to close it with code and reason. The zero upgrader
+// keeps the same-origin rule ygo's own upgrade applies with no AllowedOrigins configured.
+func refuseSocket(w http.ResponseWriter, r *http.Request, code int, reason string) {
 	var upgrader gws.Upgrader
 	connection, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -195,7 +217,7 @@ func refuseOutsideSchema(w http.ResponseWriter, r *http.Request, room string, ca
 	}
 	defer connection.Close()
 	deadline := time.Now().Add(time.Second)
-	if err := connection.WriteControl(gws.CloseMessage, gws.FormatCloseMessage(documentSchemaCloseCode, contracts.DocumentSchemaCloseReason), deadline); err != nil {
+	if err := connection.WriteControl(gws.CloseMessage, gws.FormatCloseMessage(code, reason), deadline); err != nil {
 		return
 	}
 	// The client's close in reply completes the handshake; whatever it sent before that is
@@ -236,14 +258,19 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// A browser editor normalizes a tree it cannot represent and writes the result back, so no
 	// connection - a first one, or a provider's reconnect - joins a room outside the Proof schema
-	// until it is replaced from markdown. The server decides it here, for every client at once, by
-	// the same stored document and rendering `/text` answers with (readDocument), so a socket is
-	// refused exactly when that read is ErrDocOutsideSchema.
+	// until it is replaced from markdown, or a room holding an element this build does not know,
+	// which a newer build wrote. The server decides it here, for every client at once, by the same
+	// stored document and rendering `/text` answers with (readDocument), so a socket is refused
+	// exactly when that read is ErrDocOutsideSchema or ErrDocNewerContent.
 	tree, loaded, err := s.loadTree(r.Context(), room)
 	if err == nil && tree != nil {
-		if _, renderErr := documentMarkdown(tree); errors.Is(renderErr, ErrDocOutsideSchema) {
+		if _, renderErr := documentMarkdown(tree); errors.Is(renderErr, ErrDocOutsideSchema) || errors.Is(renderErr, ErrDocNewerContent) {
 			err = renderErr
 		}
+	}
+	if errors.Is(err, ErrDocNewerContent) {
+		refuseNewerContent(w, r, room, err)
+		return
 	}
 	if errors.Is(err, ErrDocOutsideSchema) {
 		refuseOutsideSchema(w, r, room, err)
@@ -439,6 +466,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	switch {
 	case errors.Is(err, ErrDocOutsideSchema):
 		slog.Warn("dispatch: loaded document outside Proof schema; a replacement from markdown repairs it", "room", room, "error", err)
+	case errors.Is(err, ErrDocNewerContent):
+		// The room loads, so a write meets the document's own refusal rather than a failed room.
+		slog.Warn("dispatch: loaded document holding an element this build cannot read; another build may serve it", "room", room, "error", err)
 	case err != nil:
 		return err
 	default:

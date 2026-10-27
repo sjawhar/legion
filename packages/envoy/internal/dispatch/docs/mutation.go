@@ -111,6 +111,9 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	// The tree the operation starts from. One outside the Proof schema - the reader refuses it, or
 	// only the renderer does - is the document's own refusal (OutsideSchemaError), which every
 	// schema refusal this operation meets is then answered with, unless the operation repairs it.
+	// One holding an element this build does not know (NewerContentError) is refused here, as any
+	// other error is: no operation of this build repairs it, since a repair would delete what a
+	// newer build wrote.
 	// Its rendering is taken only when something needs it: a failure to classify, or the content
 	// comparison of a write that changed the fork.
 	before, startErr := treeOf(fork)
@@ -330,6 +333,8 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		}
 		// A tree outside the Proof schema - one treeOf refuses, or one it reads that does not
 		// render - has no readable text to compare or reanchor against: this replacement repairs it.
+		// A tree holding an element this build does not know (ErrDocNewerContent) is refused, as
+		// applyLive refuses it before this runs, so no replacement deletes that element.
 		repairing := errors.Is(err, ErrDocOutsideSchema)
 		if err != nil && !repairing {
 			return err
