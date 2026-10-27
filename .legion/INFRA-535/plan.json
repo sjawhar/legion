@@ -1,0 +1,134 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-535",
+  "completed": "2026-10-27T01:42:00Z",
+  "planDocument": "dispatch://INFRA-535/artifact/plan-md",
+  "summary": "Go's emphasisParser.Parse lets a * or _ run open where a ~ follows it and close where a ~ precedes it (micromark's attentionMarkers), outside flankingOnly mode, on top of INFRA-534's pmdoc pairing in micromark's pass order. Tests first and red at the base: a Go table test comparing Parse and Render read-back with the headless engine, and a Playwright test comparing a document written through the API with the same text as a comment. Then corpus + fixtures, comments/AGENTS.md/CHANGELOG, linearity shapes, and differential.sh over INFRA-534's generated corpus and over base's own renderings with every gate at 0.",
+  "baseCommit": "INFRA-534's merge commit on main (INFRA-535 is blocked by INFRA-534; the planning ran at main 4bbb2a9c)",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase rules, push, handoff, PR body (references/pr-body.md) and the proof shape for implement.json",
+      "dispatch: the production check writes a project document (dispatch artifact) and reads it back (dispatch doc-read)"
+    ],
+    "test": [
+      "legion-worker: re-run the T1 and T2 commands at base and head, quote both, and record proof entries with negative controls (references/pr-body.md)"
+    ],
+    "review": [
+      "legion-worker: merge gate and review threads (references/merge-gate.md, references/review-threads.md); check that flankingOnly stays CommonMark-only and that the differential gates read 0"
+    ]
+  },
+  "tasks": [
+    {
+      "id": "T0",
+      "title": "Rebase the plan on INFRA-534's merge",
+      "detail": "Start on main after INFRA-534 merges. Read its pairing function and emphasisParser.Parse as merged. Expected: the three spec cases still differ from the engine, and [**~~**d**~~**](https://e.com/u) reads as the engine reads it. If INFRA-534 already applied the ~ marker or did not build micromark's order, report to the INFRA-138 architect before writing code."
+    },
+    {
+      "id": "T1",
+      "title": "Go table test, red at base",
+      "files": ["packages/envoy/internal/dispatch/pmdoc/emphasis_marker_test.go (new, or INFRA-534's emphasis test file)"],
+      "detail": "TestARunBesideATildeOpensAndClosesAsTheEditorReadsIt over the plan's 13 table rows plus context rows (table cell, heading, link label, image alt, quote, list item). Per row: Parse(md) equals engineReadings(md) (as judge compares, differential_test.go:294-295); Render(Parse(md)) read back by Parse and engineReadings equals Parse(md). Rows 1-9 fail step 1 at base; controls pass. bun on PATH and bun install required, else engineReadings skips.",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/envoy\" && go test ./internal/dispatch/pmdoc -run 'TestARunBesideATildeOpensAndClosesAsTheEditorReadsIt' -count=1 -v"
+    },
+    {
+      "id": "T2",
+      "title": "Browser test, red at base",
+      "files": ["packages/dispatch/e2e/emphasis-beside-a-tilde.e2e.ts (new)"],
+      "detail": "Pattern conversation.e2e.ts:71-134. createIssue with spec 'One b*~* text.\\n\\nTwo ~**b<* end.\\n\\nThree *b**~~ end.\\n\\nFour b**~** text.\\n' and createComment unanchored with the same body. On /issues/<key>/spec and on the Conversation turn (data-turn prefix comment:, no [data-markdown-fallback]), read each paragraph's runs (text + em/strong/strike/link marks) and assert both equal the engine's reading written in the test. Base: comment passes, document's One/Four lack em/strong, Two/Three have em. Head: pass.",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/dispatch\" && bun run build:web && bun run e2e -- emphasis-beside-a-tilde.e2e.ts --project chromium (base run: the same spec file in a checkout of the base commit under $TMPDIR)"
+    },
+    {
+      "id": "T3",
+      "title": "The fix",
+      "files": ["packages/envoy/internal/dispatch/pmdoc/emphasis.go"],
+      "detail": "In emphasisParser.Parse, when !p.flankingOnly: canOpen also where after == '~', canClose also where before == '~'. flankingOnly unchanged; INFRA-534's pairing function untouched."
+    },
+    {
+      "id": "T4",
+      "title": "Corpus, fixtures, comments, AGENTS.md, CHANGELOG",
+      "files": [
+        "packages/envoy/internal/dispatch/pmdoc/testdata/corpus/emphasis-beside-a-tilde.md (new)",
+        "packages/envoy/internal/dispatch/pmdoc/testdata/fixtures.json",
+        "packages/envoy/internal/dispatch/pmdoc/testdata/splices.json",
+        "packages/envoy/internal/dispatch/pmdoc/testdata/corpus/emphasis-beside-another-marker.md",
+        "packages/envoy/internal/dispatch/pmdoc/emphasis.go",
+        "packages/envoy/internal/dispatch/pmdoc/render_inline.go",
+        "packages/envoy/AGENTS.md",
+        "packages/envoy/CHANGELOG.md"
+      ],
+      "detail": "Corpus file with rows 1-9; bun run gen then bun run check in pmdoc/gen. Rewrite emphasis-beside-another-marker.md:18, emphasis.go:32-47, render_inline.go:103-107 ('another * or _' gains ~), AGENTS.md:1536-1541. CHANGELOG [Unreleased] Fixed entry.",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/envoy/internal/dispatch/pmdoc/gen\" && bun run gen && bun run check"
+    },
+    {
+      "id": "T5",
+      "title": "Linearity shapes",
+      "files": ["packages/envoy/internal/dispatch/pmdoc/linear_test.go"],
+      "detail": "Parse shapes a*~, ~**a, a_~, ~*a** (linear_test.go:56); render shape b*~ (linear_test.go:70). The pod's clock fails [a, a_b& and [^a at main already; CI envoy-go and envoy-go-race are the authority.",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/envoy\" && go test ./internal/dispatch/pmdoc -run TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText -count=1 -v"
+    },
+    {
+      "id": "T6",
+      "title": "Suites and differential",
+      "detail": "go test ./internal/dispatch/pmdoc/ ./internal/dispatch/docs/ -count=1 and go vet ./internal/dispatch/pmdoc/ (packages/envoy); bun run lint && bun run typecheck (packages/dispatch). differential.sh --base <INFRA-534 merge> --corpus <INFRA-534's delimiter-corpus.ts output, 20000> --out $TMPDIR/infra-535-diff/run1: every GATE 0, fixed > 0 including corpus:emphasis-beside-a-tilde. Second run over base's renderings (jq -c 'select(.render != null) | {id, md: .render}' run1/base.jsonl): every GATE 0. Any flagged document is fixed in this change."
+    },
+    {
+      "id": "T7",
+      "title": "Pull request",
+      "detail": "One PR against main, 'Dispatch: INFRA-535', T1/T2 red at base and green at head quoted, both differential summaries, two E2E lines."
+    }
+  ],
+  "acceptance": [
+    {
+      "criterion": "A1: each spec case reads the same in Go and the headless engine",
+      "surface": "Go pmdoc.Parse against the engine (gen/differential.ts)",
+      "command": "T1 command",
+      "negativeControl": "at the base, rows 1-3 fail naming Go's tree against the engine's"
+    },
+    {
+      "criterion": "A1: a document written through the API shows the same emphasis as a comment",
+      "surface": "Dispatch /issues/<key>/spec and its Conversation tab, Chromium, real Go server and Postgres",
+      "command": "T2 command",
+      "negativeControl": "the same spec file at the base commit: the document's One paragraph has no em, Two and Three have one"
+    },
+    {
+      "criterion": "No stored document changes meaning or bytes",
+      "surface": "pmdoc differential (gen/differential.sh)",
+      "command": "T6 differential commands",
+      "negativeControl": "a head with the marker also in flankingOnly mode shows churn"
+    },
+    {
+      "criterion": "Pairing stays linear",
+      "surface": "linear_test.go",
+      "command": "T5 command; authority CI envoy-go",
+      "negativeControl": "none in the pod: its clock already fails three shapes at main"
+    },
+    {
+      "criterion": "Production check after the deploy",
+      "surface": "production Dispatch, project document page",
+      "command": "dispatch artifact --project INFRA --name infra-535-production-check.md --content-file - (T2 body); gh api \"repos/theorem-labs/agent-infra/contents/legion/checks/dispatch-production-check.sh?ref=main\" -H \"Accept: application/vnd.github.raw\" | bash -s -- --commit <merged sha> --page /projects/INFRA/documents/infra-535-production-check-md --route /api/v1/projects/INFRA/artifacts/infra-535-production-check-md; dispatch doc-read --project INFRA --artifact infra-535-production-check-md, expecting the head's stored spellings from T1 step 2",
+      "negativeControl": "a build before the merge stores the One line as text (asterisks escaped) and Two/Three with an italic"
+    }
+  ],
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "The flankingOnly reader's pairing order and marker rule are unspecified; byte stability rests on it (render_inline.go:117-119).", "answer": "T3 keeps the ~ marker out of flankingOnly mode; the pairing order is INFRA-534's (the architect moved the order there), and the INFRA-534 planner was told to keep flankingOnly on goldmark's order. Comments in emphasis.go, render_inline.go and AGENTS.md updated (T4)."},
+      {"finding": "Scoped recursive passes are quadratic if run literally.", "answer": "Moved out of scope: INFRA-534 builds the pairing order (architect's decision 2026-10-27). T5 adds the shapes the new marker turns into open-and-close runs; CI envoy-go is the authority for linearity."},
+      {"finding": "The second kind's pass needs its scope spelled out (e.g. *a ~b* c~).", "answer": "INFRA-534's scope; the measured engine readings (`*a ~b* c~` = em(a ~b) + ` c~`, `~a *b~ c*` = strike(a *b) + ` c*`) were sent to the INFRA-534 planner."},
+      {"finding": "Recording which kind came first must follow micromark's tokenization.", "answer": "INFRA-534's scope; edge facts (`\\~~`, a ~ in a bare URL path, [^a_b] defined or not) were measured and sent to the INFRA-534 planner. For the marker itself: the plan's table includes escaped `\\~`, `&#126;`, a `~~~` run and `_` control rows."},
+      {"finding": "The e2e must fail at base for the right reason: assert against the engine's reading, prove the comment was rendered, avoid anchoring on case text.", "answer": "T2 asserts each paragraph against the engine's reading written in the test, asserts no [data-markdown-fallback] in the comment, finds paragraphs by a stable first word and posts the comment unanchored; the base run is the same file in a base checkout."},
+      {"finding": "The pass-order work has no source in the issue.", "answer": "Resolved by the architect's narrowing: INFRA-535 does only the classification, which is the issue's Change; the order is INFRA-534's (architect's comment on INFRA-535, 2026-10-27T01:18:40Z, and the 01:37Z update)."},
+      {"finding": "Nothing measures stored renderings read by the new parser (approval carry, rebuilds).", "answer": "T6 adds a second differential run whose corpus is base's own renderings, every gate 0; any flagged document is fixed in this change."},
+      {"finding": "The production check has no page that exercises the change.", "answer": "The acceptance row creates a project document holding the cases after the deploy and runs the check on /projects/INFRA/documents/infra-535-production-check-md, then reads its stored markdown."},
+      {"finding": "The generated corpus is underspecified.", "answer": "T6 uses INFRA-534's committed generator (pmdoc/gen/delimiter-corpus.ts, 20000 paragraphs, deterministic); pieces this issue needs (`<`, `.`, `\\~~`, a URL with ~, [^a_b], image label, reference link) were requested from the INFRA-534 planner. --out under $TMPDIR; fixed > 0 required; any churn is a defect."},
+      {"finding": "Unnamed consumers: docs/history_fold_test.go reads fixtures.json; splices.json regenerates; render read-back rows; CHANGELOG path.", "answer": "T6 runs pmdoc and docs packages; T4 lists splices.json, bun run check and packages/envoy/CHANGELOG.md; T1 step 2 is the render read-back for every row."},
+      {"finding": "Some planner measurements were unverified by the analyst.", "answer": "The T1 test compares with engineReadings, so every row's expectation is recomputed in CI; rows were measured in this pod with the engine and Go at 4bbb2a9c."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": [],
+  "notes": [
+    "INFRA-535 is blocked by INFRA-534 (Dispatch link). The INFRA-138 architect parks INFRA-535 after this plan and reruns it from planning once INFRA-534 merges; that rerun checks this plan against INFRA-534's merged pairing function (T0).",
+    "In this gVisor pod TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText ([a, a_b&, [^a), TestBareURLShapesParseAndRenderLinearly and TestUpdateIsLinearInTheBlockCount fail at main 4bbb2a9c with no change (10 ms CPU clock granularity)."
+  ]
+}
