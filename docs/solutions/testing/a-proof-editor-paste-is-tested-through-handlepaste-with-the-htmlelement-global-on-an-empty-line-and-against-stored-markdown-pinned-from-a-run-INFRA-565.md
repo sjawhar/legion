@@ -36,12 +36,13 @@ related_issues:
 
 ## Evidence
 
-- `packages/proof-editor/tests/paste.ts:17-21` (`pastePlainText`) and `:30` (`withHTMLElementGlobal`);
+- `pastePlainText` and `withHTMLElementGlobal` in `packages/proof-editor/tests/paste.ts`;
   `tests/clipboard-paste-recovery.test.ts` pastes bare where it needs the throw and wrapped for its
   table.
-- `packages/proof-editor/tests/typed-block-drawing.test.ts:47-51` (`withoutMintedIds`) strips the
+- `withoutMintedIds` in `packages/proof-editor/tests/typed-block-drawing.test.ts` strips the
   heading `id`; without it the two engines' documents differed only there.
-- `packages/dispatch/e2e/typed-block-content-rule.e2e.ts:23` presses Enter; `:40` pins
+- `openOnEmptyLine` in `packages/dispatch/e2e/typed-block-content-rule.e2e.ts` presses Enter; the
+  heading row pins
   `Intro text.\n\n\\:::ask{#a1}\n\n# Heading words\n\n:::\n`. The plan expected the closing `:::`
   escaped; after the escaped opening line, Go stores it plain, and a lone `:::` paragraph reads back
   as text (`packages/envoy/internal/dispatch/pmdoc/escape_test.go`, the `":::"` row).

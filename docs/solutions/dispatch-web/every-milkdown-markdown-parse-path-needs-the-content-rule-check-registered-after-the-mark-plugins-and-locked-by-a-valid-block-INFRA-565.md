@@ -43,20 +43,22 @@ a parse that never threw for content (the editor's default mode) drops the block
   `html` child fails it too), so it cannot tell the orders apart. A valid ask whose question sits
   in a block-level mark span passes at the base and fails only when the step runs too early.
 - **Draw rather than refuse.** A throw in `handlePaste` does not mean "nothing changes":
-  `prosemirror-view`'s `doPaste` calls `preventDefault()` only after `handlePaste` returns true.
+  `prosemirror-view`'s `editHandlers.paste` calls `preventDefault()` only when `doPaste` returns
+  true, and a throw in `handlePaste` escapes both before that, so the browser's own paste goes on.
   A load such as `setMarkdown` has no edit to refuse, and Dispatch has no channel to show the
   person a refusal. Drawing the block as its literal lines keeps every word on every path.
 
 ## Evidence
 
-- `packages/proof-editor/src/lib.ts:319-321` registers `unfitTypedBlocksRemarkPlugin` after
-  `remarkDispatchMarksPlugin`; `packages/proof-editor/src/lib-headless.ts:166-168` runs
-  `remarkUnfitTypedBlocks` after `remarkTypedBlocks` in default mode.
-- `packages/proof-editor/src/typed-block-drawing.ts:195` (`remarkDecideTypedBlocks`) and
-  `:223-228` (the `$remark` wrapper reading `schemaCtx` per parse).
-- `packages/proof-editor/tests/typed-block-drawing.test.ts:213` is the ordering lock
-  (`MARK_SPAN_VALID_ASK`, `:23`). With the step moved before the mark plugins, it is the one row
-  that fails (15 pass, 1 fail); the invalid mark-span row at `:196` passes either way.
+- `packages/proof-editor/src/lib.ts` registers `unfitTypedBlocksRemarkPlugin` right after
+  `remarkDispatchMarksPlugin`; `buildParser` in `packages/proof-editor/src/lib-headless.ts` chains
+  `remarkUnfitTypedBlocks` after `remarkTypedBlocks` in its default-mode branch.
+- `remarkDecideTypedBlocks` and `unfitTypedBlocksRemarkPlugin` (the `$remark` wrapper reading
+  `schemaCtx` per parse) in `packages/proof-editor/src/typed-block-drawing.ts`.
+- The ordering lock is the test "the live editor checks an ask's content after the mark plugins
+  have run" in `packages/proof-editor/tests/typed-block-drawing.test.ts`, on `MARK_SPAN_VALID_ASK`.
+  With the step moved before the mark plugins, it is the one row that fails (15 pass, 1 fail); the
+  row that pastes an ask whose heading sits in a block-level mark span passes either way.
 - At the base `b08a56bc`, pasting `:::ask{#a1}` / `# Heading words` / `:::` left the live editor
   holding only `Intro text.` and an empty paragraph
   (`packages/dispatch/e2e/typed-block-content-rule.e2e.ts`, run against a tree of the base).
