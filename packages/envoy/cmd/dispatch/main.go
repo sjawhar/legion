@@ -179,6 +179,9 @@ func main() {
 	if boot.NATSDisabled {
 		slog.Info("dispatch: NATS publisher disabled")
 	} else {
+		// No WithReplicas: Dispatch keeps the stream's deployed replica count on every update and
+		// creates it with one replica, so a Dispatch process never changes the count the listener
+		// (ENVOY_NATS_REPLICAS) or an operator set.
 		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, bus.WithEnvironment(env.lookup), bus.WithName("dispatch"))
 		if err != nil {
 			slog.Error("dispatch: connect NATS", "error", err)
