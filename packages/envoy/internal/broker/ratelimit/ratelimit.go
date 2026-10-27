@@ -48,6 +48,30 @@ func (k *Keyed) AllowAt(key string, now time.Time) bool {
 	return k.bucket(key, now).AllowN(now, 1)
 }
 
+// TakeAt takes one request from key's bucket at now, as AllowAt does, and answers ok with
+// giveBack, which returns that request to the bucket: for a caller that learns only afterwards
+// that its request decided nothing the bucket exists to slow, such as one the server could not
+// complete. A refused take answers false and spends nothing. giveBack is called at most once; it
+// returns the request as of now, so the bucket refills as if it had never been taken, and a
+// request another caller took from the bucket meanwhile stays taken.
+func (k *Keyed) TakeAt(key string, now time.Time) (giveBack func(), ok bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	bucket := k.bucket(key, now)
+	if bucket.TokensAt(now) < 1 {
+		return nil, false
+	}
+	// With a request left at now the reservation needs no delay, so it spends exactly what
+	// AllowAt would. CancelAt restores nothing at a time after the reservation's own, so the
+	// give-back cancels at now.
+	reservation := bucket.ReserveN(now, 1)
+	return func() {
+		k.mu.Lock()
+		defer k.mu.Unlock()
+		reservation.CancelAt(now)
+	}, true
+}
+
 // AllowBothAt takes one request from key's bucket and one from shared at now when each has one
 // left, reporting true. Otherwise it takes from neither and answers false with the limit that
 // refused, key's bucket's first: a request one bucket refuses spends nothing of the other, so a

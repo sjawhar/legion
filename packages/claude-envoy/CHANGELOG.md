@@ -4,6 +4,9 @@
 
 ### Added
 
+- A person's browser edit of a spec a session wrote reaches that session's channel as one card, 30
+  seconds after the person stops editing: the card names the document, the two versions and each
+  editor, and the diff follows it in a fenced `diff` block.
 - The `dispatch` command (`dist/dispatch.js`) reads one block of a document:
   `dispatch read --ref dispatch://KEY/spec#b-<id>` (or an issue's or a project's document with
   `#b-<id>`, optionally pinned to a version with `@v<N>`) prints the block, the version its text
