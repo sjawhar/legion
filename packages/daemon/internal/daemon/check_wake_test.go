@@ -283,8 +283,8 @@ func newCheckWakeRig(t *testing.T) *checkWakeRig {
 	}
 	writePrompt(t, cfg, implementer)
 	// A wake resumes the implementer, and a launch provisions the issue's workspace when the host
-	// has none — which reaches GitHub. The workspace is here already, whole, so the launch
-	// provisions nothing and this test reaches nothing outside the host.
+	// has none, or when its checkout never finished — which reaches GitHub. The workspace is here
+	// already, whole, so the launch provisions nothing and no test of this rig clones from GitHub.
 	hostWorkspace(t, cfg.StateDir, "sjawhar/legion", root)
 	return rig
 }
