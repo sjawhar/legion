@@ -185,7 +185,7 @@ func TestHandoffCompleteReadyHoldsAByHandPullRequestToItsApprovedHead(t *testing
 }
 
 // READY compares the approved head with the head GitHub shows, which READY's commit names, never
-// the head the record holds: the record follows GitHub only by webhook, so it can still hold an
+// the head the record holds: the record follows GitHub by webhook and a periodic read, so it can still hold an
 // earlier, retro-only push while GitHub's head already carries a product change above it. Comparing
 // the recorded head would read retro's learnings alone and accept a change no review approved.
 func TestHandoffCompleteReadyComparesGitHubsHeadNotALaggingRecord(t *testing.T) {

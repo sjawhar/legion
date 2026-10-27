@@ -583,7 +583,7 @@ export const dispatchToolSpecs = [
       ref: z
         .string()
         .describe(
-          "Optional dispatch:// reference (issue, document, message, or ask); appended to the question and rendered as a link."
+          "Optional dispatch:// reference (issue, document, block, message, or ask); appended to the question and rendered as a link."
         )
         .optional(),
       question: z
@@ -915,6 +915,7 @@ export const dispatchToolSpecs = [
       "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " +
       "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " +
       "One replace per paragraph: more new paragraphs go in one insert after the last one you rewrote, since two inserts at one anchor come out reversed; read the passage back with dispatch doc-read afterwards. " +
+      "A block id written as {#id} longer than 256 bytes is stored, but its block is no graph node, so no reference reaches it. " +
       `The spec holds requirements, design, and decisions - never progress, status, or timestamps; a record of open items or progress is a document of its own. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
@@ -1166,6 +1167,9 @@ export const dispatchToolSpecs = [
       "--events N lists the last N, and --all-events every one. " +
       "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " +
       "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " +
+      "A block read prints `Block:`, `Document:`, `Changed in version:` and `Text:`, then those two sections; a pinned one adds " +
+      "the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, " +
+      "reads `No block <id> in <document>.` " +
       "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " +
       "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " +
       "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " +
@@ -1186,7 +1190,10 @@ export const dispatchToolSpecs = [
           "Optional dispatch:// reference: dispatch://KEY, dispatch://KEY/spec, " +
             "dispatch://KEY/artifact/<slug>[@vN], dispatch://KEY/ask/<id>, dispatch://KEY/comment/<id>, " +
             "dispatch://KEY/message/<id>, dispatch://PROJECT/artifact/<slug>[@vN], and its " +
-            "/ask/<id> and /comment/<id>; or the dashboard URL of one."
+            "/ask/<id> and /comment/<id>; or the dashboard URL of one. A block: " +
+            "dispatch://KEY/spec#b-<block id>[@vN], dispatch://KEY/artifact/<slug>#b-<block id>[@vN] or " +
+            "dispatch://PROJECT/artifact/<slug>#b-<block id>[@vN], the id percent-encoded except ASCII " +
+            "letters, digits and -."
         )
         .optional(),
       message: z

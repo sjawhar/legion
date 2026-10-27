@@ -40,11 +40,7 @@ import { AskResolutionLine } from "../refs/AgentName";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { markdownHead, searchSnippetMarkdown } from "../refs/markdown-fragment";
 import { referenceTriggerProps } from "../refs/RefPreview";
-import {
-  buildProjectPath,
-  type DispatchReferenceRoute,
-  referenceRouteFromHref,
-} from "../refs/routes";
+import { buildProjectPath, type DispatchReferenceRoute, nodeRouteFromHref } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { appKeymap, DIALOG_SCOPE, type KeymapAction, useKeymap } from "../shell/keymap";
 import { KeyHints } from "../shell/ShortcutHelp";
@@ -213,7 +209,7 @@ function ResultOption({
       active={active}
       id={optionId(result)}
       onSelect={onSelect}
-      reference={referenceRouteFromHref(result.href)}
+      reference={nodeRouteFromHref(result.href)}
     >
       <div
         className={`flex min-w-0 items-center gap-2 text-xs ${
