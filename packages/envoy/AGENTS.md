@@ -1511,13 +1511,16 @@ own text or fields and when, its maker while nothing has changed it since; `pare
 artifact's uuid, an issue's key, a component's `<project>/<id>`) and `ref`, absent for a parent
 with none (a session, a direct message, a document no project owns); and `parent_version`, the
 version of the parent it belongs to. A fact Dispatch never recorded is empty: `made_by` and
-`changed_by` are then `[]`, never null, and the others null; `refs.storedActors` reads a stored
-null, an older row's other shape and any element that is not an actor with a kind and an id as
-nobody recorded, never a failed read. `GET /api/v1/references` carries them on `node`, each
-`edges[].node` and each `edges[].block`, and `GET /api/v1/block-links` on `from`, `to` and both
-blocks of each link. Each entry of `nodeLoaders` reads its own kind's (`refs/graph.go`). An issue
-is made by `issues.created_by` at `created_at`, last changed by the actor of its latest
-`issue.created`, `issue.updated` or `issue.closed` event at that event's time, and part of its
+`changed_by` are then `[]`, never null, and the others null. `refs.storedActor` reads a
+single-actor column (a creator, an author, an event's actor, an edit's editor) and
+`refs.storedActors` a list column (a version's authors): SQL NULL (a left join that found no row,
+an edit that names no editor) and JSON null are nobody recorded, and any other value that does
+not decode as a `model.Actor` (a list of them) fails the read. `GET /api/v1/references` carries
+them on `node`, each `edges[].node` and each `edges[].block`, and `GET /api/v1/block-links` on
+`from`, `to` and both blocks of each link. Each entry of `nodeLoaders` reads its own kind's
+(`refs/graph.go`). An issue is made by `issues.created_by` at `created_at`, last changed by the
+actor of its latest `issue.created`, `issue.updated` or `issue.closed` event at that event's
+time, and part of its
 parent issue. An artifact (a document, a file, a picture) is made by `artifacts.created_by` at
 `created_at`, last changed by the authors of its latest version at that version's time, and part
 of its issue, else of the session whose conversation owns it, else (a project document) of no

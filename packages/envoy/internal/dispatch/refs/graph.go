@@ -1,7 +1,6 @@
 package refs
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -374,7 +373,9 @@ func loadIssueNodes(ctx context.Context, q Queryer, _ string, _ bool, keys []str
 			return fmt.Errorf("scan issue node: %w", err)
 		}
 		node := model.GraphNode{Kind: "issue", ID: key, IssueKey: new(key), Project: project, Ref: "dispatch://" + key, Parent: issueParent(parentKey)}
-		setMadeAndChanged(&node, createdBy, createdAt, changedBy, changedAt)
+		if err := setMadeAndChanged(&node, createdBy, createdAt, changedBy, changedAt, storedActor); err != nil {
+			return err
+		}
 		nodes[[2]string{"issue", key}] = resolvedNode{GraphNode: node, text: title}
 	}
 	return rows.Err()
@@ -416,7 +417,9 @@ func loadArtifactNodes(ctx context.Context, q Queryer, _ string, byRefKey bool, 
 			lookup = refKey
 		}
 		node := model.GraphNode{Kind: "artifact", ID: id, IssueKey: issueKey, Project: project, Ref: ArtifactRef(issueKey, project, session, slug, kind, primary)}
-		setMadeAndChanged(&node, createdBy, createdAt, authors, versionAt)
+		if err := setMadeAndChanged(&node, createdBy, createdAt, authors, versionAt, storedActors); err != nil {
+			return err
+		}
 		switch {
 		case issueKey != nil:
 			node.Parent = issueParent(issueKey)
@@ -457,6 +460,10 @@ func loadBlockNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []stri
 		if err := rows.Scan(append(targets, first.targets()...)...); err != nil {
 			return fmt.Errorf("scan block node: %w", err)
 		}
+		changers, err := storedActors(changedBy)
+		if err != nil {
+			return fmt.Errorf("decode the last change of block %s: %w", nodeID, err)
+		}
 		parent := document.parent()
 		node := model.GraphNode{
 			Kind:           "block",
@@ -467,12 +474,14 @@ func loadBlockNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []stri
 			Ref:            BlockRef(parent.Ref, blockID),
 			Document:       parent.Ref,
 			ChangedVersion: changedVersion,
-			ChangedBy:      storedActors(changedBy),
+			ChangedBy:      changers,
 			ChangedAt:      &changedAt,
 			Parent:         parent,
 			ParentVersion:  &changedVersion,
 		}
-		node.MadeBy, node.MadeAt = first.maker()
+		if node.MadeBy, node.MadeAt, err = first.maker(); err != nil {
+			return fmt.Errorf("decode the maker of block %s: %w", nodeID, err)
+		}
 		nodes[[2]string{"block", nodeID}] = resolvedNode{GraphNode: node, text: excerpt}
 	}
 	return rows.Err()
@@ -547,7 +556,9 @@ func loadAskNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []string
 			return fmt.Errorf("scan ask node: %w", err)
 		}
 		node := model.GraphNode{Kind: "ask", ID: id, IssueKey: issueKey, Project: project, Ref: itemRef("ask", issueKey, project, slug, id)}
-		setMadeAndChanged(&node, author, createdAt, editedBy, editedAt)
+		if err := setMadeAndChanged(&node, author, createdAt, editedBy, editedAt, storedActor); err != nil {
+			return err
+		}
 		node.Parent = issueParent(issueKey)
 		if parent := document.parent(); parent != nil {
 			node.Parent, node.ParentVersion = parent, version
@@ -572,8 +583,7 @@ func loadCommentNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []st
 		from comments c
 		left join issues i on i.key = c.issue_key
 		left join artifacts a on a.id = c.artifact_id
-		left join artifacts doc on c.reply_to is null and c.ask_id is null
-		  and doc.id = coalesce((c.anchor->>'artifact_id')::uuid, c.artifact_id)
+		left join artifacts doc on doc.id = coalesce((c.anchor->>'artifact_id')::uuid, c.artifact_id)
 		where c.id::text = any($1)`, ids)
 	if err != nil {
 		return fmt.Errorf("load comment nodes: %w", err)
@@ -592,7 +602,9 @@ func loadCommentNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []st
 			return fmt.Errorf("scan comment node: %w", err)
 		}
 		node := model.GraphNode{Kind: "comment", ID: id, IssueKey: issueKey, Project: project, Ref: itemRef("comment", issueKey, project, slug, id)}
-		setMadeAndChanged(&node, author, createdAt, author, editedAt)
+		if err := setMadeAndChanged(&node, author, createdAt, author, editedAt, storedActor); err != nil {
+			return err
+		}
 		switch parent := document.parent(); {
 		case replyTo != nil:
 			node.Parent = itemParent("comment", issueKey, project, slug, *replyTo)
@@ -630,7 +642,9 @@ func loadMessageNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []st
 			return fmt.Errorf("scan message node: %w", err)
 		}
 		node := model.GraphNode{Kind: "message", ID: id, IssueKey: issueKey, Project: project, Ref: itemRef("message", issueKey, project, "", id)}
-		setMadeAndChanged(&node, author, createdAt, nil, nil)
+		if err := setMadeAndChanged(&node, author, createdAt, nil, nil, storedActor); err != nil {
+			return err
+		}
 		node.Parent = issueParent(issueKey)
 		if inReplyTo != nil {
 			node.Parent = itemParent("message", issueKey, project, "", *inReplyTo)
@@ -723,35 +737,57 @@ func (d documentParent) parent() *model.NodeParent {
 	return &model.NodeParent{Kind: "artifact", ID: *d.id, Ref: ArtifactRef(d.issueKey, d.project, d.session, *d.slug, *d.kind, *d.primary)}
 }
 
-// storedActors decodes a stored actor column as a node's actors: one actor (an author, a creator,
-// an event's actor) is a list of one, and a list (a version's authors) is itself. SQL NULL, JSON
-// null, and any other shape an older row holds is the empty list, as is any element that is not
-// an actor with a kind and an id: a fact Dispatch never recorded, never a failed read.
-func storedActors(raw []byte) []model.Actor {
-	var elements []json.RawMessage
-	if trimmed := bytes.TrimSpace(raw); len(trimmed) > 0 && trimmed[0] == '{' {
-		elements = []json.RawMessage{trimmed}
-	} else if json.Unmarshal(trimmed, &elements) != nil {
-		return []model.Actor{}
-	}
-	actors := make([]model.Actor, 0, len(elements))
-	for _, element := range elements {
-		var actor model.Actor
-		if json.Unmarshal(element, &actor) != nil || actor.Kind == "" || actor.ID == "" {
-			continue
+// storedActor decodes a single-actor column (a creator, an author, an event's actor, an edit's
+// editor) as a node's actors, a list of that one actor. SQL NULL (a left join that found no row,
+// an edit that names no editor) and JSON null are nobody recorded, the empty list; any other value
+// that does not decode as a model.Actor fails the read.
+func storedActor(raw []byte) ([]model.Actor, error) {
+	var actor *model.Actor
+	if raw != nil {
+		if err := json.Unmarshal(raw, &actor); err != nil {
+			return nil, fmt.Errorf("decode actor: %w", err)
 		}
-		actors = append(actors, actor)
 	}
-	return actors
+	if actor == nil {
+		return []model.Actor{}, nil
+	}
+	return []model.Actor{*actor}, nil
 }
 
-// setMadeAndChanged sets node's maker and its last change, which is the maker until changedAt is set.
-func setMadeAndChanged(node *model.GraphNode, madeBy []byte, madeAt time.Time, changedBy []byte, changedAt *time.Time) {
-	node.MadeBy, node.MadeAt = storedActors(madeBy), &madeAt
+// storedActors decodes a list column (a version's authors) as a node's actors. SQL NULL (a left
+// join that found no version) and JSON null are nobody recorded, the empty list, as is an empty
+// list; any other value that does not decode as a list of model.Actor fails the read.
+func storedActors(raw []byte) ([]model.Actor, error) {
+	var actors []model.Actor
+	if raw != nil {
+		if err := json.Unmarshal(raw, &actors); err != nil {
+			return nil, fmt.Errorf("decode actors: %w", err)
+		}
+	}
+	if actors == nil {
+		return []model.Actor{}, nil
+	}
+	return actors, nil
+}
+
+// setMadeAndChanged sets node's maker, the single-actor column madeBy (storedActor), and its last
+// change, which is the maker until changedAt is set and then changedBy as decodeChanged reads it
+// (storedActor or storedActors). A column that does not decode fails, naming node's kind and id.
+func setMadeAndChanged(node *model.GraphNode, madeBy []byte, madeAt time.Time, changedBy []byte, changedAt *time.Time, decodeChanged func([]byte) ([]model.Actor, error)) error {
+	makers, err := storedActor(madeBy)
+	if err != nil {
+		return fmt.Errorf("decode the maker of %s %s: %w", node.Kind, node.ID, err)
+	}
+	node.MadeBy, node.MadeAt = makers, &madeAt
 	node.ChangedBy, node.ChangedAt = node.MadeBy, node.MadeAt
 	if changedAt != nil {
-		node.ChangedBy, node.ChangedAt = storedActors(changedBy), changedAt
+		changers, err := decodeChanged(changedBy)
+		if err != nil {
+			return fmt.Errorf("decode the last change of %s %s: %w", node.Kind, node.ID, err)
+		}
+		node.ChangedBy, node.ChangedAt = changers, changedAt
 	}
+	return nil
 }
 
 // ArtifactRef is the address the dashboard copies for a document: an issue's primary document

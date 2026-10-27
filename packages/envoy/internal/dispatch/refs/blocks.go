@@ -333,20 +333,26 @@ func (f *blockFirst) targets() []any {
 }
 
 // maker is who made the block and when: the authors and time of the version that first held it
-// when Dispatch knows the block was made there, else nobody recorded at no time.
-func (f blockFirst) maker() ([]model.Actor, *time.Time) {
+// when Dispatch knows the block was made there, else nobody recorded at no time. Authors that do
+// not decode (storedActors) fail.
+func (f blockFirst) maker() ([]model.Actor, *time.Time, error) {
 	if f.known == nil || !*f.known {
-		return []model.Actor{}, nil
+		return []model.Actor{}, nil, nil
 	}
-	return storedActors(f.authors), f.createdAt
+	authors, err := storedActors(f.authors)
+	if err != nil {
+		return nil, nil, err
+	}
+	return authors, f.createdAt, nil
 }
 
-// RemovedBlockFacts sets the six facts of block blockID of document (its artifact node), which no
-// current version holds since version removedVersion deleted it: made as a current block is
-// (blockFirstVersion), last changed by that deletion, with its version's authors and time, and
-// part of the document at the latest version a block-aware build indexed below removedVersion,
-// the last one known to hold it (null when none is).
-func RemovedBlockFacts(ctx context.Context, q Queryer, document model.GraphNode, blockID string, removedVersion int, node *model.GraphNode) error {
+// RemovedBlockFacts is a node carrying only the six facts of block blockID of the document whose
+// artifact id is documentID and whose reference is documentRef, which no current version holds
+// since version removedVersion deleted it: made as a current block is (blockFirstVersion), last
+// changed by that deletion, with its version's authors and time, and part of the document at the
+// latest version a block-aware build indexed below removedVersion, the last one known to hold it
+// (null when none is). Authors that do not decode (storedActors) fail the read.
+func RemovedBlockFacts(ctx context.Context, q Queryer, documentID, documentRef, blockID string, removedVersion int) (model.GraphNode, error) {
 	var first blockFirst
 	var removedBy []byte
 	var removedAt *time.Time
@@ -357,14 +363,25 @@ func RemovedBlockFacts(ctx context.Context, q Queryer, document model.GraphNode,
 		from (select $1::uuid as artifact_id, $2::text as block_id) b
 		`+blockFirstVersion("first", "b.artifact_id", "b.block_id")+`
 		left join artifact_versions removed on removed.artifact_id = b.artifact_id and removed.number = $3
-	`, document.ID, blockID, removedVersion).Scan(append(first.targets(), &removedBy, &removedAt, &held)...); err != nil {
-		return fmt.Errorf("read the facts of removed block %q of %s: %w", blockID, document.ID, err)
+	`, documentID, blockID, removedVersion).Scan(append(first.targets(), &removedBy, &removedAt, &held)...); err != nil {
+		return model.GraphNode{}, fmt.Errorf("read the facts of removed block %q of %s: %w", blockID, documentID, err)
 	}
-	node.MadeBy, node.MadeAt = first.maker()
-	node.ChangedBy, node.ChangedAt = storedActors(removedBy), removedAt
-	node.Parent = &model.NodeParent{Kind: "artifact", ID: document.ID, Ref: document.Ref}
-	node.ParentVersion = held
-	return nil
+	madeBy, madeAt, err := first.maker()
+	if err != nil {
+		return model.GraphNode{}, fmt.Errorf("decode the maker of removed block %q of %s: %w", blockID, documentID, err)
+	}
+	changedBy, err := storedActors(removedBy)
+	if err != nil {
+		return model.GraphNode{}, fmt.Errorf("decode the last change of removed block %q of %s: %w", blockID, documentID, err)
+	}
+	return model.GraphNode{
+		MadeBy:        madeBy,
+		MadeAt:        madeAt,
+		ChangedBy:     changedBy,
+		ChangedAt:     removedAt,
+		Parent:        &model.NodeParent{Kind: "artifact", ID: documentID, Ref: documentRef},
+		ParentVersion: held,
+	}, nil
 }
 
 // uniqueBlocks keeps the first block of each id, in order, as the node GET …/blocks addresses by

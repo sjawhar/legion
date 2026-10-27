@@ -138,20 +138,26 @@ func (s *server) blockReferenceNode(ctx context.Context, query refs.Query, ref t
 	pin := &model.BlockPin{Version: ref.Pin, Ref: blockRef + "@v" + strconv.Itoa(ref.Pin), Text: *at.Text}
 	if !current {
 		pin.State, pin.RemovedVersion = "removed", at.RemovedVersion
-		removed := model.GraphNode{
-			Kind:     "block",
-			ID:       query.ID,
-			BlockID:  ref.Block,
-			IssueKey: document.IssueKey,
-			Project:  document.Project,
-			Ref:      blockRef,
-			Document: document.Ref,
-			Pin:      pin,
-		}
-		if err := refs.RemovedBlockFacts(ctx, pool, document, ref.Block, at.RemovedVersion, &removed); err != nil {
+		facts, err := refs.RemovedBlockFacts(ctx, pool, document.ID, document.Ref, ref.Block, at.RemovedVersion)
+		if err != nil {
 			return model.GraphNode{}, err
 		}
-		return removed, nil
+		return model.GraphNode{
+			Kind:          "block",
+			ID:            query.ID,
+			BlockID:       ref.Block,
+			IssueKey:      document.IssueKey,
+			Project:       document.Project,
+			Ref:           blockRef,
+			Document:      document.Ref,
+			MadeBy:        facts.MadeBy,
+			MadeAt:        facts.MadeAt,
+			ChangedBy:     facts.ChangedBy,
+			ChangedAt:     facts.ChangedAt,
+			Parent:        facts.Parent,
+			ParentVersion: facts.ParentVersion,
+			Pin:           pin,
+		}, nil
 	}
 	if node.Text, err = refs.CurrentBlockText(ctx, pool, document.ID, ref.Block); err != nil {
 		return model.GraphNode{}, err

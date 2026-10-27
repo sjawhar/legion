@@ -681,3 +681,49 @@ func TestABlockAskBelongsToTheVersionThatAddedIt(t *testing.T) {
 	}
 	want("after its answer")
 }
+
+// R12: an actor column holding JSON null is nobody recorded, and one holding any other value that
+// does not decode as its column's shape (one actor, or a list of them) fails the read with a 500,
+// never a node made by nobody recorded.
+func TestAnActorThatDoesNotDecodeFailsTheRead(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	ctx := context.Background()
+	createReferenceAPIProject(t, handler, "CORE")
+	issue := createSpecIssue(t, handler, "CORE", "Spec paragraph.\n")
+	issueRef, specRef := "dispatch://"+issue.Key, "dispatch://"+issue.Key+"/spec"
+	comment := decodeBody[model.Comment](t, created(t, "comment on the issue", dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "A comment.",
+	}, "alice")))
+	commentRef := issueRef + "/comment/" + comment.ID
+	exec := func(what, statement string, args ...any) {
+		t.Helper()
+		if _, err := database.Pool.Exec(ctx, statement, args...); err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+	}
+	fails := func(what, ref string) {
+		t.Helper()
+		query := url.Values{"to": {ref}}
+		if response := graphRequest(t, handler, query); response.Code != http.StatusInternalServerError {
+			t.Fatalf("%s: GET /api/v1/references?%s: status=%d body=%s, want 500", what, query.Encode(), response.Code, response.Body.String())
+		}
+	}
+
+	exec("store a JSON null creator", `update issues set created_by = 'null'::jsonb where key = $1`, issue.Key)
+	node := readNode(t, handler, issueRef)
+	if node.MadeBy == nil || len(node.MadeBy) != 0 {
+		t.Fatalf("the issue whose creator is JSON null is made by %#v, want []", node.MadeBy)
+	}
+	if got := actorNames(node.ChangedBy); !slices.Equal(got, []string{"user:alice"}) {
+		t.Fatalf("the issue whose creator is JSON null was last changed by %v, want [user:alice]", got)
+	}
+
+	for _, author := range []string{`"not an actor"`, `[1]`, `[{"kind": "user", "id": "alice"}]`} {
+		exec("store comment author "+author, `update comments set author = $1::jsonb where id = $2`, author, comment.ID)
+		fails("a comment whose author is "+author, commentRef)
+	}
+	for _, authors := range []string{`{"kind": "user", "id": "alice"}`, `[1]`} {
+		exec("store spec authors "+authors, `update artifact_versions set authors = $1::jsonb where artifact_id = $2`, authors, issue.PrimaryArtifactID)
+		fails("a spec whose latest version's authors are "+authors, specRef)
+	}
+}
