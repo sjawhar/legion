@@ -51,6 +51,42 @@ func TestPostSendsJSONAndAnswersWithTheStatus(t *testing.T) {
 	}
 }
 
+// Patch sends its body as JSON with PATCH, as GitHub's ref update takes it, and gives a refusal
+// back as an *Answer naming PATCH.
+func TestPatchSendsJSONWithPatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var sent struct {
+			SHA   string `json:"sha"`
+			Force bool   `json:"force"`
+		}
+		if r.Method != http.MethodPatch || r.Header.Get("Content-Type") != "application/json" || json.NewDecoder(r.Body).Decode(&sent) != nil || sent.Force {
+			http.Error(w, `{"message":"bad request"}`, http.StatusBadRequest)
+			return
+		}
+		if sent.SHA == "behind" {
+			http.Error(w, `{"message":"Update is not a fast forward"}`, http.StatusUnprocessableEntity)
+			return
+		}
+		w.Write([]byte(`{"object":{"sha":"` + sent.SHA + `"}}`))
+	}))
+	defer server.Close()
+	client := Client{Token: "token", API: server.URL + "/repos/acme/widgets"}
+
+	var moved struct {
+		Object struct {
+			SHA string `json:"sha"`
+		} `json:"object"`
+	}
+	if err := client.Patch(context.Background(), "/git/refs/heads/main", map[string]any{"sha": "ahead", "force": false}, &moved); err != nil || moved.Object.SHA != "ahead" {
+		t.Fatalf("Patch = %+v, %v; want the answer read", moved, err)
+	}
+	err := client.Patch(context.Background(), "/git/refs/heads/main", map[string]any{"sha": "behind", "force": false}, nil)
+	var answer *Answer
+	if !errors.As(err, &answer) || answer.Method != http.MethodPatch || answer.Path != "/git/refs/heads/main" || answer.Status != http.StatusUnprocessableEntity {
+		t.Fatalf("Patch behind = %v, want an *Answer for PATCH /git/refs/heads/main with 422", err)
+	}
+}
+
 // GraphQL posts to the client's GraphQL route itself, so an answer other than 2xx names that route
 // rather than nothing: a failed disarm logs "POST /graphql with 502", not "POST  with 502". An
 // answer that carries errors with status 200 is a *GraphQLError, whose NOT_FOUND names its path.

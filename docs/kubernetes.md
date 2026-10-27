@@ -5050,6 +5050,84 @@ volume "<volume>", which runtime.kubernetes.pod.volumes gives it from ConfigMap 
 the daemon's boot would; a change that removes or renames one the pod still names passes here and
 fails at the restart.
 
+### Moving the handoffs onto their Dispatch issues
+
+From INFRA-177 on, a phase handoff is a record on the issue's Dispatch issue, written with
+`dispatch handoff-write`, and no longer a file committed under `.legion/<KEY>/` on the issue's
+branch. The daemon of that release reads a completion's handoff from Dispatch alone, so a branch
+still in flight at the release carries files its next role would never see.
+`legion handoffs import --config <legion.yaml> [--dry-run]` (`packages/daemon/internal/handoffimport/`)
+moves them. From the daemon's own configuration — `project`, `dispatch_url` and
+`dispatch_token_file`, the implement GitHub App, and `daemon_url` — it reads the running daemon's
+unauthenticated `GET /legion/v1/state` for every issue in a phase other than done, and for each, as
+the implement App:
+
+- lists `.legion/` on `legion/<KEY>` through GitHub's contents API, and writes each of
+  `.legion/<KEY>/plan.json`, `implement.json`, `test.json` and `review.json` to Dispatch as that
+  phase's handoff record (`plan`, `implement`, `test`, `review`), the file's text exactly, under the
+  daemon's Dispatch session `legion-daemon:<PROJECT>`. It writes only when the phase's newest record
+  is absent, or is one the import wrote and differs from the file; it never writes above a record a
+  worker wrote. The daemon refuses a completion naming a record the import wrote, since that record
+  is another session's: the next role reads it with `dispatch handoff-read` and writes it again
+  under its own session.
+- then, when every file of the issue is on Dispatch and the branch carries anything under `.legion/`
+  (other issues' directories merged in from their branches included), makes one commit on the
+  branch's head that removes all of `.legion/`, with the message
+  `chore(legion): <KEY>'s handoffs are on its Dispatch issue now`, no trailer and no bracket
+  keyword, so every required check runs on it as on any push, and moves the branch to it with a
+  non-forced ref update. A branch that moved in between is read again and the issue started over,
+  three times at most.
+
+`--dry-run` reads all of it and prints what the run would do, writing nothing. A second run with
+nothing changed writes nothing and pushes nothing.
+
+Run it where `legion probe-boot` runs ([Probing a configuration before the daemon boots on
+it](#probing-a-configuration-before-the-daemon-boots-on-it)): a one-shot pod of the worker image of
+the release the daemon will roll to, under the daemon's ServiceAccount, with the daemon pod's
+environment and mounts. It reads the configuration as boot does, so the implement App's
+`private_key_command` or secret runs there, and the Dispatch bearer and the configuration are
+mounted as the daemon's are; no daemon credential leaves the cluster. It reads the daemon at
+`daemon_url`, the address every pod of the deployment is told, so the pod must reach it.
+
+The cutover, in this order:
+
+1. **Dispatch deployed with the handoff routes.** Dispatch is deployed by hand (`dispatch://INFRA-64`).
+   A run against a Dispatch without them stops at its first handoff call, naming the route Dispatch
+   answered 404 to, before it writes or pushes anything; that is the order's own check, and the
+   daemon has no boot refusal for it.
+2. **`legion handoffs import` of the new release, while the old daemon still runs.** The old
+   daemon's carry treats the removal commit as a push of handoffs alone, so each branch keeps its
+   verdict and its approval across the removal push.
+3. **The daemon and the plugins roll to the release.** The plugin pair comes with the stale-plugin
+   relaunch from the release ([Contract discipline](#contract-discipline)).
+4. **`legion handoffs import` again.** It catches a file a worker of the old release pushed between
+   step 2 and step 3; everything else reads `unchanged`. The new daemon's READY lets the removal of
+   `.legion/` above an approved head through without a new review round, and refuses a `.legion/`
+   file added there.
+
+A worker whose push is refused because `legion/<KEY>` moved under it by the removal commit (its
+message names it) fetches, merges `legion/<KEY>@origin` forward and pushes again; it never rewrites.
+
+Each line names an issue, with a phase word for a file's line (`<KEY> plan: …`) and none for the
+branch's (`<KEY>: …`):
+
+- `imported v<n>` — the file is now version `<n>` of the phase's records, written under
+  `legion-daemon:<PROJECT>` (under `--dry-run`, `would import v<n>`).
+- `unchanged` — on a file's line, the phase's newest record is the import's and holds the file's
+  text exactly, so nothing was written; on a branch's line, the branch carries nothing under
+  `.legion/`, so nothing was pushed.
+- `kept worker record v<n>` — a worker's session wrote the phase's newest record, version `<n>`; the
+  file was not written above it, and is removed with the rest of `.legion/`.
+- `removed .legion/ at <sha>` — the branch now names `<sha>`, the one commit that removed
+  `.legion/` (under `--dry-run`, `would remove .legion/ (<n> paths) above <head>`).
+- `no branch` — GitHub has no `legion/<KEY>`: the issue has nothing to import.
+- `failed: <why>` — that file or branch did not go through; on a file's failure `.legion/` stays on
+  the branch, and the branch's line says so. Run the import again once the cause is fixed.
+
+A last line counts each kind. The exit is 0 when no line failed, and 1 when one did or the run
+stopped, its reason on stderr: a configuration it could not read, a daemon that did not answer or
+serves another project, or a Dispatch without the handoff routes.
+
 ## Kubernetes runtime (TypeScript daemon)
 
 This section is the retired TypeScript daemon's runtime, which it no longer runs: it refuses

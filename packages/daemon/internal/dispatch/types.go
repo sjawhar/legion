@@ -119,7 +119,8 @@ type Approval struct {
 
 // Handoff is one phase handoff record Dispatch keeps on an issue, as a phase completion names it:
 // the issue carrying it, its phase word (plan, implement, test or review; phase.HandoffFile), its
-// version among that phase's records, and the actor that wrote it. The body is not read: the
+// version among that phase's records, and the actor that wrote it. Body, the record's exact text,
+// is read only by LatestHandoff, for `legion handoffs import` to compare with a branch's file: the
 // daemon holds a completion to who wrote which record, and what a handoff says is the next role's
 // to read with `dispatch handoff-read`.
 type Handoff struct {
@@ -128,7 +129,13 @@ type Handoff struct {
 	Phase    string
 	Version  int
 	Author   HandoffAuthor
+	Body     string
 }
+
+// HandoffNotFound is the code Dispatch answers a handoff read with when it has no such record
+// (packages/envoy/internal/dispatch/api/handoffs.go, writeHandoff). No mechanism shares a value
+// between this module and Dispatch's, so the two spellings change together.
+const HandoffNotFound = "HANDOFF_NOT_FOUND"
 
 // HandoffAuthor is the actor that wrote a handoff record: Kind is `session` for a record a session
 // wrote with `dispatch handoff-write`, ID that session.
