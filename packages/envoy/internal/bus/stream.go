@@ -199,7 +199,8 @@ func StreamCaptures(topic string) bool {
 // construction: the dashboard promises a same-mode retry cannot deliver twice for exactly as long
 // as the stream can still recognise the repeat, and a deployment where the two differed would break
 // that promise. Once a byte limit binds, the stream discards its oldest messages first and may hold
-// less than the window: a repeat of a message it has already dropped is then stored again.
+// less than the window: a repeat of a message it has already dropped may then be stored again,
+// since nats-server keeps a dropped message's id only in memory, which a server restart clears.
 var streamCfg = &nats.StreamConfig{
 	Name:       Stream,
 	Subjects:   streamSubjects,

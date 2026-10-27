@@ -10,10 +10,12 @@ Envoy carries events between GitHub, Slack, Dispatch, Legion, and agent sessions
 
 - **NATS JetStream** holds the events. Events are messages on subjects under `notifications.`;
   the `ENVOY_NOTIFICATIONS` stream keeps those of GitHub, Slack, Dispatch, Legion and each
-  session's inbox for 72 hours, while role messages and team topics travel live and are not kept.
-  Envoy also keeps its own state in JetStream key-value buckets: which session is subscribed to
-  what (`envoy_interests`), which sessions are live (`envoy_sessions`), who holds each role
-  (`envoy_roles`), and pull request check results (`envoy_ci_state`).
+  session's inbox for 72 hours, or less once it reaches a size limit you set, while role messages
+  and team topics travel live and are not kept. Envoy also keeps its own state in JetStream
+  key-value buckets: which session is subscribed to what (`envoy_interests`), which sessions are
+  live (`envoy_sessions`), who holds each role (`envoy_roles`), and pull request check results
+  (`envoy_ci_state`). The stream and every bucket are kept in at least as many copies as the
+  deployment's `ENVOY_NATS_REPLICAS` says ([Running the listener](#running-the-listener)).
 - **The listener** is an HTTP service in front of it. It takes webhooks in, publishes them as
   events, and delivers events to the agent sessions that subscribed to them. Agents and Legion
   call its `/v1` API to subscribe, publish, claim roles, and send messages, and a session that
@@ -153,8 +155,9 @@ connection was down.
   limit.
 - **What does not:** role messages and team topics, which are live only; anything from before the
   session existed, before it followed the topic, or before it first ran a plugin version that
-  recovers; anything older than 72 hours, or dropped once the stream reached its size limit. When the stream was recreated, or the session read it
-  too late to find everything still there, it is told once that messages may be missing.
+  recovers; anything older than 72 hours, or dropped once the stream reached its size limit. When
+  the stream was recreated, or the session read it too late to find everything still there, it is
+  told once that messages may be missing.
 - **Nothing runs late:** a person's Send or Aside, a Steer or a BTW that comes back this way is
   shown as a message only, since a person's input run late could act on an old instruction. The
   session does not take it as the person's turn and does not answer a BTW. A BTW that comes back
@@ -251,6 +254,8 @@ verify it as [Running Dispatch](/legion/dispatch/running-dispatch/) shows.
 | `ENVOY_ALLOWED_HOSTS` | Comma-separated host names or addresses, with no port, that a listener with no bearer serves `/v1` to besides loopback. Set it to each name clients reach such a listener by, such as a forward to it. |
 | `ENVOY_HOST_BRIDGE` | Where the listener reaches a session on its own machine that registered a serve port: one registered through it, or one whose recorded host is the listener's own `ENVOY_MACHINE_ID` (letter case ignored), as a session that stayed on that machine and re-registered through another listener records. Unset, it uses the host the session registered with, then `host.docker.internal`. A session that re-registered through another listener and records another host is reached at that host, else that listener's machine id, never through the bridge. A listener delivers only to the sessions it owns: a session's owner is the listener its stored subscription names (the one it first subscribed through), else the one it last registered through; any other session is its owner's to deliver. |
 | `ENVOY_SUBSCRIBE_ALL_TOPICS` | Set to `1` to have the listener also deliver every topic the stream does not store, such as a team topic, to the sessions on its machine that registered a serve port. Only a NATS user allowed to subscribe to `notifications.>` (a host's own user) may set it; under any other the listener exits at start with an error naming the variable. |
+| `ENVOY_NATS_REPLICAS` | The deployment's replica count, a whole number from 1 to 5; default `1`. The listener creates the `ENVOY_NOTIFICATIONS` stream and its buckets with this many copies, raises one it finds with fewer, and never lowers one (`nats stream edit <stream> --replicas=<n>` does). More than 1 needs a clustered NATS: a single server refuses it, and the listener then exits at start with an error naming the variable. Any other value refuses startup. Give every Envoy program of a deployment, Dispatch's server included, the same value. |
+| `ENVOY_STREAM_MAX_BYTES` | The `ENVOY_NOTIFICATIONS` stream's size limit, a positive whole number of bytes: once the stream holds that much, it drops its oldest messages first, so it may keep less than 72 hours. Unset, the listener creates the stream with no limit and keeps a limit the stream already has; removing one is `nats stream edit ENVOY_NOTIFICATIONS --max-bytes=-1`. A limit larger than the NATS server can reserve makes the listener exit at start with an error naming the variable. Give every Envoy program of a deployment that sets it the same value. |
 | `ENVOY_WEBHOOKS` | Which webhook routes to mount, for example `github,slack`. |
 | `ENVOY_GITHUB_WEBHOOK_SECRET` | Required with `github`: the webhook secret. |
 | `ENVOY_REVIEWER_APP_ID` | Required with `github`: the id of the GitHub App that posts reviews. |
@@ -262,6 +267,11 @@ A listener with neither serves `/v1` only to a request whose `Host` is `localhos
 address or a name in `ENVOY_ALLOWED_HOSTS`, and answers any other `Host` with a JSON `421`, so a
 page that rebinds its own name to the listener's address cannot use the API.
 Keep the API private: only `/webhook/...` needs to be reachable from GitHub and Slack.
+
+Raising a bucket to `ENVOY_NATS_REPLICAS` copies is an update of the bucket's stream, so the
+listener's NATS user needs `$JS.API.STREAM.UPDATE.KV_<bucket>` for each of its buckets beside the
+info and create it already holds; the `envoy-infra` grant for a listener includes it. Under a grant
+without it, a start that finds a bucket with fewer copies exits with an error naming the variable.
 
 ### With Pulumi
 

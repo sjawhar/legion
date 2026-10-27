@@ -1252,7 +1252,10 @@ export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
  * dashboard makes the promise only inside it, and names the restart
  * (`packages/dispatch/web/src/features/conversation/delivery.ts`). `scripts/gen-go.ts` emits this
  * as `contracts.DeliveryDuplicateWindow`, which `bus/stream.go` uses for both the stream's
- * duplicate window and its retention.
+ * duplicate window and its age. The stream may hold less than the window: once its byte limit
+ * (`ENVOY_STREAM_MAX_BYTES`) binds it drops its oldest messages first, and a repeat of a message
+ * it already dropped may then be stored again, since nats-server keeps a dropped message's id only
+ * in memory, which a server restart clears.
  *
  * It also bounds webhook redelivery dedupe: a GitHub, Slack or Ghost Wispr envelope is stored
  * under a MsgId of its delivery id, and GitHub redelivers deliveries up to three days old, so a

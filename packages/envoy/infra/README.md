@@ -13,7 +13,11 @@ Pulumi language needs only the Pulumi CLI:
 | `envoy-infra:gcp:Dispatch` | Dispatch on GKE Autopilot, with Cloud SQL, served over a tailnet and, only to the namespaces `allowedNamespaces` names, inside its own cluster: see [gcp:Dispatch](#gcpdispatch). |
 
 The listener creates the `ENVOY_NOTIFICATIONS` stream and its key-value buckets itself when it
-starts, so it needs only a NATS server with JetStream to reach.
+starts, so it needs only a NATS server with JetStream to reach. It creates them at the deployment's
+replica count, `ENVOY_NATS_REPLICAS` (1 to 5, default 1), raises one it finds with fewer copies,
+and never lowers one. More than 1 needs a clustered NATS: a single server, which is what
+`aws:NatsService` and `gcp:NatsHub` deploy, refuses it, and the listener's start then stops with an
+error naming `ENVOY_NATS_REPLICAS`.
 
 The command, `envoy-infra`, writes a NATS user's nkey seed into a secret store and checks the seed
 stored there ([NATS seeds](#nats-seeds)), and prints what the AWS components register for a program
@@ -928,7 +932,7 @@ Its outputs are `serviceArn`, `serviceName`, `logGroupName`, `taskDefinitionArn`
 | `logGroupName`, `logRetentionDays` | required | The log group, which the filters read and the alarms' descriptions name. |
 | `listenHost` | required | `ENVOY_LISTEN_HOST`. The listener binds `127.0.0.1` when it is blank, where the target group cannot reach it. |
 | `hostBridge` | required | `ENVOY_HOST_BRIDGE`; `""` leaves it unset. |
-| `natsReplicas` | required | `ENVOY_NATS_REPLICAS`, at least 1. |
+| `natsReplicas` | required | `ENVOY_NATS_REPLICAS`, from 1 to 5: the deployment's replica count, which the listener creates its stream and buckets at and raises them to. More than 1 needs a clustered NATS; `aws:NatsService` runs one server. |
 | `subscribeAllTopics` | `false` | `true` sets `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, as for `host:Listener`: only for a NATS user holding `HostPermissions`, since under any other grant the listener's start ends. |
 | `alarmTopicArn` | required | The SNS topic the alarms page and clear on. |
 | `baseTags`, `metricNamespace` | required | As for `aws:NatsService`. |
@@ -960,7 +964,7 @@ the input:
   leading or trailing whitespace, or one holding `.`, `*`, `>`, `/`, `\`, a control character, or
   whitespace other than an interior ordinary space, or one over 246 bytes; a `hostBridge` or `listenHost` holding a
   control character; a `hostBridge` with leading or trailing whitespace; a blank `listenHost`; a
-  `natsReplicas` below 1; an empty `subnetIds`; a `baseTags` holding `service`.
+  `natsReplicas` below 1 or above 5; an empty `subnetIds`; a `baseTags` holding `service`.
 - Either, without an `aws` provider (see [Providers and transformations](#providers-and-transformations)).
 
 `natsUrls` may come from another resource, so the listener checks it when the container's

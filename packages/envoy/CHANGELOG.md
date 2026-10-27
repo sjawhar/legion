@@ -819,6 +819,50 @@
 
 ### Changed
 
+- `ENVOY_NOTIFICATIONS` and every key-value bucket Envoy opens (`envoy_interests`, `envoy_roles`,
+  `envoy_sessions`, `envoy_ci_state`, `envoy_webhook_redelivery`) now hold the deployment's
+  replica count, `ENVOY_NATS_REPLICAS`: a whole number from 1 to 5, default 1. A start creates the
+  stream or a bucket at that count, raises one it finds with fewer copies, and never lowers one;
+  lowering is an operator step (`nats stream edit <stream> --replicas=<n>`). The listener reads it
+  in `config.Load`, and now refuses 0, a negative number, more than 5 and a non-integer at load,
+  naming the variable, where it took any integer. Dispatch's server reads it from a new settings
+  table row, where it created the stream and its redelivery bucket with a single replica, and so
+  does `envoy-dispatch redeliver-webhooks`. More than 1 needs a clustered NATS: a single server
+  (nats-server v2.15.1 included) refuses both a create and a raise above 1, and the start then
+  stops with an error naming `ENVOY_NATS_REPLICAS=<n>`. Every Envoy program of a deployment sets
+  the same value (INFRA-546).
+- `ENVOY_STREAM_MAX_BYTES`, new, read by the listener and by Dispatch's server (a new settings
+  table row): a positive whole number of bytes, the stream's byte limit, past which it discards its
+  oldest messages first (`DiscardOld`, now set on every start). Unset, the stream is created with
+  no byte limit and a deployed limit is kept, so programs that leave it unset never fight one that
+  sets it; removing a limit is an operator step
+  (`nats stream edit ENVOY_NOTIFICATIONS --max-bytes=-1`). 0, a negative number or a non-integer is
+  refused at load naming the variable, and a limit above what the server can reserve is refused at
+  create or update, the start then stopping with an error naming `ENVOY_STREAM_MAX_BYTES=<n>`. The
+  stream's age still equals its 72-hour duplicate window, but once the limit binds it may hold
+  less than the window, and a repeat of a message it already dropped may be stored again
+  (INFRA-546).
+- Every update of `ENVOY_NOTIFICATIONS` a start sends now starts from the deployed configuration
+  and changes only what Envoy owns: the subjects (reconciled as before), the 72-hour age and
+  duplicate window, the replicas (the deployed count or the setting, whichever is more), the byte
+  limit (the setting when set, else the deployed one) and `DiscardOld`. Every other deployed field
+  (`MaxMsgsPerSubject`, `MaxMsgSize`, placement, compression and the rest) is kept beside the
+  metadata, `envoy_stream_id` included, where an update that changed subjects, age or window wrote
+  this binary's configuration over them, its replica count scaling a replicated stream down to the
+  starting program's count, which for Dispatch's server was always 1. A start that finds the
+  stream as it should be sends no update (INFRA-546).
+- envoy-infra: `ListenerPermissions`, and through it `HostPermissions` and `DispatchPermissions`,
+  gains `$JS.API.STREAM.UPDATE.KV_<bucket>` for each bucket the listener opens, and
+  `DispatchPermissions` the same for the webhook redelivery bucket: the update a start sends to
+  raise a bucket's copies. `gcp:NatsHub` renders it into the users it derives from those sets, so
+  moving a hub with a `listener`, a `machineId` user or a `dispatchMachineId` user to this release
+  replaces its VM once. A hub must hold the new grant (`gcp:NatsHub` moved to this release, or the
+  subject added to a hand-written grant such as an `aws:NatsService` `authorization`) before a
+  program with `ENVOY_NATS_REPLICAS` above a bucket's copies starts, or that raise is refused and
+  the start stops naming the setting (INFRA-546).
+- envoy-infra: `aws:WebhookListener` refuses a `natsReplicas` above 5, and
+  `envoy-infra render webhook-listener-env` a `--nats-replicas` above 5, since the listener
+  refuses more at load (INFRA-546).
 - `POST /v1/interests/subscribe` no longer stores a topic reaching a private stream subject other
   than the session's own agent subject (`bus.ReachesPrivateStreamSubject`): another session's
   `notifications.agent.<id>`, a failed-delivery lane

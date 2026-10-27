@@ -137,7 +137,10 @@ envoy-dispatch redeliver-webhooks --since 72h             # redeliver under the 
 
 It reads the same App credentials and NATS configuration as the server, but owns nothing on the
 bus: unlike the server it neither creates nor updates `ENVOY_NOTIFICATIONS`, and it refuses a
-NATS server that is not the machine it runs on, naming the URL. Run inside the Dispatch
+NATS server that is not the machine it runs on, naming the URL. It opens the redelivery bucket as
+the server does, at `ENVOY_NATS_REPLICAS` copies (creating it, or raising one it finds with fewer),
+so run it with the server's value; a value other than a whole number from 1 to 5 stops it before
+it connects. Run inside the Dispatch
 container it reaches that deployment's NATS with `ENVOY_ALLOW_REMOTE_NATS=1
 envoy-dispatch redeliver-webhooks …`. It connects as the nkey user `NATS_NKEY_SEED_FILE` (or
 `NATS_NKEY_SEED`) names and runs no `!` command, so it never reads `envoy.natsSeed`: a run against

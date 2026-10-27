@@ -132,7 +132,12 @@ notification stream's stored-message get, `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICA
 read-only read the listener's `POST /v1/replay` makes to return the retained notifications a
 session missed while its NATS subscription was down. It can create, change or delete nothing.
 `SessionPermissions` does not hold it, so the session user reads what it missed only through a
-listener.
+listener. The same sets hold, for each key-value bucket they open, the update of the bucket's
+stream, `$JS.API.STREAM.UPDATE.KV_<bucket>`, beside its info and create: a start that finds a
+bucket with fewer copies than `ENVOY_NATS_REPLICAS` raises it with that update. This hub is one
+server, which refuses a replica count above 1, so the programs that use it run with
+`ENVOY_NATS_REPLICAS` unset or 1 (the hub's own listener sets none), and at 1 a start sends no
+raise.
 
 `nkey` is the public key `envoy-infra seed generate` prints, and the seed stays in the secret
 store it wrote (see [NATS seeds](../README.md#nats-seeds)): a host's listener reads it from there
@@ -514,11 +519,13 @@ new template. So does a plugin release that changes the rendering itself: the re
 so upgrading to it replaces every existing hub's VM once, with the outage below, even a hub that
 sets neither input. The release that rendered `ENVOY_ALLOWED_HOSTS` into the listener's unit
 replaced, once and with that same outage, the VM of every hub that runs a listener, and no hub
-without one. This release adds `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS` to
-`ListenerPermissions`, and so to `HostPermissions` and `DispatchPermissions`, which changes the
-rendered users of every hub with a `listener`, a `machineId` user or a `dispatchMachineId` user:
-moving such a hub to it replaces its VM once, with the outage below, and a hub with none of them
-keeps its VM. The cloud-config is the instance template's `user-data`, and a template cannot
+without one. This release adds `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS` and, for each
+key-value bucket the set opens, `$JS.API.STREAM.UPDATE.KV_<bucket>` to `ListenerPermissions`, and
+so to `HostPermissions` and `DispatchPermissions` (which also gains the update for the webhook
+redelivery bucket); that changes the rendered users of every hub with a `listener`, a `machineId`
+user or a `dispatchMachineId` user: moving such a hub to it replaces its VM once, with the outage
+below, and a hub with none of them keeps its VM. The cloud-config is the instance template's
+`user-data`, and a template cannot
 change. The group then replaces its VM at once (`PROACTIVE`, minimal action `REPLACE`), deleting
 it before it creates the next (`RECREATE`, no surge, at most one unavailable). NATS is down from
 the old VM's stop until the new one's `nats` unit starts, and its clients reconnect then. The new

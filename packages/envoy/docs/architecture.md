@@ -36,9 +36,10 @@ Agent messages  --/       |
 - one GitHub receiver container on the public EC2 host
 - one Slack receiver container on the public EC2 host
 - NATS cluster across all machines via Tailscale mesh, with JetStream for durable notifications and core NATS for live role routing
-- JetStream stream `ENVOY_NOTIFICATIONS` with 72h retention for non-role notification replay on listener restart; per-machine durable consumers carry a 7d inactive threshold so the server garbage-collects consumers of decommissioned listeners
+- JetStream stream `ENVOY_NOTIFICATIONS` with 72h retention for non-role notification replay on listener restart, and an optional byte limit (`ENVOY_STREAM_MAX_BYTES`) past which it drops its oldest messages first, so it may then hold less than 72h; per-machine durable consumers carry a 7d inactive threshold so the server garbage-collects consumers of decommissioned listeners
 - Role lanes and delivery-exception lanes for role topics use core NATS; they have no durable consumer, retention, or replay. Stream reconciliation excludes role subjects and purges any role message captured while that configuration is updated.
-- JetStream KV bucket `envoy_interests` with 3 replicas for session subscriptions
+- The stream and every KV bucket hold the deployment's replica count, `ENVOY_NATS_REPLICAS` (1 to 5, default 1; more than 1 needs a clustered NATS): a start creates them at that count, raises one found with fewer copies, and never lowers one
+- JetStream KV bucket `envoy_interests` for session subscriptions
 - JetStream KV bucket `envoy_sessions` with 5m TTL for session port/host data
 
 ## Listener API
