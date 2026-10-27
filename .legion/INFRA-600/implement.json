@@ -2,9 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-600",
-  "completed": "2026-10-27T06:46:03Z",
+  "completed": "2026-10-27T07:16:00Z",
+  "round": "answers the tester's fail (F1) and the architect's decisions: tests-closed.yaml at workflow level with a skipped job; the quick-reopen race documented, not fixed (dispatch://INFRA-600/comment/ca18a3dd-c8d5-42d8-8df9-2dbc3e178d0b)",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2356",
-  "codeHead": "4773bb61d04893cc7c6193f178bc6f1f467cd815",
+  "codeHead": "20fa840cbec2b62f1e36075376e8bbd5cf8f1065",
   "proof": [
     {
       "criterion": "1 Drafts: each test job skips on a draft and ready_for_review starts the run; lint/typecheck/test report skipped on a draft, which cannot merge",
@@ -45,6 +46,14 @@
       "observed": "AGENTS.md, pr-title.yaml, check-pr-text.sh, check-private-names.sh comments, docs/kubernetes.md and four docs/solutions notes now say drafts skip, a close cancels, and a newer head cancels the older image build; every remaining hit read and true (the release, release-envoy-infra, release-envoy-listener and pages groups keep cancel-in-progress false by design; the two dated solution notes keep the old setting as a past-tense note; docs/plans is design history). README.md has no CI prose.",
       "headSha": "4773bb61d04893cc7c6193f178bc6f1f467cd815",
       "negativeControl": "At main 9b92ac14 the first grep hits AGENTS.md:149 'in the required lint job at every push' and the LEGION-631 note's 'it completes at both heads', both false after this change."
+    },
+    {
+      "criterion": "2 (review round) Closing cancels the PR's waiting Tests run with no runner used and no lint/typecheck/test check posted; the quick-reopen race is documented",
+      "surface": "GitHub Actions in sjawhar/legion, scratch PR #2380 at 8f37a0b9 (20fa840c plus an empty commit), closed while its Tests run was queued",
+      "command": "gh pr create (07:12:08Z); gh pr close 2380 (closed_at 07:12:41Z); gh api repos/sjawhar/legion/actions/runs?head_sha=8f37a0b92d5b9a9122c9a1672d99d6589ef7daed, /runs/<id>/jobs, /check-runs/<job>/annotations, /commits/8f37a0b9.../check-runs",
+      "observed": "Tests (closed pull request) run 40465747080 created 07:12:43Z, conclusion skipped, job cancel-tests skipped with no runner; Tests 40465690636 cancelled 07:12:44Z ('Canceling since a higher priority waiting request for tests-2380 exists'); Envoy 40465690660, Docs 40465690758, Worker Image 40465690559 cancelled likewise; check runs after the close: lint/typecheck/test cancelled (122060417763/122060417819/122060417497), cancel-tests skipped (122060610348), no new lint/typecheck/test. The race is written in tests-closed.yaml, the closed-trigger comments of envoy-and-contracts, docs and worker-image, pr-and-main's concurrency comment, docs/kubernetes.md and the PR body's residuals.",
+      "headSha": "20fa840cbec2b62f1e36075376e8bbd5cf8f1065",
+      "negativeControl": "At 4773bb61 the job-level cancel-tests waited for a runner after every close (P4 run 40452283161 queued; tester's #2375 runs likewise); at 20fa840c it is skipped and takes none."
     }
   ],
   "filesChanged": [
@@ -67,16 +76,14 @@
   ],
   "trickyParts": [
     "A merged PR's closed event has github.ref = refs/heads/main, so every pull_request concurrency key is the PR number; docs keeps github.ref for push so a closed run never cancels main's Pages build.",
-    "A job skipped by its own if: enters no job-level group, so Worker Image's group moved to workflow level and the job-level block was deleted (a same-named job group would wait on itself).",
-    "The Tests canceller's job-level group cancels the workflow-level Tests run of another workflow when the job enters the group, before it gets a runner (P4).",
-    "A running docker build stops slowly: the closed run cancelled the running Worker Image build after 97 s (P4b)."
+    "A job-level group cancels a workflow-level run of another workflow when the job enters the group, before a runner (P4 at 4773bb61); a workflow-level group in a run whose only job is skipped does the same at creation (P6 at 20fa840c), so tests-closed.yaml now takes no runner.",
+    "A running docker build stops slowly: the closed run cancelled the running Worker Image build after 97 s (P4b).",
+    "GitHub can create a closed run after a quick reopen's runs, which it then cancels (tester's F1); accepted and documented, since required checks fail closed (cancelled, never passing)."
   ],
   "deviations": [
-    "Plan D1 replaced by the architect's option (b): tests-closed.yaml (job cancel-tests) joins tests-<number>; Tests' key moved to the PR number.",
-    "The simplify pass ran before the scratch proofs, so every proof ran at the final code head 4773bb61.",
+    "Plan D1 replaced by the architect's option (b): tests-closed.yaml joins tests-<number> (workflow level since the review round, job cancel-tests skipped); Tests' key moved to the PR number.",
+    "The simplify pass ran before the scratch proofs, so P1-P5 ran at the first round's final code head 4773bb61; the review round changes only tests-closed.yaml's concurrency and job if plus comments and docs, proven by P6 at 20fa840c.",
     "P5's first caller run (40451991938) had its attest cancelled and re-run by another session acting as legion-implementer[bot]; its re-run attempt was cancelled by this implementer to stop a duplicate image build. Both builds had already ended success."
   ],
-  "openQuestions": [
-    "cancel-tests needs a runner per close; a skipped job under a workflow-level group would need none. Kept job-level as the architect decided."
-  ]
+  "openQuestions": []
 }
