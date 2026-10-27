@@ -1504,9 +1504,11 @@ func requireAbandoned(t *testing.T, held ...heldRequest) {
 // process made is not one that reached the session. Every hold is released when the test ends,
 // before the server closes, since a close waits for every request still in flight.
 //
-// Each route's answer is decided in serve, in one place per route, so a row that needs the
-// listener to misbehave for a while - refuse a connection, answer 503, not know a session yet -
-// adds that there, beside the hold.
+// Each route's answer is decided in serve, in one place per route. A row that needs the listener
+// to misbehave for a while starts a take-over (takeOver): for its first phase the listener refuses
+// every connection, for its second it answers 503 as a starting listener does, and for its third
+// it holds no session yet - the registry read and the send answer "no live session", the live
+// list is empty - and after that it answers as before.
 type fakeListener struct {
 	server   *httptest.Server
 	sessions []listenerSession
@@ -1514,12 +1516,19 @@ type fakeListener struct {
 	mu       sync.Mutex
 	answered []listenerSendRecord
 	holds    map[listenerRoute]*listenerHold
+	// takeOverFrom is when the take-over began, zero when there is none; takeOverPhases is how
+	// long it refuses connections, answers 503, and holds no session, in that order.
+	takeOverFrom   time.Time
+	takeOverPhases [3]time.Duration
+	// takeOverReads counts, by session id, the registry reads a take-over answered other than
+	// as the session's record.
+	takeOverReads map[string]int
 }
 
 // startFakeListener serves the sessions on loopback until the test ends.
 func startFakeListener(t *testing.T, sessions ...listenerSession) *fakeListener {
 	t.Helper()
-	f := &fakeListener{sessions: sessions, holds: map[listenerRoute]*listenerHold{}}
+	f := &fakeListener{sessions: sessions, holds: map[listenerRoute]*listenerHold{}, takeOverReads: map[string]int{}}
 	f.server = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(func() {
 		f.mu.Lock()
@@ -1568,6 +1577,56 @@ func (f *fakeListener) sendsUnder(key string) []listenerSendRecord {
 	return sends
 }
 
+// listenerTakeOverPhase is what a take-over has the fake listener do with a request right now.
+type listenerTakeOverPhase int
+
+const (
+	takeOverOver listenerTakeOverPhase = iota
+	takeOverRefusing
+	takeOverStarting
+	takeOverUnknown
+)
+
+// takeOver begins a take-over now: the listener refuses connections for refuse, then answers
+// 503 for starting, then holds no session for unknown.
+func (f *fakeListener) takeOver(refuse, starting, unknown time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.takeOverFrom = time.Now()
+	f.takeOverPhases = [3]time.Duration{refuse, starting, unknown}
+}
+
+// endTakeOver ends the take-over at once, whatever phase it is in.
+func (f *fakeListener) endTakeOver() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.takeOverFrom = time.Time{}
+}
+
+// takeOverPhase is the phase the take-over is in now.
+func (f *fakeListener) takeOverPhase() listenerTakeOverPhase {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.takeOverFrom.IsZero() {
+		return takeOverOver
+	}
+	elapsed := time.Since(f.takeOverFrom)
+	for index, phase := range []listenerTakeOverPhase{takeOverRefusing, takeOverStarting, takeOverUnknown} {
+		if elapsed -= f.takeOverPhases[index]; elapsed < 0 {
+			return phase
+		}
+	}
+	return takeOverOver
+}
+
+// readsDuringTakeOver is how many registry reads of sessionID a take-over answered other than as
+// the session's record.
+func (f *fakeListener) readsDuringTakeOver(sessionID string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.takeOverReads[sessionID]
+}
+
 func (f *fakeListener) serve(w http.ResponseWriter, r *http.Request) {
 	// The whole body is read before anything waits, so the server sees the request end and
 	// notices its caller going away while the request is held.
@@ -1577,6 +1636,26 @@ func (f *fakeListener) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	phase := f.takeOverPhase()
+	if phase != takeOverOver && r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/registry/") {
+		f.mu.Lock()
+		f.takeOverReads[strings.TrimPrefix(r.URL.Path, "/v1/registry/")]++
+		f.mu.Unlock()
+	}
+	switch phase {
+	case takeOverRefusing:
+		// The connection is dropped unanswered, which the client meets as a listener that is not
+		// there: what a deleted listener pod, or its successor not yet listening, gives.
+		if connection, _, err := http.NewResponseController(w).Hijack(); err == nil {
+			_ = connection.Close()
+		}
+		return
+	case takeOverStarting:
+		// The real listener's starting gate (cmd/listener/main.go startingGate).
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "service starting"})
+		return
+	}
 	switch {
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/registry/"):
 		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/registry/")
@@ -1584,7 +1663,7 @@ func (f *fakeListener) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		session, ok := f.session(sessionID)
-		if !ok {
+		if !ok || phase == takeOverUnknown {
 			w.WriteHeader(http.StatusNotFound)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "no live session " + sessionID})
 			return
@@ -1592,6 +1671,10 @@ func (f *fakeListener) serve(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(session)
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 		if !f.await(listenerSessions, "", r) {
+			return
+		}
+		if phase == takeOverUnknown {
+			_ = json.NewEncoder(w).Encode([]listenerSession{})
 			return
 		}
 		_ = json.NewEncoder(w).Encode(f.sessions)
@@ -1608,7 +1691,7 @@ func (f *fakeListener) serve(w http.ResponseWriter, r *http.Request) {
 		if !f.await(listenerSend, send.IdempotencyKey, r) {
 			return
 		}
-		if _, ok := f.session(send.TargetSession); !ok {
+		if _, ok := f.session(send.TargetSession); !ok || phase == takeOverUnknown {
 			w.WriteHeader(http.StatusNotFound)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "no live session " + send.TargetSession})
 			return
@@ -1910,4 +1993,144 @@ func TestASendWhoseRequestIsCancelledAfterItsCommitReachesItsRecipient(t *testin
 		messageDelivery("the direct message", direct),
 		mentionDelivery("the mention", mention),
 	)
+}
+
+// takeOverDeliveries waits up to ten seconds for the direct message and the mentioning comment a
+// row sent, by their bodies, to be stored, and answers each as the delivery it follows.
+func takeOverDeliveries(t *testing.T, database *store.Store, messageBody, commentBody string) (direct, mention deliveryUnderTest) {
+	t.Helper()
+	storedID := func(table, body string) string {
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			var id string
+			err := database.Pool.QueryRow(context.Background(),
+				`select id::text from `+table+` where body = $1`, body).Scan(&id)
+			if err == nil {
+				return id
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				t.Fatalf("read the stored %s %q: %v", table, body, err)
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%q was not stored in %s within 10s", body, table)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	direct = messageDelivery("the direct message", storedID("messages", messageBody)+":steer")
+	mention = mentionDelivery("the mention",
+		storedID("comments", commentBody)+":session:"+resumeSession.SessionID+":steer")
+	return direct, mention
+}
+
+// sendDuringTakeOver sends, on p, a direct message to the live session and a comment mentioning
+// it, each without waiting for its answer, and returns the two deliveries once both are stored.
+func sendDuringTakeOver(t *testing.T, p *dispatchProcess, database *store.Store, issue, what string) (direct, mention deliveryUnderTest) {
+	t.Helper()
+	messageBody, commentBody := "A direct message "+what, "A mention "+what
+	p.sendInBackground(http.MethodPost, "/api/v1/agents/"+resumeSession.SessionID+"/messages",
+		fmt.Sprintf(`{"body":%q,"delivery":"steer"}`, messageBody))
+	p.sendInBackground(http.MethodPost, "/api/v1/issues/"+issue+"/comments",
+		fmt.Sprintf(`{"body":%q,"mentions":[{"target":"session:%s"}]}`, commentBody, resumeSession.SessionID))
+	return takeOverDeliveries(t, database, messageBody, commentBody)
+}
+
+// requireWaitingOutTheTakeOver waits up to ten seconds for both deliveries' senders to be waiting
+// out the take-over: each attempt is still pending under a claim, and the session has been read
+// at least five times during the take-over - the two first resolutions and at least three tries
+// after them.
+func requireWaitingOutTheTakeOver(t *testing.T, database *store.Store, listener *fakeListener, deliveries ...deliveryUnderTest) {
+	t.Helper()
+	claimed := func(delivery deliveryUnderTest) bool {
+		column, _, _, id := delivery.owner()
+		var held bool
+		if err := database.Pool.QueryRow(context.Background(), `
+			select count(*) = 1 and bool_and(state = 'pending' and claimed_at is not null)
+			from `+delivery.table+` where `+column+` = $1
+		`, id).Scan(&held); err != nil {
+			t.Fatalf("read the attempts of %s: %v", delivery.what, err)
+		}
+		return held
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		waiting := listener.readsDuringTakeOver(resumeSession.SessionID) >= 5
+		for _, delivery := range deliveries {
+			waiting = waiting && claimed(delivery)
+		}
+		if waiting {
+			return
+		}
+		if time.Now().After(deadline) {
+			for _, delivery := range deliveries {
+				t.Errorf("%s reads %v", delivery.what, delivery.attempts(t, database))
+			}
+			t.Fatalf("the senders were not waiting out the take-over within 10s: %d reads of the session during it, "+
+				"want at least 5 with every attempt pending under its claim", listener.readsDuringTakeOver(resumeSession.SessionID))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// While the active listener is replaced, its successor refuses connections, then answers 503,
+// then does not yet hold the session, for a few seconds. A direct message and a mention sent then
+// wait it out under the attempt each holds and reach the session once it answers: attempt 1 sent,
+// one receipt, one send. A session the listener never knows still reads failed, "no live session",
+// once the take-over window has passed. And a process killed while it waits leaves its attempts
+// pending under the claim it renewed last, which the other process's resume loop sends.
+func TestASendDuringAListenerTakeOverReachesItsSession(t *testing.T) {
+	t.Run("sent during the take-over", func(t *testing.T) {
+		listener := startFakeListener(t, resumeSession)
+		// The resume loop is an hour out, so only each request's own sender can deliver.
+		pair := startPair(t, listener.processEnv(time.Hour))
+		project := uniqueProjectKey(t, "TKO")
+		pair.a.createProject(t, project, "Listener take-over")
+		issue, _ := pair.a.createIssueIn(t, project, "Mentioned during a take-over", "spec")
+
+		listener.takeOver(time.Second, time.Second, time.Second)
+		direct, mention := sendDuringTakeOver(t, pair.a, pair.database, issue, "sent during a take-over")
+		requireDeliveredOnce(t, pair, listener, 10*time.Second, direct, mention)
+	})
+
+	t.Run("sent to a session the listener never knows", func(t *testing.T) {
+		listener := startFakeListener(t, resumeSession)
+		pair := startPair(t, listener.processEnv(time.Hour))
+		started := time.Now()
+		var message model.Message
+		if err := json.Unmarshal(pair.a.call(t, http.MethodPost, "/api/v1/agents/never-known/messages",
+			`{"body":"To nobody","delivery":"steer"}`, http.StatusCreated), &message); err != nil {
+			t.Fatalf("decode the message: %v", err)
+		}
+		took := time.Since(started)
+		if len(message.Deliveries) != 1 || message.Deliveries[0].State != "failed" ||
+			message.Deliveries[0].Error == nil || *message.Deliveries[0].Error != "no live session never-known" {
+			t.Fatalf("deliveries = %#v, want attempt 1 failed with %q", message.Deliveries, "no live session never-known")
+		}
+		if took > 15*time.Second {
+			t.Fatalf("the send to a session the listener never knows answered after %v, want within 15s", took)
+		}
+		gone := messageDelivery("the message to nobody", message.ID+":steer")
+		if states := gone.attempts(t, pair.database); !slices.Equal(states, []string{"1:failed"}) {
+			t.Fatalf("%s reads %v, want attempt 1 alone, failed", gone.what, states)
+		}
+		if receipts := gone.receipts(t, pair.database); receipts != 1 {
+			t.Fatalf("%s: attempt 1 has %d delivery receipts, want one", gone.what, receipts)
+		}
+	})
+
+	t.Run("killed during the wait", func(t *testing.T) {
+		listener := startFakeListener(t, resumeSession)
+		pair := startPair(t, listener.processEnv(time.Second))
+		project := uniqueProjectKey(t, "TKK")
+		pair.a.createProject(t, project, "Killed during a take-over")
+		issue, _ := pair.a.createIssueIn(t, project, "Mentioned, then killed", "spec")
+
+		listener.takeOver(time.Hour, 0, 0)
+		direct, mention := sendDuringTakeOver(t, pair.a, pair.database, issue, "killed during a take-over")
+		requireWaitingOutTheTakeOver(t, pair.database, listener, direct, mention)
+		pair.a.kill(t)
+		listener.endTakeOver()
+		backDatePendingAttempts(t, pair.database)
+		requireDeliveredOnce(t, pair, listener, 30*time.Second, direct, mention)
+	})
 }
