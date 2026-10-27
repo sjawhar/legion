@@ -13,9 +13,9 @@ import (
 // An accepted suggestion writes blocks, so what it stores is read back before it is written, and an
 // accept whose document would not read back as the live tree is refused, naming replace_with, with
 // nothing written and the suggestion left open. applySuggestion runs these in order: settleAccepted,
-// then outside an ask refuseUnreadableAccept and refuseReshapedAccept over each document-level block
-// the accept changed, the write's block-id check, refuseBrokenAsks, and last refuseMisreadAccept
-// over the whole document.
+// refuseCodePipeInTableCell, then outside an ask refuseUnreadableAccept and refuseReshapedAccept over
+// each document-level block the accept changed, the write's block-id check, refuseBrokenAsks, and
+// last refuseMisreadAccept over the whole document.
 
 // settleAccepted makes what an accept wrote hold what its markdown reads back as where that is
 // unambiguous (pmdoc.AgreeWithReadBack): the empty halves a block replacement leaves of the

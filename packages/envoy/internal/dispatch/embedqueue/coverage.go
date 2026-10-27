@@ -26,7 +26,7 @@ const (
 
 // coverageSource is one kind of item meaning search ranks: its FROM clause (from, plus where when
 // the kind needs a filter), and the expressions for its id, its text and when it was written.
-// id and text are the kind's write-time trigger's own (0073-0077, the issue's as 0131 replaced
+// id and text are the kind's write-time trigger's own (0073-0077, the issue's as 0136 replaced
 // it), byte for byte, so a row the coverage pass writes is the row the trigger would have
 // written, and a row the trigger wrote is never seen as stale. from and where are the items search
 // ranks (api/search.go's meaning candidate CTEs), which the triggers can exceed: see
@@ -40,7 +40,7 @@ type coverageSource struct {
 // (nothingToEmbed: the empty string, or only white space) is not covered: it matches nothing by
 // meaning, so items leaves it out and the queue settles its row with no vector.
 //
-//   - issue: 0073's trigger, as 0131 replaced it, and 0131's trigger on a new version of the
+//   - issue: 0073's trigger, as 0136 replaced it, and 0136's trigger on a new version of the
 //     issue's primary document enqueue new.key and
 //     issue_embedding_text(new.title, issue_embedding_spec(new.key)); text is that expression.
 //   - document: 0074 enqueues new.artifact_id::text, new.markdown for every artifact_versions
