@@ -2,21 +2,20 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-439",
-  "completed": "2026-10-27T05:54:21Z",
+  "completed": "2026-10-27T14:21:29Z",
   "pr": 2228,
-  "round": "review round 7 (changes requested for CI alone at 465a078b): forward merge of main so the pull_request merge ref carries main's #2317 fix for the daemon admission test",
+  "round": "forward merge of main on a reported conflict while READY waited for queued CI; nothing else changed",
   "proof": [
     {
-      "criterion": "The forward merge changes nothing of this branch's diff and brings main's fix for the only red required check",
-      "surface": "the unchanged-diff fingerprint (jj diff from the fork point, .legion and docs/solutions excluded) and the merge's parents",
-      "command": "fingerprint at 465a078b (and at code head fcc7d008) vs at merge 34b3e846cb6e (https://github.com/sjawhar/legion/pull/2228#issuecomment-6434885121); jj log -r 'baadccdc & ::main@origin'",
-      "observed": "fingerprint fcfbc288f05b54a8f89461975c53a87e0da717f16b03149df2a0cf507b638fcf before and after, unchanged; no conflicts; #2317 (baadccdc) is an ancestor of the merged main 448a41003a17; locally tsc, go build (envoy, daemon), check-dist and biome are green, and pi-envoy bun test gives 1016 pass with the skills guard green",
-      "headSha": "34b3e846cb6e35bb661f02261d2fab236a2ca3f0",
-      "negativeControl": "at fcc7d008 the required test job failed 'Test the Go daemon' (read a slotted issue ... got 20 and 31) in runs 40445205215 job 121994721541 and its rerun 122015255071, from main's #2289 in the old merge ref"
+      "criterion": "The forward merge leaves this branch's diff unchanged and makes the PR mergeable again",
+      "surface": "the unchanged-diff fingerprint (jj diff from the fork point, .legion and docs/solutions excluded) and GitHub's mergeable state",
+      "command": "fingerprint at f100b911 vs at merge 833fd5245204 (https://github.com/sjawhar/legion/pull/2228#issuecomment-6444474317); gh pr view 2228 --json mergeable",
+      "observed": "fingerprint 50792ce80e87eb6f6db826aef7702385aed83eccbe5604bb857faf0f9df2c620 before and after, unchanged; the only conflict was packages/envoy/CHANGELOG.md, both sides kept, nothing removed from either parent; GitHub reports MERGEABLE; go vet (envoy), go build (daemon), tsc in six packages, check-dist and biome green",
+      "headSha": "833fd5245204035929697f889201a9d0743b8354",
+      "negativeControl": "GitHub reported the PR CONFLICTING at f100b911 and ran no checks on it"
     }
   ],
-  "filesChanged": [],
-  "deviations": [
-    "Two tests fail in this pod, in files this PR does not change: envoy-client envoy-config.test.ts 'still running after 10 s' and claude-envoy session-title.test.ts 'queryTmux is bounded'."
+  "filesChanged": [
+    "packages/envoy/CHANGELOG.md (merge resolution)"
   ]
 }

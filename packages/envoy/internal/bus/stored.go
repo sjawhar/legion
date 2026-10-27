@@ -91,7 +91,6 @@ func (c *Client) requestConfirmed(ctx context.Context, subject string, data []by
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return nil, err
 	}
-	deadline, _ := ctx.Deadline()
 	c.mu.Lock()
 	conn := c.Conn
 	c.mu.Unlock()
@@ -101,7 +100,7 @@ func (c *Client) requestConfirmed(ctx context.Context, subject string, data []by
 		return nil, err
 	}
 	defer replies.Unsubscribe()
-	err = c.publishConfirmed(conn, &nats.Msg{Subject: subject, Reply: inbox, Data: data}, deadline, conn.PublishMsg)
+	err = c.publishConfirmed(ctx, conn, &nats.Msg{Subject: subject, Reply: inbox, Data: data}, conn.PublishMsg)
 	if err != nil && !errors.Is(err, errPublishUnconfirmed) {
 		return nil, err
 	}

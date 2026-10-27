@@ -60,9 +60,11 @@ var settings = []setting{
 	{Name: "DISPATCH_IDENTITY_HEADER_TRUSTED", Required: "when `DISPATCH_IDENTITY` is a header",
 		Description: "Set to `1` to acknowledge header identity, which is for tests and local harnesses only; without it a header-identity server refuses to start."},
 	{Name: "DISPATCH_LISTEN_HOST", Default: "every interface", Required: "no",
-		Description: "Host the server binds; an IPv6 host may be written with or without brackets."},
+		Description: "Host the server binds; an IPv6 host may be written with or without brackets. With `DISPATCH_LISTEN_FD` set the server binds nothing, and a set host must be the IP address of the socket that names; an empty one is unset."},
 	{Name: "DISPATCH_PORT", Default: "`" + defaultListenPort + "`", Required: "no",
-		Description: "Port the server binds."},
+		Description: "Port the server binds. With `DISPATCH_LISTEN_FD` set the server binds nothing, and a set port must be the port of the socket that names; an empty one is unset."},
+	{Name: "DISPATCH_LISTEN_FD", Required: "no",
+		Description: "An inherited listening TCP socket (descriptor number) the server serves on instead of binding; for test harnesses that hold the port. `DISPATCH_PORT` and `DISPATCH_LISTEN_HOST`, when set and not empty, must name the socket's address; `DISPATCH_SERVER_URL` is not derived from it. A descriptor that is not a listening TCP socket refuses startup, and the server binds nothing in its place."},
 	{Name: "DISPATCH_PPROF_PORT", Required: "no",
 		Description: "Port on `127.0.0.1` the Go profiler (`net/http/pprof`, under `/debug/pprof/`) listens on, reachable only from inside the pod or through `kubectl port-forward`; unset or empty, nothing listens. A value that is not a port 1-65535 refuses startup."},
 	{Name: "XDG_CONFIG_HOME", Default: "`~/.config`", Required: "no",
@@ -141,6 +143,8 @@ var settings = []setting{
 		Description: "Set to `1` to mount the end-to-end tests' hook routes; never in a real deployment."},
 	{Name: "DISPATCH_TEST_SETTLE_DELAY", Default: "`2s`", Required: "no",
 		Description: "Document settlement delay for an end-to-end test process; a positive Go duration. Set only with `DISPATCH_TEST_HOOKS=1`."},
+	{Name: "DISPATCH_TEST_EDIT_NOTICE_QUIET", Default: "`30s`", Required: "no",
+		Description: "How long a document stays quiet after a person's last settled version before its `artifact.human_edited` notice goes, for an end-to-end test process; a positive Go duration. Set only with `DISPATCH_TEST_HOOKS=1`."},
 }
 
 // removedSettings are the variables a release stopped reading, each with what replaced it. None is

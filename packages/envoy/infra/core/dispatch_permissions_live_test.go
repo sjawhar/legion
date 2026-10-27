@@ -213,10 +213,14 @@ func seedDispatchDeliverySettings(t *testing.T, databaseURL string) {
 	require.NoError(t, err)
 }
 
+// startDispatch runs the Dispatch binary against databaseURL and natsURL on a held loopback port,
+// which it inherits as DISPATCH_LISTEN_FD, so no other program can take the port before it serves,
+// and returns it with its port. DISPATCH_PORT and DISPATCH_SERVER_URL name the same port, and
+// Dispatch checks DISPATCH_PORT and DISPATCH_LISTEN_HOST against the socket.
 func startDispatch(t *testing.T, binary, databaseURL, natsURL, seed, githubURL string) (*cmdtest.Process, int) {
 	t.Helper()
 	home := t.TempDir()
-	port := cmdtest.FreeTCPPort(t)
+	held := cmdtest.HoldPort(t)
 	_, pemText := githubapptest.Key(t)
 	cmd := exec.Command(binary)
 	cmd.Dir = home
@@ -226,8 +230,8 @@ func startDispatch(t *testing.T, binary, databaseURL, natsURL, seed, githubURL s
 		"DISPATCH_DEV_SIGNIN=1",
 		"DISPATCH_INSECURE_COOKIE=1",
 		"DISPATCH_LISTEN_HOST=127.0.0.1",
-		"DISPATCH_PORT=" + strconv.Itoa(port),
-		"DISPATCH_SERVER_URL=" + dispatchURL(port, ""),
+		"DISPATCH_PORT=" + strconv.Itoa(held.Port),
+		"DISPATCH_SERVER_URL=" + dispatchURL(held.Port, ""),
 		"NATS_URLS=" + natsURL,
 		core.EnvNATSSeed + "=" + seed,
 		"DISPATCH_APP_CLIENT_ID=Iv1.e2efake",
@@ -237,7 +241,8 @@ func startDispatch(t *testing.T, binary, databaseURL, natsURL, seed, githubURL s
 		"HOME=" + home,
 		"XDG_CONFIG_HOME=" + filepath.Join(home, "config"),
 	}
-	return cmdtest.Start(t, "Dispatch", cmd), port
+	held.Pass(cmd, "DISPATCH_LISTEN_FD")
+	return cmdtest.Start(t, "Dispatch", cmd), held.Port
 }
 
 // dispatchHealthy is the answer Dispatch's /healthz gives once its schema is migrated.

@@ -1,6 +1,7 @@
 package webhook
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
@@ -9,10 +10,11 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 )
 
-// Publisher abstracts NATS envelope publishing for handler testability.
-// Matches the envelopePublisher pattern from cmd/ghostwispr/main.go.
+// Publisher publishes a webhook's envelopes, each within the context its handler gives it, which
+// carries the request's own end and the route's budget for its caller (*bus.Client.PublishWithin,
+// which also keeps the bus's own five-second bound).
 type Publisher interface {
-	Publish(contracts.Envelope) error
+	PublishWithin(context.Context, contracts.Envelope) error
 }
 
 // deliveryFailed answers a delivery whose envelope, or CI observation, the listener did not publish,
