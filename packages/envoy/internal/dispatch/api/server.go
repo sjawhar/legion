@@ -289,10 +289,11 @@ type server struct {
 	// which shares nothing with another process and runs a hook on itself.
 	testHooks *testHookFanout
 	// warnedUnmatchedRuns holds a warnedProductionRun for each deploy run productionApplies has
-	// warned holds no production job or no configured apply step, so a read that judges a run again
-	// does not warn about it again. Nothing evicts an entry: the map holds one per configured job
-	// names and apply step that it has warned about, until the configuration is fixed or the process
-	// restarts.
+	// asked about - one with no production job or no configured apply step - so this process asks
+	// delivery_run_warnings, which decides which process logs the warning (firstToWarn), once per
+	// run and configuration rather than on every read. Nothing evicts an entry: the map holds one
+	// per configured job names and apply step it has asked about, until the configuration is fixed
+	// or the process restarts.
 	warnedUnmatchedRuns sync.Map
 }
 

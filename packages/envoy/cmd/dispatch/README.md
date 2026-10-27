@@ -456,6 +456,18 @@ What the two processes share, and what each keeps to itself:
   each of its steps safe beside another process's, and drops every vector its own embedder did not
   make, so every process takes the same embedder settings (Search, below); `cmd/dispatch/main.go`
   says at the call site which loop is which and why.
+- The delivery live hub and the event-stream relay run in every process, each on a `LISTEN`
+  connection of its own (`api/delivery_live_hub.go`, `api/event_stream_relay.go`). Each process
+  serves its own browser sockets - the Delivery and Pipeline pages' `GET /ws/delivery`, every SSE
+  stream - so each needs the notifications and the recomputed views for them, and sharing them
+  would need a cache across the processes. The cost is two Postgres connections per process
+  outside `pool_max_conns`.
+- A Delivery page configuration warning is logged once across the processes. Every read judges
+  each deploy run, and a successful run holding none of `production_job_names`, or whose production
+  job lists no step named `production_apply_step_name`, is named in the log; the process whose
+  insert into `delivery_run_warnings` (migration `0124`) writes the run's row logs it, and every
+  other process finds the row and stays quiet. A database that cannot record the row leaves the
+  process to log it anyway.
 - A test hook acts on every process (`DISPATCH_TEST_HOOKS=1` only, so never in a real
   deployment). A browser suite against two processes holds its page's stream, delivery socket,
   document and conversation viewer on whichever process the page reached, and calls a hook on
@@ -900,6 +912,15 @@ read (`githubapp/ratelimit`). It is a new table, so nothing existing is read, lo
 rewritten, and the census answers `0`. The release before it neither reads nor writes the table:
 while both serve, its processes obey only the answers GitHub gives each of them, and its sweeps
 keep their backoff in the NATS KV bucket; rolling back past it is an image rollback alone.
+
+Migration `0124_delivery_run_warnings` creates `delivery_run_warnings`, one row per Delivery page
+configuration warning logged: the deploy run (`repo`, `run_id`) and the configuration it was
+warned under (`job_names`, and `apply_step`, `''` for a run holding no production job), all four
+the primary key, so a changed configuration is warned about again. A read inserts the row before
+it logs and only the process whose insert wrote it logs (`api/delivery.go`, `firstToWarn`).
+Nothing deletes a row. It is a new table, so nothing existing is read, locked or rewritten, and
+the census answers `0`. The release before it neither reads nor writes the table and logs each
+warning once in each of its processes, as before; rolling back past it is an image rollback alone.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a

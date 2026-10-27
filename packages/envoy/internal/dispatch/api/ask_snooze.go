@@ -55,26 +55,37 @@ func (s *server) putAskSnooze(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "SNOOZE_INPUT", http.StatusBadRequest, "snoozed_until must be an RFC3339 timestamp")
 		return
 	}
-	// A snooze that has already passed would fold nothing away. The bound allows no skew: the
-	// Inbox's presets are its own to keep clear of it, and the one that can land near midnight
-	// keeps a few seconds of today in hand rather than naming a moment this could refuse.
-	if !snoozedUntil.After(time.Now()) {
-		writeError(w, "SNOOZE_INPUT", http.StatusBadRequest, "snoozed_until must be in the future")
-		return
-	}
-	// Selecting the ask rather than inserting its id makes an unknown ask pgx.ErrNoRows - a
-	// 404 - instead of the foreign key's 500.
-	var stored time.Time
+	// A snooze that has already passed would fold nothing away, so it is refused. "Passed" is
+	// judged against the database's now(), in the statement that stores the snooze: each
+	// process's host keeps its own clock, and the Inbox compares a snooze with now when it reads
+	// it. The bound allows no skew: the Inbox's presets are its own to keep clear of it, and the
+	// one that can land near midnight keeps a few seconds of today in hand rather than naming a
+	// moment this could refuse. The ask is selected rather than its id inserted, so an unknown ask
+	// stores nothing and reads as absent - a 404 - instead of the foreign key's 500; a past moment
+	// is refused first, whatever ask it names.
+	var future bool
+	var stored *time.Time
 	if err := s.deps.Store.Pool.QueryRow(r.Context(), `
-		insert into user_ask_snooze (login, ask_id, snoozed_until)
-		select $1, id, $3 from asks where id = $2
-		on conflict (login, ask_id) do update set snoozed_until = excluded.snoozed_until
-		returning snoozed_until
-	`, model.CanonicalLogin(actor.ID), askID, snoozedUntil).Scan(&stored); err != nil {
+		with snoozed as (
+			insert into user_ask_snooze (login, ask_id, snoozed_until)
+			select $1, id, $3::timestamptz from asks where id = $2 and $3::timestamptz > now()
+			on conflict (login, ask_id) do update set snoozed_until = excluded.snoozed_until
+			returning snoozed_until
+		)
+		select $3::timestamptz > now(), (select snoozed_until from snoozed)
+	`, model.CanonicalLogin(actor.ID), askID, snoozedUntil).Scan(&future, &stored); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, userAskSnooze{SnoozedUntil: timestampValue(stored)})
+	if !future {
+		writeError(w, "SNOOZE_INPUT", http.StatusBadRequest, "snoozed_until must be in the future")
+		return
+	}
+	if stored == nil {
+		writeError(w, "NOT_FOUND", http.StatusNotFound, "no ask "+askID)
+		return
+	}
+	WriteJSON(w, http.StatusOK, userAskSnooze{SnoozedUntil: timestampValue(*stored)})
 }
 
 // DELETE /api/v1/me/asks/{id}/snooze
