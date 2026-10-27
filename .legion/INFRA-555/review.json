@@ -2,73 +2,49 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-555",
-  "completed": "2026-10-27T12:22:29Z",
-  "round": 1,
-  "reviewedCodeHead": "e1754f3c416e7df4252b1ff2676268647549d03c",
+  "completed": "2026-10-27T16:14:13Z",
+  "round": 2,
+  "reviewedCodeHead": "76483b143ad894e973ec8e537d9d4deab604fe0a",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 4,
-  "minor": 7,
-  "ci": "At code head e1754f3c (CI head of the newest pull_request runs; compare to the PR head shows only .legion/ changed): required lint, typecheck, test and pr-title all queued at 12:14Z (171 runs queued repository-wide). Not read as a pass; this round requests changes on other grounds.",
+  "important": 2,
+  "minor": 4,
+  "ci": "At code head 76483b14 (CI head of the newest pull_request runs; compare to PR head 6bbf48f8 shows only .legion/ changed): required lint, typecheck, test and pr-title all queued at 15:50Z. Not read as a pass; this round requests changes on other grounds.",
+  "roundOneThreads": "All ten round-1 threads verified fixed at 76483b14 and answered with a reply each (the implementer had already resolved them).",
   "thermonuclear": {
-    "deepReview": "CHANGES at e1754f3c: verifiers-staging-token.sh hangs (Medium), dev sign-in restart after SIGKILL refused (Medium), empty signing-key file panics (Minor); security rows answered with no exploitable finding",
-    "codeQuality": "CHANGES at e1754f3c: seven duplication or boundary findings, each verified in the code"
+    "deepReview": "APPROVE at 76483b14; minor: PR-body census and brief stale, migration comment names a reader that does not exist, stop signal during the admission wait exits 1, refresh failures retried per request with no pause (recorded as risk)",
+    "codeQuality": "CHANGES at 76483b14: publishWithin re-implements bus.Client.PublishReportingDuplicateWithin, PR body stale, joinRegistry lives in shutdown.go, duplicated healthz wait loop in verifiers-staging-token.sh"
   },
   "keyFindings": [
     {
       "severity": "important",
-      "file": "PR body",
-      "description": "No `## Contract change census`, although the PR adds a boot refusal (key set a live peer does not share), refuses a DISPATCH_SIGNING_KEY with an empty or repeated entry, splits a key at whitespace, changes /healthz `ok` and its fields, ends the boot refusal on an unreachable NATS or OIDC issuer, and changes server.started's id and timing."
+      "file": "PR body (## Contract change census)",
+      "description": "C2 and C5 name migration 0130, which at the head is 0130_comments_written_version; this PR's is 0135_server_processes, and the C5 rollout note tells an operator to check for the wrong one. The header says every other search has 0 hits in agent-infra; a re-run gives 4 for the NATS-down search, 381 for the replicas search and 102 (not 94) for refuses/exits."
     },
     {
       "severity": "important",
-      "file": "packages/envoy/cmd/dispatch/main.go",
-      "description": "Line 300: the service-account issuer is no longer read at boot, but scripts/e2e/verifiers-staging-token.sh:195-199 still runs envoy-dispatch in the foreground against an absent issuer and waits for it to exit, so that live proof now blocks forever; scripts/e2e/README.md:37, the script header and packages/envoy/deploy/README.md:229 still say the boot is refused."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/cmd/dispatch/main.go",
-      "description": "Line 521: under DISPATCH_DEV_SIGNIN each start mints a new key, so a server restarted within about 15 s of a SIGKILL (Playwright's default stop of packages/dispatch/e2e's web server, which sets no gracefulShutdown) is refused beside the dead process's still-live row."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/processes/processes.go",
-      "description": "Lines 197-228 and 324-360: the admission check (lock, Live, keySetsShared loop, insert) is written twice, once in Register and once in renew's lapsed path."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/store/refresh_token_seal.go",
-      "description": "Line 44: an empty signing-key file now panics in newRefreshTokenSeal before BuildAppContext can refuse it by name."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/bus/nats.go",
-      "description": "Lines 259-269, 323-357: background connect copied in Dial and spread across three branches of newClient; Dial accepts WithName/WithEnvironment and ignores them."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/auth/session.go",
-      "description": "Lines 70 and 157: Keys() exports raw signing keys only for the seal, and purposeMAC repeats the seal's HKDF derivation."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/identity/identity.go",
-      "description": "Line 93 (with api/server.go:738, docs/websocket.go:223): oidc.ErrIssuerUnavailable becomes identity's error vocabulary, the same sentinel the service-token verifier returns."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/redeliver/sweep.go",
-      "description": "Line 286: Sweeper has two exported ways to give the state, and Sweep overwrites its own config; this shape already caused the redeliver-webhooks panic."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/processes/processes.go",
-      "description": "Line 427: DashboardBuild copies routes.servePage's ETag hash into another package, though the two must stay equal."
+      "file": "packages/envoy/internal/dispatch/startup/started.go",
+      "description": "Line 302: publishWithin re-implements bus.Client.PublishReportingDuplicateWithin with a goroutine that keeps publishing after the pass gives up and its transaction rolls back."
     },
     {
       "severity": "minor",
       "file": "packages/envoy/cmd/dispatch/main.go",
-      "description": "Lines 502-534: registry wiring added inline to main(), now 409 lines."
+      "description": "Line 518: a SIGTERM during the up-to-20 s admission wait ends as 'register this server process: context canceled', ERROR and exit 1, not a clean stop."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/store/migrations/0135_server_processes.up.sql",
+      "description": "Lines 13-15: says the dashboard's new-version notice reads commit and dashboard_build; nothing at the head reads dashboard_build (INFRA-559 will)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/cmd/dispatch/shutdown.go",
+      "description": "Line 84: joinRegistry starts the prune loop and the announcer, boot wiring in the shutdown file."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/e2e/verifiers-staging-token.sh",
+      "description": "Lines 230-237: the new /healthz wait loop copies the one at 300-304."
     }
   ]
 }
