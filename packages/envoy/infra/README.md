@@ -460,12 +460,14 @@ replaces the component's networked resources. Keep `deletionProtection` enabled 
 teardown-and-rebuild work: deleting the Cloud SQL instance deletes its backups. A teardown
 therefore takes an `up` with `deletionProtection: false` before `destroy`.
 
-`envoy-dispatch` itself is not yet safe at more than one concurrent process: its two delivery
-consumers are exclusive push durables, so a second process logs a bind error for as long as it
-runs, its SSE broker and its live document rooms are per-process, its outbox publisher claims no
-row before it publishes, and several of its loops are written for the one process that runs them,
-so a second copy runs them again. The component carries the capability and leaves the default at
-1; raising a production deployment above it waits on that separate work.
+`envoy-dispatch` itself is not yet safe at more than one concurrent process: its SSE broker and its
+live document rooms are per-process, its outbox publisher claims no row before it publishes, and
+several of its loops are written for the one process that runs them, so a second copy runs them
+again. Its two delivery intakes already run safely beside a second process: one process delivers
+from each durable while it holds that durable's hold in Postgres, and the others stand by, logging
+so at INFO, and take the durable over when the holder stops or dies. The component carries the
+capability and leaves the default at 1; raising a production deployment above it waits on that
+separate work.
 
 To inspect pending migrations before an image update, run the image with the deployment's service
 account and `DATABASE_URL` from its Secret:

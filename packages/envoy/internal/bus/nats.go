@@ -126,6 +126,10 @@ type recoverableSubscription struct {
 	handler   nats.MsgHandler
 	opts      []nats.SubOpt
 	active    *nats.Subscription
+	// subscribed is the handle the registration's first successful bind installed: the one
+	// Subscribe returned, when its own bind succeeded. Release names the registration by it; a
+	// restore's bind replaces active and leaves it.
+	subscribed *nats.Subscription
 	// binding is set while a bind of this registration is in flight, and closed when it ends. A
 	// registration has one bind at a time: a restore leaves one that has a bind in flight, and a
 	// registration that replaces it waits for that bind first.
@@ -408,7 +412,8 @@ func (c *Client) Connected() bool {
 
 // Subscribe creates the client's recoverable JetStream subscription. The client keeps one
 // JetStream subscription: a later call on the same subject replaces it, unsubscribing the handle
-// an earlier one returned, and a call on another subject is refused with ErrSubscriptionHeld.
+// an earlier one returned, a call on another subject is refused with ErrSubscriptionHeld, and a
+// caller that is done with it gives it up with Release.
 func (c *Client) Subscribe(subject string, handler nats.MsgHandler, opts ...nats.SubOpt) (*nats.Subscription, error) {
 	c.mu.Lock()
 	conn, js := c.Conn, c.js
@@ -454,12 +459,7 @@ func (c *Client) SubscribeCore(subject string, handler nats.MsgHandler, queues .
 func (c *Client) registerSubscription(next recoverableSubscription, conn *nats.Conn, js nats.JetStreamContext) (*nats.Subscription, error) {
 	c.subscriptionsMu.Lock()
 	subscription := &c.subscriptions[next.transport]
-	for subscription.binding != nil {
-		inFlight := subscription.binding
-		c.subscriptionsMu.Unlock()
-		<-inFlight
-		c.subscriptionsMu.Lock()
-	}
+	c.awaitBindLocked(subscription)
 	if c.stopped() {
 		c.subscriptionsMu.Unlock()
 		return nil, errStopped
@@ -495,6 +495,45 @@ func (c *Client) registerSubscription(next recoverableSubscription, conn *nats.C
 	return sub, nil
 }
 
+// Release gives up the JetStream registration the Subscribe that returned sub made, so that no
+// reconnect or recovery binds it again, and a later Subscribe, on any subject, registers anew. A
+// caller that ends a subscription for good while the client runs on calls it once sub has ended
+// (drained or unsubscribed): the client binds again any registration whose subscription is no
+// longer valid, a drained one included, so without it the next reconnect would hand the stopped
+// handler new deliveries. A bind of the registration in flight is waited for first, as
+// registerSubscription does, and a handle a restore bound for it since sub ended is unsubscribed.
+// A sub the client no longer holds -- one a later Subscribe replaced -- releases nothing.
+func (c *Client) Release(sub *nats.Subscription) {
+	if sub == nil {
+		return
+	}
+	c.subscriptionsMu.Lock()
+	subscription := &c.subscriptions[jetStreamSubscription]
+	c.awaitBindLocked(subscription)
+	if subscription.subscribed != sub {
+		c.subscriptionsMu.Unlock()
+		return
+	}
+	rebound := subscription.active
+	*subscription = recoverableSubscription{transport: jetStreamSubscription}
+	c.subscriptionsMu.Unlock()
+	if rebound != nil && rebound != sub {
+		_ = rebound.Unsubscribe()
+	}
+}
+
+// awaitBindLocked waits until no bind of the registration s holds is in flight. It is called with
+// subscriptionsMu held and returns with it held; the lock is let go while it waits, so a bind that
+// ends while it waits may have changed s, and another may have started, which it waits for too.
+func (c *Client) awaitBindLocked(s *recoverableSubscription) {
+	for s.binding != nil {
+		inFlight := s.binding
+		c.subscriptionsMu.Unlock()
+		<-inFlight
+		c.subscriptionsMu.Lock()
+	}
+}
+
 // describeSubscription names a subscription in ErrSubscriptionHeld's error: its subject, and its
 // queue group when it has one.
 func describeSubscription(subject, queue string) string {
@@ -526,6 +565,9 @@ func (c *Client) endBind(subscription *recoverableSubscription, sub *nats.Subscr
 	mode := c.stopMode
 	if err == nil && (mode == clientRunning || mode == clientDraining) {
 		subscription.active = sub
+		if subscription.subscribed == nil {
+			subscription.subscribed = sub
+		}
 	}
 	c.subscriptionsMu.Unlock()
 

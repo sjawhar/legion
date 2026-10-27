@@ -142,9 +142,10 @@ var errLeaseNotHeld = errors.New("the unlock reports this session did not hold t
 // period is the loop's own interval, the time it means to leave between passes, and is compared
 // against the database's record of when this lease's last pass at that period began (duty_passes,
 // migration 0115; readPeriod). A period of zero or less is no period at all - mutual exclusion and
-// nothing else - which is what the delivery consumers' reconciliation wants: it is not a periodic
-// loop, since it runs on every bind poll, and it carries a throttle of its own
-// (delivery.bindThrottle). Such a pass reads and records nothing.
+// nothing else - which is what a delivery intake's take-over of its durable wants
+// (delivery.consumerLease): it is not a periodic loop but a step a process makes only while it
+// holds the durable's Hold and the durable does not deliver to it yet. Such a pass reads and
+// records nothing.
 //
 // The lease is a session-level two-key advisory lock, leaseNamespace and the name's hashtext, taken
 // on a connection of its own with pg_try_advisory_lock: a lease the database reports held elsewhere

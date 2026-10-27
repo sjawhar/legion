@@ -347,8 +347,8 @@ func main() {
 	//   - already claims its own work, so two processes never do one unit of it twice: the
 	//     embedding queue (embedqueue, `for update skip locked`), the task progress
 	//     reconciliation (`for no key update ... skip locked`), the outbox's own publish scan
-	//     (its claim window) and the delivery intakes (NATS's push-durable exclusivity, which
-	//     delivery.StartIntakes takes).
+	//     (its claim window) and the delivery intakes (each delivers from its durable only while
+	//     it holds that durable's duty.Hold, which delivery.StartIntakes takes).
 	//   - per-process by design, because each serves this process's own connections or memory:
 	//     the settlement resumption (it arms this process's rooms, and docs/resume.go says it
 	//     runs on an interval precisely because a rolling deploy overlaps two processes), the
@@ -429,9 +429,10 @@ func main() {
 	go delivery.NewReconcile(database.Pool, appCtx.GitHub(), broker).Run(ctx, leases)
 	if natsClient != nil {
 		// The intake and the job intake (LEGION-690) each bind a durable, so each takes a client of
-		// its own (delivery.StartIntakes). Their clients stay open until the publisher closes, so a
-		// message still in its handler can be acknowledged while Dispatch shuts down; stop waits for
-		// both Runs, which return once ctx is cancelled, and not for that handler.
+		// its own (delivery.StartIntakes). Once ctx is cancelled each Run stops delivering: the
+		// message in its handler finishes and is acknowledged, the messages behind it go back to
+		// NATS, and the intake's hold is released, so another process takes its durable over at
+		// once. stop waits for both Runs, then closes their clients.
 		connectIntake := func(name string) (*bus.Client, error) {
 			return bus.Connect(envoyConfig.Envoy.NatsURLs, bus.WithEnvironment(env.lookup), bus.WithName(name))
 		}
