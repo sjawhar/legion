@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-549",
+  "completed": "2026-10-27T08:16:30Z",
+  "round": 1,
+  "reviewedCodeHead": "e0040d229bba89bf903069f8f4b12ff12f04779f",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 3,
+  "minor": 0,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/infra/gcp/clusteredhub_kube.go",
+      "description": "A lower maxFileStoreGb (explicit, unset after a larger explicit value, or a smaller streamMaxBytes with diskSizeGb explicit) changes only nats.conf. nats-server v2.15.1 refuses a reload that decreases max_file_store (server/reload.go:1884) and compares every later reload with the running options, so every later users change (a user removal included) is refused too, while pulumi up succeeds and no pod rolls. Fix: roll the pods when the store limit changes (a pod-template annotation beside no-auth-user), pin it with a unit test, and correct README/nats-hub.md."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/infra/gcp/clusteredhub_tailnet.go",
+      "description": "The advertiser container is /bin/sh -c <script> as PID 1 with no SIGTERM trap (tailnet_service.go:358-541), so the kernel drops the kubelet's SIGTERM and every tailnet host pod takes the full 60 s grace to stop. Fix: trap TERM in tailnetAdvertiserBody (keep the INFRA-560 copy identical) and pin it in the script test."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/infra/README.md",
+      "description": "The component runs at least two listener hosts as one machine id, but neither README nor nats-hub.md says the listener image must carry INFRA-557's single-deliverer take-over; with today's listener two pods can both deliver from listener-<machine id> (INFRA-557 spec, item 1). State the prerequisite where tailnet.listener.image and the consumer's prerequisites are described."
+    }
+  ],
+  "thermonuclear": {
+    "deepReview": "Verdict: CHANGES at e0040d22 (H1 max_file_store reload lock-out; M1 advertiser SIGTERM; M2 chart fetched by version, hardening)",
+    "codeQuality": "Verdict: CHANGES at b8687b33, cleanup only: authorizationRefusal reads core's error labels (declined: clusteredhub_refusals_test.go:165,186-187 pin every mapped input, so a wording change fails tests); shared helpers placed in dispatch*.go (declined: placement within one package, and the same files are open in INFRA-560's #2368); 1222-line live test (declined: the plan's five phases, proof unaffected)"
+  },
+  "ci": "At e0040d22 every pull_request run (Tests, Legion Envoy and Contracts, Docs, PR Title) was still queued at 08:15Z; legion/INFRA-546 requires no check (no ruleset, no protection). A request for changes does not wait on CI.",
+  "verifiedLocally": "gofmt clean, go vet -tags pulumilive,natslive ./gcp/ ./core/ ./provider/ ok, go test ./core/ ./provider/ ok, go test -run 'Clustered|NatsHub|Dispatch|Tailnet' ./gcp/ ok at e0040d22; tailnet_service.go and its test byte-identical to legion/INFRA-560@origin (sha256)."
+}
