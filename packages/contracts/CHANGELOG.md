@@ -10,10 +10,13 @@
   document shows, without the full read. The event payloads gain optional fields saying what a
   write moved: `IssueEventChanges` (`changed`, `ancestors`, `thread_logins`) on
   `IssueEventPayload`, `ThreadLoginsPayload` (`thread_logins`) on `AskEventPayload`,
-  `CommentEventPayload` and `MessageEventPayload`, and `UserStateUpdatedEventPayload.changed`,
-  with the same optional fields on `IssueEventPayloadSchema` and the ask, comment and message
-  event schemas. Each is absent from an event written before Dispatch sent it, which a reader
-  takes as "anything may have moved" (INFRA-492).
+  `CommentEventPayload` and `MessageEventPayload`, `UserStateUpdatedEventPayload.changed` (which
+  names `snoozed` for a snooze or an un-snooze) and `UserStateUpdatedEventPayload.ask_id`, the ask
+  a snooze moved; `IssueEventPayloadSchema` and the ask, comment and message event schemas carry
+  the same optional fields. `ChangedReference` gains `kind: "artifact"`, a cited document
+  or file named by its uuid, and the optional `ref`, its `dispatch://` address. Each is absent from
+  an event written before Dispatch sent it, which a reader takes as "anything may have moved"
+  (INFRA-492).
 
 - Daemon API contract 40: `LEGION_WORKFLOW_PHASES` gains `awaiting_person`, after `admitted`, a
   root that gave its admission slot up while its architect waits on a person's answer, and the

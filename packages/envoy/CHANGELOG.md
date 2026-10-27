@@ -18,9 +18,13 @@
   `message.answered`, `ask.opened`, `ask.answered`, `ask.resolved`, and an issue event that moved
   the status carry `thread_logins`, whose Replies count the write can move; `user_state.updated`
   carries `changed`, which of `pinned`, `last_read_seq` and `dismissed` moved. Each is absent from
-  an event written before this release. `GET /api/v1/events` answers
-  `X-Dispatch-Event-Replay: complete` on a resuming connection whose `since` is at or below the
-  log's head, which it replays in full (`cmd/dispatch/README.md`, "Routes").
+  an event written before this release. A snooze or an un-snooze of an Inbox row
+  (`PUT`/`DELETE /api/v1/me/asks/{id}/snooze`), which appended no event, now appends the writer's
+  `user_state.updated` with `changed: ["snoozed"]` and the ask's `ask_id` when it moves the row,
+  so the writer's other tabs and devices follow it; it names nobody else and wakes no one.
+  `GET /api/v1/events` answers `X-Dispatch-Event-Replay: complete` on a resuming connection whose
+  `since` is at or below the log's head, which it replays in full (`cmd/dispatch/README.md`,
+  "Routes").
 - `envoy-infra:gcp:Dispatch` takes `pprofPort`, which sets `DISPATCH_PPROF_PORT` on the app
   Deployment's `envoy-dispatch` container alone, so a deployment turns on Dispatch's loopback-only
   profiler through the component rather than by editing the Deployment, which the next update
@@ -821,16 +825,28 @@
   refresh goes through one scheduler (`api/query-refresh.ts`): events are batched for 100 ms, and
   each read is fetched at most once a second, never twice at once and never by cancelling the
   request in flight, so a first load's response is kept; an inactive read is only marked stale.
+  A test of a read's data waits, while a fetch of it is out, for the response that lands, and a
+  read left while it owes a refresh stays stale once that fetch lands, so it fetches when it
+  mounts again. An ancestor's detail refreshes on any write of a descendant, whose activity its
+  Children tab shows; the Replies page on a retitle of an issue it lists; the Architecture tab on
+  any write of an issue its tree lists; a document's `Referenced by` panel when the event's
+  `references_changed` names the document; and the Inbox on the viewer's own snooze in another
+  tab. A read the server refuses with a 503 carrying `Retry-After` is retried after that many
+  seconds plus a random share of them again, up to twice them, so tabs refused together do not
+  all come back at once; any other failure is still retried after 500 ms.
   The app's query client (`api/query-client.ts`) gives every mutation's invalidation the same
   never-cancel rule. A reconnect whose replay the server calls complete refreshes nothing beyond
   what its events change, where every reconnect, a tab regaining focus among them, refetched every
   read. A `dispatch://` reference reads the new summary routes in place of the full issue, and an
   inline link reads no document text.
-- Dispatch's `references_changed` also names a target whose edge the write kept but whose excerpt
-  it moved, which the target's `Referenced by` panel shows: an edit of an ask's question or a
-  comment's body that changes the head of its text names every target the text still cites, a
-  document version names each target whose stored excerpt it changed, and an issue retitle names
-  the issue's parent and the issues it is blocked by (INFRA-492).
+- Dispatch's `references_changed` also names a cited document or file, as
+  `{kind: "artifact", id, ref}` (its uuid and the `dispatch://` address its `Referenced by` panel
+  is opened on), so that panel follows a citation made elsewhere. It also names a target whose
+  edge the write kept but whose excerpt it moved, which the target's `Referenced by` panel shows:
+  an edit of an ask's question or a comment's body that changes the head of its text names every
+  target the text still cites, a document version names each target whose stored excerpt it
+  changed, and an issue retitle names the issue's parent and the issues it is blocked by
+  (INFRA-492).
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a

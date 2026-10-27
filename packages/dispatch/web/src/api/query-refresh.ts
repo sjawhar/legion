@@ -47,8 +47,8 @@ interface DeferredCheck {
 
 // Per QueryClient, keyed by query hash: when each query's last fetch began (from the cache's
 // `fetch` action), the moment each owed refresh was asked for, the timer that will start a
-// refresh the interval holds back, and the checks waiting for a first load to land. Every entry
-// of a hash leaves when its query is removed.
+// refresh the interval holds back, and the checks waiting for the response of a fetch that is out
+// (a first load or a refetch) to land. Every entry of a hash leaves when its query is removed.
 interface SchedulerState {
   readonly started: Map<string, number>;
   readonly owed: Map<string, number>;
