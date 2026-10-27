@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-368",
+  "completed": "2026-10-27T15:38:16Z",
+  "plan": "dispatch://INFRA-368/artifact/plan-md",
+  "summary": "One pull request in eight ordered tasks: pure split/align/carry and UTF-16 offsets in packages/envoy/internal/dispatch/itemblocks; migrations for comment_blocks, message_blocks, comment_block_texts, owed state rows with triggers, item block refs, replies_to_block columns and six graph_edges arms under storage kinds comment_block/message_block; IndexItem at every comment and message write and in ReindexOwedItem; the item-block reference grammar and graph readers (API node kind block, R12 facts, pins on comment revisions); reply_to_block / in_reply_to_block with reply_block on every read and event; GET /api/v1/comments/{id}/blocks and /messages/{id}/blocks and dispatch read of an item block; the dashboard comment editor carrying block ids through edits; rebuild-refs, the block-index loop's third batch, the driver's A7/A10/A11/A13/A15-comment sections, two Conversation tab browser rows, docs and five changelogs.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase rules, push and handoff, and references/pr-body.md for proof entries, the census and the simplify pass (references/conflicts-and-rewrites.md if #2394 or #2245 merges first and a migration renumber or view restatement conflicts)",
+      "ce-simplify-code: the simplify pass the PR body reference requires on settled code before the proof head",
+      "dispatch: the production record and any Dispatch write (the plan's after-merge production check writes the Production line and reads threads with dispatch read)"
+    ],
+    "test": [
+      "legion-worker: the tester's evidence rules and references/pr-body.md for what a proof is; re-run the plan's driver, Playwright and Go commands at the head on the local harness",
+      "dispatch: reading threads and references with dispatch read on the harness and checking the CLI output the plan names"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md for review and approval of the head, and references/review-threads.md for threads",
+      "ce-simplify-code: judge whether the new itemblocks, refs/item_blocks.go and block-spans.ts code is as simple as its rules allow"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "Reusing block_grammar_owed lets an older build drain the queue without indexing blocks (old ReindexOwedItem deletes rows; old sourceText treats direct messages as gone).", "answer": "Decision 7: owed_at on comment_block_state and message_block_state, set by new triggers the older build does not know; drained only by this build's block-index tick as a third batch under the existing lease. Rollback leaves items owed for the next roll forward."},
+      {"finding": "On ?to=<target>, is a comment mention's source the block node or the comment (R7 vs R14 and the driver's existing checks)?", "answer": "Decision 4: the block node with parent the comment, as documents do; every reader that renders a source (ReferencedBy.tsx groups by parent, dispatch-execute.ts referenceLines/blockLines) is updated and listed in a census; the driver's existing source checks move to the block node with parent.id the comment."},
+      {"finding": "Counts: older builds double-count block rows during the roll; the two-paragraph count changes; event counted changes can miss a link moving between blocks.", "answer": "Decision 2: storage kinds comment_block/message_block, which an older build skips as unknown (no double count, rollback-safe). Two paragraphs citing one target count 2, once counts 1 (TestAMentionStartsAtItsBlock). IndexItem returns targets whose block rows changed for the event's counted changes."},
+      {"finding": "Direct-message mentions would become visible on public ?to= reads.", "answer": "Decision 4: a direct message writes no block mentions (as it writes no mentions today); its blocks are nodes reachable only through the blocks route under getMessageThread's read check."},
+      {"finding": "Stale or owed items: the blocks route would hand the editor wrong ids; replies to an unindexed block are refused.", "answer": "The blocks route answers indexed:false with no blocks when owed or the body hash differs, and writes nothing; the editor then sends no ids. A reply naming a block of an owed parent indexes the parent first in its own transaction, under the lock it already holds."},
+      {"finding": "Writes during the roll: an older pod refuses the new fields and has no blocks routes.", "answer": "Decision 13: the save fails with the older pod's 400, the draft stays, the person saves again; no retry logic. Transient and lossless."},
+      {"finding": "Editor offsets vs the trim and CR LF (a textarea turns CR LF into LF).", "answer": "Decisions 6 and 8: offsets are UTF-16 over the stored body, translated by the composer into the textarea value; the trim shift is applied before sending; the identity hash reads CR LF as LF, so a line-ending-only change moves nothing."},
+      {"finding": "Where the ask-thread exclusion stops.", "answer": "Decision 10: any reply in an ask's thread (ask_id, or reply_to whose thread head is an ask) naming a block is refused 400 INVALID_COMMENT until INFRA-369."},
+      {"finding": "A13 restore: rule 2 matches only the removed block's last text; Backspace deletion holds no span.", "answer": "Restore means the text that was deleted, matched against the removed block's last text (rule 2) on a later save; within one edit, cut/drag holds the span and paste/drop of the same text returns it. Documented in the AGENTS paragraph."},
+      {"finding": "PR #2394 also restates graph_edges; can a block[] attribute name a comment block?", "answer": "The second to merge carries both sets of arms; block[] points at document blocks only, with a refusal test if #2394 is on main at implementation, else an Envoy message to the root's implementer before review ends."},
+      {"finding": "Migration census, seed conflicts, locks named in the README, and lock order.", "answer": "Seeds use on conflict do nothing; census answers 0; README names ACCESS EXCLUSIVE on comments, messages, graph_edges and SHARE ROW EXCLUSIVE per trigger migration; lock order owner, item, state, and the reconciler never takes an owner row."},
+      {"finding": "R12 made_at for blocks is unspecified (tree plan said made_at = changed_at).", "answer": "Decision 12: made_at is the revision that first held the block; null for a block found at the first indexing of a comment edited before this change; message block made_at is created_at; parent_version changed_revision for comments, null for messages."},
+      {"finding": "Machine checks for A7, A10, A11, A13, A15-comment, R12 replies, R14; A13/A15 cannot run in production (human-only PATCH, no dev sign-in).", "answer": "Each has a driver section and a Go test with the concrete assertions; the driver's new optional DEV_SIGNIN_LOGIN input runs A13/A15-comment on the harness and prints SKIP lines on production, where the browser rows are the proof (recorded as a spec departure)."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": [
+    {
+      "spec": "Issue spec, second R11 bullet: block ids survive every edit 'through the dashboard and through an agent's command', and 'A13 now also splits the cited paragraph and edits through an agent's command'.",
+      "plan": "No agent command edits a comment. The dashboard editor carries ids (PATCH with blocks and base_revision); an API body without ids is matched by the five text rules.",
+      "evidence": "Root spec R11 at approved version 16 says only the dashboard editor carries ids and an API body is text-matched; architect comment dispatch://INFRA-368/comment/35191e49-42d2-4242-8e16-b8b77361c1e4 says no new agent command is in scope and A13's edits go through the dashboard editor.",
+      "outcome": {"kind": "changed", "acceptance": ["A13 as worded in the issue spec's second R11 bullet: its edits run through the dashboard editor (and the editor's PATCH wire in the driver), not an agent's command."]}
+    },
+    {
+      "spec": "Issue spec, Proof: the driver's A7 section, extended with A10 and A13, runs through the real CLI and HTTP on the local harness before the merge and on production after it.",
+      "plan": "On production the driver's A13 and A15-comment sections print a SKIP line naming why; they run on the local harness with the new optional DEV_SIGNIN_LOGIN input, and the browser rows prove them before the merge.",
+      "evidence": "PATCH /api/v1/comments/{id} is authHuman (packages/envoy/internal/dispatch/api/routes_table.go:142, comment_actions.go:134-137) and production has no dev sign-in; the deployment instructions say a path only a person can take is proven by the browser test and nothing else.",
+      "outcome": {"kind": "changed", "scope": "The production run proves A7, A10 and A11 for comment and message blocks; A13 and the comment half of A15 are proven before the merge only, by the browser rows and the harness run."}
+    },
+    {
+      "spec": "Issue spec: plan from the tree plan's PR5 section (Task 5.2 storage, Task 5.7 first-hour sweep under an item-blocks lease, contract item 13 node kind block).",
+      "plan": "Storage kinds comment_block and message_block in graph_edges and refs.to_kind (the API node stays kind block); owed_at state with triggers drained by the existing block-index loop, no new lease and no first-hour sweep.",
+      "evidence": "An older build counts every 'block' row in BacklinkCounts and resolves it through document_blocks (refs/graph.go:61-95, 296-312), and its ReindexOwedItem would drain a shared queue without indexing blocks (refs/rebuild.go:154, 211-247); the lease pool has no headroom (store/pool.go:258-274).",
+      "outcome": {"kind": "unchanged"}
+    },
+    {
+      "spec": "Tree plan PR5 (which the issue spec says to plan from): item ids aligned by five text rules on every edit, a split or join mints new ids, no pin storage for comments, made_at = changed_at, reply_to_block refused only with ask_id.",
+      "plan": "Carried ids from the editor with split-keeps-start and join-keeps-first; comment_block_texts for pins at a comment revision; made_at the revision that first held the block; any reply in an ask's thread refused a block; identity hash reads CR LF as LF; direct messages write no block mentions; the blocks route adds from, to (UTF-16) and indexed.",
+      "evidence": "Root spec v16 R1, R11, R12 and A13, A15; the issue spec's bullets superseding 'Item mentions stay on the item' and the split/join rule; messages.go:184 (direct messages write no mentions today); a textarea turns CR LF into LF.",
+      "outcome": {"kind": "unchanged"}
+    }
+  ]
+}
