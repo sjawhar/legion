@@ -1443,7 +1443,7 @@
   event cost a network round trip and a write: at a 150 ms round trip it published 1.7 to 1.9
   events a second, and under load in production it fell up to about 29 minutes behind the events
   being created. It now sends a whole claimed batch (100 events) before it waits for any answer
-  (`bus.Client.PublishAsync`), in id order, so NATS still takes each issue's events in order, and
+  (`bus.Client.Window`), in id order, so NATS still takes each issue's events in order, and
   writes the batch's outcome in one statement on a database pool of its own (`store.Pool.Outbox`):
   540 events a second at a 150 ms round trip and 1,100 at 50 ms, with the API's pool busy
   (`TestOutboxThroughputUnderRemoteLatency`). An event is still marked published only once NATS

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -46,9 +47,13 @@ type Sender interface {
 // a JetStream acknowledgement (the JetStream context's PublishAsyncTimeout), or a core publish's own
 // flush, confirmed as PublishCoreTo confirms one (confirmFlushed). A core publish that its own
 // flush cannot confirm because another publish on the connection changed its last error in the
-// meantime is published again alone through PublishCoreTo, which answers for it.
+// meantime is published again alone through PublishCoreTo, which answers for it: once every core
+// flush of the window has returned, and one such republish at a time, so that another of the
+// window's denials cannot land during it and leave it unconfirmed too.
 func (c *Client) Window() Sender {
-	return &window{client: c}
+	w := &window{client: c}
+	w.settled = sync.NewCond(&w.mu)
+	return w
 }
 
 type window struct {
@@ -56,6 +61,12 @@ type window struct {
 	conn       *nats.Conn
 	js         nats.JetStreamContext
 	reconnects uint64
+
+	// mu guards flushing, the window's core sends whose flush has not returned, and is held
+	// across a republish. settled is signalled when flushing reaches zero.
+	mu       sync.Mutex
+	flushing int
+	settled  *sync.Cond
 }
 
 func (w *window) PublishAsync(item contracts.Envelope) <-chan error {
@@ -118,11 +129,16 @@ func (w *window) current() bool {
 func (w *window) sendCore(item contracts.Envelope, data []byte) (func() error, error) {
 	deadline := time.Now().Add(publishAcknowledgementTimeout)
 	before := observe(w.conn)
+	w.mu.Lock()
+	w.flushing++
+	w.mu.Unlock()
 	if err := w.conn.PublishMsg(&nats.Msg{Subject: item.Topic, Data: data}); err != nil {
+		w.flushed()
 		return nil, w.unsent(err, len(data))
 	}
 	return func() error {
 		err := confirmFlushed(w.conn, item.Topic, before, deadline)
+		w.flushed()
 		if err == nil || errors.Is(err, ErrPublishDenied) {
 			return err
 		}
@@ -131,10 +147,25 @@ func (w *window) sendCore(item contracts.Envelope, data []byte) (func() error, e
 			return fmt.Errorf("bus: %w: %w", ErrUnavailable, err)
 		}
 		if errors.Is(err, errPublishUnconfirmed) {
+			w.mu.Lock()
+			defer w.mu.Unlock()
+			for w.flushing > 0 {
+				w.settled.Wait()
+			}
 			return w.client.PublishCoreTo(item.Topic, item)
 		}
 		return err
 	}, nil
+}
+
+// flushed records that one of the window's core sends has its flush's answer.
+func (w *window) flushed() {
+	w.mu.Lock()
+	w.flushing--
+	if w.flushing == 0 {
+		w.settled.Broadcast()
+	}
+	w.mu.Unlock()
 }
 
 // sendJetStream publishes data, item's encoding, to the stream and returns what waits for its

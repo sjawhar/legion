@@ -1172,16 +1172,19 @@ concurrent reads each holding one connection, concurrent anchored writes, and tw
 queued behind one held write on a four-connection pool.
 
 **Every pool's size is set in code.** `store.Open` fixes `MaxConns` at `store.sharedPoolSize`
-(16), so neither the task's CPU allotment nor the DSN another repository's URL builder writes
-decides it, and a `DATABASE_URL` that carries `pool_max_conns` is **refused at open** rather
+(64, from 16 since 2026-10-27), so neither the task's CPU allotment nor the DSN another
+repository's URL builder writes decides it, and a `DATABASE_URL` that carries `pool_max_conns`
+is **refused at open** rather
 than silently overridden — the parameter is read from `pgx.ParseConfig`'s `RuntimeParams`,
 because `pgxpool.ParseConfig` is the layer that folds it into `MaxConns` and deletes it, so
 pgxpool's own parse cannot answer the question and a raw-string scan answers a different one.
 The other pool parameters are not refused, because the shared pool keeps whatever minimums the
 connection string sets. pgx's default, `max(4, NumCPU)`, is four on production's one Fargate
 task at `cpu="512"`, and four is a connection per blocked writer: with four writers parked on
-one issue's row lock, a read of an unrelated issue waits for as long as the lock is held. The
-shared Aurora cluster has thousands of connections spare, so 16 is deliberate headroom.
+one issue's row lock, a read of an unrelated issue waits for as long as the lock is held. Sixteen
+ran out too: under heavy agent load the API held all sixteen and every other caller, the events
+outbox included, waited behind them. The database has hundreds of connections spare, so 64 is
+deliberate headroom.
 
 Work that genuinely needs its own connection while a transaction is open does not take it from
 the shared one; it takes it from a pool of its own, opened on demand from a copy of the shared
@@ -1206,7 +1209,10 @@ context carries no deadline. Warm is production's normal state, so the unbounded
 one it runs. Both separate pools zero `MinConns` and `MinIdleConns`, so a floor meant for the
 shared pool cannot become a target a one- or four-connection pool can never reach, and both
 are deliberately unguarded — a load or a probe taken under an open transaction must be served,
-not refused, and a separate pool cannot close the cycle the guard prevents.
+not refused, and a separate pool cannot close the cycle the guard prevents. The events outbox
+claims, reads and records its batches on a pool of its own too (`store.Pool.Outbox`, one
+connection): it runs one statement at a time, and a full shared pool must not hold back
+publishing.
 
 The migration runner takes one more connection outside the shared pool. `pgmigrate.Exec`, which
 applies every migration, first sets the transaction's `lock_timeout` to `pgmigrate.LockTimeout`

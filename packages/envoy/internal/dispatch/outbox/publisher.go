@@ -203,12 +203,15 @@ type pendingEvent struct {
 //
 // A failure of the connection rather than the envelope (bus.ErrUnavailable: no connection, one
 // lost or reconnected mid-batch, no answer at all) is no fault of its event. The window sends
-// nothing on a connection that came back, so what of the batch reached NATS is a prefix of it; no
-// event after the first such send is sent, and every event that met the failure, or was not sent,
-// is released rather than backed off, so the next scan sends them again in id order, and the
-// stream's MsgId drops the copies of those that had landed. An event backed off instead would reach
-// its issue's subject after the later events of that issue, which the Legion daemon then drops as
-// stale by their sequence.
+// nothing on a connection that came back, so when the connection fails, what of the batch reached
+// NATS is a prefix of it: no event after the first send that met the lost connection is sent, and
+// every event that met the failure, or was not sent, is released rather than backed off, so the
+// next scan sends them again in id order, and the stream's MsgId drops the copies of those that
+// had landed. An event backed off instead would reach its issue's subject after the later events
+// of that issue, which the Legion daemon then drops as stale by their sequence. The guarantee
+// covers a failed connection only: an answer that times out, or no responders, on a connection
+// still current stops no later send, so the released event can land after a later event of its
+// issue that NATS did store.
 func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 	pending, blocked, err := scanPendingEvents(ctx, deps)
 	if err != nil {
@@ -491,7 +494,7 @@ func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, bool, er
 	// claimWindow, a minute argued from how long a healthy batch of 100 takes (claimWindow),
 	// where before the claim existed the next scan tick re-selected them retryInterval later.
 	// Driven by the ids actually read, because scanBatch's loop reaches every item returned
-	// here: a row the batch reached and backed off keeps the backoff retryEvent wrote for it,
+	// here: a row the batch reached and backed off keeps the backoff recordBatch wrote for it,
 	// and a row it published keeps its published_at. The paths above that return an error
 	// release nothing and leave the claim standing, as claimPendingEvents describes.
 	if len(pending) < len(claimed) {

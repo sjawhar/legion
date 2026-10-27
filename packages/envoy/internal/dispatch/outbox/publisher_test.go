@@ -25,7 +25,7 @@ import (
 
 // answered is a channel already holding err, the outcome of a test publisher that answers each
 // publish before it returns: the outbox reads such an answer the moment it sends, as it reads one
-// bus.Client.PublishAsync decides before anything is sent.
+// a bus.Client.Window's PublishAsync decides before anything is sent.
 func answered(err error) <-chan error {
 	answer := make(chan error, 1)
 	answer <- err
