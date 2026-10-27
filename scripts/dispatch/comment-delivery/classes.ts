@@ -225,12 +225,19 @@ function causeParts(cause: string): string[] {
 
 const CAUSE_RANKS = new Map(Object.keys(CAUSES).map((cause, index) => [cause, index]));
 
-/** Orders causes as the report checks them: by the CAUSES place of each part in turn, a part
- *  with no entry after every part with one. */
+/** The CAUSES entry of one part of a cause. Every cause the report builds has one; a part without
+ *  one is a bug, so it throws rather than leaving an empty cell or an arbitrary order. */
+function causePart(part: string): { rank: number; entry: CauseEntry } {
+  const rank = CAUSE_RANKS.get(part);
+  const entry = CAUSES[part];
+  if (rank === undefined || entry === undefined) throw new Error(`no CAUSES entry for ${part}`);
+  return { rank, entry };
+}
+
+/** Orders causes as the report checks them: by the CAUSES place of each part in turn. */
 export function compareCauses(left: string, right: string): number {
-  const rank = (part: string) => CAUSE_RANKS.get(part) ?? CAUSE_RANKS.size;
-  const a = causeParts(left).map(rank);
-  const b = causeParts(right).map(rank);
+  const a = causeParts(left).map((part) => causePart(part).rank);
+  const b = causeParts(right).map((part) => causePart(part).rank);
   for (let index = 0; index < Math.max(a.length, b.length); index++) {
     const difference = (a[index] ?? -1) - (b[index] ?? -1);
     if (difference !== 0) return difference;
@@ -238,11 +245,9 @@ export function compareCauses(left: string, right: string): number {
   return compare(left, right);
 }
 
-/** What CAUSES says of a cause, or undefined when a part of it has no entry. */
-export function describeCause(cause: string): CauseEntry | undefined {
-  const entries = causeParts(cause).map((part) => CAUSES[part]);
-  if (entries.some((entry) => entry === undefined)) return undefined;
-  const found = entries as CauseEntry[];
+/** What CAUSES says of a cause: each part's meaning, and each distinct fix. */
+export function describeCause(cause: string): CauseEntry {
+  const found = causeParts(cause).map((part) => causePart(part).entry);
   return {
     meaning: found.map((entry) => entry.meaning).join(" "),
     fix: [...new Set(found.map((entry) => entry.fix))].join(" "),

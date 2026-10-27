@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RECEIPT_TIMEOUT_CAUSE } from "../../../packages/contracts/src/dispatch-api.ts";
 import {
@@ -27,9 +28,7 @@ const input: ReportInput = {
   receipts: await fixture(FILES.receipts),
   counts: await fixture(FILES.counts),
 };
-const scratch = await mkdtemp(
-  join(process.env.TMPDIR ?? "/legion/scratch/tmp", "comment-delivery-")
-);
+const scratch = await mkdtemp(join(tmpdir(), "comment-delivery-"));
 afterAll(() => rm(scratch, { recursive: true, force: true }));
 
 function judged(report: { readonly comments: readonly Judged[] }, commentId: string): Judged {

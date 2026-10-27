@@ -224,7 +224,7 @@ export function renderReport(
     const entry = describeCause(cause);
     out.push(
       `| ${cellCode(cause)} | ${counts.causes.get(cause) ?? 0} | ${pairCounts.causes.get(cause) ?? 0} | ` +
-        `${cell(entry?.meaning ?? "")} | ${cell(entry?.fix ?? "")} |`
+        `${cell(entry.meaning)} | ${cell(entry.fix)} |`
     );
   }
   out.push("");
