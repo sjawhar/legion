@@ -215,7 +215,7 @@ test("the Pinned tab while a margin thread's reply is out keeps the reply's draf
 // them; the reply is the margin's, so the thread finds it again when the margin comes back.
 test("collapsing the margin to its rail while a thread's reply is out keeps the reply's draft and refusal", async ({
   browser,
-}, testInfo) => {
+}) => {
   const { comments, first, issueKey } = await seed("Rail under a margin reply");
   const alice = await asUser(browser, "alice");
 
@@ -223,7 +223,8 @@ test("collapsing the margin to its rail while a thread's reply is out keeps the 
     const page = await alice.newPage();
     await page.setViewportSize({ height: 900, width: 1440 });
     await openSpec(page, issueKey, spec);
-    const card = await openThread(page, testInfo.project.name, first.id);
+    // The test sets a desktop viewport itself, so the margin is the desktop rail on any project.
+    const card = await openThread(page, "chromium", first.id);
     const refuse = await refusePosts(page, comments);
     const { field, form } = await sendReply(card, "Reply under the rail");
 

@@ -16,8 +16,9 @@ const plainHttpSpecs = /plain-http-(origin|proxy)\.e2e\.ts/;
 // describe's title): the tests that take a phone-only path (they branch on the project or on the
 // phone layout, read the window's size, use touch, run only on the phone, or say they cover the
 // phone layout). An untagged test drops out of `iphone` with no failure. The full rule is in
-// `packages/dispatch/AGENTS.md`, "Phone acceptance". The regex is anchored because Playwright's
-// grep text also holds the project name `iphone` and file names like `phone.e2e.ts`.
+// `packages/dispatch/AGENTS.md`, "Phone acceptance". The regex is anchored so `@phone` matches
+// only as a whole whitespace-separated token, never inside a longer one such as `@phones` or
+// `x@phone`.
 const phoneTagged = /(^|\s)@phone(\s|$)/;
 const startsOwnServers = !process.env.PLAYWRIGHT_BASE_URL;
 

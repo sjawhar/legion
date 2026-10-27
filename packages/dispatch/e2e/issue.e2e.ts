@@ -694,7 +694,7 @@ async function subscribeSession(issueKey: string): Promise<void> {
   ]);
 }
 
-test("issue header keeps every control in a shared row on a phone and the whose-turn indicator in view at every width", async ({
+test("issue header keeps every control in a shared row on a phone and the whose-turn indicator in view at every width @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });

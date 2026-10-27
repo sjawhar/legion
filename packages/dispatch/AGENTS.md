@@ -1311,8 +1311,15 @@ the live view's phone layout. It does not replace the manual phone check: run
 the server on a tailnet-reachable address, open it from a phone, open the
 review panel, and answer an open ask in Waiting on you.
 
-A test takes the tag when, under `iphone`, it takes a phone-only path. That
-is, it:
+The rules below apply only to a test that `iphone` can run at its own
+viewport. A test that skips every project but `chromium`
+(`test.skip(project.name !== "chromium", …)`) or every project but
+`webkit-iphone`, or that sets a desktop viewport for every project before it
+checks anything, stays untagged, whatever its title says: under `iphone` it
+would skip, or run at a desktop width where a phone branch (`setSheet`,
+`openedThreadCard`) finds no phone layout. Such a test passes `"chromium"`
+rather than the project name to a helper that branches on it. Any other test
+takes the tag when, under `iphone`, it takes a phone-only path. That is, it:
 
 - **R1** chooses what to do by which project runs it, and `iphone` takes
   another branch than `chromium`, directly, in a hook, or in a helper it calls:
@@ -1342,8 +1349,10 @@ loses the phone coverage. Write the tag at the end of the title,
 `@word` in a title as a tag; the title form keeps the call at two arguments, so
 Biome does not re-indent the body as it does for a `{ tag }` details argument.
 A user-agent path (the Mac keymap that the iPhone user agent also takes) is not
-a phone-only path. A test that skips `iphone` has no reason to: leave it
-untagged and drop the skip.
+a phone-only path. An untagged test needs no
+`test.skip(project.name === "iphone", …)`, since `iphone` no longer runs it:
+drop the skip. A `!== "chromium"` skip stays: it says the test is desktop-only
+by design, and keeps it off any other project whose `testMatch` names its file.
 
 Nothing fails when a phone test lacks the tag: it silently drops out of
 `iphone` and runs only on `chromium`. So after writing or renaming one, run

@@ -67,7 +67,6 @@ test("the search box narrows by a word in the title, directory, machine, session
   try {
     const page = await alice.newPage();
     await openAgents(page);
-    const width = testInfo.project.name === "iphone" ? "390" : "1280";
     const search = page.getByRole("searchbox", { name: "Search agents" });
     const titles = () => shownAgentRows(page).locator("h2");
     await expect(titles()).toHaveText(["Scrum planning", "Release notes", "Archivist"]);
@@ -99,7 +98,7 @@ test("the search box narrows by a word in the title, directory, machine, session
     await expect(titles()).toHaveText(["Scrum planning"]);
     await page.screenshot({
       fullPage: true,
-      path: testInfo.outputPath(`agents-search-filtered-${width}.png`),
+      path: testInfo.outputPath("agents-search-filtered-1280.png"),
     });
     await search.fill(`release ${issueKey}`);
     await expect(titles()).toHaveText([]);
@@ -110,7 +109,7 @@ test("the search box narrows by a word in the title, directory, machine, session
     await expect(titles()).toHaveText(["Scrum planning", "Release notes", "Archivist"]);
     await page.screenshot({
       fullPage: true,
-      path: testInfo.outputPath(`agents-search-cleared-${width}.png`),
+      path: testInfo.outputPath("agents-search-cleared-1280.png"),
     });
   } finally {
     await alice.close();

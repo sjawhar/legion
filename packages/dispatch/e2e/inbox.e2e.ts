@@ -377,10 +377,9 @@ test("a quote-anchored inbox ask names and opens its document", async ({ browser
     const document = card.getByRole("link", { name: "spec.md" });
     await expect(document).toHaveAttribute("href", documentHref);
     await expect(card).toContainText("quoted passage");
-    const width = testInfo.project.name === "iphone" ? "390" : "1280";
-    const screenshot = testInfo.outputPath(`inbox-quote-anchor-${width}.png`);
+    const screenshot = testInfo.outputPath("inbox-quote-anchor-1280.png");
     await page.screenshot({ path: screenshot, fullPage: true });
-    await testInfo.attach(`quote-anchored Inbox card (${width}px)`, {
+    await testInfo.attach("quote-anchored Inbox card (1280px)", {
       contentType: "image/png",
       path: screenshot,
     });
