@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-652",
+  "completed": "2026-10-27T18:35:52Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Drove the same surface on an independent rig: base 59f6647db9d7 and head 81d5a51436ff binaries built by the tester (git archive, GOWORK=off go build ./cmd/dispatch), a fresh copy of the load-test seed database and a counting fake listener serving the implementer's 1,000-session file. Base and head GET /api/v1/agents were byte-identical for bearer and person reads (sha256 569e4bd9..., the implementer's value); 20 agents + 20 issue reads made 21 listener calls at base and 1 at head; the uncached hook made 40. The load-test CPU series and the memory figures were not re-run: the call counts and the identical bodies are the observable contract, and the load-test rule is the implementer's merge measurement, quoted on the pull request."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "What an agent sees does not change: same rows, fields and order for the same listener answer, at fleet size.",
+      "surface": "Dispatch server binary over HTTP (GET /api/v1/agents with the agent bearer and with a trusted person header), and the pi-envoy `dispatch read` CLI, which reads the issue and then the agents list for a holder's title",
+      "command": "$TMPDIR/infra652-test/s1-verify.sh (base then head on database infra652_tester, curl > base.json/head.json, cmp, sha256sum); $TMPDIR/infra652-test/s4-cli.sh (LGA-1 routed to role:role-0, env -i DISPATCH_URL=<local> DISPATCH_TOKEN=<test token> DISPATCH_HOST=omp dispatch read LGA-1). Comment https://github.com/sjawhar/legion/pull/2429#issuecomment-6450470746",
+      "observed": "200, 1000 rows on both; cmp identical for bearer and person reads; sha256 569e4bd94c9acb1dc0ad8ec67aa00e3016bdc5c774e10be22f7450088ff3f206 for both. dispatch read printed 'Route: role:role-0 (held by synthetic ses-x-0520)' on base and head; 50 concurrent agents reads at head gave one distinct body, equal to base's.",
+      "headSha": "81d5a51436ff24a83ab4b3238ab982e8f8569ff3",
+      "negativeControl": "Listener stopped: dispatch read at head printed 'Route: role:role-0 (the Envoy listener did not answer, so whether it reaches anyone is unknown)' with no holder title."
+    },
+    {
+      "criterion": "The list is no staler than route_status (<= 5 s plus fetch), and agents and issue reads share one listener call per TTL.",
+      "surface": "Dispatch server binary over HTTP with a request-counting fake listener; the pi-envoy dispatch read CLI; the Agents page in Chromium",
+      "command": "s1-verify.sh (20 agents + 20 GET /api/v1/issues/LGA-1 interleaved, 6 s after boot); s4-cli.sh (one dispatch read, then three more); s5-burst.sh (20+20 and 50+50 concurrent after expiry); s3-browser.sh (Playwright, /agents searched for tester-probe, listener title changed mid-run, head without the test hook)",
+      "observed": "base 21 listener calls, head 1. One dispatch read: base 2 calls, head 1; three more: base 3, head 0. 20+20 concurrent in 3.4 s: 1 call; 50+50 in 7.5 s: 2 calls (the burst outlasted the 5 s TTL). The Agents page showed 'Tester probe one', then 'Tester probe two' 10.3 s after the listener changed, at its next 15 s poll, with 2 listener calls for the whole page run.",
+      "headSha": "81d5a51436ff24a83ab4b3238ab982e8f8569ff3",
+      "negativeControl": "Head booted with DISPATCH_TEST_HOOKS=1 DISPATCH_TEST_ROSTER_UNCACHED=1: 40 listener calls for the same 40 reads; with UNCACHED='0' or 'true' under the hooks, 10 reads made 1 call; with ' 1 ', 10 calls."
+    },
+    {
+      "criterion": "A listener failure still answers 503 ENVOY_UNAVAILABLE (and, as accepted, a listener slower than 2 s answers 503 and a failed fetch's 503 is served up to 5 s without a new call).",
+      "surface": "Dispatch server binary over HTTP with a fake listener that delays, fails or garbles its answer",
+      "command": "$TMPDIR/infra652-test/s2-break.sh: fake delay=3 with 10 concurrent agents reads, then an issue read and an agents read inside the silence; delay=1.5 with a client that gives up at 0.5 s (curl -m 0.5); status=500; body=garbage; body=null; body=[]",
+      "observed": "Slow listener: 10x 503 {\"code\":\"ENVOY_UNAVAILABLE\",\"error\":\"envoy listener unavailable: GET /v1/sessions: ... context deadline exceeded\"}, max 2.02 s, 1 listener call; inside the silence, the issue read answered route_status unknown in 17 ms and the agents read answered 503 in 2 ms, still 1 call. When the client gave up, the fetch ran on, and the next read was 200 with 1000 rows (1 call in total). 500 -> 503 'GET /v1/sessions returned 500'; garbage -> 503 'decode GET /v1/sessions response: ...'; null and [] -> 200 [].",
+      "headSha": "81d5a51436ff24a83ab4b3238ab982e8f8569ff3",
+      "negativeControl": "Unauthenticated read -> 401 NO_IDENTITY and wrong bearer -> 401 UNAUTHORIZED, both with 0 listener calls (an unauthenticated caller cannot start a fetch)."
+    },
+    {
+      "criterion": "DISPATCH_TEST_ROSTER_UNCACHED is a test-only setting refused without DISPATCH_TEST_HOOKS=1.",
+      "surface": "Dispatch server binary boot",
+      "command": "s2-break.sh section g: boot head with DISPATCH_TEST_ROSTER_UNCACHED=1 alone, and with DISPATCH_TEST_HOOKS=0",
+      "observed": "Both exited 1 with level=ERROR msg=\"dispatch: resolve boot config\" error=\"DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_ROSTER_UNCACHED\".",
+      "headSha": "81d5a51436ff24a83ab4b3238ab982e8f8569ff3",
+      "negativeControl": "With DISPATCH_TEST_HOOKS=1 the same setting booted and made every read ask the listener (40 reads -> 40 calls)."
+    }
+  ],
+  "notes": [
+    "The implementer's tests (agents_test.go: shared call inside the TTL, new answer after it, 503 and silence then recovery, concurrent reads leave the shared list unsorted with the empty host intact under -race, request ended while waiting answers 503, uncached hook; settings_test.go reader and refusal) would catch each way I tried to break it. I wrote no red test.",
+    "CI at code head 76dbf9108bb3 (head 81d5a514 is handoff-only, skip-checks): runs Tests 40553074056, Legion Envoy and Contracts 40553073829, Worker Image 40553073848, Docs 40553074108 queued since 17:42Z, PR Title 40558843935 queued since 18:19Z. They were read as queued, without waiting.",
+    "PR body E2E (tester) line written; the evidence comment is https://github.com/sjawhar/legion/pull/2429#issuecomment-6450470746."
+  ]
+}
