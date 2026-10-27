@@ -1,0 +1,127 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-606",
+  "completed": "2026-10-27T14:06:30Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
+  "proof": [
+    {
+      "criterion": "A reconnecting stream receives a bounded catch-up (or a signal to refetch once), never the whole backlog; per-connection state is bounded and freed on disconnect; an overflowed subscriber is caught up from the database instead of being closed.",
+      "surface": "GET /api/v1/events on a local Dispatch (load-test stack: Postgres 16, NATS, listener) built from the branch head, seed with 13,000 events",
+      "command": "proof1.sh head (curl -sN -D h.txt -H 'X-Dispatch-User: person-1' \"http://127.0.0.1:28777/api/v1/events?since=$((H-300))\" then ?since=$((H-10)), one comment posted mid-stream); raw output in dispatch://INFRA-606/artifact/infra606-surface-proofs-tar-gz (proofs/1-catchup-head.txt). Overflow catch-up: TestSSECatchesUpAConnectionWhoseSubscriptionOverflowed.",
+      "observed": "since=H-300: ': open', 0 replayed frames, no X-Dispatch-Event-Replay header, then the live frame 13001. since=H-10: exactly 10 replayed frames (12992-13001), header 'X-Dispatch-Event-Replay: complete', then live frame 13002.",
+      "headSha": "153513a38b9d59c275cc4c1ec95d55407b37046d",
+      "negativeControl": "Same commands against Dispatch built from main c3d09eec: since=H-300 replays all 300 frames (12701-13000) and no response ever carries the header (proofs/1-catchup-base.txt)."
+    },
+    {
+      "criterion": "The relay and the delivery hub do no event-log reads while nobody subscribes, and one read serves every subscriber of a commit.",
+      "surface": "The load-test stack's Postgres with log_statement='all', Dispatch at the branch head, one comment per second for 60 s per phase",
+      "command": "proof2.sh head + proof2-count.py (phases: nothing open; 1 SSE stream; 50 SSE streams + one /ws/delivery timeline subscription; all closed); raw output in dispatch://INFRA-606/artifact/infra606-surface-proofs-tar-gz (proofs/2-reads-head.txt)",
+      "observed": "Comments 55/55/54/54; relay reads ('where e.id > $1 order by e.id asc limit $2') 0/55/53/0; hub event-log reads 0 in every phase; LISTEN backends 0/1/1/0 (the hub listens only on delivery_changes and delivery_freshness).",
+      "headSha": "153513a38b9d59c275cc4c1ec95d55407b37046d",
+      "negativeControl": "Base c3d09eec: with everything closed after the first subscribers, 54 relay reads and 72 hub liveEventsSince reads continue and 2 LISTEN backends stay; with 50 streams + a delivery view both the relay (53) and the hub (63) read per commit (proofs/2-reads-base.txt)."
+    },
+    {
+      "criterion": "Mention delivery runs off the request path, in order, with a test that a slow listener does not delay the comment's response (architect's bound: lookup cut at 250 ms).",
+      "surface": "POST /api/v1/issues/LGA-5/comments on the load-test stack with Dispatch's ENVOY_URL through 'loadgen proxy -rtt 500ms' (LOADTEST_ENVOY_RTT=500ms stack.sh reset), 3 live steer-capable sessions mentioned",
+      "command": "proof3.sh head + proof3-report.py, 5 mentioned and 5 unmentioned comments alternating; raw output in dispatch://INFRA-606/artifact/infra606-surface-proofs-tar-gz (proofs/3-mentions-head.txt). Go tests: comment_delivery_sender_test.go (blocked send, order, cross-recipient, concurrent lookups, never-answering lookup, recovery, overflow) and cmd/dispatch/shutdown_test.go.",
+      "observed": "Unmentioned p50 0.094 s, 3 mentions p50 0.653 s (0.629-0.690 s, about one 500 ms round trip); the 201 lists the 3 deliveries pending; the 3 comment.delivery events (sent) are created 1.04-1.20 s after the response.",
+      "headSha": "153513a38b9d59c275cc4c1ec95d55407b37046d",
+      "negativeControl": "Base c3d09eec: 3 mentions p50 5.406 s (5.38-5.51 s) against 0.091 s unmentioned; the deliveries are already 'sent' inside the 201, their events created 2.2/1.1/0.04 s before the response ended (proofs/3-mentions-base.txt)."
+    },
+    {
+      "criterion": "Agent-stream viewers hold a bounded number of bytes, not whole messages.",
+      "surface": "GET /api/v1/agents/{session_id}/stream on a local head Dispatch with DISPATCH_TEST_HOOKS=1 and DISPATCH_NATS_DISABLED=1 (in-memory relay), frames injected through POST /api/v1/agents/{session_id}/stream/_test/publish",
+      "command": "start4.sh head + proof4.sh (viewer4.py paused viewer with a 4 KiB receive buffer, pub4.py publisher; and curl --limit-rate 1k); raw output in dispatch://INFRA-606/artifact/infra606-surface-proofs-tar-gz (proofs/4-agentstream-head.txt)",
+      "observed": "curl --limit-rate 1k viewer receives all 200 x 1 KiB frames in order and stays open; paused viewer receives 4 x 1 MiB + 200 x 1 KiB (204 frames, 4.2 MiB) in order with no EOF; 12 x 1 MiB unread (> 8 MiB) ends the stream after 1 frame.",
+      "headSha": "153513a38b9d59c275cc4c1ec95d55407b37046d",
+      "negativeControl": "Base c3d09eec: the same 4 x 1 MiB + 200 x 1 KiB unread ends the stream after 2 frames (64-frame buffer), while 12 x 1 MiB does not end it (no byte bound) (proofs/4-agentstream-base.txt)."
+    },
+    {
+      "criterion": "Before and after on the committed load reproduction: a Dispatch restart at tonight's step with 50 open streams, measuring reconnect catch-up bytes, CPU in the minute after the restart, and comment-create latency with mentions.",
+      "surface": "INFRA-589's load-test harness plus this issue's restart scenario (dispatch://INFRA-606/artifact/infra606-restart-scenario-patch) on this 2-vCPU pod",
+      "command": "run-step.sh restart-{before,after}-{1,2} --events 4 --sessions 400 --requests 60 --sse 50 --sse-resume 1 --sse-stale 10 --restart-at 90s --mention-frac 0.2 --mentions 3 --envoy-rtt 200ms --rng-seed 1, and the same at 0.25x (--events 1 --sessions 100 --requests 15), LOADTEST_DISPATCH_SRC alternating base and head; tables in dispatch://INFRA-606/artifact/restart-measurement-md",
+      "observed": "1x replayed bytes after the restart 2,595 / 3,437 KiB (head) against 119,272 / 120,310 KiB (base); stale streams 0 replayed on head (one refetch each) against 11.7 MB each; refetch requests 60 against 294-300. 0.25x mentioned comments p50 1,001 / 831 ms against 3,044 / 2,960 ms. Dispatch CPU-s in the 60 s after the restart not lower beyond noise: 1x 19.93 / 24.15 head against 18.26 / 21.73 base; 0.25x 20.59 / 17.21 against 18.64 / 19.10 (recorded as measured; at 1x the commit-order lock is held 90-95% of samples).",
+      "headSha": "153513a38b9d59c275cc4c1ec95d55407b37046d",
+      "negativeControl": "The base build is the control: each of its 10 stale streams replays 12,566-12,600 events (11.7 MB) and every one of its 49-50 reconnects refetches, because it never sends X-Dispatch-Event-Replay."
+    },
+    {
+      "criterion": ".dispatch/architecture/ files for the components it changes say what is now true.",
+      "surface": ".dispatch/architecture/dispatch-api.md, dispatch-events.md, dispatch-agent-conversations.md and the route/AGENTS docs",
+      "command": "Read each edit against the code at the head (events.go, event_stream_relay.go, delivery_live_hub*.go, comment_mention_sender.go, agent_stream.go); repository-wide grep for maxSSEReplay=1000, 'replay cap', sentDuringCatchup, catchUpEvents, liveEventsSince, agentStreamBuffer; .github/scripts/check-private-names.sh",
+      "observed": "The three architecture files state the 256-event / 1 MiB catch-up and header rule, the relay as the one reader with start and stop, the hub on its feed, the mention sender's lanes, drain, recovery and 250 ms lookup bound, Stream[T], and the 8 MiB viewer budget; the grep finds no stale mention; check-private-names passes on 5,347 files.",
+      "headSha": "153513a38b9d59c275cc4c1ec95d55407b37046d",
+      "negativeControl": "At base c3d09eec, cmd/dispatch/AGENTS.md:140-143 and packages/dispatch/AGENTS.md:247 still describe the 1,000-event replay pages and the replay cap, which the head no longer has."
+    }
+  ],
+  "filesChanged": [
+    ".dispatch/architecture/dispatch-agent-conversations.md",
+    ".dispatch/architecture/dispatch-api.md",
+    ".dispatch/architecture/dispatch-events.md",
+    "packages/dispatch/AGENTS.md",
+    "packages/dispatch/e2e/api.ts",
+    "packages/envoy/AGENTS.md",
+    "packages/envoy/cmd/dispatch/AGENTS.md",
+    "packages/envoy/cmd/dispatch/README.md",
+    "packages/envoy/cmd/dispatch/shutdown_test.go",
+    "packages/envoy/cmd/listener/dispatch_resolution_test.go",
+    "packages/envoy/internal/dispatch/api/agent_stream.go",
+    "packages/envoy/internal/dispatch/api/agent_stream_test.go",
+    "packages/envoy/internal/dispatch/api/ask_turn_test.go",
+    "packages/envoy/internal/dispatch/api/comment_create.go",
+    "packages/envoy/internal/dispatch/api/comment_delivery.go",
+    "packages/envoy/internal/dispatch/api/comment_delivery_claim_test.go",
+    "packages/envoy/internal/dispatch/api/comment_delivery_duplicate_test.go",
+    "packages/envoy/internal/dispatch/api/comment_delivery_receipt_test.go",
+    "packages/envoy/internal/dispatch/api/comment_delivery_resolution_test.go",
+    "packages/envoy/internal/dispatch/api/comment_delivery_sender_test.go",
+    "packages/envoy/internal/dispatch/api/comment_document_authors_test.go",
+    "packages/envoy/internal/dispatch/api/comment_mention_sender.go",
+    "packages/envoy/internal/dispatch/api/comment_mentions_test.go",
+    "packages/envoy/internal/dispatch/api/comments_test.go",
+    "packages/envoy/internal/dispatch/api/delivery_live_events.go",
+    "packages/envoy/internal/dispatch/api/delivery_live_events_test.go",
+    "packages/envoy/internal/dispatch/api/delivery_live_hub.go",
+    "packages/envoy/internal/dispatch/api/delivery_live_hub_freshness.go",
+    "packages/envoy/internal/dispatch/api/delivery_live_hub_intake.go",
+    "packages/envoy/internal/dispatch/api/delivery_live_hub_test.go",
+    "packages/envoy/internal/dispatch/api/delivery_live_hub_worker.go",
+    "packages/envoy/internal/dispatch/api/event_stream_relay.go",
+    "packages/envoy/internal/dispatch/api/event_stream_relay_test.go",
+    "packages/envoy/internal/dispatch/api/events.go",
+    "packages/envoy/internal/dispatch/api/message_delivery.go",
+    "packages/envoy/internal/dispatch/api/routes_table.go",
+    "packages/envoy/internal/dispatch/api/server.go",
+    "packages/envoy/internal/dispatch/api/server_test.go",
+    "packages/envoy/internal/dispatch/events/broker.go",
+    "packages/envoy/internal/dispatch/events/stream.go",
+    "packages/envoy/internal/dispatch/events/stream_test.go",
+    "packages/envoy/internal/dispatch/model/model.go",
+    "packages/envoy/internal/dispatch/outbox/publisher.go",
+    "packages/envoy/internal/dispatch/store/pool.go",
+    "scripts/e2e/README.md",
+    "scripts/e2e/lib/operator-dispatch.sh",
+    "scripts/e2e/stage3-4b13b-acceptance.sh",
+    "scripts/e2e/stage3-devbox-workflow.sh"
+  ],
+  "trickyParts": [
+    "Relay and hub generations: start and stop under one mutex; a stopped generation publishes only into its own subscriber-less stream; Add on the WaitGroup only while not closed (event_stream_relay.go, delivery_live_hub.go).",
+    "The SSE live loop dedupes on one rising id; an overflowed subscription re-subscribes before cancelling the old one and catches up within the replay bounds, while a generation end (reset, test hook, shutdown) still ends the response so the browser reconnects.",
+    "Pending comment_deliveries rows are inserted in the comment's transaction with claimed_at null so a queued send left at SIGTERM is recoverable; the sender claims them with claimCommentDeliveryAttempt(initial=true).",
+    "A timed-out mention lookup carries no suppression, except that a route string equal to the timed-out mention's target suppresses the route copy (architect's decision); differing strings resolving to one session get two copies (tests pin both).",
+    "The delivery hub records what each event touched while a view's read is in flight and re-checks it against the installed answer, so an event during a read is not lost and an unrelated session write causes no second recompute."
+  ],
+  "deviations": [
+    "The restart scenario (T1) is built on legion/INFRA-589 and attached as dispatch://INFRA-606/artifact/infra606-restart-scenario-patch; it lands in this PR in the next implementing round, after INFRA-589 merges (architect's decision A, Envoy 2026-10-27T14:03Z), with at least five runs per side per step.",
+    "The plan's expectation that Dispatch CPU in the minute after the restart falls below base was not observed beyond run-to-run noise at two runs per side; recorded as measured in the PR body.",
+    "Added beyond the plan: the spec's API-3 line (an overflowed SSE subscriber is caught up from the database instead of closed) and a hub race fix (an event during a view's read).",
+    "X-Dispatch-Event-Replay: complete is set by this PR server-side (INFRA-492's client reads it); INFRA-492's architect was told the rule over Envoy.",
+    "Mention lookups are bounded at 250 ms (architect's amendment) and the issue-route lookup in the comment request uses the same bound.",
+    "No partial index for the recovery pass's comment_deliveries query: it runs once per process start (and after a queue overflow drains); a new migration would collide with main's numbering."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves cannot run on this pod's Postgres (byte-order collation only; the pgserver build has no ICU); CI runs it.",
+    "internal/dispatch/files needs Docker and internal/dispatch/pmdoc needs node_modules; neither is touched by this change."
+  ]
+}
