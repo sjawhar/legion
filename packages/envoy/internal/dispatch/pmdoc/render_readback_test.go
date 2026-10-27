@@ -417,13 +417,6 @@ var referenceRows = []string{
 	`&#10;`, `&#xA;`, `&NewLine;`, `a&#10;b`, `&nGt;`, `&nLt;`,
 }
 
-// readingDiff is the two trees of one markdown, for a failure saying where Go and the engine part.
-func readingDiff(doc, engine *Node) string {
-	got, _ := doc.JSON()
-	reading, _ := engine.JSON()
-	return "Go reads " + string(got) + "\nthe engine reads " + string(reading)
-}
-
 // parseAsTheEngine reads each markdown with Parse and with the engine (engineReadings) and reports
 // each that Parse fails on, with the engine's tree, or reads otherwise, with both trees. It returns
 // Go's trees, nil where Go's reading failed or parted from the engine's.
@@ -439,7 +432,9 @@ func parseAsTheEngine(t *testing.T, markdowns []string) []*Node {
 			continue
 		}
 		if readings[index] == nil || !doc.Equal(readings[index]) {
-			t.Errorf("%q:\n%s", markdown, readingDiff(doc, readings[index]))
+			got, _ := doc.JSON()
+			engine, _ := readings[index].JSON()
+			t.Errorf("%q:\nGo reads %s\nthe engine reads %s", markdown, got, engine)
 			continue
 		}
 		trees[index] = doc
