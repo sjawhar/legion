@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-529",
+  "completed": "2026-10-27T02:21:00Z",
+  "round": 1,
+  "reviewedCodeHead": "f213a0a6b23ee6552bc124c9ba28363d8cd8f292",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 3,
+  "minor": 3,
+  "ci": "Required set (ruleset): lint, typecheck, test, pr-title; branch protection none. CI head f213a0a6b23e (newest pull_request run); every check queued at 02:20Z, not completed. Compare f213a0a6b23e...be70ad96: handoffsOnly true, 2 files. A REQUEST_CHANGES does not wait on CI.",
+  "threads": "0 review threads at be70ad96.",
+  "thermonuclear": "Both run at f213a0a6b23e: deep-review CHANGES (lone-CR line endings, mark-wrapped child in the fit check, false closing fence), code-quality CHANGES (copied createAndFill with a catch-all, optional schema, duplicated label rule / split keptEnd).",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/proof-editor/src/read-only-directives.ts:85-88",
+      "description": "drawDirective ends a line only at \\n; micromark also ends one at a lone \\r. Comment and message bodies are not line-feed normalized on the server (comment_create.go:339 normalizes only Suggestion.ReplaceWith; asks.go:327 normalizes only ask questions). Reproduced at the code head with the real server schema: 'Intro\\n\\n:::a\\rbody\\r:::\\n\\nAfter' draws ':::abody:::' then 'body' then ':::' (text shown twice); ':::a\\r:::\\r'.repeat(3555) (31,995 chars, under the 32,000 cap) renders 44,245,530 characters in 1.5 s, quadratic. The default engine throws for the same input."
+    },
+    {
+      "severity": "important",
+      "file": "packages/proof-editor/src/read-only-directives.ts:44",
+      "description": "fitsContentRule returns true when a child matches a mark (remarkDispatchMarks wraps the blocks after a block-level <span data-dispatch> in a dispatchMark), so the block stays typed and Milkdown drops it with its text. Reproduced: ':::ask\\n<span data-dispatch=\"ask\" data-id=\"x\">\\n\\n# Heading words\\n\\n</span>\\n:::' renders one empty paragraph and logs 'Cannot create node for ask'. Breaks the architect's 'the read-only engine never drops text' rule and the PR body's claim."
+    },
+    {
+      "severity": "important",
+      "file": "packages/proof-editor/src/read-only-directives.ts:89",
+      "description": "The closing fence is any trailing colon run of the last source line, so a line that is not a fence is drawn as one: ':::note\\nbody\\n\\n[x]: mailto:' draws a ':' paragraph and '...[x]: https://e.x/a:::' draws ':::', though neither directive is closed. A closing fence is a line of only colons (three or more) after its container prefixes."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/proof-editor/src/read-only-directives.ts:48-61",
+      "description": "Lines 54-61 copy prosemirror-model's NodeType.createAndFill and the try/catch returns 'fits' on any throw; call type.createAndFill(defaultAttrs(type), placeholders) !== null and check target.isText instead of catching."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/proof-editor/src/read-only-directives.ts:22,117,147",
+      "description": "schema is optional only for one test; production always passes it, and without it the content-rule check is silently skipped. Make it required."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/proof-editor/src/lib-headless.ts:79-83",
+      "description": "The readOnly option doc omits the content-rule case the transform also draws as text; the label predicate is duplicated at read-only-directives.ts:96 and :114."
+    }
+  ]
+}
