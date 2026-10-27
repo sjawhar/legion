@@ -4,6 +4,23 @@
 
 ### Added
 
+- A person's browser edit of a document reaches the agent sessions that wrote it. Once the
+  document has been quiet for 30 seconds after a person's last settled version, Dispatch appends
+  one `artifact.human_edited` event: the person who edited last is its actor, and its payload
+  names the two versions the quiet window spans, each person who edited, and the unified diff of
+  the two versions, cut at its last line end within 4,096 bytes. It goes to the issue's route and
+  to each session the document credits, never to a person. The quiet window is a row of the new
+  table `document_edit_notices` (migration 0129), so a notice still pending when a process stops
+  is sent by the next sweep of either process; the sweep runs every 5 seconds under the
+  `edit-notices` lease, and the lease pool grows from nine connections to ten for it. A notice
+  on an issue closed inside its quiet window is dropped. The dashboard's issue log reads `Edited
+  spec.md v4 to v7`. `DISPATCH_TEST_EDIT_NOTICE_QUIET`, under `DISPATCH_TEST_HOOKS=1`, sets the
+  quiet time for an end-to-end test process. The actor is the sender of the latest edit a person
+  made, never a name picked from the people an edit credits: an agent's edit after a
+  person's still names the person, which the new column `doc_settlements_pending.last_person`
+  (same migration) keeps across processes; an edit made while two peers were connected names
+  nobody: an open window keeps its actor and takes the edit in, and with no window open the edit
+  holds the window until a later version names a person, whose notice covers both.
 - Each block of a Dispatch document is a node of the reference graph. A reference can name one
   block, `dispatch://KEY/spec#b-<id>`, `dispatch://KEY/artifact/<slug>#b-<id>` or
   `dispatch://PROJECT/artifact/<slug>#b-<id>`, the id percent-encoded as `text.EncodeBlockID` and
@@ -111,6 +128,26 @@
   exits 2 on a narrowing the broker would refuse `INVALID_NARROWING` before it sends any request,
   and runs its command only once the broker names the narrowing it applied, so deploy the broker
   before any caller passes `--github-owner`.
+- `envoy-dispatch` serves on an inherited listening TCP socket that `DISPATCH_LISTEN_FD` names by
+  its descriptor number, and binds nothing: a test harness opens the socket on port 0 and holds the
+  port the kernel chose until Dispatch serves on it, so no other program can take it in between.
+  `DISPATCH_LISTEN_HOST` and `DISPATCH_PORT`, when set and not empty, must name the socket's
+  address, and `DISPATCH_SERVER_URL` is not derived from it. A descriptor that is not a listening
+  TCP socket, or a setting that names another address, refuses startup naming the variable, with
+  nothing bound in its place, and `DISPATCH_DEV_SIGNIN=1` refuses a socket that is not on a
+  loopback address. The `dispatch: listening` line names the address the server is bound to, in
+  both modes: a server on every interface logs `addr=[::]:8766` where it logged `addr=:8766`.
+- `envoy-listener` serves on an inherited listening TCP socket that `ENVOY_LISTEN_FD` names by its
+  descriptor number, and binds nothing, for a process a test harness starts (not a container:
+  Docker cannot pass a host descriptor in). `ENVOY_LISTEN_HOST` and `PORT`, when set, must name the
+  socket's address, and `PORT=0` names none; a descriptor that is not a listening TCP socket, or a
+  setting that names another address, refuses startup naming the variable, with nothing bound in
+  its place. The API auth rule judges the socket's own address, so a socket on every interface
+  needs `ENVOY_API_TOKEN`, the OIDC pair or `ENVOY_API_ALLOW_UNAUTHENTICATED=1` as
+  `ENVOY_LISTEN_HOST=0.0.0.0` does, though an unset `ENVOY_LISTEN_HOST` means loopback. The
+  `envoy-listener listening` line's `addr` is the address the listener is bound to, in both modes:
+  `PORT=0` logs the port the kernel chose where it logged port 0, and a listener on every interface
+  logs `[::]:9020` where it logged `0.0.0.0:9020`.
 - Dispatch can serve the Go profiler: `DISPATCH_PPROF_PORT` set to a port serves
   `net/http/pprof` on `127.0.0.1:<port>` alone, on a mux of its own, so a CPU profile of a busy
   server is one `kubectl port-forward` and `go tool pprof` away. Unset or empty, nothing listens;
@@ -1663,6 +1700,12 @@
   alt text to the outer alt text, as the browser editor reads it. A `*` or `_` run beside a tilde
   now opens or closes toward it as the browser editor reads it, so `*~~**b~~*` is emphasis around
   struck `**b`, and `Plain b*~* text.` is emphasis `~` (INFRA-534).
+
+- A bare email address, or one written `<a@b.test>`, in Markdown written to a document through the
+  API is now stored and shown as a link to its `mailto:` URL, `[a@b.test](mailto:a@b.test)`, as a
+  comment and the browser editor show it (INFRA-530). Dispatch linked it to the bare address, which
+  the editor's link opener resolved as a page path under the document's own URL. A document that
+  already holds `[a@b.test](a@b.test)` keeps that link's bare target until it is edited.
 
 - A broker outage no longer ends the sessions whose leases ran out during it (INFRA-487). A session
   renews its lease through a broker, so while every broker process was down, or none could reach
