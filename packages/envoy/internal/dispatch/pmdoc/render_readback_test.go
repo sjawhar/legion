@@ -393,6 +393,10 @@ func TestURLReadingsAgreeWithTheEngine(t *testing.T) {
 		{"`www.e.test_\n", false},
 		// A www address inside a link label that never forms a link (INFRA-534's corpus).
 		{"y [.a www.a.com/x]\\(u) z\n", false},
+		// A name that is a character reference only with its `;` (`&copy`, `&amp`) is text to the
+		// engine, inside an address the transform reads as anywhere else (INFRA-531 testing).
+		{"see http\\://x.test/?a=1&copy=2 b\n", false},
+		{"x;www.x.test/?a=1&amp=2 b\n", false},
 	}
 	plain := func(text string) *Node {
 		return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: text}}}}}
@@ -422,6 +426,37 @@ func TestURLReadingsAgreeWithTheEngine(t *testing.T) {
 			if rendered, err := Render(doc); err != nil || rendered != markdown {
 				t.Errorf("%q is written back as %q (%v), want it as it is", markdown, rendered, err)
 			}
+		}
+	}
+}
+
+// A link Go reads from a bare address at a position the engine starts one is written back as Go
+// read it and the engine reads that writing alike, so a document holding it is stored rather than
+// refused (INFRA-531 testing): an address holding `>` after a closing parenthesis, and one ending
+// in a backslash before an escaped character.
+func TestALinkReadFromABareAddressAfterPunctuationIsWrittenBack(t *testing.T) {
+	markdowns := []string{
+		"x;https://x.test/(a)> b\n",
+		"\\(http://x.test/a>b\\_\n",
+	}
+	docs := make([]*Node, len(markdowns))
+	rendered := make([]string, len(markdowns))
+	for index, markdown := range markdowns {
+		doc, err := Parse(markdown)
+		if err != nil {
+			t.Fatalf("Parse(%q) = %v", markdown, err)
+		}
+		docs[index] = doc
+		if rendered[index], err = Render(doc); err != nil {
+			t.Fatalf("Render(Parse(%q)) = %v", markdown, err)
+		}
+	}
+	readings := engineReadings(t, rendered)
+	for index, markdown := range markdowns {
+		back, err := Parse(rendered[index])
+		if err != nil || !back.Equal(docs[index]) || readings[index] == nil || !readings[index].Equal(back) {
+			t.Errorf("%q reads in Go as %s, is written as %q, which reads back in Go as %s (%v) and in the engine as %s",
+				markdown, readingSummary(docs[index]), rendered[index], readingSummary(back), err, readingSummary(readings[index]))
 		}
 	}
 }
