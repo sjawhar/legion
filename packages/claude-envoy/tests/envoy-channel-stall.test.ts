@@ -6,20 +6,131 @@ import {
   type EnvoyStack,
   envoyStackEnabled,
   startEnvoyStack,
-} from "@legion/envoy-client/testing/envoy-stack"
-import { startStallProxy } from "@legion/envoy-client/testing/stall-proxy"
+} from "@legion/envoy-client/test/envoy-stack"
+import { type StallProxy, startStallProxy } from "@legion/envoy-client/test/stall-proxy"
+import { runFreezeScenario } from "@legion/envoy-client/test/stall-scenario"
+import type { Subprocess } from "bun"
 import { z } from "zod"
 import { readReplayState, replayStateFile } from "../src/replay-state"
 
 const channelEntry = resolve(import.meta.dir, "..", "bin", "envoy-channel.ts")
 
-/** What a replayed channel message ends with (`replayedText`); a live one has no such line. */
-const REPLAYED = "while this session's connection was down."
-
 const ChannelNotificationSchema = z.object({
   method: z.literal("notifications/claude/channel"),
   params: z.object({ content: z.string() }),
 })
+
+/** A channel server process, initialized, whose only NATS path goes through `proxy`. */
+interface ChannelServer {
+  readonly server: Subprocess<"pipe", "pipe", "pipe">
+  readonly proxy: StallProxy
+  readonly sessionID: string
+  readonly home: string
+  /** The channel messages Claude Code would be shown, in the order the server sent them. */
+  readonly channel: readonly string[]
+  /** Resolves once `condition` holds; throws when the server exits or `deadline` passes first. */
+  waitFor(
+    condition: () => boolean | Promise<boolean>,
+    deadline: number,
+    what: string,
+  ): Promise<void>
+  /** Stops the server (SIGTERM, then SIGKILL after 10 s), closes the proxy, removes its home. */
+  stop(): Promise<void>
+}
+
+/**
+ * Starts the channel server from this checkout as Claude Code would, for a new session whose
+ * Envoy is `stack`'s listener and whose NATS goes through a stall proxy to `stack`'s natsd, and
+ * sends it the MCP initialize handshake.
+ */
+async function startChannelServer(
+  stack: EnvoyStack,
+  sessionPrefix: string,
+): Promise<ChannelServer> {
+  const proxy = await startStallProxy(stack.natsHostPort)
+  const home = await mkdtemp(join(tmpdir(), "claude-envoy-stall-"))
+  const configDirectory = join(home, "claude-config")
+  await mkdir(configDirectory)
+  await writeFile(
+    join(configDirectory, "envoy.json"),
+    JSON.stringify({ envoy: { enabled: true, url: stack.envoyUrl, natsUrls: [proxy.url] } }),
+  )
+  const sessionID = `${sessionPrefix}_${crypto.randomUUID().replaceAll("-", "")}`
+  const server = Bun.spawn(["bun", channelEntry], {
+    cwd: home,
+    env: {
+      PATH: process.env["PATH"] ?? "",
+      HOME: home,
+      CLAUDE_CONFIG_DIR: configDirectory,
+      CLAUDE_CODE_SESSION_ID: sessionID,
+      CLAUDE_PLUGIN_DATA: home,
+      // No heartbeat sweep runs in the test's window: the reconnect is the only catch-up trigger.
+      ENVOY_HEARTBEAT_MS: "240000",
+    },
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const channel: string[] = []
+  void (async () => {
+    let buffered = ""
+    for await (const chunk of server.stdout.pipeThrough(new TextDecoderStream())) {
+      buffered += chunk
+      for (let newline = buffered.indexOf("\n"); newline !== -1; newline = buffered.indexOf("\n")) {
+        const notification = ChannelNotificationSchema.safeParse(
+          JSON.parse(buffered.slice(0, newline)),
+        )
+        buffered = buffered.slice(newline + 1)
+        if (notification.success) channel.push(notification.data.params.content)
+      }
+    }
+  })()
+  let stderr = ""
+  void (async () => {
+    for await (const chunk of server.stderr.pipeThrough(new TextDecoderStream())) stderr += chunk
+  })()
+  server.stdin.write(
+    `${JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "test", version: "0" },
+      },
+    })}\n`,
+  )
+  server.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`)
+  return {
+    server,
+    proxy,
+    sessionID,
+    home,
+    channel,
+    // The server runs on nats.js's real ping and dial timers and a real listener, so each wait
+    // polls the real clock until its condition holds or its deadline passes.
+    async waitFor(condition, deadline, what) {
+      while (!(await condition())) {
+        if (server.exitCode !== null) {
+          throw new Error(
+            `the channel server exited ${server.exitCode} waiting for ${what}: ${stderr}`,
+          )
+        }
+        if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}: ${stderr}`)
+        await Bun.sleep(100)
+      }
+    },
+    async stop() {
+      server.kill("SIGTERM")
+      const killer = setTimeout(() => server.kill("SIGKILL"), 10_000)
+      await server.exited
+      clearTimeout(killer)
+      await proxy.close()
+      await rm(home, { recursive: true, force: true })
+    },
+  }
+}
 
 describe.skipIf(!envoyStackEnabled)(
   "the channel server against a real natsd and Envoy listener",
@@ -35,98 +146,12 @@ describe.skipIf(!envoyStackEnabled)(
     test("a session whose NATS path freezes reconnects within 60 s and shows the message sent meanwhile once, replayed", async () => {
       if (stack === undefined) throw new Error("the Envoy stack did not start")
       const { envoyUrl } = stack
-      const proxy = await startStallProxy(stack.natsHostPort)
-      const home = await mkdtemp(join(tmpdir(), "claude-envoy-stall-"))
-      const configDirectory = join(home, "claude-config")
-      await mkdir(configDirectory)
-      await writeFile(
-        join(configDirectory, "envoy.json"),
-        JSON.stringify({ envoy: { enabled: true, url: envoyUrl, natsUrls: [proxy.url] } }),
+      const { proxy, sessionID, home, channel, waitFor, stop } = await startChannelServer(
+        stack,
+        "ses_stall",
       )
-      const sessionID = `ses_stall_${crypto.randomUUID().replaceAll("-", "")}`
       const directSubject = `notifications.agent.${sessionID}`
-      const server = Bun.spawn(["bun", channelEntry], {
-        cwd: home,
-        env: {
-          PATH: process.env["PATH"] ?? "",
-          HOME: home,
-          CLAUDE_CONFIG_DIR: configDirectory,
-          CLAUDE_CODE_SESSION_ID: sessionID,
-          CLAUDE_PLUGIN_DATA: home,
-          // No heartbeat sweep runs in the test's window: the reconnect is the only catch-up trigger.
-          ENVOY_HEARTBEAT_MS: "240000",
-        },
-        stdin: "pipe",
-        stdout: "pipe",
-        stderr: "pipe",
-      })
-      // The channel messages Claude Code would be shown, in the order the server sent them.
-      const channel: string[] = []
-      void (async () => {
-        let buffered = ""
-        for await (const chunk of server.stdout.pipeThrough(new TextDecoderStream())) {
-          buffered += chunk
-          for (
-            let newline = buffered.indexOf("\n");
-            newline !== -1;
-            newline = buffered.indexOf("\n")
-          ) {
-            const notification = ChannelNotificationSchema.safeParse(
-              JSON.parse(buffered.slice(0, newline)),
-            )
-            buffered = buffered.slice(newline + 1)
-            if (notification.success) channel.push(notification.data.params.content)
-          }
-        }
-      })()
-      let stderr = ""
-      void (async () => {
-        for await (const chunk of server.stderr.pipeThrough(new TextDecoderStream()))
-          stderr += chunk
-      })()
-      // The server runs on nats.js's real ping and dial timers and a real listener, so each wait
-      // polls the real clock until its condition holds or its deadline passes.
-      const waitFor = async (
-        condition: () => boolean | Promise<boolean>,
-        deadline: number,
-        what: string,
-      ): Promise<void> => {
-        while (!(await condition())) {
-          if (server.exitCode !== null) {
-            throw new Error(
-              `the channel server exited ${server.exitCode} waiting for ${what}: ${stderr}`,
-            )
-          }
-          if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}: ${stderr}`)
-          await Bun.sleep(100)
-        }
-      }
-      const shown = (marker: string) => channel.filter((content) => content.includes(marker))
-      const send = async (marker: string) => {
-        const answer = await fetch(`${envoyUrl}/v1/messages/send`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ target_session: sessionID, source: "agent", message: marker }),
-        })
-        expect(answer.status).toBe(200)
-      }
-      const run = crypto.randomUUID()
       try {
-        server.stdin.write(
-          `${JSON.stringify({
-            jsonrpc: "2.0",
-            id: 1,
-            method: "initialize",
-            params: {
-              protocolVersion: "2025-06-18",
-              capabilities: {},
-              clientInfo: { name: "test", version: "0" },
-            },
-          })}\n`,
-        )
-        server.stdin.write(
-          `${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`,
-        )
         const started = Date.now()
         await waitFor(
           async () => (await fetch(`${envoyUrl}/v1/registry/${sessionID}`)).ok,
@@ -155,119 +180,27 @@ describe.skipIf(!envoyStackEnabled)(
           "the session's first sweep",
         )
 
-        const live = `stall-live-before-${run}`
-        await send(live)
-        await waitFor(() => shown(live).length > 0, Date.now() + 10_000, "the live message")
-
-        const frozenAt = proxy.freeze()
-        const missed = `stall-missed-${run}`
-        await send(missed)
-        await waitFor(
-          () => shown(missed).length > 0,
-          frozenAt + 60_000,
-          "the message sent while the path was frozen",
-        )
-        const shownAt = Date.now()
-        const resubscribed = proxy.connections.find(
-          (opened) => opened.acceptedAt >= frozenAt && opened.subscribedAt !== undefined,
-        )
-        console.log(
-          `claude-envoy stall: resubscribed ${(((resubscribed?.subscribedAt ?? Number.NaN) - frozenAt) / 1000).toFixed(1)} s, missed message shown ${((shownAt - frozenAt) / 1000).toFixed(1)} s after the freeze`,
-        )
-        expect(resubscribed?.subscribedAt).toBeDefined()
-        expect((resubscribed?.subscribedAt ?? Number.POSITIVE_INFINITY) - frozenAt).toBeLessThan(
-          60_000,
-        )
-        expect(shownAt - frozenAt).toBeLessThan(60_000)
-
-        const after = `stall-live-after-${run}`
-        await send(after)
-        await waitFor(
-          () => shown(after).length > 0,
-          Date.now() + 10_000,
-          "the message after the reconnect",
-        )
-
-        // Each shown once: the two live without the replay line, the frozen window's replayed.
-        for (const [marker, replayed] of [
-          [live, false],
-          [missed, true],
-          [after, false],
-        ] as const) {
-          const messages = shown(marker)
-          expect(messages).toHaveLength(1)
-          expect(messages[0]?.includes(REPLAYED)).toBe(replayed)
-        }
+        await runFreezeScenario({
+          label: "claude-envoy stall",
+          envoyUrl,
+          sessionID,
+          proxy,
+          shown: (marker) => channel.filter((content) => content.includes(marker)),
+          waitFor,
+        })
       } finally {
-        server.kill("SIGTERM")
-        const killer = setTimeout(() => server.kill("SIGKILL"), 10_000)
-        await server.exited
-        clearTimeout(killer)
-        await proxy.close()
-        await rm(home, { recursive: true, force: true })
+        await stop()
       }
     }, 120_000)
 
     test("a session whose redial once hung still exits on SIGTERM", async () => {
       if (stack === undefined) throw new Error("the Envoy stack did not start")
       const { envoyUrl } = stack
-      const proxy = await startStallProxy(stack.natsHostPort)
-      const home = await mkdtemp(join(tmpdir(), "claude-envoy-stall-exit-"))
-      const configDirectory = join(home, "claude-config")
-      await mkdir(configDirectory)
-      await writeFile(
-        join(configDirectory, "envoy.json"),
-        JSON.stringify({ envoy: { enabled: true, url: envoyUrl, natsUrls: [proxy.url] } }),
+      const { server, proxy, sessionID, waitFor, stop } = await startChannelServer(
+        stack,
+        "ses_stall_exit",
       )
-      const sessionID = `ses_stall_exit_${crypto.randomUUID().replaceAll("-", "")}`
-      const server = Bun.spawn(["bun", channelEntry], {
-        cwd: home,
-        env: {
-          PATH: process.env["PATH"] ?? "",
-          HOME: home,
-          CLAUDE_CONFIG_DIR: configDirectory,
-          CLAUDE_CODE_SESSION_ID: sessionID,
-          CLAUDE_PLUGIN_DATA: home,
-          ENVOY_HEARTBEAT_MS: "240000",
-        },
-        stdin: "pipe",
-        stdout: "ignore",
-        stderr: "pipe",
-      })
-      let stderr = ""
-      void (async () => {
-        for await (const chunk of server.stderr.pipeThrough(new TextDecoderStream()))
-          stderr += chunk
-      })()
-      // Real nats.js ping and dial timers against a real listener: each wait polls the real clock.
-      const waitFor = async (
-        condition: () => boolean | Promise<boolean>,
-        deadline: number,
-        what: string,
-      ) => {
-        while (!(await condition())) {
-          if (server.exitCode !== null)
-            throw new Error(`the channel server exited waiting for ${what}: ${stderr}`)
-          if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}: ${stderr}`)
-          await Bun.sleep(100)
-        }
-      }
       try {
-        server.stdin.write(
-          `${JSON.stringify({
-            jsonrpc: "2.0",
-            id: 1,
-            method: "initialize",
-            params: {
-              protocolVersion: "2025-06-18",
-              capabilities: {},
-              clientInfo: { name: "test", version: "0" },
-            },
-          })}\n`,
-        )
-        server.stdin.write(
-          `${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`,
-        )
         const started = Date.now()
         await waitFor(
           async () =>
@@ -298,10 +231,7 @@ describe.skipIf(!envoyStackEnabled)(
         )
         expect(outcome).toBe("exited")
       } finally {
-        server.kill("SIGKILL")
-        await server.exited
-        await proxy.close()
-        await rm(home, { recursive: true, force: true })
+        await stop()
       }
     }, 120_000)
   },

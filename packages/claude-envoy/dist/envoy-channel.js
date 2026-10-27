@@ -44455,9 +44455,10 @@ function createReplayEngine(options) {
 function replaySuppressed(rendered) {
   return rendered.skip || rendered.malformedDelivery === true;
 }
+var REPLAYED_SUFFIX = "while this session's connection was down.";
 function replayedText(content, publishedAt) {
   return `${content}
-Published at ${publishedAt} while this session's connection was down.`;
+Published at ${publishedAt} ${REPLAYED_SUFFIX}`;
 }
 function failureNoticeFields(notice) {
   const readWith = notice.readWith === "dispatch read" ? "Read it with the `dispatch read` command on the issue or ask it concerns." : "Read it with the envoy_inbox tool.";

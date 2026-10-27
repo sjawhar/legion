@@ -37,8 +37,9 @@ import {
   type EnvoyStack,
   envoyStackEnabled,
   startEnvoyStack,
-} from "@legion/envoy-client/testing/envoy-stack";
-import { startStallProxy } from "@legion/envoy-client/testing/stall-proxy";
+} from "@legion/envoy-client/test/envoy-stack";
+import { startStallProxy } from "@legion/envoy-client/test/stall-proxy";
+import { runFreezeScenario } from "@legion/envoy-client/test/stall-scenario";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
@@ -207,9 +208,9 @@ const clipboardState = {
   error: undefined as Error | undefined,
 };
 
-// @legion/envoy-client/nats-auth resolves the NATS credential with the real nkey exports, and a row
-// that sets `natsState.realConnect` gets nats.js's own connect. They are copied out of the module
-// before the mock replaces it: a static import's live bindings would read the mock.
+// @legion/envoy-client/nats-connection resolves the NATS credential with the real nkey exports, and
+// a row that sets `natsState.realConnect` gets nats.js's own connect. They are copied out of the
+// module before the mock replaces it: a static import's live bindings would read the mock.
 const { connect: realConnect, Events, nkeyAuthenticator, nkeys } = await import("nats");
 mock.module("nats", () => ({
   Events,
@@ -15828,9 +15829,6 @@ describe.skipIf(!envoyStackEnabled)("against a real natsd and Envoy listener", (
     await stack?.stop();
   }, 60_000);
 
-  /** What a replayed card ends with (`replayedText`); a live card has no such line. */
-  const REPLAYED = "while this session's connection was down.";
-
   // The session runs on nats.js's real ping and dial timers and a real listener, so each wait polls
   // the real clock until its condition holds or its deadline passes.
   async function waitFor(
@@ -15861,19 +15859,6 @@ describe.skipIf(!envoyStackEnabled)("against a real natsd and Envoy listener", (
     const fixture = createPi();
     envoyExtension(fixture.pi);
     const context = sessionContext(sessionID);
-    const run = crypto.randomUUID();
-    const cards = (marker: string) =>
-      fixture.deliveries.filter(
-        (delivery) => delivery.customType === "envoy-message" && delivery.content.includes(marker)
-      );
-    const send = async (marker: string) => {
-      const answer = await fetch(`${envoyUrl}/v1/messages/send`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ target_session: sessionID, source: "agent", message: marker }),
-      });
-      expect(answer.status).toBe(200);
-    };
     try {
       await fixture.handlers.get("session_start")?.({}, context);
       const started = Date.now();
@@ -15906,49 +15891,20 @@ describe.skipIf(!envoyStackEnabled)("against a real natsd and Envoy listener", (
         "the session's first sweep"
       );
 
-      const live = `stall-live-before-${run}`;
-      await send(live);
-      await waitFor(() => cards(live).length > 0, Date.now() + 10_000, "the live message");
-
-      const frozenAt = proxy.freeze();
-      const missed = `stall-missed-${run}`;
-      await send(missed);
-      await waitFor(
-        () => cards(missed).length > 0,
-        frozenAt + 60_000,
-        "the message sent while the path was frozen"
-      );
-      const shownAt = Date.now();
-      const resubscribed = proxy.connections.find(
-        (opened) => opened.acceptedAt >= frozenAt && opened.subscribedAt !== undefined
-      );
-      console.log(
-        `pi-envoy stall: resubscribed ${(((resubscribed?.subscribedAt ?? Number.NaN) - frozenAt) / 1000).toFixed(1)} s, missed message shown ${((shownAt - frozenAt) / 1000).toFixed(1)} s after the freeze`
-      );
-      expect(resubscribed?.subscribedAt).toBeDefined();
-      expect((resubscribed?.subscribedAt ?? Number.POSITIVE_INFINITY) - frozenAt).toBeLessThan(
-        60_000
-      );
-      expect(shownAt - frozenAt).toBeLessThan(60_000);
-
-      const after = `stall-live-after-${run}`;
-      await send(after);
-      await waitFor(
-        () => cards(after).length > 0,
-        Date.now() + 10_000,
-        "the message after the reconnect"
-      );
-
-      // Each shown once: the two live without the replay line, the frozen window's replayed.
-      for (const [marker, replayed] of [
-        [live, false],
-        [missed, true],
-        [after, false],
-      ] as const) {
-        const shown = cards(marker);
-        expect(shown).toHaveLength(1);
-        expect(shown[0]?.content.includes(REPLAYED)).toBe(replayed);
-      }
+      await runFreezeScenario({
+        label: "pi-envoy stall",
+        envoyUrl,
+        sessionID,
+        proxy,
+        shown: (marker) =>
+          fixture.deliveries
+            .filter(
+              (delivery) =>
+                delivery.customType === "envoy-message" && delivery.content.includes(marker)
+            )
+            .map((delivery) => delivery.content),
+        waitFor,
+      });
     } finally {
       await fixture.handlers.get("session_shutdown")?.({}, context);
       await proxy.close();

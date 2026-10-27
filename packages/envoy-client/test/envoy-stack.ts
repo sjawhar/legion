@@ -23,56 +23,31 @@ export interface EnvoyStack {
   readonly natsUrl: string;
   /** natsd's client address, `127.0.0.1:<port>`, for a proxy to front. */
   readonly natsHostPort: string;
-  /** Stops the listener and natsd and removes their scratch directory. */
+  /** Stops the listener and natsd and removes their scratch directory, binaries included. */
   stop(): Promise<void>;
 }
 
-const ENVOY_MODULE = path.resolve(import.meta.dir, "../../../envoy");
+const ENVOY_MODULE = path.resolve(import.meta.dir, "../../envoy");
 const READY_TIMEOUT_MS = 60_000;
 const STOP_GRACE_MS = 10_000;
 
-// The binaries' directory, built once and shared by every stack running in this process. The last
-// stack to stop removes it (`release`): `bun test` emits no process exit event to clean up on.
-let built: Promise<string> | undefined;
-let running = 0;
-
-/** Builds natsd and the listener from this checkout once; resolves their directory. */
-function buildBinaries(): Promise<string> {
-  built ??= (async () => {
-    if (Bun.which("go") === null) {
-      throw new Error("the Envoy stack needs go on PATH to build natsd and the listener");
-    }
-    const bin = mkdtempSync(path.join(os.tmpdir(), "envoy-stack-bin-"));
-    try {
-      for (const [name, pkg] of [
-        ["natsd", "./internal/testnats/cmd/natsd"],
-        ["listener", "./cmd/listener"],
-      ] as const) {
-        const build = Bun.spawn(["go", "build", "-o", path.join(bin, name), pkg], {
-          cwd: ENVOY_MODULE,
-          stdout: "pipe",
-          stderr: "pipe",
-        });
-        const [stderr, code] = await Promise.all([new Response(build.stderr).text(), build.exited]);
-        if (code !== 0) {
-          throw new Error(`go build ${pkg} in ${ENVOY_MODULE} exited ${code}: ${stderr}`);
-        }
-      }
-    } catch (error) {
-      rmSync(bin, { recursive: true, force: true });
-      throw error;
-    }
-    return bin;
-  })();
-  return built;
-}
-
-/** One stack is done with the binaries; the last one removes them, so the next stack rebuilds. */
-function release(bin: string | undefined): void {
-  running -= 1;
-  if (running > 0) return;
-  built = undefined;
-  if (bin !== undefined) rmSync(bin, { recursive: true, force: true });
+/** Builds natsd and the listener from this checkout into `bin`, as `bin/natsd` and `bin/listener`. */
+async function buildBinaries(bin: string): Promise<void> {
+  if (Bun.which("go") === null) {
+    throw new Error("the Envoy stack needs go on PATH to build natsd and the listener");
+  }
+  const packages = ["./internal/testnats/cmd/natsd", "./cmd/listener"];
+  // An -o ending in a separator names a directory: each main package's binary goes in it, named
+  // after the package's directory.
+  const build = Bun.spawn(["go", "build", "-o", `${bin}${path.sep}`, ...packages], {
+    cwd: ENVOY_MODULE,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stderr, code] = await Promise.all([new Response(build.stderr).text(), build.exited]);
+  if (code !== 0) {
+    throw new Error(`go build ${packages.join(" ")} in ${ENVOY_MODULE} exited ${code}: ${stderr}`);
+  }
 }
 
 /** A loopback port nothing listens on now. */
@@ -148,23 +123,16 @@ async function stopProcess(child: Subprocess): Promise<void> {
  * when `go` is missing, a build fails or either process does not come up.
  */
 export async function startEnvoyStack(): Promise<EnvoyStack> {
-  running += 1;
-  let bin: string;
-  try {
-    bin = await buildBinaries();
-  } catch (error) {
-    release(undefined);
-    throw error;
-  }
   const { PATH = "" } = process.env;
   const work = mkdtempSync(path.join(os.tmpdir(), "envoy-stack-"));
   const processes: Subprocess[] = [];
   const stop = async () => {
     for (const child of processes.reverse()) await stopProcess(child);
     rmSync(work, { recursive: true, force: true });
-    release(bin);
   };
   try {
+    const bin = path.join(work, "bin");
+    await buildBinaries(bin);
     const [natsPort, monitorPort, listenerPort] = [
       await freePort(),
       await freePort(),

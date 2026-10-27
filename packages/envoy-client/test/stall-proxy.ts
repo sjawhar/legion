@@ -7,6 +7,9 @@ export interface ProxiedConnection {
   /** When the proxy first forwarded client bytes holding a `SUB ` line: the client subscribed
    *  through it. Undefined until then, and for good on a connection stalled from its first byte. */
   readonly subscribedAt: number | undefined;
+  /** When the client's socket ended (`Date.now()` at its FIN or its close, whichever came first):
+   *  the client closed it, or `close()` destroyed it. Undefined while it is open. */
+  readonly closedAt: number | undefined;
 }
 
 /**
@@ -26,8 +29,8 @@ export interface StallProxy {
    */
   freeze(): number;
   /** The next `count` connections behave as a server that accepts and never answers: what arrives
-   *  is read and discarded, never forwarded, and the proxy never closes them, so the client's own
-   *  close of one is observable. */
+   *  is read and discarded, never forwarded, and the proxy never closes them, so a `closedAt` on
+   *  one is the client's own close. */
   stallNext(count: number): void;
   /** Destroys every socket and stops listening. */
   close(): Promise<void>;
@@ -38,7 +41,7 @@ export async function startStallProxy(upstream: string): Promise<StallProxy> {
   const separator = upstream.lastIndexOf(":");
   const host = upstream.slice(0, separator);
   const port = Number(upstream.slice(separator + 1));
-  const connections: { acceptedAt: number; subscribedAt: number | undefined }[] = [];
+  const connections: ProxiedConnection[] = [];
   const open: { frozen: boolean; client: Socket; target: Socket }[] = [];
   const sockets = new Set<Socket>();
   let stalls = 0;
@@ -55,8 +58,18 @@ export async function startStallProxy(upstream: string): Promise<StallProxy> {
   // closes from the proxy's side.
   const server = createServer({ allowHalfOpen: true }, (client) => {
     track(client);
-    const record = { acceptedAt: Date.now(), subscribedAt: undefined as number | undefined };
+    const record = {
+      acceptedAt: Date.now(),
+      subscribedAt: undefined as number | undefined,
+      closedAt: undefined as number | undefined,
+    };
     connections.push(record);
+    // allowHalfOpen keeps a client's FIN from closing the proxy's side, so the FIN is its close.
+    const closed = () => {
+      record.closedAt ??= Date.now();
+    };
+    client.once("end", closed);
+    client.once("close", closed);
     if (stalls > 0) {
       stalls -= 1;
       client.on("data", () => undefined);

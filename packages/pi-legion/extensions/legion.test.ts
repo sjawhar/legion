@@ -52,7 +52,7 @@ const natsConnections: {
 const eventOrder: string[] = [];
 /** A connect for a connection name calls its gate, when a test sets one, and waits on it. */
 const natsConnectGates = new Map<string, () => Promise<void>>();
-// @legion/envoy-client/nats-auth resolves the NATS credential with the real nkey exports.
+// @legion/envoy-client/nats-connection resolves the NATS credential with the real nkey exports.
 const { nkeyAuthenticator, nkeys } = await import("nats");
 mock.module("nats", () => ({
   nkeyAuthenticator,

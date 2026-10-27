@@ -178,6 +178,9 @@ jobs:
               - 'skills/envoy/**'
               - 'scripts/third-party-notices.ts'
               - 'scripts/pi-plugin-prepack.sh'
+              # The Envoy plugin's bundle inlines nats.js, patched (patches/nats@2.29.3.patch);
+              # bun.lock names the patch only by path.
+              - 'patches/**'
             pi_legion:
               - 'packages/pi-legion/**'
               - 'packages/pi-shared/**'
@@ -747,8 +750,9 @@ jobs:
       # it was split from: its own name on npm holds only a placeholder 0.0.0 until its first
       # publish, so reading it would restart the line at 0.x. scripts/pi-plugin-prepack.sh copies
       # this plugin's five skills into dist/skills, which every Oh My Pi session loads as the
-      # plugin's skills, so a commit there releases whatever its type. Its notices generator and the
-      # prepack itself are shipped build inputs too, so they get the same patch release.
+      # plugin's skills, so a commit there releases whatever its type. Its notices generator, the
+      # prepack itself and patches/ (the bundle inlines nats.js with patches/nats@2.29.3.patch
+      # applied) are shipped build inputs too, so they get the same patch release.
       - name: Determine next version
         id: version
         run: |
@@ -757,9 +761,10 @@ jobs:
             --patch-path skills/asd-ste100/ --patch-path skills/dispatch/ --patch-path skills/dispatch-first/ \
             --patch-path skills/dispatch-writing-specs/ --patch-path skills/envoy/ \
             --patch-path scripts/third-party-notices.ts --patch-path scripts/pi-plugin-prepack.sh \
+            --patch-path patches/ \
             -- packages/pi-envoy/ packages/pi-shared/ packages/envoy-client/ packages/contracts/ \
             skills/asd-ste100/ skills/dispatch/ skills/dispatch-first/ skills/dispatch-writing-specs/ skills/envoy/ \
-            scripts/third-party-notices.ts scripts/pi-plugin-prepack.sh \
+            scripts/third-party-notices.ts scripts/pi-plugin-prepack.sh patches/ \
             >> "$GITHUB_OUTPUT"
 
       - uses: ./.github/actions/setup-bun

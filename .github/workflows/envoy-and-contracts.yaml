@@ -176,6 +176,9 @@ jobs:
               - 'packages/contracts/**'
               - 'package.json'
               - 'bun.lock'
+              # nats.js runs patched (patches/nats@2.29.3.patch); bun.lock names the patch only by
+              # path.
+              - 'patches/**'
               - *bun_toolchain
               # src/__tests__/dispatch-advice.test.ts holds every skill section a notice cites to a
               # heading of that skill's SKILL.md.
@@ -258,6 +261,8 @@ jobs:
               - 'packages/daemon/go.sum'
               - 'package.json'
               - 'bun.lock'
+              # Its subscriber runs nats.js, patched; bun.lock names the patch only by path.
+              - 'patches/**'
               - *bun_toolchain
             # The session stall suites (envoy-session-stall): envoy-client's stall proxy and stack
             # build natsd and the listener with go build in workspace mode (envoy's note above)
@@ -276,6 +281,8 @@ jobs:
               - 'packages/daemon/go.sum'
               - 'package.json'
               - 'bun.lock'
+              # The suites run nats.js, patched; bun.lock names the patch only by path.
+              - 'patches/**'
               - *bun_toolchain
               - '.github/workflows/envoy-and-contracts.yaml'
             plugin:
@@ -297,6 +304,8 @@ jobs:
               - 'packages/contracts/**'
               - 'package.json'
               - 'bun.lock'
+              # The committed bundle inlines nats.js, patched; bun.lock names the patch only by path.
+              - 'patches/**'
               # check-dist rebuilds the committed dist/THIRD_PARTY_NOTICES.
               - 'scripts/third-party-notices.ts'
               # scripts/build.ts, which check-dist and tests/dist-fresh.test.ts run, builds only under
@@ -345,6 +354,8 @@ jobs:
               - 'packages/contracts/**'
               - 'package.json'
               - 'bun.lock'
+              # The bundle inlines nats.js, patched; bun.lock names the patch only by path.
+              - 'patches/**'
               - *bun_toolchain
               # Its pack step writes dist/THIRD_PARTY_NOTICES.
               - 'scripts/third-party-notices.ts'
@@ -380,6 +391,9 @@ jobs:
               - 'packages/contracts/**'
               - 'package.json'
               - 'bun.lock'
+              # The Envoy entry its tests load runs nats.js, patched; bun.lock names the patch only
+              # by path.
+              - 'patches/**'
               - *bun_toolchain
               - 'scripts/third-party-notices.ts'
               - 'scripts/pi-plugin-prepack.sh'
@@ -1275,8 +1289,8 @@ jobs:
           path: packages/envoy/out/e2e
 
   # The session stall suites (INFRA-548): each freezes a session's NATS path behind
-  # envoy-client's stall proxy (src/testing/stall-proxy.ts) on a real natsd and listener, which
-  # src/testing/envoy-stack.ts builds with go build from packages/envoy, and holds the client to a
+  # envoy-client's stall proxy (test/stall-proxy.ts) on a real natsd and listener, which
+  # test/envoy-stack.ts builds with go build from packages/envoy, and holds the client to a
   # reconnect within 60 s: envoy-client's shared connection options on their own, then the real
   # pi-envoy extension and the real claude-envoy channel server, each showing the message sent
   # while it was cut off once, replayed. They run only with LEGION_E2E_ENVOY_STACK=1, which only

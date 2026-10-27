@@ -111,8 +111,9 @@ belongs: `not_served` and `unavailable` are a warning, `stream_recreated`, `stre
 
 `natsConnectionOptions({ servers, name, seed })` (`@legion/envoy-client/nats-connection`) is the
 nats.js `connect` options every session plugin dials with: the credential `natsAuthOptions` builds
-from the seed, reconnecting forever 2 s apart, and a ping every 10 s (`NATS_PING_INTERVAL_MS`) with
-the connection dropped on the tick that finds two pings unanswered (`NATS_MAX_PINGS_OUT`). So a
+from the seed (`src/nats-auth.ts`, which the package does not export, so a plugin dials only with
+these options), reconnecting forever 2 s apart, and a ping every 10 s (`NATS_PING_INTERVAL_MS`)
+with the connection dropped on the tick that finds two pings unanswered (`NATS_MAX_PINGS_OUT`). So a
 path that freezes without closing is left within 30 s and redialed at once, and a session is back
 within 52 s when that redial also hangs on nats.js's 20 s dial timeout and the 2 s wait; nats.js's
 default 120 s interval left a frozen path for up to 6 minutes.
@@ -132,11 +133,14 @@ in `ProtocolHandler.disconnect()`; a client-initiated `reconnect()` still flushe
 for a version that is not installed without a word, so moving nats means carrying the patch to
 the new version.
 
-`@legion/envoy-client/testing/stall-proxy` and `@legion/envoy-client/testing/envoy-stack` (Bun
-only, not built) are what the stall tests run: a TCP proxy whose `freeze()` stops forwarding on,
-and stops reading, the connections open at that moment without closing either side, and a real
-natsd and listener built with `go build` from `packages/envoy`. A test that uses the stack runs
-only with `LEGION_E2E_ENVOY_STACK=1`.
+`@legion/envoy-client/test/stall-proxy`, `@legion/envoy-client/test/envoy-stack` and
+`@legion/envoy-client/test/stall-scenario` (Bun only, not built, in `test/`) are what the stall
+tests run: a TCP proxy whose `freeze()` stops forwarding on, and stops reading, the connections
+open at that moment without closing either side, and which records when each connection was
+accepted, first subscribed and closed; a real natsd and listener that each stack builds with
+`go build` from `packages/envoy` into its own scratch directory; and `runFreezeScenario`, the
+freeze both plugins' stall tests put their session through. A test that uses the stack runs only
+with `LEGION_E2E_ENVOY_STACK=1`.
 
 ## HTTP transport
 

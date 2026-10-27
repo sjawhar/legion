@@ -10,6 +10,10 @@
   keeps both as optional strings, so a row from an older listener or plugin still parses
   (INFRA-548).
 
+- **Breaking:** `@legion/envoy-client/nats-auth` is no longer a package export: `src/nats-auth.ts`
+  stays the module `natsConnectionOptions` builds its credential with, so a session dials NATS
+  only with those options and their ping settings. No package imported it (INFRA-548).
+
 - **Breaking:** `dispatch architecture-sync` imports every architecture source of the project,
   one per repository, and prints each source's answer in turn: `Synced P architecture from
   repo@branch: commit C (time).`, or `Sync failed for P (repo@branch): error` followed by `The
@@ -53,12 +57,14 @@
   2 s apart, and a ping every 10 s (`NATS_PING_INTERVAL_MS`) with the connection dropped after
   two unanswered pings (`NATS_MAX_PINGS_OUT`), so a path that freezes without closing is left
   within 30 s, where nats.js's default 120 s interval left it for up to 6 minutes. Bun-only test
-  helpers `@legion/envoy-client/testing/stall-proxy` (a TCP proxy whose `freeze()` stops
-  forwarding and reading without closing either side) and
-  `@legion/envoy-client/testing/envoy-stack` (a real natsd and listener built with `go build` from
-  `packages/envoy`, for tests gated on `LEGION_E2E_ENVOY_STACK=1`) back
-  `src/__tests__/nats-stall.test.ts` and the plugins' stall tests
-  (INFRA-548).
+  helpers in `test/`, exported as `@legion/envoy-client/test/stall-proxy` (a TCP proxy whose
+  `freeze()` stops forwarding and reading without closing either side, recording when each
+  connection was accepted, first subscribed and closed), `@legion/envoy-client/test/envoy-stack`
+  (a real natsd and listener each stack builds with `go build` from `packages/envoy` into its own
+  scratch directory, for tests gated on `LEGION_E2E_ENVOY_STACK=1`) and
+  `@legion/envoy-client/test/stall-scenario` (`runFreezeScenario`, the freeze both plugins' stall
+  tests run), back `src/__tests__/nats-stall.test.ts` and the plugins' stall tests. `replay`
+  exports `REPLAYED_SUFFIX`, the words a replayed frame's text ends with (INFRA-548).
 
 - `@legion/envoy-client/replay`: `createReplayEngine` shows a session, once, each message the
   notification stream stored on a subject it follows while its own NATS subscription was down,
