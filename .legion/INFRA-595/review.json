@@ -2,17 +2,17 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-595",
-  "completed": "2026-10-27T14:21:46Z",
+  "completed": "2026-10-27T16:22:02Z",
   "round": 3,
   "kind": "confirmation after a conflict-forced merge",
   "decision": "approved",
-  "previousApproval": "9791bbe6d33dbe85223f49abd53ea64963b7b78d",
-  "reviewedCodeHead": "f48e32d9249c75cb9a82716b3c64cf8fea089305",
-  "fingerprint": "9cfde11a35ae2b9601d92dab83bcc08daf816ef0774db140ab7372beb45741e7 at 9791bbe6 and at e7a25a02 (fork point against main@origin, without .legion and docs/solutions): unchanged",
+  "previousApproval": "9cdc516fb90338106b029e3e50deab840aba581d",
+  "reviewedCodeHead": "c5ecb79f20a97a14f078183c3f9081354e1bc6ae",
+  "fingerprint": "9cfde11a35ae2b9601d92dab83bcc08daf816ef0774db140ab7372beb45741e7 at 9cdc516f and at 8b52d899 (fork point against main@origin, without .legion and docs/solutions): unchanged",
   "critical": 0,
   "important": 0,
   "minor": 0,
   "keyFindings": [],
-  "ci": "CI head f48e32d9 (the merge of main 2e8c68cd); required lint, typecheck, test, pr-title completed success; compare f48e32d9...e7a25a02 is handoffs only (2 files). envoy-go (not required) failed on TestSessionEntryRouteAnswersASessionTheCacheHasNotRefilled (cmd/listener role-claim-view race, a route this PR does not touch); evidence posted on dispatch://INFRA-523/comment/5cdbed94-2ecd-4899-bd85-052894cd03ff.",
-  "mergeability": "GitHub reports the PR CONFLICTING again at 14:21Z: main moved past 2e8c68cd and changed .dispatch/architecture/envoy-listener.md, packages/envoy/AGENTS.md, packages/envoy/CHANGELOG.md and packages/envoy/cmd/listener/main.go, all files this PR edits. Another forward merge and fingerprint confirmation follow."
+  "ci": "CI head c5ecb79f (the merge of main ae36683e); required lint, typecheck, test, pr-title completed success; compare c5ecb79f...8b52d899 is handoffs only (2 files). envoy-go (not required) failed: internal/dispatch/api hit the 10 min go test timeout again (internal/cistore passed in that job); the PR does not touch that package, and dispatch://INFRA-520 and dispatch://INFRA-523 track the timeout.",
+  "mergeability": "MERGEABLE at 16:22Z."
 }
