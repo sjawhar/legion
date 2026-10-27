@@ -334,6 +334,168 @@ func TestCoverRepairsAStaleRow(t *testing.T) {
 	}
 }
 
+// seedSpec gives issueKey its primary document, as issue creation does, with spec as its first
+// version, and returns the document's id.
+func seedSpec(t *testing.T, q querier, project, issueKey, spec string) string {
+	t.Helper()
+	var artifactID string
+	if err := q.QueryRow(context.Background(), `
+		insert into artifacts (issue_key, project_key, slug, name, kind, is_primary, created_by)
+		values ($1, $2, 'spec', 'spec.md', 'doc', true, '{"kind":"user","id":"alice"}')
+		returning id::text
+	`, issueKey, project).Scan(&artifactID); err != nil {
+		t.Fatalf("seed the primary document of %s: %v", issueKey, err)
+	}
+	addVersion(t, q, artifactID, 1, spec)
+	return artifactID
+}
+
+func addVersion(t *testing.T, q querier, artifactID string, number int, markdown string) {
+	t.Helper()
+	mustExec(t, q, `insert into artifact_versions (artifact_id, number, markdown, authors) values ($1, $2, $3, '[]')`,
+		artifactID, number, markdown)
+}
+
+// issueRow reads an issue's embeddings row: its text and whether it waits for a vector.
+func issueRow(t *testing.T, database *store.Store, issueKey string) (text string, pending bool) {
+	t.Helper()
+	if err := database.Pool.QueryRow(context.Background(), `
+		select text_snapshot, embedded_hash is distinct from content_hash from embeddings where kind = 'issue' and id = $1
+	`, issueKey).Scan(&text, &pending); err != nil {
+		t.Fatalf("read the embeddings row of %s: %v", issueKey, err)
+	}
+	return text, pending
+}
+
+func embeddedTexts(e *placeEmbedder) map[string]bool {
+	texts := map[string]bool{}
+	for _, call := range e.calls {
+		for _, text := range call {
+			texts[text] = true
+		}
+	}
+	return texts
+}
+
+// An issue embeds its title and its spec: a new version of its primary document queues the issue
+// again at the title, a blank line and that version's markdown, a title change keeps the spec,
+// and the coverage pass builds the same text, so it changes nothing the triggers wrote.
+func TestASpecEditRequeuesTheIssueWithItsTitleAndSpec(t *testing.T) {
+	database := storetest.Open(t)
+	const title = "Ünïcödé title — 日本語 ✓"
+	seedIssue(t, database, "SPEC", "SPEC-1", title)
+	spec := seedSpec(t, database.Pool, "SPEC", "SPEC-1", "")
+	embedder := newPlaceEmbedder(configuredIdentity)
+	deps := Deps{Store: database, Embedder: embedder}
+	drain(t, deps)
+
+	const markdown = "## Problem\n\nNaïve café — the spec 🚀\n"
+	addVersion(t, database.Pool, spec, 2, markdown)
+	want := title + "\n\n" + markdown
+	if text, pending := issueRow(t, database, "SPEC-1"); text != want || !pending {
+		t.Fatalf("after the spec edit the issue's row holds %q (pending %t), want %q pending", text, pending, want)
+	}
+	drain(t, deps)
+	if !embeddedTexts(embedder)[want] {
+		t.Errorf("the embedder never received %q: %v", want, embedder.calls)
+	}
+
+	before := snapshotRows(t, database)
+	cover(t, deps)
+	if after := snapshotRows(t, database); after["issue/SPEC-1"] != before["issue/SPEC-1"] {
+		t.Errorf("Cover changed the issue's row the trigger wrote:\n before %+v\n after  %+v", before["issue/SPEC-1"], after["issue/SPEC-1"])
+	}
+
+	mustExec(t, database.Pool, `update issues set title = 'Renamed' where key = 'SPEC-1'`)
+	if text, _ := issueRow(t, database, "SPEC-1"); text != "Renamed\n\n"+markdown {
+		t.Errorf("after the title change the issue's row holds %q, want the new title and the spec", text)
+	}
+}
+
+// Only the issue's primary document is its spec: a version of another document on the issue
+// leaves the issue's row as it was.
+func TestAVersionOfAnotherDocumentLeavesTheIssuesTextAlone(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "NPRI", "NPRI-1", "Title")
+	seedSpec(t, database.Pool, "NPRI", "NPRI-1", "The spec")
+	var notes string
+	if err := database.Pool.QueryRow(context.Background(), `
+		insert into artifacts (issue_key, project_key, slug, name, kind, created_by)
+		values ('NPRI-1', 'NPRI', 'notes', 'notes.md', 'doc', '{"kind":"user","id":"alice"}')
+		returning id::text
+	`).Scan(&notes); err != nil {
+		t.Fatalf("seed another document: %v", err)
+	}
+	addVersion(t, database.Pool, notes, 1, "Notes, first")
+	drain(t, Deps{Store: database, Embedder: newPlaceEmbedder(configuredIdentity)})
+	if text, _ := issueRow(t, database, "NPRI-1"); text != "Title\n\nThe spec" {
+		t.Fatalf("the issue's row holds %q, want its title and its primary document's text", text)
+	}
+
+	before := snapshotRows(t, database)["issue/NPRI-1"]
+	addVersion(t, database.Pool, notes, 2, "Notes, second")
+	if after := snapshotRows(t, database)["issue/NPRI-1"]; after != before {
+		t.Errorf("a version of another document wrote the issue's row:\n before %+v\n after  %+v", before, after)
+	}
+}
+
+// An issue whose row a release before 0122 embedded at its title alone is queued again by the
+// coverage pass at its title and spec, and then embedded at that text.
+func TestCoverRequeuesAnIssueEmbeddedWithItsTitleAlone(t *testing.T) {
+	database := storetest.Open(t)
+	withTriggersOff(t, database, func(q querier) {
+		mustExec(t, q, `insert into projects (key, name) values ('OLDE', 'Test')`)
+		mustExec(t, q, `
+			insert into issues (key, project_key, number, title, created_by, rank)
+			values ('OLDE-1', 'OLDE', 1, 'Old title', '{"kind":"user","id":"alice"}', 'A')`)
+		seedSpec(t, q, "OLDE", "OLDE-1", "What the old issue's spec says")
+	})
+	mustExec(t, database.Pool, `select embeddings_enqueue('issue', 'OLDE-1', 'Old title')`)
+	embedder := newPlaceEmbedder(configuredIdentity)
+	deps := Deps{Store: database, Embedder: embedder}
+	drain(t, deps)
+
+	cover(t, deps)
+	want := "Old title\n\nWhat the old issue's spec says"
+	if text, pending := issueRow(t, database, "OLDE-1"); text != want || !pending {
+		t.Fatalf("after Cover the issue's row holds %q (pending %t), want %q pending", text, pending, want)
+	}
+	drain(t, deps)
+	if !embeddedTexts(embedder)[want] {
+		t.Errorf("the embedder never received %q: %v", want, embedder.calls)
+	}
+	if items, current, _, _, _ := coverage(t, database, configuredIdentity); current != items {
+		t.Errorf("after the drain %d of %d items are current, want all", current, items)
+	}
+}
+
+// A spec that is empty or holds only white space adds nothing to the issue's text: the issue
+// embeds its title alone, and the coverage pass agrees.
+func TestAnIssueWhoseSpecIsBlankEmbedsItsTitleAlone(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "BLNK", "BLNK-1", "Title")
+	spec := seedSpec(t, database.Pool, "BLNK", "BLNK-1", "")
+	if text, _ := issueRow(t, database, "BLNK-1"); text != "Title" {
+		t.Fatalf("with an empty spec the issue's row holds %q, want the title alone", text)
+	}
+	addVersion(t, database.Pool, spec, 2, "A spec")
+	if text, _ := issueRow(t, database, "BLNK-1"); text != "Title\n\nA spec" {
+		t.Fatalf("with a spec the issue's row holds %q, want the title and the spec", text)
+	}
+	addVersion(t, database.Pool, spec, 3, " \n\t\n")
+	if text, _ := issueRow(t, database, "BLNK-1"); text != "Title" {
+		t.Fatalf("with a blank spec the issue's row holds %q, want the title alone", text)
+	}
+
+	deps := Deps{Store: database, Embedder: newPlaceEmbedder(configuredIdentity)}
+	drain(t, deps)
+	before := snapshotRows(t, database)["issue/BLNK-1"]
+	cover(t, deps)
+	if after := snapshotRows(t, database)["issue/BLNK-1"]; after != before {
+		t.Errorf("Cover changed the issue's row:\n before %+v\n after  %+v", before, after)
+	}
+}
+
 // The repair is a compare-and-swap: a trigger write that commits after the pass read the row and
 // before it updated it wins, keeping the trigger's text, hash, claim and counters. The trigger's
 // transaction holds the row while the pass's update waits on it, so the interleaving is exact.

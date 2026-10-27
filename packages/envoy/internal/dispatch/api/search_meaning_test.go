@@ -93,6 +93,12 @@ func queryVector() []float32 { return angledVector(1, 1) }
 // queryVector(), comfortably below searchMeaningFloor.
 func defaultVector() []float32 { return angledVector(0, 1) }
 
+// issueEmbeddingText is the text an issue created with a one-paragraph spec embeds (0122's
+// issue_embedding_text): its title, a blank line and its spec as the primary document stores it,
+// serialized markdown ending in a newline. A test keys an issue's vector by this, not by the title
+// alone.
+func issueEmbeddingText(title, spec string) string { return title + "\n\n" + spec + "\n" }
+
 func processAllPending(t *testing.T, database *store.Store, embedder embed.Embedder) {
 	t.Helper()
 	deps := embedqueue.Deps{Store: database, Embedder: embedder}
@@ -112,12 +118,13 @@ func processAllPending(t *testing.T, database *store.Store, embedder embed.Embed
 // deterministic cosine match, since keyword search (websearch_to_tsquery) cannot match a query
 // term absent from the corpus at all.
 func TestSearchFindsAMeaningOnlyMatch(t *testing.T) {
+	const title, spec = "Celestial navigation device maintenance", "Routine upkeep notes."
 	embedder := &fakeEmbedder{vectors: map[string][]float32{
-		"Celestial navigation device maintenance": angledVector(0.9, 2),
-		"wibbleflorp": queryVector(),
+		issueEmbeddingText(title, spec): angledVector(0.9, 2),
+		"wibbleflorp":                   queryVector(),
 	}}
 	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
-	issue := createInteractionIssue(t, handler, "MEAN", "Celestial navigation device maintenance", "Routine upkeep notes.")
+	issue := createInteractionIssue(t, handler, "MEAN", title, spec)
 	processAllPending(t, database, embedder)
 
 	// Sanity: keyword search for this query matches nothing at all (the term appears nowhere),
@@ -152,12 +159,13 @@ func TestSearchFindsAMeaningOnlyMatch(t *testing.T) {
 // their InputQuery calls go straight to the unwrapped fake embedder and are never subject to
 // that backoff at all.
 func TestSearchStaysNonDegradedWhileEmbedqueueIsThrottled(t *testing.T) {
+	const title, spec = "Celestial navigation device maintenance", "Routine upkeep notes."
 	embedder := &fakeEmbedder{vectors: map[string][]float32{
-		"Celestial navigation device maintenance": angledVector(0.9, 2),
-		"wibbleflorp": queryVector(),
+		issueEmbeddingText(title, spec): angledVector(0.9, 2),
+		"wibbleflorp":                   queryVector(),
 	}}
 	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
-	createInteractionIssue(t, handler, "PRIO", "Celestial navigation device maintenance", "Routine upkeep notes.")
+	createInteractionIssue(t, handler, "PRIO", title, spec)
 	// Embeds while nothing is throttled yet: this is the content a later query below must still
 	// find - already embedded, before the saturating bulk traffic simulated next ever starts.
 	processAllPending(t, database, embedder)
@@ -211,14 +219,15 @@ func TestSearchStaysNonDegradedWhileEmbedqueueIsThrottled(t *testing.T) {
 func TestSearchMeaningFloorExcludesWeakMatches(t *testing.T) {
 	const belowFloor = 0.1 // < searchMeaningFloor (0.25)
 	const atFloor = 0.25
+	const weakTitle, lineTitle, spec = "Unrelated quarterly budget notes", "Right at the line", "Body text."
 	embedder := &fakeEmbedder{vectors: map[string][]float32{
-		"Unrelated quarterly budget notes": angledVector(belowFloor, 2),
-		"Right at the line":                angledVector(atFloor, 3),
-		"wibbleflorp":                      queryVector(),
+		issueEmbeddingText(weakTitle, spec): angledVector(belowFloor, 2),
+		issueEmbeddingText(lineTitle, spec): angledVector(atFloor, 3),
+		"wibbleflorp":                       queryVector(),
 	}}
 	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
-	weak := createInteractionIssue(t, handler, "WEAK", "Unrelated quarterly budget notes", "Body text.")
-	line := createInteractionIssue(t, handler, "LINE", "Right at the line", "Body text.")
+	weak := createInteractionIssue(t, handler, "WEAK", weakTitle, spec)
+	line := createInteractionIssue(t, handler, "LINE", lineTitle, spec)
 	processAllPending(t, database, embedder)
 
 	response := searchResponse(t, handler, "q=wibbleflorp")
@@ -302,14 +311,16 @@ func TestSearchSkipsTheEmbedderForAStopWordOnlyQuery(t *testing.T) {
 // scoring one 1/(60+2) term - under half as much. Fusion summing, not taking the better list's
 // score alone, is what makes that gap as large as it is.
 func TestSearchFusesAnItemFoundByBothListsAboveOneFoundOnlyByMeaning(t *testing.T) {
+	const bothTitle, bothSpec = "Harbor lantern inspection report", "Body text one."
+	const meaningOnlyTitle, meaningOnlySpec = "Unrelated maintenance budget request", "Body text two."
 	embedder := &fakeEmbedder{vectors: map[string][]float32{
-		"Harbor lantern inspection report":     angledVector(0.9, 2), // keyword match and a strong cosine match: both lists
-		"Unrelated maintenance budget request": angledVector(0.4, 3), // no shared word with the query, a weaker cosine match: meaning list only
-		"lantern inspection":                   queryVector(),
+		issueEmbeddingText(bothTitle, bothSpec):               angledVector(0.9, 2), // keyword match and a strong cosine match: both lists
+		issueEmbeddingText(meaningOnlyTitle, meaningOnlySpec): angledVector(0.4, 3), // no shared word with the query, a weaker cosine match: meaning list only
+		"lantern inspection":                                  queryVector(),
 	}}
 	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
-	both := createInteractionIssue(t, handler, "FUSE", "Harbor lantern inspection report", "Body text one.")
-	meaningOnly := createInteractionIssue(t, handler, "FUSM", "Unrelated maintenance budget request", "Body text two.")
+	both := createInteractionIssue(t, handler, "FUSE", bothTitle, bothSpec)
+	meaningOnly := createInteractionIssue(t, handler, "FUSM", meaningOnlyTitle, meaningOnlySpec)
 	processAllPending(t, database, embedder)
 
 	response := searchResponse(t, handler, "q="+url.QueryEscape("lantern inspection"))
@@ -349,14 +360,15 @@ func TestSearchFusesAnItemFoundByBothListsAboveOneFoundOnlyByMeaning(t *testing.
 // meaning hit, while the right-identity issue does. Recording the same vector under the query
 // embedder's identity then ranks it first, so its absence was the identity alone.
 func TestSearchNeverRanksAVectorOfAnotherIdentity(t *testing.T) {
+	const rightTitle, foreignTitle, spec = "Celestial navigation device maintenance", "Sextant mirror alignment checklist", "Routine upkeep notes."
 	embedder := &fakeEmbedder{vectors: map[string][]float32{
-		"Celestial navigation device maintenance": angledVector(0.5, 2),
-		"Sextant mirror alignment checklist":      angledVector(0.95, 3),
-		"wibbleflorp":                             queryVector(),
+		issueEmbeddingText(rightTitle, spec):   angledVector(0.5, 2),
+		issueEmbeddingText(foreignTitle, spec): angledVector(0.95, 3),
+		"wibbleflorp":                          queryVector(),
 	}}
 	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
-	right := createInteractionIssue(t, handler, "RGHT", "Celestial navigation device maintenance", "Routine upkeep notes.")
-	foreign := createInteractionIssue(t, handler, "FRGN", "Sextant mirror alignment checklist", "Routine upkeep notes.")
+	right := createInteractionIssue(t, handler, "RGHT", rightTitle, spec)
+	foreign := createInteractionIssue(t, handler, "FRGN", foreignTitle, spec)
 	processAllPending(t, database, embedder)
 
 	const otherIdentity = "azure:other.example/embed-v-4-0"

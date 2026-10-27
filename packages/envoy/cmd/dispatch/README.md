@@ -801,6 +801,36 @@ the release before it runs over the new schema unchanged, and the trigger gives 
 release writes its sequence. The auto-deployer is the exception, by its own rule above: once the
 schema has moved it refuses to start the previous tag, and recovery there is forward.
 
+Migration `0121_related_checks` adds three tables for the related-item check, which INFRA-568 makes
+search by meaning first and by the project's rarest words. `related_checks` holds one row per
+check of an issue, an ask or a decision block a document edit adds, written by the check itself
+once it has answered (a check that ran out of time included; the no-write related route records
+nothing): its project and source, the actor, the outcome (`found`, `none` or `not_made`), how it
+searched (`meaning_and_keywords` or `keywords_only`, none when not made), the reason it was not
+made or searched by keywords alone, the lexemes it searched for, its keyword, meaning and total
+milliseconds and how many items it listed. `search_term_stats` (how many of a project's searchable
+items hold each lexeme) and `search_term_totals` (how many searchable items the project has, and
+when they were counted) are the statistics the check picks its keywords from; the term-statistics
+refresh, also added by INFRA-568, rebuilds a project's rows at boot and every 10 minutes, and the
+check only reads them. Every row names its project with `on delete cascade`, and a check's row
+also cascades from its issue, document or ask. The tables are new, so the migration rewrites and
+refuses no row and its census answers `0`; its foreign keys take the referenced tables' locks for
+milliseconds, as `0070`'s did.
+
+Migration `0122_issue_embedding_spec` makes an issue's meaning-search text its title and its spec:
+`issue_embedding_text(title, spec)` is the title, a blank line and the markdown of the latest
+version of the issue's primary document, or the title alone when that markdown is empty or only
+white space. It replaces the function of `0073`'s issues trigger, which still fires on an insert or
+a title change, and adds a trigger on `artifact_versions` that queues the issue again when a new
+version of its primary document is written. Replacing a function's body locks no table, so the
+migration takes `artifact_versions`' lock alone, for its trigger, as `0073`–`0077` each take one
+table's. The coverage pass (Search, below) builds the same text, so an existing issue, whose row
+holds its title alone, is queued again by the first pass once an embedder runs and re-embedded at
+its title and spec; nothing is re-embedded by the migration itself, and its census answers `0`.
+While the release before it still serves, its coverage pass points those rows back at the title
+alone, and each pass of either release queues them again, so a roll that spans passes embeds some
+issues more than once; a deployment with no embedder runs no pass and sees none of this.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
