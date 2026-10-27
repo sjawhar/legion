@@ -474,6 +474,59 @@ test("with a slow token command, a list read from another Dispatch than envoy.js
   expect(before.requests).toHaveLength(1)
 }, 20_000)
 
+test("a refresher started for the Dispatch envoy.json named before never hands its list to a hook for the Dispatch it names now", async () => {
+  // The refresher is shared by every hook of the session, whatever Dispatch each resolves. A
+  // refresher started while envoy.json named `before` that finishes while a later hook, started
+  // after envoy.json moved to `now`, is still waiting must not give that hook `before`'s list, the
+  // invariant the review asked for ("no list from another Dispatch URL").
+  const before = standinDispatch()
+  before.route = { kind: "list", items: [answer("ask-x", "Read from the Dispatch before.", 1)] }
+  const now = standinDispatch()
+  now.route = { kind: "list", items: [] }
+  const { home, state, config, tmp } = await scratch()
+  const env = { HOME: home, DISPATCH_STATE_DIR: state, CLAUDE_CONFIG_DIR: config, TMPDIR: tmp }
+  const envoyJson = join(config, "envoy.json")
+  const gate = join(home, "gate")
+
+  // The first hook's refresher runs the command, which waits until the test opens the gate.
+  await writeFile(
+    envoyJson,
+    JSON.stringify({
+      dispatch: {
+        serverUrl: before.base,
+        token: `!while [ ! -e '${gate}' ]; do sleep 0.02; done; printf before-token`,
+      },
+    }),
+  )
+  const since = Date.now()
+  cleanup.push(async () => {
+    await writeFile(gate, "")
+    await refresherFinished(state, since)
+  })
+  const first = await runHook(env, sessionStart("startup", home))
+  expect(contextOf(first, "SessionStart")).toBe(
+    sessionAnswersFailureLine(
+      `a "!" command in envoy.json had not finished 800 ms after the hook started`,
+    ),
+  )
+
+  // envoy.json now names another Dispatch. A hook starts and finds the refresher running; the gate
+  // opens as it starts, so the refresher reads `before` and finishes after this hook started and
+  // before its print deadline, an outcome the hook waits for.
+  await writeFile(
+    envoyJson,
+    JSON.stringify({ dispatch: { serverUrl: now.base, token: "!printf now-token" } }),
+  )
+  const second = runHook(env, sessionStart("resume", home))
+  await writeFile(gate, "")
+  const context = contextOf(await second, "SessionStart")
+  await refresherFinished(state, since)
+
+  // The refresher did read `before`, so the case is not vacuous.
+  expect(before.requests).toEqual([`Bearer before-token /api/v1/agents/${SESSION}/answers`])
+  expect(context).not.toContain("Read from the Dispatch before.")
+}, 20_000)
+
 test("hooks started together run a slow token command once", async () => {
   const dispatch = standinDispatch()
   dispatch.route = { kind: "list", items: [answer("ask-6", "One run.", 1)] }
