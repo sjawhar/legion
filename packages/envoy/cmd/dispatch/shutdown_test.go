@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -247,6 +248,98 @@ func TestShutdownWaitsForDeliveryWorkBeforeClosingThePool(t *testing.T) {
 	}
 	if _, err := database.Pool.Exec(context.Background(), "select 1"); err == nil {
 		t.Fatal("shutdown left the pool open")
+	}
+}
+
+// A deploy can find a mention's send in flight - its session's listener still answering - and a
+// second comment's send to that same session queued behind it. SIGTERM starts no queued send, so
+// the second attempt is left pending with no claim, for the next process's recovery pass; and
+// Dispatch waits for the send in flight to settle before it closes its pool, so the outcome the
+// listener answered is recorded rather than lost with the process.
+func TestSIGTERMSettlesTheMentionSendInFlightAndLeavesTheQueuedOnePending(t *testing.T) {
+	var sends atomic.Int32
+	arrived := make(chan struct{}, 2)
+	answer := make(chan struct{})
+	var answerOnce sync.Once
+	letAnswer := func() { answerOnce.Do(func() { close(answer) }) }
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
+			sends.Add(1)
+			arrived <- struct{}{}
+			select {
+			case <-answer:
+			case <-r.Context().Done():
+				return
+			}
+			_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"s1"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer listener.Close()
+	defer letAnswer()
+	database := storetest.Open(t)
+	process := startDispatchProcessWith(t, database.Pool.Config().ConnString(), dispatchOptions{
+		Env: map[string]string{"ENVOY_URL": listener.URL},
+	})
+	process.waitHealthy(t)
+	key, _ := process.createIssue(t)
+	mention := func(body string) string {
+		t.Helper()
+		input, err := json.Marshal(map[string]any{"body": body, "mentions": []map[string]string{{"target": "session:s1"}}})
+		if err != nil {
+			t.Fatalf("encode the comment: %v", err)
+		}
+		var comment struct {
+			ID string `json:"id"`
+		}
+		created := process.call(t, http.MethodPost, "/api/v1/issues/"+key+"/comments", string(input), http.StatusCreated)
+		if err := json.Unmarshal(created, &comment); err != nil || comment.ID == "" {
+			t.Fatalf("create the comment: %v: %s", err, created)
+		}
+		return comment.ID
+	}
+	inFlight := mention("In flight at SIGTERM.")
+	select {
+	case <-arrived:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the mention's send never reached the listener:\n%s", process.Output.String())
+	}
+	queued := mention("Queued behind it.")
+
+	process.Terminate(t)
+	process.WaitForOutput(t, `msg="dispatch: shutting down"`)
+	select {
+	case <-process.Exited:
+		t.Fatalf("Dispatch exited with a mention send still in flight:\n%s", process.Output.String())
+	default:
+	}
+	letAnswer()
+	process.WaitExit(t, "SIGTERM")
+
+	attempt := func(commentID string) (state string, claimed bool) {
+		t.Helper()
+		if err := database.Pool.QueryRow(context.Background(), `
+			select state, claimed_at is not null from comment_deliveries where comment_id = $1 and attempt = 1
+		`, commentID).Scan(&state, &claimed); err != nil {
+			t.Fatalf("read the attempt of %s: %v", commentID, err)
+		}
+		return state, claimed
+	}
+	if state, _ := attempt(inFlight); state != "sent" {
+		t.Errorf("the send in flight at SIGTERM left its attempt %s, want it settled sent before exit", state)
+	}
+	if state, claimed := attempt(queued); state != "pending" || claimed {
+		t.Errorf("the queued send left its attempt %s (claimed %v), want it pending with no claim", state, claimed)
+	}
+	if got := sends.Load(); got != 1 {
+		t.Errorf("the listener took %d sends, want only the one in flight at SIGTERM", got)
+	}
+	if t.Failed() {
+		t.Logf("Dispatch's output:\n%s", process.Output.String())
 	}
 }
 

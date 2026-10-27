@@ -182,6 +182,7 @@ func TestAPersonsCommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 			t.Fatalf("suppressed_authors = %v, want the mentioned author alone", suppressed)
 		}
 		expect(t, id, true, contracts.AgentSubject("session-editor"))
+		settledCommentDeliveries(t, database, id)
 		sendsMu.Lock()
 		defer sendsMu.Unlock()
 		if sends["session-writer"] != 1 || sends["session-editor"] != 0 {

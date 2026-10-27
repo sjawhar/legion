@@ -8,6 +8,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -51,6 +54,50 @@ func decodeMentionedComment(t *testing.T, response *httptest.ResponseRecorder) m
 	return decodeBody[mentionedCommentRead](t, response)
 }
 
+// settledCommentDeliveries waits until no attempt of the comment is pending - the mention sender
+// settles each after the create has answered - and returns its attempts by target and attempt.
+func settledCommentDeliveries(t *testing.T, database *store.Store, commentID string) []model.CommentDelivery {
+	t.Helper()
+	return waitForCommentDeliveries(t, database, commentID, "no attempt pending", func(attempts []model.CommentDelivery) bool {
+		for _, attempt := range attempts {
+			if attempt.State == "pending" {
+				return false
+			}
+		}
+		return len(attempts) > 0
+	})
+}
+
+// waitForCommentDeliveries reads the comment's attempts, by target and attempt, until done accepts
+// them, for at most 10 s; want says what done waits for.
+func waitForCommentDeliveries(
+	t *testing.T, database *store.Store, commentID, want string, done func([]model.CommentDelivery) bool,
+) []model.CommentDelivery {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		rows, err := database.Pool.Query(context.Background(), `
+			select `+commentDeliveryColumns+` from comment_deliveries where comment_id = $1 order by target, attempt
+		`, commentID)
+		if err != nil {
+			t.Fatalf("read comment %s attempts: %v", commentID, err)
+		}
+		attempts, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (model.CommentDelivery, error) {
+			return scanCommentDelivery(row)
+		})
+		if err != nil {
+			t.Fatalf("read comment %s attempts: %v", commentID, err)
+		}
+		if done(attempts) {
+			return attempts
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("comment %s attempts = %#v, want %s", commentID, attempts, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestMentionedCommentRecordsFailedOfflineSession(t *testing.T) {
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/v1/sessions" {
@@ -60,7 +107,7 @@ func TestMentionedCommentRecordsFailedOfflineSession(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer listener.Close()
-	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	handler, database := newTargetedMessageHandler(t, listener.URL)
 	issue := createInteractionIssue(t, handler, "TEST", "Offline mention", "before")
 
 	created := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
@@ -69,10 +116,12 @@ func TestMentionedCommentRecordsFailedOfflineSession(t *testing.T) {
 	if len(created.Mentions) != 1 || created.Mentions[0].SessionID != nil {
 		t.Fatalf("offline mention = %#v, want an unresolved mention", created.Mentions)
 	}
-	if len(created.Deliveries) != 1 || created.Deliveries[0].State != "failed" ||
-		created.Deliveries[0].SessionID != nil ||
-		created.Deliveries[0].Error == nil || *created.Deliveries[0].Error != "no live session gone" {
-		t.Fatalf("offline delivery = %#v, want a failed delivery with no resolved session", created.Deliveries)
+	if len(created.Deliveries) != 1 || created.Deliveries[0].State != "pending" {
+		t.Fatalf("offline delivery in the create response = %#v, want its pending attempt", created.Deliveries)
+	}
+	if settled := settledCommentDeliveries(t, database, created.ID); len(settled) != 1 || settled[0].State != "failed" ||
+		settled[0].SessionID != nil || settled[0].Error == nil || *settled[0].Error != "no live session gone" {
+		t.Fatalf("offline delivery = %#v, want a failed delivery with no resolved session", settled)
 	}
 	events := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
 	if events.Code != http.StatusOK || !strings.Contains(events.Body.String(), `"type":"comment.delivery"`) ||
@@ -106,22 +155,25 @@ func TestMentionedCommentUsesRequestedOrDefaultDeliveryMode(t *testing.T) {
 		}
 	}))
 	defer listener.Close()
-	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	handler, database := newTargetedMessageHandler(t, listener.URL)
 	issue := createInteractionIssue(t, handler, "TEST", "Mention mode", "before")
 
 	defaultMode := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "Default mode.", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
-	if len(defaultMode.Mentions) != 1 || defaultMode.Mentions[0].Delivery != "steer" ||
-		len(defaultMode.Deliveries) != 1 || defaultMode.Deliveries[0].Delivery != "steer" ||
-		defaultMode.Deliveries[0].State != "sent" {
+	if len(defaultMode.Mentions) != 1 || defaultMode.Mentions[0].Delivery != "steer" {
 		t.Fatalf("default mode result = %#v", defaultMode)
+	}
+	if settled := settledCommentDeliveries(t, database, defaultMode.ID); len(settled) != 1 ||
+		settled[0].Delivery != "steer" || settled[0].State != "sent" {
+		t.Fatalf("default mode delivery = %#v", settled)
 	}
 	btwMode := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "BTW mode.", "mentions": []map[string]any{{"target": "session:s1"}}, "delivery": "btw",
 	}))
-	if len(btwMode.Deliveries) != 1 || btwMode.Deliveries[0].Delivery != "btw" || btwMode.Deliveries[0].State != "sent" {
-		t.Fatalf("btw mode result = %#v", btwMode)
+	if settled := settledCommentDeliveries(t, database, btwMode.ID); len(settled) != 1 ||
+		settled[0].Delivery != "btw" || settled[0].State != "sent" {
+		t.Fatalf("btw mode delivery = %#v", settled)
 	}
 	if len(sent) != 2 {
 		t.Fatalf("mention sends = %#v, want default and btw sends", sent)
@@ -141,19 +193,20 @@ func TestMentionedCommentUsesRequestedOrDefaultDeliveryMode(t *testing.T) {
 	unadvertisedSteer := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "Unavailable steer mode.", "mentions": []map[string]any{{"target": "session:s1"}}, "delivery": "steer",
 	}))
-	if len(unadvertisedSteer.Deliveries) != 1 || unadvertisedSteer.Deliveries[0].State != "failed" ||
-		unadvertisedSteer.Deliveries[0].Error == nil ||
-		*unadvertisedSteer.Deliveries[0].Error != "session s1 (planner) does not advertise steer" {
-		t.Fatalf("unadvertised steer result = %#v", unadvertisedSteer.Deliveries)
+	if settled := settledCommentDeliveries(t, database, unadvertisedSteer.ID); len(settled) != 1 ||
+		settled[0].State != "failed" || settled[0].Error == nil ||
+		*settled[0].Error != "session s1 (planner) does not advertise steer" {
+		t.Fatalf("unadvertised steer result = %#v", settled)
 	}
 
 	capabilities = nil
 	unadvertised := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "Unavailable BTW mode.", "mentions": []map[string]any{{"target": "session:s1"}}, "delivery": "btw",
 	}))
-	if len(unadvertised.Deliveries) != 1 || unadvertised.Deliveries[0].State != "failed" ||
-		unadvertised.Deliveries[0].Error == nil || *unadvertised.Deliveries[0].Error != "session s1 (planner) does not advertise btw" {
-		t.Fatalf("unadvertised mode result = %#v", unadvertised.Deliveries)
+	if settled := settledCommentDeliveries(t, database, unadvertised.ID); len(settled) != 1 ||
+		settled[0].State != "failed" || settled[0].Error == nil ||
+		*settled[0].Error != "session s1 (planner) does not advertise btw" {
+		t.Fatalf("unadvertised mode result = %#v", settled)
 	}
 }
 
@@ -213,7 +266,7 @@ func TestMentionedCommentPinsRoleHolderBeforeSending(t *testing.T) {
 		}
 	}))
 	defer listener.Close()
-	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	handler, database := newTargetedMessageHandler(t, listener.URL)
 	issue := createInteractionIssue(t, handler, "TEST", "Pinned mention", "before")
 	patched := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{"route": "role:reviewer"}, "alice")
 	if patched.Code != http.StatusOK {
@@ -223,6 +276,7 @@ func TestMentionedCommentPinsRoleHolderBeforeSending(t *testing.T) {
 	created := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "Review this exact version.", "mentions": []map[string]any{{"target": "role:reviewer"}},
 	}))
+	settledCommentDeliveries(t, database, created.ID)
 	if roleLookups != 1 || roleHolder != "s2" || len(created.Mentions) != 1 || created.Mentions[0].SessionID == nil ||
 		*created.Mentions[0].SessionID != "s1" || len(sent) != 1 || sent[0]["target_session"] != "s1" {
 		t.Fatalf("role resolution/sends = holder:%s lookups:%d mentions:%#v sends:%#v, want one pinned s1 delivery after role moves to s2", roleHolder, roleLookups, created.Mentions, sent)
@@ -250,11 +304,12 @@ func TestMentionReplyRequiresItsAttemptTargetAndIsIdempotent(t *testing.T) {
 		}
 	}))
 	defer listener.Close()
-	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	handler, database := newTargetedMessageHandler(t, listener.URL)
 	issue := createInteractionIssue(t, handler, "TEST", "Mention reply", "before")
 	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "Can this ship?", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
+	settledCommentDeliveries(t, database, comment.ID)
 
 	human := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/reply", map[string]any{
 		"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": "Human cannot answer.",
@@ -332,11 +387,12 @@ func TestMentionReplyErrorRecordsAttemptWithoutComment(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer listener.Close()
-	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	handler, database := newTargetedMessageHandler(t, listener.URL)
 	issue := createInteractionIssue(t, handler, "TEST", "Mention error reply", "before")
 	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "Are you there?", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
+	settledCommentDeliveries(t, database, comment.ID)
 	failure := bearerRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/reply", map[string]any{
 		"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "error": "No active model.",
 	})
@@ -367,7 +423,6 @@ func TestMentionReplyErrorRecordsAttemptWithoutComment(t *testing.T) {
 func TestMentionRetrySelectsOneTargetAndReresolvesIt(t *testing.T) {
 	live := false
 	roleHolder := "s1"
-	sent := []map[string]any{}
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/registry/"):
@@ -398,24 +453,22 @@ func TestMentionRetrySelectsOneTargetAndReresolvesIt(t *testing.T) {
 				"role": "reviewer", "holder": roleHolder, "title": "reviewer", "capabilities": []string{"btw", "steer"},
 			})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
-			var input map[string]any
-			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-				t.Fatalf("decode retry send: %v", err)
+			if err := json.NewDecoder(r.Body).Decode(new(map[string]any)); err != nil {
+				t.Errorf("decode retry send: %v", err)
 			}
-			sent = append(sent, input)
 			_, _ = w.Write([]byte(`{"event_id":"retry-envelope","recipient":"s1"}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
 	defer listener.Close()
-	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	handler, database := newTargetedMessageHandler(t, listener.URL)
 	issue := createInteractionIssue(t, handler, "TEST", "Mention retry", "before")
 	single := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "Retry a single mention.", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
-	if len(single.Deliveries) != 1 || single.Deliveries[0].State != "failed" {
-		t.Fatalf("initial retry candidate = %#v", single.Deliveries)
+	if settled := settledCommentDeliveries(t, database, single.ID); len(settled) != 1 || settled[0].State != "failed" {
+		t.Fatalf("initial retry candidate = %#v", settled)
 	}
 	live = true
 	humanRetry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+single.ID+"/deliveries", map[string]any{"delivery": "steer"}, "alice")
@@ -438,6 +491,7 @@ func TestMentionRetrySelectsOneTargetAndReresolvesIt(t *testing.T) {
 	multiple := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "Select exactly one retry target.", "mentions": []map[string]any{{"target": "session:s1"}, {"target": "session:s2"}},
 	}))
+	settledCommentDeliveries(t, database, multiple.ID)
 	missingTarget := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+multiple.ID+"/deliveries", map[string]any{"delivery": "steer"}, "alice")
 	if missingTarget.Code != http.StatusBadRequest || !strings.Contains(missingTarget.Body.String(), `"code":"MENTION_INPUT"`) {
 		t.Fatalf("multi-target retry without target: status=%d body=%s", missingTarget.Code, missingTarget.Body.String())
@@ -455,6 +509,7 @@ func TestMentionRetrySelectsOneTargetAndReresolvesIt(t *testing.T) {
 	role := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "Retry current role holder.", "mentions": []map[string]any{{"target": "role:reviewer"}},
 	}))
+	settledCommentDeliveries(t, database, role.ID)
 	roleHolder = "s2"
 	roleRetry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+role.ID+"/deliveries", map[string]any{"delivery": "steer"}, "alice")
 	if roleRetry.Code != http.StatusCreated {
@@ -535,7 +590,7 @@ func TestMentionedCommentDoesNotReresolveMissingRoleHolder(t *testing.T) {
 		}
 	}))
 	defer listener.Close()
-	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	handler, database := newTargetedMessageHandler(t, listener.URL)
 	issue := createInteractionIssue(t, handler, "TEST", "Missing role holder", "before")
 	patched := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{"route": "role:reviewer"}, "alice")
 	if patched.Code != http.StatusOK {
@@ -545,9 +600,11 @@ func TestMentionedCommentDoesNotReresolveMissingRoleHolder(t *testing.T) {
 	created := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "No holder should remain unresolved.", "mentions": []map[string]any{{"target": "role:reviewer"}},
 	}))
+	settled := settledCommentDeliveries(t, database, created.ID)
 	if roleLookups != 1 || sends != 0 || len(created.Mentions) != 1 || created.Mentions[0].SessionID != nil ||
-		len(created.Deliveries) != 1 || created.Deliveries[0].SessionID != nil || created.Deliveries[0].State != "failed" {
-		t.Fatalf("missing-holder mention = lookups:%d sends:%d comment:%#v, want one unresolved failed attempt", roleLookups, sends, created)
+		len(settled) != 1 || settled[0].SessionID != nil || settled[0].State != "failed" {
+		t.Fatalf("missing-holder mention = lookups:%d sends:%d comment:%#v attempts:%#v, want one unresolved failed attempt",
+			roleLookups, sends, created, settled)
 	}
 	events := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
 	if events.Code != http.StatusOK || !strings.Contains(events.Body.String(), `"suppress_route":false`) {
@@ -564,7 +621,7 @@ func TestCallbackReplyUnderAnAskJoinsTheAskThread(t *testing.T) {
 	sent := []map[string]any{}
 	listener := sessionListener(t, &live, &sent)
 	defer listener.Close()
-	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	handler, database := newTargetedMessageHandler(t, listener.URL)
 	issue := createInteractionIssue(t, handler, "TEST", "Ask thread callback", "before")
 	askResponse := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
 		"question": "Which approach?", "actor": sessionActor(),
@@ -577,6 +634,7 @@ func TestCallbackReplyUnderAnAskJoinsTheAskThread(t *testing.T) {
 		"body": "Say more, @session:s1.", "ask_id": ask.ID,
 		"mentions": []map[string]any{{"target": "session:s1"}},
 	}))
+	settledCommentDeliveries(t, database, clarification.ID)
 
 	answered := bearerRequest(t, handler, http.MethodPost, "/api/v1/comments/"+clarification.ID+"/reply", map[string]any{
 		"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": "The second approach.",
@@ -683,6 +741,7 @@ func TestCommentRouteResolutionIsVerifiedAgainstTheLockedIssue(t *testing.T) {
 	if created.Code != http.StatusCreated {
 		t.Fatalf("comment across one route move: status=%d body=%s", created.Code, created.Body.String())
 	}
+	settledCommentDeliveries(t, database, decodeMentionedComment(t, created).ID)
 	if len(lookups) != 2 || lookups[0] != "reviewer" || lookups[1] != "auditor" {
 		t.Fatalf("route lookups = %#v, want the stale reviewer then the locked auditor", lookups)
 	}
@@ -831,6 +890,9 @@ func TestReplyDuringAMentionSendStillRecordsTheDeliveryReceipt(t *testing.T) {
 	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "Answer this while it is still in flight.", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
+	// The reply settles the row while the send is in flight; the sender's settle transaction,
+	// after the send returns, is what appends the receipt the answered row owes.
+	receipts := awaitCommentDeliveryReceipts(t, database, comment.ID, "session:s1", 1)
 	if replied != 1 {
 		t.Fatalf("the session answered %d times, want exactly one reply from inside the send", replied)
 	}
@@ -839,7 +901,7 @@ func TestReplyDuringAMentionSendStillRecordsTheDeliveryReceipt(t *testing.T) {
 	if !strings.HasPrefix(attempt, "sent//") || strings.HasPrefix(attempt, "sent///") {
 		t.Fatalf("attempt row = %q, want the reply recorded against a sent attempt", attempt)
 	}
-	if receipts := commentDeliveryReceipts(t, database, comment.ID, "session:s1", 1); receipts != attempt {
+	if receipts != attempt {
 		t.Fatalf("comment.delivery events for attempt 1 = %q, want the one receipt %q the answered row owes", receipts, attempt)
 	}
 	var answers int

@@ -66,6 +66,7 @@ func TestCommentMentionThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(
 	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "The mention landed; the answer did not.", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
+	settledCommentDeliveries(t, database, comment.ID)
 
 	retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/deliveries", map[string]any{
 		"delivery": "steer",

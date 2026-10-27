@@ -281,7 +281,7 @@ func (s *server) resolveCommentRoute(
 			return route, nil
 		}
 	}
-	route.sessionID = s.resolveMentionTargets(ctx, []string{route.route}, "steer")[0].SessionID
+	route.sessionID = s.resolveMentionTargets(ctx, []string{route.route}, "steer", mentionLookupTimeout)[0].SessionID
 	return route, nil
 }
 
@@ -357,18 +357,18 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	}
 
 	// Every Envoy listener lookup this comment needs happens here, with no transaction and no
-	// pooled connection held: each mention, and the issue's delivery route when the comment
-	// mentions anyone. beginCommentWrite re-reads that route under the owner's lock and
-	// refuses a resolution the locked row no longer agrees with - and refuses, under that same
-	// lock, an owner this pooled read already found missing or closed, which is why a comment
-	// the write cannot accept pays for no lookup here.
+	// pooled connection held: each mention, all at once, and the issue's delivery route when the
+	// comment mentions anyone, each bounded by mentionLookupTimeout. beginCommentWrite re-reads
+	// that route under the owner's lock and refuses a resolution the locked row no longer agrees
+	// with - and refuses, under that same lock, an owner this pooled read already found missing
+	// or closed, which is why a comment the write cannot accept pays for no lookup here.
 	if len(mentionTargets) > 0 {
 		if err := s.refuseClosedOwnerBeforeResolving(r.Context(), owner); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
 	}
-	resolvedMentions := s.resolveMentionTargets(r.Context(), mentionTargets, delivery)
+	resolvedMentions := s.resolveMentionTargets(r.Context(), mentionTargets, delivery, mentionLookupTimeout)
 	mentions := make([]model.Mention, 0, len(resolvedMentions))
 	mentionedSessions := make(map[string]struct{}, len(resolvedMentions))
 	for _, resolved := range resolvedMentions {
@@ -573,6 +573,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			}
 		}
 	}
+	attempts := make([]model.CommentDelivery, 0, len(resolvedMentions))
 	for _, mention := range resolvedMentions {
 		if _, err := tx.Exec(r.Context(), `
 			insert into comment_mentions (comment_id, target, delivery, resolved_session_id)
@@ -585,13 +586,20 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		if mention.ResolveError != "" {
 			resolveError = &mention.ResolveError
 		}
-		if _, err := tx.Exec(r.Context(), `
+		// The attempt commits with its comment, pending and unclaimed: the mention sender claims
+		// it when its send starts, and an attempt no sender reaches - one queued at shutdown, or
+		// past the queue's bound - is still there for the recovery pass to find.
+		attempt, err := scanCommentDelivery(tx.QueryRow(r.Context(), `
 			insert into comment_deliveries (comment_id, target, attempt, delivery, session_id, resolve_error, state)
 			values ($1, $2, 1, $3, $4, $5, 'pending')
-		`, comment.ID, mention.Target, mention.Delivery, mention.SessionID, resolveError); err != nil {
+			returning `+commentDeliveryColumns,
+			comment.ID, mention.Target, mention.Delivery, mention.SessionID, resolveError,
+		))
+		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
+		attempts = append(attempts, attempt)
 	}
 	referenceChanges, err := s.replaceReferences(r.Context(), tx, "comment", comment.ID, comment.Body)
 	if err != nil {
@@ -661,12 +669,10 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	}
 	s.publish(events...)
 	for _, mention := range resolvedMentions {
-		attempt, err := s.deliverResolvedCommentMention(r.Context(), comment, event, mention, actor, true)
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		comment.Deliveries = append(comment.Deliveries, attempt)
+		s.mentions.enqueue(mentionSend{comment: comment, created: event, mention: mention, actor: actor})
 	}
+	// The answer carries each attempt as it committed, pending: the mention sender settles it
+	// after this response, and its comment.delivery receipt says how it ended.
+	comment.Deliveries = attempts
 	WriteJSON(w, http.StatusCreated, withAdvice(commentWriteResponse{Comment: comment, AskWaitingOn: waitingOn}, advice))
 }

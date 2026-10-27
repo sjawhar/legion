@@ -196,6 +196,7 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 	mux := http.NewServeMux()
 	served := register(mux, deps)
 	t.Cleanup(served.eventRelay.wait)
+	t.Cleanup(served.mentions.wait)
 	if served.deliveryHub != nil {
 		t.Cleanup(served.deliveryHub.wait)
 		t.Cleanup(served.deliverySockets.wait)

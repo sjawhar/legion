@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -30,37 +32,82 @@ type ResolvedMention struct {
 	attemptSessionID string
 }
 
+// mentionLookupTimeout bounds each listener lookup a comment's creation makes before its
+// transaction opens: every mention's, and the issue route's. A lookup cut short leaves its
+// target unresolved (resolveMentionTarget), and the comment is created and answered without it.
+const mentionLookupTimeout = 250 * time.Millisecond
+
+// mentionLookupConcurrency is how many targets resolveMentionTargets resolves at once, so a
+// comment's k mentions cost one listener round trip rather than k.
+const mentionLookupConcurrency = 8
+
 // resolveMentionTargets performs the only registry lookup for a comment's original deliveries.
 // The result is persisted in the comment-created event and handed to the post-commit sender, so a
-// role transition cannot change the target after routing suppression has been decided.
-func (s *server) resolveMentionTargets(ctx context.Context, targets []string, delivery string) []ResolvedMention {
-	resolved := make([]ResolvedMention, 0, len(targets))
-	for _, target := range targets {
-		item := ResolvedMention{Target: target, Delivery: delivery}
-		route, err := model.ParseRoute(target)
-		if err != nil {
-			item.ResolveError = err.Error()
-			resolved = append(resolved, item)
-			continue
-		}
-		sessionID, title, resolveError := s.resolveDeliveryTarget(ctx, route, delivery)
-		item.title = title
-		item.attemptSessionID = sessionID
-		item.ResolveError = resolveError
-		// A missing session is not a resolved target, even though the legacy message delivery
-		// model retains its requested id in an attempt row. A live session that lacks a mode is
-		// still resolved and participates in the event's session-level suppression calculation.
-		// resolveDeliveryTarget writes this exact prefix for one answer only - the listener
-		// holds no record under that session id - so the prefix test separates "no record",
-		// whose requested id is kept on the attempt row, from a capability refusal. A read that
-		// did not answer gives no session id here, so it sets no pin; an existing attempt keeps
-		// the one it holds only through the coalesce(session_id, ...) update further down.
-		if sessionID != "" && !strings.HasPrefix(resolveError, "no live session ") {
-			item.SessionID = new(sessionID)
-		}
-		resolved = append(resolved, item)
+// role transition cannot change the target after routing suppression has been decided. It
+// resolves up to mentionLookupConcurrency targets at once and answers them in input order.
+// timeout, when positive, bounds each lookup (resolveMentionTarget says what one cut short
+// yields); zero leaves each bounded by the listener client's own window.
+func (s *server) resolveMentionTargets(
+	ctx context.Context, targets []string, delivery string, timeout time.Duration,
+) []ResolvedMention {
+	resolved := make([]ResolvedMention, len(targets))
+	if len(targets) == 1 {
+		resolved[0] = s.resolveMentionTarget(ctx, targets[0], delivery, timeout)
+		return resolved
 	}
+	slots := make(chan struct{}, mentionLookupConcurrency)
+	var lookups sync.WaitGroup
+	for index, target := range targets {
+		slots <- struct{}{}
+		lookups.Go(func() {
+			defer func() { <-slots }()
+			resolved[index] = s.resolveMentionTarget(ctx, target, delivery, timeout)
+		})
+	}
+	lookups.Wait()
 	return resolved
+}
+
+// resolveMentionTarget resolves one mention target. A lookup that timeout cut short, while ctx
+// itself is still live, yields the target with no pinned session and no resolve error: the
+// listener has not answered, so nothing is known to refuse and no session is known to suppress.
+// Its attempt row records neither, which is the shape of an attempt stranded before anything was
+// resolved, so the sender resolves it when it sends (mentionResolutionFor).
+func (s *server) resolveMentionTarget(
+	ctx context.Context, target, delivery string, timeout time.Duration,
+) ResolvedMention {
+	item := ResolvedMention{Target: target, Delivery: delivery}
+	route, err := model.ParseRoute(target)
+	if err != nil {
+		item.ResolveError = err.Error()
+		return item
+	}
+	lookup := ctx
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		lookup, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	sessionID, title, resolveError := s.resolveDeliveryTarget(lookup, route, delivery)
+	if sessionID == "" && resolveError != "" && ctx.Err() == nil &&
+		errors.Is(lookup.Err(), context.DeadlineExceeded) {
+		return item
+	}
+	item.title = title
+	item.attemptSessionID = sessionID
+	item.ResolveError = resolveError
+	// A missing session is not a resolved target, even though the legacy message delivery
+	// model retains its requested id in an attempt row. A live session that lacks a mode is
+	// still resolved and participates in the event's session-level suppression calculation.
+	// resolveDeliveryTarget writes this exact prefix for one answer only - the listener
+	// holds no record under that session id - so the prefix test separates "no record",
+	// whose requested id is kept on the attempt row, from a capability refusal. A read that
+	// did not answer gives no session id here, so it sets no pin; an existing attempt keeps
+	// the one it holds only through the coalesce(session_id, ...) update further down.
+	if sessionID != "" && !strings.HasPrefix(resolveError, "no live session ") {
+		item.SessionID = new(sessionID)
+	}
+	return item
 }
 
 // sendResolvedDelivery sends one already-resolved delivery and reports what the listener did:
@@ -191,8 +238,9 @@ func (s *server) claimCommentDeliveryAttempt(
 	case err != nil && !errors.Is(err, pgx.ErrNoRows):
 		return claimedCommentDelivery{}, err
 	case err == nil && lapsed:
-		// Nobody holds this attempt, or whoever claimed it never came back, so this call takes
-		// it under its original number and the listener deduplicates a send that did land.
+		// Nobody holds this attempt - the mention sender's own attempt, committed unclaimed with
+		// its comment, or one whose claimer never came back - so this call takes it under its
+		// original number and the listener deduplicates a send that did land.
 		if err := tx.QueryRow(ctx, `
 			update comment_deliveries set claimed_at = now()
 			where comment_id = $1 and target = $2 and attempt = $3
@@ -203,8 +251,9 @@ func (s *server) claimCommentDeliveryAttempt(
 		claimed.attempt = pending.Attempt
 		claimed.pending = &pending
 	case err == nil && initial:
-		// A retry took the comment's original attempt in the moment between the creating
-		// transaction's commit and this completion of it; that sender owns the outcome.
+		// Another sender holds the pending attempt: a retry took it between the creating
+		// transaction's commit and this send, or another process's recovery pass resumed it.
+		// That sender owns the outcome.
 		claimed.settled = &pending
 	case err == nil:
 		// A live sender holds the pending attempt, so this retry gets one of its own rather
@@ -213,8 +262,8 @@ func (s *server) claimCommentDeliveryAttempt(
 			return claimedCommentDelivery{}, err
 		}
 	case initial:
-		// The original attempt is already answered: a reply consumed it while this completion
-		// was on its way, and that terminal row is what the creating request reports.
+		// The attempt is already settled: a reply consumed it, or another sender sent it, while
+		// this send was queued, and that terminal row is its outcome.
 		answered, err := loadCommentDelivery(ctx, tx, stored.ID, target.Target, 1)
 		if err != nil {
 			return claimedCommentDelivery{}, err
@@ -313,7 +362,7 @@ func (s *server) completeCommentDelivery(
 // A pinned session is rechecked. The resolution behind the attempt was made before the
 // comment-creation transaction committed (or, for a genuine retry, at an even earlier
 // comment-creation moment) while the send always happens after that commit, whether this is the
-// synchronous post-commit completion of a fresh comment or a much later retry, and a session's
+// mention sender's send of a fresh comment or a much later retry, and a session's
 // advertised capabilities and liveness are live state that changes on every registration. So
 // both callers recheck, not just retries - only whether that pinned session can still receive
 // this delivery mode right now, through the same resolveMentionTargets/resolveDeliveryTarget
@@ -323,7 +372,7 @@ func (s *server) mentionResolutionFor(
 	ctx context.Context, target ResolvedMention, pending *model.CommentDelivery,
 ) (ResolvedMention, *string) {
 	if pending == nil || (pending.SessionID == nil && pending.ResolveError == nil) {
-		resolved := s.resolveMentionTargets(ctx, []string{target.Target}, target.Delivery)[0]
+		resolved := s.resolveMentionTargets(ctx, []string{target.Target}, target.Delivery, 0)[0]
 		if resolved.ResolveError == "" {
 			return resolved, nil
 		}
@@ -334,7 +383,7 @@ func (s *server) mentionResolutionFor(
 		resumed.ResolveError = *pending.ResolveError
 	}
 	if pending.SessionID != nil {
-		recheck := s.resolveMentionTargets(ctx, []string{"session:" + *pending.SessionID}, pending.Delivery)[0]
+		recheck := s.resolveMentionTargets(ctx, []string{"session:" + *pending.SessionID}, pending.Delivery, 0)[0]
 		resumed.SessionID = recheck.SessionID
 		resumed.ResolveError = recheck.ResolveError
 		resumed.attemptSessionID = recheck.attemptSessionID
@@ -426,7 +475,11 @@ func (s *server) deliverResolvedCommentMention(
 	}
 	// The key is scoped to the mention's target and mode, stable across every attempt of that
 	// triple, so a retry of a send that already landed repeats its dedupe key and is recognised as
-	// the repeat it is (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts says by what).
+	// the repeat it is (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts says by what). It is
+	// not the key of the issue route's copy of comment.created, which the outbox publishes under
+	// dispatch-<event id> (outbox.envelope): a session that copy reaches and this send reaches
+	// receives the comment twice unless the event suppressed the route for it, which it does only
+	// for a session a mention lookup pinned before the commit (createCommentFor).
 	envelopeID, duplicate, deliveryError := s.sendResolvedDelivery(
 		ctx, target, stored.Body, stored.ID+":"+target.Target+":"+target.Delivery, nil, frame,
 	)
@@ -435,16 +488,26 @@ func (s *server) deliverResolvedCommentMention(
 	)
 }
 
-func (s *server) loadCommentCreatedEvent(ctx context.Context, q queryer, commentID string) (model.Event, error) {
+// loadCommentCreatedEvent reads comment's comment.created event within the comment's owner, so
+// the read walks that owner's events by its (issue_key, seq) or (artifact_id, seq) index instead
+// of matching the payload id across the whole log.
+func (s *server) loadCommentCreatedEvent(ctx context.Context, q queryer, comment model.Comment) (model.Event, error) {
+	ownerColumn, ownerID := "issue_key", ""
+	switch {
+	case comment.IssueKey != nil:
+		ownerID = *comment.IssueKey
+	case comment.ArtifactID != nil:
+		ownerColumn, ownerID = "artifact_id", *comment.ArtifactID
+	}
 	var event model.Event
 	var actor, payload []byte
 	if err := q.QueryRow(ctx, `
 		select id, issue_key, artifact_id::text, coalesce(project_key, ''), seq, type, actor, notify, created_at, payload
 		from events
-		where type = 'comment.created' and payload ->> 'id' = $1
-		order by id
+		where `+ownerColumn+` = $1 and type = 'comment.created' and payload ->> 'id' = $2
+		order by seq
 		limit 1
-	`, commentID).Scan(
+	`, ownerID, comment.ID).Scan(
 		&event.ID, &event.IssueKey, &event.ArtifactID, &event.Project, &event.Seq, &event.Type,
 		&actor, &event.Notify, &event.CreatedAt, &payload,
 	); err != nil {
@@ -562,7 +625,7 @@ func (s *server) createCommentDelivery(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	created, err := s.loadCommentCreatedEvent(r.Context(), s.deps.Store.Pool, comment.ID)
+	created, err := s.loadCommentCreatedEvent(r.Context(), s.deps.Store.Pool, comment)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

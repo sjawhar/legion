@@ -114,6 +114,7 @@ func TestInitialMentionDeliveryDoesNotAppendAfterReplyConsumesPending(t *testing
 	created := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "Reply before sender updates.", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
+	settledCommentDeliveries(t, database, created.ID)
 	if _, err := database.Pool.Exec(context.Background(), `
 		update comment_deliveries set state = 'pending', envelope_id = null, error = null, claimed_at = null
 		where comment_id = $1 and target = 'session:s1' and attempt = 1
@@ -133,7 +134,7 @@ func TestInitialMentionDeliveryDoesNotAppendAfterReplyConsumesPending(t *testing
 	if err != nil {
 		t.Fatalf("load comment for initial delivery: %v", err)
 	}
-	event, err := direct.loadCommentCreatedEvent(context.Background(), database.Pool, created.ID)
+	event, err := direct.loadCommentCreatedEvent(context.Background(), database.Pool, comment)
 	if err != nil {
 		t.Fatalf("load comment-created event: %v", err)
 	}
@@ -184,6 +185,7 @@ func TestInitialMentionDeliveryReturnsFailedAttemptAfterErrorReplyConsumesPendin
 	created := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "Error reply before sender updates.", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
+	settledCommentDeliveries(t, database, created.ID)
 	if _, err := database.Pool.Exec(context.Background(), `
 		update comment_deliveries set state = 'pending', envelope_id = null, error = null, claimed_at = null
 		where comment_id = $1 and target = 'session:s1' and attempt = 1
@@ -203,7 +205,7 @@ func TestInitialMentionDeliveryReturnsFailedAttemptAfterErrorReplyConsumesPendin
 	if err != nil {
 		t.Fatalf("load comment for initial delivery: %v", err)
 	}
-	event, err := direct.loadCommentCreatedEvent(context.Background(), database.Pool, created.ID)
+	event, err := direct.loadCommentCreatedEvent(context.Background(), database.Pool, comment)
 	if err != nil {
 		t.Fatalf("load comment-created event: %v", err)
 	}
@@ -284,6 +286,7 @@ func TestASenderPastItsLeaseLeavesTheResumedAttemptsReceiptAlone(t *testing.T) {
 	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "Answer this while a lapsed sender is still out there.", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
+	settledCommentDeliveries(t, database, comment.ID)
 
 	// Attempt 1 as a sender that claimed it two minutes ago and has not come back left it:
 	// pending, and past the claim lease. lapsed is that sender's own claim, the token its
@@ -401,6 +404,7 @@ func TestReplyDuringAMentionRetrySendStillRecordsTheDeliveryReceipt(t *testing.T
 	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "The first send goes unanswered.", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
+	settledCommentDeliveries(t, database, comment.ID)
 
 	// The retry opens attempt 2 beside the settled first one, and the session answers that
 	// frame while the retry's send is still in flight.
@@ -464,6 +468,7 @@ func TestASessionAnswersAnAttemptStrandedBetweenItsSendAndItsSettle(t *testing.T
 	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "The retry's sender will not come back.", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
+	settledCommentDeliveries(t, database, comment.ID)
 
 	abandoned, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
 	defer cancel()
@@ -519,6 +524,23 @@ func commentDeliveryReceipts(t *testing.T, database *store.Store, commentID, tar
 		t.Fatalf("read delivery receipts: %v", err)
 	}
 	return receipts
+}
+
+// awaitCommentDeliveryReceipts waits, at most 10 s, until the attempt carries a comment.delivery
+// receipt - the mention sender appends it in its settle transaction, after the comment's create
+// has answered - and returns the receipts as commentDeliveryReceipts renders them.
+func awaitCommentDeliveryReceipts(t *testing.T, database *store.Store, commentID, target string, attempt int) string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if receipts := commentDeliveryReceipts(t, database, commentID, target, attempt); receipts != "" {
+			return receipts
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("attempt %d of %s for %s carries no comment.delivery receipt", attempt, commentID, target)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // commentAttemptRow renders one attempt of one of a comment's mention targets the way a receipt

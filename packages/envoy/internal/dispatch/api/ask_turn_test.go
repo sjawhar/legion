@@ -331,12 +331,12 @@ func TestAReplyThatWaitedForTheOwnerRowIsTheNewest(t *testing.T) {
 		name   string
 		author string
 		// open readies the agent's reply in askID's thread and returns the call that sends it.
-		open func(t *testing.T, handler http.Handler, issueKey, askID string) func() *httptest.ResponseRecorder
+		open func(t *testing.T, handler http.Handler, database *store.Store, issueKey, askID string) func() *httptest.ResponseRecorder
 	}{
 		{
 			name:   "a comment posted to the ask",
 			author: sessionActor()["id"].(string),
-			open: func(t *testing.T, handler http.Handler, issueKey, askID string) func() *httptest.ResponseRecorder {
+			open: func(t *testing.T, handler http.Handler, _ *store.Store, issueKey, askID string) func() *httptest.ResponseRecorder {
 				return func() *httptest.ResponseRecorder {
 					return sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issueKey+"/comments", map[string]any{
 						"body": "The second approach.", "ask_id": askID, "actor": sessionActor(),
@@ -347,11 +347,14 @@ func TestAReplyThatWaitedForTheOwnerRowIsTheNewest(t *testing.T) {
 		{
 			name:   "a mention's callback reply",
 			author: "s1",
-			open: func(t *testing.T, handler http.Handler, issueKey, askID string) func() *httptest.ResponseRecorder {
+			open: func(t *testing.T, handler http.Handler, database *store.Store, issueKey, askID string) func() *httptest.ResponseRecorder {
 				clarification := decodeMentionedComment(t, postMentionedComment(t, handler, issueKey, map[string]any{
 					"body": "Say more, @session:s1.", "ask_id": askID,
 					"mentions": []map[string]any{{"target": "session:s1"}},
 				}))
+				// The mention's own send takes the owner row too; it is settled before the race
+				// below holds that row, so the one write queued behind the hold is the reply.
+				settledCommentDeliveries(t, database, clarification.ID)
 				return func() *httptest.ResponseRecorder {
 					return bearerRequest(t, handler, http.MethodPost, "/api/v1/comments/"+clarification.ID+"/reply", map[string]any{
 						"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": "The second approach.",
@@ -371,7 +374,7 @@ func TestAReplyThatWaitedForTheOwnerRowIsTheNewest(t *testing.T) {
 			askID := openTurnAsk(t, handler, issue.Key, "Which approach?")
 			other := createInteractionIssue(t, handler, "OTHER", "Another thread", "spec")
 			otherAskID := openTurnAsk(t, handler, other.Key, "Which region?")
-			agentReply := path.open(t, handler, issue.Key, askID)
+			agentReply := path.open(t, handler, database, issue.Key, askID)
 
 			hold, err := database.Pool.Begin(ctx)
 			if err != nil {

@@ -267,6 +267,9 @@ type server struct {
 	// on every server register mounts: it starts its listening connection on the first of them to
 	// subscribe and stops it with the last.
 	eventRelay *eventStreamRelay
+	// mentions sends comment mentions after their comment's response (comment_mention_sender.go),
+	// on every server register mounts.
+	mentions *mentionSender
 	// warnedUnmatchedRuns holds a warnedProductionRun for each deploy run productionApplies has
 	// warned holds no production job or no configured apply step, so a read that judges a run again
 	// does not warn about it again. Nothing evicts an entry: the map holds one per configured job
@@ -308,39 +311,49 @@ type queryer interface {
 // under the same wrappers; a server without one (a test's) has neither, so nothing outlives the
 // test. Every server holds the event stream relay (INFRA-66), which every open SSE connection and
 // the hub read, and which runs its own listening connection while any of them subscribes, also on
-// Lifetime. The returned wait blocks until the hub, every delivery socket and the relay have ended.
-// Call it only after Lifetime has been cancelled and before the database pool closes.
+// Lifetime, and the comment mention sender, which sends on Lifetime and drains for at most
+// mentionDrainTimeout once it ends; a server with a Lifetime and a store also starts the
+// sender's recovery pass for the attempts a stopped process left pending. The returned wait
+// blocks until the hub, every delivery socket, the relay and the mention sends in flight have
+// ended. Call it only after Lifetime has been cancelled and before the database pool closes.
 //
 // That wait is for a server given a Deps.Lifetime: it returns once that context is cancelled,
 // which is what ends the relay's goroutines and the hub's. A server built without a Deps.Lifetime
-// runs its relay on context.Background() instead, so only its subscribers end it: the wait blocks
-// until every SSE connection open on it has ended, the relay stopping with the last, and returns
-// at once when none is open. The delivery hub sets no such condition, since it is built only with
-// a Deps.Lifetime.
+// runs its relay and its mention sender on context.Background() instead, so only its subscribers
+// end the relay: the wait blocks until every SSE connection open on it has ended, the relay
+// stopping with the last, and returns at once when none is open. The delivery hub sets no such
+// condition, since it is built only with a Deps.Lifetime.
 func Register(mux *http.ServeMux, deps Deps) func() {
 	s := register(mux, deps)
 	return s.waitBackground
 }
 
-// waitBackground waits for every delivery socket, then for the hub's goroutines and the relay's.
+// waitBackground waits for every delivery socket, then for the hub's goroutines and the relay's,
+// then for the mention sends in flight.
 func (s *server) waitBackground() {
 	if s.deliveryHub != nil {
 		s.deliverySockets.wait()
 		s.deliveryHub.wait()
 	}
 	s.eventRelay.wait()
+	s.mentions.wait()
 }
 
-// register is Register, answering the server it mounted, whose delivery hub and event stream
-// relay a test waits out before its database closes. It is also called with a zero Deps, as
-// TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound does, so it must stay cheap and
-// must not dial or read the nil Store: whatever reaches the database or the network starts
-// later, from a handler or the relay's first subscriber.
+// register is Register, answering the server it mounted, whose delivery hub, event stream relay
+// and mention sender a test waits out before its database closes. It is also called with a zero
+// Deps, as TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound does, so it must stay cheap
+// and must not dial or read the nil Store: whatever reaches the database or the network starts
+// later, from a handler, the relay's first subscriber, or the mention sender's recovery pass,
+// which starts only with a Lifetime and a store.
 func register(mux *http.ServeMux, deps Deps) *server {
 	s := &server{deps: deps, rosters: rosterCache{ttl: routeRosterTTL, silenceTTL: routeRosterSilenceTTL}}
 	s.eventRelay = newEventStreamRelay(s, s.lifetime())
+	s.mentions = newMentionSender(s.lifetime(), s.sendCommentMention, s.strandedCommentMentions)
 	if deps.Lifetime != nil {
 		s.deliveryHub = newDeliveryHub(s, deps.Lifetime, deliveryHubClock{})
+		if deps.Store != nil && deps.Store.Pool != nil {
+			s.mentions.recoverStranded()
+		}
 	}
 	routes := s.routes()
 	s.routeIndex = routeIndexEntries(routes)
