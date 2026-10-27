@@ -155,6 +155,40 @@ func reportRefusalsUntilConnected(nc *nats.Conn, name string, urls []string, ref
 	}
 }
 
+// connectFirstInBackground makes the connection a constructor returns with WithConnectInBackground.
+// dial connects with the option it is handed added to the constructor's own settings, and here
+// that option is connectInBackground, so nats.go dials alone until the connection first connects.
+// The refusals of the credential before then are logged by reportRefusalsUntilConnected, on the
+// throttle connectInBackground logs the later ones on, a throttle on now (newReconnectErrThrottle).
+//
+// install, when not nil, records the connection dial returned; an error from it closes the
+// connection and is returned. connected, when not nil, runs on the first connection, and never
+// before install has returned: nats.go can connect the connection as soon as dial returns, and
+// connected may read what install records.
+func connectFirstInBackground(name string, urls []string, now func() time.Time, dial func(nats.Option) (*nats.Conn, error), connected func(*nats.Conn), install func(*nats.Conn) error) (*nats.Conn, error) {
+	refusals := newReconnectErrThrottle(now)
+	installed := make(chan struct{})
+	defer close(installed)
+	first := func(nc *nats.Conn) {
+		<-installed
+		if connected != nil {
+			connected(nc)
+		}
+	}
+	nc, err := dial(connectInBackground(name, urls, refusals, first))
+	if err != nil {
+		return nil, err
+	}
+	if install != nil {
+		if err := install(nc); err != nil {
+			nc.Close()
+			return nil, err
+		}
+	}
+	go reportRefusalsUntilConnected(nc, name, urls, refusals)
+	return nc, nil
+}
+
 // authorizationRefusal reports whether err is the server refusing the connection's credential:
 // one it does not know, or one whose authorization expired or was revoked.
 func authorizationRefusal(err error) bool {

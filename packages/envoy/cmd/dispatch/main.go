@@ -203,7 +203,7 @@ func main() {
 	if boot.NATSDisabled {
 		slog.Info("dispatch: NATS publisher disabled")
 	} else {
-		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, serverBus(bus.WithEnvironment(env.lookup), bus.WithName("dispatch"))...)
+		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, serverClient(bus.WithEnvironment(env.lookup), bus.WithName("dispatch"))...)
 		if err != nil {
 			slog.Error("dispatch: connect NATS", "error", err)
 			os.Exit(1)
@@ -478,7 +478,7 @@ func main() {
 		// both Runs, which return once ctx is cancelled, and not for that handler. Each connects in
 		// the background as the publisher does, and its bind poll binds the durable once it has.
 		connectIntake := func(name string) (*bus.Client, error) {
-			return bus.Connect(envoyConfig.Envoy.NatsURLs, serverBus(bus.WithEnvironment(env.lookup), bus.WithName(name))...)
+			return bus.Connect(envoyConfig.Envoy.NatsURLs, serverClient(bus.WithEnvironment(env.lookup), bus.WithName(name))...)
 		}
 		stopIntakes, err := delivery.StartIntakes(ctx, connectIntake, database.Pool, appCtx.GitHub(), broker)
 		if err != nil {
@@ -525,38 +525,15 @@ func main() {
 		slog.Error("dispatch: listen", "addr", boot.ListenAddr, "error", err)
 		os.Exit(1)
 	}
-	// INFRA-555: the process enters the registry of live server processes once it holds its
-	// listener (bound, or adopted from DISPATCH_LISTEN_FD) and before it serves its first request,
-	// after one probe that the database answers. The registration refuses a key set a live peer
-	// does not share (processes.Register): a cookie this process minted would not verify there, or
-	// the reverse, and the people it signed in would be signed out on the next request the load
-	// balancer sends to the other. That refusal ends the process with 1 here, before anything is
-	// served, so a roll stalls on the new pod while the old
-	// ones keep serving. The registration's heartbeat runs until shutdown deregisters it, after the
-	// HTTP drain (shutdown), so a draining process counts as live until its last request is
-	// answered. A heartbeat that lapsed (the process frozen, or cut from the database) or whose
-	// row was pruned checks the keys again before the process counts as live once more; beside a
-	// live process whose keys it does not share it refuses (registration.Lost), and serving stops
-	// as at a signal and ends the process with 1 once drained (serveUntilStopped). The prune loop
-	// deletes what processes that died without deregistering left behind, once overall under its
-	// lease. The announcer starts only now, so its first pass counts this process among the live
-	// ones and never announces a build the fleet is rolling away from.
-	if _, err := database.Pool.Healthy(ctx); err != nil {
-		slog.Error("dispatch: probe the database", "error", err)
-		os.Exit(1)
-	}
-	registration, err := processes.Register(ctx, database.Pool, processes.Instance{
+	registration, err := joinRegistry(ctx, database, processes.Instance{
 		Commit:         buildCommit,
 		DashboardBuild: dashboardBuild.Build,
 		SigningKeys:    signingKey.Fingerprints(),
-	})
+	}, leases, announcer)
 	if err != nil {
 		slog.Error("dispatch: register this server process", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("dispatch: registered this server process", "instance", registration.ID)
-	go processes.RunPrune(ctx, database.Pool, leases)
-	go announcer.Run(ctx)
 	if err := serveUntilStopped(ctx, cancel, server, listener, documentService, database.Pool, waitDelivery,
 		deregisterAfterDrain(registration), registration.Lost()); err != nil {
 		slog.Error("dispatch: serve", "error", err)
@@ -929,7 +906,9 @@ func explainMigrateError(err error) error {
 // DISPATCH_SIGNING_KEY's keys when that is set (a deployment's, from its secrets manager),
 // otherwise the data dir's signing-key file, created on first start (a local run's). Outside dev
 // sign-in the keys must stay the same across deploys, or every dsession cookie is invalidated
-// whenever a container rolls; a rotation adds the new key second first.
+// whenever a container rolls; a rotation adds the new key second first. An empty signing-key file
+// is refused by name: the empty set signs nothing, and the people store would refuse it only by
+// panicking.
 func sessionSigningKey(boot bootConfig, dataDir string) (auth.SigningKeys, error) {
 	if boot.DevSignIn {
 		if boot.DevSignInSharedKey != "" {
@@ -944,7 +923,15 @@ func sessionSigningKey(boot bootConfig, dataDir string) (auth.SigningKeys, error
 	if !boot.SigningKey.Empty() {
 		return boot.SigningKey, nil
 	}
-	return auth.LoadOrCreateSigningKey(filepath.Join(dataDir, "signing-key"))
+	path := filepath.Join(dataDir, "signing-key")
+	keys, err := auth.LoadOrCreateSigningKey(path)
+	if err != nil {
+		return auth.SigningKeys{}, err
+	}
+	if keys.Empty() {
+		return auth.SigningKeys{}, fmt.Errorf("the session signing key file %s is empty: put its key back, delete it to have a new key written (which signs out everyone signed in under the old one), or set DISPATCH_SIGNING_KEY", path)
+	}
+	return keys, nil
 }
 
 // devSignInSharedSigningKeyLabel separates the cookie key dev sign-in derives from every key a
@@ -978,7 +965,7 @@ const dashboardPublishTimeout = 60 * time.Second
 // publishDashboard stores the dashboard build at webDistDir in the database
 // (dashboard.Publish, stamped with buildCommit) and then prunes the builds no process needs any
 // more (dashboard.Prune), both within timeout, and returns what it published: the build's id
-// (processes.DashboardBuild's) and entry chunk among it. A dist with no index.html (the Go test
+// (routes.DashboardBuild's) and entry chunk among it. A dist with no index.html (the Go test
 // rigs serve an empty directory) publishes nothing, logs that it did not, and returns the zero
 // Published, whose empty build and entry say this process serves no dashboard. A failed publish
 // is the error returned, and refuses the boot; a failed prune is logged and the start goes on,
@@ -1125,13 +1112,21 @@ func openFileStore(ctx context.Context, boot bootConfig) (files.Store, error) {
 	return bucketStore, nil
 }
 
-// serverBus is the options every NATS client of the server connects with, after extra: it connects
-// in the background (bus.WithConnectInBackground), so a bus that is down at boot or refuses the
-// credential leaves the process serving and connects it once the bus answers, and it declares a
-// connection whose packets stop coming back lost within seconds (bus.WithSilentCutDetection), so
-// /healthz reports a cut bus within seconds of the cut.
-func serverBus(extra ...bus.ConnectOption) []bus.ConnectOption {
-	return append(extra, bus.WithConnectInBackground(), bus.WithSilentCutDetection())
+// serverBus is the options every NATS connection of the server is made with: it connects in the
+// background (bus.WithConnectInBackground), so a bus that is down at boot or refuses the credential
+// leaves the process serving and connects it once the bus answers, and it declares a connection
+// whose packets stop coming back lost within seconds (bus.WithSilentCutDetection), so /healthz
+// reports a cut bus within seconds of the cut.
+func serverBus() []bus.DialOption {
+	return []bus.DialOption{bus.WithConnectInBackground(), bus.WithSilentCutDetection()}
+}
+
+// serverClient is the options a NATS client of the server connects with: extra, then serverBus's.
+func serverClient(extra ...bus.ConnectOption) []bus.ConnectOption {
+	for _, option := range serverBus() {
+		extra = append(extra, option)
+	}
+	return extra
 }
 
 // dispatchHandler mounts the one /healthz the process serves above every dashboard and API

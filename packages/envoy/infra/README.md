@@ -231,9 +231,9 @@ of the app's node waits: `kubectl drain` waits with no limit (until its own `--t
 given), and a GKE upgrade waits up to an hour (below). It keeps Kubernetes' default
 `unhealthyPodEvictionPolicy`, `IfHealthyBudget`, so it holds a pod that is not ready too while
 the budget is not met:
-`envoy-dispatch` reports not ready whenever NATS or Postgres is briefly out of reach (the front
-door's own eviction in the same drain is one way), and evicting it then would turn that into a
-cold restart. A drain of a pod that stays broken waits the longer for it: GKE respects a budget for
+`envoy-dispatch` reports not ready whenever Postgres is briefly out of reach (a Cloud SQL
+failover, the proxy sidecar restarting), and evicting it then would turn that into a cold
+restart. A drain of a pod that stays broken waits the longer for it: GKE respects a budget for
 up to an hour while it drains a node for an upgrade and then evicts anyway
 ([Autopilot cluster upgrades](https://cloud.google.com/kubernetes-engine/docs/concepts/cluster-upgrades-autopilot)).
 The budget never slows the app's own rollouts, which Kubernetes does not run through the eviction
@@ -420,10 +420,10 @@ kubelet rewrites them in place, and Dispatch reads the broker token on every cal
 Azure form's token on every exchange with Entra, so neither rewrite needs a restart. After rotating
 one of the others, restart the Deployments that read it so their pods boot on the new value:
 
-- the `<hostname>-dispatch` Secret's keys, the App key and the Azure key: the app alone reads
-  them (`kubectl -n <namespace> rollout restart deployment/<hostname>`). `DISPATCH_AGENT_TOKEN`
-  is also the `agentToken` output, so a consumer that hands it to its agents passes them the new
-  value too;
+- the `<hostname>-dispatch` Secret's keys but `DISPATCH_SIGNING_KEY` (below), the App key and the
+  Azure key: the app alone reads them (`kubectl -n <namespace> rollout restart
+  deployment/<hostname>`). `DISPATCH_AGENT_TOKEN` is also the `agentToken` output, so a consumer
+  that hands it to its agents passes them the new value too;
 - the NATS seed: the app's `envoy-dispatch` and the listener's `envoy-listener` each read it once,
   at start;
 - the listener's bearer, the `<hostname>-listener` Secret's `ENVOY_API_TOKEN`: the listener
@@ -434,15 +434,28 @@ For the last two, restart both Envoy Deployments
 (`kubectl -n <namespace> rollout restart deployment/<hostname> deployment/<hostname>-listener`).
 The front door reads none of these.
 
+`DISPATCH_SIGNING_KEY` is the exception to that one-step rotation. The component writes one random
+key (the `RandomPassword` `<hostname>-signing-key`), and Dispatch refuses to start a server whose
+keys a running server does not share, so changing the value and restarting the app signs everyone
+out at one replica, and above one stalls the roll: the first new pod, holding only the new key, is
+refused beside the old pods, which hold only the old one, and crash-loops while they keep serving.
+The three steps of
+[Changing the session key](https://sjawhar.github.io/legion/dispatch/running-dispatch/#changing-the-session-key)
+change the key without signing anyone out, but they need the Secret to hold two keys at once, which
+the component does not express, and the next `up` reverts a hand edit of the Secret. A rotation
+through the component therefore signs everyone out, and is applied at one replica: set `replicas`
+to 1, so the app updates with `Recreate`, replace the key (`pulumi up --replace` with the
+`<hostname>-signing-key` resource's URN), restart the app, and then restore `replicas`.
+
 The Deployments intentionally have no liveness probe for Dispatch because its health endpoint
 reads Cloud SQL. At one replica an input or image update recreates the app's one pod, which is a
 brief outage; so is every update of the front door or of the listener, at any replica count, since
-both are recreated, and a front-door recreate takes the app down with it: the app's readiness reads
-NATS, which reaches the hub only through that proxy, so thirty seconds later (`failureThreshold` 3
-at `periodSeconds` 10) every app replica fails readiness and leaves Service `<hostname>` too, and
-the in-cluster `allowedNamespaces` consumers lose the app for that window as well. It heals itself,
-since `internal/bus` reconnects without limit (`MaxReconnect = -1`) and no liveness probe restarts
-anything, and it is no regression, since the base ran one pod. Above one replica the app rolls
+both are recreated, and a front-door recreate takes the tailnet URL down with it and pauses the
+app's NATS traffic, which reconnects through the new proxy and lets the outbox catch up; the app
+stays Ready, since its readiness reads only Postgres, and the in-cluster `allowedNamespaces`
+consumers keep it. It heals itself, since `internal/bus` reconnects without limit
+(`MaxReconnect = -1`) and no liveness probe restarts anything, and it is no regression, since the
+base ran one pod. Above one replica the app rolls
 instead: a new pod is ready before an old one stops, and a stopping pod keeps serving for five
 seconds after it is told to stop, which is the window its removal from routing has to propagate,
 and is what the pre-stop wait is for. The kubelet runs that wait inside the pod's one

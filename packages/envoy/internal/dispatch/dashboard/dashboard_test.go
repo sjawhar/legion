@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sjawhar/envoy/internal/dispatch/processes"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -126,7 +125,7 @@ func TestPublishStoresEveryFileOfTheBuild(t *testing.T) {
 	}
 	// The registry of live server processes records this id for the process serving the dist, and
 	// the builds route joins the two on it.
-	if registered := processes.DashboardBuild(dist); build != registered || registered == "" {
+	if registered := routes.DashboardBuild(dist); build != registered || registered == "" {
 		t.Errorf("build id %q, want the registry's %q", build, registered)
 	}
 	assets := NewStore(pool)

@@ -739,9 +739,11 @@ func bearerSessionActor(r *http.Request, authenticated model.Actor, supplied *mo
 
 // writeAuthenticationError answers a caller that did not resolve: 401 NO_IDENTITY, or 503
 // SIGNIN_UNAVAILABLE for a person whose lapsed confirmation the sign-in issuer could not renew,
-// as identity.WriteError renders both; anything else as writeHandlerError does.
+// as identity.WriteError renders both; anything else as writeHandlerError does. Only identity's
+// own sentinels reach identity.WriteError, so a service-account token's issuer outage
+// (serviceTokenActor's OIDC_ISSUER_UNAVAILABLE) never reads as the sign-in issuer's.
 func (s *server) writeAuthenticationError(w http.ResponseWriter, err error) {
-	if errors.Is(err, identity.ErrNoIdentity) || errors.Is(err, oidc.ErrIssuerUnavailable) {
+	if errors.Is(err, identity.ErrNoIdentity) || errors.Is(err, identity.ErrSignInUnavailable) {
 		identity.WriteError(w, err)
 		return
 	}

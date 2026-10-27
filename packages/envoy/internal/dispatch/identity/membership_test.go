@@ -222,10 +222,11 @@ func TestMembershipEndsTheSessionWhenTheRefreshFails(t *testing.T) {
 }
 
 // A refresh the issuer cannot answer now (an outage, a 5xx, a 429, the client refused, a broken
-// connection) ends nothing: Confirm refuses the request with an error matching
-// oidc.ErrIssuerUnavailable, which every caller answers 503, and leaves the session generation, the
-// refresh token and the lapsed confirmation as they were, so the first request after the issuer
-// answers again refreshes and is served. Only the issuer's invalid_grant ends the sign-in.
+// connection) ends nothing: Confirm refuses the request with ErrSignInUnavailable, the issuer's
+// oidc.ErrIssuerUnavailable kept in its chain, which every caller answers 503, and leaves the
+// session generation, the refresh token and the lapsed confirmation as they were, so the first
+// request after the issuer answers again refreshes and is served. Only the issuer's invalid_grant
+// ends the sign-in.
 func TestMembershipKeepsTheSignInWhenTheIssuerCannotAnswerTheRefresh(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -243,8 +244,8 @@ func TestMembershipKeepsTheSignInWhenTheIssuerCannotAnswerTheRefresh(t *testing.
 			tc.fail(rig.issuer)
 			rig.now = rig.now.Add(2 * time.Hour)
 			for range 2 {
-				if err := rig.membership.Confirm(context.Background(), memberEmail); !errors.Is(err, oidc.ErrIssuerUnavailable) || errors.Is(err, ErrNoIdentity) {
-					t.Fatalf("Confirm while the issuer answers %s: err = %v, want oidc.ErrIssuerUnavailable and not ErrNoIdentity", tc.name, err)
+				if err := rig.membership.Confirm(context.Background(), memberEmail); !errors.Is(err, ErrSignInUnavailable) || !errors.Is(err, oidc.ErrIssuerUnavailable) || errors.Is(err, ErrNoIdentity) {
+					t.Fatalf("Confirm while the issuer answers %s: err = %v, want ErrSignInUnavailable carrying oidc.ErrIssuerUnavailable and not ErrNoIdentity", tc.name, err)
 				}
 			}
 			if generation := rig.sessions.generation(memberEmail); generation != 0 {
@@ -254,8 +255,8 @@ func TestMembershipKeepsTheSignInWhenTheIssuerCannotAnswerTheRefresh(t *testing.
 				t.Fatalf("membership after the failed refresh = %#v, want the sign-in's %#v unchanged", kept, signedIn)
 			}
 			login := CookieIdentity{SigningKey: testSigningKey, Sessions: rig.sessions, Membership: rig.membership}
-			if _, err := login.Login(cookieRequest(t, memberEmail, 0)); !errors.Is(err, oidc.ErrIssuerUnavailable) {
-				t.Fatalf("Login while the issuer answers %s: err = %v, want oidc.ErrIssuerUnavailable", tc.name, err)
+			if _, err := login.Login(cookieRequest(t, memberEmail, 0)); !errors.Is(err, ErrSignInUnavailable) {
+				t.Fatalf("Login while the issuer answers %s: err = %v, want ErrSignInUnavailable", tc.name, err)
 			}
 
 			rig.issuer.FailToken(0, "")

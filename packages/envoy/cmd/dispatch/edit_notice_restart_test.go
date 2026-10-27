@@ -15,7 +15,8 @@ import (
 // its quiet window leaves it to the next process on the same database, which sends it once the
 // window ends. Both processes take one DISPATCH_SIGNING_KEY, as every process of a deployment
 // does: the killed process's registry row is still live when the second starts, and a key the
-// second minted in its own data dir would refuse its start (processes.Register).
+// second minted in its own data dir would hold its start up to a live window, until that row
+// lapsed (processes.Register).
 func TestEditNoticeRestart(t *testing.T) {
 	database := storetest.Open(t)
 	options := dispatchOptions{SigningKey: "edit-notice-restart-key", Env: map[string]string{"DISPATCH_TEST_EDIT_NOTICE_QUIET": "3s"}}

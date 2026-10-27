@@ -16,7 +16,10 @@ every migration's lock waits at `pgmigrate.LockTimeout`; README "Database
 migrations"), then binds its port, registers the process in the registry of
 live server processes (`internal/dispatch/processes`, migration `0130`: a key
 set a live process does not share both ways refuses the start, exiting 1
-before anything is served), and starts HTTP serving; shutdown deregisters it
+before anything is served, once the process has waited up to one live window
+(15 s) and a heartbeat for the refusing process to stop heartbeating, so a
+restart after a kill starts once the dead process's row lapses;
+`joinRegistry`), and starts HTTP serving; shutdown deregisters it
 once HTTP has drained. A process whose heartbeat lapsed (frozen, cut from the
 database) or whose row was pruned checks its keys again before it counts as
 live once more; beside a live process whose keys it does not share, its
@@ -297,7 +300,8 @@ write identity errors with `identity.WriteError`.
   thirty), and so does the first call that needs it, so an unreachable issuer
   refuses no boot. Until it is read, `AuthURL`, `Exchange`, `Refresh` and
   `Revoke` fail with `oidc.ErrIssuerUnavailable`, which `/auth/start` and the
-  callback answer `503 SIGNIN_UNAVAILABLE`. The sign-in in flight rides the
+  callback wrap in `identity.ErrSignInUnavailable` and answer
+  `503 SIGNIN_UNAVAILABLE`. The sign-in in flight rides the
   browser's `dispatch_oauth_state` cookie (`routes/oauthstate.go`: state,
   nonce, next and expiry, signed under a key `auth.SigningKeys.SignFor` derives
   from the current signing key), so any process completes a sign-in another
@@ -331,8 +335,10 @@ write identity errors with `identity.WriteError`.
   the rule, names another email, or (under a domain) another `sub`, advances
   their session generation and forgets the token, ending every session they
   hold. Any other failed refresh (`oidc.ErrIssuerUnavailable`) ends nothing:
-  `Login` returns it, every caller answers it `503 SIGNIN_UNAVAILABLE`
-  (`identity.WriteError`), and the next request after the issuer answers
+  `Login` returns it wrapped in `identity.ErrSignInUnavailable`, every caller
+  answers that `503 SIGNIN_UNAVAILABLE` (`identity.WriteError`; a service
+  token's own issuer outage stays `OIDC_ISSUER_UNAVAILABLE`), and the next
+  request after the issuer answers
   refreshes. `store.PgPeopleStore` seals that token at rest
   (`store/refresh_token_seal.go`; the format is in the README's Identity
   section) under a key derived from the current signing key, and opens one

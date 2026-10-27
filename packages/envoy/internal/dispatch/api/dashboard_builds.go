@@ -20,7 +20,7 @@ type dashboardBuilds struct {
 	Live    []string `json:"live"`
 }
 
-// LiveDashboardBuilds is the distinct dashboard builds (processes.DashboardBuild's ids) the live
+// LiveDashboardBuilds is the distinct dashboard builds (routes.DashboardBuild's ids) the live
 // server processes serve (processes.Live), in the order Live first names each, and never nil, so a
 // query given it binds an empty array rather than SQL null. A process that serves no dashboard
 // adds nothing. It lives here rather than in package dashboard, which imports this package through

@@ -319,7 +319,7 @@ func (w *workflowRuntime) wakeOutbox(issue string, kind record.OutboxKind) {
 // wake its production checks, and the repository the binary is built from is the one whose open
 // production checks a build is compared against — only for a release build, one with a revision,
 // since nothing else names a commit a merge could be in; a build with none compares nothing,
-// Dispatch's start included.
+// Dispatch's announcement that every server process serves a build (server.started) included.
 func engineConfig(cfg config.Config, reviewAppLogin string, build Build) workflow.Config {
 	project := cfg.Projects[cfg.Project]
 	engine := workflow.Config{

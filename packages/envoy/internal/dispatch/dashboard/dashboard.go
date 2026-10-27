@@ -24,7 +24,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/sjawhar/envoy/internal/dispatch/processes"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -47,8 +46,8 @@ var (
 	entryPath    = regexp.MustCompile(`^/assets/index-[^/]+\.js$`)
 )
 
-// BuildID returns the build id of the web dist at distDir — processes.DashboardBuild's name for
-// it, the one each process records in the registry of live server processes — and the entry chunk
+// BuildID returns the build id of the web dist at distDir — routes.DashboardBuild's name for it,
+// the one each process records in the registry of live server processes — and the entry chunk
 // its page names (`/assets/index-*.js`, the path a tab compares to tell builds apart, read as
 // DeploymentResilience.tsx reads it), or an empty entry when the page names none. It returns
 // ErrNoBuild when there is no index.html.
@@ -60,7 +59,7 @@ func BuildID(distDir string) (build, entry string, err error) {
 	if err != nil {
 		return "", "", fmt.Errorf("read the dashboard's index.html: %w", err)
 	}
-	if build = processes.DashboardBuild(distDir); build == "" {
+	if build = routes.DashboardBuild(distDir); build == "" {
 		return "", "", errors.New("read the dashboard's index.html: it could not be read a second time")
 	}
 	for _, match := range scriptSource.FindAllSubmatch(page, -1) {

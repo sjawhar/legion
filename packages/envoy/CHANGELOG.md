@@ -38,7 +38,11 @@
   current key among its own) logs `dispatch: register this server process` at ERROR, naming the
   other process and the rotation steps, and exits 1 before it serves: a process that minted a key
   in its data dir refuses beside any live process, and so does a pod rolled with a changed secret
-  beside pods that hold only the old key, which stalls the roll while the old pods serve. A
+  beside pods that hold only the old key, which stalls the roll while the old pods serve. Before
+  it exits, a refused process logs at WARN which live process refuses it and waits up to one live
+  window (15 s) and a heartbeat for that process to stop heartbeating, trying again every
+  heartbeat, so a restart after a kill (a dev sign-in server, whose key is minted per process, or
+  a pod replaced with a changed secret) starts once the dead process's row lapses. A
   process whose heartbeat lapsed (frozen, cut from the database) or whose row was pruned checks
   its keys again before it counts as live once more, and beside a live process whose keys it does
   not share logs `dispatch: this server process no longer shares its signing keys with a live
@@ -1013,6 +1017,12 @@
   connection, the outbox publishes what was written meanwhile, the webhook redelivery sweep opens
   its KV bucket on its first pass with NATS connected, and the agent conversation route answers
   `503 STREAM_UNAVAILABLE` until the relay connects (INFRA-555).
+- The Dispatch auto-deployer (`deploy/scripts/autodeploy.sh`) takes a new image as healthy only
+  once `/healthz` answers `200` with `nats` not `false` (`null`, NATS turned off, passes), within
+  the same 90 seconds. Dispatch now serves while its NATS connection fails, so a `200` alone would
+  keep an image whose NATS credential is refused; such an image is rolled back, as it was when it
+  exited at boot. A NATS outage fails the previous image's check too, so its rollback then reports
+  that it did not become healthy (INFRA-555).
 - Dispatch starts without its sign-in issuer or service-account token issuer. Each discovery
   document is read in the background from boot (retrying after one second, doubling to thirty,
   each attempt bounded at ten seconds and at least five seconds after a failed one, a failure
@@ -1022,6 +1032,11 @@
   refresh token the boot cannot revoke yet stays for the next boot (INFRA-555).
 - `/auth/start` no longer answers `429` "too many pending sign-in attempts": no process holds a
   sign-in in flight, so there is nothing to cap (INFRA-555).
+- A dead session's subscriptions now stay 5 minutes longer: the interest reaper deletes one only
+  15 minutes after its row's last write, where it was 10, because it now adds
+  `store.InterestRefreshAge` to its grace window. For that time the subscribers page and the
+  `envoy_active_interests` gauge still list them, and a message matching one logs a failed
+  delivery to that session; a paused session that comes back within it still has them.
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a

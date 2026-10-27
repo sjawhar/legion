@@ -594,7 +594,7 @@ type dispatchProcess struct {
 }
 
 // dispatchOptions is what a test varies about the Dispatch process it starts. Its zero value is
-// the shutdown tests' process: no NATS, no signing key of its own, the default settle delay.
+// the shutdown tests' process: no NATS, no DISPATCH_SIGNING_KEY, the default settle delay.
 type dispatchOptions struct {
 	// NATSURL is the NATS server the process publishes to and reads its durables from. Empty
 	// sets DISPATCH_NATS_DISABLED=1 instead, which is what every test but the multiprocess
@@ -613,14 +613,14 @@ type dispatchOptions struct {
 	// one here, and a name not here is added. It is how a test gives the process a GitHub App,
 	// a sign-in issuer or cookie identity without every other test growing those rows.
 	Env map[string]string
-	// Without names rows below the process does not get at all, as a deployment that leaves
-	// them unset.
-	Without []string
 	// OwnProcessGroup starts the process in a process group of its own, so a test can stop it
 	// with SIGSTOP and resume it without the stop reaching the test's own process group: a
 	// kernel that hangs up an orphaned process group holding a stopped process (gVisor does)
 	// would otherwise end the test with it.
 	OwnProcessGroup bool
+	// Without names rows below the process does not get at all, as a deployment that leaves
+	// them unset.
+	Without []string
 }
 
 // startDispatchProcess builds Dispatch and starts it on a loopback port it holds against
