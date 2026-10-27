@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-511",
-  "completed": "2026-10-27T06:30:00Z",
+  "completed": "2026-10-27T07:10:00Z",
   "proof": [
+    {
+      "criterion": "Review round 2 (narrowed): a /new during the start claim keeps the registration and the start message in one session with a true notice; a queued /legion-controller-start says it waits; the re-claim warning follows its own registration; the AGENTS.md row matches claimComplete",
+      "surface": "pi-legion unit suite with the real extension wiring and stand-in daemon/listener, and the real interactive Oh My Pi 18.12.2 under a pseudo-terminal with both plugins and real NATS",
+      "command": "cd packages/pi-legion && bun test extensions/legion.test.ts src/ && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:4222 bun test ./extensions/controller-start-omp.test.ts",
+      "observed": "499 pass, 0 fail; the session-change test shows nothing sent before the new session registers, one start message into it, the mark naming it, the role held by it, and the info notice 'the session changed while the controller claim ran; the claim for the new session follows and sends the start message there.'; a queued /legion-controller-start shows the waiting notice; a re-claim refused at its registration gets the plain warning. Real binary: 6 pass",
+      "headSha": "8f276a8be9d3179fdfb03404743d87d538aab595",
+      "negativeControl": "controller-session.ts from 05af9dbe: the session-change test fails (it gets 'the controller claim failed after the start message was sent: Envoy has no active session for Legion role claim: ses_controller_before_new ...'), and the re-claim-refused-at-registration test fails (it says the session keeps its registration)"
+    },
     {
       "criterion": "Review round 1: a claim refused after the start message leaves the start turn able to use the legion tool and a true warning; no startupTurn mark outlives the session's first run; a waiting claim says so; logs go through Oh My Pi's logger",
       "surface": "pi-legion unit suite with the real extension wiring and stand-in daemon/listener, and the real interactive Oh My Pi 18.12.2 under a pseudo-terminal with both plugins and real NATS",
@@ -71,7 +79,8 @@
     "Architect-approved design change: the operator controller's whole claim runs from /legion-controller-start instead of session_start, so LEGION-392's order holds on main's pi-envoy; the claim refusal is shown as a warning notice from the command.",
     "Daemon API contract is 41, not 40: main released 40 for the awaiting_person change while this was open (collision note).",
     "The plan's pi_legion path-filter edit was unnecessary: the filter already listed packages/pi-envoy/**.",
-    "Review round 1: the startupTurn slot shape changed to `{session, sentAt} | undefined`; the pushed legion/INFRA-511-startup-wait branch (for #2278) still reads the earlier two-field shape and must adapt when moved."
+    "Review round 1: the startupTurn slot shape changed to `{session, sentAt} | undefined`; the pushed legion/INFRA-511-startup-wait branch (for #2278) still reads the earlier two-field shape and must adapt when moved.",
+    "Review round 2 ledger: the tester's test '/legion-controller-start run again while the start command's claim is in flight registers once and says nothing to do' now expects the waiting notice before NOTHING_TO_DO (its only change), because the architect's narrowed item 2 requires that notice on this exact path; it still asserts one registration and one start message."
   ],
   "openQuestions": [
     "Residual race, recorded in the PR body: a message sent straight to the new session id between pi-envoy's registration (during startup) and the claim is an ordinary card on main's pi-envoy and can take the first turn."
