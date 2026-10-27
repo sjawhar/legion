@@ -1,234 +1,296 @@
-package startup_test
+package startup
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"log/slog"
+	"errors"
 	"os"
-	"strings"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
 
-	natsgo "github.com/nats-io/nats.go"
-
-	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
-	"github.com/sjawhar/envoy/internal/dispatch/startup"
-	"github.com/sjawhar/envoy/internal/testnats"
+	"github.com/sjawhar/envoy/internal/dispatch/auth"
+	"github.com/sjawhar/envoy/internal/dispatch/processes"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-// TestMain removes the NATS server the package's tests share (testnats.Main).
-func TestMain(m *testing.M) { os.Exit(testnats.Main(m)) }
+func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 
-const stampedCommit = "0123456789abcdef0123456789abcdef01234567"
+// The two builds the fleet rolls between.
+const (
+	c1 = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+	c2 = "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"
+)
 
-// startedAt is the clock every test starts Dispatch at, whole seconds as Envelope keeps them, and
-// startedEventID the event id Envelope builds from it (its unix time, 1792411200).
-var startedAt = time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
-
-const startedEventID = "dispatch-server-started-" + stampedCommit + "-1792411200"
-
-func clock(at time.Time) func() time.Time { return func() time.Time { return at } }
-
-// logBuffer collects a test's log lines, written by the publish on its goroutine and read by the
-// test on its own.
-type logBuffer struct {
-	mu     sync.Mutex
-	buffer bytes.Buffer
+// recordingPublisher stands in for the bus client: it records every envelope it is asked to
+// publish while it is connected and not failing, and refuses the rest. delay is how long each
+// publish takes before it answers, as a stream's acknowledgement does.
+type recordingPublisher struct {
+	delay        time.Duration
+	mu           sync.Mutex
+	disconnected bool
+	failure      error
+	published    []contracts.Envelope
 }
 
-func (b *logBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buffer.Write(p)
+func (p *recordingPublisher) Connected() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return !p.disconnected
 }
 
-func (b *logBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buffer.String()
+func (p *recordingPublisher) PublishReportingDuplicate(item contracts.Envelope) (bool, error) {
+	time.Sleep(p.delay)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.failure != nil {
+		return false, p.failure
+	}
+	p.published = append(p.published, item)
+	return false, nil
 }
 
-// logger is a logger into logs.
-func logger(logs *logBuffer) *slog.Logger { return slog.New(slog.NewTextHandler(logs, nil)) }
-
-// TestAnUnstampedBuildPublishesNoStart: an empty commit publishes nothing, and says so at INFO.
-func TestAnUnstampedBuildPublishesNoStart(t *testing.T) {
-	client := connect(t, testnats.URL(t))
-	var logs logBuffer
-	startup.PublishStarted(t.Context(), client, "", clock(startedAt), logger(&logs))
-	if got := countStarts(t, client); got != 0 {
-		t.Fatalf("the stream holds %d start(s) for an unstamped build, want none", got)
-	}
-	if !strings.Contains(logs.String(), "dispatch publishes no start: no build commit") {
-		t.Fatalf("logs = %q, want the INFO line naming the missing commit", logs.String())
-	}
+func (p *recordingPublisher) fail(err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.failure = err
 }
 
-// TestAStampedBuildPublishesItsStartOnce: a stamped commit publishes one envelope the stream holds,
-// in the shape the Legion daemon decodes: every field its envelope check requires, source dispatch,
-// the subject, the dedupe key naming the start, and the payload {commit, started_at}. The same
-// start published again, as a retry whose first acknowledgement was lost would, is a duplicate the
-// stream stores once.
-func TestAStampedBuildPublishesItsStartOnce(t *testing.T) {
-	client := connect(t, testnats.URL(t))
-	var logs logBuffer
-	log := logger(&logs)
-	startup.PublishStarted(t.Context(), client, stampedCommit, clock(startedAt), log)
-	if got := countStarts(t, client); got != 1 {
-		t.Fatalf("the stream holds %d start(s), want 1", got)
-	}
-	if !strings.Contains(logs.String(), "dispatch published its start") || !strings.Contains(logs.String(), stampedCommit) {
-		t.Fatalf("logs = %q, want the success line naming the commit", logs.String())
-	}
-
-	item := lastStart(t, client)
-	if err := item.Validate(); err != nil {
-		t.Fatalf("the published envelope does not validate: %v", err)
-	}
-	if item.EventID != startedEventID || item.SourceEventID != startedEventID || item.DedupeKey != startedEventID {
-		t.Fatalf("event id, source event id, dedupe key = %q, %q, %q; want all %q", item.EventID, item.SourceEventID, item.DedupeKey, startedEventID)
-	}
-	if item.Source != "dispatch" || item.Topic != "notifications.dispatch.server.started" {
-		t.Fatalf("source/topic = (%q, %q), want dispatch on notifications.dispatch.server.started", item.Source, item.Topic)
-	}
-	if item.IssuedAt != startedAt.UnixMilli() || item.TraceID == "" {
-		t.Fatalf("issued_at %d, trace_id %q; want %d and a trace id", item.IssuedAt, item.TraceID, startedAt.UnixMilli())
-	}
-	if item.PayloadSummary != "dispatch started on 0123456" {
-		t.Fatalf("payload summary = %q, want the short commit", item.PayloadSummary)
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(item.Payload), &fields); err != nil {
-		t.Fatalf("the payload is not a JSON object: %v: %s", err, item.Payload)
-	}
-	if len(fields) != 2 || string(fields["commit"]) != `"`+stampedCommit+`"` || string(fields["started_at"]) != `"2026-10-19T12:00:00Z"` {
-		t.Fatalf("payload = %s, want exactly {commit, started_at} naming the commit and the start", item.Payload)
-	}
-
-	startup.PublishStarted(t.Context(), client, stampedCommit, clock(startedAt), log)
-	if got := countStarts(t, client); got != 1 {
-		t.Fatalf("the stream holds %d start(s) after the same start was published again, want 1", got)
-	}
+func (p *recordingPublisher) envelopes() []contracts.Envelope {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]contracts.Envelope(nil), p.published...)
 }
 
-// TestTheStartIsRetriedUntilTheStreamAcknowledgesIt: with the server away, the publish fails and is
-// retried; once the server is back, the retry publishes, and the stream holds the one start.
-func TestTheStartIsRetriedUntilTheStreamAcknowledgesIt(t *testing.T) {
-	srv, uri := testnats.Start(t)
-	client := connect(t, uri)
-	srv.Stop(t)
-	waitFor(t, 15*time.Second, "the client to notice the server is gone", func() bool { return !client.Connected() })
-
-	var logs logBuffer
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		startup.PublishStarted(t.Context(), client, stampedCommit, clock(startedAt), logger(&logs))
-	}()
-	// The first attempts fail while the server is away: the publish is still running once it has
-	// said so.
-	waitFor(t, 15*time.Second, "a failed attempt to be logged", func() bool {
-		select {
-		case <-done:
-			t.Fatal("the start was published with the server away")
-		default:
-		}
-		return strings.Contains(logs.String(), "dispatch could not publish its start")
+// register registers a server process serving commit, and deregisters it when the test ends
+// unless the test has.
+func register(t *testing.T, database *store.Store, commit string) *processes.Registration {
+	t.Helper()
+	keys, err := auth.ParseSigningKeys("startup-test-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	registration, err := processes.Register(context.Background(), database.Pool, processes.Instance{
+		Commit: commit, SigningKeys: keys.Fingerprints(),
 	})
-
-	srv.Start(t)
-	select {
-	case <-done:
-	case <-time.After(60 * time.Second):
-		t.Fatal("the start was not published within a minute of the server's return")
-	}
-	if !strings.Contains(logs.String(), "dispatch published its start") {
-		t.Fatalf("logs = %q, want the success line after the retries", logs.String())
-	}
-	waitFor(t, 15*time.Second, "the client to reconnect", client.Connected)
-	if got := countStarts(t, client); got != 1 {
-		t.Fatalf("the stream holds %d start(s) after the retry, want 1", got)
-	}
-	if item := lastStart(t, client); item.EventID != startedEventID {
-		t.Fatalf("the retried start is %q, want the envelope built once at the start", item.EventID)
-	}
-}
-
-// TestAStoppedProcessGivesUpItsStart: a context that ends while the server is away ends the
-// retries without a publish.
-func TestAStoppedProcessGivesUpItsStart(t *testing.T) {
-	srv, uri := testnats.Start(t)
-	client := connect(t, uri)
-	srv.Stop(t)
-	waitFor(t, 15*time.Second, "the client to notice the server is gone", func() bool { return !client.Connected() })
-
-	ctx, cancel := context.WithCancel(t.Context())
-	var logs logBuffer
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		startup.PublishStarted(ctx, client, stampedCommit, clock(startedAt), logger(&logs))
-	}()
-	waitFor(t, 15*time.Second, "a failed attempt to be logged", func() bool {
-		return strings.Contains(logs.String(), "dispatch could not publish its start")
-	})
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the publish did not end with its context")
-	}
-	if !strings.Contains(logs.String(), "dispatch stopped before it published its start") {
-		t.Fatalf("logs = %q, want the line saying the process stopped first", logs.String())
-	}
-}
-
-// connect opens a client that owns the stream on uri and closes it with the test.
-func connect(t *testing.T, uri string) *bus.Client {
-	t.Helper()
-	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
-		t.Fatalf("connect: %v", err)
+		t.Fatalf("register a process serving %q: %v", commit, err)
 	}
-	t.Cleanup(client.Close)
-	return client
+	t.Cleanup(func() { _ = registration.Deregister(context.Background()) })
+	return registration
 }
 
-// countStarts is how many messages the stream holds on the start subject.
-func countStarts(t *testing.T, client *bus.Client) uint64 {
+func deregister(t *testing.T, registrations ...*processes.Registration) {
 	t.Helper()
-	info, err := client.JS().StreamInfo(bus.Stream, &natsgo.StreamInfoRequest{SubjectsFilter: startup.Subject})
-	if err != nil {
-		t.Fatalf("read the stream: %v", err)
-	}
-	return info.State.Subjects[startup.Subject]
-}
-
-// lastStart is the last envelope the stream holds on the start subject.
-func lastStart(t *testing.T, client *bus.Client) contracts.Envelope {
-	t.Helper()
-	message, err := client.JS().GetLastMsg(bus.Stream, startup.Subject)
-	if err != nil {
-		t.Fatalf("read the last start: %v", err)
-	}
-	var item contracts.Envelope
-	if err := json.Unmarshal(message.Data, &item); err != nil {
-		t.Fatalf("decode the start envelope: %v", err)
-	}
-	return item
-}
-
-// waitFor polls condition until it holds, and fails the test once timeout has passed.
-func waitFor(t *testing.T, timeout time.Duration, what string, condition func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for !condition() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", what)
+	for _, r := range registrations {
+		if err := r.Deregister(context.Background()); err != nil {
+			t.Fatal(err)
 		}
-		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// announcement is one row of server_build_announcements.
+type announcement struct {
+	seq         int64
+	commit      string
+	announcedAt time.Time
+	published   bool
+}
+
+func announcements(t *testing.T, database *store.Store) []announcement {
+	t.Helper()
+	rows, err := database.Pool.Query(context.Background(),
+		`select seq, commit, announced_at, published_at is not null from server_build_announcements order by seq`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var all []announcement
+	for rows.Next() {
+		var a announcement
+		if err := rows.Scan(&a.seq, &a.commit, &a.announcedAt, &a.published); err != nil {
+			t.Fatal(err)
+		}
+		all = append(all, a)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return all
+}
+
+// requireEnvelopes requires one announcement row per commit of commits, in that order, each
+// published, and the publisher to hold exactly their envelopes, each the one Envelope builds from
+// its row.
+func requireEnvelopes(t *testing.T, database *store.Store, publisher *recordingPublisher, commits ...string) {
+	t.Helper()
+	got := publisher.envelopes()
+	rows := announcements(t, database)
+	if len(got) != len(commits) || len(rows) != len(commits) {
+		t.Fatalf("published %d envelopes from %d announcements %+v, want %d naming %v: %+v", len(got), len(rows), rows, len(commits), commits, got)
+	}
+	for i, row := range rows {
+		want, err := Envelope(row.commit, row.seq, row.announcedAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if row.commit != commits[i] || !row.published || !reflect.DeepEqual(got[i], want) {
+			t.Fatalf("announcement %d = %+v published as %+v, want %s published as %+v", i, row, got[i], commits[i], want)
+		}
+	}
+}
+
+func requireFleetCommit(t *testing.T, a *Announcer, want string) {
+	t.Helper()
+	got := a.FleetCommit()
+	switch {
+	case want == "" && got != nil:
+		t.Fatalf("FleetCommit = %q, want nil", *got)
+	case want != "" && (got == nil || *got != want):
+		t.Fatalf("FleetCommit = %v, want %q", got, want)
+	}
+}
+
+// The fleet's build is announced once each time every live process comes to serve one commit
+// the latest announcement does not name: not while a roll has C1 and C2 live, once when the last
+// C1 process goes, not again when every process restarts on C2, and again, under a new seq, when
+// the fleet rolls back to C1. Each envelope is the one its row builds, its started_at the
+// database's announced_at.
+func TestTheFleetsBuildIsAnnouncedOnceEachTimeItChanges(t *testing.T) {
+	database := storetest.Open(t)
+	publisher := &recordingPublisher{}
+	announcer := New(Deps{Pool: database.Pool, Publisher: publisher})
+	ctx := context.Background()
+
+	old := register(t, database, c1)
+	rolled := register(t, database, c2)
+	announcer.pass(ctx)
+	requireEnvelopes(t, database, publisher)
+	requireFleetCommit(t, announcer, "")
+
+	deregister(t, old)
+	announcer.pass(ctx)
+	requireEnvelopes(t, database, publisher, c2)
+	requireFleetCommit(t, announcer, c2)
+
+	deregister(t, rolled)
+	restarted := []*processes.Registration{register(t, database, c2), register(t, database, c2)}
+	announcer.pass(ctx)
+	announcer.pass(ctx)
+	requireEnvelopes(t, database, publisher, c2)
+
+	deregister(t, restarted...)
+	register(t, database, c1)
+	announcer.pass(ctx)
+	requireEnvelopes(t, database, publisher, c2, c1)
+	requireFleetCommit(t, announcer, c1)
+}
+
+// A build nothing stamped names nothing, so a fleet any of whose live processes carries no commit
+// is never announced: not alone, and not beside a stamped one.
+func TestAnUnstampedBuildIsNeverAnnounced(t *testing.T) {
+	database := storetest.Open(t)
+	publisher := &recordingPublisher{}
+	announcer := New(Deps{Pool: database.Pool, Publisher: publisher})
+	unstamped := register(t, database, "")
+	announcer.pass(context.Background())
+	requireEnvelopes(t, database, publisher)
+
+	register(t, database, c1)
+	announcer.pass(context.Background())
+	requireEnvelopes(t, database, publisher)
+	requireFleetCommit(t, announcer, "")
+
+	deregister(t, unstamped)
+	announcer.pass(context.Background())
+	requireEnvelopes(t, database, publisher, c1)
+}
+
+// Two processes passing at once, each on a pool of its own, announce one build once and publish
+// it once between them, though each publish takes long enough for the other process to read the
+// announcement as unpublished meanwhile.
+func TestTwoAnnouncersAtOnceAnnounceAndPublishOnce(t *testing.T) {
+	database := storetest.Open(t)
+	register(t, database, c1)
+	publisher := &recordingPublisher{delay: 100 * time.Millisecond}
+	announcers := []*Announcer{
+		New(Deps{Pool: database.Pool, Publisher: publisher}),
+		New(Deps{Pool: storetest.SecondProcess(t, database).Pool, Publisher: publisher}),
+	}
+	start := make(chan struct{})
+	var passes sync.WaitGroup
+	for _, a := range announcers {
+		passes.Go(func() {
+			<-start
+			for range 20 {
+				a.pass(context.Background())
+			}
+		})
+	}
+	close(start)
+	passes.Wait()
+	requireEnvelopes(t, database, publisher, c1)
+	for _, a := range announcers {
+		requireFleetCommit(t, a, c1)
+	}
+}
+
+// An announcement made while the publish fails, or while this process's bus is down, stays
+// unpublished, and is published once by the first pass whose publish succeeds, this process's
+// or another's.
+func TestAnAnnouncementIsPublishedOnceAPublishSucceeds(t *testing.T) {
+	database := storetest.Open(t)
+	register(t, database, c1)
+	ctx := context.Background()
+
+	down := &recordingPublisher{disconnected: true}
+	New(Deps{Pool: database.Pool, Publisher: down}).pass(ctx)
+	if rows := announcements(t, database); len(rows) != 1 || rows[0].published {
+		t.Fatalf("announcements after a pass with the bus down = %+v, want one unpublished", rows)
+	}
+
+	failing := &recordingPublisher{}
+	failing.fail(errors.New("stream unavailable"))
+	announcer := New(Deps{Pool: database.Pool, Publisher: failing})
+	announcer.pass(ctx)
+	announcer.pass(ctx)
+	if rows := announcements(t, database); len(rows) != 1 || rows[0].published {
+		t.Fatalf("announcements after failed publishes = %+v, want one unpublished", rows)
+	}
+	requireFleetCommit(t, announcer, c1)
+
+	failing.fail(nil)
+	announcer.pass(ctx)
+	announcer.pass(ctx)
+	requireEnvelopes(t, database, failing, c1)
+	if got := down.envelopes(); len(got) != 0 {
+		t.Fatalf("a publisher with no connection was asked to publish %+v", got)
+	}
+}
+
+// fixturePath is the server.started envelope the Legion daemon's intake decodes, shared with it
+// and with packages/contracts: the build this package publishes is the one the daemon reads.
+const fixturePath = "../../../../daemon/internal/intake/testdata/dispatch/server-started.json"
+
+// The envelope of announcement 7 of commit 0f1e2d3… at a fixed time is, field for field, the
+// shared fixture.
+func TestTheBuiltEnvelopeIsTheSharedFixture(t *testing.T) {
+	data, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture contracts.Envelope
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	built, err := Envelope("0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c", 7, time.Date(2026, 10, 27, 12, 0, 0, 345_000_000, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(built, fixture) {
+		t.Fatalf("built envelope = %+v\nwant the fixture %+v", built, fixture)
 	}
 }

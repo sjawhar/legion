@@ -442,16 +442,23 @@ func main() {
 			cancel()
 			stopIntakes()
 		}()
-		// LEGION-781: the start, naming the stamped build commit, goes on the bus once the
-		// publisher is open, and is retried until the stream acknowledges it or the shutdown
-		// context ends; a binary with no stamped commit publishes none.
-		go startup.PublishStarted(ctx, natsClient, buildCommit, time.Now, slog.Default())
 	} else {
 		slog.Info("dispatch delivery: no NATS client — intake is idle; the reconcile alone still runs")
 	}
 
+	// LEGION-781, INFRA-555: the announcer publishes server.started once each time every live
+	// server process comes to serve one build (startup.Announcer), and /healthz reports the latest
+	// announcement's commit as fleet_commit. It runs once this process is registered, below. A
+	// process without NATS announces into the database and leaves the publish to a process whose
+	// bus answers.
+	var announcements startup.Publisher
+	if natsClient != nil {
+		announcements = natsClient
+	}
+	announcer := startup.New(startup.Deps{Pool: database.Pool, Publisher: announcements})
+
 	routesHandler, waitDelivery := routes.New(appCtx)
-	handler := dispatchHandler(routesHandler, database, natsClient, fileStore, buildCommit)
+	handler := dispatchHandler(routesHandler, database, natsClient, fileStore, buildCommit, announcer)
 	server := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: readHeaderTimeout,
@@ -474,7 +481,8 @@ func main() {
 	// ones keep serving. The registration's heartbeat runs until shutdown deregisters it, after the
 	// HTTP drain (shutdown), so a draining process counts as live until its last request is
 	// answered. The prune loop deletes what processes that died without deregistering left behind,
-	// once overall under its lease.
+	// once overall under its lease. The announcer starts only now, so its first pass counts this
+	// process among the live ones and never announces a build the fleet is rolling away from.
 	if _, err := database.Pool.Healthy(ctx); err != nil {
 		slog.Error("dispatch: probe the database", "error", err)
 		os.Exit(1)
@@ -490,6 +498,7 @@ func main() {
 	}
 	slog.Info("dispatch: registered this server process", "instance", registration.ID)
 	go processes.RunPrune(ctx, database.Pool, leases)
+	go announcer.Run(ctx)
 	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool, waitDelivery, deregisterAfterDrain(registration)); err != nil {
 		slog.Error("dispatch: serve", "error", err)
 		os.Exit(1)
@@ -977,9 +986,9 @@ func openFileStore(ctx context.Context, boot bootConfig) (files.Store, error) {
 // dispatchHandler mounts the one /healthz the process serves above every dashboard and API
 // route, so the probe is answered whatever the router is doing. Go's ServeMux prefers the
 // longer pattern, so "GET /healthz" wins over the router's "/".
-func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string) http.Handler {
+func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string, announcer *startup.Announcer) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("GET /healthz", healthzHandler(database, natsClient, fileStore, commit))
+	mux.Handle("GET /healthz", healthzHandler(database, natsClient, fileStore, commit, announcer))
 	mux.Handle("/", handler)
 	return mux
 }
@@ -998,12 +1007,17 @@ func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bu
 // take documents, asks and comments down with the files. A deploy check that wants the bucket
 // asserts `files: true` itself.
 //
-// Beside those it reports what is deployed: `commit`, the legion commit the binary was built
-// from (null when the build did not stamp one), and `schema_version`, the highest migration
-// the database has applied, read by the same probe (null when the database did not answer).
-// A deploy check compares the two with the commit its image pin names and that commit's
-// migrations, so neither is ever filled with a guess.
-func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string) http.HandlerFunc {
+// Beside those it reports what is deployed: `commit`, the legion commit this process's binary
+// was built from (null when the build did not stamp one), `fleet_commit`, the commit of the latest
+// announcement that every live server process serves one build (startup.Announcer.FleetCommit:
+// null when there is none, or before this process's announcer has first read the table, and up
+// to one announcer interval behind the table, a read the announcer makes anyway, so the probe
+// adds no statement to the database), and `schema_version`, the highest migration the database
+// has applied, read by the same probe (null when the database did not answer). A deploy check
+// compares commit and schema_version with the commit its image pin names and that commit's
+// migrations, so neither is ever filled with a guess; the Legion daemon reads fleet_commit, since
+// mid-roll whichever process answers it may serve a build the rest do not.
+func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string, announcer *startup.Announcer) http.HandlerFunc {
 	var reportedCommit *string
 	if commit != "" {
 		reportedCommit = &commit
@@ -1058,8 +1072,9 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore fil
 			NATS          *bool   `json:"nats"`
 			Files         *bool   `json:"files"`
 			Commit        *string `json:"commit"`
+			FleetCommit   *string `json:"fleet_commit"`
 			SchemaVersion *int    `json:"schema_version"`
-		}{OK: ok, DB: databaseOK, NATS: natsOK, Files: filesOK, Commit: reportedCommit, SchemaVersion: schemaVersion})
+		}{OK: ok, DB: databaseOK, NATS: natsOK, Files: filesOK, Commit: reportedCommit, FleetCommit: announcer.FleetCommit(), SchemaVersion: schemaVersion})
 	}
 }
 

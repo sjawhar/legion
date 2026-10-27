@@ -1864,18 +1864,25 @@ export const IssueDeployedEventPayloadSchema = z.strictObject({
 export type IssueDeployedEventPayload = z.infer<typeof IssueDeployedEventPayloadSchema>;
 
 /**
- * The subject Dispatch publishes its own start on, directly on the bus rather than through the
- * outbox (it is no issue's, document's or project's event), as an Envoy envelope with `source`
- * `dispatch` whose payload is `DispatchServerStartedPayload`. Mirrored by `startup.Subject` in
- * `packages/envoy/internal/dispatch/startup`, and matched whole by the Legion daemon's intake.
+ * The subject Dispatch announces its server fleet's build on, directly on the bus rather than
+ * through the outbox (it is no issue's, document's or project's event), as an Envoy envelope with
+ * `source` `dispatch` whose payload is `DispatchServerStartedPayload`. One envelope each time the
+ * commit every live Dispatch server process serves changes: a rolling update is announced once its
+ * last process of the build before has gone, a restart on the announced build is not announced, and
+ * a rollback to an earlier build is announced again. Its event id, source event id and dedupe key
+ * are `dispatch-server-started-<commit>-<seq>`, `seq` being the announcement's own number. Mirrored
+ * by `startup.Subject` in `packages/envoy/internal/dispatch/startup`, and matched whole by the
+ * Legion daemon's intake.
  */
 export const DISPATCH_SERVER_STARTED_SUBJECT = "notifications.dispatch.server.started";
 
 /**
- * The payload of a `server.started` envelope: the build commit Dispatch was stamped with (a
- * Dispatch built without one publishes no start) and when the process started, in UTC. The Legion
- * daemon compares the commit with the merges of its open production checks. Strict: the Go writer
- * emits exactly these two fields.
+ * The payload of a `server.started` envelope: the build commit every live Dispatch server process
+ * serves (a fleet any of whose processes carries no stamped commit is never announced) and when
+ * the fleet was found serving it, by the database's clock, in UTC. The field keeps the name
+ * `started_at` from when each process announced its own start. The Legion daemon compares the
+ * commit with the merges of its open production checks. Strict: the Go writer emits exactly these
+ * two fields.
  */
 export const DispatchServerStartedPayloadSchema = z.strictObject({
   commit: z.string().min(1),

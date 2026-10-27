@@ -699,9 +699,10 @@ func (LingerExpired) isFact() {}
 // boot replayed what its claims' terminal states owe the workflow. Boot is the boot's record id
 // (daemon_boot), which makes each boot's fact its own. Revision is the daemon's own build commit,
 // stamped into a release build and empty outside one, where the boot wakes no production check;
-// DispatchBuild is the build commit Dispatch's /healthz reported to the boot, empty when it
-// reported none. The workflow compares each against the open checks of the repository the daemon
-// is built from (workflow.Config.BuiltFrom), one check_compare row per check.
+// DispatchBuild is the build Dispatch's /healthz reported to the boot as its server fleet's
+// (dispatch.Client.BuildCommit), empty when it reported none. The workflow compares each against
+// the open checks of the repository the daemon is built from (workflow.Config.BuiltFrom), one
+// check_compare row per check.
 type DaemonBooted struct {
 	Boot          int64
 	Revision      string
@@ -738,9 +739,12 @@ type IssueDeployed struct {
 
 func (IssueDeployed) isFact() {}
 
-// ServerStarted is Dispatch's `server.started`: Dispatch started on the build Commit names. The
-// workflow compares the build against the open checks of the repository the daemon is built from,
-// as it compares the daemon's own revision at boot; an event with no commit is decoded to none.
+// ServerStarted is Dispatch's `server.started`: every live Dispatch server process serves the
+// build Commit names, announced once each time that fleet-wide build changes, so a rolling update
+// is announced once it has replaced the last process of the build before, and a restart on the
+// announced build is not announced. The workflow compares the build against the open checks of
+// the repository the daemon is built from, as it compares the daemon's own revision at boot; an
+// event with no commit is decoded to none.
 type ServerStarted struct {
 	Commit string
 }

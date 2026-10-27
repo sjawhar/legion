@@ -36,11 +36,13 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
+	"github.com/sjawhar/envoy/internal/dispatch/startup"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
@@ -1467,4 +1469,137 @@ func whoami(t *testing.T, p *dispatchProcess, session *http.Cookie) (string, int
 	defer response.Body.Close()
 	body, _ := io.ReadAll(response.Body)
 	return strings.TrimSpace(string(body)), response.StatusCode
+}
+
+// ───── the fleet's build ────────────────────────────────────────────────────
+
+// The two builds TestTwoProcessesAnnounceTheirBuildOnce rolls between, stamped into its binaries
+// as the image build stamps a commit.
+const (
+	fleetBuildC1 = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+	fleetBuildC2 = "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"
+)
+
+// fleetQuiet is how long a step that must announce nothing is watched: two passes of the
+// announcer (startup.Interval, five seconds) and a second more, so every live process has passed
+// at least once since the step and a pass that would announce has had its chance to.
+const fleetQuiet = 2*5*time.Second + time.Second
+
+// server.started goes out once each time every live process comes to serve one build, never per
+// process start: two processes stamped C1 put one envelope on the stream; B restarted on C1 puts
+// none; B replaced by a C2 binary while A still runs C1 is a roll halfway through and puts none;
+// A replaced by C2 completes it and puts one for C2. Each process's /healthz fleet_commit follows
+// the announcements, whichever build that process itself runs.
+func TestTwoProcessesAnnounceTheirBuildOnce(t *testing.T) {
+	pair := newPair(t)
+	c1 := cmdtest.BuildStamped(t, "envoy-dispatch-c1", fleetBuildC1)
+	c2 := cmdtest.BuildStamped(t, "envoy-dispatch-c2", fleetBuildC2)
+	start := func(binary string) *dispatchProcess {
+		t.Helper()
+		process := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
+			NATSURL: pair.nats, SigningKey: multiprocessSigningKey, Binary: binary,
+		})
+		process.waitHealthy(t)
+		return process
+	}
+	replace := func(process *dispatchProcess, name, binary string) *dispatchProcess {
+		t.Helper()
+		process.Terminate(t)
+		process.WaitExit(t, "SIGTERM to "+name)
+		return start(binary)
+	}
+	conn := testnats.Connect(t, pair.nats)
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream context: %v", err)
+	}
+	head := streamHead(t, js)
+	announced := func() []contracts.Envelope {
+		var starts []contracts.Envelope
+		for _, item := range readStreamFrom(t, js, head) {
+			if item.Topic == startup.Subject {
+				starts = append(starts, item)
+			}
+		}
+		return starts
+	}
+
+	a, b := start(c1), start(c1)
+	waitForAnnouncements(t, announced, fleetBuildC1)
+	waitForFleetCommit(t, fleetBuildC1, a, b)
+
+	b = replace(b, "B", c1)
+	time.Sleep(fleetQuiet)
+	requireAnnouncements(t, announced(), fleetBuildC1)
+
+	b = replace(b, "B", c2)
+	time.Sleep(fleetQuiet)
+	requireAnnouncements(t, announced(), fleetBuildC1)
+	waitForFleetCommit(t, fleetBuildC1, a, b)
+
+	a = replace(a, "A", c2)
+	waitForAnnouncements(t, announced, fleetBuildC1, fleetBuildC2)
+	waitForFleetCommit(t, fleetBuildC2, a, b)
+	time.Sleep(fleetQuiet)
+	requireAnnouncements(t, announced(), fleetBuildC1, fleetBuildC2)
+}
+
+// waitForAnnouncements waits up to thirty seconds for the stream to hold as many server.started
+// envelopes as commits names, then requires them to be those (requireAnnouncements).
+func waitForAnnouncements(t *testing.T, announced func() []contracts.Envelope, commits ...string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for len(announced()) < len(commits) && time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+	}
+	requireAnnouncements(t, announced(), commits...)
+}
+
+// requireAnnouncements requires got to be one server.started envelope per commit of commits, in
+// that order, each from Dispatch, naming its commit in its payload and in its event id.
+func requireAnnouncements(t *testing.T, got []contracts.Envelope, commits ...string) {
+	t.Helper()
+	if len(got) != len(commits) {
+		t.Fatalf("the stream holds %d server.started envelopes, want %d naming %v: %+v", len(got), len(commits), commits, got)
+	}
+	for i, item := range got {
+		var payload startup.Payload
+		if err := json.Unmarshal([]byte(item.Payload), &payload); err != nil {
+			t.Fatalf("decode server.started payload %q: %v", item.Payload, err)
+		}
+		if item.Source != startup.Source || payload.Commit != commits[i] ||
+			!strings.HasPrefix(item.EventID, "dispatch-server-started-"+commits[i]+"-") {
+			t.Fatalf("server.started envelope %d = %+v, want one from dispatch announcing %s", i, item, commits[i])
+		}
+	}
+}
+
+// waitForFleetCommit waits up to fleetQuiet for every one of processes to report want as its
+// /healthz fleet_commit: each refreshes it on its announcer's pass.
+func waitForFleetCommit(t *testing.T, want string, processes ...*dispatchProcess) {
+	t.Helper()
+	deadline := time.Now().Add(fleetQuiet)
+	for _, process := range processes {
+		for {
+			response, err := http.Get(process.url("/healthz"))
+			if err != nil {
+				t.Fatalf("GET /healthz: %v", err)
+			}
+			var health struct {
+				FleetCommit *string `json:"fleet_commit"`
+			}
+			err = json.NewDecoder(response.Body).Decode(&health)
+			_ = response.Body.Close()
+			if err != nil {
+				t.Fatalf("decode /healthz: %v", err)
+			}
+			if health.FleetCommit != nil && *health.FleetCommit == want {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("/healthz fleet_commit = %v, want %s", health.FleetCommit, want)
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
 }

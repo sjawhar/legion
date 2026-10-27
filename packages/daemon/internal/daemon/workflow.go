@@ -583,7 +583,7 @@ func retryUntilApplied(ctx context.Context, log *slog.Logger, first, most time.D
 // machine and the terminal facts are replayed: it starts, through the outbox's start, every claim
 // that owns its issue's current phase and that the daemon or its own exit suspended, and it
 // compares two builds against the open production checks of the repository the daemon is built
-// from: this binary's own revision, and the build Dispatch reports itself built from
+// from: this binary's own revision, and the build Dispatch's server fleet serves
 // (dispatchBuild), read only when the daemon has a revision to compare — a build with none
 // compares nothing — and a Dispatch client to ask.
 func (w *workflowRuntime) booted(ctx context.Context, bootID int64) error {
@@ -597,10 +597,11 @@ func (w *workflowRuntime) booted(ctx context.Context, bootID int64) error {
 	return nil
 }
 
-// dispatchBuild is the build commit Dispatch reports itself built from (dispatch.Client.BuildCommit),
-// "" when it reports none or could not be asked: the boot never fails on it, since a Dispatch
-// unreachable, or answering 503 while its own dependencies are down, is logged and compared with
-// nothing, and Dispatch's own start reports the same build (intake.ServerStarted).
+// dispatchBuild is the build every Dispatch server process serves, as Dispatch last announced it
+// (dispatch.Client.BuildCommit), "" when it reports none or could not be asked: the boot never
+// fails on it, since a Dispatch unreachable, or answering 503 while its database is down, is
+// logged and compared with nothing, and Dispatch's announcement on the bus reports the same build
+// (intake.ServerStarted).
 func (w *workflowRuntime) dispatchBuild(ctx context.Context) string {
 	commit, err := w.dispatch.BuildCommit(ctx)
 	if err != nil {

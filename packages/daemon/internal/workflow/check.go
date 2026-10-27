@@ -27,7 +27,10 @@ const CheckLookBound = 2 * time.Hour
 // The causes a look is woken by: what the check's record names as its last wake, and what the
 // check task tells the implementer woke it. A deploy run is a configured deploy workflow's job
 // whose named step succeeded after the merge (deployRunCompleted, then the check_compare row's
-// GitHub read).
+// GitHub read). A Dispatch start is Dispatch's server.started, which announces the build every
+// Dispatch server process serves (intake.ServerStarted); the cause keeps the name `dispatch start`
+// from when each process announced its own start, since check records and the daemon's state
+// API carry it.
 const (
 	wakeMerge         = "merge"
 	wakeDeployed      = "issue.deployed"
@@ -159,7 +162,7 @@ func wokenBy(cause, detail string) string {
 	case wakeDaemonBoot:
 		return "the Legion daemon's boot on build " + detail
 	case wakeDispatchStart:
-		return "Dispatch's start on build " + detail
+		return "Dispatch serving build " + detail + " on every server process"
 	case wakeDispatchBuild:
 		return "Dispatch's build " + detail
 	case wakeDeployRun:
@@ -423,19 +426,20 @@ func (e *Engine) checkWake(ctx context.Context, tx pgx.Tx, fact intake.CheckWake
 	return intake.Result{}, e.wake(ctx, tx, check, fact.Cause, fact.Detail)
 }
 
-// serverStarted is Dispatch's start on a build (intake.ServerStarted): the build is compared
-// against the open checks of the repository the daemon is built from (compareBuilds), as the
-// daemon's own build is at boot.
+// serverStarted is Dispatch's announcement that every live server process serves a build
+// (intake.ServerStarted): the build is compared against the open checks of the repository the
+// daemon is built from (compareBuilds), as the daemon's own build is at boot.
 func (e *Engine) serverStarted(ctx context.Context, tx pgx.Tx, fact intake.ServerStarted) (intake.Result, error) {
 	return intake.Result{}, e.compareBuilds(ctx, tx, wakeDispatchStart, fact.Commit)
 }
 
 // buildShape is what a build's commit must look like to be compared: a git SHA, abbreviated or
-// whole. The daemon's own revision and Dispatch's /healthz commit are release stamps of that
-// shape; Dispatch's server.started is published on the bus by any client the listener takes a
-// `source: dispatch` publish from, so its commit is held to the shape here, where every build
-// meets the compare path (the implement App's GitHub compare URL) and the wake detail written
-// into the implementer's task text, and nothing else reaches either.
+// whole. The daemon's own revision and the build Dispatch's /healthz reports are release stamps of
+// that shape; Dispatch's server.started, the announcement of the build its whole server fleet
+// serves, is published on the bus by any client the listener takes a `source: dispatch` publish
+// from, so its commit is held to the shape here, where every build meets the compare path (the
+// implement App's GitHub compare URL) and the wake detail written into the implementer's task
+// text, and nothing else reaches either.
 var buildShape = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
 
 // compareBuilds queues one check_compare row, carrying cause, the build's commit and the check

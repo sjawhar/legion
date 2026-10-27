@@ -353,6 +353,20 @@ func TestACheckWakeOnTheSameBuildWakesOnce(t *testing.T) {
 	}
 }
 
+// A look Dispatch's server.started wakes tells the implementer what that announcement means: the
+// build every Dispatch server process serves, not one process's start.
+func TestADispatchStartWakeNamesTheBuildEveryServerProcessServes(t *testing.T) {
+	rig := childCheckRig(t, "sjawhar/legion")
+	rig.apply("pending", intake.CheckReport{Issue: "LEGION-209", Look: 1, Verdict: "pending"})
+	rig.apply("start-wake", intake.CheckWake{Issue: "LEGION-209", Look: 1, Cause: "dispatch start", Detail: "b00f"})
+	if check := productionCheck(t, rig.pool, "LEGION-209"); check.Looks != 2 || !check.LookOpen || check.LastWakeKind != "dispatch start" {
+		t.Fatalf("the check after Dispatch's announcement = %+v, want look 2 open, woken by `dispatch start`", check)
+	}
+	if starts := superviseRowsOf(t, rig.pool, "LEGION-209", "start"); len(starts) != 2 || !strings.Contains(starts[1].Task, "woken by Dispatch serving build b00f on every server process.") {
+		t.Fatalf("start rows = %+v, want look 2's naming the build every Dispatch server process serves", starts)
+	}
+}
+
 // A look nobody reports ends at its bound as a pending report would: the implementer is suspended
 // and the Sandbox with it. A row naming a look already ended, or an earlier look, changes nothing.
 func TestCheckLookEndedEndsASilentLook(t *testing.T) {

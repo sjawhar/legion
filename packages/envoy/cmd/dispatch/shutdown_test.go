@@ -540,6 +540,10 @@ type dispatchOptions struct {
 	SigningKey string
 	// SettleDelay is DISPATCH_TEST_SETTLE_DELAY; zero leaves the server's own default.
 	SettleDelay time.Duration
+	// Binary is the envoy-dispatch binary to run. Empty builds the command's own, unstamped
+	// (cmdtest.Build); a row whose processes serve given builds builds each once with
+	// cmdtest.BuildStamped and runs it here.
+	Binary string
 	// Env overrides and adds to the rows below, by name: a row the caller names wins over the
 	// one here, and a name not here is added. It is how a test gives the process a GitHub App,
 	// a sign-in issuer or cookie identity without every other test growing those rows.
@@ -564,7 +568,11 @@ func startDispatchProcessWithSettleDelay(t *testing.T, databaseURL string, settl
 func startDispatchProcessWith(t *testing.T, databaseURL string, options dispatchOptions) *dispatchProcess {
 	t.Helper()
 	home := t.TempDir()
-	cmd := exec.Command(cmdtest.Build(t, "envoy-dispatch"))
+	binary := options.Binary
+	if binary == "" {
+		binary = cmdtest.Build(t, "envoy-dispatch")
+	}
+	cmd := exec.Command(binary)
 	port := cmdtest.FreeTCPPort(t)
 	cmd.Dir = home
 	environment := map[string]string{

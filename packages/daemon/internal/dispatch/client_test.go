@@ -550,10 +550,12 @@ func TestMessageBodiesSincePagesNewestFirstUntilTheOutboxWindow(t *testing.T) {
 	}
 }
 
-// BuildCommit is Dispatch's /healthz `commit`: the stamped build commit when the build has one, and
-// none ("") when the field is null or absent; a Dispatch that answers other than 2xx — its own 503
-// while a dependency is down — is an error, not a commit of none.
-func TestBuildCommitReadsTheHealthzCommitAndNoneForNullOrAbsent(t *testing.T) {
+// BuildCommit is the build Dispatch's server fleet serves: its /healthz `fleet_commit` when the body
+// carries the field, whatever this process's own `commit`, and none ("") when it is null; a body
+// without the field, from a Dispatch older than the fleet's announcement, is read for its `commit`,
+// none when that is null or absent. A Dispatch that answers other than 2xx — its own 503 while its
+// database is down — is an error, not a commit of none.
+func TestBuildCommitReadsTheFleetCommitOrTheCommitOfAnOlderDispatch(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		status int
@@ -561,10 +563,12 @@ func TestBuildCommitReadsTheHealthzCommitAndNoneForNullOrAbsent(t *testing.T) {
 		want   string
 		err    bool
 	}{
-		{name: "stamped", status: http.StatusOK, body: `{"ok":true,"db":true,"nats":true,"files":null,"commit":"a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0","schema_version":41}`, want: "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0"},
-		{name: "null", status: http.StatusOK, body: `{"ok":true,"db":true,"nats":null,"files":null,"commit":null,"schema_version":41}`},
-		{name: "absent", status: http.StatusOK, body: `{"ok":true,"db":true}`},
-		{name: "unavailable", status: http.StatusServiceUnavailable, body: `{"ok":false,"db":false,"commit":"a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0"}`, err: true},
+		{name: "fleet commit", status: http.StatusOK, body: `{"ok":true,"db":true,"nats":true,"files":null,"commit":"b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2","fleet_commit":"a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0","schema_version":121}`, want: "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0"},
+		{name: "null fleet commit", status: http.StatusOK, body: `{"ok":true,"db":true,"nats":true,"files":null,"commit":"b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2","fleet_commit":null,"schema_version":121}`},
+		{name: "older Dispatch, stamped", status: http.StatusOK, body: `{"ok":true,"db":true,"nats":true,"files":null,"commit":"a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0","schema_version":41}`, want: "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0"},
+		{name: "older Dispatch, null", status: http.StatusOK, body: `{"ok":true,"db":true,"nats":null,"files":null,"commit":null,"schema_version":41}`},
+		{name: "older Dispatch, absent", status: http.StatusOK, body: `{"ok":true,"db":true}`},
+		{name: "unavailable", status: http.StatusServiceUnavailable, body: `{"ok":false,"db":false,"commit":"a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0","fleet_commit":"a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0"}`, err: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
