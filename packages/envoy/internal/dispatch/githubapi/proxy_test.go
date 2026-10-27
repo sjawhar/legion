@@ -296,8 +296,9 @@ func TestProxyWithoutTheAppIsUnavailable(t *testing.T) {
 }
 
 // A rate limit, met minting the installation token or answered to the read itself, is 503
-// GITHUB_RATE_LIMITED with GitHub's wait as Retry-After, so the web app waits and asks again: never
-// a 502 that reads as GitHub failing, and never GitHub's own 403, which reads as a refusal.
+// GITHUB_RATE_LIMITED with GitHub's wait as Retry-After, which a client that honours the header
+// waits out before it asks again: never a 502 that reads as GitHub failing, and never GitHub's own
+// 403, which reads as a refusal.
 func TestProxyAnswersARateLimitWithRetryAfter(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
