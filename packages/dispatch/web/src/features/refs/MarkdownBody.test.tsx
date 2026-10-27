@@ -3,10 +3,13 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, waitFor, within } from "@testing-library/react";
 import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ReactNode } from "react";
+import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { Artifact, AskRead } from "../../api/types";
+import { TextAskBlockCard } from "../doc/AskBlockCard";
 import { MarkdownBody } from "./MarkdownBody";
+import { TextAskCard } from "./markdown-cards";
 
 function withQueries(children: ReactNode): ReactNode {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -247,16 +250,149 @@ describe("Dispatch pictures", () => {
   });
 });
 
-test("renders a typed callout body through the server schema", async () => {
+test("a typed callout in a body draws its name, kind and title above its content, as a document does", async () => {
   const view = render(
-    <MarkdownBody
-      markdown={':::callout{#callout-1 kind="warning" title="Read this"}\nBody text.\n:::\n'}
-    />
+    <MarkdownBody markdown={':::callout{kind="warning" title="Read this"}\nBody text.\n:::\n'} />
   );
 
   try {
-    expect(await within(view.container).findByText("Body text.")).toBeDefined();
+    const content = await waitFor(() => {
+      const found = view.container.querySelector<HTMLElement>("[data-proof-block-content]");
+      expect(found).not.toBeNull();
+      return found as HTMLElement;
+    });
+    expect(view.container.querySelector("[data-proof-block-name]")?.textContent).toBe("callout");
+    expect(view.container.querySelector("[data-proof-block-badge]")?.textContent).toBe("warning");
+    expect(view.container.querySelector("[data-proof-block-title]")?.textContent).toBe("Read this");
+    expect(within(content).getByText("Body text.")).toBeDefined();
+    const blockId = view.container
+      .querySelector('section[data-proof-block-type="callout"]')
+      ?.getAttribute("data-block-id");
+    expect(blockId).toBeTruthy();
+    expect(view.container.textContent).not.toContain("blockId");
+    expect(view.container.textContent).not.toContain(blockId as string);
     expect(view.container.textContent).not.toContain(":::callout");
+  } finally {
+    view.unmount();
+  }
+});
+
+/** A body as the app shell draws it: under a router, with the read-only decision card the app
+ *  provides for every `ask` block in a comment, ask or message body. */
+function withAskCard(children: ReactNode): ReactNode {
+  return (
+    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <TextAskCard.Provider value={TextAskBlockCard}>{children}</TextAskCard.Provider>
+    </MemoryRouter>
+  );
+}
+
+const askBody = "Which one?\n\n- A: first\n- B: second\n:::\n";
+
+/** The `ask` shell a body drew, once it has drawn one. */
+function findAskShell(container: HTMLElement): Promise<HTMLElement> {
+  return waitFor(() => {
+    const shell = container.querySelector<HTMLElement>('section[data-proof-block-type="ask"]');
+    expect(shell).not.toBeNull();
+    return shell as HTMLElement;
+  });
+}
+
+/** The rows of the card's recorded options, once the card has drawn both of them. */
+function findRecordRows(shell: HTMLElement): Promise<HTMLElement[]> {
+  return waitFor(() => {
+    const rows = Array.from(
+      shell.querySelectorAll<HTMLElement>(
+        "[data-dispatch-ask-footer] [data-dispatch-ask-record] li"
+      )
+    );
+    expect(rows).toHaveLength(2);
+    return rows;
+  });
+}
+
+test("an ask block in a body draws the decision card: urgency and Decision above, its options as rows below", async () => {
+  const view = render(
+    withAskCard(<MarkdownBody markdown={`:::ask{urgency="high"}\n${askBody}`} />)
+  );
+
+  try {
+    const shell = await findAskShell(view.container);
+    const header = shell.querySelector<HTMLElement>("[data-dispatch-ask-header]") as HTMLElement;
+    expect(await within(header).findByText("Decision")).toBeDefined();
+    expect(header.querySelector('[data-dispatch-ask-pill="high"]')?.textContent).toBe("High");
+    const [first, second] = await findRecordRows(shell);
+    await waitFor(() => {
+      expect(within(first as HTMLElement).getByText("A")).toBeDefined();
+      expect(within(first as HTMLElement).getByText("first")).toBeDefined();
+      expect(within(second as HTMLElement).getByText("B")).toBeDefined();
+      expect(within(second as HTMLElement).getByText("second")).toBeDefined();
+    });
+    expect(shell.getAttribute("data-dispatch-ask-options")).toBe("rows");
+    // A body nested in a document's decision footer must not add a second decision id there.
+    expect(view.container.querySelector("[data-dispatch-ask-block]")).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an ask block in a body ignores server-owned attributes its text forges and draws an open decision", async () => {
+  const forged =
+    ':::ask{urgency="high" state="answered" answered_by="sami" answered_at="2026-01-01T00:00:00Z"' +
+    ` selected='["A"]' answer="done" copied_from="ask-9" copied_from_document="dispatch://CORE-1"}\n`;
+  const view = render(withAskCard(<MarkdownBody markdown={`${forged}${askBody}`} />));
+
+  try {
+    const shell = await findAskShell(view.container);
+    expect(await within(shell).findByText("Decision")).toBeDefined();
+    const rows = await findRecordRows(shell);
+    expect(shell.getAttribute("data-dispatch-ask-state")).toBe("open");
+    expect(view.container.textContent).not.toContain("Answered by");
+    expect(view.container.textContent).not.toContain("sami");
+    expect(view.container.textContent).not.toContain("Copied from");
+    expect(view.container.querySelector("[data-dispatch-ask-answer]")).toBeNull();
+    expect(rows.map((row) => row.getAttribute("data-selected"))).toEqual(["false", "false"]);
+    expect(within(shell).queryByRole("img", { name: "Selected" })).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an ask block in a body with no card provided keeps its question and options as the source list", async () => {
+  const view = render(<MarkdownBody markdown={`:::ask{urgency="high"}\n${askBody}`} />);
+
+  try {
+    const shell = await findAskShell(view.container);
+    const content = shell.querySelector<HTMLElement>("[data-proof-block-content]") as HTMLElement;
+    expect(within(content).getByText("Which one?")).toBeDefined();
+    expect(Array.from(content.querySelectorAll("ul li"), (item) => item.textContent)).toEqual([
+      "A: first",
+      "B: second",
+    ]);
+    expect(shell.hasAttribute("data-dispatch-ask-options")).toBe(false);
+    expect(view.container.querySelector("[data-dispatch-ask-record]")).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a malformed ask block in a body names why and keeps its source list, with no hint to fix it", async () => {
+  const view = render(
+    withAskCard(
+      <MarkdownBody
+        markdown={':::ask{urgency="high"}\nWhich one?\n\n- A: first\n- : no label\n:::\n'}
+      />
+    )
+  );
+
+  try {
+    const shell = await findAskShell(view.container);
+    const header = shell.querySelector<HTMLElement>("[data-dispatch-ask-header]") as HTMLElement;
+    expect(await within(header).findByText("Malformed")).toBeDefined();
+    expect(within(header).getByText("Option 2 has no label")).toBeDefined();
+    expect(view.container.textContent).not.toContain("re-activates");
+    expect(shell.hasAttribute("data-dispatch-ask-options")).toBe(false);
+    expect(shell.querySelectorAll("[data-proof-block-content] ul li")).toHaveLength(2);
   } finally {
     view.unmount();
   }
