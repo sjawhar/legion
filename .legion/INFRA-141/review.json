@@ -2,31 +2,28 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T21:28:45Z",
+  "completed": "2026-10-27T00:06:30Z",
   "generation": 4,
-  "round": "generation 4: roles from the role claims (757f5eff82dd) and the forward merge of main (d11db8ab658c); handoff head 6ea9f93b. The workspace was recreated before this turn; my last handoff (review.json, 0c227469) is in the branch's history, and nothing of mine was unpushed.",
-  "scope": "The architect's generation-4 ruling (Envoy c4ef16ff87154e5ba08d4671825b0fb1; dispatch://INFRA-141/comment/04a5215e-6d68-4da1-b0ef-c039e778f9a5; plan.md v4 A10). Confirm: roles come from the claims on every reporting path; a stale topic is not reported as a role; A10 holds for an idle-timed-out first scan and a recreated bucket; no send pays a per-role store read; the docs agree. Check d11db8ab's conflict resolution and items 2-4 of 5656109351. Raise only defects.",
+  "round": "the round after review 5659336410: code commits 3c79342be613 and 1e7885a92fc2; handoff head 3ff34ede",
+  "scope": "The architect's rulings (Envoy 57c238dbb0ea914e774aab870f4c7cf5, dd4fa95b8ea9271731330b673d25d38e). Confirm the five Minors of 5659336410, the race fix in roles_from_claims_test.go, and the CI change. If the race step does not cover ./internal/store and ./internal/kvwatch, request that one change. Otherwise raise only defects.",
   "decision": "changes_requested",
   "confirmed": [
-    "Roles from the claims: senderStamp and sessionInfoFor are the only builders of roles, and both read store.Registry.RolesHeldBy; roleNames is deleted. GET /v1/sessions, GET /v1/registry/<id> and Dispatch's roster go through sessionInfoFor.",
-    "A stale topic is not reported: roles_from_claims_test.go asserts it, and the code-quality pass's topics-again mutant fails it.",
-    "A10: RolesHeldBy refuses (ErrRoleViewNotReady) unless the current watcher's first scan ended at nats.go's real end marker, and re-checks the generation after reading. A timed-out scan, a Rewatch, a recreated bucket, a watcher end or a Stop clears completeness. Both session routes send the refusal to writeBusUnavailable (503, Retry-After: 1); senderStamp leaves roles out and the send goes on.",
-    "No per-role store read: RolesHeldBy reads only memory under holdersMu (kv.go:488-511). No test pins it (a mutant adding a bucket Get per role passes the listener suite); it is not held as a defect.",
-    "Merge d11db8ab: the only conflict, in packages/envoy/AGENTS.md, keeps main's Dispatch access-log bullet and the branch's /healthz and NATS bullets (git show --remerge-diff).",
-    "Items 2-4 of 5656109351 still hold: storeAnswer, the corrected test comment, and /healthz's 503 for an unanswered JetStream check are unchanged by this range."
+    "Own-write test: with setOwnRoleHolder dropped, TestRolesHeldByFollowsTheRoleClaims fails 30 of 30; with forgetRoleHolder dropped, 30 of 30 (go test -overlay, run here).",
+    "Recreated-bucket tests: a resetRoleHolders that keeps holders fails the store test 5 of 5 and the listener test (roles [planner reviewer]); one that keeps holderRevisions fails both too (target roles [], want [architect]).",
+    "kvwatch: with watch() no longer clearing complete, TestCompleteIsTheCurrentWatchersFirstScanDeliveringEveryKey fails 10 of 10.",
+    "Text: AGENTS.md and the CHANGELOG give 'interest KV watcher unavailable: role claims watcher stopped', which matches main.go's WatchErr label. WaitForCacheReady wraps its error with the cache's name (%w); no caller matches the error text. The WARN names both caches.",
+    "Race fix: timeOutRoleClaimScan no longer writes Registry.holders without holdersMu. No test now writes holders, holderRevisions or holderEpoch without the lock (code-quality pass).",
+    "Scope: since 757f5eff and d11db8ab only tests, comments, docs, the WaitForCacheReady error wrap, the WARN text and the workflow step changed."
   ],
-  "ci": "CI head 5f1cdd9579ff: Docs success, Legion Envoy and Contracts and PR Title queued at reading. A request for changes does not wait for CI.",
-  "thermonuclear": "Both run at 6ea9f93b under the defect-only rule. deep-review: CLEAN of behaviour, two Minor false statements (below). code-quality: CHANGES, test gaps; I re-ran its own-write mutants: dropping setOwnRoleHolder fails TestRolesHeldByFollowsTheRoleClaims 7 of 30 runs, dropping forgetRoleHolder fails it 0 of 30.",
-  "verdictProvenance": "Read from the session store's transcripts (omp_session_files). This session: anthropic/claude-opus-5-5, 290 of 290 assistant turns. DeepReview9: anthropic/claude-opus-5-5, 69 of 69. CodeQuality9: anthropic/claude-opus-5-5, 23 of 23.",
+  "ci": "CI head 5dfa7c20ceb7: Tests, Legion Envoy and Contracts, Docs and Worker Image queued, and PR Title pending at reading. The new race step has not run in CI yet. A request for changes does not wait for CI. -race cannot run in this pod (no cgo).",
+  "thermonuclear": "Both run at 3ff34ede under the defect-only rule. deep-review: CLEAN (the callers, whether the race step can run with the job's Postgres service and DISPATCH_TEST_DATABASE_URL, and the docs). code-quality: CHANGES (the job timeout, below); the changed tests are deterministic.",
+  "verdictProvenance": "Read from the session store's transcripts (omp_session_files). This session: anthropic/claude-opus-5-5, 315 of 315 assistant turns. DeepReview10: anthropic/claude-opus-5-5, 31 of 31. CodeQuality10: anthropic/claude-opus-5-5, 49 of 49.",
   "critical": 0,
-  "important": 0,
-  "minor": 5,
+  "important": 1,
+  "minor": 1,
   "keyFindings": [
-    {"severity": "minor", "file": "packages/envoy/internal/store/role_holders_test.go", "description": "TestRolesHeldByFollowsTheRoleClaims says 'a claim this registry writes itself is in the view as soon as its write answers', but cannot reliably fail without that: with setOwnRoleHolder dropped it fails 7 of 30 runs, with forgetRoleHolder dropped 0 of 30, because the watcher usually delivers first. Hold the watcher's delivery while SetRole and Remove answer, as the refill test does."},
-    {"severity": "minor", "file": "packages/envoy/internal/store/role_holders_test.go", "description": "TestARecreatedRoleBucketsViewAnswersOnlyOnceItsRefillCompletes (and roles_from_claims_test.go's recreated-bucket case) says the reset empties the view, but both put the same claims back at higher revisions, so a resetRoleHolders that keeps holders or holderRevisions passes. Leave one old claim out of the new bucket, and write an old claim at a revision above the new one."},
-    {"severity": "minor", "file": "packages/envoy/internal/kvwatch/warmup_test.go", "description": "TestCompleteIsTheCurrentWatchersFirstScanDeliveringEveryKey's comment says the new watcher is complete only once its own scan is; the test checks only that the generation moved and completeness returns (a watch() that stops clearing complete passes it)."},
-    {"severity": "minor", "file": "packages/envoy/AGENTS.md", "description": "The /healthz bullet (:1976) and CHANGELOG (:999-1001) give a stopped role watcher's body as 'interest KV unavailable: role claims watcher stopped'. /healthz checks WatchErr first and labels it 'interest KV watcher' (main.go:411-415), so the body is 'interest KV watcher unavailable: role claims watcher stopped'."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/main.go", "description": "WaitForCacheReady now also waits for the role watcher (kv.go:520-525), but a timeout there is still logged 'interest cache warm-up timed out' (main.go:745-748), naming the wrong cache."}
+    {"severity": "important", "file": ".github/workflows/envoy-and-contracts.yaml", "description": "The architect's required change. The new step race-tests only ./cmd/listener/. This PR's new concurrency also lives in ./internal/store (the role-holder map, holdersMu, the epoch fence) and ./internal/kvwatch (completeness, WithRescan), and no race step in any workflow covers either package. That is why a race in this PR's code reached a tester and not CI. Add ./internal/store/ and ./internal/kvwatch/... to the race step."},
+    {"severity": "minor", "file": ".github/workflows/envoy-and-contracts.yaml", "description": "The envoy-go-race job keeps timeout-minutes: 45, and its first race step takes 12-18 min in recent runs. The new step's -timeout 30m can therefore never fire: the runner cancels the job first, so a hung listener test never prints Go's timeout dump naming the stuck test. Raise the job's timeout-minutes to cover both steps plus compile (about 60, more once store and kvwatch join), or lower the step's -timeout below what the job leaves."}
   ],
-  "threads": "59 threads, all resolved. I replied 'Accepted: fixed in 757f5eff' on the seven threads of 5656109351 and before (PRRT_kwDORFy7ds6wV7Ar, -wV7A1, -wXxER, -wXxEZ, -wXxEi, -wXxEr, -wXxE2). No bot threads."
+  "threads": "63 threads, all resolved. I replied 'Accepted: fixed in 3c79342be613' on the four threads of 5659336410 (PRRT_kwDORFy7ds6wdkPA, -wdkPK, -wdkPO, -wdkPT), each with the mutant results. No bot threads."
 }
