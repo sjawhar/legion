@@ -16,9 +16,12 @@ import (
 // them); red and green settlements of the current or an earlier head arrive between the heads,
 // with clears of the head the required workflows were read at, a reopen at a head and a read of
 // the required set; and half the histories reset the branch to a commit it held before, then push
-// once more. Each push arrives at a random position in a random order, sometimes twice, and the
-// record goes through the store's round trip after every fact. LEGION_RUN_FUZZ_ITERS sets the
-// number of histories (the long mode), LEGION_RUN_FUZZ_SEED the seed.
+// once more. Settlements arrive before the head they settle and again after it, and the listener
+// redelivers some. A push webhook is sometimes lost for good, in both orders; the run it leaves
+// open then stays open, its judgement the same. Each push arrives at a random position in a random
+// order, sometimes twice, and the record goes through the store's round trip after every fact.
+// LEGION_RUN_FUZZ_ITERS sets the number of histories (the long mode), LEGION_RUN_FUZZ_SEED the
+// seed.
 func TestEveryRandomOrderOfThePushesGivesThePushesFirstJudgement(t *testing.T) {
 	iters, seed := 20000, uint64(1)
 	if s := os.Getenv("LEGION_RUN_FUZZ_ITERS"); s != "" {
@@ -31,6 +34,13 @@ func TestEveryRandomOrderOfThePushesGivesThePushesFirstJudgement(t *testing.T) {
 	failures := 0
 	for it := 0; it < iters && failures < 3; it++ {
 		pushes, facts := randomHistory(rng)
+		// A push webhook lost for good: neither order delivers it, and the run it leaves waiting
+		// stays open in both, its judgement the same.
+		lost := rng.IntN(5) == 0
+		if lost {
+			drop := rng.IntN(len(pushes))
+			pushes = append(pushes[:drop:drop], pushes[drop+1:]...)
+		}
 		planned := rng.IntN(2) == 0
 		red := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
 			CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 2, PlannedRed: planned}
@@ -42,6 +52,9 @@ func TestEveryRandomOrderOfThePushesGivesThePushesFirstJudgement(t *testing.T) {
 			want = stored(t, deliver(f, want))
 		}
 		order := append([]record.ClassifiedPush{}, pushes...)
+		if len(order) == 0 {
+			continue
+		}
 		rng.Shuffle(len(order), func(i, j int) { order[i], order[j] = order[j], order[i] })
 		if rng.IntN(4) == 0 {
 			order = append(order, order[rng.IntN(len(order))])
@@ -58,7 +71,7 @@ func TestEveryRandomOrderOfThePushesGivesThePushesFirstJudgement(t *testing.T) {
 		for _, fact := range seq {
 			got = stored(t, deliver(fact, got))
 		}
-		if want.Run != nil || got.Run != nil || JudgementChanged(want, got) {
+		if (!lost && (want.Run != nil || got.Run != nil)) || JudgementChanged(want, got) {
 			failures++
 			t.Errorf("history %d, planned %v, pushes %+v\n order %v\n got  fix=%d counted=%q planned=%v checked=%q failing=%v run open=%v\n want fix=%d counted=%q planned=%v checked=%q failing=%v run open=%v",
 				it, planned, pushes, seq, got.FixAttempts, got.HeadCounted, got.PlannedRed, got.CheckedHead, got.Failing, got.Run != nil,
@@ -137,6 +150,39 @@ func randomHistory(rng *rand.Rand) ([]record.ClassifiedPush, []runFact) {
 		}
 		facts = append(facts[:at], append([]runFact{{required: required}}, facts[at:]...)...)
 	}
+	// A settlement of a head delivered before that head arrives, and redelivered after it.
+	var heads []int
+	for i, f := range facts {
+		if f.head != "" {
+			heads = append(heads, i)
+		}
+	}
+	if len(heads) > 0 && rng.IntN(3) == 0 {
+		at := heads[rng.IntN(len(heads))]
+		early := settles(facts[at].head, id, "ci")
+		if rng.IntN(2) == 0 {
+			early = settles(facts[at].head, id)
+		}
+		id++
+		before, after := rng.IntN(at+1), at+1+rng.IntN(len(facts)-at)
+		facts = append(facts[:after], append([]runFact{early}, facts[after:]...)...)
+		facts = append(facts[:before], append([]runFact{early}, facts[before:]...)...)
+	}
+	// The listener's redelivery of a settlement, later in the history.
+	for k := rng.IntN(3); k > 0; k-- {
+		var settled []int
+		for i, f := range facts {
+			if f.settlement != nil {
+				settled = append(settled, i)
+			}
+		}
+		if len(settled) == 0 {
+			break
+		}
+		from := settled[rng.IntN(len(settled))]
+		at := from + 1 + rng.IntN(len(facts)-from)
+		facts = append(facts[:at], append([]runFact{facts[from]}, facts[at:]...)...)
+	}
 	return pushes, facts
 }
 
@@ -175,5 +221,34 @@ func TestABranchThatReturnsToACommitIsJudgedTheSameInEveryOrder(t *testing.T) {
 	if want.Run != nil || got.Run != nil || JudgementChanged(want, got) {
 		t.Fatalf("pushes first: fix=%d counted=%q planned=%v run open=%v; interleaved: fix=%d counted=%q planned=%v run open=%v",
 			want.FixAttempts, want.HeadCounted, want.PlannedRed, want.Run != nil, got.FixAttempts, got.HeadCounted, got.PlannedRed, got.Run != nil)
+	}
+}
+
+// A settlement of h4 delivered before h4 arrives stands nowhere; its redelivery after h4 arrives
+// stands for h4. The redelivery is a step of its own while the run is open, so h4 is red in both
+// orders. A redelivery with no head between it and its copy takes no step.
+func TestARedeliveredSettlementAfterItsHeadArrivesStandsInEveryOrder(t *testing.T) {
+	red := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
+		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 2}
+	p3, p4 := record.ClassifiedPush{SHA: "h3", Before: "h2"}, record.ClassifiedPush{SHA: "h4", Before: "h3"}
+	h4red := settles("h4", 3, "ci")
+	want := red
+	for _, f := range []runFact{pushed(p3), pushed(p4), arrives("h3"), h4red, arrives("h4"), h4red} {
+		want = stored(t, deliver(f, want))
+	}
+	got := red
+	for _, f := range []runFact{arrives("h3"), h4red, arrives("h4"), h4red} {
+		got = stored(t, deliver(f, got))
+	}
+	steps := len(got.Run.Steps)
+	if again := stored(t, deliver(h4red, got)); len(again.Run.Steps) != steps {
+		t.Fatalf("a redelivery with no head since its copy took a step: %d steps, want %d", len(again.Run.Steps), steps)
+	}
+	for _, p := range []record.ClassifiedPush{p3, p4} {
+		got = stored(t, deliver(pushed(p), got))
+	}
+	if HeadVerdict(want) != "red" || got.Run != nil || JudgementChanged(want, got) {
+		t.Fatalf("pushes first: checked=%q verdict=%q; pushes last: checked=%q verdict=%q run open=%v",
+			want.CheckedHead, HeadVerdict(want), got.CheckedHead, HeadVerdict(got), got.Run != nil)
 	}
 }

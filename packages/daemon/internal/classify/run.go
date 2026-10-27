@@ -44,11 +44,13 @@ func runStep(pr record.PullRequest, step record.RunStep) record.PullRequest {
 
 // replayRun replays pr's open run: its steps from its anchor, with the run's pushes and every push
 // the pull request holds that carries an approval across - which no fact drops (keptPushes), so
-// the run does not keep a copy of them. The run stays open from its first head judged with no
-// chain of pushes, its anchor the judgement before that head, and closes when there is none; past
-// maxRunSteps its oldest steps fold into the anchor too. The pull request keeps its own pushes.
-// BlockedAttempts is what was reported, so it stays, unless the count it reported is no longer
-// reached, as when a count is taken back.
+// the run does not keep a copy of them - less every push whose move the anchor had already made: a
+// push redelivered after its move was judged before the run opened is spent there, as it is when
+// it arrives first. The run stays open from its first head judged with no chain of pushes, its
+// anchor the judgement before that head, and closes when there is none; past maxRunSteps its oldest
+// steps fold into the anchor too. The pull request keeps its own pushes. BlockedAttempts is what
+// was reported, so it stays, unless the count it reported is no longer reached, as when a count is
+// taken back.
 func replayRun(pr record.PullRequest) record.PullRequest {
 	run, live := pr.Run, pr.Pushes
 	blocked := pr.BlockedAttempts
@@ -59,6 +61,7 @@ func replayRun(pr record.PullRequest) record.PullRequest {
 			at.Pushes = withPush(at.Pushes, p)
 		}
 	}
+	at.Pushes = unspentPushes(at.Pushes, at.Moves, false)
 	type state struct {
 		judgement record.Judgement
 		pushes    []record.ClassifiedPush
@@ -75,7 +78,7 @@ func replayRun(pr record.PullRequest) record.PullRequest {
 	}
 	waiting = max(waiting, len(run.Steps)-maxRunSteps)
 	if waiting < len(run.Steps) {
-		at.Run = &record.HeadRun{Anchor: before[waiting].judgement, Pushes: before[waiting].pushes, Steps: clone(run.Steps[waiting:]), Since: run.Since}
+		at.Run = &record.HeadRun{Anchor: before[waiting].judgement, Pushes: before[waiting].pushes, Steps: clone(run.Steps[waiting:]), Decided: run.Decided}
 	}
 	at.Pushes, at.BlockedAttempts = unspentPushes(live, at.Moves, false), blocked
 	if at.FixAttempts < blocked {
@@ -138,22 +141,39 @@ func Reopen(pr record.PullRequest, head string) record.PullRequest {
 // (SettlementFor) and is newer than the one recorded (ApplySettlement), and says whether the
 // judgement changed. While a head run is open the settlement is a step of it, recorded whether it
 // stands or not: a push the run is waiting for can make it stand. The pull request then changed
-// either way, and the judgement changed when the replay with it differs. A settlement the run
-// already holds - the listener's redelivery - is no new step, so it does not use up the run's
-// bound (maxRunSteps).
+// either way, and the judgement changed when the replay with it differs. A redelivery is no new
+// step (redundantSettlement), so the listener's redeliveries do not use up the run's bound
+// (maxRunSteps).
 func ApplyCheckSettlement(pr record.PullRequest, candidate SettlementCandidate) (record.PullRequest, bool) {
 	if pr.Run == nil {
 		return settle(pr, candidate)
 	}
 	step := record.Settlement{Head: candidate.Head, CheckRuns: clone(candidate.CheckRuns), Generation: candidate.Generation,
 		Snapshot: candidate.Snapshot, Failing: clone(candidate.Failing), Cancelled: clone(candidate.Cancelled)}
-	for _, held := range pr.Run.Steps {
-		if held.Settlement != nil && sameSettlement(*held.Settlement, step) {
-			return pr, false
-		}
+	if redundantSettlement(pr.Run.Steps, step) {
+		return pr, false
 	}
 	replayed := runStep(pr, record.RunStep{Settlement: &step})
 	return replayed, JudgementChanged(pr, replayed)
+}
+
+// redundantSettlement is whether settlement, appended to steps, would replay as nothing in every
+// order of the pushes still to come: an exact copy of it is a step, and no head arrived and no
+// reopen started the settlement afresh after that copy. The copy then meets the same head and the
+// same pushes as the redelivery would: where the copy stands and is newer, it applies and the
+// redelivery is not newer; where it does not, neither does the redelivery. A copy before a head's
+// arrival is no such copy - a settlement of a head that had not arrived stands once it has - so the
+// redelivery is a step of its own.
+func redundantSettlement(steps []record.RunStep, settlement record.Settlement) bool {
+	for i := len(steps) - 1; i >= 0; i-- {
+		switch held := steps[i]; {
+		case held.Head != "" || held.Reopened:
+			return false
+		case held.Settlement != nil && sameSettlement(*held.Settlement, settlement):
+			return true
+		}
+	}
+	return false
 }
 
 // sameSettlement is whether a and b are the same report of the same settlement.

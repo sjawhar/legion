@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
@@ -209,13 +210,36 @@ func tenChecks(head int) []record.AttemptRun {
 	return runs
 }
 
+// sha is the i'th commit, at a real commit SHA's 40 hexadecimal characters, so the sizes below are
+// those a stored run reaches.
+func sha(i int) string { return fmt.Sprintf("%040x", i) }
+
+// stampHead puts an arrival time on pr's run's last head step, as the workflow does (stampRun).
+func stampHead(pr record.PullRequest, at time.Time) record.PullRequest {
+	if pr.Run == nil {
+		return pr
+	}
+	run := *pr.Run
+	run.Steps = append([]record.RunStep{}, run.Steps...)
+	for i := len(run.Steps) - 1; i >= 0; i-- {
+		if run.Steps[i].Head != "" {
+			if run.Steps[i].At.IsZero() {
+				run.Steps[i].At = at
+			}
+			break
+		}
+	}
+	pr.Run = &run
+	return pr
+}
+
 // A pull request whose heads each arrive before their pushes keeps a bounded head run and record:
 // the run's front folds into its anchor as each push arrives, so the stored run stays as long as
 // the pushes lag, here three heads. A push lost for good keeps the run open at its head; the run is
 // cut to its newest maxRunSteps steps and stays that size, however many heads follow. Every second
 // push is handoff-only, which the record keeps for good (it carries an approval across) and the
 // run does not copy; each settlement holds ten check runs and is delivered twice, and the second
-// delivery takes no step.
+// delivery takes no step. Heads are 40-character SHAs and each head step carries its arrival time.
 func TestAHeadRunStaysBounded(t *testing.T) {
 	encoded := func(v any) int {
 		b, err := json.Marshal(v)
@@ -233,11 +257,12 @@ func TestAHeadRunStaysBounded(t *testing.T) {
 		{"the fifth push lost", 5, maxRunSteps, maxRunSteps},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			pr := record.PullRequest{HeadSHA: "c0", CheckedHead: "c0", Failing: []string{"check-0"}, Required: []string{"check-0"}, CheckRuns: tenChecks(0)}
-			largestRun, largestMoves := 0, 0
+			pr := record.PullRequest{HeadSHA: sha(0), CheckedHead: sha(0), Failing: []string{"check-0"}, Required: []string{"check-0"}, CheckRuns: tenChecks(0)}
+			largestRun, largestMoves, largestRow := 0, 0, 0
+			start := time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC)
 			for i := 1; i <= 200; i++ {
-				pr = AdvancePullRequestHead(pr, fmt.Sprintf("c%d", i))
-				settlement := SettlementCandidate{Head: fmt.Sprintf("c%d", i), CheckRuns: tenChecks(i), Generation: int64(i + 1),
+				pr = stampHead(AdvancePullRequestHead(pr, sha(i)), start.Add(time.Duration(i)*time.Minute))
+				settlement := SettlementCandidate{Head: sha(i), CheckRuns: tenChecks(i), Generation: int64(i + 1),
 					Snapshot: fmt.Sprintf("s%d", i), Failing: []string{"check-0"}}
 				pr, _ = ApplyCheckSettlement(pr, settlement)
 				steps := 0
@@ -248,7 +273,7 @@ func TestAHeadRunStaysBounded(t *testing.T) {
 					t.Fatalf("after %d heads the redelivered settlement took a step: %d steps, want %d", i, len(pr.Run.Steps), steps)
 				}
 				if late := i - 3; late >= 1 && late != tc.lost {
-					pr = ApplyPush(pr, record.ClassifiedPush{SHA: fmt.Sprintf("c%d", late), Before: fmt.Sprintf("c%d", late-1), HandoffOnly: late%2 == 0})
+					pr = ApplyPush(pr, record.ClassifiedPush{SHA: sha(late), Before: sha(late - 1), HandoffOnly: late%2 == 0})
 				}
 				if pr.Run != nil {
 					largestRun = max(largestRun, encoded(pr.Run))
@@ -261,9 +286,10 @@ func TestAHeadRunStaysBounded(t *testing.T) {
 					t.Fatalf("after %d heads the record holds %d moves, want at most %d", i, len(pr.Moves), maxMoves)
 				}
 				largestMoves = max(largestMoves, encoded(pr.Moves))
+				largestRow = max(largestRow, encoded(pr.Run)+encoded(pr.Moves)+encoded(pr.Pushes))
 			}
-			t.Logf("largest stored head run: %d bytes; largest stored moves: %d bytes; pushes kept at the end: %d (%d bytes)",
-				largestRun, largestMoves, len(pr.Pushes), encoded(pr.Pushes))
+			t.Logf("largest stored head run: %d bytes; largest stored moves: %d bytes; largest run, moves and pushes together: %d bytes; pushes kept at the end: %d (%d bytes)",
+				largestRun, largestMoves, largestRow, len(pr.Pushes), encoded(pr.Pushes))
 		})
 	}
 }
@@ -271,10 +297,11 @@ func TestAHeadRunStaysBounded(t *testing.T) {
 // BenchmarkReplayAtTheBound replays a head run of maxRunSteps steps - heads and settlements of ten
 // check runs alternating, every head waiting for its push - which is the most a push replays.
 func BenchmarkReplayAtTheBound(b *testing.B) {
-	pr := record.PullRequest{HeadSHA: "c0", CheckedHead: "c0", Failing: []string{"check-0"}, Required: []string{"check-0"}, CheckRuns: tenChecks(0)}
+	pr := record.PullRequest{HeadSHA: sha(0), CheckedHead: sha(0), Failing: []string{"check-0"}, Required: []string{"check-0"}, CheckRuns: tenChecks(0)}
+	start := time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC)
 	for i := 1; pr.Run == nil || len(pr.Run.Steps) < maxRunSteps; i++ {
-		pr = AdvancePullRequestHead(pr, fmt.Sprintf("c%d", i))
-		pr, _ = ApplyCheckSettlement(pr, SettlementCandidate{Head: fmt.Sprintf("c%d", i), CheckRuns: tenChecks(i),
+		pr = stampHead(AdvancePullRequestHead(pr, sha(i)), start.Add(time.Duration(i)*time.Minute))
+		pr, _ = ApplyCheckSettlement(pr, SettlementCandidate{Head: sha(i), CheckRuns: tenChecks(i),
 			Generation: int64(i + 1), Snapshot: fmt.Sprintf("s%d", i), Failing: []string{"check-0"}})
 	}
 	if len(pr.Run.Steps) != maxRunSteps {

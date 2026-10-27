@@ -36,7 +36,7 @@ func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRe
 //
 // The move's planned mark is its last push that may change code on the chain (arrivalPlan): the
 // review App's sets it, anyone else's clears it, and a move of handoffs alone carries it. With no
-// chain, any push that left the head and may change code decides (headPush).
+// chain, the pushes that left the head and may change code decide (unchainedPlan).
 //
 // HeadCounted names the head the count last counted, and the attempt it marks runs on through every
 // head pushed on top of it until one is pushed onto a green verdict, or onto a settled head whose
@@ -45,8 +45,8 @@ func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRe
 // a red that counts nothing, is the same attempt, not a new one.
 func advance(pr record.PullRequest, headSHA string) (record.PullRequest, bool) {
 	planned, decided, chained := arrivalPlan(pr.Pushes, pr.HeadSHA, headSHA)
-	if pending := headPush(pr.Pushes, pr.HeadSHA, headSHA); !chained && pending != nil && pending.MayChangeCode() {
-		planned, decided = pending.ByReviewApp, true
+	if !chained {
+		planned, decided = unchainedPlan(pr.Pushes, pr.HeadSHA, headSHA)
 	}
 	spared := sparedMove(pr.Pushes, pr.HeadSHA, headSHA)
 	pr.Moves = madeMoves(pr.Moves, pr.HeadSHA, headSHA, chainOf(pr.Pushes, pr.HeadSHA, headSHA))
@@ -184,6 +184,25 @@ func headPush(pushes []record.ClassifiedPush, previous, head string) *record.Cla
 		}
 	}
 	return found
+}
+
+// unchainedPlan reads the planned mark off the pushes that left head when no chain of recorded
+// pushes leads to it from previous: the push that replaced previous, when the branch has one and
+// it may change code; else every push that left head and may change code, which plan the red when
+// all of them are the review App's and clear it when any is not - an answer that does not depend
+// on the order they were recorded in. decided is whether any such push is recorded.
+func unchainedPlan(pushes []record.ClassifiedPush, previous, head string) (planned, decided bool) {
+	planned = true
+	for _, p := range pushes {
+		if p.SHA != head || !p.MayChangeCode() {
+			continue
+		}
+		if p.Before == previous {
+			return p.ByReviewApp, true
+		}
+		planned, decided = planned && p.ByReviewApp, true
+	}
+	return planned && decided, decided
 }
 
 // HeadPushKnown says whether the push that left head is recorded (headPush), as the push that

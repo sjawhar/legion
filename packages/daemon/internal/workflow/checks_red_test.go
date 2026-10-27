@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -1015,6 +1016,34 @@ func TestAReopenedPullRequestJudgesItsNewHeadAsASynchronizeWould(t *testing.T) {
 					checksRed, blocked, attempts, mark, tc.checksRed, tc.blocked, tc.attempts, tc.mark)
 			}
 		})
+	}
+}
+
+// Each head is held from its own arrival, not from when the head run opened: h3's push is lost for
+// good, so the run h3 opened stays open, and h4 arrives on top of it an hour later. h4's red is held
+// for its own ten minutes, nothing told, and the pass's unchanged read decides it once that lapses.
+func TestAHeadThatJoinsAnOldRunIsHeldFromItsOwnArrival(t *testing.T) {
+	const required = "pr-checks-result"
+	start := time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC)
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+		Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "h2", CheckedHead: "h2", Failing: []string{},
+		CheckRuns: []record.AttemptRun{{Name: required, ID: 1}}, Required: []string{required}, FixAttempts: 1})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+	applyRefusingNothing(t, pool, readyEngineAt("merge-queue", start), syncedTo("h3"))
+	later := readyEngineAt("merge-queue", start.Add(time.Hour))
+	applyRefusingNothing(t, pool, later, syncedTo("h4"))
+	applyRefusingNothing(t, pool, later, pushedFromTo("h3", "h4", "src/widget.go", "legion-implementer[bot]"))
+	applyRefusingNothing(t, pool, later, settledAt("h4", required, 2, required))
+	if got, kinds := issuePhase(t, pool), noticeKinds(t, pool, "LEGION-208"); got != phase.Testing || len(kinds) != 0 {
+		t.Fatalf("an hour after the run opened, h4's red leaves the issue in %s and the architect told %v, want testing and nothing: h4 arrived just now", got, kinds)
+	}
+	applyRefusingNothing(t, pool, readyEngineAt("merge-queue", start.Add(time.Hour+redHold+time.Second)),
+		intake.RequiredChecks{Repo: "sjawhar/legion", Number: 42, Names: []string{required}})
+	if got := issuePhase(t, pool); got != phase.Implementing {
+		t.Fatalf("once h4's own hold lapses the issue is in %s, want implementing", got)
 	}
 }
 

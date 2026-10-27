@@ -459,9 +459,9 @@ type HeadRun struct {
 	Anchor Judgement        `json:"anchor"`
 	Pushes []ClassifiedPush `json:"pushes"`
 	Steps  []RunStep        `json:"steps"`
-	// Since is when the run opened, by the daemon's clock: a red is held while the run waits for a
-	// push, for a bounded time from then (workflow's holdsRed).
-	Since time.Time `json:"since,omitzero"`
+	// Decided is the head whose held red a lapsed hold let be decided as it stands (workflow's
+	// HoldLapsed), so the required-checks pass decides it once, not on every pass.
+	Decided string `json:"decided,omitempty"`
 }
 
 // Judgement is the part of a pull request a head run replays: its head, its fix-attempt count and
@@ -493,9 +493,11 @@ type Move struct {
 // RunStep is one fact a head run replays: exactly one of a head's arrival (Head), a CI settlement
 // (Settlement), a read of what the base branch requires (Required), the clearing of the head the
 // required workflows' runs were read at (WorkflowsCleared), or a reopen, which starts the CI
-// settlement afresh (Reopened).
+// settlement afresh (Reopened). At is when a head arrived, by the daemon's clock: a red at that
+// head is held for a bounded time from then (workflow's holdsRed).
 type RunStep struct {
 	Head             string        `json:"head,omitempty"`
+	At               time.Time     `json:"at,omitzero"`
 	Settlement       *Settlement   `json:"settlement,omitempty"`
 	Required         *RequiredRead `json:"required,omitempty"`
 	WorkflowsCleared bool          `json:"workflowsCleared,omitempty"`

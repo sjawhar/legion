@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -480,5 +481,43 @@ func TestAFailedRulesetsReadNeverDiscardsAnAlreadyDecodedConflict(t *testing.T) 
 	reasons := noticeReasons(t, pool, "checks-red")
 	if len(reasons) != 1 || !strings.Contains(reasons[0], want) {
 		t.Fatalf("checks-red notices %q, want one saying %q", reasons, want)
+	}
+}
+
+// A red held while its head waits for the push that reached it is decided by the required-checks
+// pass once the hold lapses, though the pass reads the required set unchanged: a push webhook lost
+// for good holds it no longer. The pass decides it once - the next pass sends nothing back again -
+// and a hold that has not lapsed is left held.
+func TestThePassDecidesARedWhoseHoldLapsed(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		arrived time.Duration
+		want    phase.Phase
+		red     int
+	}{
+		{"an hour after the head arrived", -time.Hour, phase.Implementing, 1},
+		{"a minute after the head arrived", -time.Minute, phase.Testing, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			seedCapture(t, pool, phase.Testing, "testing", record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleTester, Claim: "test-claim"})
+			setCapturePullRequest(t, pool, func(pr *record.PullRequest) {
+				pr.HeadSHA, pr.CheckedHead, pr.Failing, pr.Required = "code", "code", []string{"pr-checks-result"}, []string{"pr-checks-result"}
+				pr.CheckRuns = []record.AttemptRun{{Name: "pr-checks-result", ID: 3}}
+				pr.Run = &record.HeadRun{Steps: []record.RunStep{{Head: "code", At: time.Now().Add(tc.arrived)}},
+					Anchor: record.Judgement{HeadSHA: "prev", Failing: []string{}, Required: []string{"pr-checks-result"}, Workflows: []record.RequiredWorkflow{}}}
+			})
+			w := requiredRuntime(pool, mergeableStandIn(t, "true").URL, quietLogger())
+			for range 3 {
+				w.readRequiredChecks(context.Background())
+			}
+			got, pr := capturePhase(t, pool)
+			if red := noticeReasons(t, pool, "checks-red"); got != tc.want || len(red) != tc.red {
+				t.Fatalf("after three passes the issue is in %s with checks-red notices %q, want %s and %d", got, red, tc.want, tc.red)
+			}
+			if decided := pr.Run != nil && pr.Run.Decided == "code"; decided != (tc.red == 1) {
+				t.Fatalf("the lapse recorded as decided: %v, want %v (run %+v)", decided, tc.red == 1, pr.Run)
+			}
+		})
 	}
 }

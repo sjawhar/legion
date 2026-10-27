@@ -45,16 +45,17 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 // only a required check or workflow makes a head red (classify.HeadVerdict), so a new read can
 // send work back for a newly required check or a required workflow that failed, leave standing a
 // head red only on checks the base branch never required, and give a head its first verdict when
-// its set was never read. A read that says what is recorded changes nothing, unless a red was held
-// while a head waited for its push and the hold has lapsed (holdsRed): the pass's read then decides
-// the red as it stands, once a push webhook lost for good has had its time.
+// its set was never read. A read that says what is recorded changes nothing, unless a red held
+// while its head waited for a push has lapsed and is not decided yet (HoldLapsed): the pass sends
+// that read for it (daemon's readRequiredChecks), and it decides the red as it stands, once a push
+// webhook lost for good has had its time.
 func (e *Engine) requiredChecks(ctx context.Context, tx pgx.Tx, fact intake.RequiredChecks) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
 	if err != nil || pr == nil {
 		return intake.Result{}, err
 	}
 	if pr.RequiredReadUnchanged(fact.Names, fact.Workflows, fact.WorkflowsHead) {
-		if pr.Run == nil || e.holdsRed(*pr) {
+		if !e.HoldLapsed(*pr) {
 			return intake.Result{}, nil
 		}
 		return intake.Result{}, e.decideChecks(ctx, tx, pr, false)
@@ -121,6 +122,7 @@ func (e *Engine) mergeability(ctx context.Context, tx pgx.Tx, fact intake.PullRe
 // a red that sent the work back is told by its checks-red, and the next push onto it raises the
 // count.
 func (e *Engine) decideChecks(ctx context.Context, tx pgx.Tx, pr *record.PullRequest, requiredRead bool) error {
+	e.noteLapse(ctx, pr)
 	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
 		return err
 	}
@@ -500,32 +502,91 @@ func (e *Engine) reviewRound(issue record.Issue, row record.PhaseRow, pr *record
 // (holdsRed). In awaiting_merge a red withdraws the READY whatever it is (decideChecks), so nothing
 // is held there.
 func (e *Engine) standingRed(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) (bool, error) {
-	if issue.Phase == phase.AwaitingMerge || pr == nil || e.holdsRed(*pr) || !classify.RedSendsBack(*pr) || classify.FixAttemptCapHolds(*pr, e.cfg.MaxFixAttempts) {
+	if issue.Phase == phase.AwaitingMerge || pr == nil || !classify.RedSendsBack(*pr) {
+		return false, nil
+	}
+	if e.holdsRed(*pr) {
+		e.logOnCommit(ctx, "workflow: a red is held while its head waits for the push that reached it; the push, or the pass once the hold lapses, decides it",
+			"issue", pr.Issue, "pullRequest", pr.Number, "head", pr.HeadSHA, "heldSince", heldSince(*pr), "lapses", heldSince(*pr).Add(redHold))
+		return false, nil
+	}
+	if classify.FixAttemptCapHolds(*pr, e.cfg.MaxFixAttempts) {
 		return false, nil
 	}
 	return e.sendBack(ctx, tx, issue, pr)
 }
 
-// redHold bounds how long a red is held while a head waits for a push of its move: GitHub delivers
-// a push webhook and its synchronize seconds apart, and the required-checks pass, which ends a lapsed
-// hold (requiredChecks), reads every requiredChecksInterval (two minutes). A push webhook lost for
-// good, which nothing replays, then leaves the red to be judged as it stands, as before the head run.
+// redHold bounds how long a red is held while its head waits for a push of its move: GitHub
+// delivers a push webhook and its synchronize seconds apart, and the required-checks pass, which
+// ends a lapsed hold (HoldLapsed), reads every two minutes. A push webhook lost for good, which
+// nothing replays, then leaves the red to be judged as it stands, as before the head run.
 const redHold = 10 * time.Minute
 
-// holdsRed says whether pr's red is held: a head run is open (record.PullRequest.Run) - a head
-// arrived before every push of its move - and opened less than redHold ago. While it holds, whether
-// the red is planned, and the count it stands at, are not yet what every push arriving first would
-// make them, and a send-back cannot be taken back; the push that closes the run, or whose replay
-// changes the judgement, decides the checks (push), and so does the pass's next read once the
-// hold lapses (requiredChecks). A run with no opening time is not held.
-func (e *Engine) holdsRed(pr record.PullRequest) bool {
-	return pr.Run != nil && !pr.Run.Since.IsZero() && e.now().Before(pr.Run.Since.Add(redHold))
+// heldSince is when pr's head arrived while a head run was open - the arrival time on the run's
+// last head step, which is the head's own (stampRun) - or zero when no run is open or the step
+// carries no time. Each head is held from its own arrival: a head that joins an open run gets its
+// full hold whenever the run opened.
+func heldSince(pr record.PullRequest) time.Time {
+	if pr.Run == nil {
+		return time.Time{}
+	}
+	for i := len(pr.Run.Steps) - 1; i >= 0; i-- {
+		if step := pr.Run.Steps[i]; step.Head != "" {
+			return step.At
+		}
+	}
+	return time.Time{}
 }
 
-// stampRun records when pr's head run opened, if one opened just now (record.HeadRun.Since).
+// holdsRed says whether pr's red is held: a head run is open (record.PullRequest.Run) - a head
+// arrived before every push of its move - and the head arrived less than redHold ago. While it
+// holds, whether the red is planned, and the count it stands at, are not yet what every push
+// arriving first would make them, and a send-back cannot be taken back; the push that closes the
+// run, or whose replay changes the judgement, decides the checks (push), and so does the pass once
+// the hold lapses (HoldLapsed).
+func (e *Engine) holdsRed(pr record.PullRequest) bool {
+	since := heldSince(pr)
+	return !since.IsZero() && e.now().Before(since.Add(redHold))
+}
+
+// HoldLapsed says whether the hold on pr's red has lapsed by the engine's clock and nothing has
+// decided the red since: the required-checks pass then sends its read even when it says what is
+// recorded (daemon's readRequiredChecks), and the engine decides the red (requiredChecks).
+func (e *Engine) HoldLapsed(pr record.PullRequest) bool {
+	since := heldSince(pr)
+	return !since.IsZero() && !e.now().Before(since.Add(redHold)) && pr.Run.Decided != pr.HeadSHA
+}
+
+// noteLapse marks pr's lapsed hold decided (record.HeadRun.Decided) and says so, when the checks
+// are about to be decided with the hold lapsed, so the pass does not send the read again.
+func (e *Engine) noteLapse(ctx context.Context, pr *record.PullRequest) {
+	if !e.HoldLapsed(*pr) {
+		return
+	}
+	run := *pr.Run
+	run.Decided = pr.HeadSHA
+	pr.Run = &run
+	e.logOnCommit(ctx, "workflow: the hold on a red whose head waited for its push lapsed; the red is decided as it stands",
+		"issue", pr.Issue, "pullRequest", pr.Number, "head", pr.HeadSHA, "heldSince", heldSince(*pr), "held", e.now().Sub(heldSince(*pr)))
+}
+
+// stampRun records when pr's head arrived on the run's last head step, the step that arrival
+// added (record.RunStep.At), when a head run is open.
 func (e *Engine) stampRun(pr *record.PullRequest) {
-	if pr.Run != nil && pr.Run.Since.IsZero() {
-		pr.Run.Since = e.now()
+	if pr.Run == nil {
+		return
+	}
+	for i := len(pr.Run.Steps) - 1; i >= 0; i-- {
+		if pr.Run.Steps[i].Head == "" {
+			continue
+		}
+		if pr.Run.Steps[i].At.IsZero() {
+			run := *pr.Run
+			run.Steps = append([]record.RunStep{}, run.Steps...)
+			run.Steps[i].At = e.now()
+			pr.Run = &run
+		}
+		return
 	}
 }
 
