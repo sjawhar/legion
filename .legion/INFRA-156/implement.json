@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-156",
-  "completed": "2026-10-27T11:52:00Z",
+  "completed": "2026-10-27T12:30:00Z",
   "proof": [
     {
       "criterion": "A3 (server): a test block type declaring a block-pointer attribute accepts a valid block reference and refuses a malformed one",
       "surface": "the real Dispatch server process (packages/dispatch/e2e/run-server.sh, go build of the working copy) on a local Postgres 17 with pgvector and real migrations, built with a scratch blocks.json adding requirement and claim{serves: block[], targets [requirement]}; driven over HTTP",
       "command": "bash $TMPDIR/infra156/a3-e2e.sh (script posted on the pull request), steps 2 and 4",
       "observed": "upload of checks.md holding :::claim{#c1 serves=\"dispatch://CORE-1/spec#b-r1\"} -> 201; serves=\"dispatch://CORE-1/spec#x\", \"...#b-r%311\" (over-encoded), \"dispatch://CORE-1/artifact/spec#b-r1\" (non-canonical spec spelling), a doubled space and a leading space -> each 400 INVALID_MARKDOWN naming typed block \"claim\" attribute \"serves\" and the bad value",
-      "headSha": "bca854bac517802f180c9d295a99150c99ee695a",
+      "headSha": "4f84c42bc495cf12a6d827c71e69088e450ecfc9",
       "negativeControl": "the malformed values above, each refused 400 INVALID_MARKDOWN with no version written"
     },
     {
@@ -17,7 +17,7 @@
       "surface": "same real server process over HTTP (upload route and POST /api/v1/artifacts/{id}/edits)",
       "command": "bash $TMPDIR/infra156/a3-e2e.sh, step 4",
       "observed": "serves naming the spec's paragraph -> 400 INVALID_MARKDOWN 'block pointer refused: typed block \"claim\" #c1 attribute \"serves\" points at dispatch://CORE-1/spec#b-<paragraph id>, a \"paragraph\" block; it points only at requirement'; naming callout k1 -> 400 INVALID_MARKDOWN naming \"callout\"; an edit op inserting a claim pointing at k1 -> 400 INVALID_OP field \"attributes\" with the same message",
-      "headSha": "bca854bac517802f180c9d295a99150c99ee695a",
+      "headSha": "4f84c42bc495cf12a6d827c71e69088e450ecfc9",
       "negativeControl": "the same pointer at requirement r1 -> 201 (the allowed type is accepted)"
     },
     {
@@ -25,7 +25,7 @@
       "surface": "same real server process, read over HTTP and with the real dispatch CLI (bun packages/envoy-client/bin/dispatch.ts read)",
       "command": "bash $TMPDIR/infra156/a3-e2e.sh, step 3",
       "observed": "dispatch read --ref dispatch://CORE-1/spec#b-r1 prints 'Referenced by: - serves block dispatch://CORE-1/artifact/checks-md#b-c1'; GET /api/v1/references?to=...#b-r1&kind=serves -> [{kind: serves, node: dispatch://CORE-1/artifact/checks-md#b-c1}]; &kind=mentions -> []; GET /api/v1/block-links?from=checks.md&to=spec -> [{kind: serves, from: c1, to: r1}]",
-      "headSha": "bca854bac517802f180c9d295a99150c99ee695a",
+      "headSha": "4f84c42bc495cf12a6d827c71e69088e450ecfc9",
       "negativeControl": "?kind=nope -> 400 INVALID_KIND naming the structural kinds and the declared block[] names (serves); checks.md re-uploaded with serves=\"\" -> 201 and ?to=...#b-r1 lists no edge"
     },
     {
@@ -33,7 +33,7 @@
       "surface": "same real server process over HTTP",
       "command": "bash $TMPDIR/infra156/a3-e2e.sh, retype steps",
       "observed": "edit op retype r1 -> callout on the spec -> 200, then ?to=...#b-r1 lists no edge; retype back to requirement -> 200, the serves edge from c1 is listed again",
-      "headSha": "bca854bac517802f180c9d295a99150c99ee695a",
+      "headSha": "4f84c42bc495cf12a6d827c71e69088e450ecfc9",
       "negativeControl": "while r1 is a callout the serves edge is absent from ?to= (a target of a disallowed type is not listed)"
     },
     {
@@ -41,7 +41,7 @@
       "surface": "same real server process over HTTP, with a scratch type loose{serves: block[] with no targets} beside claim{serves: block[] targets [requirement]}",
       "command": "bash $TMPDIR/infra156/a3-e2e.sh, 'review finding 1' steps",
       "observed": "loose.md holding :::loose{#c1 serves=\"dispatch://CORE-1/spec#b-k1\"} -> 201; the same document re-uploaded as :::claim{#c1 serves=...k1} -> 400 INVALID_MARKDOWN 'block pointer refused: typed block \"claim\" #c1 attribute \"serves\" points at dispatch://CORE-1/spec#b-k1, a \"callout\" block; it points only at requirement'; edit op {op: retype, block: c1, type: claim, attributes: {serves: [k1]}} -> 400 INVALID_OP field \"attributes\" with the same message",
-      "headSha": "bca854bac517802f180c9d295a99150c99ee695a",
+      "headSha": "4f84c42bc495cf12a6d827c71e69088e450ecfc9",
       "negativeControl": "the same retype op with serves at requirement r1 -> 200, and an unrelated insert into loose.md -> 200"
     }
   ],
@@ -74,6 +74,7 @@
   "discoveredComplexity": [
     "The plan named no test for RebuildDocument's refusal of supplied markdown; TestARebuildFromMarkdownRefusesABlockPointerToADisallowedType (api) was added, and fails with the check disabled (status 200 where 400 is wanted).",
     "Conflict round: main was merged forward twice (acebae8a against 1b8d5c13, f530ab46 against 2e8c68cd), with the migration renumbered 0129 -> 0130 and the proof-editor AGENTS.md counts and changelogs combined. Fingerprint 68aba2dc… (e7927e03/73bc10a0) -> fd8b67c7… (acebae8a) -> 98c0d33d… (f530ab46), changed in prose and migration file names only; no Go, TypeScript or SQL statement changed. The E2E script was rerun at f530ab46 with the same observations.",
-    "Review round 1 (bca854ba): finding 1 fixed (held key gains the typed block's type in pmdoc.CheckBlockPointers; the editor's retype treats held as empty when the type changes), with a pmdoc row and an editor test that each fail before the fix; the five fast-follow cleanups folded in (contracts blockPointerValueProblem/blockPointersProblem give the refusal reason; BlockPointer/refs.Pointer carry the parsed text.Ref; refs pointerPairs; a shared findBlock in block-pointers.ts, now returning the first holder of a repeated id as the server reads it; one document_blocks query per check, node_id = any($1)); the PR body gains the Contract change census."
+    "Review round 1 (bca854ba): finding 1 fixed (held key gains the typed block's type in pmdoc.CheckBlockPointers; the editor's retype treats held as empty when the type changes), with a pmdoc row and an editor test that each fail before the fix; the five fast-follow cleanups folded in (contracts blockPointerValueProblem/blockPointersProblem give the refusal reason; BlockPointer/refs.Pointer carry the parsed text.Ref; refs pointerPairs; a shared findBlock in block-pointers.ts, now returning the first holder of a repeated id as the server reads it; one document_blocks query per check, node_id = any($1)); the PR body gains the Contract change census.",
+    "Acceptance send-back (ce7d869f, then forward merge 4f84c42b against main 8ea7d06d): the reviewer's three proof-editor items, behaviour unchanged. blockPointerRefusal takes the prior node and derives the block id and the held pointers itself (held only when the type is unchanged). parseBlockPointers calls contracts' parseBlockPointerValue and asks blockPointerValueProblem only for the refusal text. The comments and docs that claimed the TS and Go refusals use the same words now say what differs: a value is quoted with JSON.stringify where Go uses %q, and the editor's type refusal has no `block pointer refused:` prefix. main conflicted in packages/proof-editor/AGENTS.md (INFRA-526's edit kind), so the count of edit kinds is now eighteen. Editor 133 pass, contracts 332 pass, and the Go block-pointer tests pass; the E2E output is identical to the run at bca854ba."
   ]
 }
