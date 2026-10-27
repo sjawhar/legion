@@ -75,11 +75,14 @@ import (
 )
 
 const (
-	// horizonPendingLimit bounds the observations waiting for a later one to prove them safe.
-	// Any later observation can prove any earlier one, so when the list is full the newest
-	// observation takes the last slot: a long stall costs no memory, only the latency of proving
-	// the newest observation once the stall ends.
-	horizonPendingLimit = 64
+	// horizonPendingLimit bounds the observations waiting for a later one to prove them safe. An
+	// entry is 48 bytes, so the list stays under 48 KiB. Writes that overlap without a break keep
+	// every observation unproven for D, the length of the open transactions they overlap. While
+	// fewer than horizonPendingLimit observations come in D, every one is kept, and H reaches each
+	// as soon as a later snapshot proves it. Past that, thinPending spreads the kept observations
+	// evenly over D rather than starve the newest, so H trails by at most about
+	// 4D/horizonPendingLimit more.
+	horizonPendingLimit = 1024
 	// Await's re-observation backoff: 10 ms doubling to 250 ms.
 	horizonBackoffMin = 10 * time.Millisecond
 	horizonBackoffMax = 250 * time.Millisecond
@@ -137,7 +140,7 @@ type Horizon struct {
 	// so one in flight across a Reset cannot bring back what the Reset forgot.
 	generation uint64
 	// started counts observations ever started and is never reset: an observation's number is
-	// its order, and Await waits for one numbered above the count when it was called.
+	// its order, and Safe and Await each wait for one numbered above the count when called.
 	started  uint64
 	inFlight *horizonFlight
 	// safe is H. safeThrough is the number of the newest observation H covers: proven safe, or
@@ -183,11 +186,21 @@ func NewHorizon(db HorizonDB) *Horizon {
 	}
 }
 
-// Safe runs one observation (shared with concurrent callers), checks the pending observations
-// against it and returns H, the highest id at or below which every event is final (0 before any
-// observation has been proven safe).
+// Safe runs one observation that starts after the call (shared with concurrent callers), checks
+// the pending observations against it and returns H, the highest id at or below which every
+// event is final (0 before any observation has been proven safe).
+//
+// Like Await, Safe never settles for an observation already in flight when it is called: that
+// one took its snapshot before the call and can miss an id committed just before it, and if its
+// A were at or below H it would leave Pending false, so the reader would arm no re-read for that
+// id. Safe waits it out and joins or runs the next. Its own observation saw every id committed
+// before the call, so each such id is at or below H, or stands above it and keeps Pending true
+// until H reaches it.
 func (h *Horizon) Safe(ctx context.Context) (int64, error) {
-	if err := h.observe(ctx, 0); err != nil {
+	h.mu.Lock()
+	after := h.started
+	h.mu.Unlock()
+	if err := h.observe(ctx, after); err != nil {
 		return 0, err
 	}
 	h.mu.Lock()
@@ -286,7 +299,10 @@ func (h *Horizon) observe(ctx context.Context, after uint64) error {
 }
 
 // run takes flight's observation and records it, unless a Reset came between. A stall warning it
-// finds due runs after the waiters are released.
+// finds due runs on a goroutine of its own: its diagnosis query can take up to
+// horizonDiagnosisTimeout, which would otherwise hold up the relay, the hub or the handler that
+// ran the observation. stalled has already marked the warning logged, so the rate limit holds
+// however long the diagnosis takes.
 func (h *Horizon) run(ctx context.Context, flight *horizonFlight) {
 	observation, xmin, err := h.take(ctx)
 	h.mu.Lock()
@@ -303,7 +319,7 @@ func (h *Horizon) run(ctx context.Context, flight *horizonFlight) {
 	h.mu.Unlock()
 	close(flight.done)
 	if stalled != nil {
-		h.warnStall(ctx, *stalled, safe)
+		go h.warnStall(ctx, *stalled, observation.at.Sub(stalled.at), safe)
 	}
 }
 
@@ -369,11 +385,38 @@ func (h *Horizon) record(observation horizonObservation, xmin uint64) {
 		h.safeThrough = max(h.safeThrough, observation.number)
 		return
 	}
-	if len(h.pending) == horizonPendingLimit {
-		h.pending[len(h.pending)-1] = observation
-		return
+	if len(h.pending) >= horizonPendingLimit {
+		h.thinPending()
 	}
 	h.pending = append(h.pending, observation)
+}
+
+// thinPending makes room in the full pending list. Any later observation can prove any earlier
+// one, so dropping one costs only latency: when a snapshot proves a dropped observation, H stops
+// at the A of the kept one before it. The kept observations are therefore spread evenly in time,
+// not by position. Walking from the oldest, which it keeps (the stall warning reports its age),
+// it keeps an observation only when the next one was recorded more than step after the last one
+// kept, and it always keeps the newest. step is four times the list's span per slot,
+// 4·span/horizonPendingLimit, rounded up to at least a nanosecond.
+//
+// Two observations it keeps next to each other were then recorded at most step apart, unless
+// they were next to each other already. So any two neighbours in the list are at most the
+// largest step any thinning used, or the time between two observations, apart, and each step is
+// at most 4/horizonPendingLimit of the oldest observation's wait, the length of the open
+// transactions holding H back. Of any three observations it keeps in a row, the third was
+// recorded more than step after the first, so at most 2·span/step + 2, about half the limit,
+// survive, and the newest observation always gets a slot. h.mu is held.
+func (h *Horizon) thinPending() {
+	last := len(h.pending) - 1
+	span := h.pending[last].at.Sub(h.pending[0].at)
+	step := max((4*span+horizonPendingLimit-1)/horizonPendingLimit, 1)
+	kept := h.pending[:1]
+	for i := 1; i < last; i++ {
+		if h.pending[i+1].at.Sub(kept[len(kept)-1].at) > step {
+			kept = append(kept, h.pending[i])
+		}
+	}
+	h.pending = append(kept, h.pending[last])
 }
 
 // stalled returns the oldest pending observation when it has waited stallAfter and no warning
@@ -390,12 +433,13 @@ func (h *Horizon) stalled(now time.Time) *horizonObservation {
 	return &oldest
 }
 
-// warnStall logs that oldest has waited too long to be proven safe, naming the oldest open
-// transaction that holds a transaction id. The diagnosis runs past the caller's cancellation
-// under its own short deadline, and a failed one is logged in the warning, never returned.
-func (h *Horizon) warnStall(ctx context.Context, oldest horizonObservation, safe int64) {
+// warnStall logs that oldest has waited pendingFor to be proven safe, naming the oldest open
+// transaction that holds a transaction id. It runs on a goroutine of its own (see run), and the
+// diagnosis runs past the caller's cancellation under its own short deadline; a failed one is
+// logged in the warning, never returned.
+func (h *Horizon) warnStall(ctx context.Context, oldest horizonObservation, pendingFor time.Duration, safe int64) {
 	attrs := []any{
-		"pending_for", h.now().Sub(oldest.at), "observed_id", oldest.newest, "safe_horizon", safe,
+		"pending_for", pendingFor, "observed_id", oldest.newest, "safe_horizon", safe,
 		"observer_xid", oldest.xid,
 	}
 	diagnosis, cancel := context.WithTimeout(context.WithoutCancel(ctx), horizonDiagnosisTimeout)

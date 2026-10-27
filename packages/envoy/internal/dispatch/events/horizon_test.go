@@ -1,9 +1,9 @@
 package events
 
 import (
-	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -54,25 +54,74 @@ func TestHorizonProvesAnObservationOnlyFromALaterSnapshot(t *testing.T) {
 	}
 }
 
-// A writer held open for longer than the pending list holds observations must not cost memory
-// past the list's bound, and once it ends the horizon must reach the newest id observed, not
-// the newest one that happened to fit in the list.
-func TestHorizonKeepsTheNewestObservationWhenThePendingListIsFull(t *testing.T) {
+// Writes that overlap without a break keep every observation unproven for as long as the open
+// transactions it overlaps. Scripted: observation i takes transaction id 1000+10i and sees id i,
+// and its snapshot's xmin is just above observation i-window's transaction id, so it proves the
+// observations up to i-window and no later one. Observations are 10 ms apart. H must then follow
+// i-window closely after every observation, however many observations the window holds, and the
+// pending list must stay within its bound. A window shorter than the bound keeps every
+// observation, so H is exactly i-window. A longer one is thinned: thinning keeps neighbours at
+// most step = ceil(4·span/horizonPendingLimit) apart, and span < window·10 ms, so neighbours are
+// at most 4·window/horizonPendingLimit observations apart and H trails i-window by fewer than
+// that: lagBound = 4·window/horizonPendingLimit (0 for the short window, 12 for the long one).
+func TestHorizonFollowsContinuouslyOverlappingWrites(t *testing.T) {
+	for _, window := range []int{200, 3 * horizonPendingLimit} {
+		t.Run(fmt.Sprintf("window of %d observations", window), func(t *testing.T) {
+			ctx := context.Background()
+			lagBound := int64(4 * window / horizonPendingLimit)
+			db := &scriptedHorizonDB{}
+			horizon := NewHorizon(db)
+			clock := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+			horizon.now = func() time.Time { return clock }
+			horizon.stallAfter = 24 * time.Hour // the stall warning is not under test
+			xid := func(i int) uint64 { return uint64(1000 + 10*i) }
+			for i := range window + 4000 {
+				clock = clock.Add(10 * time.Millisecond)
+				xmin := xid(0) // proves nothing
+				if i >= window {
+					xmin = xid(i-window) + 1
+				}
+				db.script = []scriptedObservation{{newest: int64(i), xmin: xmin, xid: xid(i)}}
+				safe, err := horizon.Safe(ctx)
+				if err != nil {
+					t.Fatalf("observation %d: %v", i, err)
+				}
+				if kept := len(horizon.pending); kept > horizonPendingLimit {
+					t.Fatalf("after observation %d: %d pending observations, want at most %d", i, kept, horizonPendingLimit)
+				}
+				provable := max(int64(i-window), 0)
+				if safe > provable || safe < provable-lagBound {
+					t.Fatalf("after observation %d: Safe = %d, want it in [%d, %d]: proven through observation %d, within %d of it",
+						i, safe, max(provable-lagBound, 0), provable, provable, lagBound)
+				}
+			}
+		})
+	}
+}
+
+// A writer held open across more observations than the pending list holds must cost no memory
+// past the list's bound, and once it ends the horizon must reach the newest id observed, not the
+// newest one that happened to fit in the list.
+func TestHorizonReachesTheNewestIDAfterAStallLongerThanThePendingList(t *testing.T) {
 	ctx := context.Background()
 	const stuck = 3 * horizonPendingLimit
 	db := &scriptedHorizonDB{}
 	for i := range stuck {
 		db.script = append(db.script, scriptedObservation{newest: int64(i + 1), xmin: 10, xid: uint64(300 + i)})
 	}
-	db.script = append(db.script, scriptedObservation{newest: stuck, xmin: 1000, xid: 1000})
+	db.script = append(db.script, scriptedObservation{newest: stuck, xmin: 100_000, xid: 100_000})
 	horizon := NewHorizon(db)
+	clock := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	horizon.now = func() time.Time { return clock }
+	horizon.stallAfter = 24 * time.Hour // the stall warning is not under test
 	for range stuck {
+		clock = clock.Add(10 * time.Millisecond)
 		if safe, err := horizon.Safe(ctx); err != nil || safe != 0 {
 			t.Fatalf("Safe behind a writer open since transaction 10 = %d, %v; want 0", safe, err)
 		}
-	}
-	if kept := len(horizon.pending); kept > horizonPendingLimit {
-		t.Fatalf("pending observations = %d, want at most %d", kept, horizonPendingLimit)
+		if kept := len(horizon.pending); kept > horizonPendingLimit {
+			t.Fatalf("pending observations = %d, want at most %d", kept, horizonPendingLimit)
+		}
 	}
 	if safe, err := horizon.Safe(ctx); err != nil || safe != stuck {
 		t.Fatalf("Safe once the writer ended = %d, %v; want %d", safe, err, stuck)
@@ -87,12 +136,11 @@ func TestHorizonStallWarningNamesTheHolderAndNeverFailsSafe(t *testing.T) {
 	for i := range 4 {
 		db.script = append(db.script, scriptedObservation{newest: 5, xmin: 10, xid: uint64(20 + i)})
 	}
-	var logged bytes.Buffer
+	logged := &storetest.LockedLog{}
 	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
 	horizon := NewHorizon(db)
 	horizon.now = func() time.Time { return now }
-	horizon.logger = slog.New(slog.NewTextHandler(&logged, nil))
-	warnings := func() int { return strings.Count(logged.String(), "event horizon held back") }
+	horizon.logger = slog.New(slog.NewTextHandler(logged, nil))
 
 	for step, advance := range []time.Duration{0, 6 * time.Second, 14 * time.Second, 20 * time.Second} {
 		now = now.Add(advance)
@@ -113,13 +161,13 @@ func TestHorizonStallWarningNamesTheHolderAndNeverFailsSafe(t *testing.T) {
 			t.Fatalf("Safe at step %d = %d, %v; want 0 and no error", step, safe, err)
 		}
 		want := []int{0, 1, 1, 2}[step]
-		if got := warnings(); got != want {
+		if got := waitForStallWarnings(logged, want); got != want {
 			t.Fatalf("stall warnings after step %d = %d, want %d; log:\n%s", step, got, want, logged.String())
 		}
 	}
 	lines := strings.Split(strings.TrimSpace(logged.String()), "\n")
-	if !strings.Contains(lines[0], "diagnosis_error=") {
-		t.Fatalf("first warning does not report its failed diagnosis: %s", lines[0])
+	if !strings.Contains(lines[0], "diagnosis_error=") || !strings.Contains(lines[0], "pending_for=6s") {
+		t.Fatalf("first warning does not report its failed diagnosis and its 6 s wait: %s", lines[0])
 	}
 	for _, field := range []string{"pid=4242", "application_name=holder-app", "state=\"idle in transaction\"", "xact_start="} {
 		if !strings.Contains(lines[1], field) {
@@ -301,8 +349,66 @@ func TestHorizonResetDiscardsAnObservationInFlight(t *testing.T) {
 	}
 }
 
-// Every reader of a process calls Safe; concurrent calls must share an observation, since each
-// one costs a round trip and a transaction id.
+// Safe must not settle for an observation already in flight when it is called: that one's
+// snapshot can predate an event committed just before the call, and with its A at or below H it
+// leaves Pending false, so a reader would arm no re-read and the event would wait for the next
+// notification however long that takes. Whatever Safe returns, an event committed before the call
+// must be at or below H or keep Pending true.
+func TestHorizonSafeWaitsOutAnObservationInFlightBeforeTheCall(t *testing.T) {
+	database := storetest.Open(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	gated := &gatedHorizonDB{HorizonDB: database.Pool, observed: make(chan struct{}), release: make(chan struct{})}
+	horizon := NewHorizon(gated)
+	first := commitHorizonEvent(ctx, t, database)
+	if safe, err := horizon.Await(ctx); err != nil || safe != first {
+		t.Fatalf("Await on a quiet log = %d, %v; want %d", safe, err, first)
+	}
+
+	gated.armed.Store(true)
+	stale := make(chan error, 1)
+	go func() {
+		_, err := horizon.Safe(ctx)
+		stale <- err
+	}()
+	<-gated.observed // the stale observation has read the log and committed
+	id := commitHorizonEvent(ctx, t, database)
+	type result struct {
+		safe int64
+		err  error
+	}
+	called := make(chan result, 1)
+	go func() {
+		safe, err := horizon.Safe(ctx)
+		called <- result{safe, err}
+	}()
+	select {
+	case got := <-called:
+		t.Fatalf("Safe = %d, %v while the observation in flight before the call is held", got.safe, got.err)
+	case <-time.After(100 * time.Millisecond): // let the call reach the observation in flight
+	}
+	close(gated.release)
+	if err := <-stale; err != nil {
+		t.Fatalf("Safe that ran the stale observation: %v", err)
+	}
+	got := <-called
+	if got.err != nil {
+		t.Fatalf("Safe after committing id %d: %v", id, got.err)
+	}
+	if got.safe < id && !horizon.Pending() {
+		t.Fatalf("Safe after committing id %d = %d with Pending false: a reader would never re-read for it", id, got.safe)
+	}
+	horizon.mu.Lock()
+	observed := horizon.newest
+	horizon.mu.Unlock()
+	if observed < id {
+		t.Fatalf("Safe after committing id %d returned from observations that saw only up to %d", id, observed)
+	}
+}
+
+// Every reader of a process calls Safe; concurrent calls must share observations, since each one
+// costs a round trip and a transaction id. Callers that arrive while one is in flight wait it out
+// and share the next.
 func TestHorizonConcurrentSafeCallsShareAnObservation(t *testing.T) {
 	database := storetest.Open(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -353,11 +459,25 @@ func TestHorizonStallWarningNamesAnOpenTransaction(t *testing.T) {
 	if _, err := horizon.Safe(ctx); err != nil {
 		t.Fatalf("Safe: %v", err)
 	}
+	waitForStallWarnings(logged, 1)
 	warning := logged.Lines("event horizon held back")
 	if warning == "" || strings.Contains(warning, "diagnosis_error") || !strings.Contains(warning, "pid=") {
 		t.Fatalf("stall warning does not name an open transaction:\n%s", logged.String())
 	}
 	t.Log(strings.TrimSpace(warning))
+}
+
+// waitForStallWarnings waits up to ten seconds for logged to hold want stall warnings, which a
+// Horizon logs on a goroutine of its own, and returns how many it holds.
+func waitForStallWarnings(logged *storetest.LockedLog, want int) int {
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		got := strings.Count(logged.String(), "event horizon held back")
+		if got >= want || time.Now().After(deadline) {
+			return got
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // requireHorizonBelow asserts that Safe stays below id however often it is asked, and that Await
