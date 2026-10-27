@@ -8,15 +8,16 @@
 # `Node:` line of `dispatch read`; the older document references route.
 #
 # Inputs: DISPATCH_URL (the server), DISPATCH_TOKEN or DISPATCH_TOKEN_FILE (an agent bearer, read
-# here and never printed), PROJECT (an existing project key), COMPONENT_SOURCE (where the component
-# nodes come from: `fixture` seeds the harness's fake GitHub, on FAKE_GITHUB_PORT, with a
-# two-component model in acme/r12-arch, replacing every repository it served, and adds that
-# repository as an architecture source of PROJECT; `existing` reads the first project with a
-# component that has a parent, and writes nothing; `none` proves the server has no architecture
-# source). It writes two issues in PROJECT, the second a child of the first holding an ask, and
-# resolves the ask and closes both, also when a check fails; it removes the source `fixture` added
-# the same way. Each passing check prints `PASS: <section> <what>`; the first failing one prints
-# `FAIL: <section> <what>: <observed>` and the script exits 1.
+# here and never printed), PROJECT (an existing project key), and optionally COMPONENT_SOURCE
+# (where the component nodes come from: `fixture` seeds the harness's fake GitHub, on
+# FAKE_GITHUB_PORT, with a two-component model in acme/r12-arch, replacing every repository it
+# served, and adds that repository as an architecture source of PROJECT; `existing` reads the first
+# project with a component that has a parent, and writes nothing; `none` proves the server has no
+# architecture source; unset, the script reads no component node and says so on one
+# `SKIP: R12 component …` line). It writes two issues in PROJECT, the second a child of the first
+# holding an ask, and resolves the ask and closes both, also when a check fails; it removes the
+# source `fixture` added the same way. Each passing check prints `PASS: <section> <what>`; the first
+# failing one prints `FAIL: <section> <what>: <observed>` and the script exits 1.
 #
 # Every check is `cmd || fail …`, never part of an `&&` list: under `set -e` a failing command
 # anywhere but last in such a list does not stop the script.
@@ -28,18 +29,17 @@ set +x
 usage() {
   cat >&2 <<'USAGE'
 Usage: DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE \
-         COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9022 block-graph.sh
+         [COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9022] block-graph.sh
        (DISPATCH_TOKEN_FILE=<file holding the bearer> in place of DISPATCH_TOKEN;
        COMPONENT_SOURCE=existing reads a component the server holds, COMPONENT_SOURCE=none proves
-       it holds none, and neither takes FAKE_GITHUB_PORT)
+       it holds none, and neither takes FAKE_GITHUB_PORT; unset, no component node is read)
 USAGE
 }
 
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-require_env DISPATCH_URL PROJECT COMPONENT_SOURCE
-# shellcheck disable=SC2153 # COMPONENT_SOURCE is the caller's input, checked by name above
-readonly component_source="$COMPONENT_SOURCE"
+require_env DISPATCH_URL PROJECT
+readonly component_source="${COMPONENT_SOURCE-}"
 case "$component_source" in
   fixture)
     require_env FAKE_GITHUB_PORT
@@ -49,7 +49,7 @@ case "$component_source" in
       exit 2
     }
     ;;
-  existing | none) ;;
+  existing | none | "") ;;
   *)
     printf 'COMPONENT_SOURCE is %s; want fixture, existing or none\n' "$component_source" >&2
     usage
@@ -721,8 +721,11 @@ component with a parent: COMPONENT_SOURCE=existing needs one"
       "this server has architecture sources, so run with COMPONENT_SOURCE=existing: $(body)"
     pass R12 "component: this server has no architecture source, so it holds no component node"
     ;;
+  "")
+    printf 'SKIP: R12 component: COMPONENT_SOURCE is unset, so no component node is read; set it to fixture (with FAKE_GITHUB_PORT), existing or none to read one\n'
+    ;;
 esac
-if [[ "$component_source" != none ]]; then
+if [[ "$component_source" == fixture || "$component_source" == existing ]]; then
   component_ref="dispatch://$component_project/component/$component"
   component_parent_ref="dispatch://$component_project/component/$component_parent"
   node_of R12 "$component_parent_ref"

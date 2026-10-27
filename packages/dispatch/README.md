@@ -154,7 +154,9 @@ passing check prints `PASS: <section> <what>`; the first failure prints
 - `DISPATCH_TOKEN`, an agent bearer, or `DISPATCH_TOKEN_FILE`, a file holding one, which the script
   reads itself and never prints;
 - `PROJECT`, an existing project key;
-- `COMPONENT_SOURCE`, where the component nodes come from:
+- `COMPONENT_SOURCE`, optional, where the component nodes come from (unset, the script reads no
+  component node and prints one
+  `SKIP: R12 component: COMPONENT_SOURCE is unset, so no component node is read; …` line):
   - `fixture` seeds the harness's fake GitHub on `FAKE_GITHUB_PORT` (9022 under
     `bun run dispatch:local`) with a two-component model in `acme/r12-arch` (`web`, part of
     `platform`), replacing every repository the fake served, adds that repository as an
