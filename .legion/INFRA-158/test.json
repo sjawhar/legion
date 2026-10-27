@@ -2,47 +2,47 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-158",
-  "completed": "2026-10-27T01:08:00Z",
-  "round": 7,
+  "completed": "2026-10-27T02:20:00Z",
+  "round": 8,
   "generation": 4,
-  "head": "52159aaf335f",
+  "head": "61b165e79e06",
   "verdictProvider": "No subagent judged anything in this round; the tester's own session ran every check, so no provider or model needs naming.",
-  "scope": "52159aaf changes only the web app (connection.ts, pending-sync.ts) and its tests; the server is unchanged since round 6's 58b805d9.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the gap case independently with my own WebSocket gate, which holds every server frame except the authentication answer (the implementer's test drops frames with admitWithoutSync), against the head web app and a web app built without the fix."
+    "how": "Recorded the server's real frame order and drove the reopen, offline, second close and typing cases in that order with my own throwaway Playwright spec, against the head web app and the 52159aaf web app; re-drove the unloadable close and rebuild that 312a14eb refactored."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Review round 5: what a person types between a writable reconnect's authentication and its sync is stored, survives a cut and a reload, and reaches the server",
-      "surface": "Dispatch's Playwright harness (chromium and iphone) against the head's Go server and Postgres, with a throwaway spec (deleted after)",
-      "command": "Agent spec with headings, issue closed; open read-only; reopen; wait until the page drops the closed banner; gate the next socket (authentication passes, every other server frame held); cut; type 'typed in the gap'; count IndexedDB rows; cut with new sockets held; reload; release. bunx playwright test zz-tester-probe.e2e.ts --project chromium --project iphone --repeat-each 2 --workers 1 (DISPATCH_E2E_REUSE_SERVERS=1)",
-      "observed": "4 of 4 passed: the editor turned writable at authentication; 18 rows were stored in the gap; after the reload the status said 'saved in this browser, not sent yet'; the text reached the server; no 'rebuilt since' notice.",
-      "headSha": "52159aaf335f",
-      "negativeControl": "The same spec against the web app built with connection.ts and pending-sync.ts restored to 52159aaf's parent failed 2 of 2 at the row count: Expected >= 16, Received 0, so the gap typing is never stored."
+      "criterion": "Review round 6: in the server's real frame order a read-only load stores and holds nothing, so a reopen, an offline spell and a second close show no false unsent-edit notice",
+      "surface": "Dispatch's Playwright harness (chromium and iphone) against the head's Go server, with a throwaway spec that records server frames and never reorders them (deleted after)",
+      "command": "Probe 0 recorded frames on a first connection and on a reconnect. Probe 2: agent spec with headings, closed; open; reopen; wait for the closed banner to go; cut, so the reconnect is writable; count rows; hold and cut (offline); read the status; close again; release; read the status and rows. bunx playwright test zz-tester-probe.e2e.ts --project chromium --project iphone --repeat-each 2 --workers 1 (DISPATCH_E2E_REUSE_SERVERS=1)",
+      "observed": "Frame order on both: Sync.Step1 > Sync.Step2 > Awareness > Auth > Sync.Step2. Probe 2, head, 4 of 4: 0 rows after the writable reconnect; offline status 'Connecting to the document…' with no edit named; after the second close the status is 'connected', with no notice and 0 rows.",
+      "headSha": "61b165e79e06",
+      "negativeControl": "The 52159aaf web app (its connection.ts and pending-sync.ts) failed probe 2 2 of 2: 1 row stored after the reopen's reconnect, and the offline status read 'Connecting to the document… · 1 edit saved in this browser, not sent yet.' with nothing typed."
     },
     {
-      "criterion": "The architect's named risk: holding the read-only load's heading-id stamp does not bring back round 1's false unsent-edit message or store rows on a tab that stays read-only",
+      "criterion": "A closed document stores nothing across reloads; typing after a reopen's reconnect survives a cut and a reload; another tab's row is restored",
       "surface": "Same harness and both builds",
-      "command": "Probe 1: a closed issue whose agent-written spec has headings, opened and reloaded twice by alice, who types nothing. Probe 2: the same, with the socket cut and reconnected (still read-only), then a reload. After each load: the pending-edit status and the IndexedDB row count.",
-      "observed": "Head: 4 of 4 for each probe; no pending-edit notice and 0 rows after every load and reconnect. The round-1 browser test in close-withdraws-asks.e2e.ts passes too.",
-      "headSha": "52159aaf335f",
-      "negativeControl": "The build without 52159aaf also passes probes 1 and 2, so the fix changed nothing there. Probe 3 above is the case the fix changes, and it fails on that build."
+      "command": "Probe 1: a closed document opened, reconnected and reloaded twice, with the status and the row count after each. Probe 3: reopen, writable reconnect, hold and cut, type, reload, release. Probe 4: another tab's unsent row restored through a reopen's reconnect.",
+      "observed": "Head, 4 of 4 each. Probe 1: no notice and 0 rows every time. Probe 3: the status said 'saved in this browser, not sent yet' after the reload; the text reached the server; the rows cleared; no rebuild notice. Probe 4: the row reached the server with no rebuild notice.",
+      "headSha": "61b165e79e06",
+      "negativeControl": "Probes 1, 3 and 4 also pass on 52159aaf, so the round's narrowing kept them working. Probe 2 is the case it changes, and it fails there."
     },
     {
-      "criterion": "Earlier behaviour still holds: another tab's row is restored through a writable reconnect; closes withdraw and reopens restore; the browser suites pass",
-      "surface": "Same harness; dispatch:local at the head with the branch's CLI and the daemon's SetStatus",
-      "command": "Probe 4 (round 5's reconnect case with the corrected frame parser); bunx playwright test close-withdraws-asks.e2e.ts offline-edits.e2e.ts doc.e2e.ts margin.e2e.ts --project chromium --project iphone; seed.ts TT 3, closes by alice, the agent CLI and daemonclose, then a reopen",
-      "observed": "Probe 4: 4 of 4. Suites: 71 passed, 0 failed. After each close open_asks is 0, the approval draft, and every open ask withdrawn naming alice | tester-agent-9 | legion-daemon:TT; answered and retracted asks unchanged; blocks resolved. The reopen restored 5 asks and the blocks.",
-      "headSha": "52159aaf335f",
-      "negativeControl": "Round 5's control for probe 4 (the web app without 988beb33) failed 4 of 4. Round 6's control for the closes (main 1357b95c) left open_asks 5. The server is unchanged since then."
+      "criterion": "Server side after 312a14eb's refactor: a close beside an unloadable document succeeds, a rebuild shows the withdrawn block resolved, and a reopen opens it; closes withdraw every open ask; races stay consistent",
+      "surface": "dispatch:local at the head with the branch's CLI and the daemon's SetStatus",
+      "command": "TT-4: notes.md with an indexed block, its doc_updates corrupted in SQL, restart, daemonclose, rebuild as alice, reopen; seed.ts TT 3 with closes by alice, the agent CLI and SetStatus, then a reopen; race.ts resolve 8, double 5, unsettled 5, flip 5",
+      "observed": "Close 200; ask withdrawn; the log reads 'leave the ask blocks of a document whose history cannot load as they are'. Rebuild 200, block state=\"resolved\"; after the reopen, state=\"open\". The three closes give open_asks 0, the approval draft, and every open ask withdrawn naming its closer, with answered and retracted asks unchanged; the reopen restored 5 asks. Races: 0 problems.",
+      "headSha": "61b165e79e06",
+      "negativeControl": "Round 5's control for the rebuild (the round-4 server 337c577d) left the block open; round 6's control for the closes (main 1357b95c) left open_asks 5."
     }
   ],
-  "correction": "Round 6's reconnect probe parsed the frame type wrongly ('offset += varUint()' overwrote the offset), so on the reconnect it held every server frame for 2.5 s, the authentication answer included, not every frame but authentication. Its pass still shows a delayed reconnect restores the row, but it did not hold open the window between authentication and sync. Round 5's probe and this round's parse correctly.",
-  "ci": "At 52159aaf: Tests 40427581473, Docs 40427581452, Worker Image 40427581415 and Legion Envoy and Contracts 40427581450 queued; PR Title 40427671426 pending.",
+  "correction": "Round 7's gap probe let the authentication answer through ahead of the sync frames. The server sends Sync.Step1, Sync.Step2 and Awareness before Auth, so that probe tested an order the server never produces. Round 8's probes keep the server's own order.",
+  "browserSuites": "close-withdraws-asks, offline-edits, doc, margin and ask-blocks on chromium and iphone: 137 passed, 0 failed, 1 skipped.",
+  "ci": "At 61b165e7: Tests 40434266163, Docs 40434266143, Worker Image 40434266255, Legion Envoy and Contracts 40434266130 and PR Title 40434890848 all queued. The architect reports that the tenth forward merge brought in main's red pi-envoy skills-guard test (three Dispatch skills at 2,057 words against a 2,000-word bound). That failure is main's, not this change's, and INFRA-366 is fixing it on main.",
   "evidenceComments": [
-    "https://github.com/sjawhar/legion/pull/2233#issuecomment-6431075472"
+    "https://github.com/sjawhar/legion/pull/2233#issuecomment-6432052150"
   ]
 }
