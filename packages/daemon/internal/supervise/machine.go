@@ -285,13 +285,14 @@ type Deps struct {
 	// owner of the repository the issue works. Every delivery hands it to the agent's working copy
 	// before the task. nil, for a daemon with no workflow or no GitHub Apps, adopts nothing.
 	Identity func(ctx context.Context, role claim.Role, issue string) (runtime.GitIdentity, error)
-	// PhaseHolds says whether issue is still in phase: the workflow enqueues a task for the phase
-	// its issue was in, and the outbox refuses to start a role for a phase the issue has left
-	// (daemon/outbox.go), so a delivery queued before the phase moved on is that same staleness
-	// one step later and is dropped rather than sent. It is asked only about a delivery that names
-	// a phase; a task an operator delivered by hand names none and is never put to it, which the
-	// machine decides rather than this answer. nil holds every delivery.
-	PhaseHolds func(ctx context.Context, issue string, p phase.Phase) (bool, error)
+	// PhaseHolds says whether issue is still in phase p on run generation: the workflow enqueues a
+	// task for the phase and run its issue was in, and the outbox refuses to start a role for a
+	// phase the issue has left (daemon/outbox.go), so a delivery queued before the phase or the run
+	// moved on is that same staleness one step later and is dropped rather than sent. It is asked
+	// only about a delivery that names a phase; a task an operator delivered by hand names none and
+	// is never put to it, which the machine decides rather than this answer. generation is 0 for a
+	// task of no run. nil holds every delivery.
+	PhaseHolds func(ctx context.Context, issue string, p phase.Phase, generation uint64) (bool, error)
 	// TreeClosable answers whether the operator may close this claim's tree: false refuses the
 	// close, and an error is the read itself failing, which the caller sees as a failure rather
 	// than a refusal. It is asked for the operator's own close — the workflow's linger close is its
@@ -419,6 +420,9 @@ type Machine struct {
 	// delivery it may already have sent, or a turn it saw start and may not have seen end. The
 	// machine asks the agent (get_state) before it acts on either.
 	askFirst bool
+	// unansweredAsks counts the asks in a row the agent left unanswered while askFirst stayed armed
+	// on a working claim (askTurnOver); from unansweredAsksWarn on, each one is logged at Warn.
+	unansweredAsks int
 	// held is the suspension held for the agent's turn (holdSuspension), nil for none.
 	held *RequestSuspend
 	// interrupt is the turn this claim was interrupted in for a start that takes over its issue's
@@ -962,6 +966,16 @@ func (m *Machine) backOff(ctx context.Context) error {
 	return nil
 }
 
+// start launches the claim's process for this try: a Resume of its recorded session, or a Spawn
+// when it records none. A Resume the runtime answers with runtime.ErrSessionFileMissing is the
+// operator's takeover of another runtime's claims (the tmux runtime's `runtime.tmux.take_over`): the
+// previous process was that runtime's, and its session is found nowhere this one runs the agent. It
+// would fail the same way on every try and wedge the claim until its launch budget ran out, so the
+// claim forgets the session and the same try spawns a fresh agent, which registers its own session;
+// the runtime has started nothing first. It is logged, never charged: the session stayed with the
+// runtime the operator moved the project off. Any other refusal of a Resume, a session file missing
+// elsewhere among them, is a launch failure the caller charges, and the claim keeps its session:
+// a fresh agent on a claim that had one is what the same-agent refusal exists to catch.
 func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, error) {
 	spec, err := m.deps.Specs.SpawnSpec(ctx, m.claim)
 	if err != nil {
@@ -973,7 +987,15 @@ func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, err
 		return m.deps.Runtime.Spawn(ctx, spec)
 	}
 	spec.ResumeSessionFile = m.claim.SessionFile
-	return m.deps.Runtime.Resume(ctx, m.previous, spec)
+	loc, err := m.deps.Runtime.Resume(ctx, m.previous, spec)
+	if !errors.Is(err, runtime.ErrSessionFileMissing) {
+		return loc, err
+	}
+	m.log.Warn("supervise: the session of the process another runtime ran is found nowhere this runtime runs the agent; taking the claim over with a fresh session",
+		"session", m.claim.Session, "sessionFile", m.claim.SessionFile, "error", err)
+	m.forgetSession()
+	spec.ResumeSessionFile = ""
+	return m.deps.Runtime.Spawn(ctx, spec)
 }
 
 // stopPrevious stops the process letGo moved into previous when a launch fails: the claim no longer

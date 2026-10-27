@@ -4,7 +4,7 @@
 // tab holding one build's page asks for that build's content-hashed chunks, and whichever process
 // answers must have them. Every process publishes its build at boot, before it listens (Publish),
 // prunes the builds no process needs (Prune), and answers a local miss from the database (Store,
-// the router's routes.AssetStore). The tables are migration 0122's.
+// the router's routes.AssetStore). The tables are migration 0130's.
 package dashboard
 
 import (

@@ -19,6 +19,58 @@
   `packages/dispatch`) runs two servers on one database, serving two builds of the dashboard,
   behind a round-robin proxy, and runs the `*.multiprocess.e2e.ts` specs in Chromium; CI runs it
   as the `dispatch-browser-multiprocess` job.
+- Each block of a Dispatch document is a node of the reference graph. A reference can name one
+  block, `dispatch://KEY/spec#b-<id>`, `dispatch://KEY/artifact/<slug>#b-<id>` or
+  `dispatch://PROJECT/artifact/<slug>#b-<id>`, the id percent-encoded as `text.EncodeBlockID` and
+  `encodeBlockId` write it, and so does a live document page's `#b-<id>`; `@v<N>` after the id
+  pins it to version N of the document. N is at most 9223372036854775807: a larger N is no
+  reference, `400 INVALID_REFERENCE` where the API is given one, and a pin past every version the
+  document has is `404 NOT_FOUND` `no version N of <document>`. A block id of any length is
+  written, by a seeded spec, an upload, an `insert`, a rebuild, an accepted suggestion or a
+  browser's edit; the graph keys a block by its id, so one longer than 256 bytes, decoded
+  (`text.MaxBlockIDBytes`), is no graph node: its version is written, a mention inside it starts
+  at the block holding it, the server logs a warning naming the document, the longest id's length
+  and the bound, and a read of its reference is `404 NOT_FOUND`. An ask block, a comment anchored
+  in a block and an ask anchored in one are written under a block id of any length, so a
+  settlement never fails on one. Text cites a reference, a block's or any other, only while its
+  block id is within that bound and the target id the graph stores its edge under
+  (`text.TargetID`: an issue's key, a document's `<KEY or PROJECT>/<slug>`, a block's
+  `<KEY or PROJECT>/<slug>#<block id>`, an ask's, a comment's or a message's id) holds at most
+  2048 bytes (`text.MaxTargetBytes`), since a slug or an item id has no bound of its own: past
+  either the text is written and cites nothing, and a live document page whose block is past them
+  names the document, one whose document or item is past them nothing. The bounds decide only
+  what the graph indexes: `GET /api/v1/references?to=|from=` and `GET /api/v1/block-links` read
+  the reference they are given whatever its length (`text.ParseRef`), so a node of any name is
+  read, and no reference's length answers `400`. A new artifact's name, and the reference key
+  `<owner>/<slug>` it gives the artifact, hold at most 2692 bytes: an upload past either is
+  `400 INVALID_ARTIFACT` naming the bound, and an artifact already stored past it keeps taking
+  versions and edits. A
+  mention written inside a block starts at the innermost block holding it: `GET /api/v1/references`
+  names that block as the source (`kind: "block"`, with
+  `block_id`, `document`, `changed_version` and `changed_at`, the version its text last changed
+  in), a node cited from two blocks of one document counts twice, a document's own read names the
+  block at each edge as `block`, and each block is `part_of` its document, which a document's read
+  lists only under `?kind=part_of`. A block reference's read carries the block's whole current
+  `text`; a pinned one also carries `pin`, the block's text at that version and whether it is
+  `unchanged`, `changed` or `removed` since. Deleting a block takes the links to it out of every
+  list, count, closure and outgoing list until a version restores its id.
+  `GET /api/v1/block-links?from=<document>&to=<document>` lists the links from the blocks of one
+  document to the blocks of another. `GET /api/v1/artifacts/{id}/references` keeps every source.
+  Migrations `0121`-`0126` add the block tables, the triggers that owe the index what any build
+  writes, and the seed of the comments, asks and issue messages already holding `#b-`, and
+  `0127`-`0128` rebuild the ask-block and block-anchor indexes over `block_id_key`, the id's
+  SHA-256, holding `asks` while its two indexes build and `comments` while its one does; the
+  server's block-index reconciliation (lease `block-index`, logged as `dispatch: block index`)
+  indexes every document and text owed, with no command run, and takes one more lease connection
+  per server, ten. `rebuild-refs` marks every document owed that index and prints `blocks_owed=`.
+  The dashboard titles a block link with the block's text, its hover card shows the document and,
+  for a pinned link, the version and how the block stands since, a pinned link opens that version,
+  and Referenced by shows one row per citing block, each linked to its block; on a document's page
+  each row also links the document's own block the edge meets (`block <id>`), so a source citing
+  two of its blocks is two rows. The dashboard draws a picture and opens a link an author names
+  whatever the length of its target's key; only bare text it links is held to the index's
+  bounds. A search hit for an ask links its typed block (`#b-<id>`) only while that block is a
+  graph node, and otherwise `?ask=<id>`, so `dispatch read` of the hit reads the ask.
 - `envoy-infra:gcp:Dispatch` takes `pprofPort`, which sets `DISPATCH_PPROF_PORT` on the app
   Deployment's `envoy-dispatch` container alone, so a deployment turns on Dispatch's loopback-only
   profiler through the component rather than by editing the Deployment, which the next update
@@ -812,7 +864,7 @@
 ### Changed
 
 - Every Dispatch server process now stores its dashboard build's assets in Postgres at boot,
-  before it listens (migration `0122_dashboard_assets`: `dashboard_builds`, `dashboard_assets` and
+  before it listens (migration `0130_dashboard_assets`: `dashboard_builds`, `dashboard_assets` and
   `dashboard_build_assets`), and answers a file under `/assets/` that its own image lacks from
   there, through a cache of at most 64 MiB its requests share, with one database read per file
   however many requests ask for it at once. While a rolling update or a rollback runs two builds
@@ -822,9 +874,9 @@
   build no live server process serves that is not among the 20 started most recently. A publish
   that fails, a build holding a file over 8 MiB among them, refuses the boot, so a rolling update
   keeps the processes it would have replaced; `bun run check:asset-sizes` in `packages/dispatch`,
-  run in CI after the build, refuses such a build first. A release before `0122` neither reads
+  run in CI after the build, refuses such a build first. A release before `0130` neither reads
   nor writes the new tables, so it serves beside this one unchanged, its pages' chunks from its
-  own image alone as before, and rolling back past `0122` is an image rollback.
+  own image alone as before, and rolling back past `0130` is an image rollback.
 - **Breaking:** `DISPATCH_ASSET_STORE_BUCKET` and its S3 reader of earlier builds' assets are
   removed: a Dispatch that still sets the variable refuses to start, naming it and saying that
   every server process now keeps its build's dashboard assets in Dispatch's database. Unset it
@@ -1490,6 +1542,24 @@
   a typed SDK or Pulumi YAML program sending `replicas: 2.5` got 2 replicas with no error, and one
   past the range got whatever the conversion gave. The check reads the plugin's own schema, so an
   integer input added later is covered with no list to keep.
+
+- Dispatch's event outbox publishes a backlog hundreds of times faster across a remote NATS hub.
+  It sent each envelope and waited for NATS to answer before it sent the next, then wrote the
+  answer to Postgres through the pool the API's requests queue for, so every destination of every
+  event cost a network round trip and a write: at a 150 ms round trip it published 1.7 to 1.9
+  events a second, and under load in production it fell up to about 29 minutes behind the events
+  being created. It now sends a whole claimed batch (100 events) before it waits for any answer
+  (`bus.Client.Window`), in id order, so NATS still takes each issue's events in order, and
+  writes the batch's outcome in one statement on a database pool of its own (`store.Pool.Outbox`):
+  540 events a second at a 150 ms round trip and 1,100 at 50 ms, with the API's pool busy
+  (`TestOutboxThroughputUnderRemoteLatency`). An event is still marked published only once NATS
+  accepted every destination of it. A publish NATS cannot take because the connection is down no
+  longer backs its event off behind the events after it: the batch stops and waits for the next
+  scan, so a backlog held up by an outage goes out in id order once NATS is back, where before the
+  first events of an issue reached the Legion daemon after later ones, which it drops as stale.
+  The shared database pool every request reads through holds 64 connections, from 16: under heavy
+  agent load the API held all sixteen and every other caller waited behind them.
+
 - A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
   such as a session's answer to a model switch, without waiting for the stream's heartbeat.
   Firefox opened the stream only once its first byte arrived, and a stream with no backlog and no

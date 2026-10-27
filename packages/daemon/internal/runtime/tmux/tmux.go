@@ -116,6 +116,19 @@ type Options struct {
 	// 0600 file per key: every pane's shim is started with `--provider-env-dir` on it and exports
 	// each file into OMP's environment alone. "" is none. New reads the key names once.
 	ProviderEnvDir string
+	// PaneEnv is the operator's `runtime.tmux.pane_env`: plain variables added to every pane's
+	// environment, after the runtime's own and before the spec's. New refuses a name the runtime
+	// sets itself, the git identity a launch sets, a provider key or its pointer, a credential-shaped
+	// name, and every variable runtime.PaneVariableRefusal refuses. Nil is none.
+	PaneEnv map[string]string
+	// PiConfigFiles is the operator's `runtime.tmux.pi_config_files`: absolute paths of Oh My Pi
+	// settings overlays every pane names in PI_CONFIG_FILES ahead of the turn-scoping overlay, which
+	// stays last so its keys outrank theirs. Nil is none.
+	PiConfigFiles []string
+	// TakeOver is the operator's `runtime.tmux.take_over`: TakeOverKubernetes to take over the
+	// claims a daemon running the project under runtime kubernetes left in the store (foreign), ""
+	// to refuse them, as every locator of another runtime is refused without it.
+	TakeOver string
 	// CommandTimeout bounds each tmux invocation; 30 s when zero.
 	CommandTimeout time.Duration
 	// Conns is the directory of agent connections (the worker stream listener): a stop's graceful
@@ -162,6 +175,11 @@ type Runtime struct {
 	log              *slog.Logger
 	providerEnvDir   string
 	providerKeys     []string
+	operatorEnv      map[string]string
+	piConfigFiles    []string
+	// takeOver is the runtime whose locators this runtime takes over (Options.TakeOver):
+	// runtime.RuntimeSandbox under TakeOverKubernetes, "" for none.
+	takeOver string
 
 	// run executes one tmux argv. A field so an in-package test can record every argv the
 	// runtime hands tmux; New sets it to runTmux.
@@ -179,6 +197,11 @@ type Runtime struct {
 	// and those it was told of by ReconcileOrphans. An entry leaves when its process is stopped
 	// or a sweep has reported it gone for good.
 	tracked map[string]*trackedProcess
+	// displaced is every known claim's locator another runtime recorded (foreign), by claim, as the
+	// last ReconcileOrphans read them: the next sweep reports each Gone and Displaced and lets it
+	// go. Keyed by claim, not incarnation: the roles of one issue share its pod, so two of them at
+	// one generation share a sandbox incarnation (`PodUID/Generation`). Guarded by trackedMu.
+	displaced map[claim.Token]runtime.Locator
 }
 
 // trackedProcess is one watched process: its locator, the issue it works on when the runtime
@@ -221,6 +244,12 @@ func New(opts Options) (*Runtime, error) {
 		return nil, fmt.Errorf("tmux runtime: the real gh a pane's `legion gh` runs is %q, not an absolute path", opts.GH)
 	case opts.GitHubCredential != nil && opts.RepositoryOwner == nil:
 		return nil, errors.New("tmux runtime: a GitHub credential function needs the daemon's record of each claim's repository owner (RepositoryOwner)")
+	case opts.TakeOver != "" && opts.TakeOver != TakeOverKubernetes:
+		return nil, fmt.Errorf("tmux runtime: take_over %q is not a runtime it takes claims over from (%s)", opts.TakeOver, TakeOverKubernetes)
+	}
+	takeOver := ""
+	if opts.TakeOver == TakeOverKubernetes {
+		takeOver = runtime.RuntimeSandbox
 	}
 	environ := opts.Environ
 	if environ == nil {
@@ -239,6 +268,14 @@ func New(opts Options) (*Runtime, error) {
 	if opts.ProviderEnvDir != "" {
 		if providerKeys, err = readProviderKeyNames(opts.ProviderEnvDir, opts.DispatchTokenFile != ""); err != nil {
 			return nil, err
+		}
+	}
+	if err := checkPaneEnv(opts.PaneEnv, providerKeys); err != nil {
+		return nil, err
+	}
+	for _, path := range opts.PiConfigFiles {
+		if !filepath.IsAbs(path) || strings.Contains(path, ":") {
+			return nil, fmt.Errorf("tmux runtime: Oh My Pi overlay %q is not an absolute path PI_CONFIG_FILES can name", path)
 		}
 	}
 	tmuxPath, ok := lookpath.On(paneEnv["PATH"], "tmux")
@@ -278,8 +315,12 @@ func New(opts Options) (*Runtime, error) {
 		log:              opts.Log,
 		providerEnvDir:   opts.ProviderEnvDir,
 		providerKeys:     providerKeys,
+		operatorEnv:      opts.PaneEnv,
+		piConfigFiles:    opts.PiConfigFiles,
+		takeOver:         takeOver,
 		readProc:         os.ReadFile,
 		tracked:          map[string]*trackedProcess{},
+		displaced:        map[claim.Token]runtime.Locator{},
 	}
 	if r.commandTimeout == 0 {
 		r.commandTimeout = defaultCommandTimeout
@@ -399,19 +440,51 @@ func parseIncarnation(s string) (incarnation, error) {
 	return incarnation{pid: pid, ticks: ticks}, nil
 }
 
-// paneOf is a locator's pane and incarnation, or the reason nothing can be done with it.
-func paneOf(loc runtime.Locator) (string, incarnation, error) {
+// paneOf is a locator's pane and incarnation, or the reason nothing can be done with it. A locator
+// another runtime recorded names no pane here: without runtime.tmux.take_over, the refusal names
+// the key that lets this daemon take the claim over, which boot's ReconcileOrphans returns for
+// every such claim of a store a Kubernetes daemon ran.
+func (r *Runtime) paneOf(loc runtime.Locator) (string, incarnation, error) {
 	if err := loc.Validate(); err != nil {
 		return "", incarnation{}, err
 	}
 	if loc.Runtime != runtime.RuntimeTmux {
-		return "", incarnation{}, fmt.Errorf("tmux runtime cannot act on a %q locator (%s)", loc.Runtime, loc.Claim)
+		if r.takeOver == "" && loc.Runtime == runtime.RuntimeSandbox {
+			return "", incarnation{}, fmt.Errorf("tmux runtime cannot act on a %q locator (%s): a daemon that ran the project under runtime kubernetes recorded it; once every pod of that daemon is stopped, runtime.tmux.take_over: %s lets this daemon take the claim over",
+				loc.Runtime, loc.Claim, TakeOverKubernetes)
+		}
+		return "", incarnation{}, fmt.Errorf("tmux runtime cannot act on a %q locator (%s): its process is no pane of this daemon's tmux server", loc.Runtime, loc.Claim)
 	}
 	inc, err := parseIncarnation(loc.Incarnation)
 	if err != nil {
 		return "", incarnation{}, fmt.Errorf("locator %s: %w", loc.Claim, err)
 	}
 	return loc.Tmux.Pane, inc, nil
+}
+
+// TakeOverKubernetes is Options.TakeOver taking over the claims a daemon running the project
+// under runtime kubernetes left in the store (`runtime.tmux.take_over: kubernetes`).
+const TakeOverKubernetes = "kubernetes"
+
+// foreign is whether loc is a valid locator of the runtime this one takes over
+// (runtime.tmux.take_over): a Sandbox role process left in the store by a daemon that ran the
+// project under runtime kubernetes before this one. This runtime cannot see that process, stop it,
+// or wait it out — the operator stops the other runtime's processes before a tmux daemon boots on
+// its store with the key set (docs/deployment.md, "Moving a project onto tmux") — so its claim is
+// reported Gone and Displaced (Probe, the sweep after ReconcileOrphans), and relaunched here at
+// once on its recorded session, charging nothing; a resume over it whose session file is found
+// nowhere on this host starts a fresh agent (Resume). Without the key nothing is foreign, and every
+// locator of another runtime is refused (paneOf), as before the takeover existed.
+func (r *Runtime) foreign(loc runtime.Locator) bool {
+	return r.takeOver != "" && loc.Runtime == r.takeOver && loc.Validate() == nil
+}
+
+// displacedObservation is a foreign locator's one verdict: Gone, Displaced.
+func (r *Runtime) displacedObservation(loc runtime.Locator) runtime.Observation {
+	return runtime.Observation{
+		Locator: loc, Kind: runtime.Gone, At: r.now(), Displaced: true,
+		Detail: fmt.Sprintf("its %s is another runtime's (%s) process, no pane of this daemon's tmux server: this daemon takes the claim over (runtime.tmux.take_over) and relaunches it here", loc.Label(), loc.Runtime),
+	}
 }
 
 func (r *Runtime) track(loc runtime.Locator, issue, ghWriter string) {
@@ -456,7 +529,7 @@ func (r *Runtime) adoptExactly(located []runtime.Locator) {
 	}
 }
 
-// untrackClaim stops watching every process of the claim.
+// untrackClaim stops watching every process of the claim, its displaced one included.
 func (r *Runtime) untrackClaim(token claim.Token) {
 	r.trackedMu.Lock()
 	defer r.trackedMu.Unlock()
@@ -465,6 +538,40 @@ func (r *Runtime) untrackClaim(token claim.Token) {
 			delete(r.tracked, incarnation)
 		}
 	}
+	delete(r.displaced, token)
+}
+
+// displaceExactly makes the displaced set exactly the foreign locators of the known claims a
+// sweep read (ReconcileOrphans): one the store no longer records is not reported again.
+func (r *Runtime) displaceExactly(foreigners []runtime.Locator) {
+	r.trackedMu.Lock()
+	defer r.trackedMu.Unlock()
+	r.displaced = make(map[claim.Token]runtime.Locator, len(foreigners))
+	for _, loc := range foreigners {
+		r.displaced[loc.Claim] = loc
+	}
+}
+
+// forgetDisplaced lets go of a foreign locator, reported or stopped: the claim's displaced entry
+// when it is still that locator, never a newer one a later ReconcileOrphans read.
+func (r *Runtime) forgetDisplaced(loc runtime.Locator) {
+	r.trackedMu.Lock()
+	defer r.trackedMu.Unlock()
+	if held, ok := r.displaced[loc.Claim]; ok && held.Incarnation == loc.Incarnation {
+		delete(r.displaced, loc.Claim)
+	}
+}
+
+// displacedLocators is the displaced set, ordered by claim.
+func (r *Runtime) displacedLocators() []runtime.Locator {
+	r.trackedMu.Lock()
+	defer r.trackedMu.Unlock()
+	out := make([]runtime.Locator, 0, len(r.displaced))
+	for _, loc := range r.displaced {
+		out = append(out, loc)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Claim < out[j].Claim })
+	return out
 }
 
 // trackedProcesses is every watched process, ordered by claim then incarnation, so a sweep and a
@@ -520,9 +627,17 @@ func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
 // to its live incarnation, and a stale locator must not shut down the claim's newer process. A
 // pane that is gone, or now holds some other process, is already stopped as far as this locator
 // is concerned, and is not killed. A pane that cannot be verified either way — tmux could not be
-// listed — is an error: a process nobody can confirm stopped is never reported stopped.
+// listed — is an error: a process nobody can confirm stopped is never reported stopped. A locator
+// of the runtime this one takes over (foreign) names no pane here: there is nothing of it this
+// runtime can stop, and it is let go; without runtime.tmux.take_over, such a locator is refused
+// (paneOf).
 func (r *Runtime) stop(ctx context.Context, loc runtime.Locator) error {
-	pane, inc, err := paneOf(loc)
+	if r.foreign(loc) {
+		r.log.Info("tmux runtime: nothing to stop for a process another runtime recorded", "claim", loc.Claim, "process", loc.Label())
+		r.forgetDisplaced(loc)
+		return nil
+	}
+	pane, inc, err := r.paneOf(loc)
 	if err != nil {
 		return err
 	}
@@ -602,7 +717,7 @@ func (r *Runtime) awaitNotRunning(ctx context.Context, pane string, inc incarnat
 // `jj metaedit --update-author` run in the pane's own workspace — over the claim's connection,
 // bounded by the adoption timeout. The recorded process must still verify: the connection is its.
 func (r *Runtime) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id runtime.GitIdentity) error {
-	pane, inc, err := paneOf(loc)
+	pane, inc, err := r.paneOf(loc)
 	if err != nil {
 		return err
 	}
