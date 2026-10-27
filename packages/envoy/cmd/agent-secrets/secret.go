@@ -320,7 +320,10 @@ func readSecretValue(name, pipeTo string, stderr io.Writer) (string, error) {
 	if !utf8.Valid(data) {
 		return "", usageErr{errors.New("the value must be valid UTF-8")}
 	}
-	value := strings.TrimSuffix(string(data), "\n")
+	value, lf := strings.CutSuffix(string(data), "\n")
+	if lf {
+		value = strings.TrimSuffix(value, "\r")
+	}
 	if value == "" {
 		return "", usageErr{errors.New("the value is read from standard input, which was empty")}
 	}
