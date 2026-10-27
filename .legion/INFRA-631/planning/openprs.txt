@@ -1,0 +1,41 @@
+2406 legion/INFRA-606 [packages/envoy/AGENTS.md,packages/envoy/cmd/dispatch/README.md] perf(dispatch): live streams cost little per viewer, and a restart replays at mo
+2404 legion/INFRA-557 [packages/envoy/AGENTS.md] feat(envoy-listener): an active and a standby pod for one machine id, with one d
+2403 legion/INFRA-581 [packages/envoy/AGENTS.md,packages/envoy/cmd/dispatch/README.md] fix(dispatch): a body with deeply nested ::: blocks draws in well under a second
+2402 legion/INFRA-592 [packages/envoy/cmd/dispatch/README.md] feat(dispatch): refuse excess load instead of collapsing: admission, deadlines, 
+2397 legion/INFRA-568 [packages/envoy/AGENTS.md,packages/envoy/cmd/dispatch/README.md] feat(dispatch): the related-item check searches by meaning and rare keywords, an
+2395 legion/INFRA-590 [packages/envoy/AGENTS.md,packages/envoy/cmd/dispatch/README.md] feat(envoy): Dispatch's outbox has one publisher, take-over within 10 s, per-ses
+2394 legion/INFRA-156 [packages/envoy/AGENTS.md,packages/envoy/cmd/dispatch/README.md] feat(dispatch): a typed block attribute can point at blocks
+2392 legion/INFRA-591 [packages/envoy/AGENTS.md,packages/envoy/cmd/dispatch/README.md] fix(dispatch): writes to different issues no longer wait on one database-wide ev
+2391 legion/INFRA-607 [packages/envoy/AGENTS.md,packages/envoy/cmd/dispatch/README.md] perf(dispatch): background loops run when something changes, and the GitHub inta
+2390 legion/INFRA-555 [packages/envoy/AGENTS.md,packages/envoy/cmd/dispatch/README.md] fix(dispatch): the server signs people in, starts and reports health correctly a
+2387 legion/INFRA-562 [packages/envoy/AGENTS.md,packages/envoy/cmd/dispatch/README.md] fix(dispatch): keep accepted work when a pod stops mid-request, and stop two pod
+2377 legion/INFRA-514 [packages/envoy/AGENTS.md] fix(envoy): the listener's session cache, interest reaper and KV rewatch scale w
+2376 legion/INFRA-148 [packages/envoy/AGENTS.md,packages/envoy/cmd/dispatch/README.md] feat: people's answers on every model request, and dispatch doc-read prints comm
+2373 legion/INFRA-531 [packages/envoy/AGENTS.md] fix(dispatch): a web address or email after punctuation is a link in a document,
+2370 legion/INFRA-547 [packages/envoy/AGENTS.md] fix(envoy): a role or topic message sent through a listener reaches its recipien
+2369 legion/INFRA-589 [packages/envoy/AGENTS.md] feat(envoy): commit the 2-core reproduction of the 2026-10-26 outage load
+2368 legion/INFRA-560 [packages/envoy/AGENTS.md,packages/envoy/cmd/dispatch/README.md] feat(envoy-infra)!: gcp:Dispatch runs every workload with no single pod, across 
+2367 legion/INFRA-595 [packages/envoy/AGENTS.md] fix(envoy): the CI summary loop does no work while no record changes
+2366 legion/INFRA-596 [packages/envoy/AGENTS.md] fix(dispatch): a person's comment reaches the issue's claimant and every agent i
+2364 legion/INFRA-571 [packages/envoy/cmd/dispatch/README.md] feat(envoy-infra)!: Dispatch runs on PostgreSQL 18 — gcp:Dispatch defaults to PO
+2363 legion/INFRA-569 [packages/envoy/cmd/dispatch/README.md] feat(dispatch): a search hit for an ask shows whether it is answered and its lat
+2362 legion/INFRA-546 [packages/envoy/AGENTS.md,packages/envoy/cmd/dispatch/README.md] feat(envoy): every stream and bucket at the deployment's replica count, never lo
+2361 legion/INFRA-536 [packages/envoy/AGENTS.md] fix(pmdoc): read escapes and character references as CommonMark does
+2360 legion/INFRA-534 [packages/envoy/AGENTS.md] fix(pmdoc): a document strikes tilde runs as a comment does
+2331 legion/INFRA-548 [packages/envoy/AGENTS.md] feat(envoy): session plugins leave a frozen NATS path within a minute and regist
+2324 legion/INFRA-492 [packages/envoy/AGENTS.md,packages/envoy/cmd/dispatch/README.md] fix(dispatch): a tab fetches again only what an event changes, once a second at 
+2323 legion/INFRA-559 [packages/envoy/AGENTS.md,packages/envoy/cmd/dispatch/README.md] fix(dispatch): the web app serves both builds' assets and shows no error or blan
+2320 sami/agent-secrets-trim-newline-v2 [packages/envoy/AGENTS.md] fix(envoy): agent-secrets drops the one trailing newline of a single-line value
+2316 legion/INFRA-520 [packages/envoy/AGENTS.md] ci: run pull-request CI as one router workflow whose final job, ci-ok, condenses
+2297 legion/INFRA-522 [packages/envoy/AGENTS.md] ci(envoy): build the arm64 Envoy image on a native arm64 runner
+2254 iam455/approver-identity [packages/envoy/AGENTS.md] withdrawn: feat(broker)!: an approval carries the approver's own sign-in
+2245 legion/INFRA-189 [packages/envoy/AGENTS.md,packages/envoy/cmd/dispatch/README.md] feat(dispatch): a bare issue key and a #question id link to their target and ent
+2238 legion/INFRA-261 [packages/envoy/AGENTS.md,packages/envoy/cmd/dispatch/README.md] fix(envoy): agent lists keep live sessions while the listener re-reads, and say 
+2234 legion/INFRA-448 [packages/envoy/AGENTS.md,packages/envoy/cmd/dispatch/README.md] feat(dispatch): a closed issue takes comments and messages, from its page too, a
+2233 legion/INFRA-158 [packages/envoy/AGENTS.md,packages/envoy/cmd/dispatch/README.md] feat(dispatch): closing an issue withdraws its open asks, and reopening brings t
+2228 legion/INFRA-439 [packages/envoy/AGENTS.md] feat(envoy): a session shows once each Envoy message it missed while its NATS su
+2225 legion/INFRA-278 [packages/envoy/AGENTS.md] fix(dispatch): a person's answers and comments on a claimed issue reach the clai
+2204 legion/INFRA-190 [packages/envoy/AGENTS.md] fix(dispatch): a linked image keeps its link when a document is saved
+2198 legion/INFRA-314 [packages/envoy/AGENTS.md] feat(broker)!: a person approves a secret on the broker's own page, signed in to
+2177 dispatch-backlink-counts-by-arm [packages/envoy/AGENTS.md,packages/envoy/cmd/dispatch/README.md] fix(dispatch): count backlinks through each indexed arm, not the graph view
+2067 dispatch/raise-comment-limit [packages/envoy/cmd/dispatch/README.md] feat(dispatch): a person's comment or message may run to 65,536 characters; an a
