@@ -39,16 +39,52 @@ func decodeMarkdownText(value []byte) string {
 
 // characterReferenceAt reports whether the `&` at offset at opens a character reference the
 // browser editor's parser decodes, how many bytes it takes, and the characters it names. A
-// reference is shaped as characterReference: `&name;`, `&#` and up to seven decimal digits, or
-// `&#x` and up to six hexadecimal digits, then `;`. A numeric one names its code point, or U+FFFD
-// where the parser refuses the code point (numericReferenceCharacter). A named one is decoded as
-// HTML decodes it, but for `&nLt;` and `&nGt;`, which Go's table lacks, and counts only when that
-// changed it and did not stop short of its `;`, as `&notit;` decodes to `¬it;`; `&semi;` alone
-// names a `;`. Anything else is not a reference and stays text.
+// reference is shaped as characterReferenceLength reads it. A numeric one names its code point, or
+// U+FFFD where the parser refuses the code point (numericReferenceCharacter). A named one is
+// decoded as HTML decodes it, but for `&nLt;` and `&nGt;`, which Go's table lacks, and counts only
+// when that changed it and did not stop short of its `;`, as `&notit;` decodes to `¬it;`; `&semi;`
+// alone names a `;`. Anything else is not a reference and stays text.
 func characterReferenceAt[T string | []byte](value T, at int) (length int, characters string, ok bool) {
+	length = characterReferenceLength(value, at)
+	if length == 0 {
+		return 0, "", false
+	}
+	if value[at+1] == '#' {
+		start, base := at+2, 10
+		if value[start] == 'x' || value[start] == 'X' {
+			start, base = start+1, 16
+		}
+		code := 0
+		for index := start; index < at+length-1; index++ {
+			digit, _ := digitValue(value[index], base)
+			code = code*base + digit
+		}
+		return length, string(numericReferenceCharacter(code)), true
+	}
+	reference := string(value[at : at+length])
+	// Go's html table omits these two (src/html/entity.go, a TODO); character-entities names them.
+	switch reference {
+	case "&nLt;":
+		return length, "\u226A\u20D2", true
+	case "&nGt;":
+		return length, "\u226B\u20D2", true
+	}
+	decoded := html.UnescapeString(reference)
+	if decoded == reference || strings.HasSuffix(decoded, ";") && reference != "&semi;" {
+		return 0, "", false
+	}
+	return length, decoded, true
+}
+
+// characterReferenceLength is how many bytes the character reference that the `&` at offset at
+// opens takes, or 0 where it opens none. A reference is shaped as `&name;`, a name being an ASCII
+// letter then ASCII letters and digits, `&#` and one to seven decimal digits then `;`, or `&#x` or
+// `&#X` and one to six hexadecimal digits then `;`; whether the parser decodes it is
+// characterReferenceAt's to say.
+func characterReferenceLength[T string | []byte](value T, at int) int {
 	end := at + 1
 	if end >= len(value) {
-		return 0, "", false
+		return 0
 	}
 	if value[end] == '#' {
 		end++
@@ -57,42 +93,28 @@ func characterReferenceAt[T string | []byte](value T, at int) (length int, chara
 			end++
 			base, limit = 16, 6
 		}
-		start, code := end, 0
+		start := end
 		for end < len(value) && end-start < limit {
-			digit, isDigit := digitValue(value[end], base)
-			if !isDigit {
+			if _, isDigit := digitValue(value[end], base); !isDigit {
 				break
 			}
-			code = code*base + digit
 			end++
 		}
-		if end == start || end >= len(value) || value[end] != ';' {
-			return 0, "", false
+		if end == start {
+			return 0
 		}
-		return end + 1 - at, string(numericReferenceCharacter(code)), true
-	}
-	if !isASCIILetter(value[end]) {
-		return 0, "", false
-	}
-	for end < len(value) && isASCIIAlphaNumeric(value[end]) {
-		end++
+	} else {
+		if !isASCIILetter(value[end]) {
+			return 0
+		}
+		for end < len(value) && isASCIIAlphaNumeric(value[end]) {
+			end++
+		}
 	}
 	if end >= len(value) || value[end] != ';' {
-		return 0, "", false
+		return 0
 	}
-	reference := string(value[at : end+1])
-	// Go's html table omits these two (src/html/entity.go, a TODO); character-entities names them.
-	switch reference {
-	case "&nLt;":
-		return len(reference), "\u226A\u20D2", true
-	case "&nGt;":
-		return len(reference), "\u226B\u20D2", true
-	}
-	decoded := html.UnescapeString(reference)
-	if decoded == reference || strings.HasSuffix(decoded, ";") && reference != "&semi;" {
-		return 0, "", false
-	}
-	return len(reference), decoded, true
+	return end + 1 - at
 }
 
 // numericReferenceCharacter is the character a numeric reference to code names for the browser

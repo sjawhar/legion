@@ -3,7 +3,6 @@ package pmdoc
 import (
 	"bytes"
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -879,8 +878,9 @@ func escapeTableLinkDestination(value string) string {
 
 // escapeFootnoteLabel writes label so that the browser editor's parser, which decodes a label's
 // escapes and character references, reads it back: a bracket, a pipe, and a backslash before ASCII
-// punctuation or at the label's end are escaped, an ampersand only where it would open a character
-// reference, and white space, which no label holds as written, is a numeric character reference.
+// punctuation or at the label's end are escaped, an ampersand only where it opens a run shaped as a
+// character reference (characterReferenceLength), and white space, which no label holds as written,
+// is a numeric character reference.
 // A label that reads back as written stays as it is.
 func escapeFootnoteLabel(label string) string {
 	var written strings.Builder
@@ -891,7 +891,7 @@ func escapeFootnoteLabel(label string) string {
 			written.WriteByte('\\')
 		case char == '\\' && (index+1 == len(label) || isASCIIPunctuation(label[index+1])):
 			written.WriteByte('\\')
-		case char == '&' && characterReference.MatchString(label[index:]):
+		case char == '&' && characterReferenceLength(label, index) > 0:
 			written.WriteByte('\\')
 		case unicode.IsSpace(char):
 			written.WriteString("&#" + strconv.Itoa(int(char)) + ";")
@@ -901,10 +901,6 @@ func escapeFootnoteLabel(label string) string {
 	}
 	return written.String()
 }
-
-// characterReference is a character reference opening text: a named one, or a decimal or
-// hexadecimal numeric one.
-var characterReference = regexp.MustCompile(`^&(?:[A-Za-z][A-Za-z0-9]*|#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6});`)
 
 func holdsHardBreak(nodes []*Node) bool {
 	for _, n := range nodes {

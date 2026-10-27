@@ -185,8 +185,9 @@ func nodeWeight(node ast.Node, source []byte) int {
 	return weight
 }
 
-// escapes is how many backslash escapes of punctuation and character references (characterReference)
-// value holds, the spellings the parser reads as the one character each names.
+// escapes is how many backslash escapes of punctuation and character references
+// (characterReferenceLength) value holds, the spellings the parser reads as the one character each
+// names.
 func escapes(value []byte) int {
 	count := 0
 	for index := 0; index < len(value); index++ {
@@ -197,9 +198,9 @@ func escapes(value []byte) int {
 				index++
 			}
 		case '&':
-			if reference := characterReference.Find(value[index:]); reference != nil {
+			if length := characterReferenceLength(value, index); length > 0 {
 				count++
-				index += len(reference) - 1
+				index += length - 1
 			}
 		}
 	}
