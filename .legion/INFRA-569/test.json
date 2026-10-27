@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-569",
+  "completed": "2026-10-27T05:31:30Z",
+  "testedHead": "284986e6a9d1d882334752d2c25937c4d153d471",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Drove the same surfaces independently on the tester lane (port 18777, database dispatch_tester_e2e): the head's dispatch CLI against bun run dispatch:local with fresh asks of my own (changed answer, option-only answer, multi-option answer, self-resolved, open, and a legacy settlement retraction seeded as ask_answer_change_test.go:190-202 does); then re-ran the head's browser test and, with packages/dispatch/web, packages/envoy/internal/dispatch and packages/contracts restored from 94ab028a, saw it fail on the same 'Answered' assertion the implementer quoted."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "A dispatch search hit for an ask whose answer replaced an earlier one prints the latest answer, who gave it, when, and the options chosen; one with no option chosen says so; an ask closed with no answer says so; an open ask says it is open.",
+      "surface": "the head's dispatch command (packages/envoy-client/bin/dispatch.ts) against a real Dispatch server and Postgres 17 + pgvector: bun run dispatch:local on the tester lane of the pod harness (http://127.0.0.1:18777)",
+      "command": "bash /legion/scratch/tmp/i569-test/cli-test.sh; bash /legion/scratch/tmp/i569-test/cli-change.sh (ask H answered by alice [Brass] 'Brass, to match the drum.', then changed by alice with expected_answer_at to selected [] and 'Neither metal after all.\\nUse the original pewter.'); dispatch search --query zoetrope / praxinoscope / kinetoscope; curl GET /api/v1/search?q=zoetrope with the agent bearer",
+      "observed": "praxinoscope: '  Answered by alice at 2026-10-27T05:15:06.701407716Z · options chosen: none' + '  Answer text: Neither metal after all.' / '    Use the original pewter.'; that at equals the newest of the 2 answers GET /api/v1/asks/b93a16d7-… returns (alice, []), and no line holds the first text. zoetrope: '  Answered by alice at … · options chosen: Clear' + '  Answer text: none'; '  Answered by alice at … · options chosen: North, East' + '  Answer text: **Both**, see <b>notes</b>.'; '  Closed with no answer: resolved by session tester-proof at …: The motor stays; decided in the spec.'; '  Open: no answer yet.' on both open asks (one with options, one free-text); the issue hit has no state line and its API row has no ask key. kinetoscope (legacy row resolved by settlement with the answer only in events): '  Closed after an answer: retracted by system document-settlement at …' + '  Last answer by alice at … · options chosen: Arc' + '  Answer text: Arc, it is brighter.'. API ask fields match each line (state, user, selected, text, at, resolution). Logs: /legion/scratch/tmp/i569-test/cli-head.log, cli-change-head.log.",
+      "headSha": "284986e6a9d1d882334752d2c25937c4d153d471",
+      "negativeControl": "packages/envoy-client/src and packages/contracts/src restored from base 94ab028a (contracts rebuilt), same server and data: SEED=0 cli-change.sh and dispatch search --query 'zoetrope OR kinetoscope' print the same hit lines and no Answered by / Closed / Open line under any ask hit (/legion/scratch/tmp/i569-test/cli-change-base.log); head files restored and rebuilt afterwards."
+    },
+    {
+      "criterion": "A test in Dispatch's browser suite shows the search panel marking an answered ask with its answer; it fails at the commit before the change and passes at its head.",
+      "surface": "Dispatch's browser suite (packages/dispatch/e2e, Playwright) against the real Go server, production SPA bundle and Postgres on the tester lane; plus the palette driven in headless Chromium against dispatch:local at 1280 and 390 px",
+      "command": "( source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- search.e2e.ts keyboard-palette.e2e.ts deep-links.e2e.ts ); palette driver (throwaway Playwright script, removed) querying zoetrope / praxinoscope / kinetoscope",
+      "observed": "✓ [chromium] › e2e/search.e2e.ts:169:1 › an ask hit says whether it is answered, and an answered one shows its latest answer, who gave it and the options chosen (2.8s); ✓ [iphone] › e2e/search.e2e.ts:328:1 › phone search rows are at least 44px, do not overflow, …; every chromium and iphone test of the three specs passed (74 passed, 44 skipped); the 38 failures are all firefox/webkit projects of deep-links.e2e.ts failing browserType.launch because the pod harness installs only chromium (environment). Palette rows read 'Answered | alice · 2 minutes ago · Chose Clear', 'Answered | alice · … · No option chosen | Neither metal after all. Use the original pewter.', 'Closed, no answer | Resolved by session:tester-p… · …', 'Open', 'Closed after an answer | Retracted by document-settlement · … | alice · … · Chose Arc | Arc, it is brighter.'; answer text '<b>notes</b>' renders as literal text (no element injected); no horizontal overflow at 390 px. Logs: /legion/scratch/tmp/i569-test/e2e-head.log, palette-zoetrope.png, palette-kinetoscope.png, palette-phone.png.",
+      "headSha": "284986e6a9d1d882334752d2c25937c4d153d471",
+      "negativeControl": "packages/dispatch/web, packages/envoy/internal/dispatch and packages/contracts restored from 94ab028a with the head's search.e2e.ts: bun run e2e -- search.e2e.ts --project=chromium -g 'an ask hit says whether it is answered' → '✘ [chromium] › e2e/search.e2e.ts:169:1 … (18.5s)', Expected substring \"Answered\", Received \"Ask resultaskWhich orrery frame do we keep? [{\\\"label\\\": \\\"Brass\\\"}, {\\\"label\\\": \\\"Steel\\\"}] Keep the steel one after\" at search.e2e.ts:218 (/legion/scratch/tmp/i569-test/e2e-base.log); head restored afterwards."
+    },
+    {
+      "criterion": ".dispatch/architecture/<id>.md updated for each component whose code changes.",
+      "surface": "the pull request diff (sjawhar/legion#2363)",
+      "command": "jj diff --stat --from 94ab028a --to 284986e6",
+      "observed": "dispatch-api.md, dispatch-model.md, contracts.md, envoy-client.md, dispatch-web.md and claude-envoy-bridge.md each change by one line, covering packages/envoy/internal/dispatch/api, …/model, packages/contracts, packages/envoy-client, packages/dispatch and packages/claude-envoy, every directory with a changed code or test file.",
+      "headSha": "284986e6a9d1d882334752d2c25937c4d153d471",
+      "negativeControl": "packages/envoy/CHANGELOG.md and cmd/dispatch/README.md change with no code under their owners (envoy.md, dispatch-server.md), and those two docs are unchanged; a code directory without its doc would show as a changed path with no matching .dispatch/architecture line."
+    }
+  ],
+  "ci": "At 284986e6 every check (build x2, changes, lint, pr-title, test, typecheck) was queued on GitHub when read at 05:31Z; read as running, not waited on.",
+  "observations": [
+    "Not this change's defect, and left as it is: a hit whose snippet holds a newline (an answer or comment text over two lines) prints its hit line over two lines in dispatch search, since snippetText (packages/contracts/src/dispatch-snippet.ts:60) keeps newlines. The base did the same: the old ask snippet also carried answer->>'text'.",
+    "Only an answered ask written before the current settlement reaches 'Closed after an answer'. The current code never returns an answered ask to open, and resolve-ask refuses an answered ask, so I seeded that row through psql as the Go test does."
+  ]
+}
