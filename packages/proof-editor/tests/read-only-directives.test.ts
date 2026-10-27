@@ -6,11 +6,10 @@
  */
 
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import type { Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
 import type { BlockSchema } from "../src/block-schema.js";
 import { createHeadlessProof, type SoftBreaks } from "../src/lib-headless.js";
 import { remarkReadOnlyDirectives } from "../src/read-only-directives.js";
+import { blocks, runs, serverBlockSchema } from "./block-schema-fixture";
 
 const blockSchema: BlockSchema = {
   version: 1,
@@ -29,24 +28,6 @@ const blockSchema: BlockSchema = {
 async function readOnlyParse(markdown: string, softBreaks?: SoftBreaks) {
   const proof = await createHeadlessProof({ blockSchema, readOnly: true });
   return proof.parseMarkdown(markdown, softBreaks);
-}
-
-/** Each child block of `node` as its type name and its text. */
-function blocks(node: ProseMirrorNode): [string, string][] {
-  const out: [string, string][] = [];
-  node.forEach((child) => {
-    out.push([child.type.name, child.textContent]);
-  });
-  return out;
-}
-
-/** Each inline child of `node` as its text and the names of its marks. */
-function runs(node: ProseMirrorNode): { text: string; marks: string[] }[] {
-  const out: { text: string; marks: string[] }[] = [];
-  node.forEach((child) => {
-    out.push({ text: child.text ?? "", marks: child.marks.map((mark) => mark.type.name) });
-  });
-  return out;
 }
 
 test("the default mode still refuses a directive the schema does not know", async () => {
@@ -277,14 +258,6 @@ test("read-only keeps an outer typed block typed when a drawn directive's lines 
     ["paragraph", ":::"],
   ]);
 });
-
-/** The document service's own block schema, the one Dispatch parses its bodies with. */
-const serverBlockSchema: BlockSchema = JSON.parse(
-  readFileSync(
-    new URL("../../envoy/internal/dispatch/pmdoc/schema/blocks.json", import.meta.url),
-    "utf8"
-  )
-);
 
 async function readOnlyServerParse(markdown: string) {
   const proof = await createHeadlessProof({ blockSchema: serverBlockSchema, readOnly: true });

@@ -107,9 +107,10 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   reader-facing Dispatch change must pass before it merges, reaches `psql` through
   `packages/dispatch/e2e/psql.ts` — `packages/dispatch/e2e/seed.ts` calls it for every spec's
   database reset — and the local stack `bun run dispatch:local`
-  (`packages/dispatch/e2e/local-instance.ts`) refuses to start without `go`, `psql`, `flock` and
-  `openssl` on `PATH`, and without `docker` too unless a `DATABASE_URL` is given; the image
-  carries `go`, `flock` and `openssl`, a `DATABASE_URL` stands in for `docker`, and `psql` was the
+  (`packages/dispatch/e2e/local-instance.ts`) refuses to start without `go`, `psql`, `flock`,
+  `openssl` and `python3` on `PATH`, and without `docker` too unless a `DATABASE_URL` is given; the
+  image carries `go`, `flock`, `openssl` and `python3`, a `DATABASE_URL` stands in for `docker`,
+  and `psql` was the
   one a role had no way to supply, so a role on a digest without it cannot run the suite its own
   change owes — Debian's `psql` is a Perl wrapper around the versioned client, and it resolves
   because `perl-base` is in the image),
@@ -498,7 +499,9 @@ The attestation is separate from the image's own BuildKit provenance, which the 
 
 `.github/workflows/worker-image.yaml` builds on the GitHub-hosted runner with `docker/setup-buildx-action`
 + `docker/build-push-action` (the pair `release-envoy-listener.yaml` uses), layer cache in GitHub Actions
-cache (`cache-from: type=gha`, `cache-to: type=gha,mode=max`), pushed with the workflow's own `GITHUB_TOKEN`
+cache under the image's own scope (`cache-from: type=gha,scope=worker-image`, and on `main` only
+`cache-to: type=gha,mode=max,scope=worker-image`), read by every build and written only by a build on
+`main`, pushed with the workflow's own `GITHUB_TOKEN`
 — no third-party builder, no project variable, no extra credential. It runs (1) from `release.yaml` after
 the `legion_build` and `legion_publish` jobs on every `main` push that touches any file the image builds
 from, (2) on a pull request against `main` whose diff touches any of those files — building

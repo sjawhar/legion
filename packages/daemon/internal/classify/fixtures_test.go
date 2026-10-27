@@ -292,6 +292,12 @@ func replayGitHubDecision(input json.RawMessage) ([]byte, error) {
 		classification := ClassifyPush(PushPayload{
 			ChangedPaths: optionalString(payload, "changed_paths"), ChangedPathsTruncated: optionalString(payload, "changed_paths_truncated"),
 		}, issue)
+		// The shipped state marks the counted head, not the head its count moved from: the shipped
+		// daemon read one push per head, the one that made the move its synchronize counted, so the
+		// replay names that push's before as the head the count moved from.
+		if pr.HeadCounted != "" && pr.HeadCounted == stringValue(payload, "after") {
+			pr.HeadCountedFrom = stringValue(payload, "before")
+		}
 		pr = ApplyPush(pr, record.ClassifiedPush{SHA: stringValue(payload, "after"), Before: stringValue(payload, "before"),
 			HandoffOnly: classification.HandoffOnly, Unknown: classification.Unknown,
 			ByReviewApp: login != "" && stringValue(payload, "pusher") == login})
@@ -435,7 +441,15 @@ func (fixture fixturePullRequest) record() record.PullRequest {
 	// The shipped state holds one pending push; the Go record keeps every one.
 	var pushes []record.ClassifiedPush
 	if fixture.PendingPush != nil {
-		pushes = []record.ClassifiedPush{*fixture.PendingPush}
+		pending := *fixture.PendingPush
+		// The shipped daemon matched a head's pending push by its sha alone and read it as the push
+		// that replaced the recorded head, whatever before it named (none, from a listener that
+		// predated the field); the Go record judges a move by the chain of pushes from the recorded
+		// head (sparedMove), so the replay places the push there.
+		if pending.SHA != fixture.HeadSHA {
+			pending.Before = fixture.HeadSHA
+		}
+		pushes = []record.ClassifiedPush{pending}
 	}
 	// The shipped state's verdict is always its head's (a new head cleared it), and a state that
 	// records one has settled, so its head is the checked head. The shipped daemon judged every
