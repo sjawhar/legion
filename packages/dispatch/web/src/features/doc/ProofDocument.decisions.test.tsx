@@ -283,3 +283,29 @@ test("a closed issue's current document shows a withdrawn block's record from it
     view.unmount();
   }
 });
+
+test("the open-decision link names its block as encodeBlockId writes it, in its href and in the hash it sets", async () => {
+  const decision: Ask = { ...blockAsk, block_id: "ship_it" };
+  const queryClient = createQueryClient();
+  queryClient.setQueryData(["asks", "CORE-1"], [decision]);
+  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([
+    { ...decision, last_reply: null },
+  ]);
+  const originalHash = window.location.hash;
+  const { editors, sync, view } = renderProofDocument({ queryClient });
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    const nav = await within(view.container).findByRole("navigation", { name: "Open decisions" });
+    const link = within(nav).getByRole("link", { name: "Should we ship?" });
+    expect(link.getAttribute("href")).toBe("#b-ship%5Fit");
+    fireEvent.click(link);
+    expect(window.location.hash).toBe("#b-ship%5Fit");
+    expect(editors[0]?.focusedBlocks).toContain("ship_it");
+  } finally {
+    window.history.replaceState(null, "", originalHash || "/");
+    listIssueAsks.mockRestore();
+    view.unmount();
+  }
+});

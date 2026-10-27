@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { SEARCH_QUERY_MAX } from "@legion/contracts/dispatch-tools";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { Window as HappyDOMWindow } from "happy-dom";
 import { type ReactNode, useState } from "react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 
@@ -169,6 +170,58 @@ test("renders document-owned results under the document and opens their discussi
     search.mockRestore();
     view.unmount();
     view.queryClient.clear();
+  }
+});
+
+// A hit's href is the server's, so a hit in a document whose name is past the bound text is held
+// to (2683 characters, which a new upload's reference key still holds) is a hover-card trigger
+// for that document all the same, an issue's and a project's alike. The hrefs are read against
+// the page's origin, which happy-dom's `about:blank` does not have.
+test("a hit in a long-named document previews that document", async () => {
+  const slug = "a".repeat(2683);
+  const search = spyOn(api, "search").mockResolvedValue(
+    searchAnswer([
+      {
+        artifact: { name: "Long notes", slug },
+        href: `/issues/LEGION-2/artifacts/${slug}`,
+        id: "document-2",
+        kind: "document",
+        owner: { key: "LEGION-2", kind: "issue", status: "todo", title: "Navigation instruments" },
+        rank: 2,
+        snippet: "The <mark>astrolabe</mark> measures altitude.",
+      },
+      {
+        artifact: { name: "Long handbook", slug },
+        href: `/projects/CORE/documents/${slug}`,
+        id: "document-3",
+        kind: "document",
+        owner: {
+          artifact_id: "document-3",
+          kind: "document",
+          name: "Long handbook",
+          project: "CORE",
+          slug,
+        },
+        rank: 1,
+        snippet: "Keep the <mark>astrolabe</mark> dry.",
+      },
+    ])
+  );
+  const testWindow = window as unknown as HappyDOMWindow;
+  const pageBefore = window.location.href;
+  testWindow.happyDOM.setURL("https://dispatch.test/issues/LEGION-2");
+  const view = renderPalette();
+
+  try {
+    await searchFor("astrolabe");
+    expect(
+      screen.getAllByRole("option").map((option) => option.getAttribute("data-dispatch-ref"))
+    ).toEqual([`dispatch://LEGION-2/artifact/${slug}`, `dispatch://CORE/artifact/${slug}`]);
+  } finally {
+    search.mockRestore();
+    view.unmount();
+    view.queryClient.clear();
+    testWindow.happyDOM.setURL(pageBefore);
   }
 });
 

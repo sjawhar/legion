@@ -198,7 +198,7 @@ describe("dispatchToolSpecs", () => {
       ref: z.ZodOptional<z.ZodString>;
     };
     expect(argumentsSchema.ref.unwrap().description).toBe(
-      "Optional dispatch:// reference (issue, document, message, or ask); appended to the question and rendered as a link."
+      "Optional dispatch:// reference (issue, document, block, message, or ask); appended to the question and rendered as a link."
     );
   });
 
@@ -1113,6 +1113,14 @@ describe("dispatchToolSpecs", () => {
       "dispatch_issue",
       "Create a project only when a person asks for one; work that spans projects goes in the project that owns most of it.",
     ],
+    [
+      "dispatch_doc_edit",
+      "A block id written as {#id} longer than 256 bytes is stored, but its block is no graph node, so no reference reaches it.",
+    ],
+    [
+      "dispatch_read",
+      "A block read prints `Block:`, `Document:`, `Changed in version:` and `Text:`, then those two sections; a pinned one adds the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, reads `No block <id> in <document>.`",
+    ],
   ])("%s's description, which --help prints, holds the rule moved from the skill", (name, rule) => {
     expect(specFor(name).description).toContain(rule);
   });
@@ -1128,6 +1136,11 @@ describe("dispatchToolSpecs", () => {
       "dispatch_read",
       "ref",
       "dispatch://PROJECT/artifact/<slug>[@vN], and its /ask/<id> and /comment/<id>; or the dashboard URL of one.",
+    ],
+    [
+      "dispatch_read",
+      "ref",
+      "A block: dispatch://KEY/spec#b-<block id>[@vN], dispatch://KEY/artifact/<slug>#b-<block id>[@vN] or dispatch://PROJECT/artifact/<slug>#b-<block id>[@vN], the id percent-encoded except ASCII letters, digits and -.",
     ],
   ])("%s's %s flag help holds the rule moved from the skill", (name, field, rule) => {
     const fields = specFor(name).arguments(schemaApi) as unknown as Record<
