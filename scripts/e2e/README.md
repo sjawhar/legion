@@ -836,11 +836,11 @@ box's shims, where a pane's `jj` shim hands the call back to itself, exit 127), 
 pinned in mise. `LEGION_CLAUDE_PATH` is set to the `claude` on the operator's `PATH`,
 `LEGION_BUN_PATH` to that real `bun`, and `LEGION_CLAUDE_PLUGIN_DIR` to this checkout's
 `packages/claude-envoy`, whose `dist/envoy-channel.js` and generated `legion/` must be built.
-Legion's role Apps resolve as Stage 3's do: the daemon runs `secrets <implement App key> -- …` and
-`secrets <review App key> -- …` (the key names `LEGION_E2E_IMPLEMENT_APP_KEY_NAME` and
-`LEGION_E2E_REVIEW_APP_KEY_NAME` give) as each App's `private_key_command`, and `prerequisites`
-checks each with `secrets get <KEY> --no-request`, which prints only the key and its tier, refuses
-one that does not resolve to the agent tier, and then proves each key is its id's App
+Legion's role Apps resolve as Stage 3's do: the daemon runs `<runner> <implement App key> -- …`
+and `<runner> <review App key> -- …` (the runner `LEGION_E2E_APP_KEY_RUNNER` names, `secrets` by
+default, which `prerequisites` requires on `PATH`; the key names `LEGION_E2E_IMPLEMENT_APP_KEY_NAME`
+and `LEGION_E2E_REVIEW_APP_KEY_NAME` give) as each App's `private_key_command`, and
+`prerequisites` proves each key is its id's App
 ([`read_app_logins`](#libworkflowsh)) before the run's first write. The proof human is the devbox's ordinary
 `gh` acting as `sjawhar-agent[bot]` ([`require_proof_human`](#libworkflowsh)), so the run starts
 from the operator's own Oh My Pi session. The `EXIT` trap stops every process and container,
