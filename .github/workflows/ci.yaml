@@ -97,12 +97,17 @@ jobs:
           # for Go, the closure of the packages the job compiles (`go list -deps -test`), the
           # targets of the go commands its tests start, and the module files of the workspace the
           # build runs in, whose go.mod files move the versions it compiles; and this file, since a
-          # job reads its own definition. The quantifier is the default, `some` (a change matches a
-          # filter when any of its patterns matches), and no pattern is negated:
-          # .github/scripts/check-image-trigger-paths.sh reads the filters that gate an image build
-          # (worker_image, envoy_smoke) only that way, and only as flat lists of globs, so those two
-          # name no anchor.
+          # job reads its own definition.
           #
+          # dorny/paths-filter v4.0.3's `some-with-excludes` quantifier matches a change to a filter
+          # when one of its patterns without `!` matches and none of its `!` patterns does. Only
+          # worker_image has `!` patterns: they drop what the .dockerignore keeps out of the worker
+          # image's build context. Every other filter must stay without one, so it means what it
+          # would under the default, `some` (any pattern matches), where a `!` pattern would match
+          # every file outside it. .github/scripts/check-image-trigger-paths.sh reads the filters
+          # that gate an image build (worker_image, envoy_smoke) under this quantifier, and only as
+          # flat lists of globs, so those two name no anchor.
+          predicate-quantifier: some-with-excludes
           # The first keys are no job's gate: each is a group many filters share, written once and
           # named by every filter that needs it through its anchor, which dorny/paths-filter
           # flattens into the list that names it.
@@ -795,10 +800,15 @@ jobs:
             # stages them); the Go workspace; packages/envoy, copied whole for its agent-secrets
             # binary but for packages/envoy/infra, which the .dockerignore drops, so each of its
             # top-level directories but infra is named; the scripts that write the image's
-            # third-party notices; the Oh My Pi pin; and the context's .dockerignore.
+            # third-party notices; the Oh My Pi pin; and the context's .dockerignore. Then a `!`
+            # pattern for each .dockerignore line that drops part of those packages, of
+            # packages/envoy or of skills/, which the step's some-with-excludes reads as an
+            # exclusion, so a pull request touching only files the build does not read builds no
+            # image.
             # .github/scripts/check-image-trigger-paths.sh fails the build when this list misses a
-            # file the image build reads, including a new top-level directory of packages/envoy; it
-            # reads this filter only as a flat list, so it names no anchor.
+            # file the image build reads, including a new top-level directory of packages/envoy, or
+            # matches a file it does not read other than the two workflow files; it reads this
+            # filter only as a flat list, so it names no anchor.
             worker_image:
               - '.github/workflows/ci.yaml'
               - '.github/workflows/worker-image.yaml'
@@ -835,6 +845,17 @@ jobs:
               - 'scripts/third-party-notices.ts'
               - 'scripts/go-third-party-notices.sh'
               - 'scripts/assemble-third-party-notices.sh'
+              - '!**/node_modules/**'
+              - '!**/dist/**'
+              - '!**/build/**'
+              - '!**/coverage/**'
+              - '!**/docker-data/**'
+              - '!skills/AGENTS.md'
+              - '!packages/envoy/**/*_test.go'
+              - '!packages/envoy/internal/integration/**'
+              - '!packages/envoy/internal/smoke/**'
+              - '!packages/envoy/deploy/**'
+              - '!packages/envoy/infra/**'
             # lint's notices step: the Go packages it loads for every release target (`legion`,
             # the listener, the agent-secrets binaries and client, every envoy-infra command), the
             # workspaces they build in, the target lists and the notices script.

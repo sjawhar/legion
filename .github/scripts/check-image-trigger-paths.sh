@@ -23,7 +23,13 @@
 #   * GATES are an ALLOWLIST: unknown means refused, never ungated. A gate resolves to
 #     `dorny/paths-filter` outputs tested `== 'true'` and joined by `||`, to event terms, or to
 #     terms that cannot narrow by path, or it is refused. GitHub compares case-insensitively,
-#     so this check does too.
+#     so this check does too. A filter is read under its step's `predicate-quantifier`: under
+#     `some` (the default) a file matches when any pattern does, and a `!` pattern, which
+#     there matches every file outside it, is refused; under `some-with-excludes` a file
+#     matches when a pattern without `!` does and no `!` pattern does, so a `!` pattern
+#     excludes. Any other quantifier (`every` among them), a pattern holding a brace, which
+#     picomatch expands, and a filter whose name two paths-filter steps of one job define,
+#     are refused.
 #   * A build in a `run:` step is DETECTED, and EVERY detection is refused - there is no
 #     pattern that can excuse one. The detector judges ONE COMMAND at a time and is drawn
 #     broad: a container-CLI word followed later on the command by `build`, `bake` or `b`, the
@@ -78,7 +84,19 @@
 #      the remedy,
 #   4. a run step the net catches, since skipping one leaves an image whose inputs no trigger
 #      owes,
-#   5. no image build found at all, since that checks nothing.
+#   5. no image build found at all, since that checks nothing,
+#   6. the other direction: a pull request trigger path that starts an image build and nothing
+#      else, yet matches a file no build it starts reads, since each push to a pull request
+#      touching only such files then builds an image for nothing. That is (a) a `pull_request`
+#      or `pull_request_target` trigger of a workflow whose every job builds, calls a workflow
+#      that only builds, or needs a job that does, with no paths-filter filter selecting the
+#      build; and (b) a path that paths-filter filters select, where each of those filters
+#      decides only jobs that only build — a building job with nothing beside its build but
+#      checkout, buildx and registry steps, or a call of a workflow that only builds — and the
+#      job's gates admit a pull request event. There the event's paths AND the filters must
+#      match only files the builds read, or the workflows involved (the building one and the
+#      caller). A `push` or `merge_group` trigger, a filter that also decides a job doing more,
+#      and a workflow with other jobs are left alone: what they start reads more than an image.
 #
 # Files are discovered by walking the tree, not by asking git, so an unsnapshotted change cannot
 # read green locally.
@@ -101,7 +119,7 @@ import sys
 from pathlib import Path
 
 import yaml
-from workflow_paths import Filter, events, glob_regex, unread_patterns, walk
+from workflow_paths import Filter, PathsFilter, events, glob_regex, unread_filter_patterns, unread_patterns, walk
 
 WORKFLOWS = Path(".github/workflows")
 PATH_EVENTS = ("push", "pull_request", "pull_request_target", "merge_group")
@@ -163,7 +181,7 @@ FILES = walk()
 class AnyOf:
     """Covers what any one of its filters covers: a job gated on `a == 'true' || b == 'true'`."""
 
-    def __init__(self, filters: list[Filter]):
+    def __init__(self, filters: list[PathsFilter]):
         self.filters = filters
 
     def covers(self, path: str) -> bool:
@@ -609,14 +627,14 @@ def event_filters(workflow: Path, document: dict) -> list[tuple[str, str, Filter
         if key is None:
             found.append((name, f"on.{name}", Filter(None)))
             continue
-        # glob_regex reads patterns as picomatch does, so it refuses GitHub's `?`, `+` and `\`
-        # rather than guess (workflow_paths.unread_patterns).
+        # glob_regex reads patterns as picomatch does, so it refuses GitHub's `?`, `+`, `\` and
+        # braces rather than guess (workflow_paths.unread_patterns).
         unread = unread_patterns(spec[key])
         if unread:
             problems.append(
                 f"::error file={workflow}::{workflow} on.{name}.{key} has {', '.join(unread)}: "
-                f"this check does not read GitHub's ?, + or \\ in a path filter; write the "
-            f"filter with `*`, `**` and literal characters"
+                f"this check does not read GitHub's ?, + or \\ or braces in a path filter; write "
+                f"the filter with `*`, `**` and literal characters"
             )
             continue
         found.append((name, f"on.{name}.{key}", Filter(spec[key], ignore=key == "paths-ignore")))
@@ -757,7 +775,7 @@ def gate_outputs(condition: str, document: dict) -> tuple[list[tuple[str, str]],
     return outputs, admitted
 
 
-def gating_filters(document: dict, describe: str, holder: dict) -> tuple[list[tuple[str, Filter]], set[str]]:
+def gating_filters(document: dict, describe: str, holder: dict) -> tuple[list[tuple[str, PathsFilter]], set[str]]:
     """The dorny/paths-filter filters an `if:` is gated on, and the trigger events it admits.
     The holder is a job that builds an image, a job that calls a workflow which does, a job
     either of those needs, or the build step itself. A gate this check cannot evaluate is
@@ -772,17 +790,11 @@ def gating_filters(document: dict, describe: str, holder: dict) -> tuple[list[tu
     found = []
     for needed, output in outputs:
         upstream = jobs.get(needed) or {}
-        expression = str((upstream.get("outputs") or {}).get(output, ""))
-        reference = STEP_OUTPUT.search(expression)
+        reference = output_filter(document, needed, output)
         step = None
         if reference:
             step = next(
-                (
-                    s
-                    for s in upstream.get("steps") or []
-                    if s.get("id") == reference.group(1)
-                    and "dorny/paths-filter" in str(s.get("uses", ""))
-                ),
+                (s for s in paths_filter_steps(upstream) if s.get("id") == reference[0]),
                 None,
             )
         if step is None:
@@ -792,29 +804,81 @@ def gating_filters(document: dict, describe: str, holder: dict) -> tuple[list[tu
                 f"this check can read; make that output a paths-filter filter, or drop the gate"
             )
             continue
-        options = step.get("with") or {}
-        # `every` makes a filter match only a change that every one of its patterns matches
-        # (https://github.com/dorny/paths-filter#advanced-options); only the default, `some`,
-        # means "any pattern matches".
-        quantifier = options.get("predicate-quantifier", "some")
-        if quantifier != "some":
+        name = reference[1]
+        # A filter of the same name in another paths-filter step of the job reads like the gate,
+        # while the output reads only one of them.
+        holders = [str(s.get("id", "")) for s in paths_filter_steps(upstream) if name in step_filters(s)]
+        if len(holders) > 1:
             problems.append(
-                f"::error::jobs.{needed} runs dorny/paths-filter with predicate-quantifier: "
-                f"{quantifier}, which this check cannot evaluate; drop it and let the filter "
-                f"use the default, some"
+                f"::error::jobs.{needed} defines filter {name} in two dorny/paths-filter steps "
+                f"({', '.join(holders)}); keep it in the one step its output reads"
             )
             continue
-        name = reference.group(2)
-        filters = yaml.safe_load(str(options.get("filters", ""))) or {}
-        patterns = filters.get(name)
+        options = step.get("with") or {}
+        # dorny/paths-filter v4.0.3 (src/filter.ts:58-66,133-149): under the default, `some`, a
+        # file matches a filter when any of its patterns matches it, and picomatch reads a `!`
+        # pattern as the files outside it; under `some-with-excludes`, when a pattern without `!`
+        # matches it and no `!` pattern does. `every` (each pattern matches) is not read.
+        quantifier = str(options.get("predicate-quantifier", "some"))
+        if quantifier not in PathsFilter.QUANTIFIERS:
+            problems.append(
+                f"::error::jobs.{needed} runs dorny/paths-filter with predicate-quantifier: "
+                f"{quantifier}, which this check cannot evaluate; use the default, some, or "
+                f"some-with-excludes to exclude with `!` patterns"
+            )
+            continue
+        patterns = step_filters(step).get(name)
         if not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
             problems.append(
                 f"::error::jobs.{needed} filter {name} is not a list of globs, which this "
                 f"check cannot read; write it as a list of path globs"
             )
             continue
-        found.append((f"jobs.{needed} filter {name}", Filter(patterns)))
+        negated = [p for p in patterns if p.startswith("!")]
+        if quantifier == "some" and negated:
+            problems.append(
+                f"::error::jobs.{needed} filter {name} has {negated[0]}, a `!` pattern under "
+                f"predicate-quantifier: some, where it matches every file outside "
+                f"{negated[0][1:]}; give the step predicate-quantifier: some-with-excludes, where "
+                f"it excludes those files and a filter with no `!` pattern reads as under some"
+            )
+            continue
+        # picomatch expands {a,b} and {a..c}; glob_regex would read the brace literally.
+        unread = unread_filter_patterns(patterns)
+        if unread:
+            problems.append(
+                f"::error::jobs.{needed} filter {name} has {unread[0]}, a brace picomatch expands "
+                f"and this check does not read; write one pattern per alternative with `*`, `**`, "
+                f"`[...]` and literal characters"
+            )
+            continue
+        found.append((filter_label(needed, name), PathsFilter(patterns, quantifier)))
     return found, admitted
+
+
+def filter_label(needed: str, name: str) -> str:
+    return f"jobs.{needed} filter {name}"
+
+
+def output_filter(document: dict, needed: str, output: str) -> tuple[str, str] | None:
+    """(step id, filter name) that `needs.<needed>.outputs.<output>` reads, or None when the
+    output is not a step output."""
+    upstream = (document.get("jobs") or {}).get(needed) or {}
+    reference = STEP_OUTPUT.search(str((upstream.get("outputs") or {}).get(output, "")))
+    return (reference.group(1), reference.group(2)) if reference else None
+
+
+def paths_filter_steps(job: dict) -> list[dict]:
+    return [
+        s for s in job.get("steps") or []
+        if isinstance(s, dict) and "dorny/paths-filter" in str(s.get("uses", ""))
+    ]
+
+
+def step_filters(step: dict) -> dict:
+    """A paths-filter step's filters, by name; empty when they are not inline YAML."""
+    filters = yaml.safe_load(str((step.get("with") or {}).get("filters", ""))) or {}
+    return filters if isinstance(filters, dict) else {}
 
 
 documents = {
@@ -825,39 +889,48 @@ documents = {
 documents = {path: doc for path, doc in documents.items() if isinstance(doc, dict)}
 
 
-def inherited_gates(document: dict, job_name: str) -> list[tuple[str, list[tuple[str, Filter]], set[str]]]:
-    """(label, filters, admitted events) for every gate that decides whether `job_name` runs:
-    its own `if:` and that of each job it transitively `needs:`, since GitHub skips a job whose
-    needed job was skipped.
+def deciding_jobs(document: dict, job_name: str) -> list[str]:
+    """`job_name` and every job whose `if:` decides whether it runs: each job it transitively
+    `needs:`, since GitHub skips a job whose needed job was skipped.
 
     A job whose own `if:` says `always()` or `!cancelled()` runs past a skipped need, so the
     walk does not descend into its `needs:` — except into a job whose result that same `if:`
     demands. `always() && needs.X.result == 'success'` is exempt from the skip rule and then
     re-imposes X's gate by hand, so X still decides whether this job runs."""
-    gates, seen, queue = [], set(), [job_name]
+    order, seen, queue = [], set(), [job_name]
     while queue:
         name = queue.pop()
         if name in seen:
             continue
         seen.add(name)
+        order.append(name)
         job = (document.get("jobs") or {}).get(name) or {}
         condition = str(job.get("if", ""))
-        found, admitted = gating_filters(document, f"jobs.{name}", job)
-        gates.append((f"jobs.{name}.if", found, admitted))
-        demanded = required_results(condition)
-        queue += sorted(demanded)
+        queue += sorted(required_results(condition))
         if "always()" in condition or "cancelled()" in condition:
             continue
         needs = job.get("needs") or []
         queue += [needs] if isinstance(needs, str) else list(needs)
+    return order
+
+
+def inherited_gates(document: dict, job_name: str) -> list[tuple[str, list[tuple[str, PathsFilter]], set[str]]]:
+    """(label, filters, admitted events) for every gate that decides whether `job_name` runs:
+    the `if:` of each of its deciding_jobs."""
+    gates = []
+    for name in deciding_jobs(document, job_name):
+        job = (document.get("jobs") or {}).get(name) or {}
+        found, admitted = gating_filters(document, f"jobs.{name}", job)
+        gates.append((f"jobs.{name}.if", found, admitted))
     return gates
 
 
-def apply_gates(triggers: list, gates: list) -> list:
+def apply_gates(triggers: list, gates: list, workflow: Path) -> list:
     """Drop each trigger whose event a gate does not admit, and AND each gate's filters into the
-    rest. Filters inside one `if:` are ||-joined and widen, but separate gates must all hold."""
+    rest. Filters inside one `if:` are ||-joined and widen, but separate gates must all hold.
+    Each trigger's selectors gain the gates' filters, as (workflow, filter label)."""
     for gate_label, found, admitted in gates:
-        for label, event, _ in triggers:
+        for label, event, *_ in triggers:
             if event not in admitted:
                 print(f"{label}: not checked, since {gate_label} admits no {event} run")
         triggers = [trigger for trigger in triggers if trigger[1] in admitted]
@@ -866,18 +939,28 @@ def apply_gates(triggers: list, gates: list) -> list:
         names = " or ".join(label for label, _ in found)
         either = AnyOf([f for _, f in found])
         triggers = [
-            (f"{label} + {gate_label} ({names})", event, filters + [either])
-            for label, event, filters in triggers
+            (
+                f"{label} + {gate_label} ({names})",
+                event,
+                filters + [either],
+                origin,
+                selectors + tuple((workflow, name) for name, _ in found),
+            )
+            for label, event, filters, origin, selectors in triggers
         ]
     return triggers
 
 
-def triggers_for(workflow: Path) -> list[tuple[str, str, list]]:
-    """(label, event, filters that must all cover an input) for every trigger that runs
-    `workflow`. A called workflow's `github.event_name` is its caller's event, so a caller's
-    trigger carries the caller's event."""
+def triggers_for(workflow: Path) -> list[tuple[str, str, list, Path, tuple]]:
+    """(label, event, filters that must all cover an input, the workflow whose trigger it is,
+    the paths-filter filters that select it) for every trigger that runs `workflow`. A called
+    workflow's `github.event_name` is its caller's event, so a caller's trigger carries the
+    caller's event."""
     document = documents[workflow]
-    found = [(f"{workflow} {label}", event, [f]) for event, label, f in event_filters(workflow, document)]
+    found = [
+        (f"{workflow} {label}", event, [f], workflow, ())
+        for event, label, f in event_filters(workflow, document)
+    ]
     if "workflow_call" not in events(document):
         return found
     for caller, caller_document in documents.items():
@@ -888,13 +971,13 @@ def triggers_for(workflow: Path) -> list[tuple[str, str, list]]:
             # exactly as a building job is.
             gates = inherited_gates(caller_document, job_name)
             base = [
-                (f"{caller} {label}", event, [caller_filter])
+                (f"{caller} {label}", event, [caller_filter], caller, ())
                 for event, label, caller_filter in event_filters(caller, caller_document)
             ]
             filtered = any(gate_filters for _, gate_filters, _ in gates)
             found += [
-                (label if filtered else f"{label} (jobs.{job_name})", event, filters)
-                for label, event, filters in apply_gates(base, gates)
+                (label if filtered else f"{label} (jobs.{job_name})", *rest)
+                for label, *rest in apply_gates(base, gates, caller)
             ]
     return found
 
@@ -1106,6 +1189,11 @@ if not builds:
         "delete this check"
     )
 
+# Per pull request trigger path that starts a build, its filters, the workflow whose trigger it
+# is, the paths-filter filters that select it, and every file the builds it starts read: the
+# reverse check below reads them.
+PULL_REQUEST_EVENTS = ("pull_request", "pull_request_target")
+started: dict[str, tuple[list, Path, tuple, set[str]]] = {}
 for workflow, job_name, step, context, dockerfile in builds:
     if not Path(dockerfile).is_file():
         problems.append(f"::error file={workflow}::{workflow} builds {dockerfile}, which is missing; add the "
@@ -1150,8 +1238,12 @@ for workflow, job_name, step, context, dockerfile in builds:
         describe = f"jobs.{job_name} step '{where}'"
         found, admitted = gating_filters(document, describe, step)
         gates.append((f"{describe} if", found, admitted))
-    triggers = apply_gates(triggers_for(workflow), gates)
-    for label, _, filters in triggers:
+    triggers = apply_gates(triggers_for(workflow), gates, workflow)
+    read = {path for _, files in inputs for path in files}
+    for label, event, filters, origin, selectors in triggers:
+        if event in PULL_REQUEST_EVENTS:
+            started.setdefault(label, (filters, origin, selectors, set()))[3].update(read)
+    for label, _, filters, _, _ in triggers:
         for name, files in inputs:
             uncovered = [path for path in files if not all(f.covers(path) for f in filters)]
             if uncovered:
@@ -1167,6 +1259,138 @@ for workflow, job_name, step, context, dockerfile in builds:
         )
     if not triggers:
         print(f"{dockerfile}: no path-triggered event of {workflow} reaches this build; nothing to check")
+
+building_jobs: dict[Path, set[str]] = {}
+for workflow, job_name, *_ in builds:
+    building_jobs.setdefault(workflow, set()).add(job_name)
+
+# The steps a job may run and still have an image build as its only purpose: the build itself,
+# and steps that prepare or publish it and read no file of the tree.
+BUILD_PLUMBING = {
+    "actions/checkout",
+    "docker/build-push-action",
+    "docker/login-action",
+    "docker/metadata-action",
+    "docker/setup-buildx-action",
+    "docker/setup-qemu-action",
+}
+
+
+def local_call(job: dict) -> Path | None:
+    called = str(job.get("uses", "")) if isinstance(job, dict) else ""
+    target = Path(called[2:]) if called.startswith("./.github/workflows/") else None
+    return target if target in documents else None
+
+
+def only_builds(workflow: Path, seen: frozenset = frozenset()) -> bool:
+    """True when every job of the workflow builds an image, calls a workflow that only builds,
+    or transitively needs a job that does either, so whatever starts the workflow starts an
+    image build and nothing else."""
+    jobs = documents[workflow].get("jobs") or {}
+    building = set(building_jobs.get(workflow, set()))
+    for name, job in jobs.items():
+        target = local_call(job)
+        if target and target not in seen | {workflow} and only_builds(target, seen | {workflow}):
+            building.add(name)
+
+    def reaches(name: str, path: frozenset) -> bool:
+        if name in building:
+            return True
+        needs = (jobs.get(name) or {}).get("needs") or []
+        needs = [needs] if isinstance(needs, str) else list(needs)
+        return any(need not in path and reaches(need, path | {name}) for need in needs)
+
+    return bool(jobs) and all(reaches(name, frozenset()) for name in jobs)
+
+
+def builds_only(workflow: Path, job_name: str) -> bool:
+    """True for a job whose only purpose is an image build: a call of a workflow that only
+    builds, or a building job whose every step is in BUILD_PLUMBING. A run step or any other
+    action may read files no build reads, so a job with one does more."""
+    job = (documents[workflow].get("jobs") or {}).get(job_name) or {}
+    target = local_call(job)
+    if target:
+        return only_builds(target)
+    if job_name not in building_jobs.get(workflow, set()):
+        return False
+    return all(
+        isinstance(step, dict) and str(step.get("uses", "")).split("@", 1)[0] in BUILD_PLUMBING
+        for step in job.get("steps") or []
+    )
+
+
+def jobs_selected_by(workflow: Path, label: str) -> list[str]:
+    """The jobs of the workflow the paths-filter filter `label` decides: one whose `if:`, or
+    that of a job it inherits a gate from (deciding_jobs), or that of one of its steps, tests
+    that filter's output. Every test counts, not only `== 'true'`, so the list errs long."""
+    document = documents[workflow]
+    jobs = document.get("jobs") or {}
+
+    def names(condition) -> set[str]:
+        return {
+            filter_label(needed, reference[1])
+            for needed, output in NEEDS_OUTPUT.findall(str(condition or ""))
+            for reference in [output_filter(document, needed, output)]
+            if reference
+        }
+
+    selected = []
+    for job_name, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        conditions = [(jobs.get(name) or {}).get("if") for name in deciding_jobs(document, job_name)]
+        conditions += [step.get("if") for step in job.get("steps") or [] if isinstance(step, dict)]
+        if any(label in names(condition) for condition in conditions):
+            selected.append(job_name)
+    return selected
+
+
+# The other direction, for a pull request: a trigger path that starts an image build at every
+# push to a pull request whose diff it matches must match nothing the builds it starts do not
+# read (a file the .dockerignore drops, or one no COPY names), or a pull request touching only
+# such files builds an image for nothing, in the queue the required checks wait in. A path is
+# held to this when it starts builds and nothing else: when paths-filter filters select it, each
+# of them decides only jobs that only build (builds_only); when none do, the workflow whose
+# trigger it is only builds (only_builds). A push, a merge group, a filter that also decides a
+# job doing more, and a workflow with other jobs are left alone, since what they start reads
+# more than the image. The workflows involved, the building one and the caller, count as read.
+for label, (filters, origin, selectors, read) in started.items():
+    wider = next(
+        (
+            (name, job_name)
+            for where, name in selectors
+            for job_name in jobs_selected_by(where, name)
+            if not builds_only(where, job_name)
+        ),
+        None,
+    )
+    if wider:
+        print(
+            f"{label}: not checked for files no image build reads, since {wider[0]} gates "
+            f"jobs.{wider[1]}, which does more than build an image"
+        )
+        continue
+    if not selectors and not only_builds(origin):
+        continue
+    extra = [
+        path
+        for path in FILES
+        if all(f.covers(path) for f in filters) and path not in read and path != str(origin)
+    ]
+    if not extra:
+        print(f"{label}: matches only files its image builds read")
+        continue
+    more = f" and {len(extra) - 1} more" if len(extra) > 1 else ""
+    how = (
+        "under predicate-quantifier: some-with-excludes, a `!` pattern excludes"
+        if selectors
+        else "a `!` pattern after the pattern that matches it excludes"
+    )
+    problems.append(
+        f"::error file={origin}::{label} matches {extra[0]}{more}, which no image build reads, "
+        f"so a pull request touching only that builds an image for nothing; narrow the filter "
+        f"so it matches only files the build reads ({how})"
+    )
 
 # Every excusal is printed, so a reader can audit the list against what it excused.
 for excusal in dict.fromkeys(excused):

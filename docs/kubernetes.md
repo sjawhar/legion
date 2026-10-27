@@ -520,7 +520,10 @@ than merging and publishing nothing. The Go build inputs are `go.work`, `go.work
 `go.work`'s Go version, so a change that moves it past the build stage's Go fails on its own pull request
 rather than in the next image build.
 `.github/scripts/check-image-trigger-paths.sh` (the lint job of `ci.yaml`) parses the Dockerfile
-and fails when trigger (1) or (2) misses a file it reads, so these lists cannot drift from it.
+and fails when trigger (1) or (2) misses a file it reads, so these lists cannot drift from it. It also
+fails when trigger (2)'s `worker_image` filter matches a file the build does not read (one the
+`.dockerignore` drops, or one no `COPY` names), since a pull request touching only that file would build
+an image for nothing; the filter's `!` patterns drop those, under its step's `some-with-excludes`.
 Trigger (2) selects by the pull request's whole diff: on `pull_request`, the `changes` job of `ci.yaml`
 reads the pull request's file list, so a later commit that touches none of those paths (a handoff, a docs
 fix) still gets the build and the PR head never loses it, unless that head carries `skip-checks: true`,

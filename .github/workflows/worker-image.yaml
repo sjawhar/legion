@@ -46,7 +46,7 @@ on:
   # accepts (docs/kubernetes.md, "Pin by digest, never by tag"). The final `legion probe-image` runs
   # the image's own `legion` and both plugins, so a pull request that breaks any of them fails here
   # instead of merging and publishing nothing. .github/scripts/check-image-trigger-paths.sh fails the
-  # build when that filter misses a file the image build reads.
+  # build when that filter misses a file the image build reads, or matches one it does not read.
 
 # This workflow has no pull_request trigger of its own: a pull request's run is ci.yaml's call on
 # pull_request, which gets this same token (a fork pull request would get a read-only one, and this

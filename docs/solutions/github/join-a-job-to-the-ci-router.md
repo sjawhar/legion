@@ -63,10 +63,24 @@ For every job, add:
 - Biome's files when it runs `bunx biome` (the `biome` anchor);
 - `.github/workflows/ci.yaml` itself, since a job reads its own definition.
 
-Write no `!` pattern. The step's quantifier is `some`: a change matches a filter when any pattern
-matches, so a negated pattern matches every file outside it and selects the job on almost every
-change. `.github/scripts/check-image-trigger-paths.sh` also reads the image gates (`worker_image`,
-`envoy_smoke`) only as flat lists of globs, so those two name no anchor and no negation.
+Write no `!` pattern. The step's quantifier is `some-with-excludes`: a change matches a filter
+when one of its patterns without `!` matches and none of its `!` patterns does. A filter with no
+`!` pattern therefore means what it would under the default, `some` (any pattern matches), and
+every filter but `worker_image` must stay that way.
+
+`worker_image` is the one exception. Its `!` patterns are exclusions under `some-with-excludes`:
+after the roots the worker image build reads come one `!` pattern for each thing the
+`.dockerignore` keeps out of the build context inside those roots. The check fails when
+`worker_image` misses a file the build reads, and, since it gates a job that only builds, when it
+matches a file the build does not read (the two workflow files aside): a pull request touching
+only such files would build an image for nothing. When the Dockerfile copies from a new root, add
+the root; when the `.dockerignore` drops something new inside a root, add its `!` pattern.
+
+`.github/scripts/check-image-trigger-paths.sh` reads the image gates (`worker_image`,
+`envoy_smoke`) only as flat lists of globs, so those two name no anchor. In an image gate it
+refuses a `!` pattern under `some`, where it would match every file outside it, any quantifier but
+`some` and `some-with-excludes` (`every` included), and a `{` or `}` in a pattern, which picomatch
+expands and the check does not read.
 
 ## What goes wrong when the filter misses a file
 
