@@ -488,8 +488,8 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 		// An unrecorded todo child of a live tree is the workflow's to record, as its own todo event
 		// would (the engine's recordChildUnderLiveTree, which runs before admission on every live
 		// event), from the parent the listing shows now. Without this, a child no event of it ever
-		// recorded stays unrecorded under its running tree, and no later event of it is coming: it
-		// is todo already. Two ways that happens — an event the daemon never received (a durable
+		// recorded stays unrecorded under its running tree, and no later event of it need come:
+		// Dispatch already shows it todo, so nothing writes that status again. Two ways that
 		// consumer created fresh takes only what is published after it, so an event published while
 		// the project had none never arrives), and one it received while the child's parent had no
 		// record or its tree was not live, where the workflow records nothing. A child the workflow
