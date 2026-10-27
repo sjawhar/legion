@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-522",
+  "completed": "2026-10-27T14:40:00Z",
+  "decision": "changes_requested",
+  "reviewedCodeHead": "0fb74300a550c1a6176fb00189066b362df1f07d",
+  "critical": 1,
+  "important": 2,
+  "minor": 0,
+  "keyFindings": [
+    {
+      "severity": "critical",
+      "file": ".github/workflows/release-envoy-listener.yaml:216,267-268",
+      "description": "Security[untrusted-input]: main's attested build reads the registry cache envoy:buildcache-<arch>, which any run of this repository holding packages: write can write (a workflow_dispatch of an edited copy, or a same-repo pull_request run of worker-image.yaml, which holds packages: write). The tags today hold the versions branch run 40453177184 wrote (sha256:2b598417... amd64, sha256:d05175cf... arm64). Spec v4 requires type=gha, one scope per leg, mode=min, written only on main; GitHub never lets a main run restore a branch's Actions-cache entries."
+    },
+    {
+      "severity": "important",
+      "file": ".github/workflows/release-envoy-listener.yaml:288",
+      "description": "retention-days: 1 on envoy-image-digest-<arch>: a re-run of a failed image_index, or of one failed leg, more than a day later finds no digests and stops ('expected 2 digests ... found 0'). The files are empty; keep them 7 days or more."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/AGENTS.md:3941-3943; docs/solutions/envoy/ghcr-docker-multiarch-ci.md:110-111,117-131; workflow comments 212-216, 258-266; PR body",
+      "description": "The prose states 'only a build on main writes' the registry cache as a guarantee the code does not enforce, and rejects type=gha for its mode=max size, not for the cache spec v4 asks for. Rewrite with the cache change. The PR body must restate the minutes with the new cache, hit and miss, and the Actions-cache size each main run adds (spec v4)."
+    }
+  ],
+  "ci": "At code head 0fb74300 (newest pull_request run's head): lint, typecheck, test, pr-title success; compare 0fb74300...e5ff68f5 is .legion/ only (2 files).",
+  "thermonuclear": "Deep review and code quality pair ran at 0fb74300: both Verdict CHANGES, on the cache trust boundary; quality also suggests declaring the cache ref once in the docker job's env.",
+  "threads": "0 threads on the PR."
+}
