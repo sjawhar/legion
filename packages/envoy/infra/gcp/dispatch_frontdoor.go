@@ -311,8 +311,24 @@ const dispatchCertClaimBody = `(
     end=$(date -u -d "${end#notAfter=}" +%s 2>/dev/null) || return 1
     echo $((end - $(date -u +%s)))
   }
-  # annotation prints the value of the Secret's annotation $1 as the pass read it, or nothing.
-  annotation() { printf '%s' "$body" | sed -n "s|.*\"$1\": *\"\([^\"]*\)\".*|\1|p"; }
+  # annotation prints the value of the Secret's annotation $1 as the pass read it, or nothing. The
+  # key's dots are escaped, so only the key itself, quoted, matches.
+  annotation() {
+    k=$(printf '%s' "$1" | sed 's/\./\\./g')
+    printf '%s' "$body" | sed -n "s|.*\"$k\": *\"\([^\"]*\)\".*|\1|p"
+  }
+  # entry succeeds when $1 is a ledger entry this gate writes: an epoch of 1 to 12 digits with no
+  # leading zero (the shell reads a leading zero as octal and fails on 8 or 9, and a longer number
+  # overflows its arithmetic, either of which would end this loop), then "/" and characters a pod
+  # name or node id holds. Anything else, a hand edit or a value an escaped quote cut short, is
+  # skipped and so dropped at the next write, rather than carried into the merge patch's JSON.
+  entry() {
+    t=${1%%/*}
+    case "$t" in ''|0*|*[!0-9]*|?????????????*) return 1 ;; esac
+    case "${1#*/}" in ''|*[!A-Za-z0-9./-]*) return 1 ;; esac
+    case "$1" in */*) return 0 ;; esac
+    return 1
+  }
   # patch writes the annotations $1 (JSON members) on the Secret, with the resourceVersion the pass
   # read as the precondition, so a write after another pod's fails with 409 and writes nothing.
   patch() {
@@ -372,9 +388,9 @@ const dispatchCertClaimBody = `(
     # a node it was before a re-registration is still named as the front door's.
     reg=
     for e in $nodes; do
+      entry "$e" || continue
       t=${e%%/*}
       rest=${e#*/}
-      case "$t" in ''|*[!0-9]*) continue ;; esac
       [ $((now - t)) -lt "$keep" ] || continue
       [ "$rest" = "$me/$id" ] && continue
       reg="$reg $e"
@@ -385,8 +401,8 @@ const dispatchCertClaimBody = `(
     count=0
     mine=
     for c in $claims; do
+      entry "$c" || continue
       t=${c%%/*}
-      case "$t" in ''|*[!0-9]*) continue ;; esac
       [ $((now - t)) -lt "$window" ] || continue
       live="$live $c"
       count=$((count + 1))

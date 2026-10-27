@@ -428,6 +428,7 @@ type frontDoorLedger struct {
 	conflictOnce        bool // moves the resourceVersion between the next read and its write
 	url                 string
 	annotationsReceived []map[string]string
+	extra               map[string]string // further annotations the GET answers, never written
 }
 
 func newFrontDoorLedger(t *testing.T, claims string) *frontDoorLedger {
@@ -452,6 +453,9 @@ func newFrontDoorLedger(t *testing.T, claims string) *frontDoorLedger {
 				return
 			}
 			annotations := map[string]string{}
+			for key, value := range l.extra {
+				annotations[key] = value
+			}
 			for key, field := range fields() {
 				if *field != "" {
 					annotations[key] = *field
@@ -816,4 +820,33 @@ func TestDispatchCertificateBudgetSkipsAMalformedEpoch(t *testing.T) {
 	require.Equal(t, 1, l.claimWrites, out)
 	require.Contains(t, l.claims, "/"+p.name)
 	require.True(t, registeredIn(l, p), l.nodes)
+}
+
+// The gate reads its ledger by the annotation's exact key: a key that differs only where the
+// real key has a dot (here sorting after it, where a regex dot would take it in its place) is
+// not the ledger, so a week whose three claims are taken stays taken. The negative control is
+// TestDispatchCertificateBudgetClaims's open week.
+func TestDispatchCertificateBudgetReadsOnlyItsOwnAnnotation(t *testing.T) {
+	l := newFrontDoorLedger(t, gateClaimsAt(time.Hour, 2*time.Hour, 3*time.Hour))
+	l.extra = map[string]string{strings.Replace(dispatchCertificateClaimsAnnotation, ".", "x", 1): gateClaimsAt(100 * 24 * time.Hour)}
+	p := newGatePod(t, frontDoorTestPod+"a")
+	ok, out := p.gate(t, l)
+	require.False(t, ok, out)
+	require.Contains(t, out, "no claim left")
+	require.Zero(t, l.claimWrites, out)
+}
+
+// A ledger value a hand edit left holding a quote, which the gate's read cuts short at the
+// escaping backslash, costs only that entry: the gate still decides, and its write is valid JSON
+// the API server takes, rather than a 400 on every pass. The negative control is
+// TestDispatchCertificateBudgetClaims, whose entries are all well formed.
+func TestDispatchCertificateBudgetDropsAnEntryItCannotWrite(t *testing.T) {
+	l := newFrontDoorLedger(t, gateClaimsAt(time.Hour)+` `+fmt.Sprintf(`%d/%s"quoted`, time.Now().Unix(), frontDoorTestPod))
+	p := newGatePod(t, frontDoorTestPod+"a")
+	ok, out := p.gate(t, l)
+	require.True(t, ok, out)
+	require.Equal(t, 1, l.claimWrites, out)
+	require.Contains(t, l.claims, "/"+p.name)
+	require.NotContains(t, l.claims, `quoted`)
+	require.Len(t, strings.Fields(l.claims), 2, l.claims)
 }
