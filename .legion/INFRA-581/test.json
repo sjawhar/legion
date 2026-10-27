@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-581",
+  "completed": "2026-10-27T13:58:00Z",
+  "headTested": "35423b3dd5f08bd119a01f0a1efc3aba2a254440",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's e2e command on the tester lane (LEGION_ROLE=tester: ports 28777/29021-29024, database dispatch_tester_e2e) after bun run build:web: 18 passed on chromium and iphone, nested-directive rows 3.2/2.8 s and 3.6/2.6 s wall, document-write refusal row passed. Re-ran its A3 commands: pmdoc/gen `bun run check` -> fixtures up to date (88 documents, 43 splice cases); `differential.sh --base b08a56bce0c8 --head 35423b3dd5f0` -> every gate 0, PASS (head stores 88/88, base 87). Re-ran the new bound tests: proof-editor tests/nested-directive.test.ts 8 pass; Go -run 'Nested|Typed|Corpus|ReadBack' passes except the tester's new red test."
+  },
+  "failures": [
+    {
+      "criterion": "Architect's direction for this round (envoy e436ee03): Go's refusal of a footnote definition inside a typed block must not misstate the browser editor's behaviour",
+      "evidence": "At head, pmdoc refusals.go:83 refuses `Ref[^1].\\n\\n:::callout{#c1 kind=\"note\" title=\"T\"}\\n[^1]: x\\n:::\\n` with 'which the browser editor refers to only from inside a typed block or after it' (parse_test.go:78-81 states the same). The headless engine at head, read-only and default, reads both rows of parse_test.go:87-88 as paragraph+footnote_reference with the definition inside the callout (the quote row likewise) and serializes each back byte for byte, the same tree it reads for a definition inside a quote, which Go accepts. With lines 82-84 of refusals.go removed (temporary, restored), Go reads both rows to that same tree and renders them back as written, and TestParseMatchesMilkdownForFixtures still passes. So no reason about the browser holds: the corrected behaviour is to read the definition as the browser does. Red test: TestParseReadsAFootnoteDefinitionInsideATypedBlockAsTheBrowserDoes in packages/envoy/internal/dispatch/pmdoc/parse_test.go (commit b5d904f9). Fails now: `cd packages/envoy && go test -count=1 -run TestParseReadsAFootnoteDefinitionInsideATypedBlockAsTheBrowserDoes ./internal/dispatch/pmdoc/` -> 'outside Proof schema: a footnote definition inside a typed block, which the browser editor refers to only from inside a typed block or after it, want it read as the browser editor reads it' for both rows. Passes with the refusal removed. The two typed-block rows of TestParseRefusesAFootnoteDefinitionInsideAnotherOrATypedBlock (parse_test.go:87-88) and its doc comment pin the old behaviour and go with the fix."
+    },
+    {
+      "criterion": "CI green at the tested head (the bare gate every head must pass before review)",
+      "evidence": "GitHub ran no workflow at any commit of legion/INFRA-581: `gh api repos/sjawhar/legion/actions/runs?head_sha=35423b3dd5f08bd119a01f0a1efc3aba2a254440` and the same for c9472cff, 40bdc369, d114a55f return no runs, and `gh pr view 2403 --json mergeable` answers CONFLICTING. main moved from the fork point b08a56bc to 1b859ea3; both sides change packages/proof-editor/AGENTS.md, packages/envoy/AGENTS.md, packages/envoy/CHANGELOG.md, packages/envoy/cmd/dispatch/README.md and packages/dispatch/web/src/features/refs/markdown-engine.ts. GitHub runs no checks on a conflicting head, so lint, types and every suite are unread until the base is brought in (skill://legion-worker/references/conflicts-and-rewrites.md, reintegrating the base on a real conflict)."
+    }
+  ],
+  "failed": 2,
+  "proof": [
+    {
+      "criterion": "A1: a comment holding each input draws on the Conversation tab with no main-thread gap of 1,000 ms or more, and a document write of each input is refused with a reason in under 1,000 ms",
+      "surface": "Dispatch Conversation tab in Chromium (chromium and iphone projects) against the real Go Dispatch server and Postgres 17 + pgvector; the API's issue-document write",
+      "command": "cd packages/dispatch && LEGION_ROLE=tester source /legion/harness/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts nested-directive.e2e.ts unknown-directive.e2e.ts typed-blocks.e2e.ts --project=chromium --project=iphone --reporter=list",
+      "observed": "18 passed (1.1 m); both nested-directive rows and the refusal row pass on both projects",
+      "headSha": "35423b3dd5f08bd119a01f0a1efc3aba2a254440",
+      "negativeControl": "Throwaway rows on the same surface: a comment of 32 unclosed `:::a` then 15,920 `x` lines holds the main thread 1,127 ms (chromium) / 2,128 ms (iphone) and a no-directive 10,666-paragraph body 2,115 / 1,932 ms, so the 1,000 ms heartbeat assertion does fail on a slow body; the same lines with no `:::` take 764 / 811 ms (plain-markdown baseline, outside the plan's scope per its spec departure)"
+    },
+    {
+      "criterion": "A2: nesting is bounded at 32; the read-only engine draws the 33rd opener as text, Go refuses a 33rd nested typed block on write; 32 nest in both",
+      "surface": "Dispatch Conversation tab (comment card) and the issue-document write and document page, real Chromium against the real Go server",
+      "command": "throwaway packages/dispatch/e2e/zz-tester-bound.e2e.ts (removed after the run): createComment with 32 and 33 nested callouts (fences shortening inwards), createIssueArtifact with 33 then 32, open /issues/CORE-1/artifacts/deep32-md; bunx playwright test --config e2e/playwright.config.ts zz-tester-bound.e2e.ts --project=chromium",
+      "observed": "3 passed. 32-deep comment: no `:::` text in the card. 33-deep comment: the card text holds the 33rd opener `:::callout{kind=\"note\" title=\"L33\"}` as text and not the 32nd. 32-deep document: stored as deep32-md and the editor draws 32 [data-proof-block-type=callout] blocks. Headless probes: 33 nested in a list item and in a quote draw 32 and the default mode refuses line 33; 200 list/quote-ended callouts then 32 nested still nest 32 (no depth leak); reopening the innermost block 50 times at depth 32 stays 32; Go refuses 33 in a quote and in a list item at line 33 and reads 32 inside 68 quotes",
+      "headSha": "35423b3dd5f08bd119a01f0a1efc3aba2a254440",
+      "negativeControl": "createIssueArtifact of 33 nested callouts -> 400 {\"code\":\"INVALID_MARKDOWN\",\"error\":\"markdown is not a Proof document: outside Proof schema: line 33 opens a typed block inside 32 typed blocks; a document nests at most 32 typed blocks\"}"
+    },
+    {
+      "criterion": "A3: both parsers read the committed corpus as before",
+      "surface": "the server's and the browser editor's reading of documents",
+      "command": "cd packages/envoy/internal/dispatch/pmdoc/gen && bun run check; bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base b08a56bce0c8 --head 35423b3dd5f0 --out /legion/scratch/tmp/differential-tester",
+      "observed": "fixtures up to date (88 documents, 43 splice cases); differential: regressions 0, misreads 0, churn 0, engine-tree regressions 0, engine-tree churn 0, head panics 0, lost fixed points 0, PASS",
+      "headSha": "35423b3dd5f08bd119a01f0a1efc3aba2a254440",
+      "negativeControl": "Go with refusals.go:82-84 removed (temporary, restored) still passes TestParseMatchesMilkdownForFixtures, so the corpus holds no footnote-in-typed-block shape that would catch the refusal's false reason; the red test above does"
+    }
+  ],
+  "observations": [
+    "Nesting cost at the bound, headless warm best of 3: 32 unclosed `:::a` then 32,000-char bodies cost 1.6x (x lines), 1.55x (list items), 2.1x (quote lines), 3.4x (blank-separated paragraphs: 4.1 s vs 1.2 s) the same body with no `:::`; in Chromium the blank-separated body took 3,519 ms against 2,115 ms with no `:::` (1.66x). Linear and bounded as the plan says; the plan's 'at most about 1.6x' holds in the browser but not for every shape headless.",
+    "The default mode counts an unknown `:::foo` wrapper toward the 32 bound and refuses line 33 before naming the unknown block; it calls such a wrapper an 'unknown typed block' itself, and Go refuses the same document, so no finding."
+  ]
+}
