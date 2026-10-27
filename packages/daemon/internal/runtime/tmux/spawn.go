@@ -379,11 +379,15 @@ func (r *Runtime) Spawn(ctx context.Context, spec runtime.SpawnSpec) (runtime.Lo
 // is refused, naming the key (paneOf). The session is resumed where it is: at its recorded path,
 // or, by its name, in another working directory's folder of the recorded path's sessions directory
 // or of the pane's own (sessionFileOf), where a session carried over from a pod lands. One found
-// nowhere starts nothing. Over a foreign prev the error wraps runtime.ErrSessionFileMissing, which
-// the claim's machine answers by forgetting the session and spawning a fresh agent: the session was
-// another runtime's, and the operator chose the takeover. Over any other prev, or none, it is a
-// refusal, never a fresh agent: the claim resumes the agent it recorded or none
-// (assertResumeSessionFile, runtime.ts), and the refusal is charged as any launch failure is.
+// nowhere starts nothing. A session this runtime takes over found nowhere wraps
+// runtime.ErrSessionFileMissing, which the claim's machine answers by forgetting the session and
+// spawning a fresh agent: the session was another runtime's, and the operator chose the takeover.
+// That is a resume over a foreign prev, or, under take_over, one whose recorded path lies under
+// neither the pane's own sessions directory nor the state directory, which only the other runtime
+// records — a claim it left suspended, or one whose takeover launch failed before a restart, has no
+// prev left to say so. Any other session found nowhere is a refusal, never a fresh agent: the claim
+// resumes the agent it recorded or none (assertResumeSessionFile, runtime.ts), and the refusal is
+// charged as any launch failure is.
 func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	if spec.ResumeSessionFile == "" {
 		return runtime.Locator{}, fmt.Errorf("resume %s: no session file to resume from", spec.Claim)
@@ -428,8 +432,9 @@ func (r *Runtime) awaitGone(ctx context.Context, loc runtime.Locator) error {
 
 // launch is Spawn's and Resume's shared half: every check that needs no tmux, the secret files,
 // the claim's gh bundle, then the pane. takenOver is a resume over a previous incarnation of the
-// runtime this one takes over (Resume), whose session found nowhere is runtime.ErrSessionFileMissing
-// rather than a refusal.
+// runtime this one takes over (Resume); its session, or under take_over one recorded outside this
+// host's places (recordedElsewhere), found nowhere is runtime.ErrSessionFileMissing rather than a
+// refusal.
 func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec, takenOver bool) (runtime.Locator, error) {
 	if err := validateSpawnSpec(spec, r.providerKeys, r.operatorEnv); err != nil {
 		return runtime.Locator{}, err
@@ -454,6 +459,7 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec, takenOver 
 	}
 	if spec.ResumeSessionFile != "" {
 		harness := runtime.Backends[backend].Name
+		var paneDir string
 		found, searched, err := sessionFileOf(spec.ResumeSessionFile, func() (string, error) {
 			env := maps.Clone(r.paneEnv)
 			maps.Copy(env, r.operatorEnv)
@@ -461,12 +467,13 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec, takenOver 
 			if err != nil {
 				return "", fmt.Errorf("the pane's %s sessions directory: %w", harness, err)
 			}
+			paneDir = dir
 			return dir, nil
 		})
 		switch {
 		case err != nil:
 			return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
-		case found == "" && takenOver:
+		case found == "" && (takenOver || r.recordedElsewhere(spec.ResumeSessionFile, paneDir)):
 			return runtime.Locator{}, fmt.Errorf("resume %s: %w: no %s session at %s, and no other folder of %s holds that session",
 				spec.Claim, runtime.ErrSessionFileMissing, harness, spec.ResumeSessionFile, searchedIn(searched))
 		case found == "":

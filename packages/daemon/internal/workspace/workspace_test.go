@@ -231,7 +231,7 @@ func provisionRequest(t *testing.T) Request {
 		Issue:            "WIDGETS-42",
 		DefaultBranch:    "main",
 		CredentialHelper: GitHubCredentialHelper,
-		Source:           FromGitHub("test-installation-token", state),
+		Source:           FromGitHub(staticToken("test-installation-token"), state),
 		Log:              func(line string) { t.Logf("provisioning logged: %s", line) },
 	}
 }
@@ -297,7 +297,7 @@ func TestProvisionStartsAtADefaultBranchWhoseNameJJWouldParse(t *testing.T) {
 					t.Helper()
 					req := provisionRequest(t)
 					req.StateDir = filepath.Join(filepath.Dir(run.remote), "legion state")
-					req.Source = FromGitHub("test-installation-token", req.StateDir)
+					req.Source = FromGitHub(staticToken("test-installation-token"), req.StateDir)
 					req.DefaultBranch = tc.branch
 					if source == "feed" {
 						req = feedRequest(t, run, req)
@@ -346,7 +346,8 @@ func TestProvisionRefusesARequestWithNoOneWayToTheRepository(t *testing.T) {
 		edit func(*Request)
 		want string
 	}{
-		{"a token and no credential directory", func(r *Request) { r.Source = FromGitHub("test-installation-token", "") }, "workspace credential directory is required"},
+		{"a token and no credential directory", func(r *Request) { r.Source = FromGitHub(staticToken("test-installation-token"), "") }, "workspace credential directory is required"},
+		{"no token", func(r *Request) { r.Source = FromGitHub(nil, r.StateDir) }, "workspace provisioning token is required"},
 		{"no way to the repository", func(r *Request) { r.Source = nil }, "workspace request names no way to the repository: FromFeed or FromGitHub"},
 		{"no log", func(r *Request) { r.Log = nil }, "workspace request names no log"},
 	} {

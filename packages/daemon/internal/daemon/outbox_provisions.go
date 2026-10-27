@@ -14,7 +14,10 @@ import (
 // (workspace.Request.StoreLock); sixteen keep a host's disk busy without a few hundred writers
 // contending for it. Only the checkout takes a place: the rest of a provision is ordered by its
 // repository's store lock, and a provision that waited on that lock while it held a place would
-// keep every other repository's checkouts waiting behind it.
+// keep every other repository's checkouts waiting behind it. The clone and fetch under each store
+// lock are one at a time per repository and unbounded across repositories, on purpose: a project
+// maps a handful of repositories, each fetch brings two branches, and a bound shared across
+// repositories would bring back the cross-repository wait the place's position removed.
 const provisionConcurrency = 16
 
 // provisionLocks orders the outbox's workspace provisions and removals. At most

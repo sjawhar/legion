@@ -315,9 +315,10 @@ bookmark `legion/<ISSUE>`. The first provision of a repository clones it with th
 installation token, handed to git through a one-shot 0600 credential helper under the state
 directory. Every launch first makes sure its issue's workspace is there: a claim resumed,
 relaunched or recovered, as well as a new one, is provisioned when its directory is missing or its
-checkout never finished (its sparse patterns, read with `jj sparse list --ignore-working-copy`, are
-not `.`), checking out `legion/<ISSUE>` when GitHub has it. A launch waits for a provision or
-removal of the same issue that is under way.
+checkout never finished (it holds no sparse pattern, read with `jj sparse list
+--ignore-working-copy`; a workspace an agent narrowed keeps its patterns), checking out
+`legion/<ISSUE>` when GitHub has it. A launch waits for a provision or removal of the same issue
+that is under way.
 
 Provisions of different issues run side by side. Everything a provision does to the shared clone
 runs under the clone's one store lock: a fetch of the default branch and the issue's branch alone,
@@ -363,16 +364,19 @@ written by whichever daemon wrote last — so the order matters:
 3. Set `runtime.tmux.take_over: kubernetes` and boot the tmux daemon with the same Postgres. Each
    claim whose recorded process is a pod is reported gone, displaced, and relaunched in a pane,
    charged nothing, on its session when step 2 put its file in one of those places, searched by
-   file name or session id. A displaced claim whose session is found nowhere starts a fresh agent,
-   uncharged, which registers a session of its own; every other claim whose session file is
-   missing is refused, charged, and keeps its recorded session. Each workspace is provisioned
-   before its first launch.
+   file name or session id. A session the other runtime recorded — over a pod's process, or at a
+   path under neither the pane's sessions directory nor the state directory, as a claim the
+   Kubernetes daemon left suspended has — that is found nowhere starts a fresh agent, uncharged,
+   which registers a session of its own. A session recorded in this host's own places that is
+   missing is refused, charged, and the claim keeps it. Each workspace is provisioned before its
+   first launch.
 4. Retry what failed to launch meanwhile, once the cause is gone: `legion claims retry --failed`
    (an architect relaunches on its session; a phase worker whose issue is held for its own role
    retries that phase).
-5. Once every claim that was running has relaunched in a pane, remove `take_over`: from then on a
-   tmux daemon pointed at a store a Kubernetes daemon still drives refuses to start rather than
-   take its claims.
+5. Remove `take_over` once no claim can still resume a session a pod recorded: every claim that was
+   running has relaunched in a pane, and no claim the Kubernetes daemon suspended (a production
+   check waiting for its deploy among them) is left to wake. From then on a tmux daemon pointed at
+   a store a Kubernetes daemon still drives refuses to start rather than take its claims.
 
 ## Rotating the App keys
 

@@ -183,6 +183,50 @@ func TestCheckedOutNeverSnapshotsTheWorkingCopy(t *testing.T) {
 	}
 }
 
+// A workspace an agent narrowed (`jj sparse set`) finished its checkout: CheckedOut reads it as
+// checked out, and the next Provision — every launch of its issue runs one when the workspace is
+// not — leaves the agent's patterns as they are rather than resetting them to the whole tree.
+func TestANarrowedWorkspaceIsCheckedOutAndKeepsItsPatterns(t *testing.T) {
+	base := newLocalRunner(t)
+	pushRemoteBranch(t, base.remote, "main", "kept.txt")
+	req := provisionRequest(t)
+	working, err := Provision(context.Background(), base, req)
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	runSetup(t, working.Dir, "jj", "sparse", "set", "--clear", "--add", "docs", "-R", working.Dir)
+	if whole, err := CheckedOut(context.Background(), base, working); err != nil || !whole {
+		t.Fatalf("CheckedOut of a narrowed workspace = %t, %v; want true", whole, err)
+	}
+	if _, err := Provision(context.Background(), base, req); err != nil {
+		t.Fatalf("Provision of the narrowed workspace: %v", err)
+	}
+	if listed := strings.TrimSpace(runSetup(t, working.Dir, "jj", "sparse", "list", "-R", working.Dir)); listed != "docs" {
+		t.Errorf("the narrowed workspace's sparse patterns are %q after the next provision, want the agent's (docs)", listed)
+	}
+}
+
+// A provision from GitHub asks for its token only once it holds the shared clone's store lock, so
+// a provision that waited on that lock behind its repository's queue never fetches with a token
+// that expired in the wait.
+func TestProvisionAsksForItsTokenUnderTheStoreLock(t *testing.T) {
+	run := newLocalRunner(t)
+	lock := &heldLock{}
+	var asked, heldWhenAsked bool
+	req := provisionRequest(t)
+	req.StoreLock = lock
+	req.Source = FromGitHub(func() (string, error) {
+		asked, heldWhenAsked = true, lock.held.Load()
+		return "test-installation-token", nil
+	}, req.StateDir)
+	if _, err := Provision(context.Background(), run, req); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if !asked || !heldWhenAsked {
+		t.Errorf("the token was asked %t, under the store lock %t; want both", asked, heldWhenAsked)
+	}
+}
+
 // placeReadingRunner records, per command, whether the store lock and a checkout place were held
 // as it started.
 type placeReadingRunner struct {

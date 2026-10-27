@@ -299,3 +299,51 @@ func TestUnderTakeOverAMissingSessionOverAPaneOrNoneIsRefused(t *testing.T) {
 		})
 	}
 }
+
+// Under take_over, a session recorded outside this host's places — a pod's path, under neither the
+// pane's own sessions directory nor the state directory — is the other runtime's even when no
+// previous incarnation says so: a claim the Kubernetes daemon left suspended, or one whose takeover
+// launch failed before this daemon restarted, records no locator. Found nowhere, it is
+// runtime.ErrSessionFileMissing, a fresh agent, never a refusal that no retry could get past.
+// Without the key the same resume is the refusal.
+func TestAPodRecordedSessionFoundNowhereWithNoPreviousIncarnationIsTheMissingSessionOnlyUnderTakeOver(t *testing.T) {
+	ctx := context.Background()
+	f := takingOver(t)
+	spec := f.spec(t, claim.RoleTester)
+	spec.ResumeSessionFile = podSession
+	_, err := f.Resume(ctx, nil, spec)
+	want := "resume " + string(spec.Claim) + ": the recorded session file is missing: no OMP session at " + podSession +
+		", and no other folder of " + filepath.Dir(filepath.Dir(podSession)) + " or of the pane's sessions directory " + paneSessions(f) + " holds that session"
+	if !errors.Is(err, runtime.ErrSessionFileMissing) || err.Error() != want {
+		t.Fatalf("Resume under take_over = %v, want runtime.ErrSessionFileMissing: %q", err, want)
+	}
+	if opened(f.argvs) {
+		t.Errorf("a resume of a missing session opened a pane: %q", f.argvs)
+	}
+
+	f.takeOver = ""
+	_, err = f.Resume(ctx, nil, spec)
+	if err == nil || errors.Is(err, runtime.ErrSessionFileMissing) || !strings.HasPrefix(err.Error(), "Refusing to start LEGION-43 fresh while respawning: ") {
+		t.Fatalf("Resume without take_over = %v, want the refusal to start fresh", err)
+	}
+}
+
+// within holds a path to the directory it lies below, and no other: a sibling whose name starts
+// with the directory's is outside it, and an empty directory holds nothing.
+func TestWithinHoldsOnlyWhatLiesBelowTheDirectory(t *testing.T) {
+	for _, tc := range []struct {
+		path, dir string
+		want      bool
+	}{
+		{"/state/home/.omp/agent/sessions/x/a.jsonl", "/state", true},
+		{"/state", "/state", true},
+		{"/state-other/a.jsonl", "/state", false},
+		{"/home/legion/.omp/profiles/legion/agent/sessions/x/a.jsonl", "/state", false},
+		{"/state/../elsewhere/a.jsonl", "/state", false},
+		{"/state/a.jsonl", "", false},
+	} {
+		if got := within(tc.path, tc.dir); got != tc.want {
+			t.Errorf("within(%q, %q) = %t, want %t", tc.path, tc.dir, got, tc.want)
+		}
+	}
+}

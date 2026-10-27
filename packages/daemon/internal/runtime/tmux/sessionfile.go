@@ -95,3 +95,23 @@ func searchedIn(searched []string) string {
 	}
 	return strings.Join(searched, ", ")
 }
+
+// recordedElsewhere is whether, under runtime.tmux.take_over, the session recorded at path was
+// recorded by the runtime this one takes over: a path under neither paneSessions, the pane's own
+// sessions directory, nor the state directory, below which this runtime places every pane's home
+// and harness directories. Such a session found nowhere is the takeover's even with no previous
+// incarnation to say so — a claim the other runtime left suspended, or one whose takeover launch
+// failed before this daemon restarted — and starts a fresh agent (Resume). Without the key nothing
+// is, and a session missing from this host's own places is always the refusal.
+func (r *Runtime) recordedElsewhere(path, paneSessions string) bool {
+	return r.takeOver != "" && !within(path, paneSessions) && !within(path, r.stateDir)
+}
+
+// within is whether path is dir or lies below it; an empty dir holds nothing.
+func within(path, dir string) bool {
+	if dir == "" {
+		return false
+	}
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(path))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+}

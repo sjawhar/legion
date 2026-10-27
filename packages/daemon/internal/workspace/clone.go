@@ -149,27 +149,39 @@ func (dir feedSource) open(repository ghrepo.Repository, bookmark, defaultBranch
 	return feedRemote(feed, repository, bookmark, defaultBranch), nil
 }
 
-// FromGitHub is GitHub itself, reached with the one-shot credential holding token, created under
-// credentialDir and removed again: the tmux runtime, which names its state directory. Its fetch
-// brings only the repository's default branch and the issue's own branch, by their exact names: it
-// runs under the shared clone's store lock (Request.StoreLock), and every branch of a busy
-// repository would hold every other issue's provision behind it. A pane's own `jj git fetch`
-// brings the rest when it needs them.
-func FromGitHub(token, credentialDir string) Source {
+// FromGitHub is GitHub itself, reached with the one-shot credential holding the token that token
+// answers, created under credentialDir and removed again: the tmux runtime, which names its state
+// directory. token is asked when the provision opens the source, under the shared clone's store
+// lock (Request.StoreLock), never before: a provision may wait on that lock behind a repository's
+// whole queue of provisions, and a token minted before the wait could expire in it. Its fetch
+// brings only the repository's default branch and the issue's own branch, by their exact names:
+// it runs under the store lock, and every branch of a busy repository would hold every other
+// issue's provision behind it. A pane's own `jj git fetch` brings the rest when it needs them.
+func FromGitHub(token func() (string, error), credentialDir string) Source {
 	return gitHubSource{token: token, credentialDir: credentialDir}
 }
 
-type gitHubSource struct{ token, credentialDir string }
+type gitHubSource struct {
+	token         func() (string, error)
+	credentialDir string
+}
 
 func (s gitHubSource) check(ghrepo.Repository) error {
 	if s.credentialDir == "" {
 		return errors.New("workspace credential directory is required")
 	}
+	if s.token == nil {
+		return errors.New("workspace provisioning token is required")
+	}
 	return nil
 }
 
 func (s gitHubSource) open(_ ghrepo.Repository, bookmark, defaultBranch string) (remote, error) {
-	r, err := newProvisioningCredential(s.credentialDir, s.token)
+	token, err := s.token()
+	if err != nil {
+		return remote{}, err
+	}
+	r, err := newProvisioningCredential(s.credentialDir, token)
 	if err != nil {
 		return remote{}, err
 	}

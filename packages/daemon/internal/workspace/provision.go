@@ -139,20 +139,21 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	return workspace, nil
 }
 
-// CheckedOut is whether workspace's checkout finished: its sparse patterns are the whole tree
-// (`.`). Provision registers a workspace with no files (`jj workspace add --sparse-patterns
-// empty`) and checks it out after (`jj sparse reset`), so a workspace whose checkout failed or was
-// cut short — a jj error, a full disk, a daemon stopped mid-checkout — holds no pattern and no
-// file until a provision checks it out. The read never snapshots the working copy
-// (--ignore-working-copy): a pane may be writing it, and a snapshot would run the working-copy
-// filters, fsmonitor and signing programs a tree agent can configure. A directory with no `.jj` is
-// refused, as every jj command in a workspace is (guardWorkspace).
+// CheckedOut is whether workspace's checkout finished: it holds at least one sparse pattern — the
+// whole tree (`.`) after Provision's checkout, or whatever narrower set an agent chose since, which
+// a launch must not undo. Provision registers a workspace with no pattern and no file (`jj
+// workspace add --sparse-patterns empty`) and checks it out after (`jj sparse reset`), so a
+// workspace whose checkout failed or was cut short — a jj error, a full disk, a daemon stopped
+// mid-checkout — holds no pattern until a provision checks it out. The read never snapshots the
+// working copy (--ignore-working-copy): a pane may be writing it, and a snapshot would run the
+// working-copy filters, fsmonitor and signing programs a tree agent can configure. A directory with
+// no `.jj` is refused, as every jj command in a workspace is (guardWorkspace).
 func CheckedOut(ctx context.Context, run Runner, workspace Workspace) (bool, error) {
 	listed, err := RunCheckedIn(ctx, run, workspace, []string{"jj", "sparse", "list", "--ignore-working-copy", "--color=never"})
 	if err != nil {
 		return false, err
 	}
-	return strings.TrimSpace(listed.Stdout) == ".", nil
+	return strings.TrimSpace(listed.Stdout) != "", nil
 }
 
 // excludeCodegraphDirectory appends ".codegraph/" to cloneDir's ".git/info/exclude" unless a

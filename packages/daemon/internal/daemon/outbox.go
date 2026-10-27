@@ -1225,15 +1225,21 @@ func (r *outbox) provisionIn(ctx context.Context, key string, repo ghrepo.Reposi
 	if r.tokens == nil {
 		return errors.New("supervise executor has no GitHub App token manager")
 	}
-	lease, err := r.tokens.Token(ctx, appauth.Implement, repo.Owner())
-	if err != nil {
-		return fmt.Errorf("mint the implement App token for %s to provision %s: %w", repo.Owner(), key, err)
+	// The token is minted when the provision opens GitHub, under the repository's store lock
+	// (workspace.FromGitHub), never here: a provision may wait on that lock behind its
+	// repository's whole queue, longer than a cached token has left to live.
+	mint := func() (string, error) {
+		lease, err := r.tokens.Token(ctx, appauth.Implement, repo.Owner())
+		if err != nil {
+			return "", fmt.Errorf("mint the implement App token for %s to provision %s: %w", repo.Owner(), key, err)
+		}
+		return lease.Token, nil
 	}
 	store, releaseStore := r.provisions.stores.take(located.Clone)
 	defer releaseStore()
 	if _, err := r.provision(ctx, workspace.Request{
 		StateDir: r.stateDir, Repo: repo, Issue: key, DefaultBranch: defaultBranch, CredentialHelper: workspace.GitHubCredentialHelper,
-		Source:       workspace.FromGitHub(lease.Token, r.stateDir),
+		Source:       workspace.FromGitHub(mint, r.stateDir),
 		Log:          func(line string) { r.log.Warn("provisioning: "+line, "issue", key) },
 		StoreLock:    store,
 		CheckoutSlot: r.provisions.slot,
