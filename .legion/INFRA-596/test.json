@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-596",
-  "completed": "2026-10-27T11:41:30Z",
-  "testedHead": "c73382871c542a12b1030c24d97ecfdf3a78782e",
-  "codeHead": "9ac93a9703a08a11a746a98c747099e5087fb7e8",
+  "completed": "2026-10-27T12:34:00Z",
+  "testedHead": "fe6b65fc9ad1cff65249ca05fa1ef1ed974974cc",
+  "codeHead": "97e2b115645f8fc0304a4cb61a0a2d6b3fb14d0e",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove each claim's surface independently at c7338287 (code 9ac93a97). The local-stack delivery claim is tester-rig-edge.sh E1 (BET-15's shape: the person's reply reached S-claim, S-other and S-writer once each). Review finding 1, which the implementer proved with Go tests, I drove live with tester-rig-fail.sh: the owner topic and route go out before the failed recipient query backs the event off, the retry sends only the rest, and the previous head 86599d45 published nothing. The report claim: report.ts at head on the six run files from INFRA-596 (hashes equal to the manifest) gives document sha256 0631201835fd… and pairs bd067fb6…, cmp-equal to the INFRA-514 uploads."
+    "how": "Drove each claim's surface independently at fe6b65fc (code 97e2b115): the delivery claim with tester-rig-edge.sh (BET-15's shape is E1), the failed-recipient-query claim live with tester-rig-fail.sh, the report claim by re-running report.ts on the six run files from INFRA-596 and comparing with the INFRA-514 uploads (sha256 0631201835fd… and bd067fb66dac…, cmp-equal). The 'impossible by construction' claim for the four removed refusals was checked: classify() is a total if-chain, the throw for input problems still runs before it (classes.ts:376), and an owed reason outside the cause table is refused by the input check (mutation below)."
   },
   "failures": [],
   "failed": 0,
@@ -15,55 +15,54 @@
     {
       "criterion": "Review round 1, finding 1: a failed recipient query still publishes the comment's owner topic and route, backs off only the events that needed it, and a retry sends only the rest.",
       "surface": "Local Dispatch stack: the Dispatch server built from the head on Postgres 17 + pgvector with every migration, nats-server 2.10.29 -js, a subscriber on notifications.>; driven over the HTTP API, with one data fault injected by psql.",
-      "command": "$TMPDIR/infra596-tester/fail.sh head (dispatch://INFRA-596/artifact/tester-rig-fail-sh): set every S-writer spec version's authors to the JSON scalar 5, post a person's reply on a claimed unrouted issue (FC), a reply on a routed issue (FR), a conversation comment on an issue nobody claimed or routed (FU), and a comment on a healthy claimed issue (HC); then repair the authors and make the backed-off events due",
-      "observed": "First attempt: FC published_destinations [issue topic, notifications.agent.S-claim], FR [issue topic, notifications.agent.S-route], FU [issue topic], each published_at null, attempt_count 1, retry scheduled; server log 'load comment recipients' / 'load primary document authors: ERROR: cannot extract elements from a scalar (SQLSTATE 22023)'; HC published at once to its issue topic and S-healthy. After the repair: FC and FR added S-other and S-writer, FU added S-writer, attempt_count stayed 1; the subscriber saw every subject of every comment exactly once.",
-      "headSha": "c73382871c542a12b1030c24d97ecfdf3a78782e",
-      "negativeControl": "fail.sh old (server from the previous head 86599d457b94): FC, FR and FU recorded published_destinations {} (no issue topic, no route) and attempt_count 2 before the repair; HC unaffected."
+      "command": "$TMPDIR/infra596-tester/fail.sh head (dispatch://INFRA-596/artifact/tester-rig-fail-sh)",
+      "observed": "First attempt: FC [issue topic, notifications.agent.S-claim], FR [issue topic, notifications.agent.S-route], FU [issue topic], each unpublished with attempt_count 1 and a retry scheduled; HC published at once to its issue topic and S-healthy. After the repair: FC and FR added S-other and S-writer, FU added S-writer, attempt_count stayed 1; every subject of every comment received once.",
+      "headSha": "fe6b65fc9ad1cff65249ca05fa1ef1ed974974cc",
+      "negativeControl": "Round 2's fail.sh old (previous head 86599d457b94, tree unchanged since): FC, FR and FU recorded published_destinations {} and attempt_count 2."
     },
     {
       "criterion": "Each cause found in Dispatch or Envoy is fixed with a test: a person's reply reaches the claimant (no route), every session in its thread and the thread document's authors; a person's comment on an issue with no route and no session claim reaches the primary document's session authors.",
       "surface": "The same local Dispatch stack, plus a stub Envoy listener answering /v1/sessions, /v1/registry and /v1/messages/send.",
-      "command": "$TMPDIR/infra596-tester/edge.sh head (dispatch://INFRA-596/artifact/tester-rig-edge-sh v2; output in dispatch://INFRA-596/artifact/tester-evidence-txt v2 section 2)",
-      "observed": "12/12 cases OK and no subject received twice: E1 the person's reply, its edit, and a reply aimed at S-other's reply each reached S-claim, S-other, S-writer; the root's edit S-claim, S-writer; a session's reply no agent. E2 routed and claimed: the conversation comment reached S-route, the reply S-route and S-claim (a thread member). E3 person-claimed: S-spec. E4 ask thread: S-asker, S-claim. E5 session comment, E6 released claim: no agent. E9 mentioned claimant: S-other, S-writer on NATS, S-claim by one Envoy send. Burst: 30 claimed issues, 15 comments at a time, each reached its claimant once.",
-      "headSha": "c73382871c542a12b1030c24d97ecfdf3a78782e",
-      "negativeControl": "edge.sh main (448a41003a17): the 8 cases the change adds recipients to and all 30 burst comments fail; the 4 unchanged cases pass."
+      "command": "$TMPDIR/infra596-tester/edge.sh head (dispatch://INFRA-596/artifact/tester-rig-edge-sh)",
+      "observed": "12/12 cases OK and no subject received twice (claimant, thread sessions and spec writer on a reply, its edit and a reply aimed at a reply; claimant and spec writer on the root's edit; route and thread member on a routed issue; S-spec on a person-claimed issue; claimant and asker in an ask thread; a mentioned claimant only through one Envoy send; nobody for a session's comment or after a release); 30 claimed issues commented 15 at a time each reached their claimant once.",
+      "headSha": "fe6b65fc9ad1cff65249ca05fa1ef1ed974974cc",
+      "negativeControl": "Round 2's edge.sh main (448a41003a17, unchanged): the 8 cases the change adds recipients to and all 30 burst comments fail."
     },
     {
-      "criterion": "The forward merge of #2137 (artifact.human_edited author read moved into publishAuthorRoutes) keeps a person's spec edit reaching the spec's agents.",
+      "criterion": "The refactored document-author read (considerDocument) keeps a person's spec edit reaching the spec's agents (artifact.human_edited, from #2137).",
       "surface": "The same local Dispatch stack.",
-      "command": "$TMPDIR/infra596-tester/he.sh head (dispatch://INFRA-596/artifact/tester-rig-he-sh): S-writer edits HE's spec, S-claim claims, the person edits the spec, wait out the 30 s quiet window",
-      "observed": "Event 6 artifact.human_edited, actor person@example.com, published_destinations [notifications.dispatch.issue.RIG-1.artifact.human_edited, notifications.agent.S-writer]; the subscriber saw each once.",
-      "headSha": "c73382871c542a12b1030c24d97ecfdf3a78782e",
-      "negativeControl": "he.sh against current main c892b97df887 gives the same two destinations, so the merge changed nothing there; the person's own artifact.version (event 5) reaches only the issue topic at both."
+      "command": "$TMPDIR/infra596-tester/he.sh head (dispatch://INFRA-596/artifact/tester-rig-he-sh)",
+      "observed": "Event 6 artifact.human_edited, actor person@example.com, published_destinations [notifications.dispatch.issue.RIG-1.artifact.human_edited, notifications.agent.S-writer], each received once.",
+      "headSha": "fe6b65fc9ad1cff65249ca05fa1ef1ed974974cc",
+      "negativeControl": "The person's own artifact.version (event 5) reaches only the issue topic; round 2's run on current main c892b97df887 gave the same two destinations for event 6."
     },
     {
       "criterion": "dispatch doc-read shows open comments with their text, not only their id.",
-      "surface": "The dispatch CLI bundled from the head (packages/envoy-client/bin/dispatch.ts) against the same local Dispatch.",
-      "command": "$TMPDIR/infra596-tester/docread.sh head (dispatch://INFRA-596/artifact/tester-rig-docread-sh v2): doc-read --issue RIG-1 --artifact spec, --artifact plan-md, --project RIG --artifact notes-md",
-      "observed": "spec: 'Open anchored threads:' with the open anchored ask and its reply, T1 with both replies (multi-line body intact), the reopened T8; absent: resolved T2, retracted ask T7, unanchored ask T6, conversation comment T4, the plan's T3. plan-md: T3 with its reply. Project document: root and S-proj's reply.",
-      "headSha": "c73382871c542a12b1030c24d97ecfdf3a78782e",
+      "surface": "The dispatch CLI bundled from the head against the same local Dispatch.",
+      "command": "$TMPDIR/infra596-tester/docread.sh head (dispatch://INFRA-596/artifact/tester-rig-docread-sh)",
+      "observed": "spec: the open anchored ask with its reply, T1 with both replies, the reopened T8; absent: resolved T2, retracted ask T7, unanchored ask T6, conversation comment T4, the plan's T3. plan-md: T3 with its reply. Project document: root and S-proj's reply.",
+      "headSha": "fe6b65fc9ad1cff65249ca05fa1ef1ed974974cc",
       "negativeControl": "doc-read --artifact nosuch: exit 1, 'document \"nosuch\" not found by slug; this issue's documents: spec (spec.md), plan-md (plan.md)'."
     },
     {
       "criterion": "A committed query or command produces the October table; the document's counts add up: total, delivered, not delivered by cause, unknown.",
-      "surface": "scripts/dispatch/comment-delivery/report.ts (now inputs/join/classes/render/report) at the head over the six run files attached to INFRA-596; dispatch://INFRA-514/artifact/human-comment-delivery-2026-10-md and -pairs-tsv.",
+      "surface": "scripts/dispatch/comment-delivery/report.ts at the head over the six run files attached to INFRA-596; dispatch://INFRA-514/artifact/human-comment-delivery-2026-10-md and -pairs-tsv.",
       "command": "R=$TMPDIR/infra596-tester/report; bun scripts/dispatch/comment-delivery/report.ts --comments $R/comments.csv --receipts $R/receipts.tsv --counts $R/receipts-counts.txt --trace $R/trace-03207432.txt --trace $R/trace-c1283587.txt --findings $R/comment-delivery-findings-2026-10.md --pairs $R/human-comment-delivery-2026-10-pairs.tsv > $R/human-comment-delivery-2026-10.md; cmp against the INFRA-514 documents read back now",
-      "observed": "Exit 0; document sha256 0631201835fd…, pairs bd067fb66dac…, both cmp-equal to the uploads; 'Total 1055 = delivered 795 + not delivered 44 (… no-target 14, not-addressed:claimant 19, … running-no-row 11 …) + unknown 216'.",
-      "headSha": "c73382871c542a12b1030c24d97ecfdf3a78782e",
-      "negativeControl": "13 mutations of the real inputs each exit 1 naming the line: duplicated receipts or comments row, a row dropped from either file, comments.csv cut mid-row, rows_without_id 1, comments or received off by one, a receipt for an unknown comment, a received row flipped to not_received, an unknown status, a reordered header, --counts missing."
+      "observed": "Exit 0; document sha256 0631201835fd…, pairs bd067fb66dac…, both cmp-equal to the uploads; 'Total 1055 = delivered 795 + not delivered 44 (…) + unknown 216'.",
+      "headSha": "fe6b65fc9ad1cff65249ca05fa1ef1ed974974cc",
+      "negativeControl": "14 mutations of the real inputs each exit 1 naming the line: the 13 of rounds 1-2 and an owed reason with no cause-table entry ('comments.csv line 46 (comment 1f958151…): owed_reasons \"author\"')."
     },
     {
       "criterion": "The BET-15 comment's path is traced from Dispatch's records to the cause, with the records quoted.",
       "surface": "The run's trace files attached to INFRA-596.",
-      "command": "dispatch doc-read --issue INFRA-596 --artifact comment-delivery-trace-03207432-txt | tail -n +3 | sha256sum (round 1; files and trace.sql unchanged since, sha256 0240d8a3… equal to the manifest)",
-      "observed": "Events 4314/4315 by user:sami@theorem.dev, notify true, published only to the BET-15 issue topics; no mention or delivery rows; no route and claim session:01a14313 at publish; thread c1283587 (Sami) → dc3277d4 (01a14313) → 03207432 (Sami).",
-      "headSha": "c73382871c542a12b1030c24d97ecfdf3a78782e",
+      "command": "dispatch doc-read --issue INFRA-596 --artifact comment-delivery-trace-03207432-txt | tail -n +3 | sha256sum (round 1; the files, comments.sql and trace.sql unchanged since: sha256 102041144e10… and 1a0ecc261cea…)",
+      "observed": "Events 4314/4315 by user:sami@theorem.dev, notify true, published only to the BET-15 issue topics; no mention or delivery rows; no route and claim session:01a14313 at publish.",
+      "headSha": "fe6b65fc9ad1cff65249ca05fa1ef1ed974974cc",
       "negativeControl": "trace-c1283587: event 4260 published to notifications.agent.01a14313-f0d7-765d-91c1-f2e043218727 beside the issue topic."
     }
   ],
   "observations": [
-    "CI at code head 9ac93a9703a0 (c7338287 is handoff-only): build, changes, lint, test, typecheck queued when read; not waited on.",
-    "The stopping-batch release (a cancelled context releases the events whose recipient query failed) was not driven live: a stop cannot be timed inside a batch on the rig. TestAStoppingBatchReleasesTheEventsWhoseRecipientQueryFailed pins it.",
-    "THROUGHPUT.md's re-measurement ran at c2a223fc, before the two forward merges; the outbox difference they bring (#2137's artifact.human_edited arm) runs no query on the measured loads."
+    "CI at code head 97e2b115645f (fe6b65fc is handoff-only): build, changes, lint, test, typecheck queued when read; not waited on.",
+    "Negative controls for the delivery and failure paths were not re-run this round: their trees (main 448a41003a17, previous head 86599d457b94, current main c892b97df887) are unchanged since round 2, whose results are in tester-evidence-txt version 2."
   ]
 }
