@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-528",
+  "completed": "2026-10-27T07:45:46Z",
+  "decision": "changes_requested",
+  "reviewedHead": "the handoff head this commit makes (code: merge 25fba83e57509f251052e760cb2e60370da6baa9)",
+  "round": "New round: unchanged-diff fingerprint at my last review 1e95f76f was 0bbefab2…, at cf9aab61 is 314ca169… (changed: two lines of packages/proof-editor/AGENTS.md, from the forward merge of main b08a56bc, #2303 INFRA-529).",
+  "critical": 0,
+  "important": 1,
+  "minor": 1,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/refs/mermaid-diagrams.ts:150",
+      "description": "The open-fence probe finds the last line by the last \\n only, but CommonMark (and micromark, and INFRA-529's drawDirective) also ends a line at a lone \\r. A body using lone-\\r line endings that is streaming a mermaid fence inside a quote or list item gets a probe line without the quote/list lead, the probe ends the container, the fence reads as closed, and the half-written diagram is drawn (a refusal flashed each frame). Reproduced: MarkdownBody.test.tsx's 'still open inside a quote' case with the quote body written with \\r line endings fails at the head (expected 1 figure, got 2). Fix: take the last line after the last \\n or \\r, and add the \\r case to that test."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/refs/MarkdownBody.test.tsx:959",
+      "description": "No unit case puts a mermaid fence inside a ::: directive, which the merged INFRA-529 read-only parsing now draws. Both thermonuclear reviews measured the behaviour correct (31 and 15 bodies: open inside unclosed directive stays code, closed draws); a case `:::note` + open fence stays code and the same body closed draws would lock it in. Ask for it in this round, since the round already requests changes."
+    }
+  ],
+  "merge": "Resolution correct: git merge-tree 725db66a b08a56bc differs from the merge tree only in the two conflicted files; biome.json keeps all three un-ignores (read-only-directives.ts, mermaid-svg.ts, mermaid-render.ts); packages/proof-editor/AGENTS.md says Twelve (9 + 1 main + 2 branch) with 12 table rows, keeps main's Sixteen kinds of edit, and lists all three files. Nothing changed between 95dd30e9 and 725db66a but .legion/ and docs/solutions.",
+  "ci": "Not waited on: a REQUEST_CHANGES stands whatever CI says.",
+  "threads": "5 threads, all mine from round 1, each answered in round 2 and resolved; no new thread since.",
+  "thermonuclear": "Both at 25fba83e: deep review APPROVE (merge resolution and directive/mermaid interaction sound; test gap and a style-text hardening note, minor); code quality APPROVE with the lone-\\r probe finding, labelled minor there and judged important here because it changes behaviour.",
+  "fastFollow": "unchanged from round 2: split the Mermaid cases out of MarkdownBody.test.tsx, refuseLate via stopRenderer, three comment and doc corrections"
+}
