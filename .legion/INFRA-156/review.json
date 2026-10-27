@@ -2,33 +2,39 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-156",
-  "completed": "2026-10-27T16:04:00Z",
+  "completed": "2026-10-27T17:16:00Z",
   "decision": "changes_requested",
-  "round": 4,
-  "headReviewed": "1c5a0decd10af96f80a6e2c291a7809ee974e1c5",
-  "codeHead": "f5cc766b4a9f",
-  "previousReview": "5669394650 (REQUEST_CHANGES at 21e1c419)",
+  "round": 5,
+  "scope": "The architect narrowed round 5 to round 4's two items and round 5's own diff (e879c737..57e13278).",
+  "headReviewed": "9c9aadaec86408b214c79b2d745f680e6678f184",
+  "codeHead": "57e13278e65f",
+  "previousReview": "5670344763 (REQUEST_CHANGES at e879c737)",
   "critical": 0,
-  "important": 1,
+  "important": 2,
   "minor": 1,
-  "ci": "Required set: lint, typecheck, test, pr-title. CI head f7e33c2a (compare to 1c5a0dec: handoffsOnly true, 1 file). All required checks were still queued at 16:03Z. A request for changes does not wait on CI.",
-  "threads": "All five threads are answered by the reviewer and resolved: the two from round 1, and the three from round 3, which 071af05a and 0c1ba422 fixed.",
-  "census": "Re-ran the ten searches at the head. One new hit (proof-editor/tests/block-schema-fixture.ts:8, from main 2df3353c) and one gone hit (read-only-directives.test.ts:284). The implementer edited the body; verified.",
-  "roundDelta": "The round-3 findings are all fixed: migration renamed to 0135 with every reference (main's highest is 0134, and no migration 0122-0134 restates graph_edges); the contracts and envoy_go_race filters; the test move (typed_blocks_test.go back to 799 lines); the schema.go comment. The merges conflicted only in docs. Main's node-facts code reads neither block_refs nor graph_edges and adds no edge kind.",
+  "ci": "Required set: lint, typecheck, test, pr-title. CI head f2cebf09 (compare to 9c9aadae: handoffsOnly true, 1 file). All were queued at 16:50Z. A request for changes does not wait on CI.",
+  "threads": "All five threads are resolved and answered by the reviewer. No new thread.",
+  "localRuns": "Ran TestALaterHolderOfARepeatedBlockIDWritesNoPointers on a scratch copy with both halves of the fix reverted: it fails at the version write ('serves <paragraph> …', want 'mentions …'). At the head, docs/api/refs/pmdoc filtered to Pointer|RepeatedBlockID|BlockLink|BlockTypes|Reference|Kind|Rebuild|Retype|Graph|Typed|Index pass, and go vet on refs/docs/pmdoc is clean.",
+  "item2": "Done. refs.BlockTypes is built on uniqueBlocks with the same query and errors. docs no longer reads document_blocks. api/search.go:112 still does, but that read is main's (INFRA-366) and outside this PR.",
   "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at 1c5a0dec. Its Minor 1 (a pointer written by a later holder of a repeated block id is indexed as an edge from the first holder) is promoted: it writes a wrong edge and miscounts the mention subtraction.",
-    "codeQuality": "Verdict: CHANGES at 1c5a0dec. refuseBlockPointers' resolver reads document_blocks and copies refs.uniqueBlocks' first-holder rule inside docs/mutation.go. That belongs in refs."
+    "deepReview": "Verdict: CHANGES at 9c9aadae. M1 (reproduced with a probe test): BlockPointers counts list items and table rows/cells as holders, which never have offsets, so the version write and the reconciliation store different rows, and the refusal skips a pointer the reconciliation indexes. m1: the BlockPointers skip has no test. m2: a later holder's introduced pointer is never judged, and settlement's re-mint makes it real.",
+    "codeQuality": "Verdict: CHANGES at 9c9aadae. Independently reproduced M1 (list item then claim: version write 'mentions', reconciliation 'serves'). Removing only the BlockPointers skip leaves every test passing."
   },
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/refs/blocks.go",
-      "description": "pointerPairs (:246) accepts a pointer whenever its block id is a node id, but nodes are uniqueBlocks' first holder of each id. So a typed block that is a later holder of a repeated id (which a rendered version can carry, pmdoc/block_ids.go) has its pointers written as edges from the first holder, possibly a paragraph. Its pointed count also subtracts the first holder's real mention of that target. Meanwhile the later holder's own text mention goes to its innermost node and is not subtracted. Mentions never attribute by id this way. Emit pointers only from the first holder of each id, as uniqueBlocks does, or check that the node's type is the pointer's BlockType, and add a test."
+      "file": "packages/envoy/internal/dispatch/pmdoc/pointers.go",
+      "description": "BlockPointers (:43-54) adds every non-inline node's id to held, including list_item, table rows and cells and a list item's unwritten first paragraph, none of which the renderer gives an offset. For a list item with id X followed by a claim with id X, the claim is uniqueBlocks' node for X. Yet the version write drops its pointers ('mentions X'), while the reconciliation, whose read-back mints a fresh list-item id, writes 'serves X'. CheckBlockPointers skips the pointer the reconciliation stores. Round 4's code wrote 'serves X' on both paths, so this is a regression. Fix: add only typed-block ids to held. Typed blocks always have offsets, and their ids survive the read-back. pointerPairs' BlockType check covers earlier holders that have offsets. Correct the comments at pointers.go:34-37 and :82-84, refs/blocks.go:232-233 and packages/envoy/AGENTS.md:2044-2049."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/docs/block_pointer_links_test.go",
+      "description": "The BlockPointers skip has no covering test: remove it and every test passes. It is the only guard against a later claim repeating an earlier claim's id, which writes the later claim's pointers as edges from the first claim (round 4's wrong edge, same-type form). Add, on both the version write and the reconciliation: (a) two claims sharing an id, where only the first claim's pointers are edges; (b) a list item then a claim sharing an id, where the claim's pointer is an edge from it and the rows are identical on both paths."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/docs/mutation.go",
-      "description": "refuseBlockPointers (:263-305) queries document_blocks and copies the first-holder rule of refs.uniqueBlocks without its id checks. Every other document_blocks read is in refs. Move the type resolution into refs, reusing uniqueBlocks, so the refusal and the index use one node rule. It is fixed in this push with finding 1, since both are the same rule."
+      "file": "packages/envoy/AGENTS.md",
+      "description": "CheckBlockPointers never judges an introduced pointer on a later holder of a typed id. Settlement's EnsureBlockIDs then re-mints that block's id, and the pointer becomes the block's own without having been judged; readers still hide a disallowed target through block_ref_listed. Reaching it needs a repeat the live document already carries. State this consequence where the AGENTS.md paragraph describes the skip."
     }
   ]
 }
