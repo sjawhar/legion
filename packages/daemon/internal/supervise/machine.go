@@ -312,6 +312,12 @@ type Deps struct {
 	// means a stale claim is recorded and reported, never relaunched or refused — relaunching
 	// nothing it cannot build, and refusing nothing a relaunch is not already under way to fix.
 	PluginRelaunchable bool
+	// TaskConfirmed is told of each claim whose pending delivery a turn has just confirmed: the
+	// agent took the work the daemon gave it. The workflow decides what a root still owes its
+	// architect from that (admission's ReconcileAwaiting), so without it a root whose wait was
+	// held by an untaken task would wait for the next tick. Nil tells no one. It is called inside
+	// the machine's decision, so it returns at once.
+	TaskConfirmed func(c Claim)
 }
 
 func (d Deps) check() error {
