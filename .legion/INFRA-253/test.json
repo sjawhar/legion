@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-253",
+  "completed": "2026-10-27T04:25:00Z",
+  "headSha": "9c51021b0b9dda25f493d0d68b29acd2897c63ee",
+  "generation": 3,
+  "rebaseRecheck": "rebase re-check e067b440 → 9c51021b: fingerprint unchanged, bare gates only. 9c51021b is the implementer's forward merge of main for a GitHub-reported conflict, on top of retro's docs/solutions commit (1457792189cd) and its removal of .legion/INFRA-253/ (36a2d2c6040f), both of which the fingerprint's fileset leaves out. Fingerprint (fork_point(main@origin | head) .. head, --context 0, '~(.legion | docs/solutions)', @@ and index lines dropped): 890278d4f5b253ac1b1405ccfc0aa9f94276f8d28d369ca71035efe70b497555 at both heads. The round at e067b440 drove the real surfaces (Dispatch on a held socket beside DISPATCH_PPROF_PORT, the pprof-port refusal, Stage 1). Retro removed that round's handoff, and this file records it again.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "No code changed since e067b440 (unchanged fingerprint). Earlier rounds verified the implementer's real-surface proofs by re-running them; the record is on #2229's E2E (tester) line."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Bare gate after a conflict-forced merge: the Stage 1 live proof at the new head",
+      "surface": "pod: the real legion built at 9c51021b, under tmux 3.5a, with Postgres 17",
+      "command": "LEGION_E2E_PG_DSN=<pod pg> bash scripts/e2e/stage1-skeleton.sh",
+      "observed": "`stage 1 e2e: PASS`, including the keeper restart and the check that only the daemon and keeper hold the listening socket",
+      "headSha": "9c51021b0b9dda25f493d0d68b29acd2897c63ee",
+      "negativeControl": "the run's own first check: a DSN to a port with no Postgres is refused, naming the host and not the password"
+    },
+    {
+      "criterion": "A1c after the merge of #2264 (round at e067b440, unchanged code since): envoy-dispatch on DISPATCH_LISTEN_FD serves beside a separate DISPATCH_PPROF_PORT listener, and a pprof port equal to the held socket's is refused",
+      "surface": "pod: the real envoy-dispatch built at e067b440 through held-port.py exec under env -i, scratch pgvector database",
+      "command": "CASE=unset|separate|same bash $TMPDIR/tester/pprof-held.sh",
+      "observed": "The held port answers /healthz 200 and /debug/pprof/ 404, and the pprof port answers the reverse. One listening socket on the held port, held by Dispatch alone.",
+      "headSha": "e067b44011e47e8e0b70284bd6eb3b07cec93547",
+      "negativeControl": "DISPATCH_PPROF_PORT set to the held socket's own port → exit 1: `DISPATCH_PPROF_PORT: listen on 127.0.0.1:64345: … bind: address already in use`"
+    },
+    {
+      "criterion": "A2: four parallel copies of `go test -count=1 -tags natslive ./core/ ./seed/` from packages/envoy/infra pass, three rounds in a row",
+      "surface": "GitHub runner, throwaway branch infra-253/parallel-proof-46502a84 (deleted) checking out 46502a8428905acd9ecaad7c402ee1050d71af16",
+      "command": "GitHub run 40412067631, job 121885005294",
+      "observed": "success, 12/12 pass. All 12 uploaded logs show `ok …/infra/core` and `ok …/infra/seed`, with no FAIL, panic or 'address already in use'. The merges since change nothing ./core/ or ./seed/ import, and nothing in internal/cmdtest.",
+      "headSha": "46502a8428905acd9ecaad7c402ee1050d71af16",
+      "negativeControl": "A1b's deterministic control: HoldPort mutated to release before Start fails TestHeldPortStaysHeldUntilItsProcessServes"
+    }
+  ],
+  "ciAtHead": "9c51021b at 04:23Z: Tests 40448506200, Legion Envoy and Contracts 40448506142, Docs 40448506218 and Worker Image 40448506123 are queued or pending. Retro's head 36a2d2c6's runs were cancelled by this push. e067b440, read job by job: every job success (Tests; Docs; Worker Image; every Legion Envoy and Contracts job, envoy-smoke, dispatch, dispatch-memory, dispatch-multiprocess, envoy-go, envoy-go-race, envoy-infra-go and envoy-e2e-local included). The reviewer and merger must read every job at 9c51021b.",
+  "devbox": "Unchanged since the last round: at 46502a84, stage2 PASS (23/23, restart-readopts included) and claude-backend PASS (9/9). stage3 has reached no restart checkpoint in four runs, each failing for a cause outside this PR, and a re-run waits for a quiet Actions queue. stage3-4b13b and dispatch-user-turns take only the gateway route and are not run."
+}
