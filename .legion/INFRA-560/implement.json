@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-560",
-  "completed": "2026-10-27T06:48:00Z",
+  "completed": "2026-10-27T07:05:00Z",
   "proof": [
     {
       "criterion": "Pulumi mock tests and goldens show each item (front door on two or more pods hosting one Tailscale Service with a stored certificate, per-workload replicas and strategy, zone and node spreading, budgets and one priority class, liveness probes, Secret checksums, Cloud SQL availability, proxy sizing, default tier); fail before, pass after",
       "surface": "envoy-infra's Go suite and the dispatch server's Go suite, as CI's envoy-infra-go job and the release job run them",
       "command": "cd packages/envoy/infra && go test ./... -count=1 -timeout 30m; cd packages/envoy && go test ./cmd/dispatch/ -count=1",
-      "observed": "After merging main@origin (#2302 and others): gcp, provider and every other infra package ok except TestTheDataDiskIsFormattedOnlyWhenItReadsAsZerosToItsEnd and TestARefusedDataDiskIsNeverFormattedOnALaterBoot ('these tests need mkfs.ext4 on this machine'; data_disk_test.go and cloudconfig.go unchanged); cmd/dispatch ok",
-      "headSha": "1df0a24d9f56d607df5634d2f90ffd5904a1faa4",
+      "observed": "After two forward merges of main@origin (#2302 raised the shared pool to 64; a later commit the lease pool to 9): gcp, provider and every other infra package ok except TestTheDataDiskIsFormattedOnlyWhenItReadsAsZerosToItsEnd and TestARefusedDataDiskIsNeverFormattedOnALaterBoot ('these tests need mkfs.ext4 on this machine'; data_disk_test.go and cloudconfig.go unchanged); cmd/dispatch ok",
+      "headSha": "d0e63dd365d5b713007122feac9c2aafb40192c3",
       "negativeControl": "The head's _test.go files and goldens copied onto a git archive of base 819dc283d: the gcp test build fails (undefined: dispatchCertPaths, undefined: tailnetServiceHost, unknown field TailnetService) and the cmd/dispatch test build fails (undefined: newHTTPServer, undefined: maxConnAge); at head, a resolved tailnetService other than svc:<hostname> is refused naming tailnetService and not echoing the value (TestDispatchRefusesATailnetServiceOtherThanItsOwn)"
     },
     {
@@ -17,7 +17,7 @@
       "surface": "the pulumi-resource-envoy-infra plugin binary Pulumi installs, read with the Pulumi CLI v3.268.0 that .github/actions/install-pulumi pins",
       "command": "cd packages/envoy/infra && go build -o $TMPDIR/pre-head ./cmd/pulumi-resource-envoy-infra && pulumi package get-schema $TMPDIR/pre-head | jq '.resources[\"envoy-infra:gcp:Dispatch\"] | (.inputProperties|keys), .requiredInputs'",
       "observed": "inputs include databaseAvailabilityType, frontDoorPdbMinAvailable, frontDoorReplicas, frontDoorToolsImage, listenerPdbMinAvailable, listenerReplicas, priorityClassName, proxyCpu, proxyMemory, tailnetService; requiredInputs include tailnetService and frontDoorToolsImage; no appPriorityClassName",
-      "headSha": "1df0a24d9f56d607df5634d2f90ffd5904a1faa4",
+      "headSha": "d0e63dd365d5b713007122feac9c2aafb40192c3",
       "negativeControl": "the same query on a plugin built from base 819dc283d lists appPriorityClassName and none of the new inputs"
     },
     {
@@ -25,7 +25,7 @@
       "surface": "the claim gate script as the cert-publish container runs it, under sh against a stand-in Kubernetes API server answering PartialObjectMetadata (dispatch_frontdoor_test.go)",
       "command": "cd packages/envoy/infra && go test ./gcp/ -run 'TestDispatchCertificateBudget' -count=1 -v",
       "observed": "all 13 TestDispatchCertificateBudget* tests PASS, including the tester's SkipsAMalformedEpoch (epochs 08, 0177, a 23-digit epoch and 09 in the registry are skipped; the gate takes its claim and registers its node) and the new ReadsOnlyItsOwnAnnotation (a key legionxdev/... is not read as the ledger) and DropsAnEntryItCannotWrite (an entry an escaped quote cut short is dropped, the merge patch is valid JSON)",
-      "headSha": "1df0a24d9f56d607df5634d2f90ffd5904a1faa4",
+      "headSha": "d0e63dd365d5b713007122feac9c2aafb40192c3",
       "negativeControl": "the same three tests against the previous dispatch_frontdoor.go (commit before the fix): SkipsAMalformedEpoch fails with '/bin/sh: Illegal number: 09', ReadsOnlyItsOwnAnnotation takes a claim from a full week, DropsAnEntryItCannotWrite gets 400 for the invalid JSON patch"
     }
   ],
@@ -64,8 +64,8 @@
     "Spec items BG-11 and BG-12 (added by the INFRA-63 architect, 04:02Z): proxyCpu/proxyMemory inputs, default 1 CPU / 2Gi (the cloud-sql-proxy v2.26.3 sidecar example); default databaseTier db-custom-4-15360 (max_connections 500 holds 15 pods at 32 connections each); pool.go comment fixed.",
     "Liveness and startup probes use a new /livez endpoint rather than /healthz (simplify pass finding): /healthz on the listener can exceed curl's 8 s on a slow hub and would restart it.",
     "The advertiser container is named advertiser, not cert-order: it advertises, recovers a stuck advertisement, orders the certificate and writes the ready file.",
-    "Round 2: merged main@origin forward (merge commit e854d947, one conflict in pool.go's sharedPoolSize comment, resolved keeping main's 64 and this change's max_connections bound). main's #2302 raised a server pod's connections from 32 to 81, so the default tier db-custom-4-15360 (500 connections) now holds 5 replicas rolling, not 14; the tier is kept and every comment, the README and the CHANGELOG now give 81 x 6 = 486.",
-    "Round 2: besides the tester's red test, the claim gate reads its annotations by the exact key (dots escaped) and drops any ledger entry whose node part holds characters outside A-Za-z0-9./- (the tester's low-severity observation), each with a new test."
+    "Round 2: besides the tester's red test, the claim gate reads its annotations by the exact key (dots escaped) and drops any ledger entry whose node part holds characters outside A-Za-z0-9./- (the tester's low-severity observation), each with a new test.",
+    "Round 2: merged main@origin forward twice (e854d947: conflict in pool.go's sharedPoolSize comment, resolved keeping main's 64 and this change's max_connections bound; 811e6714: conflict in CHANGELOG [Unreleased] Added, both entries kept). main now opens 82 connections per server pod (shared 64, rooms 4, health 1, leases 9, outbox 1, 3 LISTEN), so the default tier db-custom-4-15360 (500 connections) holds 5 replicas rolling (82 x 6 = 492), not 14; the tier is kept and the comments, README and CHANGELOG give those figures."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
