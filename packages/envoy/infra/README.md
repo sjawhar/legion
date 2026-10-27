@@ -1799,6 +1799,15 @@ as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space
   delete nothing. `HostPermissions` and `DispatchPermissions` hold it through
   `ListenerPermissions`; `SessionPermissions` does not, so a session holding that set alone reads
   what it missed only through the listener;
+- the calls of the session consumers, one durable pull consumer per session named
+  `s-<session id>` (`bus.SessionConsumers`), on any consumer of the stream:
+  `$JS.API.CONSUMER.CREATE` (with and without a filter subject in its subject), `INFO`, `DELETE`
+  and `MSG.NEXT` on `ENVOY_NOTIFICATIONS.*`, and the acknowledgements
+  `$JS.ACK.ENVOY_NOTIFICATIONS.*.>`. A NATS wildcard is a whole token, so these entries reach every
+  consumer of the stream, other listeners' durables and Dispatch's included, and let the listener
+  create a push consumer that delivers the stream's messages to any subject; that risk is accepted,
+  since the listener, Dispatch and host users are the trusted users. The durable's own entries stay
+  beside them, so a grant without these entries still serves the listener's durable;
 - for each key-value bucket, `envoy_interests`, `envoy_roles`, `envoy_sessions` and
   `envoy_ci_state`, the calls nats.go's key-value store makes: the info and create of the bucket's
   stream `KV_<bucket>`, its direct and stream message gets, `$KV.<bucket>.>`, and its watchers'
@@ -1806,8 +1815,11 @@ as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space
 - `$JS.API.STREAM.PURGE.KV_envoy_interests`, which the interest bucket's delete-marker collection
   sends.
 
-It subscribes to `_INBOX.>`, and to the role lanes in the machine's queue group,
-`notifications.role.> envoy-listener-<m>`.
+It subscribes to `_INBOX.>`, and to the role lanes in the queue group every listener shares,
+`notifications.role.> envoy-roles`, so each role message is forwarded once whichever machine's
+listener takes it, and in the machine's own group, `notifications.role.> envoy-listener-<m>`, which
+a listener of an earlier release subscribes in and a listener refused the shared group falls back
+to.
 
 `SessionPermissions()` is what any agent session needs, with `*` for the session id. It publishes
 to `_INBOX.>`, for the receipt a role delivery waits for, and `agentstream.*.frames`, and
@@ -1827,8 +1839,10 @@ that already reads the host's seed. This repository's listener and a session, co
 user holding `HostPermissions`, and connected as a user holding `ListenerPermissions` beside a
 credential-free session user holding `SessionPermissions`, are checked against real nats-server
 2.10 and 2.15.1 servers, the listener's `/v1/replay` read of a send stored while its session had
-no subscription open and the session user's refusal of that JetStream read included; `AGENTS.md`
-in this directory says how.
+no subscription open and the session user's refusal of that JetStream read included, as are a
+session consumer the listener's user creates, pulls, acks, restarts and deletes, both of its role
+lane queue groups, and the session user's refusal of a consumer create; `AGENTS.md` in this
+directory says how.
 
 `HostPermissions` is also the one set under which a listener may set `ENVOY_SUBSCRIBE_ALL_TOPICS=1`
 (`host:Listener`'s and `aws:WebhookListener`'s `subscribeAllTopics`). The listener then holds a

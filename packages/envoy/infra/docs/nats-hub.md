@@ -134,6 +134,14 @@ session missed while its NATS subscription was down. It can create, change or de
 `SessionPermissions` does not hold it, so the session user reads what it missed only through a
 listener.
 
+`ListenerPermissions` also holds the session consumers' calls on every consumer of the stream
+(`$JS.API.CONSUMER.CREATE`, `INFO`, `DELETE` and `MSG.NEXT` on `ENVOY_NOTIFICATIONS.*`, the create
+with a filter subject on `ENVOY_NOTIFICATIONS.*.>`, and `$JS.ACK.ENVOY_NOTIFICATIONS.*.>`), with
+which a listener keeps one pull consumer per session, and subscribes to the role lanes in the queue
+group every listener shares, `envoy-roles`, beside its machine's own. A NATS wildcard is a whole
+token, so those entries reach every consumer of the stream, other listeners' and Dispatch's
+included; that risk is accepted, since the listener, Dispatch and host users are the trusted users.
+
 `nkey` is the public key `envoy-infra seed generate` prints, and the seed stays in the secret
 store it wrote (see [NATS seeds](../README.md#nats-seeds)): a host's listener reads it from there
 into its `seed` with the hub's `natsUrl` as its `natsUrls`, and a Legion daemon reads its own. In the authorization `core`
@@ -514,8 +522,9 @@ new template. So does a plugin release that changes the rendering itself: the re
 so upgrading to it replaces every existing hub's VM once, with the outage below, even a hub that
 sets neither input. The release that rendered `ENVOY_ALLOWED_HOSTS` into the listener's unit
 replaced, once and with that same outage, the VM of every hub that runs a listener, and no hub
-without one. This release adds `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS` to
-`ListenerPermissions`, and so to `HostPermissions` and `DispatchPermissions`, which changes the
+without one. This release adds `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS`, the session
+consumers' entries and the `envoy-roles` role-lane subscription to `ListenerPermissions`, and so to
+`HostPermissions` and `DispatchPermissions`, which changes the
 rendered users of every hub with a `listener`, a `machineId` user or a `dispatchMachineId` user:
 moving such a hub to it replaces its VM once, with the outage below, and a hub with none of them
 keeps its VM. The cloud-config is the instance template's `user-data`, and a template cannot

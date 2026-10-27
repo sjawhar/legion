@@ -19,7 +19,7 @@ type Permissions struct {
 // no name for them.
 const (
 	jsAPI      = "$JS.API." // the JetStream API
-	jsAck      = "$JS.ACK." // a push consumer's acknowledgements
+	jsAck      = "$JS.ACK." // a consumer's acknowledgements
 	jsFlow     = "$JS.FC."  // an ordered consumer's flow-control replies
 	kvStream   = "KV_"      // the stream behind a KV bucket, KV_<bucket>
 	kvSubjects = "$KV."     // a KV bucket's keys, $KV.<bucket>.<key>
@@ -36,20 +36,31 @@ var listenerBuckets = []string{bus.InterestBucket, bus.RoleClaimBucket, bus.Sess
 // ListenerPermissions is the grant envoy-listener needs as machine machineID, built from Envoy's own
 // names. Publish, in this order:
 //   - every notification topic (bus.NotificationTopicPrefix): the stream's subjects, the role
-//     lanes, every exception lane, and any other topic a caller of /v1/messages/publish names,
-//     which the listener publishes over core NATS (an ad-hoc topic such as
-//     notifications.team.deploy-squad);
+//     lanes, every exception lane, the session relay subjects (bus.DeliverSubjectPrefix), and any
+//     other topic a caller of /v1/messages/publish names, which the listener publishes over core
+//     NATS (an ad-hoc topic such as notifications.team.deploy-squad);
 //   - the stream's info, create and update, its stored-message get, its durable's
-//     (bus.ListenerDurable) info and create, the durable's acknowledgements, and JetStream's
-//     account info. The stored-message get is the read /v1/replay makes to return the retained
-//     notifications a session missed while its subscription was down: it reads one stored message
-//     at a time and can create, change or delete nothing;
+//     (bus.ListenerDurable) info and create, and the durable's acknowledgements. The stored-message
+//     get is the read /v1/replay makes to return the retained notifications a session missed while
+//     its subscription was down: it reads one stored message at a time and can create, change or
+//     delete nothing;
+//   - the session consumers' calls (bus.SessionConsumers): consumer create, with and without a
+//     filter subject in its subject, info, delete, pull (CONSUMER.MSG.NEXT) and acknowledgements,
+//     each on any consumer of the stream, since a session consumer is named for its session
+//     (bus.SessionConsumerName). A NATS wildcard is a whole token, so these reach every consumer of
+//     the stream, other listeners' durables and Dispatch's included: the listener, Dispatch and host
+//     users are the trusted ones, and a host user's sessions already share its listener's durable
+//     grants. The durable's own entries stay beside them, so a hub that takes the session
+//     consumers' entries away leaves the listener its durable, and its sessions core delivery;
+//   - JetStream's account info;
 //   - for each bucket of listenerBuckets in turn, the calls nats.go's KV makes: the bucket's stream
 //     info and create, direct and stream message gets, writes to its keys, its watchers' consumer
 //     create and delete, and their flow-control replies;
 //   - the purge of the interest bucket, which its delete-marker collection sends.
 //
-// Subscribe: reply inboxes, then the role lanes in the machine's queue group (bus.ListenerQueue).
+// Subscribe: reply inboxes, then the role lanes in the machine's queue group (bus.ListenerQueue),
+// which a listener of an earlier release subscribes in, and in the queue group every listener
+// shares (bus.RoleLaneQueue).
 func ListenerPermissions(machineID string) Permissions {
 	durable := bus.ListenerDurable(machineID)
 	publish := []string{
@@ -61,6 +72,12 @@ func ListenerPermissions(machineID string) Permissions {
 		jsAPI + "CONSUMER.INFO." + bus.Stream + "." + durable,
 		jsAPI + "CONSUMER.CREATE." + bus.Stream + "." + durable,
 		jsAck + bus.Stream + "." + durable + ".>",
+		jsAPI + "CONSUMER.CREATE." + bus.Stream + ".*",
+		jsAPI + "CONSUMER.CREATE." + bus.Stream + ".*.>",
+		jsAPI + "CONSUMER.INFO." + bus.Stream + ".*",
+		jsAPI + "CONSUMER.DELETE." + bus.Stream + ".*",
+		jsAPI + "CONSUMER.MSG.NEXT." + bus.Stream + ".*",
+		jsAck + bus.Stream + ".*.>",
 		jsAPI + "INFO",
 	}
 	for _, bucket := range listenerBuckets {
@@ -68,8 +85,12 @@ func ListenerPermissions(machineID string) Permissions {
 	}
 	publish = append(publish, jsAPI+"STREAM.PURGE."+kvStream+bus.InterestBucket)
 	return Permissions{
-		Publish:   Rules{Allow: publish},
-		Subscribe: Rules{Allow: []string{inboxes, contracts.RoleTopicPrefix + "> " + bus.ListenerQueue(machineID)}},
+		Publish: Rules{Allow: publish},
+		Subscribe: Rules{Allow: []string{
+			inboxes,
+			contracts.RoleTopicPrefix + "> " + bus.ListenerQueue(machineID),
+			contracts.RoleTopicPrefix + "> " + bus.RoleLaneQueue,
+		}},
 	}
 }
 

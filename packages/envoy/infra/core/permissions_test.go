@@ -14,8 +14,10 @@ import (
 // listenerPublish is the listener's publish grant for example-host-a, written out by hand from
 // Envoy's names as they stand: every notification topic (the stream's subjects, the role lanes,
 // every exception lane and any ad-hoc topic), the stream (its stored-message get the read
-// /v1/replay makes) and its durable, then each bucket in turn, then the interest bucket's purge.
-// TestSessionPermissions's exact list holds none of it: no session gets the replay read.
+// /v1/replay makes) and its durable, every consumer of the stream (the session consumers' create,
+// info, delete, pull and acknowledgements), then each bucket in turn, then the interest bucket's
+// purge. TestSessionPermissions's exact list holds none of it: no session gets the replay read or a
+// consumer.
 var listenerPublish = []string{
 	"notifications.>",
 	"$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS",
@@ -25,6 +27,12 @@ var listenerPublish = []string{
 	"$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.listener-example-host-a",
 	"$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.listener-example-host-a",
 	"$JS.ACK.ENVOY_NOTIFICATIONS.listener-example-host-a.>",
+	"$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.*",
+	"$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.*.>",
+	"$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.*",
+	"$JS.API.CONSUMER.DELETE.ENVOY_NOTIFICATIONS.*",
+	"$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.*",
+	"$JS.ACK.ENVOY_NOTIFICATIONS.*.>",
 	"$JS.API.INFO",
 	"$JS.API.STREAM.INFO.KV_envoy_interests",
 	"$JS.API.STREAM.CREATE.KV_envoy_interests",
@@ -61,10 +69,14 @@ var listenerPublish = []string{
 	"$JS.API.STREAM.PURGE.KV_envoy_interests",
 }
 
+// listenerSubscribe is the listener's subscribe grant for example-host-a: reply inboxes, then the
+// role lanes in the machine's queue group and in the one every listener shares.
+var listenerSubscribe = []string{"_INBOX.>", "notifications.role.> envoy-listener-example-host-a", "notifications.role.> envoy-roles"}
+
 func TestListenerPermissions(t *testing.T) {
 	require.Equal(t, core.Permissions{
 		Publish:   core.Rules{Allow: listenerPublish},
-		Subscribe: core.Rules{Allow: []string{"_INBOX.>", "notifications.role.> envoy-listener-example-host-a"}},
+		Subscribe: core.Rules{Allow: listenerSubscribe},
 	}, core.ListenerPermissions("example-host-a"))
 }
 
@@ -132,10 +144,9 @@ func admitsInbox(entry string) bool {
 func TestHostPermissionsAreTheListenersThenTheSessions(t *testing.T) {
 	require.Equal(t, core.Permissions{
 		Publish: core.Rules{Allow: append(append([]string{}, listenerPublish...), "_INBOX.>", "agentstream.*.frames")},
-		Subscribe: core.Rules{Allow: []string{
-			"_INBOX.>", "notifications.role.> envoy-listener-example-host-a",
+		Subscribe: core.Rules{Allow: append(append([]string{}, listenerSubscribe...),
 			"notifications.>", "agentstream.*.control",
-		}},
+		)},
 	}, core.HostPermissions("example-host-a"))
 }
 
@@ -161,10 +172,9 @@ func TestDispatchPermissions(t *testing.T) {
 	)
 	want := core.Permissions{
 		Publish: core.Rules{Allow: dispatchPublish},
-		Subscribe: core.Rules{Allow: []string{
-			"_INBOX.>", "notifications.role.> envoy-listener-example-host-a",
+		Subscribe: core.Rules{Allow: append(append([]string{}, listenerSubscribe...),
 			"agentstream.*.frames",
-		}},
+		)},
 	}
 	got := core.DispatchPermissions("example-host-a")
 	require.Equal(t, want, got)

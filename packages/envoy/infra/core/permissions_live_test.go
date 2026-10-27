@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -22,6 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sjawhar/envoy/infra/core"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -140,11 +142,13 @@ func TestHostPermissionsOnRealServers(t *testing.T) {
 			})
 			t.Run("without its durable's consumer create the listener never reaches healthy", func(t *testing.T) {
 				t.Parallel()
+				// The durable's own entry and the session consumers' wildcard both grant its create.
 				const removed = "$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.listener-example-host-a"
+				const wildcard = "$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.*"
 				grant := core.HostPermissions(liveMachineID)
 				held := len(grant.Publish.Allow)
-				grant.Publish.Allow = slices.DeleteFunc(grant.Publish.Allow, func(entry string) bool { return entry == removed })
-				require.Len(t, grant.Publish.Allow, held-1, "the grant does not hold %s", removed)
+				grant.Publish.Allow = slices.DeleteFunc(grant.Publish.Allow, func(entry string) bool { return entry == removed || entry == wildcard })
+				require.Len(t, grant.Publish.Allow, held-2, "the grant does not hold both %s and %s", removed, wildcard)
 
 				seed, server, uri := startGrantServer(t, image.Ref, grant)
 				process, port := startListener(t, listener, uri, seed)
@@ -589,5 +593,96 @@ func violationsOnceLogged(t *testing.T, server natsServer, subject string) [][]s
 			t.Fatalf("the server logged no violation naming %s within 10s:\n%s", subject, serverLog(t, server))
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// The hub's grants for session consumers, as the listener's bus client manages them: the listener's
+// user creates a session's consumer, pulls a stored message from it and acks it, restarts it at its
+// floor (its info, delete and create again) and deletes it; the credential-free session user is
+// refused a consumer create; and the listener's user still subscribes its role lanes in its
+// machine's queue group, as a listener of an earlier release does, beside the group every listener
+// shares. Those refusals are all the server refused.
+func TestListenerPermissionsManageSessionConsumersOnRealServers(t *testing.T) {
+	for _, image := range testnats.Images {
+		t.Run(image.Name, func(t *testing.T) {
+			t.Parallel()
+			seed, server, uri := startSplitServer(t, image.Ref)
+			// The listener's user, as its bus clients read it from their environment.
+			environment := bus.WithEnvironment(func(name string) (string, bool) {
+				switch name {
+				case "NATS_NKEY_SEED":
+					return seed, true
+				case "NATS_NKEY_SEED_FILE":
+					return "", false
+				}
+				return os.LookupEnv(name)
+			})
+			owner, err := bus.ConnectOwningStream([]string{uri}, environment)
+			require.NoError(t, err)
+			t.Cleanup(owner.Close)
+			consumers, err := bus.ConnectSessionConsumers([]string{uri}, environment)
+			require.NoError(t, err)
+			t.Cleanup(consumers.Close)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			agent := contracts.AgentSubject(liveSession)
+			filters := []string{agent, "notifications.github.example.repo.>"}
+			start, err := consumers.Ensure(ctx, liveSession, filters, 0)
+			require.NoError(t, err)
+			require.True(t, start.Created)
+			item := contracts.Envelope{
+				EventID:        "evt-session-consumer",
+				Source:         "agent",
+				SourceEventID:  "evt-session-consumer",
+				Topic:          agent,
+				DedupeKey:      "permissions-live-test.evt-session-consumer",
+				IssuedAt:       contracts.NowMillis(),
+				PayloadSummary: "example stored message",
+				TraceID:        "trace-evt-session-consumer",
+			}
+			require.NoError(t, owner.Publish(item))
+			pull, err := consumers.Pull(ctx, liveSession)
+			require.NoError(t, err)
+			msg, err := pull.Next(ctx)
+			require.NoError(t, err)
+			require.Equal(t, agent, msg.Subject)
+			require.NoError(t, msg.Ack())
+			pull.Stop()
+			// An ack is a publish the server answers nothing to; the floor shows it was taken.
+			require.Eventually(t, func() bool {
+				info, err := consumers.Info(ctx, liveSession)
+				return err == nil && info.AckFloor.Stream == msg.StreamSeq
+			}, 10*time.Second, 50*time.Millisecond, "the ack of %d never reached the consumer", msg.StreamSeq)
+			restarted, err := consumers.RestartAtFloor(ctx, liveSession, filters)
+			require.NoError(t, err)
+			require.Equal(t, msg.StreamSeq+1, restarted.StartSeq)
+			require.NoError(t, consumers.Delete(ctx, liveSession))
+
+			// The listener's role lanes: the shared queue group, and its machine's, which a listener of
+			// an earlier release subscribes in.
+			lane, queue, err := bus.ConnectRoleLane([]string{uri}, liveMachineID, func(*natsgo.Msg) {}, environment)
+			require.NoError(t, err)
+			t.Cleanup(lane.Close)
+			require.Equal(t, bus.RoleLaneQueue, queue)
+			listenerConn, listenerErrs := connect(t, uri, seed)
+			_, err = listenerConn.QueueSubscribe(contracts.RoleTopicPrefix+">", bus.ListenerQueue(liveMachineID), func(*natsgo.Msg) {})
+			require.NoError(t, err)
+			require.NoError(t, listenerConn.Flush())
+			select {
+			case err := <-listenerErrs:
+				t.Fatalf("the server refused the listener's user something: %v", err)
+			default:
+			}
+
+			// The session user may not create a consumer.
+			sessionConn, sessionErrs := connect(t, uri, "")
+			const create = "$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.s-s2"
+			require.NoError(t, sessionConn.Publish(create, []byte(`{}`)))
+			requireViolation(t, sessionConn, sessionErrs, `Publish to "`+create+`"`)
+			for _, v := range violationsOnceLogged(t, server, create) {
+				require.Equal(t, []string{"Publish", create}, v[1:], "the server refused what a grant should allow: %s", v[0])
+			}
+		})
 	}
 }
