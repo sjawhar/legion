@@ -284,8 +284,9 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 	if since := graphEdges(t, handler, url.Values{"to": {askRef}, "since": {strconv.FormatInt(messageEventID, 10)}}); len(since.Edges) != 0 {
 		t.Fatalf("since the introducing event kept %#v; want no edges", since.Edges)
 	}
-	// The message's own event is final once it commits, but the since read stops at the safe
-	// horizon, which a later observation moves past it.
+	// The read waits for an observation taken after it to be proven safe, so it answers the
+	// message committed before it; awaitGraphEdges re-reads only in case an open transaction
+	// elsewhere on the shared test cluster holds the horizon back past referencesSinceWait.
 	if since := awaitGraphEdges(t, handler, url.Values{"to": {askRef}, "since": {strconv.FormatInt(messageEventID-1, 10)}}, 1); since.Edges[0].SourceSeq == nil || *since.Edges[0].SourceSeq != messageEventID {
 		t.Fatalf("since the prior event = %#v; want the backlink", since.Edges)
 	}
@@ -310,10 +311,10 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 	}
 }
 
-// awaitGraphEdges reads query until it answers want edges. A since read stops at the event log's
-// safe horizon, so an edge whose event just committed can be missing from one read and appear on a
-// later one; the wait is generous, since an open write anywhere on the test cluster holds the
-// horizon back.
+// awaitGraphEdges reads query until it answers want edges. A since read answers every edge whose
+// event committed before it unless an open transaction holds the event log's safe horizon back
+// past referencesSinceWait, when it answers only the edges at or below the horizon; the wait is
+// generous, since an open write anywhere on the test cluster holds the horizon back.
 func awaitGraphEdges(t *testing.T, handler http.Handler, query url.Values, want int) model.GraphReferences {
 	t.Helper()
 	deadline := time.Now().Add(sseFrameWait)
@@ -329,13 +330,51 @@ func awaitGraphEdges(t *testing.T, handler http.Handler, query url.Values, want 
 	}
 }
 
+// A since read answers every mention committed before it, also on a server where nothing else
+// observes the event log: no event stream has started the relay and no Delivery page the hub.
+// Each observation is proven safe only by a later one, so a read that stopped at the horizon
+// proven so far would answer nothing here, the first after boot, and each later read would stop
+// at the previous read's observation, however old. A read held past referencesSinceWait (an open
+// transaction elsewhere on the shared test cluster holds the horizon back) may answer less and
+// is read again; a read that answered within it must hold the mention.
+func TestReferencesSinceAnswersAMentionCommittedBeforeTheReadOnAQuietServer(t *testing.T) {
+	handler := newTestHandler(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	target := createReferenceAPIIssue(t, handler, "CORE")
+	citingResponse := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{"project": "CORE", "title": "Rotate the database credentials"}, "alice")
+	if citingResponse.Code != http.StatusCreated {
+		t.Fatalf("create the citing issue: status=%d body=%s", citingResponse.Code, citingResponse.Body.String())
+	}
+	citing := decodeBody[model.Issue](t, citingResponse)
+	targetRef := "dispatch://" + target.Key
+	comment := createReferenceAPIComment(t, handler, citing.Key, "Blocked on "+targetRef)
+
+	query := url.Values{"to": {targetRef}, "since": {"0"}}
+	deadline := time.Now().Add(sseFrameWait)
+	for {
+		started := time.Now()
+		read := graphEdges(t, handler, query)
+		took := time.Since(started)
+		if len(read.Edges) == 1 && read.Edges[0].Kind == "mentions" && read.Edges[0].Node.ID == comment.ID {
+			return
+		}
+		if took < referencesSinceWait {
+			t.Fatalf("since 0 answered %#v in %s; want the mention by comment %s, committed before the read", read.Edges, took, comment.ID)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("since 0 = %#v, every read held past %s; want the mention by comment %s", read.Edges, referencesSinceWait, comment.ID)
+		}
+	}
+}
+
 // A poller reads ?since=<the highest source_seq it was shown>. Event ids are not commit order:
 // a comment edit that drew event a can still be open after one that drew b > a has committed. A
 // read that answered b's mention would move the poller's since to b, and a's mention, committing
 // later below it, would never be shown. The since read stops at the safe horizon, which a's open
-// transaction holds below a, so it answers neither mention while a is open, and both once it
-// commits. Each edit indexes its comment's body as a comment write does (refs.ReplaceCounted,
-// then refs.Stamp with the edit's event).
+// transaction holds below a, so it answers neither mention while a is open: each read waits out
+// referencesSinceWait for the horizon, then answers the mentions at or below it, which are none.
+// Once a commits it answers both. Each edit indexes its comment's body as a comment write does
+// (refs.ReplaceCounted, then refs.Stamp with the edit's event).
 func TestReferencesSinceWithholdsEveryMentionAboveAnOpenLowerEvent(t *testing.T) {
 	handler, database, broker := newTestHandlerWithBroker(t)
 	createReferenceAPIProject(t, handler, "CORE")
@@ -392,7 +431,9 @@ func TestReferencesSinceWithholdsEveryMentionAboveAnOpenLowerEvent(t *testing.T)
 	}
 
 	query := url.Values{"to": {targetRef}, "since": {strconv.FormatInt(low-1, 10)}}
-	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+	// Two reads, each held for referencesSinceWait by a's transaction: the second is the poller's
+	// next read, after an observation the first one took.
+	for range 2 {
 		if read := graphEdges(t, handler, query); len(read.Edges) != 0 {
 			t.Fatalf("since %d while event %d is open = %#v; want no mention, not even the committed event %d's", low-1, low, read.Edges, high)
 		}

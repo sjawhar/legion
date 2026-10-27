@@ -873,11 +873,21 @@
   `GET /api/v1/references?since=` read only up to a safe horizon, the highest id below which every
   event has committed or rolled back: an event that commits late under a lower id is still
   delivered, in id order, rather than skipped. The cost is latency to live readers: a just-written
-  event reaches them once every transaction that was open on the Postgres instance when it was
-  written has ended, in Dispatch's database or any other on that instance, and a wait over five
-  seconds logs the oldest such transaction. Each observation of the horizon uses one transaction id
-  (none while readers are idle) and runs on a two-connection pool of its own, so a full shared pool
-  does not hold live readers back. The horizon is read on the primary only.
+  event reaches them once every transaction that holds a transaction id on the Postgres instance,
+  in Dispatch's database or any other, when the first observation of the horizon after the
+  event's commit is taken has ended. That observation comes after the commit (the live stream's
+  relay reads 25 ms after the event's notification), so the event also waits for transactions
+  that began after it committed and for ones that write no event (a `SELECT ... FOR UPDATE`,
+  another database's job on that instance); a wait over five seconds logs the oldest such
+  transaction. A live event stream that resumes from an id opens at once and heartbeats while the
+  horizon is held, a cold one opens once its subscription is in place, and shutdown ends a stream
+  still waiting. The delivery hub is ready and takes delivery changes while the horizon is held,
+  and starts acting on events once the first event cursor is proven. A
+  `GET /api/v1/references?since=` read waits up to 1 s for the horizon to pass every event
+  committed before it; past that it answers the mentions at or below the horizon, and a later read
+  the rest. Each observation of the horizon uses one transaction id (none while readers are idle)
+  and runs on a two-connection pool of its own, so a full shared pool does not hold live readers
+  back. The horizon is read on the primary only.
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a
