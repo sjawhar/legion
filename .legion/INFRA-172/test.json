@@ -2,36 +2,55 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-172",
-  "completed": "2026-10-27T00:46:00Z",
-  "testedHead": "e4fea0368ad3e3b89d5e7cdefd0555a57b46a16a (code head a6ecbc12b4dceda916933a07b35407da7cc30b64; e4fea036 and 33f6c2d2 add only .legion/INFRA-172/implement.json)",
+  "completed": "2026-10-27T01:01:30Z",
+  "testedHead": "647724175d3c155dce009933b29b527a1f8e75c0 (round 2). Runtime code is a6ecbc12's: a6ecbc12..2e326959 changes only .legion/ and three _test.go files (case renames to a made-up grep command), so the real-surface runs of round 1 at a6ecbc12 hold.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's browser test ('a pipe after two backslashes ends a table cell in Go as in the editor') at the head: passes in chromium and iphone ($TMPDIR/infra172-test/e2e-head.txt). Drove the same surfaces independently: the real dispatch CLI and the live editor against the harness server, a 20,000-document Go-against-engine differential at the base and the head, and differential.sh over the implementer's 2,050-document corpus plus the 20,000 generated documents, whose stored-document result equals the implementer's (1 fixed, 4 lost fixed points of the since-rewritten documents, 0 on every gate). The base failure the implementer quoted is confirmed independently by the base run of the generated differential (4,177 disagreements on a \\\\|)."
+    "how": "Re-ran the implementer's browser test ('a pipe after two backslashes ends a table cell in Go as in the editor') at the head: passes in chromium and iphone ($TMPDIR/infra172-test/e2e-head.txt). Drove the same surfaces independently: the real dispatch CLI and the live editor against the harness server, a 20,000-document Go-against-engine differential at the base and the head, and differential.sh over the implementer's 2,050-document corpus plus the 20,000 generated documents, whose stored-document result equals the implementer's (1 fixed, 4 lost fixed points of the since-rewritten documents, 0 on every gate). The base failure the implementer quoted is confirmed independently by the base run of the generated differential (4,177 disagreements on a \\\\|). Round 2: the implementer's re-run at 2e326959 changes no runtime file; its A2 and A4 proof entries were checked on Dispatch (below)."
   },
-  "failed": 2,
-  "failures": [
+  "failed": 0,
+  "failures": [],
+  "verifiedCriteria": [
     {
-      "criterion": "A2 (spec R2: list each render difference a person can see and link each to an INFRA issue). architecture-assessment.md v2 says the renderers 'disagree in 17 places a person can see' and lists 17 rows; at least two more differences a person can see are not listed and no issue covers them.",
-      "evidence": "Pre-existing in Go at both ad909178 and a6ecbc12 (not caused by this pull request), found by the generated differential. Go's pmdoc.Parse against the headless engine (packages/dispatch/e2e/engine-tables.ts's engine, the one that draws comments, asks, messages and past versions), on the paragraph text: (1) unequal tilde runs: 'Plain ~a~~ text.' -> Go reads 'Plain a~ text.' (strike 'a', then '~') and stores 'Plain ~~a~~&#126; text.'; the engine reads 'Plain ~a~~ text.' unchanged. Same for '~~a~' (Go '~a', engine '~~a~'). So the same markdown in a document written through the API shows a struck word, and in a comment shows the tildes. (2) emphasis around a tilde: 'Plain b*~* text.' -> Go reads 'Plain b*~* text.' and stores 'Plain b\\*~* text.'; the engine reads 'Plain b~ text.' (italic '~'). In a table, 'x ~(*~|_* y' class: Go strike '(*' where the engine reads '~(' and italic '~|_'. Searches 'strikethrough', 'strike', 'tilde', 'single tilde' on Dispatch find no issue (2026-10-27 00:35Z). A possible third, judged by the architect against INFRA-531 (A web address after punctuation is a link in a comment and plain text in a document): 'See <http://e.test/a\\\\b now.' -> Go reads one backslash and stores 'See <http\\://e.test/a\\b now.'; the engine keeps both backslashes and links the address. Reproduce: the throwaway harness in $TMPDIR/infra172-test/harness (zz_tester_fuzz_test.go TestTesterText with TESTER_TEXT_IN=$TMPDIR/infra172-test/text/docs.json, zz-tester-text.ts in packages/dispatch/e2e); outputs in $TMPDIR/infra172-test/text/{go,eng,go-base}.json. Needed: drafts for the architect to file, rows in the assessment's table, and the count corrected, before the merge closes INFRA-172."
+      "criterion": "A1",
+      "result": "pass",
+      "how": "An independent checker (not check-links.sh): 554 permalinks (504 in the assessment, 50 in the refactor order), all at ad909178, 0 bad; a made-up packages/envoy/go.mod#L99999 is flagged 'end L99999 > 148 lines', a wrong sha and a missing path are flagged. 10 random citations (seed 172) read: all support their sentence; aa.md:791 only weakly (it cites Go's comment for the browser's rule). $TMPDIR/infra172-test/CitationsAndFiles/ Round 2 (assessment v4, refactor order v5): checked=560 bad=0, same checker."
     },
     {
-      "criterion": "A4 (the escaped-pipe rule and the count): the census matcher, the method the count and the production check's re-run rest on, does not implement its stated rule for a table inside a blockquote.",
-      "evidence": "bun census.ts --file fx3.md (census.ts = dispatch://INFRA-172/artifact/escaped-pipe-census-ts v1, fixture $TMPDIR/infra172-test/census/fx3.md) reports a hit for the table row in a list item and in a plain table but none for '> | q \\\\| r | s |' in a blockquoted table: 'mid=2 closing=0', where 3 mid-row rows are present. At both ad909178 and a6ecbc12 a blockquoted '> | x \\\\| y |' is a table (Go and the engine agree at the head on cells 'x \\' and 'y'), so the change moves such a row from one cell to two. Measured impact on the count: 0 blockquoted table lines with an even run before a pipe in the three census corpora ($TMPDIR/infra172/corpus.jsonl 1,966 documents, census-latest/corpus.jsonl 2,268, census-out/corpus.jsonl 3,781; bun $TMPDIR/infra172-test/census/bq.ts), so the stated count stands; the gap matters for the production check's re-run of the census, which uses this matcher. Also: the census artifact on Dispatch is v1, without the --projects and --latest-only flags the six-project run used (refactor-order.md's method names them); upload the script as run."
+      "criterion": "A2",
+      "result": "pass",
+      "how": "Round 2: 62 unique dispatch:// links in assessment v4 and refactor order v5, all resolve with dispatch read --ref; dispatch read --issue INFRA-99999 exits 1 'not found'. 20 rows, each linked; the tester's three classes linked as in round1Failures. Round 1 notes: 59 unique dispatch:// links in both documents, 59 resolve with dispatch read; dispatch read --issue INFRA-99999 exits 1 'not found'. No row reuses an INFRA-341 map issue for a different difference. aa.md:408 overstates 'R4 predates the map': R4, R5 and R6 arrived together in INFRA-189 spec v3 (04:11:50Z), before INFRA-341 was created (05:05:41Z) but with R5 already citing the audit."
+    },
+    {
+      "criterion": "A3",
+      "result": "pass against the spec's A3",
+      "how": "The spec's A3 reads 'The schema proposal is written, and the INFRA-138 architect's decision on it is recorded on this issue.' The section offers options A-D and recommends C built as B first; the decision is dispatch://INFRA-172/comment/cc100a3e-27de-4445-b969-0873cd4e927e (option C, built as B first), consistent with the section. No ask block in either document (the plan's ask-block wording is superseded by the architect's recorded decision). The schema section links neither the decision comment nor INFRA-525."
+    },
+    {
+      "criterion": "A5",
+      "result": "pass",
+      "how": "Non-test, non-generated files over 2,000 lines at ad909178 in the five packages: dispatch-execute.ts 4,131, dispatch-api.ts 3,429, docs/service.go 2,552 - equal to the assessment's list; the five named files and the nine test files over 2,000 lines match too."
+    },
+    {
+      "criterion": "A6",
+      "result": "pass",
+      "how": "11 stage headings in the plan's order, each naming a file and function that exist at ad909178; 27 items, matching the document's '27 places'."
+    },
+    {
+      "criterion": "A7",
+      "result": "pass",
+      "how": "The verdict sentence leads refactor-order.md; 15 steps, each with one marker (14 With, 1 After, none Before) and an INFRA-140 and INFRA-173 note; the summary table agrees."
+    },
+    {
+      "criterion": "R4 in code",
+      "result": "pass",
+      "how": "See proof."
     }
   ],
-  "verifiedCriteria": [
-    {"criterion": "A1", "result": "pass", "how": "An independent checker (not check-links.sh): 554 permalinks (504 in the assessment, 50 in the refactor order), all at ad909178, 0 bad; a made-up packages/envoy/go.mod#L99999 is flagged 'end L99999 > 148 lines', a wrong sha and a missing path are flagged. 10 random citations (seed 172) read: all support their sentence; aa.md:791 only weakly (it cites Go's comment for the browser's rule). $TMPDIR/infra172-test/CitationsAndFiles/"},
-    {"criterion": "A2 links", "result": "pass for the 17 listed rows", "how": "59 unique dispatch:// links in both documents, 59 resolve with dispatch read; dispatch read --issue INFRA-99999 exits 1 'not found'. No row reuses an INFRA-341 map issue for a different difference. aa.md:408 overstates 'R4 predates the map': R4, R5 and R6 arrived together in INFRA-189 spec v3 (04:11:50Z), before INFRA-341 was created (05:05:41Z) but with R5 already citing the audit."},
-    {"criterion": "A3", "result": "pass against the spec's A3", "how": "The spec's A3 reads 'The schema proposal is written, and the INFRA-138 architect's decision on it is recorded on this issue.' The section offers options A-D and recommends C built as B first; the decision is dispatch://INFRA-172/comment/cc100a3e-27de-4445-b969-0873cd4e927e (option C, built as B first), consistent with the section. No ask block in either document (the plan's ask-block wording is superseded by the architect's recorded decision). The schema section links neither the decision comment nor INFRA-525."},
-    {"criterion": "A5", "result": "pass", "how": "Non-test, non-generated files over 2,000 lines at ad909178 in the five packages: dispatch-execute.ts 4,131, dispatch-api.ts 3,429, docs/service.go 2,552 - equal to the assessment's list; the five named files and the nine test files over 2,000 lines match too."},
-    {"criterion": "A6", "result": "pass", "how": "11 stage headings in the plan's order, each naming a file and function that exist at ad909178; 27 items, matching the document's '27 places'."},
-    {"criterion": "A7", "result": "pass", "how": "The verdict sentence leads refactor-order.md; 15 steps, each with one marker (14 With, 1 After, none Before) and an INFRA-140 and INFRA-173 note; the summary table agrees."},
-    {"criterion": "R4 in code", "result": "pass", "how": "See proof."}
-  ],
   "observations": [
-    "packages/envoy/internal/dispatch/docs/edits_test.go names a case 'the production row's code' with a git command taken from a production document; the plan's ground rule says no production document text in the repository. The command holds no private name; the reviewer judges.",
-    "refactor-order.md line 238 says the every-version count of the six other projects 'runs on' and goes on the pull request; it is not on the pull request yet.",
-    "Required checks lint, typecheck, test and pr-title were queued (not started) at e4fea036 when read at 00:40Z; the Docs workflow run 40424104100 (not required) was cancelled after 20 minutes with no failed step."
+    "Round 1's production-text observation is resolved: commit 2e326959 replaces the git command from a stored document with a made-up grep command in edits_test.go, render_readback_test.go and render_table_test.go.",
+    "aa.md:791 still backs the browser's backslash rule with Go's comment rather than browser code (weak citation, not wrong).",
+    "CI at 64772417, read 01:00Z: required lint, typecheck, test and pr-title pending; the runs at 2e326959 were cancelled by the newer push."
   ],
   "proof": [
     {
@@ -57,6 +76,24 @@
       "observed": "regressions 0, churn 0, engine-tree regressions 0, engine-tree churn 0, head panics 0, lost fixed points 0; fixed 1,681. The stored documents give the implementer's result (table-cell-pipes fixed; 4 since-rewritten documents as lost fixed points). The one misread is generated fuzz-corpus:4491, now a paragraph since its header holds three cells; its difference (Go strike '(*' where the engine reads '~(' and italic '~|_') is read identically by the base on the same paragraph text, so it is the base's strikethrough-against-emphasis difference, failure 1's class, not this change.",
       "headSha": "a6ecbc12b4dceda916933a07b35407da7cc30b64",
       "negativeControl": "The base side of the same run stores 9,904 of the documents correctly against 11,585 at the head; the census matcher's --file over a fixture with one mid-row \\\\|, one closing \\\\|, one \\| and one \\\\| in a code fence reports exactly mid=1 closing=1."
+    },
+    {
+      "criterion": "A2 and A4 after round 1: every visible render difference found is listed and linked, and the census matcher reads table rows inside blockquotes and list items",
+      "surface": "architecture-assessment.md v4, refactor-order.md v5 and escaped-pipe-census.ts v2 on Dispatch",
+      "command": "dispatch doc-read --issue INFRA-172 --artifact <each>; dispatch read --ref for each of the 62 dispatch:// links; dispatch read --issue INFRA-534/535/536/531 and doc-read of INFRA-531's and INFRA-534's specs; bun census2.ts --file fx.md|fx3.md|fx4.md ($TMPDIR/infra172-test/census, r2/)",
+      "observed": "62/62 links resolve; 20 rows, the three new ones linking INFRA-534, INFRA-535, INFRA-536, children of INFRA-138; INFRA-531's spec names the '<http://e.test/a\\\\b' case; census v2: fx3 mid=3, fx4 mid=3 (nested containers), fenced block and paragraph in a blockquote not counted.",
+      "headSha": "647724175d3c155dce009933b29b527a1f8e75c0",
+      "negativeControl": "dispatch read --issue INFRA-99999 exits 1 'not found'; census v2 over fx.md (one mid-row \\\\|, one closing \\\\|, one \\| and one \\\\| in a code fence) reports exactly mid=1 closing=1."
+    }
+  ],
+  "round1Failures": [
+    {
+      "criterion": "A2 (spec R2: list each render difference a person can see and link each to an INFRA issue). architecture-assessment.md v2 says the renderers 'disagree in 17 places a person can see' and lists 17 rows; at least two more differences a person can see are not listed and no issue covers them.",
+      "resolution": "Fixed: architecture-assessment.md v4 says 20 differences and adds rows for tilde runs of different lengths (INFRA-534), emphasis next to a tilde (INFRA-535) and a backslash before an entity (INFRA-536); the '<http://...' backslash case is written into INFRA-531's spec (line 17). INFRA-534, INFRA-535 and INFRA-536 are children of INFRA-138, status todo. The rows' examples are the ones reproduced in round 1."
+    },
+    {
+      "criterion": "A4 (the escaped-pipe rule and the count): the census matcher, the method the count and the production check's re-run rest on, does not implement its stated rule for a table inside a blockquote.",
+      "resolution": "Fixed: escaped-pipe-census.ts v2 on Dispatch (byte-equal to the implementer's copy) reports mid=3 on fx3.md (blockquoted, list-item and plain rows; v1 reported mid=2), all three rows of fx4.md (list in blockquote, blockquote in blockquote, blockquote in list) and skips a fenced block and a paragraph inside a blockquote; fx.md still gives exactly mid=1 closing=1. refactor-order.md v5 states the container rule (line 245) and the --projects and --latest-only flags (line 246). The six projects' every-version count (13,898 versions, 55 with a hit, all LINUX) is in refactor-order.md line 238 and the PR's Production line."
     }
   ]
 }
