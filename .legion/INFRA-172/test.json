@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-172",
-  "completed": "2026-10-27T04:06:12Z",
-  "testedHead": "6483af7e472e79fc7dc981dfaaf9ccd82f442f4e (rebase re-check of 01465b58: ff9c859b merges main@origin c3d09eec)",
+  "completed": "2026-10-27T09:26:50Z",
+  "testedHead": "1093471149ef8ea45f554986c38f122fe9d93b43 (98892d9c merges main@origin b08a56bc into d68a0506)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Rebase re-check: fingerprint unchanged; round 5's independent verification at 01465b58 stands. Smoke at 6483af7e: the implementer's parity test passes on a server and SPA rebuilt from the merged tree."
+    "how": "Round 7: re-ran the implementer's browser parity test and drove every census entry and the panic fix independently at 10934711 against a server and SPA rebuilt from the merged tree ($TMPDIR/infra172-test/r3/e2e-r7.txt, e2e-r7b.txt); the 50,000-document varied-ending differential gives Go output byte-identical to round 5's head and 0 panics."
   },
   "failed": 0,
   "failures": [],
@@ -49,7 +49,8 @@
   ],
   "observations": [
     "Adjacent code merges into one span: beside browser-left `a\\|b` followed by text 'three', replacing 'three' with `ls | wc -l` is refused, and the refusal quotes the merged span 'a\\|bls | wc -l' rather than what the caller wrote. Conservative (storing it would take a | out of the merged code); the caller sees a span text it did not write. The reviewer judges whether the message needs a word on merged spans.",
-    "aa.md:791 still backs the browser's backslash rule with Go's comment rather than browser code (weak citation, not wrong)."
+    "aa.md:791 still backs the browser's backslash rule with Go's comment rather than browser code (weak citation, not wrong).",
+    "CI at 10934711, read 09:26Z: Tests, Legion Envoy and Contracts, PR Title, Docs queued or pending; runs on the merge commit 98892d9c cancelled by the handoff push. GitHub reports MERGEABLE (BLOCKED on review and checks)."
   ],
   "proof": [
     {
@@ -115,6 +116,14 @@
       "observed": "2 passed; fingerprint 4c40c69a at both heads",
       "headSha": "6483af7e472e79fc7dc981dfaaf9ccd82f442f4e",
       "negativeControl": "dispatch doc-edit replacing a cell's text with code `git log \\| wc -l` exits 1 naming the cell; upload of '| A | B |\\n| --- | --- |\\n| a \\\\\\\\| b | c |' exits 1 'a table row holding 3 cells where its table has 2'."
+    },
+    {
+      "criterion": "After the merge that brings the block graph from main: the changed reading, every refusal and the panic fix hold on the merged tree",
+      "surface": "Dispatch's browser suite, the real dispatch command and the SPA against a server rebuilt from 10934711 on a rootless Postgres; Go's Parse over 50,000 generated tables",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:5433/infra172_tester?sslmode=disable bun run e2e editor-paste zz-tester-pipes -g \"tester|two backslashes\"; bunx playwright test --config e2e/playwright.config.ts zz-tester-pipes -g \"tester r5\" --project chromium; TESTER_FUZZ_IN=$TMPDIR/infra172-test/fuzz2b/docs.jsonl go test ./internal/dispatch/pmdoc/ -run TestTesterFuzz",
+      "observed": "7 passed, 1 skipped; r5 1 passed; 0 panics, Go output byte-identical to round 5",
+      "headSha": "1093471149ef8ea45f554986c38f122fe9d93b43",
+      "negativeControl": "upload of '| a | b \\\\\\\\| \\\\|' into a two-column table exits 1 'a table row holding 3 cells where its table has 2'; `c\\|d` beside browser-left code refused while `ls | wc -l` is stored."
     }
   ],
   "round1Failures": [
@@ -158,18 +167,14 @@
   ],
   "testerGap": "Round 1's generated differential did not catch the reviewer's panic: every generated row closed with ' |', and the harness counted ErrPanic as a refusal. The round-5 harness varies row endings and counts panics separately; it finds 5,877 panics at cd211658 and none at the head.",
   "fingerprint": {
-    "before": "01465b587809033acb71eb2814edce835e0fce3c 4c40c69a34f8d1eb6ee35ae6cb83c0ff61ac3cc0545b869f909a1439a4b4f602",
-    "after": "6483af7e472e79fc7dc981dfaaf9ccd82f442f4e 4c40c69a34f8d1eb6ee35ae6cb83c0ff61ac3cc0545b869f909a1439a4b4f602",
-    "verdict": "unchanged: bare gates only (CI read on GitHub, smoke check); round-5 real-surface verification stands"
+    "before": "6483af7e472e79fc7dc981dfaaf9ccd82f442f4e 4c40c69a34f8d1eb6ee35ae6cb83c0ff61ac3cc0545b869f909a1439a4b4f602",
+    "after": "1093471149ef8ea45f554986c38f122fe9d93b43 cbd0eabfcf20d42a44f383049a0203a5902334b9071490a7276996a61700034e",
+    "verdict": "changed: the only differing lines are the doc-edit description line of packages/claude-envoy/dist/{dispatch,envoy-channel,session-hook}.js, which now also carries main's block-id sentence; main's only pmdoc change (parse.go) is a comment. Full real-surface round run anyway, since the merged runtime includes the block graph."
   },
-  "round5Failures": [
-    {
-      "criterion": "CI at the head (read on GitHub): the pull request must be mergeable for its required checks to run; round 5's code (21f5db10, 00428c9f) has no CI run",
-      "resolution": "Fixed: ff9c859b merges main@origin c3d09eec; GitHub reports MERGEABLE (mergeStateStatus BLOCKED on review and checks), and workflows run at 6483af7e (Tests, Legion Envoy and Contracts, Docs, PR Title, Worker Image created 04:02Z)."
-    }
-  ],
-  "bareGates": {
-    "ci": "At 6483af7e, read 04:03Z: required lint, typecheck, test and pr-title queued (not yet green); the runs on the merge commit ff9c859b were cancelled by the handoff push. Read as queued, not waited for.",
-    "smoke": "cd packages/dispatch && bun run e2e editor-paste zz-tester-pipes -g \"two backslashes|tester: CLI\" --project chromium at 6483af7e (server and SPA rebuilt from the merged tree, rootless Postgres): 2 passed - the parity test, and the CLI refusal of code `git log \\| wc -l` in a cell (exit 1, twice) with plain and bare-pipe writes stored and an upload of '| a \\\\| b | c |' refused. Output $TMPDIR/infra172-test/r3/e2e-r6.txt."
-  }
+  "round7Verified": [
+    "bun run e2e editor-paste zz-tester-pipes -g \"tester|two backslashes\" at 10934711: 7 passed, 1 skipped (chromium-only CLI test) - parity test in chromium and iphone; CLI refusal of code with an odd backslash run before | in a cell, alone and beside browser-left code; plain text, `ls | wc -l` and the rewrite stored; browser Accept suggestion HTTP 400 with the document unchanged; wide bare row 'got 3 cells, table has 2'; widened header no table; typed `a\\|b` stored `` xyz `a\\`\\|`b` `` read alike by engine and Go.",
+    "tester r5 at 10934711: '| a | b \\\\\\\\| \\\\|' refused on upload ('3 cells where its table has 2') and as a bare row insert; '| a \\\\\\\\| \\\\|' stored '| a \\\\ | \\\\| |', engine cells 'a \\\\' and '|'.",
+    "Varied-ending differential (50,000 documents): 0 panics; Go output byte-identical to round 5's head 01465b58.",
+    "Help and generated dist: doc-edit --help prints the odd-run sentence; each of the three claude-envoy dist files holds it and main's block-id sentence once."
+  ]
 }
