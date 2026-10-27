@@ -1267,7 +1267,8 @@ export const dispatchToolSpecs = [
       "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " +
       "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " +
       'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' +
-      "session that is not running at the moment of the read, whatever its priority. A restarting " +
+      "session that is not running, as of the server's copy of the listener's session list, at " +
+      "most 5 s old, whatever its priority. A restarting " +
       "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " +
       "Do not use it to search by keyword or phrase; dispatch search remains the keyword surface. " +
       "Dispatch pages the list: limit sets the page size (default " +

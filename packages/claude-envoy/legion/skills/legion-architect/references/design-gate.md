@@ -95,7 +95,13 @@ Facts about the request:
   never wrote is no registration: the gate is as it was. Read the document's latest version, check
   it is the spec the human is asked to approve, and `register_gate` that version.
 
-Then end your turn. Release no wave until a delivered wake shows `design-approved` on the root. On
+Then end your turn. A root waiting on its approval request keeps its admission slot; only a root
+question handed to the human returns it ("Every turn" in `skill://legion-architect/SKILL.md`).
+While the root waits on such a question, the human's approval or changes request of the spec
+answers that wait too, and the resume task says how the spec stands. Release no wave until a
+delivered wake shows `design-approved` on the root, or, for a root that waited on a question, a
+resume task says its design gate is open: the daemon sends that root no `design-approved` notice,
+and "this resume is your design-approved wake" is that wake. On
 `design-changes-requested`: revise the spec as the human's reason asks, run step 3's two reviews on
 the new version, resolve every finding, request approval again and end your turn. A
 `design-changes-requested` may name a version below the latest, or arrive after another for the

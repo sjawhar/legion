@@ -7,6 +7,23 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- Daemon API contract 40: a root whose architect asked a person a question and handed the turn
+  back gives its admission slot up in the new phase `awaiting_person`, its architect suspended with
+  its session kept, and the person's answer, or the spec's design gate standing open, puts it at
+  the front of the waiting line, where the next free slot resumes the same session. `legion state`
+  and the controller's `read_state` carry the phase and the issue's `waitingOn`: the question
+  (`kind: "ask"`, `ask`) or, for the gate waits of a later release, the spec version (`kind:
+  "gate"`, `gateVersion`, `artifactId`), when the wait began (`since`, Dispatch's time of the
+  hand-back), and, once the wait was answered, `answeredAt` and `answeredBy` (how it was
+  answered, not always by a person). The controller receives the new `awaiting-person` notice. A
+  39 plugin's strict state reader refuses this state, so install this release with a `legion`
+  built from the same commit. The `legion-architect` skill opens a question on the root and ends
+  its turn after handing it back; it takes a resume task that says "this resume is your
+  design-approved wake" as its `design-approved` wake, since a waiting root gets no
+  `design-approved` notice, and its `design-changes-requested` row says a waiting root's resume
+  task, not a notice, names the changes request. The `legion-controller` skill reads the
+  `awaiting-person` wake and a waiting root as no reason to label or admit anything.
+
 - A ninth Legion skill, `leading-a-work-stream`, rebuilt from dotfiles
   `feb1271d4f5021f2e0b9b22b7496a300e6f46790`: a `SKILL.md` and seven references (daily plan,
   decision rights, direction and coaching, Dispatch upkeep, sources, the speed tick, the record of
@@ -61,7 +78,6 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   or needs what only that person can provide. A finding outside the tree is always an ask. A cost
   or risk the person would weigh is now also a reason for a new version of an approved spec. The
   deployment's owner said Legion's architects asked him too many questions that did not need him.
-
 - Daemon API contract 38 (INFRA-225): Legion admits no root and starts no child while Dispatch
   shows it blocked by an issue that is not `done`, and says what it is waiting for. `legion state`
   and the controller's `read_state` carry `admission.blocked`, every root and child Legion is
