@@ -7,6 +7,7 @@ tags:
   - ci-router
   - caching
   - concurrency
+  - merge-queue
 date: 2026-10-27
 status: active
 module: ci
@@ -21,11 +22,11 @@ symptoms:
 
 # Join a Job to the CI Router
 
-`.github/workflows/ci.yaml` (name `CI`) is the one workflow every pull request and every push to
-main runs. It has no `paths:`. Its first job, `changes`, reads the paths the change touched and
-selects jobs through one dorny/paths-filter filter per job. Its last job, `ci-ok`, condenses every
-job's result into one check. The deployment repository keeps its own router guide for its own
-workflows; this page covers this repository only.
+`.github/workflows/ci.yaml` (name `CI`) is the one workflow every pull request, every merge-queue
+group and every push to main runs. It has no `paths:`. Its first job, `changes`, reads the paths
+the change touched and selects jobs through one dorny/paths-filter filter per job. Its last job,
+`ci-ok`, condenses every job's result into one check. The deployment repository keeps its own
+router guide for its own workflows; this page covers this repository only.
 
 ## The four places a job joins
 
@@ -79,19 +80,37 @@ re-run the method and extend the filter in the same pull request.
 
 ## Caches: only main writes
 
-No pull-request run writes an Actions cache entry. A pull request's entries are scoped to its ref,
-no other pull request reads them, and they count against the repository's cache limit, where they
-evict main's entries.
+No pull-request or merge-queue run writes an Actions cache entry. A pull request's entries are
+scoped to its ref, no other pull request reads them, and they count against the repository's cache
+limit, where they evict main's entries.
 
-- Give `actions/setup-go` `cache: false`.
-- Restore with `actions/cache/restore`, keyed on the family's sums, with the family's prefix as
-  `restore-keys` (`go-daemon`, `go-docs`, `go-envoy`, `go-envoy-infra`, `go-notices`). Share a
-  family only with the jobs that build the same packages, or whichever job saves first owns the
-  entry the others then miss.
+- Give `actions/setup-go` `cache: false` and `id: setup-go`.
+- Restore with `actions/cache/restore`, keyed on the Go version setup-go installed
+  (`key: <family>-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}`), with the
+  family's prefix as `restore-keys` (`<family>-${{ runner.os }}-`; the families are `go-daemon`,
+  `go-docs`, `go-envoy`, `go-envoy-infra`, `go-notices`). Each family keeps one entry, refreshed
+  only when Go is bumped, and after a bump the prefix still serves the old entry's modules. Do not
+  key on go.sum: every go.sum change would leave a whole entry, up to a gigabyte, for seven days. A
+  go.sum change downloads only the changed modules, and Go's build cache is content-addressed, so a
+  stale entry costs a run only what changed. Share a family only with the jobs that build the same
+  packages, or whichever job saves first owns the entry the others then miss.
 - Save with `actions/cache/save` as the job's last step, with
   `if: github.event_name == 'push' && success() && steps.go-cache.outputs.cache-hit != 'true'`.
   The workflow's only push trigger is main.
+- The release workflows' Go builds (release.yaml's `legion_build`, release-envoy-infra.yaml's
+  `build`) restore `go-daemon` and `go-envoy-infra` the same way and save nothing.
 - `.github/actions/setup-bun` reads and writes its cache only on main; use it as it is.
+
+## The merge queue runs the router too
+
+ci.yaml triggers on `merge_group` (`checks_requested`). On a group, `changes` selects by the
+group's `base_sha..head_sha` diff, what the queued change touches against the queue base, and
+`ci-ok` reports on the group's commit, so the required checks pass on the merged tree before
+anything lands. A new job needs nothing extra for it. But a job whose `if:` names
+`github.event_name` must admit `merge_group`, or it skips on the group and its skip passes `ci-ok`
+there. What skips a group does so on purpose: the cache saves and docs-deploy (push only), lint's
+pull-request text check (pr-title.yaml checks the text on the group), and worker-image (pull
+request only; main's image builds are release.yaml's).
 
 ## Drafts run no test job
 
@@ -107,6 +126,7 @@ typecheck and test do, must also carry `!github.event.pull_request.draft`.
 
 A newer push to a pull request cancels its older run. A push to main is a concurrency group of its
 own per commit and is never cancelled: `changes` selects by that push's own diff, and no later
-push's diff holds the jobs a dropped run would have selected. A cancelled main run would leave its
-commit untested for good. Keep a new job inside the workflow's group; do not give it a
-`concurrency:` that cancels on push.
+push's diff holds the jobs a dropped run would have selected. A merge group is likewise a group of
+its own per commit and is never cancelled. A cancelled main run would leave its commit untested for
+good. Keep a new job inside the workflow's group; do not give it a `concurrency:` that cancels on
+push.

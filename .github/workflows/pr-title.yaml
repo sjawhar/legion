@@ -13,11 +13,20 @@ name: PR Title
 # now are. Anyone signed in can review a public pull request, so check-pr-text.sh, not an
 # `if:`, decides whose text counts: a skipped job posts a `pr-title` that GitHub and the daemon
 # (classify.RunResult) count as a pass, so a skipped run would turn a real failure green.
+#
+# The merge queue's group runs it too, and it reports `pr-title` on the group's commit: a required
+# check that does not report on the merge group fails the group ("The merge will fail as the
+# required status check will not be reported",
+# https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue#triggering-merge-group-checks-with-github-actions).
+# That run re-checks the queued pull request's title, body, commits, comments and reviews as they
+# are when it is queued, read from the pull request the group's branch names.
 on:
   pull_request:
     types: [opened, edited, reopened, synchronize]
   pull_request_review:
     types: [submitted, edited]
+  merge_group:
+    types: [checks_requested]
 
 # A run cancels the run before it of the same pull request and event, so a pull request holds at
 # most one running and one pending PR Title run per event however many edits and reviews arrive.
@@ -27,9 +36,10 @@ on:
 # `gh pr checks` does): a review run that cancelled a pull_request run would leave that event's
 # latest `pr-title` cancelled on the head until the next push or edit. A review run checks with
 # main's copy of check-pr-text.sh; the required lint job checks a pull request that changes it with
-# its own copy at every push.
+# its own copy at every push. A merge group carries no pull request and is a group of its own per
+# commit (its head sha), so no run cancels a merge group's, which the queue waits for.
 concurrency:
-  group: pr-title-${{ github.event_name }}-${{ github.event.pull_request.number }}
+  group: pr-title-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.merge_group.head_sha }}
   cancel-in-progress: true
 
 # The job clones the repository for check-pr-text.sh, which reads the pull request's commits
@@ -45,30 +55,62 @@ jobs:
       issues: read
       pull-requests: read
     steps:
-      # A review run checks out the default branch, so the script it runs is main's, never the
-      # pull request's: a pull_request_review run would otherwise check out the pull request's
-      # merge ref, which is its GITHUB_REF. A pull_request run checks out that merge ref as the
-      # required lint job does, so a pull request that changes the script is checked by its own
-      # version.
+      # A review or merge-group run checks out the default branch, so the script it runs is
+      # main's, never the pull request's: a pull_request_review run would otherwise check out the
+      # pull request's merge ref, which is its GITHUB_REF. A pull_request run checks out that merge
+      # ref as the required lint job does, so a pull request that changes the script is checked by
+      # its own version.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name != 'pull_request' && github.event.repository.default_branch || '' }}
           persist-credentials: false
 
+      # The payload the two checks below read, as a file: its `path` output. A pull_request or
+      # pull_request_review run passes its own event payload. A merge_group payload carries no pull
+      # request, only the queue branch the group runs on,
+      # refs/heads/gh-readonly-queue/<base>/pr-<number>-<head sha>, so this step reads the pull
+      # request that branch names and writes it in the shape check-pr-text.sh reads, under
+      # RUNNER_TEMP; a branch that names none is refused.
+      - name: Find the pull request payload
+        id: payload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != merge_group ]; then
+            echo "path=$GITHUB_EVENT_PATH" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          head_ref=$(jq -r '.merge_group.head_ref // ""' "$GITHUB_EVENT_PATH")
+          if ! [[ $head_ref =~ ^(refs/heads/)?gh-readonly-queue/.+/pr-([0-9]+)-[0-9a-f]{40}$ ]]; then
+            echo "::error::merge_group.head_ref '$head_ref' names no queued pull request (want refs/heads/gh-readonly-queue/<base>/pr-<number>-<40 hex>)"
+            exit 1
+          fi
+          number=${BASH_REMATCH[2]}
+          pull="$RUNNER_TEMP/pull-request.json"
+          payload="$RUNNER_TEMP/pull-request-event.json"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$number" > "$pull"
+          jq --argjson number "$number" '{pull_request: ., number: $number}' "$pull" > "$payload"
+          echo "path=$payload" >> "$GITHUB_OUTPUT"
+
       # The title, body, commit messages, comments and reviews are as public as the tree
       # (check-pr-text.sh says where each lands). The required lint job checks them at every
-      # push; this step checks an edit or a review. Both steps read the event payload rather than
-      # an `env:` block, which the runner prints in the job log.
+      # push; this step checks an edit, a review or a queued group. Both steps read the payload
+      # file rather than an `env:` block, which the runner prints in the job log; only its path is
+      # in `env:`. A workflow `env:` cannot override a GITHUB_* variable, so the shell sets
+      # GITHUB_EVENT_PATH for the script.
       - name: Check the title, body, branch name, commits, comments and reviews name nothing private
         env:
           GH_TOKEN: ${{ github.token }}
-        run: .github/scripts/check-pr-text.sh
+          PAYLOAD: ${{ steps.payload.outputs.path }}
+        run: GITHUB_EVENT_PATH="$PAYLOAD" .github/scripts/check-pr-text.sh
 
       # Every run checks the title, since a review run reports `pr-title` on the head too and a
       # run that skipped it would post a passing `pr-title` over a failed one.
       - name: Require a conventional PR title
+        env:
+          PAYLOAD: ${{ steps.payload.outputs.path }}
         run: |
-          if jq -r '.pull_request.title' "$GITHUB_EVENT_PATH" | grep -qE '^[a-z]+(\([^)]+\))?!?: .+'; then
+          if jq -r '.pull_request.title' "$PAYLOAD" | grep -qE '^[a-z]+(\([^)]+\))?!?: .+'; then
             echo "PR title is conventional"
           else
             echo "::error::PR title must be a conventional commit subject (type(scope): summary). Squash merges use the PR title as the commit subject, and the release workflows version from conventional subjects — a non-conventional title makes the release pipelines rely on the squash body alone."

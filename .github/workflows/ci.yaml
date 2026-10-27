@@ -1,28 +1,35 @@
 name: CI
 
-# The router: every check a pull request or a push to main runs, in one workflow. Its first job,
-# `changes`, reads the paths the change touched and selects, through one dorny/paths-filter filter
-# per job, the jobs that read those paths; each job runs only when its filter matches (lint runs on
-# every change, and typecheck and test also run when `changes` itself failed). The last job,
-# `ci-ok`, condenses every job's result into one check, the one main's ruleset requires beside
-# pr-title.
+# The router: every check a pull request, the merge queue or a push to main runs, in one workflow.
+# Its first job, `changes`, reads the paths the change touched and selects, through one
+# dorny/paths-filter filter per job, the jobs that read those paths; each job runs only when its
+# filter matches (lint runs on every change, and typecheck and test also run when `changes` itself
+# failed). The last job, `ci-ok`, condenses every job's result into one check, the one main's
+# ruleset requires beside pr-title.
 #
 # A new job joins the router in four places: a filter in `changes` that names every file the job
 # reads, an output of `changes` for that filter, the job's `needs: changes` and an `if:` on that
 # output, and an entry in `ci-ok`'s `needs:`. docs/solutions/github/join-a-job-to-the-ci-router.md
 # walks through it.
 #
-# Caches: no pull-request run writes an Actions cache entry. setup-go caches nothing here
-# (`cache: false` on every step). The jobs that cache Go restore one of five families with
+# Caches: no pull-request or merge-queue run writes an Actions cache entry. setup-go caches nothing
+# here (`cache: false` on every step). The jobs that cache Go restore one of five families with
 # actions/cache/restore, by its prefix when the exact key misses: go-daemon (typecheck, test,
 # pi-legion), go-docs (docs), go-envoy (envoy-e2e-local), go-envoy-infra (envoy-infra-go) and
-# go-notices (lint's notices step). Each saves its family with actions/cache/save as its last step,
-# and only on a push to main whose job succeeded and whose restore missed the exact key. setup-bun
-# reads and writes its cache only on main (.github/actions/setup-bun).
+# go-notices (lint's notices step). Each family keeps one entry, keyed on the Go version its job's
+# setup-go installed, so it is refreshed only when Go is bumped. A go.sum change downloads only the
+# changed modules, and Go's build cache is content-addressed, so a stale entry costs a run only what
+# changed; a key on the go.sum files left a whole entry, up to a gigabyte, per change for seven
+# days. Each saves its family with actions/cache/save as its last step, and only on a push to main
+# whose job succeeded and whose restore missed the exact key. setup-bun reads and writes its cache
+# only on main (.github/actions/setup-bun).
 
 # No `paths:`: every change starts this workflow, and `changes` selects what runs. No `branches:`
 # on pull_request: a pull request on any base is tested. No `edited`: a title or body edit starts
 # no run (pr-title.yaml checks those). `ready_for_review` starts the run a draft skipped.
+# merge_group runs the router on the merge queue's commit of each queued group: `changes` selects
+# by what the queued change touches against the queue base (the group's base_sha..head_sha), and
+# ci-ok reports there, so the required checks pass on the merged tree before anything lands.
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
@@ -33,7 +40,8 @@ on:
 
 # A newer push to a pull request cancels its older run. A push to main is a group of its own per
 # commit and is never cancelled: `changes` selects by that push's own diff, and no later push's
-# diff contains the jobs a dropped merge's run would have selected.
+# diff contains the jobs a dropped merge's run would have selected. A merge group is likewise a
+# group of its own per commit (its head) and is never cancelled: the queue waits for its ci-ok.
 concurrency:
   group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -75,7 +83,8 @@ jobs:
       go_notices: ${{ steps.filter.outputs.go_notices }}
     steps:
       # On pull_request dorny/paths-filter reads the file list from the API and never reads the
-      # tree; push and merge_group diff with git and need the clone.
+      # tree; push and merge_group diff with git and need the clone (a merge group diffs its
+      # base_sha..head_sha, fetching what the clone lacks).
       - if: github.event_name != 'pull_request'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -919,16 +928,19 @@ jobs:
       # A pull request's title, body and commit messages reach main's squash commit, the
       # generated release notes and GitHub's pages, and its comments and reviews are public on its
       # page, so this required job checks them at every push. pr-title.yaml checks them again when
-      # the pull request is opened, reopened or edited or a review is submitted or edited. A push
-      # to main or a merge-queue run carries no pull request.
+      # the pull request is opened, reopened or edited, a review is submitted or edited, or the
+      # merge queue runs its group. A push to main or a merge-queue run of this workflow carries no
+      # pull request.
       - name: Check the pull request's title, body, branch name, commits, comments and reviews name nothing private
         if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: .github/scripts/check-pr-text.sh
 
-      # No setup-go cache: gofmt needs none, and the notices step below keeps its own (go-notices).
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      # No setup-go cache: gofmt needs none, and the notices step below keeps its own (go-notices),
+      # keyed on the Go version this step installs.
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/daemon/go.mod
           cache: false
@@ -958,10 +970,11 @@ jobs:
 
       # The notices step below builds go-licenses and loads every release binary's modules. It
       # keeps them in a cache family of its own, go-notices: one entry, read on every run, so never
-      # evicted. Keyed on the go.sum files it would leave a 2.2 GB entry per key change; keyed on
-      # the step's own inputs, a go.sum change only downloads the changed modules and rebuilds the
-      # changed packages, since Go's build cache is content-addressed. Restored and saved only when
-      # the notices step runs; saved by this job's last step.
+      # evicted, and refreshed only when Go is bumped. Keyed on the go.sum files it would leave a
+      # 2.2 GB entry per key change; keyed on the Go version, a go.sum change only downloads the
+      # changed modules and rebuilds the changed packages, since Go's build cache is
+      # content-addressed. Restored and saved only when the notices step runs; saved by this job's
+      # last step.
       - id: go-cache
         if: needs.changes.result != 'success' || needs.changes.outputs.go_notices == 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -970,7 +983,7 @@ jobs:
             ~/go/pkg/mod
             ~/.cache/go-build
             ~/.cache/legion
-          key: go-notices-${{ runner.os }}-${{ hashFiles('scripts/go-third-party-notices.sh', '.github/go-release-targets.json', '.github/agent-secrets-client-targets.json', '.github/envoy-infra-targets.json') }}
+          key: go-notices-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: go-notices-${{ runner.os }}-
 
       # Every Go archive a release ships carries THIRD_PARTY_NOTICES, written at build time with
@@ -1044,7 +1057,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/daemon/go.mod
           cache: false
@@ -1056,7 +1070,7 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: go-daemon-${{ runner.os }}-${{ hashFiles('packages/daemon/go.sum', 'go.work.sum') }}
+          key: go-daemon-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: go-daemon-${{ runner.os }}-
 
       # With the e2e tag, vet also compiles the live proofs behind it (the Stage 4a harness,
@@ -1178,7 +1192,8 @@ jobs:
       - name: Typecheck the GitHub App registration script
         run: bunx tsc --noEmit -p scripts/github-apps
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/daemon/go.mod
           cache: false
@@ -1190,7 +1205,7 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: go-daemon-${{ runner.os }}-${{ hashFiles('packages/daemon/go.sum', 'go.work.sum') }}
+          key: go-daemon-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: go-daemon-${{ runner.os }}-
 
       # The tmux runtime's tests drive a real tmux server and skip without one, and the daemon
@@ -1292,7 +1307,8 @@ jobs:
           node-version: "24"
       # docs/site/scripts/build-binaries.sh builds the Go binaries the reference generators run, and
       # the screenshots step builds the Dispatch server; both modules name the same Go.
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/daemon/go.mod
           cache: false
@@ -1305,7 +1321,7 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: go-docs-${{ runner.os }}-${{ hashFiles('packages/envoy/go.sum', 'packages/daemon/go.sum', 'go.work.sum') }}
+          key: go-docs-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: go-docs-${{ runner.os }}-
       - run: bun install --frozen-lockfile
       - name: Lint the docs site
@@ -1569,7 +1585,8 @@ jobs:
       # scripts/skill-scenarios/rig.test.ts runs rig.sh judge-omp's container with the runner's own
       # Docker, pulling its pinned ubuntu image from mirror.gcr.io.
       # scripts/skill-scenarios/daemon-pane.test.ts runs daemon-pane.go with `go run` inside packages/daemon.
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/daemon/go.mod
           cache: false
@@ -1580,7 +1597,7 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: go-daemon-${{ runner.os }}-${{ hashFiles('packages/daemon/go.sum', 'go.work.sum') }}
+          key: go-daemon-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: go-daemon-${{ runner.os }}-
       - run: bun install --frozen-lockfile
       - name: Build contracts for pi-legion
@@ -1894,7 +1911,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/infra/go.mod
           cache: false
@@ -1905,7 +1923,7 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: go-envoy-infra-${{ runner.os }}-${{ hashFiles('packages/envoy/infra/go.sum') }}
+          key: go-envoy-infra-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: go-envoy-infra-${{ runner.os }}-
       - name: Pull the NATS and Postgres test container images
         uses: ./.github/actions/pull-test-images
@@ -2242,7 +2260,8 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
@@ -2253,7 +2272,7 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: go-envoy-${{ runner.os }}-${{ hashFiles('packages/envoy/go.sum', 'packages/daemon/go.sum', 'go.work.sum') }}
+          key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: go-envoy-${{ runner.os }}-
       # scripts/e2e-local.test.sh drives the driver's refusals, which the acceptance run below
       # never reaches: an unknown option, --help, and a NATS already holding the port, where the
