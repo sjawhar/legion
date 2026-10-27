@@ -12,8 +12,8 @@ import {
   judge,
   mentionErrorClass,
   type ReportInput,
-  ReportRefusal,
-} from "../comment-delivery/report.ts";
+} from "../comment-delivery/classes.ts";
+import { ReportRefusal } from "../comment-delivery/inputs.ts";
 
 const FIXTURES = join(import.meta.dir, "..", "__fixtures__", "comment-delivery");
 const SCRIPT = join(import.meta.dir, "..", "comment-delivery", "report.ts");
@@ -793,22 +793,22 @@ describe("refusals", () => {
     ]);
   });
 
-  test("a comment in no class, or in two, is refused", () => {
-    // Without the delivered rule, the four comments a received row delivers fall in none.
-    expect(refusal(input, { rules: CLASS_RULES.slice(1) })).toEqual(
-      [CONTROL, id(7), id(11), id(14)].map((commentId) => `comment ${commentId} falls in no class`)
+  test("a comment in no class is refused, and the first class that applies wins", () => {
+    // Without the last rule, the five comments whose pairs are all not_received fall in none.
+    expect(refusal(input, { rules: CLASS_RULES.slice(0, -1) })).toEqual(
+      [id(9), BET15, id(8), id(10), id(13)].map(
+        (commentId) => `comment ${commentId} falls in no class`
+      )
     );
     const always: ClassRule = {
       name: "always",
       applies: () => true,
       verdict: () => ({ class: "delivered", cause: "" }),
     };
-    const two = refusal(input, { rules: [...CLASS_RULES, always] });
-    expect(two).toHaveLength(14);
-    expect(two).toContain(
-      `comment ${BET15} falls in 2 classes: not delivered, with a cause, always`
-    );
-    expect(two).toContain(`comment ${id(12)} falls in 2 classes: unknown, always`);
+    // A rule after the last one is never reached; a rule before the first decides every comment.
+    expect(judge(input, { rules: [...CLASS_RULES, always] })).toEqual(judge(input));
+    const first = judge(input, { rules: [always, ...CLASS_RULES] });
+    expect(first.comments.map(({ verdict }) => verdict.class)).toEqual(Array(14).fill("delivered"));
   });
 
   test("a not-delivered comment with no cause is refused", () => {

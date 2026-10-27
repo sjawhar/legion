@@ -220,7 +220,7 @@ An unknown is never counted as delivered or as not delivered.
 ### The document and its refusals
 
 The document gives the counts of comments and of pairs with the identity
-`total = delivered + not delivered by cause + unknown`. `CAUSES` in `report.ts` maps each cause to
+`total = delivered + not delivered by cause + unknown`. `CAUSES` in `classes.ts` maps each cause to
 its fix. The document has a row for each comment, the pairs file has a row for each pair, and the
 document lists the unlisted rows. No session was owed a comment with the cause `no-target`; give
 the cause of each such comment in a findings file.
@@ -251,5 +251,5 @@ these cases:
 - A line of `receipts-counts.txt` is missing, extra, out of order or not in its form; a sum of
   its numbers is not true; a number in it is not the number that `report.ts` counts; or
   `rows_without_id` is not 0. The report names the line.
-- A comment falls in no class or in two, a not-delivered comment has no cause, a cause has no fix,
-  or a count identity does not add up.
+- A comment falls in no class, a not-delivered comment has no cause, a cause has no fix, or a
+  count identity does not add up.
