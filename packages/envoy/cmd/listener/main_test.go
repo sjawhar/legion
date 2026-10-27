@@ -2685,10 +2685,10 @@ func TestListenerDeliveryHandler_RoleLaneForwardsToAHolderItsSessionCacheHasNotS
 	}
 	var forwardedTo []string
 	cfg := harness.config
-	cfg.forwardRole = func(subject string, _ contracts.Envelope, _ time.Duration) error {
+	cfg.forwardRole = inlineForward(func(subject string, _ contracts.Envelope, _ time.Duration) error {
 		forwardedTo = append(forwardedTo, subject)
 		return nil
-	}
+	})
 	item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "unseen-holder-delivery")
 	item.Payload = `{"type":"worker-queued"}`
 	probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
@@ -2723,10 +2723,10 @@ func TestListenerDeliveryHandler_RoleForwardPublishErrorEmitsDeliveryFailed(t *t
 	}
 	var forwards atomic.Int32
 	cfg := harness.config
-	cfg.forwardRole = func(string, contracts.Envelope, time.Duration) error {
+	cfg.forwardRole = inlineForward(func(string, contracts.Envelope, time.Duration) error {
 		forwards.Add(1)
 		return errors.New("nats: connection closed")
-	}
+	})
 	handler := coreNATSDeliveryHandler(cfg)
 	item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "forward-publish-error")
 	item.Payload = `{"type":"worker-queued"}`
@@ -2776,10 +2776,10 @@ func TestListenerDeliveryHandler_RoleForwardRefusesUnadvertisedDeliveryMode(t *t
 	}
 	var forwards atomic.Int32
 	cfg := harness.config
-	cfg.forwardRole = func(string, contracts.Envelope, time.Duration) error {
+	cfg.forwardRole = inlineForward(func(string, contracts.Envelope, time.Duration) error {
 		forwards.Add(1)
 		return nil
-	}
+	})
 	handler := coreNATSDeliveryHandler(cfg)
 	item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "refuse-unadvertised-mode")
 	item.Payload = `{"event":{"id":0,"issue_key":"CORE-1"},"delivery":{"attempt":1,"mode":"btw"}}`
@@ -2829,10 +2829,10 @@ func TestListenerDeliveryHandler_RoleForwardDedupeSkipsCapabilityRecheckOnRedeli
 	}
 	var forwards atomic.Int32
 	cfg := harness.config
-	cfg.forwardRole = func(string, contracts.Envelope, time.Duration) error {
+	cfg.forwardRole = inlineForward(func(string, contracts.Envelope, time.Duration) error {
 		forwards.Add(1)
 		return nil
-	}
+	})
 	handler := coreNATSDeliveryHandler(cfg)
 	item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "dedupe-before-guard")
 	item.Payload = `{"event":{"id":0,"issue_key":"CORE-1"},"delivery":{"attempt":1,"mode":"btw"}}`
@@ -2913,7 +2913,7 @@ func TestListenerDeliveryHandler_RoleForwardErrorSelectsTheReason(t *testing.T) 
 				t.Fatalf("claim role: %v", err)
 			}
 			cfg := harness.config
-			cfg.forwardRole = func(string, contracts.Envelope, time.Duration) error { return tc.forwardErr }
+			cfg.forwardRole = inlineForward(func(string, contracts.Envelope, time.Duration) error { return tc.forwardErr })
 			handler := coreNATSDeliveryHandler(cfg)
 			item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "forward-error-kind-"+role)
 			item.Payload = `{"type":"worker-queued"}`
@@ -3523,7 +3523,7 @@ func newListenerDeliveryHarnessOn(t *testing.T, client *bus.Client, transport ht
 	})
 	deliveryConfig := listenerDeliveryHandlerConfig{
 		client:            client,
-		forwardRole:       client.RequestCoreTo,
+		forwardRole:       startRoleForward(client),
 		registry:          registry,
 		sessions:          sessions,
 		machineID:         "test-machine",
@@ -3586,6 +3586,14 @@ func (f listenerTransport) RoundTrip(request *http.Request) (*http.Response, err
 
 func listenerDeliveryResponse(status int) *http.Response {
 	return &http.Response{StatusCode: status, Body: http.NoBody, Header: make(http.Header)}
+}
+
+// inlineForward is a role forward seam (listenerDeliveryHandlerConfig.forwardRole) whose publish
+// always succeeds and whose wait is forward: a test that stands in for the holder's answer.
+func inlineForward(forward func(subject string, item contracts.Envelope, timeout time.Duration) error) func(string, contracts.Envelope, time.Duration, bool) (func() error, error) {
+	return func(subject string, item contracts.Envelope, timeout time.Duration, _ bool) (func() error, error) {
+		return func() error { return forward(subject, item, timeout) }, nil
+	}
 }
 
 func listenerTestEnvelope(topic, dedupeKey string) contracts.Envelope {

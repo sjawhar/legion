@@ -58,6 +58,15 @@ type Registry struct {
 	// with the bucket, and Match answers every "is this session subscribed?" question without
 	// falling through.
 	watcher *kvwatch.Watcher
+
+	// roleMu guards roleCache and roleCacheRevisions, the watched copy of the role bucket that
+	// CachedRoleHolder answers from: roleWatcher feeds it, and this registry's own claim reads and
+	// writes go through to it. roleCacheRevisions is the revision fence cacheRevisions is for the
+	// interests, delete markers included. A Registry built as a literal has no roleWatcher.
+	roleMu             sync.RWMutex
+	roleCache          map[string]RoleClaim
+	roleCacheRevisions map[string]uint64
+	roleWatcher        *kvwatch.Watcher
 }
 
 // OpenOption configures the registry.
@@ -123,44 +132,63 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 		now:                   opts.now,
 		openedAt:              opts.now(),
 		restoredRoleRevisions: restoredRoleRevisions,
+		roleCache:             map[string]RoleClaim{},
+		roleCacheRevisions:    map[string]uint64{},
 	}
 	r.watcher = kvwatch.New("interest registry", kv, r.applyWatched, r.resetCache, kvwatch.WithLogger(opts.log))
-	// No eager load: the watcher populates the cache asynchronously. A synchronous load of N
+	r.roleWatcher = kvwatch.New("role registry", roleKV, r.applyWatchedRole, r.resetRoleCache, kvwatch.WithLogger(opts.log))
+	// No eager load: the watchers populate the caches asynchronously. A synchronous load of N
 	// individual kv.Get() calls blocks indefinitely when the KV stream leader is on a remote node.
 	r.watcher.Start()
+	r.roleWatcher.Start()
 	return r, nil
 }
 
 // Ping verifies both KV buckets are reachable through the current NATS
-// connection and reports the cache watcher's terminal error, including an
-// interest bucket recreated under it (kvwatch.Watcher.Check). /healthz and the
+// connection and reports the cache watchers' terminal errors, including a
+// bucket recreated under its watcher (kvwatch.Watcher.Check). /healthz and the
 // listener monitor use failures to report an unavailable dependency while NATS
 // reconnects.
 func (r *Registry) Ping() error {
 	if err := r.watcher.Check(); err != nil {
 		return err
 	}
-	if _, err := r.roles().Status(); err != nil {
-		return err
+	if r.roleWatcher != nil {
+		if err := r.roleWatcher.Check(); err != nil {
+			return err
+		}
 	}
-	return r.watcher.Err()
+	return r.WatchErr()
 }
 
-// WatchErr is the cache watcher's terminal error, or nil while it runs, so the listener can tell a
+// WatchErr is the cache watchers' terminal error, or nil while both run, so the listener can tell a
 // rebuildable dead cache from a transient KV timeout.
 func (r *Registry) WatchErr() error {
-	return r.watcher.Err()
+	if r.roleWatcher == nil {
+		return r.watcher.Err()
+	}
+	return errors.Join(r.watcher.Err(), r.roleWatcher.Err())
 }
 
-// StopWatch retires the cache's watcher for a shutdown (kvwatch.Watcher.Stop).
+// StopWatch retires the caches' watchers for a shutdown (kvwatch.Watcher.Stop).
 func (r *Registry) StopWatch() {
 	r.watcher.Stop()
+	if r.roleWatcher != nil {
+		r.roleWatcher.Stop()
+	}
 }
 
-// EndWatch ends the cache's watchers at shutdown, within ctx, while the connection still carries
+// EndWatch ends the caches' watchers at shutdown, within ctx, while the connection still carries
 // requests (kvwatch.Watcher.End).
 func (r *Registry) EndWatch(ctx context.Context) {
-	r.watcher.End(ctx)
+	if r.roleWatcher == nil {
+		r.watcher.End(ctx)
+		return
+	}
+	var ended sync.WaitGroup
+	ended.Go(func() { r.watcher.End(ctx) })
+	ended.Go(func() { r.roleWatcher.End(ctx) })
+	ended.Wait()
 }
 
 func (r *Registry) interests() bus.KeyValue {
@@ -282,12 +310,12 @@ func (r *Registry) deleteInterest(sessionID string) error {
 	return nil
 }
 
-// Rewatch reopens both buckets on conn and replaces the cache's watcher with one there
-// (kvwatch.Watcher.Rewatch). A NATS server restart loses the watcher's ordered consumer, and
+// Rewatch reopens both buckets on conn and replaces the caches' watchers with ones there
+// (kvwatch.Watcher.Rewatch). A NATS server restart loses a watcher's ordered consumer, and
 // nats.go replaces it only once it notices the missed heartbeats, up to twenty seconds later;
 // until then the cache misses every write another listener makes, and a drain deletes a consumer
-// the server no longer has. The listener's reconnect hook calls this, so the cache follows the
-// bucket from the reconnect on.
+// the server no longer has. The listener's reconnect hook calls this, so the caches follow their
+// buckets from the reconnect on.
 func (r *Registry) Rewatch(conn *nats.Conn) error {
 	// The role bucket opens first, so a failure leaves both handles on the previous connection
 	// rather than the interests on conn and the roles behind.
@@ -305,6 +333,9 @@ func (r *Registry) Rewatch(conn *nats.Conn) error {
 	r.kvMu.Lock()
 	r.roleKV = roleKV
 	r.kvMu.Unlock()
+	if r.roleWatcher != nil {
+		return r.roleWatcher.Rewatch(conn)
+	}
 	return nil
 }
 
@@ -344,12 +375,84 @@ func (r *Registry) applyWatched(entry nats.KeyValueEntry) {
 	r.mu.Unlock()
 }
 
-// WaitForCacheReady blocks until the watcher has delivered every existing interest, or until ctx
-// is done. After it returns nil, Match sees every existing subscription in the bucket. Callers
-// bound ctx: a watcher that fails to start releases it too, and the caller then serves the
-// write-through path while /healthz exposes the unavailable registry.
+// WaitForCacheReady blocks until the watchers have delivered every existing interest and role
+// claim, or until ctx is done. After it returns nil, Match sees every existing subscription in the
+// bucket. Callers bound ctx: a watcher that fails to start releases it too, and the caller then
+// serves the write-through path while /healthz exposes the unavailable registry.
 func (r *Registry) WaitForCacheReady(ctx context.Context) error {
-	return r.watcher.WaitReady(ctx)
+	if err := r.watcher.WaitReady(ctx); err != nil {
+		return err
+	}
+	if r.roleWatcher == nil {
+		return nil
+	}
+	return r.roleWatcher.WaitReady(ctx)
+}
+
+// resetRoleCache empties the role cache and its revision fence, for a recreated role bucket.
+func (r *Registry) resetRoleCache() {
+	r.roleMu.Lock()
+	r.roleCache = map[string]RoleClaim{}
+	r.roleCacheRevisions = map[string]uint64{}
+	r.roleMu.Unlock()
+}
+
+// applyWatchedRole applies one entry the role watcher delivered to the role cache, behind the same
+// revision fence as the registry's own reads and writes of claims.
+func (r *Registry) applyWatchedRole(entry nats.KeyValueEntry) {
+	if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
+		r.evictCachedRole(entry.Key(), entry.Revision())
+		return
+	}
+	claim, err := decodeRoleClaim(entry.Value())
+	if err != nil {
+		r.evictCachedRole(entry.Key(), entry.Revision())
+		r.logger().Warn("role registry watcher evicted malformed claim",
+			slog.String("key", entry.Key()),
+			slog.Uint64("revision", entry.Revision()),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+	r.cacheRole(entry.Key(), claim, entry.Revision())
+}
+
+// cacheRole records role's claim at revision in the role cache, unless the cache already applied a
+// later revision of it.
+func (r *Registry) cacheRole(role string, claim RoleClaim, revision uint64) {
+	r.roleMu.Lock()
+	defer r.roleMu.Unlock()
+	if revision < r.roleCacheRevisions[role] {
+		return
+	}
+	if r.roleCache == nil {
+		r.roleCache = map[string]RoleClaim{}
+		r.roleCacheRevisions = map[string]uint64{}
+	}
+	r.roleCache[role] = claim
+	r.roleCacheRevisions[role] = revision
+}
+
+// evictCachedRole drops role from the role cache as of revision, unless the cache already applied a
+// later revision of it.
+func (r *Registry) evictCachedRole(role string, revision uint64) {
+	r.roleMu.Lock()
+	defer r.roleMu.Unlock()
+	if revision < r.roleCacheRevisions[role] {
+		return
+	}
+	delete(r.roleCache, role)
+	if r.roleCacheRevisions == nil {
+		r.roleCacheRevisions = map[string]uint64{}
+	}
+	r.roleCacheRevisions[role] = revision
+}
+
+// cachedRoleRevision is the latest revision of role the role cache applied, 0 for none.
+func (r *Registry) cachedRoleRevision(role string) uint64 {
+	r.roleMu.RLock()
+	defer r.roleMu.RUnlock()
+	return r.roleCacheRevisions[role]
 }
 
 func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {
@@ -428,9 +531,15 @@ func decodeRoleClaim(value []byte) (RoleClaim, error) {
 	return RoleClaim{HolderSessionID: holder}, nil
 }
 
+// roleClaim reads role's claim from the bucket, and refreshes the role cache with what it read: the
+// claim at its revision, or, for a role the bucket no longer holds, its removal after the revision
+// the cache had applied.
 func (r *Registry) roleClaim(role string) (RoleClaim, nats.KeyValueEntry, error) {
 	entry, err := r.roles().Get(role)
 	if errors.Is(err, nats.ErrKeyNotFound) {
+		if revision := r.cachedRoleRevision(role); revision > 0 {
+			r.evictCachedRole(role, revision+1)
+		}
 		return RoleClaim{}, nil, nil
 	}
 	if err != nil {
@@ -440,7 +549,19 @@ func (r *Registry) roleClaim(role string) (RoleClaim, nats.KeyValueEntry, error)
 	if err != nil {
 		return RoleClaim{}, nil, err
 	}
+	r.cacheRole(role, claim, entry.Revision())
 	return claim, entry, nil
+}
+
+// deleteRoleClaimAt deletes role's claim when the bucket still holds it at revision, and on success
+// drops it from the role cache: the delete marker's revision is past revision, so a delayed watcher
+// update of the deleted claim cannot bring it back.
+func (r *Registry) deleteRoleClaimAt(role string, revision uint64) error {
+	if err := r.roles().Delete(role, nats.LastRevision(revision)); err != nil {
+		return err
+	}
+	r.evictCachedRole(role, revision+1)
+	return nil
 }
 
 func (r *Registry) releaseRoleClaims(sessionID string, topics []string) error {
@@ -474,7 +595,7 @@ func (r *Registry) releaseRoleClaim(sessionID, role string) error {
 	if entry == nil || claim.HolderSessionID != sessionID {
 		return nil
 	}
-	err = r.roles().Delete(role, nats.LastRevision(entry.Revision()))
+	err = r.deleteRoleClaimAt(role, entry.Revision())
 	if err != nil && !errors.Is(err, nats.ErrKeyExists) && !errors.Is(err, nats.ErrKeyNotFound) {
 		return err
 	}
@@ -506,7 +627,7 @@ func (r *Registry) ReleaseExpiredRoleClaim(role, sessionID string, sessionTTL ti
 	if restored && restoredRevision == entry.Revision() && sessionTTL > 0 && r.now().Sub(r.openedAt) < sessionTTL {
 		return ExpiredRoleClaimRetained, nil
 	}
-	err = r.roles().Delete(role, nats.LastRevision(entry.Revision()))
+	err = r.deleteRoleClaimAt(role, entry.Revision())
 	switch {
 	case err == nil:
 		return ExpiredRoleClaimReleased, nil
@@ -638,10 +759,11 @@ func (r *Registry) SetRoleWithPrevious(sessionID, machineID, role, previousSessi
 	if err != nil {
 		return Interest{}, err
 	}
+	var revision uint64
 	if entry == nil {
-		_, err = r.roles().Create(role, data)
+		revision, err = r.roles().Create(role, data)
 	} else {
-		_, err = r.roles().Update(role, data, entry.Revision())
+		revision, err = r.roles().Update(role, data, entry.Revision())
 	}
 	if err != nil {
 		holder, holderErr := r.RoleHolder(role)
@@ -661,6 +783,7 @@ func (r *Registry) SetRoleWithPrevious(sessionID, machineID, role, previousSessi
 		}
 		return Interest{}, err
 	}
+	r.cacheRole(role, claim, revision)
 
 	if oldSessionID != "" && oldSessionID != sessionID {
 		err := r.removeInterestTopics(oldSessionID, []string{roleTopic})
@@ -694,7 +817,7 @@ func (r *Registry) RoleClaim(role string) (RoleClaim, error) {
 	return claim, err
 }
 
-// RoleHolder returns the authoritative session ID for role. An unclaimed role
+// RoleHolder returns the authoritative session ID for role, read from the bucket. An unclaimed role
 // returns an empty holder without an error.
 func (r *Registry) RoleHolder(role string) (string, error) {
 	claim, err := r.RoleClaim(role)
@@ -702,6 +825,23 @@ func (r *Registry) RoleHolder(role string) (string, error) {
 		return "", err
 	}
 	return claim.HolderSessionID, nil
+}
+
+// CachedRoleHolder returns role's holder from the watched copy of the role bucket, and on a miss
+// reads the bucket as RoleHolder does, which fills the copy. The copy holds every claim this
+// registry wrote, read or watched, so it answers without a round trip; a claim another listener
+// wrote reaches it through the watcher, a moment after the bucket. The listener's role lane resolves
+// each role message's holder through it, and reads the bucket itself (RoleHolder) when the holder
+// it found was superseded. An unclaimed role is a miss, which returns an empty holder without an
+// error.
+func (r *Registry) CachedRoleHolder(role string) (string, error) {
+	r.roleMu.RLock()
+	claim, ok := r.roleCache[role]
+	r.roleMu.RUnlock()
+	if ok {
+		return claim.HolderSessionID, nil
+	}
+	return r.RoleHolder(role)
 }
 
 // Get returns the Interest for a session. Cache first, direct KV read on miss.

@@ -96,10 +96,10 @@ func TestCoreRoleDeliveryReresolvesSupersededLapsedHolder(t *testing.T) {
 
 	forwardedSubjects := []string{}
 	config := harness.config
-	config.forwardRole = func(subject string, item contracts.Envelope, timeout time.Duration) error {
+	config.forwardRole = inlineForward(func(subject string, item contracts.Envelope, timeout time.Duration) error {
 		forwardedSubjects = append(forwardedSubjects, subject)
 		return nil
-	}
+	})
 
 	item := listenerTestEnvelope(roleSubject, "core-role-supersession-race")
 	roleTopicDelivery(config, deliveryMessage{mode: coreDelivery}, item)

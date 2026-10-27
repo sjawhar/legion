@@ -139,12 +139,12 @@ func TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 }
 
 // Both tasks of one machine id run during a rolling deploy, and the replacement's role lane opens
-// before its durable binds, so both subscribe notifications.role.> at once. They are one core-NATS
-// queue group (envoy-listener-<machine id>), and NATS hands each message to one member of a group,
-// so a role message reaches its holder once whichever task takes it: no publish is forwarded by
-// both. A re-publish under the same dedupe key can land on the other task, whose dedupe cache has
-// not seen it, and is forwarded again; the holder's pump drops that copy by its dedupe key, as it
-// drops the copy each other machine's listener forwards today.
+// before its durable binds, so both subscribe notifications.role.> at once. They are members of one
+// core-NATS queue group (envoy-roles, which every listener shares), and NATS hands each message to
+// one member of a group, so a role message reaches its holder once whichever task takes it: no
+// publish is forwarded by both. A re-publish under the same dedupe key can land on the other task,
+// whose dedupe cache has not seen it, and is forwarded again; the holder's pump drops that copy by
+// its dedupe key.
 func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T) {
 	const (
 		machineID = "two-tasks"

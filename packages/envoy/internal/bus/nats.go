@@ -1038,47 +1038,101 @@ var ErrForwardNotStored = errors.New("bus: the stream did not acknowledge storin
 // the client's default 10 s flush. A forward the server denied returns at once; one
 // publishConfirmed cannot confirm for another reason still waits, since its replies prove it was
 // delivered, and returns that reason instead of ErrReceiptTimeout if no receipt arrives.
+//
+// It is StartRequestCoreTo followed by the returned forward's Wait.
 func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout time.Duration) error {
-	if err := checkSubject(subject); err != nil {
+	forward, err := c.StartRequestCoreTo(subject, item, timeout)
+	if err != nil {
 		return err
+	}
+	return forward.Wait()
+}
+
+// StartRequestCoreTo publishes RequestCoreTo's forward and returns once the server has it, leaving
+// the wait for its two replies to the returned forward's Wait, so a caller can publish forwards in
+// order on one goroutine and wait for each on another. The window, timeout, starts with this call.
+// An error is RequestCoreTo's own before any reply could arrive (a denied or invalid forward, a
+// connection that never came back within timeout); every returned forward must be waited for, which
+// releases its reply subscription.
+func (c *Client) StartRequestCoreTo(subject string, item contracts.Envelope, timeout time.Duration) (*PendingForward, error) {
+	return c.startForward(subject, item, timeout, false)
+}
+
+// StartRequestStoredTo publishes a forward as StartRequestCoreTo does, Nats-Msg-Id included, for a
+// holder with no NATS subscriber to answer it: a serving-port session whose stored messages its
+// session consumer delivers, with acknowledgement and redelivery, through the listener's relay. Its
+// Wait succeeds on the stream's acknowledgement alone, which is that delivery's one lasting copy,
+// and ignores any receipt. No acknowledgement by the deadline, the stream's error answer, or the
+// server's no-responders answer (nothing captured the subject) is ErrForwardNotStored (wrapping the
+// reason, and the one publishConfirmed could not confirm the publish for, when it could not).
+func (c *Client) StartRequestStoredTo(subject string, item contracts.Envelope, timeout time.Duration) (*PendingForward, error) {
+	return c.startForward(subject, item, timeout, true)
+}
+
+// PendingForward is a forward StartRequestCoreTo or StartRequestStoredTo published, whose replies
+// Wait reads.
+type PendingForward struct {
+	receipt  *nats.Subscription
+	deadline time.Time
+	// unconfirmed is publishConfirmed's error for a publish it could not confirm, which the replies
+	// may still overrule; nil when it confirmed the publish.
+	unconfirmed error
+	// storedOnly is set for StartRequestStoredTo's forward, which needs no receipt.
+	storedOnly bool
+}
+
+func (c *Client) startForward(subject string, item contracts.Envelope, timeout time.Duration, storedOnly bool) (*PendingForward, error) {
+	if err := checkSubject(subject); err != nil {
+		return nil, err
 	}
 	data, err := json.Marshal(item)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	if err := c.ensureConnWithContext(ctx); err != nil {
-		return err
+		return nil, err
 	}
 	deadline, _ := ctx.Deadline()
 	conn := c.Conn
 	inbox := nats.NewInbox()
 	receipt, err := conn.SubscribeSync(inbox)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer receipt.Unsubscribe()
 	forward := &nats.Msg{Subject: subject, Reply: inbox, Data: data, Header: nats.Header{}}
 	forward.Header.Set(nats.MsgIdHdr, item.DedupeKey+":"+subject)
 	err = c.publishConfirmed(conn, forward, deadline, conn.PublishMsg)
 	if err != nil && !errors.Is(err, errPublishUnconfirmed) {
-		return err
+		_ = receipt.Unsubscribe()
+		return nil, err
 	}
-	timedOut := cmp.Or(err, ErrReceiptTimeout)
+	return &PendingForward{receipt: receipt, deadline: deadline, unconfirmed: err, storedOnly: storedOnly}, nil
+}
+
+// Wait reads the forward's replies until its outcome is known or its window ends, and releases its
+// reply subscription. Its errors are RequestCoreTo's for a forward StartRequestCoreTo published, and
+// StartRequestStoredTo's for one that published.
+func (f *PendingForward) Wait() error {
+	defer f.receipt.Unsubscribe()
 	received, stored := false, false
 	// refused is the stream's error answer to the forward, which no later reply changes.
 	var refused error
 	for {
-		remaining := time.Until(deadline)
+		remaining := time.Until(f.deadline)
 		if remaining <= 0 {
 			break
 		}
-		response, err := receipt.NextMsg(remaining)
+		response, err := f.receipt.NextMsg(remaining)
 		if errors.Is(err, nats.ErrTimeout) {
 			break
 		}
 		if err != nil {
+			// The server's no-responders answer: nothing, not even a stream, took the forward.
+			if f.storedOnly && errors.Is(err, nats.ErrNoResponders) {
+				return fmt.Errorf("%w: %w", ErrForwardNotStored, err)
+			}
 			return err
 		}
 		if len(response.Data) == 0 && len(response.Header) == 0 {
@@ -1090,6 +1144,15 @@ func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout 
 				stored = true
 			}
 		}
+		if f.storedOnly {
+			if stored {
+				return nil
+			}
+			if refused != nil {
+				return fmt.Errorf("%w: %w", ErrForwardNotStored, refused)
+			}
+			continue
+		}
 		if received && stored {
 			return nil
 		}
@@ -1097,8 +1160,14 @@ func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout 
 			return fmt.Errorf("%w: %w", ErrForwardNotStored, refused)
 		}
 	}
+	if f.storedOnly {
+		if f.unconfirmed != nil {
+			return fmt.Errorf("%w: %w", ErrForwardNotStored, f.unconfirmed)
+		}
+		return ErrForwardNotStored
+	}
 	if !received {
-		return timedOut
+		return cmp.Or(f.unconfirmed, ErrReceiptTimeout)
 	}
 	return ErrForwardNotStored
 }

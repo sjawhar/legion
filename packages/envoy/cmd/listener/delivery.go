@@ -37,13 +37,17 @@ func shouldNAKFanoutDelivery(sessionLive bool, err error) bool {
 
 type listenerDeliveryHandlerConfig struct {
 	client *bus.Client
-	// forwardRole delivers a role-lane envelope to the holder's agent subject and
-	// waits for its empty receipt. main.go wires client.RequestCoreTo.
-	// bus.ErrReceiptTimeout means the forward was flushed to the server and no
-	// receipt arrived inside timeout; any other error — a raw nats.ErrTimeout
-	// from the flush included — means the forward is not known to have reached
-	// the holder.
-	forwardRole       func(subject string, item contracts.Envelope, timeout time.Duration) error
+	// forwardRole publishes a role-lane envelope to the holder's agent subject and returns the wait
+	// for its outcome; main.go wires startRoleForward(client). The wait's bus.ErrReceiptTimeout
+	// means the forward was flushed to the server and no receipt arrived inside timeout;
+	// bus.ErrForwardNotStored that the stream did not acknowledge storing it; any other error — a
+	// raw nats.ErrTimeout from the flush included, returned by the publish or the wait — means the
+	// forward is not known to have reached the holder. storedOnly asks for a forward that counts as
+	// delivered on the stream's acknowledgement alone (roleForwardStoredOnly).
+	forwardRole func(subject string, item contracts.Envelope, timeout time.Duration, storedOnly bool) (wait func() error, err error)
+	// roleForwards runs the role lane's forwards off its handler (roleForwarder); nil runs each one
+	// inline, so a caller reads its outcome as soon as the handler returns.
+	roleForwards      *roleForwarder
 	registry          *store.Registry
 	sessions          *session.SessionRegistry
 	machineID         string
@@ -323,10 +327,15 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 // tried to drop was already superseded by a fresh one — so a claim raced by
 // a live replacement is re-resolved to that replacement here exactly as it
 // is for GET /v1/roles/<role>, instead of reporting delivery_failed about a
-// session a fresh claim has already superseded.
+// session a fresh claim has already superseded. The first lookup reads the
+// registry's watched copy of the role bucket (store.Registry.CachedRoleHolder);
+// a retry after a superseded release reads the bucket itself, since the copy
+// can trail the claim that superseded it.
 func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Envelope, role string) (string, session.SessionEntry, bool) {
+	lookup := cfg.registry.CachedRoleHolder
 	for range roleHolderResolutionAttempts {
-		sessionID, err := cfg.registry.RoleHolder(role)
+		sessionID, err := lookup(role)
+		lookup = cfg.registry.RoleHolder
 		if err != nil {
 			applyDeliveryOutcome(cfg, item, deliveryOutcome{
 				metricStatus: "failed",
@@ -416,13 +425,10 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 // message as delivery_failed -- a false signal the Legion daemon treats as
 // cause to probe and potentially resume the worker. Every branch ACKs: role
 // lanes have no durable transit to retry against, so a failed forward is
-// reported via a delivery exception instead of a NAK. A forward that reached
-// the server and drew no receipt from the live holder inside
-// roleReceiptTimeout (bus.ErrReceiptTimeout, the one error keyed on) is
-// receipt_timeout; a forward not known to have left this process -- the
-// flush timed out or failed, the publish failed -- is delivery_failed like
-// a stale holder or an unadvertised/unreadable delivery mode; no claim is
-// no_holder.
+// reported via a delivery exception instead of a NAK. The forward itself is
+// handed over (forwardRoleMessage) and its outcome reported when it ends
+// (finishRoleForward), so the role lane's handler returns without waiting
+// for the holder.
 func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
 	if strings.HasPrefix(item.DedupeKey, roleForwardDedupePrefix) {
 		message.finalize(false)
@@ -486,22 +492,49 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 		return
 	}
 	cfg.attemptCache.Record(item.DedupeKey, sessionID)
-	forwarded := item
-	forwarded.DedupeKey = roleForwardDedupePrefix + item.DedupeKey
-	if err := cfg.forwardRole(contracts.AgentSubject(sessionID), forwarded, roleReceiptTimeout); err != nil {
-		if errors.Is(err, bus.ErrReceiptTimeout) {
-			applyDeliveryOutcome(cfg, item, deliveryOutcome{
-				sessionID:    sessionID,
-				metricStatus: "receipt_timeout",
-				log: func(logger *logging.Logger) {
-					logger.DeliveryLog(slog.LevelWarn, "listener role receipt timed out", sessionID, item.Topic, item.EventID, "receipt_timeout", slog.String("timeout", roleReceiptTimeout.String()))
-				},
-				exceptionReason: "receipt_timeout",
-				clearAttempt:    true,
-			})
-			message.finalize(false)
-			return
-		}
+	forwardRoleMessage(cfg, roleForward{item: item, sessionID: sessionID, storedOnly: roleForwardStoredOnly(holder)})
+	message.finalize(false)
+}
+
+// roleForwardStoredOnly reports whether holder answers no receipt for a role forward: a session on a
+// serving port has no NATS subscriber, and when its entry records consumer delivery its session
+// consumer holds the stored forward, which the listener's relay pushes to the port with
+// acknowledgement and redelivery. Its forward counts as delivered once the stream acknowledges
+// storing it. A serving-port session without consumer delivery keeps the receipt wait.
+func roleForwardStoredOnly(holder session.SessionEntry) bool {
+	return holder.Port > 0 && holder.Delivery == session.DeliveryConsumer
+}
+
+// finishRoleForward reports a role forward's outcome, err from its publish or its wait. A forward
+// that reached the server and drew no receipt from the live holder inside roleReceiptTimeout
+// (bus.ErrReceiptTimeout, the one error keyed on) is receipt_timeout; one the stream did not
+// acknowledge storing (bus.ErrForwardNotStored), or not known to have left this process -- the flush
+// timed out or failed, the publish failed -- is delivery_failed like a stale holder or an
+// unadvertised/unreadable delivery mode; no claim is no_holder. Either failure clears the attempt, so
+// a re-send is forwarded again; a delivered forward records the dedupe entry.
+func finishRoleForward(cfg listenerDeliveryHandlerConfig, forward roleForward, err error) {
+	item, sessionID := forward.item, forward.sessionID
+	switch {
+	case err == nil:
+		applyDeliveryOutcome(cfg, item, deliveryOutcome{
+			sessionID:    sessionID,
+			metricStatus: "delivered",
+			log: func(logger *logging.Logger) {
+				logger.DeliveryLog(slog.LevelInfo, "listener role forwarded", sessionID, item.Topic, item.EventID, "delivered")
+			},
+			recordDedupe: true,
+		})
+	case errors.Is(err, bus.ErrReceiptTimeout):
+		applyDeliveryOutcome(cfg, item, deliveryOutcome{
+			sessionID:    sessionID,
+			metricStatus: "receipt_timeout",
+			log: func(logger *logging.Logger) {
+				logger.DeliveryLog(slog.LevelWarn, "listener role receipt timed out", sessionID, item.Topic, item.EventID, "receipt_timeout", slog.String("timeout", roleReceiptTimeout.String()))
+			},
+			exceptionReason: "receipt_timeout",
+			clearAttempt:    true,
+		})
+	default:
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID:    sessionID,
 			metricStatus: "failed",
@@ -511,18 +544,7 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 			exceptionReason: "delivery_failed",
 			clearAttempt:    true,
 		})
-		message.finalize(false)
-		return
 	}
-	applyDeliveryOutcome(cfg, item, deliveryOutcome{
-		sessionID:    sessionID,
-		metricStatus: "delivered",
-		log: func(logger *logging.Logger) {
-			logger.DeliveryLog(slog.LevelInfo, "listener role forwarded", sessionID, item.Topic, item.EventID, "delivered")
-		},
-		recordDedupe: true,
-	})
-	message.finalize(false)
 }
 
 // agentSubjectDelivery delivers directly to the session named by the topic

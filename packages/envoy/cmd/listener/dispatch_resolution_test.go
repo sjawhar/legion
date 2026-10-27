@@ -115,7 +115,7 @@ func startListenerDelivery(t *testing.T, d *listenerDeps) {
 	met := metrics.New()
 	config := listenerDeliveryHandlerConfig{
 		client:      d.client,
-		forwardRole: d.client.RequestCoreTo,
+		forwardRole: startRoleForward(d.client),
 		registry:    d.registry,
 		sessions:    d.sessions,
 		machineID:   rigMachineID,
