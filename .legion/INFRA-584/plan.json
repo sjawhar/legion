@@ -1,0 +1,185 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-584",
+  "completed": "2026-10-27T03:36:05Z",
+  "planDocument": "dispatch://INFRA-584/artifact/plan-md",
+  "summary": "Pull-request, merge-queue and non-main-branch runs restore caches and write none; only refs/heads/main writes. Task 1 probes (throwaway branch probe/infra-584-cache-mode in sjawhar/legion) whether GitHub accepts an expression in cache-mode: Arm A = `cache-mode: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}` workflow-level in pr-and-main.yaml, envoy-and-contracts.yaml, docs.yaml and job-level on worker-image.yaml's build job; Arm B = per-step gating (actions/cache/restore+save for go-notices, setup-go move-aside step at the six caching sites, setup-bun wrapper no-cache on non-main, check-image-trigger-paths and check-bun-version updates). Common: worker-image cache-from/to `scope=worker-image`, cache-to empty unless main (mode=max kept); go-notices restore-keys `go-notices-${{ runner.os }}-`; comments and docs/kubernetes.md:500-501.",
+  "tasks": [
+    {
+      "order": 1,
+      "task": "Probe cache-mode expressions on a throwaway branch (two workflow files, positive control job evaluating to write); record 'Cache mode:' and save lines for actions/cache@55cc834, setup-go@b7ad1da, ./.github/actions/setup-bun; delete probe caches and branch. Arm A only if the wf job reads `read` with all saves skipped and the positive job reads `write` with a save; otherwise Arm B.",
+      "files": []
+    },
+    {
+      "order": 2,
+      "task": "Edit per the arm and the common changes; run check-image-trigger-paths.sh, check-action-pins.sh, check-bun-version.sh, check-release-credentials.sh and the .test.sh of each edited script; YAML-parse every edited file.",
+      "files": [
+        ".github/workflows/pr-and-main.yaml",
+        ".github/workflows/envoy-and-contracts.yaml",
+        ".github/workflows/docs.yaml",
+        ".github/workflows/worker-image.yaml",
+        "docs/kubernetes.md",
+        "(Arm B) .github/actions/setup-bun/action.yml",
+        "(Arm B) .github/scripts/check-bun-version.sh and .test.sh",
+        "(Arm B) .github/scripts/check-image-trigger-paths.sh and .test.sh"
+      ]
+    },
+    {
+      "order": 3,
+      "task": "Open the pull request (body line `Dispatch: INFRA-584`); all four edited workflows run on it and are the pre-merge proof.",
+      "files": []
+    },
+    {
+      "order": 4,
+      "task": "Measure AC4 with the jobs API (formula in plan.md) and write the before/after table into the PR body, including the case where a second push to the same PR is slower.",
+      "files": []
+    },
+    {
+      "order": 5,
+      "task": "Post-merge production check: AC1 query, main-still-writes query, AC2 usage samples, AC3 p90 query; one-off delete of pre-merge refs/pull/* entries if the architect chooses it and the App may.",
+      "files": []
+    }
+  ],
+  "acceptance": [
+    {
+      "criterion": "1. No pull-request run writes a cache entry",
+      "surface": "GitHub Actions in sjawhar/legion: this PR's runs, then every PR run after the merge",
+      "command": "gh api --paginate \"repos/sjawhar/legion/actions/caches?ref=refs/pull/N/merge&per_page=100\" --jq '.actions_caches|length' (0); after merge: gh api --paginate \"repos/sjawhar/legion/actions/caches?per_page=100&sort=created_at&direction=desc\" --jq '.actions_caches[] | select((.ref|startswith(\"refs/pull/\")) and .created_at > \"<merge time>\")' (empty)",
+      "negativeControl": "another open PR without the change lists new entries under its refs/pull/<m>/merge in the same hours"
+    },
+    {
+      "criterion": "2. Cache under 9 GB for 3 days after merge",
+      "surface": "GitHub Actions cache usage API",
+      "command": "gh api repos/sjawhar/legion/actions/cache/usage --jq .active_caches_size_in_bytes < 9000000000 at merge+1h and at least every 24h to merge+72h",
+      "dependsOn": "architect's decision on the repository storage limit / one-off delete (plan.md, 'What AC2 needs beyond this pull request')"
+    },
+    {
+      "criterion": "3. Lint notices step p90 < 3 min for 3 days after merge",
+      "surface": "GitHub Actions jobs API, pr-and-main.yaml lint job",
+      "command": "for successful lint jobs of runs created >= merge time and < merge+72h, step named 'Check every Go release archive's third-party notices…' completed_at-started_at; p90 < 180 s",
+      "baseline": "p90 14.8 min, median 10.0 (dispatch://INFRA-490/artifact/ci-router-measurement-2026-10-26-md)"
+    },
+    {
+      "criterion": "4. PR states measured minutes saved per PR push, before and after",
+      "surface": "the pull request body",
+      "command": "jobs API medians: Worker Image build job (last 30 PR runs before vs this PR's runs, plus first 10 PR runs after merge), Tests lint job and its cache post/save step, setup-go post steps of typecheck and test"
+    },
+    {
+      "criterion": "5. Docs corrected",
+      "surface": "repository text",
+      "command": "rg -n 'type=gha|cache-to|Actions cache|go-notices' docs .github packages/daemon/docker; reviewer reads the comment diffs (pr-and-main.yaml:88-90, :119-120, worker-image.yaml ~:186-191, docs/kubernetes.md:500-501, the new cache-mode comments)"
+    },
+    {
+      "criterion": "Main still writes (guard)",
+      "surface": "GitHub Actions caches API, refs/heads/main",
+      "command": "gh api \"repos/sjawhar/legion/actions/caches?ref=refs/heads/main&per_page=100&sort=created_at&direction=desc\" lists go-notices-Linux-, index-worker-image- and buildkit-blob- keys created after the merge (setup-go- after the next go.sum change)"
+    }
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase rules, push/trailer, PR body and proof shape (references/pr-body.md), identity check (references/default-branch-check.md), production check (references/merge-gate.md), tools (references/tools.md: uv run --with pyyaml for YAML parsing)",
+      "asd-ste100: the PR body's prose goes to people and teammates",
+      "ce-simplify-code: the simplify pass pr-body.md asks for on the settled workflow diff",
+      "dispatch: any comment or ask on INFRA-584, e.g. the storage-limit ask if the architect hands it over"
+    ],
+    "test": [
+      "legion-worker: tester proofs (six-field proof entries with a negative control, references/pr-body.md), re-running the plan's gh api commands on this PR's runs and on another open PR as the control"
+    ],
+    "review": [
+      "legion-worker: review and approval by head SHA, review threads and the merge gate (references/review-threads.md, references/merge-gate.md)"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "mode=min on main is outside the spec, unsupported (the 12-of-17-minute export came from a cold build) and would rebuild every intermediate stage",
+        "answer": "Dropped: mode=max stays; the plan only gates cache-to on main and gives the worker its own scope."
+      },
+      {
+        "finding": "Worker image and listener share the default BuildKit scope on main; the 0 CACHED main build may be the listener's index displacing the worker's",
+        "answer": "Checked run order (listener docker job ended 21:18:47Z, worker imported at 22:17:47Z with 0 CACHED); plan sets scope=worker-image on cache-from and cache-to, recorded as departure 2."
+      },
+      {
+        "finding": "AC2 cannot be met by the spec's changes alone; 13 GB of PR entries outlive the window; listener writes count; storage cap is a new requirement with unverified feasibility",
+        "answer": "Plan states it with measurements and sends the architect a decision: storage limit by the repository owner (recommended), one-off delete of pre-merge PR entries, or a changed AC2; listener stays INFRA-522's (#2297). AC2 command and sampling defined (GB = 10^9 bytes)."
+      },
+      {
+        "finding": "Arm A rests on unchecked facts: expression support, workflow_call, which actions honour cache-mode; setup-qemu does not run on PRs; probe location",
+        "answer": "Probe covers actions/cache v6.1.0, setup-go v7.0.0 and the setup-bun wrapper with a positive control; worker-image gets job-level cache-mode (called workflow); setup-qemu claim corrected; probe runs in sjawhar/legion on a throwaway push-triggered branch (the planner App was refused workflow writes, the sandbox legion-smoke is not readable by it); Arm B if the probe cannot run."
+      },
+      {
+        "finding": "Nothing checks that main still writes",
+        "answer": "Added the 'Main still writes' post-merge check with keys and query."
+      },
+      {
+        "finding": "Arm B hidden requirements: NON_BUILDING_ACTIONS lacks actions/cache/restore and save; setup-go sites undercounted; bun cannot be restored everywhere; design rule",
+        "answer": "Arm B extends NON_BUILDING_ACTIONS with a test case; the six caching setup-go sites named (seven others cache nothing); bun departure recorded (departure 3); the move-aside step reuses no result, it only prevents a save."
+      },
+      {
+        "finding": "AC1 needs a precise query and a ruling on open PRs that edit these files",
+        "answer": "Paginated, created_at-filtered query defined; a PR's run uses its merge commit with main, so every PR carries the rule from its next push; coordination notes for #2316, #2305, #2297, INFRA-583."
+      },
+      {
+        "finding": "AC4 has several readings and may be negative",
+        "answer": "Formula fixed (runner minutes per job and per step, medians, named samples, Worker Image separately) and the slower second-push case must be stated."
+      },
+      {
+        "finding": "AC3 has no baseline and no query",
+        "answer": "Baseline p90 14.8 min from the parent's measurement artifact; jobs-API query with the step-name prefix and p90 < 180 s."
+      },
+      {
+        "finding": "Event vs ref reading of the spec's worker-image line",
+        "answer": "Ref chosen to match the Outcome; recorded as departure 1."
+      },
+      {
+        "finding": "AC5 docs list",
+        "answer": "Listed in the plan: pr-and-main.yaml:88-90, :119-120, worker-image.yaml cache comment, docs/kubernetes.md:500-501, new cache-mode comments; no README prose."
+      },
+      {
+        "finding": "Smaller unsupported claims (buildkit failure without write; actions/cache v6.1.0 skip text)",
+        "answer": "Buildkit failure cited to Docker's docs ('Cache write restrictions'); the probe records the actual skip text for actions/cache v6.1.0."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "worker-image.yaml: buildkit cache-to only when the event is not a pull request",
+      "plan": "Every cache write is keyed on github.ref == 'refs/heads/main', so merge-queue runs and dispatches on other branches read only too",
+      "evidence": "Spec Outcome says only main writes; 44 entries / 1.23 GB under refs/heads/legion/INFRA-522 from a branch dispatch (cache list 2026-10-27 03:15Z)",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "worker-image.yaml scope names only the cache-to gate",
+      "plan": "cache-from and cache-to also get scope=worker-image",
+      "evidence": "Worker and listener share the default scope on main; main worker build job 121868689417 imported the newest index at 22:17:47Z after listener docker job of run 40400116146 ended 21:18:47Z, then 0 CACHED steps and 95 layers exported",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "actions/setup-go and setup-bun caches: saved only on main pushes, restored everywhere",
+      "plan": "Arm B only (if cache-mode refuses expressions): setup-bun wrapper passes no-cache on non-main refs, so pull-request jobs download Bun instead of restoring it",
+      "evidence": "oven-sh/setup-bun@0c5077e action.yml: the only cache input is no-cache, which disables restore and save",
+      "outcome": {
+        "kind": "changed",
+        "scope": "Under Arm B, setup-bun is not restored on pull requests"
+      }
+    },
+    {
+      "spec": "Scope: workflow changes only ('Nothing else'); AC2 cache under 9 GB for the 3 days after the merge",
+      "plan": "Workflow changes as specified, plus a decision for the architect: the repository owner sets the Actions cache storage limit to 8 GB (recommended), and/or a one-off delete of pre-merge refs/pull/* entries, or AC2 changes",
+      "evidence": "13.01 GB under refs/pull/* (oldest 2026-10-25T14:40Z, 7-day expiry); usage 18.6 GB above the 10 GB default; go-notices entries 2,197 MB with key inputs changed 17 times on main since 10-13; 9 main worker builds on 10-26; listener main job wrote 83 layers",
+      "outcome": {
+        "kind": "changed",
+        "scope": "AC2 needs an action outside this pull request: a repository storage limit set by the owner and/or a one-off delete of pull-request cache entries"
+      }
+    }
+  ]
+}
