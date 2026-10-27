@@ -408,9 +408,6 @@ func roleHolderSession(sessions *session.SessionRegistry, sessionID string, live
 	return entry, err
 }
 
-// registered is the liveness a lookup, a soft claim and the reaper ask of a role holder: any entry.
-func registered(session.SessionEntry) bool { return true }
-
 // roleHolderReadTimeout bounds roleHolderSession's bucket read, well inside the listener's 10 s HTTP
 // write timeout (main.go) and the 10 s JetStream MaxWait the read would otherwise wait out.
 const roleHolderReadTimeout = 2 * time.Second
@@ -419,7 +416,7 @@ const roleHolderReadTimeout = 2 * time.Second
 // registered session is live here. A lapsed holder's last_seen is the session registry's memory of
 // it.
 func resolveLiveRoleHolder(registry roles.ClaimStore, sessions *session.SessionRegistry, role string) (roleHolderResult, error) {
-	resolution, err := roles.ResolveHolder(registry, roleHolderSessions{sessions}, role, registered)
+	resolution, err := roles.ResolveHolder(registry, roleHolderSessions{sessions}, role, roles.Registered)
 	if readErr, ok := errors.AsType[*roles.ReadError](err); ok {
 		switch readErr.Step {
 		case roles.SessionRead:
@@ -735,7 +732,7 @@ func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
 			return
 		}
-		entry, err := roleHolderSession(d.sessions, sessionID, registered)
+		entry, err := roleHolderSession(d.sessions, sessionID, roles.Registered)
 		switch {
 		case errors.Is(err, bus.ErrRefused):
 			// Refresh reports a refused key as a missing one too, so this test comes first:
@@ -864,7 +861,7 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 			if holder != "" && holder != body.SessionID {
 				if previous != "" && holder == previous {
 					supersedable = append(supersedable, holder)
-				} else if _, liveErr := roleHolderSession(d.sessions, holder, registered); errors.Is(liveErr, nats.ErrKeyNotFound) {
+				} else if _, liveErr := roleHolderSession(d.sessions, holder, roles.Registered); errors.Is(liveErr, nats.ErrKeyNotFound) {
 					supersedable = append(supersedable, holder)
 				} else if liveErr != nil {
 					writeJSONError(w, http.StatusServiceUnavailable, "read role holder liveness: "+liveErr.Error())

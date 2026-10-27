@@ -61,18 +61,22 @@ type pendingEvent struct {
 // Of the rows read, the batch keeps every row before its batchSize-th due one in id order, and that
 // row: at most batchSize events are sent per batch, and each owner keeps a prefix of its events, the
 // owners' events interleaved as they were written, so a backlog over many owners makes short chains
-// rather than long ones for a few. The issue, document and project columns a publish needs are
-// joined onto the kept rows.
+// rather than long ones for a few. The choice carries only each row's id and back-off: the event's
+// own columns, and the issue, document and project columns a publish needs, are joined onto the
+// kept rows. A kept row's event is read by its id in a lateral subquery with a limit, which
+// Postgres does not flatten into a join, so each is one lookup of events_pkey: as a join, the
+// planner, which expects many more kept rows than a batch keeps, merges them with a walk of every
+// event's id.
 const readBatchSQL = `
 	with fresh as (
-		select id, coalesce(issue_key, artifact_id::text, project_key) as owner
+		select id, coalesce(issue_key, artifact_id::text, project_key) as owner, next_attempt_at
 		from events
 		where published_at is null and next_attempt_at is null
 		  and (payload ->> 'pending') is distinct from 'true'
 		order by id
 		limit $1
 	), retried as (
-		select id, coalesce(issue_key, artifact_id::text, project_key) as owner
+		select id, coalesce(issue_key, artifact_id::text, project_key) as owner, next_attempt_at
 		from events
 		where published_at is null and next_attempt_at is not null
 		  and (payload ->> 'pending') is distinct from 'true'
@@ -80,9 +84,9 @@ const readBatchSQL = `
 		order by next_attempt_at, id
 		limit $1
 	), due as (
-		select id, owner from fresh
+		select id, owner, next_attempt_at from fresh
 		union all
-		select id, owner from retried
+		select id, owner, next_attempt_at from retried
 	), owners as (
 		select owner, min(id) as first, array_agg(id order by id) as candidates
 		from due
@@ -91,11 +95,10 @@ const readBatchSQL = `
 		order by first
 		limit $1
 	), chosen as (
-		select o.first, o.candidates, w.*
+		select o.first, o.candidates, w.id, w.next_attempt_at
 		from owners o
 		cross join lateral (
-			select e.id, e.issue_key, e.artifact_id, e.project_key, e.seq, e.type, e.actor, e.notify,
-			       e.created_at, e.payload, e.attempt_count, e.published_destinations, e.next_attempt_at
+			select e.id, e.next_attempt_at
 			from events e
 			where coalesce(e.issue_key, e.artifact_id::text, e.project_key) = o.owner
 			  and e.published_at is null
@@ -104,10 +107,8 @@ const readBatchSQL = `
 			limit $1
 		) w
 		union all
-		select d.id, array[d.id], e.id, e.issue_key, e.artifact_id, e.project_key, e.seq, e.type, e.actor,
-		       e.notify, e.created_at, e.payload, e.attempt_count, e.published_destinations, e.next_attempt_at
+		select d.id, array[d.id], d.id, d.next_attempt_at
 		from due d
-		join events e on e.id = d.id
 		where d.owner is null
 	), ranked as (
 		select chosen.*,
@@ -117,14 +118,15 @@ const readBatchSQL = `
 		       count(*) over (partition by first) as window_size
 		from chosen
 	)
-	select r.id, r.issue_key, r.artifact_id::text, coalesce(r.project_key, i.project_key, ar.project_key, ''),
-	       r.seq, r.type, r.actor, r.notify, r.created_at, r.payload, r.attempt_count,
-	       r.published_destinations, coalesce(ar.slug, ''), coalesce(i.route, ai.route),
-	       coalesce(r.issue_key, r.artifact_id::text, r.project_key), r.due, r.next_attempt_at, r.candidates,
+	select e.id, e.issue_key, e.artifact_id::text, coalesce(e.project_key, i.project_key, ar.project_key, ''),
+	       e.seq, e.type, e.actor, e.notify, e.created_at, e.payload, e.attempt_count,
+	       e.published_destinations, coalesce(ar.slug, ''), coalesce(i.route, ai.route),
+	       coalesce(e.issue_key, e.artifact_id::text, e.project_key), r.due, r.next_attempt_at, r.candidates,
 	       r.window_size
 	from ranked r
-	left join issues i on i.key = r.issue_key
-	left join artifacts ar on ar.id = r.artifact_id
+	cross join lateral (select * from events where id = r.id limit 1) e
+	left join issues i on i.key = e.issue_key
+	left join artifacts ar on ar.id = e.artifact_id
 	left join issues ai on ai.key = ar.issue_key
 	where r.sendable - r.due::int < $1
 	order by r.first, r.id
@@ -259,8 +261,10 @@ func (d destination) key() string {
 type batchEvent struct {
 	pendingEvent
 	item contracts.Envelope
+	// delivered is the set of the event's published_destinations (publishedDestinationSet).
 	// destinationsOf are every destination the event has; resolveErr is why the list is
 	// incomplete, when it is (eventDestinations).
+	delivered      map[string]struct{}
 	destinationsOf []destination
 	resolveErr     error
 	sends          []*chainSend
@@ -350,9 +354,8 @@ func planChains(events []*batchEvent) []*chain {
 			byOwner[event.owner] = map[string]*chain{}
 			blocked[event.owner] = map[string]blocker{}
 		}
-		delivered := publishedDestinationSet(event.destinations)
 		for _, dest := range event.destinationsOf {
-			if _, ok := delivered[dest.subject]; ok {
+			if _, ok := event.delivered[dest.subject]; ok {
 				continue
 			}
 			if dest.forward != nil && dest.forward.skip != "" {
@@ -439,8 +442,8 @@ func sendChains(ctx context.Context, sender bus.Sender, chains []*chain) {
 		}
 		c.next++
 		if send.state != reached {
-			for _, rest := range c.sends[c.next:] {
-				if send.state == failed {
+			if send.state == failed {
+				for _, rest := range c.sends[c.next:] {
 					rest.state, rest.heldBy = held, send.event
 				}
 			}
@@ -454,6 +457,9 @@ func sendChains(ctx context.Context, sender bus.Sender, chains []*chain) {
 	for _, c := range chains {
 		issue(c)
 	}
+	// Each chain has at most one send in flight, so the select's cases are at most every chain's
+	// and ctx's.
+	cases := make([]reflect.SelectCase, 0, len(chains)+1)
 	for len(inflight) > 0 {
 		// An answer already in is taken first, in the order the chains were planned, so a batch
 		// whose answers are all in proceeds the same way every time.
@@ -467,7 +473,7 @@ func sendChains(ctx context.Context, sender bus.Sender, chains []*chain) {
 			}
 			break
 		}
-		cases := make([]reflect.SelectCase, 0, len(inflight)+1)
+		cases = cases[:0]
 		for _, c := range inflight {
 			cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(c.sends[c.next].answer)})
 		}

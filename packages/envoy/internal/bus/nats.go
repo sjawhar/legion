@@ -303,6 +303,12 @@ func (c *Client) Connected() bool {
 func (c *Client) ConnectionChanged() <-chan struct{} {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.connChangedLocked()
+}
+
+// connChangedLocked returns the channel ConnectionChanged returns, making it when none is taken,
+// for a caller that holds c.mu.
+func (c *Client) connChangedLocked() chan struct{} {
 	if c.connChanged == nil {
 		c.connChanged = make(chan struct{})
 	}
@@ -758,10 +764,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 		conn := c.Conn
 		// The channel is taken with the connection, before its state is read, so an event that
 		// lands between the read and the wait below closes the channel the wait is on.
-		if c.connChanged == nil {
-			c.connChanged = make(chan struct{})
-		}
-		changed := c.connChanged
+		changed := c.connChangedLocked()
 		c.mu.Unlock()
 		// A live connection serves even a stopped client: deliveries still in their handlers during
 		// Drain publish their receipts and exceptions through it.

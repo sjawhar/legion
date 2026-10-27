@@ -104,6 +104,14 @@ func (e *ReadError) Unwrap() error { return e.Err }
 // superseded.
 const resolutionAttempts = 2
 
+// Registered is the liveness that counts any registered session as live: any entry.
+func Registered(session.SessionEntry) bool { return true }
+
+// Fresh reports whether entry heartbeated within session.ClaimStaleAfter of now.
+func Fresh(entry session.SessionEntry, now time.Time) bool {
+	return entry.UpdatedAt > 0 && now.UnixMilli()-entry.UpdatedAt < session.ClaimStaleAfter.Milliseconds()
+}
+
 // ResolveHolder resolves role's holder. It reads the role's claim (Unclaimed when there is none),
 // then the holder's session through sessions, which live judges (Live when it is there). A holder
 // that is gone, or that live refuses, has its claim released (claims.ReleaseExpiredRoleClaim, a

@@ -59,9 +59,8 @@ func resolveRoleHolders(deps Deps, events []*batchEvent) {
 	var routed []string
 	seen := map[string]struct{}{}
 	for _, event := range events {
-		reached := publishedDestinationSet(event.destinations)
 		for _, dest := range event.destinationsOf {
-			if _, ok := reached[dest.subject]; ok || dest.role == "" {
+			if _, ok := event.delivered[dest.subject]; ok || dest.role == "" {
 				continue
 			}
 			if _, ok := seen[dest.role]; !ok {
@@ -82,7 +81,7 @@ func resolveRoleHolders(deps Deps, events []*batchEvent) {
 			if deps.RoleClaims != nil && deps.Sessions != nil {
 				// Any registered session is the holder here: one that has stopped heartbeating
 				// is found stale by forwardOf, and stays pending rather than losing its claim.
-				result.resolution, result.err = roles.ResolveHolder(deps.RoleClaims, deps.Sessions, role, registered)
+				result.resolution, result.err = roles.ResolveHolder(deps.RoleClaims, deps.Sessions, role, roles.Registered)
 			}
 			if result.err == nil && result.resolution.State == roles.Lapsed {
 				slog.Info("dispatch outbox: a role's holder is gone", "role", role, "holder", result.resolution.Holder,
@@ -104,9 +103,6 @@ func resolveRoleHolders(deps Deps, events []*batchEvent) {
 		}
 	}
 }
-
-// registered is the liveness a batch asks of a role holder's session: any entry.
-func registered(session.SessionEntry) bool { return true }
 
 // forwardOf maps a role's resolution to how item reaches it, as the listener's role lane maps the
 // same resolution to its delivery outcomes:
@@ -147,7 +143,7 @@ func forwardOf(item contracts.Envelope, resolution roles.Resolution, err error, 
 		return &roleForward{holder: holder, skip: "the role's holder is the event's actor"}
 	}
 	entry := resolution.Entry
-	if entry.UpdatedAt <= 0 || now.UnixMilli()-entry.UpdatedAt >= session.ClaimStaleAfter.Milliseconds() {
+	if !roles.Fresh(entry, now) {
 		return &roleForward{holder: holder, err: fmt.Errorf("the role's holder %s has not heartbeated within %s", holder, session.ClaimStaleAfter)}
 	}
 	return &roleForward{holder: holder, streamAck: entry.Port != 0}

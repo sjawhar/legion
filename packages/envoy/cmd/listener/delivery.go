@@ -326,7 +326,7 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 // fresh claim has already superseded.
 func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Envelope, role string) (string, session.SessionEntry, bool) {
 	fresh := func(holder session.SessionEntry) bool {
-		return holder.UpdatedAt > 0 && time.Now().UnixMilli()-holder.UpdatedAt < int64(session.ClaimStaleAfter/time.Millisecond)
+		return roles.Fresh(holder, time.Now())
 	}
 	resolution, err := roles.ResolveHolder(cfg.registry, roleHolderSessions{cfg.sessions}, role, fresh)
 	if readErr, ok := errors.AsType[*roles.ReadError](err); ok {

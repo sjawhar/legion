@@ -118,8 +118,13 @@ type window struct {
 }
 
 func (w *window) PublishAsync(item contracts.Envelope) <-chan error {
+	return outcomeOf(w.send(item))
+}
+
+// outcomeOf is the channel a send's outcome comes in: err at once when the send failed before
+// anything waits, otherwise answer's result once it returns.
+func outcomeOf(answer func() error, err error) <-chan error {
 	outcome := make(chan error, 1)
-	answer, err := w.send(item)
 	if err != nil {
 		outcome <- err
 		return outcome
@@ -230,14 +235,7 @@ const requestReplies = 4
 //
 // Its inbox is unsubscribed once the outcome is decided.
 func (w *window) Request(subject string, item contracts.Envelope, opts RequestOptions) <-chan error {
-	outcome := make(chan error, 1)
-	answer, err := w.request(subject, item, opts)
-	if err != nil {
-		outcome <- err
-		return outcome
-	}
-	go func() { outcome <- answer() }()
-	return outcome
+	return outcomeOf(w.request(subject, item, opts))
 }
 
 // request sends item as Request describes and returns what waits for its answer.

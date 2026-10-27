@@ -47,7 +47,8 @@ const (
 // Publisher is the NATS client the outbox publishes through (bus.Client).
 type Publisher interface {
 	// Window starts one batch's sends: each is sent without waiting for NATS's answer, all on one
-	// connection and in the order they were made, or not at all (bus.Client.Window).
+	// connection or not at all, in no order of its own (bus.Client.Window); sendChains keeps the
+	// order per owner and destination.
 	Window() bus.Sender
 	// Connected reports whether the client has a live connection now. A standby takes the
 	// publisher hold only while it does, and a holder whose client has not for natsLossGrace
@@ -195,7 +196,7 @@ func scanBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID) (ba
 	result := batchResult{}
 	events := make([]*batchEvent, len(pending))
 	for index := range pending {
-		events[index] = &batchEvent{pendingEvent: pending[index]}
+		events[index] = &batchEvent{pendingEvent: pending[index], delivered: publishedDestinationSet(pending[index].destinations)}
 		if pending[index].due {
 			result.sendable++
 		}
@@ -247,7 +248,7 @@ func scanBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID) (ba
 	}
 
 	var outcomes []outcome
-	released := false
+	anyReleased := false
 	for _, event := range events {
 		if !event.due {
 			continue
@@ -257,14 +258,14 @@ func scanBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID) (ba
 		switch event.outcome.state {
 		case published:
 			result.published++
-		case releasedState:
-			released = true
+		case released:
+			anyReleased = true
 		}
 	}
 	if !stopped {
 		outcomes = append(outcomes, deferPastWindow(events)...)
 	}
-	if released && !result.fenced && ctx.Err() == nil {
+	if anyReleased && !result.fenced && ctx.Err() == nil {
 		slog.Error("dispatch outbox: NATS is unreachable, so the batch's released events wait for the next scan")
 	}
 	if result.fenced || !time.Now().Before(hold.Deadline()) {
@@ -287,7 +288,7 @@ func scanBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID) (ba
 			"holder", holder)
 		result.fenced = true
 	}
-	result.blocked = stopped || released
+	result.blocked = stopped || anyReleased
 	return result, nil
 }
 
@@ -295,9 +296,6 @@ func scanBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID) (ba
 // batch's first send (Publisher.ConnectionChanged), has closed: the connection the batch's window
 // pinned was lost or replaced since.
 func connectionReplaced(changed <-chan struct{}) bool {
-	if changed == nil {
-		return false
-	}
 	select {
 	case <-changed:
 		return true
@@ -332,10 +330,10 @@ const (
 	// of its owner that has not reached it. It falls due when the earliest of those does, with no
 	// attempt counted, and its sends then follow theirs.
 	blocked outcomeState = "blocked"
-	// releasedState: the event was not tried to the end, because NATS was unreachable, the
+	// released: the event was not tried to the end, because NATS was unreachable, the
 	// connection was replaced or the process is stopping, so it is due again at once, with no
 	// attempt counted.
-	releasedState outcomeState = "released"
+	released outcomeState = "released"
 )
 
 // outcome is what one event of a batch came to, as recordBatch writes it.
@@ -390,7 +388,7 @@ func settleEvent(event *batchEvent, releaseUnacknowledged bool) outcome {
 	switch {
 	case release:
 		slog.Info("dispatch outbox: event released", "event_id", event.event.ID, "error", errors.Join(failures...))
-		result.state = releasedState
+		result.state = released
 		return result
 	case len(failures) > 0:
 		return backOff(result, event.pendingEvent, "dispatch outbox: publish event", errors.Join(failures...))
@@ -440,12 +438,12 @@ func holdBack(result outcome, blockers []blocker) outcome {
 			earlierDelay(by.event.outcome.delay)
 			earlierUntil(by.event.outcome.until)
 		default:
-			result.state, result.delay, result.until = releasedState, nil, nil
+			result.state, result.delay, result.until = released, nil, nil
 			return result
 		}
 	}
 	if result.delay == nil && result.until == nil {
-		result.state = releasedState
+		result.state = released
 	}
 	return result
 }
@@ -584,10 +582,9 @@ func recordBatch(ctx context.Context, deps Deps, outcomes []outcome, holder uuid
 			left join reached r on r.id = o.id
 			where e.id = o.id and e.published_at is null
 			  and (o.state = 'published' or h.mine or r.id is not null)
-			returning 1
 		)
-		select (select mine from hold), (select count(*) from recorded)
-	`, publisherHold, holder, ids, states, attempts, delays, until, failures, reachedIDs, reachedTopics).Scan(&holds, new(int64)); err != nil {
+		select mine from hold
+	`, publisherHold, holder, ids, states, attempts, delays, until, failures, reachedIDs, reachedTopics).Scan(&holds); err != nil {
 		return false, fmt.Errorf("record the batch's outcome: %w", err)
 	}
 	return holds, nil
