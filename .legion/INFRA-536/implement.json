@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-536",
+  "completed": "2026-10-27T06:34:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2361",
+  "proof": [
+    {
+      "criterion": "A1 a document written through the API: the live editor shows `Plain \\&amp; end.` as the text `Plain &amp; end.`; A1 dispatch doc-read prints `Plain &amp;amp; end.` (read as `Plain &amp; end.`); the comment control shows `Plain &amp; end.`",
+      "surface": "Dispatch browser suite: real Go server with real migrations on Postgres 17, production SPA bundle, live editor at /issues/<KEY>/spec in chromium and iphone, the Conversation, and the real packages/envoy-client/bin/dispatch.ts doc-read",
+      "command": "cd packages/dispatch && bun run e2e doc.e2e.ts -g \"backslash before a character reference\" (in-pod stack: $TMPDIR/infra536/run-e2e.sh doc.e2e.ts -g \"backslash before a character reference\")",
+      "observed": "2 passed (chromium 5.8s, iphone 4.6s): editor paragraphs [\"Plain &amp; end.\"], stored markdown \"Plain &amp;amp; end.\\n\" which engineParagraphs reads as [\"Plain &amp; end.\"], comment text \"Plain &amp; end.\", doc-read stdout \"Plain &amp;amp; end.\\n\\n\\nDocument token: sha256:…\\n\". https://github.com/sjawhar/legion/pull/2361#issuecomment-6434193464",
+      "headSha": "b8d4616d1c5e",
+      "negativeControl": "The same test at base 4bbb2a9c with the head's five e2e files restored on top: 2 failed at doc.e2e.ts:723, the editor shows [\"Plain & end.\"] instead of [\"Plain &amp; end.\"]."
+    },
+    {
+      "criterion": "A1 Go and headless engine: Go reads every escape and character reference as the engine reads it, at every decoded site; Go's text for `Plain \\&amp; end.` is exactly `Plain &amp; end.`",
+      "surface": "pmdoc Parse (the read path of every API and CLI document write) against the fork's headless engine (gen/differential.ts)",
+      "command": "cd packages/envoy && go test ./internal/dispatch/pmdoc/ -count=1 -skip 'Linear|Linearly' (bun on PATH)",
+      "observed": "ok 192.927s; TestEveryEscapeAndReferenceReadsAsTheEngineReadsIt (268 markdowns), TestALineFeedAReferenceNamesReadsAsTheEngineReadsIt, TestGeneratedEscapesAndReferencesReadAsTheEngineReadsThem (2000 paragraphs), TestEveryNameTheEngineKnowsReadsAsTheEngineReadsIt (2125 names), TestReferencesInEveryValueRenderAndReadBackInBothParsers (83 trees), TestReferenceSpellingsThatReadBackRenderUnchanged all pass",
+      "headSha": "b8d4616d1c5e",
+      "negativeControl": "The head's render_readback_test.go and gen/entity-names.ts at base 4bbb2a9c: five of the six fail (Go reads \"Plain \\\\&amp; end.\\n\" as \"Plain & end.\"; &nLt;/&nGt; undecoded; &#10; read as a line feed); only the byte-pinning guard passes."
+    },
+    {
+      "criterion": "Stored documents keep their reading: zero regressions, churn and panics; churn only in the named classes, counted",
+      "surface": "pmdoc differential over 5,137 stored production documents (latest versions, census script escaped-pipe-census.ts v2), 8,000 generated (gen/reference-corpus.ts) and the 84 in-repo documents",
+      "command": "bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base 4bbb2a9c --head b8d4616d --corpus $TMPDIR/infra536/stored.jsonl --corpus $TMPDIR/infra536/references.jsonl --out $TMPDIR/infra536/diff2",
+      "observed": "regressions 0, churn 0, engine-tree regressions 0, head panics 0, lost fixed points 0; engine-tree churn 231 (all image alt, all generated); misreads 2 (generated, link address, INFRA-425's, recorded by the architect's decision); stored corpus flags nothing. https://github.com/sjawhar/legion/pull/2361#issuecomment-6434799186",
+      "headSha": "b8d4616d1c5e",
+      "negativeControl": "The same corpus at base: 4,722 documents the head fixes (4,495 base misreads, 216 base refusals, 11 the engine read otherwise) and 1,483 engine-tree fixes, which the base gets wrong."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/pmdoc/references.go (new: decodeMarkdownText, characterReferenceAt, numericReferenceCharacter, digitValue)",
+    "packages/envoy/internal/dispatch/pmdoc/parse.go (unescapeMarkdownText removed; parseTextValue decodes and reads a decoded line feed as a space outside an image alt; break trimming on the raw segment)",
+    "packages/envoy/internal/dispatch/pmdoc/refusals.go (code-language refusal uses decodeMarkdownText)",
+    "packages/envoy/internal/dispatch/pmdoc/render.go (titleSuffix one pass with \\& before a reference; escapeImageSource)",
+    "packages/envoy/internal/dispatch/pmdoc/render_inline.go (image address uses escapeImageSource)",
+    "packages/envoy/internal/dispatch/pmdoc/render_readback_test.go (six engine-agreement tests)",
+    "packages/envoy/internal/dispatch/pmdoc/update_test.go (genResult takes args)",
+    "packages/envoy/internal/dispatch/pmdoc/gen/entity-names.ts (new)",
+    "packages/envoy/internal/dispatch/pmdoc/gen/reference-corpus.ts (new)",
+    "packages/dispatch/e2e/doc.e2e.ts (new test)",
+    "packages/dispatch/e2e/dispatch-cli.ts (new: runDispatch moved from cli-body-cap.e2e.ts)",
+    "packages/dispatch/e2e/cli-body-cap.e2e.ts",
+    "packages/dispatch/e2e/engine-reading.ts (engine-tables.ts renamed, now also paragraphs)",
+    "packages/dispatch/e2e/read-back.ts (engineParagraphs)",
+    "packages/dispatch/AGENTS.md (engine-reading.ts name)",
+    "packages/envoy/AGENTS.md (pmdoc reading rule)",
+    "packages/envoy/CHANGELOG.md ([Unreleased] Fixed)"
+  ],
+  "trickyParts": [
+    "Goldmark's Text value never holds its line's own line ending (parser.go stops at \\n and trims), so the old TrimSuffix(\"\\n\") on the decoded value only ever ate a decoded &#10; before a break; trimming now runs on the raw segment before decoding.",
+    "The engine's import (remarkSoftBreakAsSpace) turns every line feed in a text node into a space, a decoded &#10; included, but an image alt is an attribute and keeps it.",
+    "Go's html table lacks &nLt; and &nGt; (src/html/entity.go TODO); characterReferenceAt decodes them itself.",
+    "The image address now doubles a backslash before ASCII punctuation outside a table too, in one pass with the table pipe escape, so nothing is doubled twice."
+  ],
+  "deviations": [
+    "Beyond the plan: a decoded line feed in text reads as a space, and &nLt;/&nGt; decode; the plan's own generated and entity-name tests found both, and the base gets both wrong.",
+    "The pmdoc differential's misread gate shows 2 generated documents (link address, dispatch://INFRA-425). The INFRA-138 architect chose to record them on the pull request and leave the fix to INFRA-425 (Envoy reply 2026-10-27T04:02Z).",
+    "engine-text.ts was merged with engine-tables.ts into engine-reading.ts in the simplify pass.",
+    "Local runs skip the Linear timing tests: they fail at the base in this sandbox (coarse clock, '0s ... +Inf times'); CI runs them. Locally internal/dispatch/docs and cmd/dispatch pass; internal/dispatch/api passes except TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, which refuses a database with C collation (this pod's local Postgres)."
+  ],
+  "openQuestions": []
+}
