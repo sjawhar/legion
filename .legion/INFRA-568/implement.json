@@ -2,15 +2,15 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-568",
-  "completed": "2026-10-27T13:11:42Z",
+  "completed": "2026-10-27T15:18:21Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2397",
   "proof": [
     {
       "criterion": "1a: with the search made to fail, dispatch issue --force with a title identical to an existing issue's prints that issue's key and the no-check-was-made form",
       "surface": "dispatch (head build, packages/claude-envoy/dist/dispatch.js) against bun run dispatch:local",
-      "command": "$TMPDIR/infra568/e2e/run-e2e.sh rows (step 1a: psql 'lock table asks in access exclusive mode; select pg_sleep(9)' in the background, then dispatch issue --project CORE --title 'Quokka ledger reconciliation drifts' --force); transcript https://github.com/sjawhar/legion/pull/2397#issuecomment-6441663340",
+      "command": "$TMPDIR/infra568/e2e/run-e2e.sh rows (step 1a: psql 'lock table asks in access exclusive mode; select pg_sleep(9)' in the background, then dispatch issue --project CORE --title 'Quokka ledger reconciliation drifts' --force); transcript https://github.com/sjawhar/legion/pull/2397#issuecomment-6445840557",
       "observed": "Created CORE-39, then 'No related-item check was made: the search behind it did not answer within 5s. Search before you rely on this being new: dispatch search --project CORE --query 'Quokka ledger reconciliation'' and 'Title overlaps you forced past: CORE-8 [triage] Quokka ledger reconciliation drifts'; related_checks holds CORE-39 not_made timeout 5000 ms",
-      "headSha": "cdfddb65c5d6d6b366db7f53df096e6581b53c58",
+      "headSha": "a529e99bb9cd20dc372de356200ca344c5a5c5fa",
       "negativeControl": "the same --force without the lock prints 'Related items (searched by keywords only: meaning search is off on this server):' listing CORE-8"
     },
     {
@@ -26,7 +26,7 @@
       "surface": "dispatch related against bun run dispatch:local after the leased term-statistics refresh",
       "command": "run-e2e.sh seed (30 issues containing 'webhook', one holding quokka/ledger/zymurgy), then dispatch related --project CORE --title 'Webhook quokka ledger zymurgy mismatch'; Go: go test ./internal/dispatch/api -run TestRelatedCheckListsTheRareWordMatchNotTheCommonWordMatches",
       "observed": "only 'CORE-8 [triage] Quokka ledger reconciliation drifts' is listed; search_term_stats shows webhook ndoc 60 of 87 items (over max(10, N/10)), so it is not chosen",
-      "headSha": "cdfddb65c5d6d6b366db7f53df096e6581b53c58",
+      "headSha": "a529e99bb9cd20dc372de356200ca344c5a5c5fa",
       "negativeControl": "dispatch related --project CORE --title 'Webhook' prints 'Related-item check searched (keywords only: meaning search is off on this server) and found nothing.'"
     },
     {
@@ -50,7 +50,7 @@
       "surface": "dispatch issue against bun run dispatch:local",
       "command": "run-e2e.sh rows step 2d: psql 'lock table search_term_stats in access exclusive mode; select pg_sleep(1.2)' then dispatch issue --project CORE --force --title 'Zymurgy ledger reconciliation after the quokka batch'; then dispatch issue --project CORE --title 'Pelican umbrella xylophone'",
       "observed": "the held check prints 'Related items (searched by keywords only: ...)' with CORE-8 first after 1371 ms (records route keyword_ms max 921); the unmatched title prints 'Related-item check searched (keywords only: meaning search is off on this server) and found nothing.'",
-      "headSha": "cdfddb65c5d6d6b366db7f53df096e6581b53c58",
+      "headSha": "a529e99bb9cd20dc372de356200ca344c5a5c5fa",
       "negativeControl": "held past the allowance (asks locked, step 1a) the check answers not_made reason timeout instead"
     },
     {
@@ -66,7 +66,7 @@
       "surface": "dispatch ask against bun run dispatch:local; answers given as alice through POST /api/v1/asks/{id}/answer",
       "command": "run-e2e.sh rows step 4: ask on CORE-8, answered 'Fixed' then re-answered 'Exponential' with text; dispatch ask --issue CORE-41 --question '<same words>'",
       "observed": "'A past decision may already answer this: CORE-8 ... answered by alice on 2026-10-27T11:26:34.679Z' then '  Ask: answered by alice at 2026-10-27T11:26:34.679Z, chose \"Exponential\"' and '  Answer text: Changed my mind: exponential, capped at an hour.'",
-      "headSha": "cdfddb65c5d6d6b366db7f53df096e6581b53c58",
+      "headSha": "a529e99bb9cd20dc372de356200ca344c5a5c5fa",
       "negativeControl": "the first answer 'Fixed' (11:26:34.622Z) is nowhere in the output"
     },
     {
@@ -74,7 +74,7 @@
       "surface": "dispatch doc-edit against bun run dispatch:local",
       "command": "dispatch doc-edit --issue CORE-8 --ops-json '[{\"op\":\"insert\",\"after\":\"twice when the reconciliation retries.\",\"markdown\":\":::ask{urgency=\\\"med\\\"}\\nShould the zymurgy batch retry the quokka ledger write or fail the reconciliation?\\n:::\\n\"}]'",
       "observed": "'Decision block 6e6d29bc-...:' then 'Related items (searched by keywords only: ...)' listing CORE-41, CORE-40, CORE-39 (CORE-8's own items excluded); a related_checks decision_block row",
-      "headSha": "cdfddb65c5d6d6b366db7f53df096e6581b53c58",
+      "headSha": "a529e99bb9cd20dc372de356200ca344c5a5c5fa",
       "negativeControl": "an edit inserting plain text prints no 'Decision block' line"
     },
     {
@@ -82,7 +82,7 @@
       "surface": "GET /api/v1/related-checks on bun run dispatch:local",
       "command": "curl -s -H 'Authorization: Bearer e2e-token' 'http://127.0.0.1:8777/api/v1/related-checks?project=CORE'",
       "observed": "total 50, by_source_kind ask 7 / decision_block 1 / issue 42, completed 49, skipped_for_time 1, keyword_ms p50 7 p95 30 max 921 over_300ms 1",
-      "headSha": "cdfddb65c5d6d6b366db7f53df096e6581b53c58",
+      "headSha": "a529e99bb9cd20dc372de356200ca344c5a5c5fa",
       "negativeControl": "?source_kind=comment answers 400 INVALID_QUERY"
     },
     {
@@ -92,6 +92,30 @@
       "observed": "second filing (server 200): 'Dispatch already holds CORE-8: External widget seven armadillo → http://127.0.0.1:8777/issues/CORE-8; nothing was created; unassigned (not subscribed …)' and no related-item line; the tester's test passes unchanged",
       "headSha": "247b43fd729285f19cae2c206225d7bb4ec02c7d",
       "negativeControl": "the first filing (server 201) still prints 'Created CORE-8: …' followed by 'Related-item check searched (keywords only: meaning search is off on this server) and found nothing.'"
+    },
+    {
+      "criterion": "Review round 1, finding 1: the match budget skips a word that would pass it and keeps choosing rarer words (never stops the pick)",
+      "surface": "Go handler tests on real Postgres with statistics seeded directly (the picker has no other surface that reaches a 20,000-item project locally)",
+      "command": "go test ./internal/dispatch/api -run 'TestRelatedTermsSkipAWordPastTheMatchBudgetAndKeepTheRarerOnes|TestRelatedTermsSkipASingleWordPastTheMatchBudget|TestRelatedTermsHoldToTheMatchBudget' -count=1",
+      "observed": "the reviewer's case (N 20,000; deploy df 1,800 x30, rollout df 1,500 x20, quokka df 1, xanthan df 2) picks [deploy quokka xanthan], summed df 1,803; N 100,000 with one word of df 5,000 scoring first picks [quokka xanthan]",
+      "headSha": "a529e99bb9cd20dc372de356200ca344c5a5c5fa",
+      "negativeControl": "with the old break the two new tests fail: picked [deploy], and picked [] (no term at all)"
+    },
+    {
+      "criterion": "Review round 1, finding 2: a check whose request ends first is recorded with its own reason, not timeout, and is not counted as skipped for time",
+      "surface": "dispatch issue against bun run dispatch:local (port 54358), records route",
+      "command": "lock table search_term_stats (8 s) then a dispatch issue killed after 2 s (three runs), then the same lock with the client waiting; curl /api/v1/related-checks?project=CORE; transcript https://github.com/sjawhar/legion/pull/2397#issuecomment-6445840557",
+      "observed": "killed requests: related_checks not_made / cancelled / ~1.7 s (x3); records route by_reason {cancelled: 3, timeout: 2}, skipped_for_time 2; TestRelatedCheckBoundsARequestThatEndsFirstIsRecordedCancelled passes",
+      "headSha": "a529e99bb9cd20dc372de356200ca344c5a5c5fa",
+      "negativeControl": "the client left waiting past the 5 s allowance → reason timeout (5,001 ms), counted in skipped_for_time"
+    },
+    {
+      "criterion": "Review round 1, finding 3 and the fast-follow: coverage calls issue_embedding_spec; the check's keyword arms take their rank through search's keyword legs with no init-time rewrite",
+      "surface": "embedqueue and api Go suites on real Postgres; a one-off comparison of the generated SQL",
+      "command": "go test ./internal/dispatch/embedqueue/ ./internal/dispatch/api -count=1 -timeout 60m; a throwaway dump of searchQuery, searchQueryMeaning, relatedKeywordQuery, relatedMeaningQuery before and after, compared with cmp",
+      "observed": "all four queries byte-identical (5,611 / 10,735 / 6,104 / 11,229 bytes); TestCoverChangesNothingTheTriggersAlreadyEnqueued and the suites pass (api: only the known C-collation test refuses to run)",
+      "headSha": "a529e99bb9cd20dc372de356200ca344c5a5c5fa",
+      "negativeControl": "a coverage text that differed from the trigger's would make TestCoverChangesNothingTheTriggersAlreadyEnqueued fail (it requeues nothing only when the texts are byte-identical)"
     }
   ],
   "filesChanged": [
@@ -102,7 +126,8 @@
     "packages/contracts/src/dispatch-api.ts, dispatch-tools.ts (+test), AGENTS.md; packages/envoy-client/src/related-check.ts, dispatch-execute.ts, dispatch-http.ts (+tests); packages/claude-envoy/dist/*.js",
     ".dispatch/architecture/{dispatch-api,dispatch-store,dispatch-docs,dispatch-model,dispatch-server,contracts,envoy-client,envoy,claude-envoy-bridge}.md; CHANGELOGs of envoy, envoy-client, contracts, claude-envoy; two docs/solutions notes",
     "Tests: api/related_check_test.go, related_terms_test.go, related_routes_test.go, decision_block_checks_test.go, related_recall_test.go (env-gated), suggestions_test.go, search_meaning_test.go, write_advice_test.go; embedqueue/coverage_test.go; docs/service_test.go",
-    "Round 2 (tester's failure): packages/envoy-client/src/dispatch-http.ts (issue() returns created = status 201), dispatch-execute.ts (the already-holds line, no check lines), tests (fixture create mocks answer 201 as the server does; one new test), CHANGELOG, claude-envoy dist"
+    "Round 2 (tester's failure): packages/envoy-client/src/dispatch-http.ts (issue() returns created = status 201), dispatch-execute.ts (the already-holds line, no check lines), tests (fixture create mocks answer 201 as the server does; one new test), CHANGELOG, claude-envoy dist",
+    "Review round 1: api/related_terms.go (budget skip), api/suggestions.go (cancelled vs timeout via WithTimeoutCause; coordination rank through searchKeywordLegs), api/search.go (searchKeywordLegs(rank), searchQueryBody(legs), searchQueryMeaningBody(legs)), embedqueue/coverage.go, store/migrations/0130_related_checks.up.sql (reason 'cancelled'), cmd/dispatch/README.md, tests"
   ],
   "trickyParts": [
     "Harness for the tester: rootless Postgres 17 + pgvector under $TMPDIR/pg (debs unpacked per the INFRA-42 solution doc); start: . $TMPDIR/pg/env.sh; pg_ctl -D $TMPDIR/pg/data -l $TMPDIR/pg/pg.log -o \"-k $TMPDIR/pg/sock -h 127.0.0.1 -p 5433\" -w start. Go tests: export DISPATCH_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:5433/dispatch_test?sslmode=disable'. dispatch:local: env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE -u DISPATCH_PUBLIC_URL DATABASE_URL='postgres://postgres@127.0.0.1:5433/dispatch_local?sslmode=disable' bun run dispatch:local. Head CLI wrapper: $TMPDIR/infra568/e2e/d.sh (DISPATCH_HOST=omp, DISPATCH_URL=http://127.0.0.1:8777, DISPATCH_TOKEN=e2e-token, DISPATCH_PUBLIC_URL unset so links stay local); the full E2E is $TMPDIR/infra568/e2e/run-e2e.sh seed, wait for the leased term-statistics refresh (10 min after boot), then run-e2e.sh rows.",
@@ -111,7 +136,8 @@
     "The check's keyword arms use a check-only copy of search's SQL whose five ts_rank_cd expressions are replaced at init (a panic if any replacement does not happen exactly once); live search is unchanged.",
     "Production runs keywords only until INFRA-394 turns meaning search on; the meaning constants (InputQuery, 0.25 floor, ef_search 400) are measured only then (P3 is INFRA-573's).",
     "Migrations 0130/0131: dispatch://INFRA-148's pull request moves to 0130-0132; the second to merge renumbers.",
-    "Second merge round: forward merge of main into cdfddb65 (no rebase); fingerprint 1d2ccedd… -> ab2544bd… changed (renumbered migrations, lease pool 11, both sides of four CHANGELOGs, multiprocess_test.go, pool.go, dispatch-execute.ts imports, regenerated dist): https://github.com/sjawhar/legion/pull/2397#issuecomment-6441434478. A local database that ran this branch's earlier migration numbers must be recreated (the server refuses 0131 against an existing issue_embedding_text)."
+    "Second merge round: forward merge of main into cdfddb65 (no rebase); fingerprint 1d2ccedd… -> ab2544bd… changed (renumbered migrations, lease pool 11, both sides of four CHANGELOGs, multiprocess_test.go, pool.go, dispatch-execute.ts imports, regenerated dist): https://github.com/sjawhar/legion/pull/2397#issuecomment-6441434478. A local database that ran this branch's earlier migration numbers must be recreated (the server refuses 0131 against an existing issue_embedding_text).",
+    "Main's dispatch:local harness now picks its own ports: read DISPATCH_URL from its banner (this round: 54358); $TMPDIR/infra568/e2e/d3.sh and run-e2e3.sh use 54358. Recreate dispatch_local (and any test database) that ran this branch's earlier 0130."
   ],
   "deviations": [
     "Recall set widened by the architect: every done INFRA close naming exactly one covering issue ('Duplicate of', 'Folded into', 'Superseded by'), later-filed survivors reversed rather than left out; acceptance became 'no fewer than the old query' (met: 5 vs 4 of 9).",
@@ -120,7 +146,8 @@
     "An ask on a document no project holds answers not_made ('the item it sits on belongs to no project') and is not recorded (a related_checks row needs a project); before, it searched every project.",
     "The decision line also prints the decision ask's latest answer, options and text, since the one-item-per-owner rule can collapse an answered ask into its issue's item.",
     "Migrations renumbered after two forward merges of main: 0121/0122 -> 0129/0130 (main reached 0128), then -> 0130_related_checks / 0131_issue_embedding_spec (main took 0129_document_edit_notices); lease pool 11.",
-    "Round 2: existing created-path test fixtures now answer POST /api/v1/issues with 201, as the server does; with 200 they would read as an issue Dispatch already holds. The tester's red test is unchanged."
+    "Round 2: existing created-path test fixtures now answer POST /api/v1/issues with 201, as the server does; with 200 they would read as an issue Dispatch already holds. The tester's red test is unchanged.",
+    "Review round 1: reason 'cancelled' added to 0130's check constraint (unmerged migration edited in place). Coverage now calls issue_embedding_spec per issue at the architect's direction, although the coverage report's issue query measured 421-600 ms against 133-194 ms with the lateral join for 5,000 issues."
   ],
   "openQuestions": [
     "Latency on the full production copy was not measured: DISPATCH_BACKUP_BUCKET is unset, no AWS credentials, the pod's agent-secrets enrollment has no grants, and gcloud is not installed. The recall corpus holds issues and specs only.",
