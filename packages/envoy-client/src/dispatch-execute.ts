@@ -90,6 +90,7 @@ import {
   issueTopic,
   type Owner,
   type OwnerTopic,
+  ownerTitle,
   type ParsedDispatchRef,
   parseDispatchRef,
 } from "./dispatch-owner";
@@ -2166,15 +2167,9 @@ function openAskAge(ageSeconds: number): string {
   return `${days}d${hours % 24 === 0 ? "" : ` ${hours % 24}h`}`;
 }
 
-function openAskOwner(ask: OpenAsk): string {
-  return "issue" in ask.owner
-    ? `${ask.owner.issue.key}: ${ask.owner.issue.title}`
-    : `${ask.owner.document.project} / ${ask.owner.document.name}`;
-}
-
 function openAskLine(ask: OpenAsk, baseUrl: string): string {
   const priority = ask.priority === null ? "" : `P${ask.priority} · `;
-  return `- ${openAskAge(ask.age_seconds)} · ${priority}${openAskOwner(ask)} · ${ask.question} · ${new URL(ask.ref, baseUrl).toString()}`;
+  return `- ${openAskAge(ask.age_seconds)} · ${priority}${ownerTitle(ask.owner)} · ${ask.question} · ${new URL(ask.ref, baseUrl).toString()}`;
 }
 
 export function formatOpenAsksSummary(response: OpenAsksResponse, baseUrl: string): string {

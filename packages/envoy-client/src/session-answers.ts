@@ -1,9 +1,10 @@
-import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SessionAnswer, SessionAnswerRelation } from "@legion/contracts";
 import type { DispatchConfigResolution } from "./dispatch-config";
 import { DispatchClient, DispatchServiceError } from "./dispatch-http";
+import { ownerTitle } from "./dispatch-owner";
+import { sessionDirectory, writeAtomically } from "./dispatch-session-directory";
 import { messageFor } from "./errors";
 
 /**
@@ -80,12 +81,7 @@ export function renderSessionAnswerItem(item: SessionAnswer): string {
   const relation = `${RELATION_PHRASES[item.relation]}${item.replaced === true ? " (replaces an earlier answer)" : ""}`;
   const head = [item.at, `user ${item.author.id}`, relation];
   if (item.edited_at !== undefined) head.push(`edited ${item.edited_at}`);
-  const owner =
-    item.owner === null
-      ? undefined
-      : "issue" in item.owner
-        ? `${item.owner.issue.key}: ${item.owner.issue.title}`
-        : `${item.owner.document.project} / ${item.owner.document.name}`;
+  const owner = item.owner === null ? undefined : ownerTitle(item.owner);
   const where =
     item.ref === null
       ? `Direct message ${item.id}, on no issue`
@@ -127,14 +123,14 @@ export interface RenderSessionAnswersOptions {
    *  when the server cut the list short with `max_chars`, so the left-out count covers the items
    *  it did not send; the items' own count when unset. */
   readonly total?: number | undefined;
-  /** When the list was read, set when a cached list stands in for a read that failed: the header
-   *  says so on its second line. */
-  readonly cachedAt?: string | undefined;
+  /** Set when a cached list stands in for a read that failed: when that list was read and why
+   *  this read failed, which the header names on its second line. */
+  readonly cached?: { readonly readAt: string; readonly reason: string } | undefined;
 }
 
 /**
  * The per-request message: `SESSION_ANSWERS_MARKER` (and, for a cached list, `As read at <time>;
- * Dispatch did not answer now.` on the next line), then each item newest first, blank-line
+ * this read failed: <reason>.` on the next line), then each item newest first, blank-line
  * separated, as a strict prefix under the cap: the whole message, header and left-out line
  * included, is shorter than `SESSION_ANSWERS_MAX_CHARS` (at most 7,999 characters, as the
  * left-out line's "under 8,000" says); the first item that does not fit is left
@@ -154,9 +150,9 @@ export function renderSessionAnswers(
   const count = shown.length + unsent;
   if (count === 0) return undefined;
   const header =
-    options.cachedAt === undefined
+    options.cached === undefined
       ? SESSION_ANSWERS_MARKER
-      : `${SESSION_ANSWERS_MARKER}\nAs read at ${options.cachedAt}; Dispatch did not answer now.`;
+      : `${SESSION_ANSWERS_MARKER}\nAs read at ${options.cached.readAt}; this read failed: ${options.cached.reason.replace(/\s+/g, " ").trim()}.`;
   const blocks: string[] = [];
   let length = header.length;
   for (const item of shown) {
@@ -185,13 +181,15 @@ export function renderSessionAnswersList(
   ].join("\n\n");
 }
 
-/** The line a request carries in place of the list when no list has ever been read. */
+/** The line a request carries in place of the list when no list it could carry renders. */
 export function sessionAnswersFailureLine(reason: string): string {
   return `${FAILURE_MARKER}${reason.replace(/\s+/g, " ").trim()}); run \`dispatch answers\`.]`;
 }
 
-/** The last list read for a session, as memory and `answers.json` keep it. */
+/** The last list read for a session from one Dispatch, as memory and `answers.json` keep it. */
 export interface SessionAnswersCache {
+  /** The Dispatch URL the list was read from: only a read of that URL carries it. */
+  readonly dispatch_url: string;
   /** When the read answered (ISO 8601 UTC). */
   readonly read_at: string;
   /** `SessionAnswersResponse.total` of that read. */
@@ -202,18 +200,20 @@ export interface SessionAnswersCache {
 
 type ReadOutcome = { readonly cache: SessionAnswersCache } | { readonly failure: string };
 
-/** One session's read state. */
+/** One session's read state for one Dispatch URL. */
 interface SessionEntry {
-  /** The last list read, from a read in this process or `answers.json`. */
+  /** The last list read from that URL, from a read in this process or `answers.json`. */
   cache: SessionAnswersCache | undefined;
-  /** The read in flight, which every request of the session joins; it never rejects. */
+  /** The read in flight to that URL, which every request of the session to it joins; it never
+   *  rejects. */
   inFlight: Promise<ReadOutcome> | undefined;
   /** Whether a request already waited the whole deadline on `inFlight`, so no other waits on it. */
   overdue: boolean;
 }
 
 interface SessionAnswersState {
-  readonly sessions: Map<string, SessionEntry>;
+  /** Each session's read state, by session id and then by Dispatch URL. */
+  readonly sessions: Map<string, Map<string, SessionEntry>>;
   /** Until when (epoch ms) each Dispatch URL that answered 404 is not asked again. */
   readonly noRouteUntil: Map<string, number>;
 }
@@ -221,9 +221,9 @@ interface SessionAnswersState {
 /** The process-wide read state. It lives on `globalThis` under a registered symbol, as
  *  `envoy-config.ts`'s kept command outcomes do, because Oh My Pi loads each extension instance
  *  (a subagent's included) as a fresh module, and the parent and every subagent share one read
- *  and one cache per session. Its shape (`SessionAnswersState`) is its contract across bundles: a
- *  change to it takes a new key (`.v2`). */
-const STATE_KEY: unique symbol = Symbol.for("legion.pi-envoy.session-answers.v1");
+ *  and one cache per session and Dispatch URL. Its shape (`SessionAnswersState`) is its contract
+ *  across bundles: a change to it takes a new key (`.v3`). */
+const STATE_KEY: unique symbol = Symbol.for("legion.pi-envoy.session-answers.v2");
 const processGlobal = globalThis as typeof globalThis & {
   [STATE_KEY]?: SessionAnswersState;
 };
@@ -235,14 +235,21 @@ processGlobal[STATE_KEY] = state;
 
 const CACHE_FILE = "answers.json";
 
-/** `answers.json` under `directory`, or undefined when it cannot be read or is not a cache: a
- *  missing or broken cache only means the request has no list to carry. */
-function readCacheFile(directory: string): SessionAnswersCache | undefined {
+/** `answers.json` under `directory` when it holds a list read from `url` (from any Dispatch when
+ *  `url` is undefined), else undefined: a missing or broken cache, or one another Dispatch
+ *  answered, only means the request has no list to carry. */
+function readCacheFile(
+  directory: string,
+  url: string | undefined
+): SessionAnswersCache | undefined {
   try {
     const value: unknown = JSON.parse(readFileSync(join(directory, CACHE_FILE), "utf-8"));
     if (
       typeof value === "object" &&
       value !== null &&
+      "dispatch_url" in value &&
+      typeof value.dispatch_url === "string" &&
+      (url === undefined || value.dispatch_url === url) &&
       "read_at" in value &&
       typeof value.read_at === "string" &&
       "total" in value &&
@@ -250,30 +257,19 @@ function readCacheFile(directory: string): SessionAnswersCache | undefined {
       "items" in value &&
       Array.isArray(value.items)
     ) {
-      // Only `writeCacheFile` writes this file, owner-only in the session's private directory,
-      // with the items a Dispatch read answered.
-      return { read_at: value.read_at, total: value.total, items: value.items as SessionAnswer[] };
+      // Only `readSessionAnswers` writes this file, owner-only in the session's private
+      // directory, with the items a Dispatch read answered.
+      return {
+        dispatch_url: value.dispatch_url,
+        read_at: value.read_at,
+        total: value.total,
+        items: value.items as SessionAnswer[],
+      };
     }
   } catch {
     // Missing, unreadable or not JSON: no cache.
   }
   return undefined;
-}
-
-/** Writes `cache` to `answers.json` under `directory` through a temporary file and `rename`, so a
- *  reader in another process sees the old list or the new one, never part of one. The session
- *  state's own `writeAtomically` is not imported: that module imports `dispatch-execute`, which
- *  imports this one. */
-function writeCacheFile(directory: string, cache: SessionAnswersCache): void {
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const temporary = join(directory, `${CACHE_FILE}.${process.pid}.${randomUUID()}.tmp`);
-  try {
-    writeFileSync(temporary, JSON.stringify(cache), { mode: 0o600 });
-    renameSync(temporary, join(directory, CACHE_FILE));
-  } catch (error) {
-    rmSync(temporary, { force: true });
-    throw error;
-  }
 }
 
 export interface ReadSessionAnswersOptions {
@@ -283,9 +279,10 @@ export interface ReadSessionAnswersOptions {
    *  command runs on the request path. Off with a notice (nothing configures Dispatch) reads
    *  nothing; off with an error is a failed read with that error as its reason. */
   readonly dispatch: DispatchConfigResolution;
-  /** The session's state directory (`sessionDirectory(env, session)`), which holds `answers.json`;
-   *  unset keeps the cache in memory only. */
-  readonly stateDirectory?: string | undefined;
+  /** The environment the session's state directory is worked out from
+   *  (`sessionDirectory(env, session)`), which holds `answers.json`. A session id that is not one
+   *  plain path segment keeps the cache in memory only. */
+  readonly env: Readonly<Record<string, string | undefined>>;
   readonly fetchImpl?: typeof fetch | undefined;
   /** The request's own abort: it stops this call's wait, never the shared read. */
   readonly signal?: AbortSignal | undefined;
@@ -300,8 +297,8 @@ export interface SessionAnswersRead {
    *  there is nothing to show or Dispatch is not configured. */
   readonly text: string | undefined;
   /** `fresh`: this request's read answered. `cache`: it did not, and the last list read stands
-   *  in. `failure`: it did not and no list was ever read, so `text` is the failure line. `off`:
-   *  nothing configures Dispatch. */
+   *  in. `failure`: it did not and no list read has an item inside the 72 hours, so `text` is the
+   *  failure line. `off`: nothing configures Dispatch. */
   readonly source: "fresh" | "cache" | "failure" | "off";
   /** When the list shown was read (`fresh` and `cache`). */
   readonly readAt?: string;
@@ -333,57 +330,82 @@ async function settleWithin<T>(
 
 /**
  * The list for one model request, never throwing. Every request reads it; one read is in flight
- * per session for the whole process, and every request of the session (the parent's and each
- * subagent's) joins it. A request waits at most `deadlineMs` (800 ms); past that it carries the last
- * list read, and the read goes on in the background (for at most 10 s) and fills the cache when it
- * answers. While a read that a request already waited out is still in flight, a new
- * request does not wait on it: it carries the cache at once. The cache is in memory, keyed by
- * session, and in `answers.json` under `stateDirectory`, loaded when memory has none; a cached
- * list is rendered with its read time and filtered by the 72 hours again. With no list ever read,
- * a failed read carries the failure line naming why. A Dispatch that answers 404 has no answers
- * route: no request goes to its URL for 5 minutes, process-wide.
+ * per session and Dispatch URL for the whole process, and every request of the session (the
+ * parent's and each subagent's) to that URL joins it. A request waits at most `deadlineMs`
+ * (800 ms); past that it carries the last list read, and the read goes on in the background (for
+ * at most 10 s) and fills the cache when it answers. While a read that a request already waited
+ * out is still in flight, a new request does not wait on it: it carries the cache at once. The
+ * cache is in memory, keyed by session and Dispatch URL, and in `answers.json` under the
+ * session's state directory (`sessionDirectory(env, session)`) with the URL it was read from,
+ * loaded when memory has none for that URL; a list read from another Dispatch is never carried.
+ * A cached list is rendered with its read time and the reason this read failed, and filtered by
+ * the 72 hours again. When no cached list renders (none was read, it was empty, or every item is
+ * now past 72 hours), a failed read carries the failure line naming why. Dispatch off with an
+ * error has no URL to check a cache against: the last list the session read, from any Dispatch,
+ * stands in. A Dispatch that answers 404 has no answers route: no request goes to its URL for 5
+ * minutes, process-wide.
  */
 export async function readSessionAnswers(
   options: ReadSessionAnswersOptions
 ): Promise<SessionAnswersRead> {
   const now = options.now ?? Date.now;
-  const { dispatch, session, stateDirectory } = options;
+  const { dispatch, session } = options;
   if (!dispatch.enabled && dispatch.error === null) {
     return { text: undefined, source: "off", reason: dispatch.notice };
   }
-  const current: SessionEntry = state.sessions.get(session) ?? {
+  let directory: string | undefined;
+  try {
+    directory = sessionDirectory(options.env, session);
+  } catch {
+    // An id that is not one plain path segment keeps no answers.json; the read still runs.
+  }
+  const entries = state.sessions.get(session) ?? new Map<string, SessionEntry>();
+  state.sessions.set(session, entries);
+  const carry = (cache: SessionAnswersCache | undefined, reason: string): SessionAnswersRead => {
+    const text =
+      cache === undefined
+        ? undefined
+        : renderSessionAnswers(cache.items, {
+            now: now(),
+            total: cache.total,
+            cached: { readAt: cache.read_at, reason },
+          });
+    // A cache that renders nothing is no list to show: the failure line keeps a read that failed
+    // from looking like no person wrote.
+    if (cache === undefined || text === undefined) {
+      return { text: sessionAnswersFailureLine(reason), source: "failure", reason };
+    }
+    return { text, source: "cache", readAt: cache.read_at, reason };
+  };
+  if (!dispatch.enabled) {
+    let newest: SessionAnswersCache | undefined;
+    for (const { cache } of entries.values()) {
+      if (cache !== undefined && (newest === undefined || cache.read_at > newest.read_at)) {
+        newest = cache;
+      }
+    }
+    newest ??= directory === undefined ? undefined : readCacheFile(directory, undefined);
+    return carry(newest, dispatch.error);
+  }
+  const { url } = dispatch;
+  const current: SessionEntry = entries.get(url) ?? {
     cache: undefined,
     inFlight: undefined,
     overdue: false,
   };
-  state.sessions.set(session, current);
-  if (current.cache === undefined && stateDirectory !== undefined) {
-    current.cache = readCacheFile(stateDirectory);
+  entries.set(url, current);
+  if (current.cache === undefined && directory !== undefined) {
+    current.cache = readCacheFile(directory, url);
   }
-  const carry = (reason: string): SessionAnswersRead => {
-    const { cache } = current;
-    if (cache === undefined) {
-      return { text: sessionAnswersFailureLine(reason), source: "failure", reason };
-    }
-    return {
-      text: renderSessionAnswers(cache.items, {
-        now: now(),
-        total: cache.total,
-        cachedAt: cache.read_at,
-      }),
-      source: "cache",
-      readAt: cache.read_at,
-      reason,
-    };
-  };
-  if (!dispatch.enabled) return carry(dispatch.error);
-  if ((state.noRouteUntil.get(dispatch.url) ?? 0) > now()) return carry(NO_ANSWERS_ROUTE_REASON);
+  if ((state.noRouteUntil.get(url) ?? 0) > now()) {
+    return carry(current.cache, NO_ANSWERS_ROUTE_REASON);
+  }
   if (current.inFlight !== undefined && current.overdue) {
-    return carry("an earlier read is still waiting on Dispatch");
+    return carry(current.cache, "an earlier read is still waiting on Dispatch");
   }
   let read = current.inFlight;
   if (read === undefined) {
-    const client = new DispatchClient(dispatch.url, dispatch.token, options.fetchImpl ?? fetch);
+    const client = new DispatchClient(url, dispatch.token, options.fetchImpl ?? fetch);
     const started = client
       .sessionAnswers(session, {
         maxChars: SESSION_ANSWERS_MAX_CHARS,
@@ -396,15 +418,17 @@ export async function readSessionAnswers(
           if (!Array.isArray(response?.items) || typeof response.total !== "number") {
             return { failure: "Dispatch answered with something that is not an answers list" };
           }
-          const cache = {
+          const cache: SessionAnswersCache = {
+            dispatch_url: url,
             read_at: new Date(now()).toISOString(),
             total: response.total,
             items: response.items,
           };
           current.cache = cache;
-          if (stateDirectory !== undefined) {
+          if (directory !== undefined) {
             try {
-              writeCacheFile(stateDirectory, cache);
+              mkdirSync(directory, { recursive: true, mode: 0o700 });
+              writeAtomically(join(directory, CACHE_FILE), JSON.stringify(cache));
             } catch {
               // The memory cache still holds it; the next read writes the file again.
             }
@@ -413,7 +437,7 @@ export async function readSessionAnswers(
         },
         (error: unknown): ReadOutcome => {
           if (isNoAnswersRoute(error)) {
-            state.noRouteUntil.set(dispatch.url, now() + NO_ROUTE_BACKOFF_MS);
+            state.noRouteUntil.set(url, now() + NO_ROUTE_BACKOFF_MS);
             return { failure: NO_ANSWERS_ROUTE_REASON };
           }
           return { failure: messageFor(error) };
@@ -432,10 +456,12 @@ export async function readSessionAnswers(
   const outcome = await settleWithin(read, deadlineMs, options.signal);
   if (outcome === "deadline") {
     if (current.inFlight === read) current.overdue = true;
-    return carry(`Dispatch did not answer within ${deadlineMs} ms`);
+    return carry(current.cache, `Dispatch did not answer within ${deadlineMs} ms`);
   }
-  if (outcome === "aborted") return carry("the request was cancelled before Dispatch answered");
-  if ("failure" in outcome) return carry(outcome.failure);
+  if (outcome === "aborted") {
+    return carry(current.cache, "the request was cancelled before Dispatch answered");
+  }
+  if ("failure" in outcome) return carry(current.cache, outcome.failure);
   return {
     text: renderSessionAnswers(outcome.cache.items, {
       now: now(),
@@ -446,9 +472,12 @@ export async function readSessionAnswers(
   };
 }
 
-/** Settles once the read in flight for `session`, if any, has filled the cache or failed. A
- *  short-lived host (claude-envoy's hook) awaits it after printing, within a budget of its own, so
- *  a read that answered past the deadline still writes `answers.json` for the next process. */
+/** Settles once every read in flight for `session`, to any Dispatch, has filled its cache or
+ *  failed. A short-lived host (claude-envoy's hook) awaits it after printing, within a budget of
+ *  its own, so a read that answered past the deadline still writes `answers.json` for the next
+ *  process. */
 export async function sessionAnswersSettled(session: string): Promise<void> {
-  await state.sessions.get(session)?.inFlight;
+  await Promise.all(
+    Array.from(state.sessions.get(session)?.values() ?? [], (entry) => entry.inFlight)
+  );
 }

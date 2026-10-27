@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   existsSync,
   linkSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -20,6 +21,7 @@ import {
   renderSessionAnswers,
   renderSessionAnswersList,
   SESSION_ANSWERS_MARKER,
+  type SessionAnswersRead,
   sessionAnswersFailureLine,
   sessionAnswersSettled,
 } from "../session-answers";
@@ -198,14 +200,14 @@ describe("renderSessionAnswers", () => {
     expect(renderSessionAnswers(items, { now: NOW + 2 * 3_600_000 })).toBeUndefined();
   });
 
-  test("a cached list keeps the first line and says when it was read on the second", () => {
+  test("a cached list keeps the first line and names its read time and why this read failed on the second", () => {
     const rendered = renderSessionAnswers([direct], {
       now: NOW,
-      cachedAt: "2026-10-27T11:59:00.000Z",
+      cached: { readAt: "2026-10-27T11:59:00.000Z", reason: "token\n  revoked" },
     });
     expect(rendered?.split("\n").slice(0, 2)).toEqual([
       SESSION_ANSWERS_MARKER,
-      "As read at 2026-10-27T11:59:00.000Z; Dispatch did not answer now.",
+      "As read at 2026-10-27T11:59:00.000Z; this read failed: token revoked.",
     ]);
   });
 });
@@ -280,15 +282,57 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+/** The environment `readSessionAnswers` works the session's state directory out from. */
+const envAt = (root: string) => ({ DISPATCH_STATE_DIR: root });
+/** Where the session's `answers.json` lives under the state root `root`. */
+const cacheFile = (root: string, session: string) =>
+  join(root, "sessions", session, "answers.json");
+const hostOf = (dispatch: ActiveDispatchConfig) => new URL(dispatch.url).host;
+
+/** Each way a read fails, with the reason it gives and how long a request waits on it. */
+const failedReads = [
+  {
+    kind: "401",
+    reason: "token revoked",
+    deadlineMs: 2_000,
+    respond: () => json({ code: "UNAUTHORIZED", error: "token revoked" }, 401),
+  },
+  {
+    kind: "5xx",
+    reason: "database is down",
+    deadlineMs: 2_000,
+    respond: () => json({ code: "INTERNAL", error: "database is down" }, 500),
+  },
+  {
+    kind: "a hang past the deadline",
+    reason: "Dispatch did not answer within 50 ms",
+    deadlineMs: 50,
+    respond: () => new Promise<Response>(() => undefined),
+  },
+  {
+    kind: "a body that is no answers list",
+    reason: "Dispatch answered with something that is not an answers list",
+    deadlineMs: 2_000,
+    respond: () => json({ session_id: "s", topics: [] }),
+  },
+  {
+    kind: "404",
+    reason: NO_ANSWERS_ROUTE_REASON,
+    deadlineMs: 2_000,
+    respond: () => json({ code: "NOT_FOUND", error: "no route" }, 404),
+  },
+] as const;
+
 describe("readSessionAnswers", () => {
-  test("reads the list with max_chars, renders it, and keeps it in answers.json", async () => {
-    const directory = stateDir();
+  test("reads the list with max_chars, renders it, and keeps it in answers.json with its Dispatch URL", async () => {
+    const root = stateDir();
     const session = newSession();
+    const dispatch = dispatchAt();
     const { calls, fetchImpl } = fakeDispatch(() => listed(recent));
     const read = await readSessionAnswers({
       session,
-      dispatch: dispatchAt(),
-      stateDirectory: directory,
+      dispatch,
+      env: envAt(root),
       fetchImpl,
       now: () => NOW,
     });
@@ -300,7 +344,8 @@ describe("readSessionAnswers", () => {
     expect(calls.map((call) => call.url.pathname + call.url.search)).toEqual([
       `/api/v1/agents/${session}/answers?max_chars=8000`,
     ]);
-    expect(JSON.parse(readFileSync(join(directory, "answers.json"), "utf-8"))).toEqual({
+    expect(JSON.parse(readFileSync(cacheFile(root, session), "utf-8"))).toEqual({
+      dispatch_url: dispatch.url,
       read_at: new Date(NOW).toISOString(),
       total: 2,
       items: recent,
@@ -314,7 +359,7 @@ describe("readSessionAnswers", () => {
     const read = await readSessionAnswers({
       session: newSession(),
       dispatch: dispatchAt(),
-      stateDirectory: stateDir(),
+      env: envAt(stateDir()),
       fetchImpl,
       now: () => NOW,
     });
@@ -327,64 +372,199 @@ describe("readSessionAnswers", () => {
   });
 
   test("a 200 whose body is no answers list is a failed read, not a cache and not a throw", async () => {
-    const directory = stateDir();
+    const root = stateDir();
+    const session = newSession();
     const { fetchImpl } = fakeDispatch(() => json({ session_id: "s", topics: [] }));
     const read = await readSessionAnswers({
-      session: newSession(),
+      session,
       dispatch: dispatchAt(),
-      stateDirectory: directory,
+      env: envAt(root),
       fetchImpl,
       now: () => NOW,
     });
     const reason = "Dispatch answered with something that is not an answers list";
     expect(read).toEqual({ text: sessionAnswersFailureLine(reason), source: "failure", reason });
-    expect(existsSync(join(directory, "answers.json"))).toBe(false);
+    expect(existsSync(cacheFile(root, session))).toBe(false);
   });
 
-  test("a failed read after a good one carries the cached list, saying when it was read", async () => {
-    const session = newSession();
-    const dispatch = dispatchAt();
+  for (const { kind, reason, deadlineMs, respond } of failedReads) {
+    test(`after an empty read, a failed read (${kind}) carries the failure line naming why`, async () => {
+      let fail = false;
+      const { fetchImpl } = fakeDispatch(() => (fail ? respond() : listed([])));
+      const options = {
+        session: newSession(),
+        dispatch: dispatchAt(),
+        env: envAt(stateDir()),
+        fetchImpl,
+        now: () => NOW,
+      };
+      expect(await readSessionAnswers(options)).toEqual({
+        text: undefined,
+        source: "fresh",
+        readAt: new Date(NOW).toISOString(),
+      });
+      fail = true;
+      expect(await readSessionAnswers({ ...options, deadlineMs })).toEqual({
+        text: sessionAnswersFailureLine(reason),
+        source: "failure",
+        reason,
+      });
+    });
+
+    test(`after a non-empty read, a failed read (${kind}) carries the cached list, its header naming why`, async () => {
+      let fail = false;
+      const { fetchImpl } = fakeDispatch(() => (fail ? respond() : listed(recent)));
+      const options = {
+        session: newSession(),
+        dispatch: dispatchAt(),
+        env: envAt(stateDir()),
+        fetchImpl,
+      };
+      await readSessionAnswers({ ...options, now: () => NOW });
+      fail = true;
+      const later = NOW + 60_000;
+      const read = await readSessionAnswers({ ...options, now: () => later, deadlineMs });
+      const readAt = new Date(NOW).toISOString();
+      expect(read).toEqual({
+        text: renderSessionAnswers(recent, { now: later, cached: { readAt, reason } }),
+        source: "cache",
+        readAt,
+        reason,
+      });
+      expect(read.text?.split("\n").slice(0, 2)).toEqual([
+        SESSION_ANSWERS_MARKER,
+        `As read at ${readAt}; this read failed: ${reason}.`,
+      ]);
+    });
+  }
+
+  test("a failed read carries the failure line once every cached item is past 72 hours", async () => {
     let fail = false;
     const { fetchImpl } = fakeDispatch(() =>
-      fail ? json({ code: "INTERNAL", error: "database is down" }, 500) : listed(recent)
+      fail ? json({ code: "UNAUTHORIZED", error: "token revoked" }, 401) : listed(recent)
     );
-    const options = { session, dispatch, stateDirectory: stateDir(), fetchImpl };
+    const options = {
+      session: newSession(),
+      dispatch: dispatchAt(),
+      env: envAt(stateDir()),
+      fetchImpl,
+    };
     await readSessionAnswers({ ...options, now: () => NOW });
     fail = true;
-    const later = NOW + 60_000;
-    const read = await readSessionAnswers({ ...options, now: () => later });
-    const readAt = new Date(NOW).toISOString();
+    const read = await readSessionAnswers({ ...options, now: () => NOW + 73 * 3_600_000 });
     expect(read).toEqual({
-      text: renderSessionAnswers(recent, { now: later, cachedAt: readAt }),
-      source: "cache",
-      readAt,
-      reason: "database is down",
+      text: sessionAnswersFailureLine("token revoked"),
+      source: "failure",
+      reason: "token revoked",
     });
-    expect(read.text?.split("\n").slice(0, 2)).toEqual([
-      SESSION_ANSWERS_MARKER,
-      `As read at ${readAt}; Dispatch did not answer now.`,
-    ]);
   });
 
   test("loads answers.json when memory holds no list, as after a restart", async () => {
-    const directory = stateDir();
+    const root = stateDir();
+    const session = newSession();
+    const dispatch = dispatchAt();
     const readAt = hoursAgo(0.5);
+    mkdirSync(join(root, "sessions", session), { recursive: true });
     writeFileSync(
-      join(directory, "answers.json"),
-      JSON.stringify({ read_at: readAt, total: 2, items: recent })
+      cacheFile(root, session),
+      JSON.stringify({ dispatch_url: dispatch.url, read_at: readAt, total: 2, items: recent })
     );
     const { fetchImpl } = fakeDispatch(() => {
       throw new TypeError("Unable to connect");
     });
     const read = await readSessionAnswers({
-      session: newSession(),
-      dispatch: dispatchAt(),
-      stateDirectory: directory,
+      session,
+      dispatch,
+      env: envAt(root),
       fetchImpl,
       now: () => NOW,
     });
     expect(read.source).toBe("cache");
-    expect(read.text).toBe(renderSessionAnswers(recent, { now: NOW, cachedAt: readAt }));
+    expect(read.text).toBe(
+      renderSessionAnswers(recent, {
+        now: NOW,
+        cached: { readAt, reason: "Unable to connect" },
+      })
+    );
+  });
+
+  test("a list read from one Dispatch is never carried for another, from memory or answers.json", async () => {
+    const root = stateDir();
+    const session = newSession();
+    const a = dispatchAt();
+    const b = dispatchAt();
+    let aFails = false;
+    const failure = () => json({ code: "INTERNAL", error: "database is down" }, 500);
+    const { fetchImpl } = fakeDispatch((call) =>
+      call.url.host === hostOf(a) && !aFails ? listed(recent) : failure()
+    );
+    const options = { env: envAt(root), fetchImpl, now: () => NOW };
+    const fromA = await readSessionAnswers({ ...options, session, dispatch: a });
+    expect(fromA.source).toBe("fresh");
+    const notCarried: SessionAnswersRead = {
+      text: sessionAnswersFailureLine("database is down"),
+      source: "failure",
+      reason: "database is down",
+    };
+    expect(await readSessionAnswers({ ...options, session, dispatch: b })).toEqual(notCarried);
+
+    // A's answers.json, in a process with no list in memory (another session's directory here).
+    const restarted = newSession();
+    mkdirSync(join(root, "sessions", restarted), { recursive: true });
+    writeFileSync(cacheFile(root, restarted), readFileSync(cacheFile(root, session)));
+    aFails = true;
+    expect(await readSessionAnswers({ ...options, session: restarted, dispatch: b })).toEqual(
+      notCarried
+    );
+    const carried = await readSessionAnswers({ ...options, session: restarted, dispatch: a });
+    expect(carried.source).toBe("cache");
+    expect(carried.readAt).toBe(fromA.readAt);
+  });
+
+  test("a request to one Dispatch does not join a read in flight to another", async () => {
+    const session = newSession();
+    const a = dispatchAt();
+    const b = dispatchAt();
+    const pendingA = deferred<Response>();
+    const { calls, fetchImpl } = fakeDispatch((call) =>
+      call.url.host === hostOf(a) ? pendingA.promise : listed([direct])
+    );
+    const options = {
+      session,
+      env: envAt(stateDir()),
+      fetchImpl,
+      now: () => NOW,
+      deadlineMs: 2_000,
+    };
+    const fromA = readSessionAnswers({ ...options, dispatch: a });
+    const fromB = await readSessionAnswers({ ...options, dispatch: b });
+    expect(fromB).toEqual({
+      text: renderSessionAnswers([direct], { now: NOW }),
+      source: "fresh",
+      readAt: new Date(NOW).toISOString(),
+    });
+    expect(calls.map((call) => call.url.host)).toEqual([hostOf(a), hostOf(b)]);
+    pendingA.resolve(listed(recent));
+    expect((await fromA).text).toBe(renderSessionAnswers(recent, { now: NOW }));
+  });
+
+  test("a session id that is not one plain path segment keeps its list in memory only", async () => {
+    const root = stateDir();
+    let fail = false;
+    const { fetchImpl } = fakeDispatch(() =>
+      fail ? json({ code: "INTERNAL", error: "database is down" }, 500) : listed(recent)
+    );
+    const options = {
+      session: `../${newSession()}`,
+      dispatch: dispatchAt(),
+      env: envAt(root),
+      fetchImpl,
+      now: () => NOW,
+    };
+    expect((await readSessionAnswers(options)).source).toBe("fresh");
+    expect(readdirSync(root)).toEqual([]);
+    fail = true;
+    expect((await readSessionAnswers(options)).source).toBe("cache");
   });
 
   // The deadline is a real timer in the code under test, so this test waits on real time.
@@ -394,7 +574,7 @@ describe("readSessionAnswers", () => {
     const hung = deferred<Response>();
     let respond: () => Response | Promise<Response> = () => hung.promise;
     const { calls, fetchImpl } = fakeDispatch(() => respond());
-    const options = { session, dispatch, fetchImpl, now: () => NOW };
+    const options = { session, dispatch, env: envAt(stateDir()), fetchImpl, now: () => NOW };
 
     let started = performance.now();
     const first = await readSessionAnswers({ ...options, deadlineMs: 50 });
@@ -420,7 +600,10 @@ describe("readSessionAnswers", () => {
     expect(calls).toHaveLength(2);
     expect(third.source).toBe("cache");
     expect(third.text).toBe(
-      renderSessionAnswers(recent, { now: NOW, cachedAt: new Date(NOW).toISOString() })
+      renderSessionAnswers(recent, {
+        now: NOW,
+        cached: { readAt: new Date(NOW).toISOString(), reason: "database is down" },
+      })
     );
   });
 
@@ -430,7 +613,13 @@ describe("readSessionAnswers", () => {
     let respond: () => Response | Promise<Response> = () => hung.promise;
     const { calls, fetchImpl } = fakeDispatch(() => respond());
     const controller = new AbortController();
-    const options = { session, dispatch: dispatchAt(), fetchImpl, now: () => NOW };
+    const options = {
+      session,
+      dispatch: dispatchAt(),
+      env: envAt(stateDir()),
+      fetchImpl,
+      now: () => NOW,
+    };
     const waiting = readSessionAnswers({ ...options, signal: controller.signal });
     controller.abort();
     expect((await waiting).source).toBe("failure");
@@ -451,7 +640,14 @@ describe("readSessionAnswers", () => {
     const source = "../session-answers.ts";
     const copy: typeof SessionAnswersModule = await import(`${source}?copy`);
     expect(copy.readSessionAnswers).not.toBe(readSessionAnswers);
-    const options = { session, dispatch, fetchImpl, now: () => NOW, deadlineMs: 2_000 };
+    const options = {
+      session,
+      dispatch,
+      env: envAt(stateDir()),
+      fetchImpl,
+      now: () => NOW,
+      deadlineMs: 2_000,
+    };
     const parent = readSessionAnswers(options);
     const subagent = copy.readSessionAnswers(options);
     pending.resolve(listed(recent));
@@ -467,7 +663,7 @@ describe("readSessionAnswers", () => {
       json({ code: "NOT_FOUND", error: `no route for GET ${call.url.pathname}` }, 404)
     );
     let clock = NOW;
-    const options = { dispatch, fetchImpl, now: () => clock };
+    const options = { dispatch, env: envAt(stateDir()), fetchImpl, now: () => clock };
     const first = await readSessionAnswers({ ...options, session: newSession() });
     expect(first).toEqual({
       text: sessionAnswersFailureLine(NO_ANSWERS_ROUTE_REASON),
@@ -488,9 +684,11 @@ describe("readSessionAnswers", () => {
     const { calls, fetchImpl } = fakeDispatch(() => listed(recent));
     const notRun =
       "/home/u/envoy.json: dispatch.token's command has not run in this process yet, and this read does not run it";
+    const env = envAt(stateDir());
     const failed = await readSessionAnswers({
       session: newSession(),
       dispatch: { enabled: false, notice: null, error: notRun },
+      env,
       fetchImpl,
     });
     expect(failed).toEqual({
@@ -501,27 +699,53 @@ describe("readSessionAnswers", () => {
     const off = await readSessionAnswers({
       session: newSession(),
       dispatch: { enabled: false, notice: "Dispatch is off", error: null },
+      env,
       fetchImpl,
     });
     expect(off).toEqual({ text: undefined, source: "off", reason: "Dispatch is off" });
     expect(calls).toHaveLength(0);
   });
 
+  test("Dispatch off with an error, which names no URL, carries the last list the session read", async () => {
+    const session = newSession();
+    const env = envAt(stateDir());
+    const { fetchImpl } = fakeDispatch(() => listed(recent));
+    await readSessionAnswers({ session, dispatch: dispatchAt(), env, fetchImpl, now: () => NOW });
+    const notRun = "dispatch.token's command has not run in this process yet";
+    const readAt = new Date(NOW).toISOString();
+    expect(
+      await readSessionAnswers({
+        session,
+        dispatch: { enabled: false, notice: null, error: notRun },
+        env,
+        now: () => NOW,
+      })
+    ).toEqual({
+      text: renderSessionAnswers(recent, { now: NOW, cached: { readAt, reason: notRun } }),
+      source: "cache",
+      readAt,
+      reason: notRun,
+    });
+  });
+
   test("writes answers.json atomically: a new file renamed over the old, owner-only, no temporary left", async () => {
-    const directory = stateDir();
-    const file = join(directory, "answers.json");
-    const old = JSON.stringify({ read_at: hoursAgo(1), total: 0, items: [] });
+    const root = stateDir();
+    const session = newSession();
+    const dispatch = dispatchAt();
+    const directory = join(root, "sessions", session);
+    mkdirSync(directory, { recursive: true });
+    const file = cacheFile(root, session);
+    const old = JSON.stringify({
+      dispatch_url: dispatch.url,
+      read_at: hoursAgo(1),
+      total: 0,
+      items: [],
+    });
     writeFileSync(file, old);
     // A second name for the old file: a write in place would change what it reads too.
     linkSync(file, join(directory, "answers.old"));
     const { fetchImpl } = fakeDispatch(() => listed(recent));
-    await readSessionAnswers({
-      session: newSession(),
-      dispatch: dispatchAt(),
-      stateDirectory: directory,
-      fetchImpl,
-      now: () => NOW,
-    });
+    await readSessionAnswers({ session, dispatch, env: envAt(root), fetchImpl, now: () => NOW });
     expect(readFileSync(join(directory, "answers.old"), "utf-8")).toBe(old);
     expect(JSON.parse(readFileSync(file, "utf-8")).items).toEqual(recent);
     expect(statSync(file).mode & 0o777).toBe(0o600);

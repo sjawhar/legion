@@ -2,6 +2,7 @@ import { commandHelp, commandsHelp, type ParsedCommand, parseCommand } from "./d
 import type { ActiveDispatchConfig } from "./dispatch-config";
 import type { DispatchHost } from "./dispatch-cwd";
 import { checkDispatchCall, dispatchServerUrls, executeDispatchTool } from "./dispatch-execute";
+import { sessionDirectory, sessionStateRoot } from "./dispatch-session-directory";
 import {
   appendResult,
   loadSessionMemory,
@@ -9,8 +10,6 @@ import {
   type ResultInput,
   readSessionTitle,
   recordOutcome,
-  sessionDirectory,
-  sessionStateRoot,
   writeLongOutput,
   writePicture,
 } from "./dispatch-session-state";

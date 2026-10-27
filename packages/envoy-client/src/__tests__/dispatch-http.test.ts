@@ -362,7 +362,7 @@ describe("DispatchClient", () => {
     await client.docEdit("artifact-1", { ops: [], actor });
     await client.nameArtifactVersion("artifact-1", { summary: "Named", actor });
     await client.getAsk("ask-1");
-    await client.getComments("DSP-1", "artifact-1");
+    await client.getComments("DSP-1");
     await client.read("DSP-1");
 
     expect(
@@ -382,7 +382,7 @@ describe("DispatchClient", () => {
       "/api/v1/artifacts/artifact-1/edits",
       "/api/v1/artifacts/artifact-1/versions",
       "/api/v1/asks/ask-1",
-      "/api/v1/issues/DSP-1/comments?artifact=artifact-1",
+      "/api/v1/issues/DSP-1/comments",
       "/api/v1/issues/DSP-1",
       "/api/v1/issues/DSP-1/events?after=0&limit=10",
     ]);
