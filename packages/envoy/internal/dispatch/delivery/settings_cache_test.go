@@ -106,7 +106,7 @@ func TestTheIntakesReadNoSettingsWhileNothingChanges(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		cancel()
-		stop()
+		stop(context.Background())
 	})
 	awaitBoundDurable(t, publisher)
 	waitFor(t, 20*time.Second, func() bool {

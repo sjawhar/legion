@@ -39,6 +39,15 @@ const documentShutdownTimeout = docs.ShutdownDrainBudget + 5*time.Second
 // process context (api.Deps.Lifetime), which is cancelled before shutdown starts.
 const httpDrainBeforeDocuments = stopGrace - 5*time.Second - documentShutdownTimeout
 
+// intakeStopDeadline is how long after the signal main's stop of the intakes (delivery.StartIntakes)
+// lets their handlers run before giving them up: stopGrace less the 5 s reserve the document budget
+// ends inside too, which the given-up handlers' prompt return, their messages being handed back to
+// NATS and the clients closing fit in. The intakes begin stopping at the signal, beside the HTTP
+// drain and the document shutdown, under their own budget (delivery's intakeStopBudget, 15 s), so
+// they have normally returned before main reaches their stop; this deadline bounds the case they
+// have not.
+const intakeStopDeadline = stopGrace - 5*time.Second
+
 // silentProbes is how many health probes (store.Pool.Healthy, two seconds each) in a row must fail,
 // with no connection of the shared or document-rooms pool taken back meanwhile, before Dispatch
 // counts the database as having stopped answering. A probe that answers, or a connection taken

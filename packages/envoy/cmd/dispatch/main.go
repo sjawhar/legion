@@ -497,9 +497,11 @@ func main() {
 	go delivery.NewReconcile(database.Pool, appCtx.GitHub(), broker).Run(ctx, leases)
 	if natsClient != nil {
 		// The intake and the job intake (LEGION-690) each bind a durable, so each takes a client of
-		// its own (delivery.StartIntakes). stop waits for both Runs, which return once ctx is
-		// cancelled; the intake's returns once a message still in its handler has been
-		// acknowledged, so the clients close after it.
+		// its own (delivery.StartIntakes). Their Runs return once ctx is cancelled; the intake's
+		// begins stopping then, at the signal, beside the HTTP drain and the document shutdown, and
+		// returns once a message still in its handler has been acknowledged, or given up and handed
+		// back, so the clients close after it. stopIntakes has the handlers still running given up
+		// no later than intakeStopDeadline after the signal, which signalled records.
 		connectIntake := func(name string) (*bus.Client, error) {
 			return bus.Connect(envoyConfig.Envoy.NatsURLs, bus.WithEnvironment(env.lookup), bus.WithName(name))
 		}
@@ -508,9 +510,13 @@ func main() {
 			slog.Error("dispatch delivery: connect NATS", "error", err)
 			os.Exit(1)
 		}
+		signalled := make(chan time.Time, 1)
+		context.AfterFunc(ctx, func() { signalled <- time.Now() })
 		defer func() {
 			cancel()
-			stopIntakes()
+			stopCtx, cancelStop := context.WithDeadline(context.Background(), (<-signalled).Add(intakeStopDeadline))
+			defer cancelStop()
+			stopIntakes(stopCtx)
 		}()
 		// LEGION-781: the start, naming the stamped build commit, goes on the bus once the
 		// publisher is open, and is retried until the stream acknowledges it or the shutdown

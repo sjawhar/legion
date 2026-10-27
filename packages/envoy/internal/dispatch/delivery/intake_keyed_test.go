@@ -481,7 +481,7 @@ func TestAnIntakeSubscribesAtTheDeliverSubjectItIsGiven(t *testing.T) {
 	if _, err := intake.subscribe(wanted.DeliverSubject); err != nil {
 		t.Fatalf("subscribe at %s: %v", wanted.DeliverSubject, err)
 	}
-	t.Cleanup(intake.StopDelivering)
+	t.Cleanup(func() { intake.StopDelivering(context.Background()) })
 
 	publishPullRequestEnvelope(t, natsClient, "acme", "widgets", 7, map[string]string{
 		"kind": "pr", "action": "opened", "repo": "acme/widgets", "number": "7", "author": "octocat",
@@ -492,8 +492,8 @@ func TestAnIntakeSubscribesAtTheDeliverSubjectItIsGiven(t *testing.T) {
 		t.Fatalf("settings after the handled message = %+v, %v: want last_event_at recorded", settings, err)
 	}
 
-	intake.StopDelivering()
-	intake.StopDelivering()
+	intake.StopDelivering(t.Context())
+	intake.StopDelivering(t.Context())
 	waitFor(t, 5*time.Second, func() bool { return !deliveryConsumerInfo(t, natsClient).PushBound }, func() string {
 		return "the durable kept its subscriber after StopDelivering returned"
 	})
@@ -530,8 +530,8 @@ func TestAStoppedIntakeStaysStoppedAcrossAReconnectAndSubscribesAgain(t *testing
 	if _, err := intake.subscribe(recreate().DeliverSubject); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
-	t.Cleanup(intake.StopDelivering)
-	intake.StopDelivering()
+	t.Cleanup(func() { intake.StopDelivering(context.Background()) })
+	intake.StopDelivering(t.Context())
 	waitFor(t, 5*time.Second, func() bool { return !deliveryConsumerInfo(t, natsClient).PushBound }, func() string {
 		return "the durable kept its subscriber after StopDelivering returned"
 	})
