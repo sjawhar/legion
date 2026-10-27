@@ -1429,6 +1429,27 @@
 
 ### Fixed
 
+- A document load no longer replays the document's whole history, and an edit no longer waits
+  behind its document's compaction (INFRA-593). A room load or a cold read folded every stored
+  `doc_updates` row inside its transaction on the rooms pool, because compaction ran only as a
+  room closed, as the server shut down, and in the outbox's daily pass, which first ran 24 hours
+  after start and only with NATS configured; and a compaction folded while it held the
+  document's lock, so a browser's append waited for the whole fold. A load now reads the compacted
+  row and the rows since, buffers them up to 32 MiB and folds them after its transaction ends
+  (past that it folds them as it streams them), and a room's load no longer decodes a folded
+  state again before the room does. Compaction runs on any process from the log's length and
+  age: a per-process queue, fed by every append and every load, compacts a document once 16 rows
+  after its first are older than 2 minutes or one is older than 15 minutes, and an hourly sweep
+  under the `document-compaction` lease, with or without NATS, first ticks within 30 seconds of
+  start and compacts what the queues missed. It reads and folds on a two-connection pool of its
+  own (`dispatch-compaction`), so one server's stated connection ceiling is now 83; it holds no
+  document lock while it folds, writes under the lock only when the rows it folded are
+  unchanged, and leaves rows younger than 2 minutes as written. The LEGION-496 guarantee, that
+  `doc_updates` and any backup of it hold no text a write deleted, now holds within about 75
+  minutes of the write (the 2-minute tail, the 15-minute age rule, the hourly sweep) rather than
+  as a room closes, as the server shuts down and daily. ygo's `CompactEvery` setting and the
+  outbox's daily compaction are removed.
+
 - Every `envoy-infra` component refuses a number in an integer input that is not a whole number
   within the 64-bit integer range, at any depth (an object type's property, an array element, a
   map value), naming the component and the input's path and never quoting a secret value, before
