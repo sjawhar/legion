@@ -2,22 +2,20 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-158",
-  "completed": "2026-10-27T15:31:30Z",
-  "round": 12,
+  "completed": "2026-10-27T17:34:00Z",
+  "round": 13,
   "generation": 4,
-  "head": "ef8afb2f1aa00493f3dae45bd5dce59a97c90909",
+  "head": "ec86df97ac82e07909a3dc429e75eaf30c261fab",
   "decision": "approved",
   "critical": 0,
   "important": 0,
   "minor": 0,
-  "ci": "Required set: lint, typecheck, test, pr-title. At CI head ef8afb2f: lint, typecheck and test success (run 40519157011); pr-title success (runs 40519296539, 40519205758; an earlier run 40519157028 cancelled). Compare ef8afb2f...5495da27 changes only .legion/.",
-  "thermonuclear": "At ef8afb2f, scoped to e99160d9 and merge ef8afb2f: thermonuclear-deep-review APPROVE (33 assistant turns, all anthropic / claude-opus-5-5); thermonuclear-code-quality CHANGES on one cleanup only (7 assistant turns, all anthropic / claude-opus-5-5). Read turn by turn from each pass's session transcript.",
+  "ci": "Required set: lint, typecheck, test, pr-title. At CI head ec86df97 all four completed success (run 40534625245 for lint, typecheck, test; pr-title run 40534710736; one earlier pr-title run cancelled). Compare ec86df97...940f1420 changes only .legion/.",
+  "thermonuclear": "At ec86df97, scoped to that commit (the only code since approval 5669828805 at f5a6d47f, block_index.go 11 lines): thermonuclear-deep-review APPROVE (11 assistant turns, all anthropic / claude-opus-5-5); thermonuclear-code-quality APPROVE (4 assistant turns, all anthropic / claude-opus-5-5). Read turn by turn from each pass's session transcript.",
   "checks": {
-    "review 5667932178 race": "fixed: an entry is stored only when the listing read the issue open and the locked check found it live ahead, and reused only when the current listing reads open; traced through listed-closed/locked-open, listed-open/locked-closed, cached-then-closed (at most one tick of delay) and repeated flips; the new test fails against fd3bfa69",
-    "seventeenth merge": "rowResolution={false} on main's detached TextAskBlockCard is the required prop's only accurate value (ask is always undefined there, so rendering cannot change); no other new AskBlockCard call site; CHANGELOG resolution keeps both sides",
-    "leftovers()": "behaviour-identical to the two groupings it replaces",
-    "earlier findings": "none came back"
+    "ec86df97": "behaviour-preserving: block_index.go:174 is the only write to the live-ahead cache and requires document.open, tests only start from empty maps, so stillLiveAhead's dropped found.open was always true; the round-11 race stays closed by the write guard and the reader's document.open",
+    "skill split": "the backward move of 16:15Z was cancelled by the architect; the four skill files stay, unchanged since approval 5669828805"
   },
   "keyFindings": [],
-  "fastFollow": "Cleanup: stillLiveAhead's found.open is always true since only open listings are stored (block_index.go:216); state the rule once at the write."
+  "fastFollow": "none"
 }
