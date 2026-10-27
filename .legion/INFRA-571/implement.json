@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-571",
+  "completed": "2026-10-27T05:33:37Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2364",
+  "codeHead": "0fa111cd6ada",
+  "proof": [
+    {
+      "criterion": "A run that migrates a Postgres 16 database, upgrades it to 18 with pg_upgrade, then starts the server and runs a search and an issue creation, passes; its output is quoted on the pull request (P5)",
+      "surface": "Dispatch server and dispatch CLI on local PGDG PostgreSQL 16.15 / 18.6 clusters with pgvector 0.8.7 (script dispatch://INFRA-571/artifact/pg-upgrade-run-sh, harness dispatch://INFRA-571/artifact/pg-harness-setup-sh)",
+      "command": "bash /legion/scratch/tmp/infra571/pg/setup.sh && bash /legion/scratch/tmp/infra571/pg-upgrade-run.sh (OLD = main 7c1290a4 server, NEW = server built from 0fa111cd); log /legion/scratch/tmp/infra571/logs/p5-run-0fa111cd.log",
+      "observed": "16 server_version_num 160015, old server migrated to 99, seeded 3 issues/1 comment/1 ask/4 artifacts + 200 embeddings, plan Index Scan using embeddings_cosine; pg_upgrade --check 0, pg_upgrade 0; 18 server_version_num 180006, vector 0.8.7; vacuumdb --analyze-in-stages and REINDEX DATABASE clean; head server healthy, schema_version 120, migrations 100..120 applied by its boot; dispatch search lists PGUP-1; dispatch issue --force created PGUP-4 (without --force it names PGUP-1 as a duplicate); <=> top-5 equal on 16 and 18, still an index scan",
+      "headSha": "0fa111cd6ada",
+      "negativeControl": "pg_upgrade --check against an 18 cluster with default data checksums exits 1 'old cluster does not use data checksums but the new one does'; against 18 binaries without postgresql-18-pgvector exits 1 'could not load library \"$libdir/vector\": ... No such file or directory In database: dispatch'"
+    },
+    {
+      "criterion": "The component test expects POSTGRES_18 when databaseVersion is unset, and the given value when it is set (P1)",
+      "surface": "envoy-infra gcp:Dispatch unit tests on Pulumi mocks",
+      "command": "cd packages/envoy/infra && go test ./gcp/ -count=1 -run Dispatch -v",
+      "observed": "TestDispatchSettingsApplyDefaults and TestDispatchInstanceRunsTheDatabaseVersion/unset (POSTGRES_18, instance input and ResolveDispatch) and /POSTGRES_16 pass; ok github.com/sjawhar/envoy/infra/gcp",
+      "headSha": "0fa111cd6ada",
+      "negativeControl": "defaultDispatchDatabaseVersion set back to POSTGRES_16 (at 9f5d5279, dispatch.go unchanged since): dispatch_test.go:129 and TestDispatchInstanceRunsTheDatabaseVersion/unset fail 'expected: \"POSTGRES_18\" actual: \"POSTGRES_16\"'"
+    },
+    {
+      "criterion": "Dev Postgres runs 18: the dump-and-restore sequence dev-postgres.sh prints moves a migrated 16 Dispatch database onto 18 (P2, P3)",
+      "surface": "dev-postgres.sh against a fake docker; the SQL half on real PGDG 16 and 18 clusters with this head's server",
+      "command": "cd packages/envoy && bash scripts/dev-postgres.test.sh && bash scripts/dev-broker.test.sh; bash /legion/scratch/tmp/infra571/p3-run.sh (log logs/p3-run-0fa111cd.log)",
+      "observed": "8/8 dev-postgres cases and every dev-broker case PASS (refusal lists start-if-stopped, pg_dumpall, stop, rename, run, pg_isready, restore, check, rm in order, read-only); pg_dumpall --clean --if-exists from 16 restored by psql -f into 18 with only 'current user cannot be dropped' and 'role \"postgres\" already exists', vector 0.8.7, 120 migrations, server boot on 18 applied 0, dispatch read PTHREE-1 returned its title",
+      "headSha": "0fa111cd6ada",
+      "negativeControl": "re-adding 'so it has no pgvector' or dropping the docker start line for a stopped container fails the matching test case; restoring the dump into an 18 install without pgvector gives 'ERROR:  extension \"vector\" is not available' and no embeddings table"
+    },
+    {
+      "criterion": "The pinned pgvector-on-18 image starts with its data mount at /var/lib/postgresql and refuses one at /var/lib/postgresql/data (P4; CI's service image and the devbox tmpfs runs)",
+      "surface": "Kubernetes Job in the cluster per docs/kubernetes.md 'Running a workload in the cluster from a role' (gVisor, emptyDir medium Memory)",
+      "command": "kubectl create -f job-positive.yaml / job-negative.yaml (image mirror.gcr.io/pgvector/pgvector@sha256:2358fcba...), kubectl logs job/<name>; manifests under /legion/scratch/tmp/infra571/p4",
+      "observed": "positive Job Complete: PostgreSQL 18.6, server_version_num=180006, CREATE EXTENSION, extversion=0.8.7, data_directory=/var/lib/postgresql/18/docker; both Jobs deleted, none left with the run label",
+      "headSha": "0fa111cd6ada",
+      "negativeControl": "same Job with the emptyDir at /var/lib/postgresql/data: pod Failed exitCode=1 with the 18 entrypoint's refusal of the old mount"
+    },
+    {
+      "criterion": "Every Dispatch migration applies on a fresh Postgres 18 and the server's tests pass on 18 (P6)",
+      "surface": "Go suites in the pod against a fresh PGDG 18.6 cluster (template1 ICU per INFRA-56)",
+      "command": "bash /legion/scratch/tmp/infra571/p6-run.sh setup boot icu store refs stop (at 0fa111cd); docs, api, outbox, broker, daemon steps at 9f5d5279; logs /legion/scratch/tmp/infra571/logs/p6-0fa111cd and logs/p6",
+      "observed": "server boot on empty 18: schema_migrations count=120 max=120; pgmigrate + dispatch/store 235 pass; refs 6 pass; docs 1141 pass; api 1948 pass (collation ranking test included); outbox 90 pass; daemon internal/store 112 pass",
+      "headSha": "0fa111cd6ada",
+      "negativeControl": "broker/helper fails 51 tests on 'SO_PEERPIDFD: protocol not available' (gVisor) and fails the same set on a PostgreSQL 16 cluster, so it is the pod and not 18; broker/store's IAM test refuses a trust-auth cluster by its own message and passes under scram-sha-256"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/infra/gcp/dispatch.go, dispatch_test.go, README.md; packages/envoy/CHANGELOG.md (POSTGRES_18 default, Breaking entry)",
+    "packages/envoy/internal/pgmigrate/scan.go, touched.go, censuscheck.go, set_test.go, census_test.go; packages/envoy/cmd/dispatch/README.md (Postgres 18 lexer: vertical tab is space)",
+    ".github/workflows/envoy-and-contracts.yaml (6 services to pg18, envoy-go 'Postgres service version' step, new dispatch-go-postgres-16 job), pr-and-main.yaml, docs.yaml",
+    "packages/envoy/internal/testpg/testpg.go, packages/envoy/scripts/corpus-copy.sh, packages/envoy/deploy/compose/dispatch.acceptance.compose.yml, packages/dispatch/README.md",
+    "scripts/e2e/{verifiers-staging-token,stage4a-sandbox-runtime,dispatch-user-turns,claude-backend-tmux,stage3-devbox-workflow,stage4b-sandbox-tree,controller-sweep-kind}.sh, scripts/e2e/README.md, packages/pi-legion/scripts/skill-scenarios/rig.sh",
+    "packages/envoy/scripts/dev-postgres.sh, dev-postgres.test.sh, dev-broker.test.sh; docs/site/src/content/docs/dispatch/running-dispatch.md",
+    ".dispatch/architecture/{envoy,release-engineering,dispatch-store,daemon,pi-legion}.md"
+  ],
+  "trickyParts": [
+    "The 18 image's entrypoint refuses a mount at /var/lib/postgresql/data; every tmpfs/volume moved to /var/lib/postgresql, and the acceptance compose volume was renamed dispatch-acceptance-pg18 so an old 16 volume is never mounted.",
+    "pg_upgrade needs --no-data-checksums on the 18 initdb: 18 turns checksums on by default and 16 had them off.",
+    "The simplify review found pgmigrate's touched-table read copied a vertical tab raw into text its \\s regexes read; whitespace tokens are now written as one space each (offsets unchanged), with a test that fails without it."
+  ],
+  "deviations": [
+    "INFRA-148 architect decision (2026-10-27T02:57Z, Envoy 104ad3ba9a186908202650e3e5d85229, plan.md v2 Decision 5 / Task 6b) overrules the plan's 'no 16 lane': job dispatch-go-postgres-16 keeps Dispatch's Go suite on mirror.gcr.io/pgvector/pgvector@sha256:7b822b0a... until INFRA-572; INFRA-573 removes it. It is the only remaining pin of the old digest.",
+    "Task 9: Envoy message to notifications.role.legion-infra-infra-63-architect, id 3f811d399f633f67e140c867c9be4585, 2026-10-27T02:58:51Z, naming gcp/dispatch.go:25 only (dispatch_cloud.go untouched), dispatch_test.go:129 + TestDispatchInstanceRunsTheDatabaseVersion, README.md:140,151-152 + one paragraph, CHANGELOG [Unreleased] Changed, and the unset-stack upgrade risk.",
+    "README/CHANGELOG say Cloud SQL makes the instance unavailable during the upgrade (Google's page's word), not 'restarts'; the pin wording is 'moves to this release or later'.",
+    "dev-postgres.sh's put-back text adds 'docker rm -f dispatch-pg' before the rename back, since the new container holds the name after step 5.",
+    "dispatch-go-postgres-16 also sets BROKER_TEST_DATABASE_URL (internal/dispatch/api's broker contract test skips without it, as in envoy-go) and keeps envoy-go's Bun setup (pmdoc tests need Bun).",
+    "Simplify finding not applied: dropping the ResolveDispatch assertion from the new component test (the plan asks for both assertions)."
+  ],
+  "openQuestions": [
+    "CI at the head (P7) is read by the tester and reviewer on GitHub: every Postgres-service job green, Initialize containers naming sha256:2358fcba..., envoy-go's version step printing 1806xx|0.8.7, and dispatch-go-postgres-16 printing 1615xx|0.8.7 on sha256:7b822b0a...",
+    "The devbox e2e scripts and the acceptance compose file run only with Docker, which the pod lacks; P4 runs the same image with the new mount path in the cluster, and the first devbox run of each live proof remains their check."
+  ]
+}
