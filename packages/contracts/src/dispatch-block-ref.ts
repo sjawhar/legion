@@ -69,11 +69,12 @@ const MAX_BLOCK_PIN = 9223372036854775807n;
 
 /**
  * The block a `#b-` fragment (`encoded`, after the `b-`) names, and the version `pin` it pins when
- * it ends in `@v<N>`, as the server's `text.parseBlock` reads it: a raw `@` only as the start of
- * a well-formed pin (`N` a positive integer with no leading zero, at most MAX_BLOCK_PIN), and the
- * id before it as `decodeBlockId` reads it. Undefined for any other fragment. `pin` is N's decimal
- * digits as written, so a pin past the integers a JavaScript number holds exactly is carried and
- * written back unrounded.
+ * it ends in `@v<N>` (a version of a document, or a revision of a comment; whether the block's
+ * holder takes a pin, which an issue message does not, is its caller's to ask), as the server's
+ * `text.parseBlock` reads it: a raw `@` only as the start of a well-formed pin (`N` a positive
+ * integer with no leading zero, at most MAX_BLOCK_PIN), and the id before it as `decodeBlockId`
+ * reads it. Undefined for any other fragment. `pin` is N's decimal digits as written, so a pin past
+ * the integers a JavaScript number holds exactly is carried and written back unrounded.
  */
 export function parseBlockFragment(encoded: string): { block: string; pin?: string } | undefined {
   const at = encoded.indexOf("@");

@@ -1660,9 +1660,12 @@ export type GraphEdgeKind =
 //
 // A block node (`kind: "block"`, id `<document ref_key>#<block id>`) also carries `block_id`,
 // its document's reference as `document`, and `changed_version`, the document version in which
-// its text last changed (its `changed_at` is that version's time). `text` and `pin` are set only
-// on the node a reference read names: `text` is the block's whole current text, and `pin`
-// answers a reference pinned to a version.
+// its text last changed (its `changed_at` is that version's time). A block of a comment or an
+// issue message (id `comment/<uuid>#<block id>` or `message/<uuid>#<block id>`) carries no
+// `document`: its `parent` is the comment or message, and a comment block's `changed_version` is
+// the comment revision in which its text last changed (a message block has none). `text` and
+// `pin` are set only on the node a reference read names: `text` is the block's whole current
+// text, and `pin` answers a reference pinned to a version (or a comment's revision).
 export interface GraphNode {
   readonly kind:
     | "issue"

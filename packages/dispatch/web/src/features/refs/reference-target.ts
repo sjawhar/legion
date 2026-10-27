@@ -12,6 +12,7 @@ import type {
   IssueDetails,
   MessageRead,
 } from "../../api/types";
+import { itemOfBlock } from "./block-reference";
 import { useMarkdownHeadline } from "./markdown-engine";
 import {
   buildDispatchReference,
@@ -121,24 +122,29 @@ export interface ReferenceData {
  * delay renders populated instead of in its loading form: `useReferenceData`'s first hop, then
  * the document text behind a document/artifact reference once its artifact id is known, and —
  * for an issue reference — the issue's primary spec text, which only the card's issue view reads
- * (`useReferenceTarget` never fetches it). A block reference warms its graph read and the record
- * that names its document, and no document text. Every key comes from the query builders above. */
+ * (`useReferenceTarget` never fetches it). A block reference warms its graph read and, for a
+ * block of a document, the record that names its document, and no document text; a block of a
+ * comment or message is its graph read alone, whose node carries the block's text. Every key
+ * comes from the query builders above. */
 export function prefetchReference(queryClient: QueryClient, route: DispatchReferenceRoute): void {
   if (route.kind === "agent-artifact") {
     void queryClient.prefetchQuery(agentArtifactQuery(route.session, route.slug));
     return;
   }
-  if (route.kind === "message") {
-    void queryClient.prefetchQuery(messageQuery(route.key, route.id));
-    return;
-  }
   if ("block" in route && route.block !== undefined) {
     void queryClient.prefetchQuery(referencesQuery(buildDispatchReference(route)));
+    if (itemOfBlock(route) !== undefined) {
+      return;
+    }
     if (route.kind === "document") {
       void queryClient.prefetchQuery(projectArtifactQuery(route.project, route.slug));
     } else {
       void queryClient.prefetchQuery(issueQuery(route.key));
     }
+    return;
+  }
+  if (route.kind === "message") {
+    void queryClient.prefetchQuery(messageQuery(route.key, route.id));
     return;
   }
   if (route.kind === "ask") {
@@ -177,32 +183,35 @@ export function prefetchReference(queryClient: QueryClient, route: DispatchRefer
 }
 
 export function useReferenceData(route: DispatchReferenceRoute | undefined): ReferenceData {
+  // A block of a comment or message is read from its graph node alone, which carries its text:
+  // no issue, document, comment or message read behind it.
+  const record = route !== undefined && itemOfBlock(route) !== undefined ? undefined : route;
   const issueKey =
-    route === undefined || route.kind === "agent-artifact" || isProjectRoute(route)
+    record === undefined || record.kind === "agent-artifact" || isProjectRoute(record)
       ? undefined
-      : route.key;
-  const document = route?.kind === "document" ? route : undefined;
+      : record.key;
+  const document = record?.kind === "document" ? record : undefined;
   const blockReference =
     route !== undefined && "block" in route && route.block !== undefined
       ? buildDispatchReference(route)
       : undefined;
   const agentArtifact = route?.kind === "agent-artifact" ? route : undefined;
-  const message = route?.kind === "message" ? route : undefined;
+  const message = record?.kind === "message" ? record : undefined;
   const version =
     route?.kind === "artifact" || route?.kind === "document" || route?.kind === "agent-artifact"
       ? route.version
       : undefined;
   const askId =
-    route?.kind === "ask"
-      ? route.id
-      : route?.kind === "document" && route.item?.kind === "ask"
-        ? route.item.id
+    record?.kind === "ask"
+      ? record.id
+      : record?.kind === "document" && record.item?.kind === "ask"
+        ? record.item.id
         : undefined;
   const commentId =
-    route?.kind === "comment"
-      ? route.id
-      : route?.kind === "document" && route.item?.kind === "comment"
-        ? route.item.id
+    record?.kind === "comment"
+      ? record.id
+      : record?.kind === "document" && record.item?.kind === "comment"
+        ? record.item.id
         : undefined;
   const issue = useQuery({
     ...issueQuery(issueKey),

@@ -736,6 +736,122 @@ test("an unpinned block's card shows its current text, and a block that cannot b
   }
 });
 
+// A block of a comment or message heads with its item and author in place of a document; a pinned
+// comment block names the revision it pins and how the block stands since, and shows that
+// revision's text. Its text is the graph read's, so neither the comment, the message nor the
+// issue is read for it.
+test("a comment or message block's card names its item and author, a comment's pin as a revision, and the block's text", async () => {
+  const comment = "11111111-1111-4111-8111-111111111111";
+  const message = "33333333-3333-4333-8333-333333333333";
+  const getIssue = mockIssues();
+  const getComment = spyOn(api, "getComment");
+  const getMessage = spyOn(api, "getMessage");
+  const getReferences = spyOn(api, "getReferences").mockImplementation((reference) =>
+    Promise.resolve(
+      reference.includes("/comment/")
+        ? {
+            edges: [],
+            node: {
+              block_id: "b2",
+              changed_version: 2,
+              id: `comment/${comment}#b2`,
+              issue_key: "CORE-1",
+              kind: "block",
+              made_by: [{ id: "alice", kind: "user" }],
+              parent: { id: comment, kind: "comment", ref: `dispatch://CORE-1/comment/${comment}` },
+              pin: {
+                ref: `dispatch://CORE-1/comment/${comment}#b-b2@v1`,
+                state: "changed",
+                text: "Beta, as first written.",
+                version: 1,
+              },
+              project: "CORE",
+              ref: `dispatch://CORE-1/comment/${comment}#b-b2`,
+              text: "Beta, as edited.",
+            },
+          }
+        : {
+            edges: [],
+            node: {
+              block_id: "b1",
+              id: `message/${message}#b1`,
+              issue_key: "CORE-1",
+              kind: "block",
+              made_by: [{ id: "bob", kind: "user" }],
+              parent: { id: message, kind: "message", ref: `dispatch://CORE-1/message/${message}` },
+              project: "CORE",
+              ref: `dispatch://CORE-1/message/${message}#b-b1`,
+              text: "The message's first paragraph.",
+            },
+          }
+    )
+  );
+  const view = render(
+    <Harness>
+      <Link
+        to="/"
+        {...referenceTriggerProps({
+          block: { id: "b2", pin: "1" },
+          id: comment,
+          key: "CORE-1",
+          kind: "comment",
+        })}
+      >
+        the comment block
+      </Link>
+      <Link
+        to="/"
+        {...referenceTriggerProps({
+          block: { id: "b1" },
+          id: message,
+          key: "CORE-1",
+          kind: "message",
+        })}
+      >
+        the message block
+      </Link>
+    </Harness>
+  );
+  try {
+    act(() => {
+      screen.getByRole("link", { name: "the comment block" }).focus();
+    });
+    const card = screen.getByRole("tooltip");
+    await waitFor(() => expect(card.textContent).toContain("Beta, as first written."));
+    expect(getReferences).toHaveBeenCalledWith(`dispatch://CORE-1/comment/${comment}#b-b2@v1`);
+    expect(card.textContent).toContain("CORE-1 · Comment · alice");
+    expect(card.textContent).toContain("Revision 1");
+    expect(card.textContent).toContain("Changed in revision 2");
+    expect(card.textContent).not.toContain("as edited");
+    // A comment's revisions have no page: the card opens the live comment at the block.
+    expect(card.querySelector("a")?.getAttribute("href")).toBe(
+      `/issues/CORE-1/comments/${comment}#b-b2`
+    );
+
+    act(() => {
+      screen.getByRole("link", { name: "the message block" }).focus();
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("tooltip").textContent).toContain("The message's first paragraph.")
+    );
+    const messageCard = screen.getByRole("tooltip");
+    expect(messageCard.textContent).toContain("CORE-1 · Message · bob");
+    expect(messageCard.textContent).not.toContain("Revision");
+    expect(messageCard.querySelector("a")?.getAttribute("href")).toBe(
+      `/issues/CORE-1/messages/${message}#b-b1`
+    );
+    expect(getComment).not.toHaveBeenCalled();
+    expect(getMessage).not.toHaveBeenCalled();
+    expect(getIssue).not.toHaveBeenCalled();
+  } finally {
+    view.unmount();
+    getReferences.mockRestore();
+    getMessage.mockRestore();
+    getComment.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
 // INFRA-440 (exclusion E1). The card is a tooltip inside one link to the reference, so the
 // comment's agent is named by its current registry title and marked running, with no link of
 // its own: the reference link stays the card's only anchor.

@@ -5149,6 +5149,138 @@ describe("executeDispatchTool", () => {
         "Referenced by:\n- mentions issue dispatch://OPS-1 (2026-10-21T00:00:00Z) (block dispatch://CORE/artifact/handbook-md#b-ship-it)\nLinks:"
       );
     });
+
+    // A block of a comment or message reads as a document's block does, its item printed in place
+    // of its document; a comment's pin names a revision of the comment. A block of a comment or
+    // message citing the node is listed as its item, then the block.
+    describe("of a comment or message", () => {
+      const comment = "11111111-1111-4111-8111-111111111111";
+      const message = "33333333-3333-4333-8333-333333333333";
+      const commentRef = `dispatch://CORE-1/comment/${comment}`;
+      const messageRef = `dispatch://CORE-1/message/${message}`;
+      const commentBlock = {
+        kind: "block",
+        id: `comment/${comment}#b2`,
+        block_id: "b2",
+        issue_key: "CORE-1",
+        project: "CORE",
+        ref: `${commentRef}#b-b2`,
+        parent: { kind: "comment", id: comment, ref: commentRef },
+      };
+      const messageBlock = {
+        kind: "block",
+        id: `message/${message}#b1`,
+        block_id: "b1",
+        issue_key: "CORE-1",
+        project: "CORE",
+        ref: `${messageRef}#b-b1`,
+        parent: { kind: "message", id: message, ref: messageRef },
+      };
+      const sections = ["Referenced by:", "- none", "Links:", "- none"];
+
+      test("a comment block prints its comment, the revision its text last changed in, and its pin's revision", async () => {
+        const pinned = `${commentRef}#b-b2@v1`;
+        const { result } = readBlock(
+          pinned,
+          () =>
+            response({
+              node: {
+                ...commentBlock,
+                changed_version: 2,
+                made_by: [{ kind: "user", id: "alice@example.com" }],
+                changed_by: [{ kind: "user", id: "alice@example.com" }],
+                changed_at: "2026-10-20T00:00:00Z",
+                parent_version: 2,
+                text: "Beta, as edited.",
+                pin: { version: 1, ref: pinned, text: "Beta.", state: "changed" },
+              },
+              edges: [
+                {
+                  kind: "mentions",
+                  direction: "in",
+                  node: messageBlock,
+                  excerpt: { block_id: "b1", text: "The message cites it." },
+                  created_at: "2026-10-21T00:00:00Z",
+                  source_seq: 7,
+                },
+              ],
+            }),
+          () => response({ node: commentBlock, edges: [] })
+        );
+
+        expect(await result).toEqual({
+          text: [
+            "Block: b2",
+            `Comment: ${commentRef}`,
+            "Changed in revision: 2",
+            "Text:",
+            "Beta, as edited.",
+            "Pinned to revision: 1",
+            "Changed since revision 1; last changed in revision 2.",
+            "Text at revision 1:",
+            "Beta.",
+            `Node: block ${commentRef}#b-b2 · made by user alice@example.com · changed by user alice@example.com at 2026-10-20T00:00:00Z · part of ${commentRef} (revision 2)`,
+            "Referenced by:",
+            `- mentions message ${messageRef} block b1 (The message cites it. · 2026-10-21T00:00:00Z)`,
+            "Links:",
+            "- none",
+          ].join("\n"),
+          details: { issue: "CORE-1", block: "b2" },
+        });
+      });
+
+      test("a message block prints its message, and its page's link is the same block", async () => {
+        const block = `${messageRef}#b-b1`;
+        const node = { ...messageBlock, text: "The first paragraph." };
+        const expected = [
+          "Block: b1",
+          `Message: ${messageRef}`,
+          "Text:",
+          "The first paragraph.",
+          ...sections,
+        ].join("\n");
+        expect(
+          (
+            await readBlock(
+              block,
+              () => response({ node, edges: [] }),
+              () => response({ node, edges: [] })
+            ).result
+          ).text
+        ).toBe(expected);
+      });
+
+      test("a comment block no current revision holds is an error naming the block and its comment", async () => {
+        const absent = () => notFound(`no block "b9" in comment ${comment}`);
+        await expect(readBlock(`${commentRef}#b-b9`, absent, absent).result).rejects.toThrow(
+          new Error(`No block b9 in ${commentRef}.`)
+        );
+      });
+
+      test("a tool that would act on the block's owner refuses it as it refuses the comment", async () => {
+        const refused = await executeDispatchTool({
+          tool: "dispatch_comment",
+          args: { ref: `${commentRef}#b-b2`, body: "Agreed." },
+          cwd: "/workspace",
+          host: "omp",
+          config,
+          env: {},
+          exec: repoExec("owner/repo"),
+          fetchImpl: (() => {
+            throw new Error("network must not be called");
+          }) as unknown as typeof fetch,
+        }).then(
+          () => [],
+          (error: unknown) => {
+            if (!(error instanceof ToolInputError)) throw error;
+            return error.problems;
+          }
+        );
+        expect(refused).toEqual([
+          `ref ${commentRef}#b-b2 names block b2 of a comment on CORE-1; dispatch comment would act on CORE-1 and drop the block: reply in its thread with reply_to ${comment} and issue CORE-1`,
+        ]);
+      });
+    });
   });
 
   test("reads a named artifact version from a singular dispatch URI", async () => {
