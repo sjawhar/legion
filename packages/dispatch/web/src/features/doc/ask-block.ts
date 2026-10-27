@@ -122,9 +122,10 @@ class AskBlockView implements NodeView {
   }
 }
 
-/** The shell's slot element marked with `attribute`. */
+/** The shell's own slot element marked with `attribute`: a child of the shell, never the slot of
+ *  a decision nested in its content. */
 function slot(dom: HTMLElement, attribute: string): HTMLElement {
-  const element = dom.querySelector<HTMLElement>(`[${attribute}]`);
+  const element = dom.querySelector<HTMLElement>(`:scope > [${attribute}]`);
   if (element === null) {
     throw new Error(`the decision shell has no ${attribute} slot`);
   }

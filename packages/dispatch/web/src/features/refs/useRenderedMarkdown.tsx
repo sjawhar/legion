@@ -54,8 +54,8 @@ function collectAskHosts(element: HTMLElement, parsed: ProseMirrorNode): readonl
   const hosts: AskBlockHost[] = [];
   for (const [index, node] of nodes.entries()) {
     const shell = shells[index];
-    const header = shell?.querySelector<HTMLElement>("[data-dispatch-ask-header]");
-    const footer = shell?.querySelector<HTMLElement>("[data-dispatch-ask-footer]");
+    const header = shell?.querySelector<HTMLElement>(":scope > [data-dispatch-ask-header]");
+    const footer = shell?.querySelector<HTMLElement>(":scope > [data-dispatch-ask-footer]");
     if (header === null || header === undefined || footer === null || footer === undefined) {
       return NO_ASK_HOSTS;
     }

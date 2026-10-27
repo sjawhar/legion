@@ -398,6 +398,54 @@ test("a malformed ask block in a body names why and keeps its source list, with 
   }
 });
 
+test("a decision written inside another decision's option keeps each card in its own block", async () => {
+  // The outer fence is longer than the inner one, as a typed block holding another is written:
+  // the inner `:::` would close a three-colon outer block too.
+  const markdown =
+    '::::ask{urgency="high"}\nOuter?\n\n- A: first\n\n  :::ask\n  Inner?\n\n  - X: x\n  :::\n- B: second\n::::\n';
+  const view = render(withAskCard(<MarkdownBody markdown={markdown} />));
+
+  try {
+    const [outer, inner] = await waitFor(() => {
+      const shells = Array.from(
+        view.container.querySelectorAll<HTMLElement>('section[data-proof-block-type="ask"]')
+      );
+      expect(shells).toHaveLength(2);
+      return shells as [HTMLElement, HTMLElement];
+    });
+    // The inner decision sits in the outer decision's first option.
+    const outerContent = outer.querySelector<HTMLElement>(
+      ":scope > [data-proof-block-content]"
+    ) as HTMLElement;
+    expect(outerContent.contains(inner)).toBe(true);
+    expect(inner.closest("li")?.textContent).toContain("A: first");
+
+    const outerFooter = outer.querySelector<HTMLElement>(
+      ":scope > [data-dispatch-ask-footer]"
+    ) as HTMLElement;
+    const innerFooter = inner.querySelector<HTMLElement>(
+      ":scope > [data-dispatch-ask-footer]"
+    ) as HTMLElement;
+    await waitFor(() => {
+      const outerRows = Array.from(
+        outerFooter.querySelectorAll<HTMLElement>("[data-dispatch-ask-record] li")
+      );
+      expect(outerRows).toHaveLength(2);
+      expect(within(outerRows[0] as HTMLElement).getByText("A")).toBeDefined();
+      expect(within(outerRows[1] as HTMLElement).getByText("B")).toBeDefined();
+      const innerRows = Array.from(
+        innerFooter.querySelectorAll<HTMLElement>("[data-dispatch-ask-record] li")
+      );
+      expect(innerRows).toHaveLength(1);
+      expect(within(innerRows[0] as HTMLElement).getByText("X")).toBeDefined();
+    });
+    expect(within(innerFooter).queryByText("B")).toBeNull();
+    expect(within(innerFooter).queryByText("second")).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
 test("a code span containing tag-shaped text renders the literal characters with no backslashes", async () => {
   const view = render(<MarkdownBody markdown="Use `<img src=x>` here" />);
 
