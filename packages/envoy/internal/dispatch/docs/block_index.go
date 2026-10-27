@@ -284,18 +284,18 @@ func (s *Service) owedDocuments(ctx context.Context, after string) ([]owedDocume
 //
 // A closed issue's document is the exception: no settlement runs while its issue is closed
 // (RunSettlementResumption resumes open issues only), so it is indexed at its latest version from
-// that version's own text, with each block the version holds under the id the live document gives
-// that block, or, for a block an edit after the version changed, the id of the index's row that
-// holds the version's text of it (closedVersionBlocks), read under the owner row. The issue's
-// close, its final sweep and the repair write ask states into the live document and no version
-// (WriteIssueAskStates), and the close may leave an edit it could not settle. A block that only
-// such an edit made is not indexed, since no version holds its text, and a block it changed keeps
-// the version and text its row holds: the reopen's settlement indexes the edit at the version it
-// writes, the first that holds it, as block history names only versions that hold a block's text.
-// The live blocks were read before the owner row was locked, so they are used only while the
-// pending settlement's marked_at, which every appended update moves, is still the one listed;
-// otherwise the document is left owed for the next tick to read again. A version this build
-// cannot read back is indexed with no blocks.
+// that version's own text, with each block the version holds under the id of the index's row
+// that holds its text, every such row claiming its block before any live text is compared, or
+// else of the live block matched to it by text (closedVersionBlocks), read under the owner row.
+// The issue's close, its final sweep and the repair write ask states into the live document and
+// no version (WriteIssueAskStates), and the close may leave an edit it could not settle. A block
+// that only such an edit made is not indexed, since no version holds its text, and a block it
+// changed or deleted keeps the version and text its row holds: the reopen's settlement indexes
+// the edit at the version it writes, the first that holds it, as block history names only
+// versions that hold a block's text. The live blocks were read before the owner row was locked,
+// so they are used only while the pending settlement's marked_at, which every appended update
+// moves, is still the one listed; otherwise the document is left owed for the next tick to read
+// again. A version this build cannot read back is indexed with no blocks.
 //
 // A document the server cannot read (ErrDocumentUnloadable, ErrDocOutsideSchema) or that has no
 // stored state has no block to show, so its latest version's markdown is indexed with no blocks.
@@ -415,33 +415,54 @@ func indexedBlocks(ctx context.Context, tx pgx.Tx, artifactID string) ([]indexed
 }
 
 // closedVersionBlocks is the rendering of the version whose stored markdown is stored, with each
-// block of it that the live document - live, with liveBlocks (TextWithBlocks) - also holds, under
-// the live block's id, and each other block of it whose type and text a row of the document's
-// index (indexed, by id) holds, under that row's id. A block of the version that neither holds,
-// and a live block that only an edit after the version made, are left out, so each block indexed
-// at the version is text that version holds.
+// block of it that a row of the document's index (indexed, by id) or a block of the live document
+// - live, with liveBlocks (TextWithBlocks) - accounts for, under that row's or live block's id. A
+// block of the version that neither accounts for, and a live block that matches no block of it,
+// are left out, so each block indexed at the version is text that version holds.
 //
 // The version's markdown names the id of a typed block alone; its parse mints the others, which no
 // reader knows, so those ids are never indexed. A typed block of the version is the live block of
-// its id and type, whose text may differ from the version's in what the close wrote into it. An
-// untyped block is a live untyped block of its type and text, each typed block inside the live
-// one read as the version's block of that id, so a block holding an ask whose state the close
-// wrote still matches. The untyped blocks are aligned in document order by difflib's matching
-// blocks with no junk heuristic: unlike a greedy first match, a block repeated further on, or a
-// block an edit moved, cannot pull the alignment past the unchanged run that follows it, and the
-// longest runs of unchanged blocks, which an edit leaves around itself, are kept whole. A version
-// is compared and indexed as it renders today, as the live text is.
+// its id and type, whose text may differ from the version's in what the close wrote into it.
 //
-// A block of the version that an unsettled edit changed or deleted matches no live block. It is
-// the row of the index that holds its type and text (the sha256 of markdown[From:To], as
-// refs.IndexBlocks hashes it) under an id no other block of the version took: that row was
-// indexed from a version holding the same text under that id, so the id is the block's, and
-// refs.IndexBlocks keeps the block's changed version and text rather than recording it deleted at
-// a version that holds it. A typed block takes only the row of its own id. An untyped block takes
-// the first such row whose id is a live block's, in live document order, else the first of the
-// others by id. A row whose text the version does not hold - indexed at an older version whose
-// text of that block this version changed - matches no block, and is still recorded deleted at
-// this version, although this version holds the block.
+// Every row of the index that holds the text of a block of the version claims that block before
+// any live text is compared. A row was indexed from a version's text of its block under that
+// block's id, so where the version holds the row's type and text (the sha256 of markdown[From:To],
+// as refs.IndexBlocks hashes it), the block keeps its row, its changed version and its text under
+// its own id rather than being recorded deleted at a version that holds it, and a live block an
+// edit typed with the same text takes none of it. The rows claim in two steps. First the
+// version's untyped blocks are aligned in document order with the live untyped blocks that have a
+// row, keyed by that row's type and text sha256 against each version block's, by difflib's
+// matching blocks with no junk heuristic: unlike a greedy first match, a block repeated further
+// on, or a block an edit moved, cannot pull the alignment past the unchanged run that follows it,
+// and the longest runs of unchanged blocks, which an edit leaves around itself, are kept whole, so
+// each of several identical blocks keeps its own row. Then each block of the version still
+// unmatched takes the row of its type and text whose id no other block took: a typed block only
+// the row of its own id, an untyped one the first such row whose id is a live block's, in live
+// document order, else the first of the others by id. A block an edit moved across a first-step
+// match keeps its row so, and a block an unsettled edit deleted keeps its row under its own id,
+// which no live block holds.
+//
+// Only then is live text compared, between the version's untyped blocks no row claimed and the
+// live untyped blocks whose id no row claimed for a block of the version, keyed by type and live
+// text, each typed block inside the live one read as the version's block of that id, so a block
+// holding an ask whose state the close wrote still matches. They are aligned by difflib in the
+// same way within each gap between two consecutive first-step matches, so no match crosses one.
+// Those matches are the only bounds that keep document order on both sides: difflib finds a match
+// in every span that holds an equal pair, so a block of the version that the second step gave a
+// live block's row is one an edit moved across a first-step match, and a block it gave the row of
+// an id no live block holds has no place in the live document to cross. The text alignment
+// matches every untyped block of a document none of whose blocks the index holds yet, and a block
+// whose row holds an older version's text that this version changed. A version is compared and
+// indexed as it renders today, as the live text is. Last, a block of the version and a live block
+// both still unmatched take each other where each is the only one left on its side holding that
+// text: a block an edit moved across others, in a document with no row to name it, matches no
+// block within its gap, and a text held more than once on either side names none, so a repeated
+// paragraph is never given another's id.
+//
+// A row whose text the version does not hold - indexed at an older version whose text of that
+// block this version changed - and whose block's live text the version does not hold either
+// matches no block, and is still recorded deleted at this version, although this version holds
+// the block.
 func closedVersionBlocks(stored, live string, liveBlocks []model.ArtifactBlock, indexed []indexedBlock) (string, []model.ArtifactBlock, error) {
 	tree, err := pmdoc.ParseRendering(stored)
 	if err != nil {
@@ -457,11 +478,18 @@ func closedVersionBlocks(stored, live string, liveBlocks []model.ArtifactBlock, 
 			firstHolder[block.ID] = index
 		}
 	}
+	rows := make(map[string]indexedBlock, len(indexed))
+	for _, row := range indexed {
+		rows[row.id] = row
+	}
 	ids := make([]string, len(offsets))
+	sums := make([]string, len(offsets))
 	typedTexts := map[string]string{}
-	var versionKeys []string
+	var versionSums, versionKeys []string
 	var versionUntyped []int
 	for index, offset := range offsets {
+		sum := sha256.Sum256([]byte(markdown[offset.From:offset.To]))
+		sums[index] = offset.Type + "\x00" + hex.EncodeToString(sum[:])
 		if pmdoc.IsTypedBlock(offset.Type) {
 			if at, held := firstHolder[offset.ID]; held && liveBlocks[at].Type == offset.Type {
 				ids[index] = offset.ID
@@ -469,21 +497,29 @@ func closedVersionBlocks(stored, live string, liveBlocks []model.ArtifactBlock, 
 			}
 			continue
 		}
+		versionSums = append(versionSums, sums[index])
 		versionKeys = append(versionKeys, offset.Type+"\x00"+markdown[offset.From:offset.To])
 		versionUntyped = append(versionUntyped, index)
 	}
-	var liveKeys []string
-	var liveUntyped []int
+	var liveKeys, liveSums []string
+	var liveUntyped, liveIndexed []int
 	for index, block := range liveBlocks {
 		if pmdoc.IsTypedBlock(block.Type) {
 			continue
 		}
+		if row, held := rows[block.ID]; held {
+			liveSums = append(liveSums, row.typ+"\x00"+row.sum)
+			liveIndexed = append(liveIndexed, len(liveUntyped))
+		}
 		liveKeys = append(liveKeys, block.Type+"\x00"+versionText(live, liveBlocks, index, typedTexts))
 		liveUntyped = append(liveUntyped, index)
 	}
-	for _, match := range difflib.NewMatcherWithJunk(versionKeys, liveKeys, false, nil).GetMatchingBlocks() {
+	var anchors [][2]int
+	for _, match := range difflib.NewMatcherWithJunk(versionSums, liveSums, false, nil).GetMatchingBlocks() {
 		for step := range match.Size {
-			ids[versionUntyped[match.A+step]] = liveBlocks[liveUntyped[match.B+step]].ID
+			anchor := [2]int{match.A + step, liveIndexed[match.B+step]}
+			ids[versionUntyped[anchor[0]]] = liveBlocks[liveUntyped[anchor[1]]].ID
+			anchors = append(anchors, anchor)
 		}
 	}
 	used := make(map[string]bool, len(offsets))
@@ -508,12 +544,58 @@ func closedVersionBlocks(stored, live string, liveBlocks []model.ArtifactBlock, 
 		if ids[index] != "" {
 			continue
 		}
-		sum := sha256.Sum256([]byte(markdown[offset.From:offset.To]))
-		for _, id := range holders[offset.Type+"\x00"+hex.EncodeToString(sum[:])] {
+		for _, id := range holders[sums[index]] {
 			if !used[id] && (!pmdoc.IsTypedBlock(offset.Type) || id == offset.ID) {
 				ids[index], used[id] = id, true
 				break
 			}
+		}
+	}
+	var gapVersion, gapLive []string
+	var gapVersionAt, gapLiveAt []int
+	fromVersion, fromLive := 0, 0
+	for _, anchor := range append(anchors, [2]int{len(versionUntyped), len(liveUntyped)}) {
+		gapVersion, gapVersionAt = gapVersion[:0], gapVersionAt[:0]
+		for at := fromVersion; at < anchor[0]; at++ {
+			if ids[versionUntyped[at]] == "" {
+				gapVersion, gapVersionAt = append(gapVersion, versionKeys[at]), append(gapVersionAt, versionUntyped[at])
+			}
+		}
+		gapLive, gapLiveAt = gapLive[:0], gapLiveAt[:0]
+		for at := fromLive; at < anchor[1]; at++ {
+			if !used[liveBlocks[liveUntyped[at]].ID] {
+				gapLive, gapLiveAt = append(gapLive, liveKeys[at]), append(gapLiveAt, liveUntyped[at])
+			}
+		}
+		if len(gapVersion) > 0 && len(gapLive) > 0 {
+			for _, match := range difflib.NewMatcherWithJunk(gapVersion, gapLive, false, nil).GetMatchingBlocks() {
+				for step := range match.Size {
+					ids[gapVersionAt[match.A+step]] = liveBlocks[gapLiveAt[match.B+step]].ID
+					used[liveBlocks[gapLiveAt[match.B+step]].ID] = true
+				}
+			}
+		}
+		fromVersion, fromLive = anchor[0]+1, anchor[1]+1
+	}
+	// A block an edit moved across others, with no row to claim it (a document none of whose blocks
+	// the index holds yet), matches no block in its gap. Its text names it where exactly one block
+	// of the version and one live block still unmatched hold it; a text held more than once on
+	// either side names no block, so a repeated paragraph is never given another's id.
+	versionHolding := map[string][]int{}
+	for at, index := range versionUntyped {
+		if ids[index] == "" {
+			versionHolding[versionKeys[at]] = append(versionHolding[versionKeys[at]], index)
+		}
+	}
+	liveHolding := map[string][]int{}
+	for at, index := range liveUntyped {
+		if !used[liveBlocks[index].ID] {
+			liveHolding[liveKeys[at]] = append(liveHolding[liveKeys[at]], index)
+		}
+	}
+	for key, held := range versionHolding {
+		if holding := liveHolding[key]; len(held) == 1 && len(holding) == 1 {
+			ids[held[0]] = liveBlocks[holding[0]].ID
 		}
 	}
 	blocks := make([]model.ArtifactBlock, 0, len(offsets))

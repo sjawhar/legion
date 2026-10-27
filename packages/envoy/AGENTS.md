@@ -1519,18 +1519,29 @@ and its owed mark are the ones it listed, taking the version's time and the `sou
 event that recorded the version (`stampVersionEvent`). A document that owes a settlement and whose
 live markdown differs from its latest version's is skipped, counted `live_ahead` and left owed,
 except on a closed issue, which no settlement runs on: its latest version's own rendering is
-indexed, with only the blocks the live document or the index's stored rows also hold, each under
-its live id or its stored row's id (`closedVersionBlocks`), while its pending settlement's
+indexed, with only the blocks the index's stored rows or the live document also hold, each under
+its stored row's id or its live id (`closedVersionBlocks`), while its pending settlement's
 `marked_at` is still the one the tick listed. A typed block matches the live block of its id (the
 version's markdown names only typed blocks' ids; the close, its sweep and the repair write ask
-states with no version), an untyped one a live block of its type and text, aligned in document
-order. A version block an unsettled edit changed or deleted matches the stored `document_blocks`
-row of its type and text (`text_sha256`) whose id no other block took, a live id first, so it
-keeps its changed version and text; a stored row whose text the version does not hold (indexed at
-an older version this one changed) is still recorded deleted at it. A live block only an unsettled
-edit made is not indexed until the reopen's settlement writes the version that holds it, so block
-history names only versions that hold a block's text. The loop remembers a skipped document and
-counts it
+states with no version). Every stored `document_blocks` row whose type and `text_sha256` the
+version holds claims its block before any live text is compared, so the block keeps its row,
+changed version and text under its own id: first the untyped blocks are aligned in document order
+(go-difflib, no junk heuristic) with the live blocks that have a row, by that row's type and
+`text_sha256`, so a block an unsettled edit changed keeps its place and each of several identical
+blocks its own row; then each version block still unmatched (moved across a first-step match, or
+deleted by an unsettled edit) takes the stored row of its type and text whose id no other block
+took, a live id first, else by id. Only then are the version blocks no row claimed aligned by type
+and live text with the live blocks whose id no row claimed, within the gaps between first-step
+matches (every block of a document the index holds none of yet), so a paragraph an edit deleted
+and retyped with the same text keeps the deleted block's row and the retyped one gets none. Last,
+a version block and a live block both still unmatched take each other where each is the only one
+left on its side holding that text, so a block an edit moved in a document with no row yet keeps
+its version, and a repeated text names none. A
+stored row whose text the version does not hold (indexed at an older version this one changed)
+and whose live text it does not hold either is still recorded deleted at it. A live block only an
+unsettled edit made is not indexed until the reopen's settlement writes the version that holds it,
+so block history names only versions that hold a block's text. The loop remembers a skipped
+document and counts it
 again without reading it while its latest version and its pending settlement's `marked_at` (which
 every update append moves) stay as they were and this server holds no room for it. An item is
 re-read `for no key update` and re-indexed with this build's grammar (`refs.ReindexOwedItem`), a
