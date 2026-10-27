@@ -23,6 +23,7 @@ import { createServer } from "node:net";
 import { hostname, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { dispatchIssueSubject } from "@legion/contracts";
+import { RelayHeader } from "@legion/envoy-client/consumer-delivery";
 import { shownPictures } from "@legion/envoy-client/dispatch-picture-tools";
 import {
   appendResult,
@@ -136,17 +137,22 @@ type TestPi = {
   readonly sendUserMessage: (content: string, options?: unknown) => void;
   readonly appendEntry: PiApi["appendEntry"];
 };
+/** A message's headers, as nats.js's `MsgHdrs` reads them: a missing one reads `""`. */
+type MessageHeaders = { readonly get: (name: string) => string };
+
 type Subscription = {
   readonly unsubscribe: () => void;
   readonly [Symbol.asyncIterator]: () => AsyncIterator<{
     readonly subject: string;
     readonly data: Uint8Array;
     readonly reply: string;
+    readonly headers?: MessageHeaders;
   }>;
 };
 
 type SubscriptionControls = {
-  readonly push: (data: string, reply?: string) => void;
+  /** Hands the subscription a message; `headers`, when given, are the message's NATS headers. */
+  readonly push: (data: string, reply?: string, headers?: Readonly<Record<string, string>>) => void;
   readonly end: () => void;
   readonly fail: (error: Error) => void;
   readonly active: () => boolean;
@@ -278,6 +284,7 @@ mock.module("nats", () => ({
           readonly subject: string;
           readonly data: Uint8Array;
           readonly reply: string;
+          readonly headers?: MessageHeaders;
         }[] = [];
         let wake: (() => void) | undefined;
         let ended = false;
@@ -287,8 +294,15 @@ mock.module("nats", () => ({
           wake = undefined;
         };
         const controls = {
-          push: (data: string, reply = "") => {
-            queue.push({ subject: topic, data: new TextEncoder().encode(data), reply });
+          push: (data: string, reply = "", headers?: Readonly<Record<string, string>>) => {
+            queue.push({
+              subject: topic,
+              data: new TextEncoder().encode(data),
+              reply,
+              ...(headers === undefined
+                ? {}
+                : { headers: { get: (name: string) => headers[name] ?? "" } }),
+            });
             notify();
           },
           end: () => {
@@ -320,6 +334,7 @@ mock.module("nats", () => ({
                 readonly subject: string;
                 readonly data: Uint8Array;
                 readonly reply: string;
+                readonly headers?: MessageHeaders;
               }>
             > => {
               for (;;) {
@@ -2925,6 +2940,8 @@ describe("envoy OMP extension", () => {
           driving: false,
           self_subscribed: true,
           capabilities: ["aside", "steer"],
+          // The relay subject is open, so the registration asks for consumer delivery.
+          delivery: { consumer: true, epoch: expect.any(String) },
           host: machineID(),
         },
       },
@@ -9385,6 +9402,8 @@ describe("envoy OMP extension", () => {
         driving: false,
         self_subscribed: true,
         capabilities: ["aside", "steer"],
+        // The relay subject is open, so the registration asks for consumer delivery.
+        delivery: { consumer: true, epoch: expect.any(String) },
         host: machineID(),
       },
     });
@@ -15801,5 +15820,522 @@ describe("messages missed while the subscription was down", () => {
       expect(notices).toHaveLength(1);
       expect(notices[0]?.options).toMatchObject({ triggerTurn: false });
     });
+  });
+});
+
+// A listener that answers `consumer` relays the session's durable consumer on
+// `notifications.envoy.deliver.<id>`: each frame carries the stored envelope and its stream
+// headers, with a reply inbox the session answers `received` on at decode and `done` once the
+// frame is in the transcript (`@legion/envoy-client/consumer-delivery`).
+describe("consumer delivery", () => {
+  const SESSION = "ses_delivery";
+  const AGENT = `notifications.agent.${SESSION}`;
+  const RELAY = `notifications.envoy.deliver.${SESSION}`;
+  const STREAM = "stream-1";
+
+  // Lets every promise and I/O callback queued so far run.
+  async function settle(): Promise<void> {
+    for (let turn = 0; turn < 25; turn += 1) {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setImmediate(resolve);
+      await promise;
+    }
+  }
+
+  async function until(condition: () => boolean, what: string): Promise<void> {
+    const deadline = performance.now() + 2_000;
+    while (!condition()) {
+      if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+      await settle();
+    }
+  }
+
+  /** A peer session's message to the session under test. */
+  function peer(label: string): string {
+    return JSON.stringify({
+      event_id: `evt-${label}`,
+      source: "agent",
+      source_event_id: `source-${label}`,
+      source_session: "ses_peer",
+      topic: AGENT,
+      dedupe_key: `agent.ses_peer.${createHash("sha256").update(label).digest("hex").slice(0, 32)}`,
+      issued_at: 1,
+      payload_summary: `peer message ${label}`,
+      trace_id: `trace-${label}`,
+    });
+  }
+
+  interface Registration {
+    readonly topics: readonly string[];
+    readonly delivery?: {
+      readonly consumer: boolean;
+      readonly epoch: string;
+      readonly resume?: { readonly stream_id: string; readonly seq: number };
+    };
+    /** Whether the relay subject was subscribed when the registration reached the listener. */
+    readonly relaySubscribed: boolean;
+  }
+
+  interface SentCard {
+    readonly content: string;
+    readonly customType?: string;
+    readonly display?: boolean;
+    readonly details?: { readonly event_id?: string };
+  }
+
+  /**
+   * Boots the session against a listener that answers its registrations `answer`: `consumer`
+   * (with a relay on `RELAY`), `core`, or no `delivery` at all, as an earlier listener does. The
+   * host is `idle` (writes each card it is handed, then ends its message) or `streaming` (holds
+   * every card until `take`). `events` lists, in order, each card handed and written and each
+   * NATS publish (a relay reply as `<inbox> <word>`, a lane receipt as its subject).
+   */
+  async function bootConsumer(
+    query: string,
+    options: {
+      readonly answer?: "consumer" | "core" | "none";
+      /** The first consumer answer reports a gap: messages aged out before the consumer's start. */
+      readonly gap?: boolean;
+      readonly entries?: readonly unknown[];
+      readonly turn?: "idle" | "streaming";
+      readonly runEphemeralTurn?: SessionContext["runEphemeralTurn"];
+    } = {}
+  ) {
+    process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
+    process.env.DISPATCH_URL = "http://dispatch.test";
+    process.env.DISPATCH_TOKEN = "dispatch-token";
+    const answer = options.answer ?? "consumer";
+    const registrations: Registration[] = [];
+    const dispatchReplies: string[] = [];
+    let replays = 0;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(input.toString());
+      if (url.pathname.endsWith("/reply")) {
+        dispatchReplies.push(url.pathname);
+        return response({});
+      }
+      if (url.pathname === "/v1/replay") {
+        replays += 1;
+        return emptyReplay(init);
+      }
+      if (url.pathname === "/v1/interests/subscribe") {
+        const body = JSON.parse(init?.body?.toString() ?? "{}") as {
+          readonly dir: string;
+          readonly topics: readonly string[];
+          readonly delivery?: Registration["delivery"];
+        };
+        registrations.push({
+          topics: body.topics,
+          ...(body.delivery === undefined ? {} : { delivery: body.delivery }),
+          relaySubscribed: natsState.controls.get(RELAY)?.active() === true,
+        });
+        const delivery =
+          answer === "consumer" && body.delivery !== undefined
+            ? {
+                mode: "consumer",
+                subject: RELAY,
+                stream_id: STREAM,
+                gap: options.gap === true && registrations.length === 1,
+              }
+            : answer === "core"
+              ? { mode: "core", reason: "no_grant" }
+              : undefined;
+        return response({
+          session_id: SESSION,
+          machine_id: "test",
+          dir: body.dir,
+          topics: body.topics,
+          ...(delivery === undefined ? {} : { delivery }),
+        });
+      }
+      if (
+        url.pathname.startsWith("/v1/interests/") &&
+        url.pathname !== "/v1/interests/unsubscribe"
+      ) {
+        return response({ session_id: SESSION, machine_id: "test", dir: "/tmp", topics: [] });
+      }
+      return response({});
+    }) as typeof fetch;
+    const events: string[] = [];
+    natsState.onPublish = (subject) => {
+      const data = natsState.published.at(-1)?.data;
+      events.push(data === undefined ? subject : `${subject} ${new TextDecoder().decode(data)}`);
+    };
+    const { default: envoyExtension } = await import(`./envoy.ts?${query}`);
+    const fixture = createPi();
+    const intervals: (() => void)[] = [];
+    const written: unknown[] = [];
+    const held: SentCard[] = [];
+    let turn = options.turn ?? "idle";
+    const write = async (message: SentCard) => {
+      // The host starts the turn the card triggers after `sendMessage` returns.
+      await Promise.resolve();
+      const { content, customType, display, details } = message;
+      written.push({ type: "custom_message", customType, content, display, details });
+      events.push(`written ${details?.event_id ?? content}`);
+      await fixture.handlers.get("message_end")?.(
+        {
+          message: { role: "custom", customType, content, display, details, timestamp: Date.now() },
+        },
+        context
+      );
+    };
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message: SentCard, sendOptions: unknown) => {
+        fixture.pi.sendMessage(message, sendOptions);
+        events.push(`handed ${message.details?.event_id ?? message.content}`);
+        if (turn === "idle") void write(message);
+        else held.push(message);
+      },
+    });
+    const prior = options.entries ?? [];
+    const base = sessionContext(SESSION);
+    const context: SessionContext = {
+      ...base,
+      sessionManager: {
+        ...base.sessionManager,
+        getBranch: () => [...prior, ...fixture.entries, ...written],
+        getEntries: () => [...prior, ...fixture.entries, ...written],
+      },
+      setInterval: (callback) => {
+        intervals.push(callback);
+      },
+      isIdle: () => turn === "idle",
+      hasPendingMessages: () => held.length > 0,
+      ...(options.runEphemeralTurn !== undefined && { runEphemeralTurn: options.runEphemeralTurn }),
+    };
+    await fixture.handlers.get("session_start")?.({}, context);
+    await until(() => registrations.length > 0, "the first registration");
+    await settle();
+    let inboxes = 0;
+    const session = {
+      fixture,
+      events,
+      registrations,
+      dispatchReplies,
+      replays: () => replays,
+      entries: () => [...prior, ...fixture.entries, ...written],
+      /** The `envoy-message` cards handed for `eventID`. */
+      cards: (eventID: string) =>
+        fixture.deliveries.filter(
+          (delivery) =>
+            delivery.customType === "envoy-message" && delivery.content.includes(eventID)
+        ),
+      /** The listener relays stored message `seq`; answers the reply inbox it carried. */
+      relay: (
+        seq: number,
+        data: string,
+        frame: {
+          readonly subject?: string;
+          readonly delivered?: number;
+          readonly storedAt?: Date;
+        } = {}
+      ): string => {
+        const controls = natsState.controls.get(RELAY);
+        if (controls === undefined) throw new Error("the relay subject was never subscribed");
+        inboxes += 1;
+        const inbox = `_INBOX.relay.${seq}.${inboxes}`;
+        controls.push(data, inbox, {
+          [RelayHeader.subject]: frame.subject ?? AGENT,
+          [RelayHeader.streamSeq]: String(seq),
+          [RelayHeader.streamID]: STREAM,
+          [RelayHeader.delivered]: String(frame.delivered ?? 1),
+          [RelayHeader.storedAt]: (frame.storedAt ?? new Date()).toISOString(),
+        });
+        return inbox;
+      },
+      /** The words the session answered on a relay frame's inbox, in order. */
+      replies: (inbox: string) =>
+        natsState.published
+          .filter((published) => published.subject === inbox)
+          .map((published) => new TextDecoder().decode(published.data)),
+      /** A frame on one of the session's core subscriptions. */
+      core: (subject: string, data: string, reply?: string) => {
+        const controls = natsState.controls.get(subject);
+        if (controls === undefined) throw new Error(`${subject} was never subscribed`);
+        controls.push(data, reply);
+      },
+      /** One heartbeat tick, run until its registration reached the listener. */
+      tick: async () => {
+        const before = registrations.length;
+        for (const interval of intervals) interval();
+        await until(() => registrations.length > before, "the heartbeat's registration");
+        await settle();
+      },
+      /** nats.js reports a reconnect. */
+      reconnect: async () => {
+        const before = registrations.length;
+        pushNatsStatus("reconnect");
+        await until(() => registrations.length > before, "the reconnect's registration");
+        await settle();
+      },
+      /** The streaming turn takes every card it holds: the host writes each, in order. */
+      take: async () => {
+        for (const message of held.splice(0)) await write(message);
+        await settle();
+      },
+      /**
+       * The person presses Escape while the turn streams: Oh My Pi's `clearQueue({ forInterrupt:
+       * true })` drops the cards the turn held, writing none, the run ends aborted, and the host is
+       * idle from then on, writing each card it is handed.
+       */
+      interrupt: async () => {
+        held.splice(0);
+        turn = "idle";
+        await fixture.handlers.get("agent_end")?.(
+          { messages: [{ role: "assistant", stopReason: "aborted", content: [] }] },
+          context
+        );
+        await settle();
+      },
+      follow: (topic: string) =>
+        fixture.tools
+          .find((tool) => tool.name === "envoy_subscribe")
+          ?.execute("", { topics: [topic] }),
+      stop: () => fixture.handlers.get("session_shutdown")?.({}, context),
+    };
+    return session;
+  }
+
+  test("subscribes the relay subject before it registers, and every registration asks for consumer delivery", async () => {
+    const session = await bootConsumer("consumer-registration");
+
+    const [first] = session.registrations;
+    expect(first?.relaySubscribed).toBe(true);
+    expect(first?.delivery?.consumer).toBe(true);
+    expect(first?.delivery?.epoch).toEqual(expect.any(String));
+    expect(first?.delivery?.resume).toBeUndefined();
+
+    const inbox = session.relay(7, peer("registration"));
+    await until(() => session.replies(inbox).includes("done"), "the frame's done");
+    await session.tick();
+
+    const renewed = session.registrations.at(-1);
+    expect(renewed?.delivery?.epoch).toBe(first?.delivery?.epoch ?? "");
+    expect(renewed?.delivery?.resume).toEqual({ stream_id: STREAM, seq: 7 });
+  });
+
+  test("answers received before any host work and done only once each card is written, in stream order", async () => {
+    const session = await bootConsumer("consumer-order", { turn: "streaming" });
+
+    const inboxes = [1, 2, 3].map((seq) => session.relay(seq, peer(`order-${seq}`)));
+    await until(() => session.cards("evt-order-3").length > 0, "the third card");
+
+    for (const [index, inbox] of inboxes.entries()) {
+      expect(session.replies(inbox)).toEqual(["received"]);
+      expect(session.events.indexOf(`${inbox} received`)).toBeLessThan(
+        session.events.indexOf(`handed evt-order-${index + 1}`)
+      );
+    }
+    expect(
+      session.events.filter((event) => event.startsWith("handed ")).map((event) => event.slice(7))
+    ).toEqual(["evt-order-1", "evt-order-2", "evt-order-3"]);
+
+    await session.take();
+
+    for (const [index, inbox] of inboxes.entries()) {
+      expect(session.replies(inbox)).toEqual(["received", "done"]);
+      expect(session.events.indexOf(`written evt-order-${index + 1}`)).toBeLessThan(
+        session.events.indexOf(`${inbox} done`)
+      );
+    }
+  });
+
+  test("a frame written before a restart and relayed again after it is answered done and not shown again", async () => {
+    const first = await bootConsumer("consumer-restart-a");
+    const frame = peer("restart");
+    const before = first.relay(4, frame);
+    await until(() => first.replies(before).includes("done"), "the first copy's done");
+    await first.stop();
+
+    const second = await bootConsumer("consumer-restart-b", { entries: first.entries() });
+    expect(second.registrations[0]?.delivery?.resume).toEqual({ stream_id: STREAM, seq: 4 });
+    const again = second.relay(4, frame, { delivered: 2 });
+    await until(() => second.replies(again).includes("done"), "the second copy's done");
+
+    expect(second.replies(again)).toEqual(["received", "done"]);
+    expect(first.cards("evt-restart")).toHaveLength(1);
+    expect(second.cards("evt-restart")).toHaveLength(0);
+  });
+
+  for (const answer of ["core", "none"] as const) {
+    test(`a registration answered ${answer === "core" ? "core" : "without delivery"} keeps the core path: core frames are shown and the stream is swept`, async () => {
+      const session = await bootConsumer(`consumer-answer-${answer}`, { answer });
+
+      session.core(AGENT, peer(`core-${answer}`));
+      await until(() => session.cards(`evt-core-${answer}`).length > 0, "the core card");
+      const swept = session.replays();
+      await session.tick();
+
+      expect(session.cards(`evt-core-${answer}`)).toHaveLength(1);
+      expect(session.replays()).toBeGreaterThan(swept);
+    });
+  }
+
+  test("consumer delivery makes no replay call across heartbeats and reconnects", async () => {
+    const session = await bootConsumer("consumer-no-replay");
+
+    await session.tick();
+    await session.reconnect();
+    await session.tick();
+
+    expect(session.replays()).toBe(0);
+  });
+
+  test("a core frame on a relayed subject is not shown but its lane receipt is answered; an unstored topic stays on core", async () => {
+    const session = await bootConsumer("consumer-core-drop");
+    await session.follow("notifications.team.alpha");
+    await settle();
+
+    session.core(
+      AGENT,
+      forwardedRoleEnvelope("reviewer", "a role forward", "lane"),
+      "_INBOX.lane.1"
+    );
+    session.core(AGENT, peer("dropped"));
+    const team = JSON.stringify({ ...JSON.parse(peer("team")), topic: "notifications.team.alpha" });
+    session.core("notifications.team.alpha", team);
+    await until(() => session.cards("evt-team").length > 0, "the team topic's card");
+
+    expect(session.events).toContain("_INBOX.lane.1");
+    expect(session.cards("evt-lane")).toHaveLength(0);
+    expect(session.cards("evt-dropped")).toHaveLength(0);
+    expect(session.cards("evt-team")).toHaveLength(1);
+  });
+
+  test("a late BTW is shown as a card that starts no turn, and runs no side turn", async () => {
+    let sideTurns = 0;
+    const session = await bootConsumer("consumer-late-btw", {
+      runEphemeralTurn: async () => {
+        sideTurns += 1;
+        return { replyText: "too late" };
+      },
+    });
+
+    const inbox = session.relay(9, targetedDispatchEnvelope("btw", "late-btw"), { delivered: 2 });
+    await until(() => session.replies(inbox).includes("done"), "the late BTW's done");
+
+    const cards = session.cards("dispatch-late-btw");
+    expect(cards).toHaveLength(1);
+    expect(cards[0]?.content).toContain("runs no side turn");
+    expect(cards[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: false });
+    expect(session.events.indexOf("written dispatch-late-btw")).toBeLessThan(
+      session.events.indexOf(`${inbox} done`)
+    );
+    expect(sideTurns).toBe(0);
+    expect(session.dispatchReplies).toHaveLength(0);
+  });
+
+  test("a BTW whose side turn is still running delays neither the next frame's received nor its card", async () => {
+    const answering = Promise.withResolvers<{ replyText: string }>();
+    let sideTurns = 0;
+    const session = await bootConsumer("consumer-btw-off-worker", {
+      runEphemeralTurn: () => {
+        sideTurns += 1;
+        return answering.promise;
+      },
+    });
+
+    const btw = session.relay(1, targetedDispatchEnvelope("btw", "btw-running"));
+    await until(() => sideTurns === 1, "the side turn");
+    const next = session.relay(2, peer("after-btw"));
+    await until(() => session.replies(next).includes("done"), "the next frame's done");
+
+    expect(session.replies(next)).toEqual(["received", "done"]);
+    expect(session.cards("evt-after-btw")).toHaveLength(1);
+    expect(session.replies(btw)).toEqual(["received"]);
+
+    answering.resolve({ replyText: "the answer" });
+    await until(() => session.replies(btw).includes("done"), "the BTW's done");
+    expect(session.dispatchReplies).toHaveLength(1);
+    expect(session.cards("dispatch-btw-running")).toHaveLength(0);
+  });
+
+  test("a card Escape cleared from the queue between received and done is shown once afterwards, and done only after that write", async () => {
+    const session = await bootConsumer("consumer-queue-cleared", { turn: "streaming" });
+
+    const inbox = session.relay(5, peer("cleared"));
+    await until(() => session.cards("evt-cleared").length > 0, "the card");
+    expect(session.replies(inbox)).toEqual(["received"]);
+
+    await session.interrupt();
+    expect(session.replies(inbox)).toEqual(["received"]);
+    expect(
+      session.entries().filter((entry) => JSON.stringify(entry).includes("evt-cleared"))
+    ).toEqual([]);
+
+    await session.tick();
+    await until(() => session.replies(inbox).includes("done"), "the frame's done");
+
+    expect(session.events.filter((event) => event === "written evt-cleared")).toHaveLength(1);
+    expect(session.events.indexOf("written evt-cleared")).toBeLessThan(
+      session.events.indexOf(`${inbox} done`)
+    );
+    expect(session.replies(inbox)).toEqual(["received", "done"]);
+    await session.tick();
+    expect(session.events.filter((event) => event === "written evt-cleared")).toHaveLength(1);
+  });
+
+  test("a NATS reconnect begins a new epoch and registers it at once", async () => {
+    const session = await bootConsumer("consumer-reconnect");
+    const before = session.registrations.at(-1)?.delivery?.epoch;
+
+    await session.reconnect();
+
+    const after = session.registrations.at(-1)?.delivery?.epoch;
+    expect(after).toEqual(expect.any(String));
+    expect(after).not.toBe(before);
+  });
+
+  test("a gap the registration answers is a notice held until the host is settled, held again after a restart", async () => {
+    const gapNotices = (deliveries: readonly { readonly content: string }[]) =>
+      deliveries.filter((delivery) => delivery.content.includes("no longer holds some messages"));
+    const first = await bootConsumer("consumer-gap-a", { gap: true, turn: "streaming" });
+    expect(gapNotices(first.fixture.deliveries)).toHaveLength(0);
+    await first.stop();
+
+    const second = await bootConsumer("consumer-gap-b", { entries: first.entries() });
+    await second.tick();
+
+    expect(gapNotices(second.fixture.deliveries)).toHaveLength(1);
+    await second.tick();
+    expect(gapNotices(second.fixture.deliveries)).toHaveLength(1);
+  });
+
+  test("a relayed subscription removal registers the session again without the topic, and stops taking its frames", async () => {
+    const issueTopic = dispatchIssueSubject("INFRA-9", ">");
+    const issueSubject = dispatchIssueSubject("INFRA-9", "issue.updated");
+    const session = await bootConsumer("consumer-removal");
+    await session.follow(issueTopic);
+    await settle();
+    expect(session.registrations.at(-1)?.topics).toContain(issueTopic);
+    const followed = session.registrations.length;
+
+    const removal = JSON.stringify({
+      event_id: "dispatch-21",
+      source: "dispatch",
+      source_event_id: "21",
+      topic: AGENT,
+      dedupe_key: "dispatch-21",
+      issued_at: 1,
+      payload_summary: "unsubscribed from INFRA-9",
+      trace_id: "trace-dispatch-21",
+      payload: JSON.stringify({
+        issue_key: "INFRA-9",
+        type: "subscription.removed",
+        actor: { kind: "user", id: "alice" },
+        notify: true,
+        payload: { session_id: SESSION, by: { kind: "user", id: "alice" }, topics: [issueTopic] },
+      }),
+    });
+    session.relay(1, removal);
+    await until(() => session.registrations.length > followed, "the registration without it");
+    expect(session.registrations.at(-1)?.topics).not.toContain(issueTopic);
+
+    const late = JSON.stringify({ ...JSON.parse(peer("after-removal")), topic: issueSubject });
+    const inbox = session.relay(2, late, { subject: issueSubject });
+    await until(() => session.replies(inbox).includes("done"), "the unfollowed frame's done");
+    expect(session.cards("evt-after-removal")).toHaveLength(0);
   });
 });
