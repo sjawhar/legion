@@ -2,45 +2,30 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-511",
-  "completed": "2026-10-27T10:41:00Z",
+  "completed": "2026-10-27T11:18:00Z",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 6 at PR head 719b127e (code 9037d3c9). Following the architect's instruction, I first ran the committed real-binary file as it is: it fails 9/9 in this pod (the failure below). The same file, copied with DEADLINE_MS raised from 30 s to 150 s and the case timeouts from 120 s to 600 s, passes 9/9 (359 s). That confirms the implementer's report that the behaviour holds and only the deadlines fail. My round-4 red test block is byte-identical at 51f87278 and 9037d3c9 (sha256 equal). I drove the round's new behaviour with my own probe (/legion/scratch/tmp/i511t/probe-r6.test.ts, 3 pass)."
+    "how": "Round 7 at PR head b362ac00 (code 9613f45a; a test-only change to controller-start-omp.test.ts, giving Oh My Pi's startup a 150 s deadline of its own, each later wait 30 s, and each case 600 s). The pod was still slow: loadExtensions finished at 27.5 s of wall time and 9.2 s of CPU, measured just before the runs. I ran the committed file as it is, twice: run 1 passed 9 of 9 (355 s); run 2 passed 8 of 9 (457 s), with one failure below. I then ran the failing case alone 3 more times: 1 fail, 2 pass. The round-6 startup timeouts are gone: no case timed out waiting on startup in any run."
   },
   "failed": 1,
   "failures": [
     {
-      "criterion": "The pull request's real-binary proof (packages/pi-legion/extensions/controller-start-omp.test.ts, run by CI's pi-legion job and by every later role in its pod) passes on a slow but normal host. The tree's architect said on 2026-10-27 that a test which times out on such a host is a defect of this pull request.",
-      "evidence": "Command, as committed at 9037d3c9: `cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test ./extensions/controller-start-omp.test.ts` → 0 pass, 9 fail (285 s). Each case timed out at the file's DEADLINE_MS (30 s) before reaching the changed path: 6 waiting for the start turn's model request, 1 for the claim refusal's warning, 1 for the controller role's claim, 1 for the start claim's registration. In this pod Oh My Pi's startup alone takes longer than that deadline: measured with PI_DEBUG_STARTUP=1, loadExtensions completes at about 27 s of wall time (about 9 s of CPU) for the two extensions the file loads, and a pure-Python loop of 10M additions takes 3.4 s. The same file with only the two deadline constants raised (DEADLINE_MS 150_000, case timeout 600_000) passes 9/9, so the deadlines are the only defect. CI's pi-legion job has not run at 9037d3c9 (every lane queued at 10:31Z), and no earlier head of this pull request has a completed pi-legion run, so CI gives no counter-evidence. No separate red test: the committed file run as it is shows the failure."
+      "criterion": "The pull request's real-binary proof passes on a slow but normal host (the tree's architect, 2026-10-27: a test that fails on such a host is a defect of this pull request). Case: \"the operator sees a refused re-claim after /new from a focused subagent view\" (controller-start-omp.test.ts).",
+      "evidence": "Command, as committed at 9613f45a: `cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test ./extensions/controller-start-omp.test.ts`. Run 2: 8 pass, 1 fail. Then `… -t \"focused subagent view\"` 3 times: fail, pass, pass. That is 2 failures in 5 runs. Both failures stop at the same step: 'timed out waiting for the subagent's view focused'. The screen shows the Agent Hub with the subagent listed as running but '2.5s active · 0 req' (run 2: 3.7 s, 0 req), and the line 'Agent \"…\" is running and cannot be revived (no reviver registered).'. Enter in the hub reached the subagent before it had sent its first Messages request, so Oh My Pi did not focus it. The case presses alt+a and Enter once the start turn's request carrying the start message has been answered. Nothing makes it wait for the subagent's own request, although its comment says that request 'is held, so it is still running when its view is focused'. On this host the subagent has not sent it yet in about 2 of 5 runs. This is a test defect, not a product defect: the other 8 cases passed in every run."
     }
   ],
   "proof": [
     {
-      "criterion": "Review finding 1 (round 5 review): a /new held behind a hung start claim says at once that it waits; the hand-over line then stays after the /new reset and through the start turn, and goes at the operator's next run",
-      "surface": "real interactive Oh My Pi 18.12.2 under a pseudo-terminal, both plugins of this head, a stand-in that gives each registration its own secret, real NATS",
-      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test --timeout 900000 ./extensions/zz-tester-probe-r6.test.ts (copy of /legion/scratch/tmp/i511t/probe-r6.test.ts, deadlines 150 s, removed after), case R6-W",
-      "observed": "While the first registration was held (registrations 1), 'legion: waiting for the controller claim already running to finish.' was on screen. After release: 'New session started' and 'the session changed while the controller claim ran; the claim for the new session follows…' on screen. The line was still on screen after the start turn's reply. After the next typed prompt's run it was gone.",
-      "headSha": "719b127e437d9697f2a5464bf14fb99424ab7100",
-      "negativeControl": "At 55267f34 the wait notice went into the deferred batch and showed nothing while the /new was held (review finding 1; legion.test.ts asserted the deferred order then)."
-    },
-    {
-      "criterion": "Round 4's fix in its widget form: after /new, the re-claim refusal is on screen with true wording and goes at the next run",
-      "surface": "same rig",
-      "command": "same file, cases R6-C (registration and role claim)",
-      "observed": "Re-claim refused at its registration: the screen shows the warning '… have no controller grant to mint and fail', and set_status in the new session returned 'legion is available only to this session's registered claim' (statusWrites 0). Re-claim refused at its role claim: '… The session keeps its controller registration, so the `legion` tool's set_status still works…', and set_status was written (statusWrites 1). In both cases the warning was gone from the screen after the next run.",
-      "headSha": "719b127e437d9697f2a5464bf14fb99424ab7100",
-      "negativeControl": "At 7dfd25b9 neither warning appeared after /new, and my red test 'the operator sees a refused re-claim after /new' timed out. In the raised-deadline copy at this head it passes, unmodified."
-    },
-    {
-      "criterion": "All of the file's behaviour (A2-A5, card and notice ordering, claim refusal, the /new cases, the new focused-subagent /new case) holds once Oh My Pi has had time to start",
-      "surface": "the committed file with only its two deadline constants raised",
-      "command": "sed 's/^const DEADLINE_MS = 30_000;/const DEADLINE_MS = 150_000;/; s/^  120_000$/  600_000/' extensions/controller-start-omp.test.ts > extensions/zz-loaded.test.ts && bun test --timeout 900000 ./extensions/zz-loaded.test.ts (LEGION_TEST_OMP, LEGION_TEST_NATS_URL; copy removed after)",
-      "observed": "9 pass, 0 fail, 359 s",
-      "headSha": "719b127e437d9697f2a5464bf14fb99424ab7100",
-      "negativeControl": "The same file as committed (30 s deadlines): 0 pass, 9 fail, every case at startup."
+      "criterion": "The round-6 failure is fixed: Oh My Pi's startup no longer times out the real-binary file on a slow host",
+      "surface": "the committed real-binary file at 9613f45a, real interactive Oh My Pi 18.12.2 under a pseudo-terminal, both plugins of this head, stand-ins, real NATS, in this pod while loadExtensions takes about 27.5 s",
+      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test ./extensions/controller-start-omp.test.ts (twice, unmodified)",
+      "observed": "Run 1: 9 pass, 0 fail (354.9 s). Run 2: 8 pass, 1 fail (456.7 s): the focused-subagent case above, which failed at a step after startup. No case timed out during Oh My Pi's startup.",
+      "headSha": "b362ac0071ac1f29159fc66b13db6d33c2d2231b",
+      "negativeControl": "Round 6 at 9037d3c9, same pod and load, same command: 0 pass, 9 fail, every case timed out at the 30 s deadline during startup."
     }
   ],
   "observations": [
-    "CI at code head 9037d3c9: build, changes, lint, typecheck, test and pr-title queued when read at 2026-10-27T10:31Z; not waited on. PR head 719b127e is handoff-only."
+    "No plugin or Go code changed this round, so round 6's real-binary probes of the behaviour (/legion/scratch/tmp/i511t/probe-r6.test.ts, 3 pass at 719b127e) still apply.",
+    "CI at code head 9613f45a: build, changes, lint, typecheck, test and pr-title queued or pending when read at 2026-10-27T11:17Z; not waited on."
   ]
 }
