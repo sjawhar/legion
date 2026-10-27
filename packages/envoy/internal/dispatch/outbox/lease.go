@@ -64,9 +64,13 @@ type Outbox struct {
 	// batches; token is the hold's token, the host and process id.
 	instance uuid.UUID
 	token    string
-	// wake is the one-slot wake channel: every source of a wake (signal) sends to it without
-	// blocking, so wakes that come while one is pending fold into it.
+	// wake is the holder's one-slot wake channel: every source of a scan (signal) sends to it
+	// without blocking, so wakes that come while one is pending fold into it.
 	wake chan struct{}
+	// standbyWake is the standby's one-slot wake channel (signalStandby): the release of the
+	// publisher hold, a new LISTEN connection and the NATS connection changing, and nothing the
+	// holder's events cause, so a standby tries the hold only when it may be free.
+	standbyWake chan struct{}
 	// hold is the publisher hold while this process holds it, and nil otherwise.
 	hold atomic.Pointer[duty.Hold]
 	// claims counts the batches this outbox read, one per scanBatch: how often it scanned.
@@ -84,10 +88,11 @@ func New(deps Deps) *Outbox {
 		host = "unknown-host"
 	}
 	return &Outbox{
-		deps:     deps,
-		instance: uuid.New(),
-		token:    fmt.Sprintf("%s/%d", host, os.Getpid()),
-		wake:     make(chan struct{}, 1),
+		deps:        deps,
+		instance:    uuid.New(),
+		token:       fmt.Sprintf("%s/%d", host, os.Getpid()),
+		wake:        make(chan struct{}, 1),
+		standbyWake: make(chan struct{}, 1),
 	}
 }
 
@@ -106,15 +111,17 @@ func (o *Outbox) Publishing() bool {
 //
 // A standby tries the hold only while its NATS client is connected - and, once it gave the hold up
 // for NATS lost, only after a probe of its connection is answered (answering) - and only when
-// woken: by the release of the hold (duty.HoldReleasedChannel), by a timer armed to the moment the
-// current hold lapses on the database's clock (duty.Expiry, read again after every wake), or by its
+// woken (standbyWake): by the release of the hold (duty.HoldReleasedChannel), by a timer armed to
+// the moment the current hold lapses on the database's clock (duty.Expiry, read again after every
+// wake), by a new LISTEN connection (a release sent while it had none is not reported), or by its
 // own NATS connection changing; a standby probing a connection that does not answer probes it
-// again holdRetry later. A holder scans on each wake until the hold is lost, NATS is lost (natsLost)
-// or ctx ends. One wake channel serves both: it is signalled by every insert of events (a LISTEN on
-// eventsChannel, whose every new connection signals too, to catch up what it missed), by this
+// again holdRetry later. The events the holder writes and publishes never wake a standby, so a
+// standby sends no statement per event. A holder scans on each of its own wakes (wake) until the
+// hold is lost, NATS is lost (natsLost) or ctx ends: every insert of events (a LISTEN on
+// eventsChannel, whose every new connection signals too, to catch up what it missed), this
 // process's own commits (the events broker, which still reaches the outbox while the LISTEN
-// connection redials), by the NATS connection changing (the prompt resend of the events a lost
-// connection released), and by the holder's one retry timer, armed to the earliest back-off due
+// connection redials), the NATS connection changing (the prompt resend of the events a lost
+// connection released), and the holder's one retry timer, armed to the earliest back-off due
 // (nextRetry). Nothing scans on a period.
 //
 // On ctx's end the holder takes no further batch, finishes the one in flight and records it, and
@@ -142,7 +149,7 @@ func (o *Outbox) Run(ctx context.Context) {
 	}
 }
 
-// signal wakes the outbox's loop, or leaves the wake already pending.
+// signal wakes the holder's loop, or leaves the wake already pending.
 func (o *Outbox) signal() {
 	select {
 	case o.wake <- struct{}{}:
@@ -150,20 +157,33 @@ func (o *Outbox) signal() {
 	}
 }
 
+// signalStandby wakes the standby's loop, or leaves the wake already pending.
+func (o *Outbox) signalStandby() {
+	select {
+	case o.standbyWake <- struct{}{}:
+	default:
+	}
+}
+
 // listen holds the outbox's LISTEN connection until ctx ends: an insert of events by any process
-// wakes the outbox, and so does the release of the publisher hold. Every new connection wakes it
-// too, since a notification sent while it had none is not reported.
+// wakes the holder, and the release of the publisher hold wakes the standby. Every new connection
+// wakes both, since a notification sent while it had none is not reported.
 func (o *Outbox) listen(ctx context.Context) {
 	listener := &pglisten.Listener{
-		Owner:       "dispatch",
-		Dial:        o.deps.Listen,
-		Channels:    []string{eventsChannel, duty.HoldReleasedChannel},
-		OnConnected: o.signal,
-		OnNotify: func(channel, payload string) {
-			if channel == duty.HoldReleasedChannel && payload != publisherHold {
-				return
-			}
+		Owner:    "dispatch",
+		Dial:     o.deps.Listen,
+		Channels: []string{eventsChannel, duty.HoldReleasedChannel},
+		OnConnected: func() {
 			o.signal()
+			o.signalStandby()
+		},
+		OnNotify: func(channel, payload string) {
+			switch {
+			case channel == eventsChannel:
+				o.signal()
+			case payload == publisherHold:
+				o.signalStandby()
+			}
 		},
 	}
 	listener.Run(ctx)
@@ -189,9 +209,9 @@ func (o *Outbox) wakeOnCommits(ctx context.Context) {
 	}
 }
 
-// wakeOnConnectionChange wakes the outbox at every change of its NATS connection, until ctx ends: a
-// standby tries the hold once connected, and a holder resends what a lost connection released, or
-// starts counting natsLossGrace.
+// wakeOnConnectionChange wakes the holder and the standby at every change of its NATS connection,
+// until ctx ends: a standby tries the hold once connected, and a holder resends what a lost
+// connection released, or starts counting natsLossGrace.
 func (o *Outbox) wakeOnConnectionChange(ctx context.Context) {
 	for {
 		changed := o.deps.Publisher.ConnectionChanged()
@@ -200,6 +220,7 @@ func (o *Outbox) wakeOnConnectionChange(ctx context.Context) {
 			return
 		case <-changed:
 			o.signal()
+			o.signalStandby()
 		}
 	}
 }
@@ -233,7 +254,7 @@ func (o *Outbox) standby(ctx context.Context) *duty.Hold {
 		}
 		select {
 		case <-ctx.Done():
-		case <-o.wake:
+		case <-o.standbyWake:
 		case <-lapsed:
 		}
 		if lapse != nil {
@@ -372,8 +393,9 @@ type scanEnd struct {
 
 // scan reads and publishes batches under hold until there is nothing more to send: it takes the
 // next batch while the last one published anything or was full, and nothing went wrong. It takes
-// none once hold's deadline has passed. Every batch that sent anything is logged with this
-// process's instance and the span of event ids it sent.
+// none once hold's deadline has passed. Every batch that sent anything is logged as a sent batch
+// with this process's instance, the span of event ids it sent, how many events it sent at least one
+// envelope of (sent) and how many it marked published (published).
 func (o *Outbox) scan(ctx context.Context, hold fence) scanEnd {
 	for {
 		if ctx.Err() != nil {
@@ -385,8 +407,8 @@ func (o *Outbox) scan(ctx context.Context, hold fence) scanEnd {
 		o.claims.Add(1)
 		batch, err := scanBatch(ctx, o.deps, hold, o.instance)
 		if batch.sent > 0 {
-			slog.Info("dispatch outbox: published batch", "instance", o.instance,
-				"events", batch.sent, "first_id", batch.firstID, "last_id", batch.lastID, "started", batch.started)
+			slog.Info("dispatch outbox: sent batch", "instance", o.instance,
+				"sent", batch.sent, "published", batch.published, "first_id", batch.firstID, "last_id", batch.lastID, "started", batch.started)
 		}
 		switch {
 		case err != nil:

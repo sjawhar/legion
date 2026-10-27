@@ -996,7 +996,7 @@ const (
 	tookHold        = "took the publisher hold"
 	releasedHold    = "released the publisher hold"
 	lostHold        = "lost the publisher hold"
-	publishedBatch  = "published batch"
+	sentBatch       = "sent batch"
 )
 
 // healthReport is what a process's /healthz says of NATS and of the outbox. OutboxPublisher is nil
@@ -1444,7 +1444,7 @@ func (s *outboxScene) framesSince(at time.Time) map[*testSession][]sessionFrame 
 func (s *outboxScene) requireTakeOver(t *testing.T, p *dispatchProcess, since time.Time, what string) {
 	t.Helper()
 	took := p.waitForOutboxLine(t, tookHold, since, 2*takeOverWithin)
-	batch := p.waitForOutboxLine(t, publishedBatch, took.at, 2*takeOverWithin)
+	batch := p.waitForOutboxLine(t, sentBatch, took.at, 2*takeOverWithin)
 	var arrived time.Time
 	waitUntil(t, 2*takeOverWithin, "a session taking a comment written after "+what, func() bool {
 		var ok bool
@@ -1592,7 +1592,7 @@ func TestOneProcessPublishesTheOutboxAtATime(t *testing.T) {
 		}
 		own := publishingPeriods(lines)
 		for _, line := range lines {
-			if line.message != publishedBatch {
+			if line.message != sentBatch {
 				continue
 			}
 			batches++
@@ -1620,7 +1620,7 @@ func TestOneProcessPublishesTheOutboxAtATime(t *testing.T) {
 		}
 	}
 	if batches == 0 {
-		t.Errorf("neither process logged %q", outboxLogPrefix+publishedBatch)
+		t.Errorf("neither process logged %q", outboxLogPrefix+sentBatch)
 	}
 	if last := sampled[len(sampled)-1]; holder == nil || !map[*dispatchProcess]healthReport{pair.a: last.a, pair.b: last.b}[holder].publishing() {
 		t.Errorf("the process whose publisher hold is open in the logs is not the one the last /healthz read reports publishing (A %v, B %v)", last.a, last.b)
@@ -1987,7 +1987,7 @@ func TestAFrozenPublisherSendsNothingWhenItResumes(t *testing.T) {
 	}
 	for _, line := range publisher.outboxLines(t) {
 		switch {
-		case line.message == publishedBatch && line.started.After(stopped):
+		case line.message == sentBatch && line.started.After(stopped):
 			t.Errorf("the stopped publisher logged a batch started after it was stopped: %s", line.text)
 		case (line.message == tookHold || line.message == releasedHold) && !line.at.Before(resumed.Truncate(time.Millisecond)):
 			t.Errorf("the resumed process logged %q: %s", line.message, line.text)

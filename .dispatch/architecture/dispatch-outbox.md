@@ -23,14 +23,16 @@ A process publishes only while it holds the hold and its loss deadline has not p
 
 ## Wake
 
-Nothing scans on a period. One one-slot wake channel is signalled by:
+Nothing scans on a period. The holder and the standby have one one-slot wake channel each. The holder's is signalled by:
 
-- a LISTEN connection (`pglisten`, dialled through `store.Pool.Listener`) on `dispatch_events`, which migration `0107` notifies once per statement that inserts events, and on `dispatch_duty_holds` for this hold's release. Every new connection signals too, to catch up on what it missed while it had none;
+- a LISTEN connection (`pglisten`, dialled through `store.Pool.Listener`) on `dispatch_events`, which migration `0107` notifies once per statement that inserts events. Every new connection signals too, to catch up on what it missed while it had none;
 - the in-process events broker, so this process's own commits are seen while the LISTEN connection redials;
-- every change of the NATS connection (`bus.Client.ConnectionChanged`): a holder resends what a lost connection released, and a standby tries the hold once connected;
+- every change of the NATS connection (`bus.Client.ConnectionChanged`), so a holder resends what a lost connection released;
 - the holder's one retry timer, armed after each scan to the earliest due `next_attempt_at`, read as a duration on the database's clock. After a scan that failed it is armed to `retry.BaseDelay`.
 
-The holder scans on every wake. A standby only tries the hold: on a wake, on its timer to the current hold's lapse, or a second later when the database or its NATS probe did not answer. A scan takes one batch after another while the last one published anything or was full.
+The standby's is signalled only by the same LISTEN connection's `dispatch_duty_holds` notification of this hold's release, by every new LISTEN connection, and by every change of the NATS connection. The events the holder writes never wake a standby, so a standby sends no statement per event (`TestAStandbyDoesNotTryTheHoldForEveryEventTheHolderWrites`).
+
+The holder scans on every wake. A standby only tries the hold: on its wake, on its timer to the current hold's lapse, or a second later when the database or its NATS probe did not answer. A scan takes one batch after another while the last one published anything or was full.
 
 ## The batch read
 
