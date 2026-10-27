@@ -337,7 +337,7 @@ func (r *Runtime) movedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
 // movedRoleOverlays is the first of role's own overlays (Options.RoleConfigFiles) whose holder in a
 // pod created now — the deepest operator mount at or above the file (runtime.kubernetes.pod
 // volume_mounts), with its volume — pod's role container lacks: no mount of that volume with that
-// sub_path, or a volume of that name filled from another ConfigMap or Secret, or projecting other
+// sub_path at that mount path, or a volume of that name filled from another ConfigMap or Secret, or projecting other
 // items. Every generation of role is started with the file in its PI_CONFIG_FILES
 // (roleOperatorEnv), and Oh My Pi refuses to start on an overlay it cannot read, so a pod created
 // before the operator added the mount is replaced by the relaunch rather than start a role there
@@ -355,7 +355,10 @@ func (r *Runtime) movedRoleOverlays(pod *corev1.Pod, role claim.Role) (movedAddr
 		}
 		want := volumeFillName(r.pod.Volumes, holder.Name)
 		mounted := slices.ContainsFunc(pod.Spec.Containers[container].VolumeMounts, func(m corev1.VolumeMount) bool {
-			return m.Name == holder.Name && m.SubPath == holder.SubPath
+			// An issue pod's roles container mounts what lies under the image's home at its
+			// HomeMountsDir view (homeMountsView); the controller's pod mounts it as configured.
+			atPath := m.MountPath == holder.MountPath || m.MountPath == containerHomePath(holder.MountPath)
+			return m.Name == holder.Name && m.SubPath == holder.SubPath && atPath
 		})
 		held := "(unset)"
 		if mounted {

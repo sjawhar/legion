@@ -215,20 +215,12 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	}
 	// Each role's own overlays, read as that role's Oh My Pi will start on them, after the table so
 	// the log still reads as the declared list first.
-	for _, entry := range roleOverlays {
-		overlays := append(capabilities.OverlayEntries(envValue(environ, "PI_CONFIG_FILES")), entry.files...)
-		img := capabilities.Image{Launch: invocation, Env: environ, WorkDir: workDir}
-		why, err := capabilities.CheckOverlays(ctx, img, overlays, entry.files)
-		if err != nil {
-			// A run that never reached an exit of its own says nothing of the overlays: every file
-			// was read above, so it is reported, as the model-fallback read is, and the rest of the
-			// role's runs still decide.
-			fmt.Fprintf(stderr, "legion probe-image: role %s's overlays were read but Oh My Pi did not answer on some of them: %v\n", entry.role, err)
-		}
-		if why != "" {
-			fmt.Fprintln(stderr, bootprobe.RoleOverlaysRefusedLine(entry.role, why))
-			return 1
-		}
+	roleImage := capabilities.Image{Launch: invocation, Env: environ, WorkDir: workDir}
+	if code := checkRoleOverlays(roleOverlays, func(files []string) (string, error) {
+		overlays := append(capabilities.OverlayEntries(envValue(environ, "PI_CONFIG_FILES")), files...)
+		return capabilities.CheckOverlays(ctx, roleImage, overlays, files)
+	}, stderr); code != 0 {
+		return code
 	}
 	agentModels := bootprobe.AgentModelsResolved
 	if *skipAgentModels {
@@ -297,4 +289,22 @@ func envValue(environ []string, name string) string {
 		}
 	}
 	return value
+}
+
+// checkRoleOverlays runs check on each role's own overlays in order and answers the exit code: 1,
+// after printing the role's RoleOverlaysRefusedLine, for the first role check refuses, else 0. A
+// run check reports as unanswered (a timeout) is printed and does not stop the role's own verdict:
+// a refusal found after it still refuses.
+func checkRoleOverlays(entries []roleOverlays, check func(files []string) (string, error), stderr io.Writer) int {
+	for _, entry := range entries {
+		why, err := check(entry.files)
+		if err != nil {
+			fmt.Fprintf(stderr, "legion probe-image: role %s's overlays were read but Oh My Pi did not answer on some of them: %v\n", entry.role, err)
+		}
+		if why != "" {
+			fmt.Fprintln(stderr, bootprobe.RoleOverlaysRefusedLine(entry.role, why))
+			return 1
+		}
+	}
+	return 0
 }

@@ -3598,14 +3598,16 @@ compared: a change there reaches the pods created after it.
 
 The supervisor relaunches each reported claim at once, through the launch path a death uses: a
 `Resume` of its recorded session, or a `Spawn` when it has not registered yet. What the relaunch
-replaces follows from what moved. A pod whose launcher dials a stale stream, or which lacks the
-broker enrollment its roles are started against now, cannot run them as a pod created now would,
+replaces follows from what moved. A pod whose launcher dials a stale stream, which lacks the
+broker enrollment its roles are started against now, or which lacks the operator mount holding a
+file `role_config_files` names for one of its roles, cannot run them as a pod created now would,
 and every role of it is reported at once, from the boot that re-adopts them: the first of them
 relaunched replaces the pod, under the pod's launch turn, and the others, whose relaunches wait on
 that turn, resume into the new pod, whose launcher dials the current stream for every role and mounts the
 current enrollment. None of them is charged, and none is found gone when the pod is replaced under
 it. The controller's pod, whose one launcher dials a stale stream, or which lacks the broker
-enrollment under `runtime.kubernetes.agent_secrets`, is replaced the same way at its relaunch. A
+enrollment under `runtime.kubernetes.agent_secrets`, or the mount of one of its own
+`role_config_files`, is replaced the same way at its relaunch. A
 role whose environment alone moved, the broker's URL, `LEGION_SLACK_CHANNELS` for the controller
 and the other addresses its agent is told among them, starts its next generation in the same pod,
 handed the current values, and the pod and its other roles are left as they are. The stale
@@ -4693,8 +4695,8 @@ clone or workspace.
 Every end of an issue pod is therefore the end of that pod's disk, and the ends are these:
 
 - **a launch replaces the pod**, because it cannot run the launching role as a pod created now
-  would: another image, a moved worker stream, a secrets-broker enrollment or session-database key
-  the pod lacks, a role's launcher Secret that no longer binds it, or a Sandbox of the disk shape
+  would: another image, a moved worker stream, a secrets-broker enrollment, session-database key
+  or `role_config_files` mount the pod lacks, a role's launcher Secret that no longer binds it, or a Sandbox of the disk shape
   before this release ([Pinning a release that drops what a running pod still
   uses](#pinning-a-release-that-drops-what-a-running-pod-still-uses),
   [Cutting over to the pod-owned disk](#cutting-over-to-the-pod-owned-disk));
@@ -5481,13 +5483,15 @@ issue's pod (every role of it alike) and the image probe's.
   flag and is refused as one to rebuild from this daemon's commit. The probe reads the ConfigMap as
   it is at boot, and a pod reads it when it starts; a file mounted by `sub_path` is never refreshed
   in a running pod, so a changed file reaches a role once its pod is replaced.
-  **Rolling it out:** adding the overlay's volume and mount to `runtime.kubernetes.pod` (or
-  changing that volume's ConfigMap, Secret or `items`) together with `role_config_files` reaches a
-  running issue pod, or the daemon-launched controller's, only by replacing it: at its next
-  relaunch a role whose pod lacks the mount holding one of its files is reported `StaleAddress`
-  (`role_config_files.<role> <file>: held (unset), handed volume … from ConfigMap …`), and the
-  relaunch replaces the pod, the other roles of the issue moving into the new pod with their
-  sessions, as a change of the secrets broker's enrollment does.
+  **Rolling it out:** a pod created before the operator added the overlay's volume and mount (or
+  moved its mount path, or changed that volume's ConfigMap, Secret or `items`) cannot run a role
+  whose `PI_CONFIG_FILES` names the file, so it is replaced at once, as a change of the secrets
+  broker's enrollment is: at the boot's re-adoption the role is reported `StaleAddress`, its detail
+  `role_config_files.<role> <file> (unset), now volume <name> from ConfigMap <name> items [...]`,
+  and the supervisor relaunches it at once. The running turn is lost, and the issue pod is replaced
+  with its disk, which takes the unpushed work of every role in that pod ([The disk dies with its
+  pod](#the-disk-dies-with-its-pod)). So add the mount and the key when no named role is mid-turn,
+  or after the roles have pushed.
   **Who can read the files:** only loading is per role. Every role of a pod mounts every operator
   volume, so each role can read every role's overlay file; never put a secret in one (a credential
   travels in `provider_keys` or a mounted Secret the operator means every role to hold).

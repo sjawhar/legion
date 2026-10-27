@@ -3,9 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 )
 
 // Under runtime tmux, `legion start --check-config` refuses, with exit 1 and no Config OK, a file
@@ -63,5 +67,28 @@ func TestStartCheckConfigRefusesARoleOverlayNoPodMountHolds(t *testing.T) {
 	want := "legion start: role_config_files.tester entry /etc/legion-fallback/fallback.yml is under no runtime.kubernetes.pod.volume_mounts mount_path: a role's pod and the image probe's see only the image and the operator's mounts, so mount the ConfigMap that holds it there\n"
 	if code != 1 || out.Len() != 0 || errb.String() != want {
 		t.Fatalf("an unmounted overlay: exit code = %d, stdout %q, stderr %q; want 1, nothing, and %q", code, out.String(), errb.String(), want)
+	}
+}
+
+// A role whose check timed out on one run and refused on a later one is refused: the timeout is
+// printed, then the refusal line the daemon reads, and the exit is 1; a role that only timed out
+// passes with the timeout printed.
+func TestProbeImageRefusesARoleOverlayAfterATimeout(t *testing.T) {
+	timedOut := errors.New("omp config get retry.modelFallback --json under PI_CONFIG_FILES /a.yml: timed out after 1m0s")
+	for _, tc := range []struct {
+		name, why string
+		code      int
+	}{
+		{"a refusal after the timeout", "Oh My Pi refuses /b.yml: error: Failed to parse config overlay /b.yml", 1},
+		{"the timeout alone", "", 0},
+	} {
+		var stderr bytes.Buffer
+		code := checkRoleOverlays([]roleOverlays{{role: "merger", files: []string{"/a.yml", "/b.yml"}}}, func([]string) (string, error) { return tc.why, timedOut }, &stderr)
+		if code != tc.code || !strings.Contains(stderr.String(), "timed out after 1m0s") {
+			t.Errorf("%s: exit %d, stderr %q; want %d and the timeout", tc.name, code, stderr.String(), tc.code)
+		}
+		if refused := strings.Contains(stderr.String(), bootprobe.RoleOverlaysRefusedLine("merger", tc.why)); refused != (tc.why != "") {
+			t.Errorf("%s: stderr %q, refusal line printed %t", tc.name, stderr.String(), refused)
+		}
 	}
 }

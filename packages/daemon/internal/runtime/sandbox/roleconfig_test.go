@@ -217,3 +217,59 @@ func TestAddingARoleOverlaysMountReplacesAnIssuePodMadeWithoutIt(t *testing.T) {
 		t.Fatalf("the reviewer resumed into pod %s, want the tester's new pod %s", newReviewer.Sandbox.PodUID, newTester.Sandbox.PodUID)
 	}
 }
+
+// Moving the overlay volume to another mount path (same volume, role_config_files pointed at the
+// new path) is a move too: the old pod mounts the volume where the role's file is not, so the role
+// is StaleAddress naming the new file. Restarting on the same configuration, a mount of the file's
+// parent directory, and a mount under the image's home (which an issue pod's roles container holds
+// at its HomeMountsDir view) are no move, for an issue pod and the controller's pod alike.
+func TestMovingARoleOverlaysMountPathIsAMove(t *testing.T) {
+	roles := corev1.Volume{Name: "operator-roles", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+		LocalObjectReference: corev1.LocalObjectReference{Name: "legion-operator-roles"},
+	}}}
+	at := func(path string, files ...string) func(*Options) {
+		return func(o *Options) {
+			o.Pod.Volumes = append(o.Pod.Volumes, roles)
+			o.Pod.VolumeMounts = append(o.Pod.VolumeMounts, corev1.VolumeMount{Name: roles.Name, MountPath: path, ReadOnly: true})
+			o.RoleConfigFiles = map[claim.Role][]string{claim.RoleTester: files, claim.RoleController: files}
+		}
+	}
+	const home = "/home/legion/legion-roles"
+	for _, tc := range []struct {
+		name          string
+		before, after func(*Options)
+		moved         string
+	}{
+		{"the mount path moved", at("/etc/a", "/etc/a/fallback.yml"), at("/etc/b", "/etc/b/fallback.yml"), "role_config_files.tester /etc/b/fallback.yml"},
+		{"the same configuration", at("/etc/a", "/etc/a/fallback.yml"), at("/etc/a", "/etc/a/fallback.yml"), ""},
+		{"a file under a parent-directory mount", at("/etc/a", "/etc/a/roles/fallback.yml"), at("/etc/a", "/etc/a/roles/fallback.yml"), ""},
+		{"a mount under the image's home", at(home, home+"/fallback.yml"), at(home, home+"/fallback.yml"), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r1, r2 := runtimeWithOptions(t, tc.before), runtimeWithOptions(t, tc.after)
+			for _, spec := range []runtime.SpawnSpec{workerSpec(t), controllerSpec(t)} {
+				pod := &corev1.Pod{Spec: podOf(t, r1, spec)}
+				got, moved := r2.movedRoleOverlays(pod, spec.Role)
+				if tc.moved == "" && moved {
+					t.Errorf("%s: moved %s, want no move", spec.Role, got)
+				}
+				if want := strings.Replace(tc.moved, "tester", string(spec.Role), 1); tc.moved != "" && (!moved || got.where != want) {
+					t.Errorf("%s: moved %v %+v, want a move of %s", spec.Role, moved, got, want)
+				}
+			}
+		})
+	}
+}
+
+// runtimeWithOptions is the test runtime over the operator's pod, changed by change.
+func runtimeWithOptions(t *testing.T, change func(*Options)) *Runtime {
+	t.Helper()
+	opts := testOptions()
+	opts.Pod = operatorPod()
+	change(&opts)
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
