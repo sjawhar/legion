@@ -85,3 +85,33 @@ test("Conversation keeps every line of a typed block whose content breaks its ru
     await alice.close();
   }
 });
+
+test("Conversation draws a message's lone-CR unknown block once, each line on its own", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Lone CR" });
+  // A message body is stored as sent, so a lone carriage return still ends its lines: the drawn
+  // fence lines must end there too, or the body is shown twice.
+  await createMessage(
+    issue.key,
+    { body: "Lead **bold**\n\n:::a\rbody words\r:::\n\nAfter" },
+    agent
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+
+    const card = page.locator('[data-turn^="message:"]');
+    await expect(card).toHaveCount(1);
+    await expect(card.locator("strong").filter({ hasText: /^bold$/ })).toBeVisible();
+    for (const line of [":::a", "body words", ":::", "After"]) {
+      await expect(card.locator("p").filter({ hasText: new RegExp(`^${line}$`) })).toHaveCount(1);
+    }
+    await expect(card.locator("[data-markdown-fallback]")).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
