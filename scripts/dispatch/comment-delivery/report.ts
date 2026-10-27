@@ -4,10 +4,11 @@ import { parseArgs } from "node:util";
 import { RECEIPT_TIMEOUT_CAUSE } from "../../../packages/contracts/src/dispatch-api";
 
 // Turns the three files of the comment delivery audit (INFRA-596) into a document for people:
-// comments.csv from packages/envoy/internal/dispatch/deliveryaudit/comments.sql, and received.tsv
-// and sessions.tsv from received.sql and sessions.sql beside this file. scripts/dispatch/README.md
-// ("Comment delivery") gives the run. Input that does not agree with itself is refused (exit 1,
-// every problem on stderr, nothing on stdout), never counted.
+// comments.csv from packages/envoy/internal/dispatch/deliveryaudit/comments.sql, and receipts.tsv
+// and receipts-counts.txt from `tq receipts` (INFRA-608, theorem-labs/agent-infra
+// transcript-store). scripts/dispatch/README.md ("Comment delivery") gives the run. Input that
+// does not agree with itself is refused (exit 1, every problem on stderr, nothing on stdout),
+// never counted.
 
 /** comments.csv's columns, in order: the contract in deliveryaudit/README.md. */
 export const COMMENT_COLUMNS = [
@@ -20,33 +21,33 @@ export const COMMENT_COLUMNS = [
   "shape",
   "reopened",
   "target",
-  "target_kind",
   "owed_reasons",
   "addressed",
+  "mention_session_id",
+  "mention_envelope_ids",
+  "mention_btw_reply_id",
+  "mention_modes",
   "mention_state",
   "mention_error",
   "route_used",
   "claim_used",
   "route_source",
-  "mention_envelope_id",
-  "mention_delivery",
 ] as const;
-export const RECEIVED_COLUMNS = [
-  "session_id",
-  "host",
-  "ts",
-  "raw_file",
-  "raw_line",
-  "envelope_id",
-  "event_id",
+/** receipts.tsv's columns, in order: INFRA-608's output contract. */
+export const RECEIPT_COLUMNS = [
   "comment_id",
-] as const;
-export const SESSION_COLUMNS = [
-  "session_id",
-  "host",
-  "started_at",
-  "ended_at",
-  "parent_session",
+  "event_id",
+  "target",
+  "listed",
+  "checked_session",
+  "status",
+  "unknown_reason",
+  "evidence",
+  "received_by",
+  "first_received_at",
+  "first_receipt",
+  "target_started_at",
+  "target_ended_at",
 ] as const;
 
 /** The columns every row of one comment repeats. */
@@ -74,24 +75,20 @@ const MENTION_STATES: Readonly<Record<string, true>> = {
   sent: true,
   failed: true,
 };
-const MENTION_DELIVERIES: Readonly<Record<string, true>> = {
-  "": true,
-  btw: true,
-  aside: true,
-  steer: true,
-};
+const MENTION_MODES: Readonly<Record<string, true>> = { btw: true, aside: true, steer: true };
+const STATUSES = ["received", "not_received", "unknown"] as const;
+const UNKNOWN_REASONS = ["session_not_in_store", "role", "btw"] as const;
 /** Why a target was owed a comment, in the order a `not-addressed` cause names them. */
 const OWED_REASONS = ["claimant", "route", "follower", "asker", "mention"] as const;
-const AGENT_PREFIX = "notifications.agent.";
-const ROLE_PREFIX = "notifications.role.";
 
 type OwedReason = (typeof OWED_REASONS)[number];
+export type Status = (typeof STATUSES)[number];
+export type UnknownReason = (typeof UNKNOWN_REASONS)[number];
 type Row<T extends readonly string[]> = { readonly [K in T[number]]: string } & {
   readonly line: number;
 };
 export type CommentRow = Row<typeof COMMENT_COLUMNS>;
-export type ReceivedRow = Row<typeof RECEIVED_COLUMNS>;
-export type SessionRow = Row<typeof SESSION_COLUMNS>;
+export type ReceiptRow = Row<typeof RECEIPT_COLUMNS>;
 
 export class ReportRefusal extends Error {
   readonly problems: readonly string[];
@@ -173,8 +170,8 @@ const TSV_ESCAPES: Readonly<Record<string, string>> = {
   "'": "'",
 };
 
-/** ClickHouse's TSVWithNames: one record a line, fields split by tabs, backslash escapes. A
- *  NULL (`\N`) reads as empty: no column of these queries has one. */
+/** TSV with a header: one record a line, fields split by tabs, backslash escapes. A NULL
+ *  (`\N`) reads as empty. */
 function tsvRecords(text: string): Record_[] {
   const lines = text.split("\n");
   if (lines.at(-1) === "") lines.pop();
@@ -194,12 +191,13 @@ function table<T extends readonly string[]>(
   records: readonly Record_[],
   columns: T,
   file: string,
+  separator: string,
   problems: string[]
 ): Row<T>[] {
   const [header, ...body] = records;
-  if (header === undefined || header.fields.join(",") !== columns.join(",")) {
+  if (header === undefined || header.fields.join(separator) !== columns.join(separator)) {
     problems.push(
-      `${file}: the header is "${header?.fields.join(",") ?? ""}", not "${columns.join(",")}"`
+      `${file}: the header is "${header?.fields.join(separator) ?? ""}", not "${columns.join(separator)}"`
     );
     return [];
   }
@@ -219,26 +217,91 @@ function table<T extends readonly string[]>(
 }
 
 export function parseCommentsCsv(text: string, problems: string[]): CommentRow[] {
-  return table(
-    csvRecords(text, "comments.csv", problems),
-    COMMENT_COLUMNS,
-    "comments.csv",
-    problems
-  );
+  const records = csvRecords(text, "comments.csv", problems);
+  return table(records, COMMENT_COLUMNS, "comments.csv", ",", problems);
 }
 
-export function parseReceivedTsv(text: string, problems: string[]): ReceivedRow[] {
-  return table(tsvRecords(text), RECEIVED_COLUMNS, "received.tsv", problems);
+export function parseReceiptsTsv(text: string, problems: string[]): ReceiptRow[] {
+  return table(tsvRecords(text), RECEIPT_COLUMNS, "receipts.tsv", "\t", problems);
 }
 
-export function parseSessionsTsv(text: string, problems: string[]): SessionRow[] {
-  return table(tsvRecords(text), SESSION_COLUMNS, "sessions.tsv", problems);
+/** receipts-counts.txt's keys, one line each, in order: INFRA-608's output contract. */
+export const COUNT_KEYS = [
+  "from",
+  "to",
+  "listed_pairs",
+  "received",
+  "not_received",
+  "unknown",
+  "unknown_session_not_in_store",
+  "unknown_role",
+  "unknown_btw",
+  "unlisted_rows",
+  "comments",
+  "comments_with_receipt",
+  "comments_without_receipt",
+  "empty_target_pairs",
+  "rows_without_id",
+] as const;
+type CountKey = (typeof COUNT_KEYS)[number];
+type NumberKey = Exclude<CountKey, "from" | "to">;
+
+/** receipts-counts.txt: what `tq receipts` counted, by key. */
+export type ReceiptCounts = { readonly from: string; readonly to: string } & {
+  readonly [K in NumberKey]: number;
+};
+
+/** receipts-counts.txt: exactly one `<key>\t<value>` line for each of COUNT_KEYS, in order, and
+ *  a newline at the end. `from` and `to` are `YYYY-MM-DDTHH:MM:SSZ`; every other value is a plain
+ *  integer. Undefined, with a problem for each line that is not so. */
+export function parseCounts(text: string, problems: string[]): ReceiptCounts | undefined {
+  const found: string[] = [];
+  if (!text.endsWith("\n")) problems.push("receipts-counts.txt: the last line has no newline");
+  const lines = text === "" ? [] : text.replace(/\n$/, "").split("\n");
+  for (let index = 0; index < Math.max(lines.length, COUNT_KEYS.length); index++) {
+    const where = `receipts-counts.txt line ${index + 1}`;
+    const key = COUNT_KEYS[index];
+    const line = lines[index];
+    if (key === undefined) {
+      problems.push(`${where}: "${line}" is after the last key, rows_without_id`);
+      continue;
+    }
+    if (line === undefined) {
+      problems.push(`${where}: missing; the "${key}" line comes here`);
+      continue;
+    }
+    const tab = line.indexOf("\t");
+    const [given, value] =
+      tab === -1 ? [line, undefined] : [line.slice(0, tab), line.slice(tab + 1)];
+    if (given !== key) {
+      problems.push(`${where}: the key is "${given}", not "${key}"`);
+    } else if (value === undefined) {
+      problems.push(`${where}: "${line}" has no tab and value`);
+    } else if (key === "from" || key === "to") {
+      if (/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(value) && instant(value) !== undefined) {
+        found.push(value);
+      } else {
+        problems.push(`${where}: ${key} "${value}" is not a time YYYY-MM-DDTHH:MM:SSZ`);
+      }
+    } else if (/^(0|[1-9]\d*)$/.test(value) && Number.isSafeInteger(Number(value))) {
+      found.push(value);
+    } else {
+      problems.push(`${where}: ${key} "${value}" is not a plain integer`);
+    }
+  }
+  if (found.length !== COUNT_KEYS.length) return undefined;
+  const [from = "", to = "", ...numbers] = found;
+  return {
+    from,
+    to,
+    ...Object.fromEntries(COUNT_KEYS.slice(2).map((key, index) => [key, Number(numbers[index])])),
+  } as ReceiptCounts;
 }
 
-/** A UTC time as microseconds since the epoch, or undefined when it is not `YYYY-MM-DDTHH:MM:SS
- *  [.fraction]Z`. */
+/** A UTC time as microseconds since the epoch, or undefined when it is not `YYYY-MM-DD[T ]
+ *  HH:MM:SS[.fraction][Z]`. A time with no `Z` is read as UTC. */
 function instant(value: string): number | undefined {
-  const match = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(?:\.(\d{1,9}))?Z$/.exec(value);
+  const match = /^(\d{4})-(\d\d)-(\d\d)[T ](\d\d):(\d\d):(\d\d)(?:\.(\d{1,9}))?Z?$/.exec(value);
   if (match === null) return undefined;
   const [, year, month, day, hour, minute, second, fraction = ""] = match;
   const milliseconds = Date.UTC(
@@ -252,32 +315,53 @@ function instant(value: string): number | undefined {
   return milliseconds * 1000 + Number(fraction.padEnd(6, "0").slice(0, 6));
 }
 
-/** A session id without the `@<host>:<path hash>` the store adds to a diverged copy. */
-function baseSession(id: string): string {
-  const at = id.indexOf("@");
-  return at === -1 ? id : id.slice(0, at);
-}
-
 function compare(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+/** A comma-joined list of comments.csv, one element per mention attempt; empty for none. */
+function attempts(value: string): string[] {
+  return value === "" ? [] : value.split(",");
+}
+
 // ---------------------------------------------------------------- the model
 
-export interface Target {
+/** One row of receipts.tsv. */
+export interface Receipt {
+  readonly line: number;
+  readonly commentId: string;
+  readonly eventId: string;
   readonly target: string;
-  readonly kind: "session" | "role";
-  /** The session's id, for a session target. */
-  readonly session: string;
+  readonly listed: boolean;
+  readonly checkedSession: string;
+  readonly status: Status;
+  readonly unknownReason: UnknownReason | "";
+  readonly evidence: string;
+  readonly receivedBy: string;
+  readonly firstReceivedAt: string;
+  readonly firstReceipt: string;
+  readonly targetStartedAt: string;
+  readonly targetEndedAt: string;
+  readonly startedUs: number | undefined;
+  /** Undefined while the session is still running, or when the store does not hold it. */
+  readonly endedUs: number | undefined;
+}
+
+/** One (comment, target) pair of comments.csv, with its listed receipts.tsv row. */
+export interface Pair {
+  readonly target: string;
   /** Why it was owed the comment, in OWED_REASONS order; empty when only addressed. */
   readonly reasons: readonly OwedReason[];
   readonly addressed: boolean;
+  readonly mentionSessionId: string;
+  /** One element per attempt, by attempt; an element is empty for an attempt with none. */
+  readonly mentionEnvelopeIds: readonly string[];
+  readonly mentionBtwReplyId: string;
+  /** One element per attempt, by attempt, in the order of mentionEnvelopeIds. */
+  readonly mentionModes: readonly string[];
   readonly mentionState: string;
   readonly mentionError: string;
-  /** The envelope id the listener minted for the mention's newest attempt; empty when none. */
-  readonly mentionEnvelopeId: string;
-  /** That attempt's mode: btw, aside or steer; empty when the target has no mention attempt. */
-  readonly mentionDelivery: string;
+  readonly receipt: Receipt;
 }
 
 export interface Comment {
@@ -289,30 +373,20 @@ export interface Comment {
   readonly publishedUs: number | undefined;
   readonly author: string;
   readonly shape: string;
-  /** Sorted by subject. Empty for a comment with no target. */
-  readonly targets: readonly Target[];
+  /** Sorted by target. Empty for a comment with no target. */
+  readonly pairs: readonly Pair[];
 }
 
-export interface Receipt {
-  readonly session: string;
-  readonly host: string;
-  readonly ts: string;
-  readonly rawFile: string;
-  readonly rawLine: string;
-  readonly envelopeId: string;
-  readonly eventId: string;
-  readonly commentId: string;
+type PairRow = Omit<Pair, "receipt"> & { readonly line: number };
+interface CommentDraft extends Omit<Comment, "pairs"> {
+  readonly pairs: readonly PairRow[];
 }
 
-export interface Session {
-  readonly id: string;
-  readonly startedUs: number;
-  /** Undefined while the session's file is still being written. */
-  readonly endedUs: number | undefined;
-  readonly parents: readonly string[];
+function isOwedReason(value: string): value is OwedReason {
+  return (OWED_REASONS as readonly string[]).includes(value);
 }
 
-function commentsFrom(rows: readonly CommentRow[], problems: string[]): Comment[] {
+function commentsFrom(rows: readonly CommentRow[], problems: string[]): CommentDraft[] {
   const byId = new Map<string, CommentRow[]>();
   for (const row of rows) {
     const where = `comments.csv line ${row.line} (comment ${row.comment_id})`;
@@ -333,27 +407,34 @@ function commentsFrom(rows: readonly CommentRow[], problems: string[]): Comment[
     if (MENTION_STATES[row.mention_state] !== true) {
       problems.push(`${where}: mention_state "${row.mention_state}"`);
     }
-    if (MENTION_DELIVERIES[row.mention_delivery] !== true) {
-      problems.push(`${where}: mention_delivery "${row.mention_delivery}"`);
+    const modes = attempts(row.mention_modes);
+    if (!modes.every((mode) => MENTION_MODES[mode] === true)) {
+      problems.push(`${where}: mention_modes "${row.mention_modes}"`);
     }
-    if ((row.mention_state === "") !== (row.mention_delivery === "")) {
+    if ((row.mention_state === "") !== (modes.length === 0)) {
       problems.push(
-        `${where}: mention_state "${row.mention_state}" with mention_delivery "${row.mention_delivery}"`
+        `${where}: mention_state "${row.mention_state}" with mention_modes "${row.mention_modes}"`
       );
     }
+    // An attempt with no envelope id is an empty element, so both lists have one element per
+    // attempt; a single attempt with none is the empty string.
+    const envelopes =
+      modes.length === 0 ? attempts(row.mention_envelope_ids) : row.mention_envelope_ids.split(",");
+    if (envelopes.length !== modes.length) {
+      problems.push(
+        `${where}: mention_envelope_ids "${row.mention_envelope_ids}" has ${envelopes.length} ` +
+          `attempts, mention_modes "${row.mention_modes}" ${modes.length}`
+      );
+    }
+    if (row.mention_btw_reply_id !== "" && !modes.includes("btw")) {
+      problems.push(`${where}: mention_btw_reply_id with no btw attempt`);
+    }
     if (row.target === "") {
-      if (row.target_kind !== "" || row.owed_reasons !== "" || row.addressed !== "false") {
-        problems.push(`${where}: a row with no target names a kind, a reason or an address`);
+      if (row.owed_reasons !== "" || row.addressed !== "false" || modes.length > 0) {
+        problems.push(`${where}: a row with no target names a reason, an address or a mention`);
       }
     } else {
-      const kind = row.target.startsWith(AGENT_PREFIX)
-        ? "session"
-        : row.target.startsWith(ROLE_PREFIX)
-          ? "role"
-          : "";
-      if (kind === "" || kind !== row.target_kind) {
-        problems.push(`${where}: target ${row.target} with target_kind "${row.target_kind}"`);
-      }
+      if (!/^(session|role):./.test(row.target)) problems.push(`${where}: target "${row.target}"`);
       const reasons = row.owed_reasons.split(";");
       const known = row.owed_reasons === "addressed-only" || reasons.every(isOwedReason);
       if (!known || row.owed_reasons === "") {
@@ -367,7 +448,7 @@ function commentsFrom(rows: readonly CommentRow[], problems: string[]): Comment[
     if (group === undefined) byId.set(row.comment_id, [row]);
     else group.push(row);
   }
-  const comments: Comment[] = [];
+  const comments: CommentDraft[] = [];
   for (const [id, group] of byId) {
     const [first] = group;
     if (first === undefined) continue;
@@ -391,20 +472,20 @@ function commentsFrom(rows: readonly CommentRow[], problems: string[]): Comment[
     if (group.length > 1 && seen.has("")) {
       problems.push(`comments.csv: comment ${id} has a row with no target beside rows with one`);
     }
-    const targets = group
+    const pairs = group
       .filter((row) => row.target !== "")
       .map(
-        (row): Target => ({
+        (row): PairRow => ({
+          line: row.line,
           target: row.target,
-          kind: row.target_kind === "role" ? "role" : "session",
-          session:
-            row.target_kind === "session" ? baseSession(row.target.slice(AGENT_PREFIX.length)) : "",
           reasons: OWED_REASONS.filter((reason) => row.owed_reasons.split(";").includes(reason)),
           addressed: row.addressed === "true",
+          mentionSessionId: row.mention_session_id,
+          mentionEnvelopeIds: row.mention_modes === "" ? [] : row.mention_envelope_ids.split(","),
+          mentionBtwReplyId: row.mention_btw_reply_id,
+          mentionModes: attempts(row.mention_modes),
           mentionState: row.mention_state,
           mentionError: row.mention_error,
-          mentionEnvelopeId: row.mention_envelope_id,
-          mentionDelivery: row.mention_delivery,
         })
       )
       .sort((left, right) => compare(left.target, right.target));
@@ -417,7 +498,7 @@ function commentsFrom(rows: readonly CommentRow[], problems: string[]): Comment[
       publishedUs: instant(first.published_at),
       author: first.author,
       shape: first.shape,
-      targets,
+      pairs,
     });
   }
   return comments.sort(
@@ -425,91 +506,219 @@ function commentsFrom(rows: readonly CommentRow[], problems: string[]): Comment[
   );
 }
 
-function isOwedReason(value: string): value is OwedReason {
-  return (OWED_REASONS as readonly string[]).includes(value);
-}
-
-function receiptsFrom(rows: readonly ReceivedRow[], problems: string[]): Receipt[] {
-  const seen = new Map<string, number>();
+function receiptsFrom(rows: readonly ReceiptRow[], problems: string[]): Receipt[] {
+  // INFRA-608 sorts the rows by comment_id, then listed (true first), then target.
+  const unsorted = rows.find((row, index) => {
+    const before = rows[index - 1];
+    if (before === undefined) return false;
+    const order =
+      compare(before.comment_id, row.comment_id) ||
+      Number(before.listed !== "true") - Number(row.listed !== "true") ||
+      compare(before.target, row.target);
+    return order > 0;
+  });
+  if (unsorted !== undefined) {
+    problems.push(
+      `receipts.tsv line ${unsorted.line} (comment ${unsorted.comment_id}): out of order: the ` +
+        "rows are not sorted by comment_id, then listed (true first), then target"
+    );
+  }
   const receipts: Receipt[] = [];
   for (const row of rows) {
-    const session = baseSession(row.session_id);
-    const where = `received.tsv line ${row.line}`;
-    const key = `${session}\t${row.raw_file}\t${row.raw_line}`;
-    const earlier = seen.get(key);
-    if (earlier !== undefined) {
-      problems.push(
-        `received.tsv lines ${earlier} and ${row.line}: session ${session}, ${row.raw_file}:${row.raw_line} twice`
-      );
+    const where = `receipts.tsv line ${row.line} (comment ${row.comment_id})`;
+    const status = (STATUSES as readonly string[]).includes(row.status)
+      ? (row.status as Status)
+      : undefined;
+    const reason = (UNKNOWN_REASONS as readonly string[]).includes(row.unknown_reason)
+      ? (row.unknown_reason as UnknownReason)
+      : row.unknown_reason === ""
+        ? ""
+        : undefined;
+    if (row.comment_id === "") problems.push(`receipts.tsv line ${row.line}: no comment_id`);
+    if (row.listed !== "true" && row.listed !== "false") {
+      problems.push(`${where}: listed "${row.listed}"`);
     }
-    seen.set(key, row.line);
-    if (session === "") problems.push(`${where}: no session_id`);
-    if (instant(row.ts) === undefined) problems.push(`${where}: ts "${row.ts}"`);
-    const dispatchId = /^dispatch-([0-9]+)$/.exec(row.envelope_id)?.[1] ?? "";
-    if (row.envelope_id === "" || row.event_id !== dispatchId) {
-      problems.push(
-        `${where}: envelope_id "${row.envelope_id}" does not give event_id "${row.event_id}"`
-      );
+    if (status === undefined) problems.push(`${where}: status "${row.status}"`);
+    if (reason === undefined) problems.push(`${where}: unknown_reason "${row.unknown_reason}"`);
+    if (!/^(transcript|btw_reply:.+)?$/.test(row.evidence)) {
+      problems.push(`${where}: evidence "${row.evidence}"`);
     }
+    if ((status === "unknown") !== (row.unknown_reason !== "")) {
+      problems.push(`${where}: status "${row.status}" with unknown_reason "${row.unknown_reason}"`);
+    }
+    if ((status === "received") !== (row.evidence !== "")) {
+      problems.push(`${where}: status "${row.status}" with evidence "${row.evidence}"`);
+    }
+    if (row.listed === "false" && !/^session:./.test(row.target)) {
+      problems.push(`${where}: an unlisted row with target "${row.target}", not session:<id>`);
+    }
+    if (status === "not_received" && row.target_started_at === "") {
+      problems.push(`${where}: not_received with no target_started_at`);
+    }
+    for (const column of ["first_received_at", "target_started_at", "target_ended_at"] as const) {
+      if (row[column] !== "" && !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(row[column])) {
+        problems.push(`${where}: ${column} "${row[column]}" is not YYYY-MM-DDTHH:MM:SS.mmmZ`);
+      }
+    }
+    const startedUs = row.target_started_at === "" ? undefined : instant(row.target_started_at);
+    const endedUs = row.target_ended_at === "" ? undefined : instant(row.target_ended_at);
+    if (status === undefined || reason === undefined) continue;
     receipts.push({
-      session,
-      host: row.host,
-      ts: row.ts,
-      rawFile: row.raw_file,
-      rawLine: row.raw_line,
-      envelopeId: row.envelope_id,
-      eventId: row.event_id,
+      line: row.line,
       commentId: row.comment_id,
+      eventId: row.event_id,
+      target: row.target,
+      listed: row.listed === "true",
+      checkedSession: row.checked_session,
+      status,
+      unknownReason: reason,
+      evidence: row.evidence,
+      receivedBy: row.received_by,
+      firstReceivedAt: row.first_received_at,
+      firstReceipt: row.first_receipt,
+      targetStartedAt: row.target_started_at,
+      targetEndedAt: row.target_ended_at,
+      startedUs,
+      endedUs,
     });
   }
   return receipts;
 }
 
-/** One session per base id. The diverged copies of one session file (`<id>@<host>:<hash>`)
- *  are that one session, so they merge: the earliest start, the latest end (none when a copy
- *  has none), every parent. The same id twice is a duplicate. */
-function sessionsFrom(rows: readonly SessionRow[], problems: string[]): Map<string, Session> {
-  const lines = new Map<string, number>();
-  const sessions = new Map<string, Session>();
-  for (const row of rows) {
-    const where = `sessions.tsv line ${row.line}`;
-    const earlier = lines.get(row.session_id);
-    if (earlier !== undefined) {
+/** Pairs each comments.csv pair with its one listed receipts.tsv row; refuses a pair with none,
+ *  a listed row with no pair, a row whose comment, listed and target repeat, and a row whose event
+ *  is not its comment's. */
+function join(
+  drafts: readonly CommentDraft[],
+  receipts: readonly Receipt[],
+  problems: string[]
+): Comment[] {
+  const byComment = new Map(drafts.map((comment) => [comment.id, comment]));
+  const listed = new Map<string, Receipt>();
+  const unlisted = new Map<string, Receipt>();
+  for (const receipt of receipts) {
+    const comment = byComment.get(receipt.commentId);
+    if (comment === undefined) {
       problems.push(
-        `sessions.tsv lines ${earlier} and ${row.line}: session ${row.session_id} twice`
+        `receipts.tsv line ${receipt.line}: comment ${receipt.commentId} is not in comments.csv`
+      );
+      continue;
+    }
+    if (receipt.eventId !== comment.eventId) {
+      problems.push(
+        `receipts.tsv line ${receipt.line}: comment ${receipt.commentId} with event ` +
+          `"${receipt.eventId}", but comments.csv gives event "${comment.eventId}"`
       );
     }
-    lines.set(row.session_id, row.line);
-    const id = baseSession(row.session_id);
-    const startedUs = instant(row.started_at);
-    const endedUs = row.ended_at === "" ? undefined : instant(row.ended_at);
-    if (id === "") problems.push(`${where}: no session_id`);
-    if (startedUs === undefined) problems.push(`${where}: started_at "${row.started_at}"`);
-    if (row.ended_at !== "" && endedUs === undefined) {
-      problems.push(`${where}: ended_at "${row.ended_at}"`);
+    const [seen, what] = receipt.listed ? [listed, "target"] : [unlisted, "unlisted target"];
+    const key = `${receipt.commentId}\t${receipt.target}`;
+    const earlier = seen.get(key);
+    if (earlier !== undefined) {
+      problems.push(
+        `receipts.tsv lines ${earlier.line} and ${receipt.line}: comment ${receipt.commentId} and ${what} "${receipt.target}" twice`
+      );
     }
-    if (startedUs === undefined) continue;
-    const parents = row.parent_session
-      .split(";")
-      .map(baseSession)
-      .filter((parent) => parent !== "" && parent !== id);
-    const other = sessions.get(id);
-    sessions.set(
-      id,
-      other === undefined
-        ? { id, startedUs, endedUs, parents: [...new Set(parents)].sort(compare) }
-        : {
-            id,
-            startedUs: Math.min(other.startedUs, startedUs),
-            endedUs:
-              other.endedUs === undefined || endedUs === undefined
-                ? undefined
-                : Math.max(other.endedUs, endedUs),
-            parents: [...new Set([...other.parents, ...parents])].sort(compare),
-          }
+    seen.set(key, receipt);
+  }
+  const paired = new Set<string>();
+  const comments: Comment[] = [];
+  for (const draft of drafts) {
+    const pairs: Pair[] = [];
+    for (const { line, ...pair } of draft.pairs) {
+      const key = `${draft.id}\t${pair.target}`;
+      const receipt = listed.get(key);
+      if (receipt === undefined) {
+        problems.push(
+          `comments.csv line ${line}: comment ${draft.id} and target ${pair.target} have no listed row in receipts.tsv`
+        );
+        continue;
+      }
+      paired.add(key);
+      pairs.push({ ...pair, receipt });
+    }
+    comments.push({ ...draft, pairs });
+  }
+  for (const [key, receipt] of listed) {
+    if (!paired.has(key) && byComment.has(receipt.commentId)) {
+      problems.push(
+        `receipts.tsv line ${receipt.line}: comment ${receipt.commentId} and target ` +
+          `"${receipt.target}" is a listed row that comments.csv does not hold`
+      );
+    }
+  }
+  return comments;
+}
+
+/** The problems with receipts-counts.txt: a sum that its own numbers do not make, a number that
+ *  is not what the report counts from receipts.tsv and comments.csv, or a rows_without_id that is
+ *  not 0. Each problem names its line. */
+function countProblems(
+  counts: ReceiptCounts,
+  rows: readonly CommentRow[],
+  comments: readonly CommentDraft[],
+  receipts: readonly Receipt[]
+): string[] {
+  const line = (key: CountKey) => `receipts-counts.txt line ${COUNT_KEYS.indexOf(key) + 1}`;
+  const problems: string[] = [];
+  const sums: readonly [NumberKey, readonly NumberKey[]][] = [
+    ["listed_pairs", ["received", "not_received", "unknown"]],
+    ["unknown", ["unknown_session_not_in_store", "unknown_role", "unknown_btw"]],
+    ["comments", ["comments_with_receipt", "comments_without_receipt"]],
+  ];
+  for (const [total, parts] of sums) {
+    const sum = parts.reduce((value, part) => value + counts[part], 0);
+    if (sum !== counts[total]) {
+      problems.push(
+        `${line(total)}: ${total} is ${counts[total]}, but ` +
+          `${parts.map((part) => `${part} ${counts[part]}`).join(" + ")} is ${sum}`
+      );
+    }
+  }
+  // A comments.csv row with no target has no receipts.tsv row; every other row has one listed row.
+  if (counts.listed_pairs !== rows.length - counts.empty_target_pairs) {
+    problems.push(
+      `${line("listed_pairs")}: listed_pairs is ${counts.listed_pairs}, but comments.csv's ` +
+        `${rows.length} rows - empty_target_pairs ${counts.empty_target_pairs} is ` +
+        `${rows.length - counts.empty_target_pairs}`
     );
   }
-  return sessions;
+  const listed = receipts.filter((receipt) => receipt.listed);
+  const status = (value: Status) => listed.filter((receipt) => receipt.status === value).length;
+  const reason = (value: UnknownReason) =>
+    listed.filter((receipt) => receipt.unknownReason === value).length;
+  // A comment with a receipt has a received row, listed or unlisted, of either evidence.
+  const withReceipt = new Set(
+    receipts.filter((receipt) => receipt.status === "received").map((receipt) => receipt.commentId)
+  ).size;
+  const counted: Readonly<Record<Exclude<NumberKey, "rows_without_id">, number>> = {
+    listed_pairs: listed.length,
+    received: status("received"),
+    not_received: status("not_received"),
+    unknown: status("unknown"),
+    unknown_session_not_in_store: reason("session_not_in_store"),
+    unknown_role: reason("role"),
+    unknown_btw: reason("btw"),
+    unlisted_rows: receipts.length - listed.length,
+    comments: comments.length,
+    comments_with_receipt: withReceipt,
+    comments_without_receipt: comments.length - withReceipt,
+    empty_target_pairs: rows.filter((row) => row.target === "").length,
+  };
+  for (const [key, number] of Object.entries(counted) as [NumberKey, number][]) {
+    if (counts[key] !== number) {
+      problems.push(
+        `${line(key)}: ${key} is ${counts[key]}, but receipts.tsv and comments.csv give ${number}`
+      );
+    }
+  }
+  if (counts.rows_without_id !== 0) {
+    problems.push(
+      `${line("rows_without_id")}: rows_without_id is ${counts.rows_without_id}: tq receipts ` +
+        "read no event id, envelope id or comment id from that many of a person's " +
+        "comment.created rows, so receipts.tsv can miss receipts"
+    );
+  }
+  return problems;
 }
 
 // ---------------------------------------------------------------- classes and causes
@@ -520,15 +729,13 @@ export interface Verdict {
   readonly class: ClassName;
   /** The cause of a not-delivered verdict; empty otherwise. */
   readonly cause: string;
-  /** Why a target is unknown: it is a role, or the store does not hold the session. */
+  /** Why a verdict is unknown: the unknown_reason of each unknown pair. */
   readonly why?: string;
-  /** `btw-sent` on a delivered verdict that rests on Dispatch's record of a mention it sent as a
-   *  BTW, not on a transcript row: the BTW side turn writes none. */
-  readonly note?: "btw-sent";
+  /** What a delivered pair rests on: `transcript` or `btw_reply:<reply id>`. */
+  readonly evidence?: string;
 }
 
 const DELIVERED: Verdict = { class: "delivered", cause: "" };
-const BTW_SENT: Verdict = { class: "delivered", cause: "", note: "btw-sent" };
 
 function notDelivered(cause: string): Verdict {
   return { class: "not-delivered", cause };
@@ -566,7 +773,8 @@ export const CAUSES: Readonly<Record<string, CauseEntry>> = {
     fix: FAN_OUT_FIX,
   },
   "not-addressed:route": {
-    meaning: "Dispatch did not send the comment to the session that the issue's route names.",
+    meaning:
+      "Dispatch did not send the comment to the session or role that the issue's route names.",
     fix:
       "No fix yet. The outbox sends each comment to the issue's route (publishRoute); a route " +
       "it did not reach needs its own fix.",
@@ -585,8 +793,8 @@ export const CAUSES: Readonly<Record<string, CauseEntry>> = {
   },
   "not-addressed:mention": {
     meaning:
-      "The comment mentions the session, and Dispatch has no sent or failed delivery of the " +
-      "mention to it.",
+      "The comment mentions the session or role, and Dispatch has no sent or failed delivery of " +
+      "the mention.",
     fix: "No fix yet. A mention that Dispatch did not try to deliver needs its own fix.",
   },
   "mention-failed:session-not-live": {
@@ -601,14 +809,14 @@ export const CAUSES: Readonly<Record<string, CauseEntry>> = {
   },
   "mention-failed:other": {
     meaning:
-      "Dispatch tried to deliver the mention, and it failed with another error. The target " +
-      "rows give the error.",
+      "Dispatch tried to deliver the mention, and it failed with another error. The pair rows " +
+      "give the error.",
     fix: "No fix yet. Each such error needs its own fix.",
   },
   "not-running": {
     meaning:
-      "Dispatch sent the comment to the session, and no copy, fork or resume of the session " +
-      "was running when Dispatch published it.",
+      "Dispatch sent the comment to the session, and the session was not running when Dispatch " +
+      "published it: the transcript store's times for the session do not include that time.",
     fix: LAST_HOP_FIX,
   },
   "running-no-row": {
@@ -680,94 +888,37 @@ export function describeCause(
   };
 }
 
-/** What the classification reads of the sessions and their receipts. */
-export interface Evidence {
-  readonly sessions: ReadonlyMap<string, Session>;
-  /** A session and every session forked from it or that it was forked from, through any chain. */
-  family(session: string): ReadonlySet<string>;
-}
-
-function evidence(sessions: ReadonlyMap<string, Session>): Evidence {
-  const children = new Map<string, string[]>();
-  for (const session of sessions.values()) {
-    for (const parent of session.parents) {
-      const list = children.get(parent);
-      if (list === undefined) children.set(parent, [session.id]);
-      else list.push(session.id);
-    }
-  }
-  const families = new Map<string, ReadonlySet<string>>();
-  return {
-    sessions,
-    family(session) {
-      const cached = families.get(session);
-      if (cached !== undefined) return cached;
-      const family = new Set([session]);
-      const walk = (next: (id: string) => readonly string[]): void => {
-        const stack = [session];
-        for (let id = stack.pop(); id !== undefined; id = stack.pop()) {
-          for (const other of next(id)) {
-            if (family.has(other)) continue;
-            family.add(other);
-            stack.push(other);
-          }
-        }
-      };
-      walk((id) => sessions.get(id)?.parents ?? []);
-      walk((id) => children.get(id) ?? []);
-      families.set(session, family);
-      return family;
-    },
-  };
-}
-
-/** One target of a comment, judged alone: delivered when the session or one of its family has a
- *  receipt, else delivered on Dispatch's record (`btw-sent`) when a mention of the comment was
- *  sent to the session as a BTW, else never-published, else unknown (a role, or a session the
- *  store does not hold), else its one cause. */
-export function judgeTarget(
-  comment: Comment,
-  target: Target,
-  receipts: readonly Receipt[],
-  facts: Evidence
-): Verdict {
-  const family = target.kind === "session" ? facts.family(target.session) : new Set<string>();
-  if (receipts.some((receipt) => family.has(receipt.session))) return DELIVERED;
-  const mentioned = target.reasons.includes("mention");
-  // A BTW runs as a side turn, which writes no transcript row (packages/pi-envoy/extensions/
-  // envoy.ts), so Dispatch's record of the sent mention is the only evidence there is.
-  if (mentioned && target.mentionState === "sent" && target.mentionDelivery === "btw") {
-    return BTW_SENT;
-  }
+/** One pair, judged alone from its receipts.tsv status. A not_received pair gets the first cause
+ *  that applies: never-published; not-addressed, when it was owed, the outbox did not send it,
+ *  and no mention attempt was sent or failed; mention-failed; not-running, when published_at is
+ *  outside the checked session's times; else running-no-row. */
+export function judgePair(comment: Comment, pair: Pair): Verdict {
+  const { receipt } = pair;
+  if (receipt.status === "received") return { ...DELIVERED, evidence: receipt.evidence };
+  if (receipt.status === "unknown")
+    return { class: "unknown", cause: "", why: receipt.unknownReason };
   if (comment.publishedAt === "") return notDelivered("never-published");
-  if (target.kind === "role") return { class: "unknown", cause: "", why: "a role" };
-  if (!facts.sessions.has(target.session)) {
-    return { class: "unknown", cause: "", why: "the store does not hold this session" };
+  const sent = pair.addressed || pair.mentionState === "sent";
+  if (pair.reasons.length > 0 && !sent && pair.mentionState !== "failed") {
+    return notDelivered(`not-addressed:${pair.reasons.join("+")}`);
   }
-  if (!target.addressed && !(mentioned && target.mentionState === "sent")) {
-    if (mentioned && target.mentionState === "failed") {
-      return notDelivered(`mention-failed:${mentionErrorClass(target.mentionError)}`);
-    }
-    return notDelivered(`not-addressed:${target.reasons.join("+")}`);
+  if (pair.mentionState === "failed") {
+    return notDelivered(`mention-failed:${mentionErrorClass(pair.mentionError)}`);
   }
   const at = comment.publishedUs ?? 0;
-  const running = [...family].some((id) => {
-    const session = facts.sessions.get(id);
-    return (
-      session !== undefined &&
-      session.startedUs <= at &&
-      (session.endedUs === undefined || at <= session.endedUs)
-    );
-  });
+  const running =
+    receipt.startedUs !== undefined &&
+    receipt.startedUs <= at &&
+    (receipt.endedUs === undefined || at <= receipt.endedUs);
   return notDelivered(running ? "running-no-row" : "not-running");
 }
 
 /** What one comment's class rule reads. */
 export interface CommentFacts {
   readonly comment: Comment;
-  /** Every receipt of the comment, by any session. */
+  /** Every receipts.tsv row of the comment, listed or not. */
   readonly receipts: readonly Receipt[];
-  readonly targets: readonly { readonly target: Target; readonly verdict: Verdict }[];
+  readonly pairs: readonly { readonly pair: Pair; readonly verdict: Verdict }[];
 }
 
 /** A class a comment can fall in. Each rule includes the negation of every rule before it, so a
@@ -779,31 +930,20 @@ export interface ClassRule {
 }
 
 function received(facts: CommentFacts): boolean {
-  return facts.receipts.length > 0;
-}
-
-function heardByBtw(facts: CommentFacts): boolean {
-  return facts.targets.some(({ verdict }) => verdict.note === "btw-sent");
-}
-
-/** No transcript has the comment, and Dispatch has no record of a BTW mention of it sent. */
-function unconfirmed(facts: CommentFacts): boolean {
-  return !received(facts) && !heardByBtw(facts);
+  return facts.receipts.some((receipt) => receipt.status === "received");
 }
 
 function published(facts: CommentFacts): boolean {
   return facts.comment.publishedAt !== "";
 }
 
-function unheldTargets(facts: CommentFacts): readonly Target[] {
-  return facts.targets
-    .filter(({ verdict }) => verdict.class === "unknown")
-    .map(({ target }) => target);
+function unknownPairs(facts: CommentFacts): readonly { pair: Pair; verdict: Verdict }[] {
+  return facts.pairs.filter(({ verdict }) => verdict.class === "unknown");
 }
 
-/** The first cause, in CAUSES order, of the comment's targets. */
+/** The first cause, in CAUSES order, of the comment's pairs. */
 function primaryCause(facts: CommentFacts): string {
-  const causes = facts.targets
+  const causes = facts.pairs
     .map(({ verdict }) => verdict.cause)
     .filter((cause) => cause !== "")
     .sort(compareCauses);
@@ -813,36 +953,37 @@ function primaryCause(facts: CommentFacts): string {
 export const CLASS_RULES: readonly ClassRule[] = [
   { name: "delivered", applies: received, verdict: () => DELIVERED },
   {
-    name: "delivered on Dispatch's record of a BTW mention",
-    applies: (facts) => !received(facts) && heardByBtw(facts),
-    verdict: () => BTW_SENT,
-  },
-  {
     name: "never-published",
-    applies: (facts) => unconfirmed(facts) && !published(facts),
+    applies: (facts) => !received(facts) && !published(facts),
     verdict: () => notDelivered("never-published"),
   },
   {
     name: "no-target",
-    applies: (facts) => unconfirmed(facts) && published(facts) && facts.targets.length === 0,
+    applies: (facts) => !received(facts) && published(facts) && facts.pairs.length === 0,
     verdict: () => notDelivered("no-target"),
   },
   {
     name: "unknown",
     applies: (facts) =>
-      unconfirmed(facts) &&
+      !received(facts) &&
       published(facts) &&
-      facts.targets.length > 0 &&
-      unheldTargets(facts).length > 0,
-    verdict: () => ({ class: "unknown", cause: "" }),
+      facts.pairs.length > 0 &&
+      unknownPairs(facts).length > 0,
+    verdict: (facts) => ({
+      class: "unknown",
+      cause: "",
+      why: unknownPairs(facts)
+        .map(({ pair, verdict }) => `${pair.target}: ${verdict.why ?? ""}`)
+        .join("; "),
+    }),
   },
   {
     name: "not delivered, with a cause",
     applies: (facts) =>
-      unconfirmed(facts) &&
+      !received(facts) &&
       published(facts) &&
-      facts.targets.length > 0 &&
-      unheldTargets(facts).length === 0,
+      facts.pairs.length > 0 &&
+      unknownPairs(facts).length === 0,
     verdict: (facts) => notDelivered(primaryCause(facts)),
   },
 ];
@@ -908,8 +1049,8 @@ export function identityProblems(counts: Counts, level: string): string[] {
 
 export interface ReportInput {
   readonly comments: string;
-  readonly received: string;
-  readonly sessions: string;
+  readonly receipts: string;
+  readonly counts: string;
 }
 
 export interface ReportOptions {
@@ -918,14 +1059,13 @@ export interface ReportOptions {
 }
 
 export interface Report {
+  readonly window: { readonly from: string; readonly to: string };
+  readonly receiptCounts: ReceiptCounts;
   readonly comments: readonly Judged[];
   readonly commentCounts: Counts;
-  readonly targetCounts: Counts;
-  /** Receipts that name a comment or event comments.csv does not list. */
+  readonly pairCounts: Counts;
+  /** The listed=false rows: sessions that took a comment in and are no target, by comment. */
   readonly unlisted: readonly Receipt[];
-  /** Receipts that name no comment and no event, and whose envelope id is no target row's
-   *  mention_envelope_id. */
-  readonly untied: readonly Receipt[];
 }
 
 /** Reads and judges the three files, or throws ReportRefusal naming every problem. */
@@ -933,82 +1073,29 @@ export function judge(input: ReportInput, options: ReportOptions = {}): Report {
   const rules = options.rules ?? CLASS_RULES;
   const causes = options.causes ?? CAUSES;
   const problems: string[] = [];
-  const comments = commentsFrom(parseCommentsCsv(input.comments, problems), problems);
-  const receipts = receiptsFrom(parseReceivedTsv(input.received, problems), problems);
-  const sessions = sessionsFrom(parseSessionsTsv(input.sessions, problems), problems);
+  const rows = parseCommentsCsv(input.comments, problems);
+  const drafts = commentsFrom(rows, problems);
+  const receipts = receiptsFrom(parseReceiptsTsv(input.receipts, problems), problems);
+  const receiptCounts = parseCounts(input.counts, problems);
+  if (problems.length > 0 || receiptCounts === undefined) throw new ReportRefusal(problems);
+  const comments = join(drafts, receipts, problems);
+  problems.push(...countProblems(receiptCounts, rows, drafts, receipts));
   if (problems.length > 0) throw new ReportRefusal(problems);
 
-  const byId = new Map(comments.map((comment) => [comment.id, comment]));
-  const byEvent = new Map<string, Comment>();
-  for (const comment of comments) {
-    if (comment.eventId === "") continue;
-    const other = byEvent.get(comment.eventId);
-    if (other !== undefined) {
-      problems.push(
-        `comments.csv: comments ${other.id} and ${comment.id} name one event ${comment.eventId}`
-      );
-    }
-    byEvent.set(comment.eventId, comment);
-  }
-  // A mention's delivery of an ask-thread reply names neither the comment nor its event: only
-  // the envelope id the listener minted, which Dispatch records on the mention's attempt.
-  const byEnvelope = new Map<string, Comment>();
-  for (const comment of comments) {
-    for (const target of comment.targets) {
-      if (target.mentionEnvelopeId === "") continue;
-      const other = byEnvelope.get(target.mentionEnvelopeId);
-      if (other !== undefined && other.id !== comment.id) {
-        problems.push(
-          `comments.csv: comments ${other.id} and ${comment.id} name one mention envelope ` +
-            target.mentionEnvelopeId
-        );
-      }
-      byEnvelope.set(target.mentionEnvelopeId, comment);
-    }
-  }
   const receiptsOf = new Map<string, Receipt[]>();
-  const unlisted: Receipt[] = [];
-  const untied: Receipt[] = [];
   for (const receipt of receipts) {
-    const named = receipt.commentId === "" ? undefined : byId.get(receipt.commentId);
-    const byItsEvent = receipt.eventId === "" ? undefined : byEvent.get(receipt.eventId);
-    // A receipt that names both must name a pair comments.csv holds, whichever of them it lists.
-    if (
-      (named !== undefined && receipt.eventId !== "" && named.eventId !== receipt.eventId) ||
-      (byItsEvent !== undefined && receipt.commentId !== "" && byItsEvent.id !== receipt.commentId)
-    ) {
-      problems.push(
-        `received.tsv: ${receipt.rawFile}:${receipt.rawLine} names comment ${receipt.commentId} ` +
-          `and event ${receipt.eventId}, which comments.csv does not pair`
-      );
-      continue;
-    }
-    const names = receipt.commentId !== "" || receipt.eventId !== "";
-    const comment = named ?? byItsEvent ?? (names ? undefined : byEnvelope.get(receipt.envelopeId));
-    if (comment !== undefined) {
-      const list = receiptsOf.get(comment.id);
-      if (list === undefined) receiptsOf.set(comment.id, [receipt]);
-      else list.push(receipt);
-    } else if (names) {
-      unlisted.push(receipt);
-    } else {
-      untied.push(receipt);
-    }
+    const list = receiptsOf.get(receipt.commentId);
+    if (list === undefined) receiptsOf.set(receipt.commentId, [receipt]);
+    else list.push(receipt);
   }
-
-  const facts = evidence(sessions);
   const judged: Judged[] = [];
   for (const comment of comments) {
-    const its = receiptsOf.get(comment.id) ?? [];
-    const commentFacts: CommentFacts = {
+    const facts: CommentFacts = {
       comment,
-      receipts: its,
-      targets: comment.targets.map((target) => ({
-        target,
-        verdict: judgeTarget(comment, target, its, facts),
-      })),
+      receipts: receiptsOf.get(comment.id) ?? [],
+      pairs: comment.pairs.map((pair) => ({ pair, verdict: judgePair(comment, pair) })),
     };
-    const matched = rules.filter((rule) => rule.applies(commentFacts));
+    const matched = rules.filter((rule) => rule.applies(facts));
     if (matched.length !== 1) {
       problems.push(
         matched.length === 0
@@ -1017,25 +1104,19 @@ export function judge(input: ReportInput, options: ReportOptions = {}): Report {
       );
       continue;
     }
-    const verdict = (matched[0] as ClassRule).verdict(commentFacts);
+    const verdict = (matched[0] as ClassRule).verdict(facts);
     if (verdict.class === "not-delivered" && verdict.cause === "") {
       problems.push(`comment ${comment.id} is not delivered and has no cause`);
     }
-    if (verdict.class === "unknown" && unheldTargets(commentFacts).length === 0) {
-      problems.push(
-        `comment ${comment.id} is unknown and names no role or session the store does not hold`
-      );
-    }
-    judged.push({ ...commentFacts, verdict });
+    judged.push({ ...facts, verdict });
   }
 
   const commentVerdicts = judged.map((comment) => comment.verdict);
-  const targetVerdicts = judged.flatMap((comment) =>
-    comment.targets.length === 0
-      ? [comment.verdict]
-      : comment.targets.map((target) => target.verdict)
+  // A comment with no target counts once at the pair level too, with its own verdict.
+  const pairVerdicts = judged.flatMap((comment) =>
+    comment.pairs.length === 0 ? [comment.verdict] : comment.pairs.map(({ verdict }) => verdict)
   );
-  for (const verdict of [...commentVerdicts, ...targetVerdicts]) {
+  for (const verdict of [...commentVerdicts, ...pairVerdicts]) {
     // A not-delivered verdict with no cause is refused above.
     if (
       verdict.class === "not-delivered" &&
@@ -1047,20 +1128,24 @@ export function judge(input: ReportInput, options: ReportOptions = {}): Report {
     }
   }
   const commentCounts = countVerdicts(commentVerdicts, causes);
-  const targetCounts = countVerdicts(targetVerdicts, causes);
+  const pairCounts = countVerdicts(pairVerdicts, causes);
   problems.push(...identityProblems(commentCounts, "comments"));
-  problems.push(...identityProblems(targetCounts, "targets"));
+  problems.push(...identityProblems(pairCounts, "pairs"));
   if (problems.length > 0) throw new ReportRefusal(problems);
-  const byPlace = (left: Receipt, right: Receipt): number =>
-    compare(left.session, right.session) ||
-    compare(left.rawFile, right.rawFile) ||
-    Number(left.rawLine) - Number(right.rawLine);
+  const order = new Map(judged.map((comment, index) => [comment.comment.id, index]));
   return {
+    window: { from: receiptCounts.from, to: receiptCounts.to },
+    receiptCounts,
     comments: judged,
     commentCounts,
-    targetCounts,
-    unlisted: unlisted.sort(byPlace),
-    untied: untied.sort(byPlace),
+    pairCounts,
+    unlisted: receipts
+      .filter((receipt) => !receipt.listed)
+      .sort(
+        (left, right) =>
+          (order.get(left.commentId) ?? 0) - (order.get(right.commentId) ?? 0) ||
+          compare(left.target, right.target)
+      ),
   };
 }
 
@@ -1074,11 +1159,16 @@ function cell(value: string): string {
 
 function verdictText(verdict: Verdict): string {
   if (verdict.class === "delivered") {
-    return verdict.note === undefined ? "delivered" : `delivered (${verdict.note})`;
+    return verdict.evidence === undefined ? "delivered" : `delivered (${verdict.evidence})`;
   }
-  if (verdict.class === "unknown")
+  if (verdict.class === "unknown") {
     return verdict.why === undefined ? "unknown" : `unknown (${verdict.why})`;
+  }
   return "not delivered";
+}
+
+function causeText(verdict: Verdict): string {
+  return verdict.cause === "" ? "" : `\`${verdict.cause}\``;
 }
 
 function fence(text: string): string {
@@ -1087,16 +1177,15 @@ function fence(text: string): string {
   return `${marks}text\n${text}${text.endsWith("\n") || text === "" ? "" : "\n"}${marks}`;
 }
 
-function receiptLine(receipt: Receipt): string {
-  const names = [
-    receipt.commentId === "" ? "" : `comment ${receipt.commentId}`,
-    receipt.eventId === "" ? "" : `event ${receipt.eventId}`,
-  ].filter((name) => name !== "");
-  return (
-    `- ${receipt.ts}, session ${receipt.session} on ${receipt.host}, ` +
-    `${receipt.rawFile}:${receipt.rawLine}, envelope ${receipt.envelopeId}` +
-    (names.length === 0 ? "" : `, ${names.join(", ")}`)
+/** `<n> <mode> <envelope id or "no envelope">` for each attempt, then the newest attempt's state
+ *  and error. Empty when no mention named the target. */
+function mentionText(pair: Pair): string {
+  if (pair.mentionModes.length === 0) return "";
+  const each = pair.mentionModes.map(
+    (mode, index) => `${index + 1} ${mode} ${pair.mentionEnvelopeIds[index] || "no envelope"}`
   );
+  const error = pair.mentionError === "" ? "" : `: ${pair.mentionError}`;
+  return `${each.join(", ")}; newest ${pair.mentionState}${error}`;
 }
 
 /** The markdown document. Deterministic: the same files give the same bytes. */
@@ -1105,158 +1194,159 @@ export function renderReport(
   traces: readonly { readonly name: string; readonly text: string }[],
   causes: Readonly<Record<string, CauseEntry>> = CAUSES
 ): string {
-  const { commentCounts: counts, targetCounts } = report;
-  const first = report.comments[0]?.comment.createdAt ?? "";
-  const last = report.comments.at(-1)?.comment.createdAt ?? "";
+  const { commentCounts: counts, pairCounts, receiptCounts: tq } = report;
   const out: string[] = [];
   out.push("# Did people's Dispatch comments reach the agent sessions?", "");
   out.push(identityLine(counts), "");
-  const btwSent = report.comments.filter(({ verdict }) => verdict.note === "btw-sent").length;
   out.push(
-    `- Comments that people wrote: ${counts.total}` +
-      (counts.total === 0 ? "." : `, created from ${first} to ${last}.`),
-    `- Delivered: ${counts.delivered}, of which btw-sent ${btwSent}: Dispatch's record of a ` +
-      "mention it sent as a BTW, not a transcript row.",
+    `- Window: comments that people created from ${report.window.from} (included) to ` +
+      `${report.window.to} (not included), UTC.`,
+    `- Comments: ${counts.total}.`,
+    `- Delivered: ${counts.delivered}.`,
     `- Not delivered: ${counts.notDelivered}.`,
     `- Unknown: ${counts.unknown}.`,
     "",
-    "Each comment has one target or more: a session or role it was owed, or that Dispatch sent " +
-      "it to. The same classes, applied to each target alone:",
+    "Each comment has one pair or more: a session or role that it was owed, or that Dispatch " +
+      "sent it to. The same classes, applied to each pair alone:",
     "",
-    identityLine(targetCounts),
+    identityLine(pairCounts),
     ""
   );
   out.push("## What the classes mean", "");
   out.push(
-    "The report puts each comment in one class. It checks the classes in this order, and it " +
-      "uses the first class that applies.",
+    "`tq receipts` (INFRA-608, theorem-labs/agent-infra `transcript-store/`) gives each pair a " +
+      "status: `received`, `not_received` or `unknown`. It reads the transcripts of the pair's " +
+      "session and of each session forked from it. This report gives each comment one class. It " +
+      "checks the classes in this order, and it uses the first class that applies.",
     "",
-    "1. **Delivered.** The transcript of at least one agent session has the comment. A " +
-      "session that follows the issue counts too. A transcript row names the comment's id or " +
-      "its event's id. A mention's delivery of a reply on an ask names neither, so its row " +
-      "counts when its envelope id is the envelope id that Dispatch recorded for the mention's " +
-      "delivery.",
-    "2. **Delivered: btw-sent.** No transcript has the comment, and Dispatch sent a mention of " +
-      "the comment to a session as a BTW: the delivery has the state `sent`. A BTW runs as a " +
-      "side turn, and the side turn adds nothing to the transcript. So this class is Dispatch's " +
-      "record of the delivery, not a transcript row. A target is `btw-sent` on the same rule " +
-      "when no transcript of its session has the comment.",
-    "3. **Not delivered: never-published.** Dispatch's outbox never published the comment's " +
+    "1. **Delivered.** A session took the comment in: a pair has the status `received`, or " +
+      "another session's transcript has the comment (an unlisted receipt). A pair is `received` " +
+      "when a transcript has the comment (`transcript`), or when Dispatch has the answer of a BTW " +
+      "side turn to the comment (`btw_reply:<id>`).",
+    "2. **Not delivered: never-published.** Dispatch's outbox never published the comment's " +
       "event.",
-    "4. **Not delivered: no-target.** No session was owed the comment, and Dispatch sent it to " +
+    "3. **Not delivered: no-target.** No session was owed the comment, and Dispatch sent it to " +
       "no session or role.",
-    "5. **Unknown.** Dispatch sent the comment to a role, or a session that the transcript " +
-      "store does not hold was owed it or got it. The transcript store holds only the Oh My Pi " +
-      "sessions of the two dev boxes. It does not hold Claude Code sessions or the sessions " +
-      "of Legion pods. So the report cannot tell if these targets got the comment. The row " +
-      "names each such target.",
-    "6. **Not delivered, with one cause.** The report gives the first cause that applies to " +
-      "a target of the comment, in this order:",
-    "   - `not-addressed:<rule>`: Dispatch did not send the comment to a session that was " +
-      "owed it. The rule says why the session was owed it: claimant, route, follower, asker " +
-      "or mention. A mention counts as sent when Dispatch's delivery of the mention has the " +
-      "state `sent`.",
-    "   - `mention-failed:<error>`: Dispatch tried to deliver a mention, and the delivery " +
+    "4. **Unknown.** A pair has the status `unknown`. The comment row names each such pair and " +
+      "its reason.",
+    "5. **Not delivered, with one cause.** Every pair has the status `not_received`. The report " +
+      "gives the first cause that applies to a pair of the comment, in this order:",
+    "   - `not-addressed:<rule>`: the pair was owed the comment, the outbox did not send it to " +
+      "the pair, and no delivery of a mention to the pair was sent or failed. The rule says why " +
+      "the pair was owed it: claimant, route, follower, asker or mention, joined with `+`.",
+    "   - `mention-failed:<error>`: Dispatch tried to deliver a mention, and its newest attempt " +
       "failed. The error is `session-not-live`, `receipt-timeout` or `other`.",
     "   - `not-running`: Dispatch sent the comment, and the session was not running when " +
-      "Dispatch published it.",
+      "Dispatch published it. The transcript store gives the session's start and end.",
     "   - `running-no-row`: Dispatch sent the comment to a running session, and the session's " +
       "transcript does not have it.",
     "",
-    "A session includes each session that was forked from it, and each session that it was " +
-      "forked from, through any number of forks. A receipt by any of them is a receipt by the " +
-      "session. The copies of one session file that the store keeps apart are one session.",
+    "A pair is judged alone with the same rules: `received` is delivered, `unknown` is unknown, " +
+      "and `not_received` gets its one cause.",
+    ""
+  );
+  out.push("## What unknown means", "");
+  out.push(
+    "The report cannot tell whether an unknown pair got the comment. Its reason is one of these:",
+    "",
+    "- `session_not_in_store`: the transcript store does not hold the session. The store holds " +
+      "only the Oh My Pi sessions of the two dev boxes. It does not hold Claude Code sessions or " +
+      "the sessions of Legion pods.",
+    "- `role`: the pair is a role, and no mention of the role resolved to a session, so there is " +
+      "no session whose transcript to read.",
+    "- `btw`: Dispatch delivered a mention as a BTW, and has no answer from the side turn. A BTW " +
+      "side turn adds nothing to the transcript.",
     ""
   );
   out.push("## Causes and their fixes", "");
-  out.push(
-    "| Cause | Comments | Targets | What it means | Fix |",
-    "| --- | --- | --- | --- | --- |"
-  );
-  const allCauses = [...new Set([...counts.causes.keys(), ...targetCounts.causes.keys()])].sort(
+  out.push("| Cause | Comments | Pairs | What it means | Fix |", "| --- | --- | --- | --- | --- |");
+  const allCauses = [...new Set([...counts.causes.keys(), ...pairCounts.causes.keys()])].sort(
     compareCauses
   );
   for (const cause of allCauses) {
     const entry = describeCause(cause, causes);
     out.push(
-      `| \`${cause}\` | ${counts.causes.get(cause) ?? 0} | ${targetCounts.causes.get(cause) ?? 0} | ` +
+      `| \`${cause}\` | ${counts.causes.get(cause) ?? 0} | ${pairCounts.causes.get(cause) ?? 0} | ` +
         `${cell(entry?.meaning ?? "")} | ${cell(entry?.fix ?? "")} |`
     );
   }
   out.push("");
+  out.push("## What tq receipts counted", "");
+  out.push(
+    `- Listed pairs: ${tq.listed_pairs} = received ${tq.received} + not_received ` +
+      `${tq.not_received} + unknown ${tq.unknown} (session_not_in_store ` +
+      `${tq.unknown_session_not_in_store}, role ${tq.unknown_role}, btw ${tq.unknown_btw}).`,
+    `- Pairs with no target (a comments.csv row with no target, which has no receipts.tsv row): ` +
+      `${tq.empty_target_pairs}.`,
+    `- Unlisted receipt rows: ${tq.unlisted_rows}.`,
+    `- Comments: ${tq.comments} = with a receipt ${tq.comments_with_receipt} + without ` +
+      `${tq.comments_without_receipt}. A comment with a receipt has a row with the status ` +
+      "`received` in receipts.tsv, listed or unlisted.",
+    `- A person's comment rows from which no id was read: ${tq.rows_without_id}.`,
+    "",
+    "The report counted the same numbers from receipts.tsv and comments.csv.",
+    ""
+  );
   out.push("## Traces", "");
   if (traces.length === 0) out.push("No trace was given.", "");
   for (const trace of traces) out.push(`### ${trace.name}`, "", fence(trace.text), "");
   out.push("## Each comment", "");
   out.push(
-    "| Comment | On | Created | Author | Shape | Class | Cause | Targets |",
+    "| Comment | On | Created | Author | Shape | Class | Cause | Pairs |",
     "| --- | --- | --- | --- | --- | --- | --- | --- |"
   );
   for (const judged of report.comments) {
     const { comment, verdict } = judged;
-    const targets =
-      judged.targets
-        .map(({ target, verdict: its }) => {
+    const pairs =
+      judged.pairs
+        .map(({ pair, verdict: its }) => {
           const result = its.class === "not-delivered" ? its.cause : verdictText(its);
-          const owed =
-            target.reasons.length === 0 ? "not owed, only sent" : target.reasons.join(", ");
-          return `${target.target} (${owed}): ${result}`;
+          const owed = pair.reasons.length === 0 ? "not owed, only sent" : pair.reasons.join(", ");
+          return `${pair.target} (${owed}): ${result}`;
         })
         .join("<br>") || "(none)";
     out.push(
       `| ${comment.id} | ${cell(comment.owner)} | ${comment.createdAt} | ${cell(comment.author)} | ` +
-        `${comment.shape} | ${verdictText(verdict)} | ${verdict.cause === "" ? "" : `\`${verdict.cause}\``} | ` +
-        `${cell(targets)} |`
+        `${comment.shape} | ${cell(verdictText(verdict))} | ${causeText(verdict)} | ${cell(pairs)} |`
     );
   }
   out.push("");
-  out.push("## Each target of each comment", "");
+  out.push("## Each pair", "");
   out.push(
-    "| Comment | Target | Owed because | Sent by Dispatch | Mention delivery | Class | Cause |",
-    "| --- | --- | --- | --- | --- | --- | --- |"
+    "| Comment | Target | Owed because | Sent by the outbox | Mention attempts | Checked session | Status | Class | Cause |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
   );
   for (const judged of report.comments) {
     const id = judged.comment.id;
-    if (judged.targets.length === 0) {
+    if (judged.pairs.length === 0) {
       out.push(
-        `| ${id} | (none) |  |  |  | ${verdictText(judged.verdict)} | ` +
-          `${judged.verdict.cause === "" ? "" : `\`${judged.verdict.cause}\``} |`
+        `| ${id} | (none) |  |  |  |  |  | ${verdictText(judged.verdict)} | ${causeText(judged.verdict)} |`
       );
       continue;
     }
-    for (const { target, verdict } of judged.targets) {
-      // `<state> (<mode>)`, then `: <error>` when the attempt has one; empty with no attempt.
-      const mode = target.mentionDelivery === "" ? "" : ` (${target.mentionDelivery})`;
-      const error = target.mentionError === "" ? "" : `: ${target.mentionError}`;
+    for (const { pair, verdict } of judged.pairs) {
       out.push(
-        `| ${id} | ${target.target} | ` +
-          `${target.reasons.length === 0 ? "not owed, only sent" : target.reasons.join(", ")} | ` +
-          `${target.addressed ? "yes" : "no"} | ` +
-          `${cell(`${target.mentionState}${mode}${error}`)} | ` +
-          `${verdictText(verdict)} | ` +
-          `${verdict.cause === "" ? "" : `\`${verdict.cause}\``} |`
+        `| ${id} | ${pair.target} | ` +
+          `${pair.reasons.length === 0 ? "not owed, only sent" : pair.reasons.join(", ")} | ` +
+          `${pair.addressed ? "yes" : "no"} | ${cell(mentionText(pair))} | ` +
+          `${cell(pair.receipt.checkedSession)} | ${pair.receipt.status} | ` +
+          `${cell(verdictText(verdict))} | ${causeText(verdict)} |`
       );
     }
   }
   out.push("");
-  out.push("## Receipts that the report did not count", "");
+  out.push("## Unlisted receipts", "");
   out.push(
-    `Receipts that name a comment or an event that comments.csv does not list: ` +
-      `${report.unlisted.length}. Such a receipt is of a person's comment from outside the window.`,
+    "Sessions that took a comment in and are not a pair's session or a session forked from " +
+      `one: ${report.unlisted.length}. Each makes its comment delivered.`,
     ""
   );
-  for (const receipt of report.unlisted) out.push(receiptLine(receipt));
-  if (report.unlisted.length > 0) out.push("");
-  out.push(
-    `Receipts that name no comment and no event, and whose envelope id is not an envelope id ` +
-      `that comments.csv records for a mention's delivery: ${report.untied.length}. Such a ` +
-      "receipt is a mention's delivery of a reply on an ask from outside the window, or of an " +
-      "earlier attempt of the mention than its newest. comments.csv gives only the newest " +
-      "attempt of each mention.",
-    ""
-  );
-  for (const receipt of report.untied) out.push(receiptLine(receipt));
-  if (report.untied.length > 0) out.push("");
+  for (const receipt of report.unlisted) {
+    out.push(
+      `- Comment ${receipt.commentId}: ${receipt.target}, first at ` +
+        `${receipt.firstReceivedAt}, ${receipt.firstReceipt}`
+    );
+  }
   return `${out.join("\n").trimEnd()}\n`;
 }
 
@@ -1264,8 +1354,8 @@ export function renderReport(
 
 interface Options {
   readonly comments: string;
-  readonly received: string;
-  readonly sessions: string;
+  readonly receipts: string;
+  readonly counts: string;
   readonly traces: readonly string[];
 }
 
@@ -1274,23 +1364,23 @@ function parseArguments(argv: readonly string[]): Options {
     args: [...argv],
     options: {
       comments: { type: "string" },
-      received: { type: "string" },
-      sessions: { type: "string" },
+      receipts: { type: "string" },
+      counts: { type: "string" },
       trace: { type: "string", multiple: true },
     },
     strict: true,
   });
-  const { comments, received, sessions } = values;
-  if (comments === undefined || received === undefined || sessions === undefined) {
-    throw new Error("--comments, --received and --sessions are required");
+  const { comments, receipts, counts } = values;
+  if (comments === undefined || receipts === undefined || counts === undefined) {
+    throw new Error("--comments, --receipts and --counts are required");
   }
-  return { comments, received, sessions, traces: values.trace ?? [] };
+  return { comments, receipts, counts, traces: values.trace ?? [] };
 }
 
 export async function run(argv: readonly string[]): Promise<string> {
   const options = parseArguments(argv);
-  const [comments, received, sessions, ...traceTexts] = await Promise.all(
-    [options.comments, options.received, options.sessions, ...options.traces].map((path) =>
+  const [comments, receipts, counts, ...traceTexts] = await Promise.all(
+    [options.comments, options.receipts, options.counts, ...options.traces].map((path) =>
       readFile(path, "utf8")
     )
   );
@@ -1300,8 +1390,8 @@ export async function run(argv: readonly string[]): Promise<string> {
   }));
   const report = judge({
     comments: comments ?? "",
-    received: received ?? "",
-    sessions: sessions ?? "",
+    receipts: receipts ?? "",
+    counts: counts ?? "",
   });
   return renderReport(report, traces);
 }

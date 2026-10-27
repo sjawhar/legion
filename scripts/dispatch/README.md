@@ -63,129 +63,167 @@ for the stage 4b proof.
 
 ## Comment delivery
 
-`comment-delivery/` answers which comments people wrote in Dispatch reached no agent session, and
-why (INFRA-596). Three queries give three files, and `report.ts` turns the files into one markdown
-document. The run is read-only. Run it once, on a dev box, which reaches both Dispatch's database
-and the transcript store.
+`comment-delivery/report.ts` answers which comments people wrote in Dispatch reached no agent
+session, and why (INFRA-596). The run has three steps. Every step only reads.
+
+1. `comments.sql` reads Dispatch's database and writes `comments.csv`: every comment that a person
+   wrote in the window, one row for each session or role that the comment was owed or sent to (a
+   pair). `trace.sql` writes Dispatch's whole record of one comment. Both are in
+   `packages/envoy/internal/dispatch/deliveryaudit/`. Its `README.md` gives their columns.
+2. `tq receipts` (INFRA-608, in theorem-labs/agent-infra `transcript-store/`) reads
+   `comments.csv` and the transcript store. It writes `receipts.tsv`, one status for each pair,
+   and `receipts-counts.txt`, its counts. It owns the transcript rules: which transcript row is a
+   receipt of a comment, which sessions count as the pair's session, and each pair's status.
+3. `report.ts` reads the three files and writes one markdown document.
+
+INFRA-608's `transcript-store/comment-delivery/run.sh` does steps 1 and 2 on a dev box, which
+reaches both Dispatch's database and the transcript store.
 
 ### The run
 
-Use one window for every query. `TO` is the run's start minus 30 minutes: the store loads new
-lines every 10 minutes. Both times are UTC, in the form `2026-10-01T00:00:00Z`.
+Use one window for both steps. INFRA-608's run chooses `TO`. Both times are UTC, in the form
+`2026-10-01T00:00:00Z`.
 
 ```bash
 FROM=2026-10-01T00:00:00Z
-TO=2026-10-27T12:00:00Z
+TO=2026-10-27T05:00:00Z
 
-# 1. Dispatch: every person's comment in the window, one row per target (deliveryaudit/README.md).
+# 1. Dispatch: every person's comment in the window, one row per pair.
 PGOPTIONS='-c default_transaction_read_only=on' psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 --csv \
   -v from="$FROM" -v to="$TO" \
   -f packages/envoy/internal/dispatch/deliveryaudit/comments.sql > comments.csv
 
-# 2. The transcript store: each query has the literal placeholders {from} and {to}.
-for query in received sessions; do
-  sed -e "s/{from}/$FROM/g" -e "s/{to}/$TO/g" "scripts/dispatch/comment-delivery/$query.sql" \
-    | tq sql > "$query.tsv"
-done
-
-# 3. Optional: Dispatch's whole record of one comment, once for each comment to show.
+# Optional: Dispatch's whole record of one comment, once for each comment to show.
 PGOPTIONS='-c default_transaction_read_only=on' psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 --csv \
   -v comment=03207432-749f-4211-9607-e378dc636807 \
   -f packages/envoy/internal/dispatch/deliveryaudit/trace.sql > trace-03207432.csv
 
-# 4. The document.
+# 2. The transcript store (INFRA-608): receipts.tsv on stdout, the counts on stderr.
+tq receipts --comments comments.csv --from "$FROM" > receipts.tsv 2> receipts-counts.txt
+
+# 3. The document.
 bun scripts/dispatch/comment-delivery/report.ts \
-  --comments comments.csv --received received.tsv --sessions sessions.tsv \
+  --comments comments.csv --receipts receipts.tsv --counts receipts-counts.txt \
   --trace trace-03207432.csv > human-comment-delivery-2026-10.md
 ```
 
-`tq sql` reads the query from stdin and writes `TSVWithNames`. `tq` takes no query parameters, so
-`sed` puts the times in. A placeholder left in a query is an error, not an empty window.
-`--trace` repeats. The document holds each trace file whole, under the file's name, in the order
-given. The same files give the same document, byte for byte.
+`--trace` can be given more than one time. The document holds each trace file whole, under the
+file's name, in the order given. The same files give the same document, byte for byte.
 
-- `received.sql`: every Envoy delivery of a person's comment that a session's transcript holds,
-  from `{from}` to `{to}` by the row's time. Columns: `session_id` (the base id, the part before
-  `@` of a diverged copy `<id>@<host>:<path hash>`), `host`, `ts`, `raw_file`, `raw_line`,
-  `envelope_id`, `event_id` (the Dispatch event id when the envelope id is `dispatch-<id>`, else
-  empty) and `comment_id` (empty when the delivery names none). Identical rows, which the store
-  keeps when it loaded a batch twice, are one row.
-- `sessions.sql`: every session the store holds that started before `{to}`, one row per base id:
-  `session_id`, `host` (each host, joined with `,`), `started_at`, `ended_at` (empty while the
-  file is still being written) and `parent_session` (the session it was forked from; parents
-  joined with `;`). It reads no `{from}`: a session that ended before the window is still a
-  session the store holds, so a comment sent to it is `not-running`, not `unknown`. The diverged
-  copies of one session file are that one session, so they merge into one row: the earliest
-  start, the latest end. A subagent's `parent_session` names the session that started it, which
-  is another agent with its own Envoy identity, so a subagent gets no parent.
+`report.ts` reads `receipts-counts.txt` as exactly these 15 lines, in this order. Each line is a
+key, a tab and a value, with no header. `from` and `to` are UTC times in the form
+`2026-10-01T00:00:00Z`. Every other value is a plain integer. The file ends with a newline.
 
-### What `received.sql` matches
+```text
+from	<UTC time>
+to	<UTC time>
+listed_pairs	<N>
+received	<N>
+not_received	<N>
+unknown	<N>
+unknown_session_not_in_store	<N>
+unknown_role	<N>
+unknown_btw	<N>
+unlisted_rows	<N>
+comments	<N>
+comments_with_receipt	<N>
+comments_without_receipt	<N>
+empty_target_pairs	<N>
+rows_without_id	<N>
+```
 
-omp stores each Envoy delivery as a `messages` row with `kind = 'system'` and
-`role = 'custom:envoy-message'`. Its text is the envelope that `renderInbound`
-(`packages/envoy-client/src/delivery.ts`) encodes as TOON. The query keeps a row whose
-`dispatch:` block has `type: comment.created` and an `actor:` with `kind: user`, and reads the
-envelope's `id:` and the `id:` of the block's `payload:`. It matches each form a session received
-in October:
+The document gives `from` and `to` as its window. `report.ts` counts each number again from
+`comments.csv` and `receipts.tsv`, and it checks these rules:
 
-| Form | From | What identifies the comment |
-| --- | --- | --- |
-| The outbox's frame, with the comment as the payload, on the session's own subject, on an issue's topic, or forwarded from a role (the forward keeps the event id, `cmd/listener/delivery.go`) | d480211bd (2026-09-09), unchanged through f15cdd471 (2026-10-09), the last change to `delivery.ts` | `id: dispatch-<event id>` and the payload's `id:` |
-| The same, before f15cdd471: `reply_with` is `tool: dispatch_comment` with `args:`, not `command: dispatch comment ...` | d480211bd to f15cdd471 | the same |
-| The same, before c8d44d66e (2026-10-01T05:10Z): `to: you (01a1…)` shows the session id cut short | d480211bd to c8d44d66e | the same |
-| The same, with the `Pictures:` lines after a blank line | 18b304577 (2026-10-05) on | the same |
-| A reply on an ask: the block has `question:`, `reply:`, `state:` and `waiting_on:` (`dispatchCompact`), and no comment id | a975f0594 (2026-09-21) on | `id: dispatch-<event id>` only |
-| An event that failed `DispatchEventSchema`: the block holds the raw event, with the payload at the same level | d480211bd on | `id: dispatch-<event id>` and the payload's `id:` |
-| A mention's delivery (`api/comment_delivery.go`): the frame `{event, delivery}`, sent through the listener's `/v1/messages/send`, which gives the envelope an id of its own | c8ee6dfe2 (2026-09-17) on | the payload's `id:`; for a reply on an ask, only the envelope id, which `report.ts` matches to `mention_envelope_id` in `comments.csv` |
+- `listed_pairs` = `received` + `not_received` + `unknown`, the listed rows of `receipts.tsv`.
+- `unknown` = `unknown_session_not_in_store` + `unknown_role` + `unknown_btw`.
+- `unlisted_rows` is the number of rows of `receipts.tsv` with `listed` `false`.
+- `comments` = `comments_with_receipt` + `comments_without_receipt`: the distinct `comment_id`s
+  of `comments.csv`, also those of a comment with no target. A comment "with receipt" has a row
+  in `receipts.tsv`, listed or unlisted, with the status `received`. Its evidence can be
+  `transcript` or `btw_reply:<id>`.
+- `empty_target_pairs` is the number of rows of `comments.csv` with no target. Such a row has no
+  row in `receipts.tsv`, so `listed_pairs` = the rows of `comments.csv` - `empty_target_pairs`.
+- `rows_without_id` is 0. It counts the rows of a person's comment in the transcripts from which
+  `tq receipts` read no id. When it is not 0, `receipts.tsv` can miss receipts.
 
-Deployed plugins lag these commits, so a form can appear after the commit that replaced it.
+`receipts.tsv` has its rows sorted by `comment_id`, then `listed` (`true` first), then `target`.
+`listed` is `true` or `false`. A time is in the form `2026-10-20T04:00:01.000Z`, or empty. An
+unlisted row has the target `session:<base session id>`: the id of the session that its forks
+come from. Its `checked_session` can be empty.
 
 ### Classes
 
-`report.ts` puts each comment in one class. It checks the classes in this order and uses the first
-that applies:
+A pair is judged from its status in `receipts.tsv`:
 
-1. **Delivered.** A session's transcript has the comment: a row in `received.tsv` names the
-   comment's id, or its event's id, or (when it names neither) has as its `envelope_id` the
-   `mention_envelope_id` of a row of the comment. Any session counts, also one that only follows
-   the issue.
-2. **Delivered, `btw-sent`.** No session's transcript has the comment, and Dispatch sent a mention
-   of it as a BTW: the row's `mention_state` is `sent` and its `mention_delivery` is `btw`. A BTW
-   runs as a side turn, which adds nothing to the transcript
-   (`packages/pi-envoy/extensions/envoy.ts`), so this class is Dispatch's record of the delivery,
-   not a transcript row. The document labels such a comment and such a target
-   `delivered (btw-sent)`, and counts them as delivered.
-3. **Not delivered, `never-published`.** Dispatch's outbox never published the event.
-4. **Not delivered, `no-target`.** No session was owed the comment, and Dispatch sent it to no
+- `received`: delivered. The evidence is `transcript` (a transcript has the comment), or
+  `btw_reply:<id>` (the session's BTW side turn posted that reply to the comment).
+- `unknown`: unknown, with the reason that `tq receipts` gives.
+- `not_received`: not delivered, with the first cause that applies, in this order:
+  1. `never-published`: Dispatch's outbox never published the comment's event.
+  2. `not-addressed:<rule>`: the pair was owed the comment, the outbox did not send it to the
+     pair (`addressed` is `false`), and no delivery of a mention to the pair was sent or failed.
+     The rule says why the pair was owed it: `claimant`, `route`, `follower`, `asker` or
+     `mention`, joined with `+`.
+  3. `mention-failed:<error>`: the newest attempt of a mention to the pair failed. The error is
+     `session-not-live`, `receipt-timeout` or `other`.
+  4. `not-running`: the comment's `published_at` is not between the session's
+     `target_started_at` and `target_ended_at`. An empty `target_ended_at` means that the session
+     still runs.
+  5. `running-no-row`: any other `not_received` pair. Dispatch sent the comment to a running
+     session, and the session's transcript does not have it.
+
+`report.ts` puts each comment in one class. It checks the classes in this order and uses the
+first that applies:
+
+1. **Delivered.** A row of the comment in `receipts.tsv` has the status `received`. The row can be
+   a pair or an unlisted row. An unlisted row is a session that took the comment in and is not a
+   pair's session or a session forked from one.
+2. **Not delivered, `never-published`.** Dispatch's outbox never published the event.
+3. **Not delivered, `no-target`.** No session was owed the comment, and Dispatch sent it to no
    session or role.
-5. **Unknown.** A target is a role, or a session that is not in `sessions.tsv`. The document names
-   each such target. The transcript store holds only the Oh My Pi sessions of the two dev boxes. It
-   does not hold Claude Code sessions or the sessions of Legion pods, and a role names no session.
-   So the report cannot tell whether such a target got the comment.
-6. **Not delivered, with one cause.** The first that applies to a target, in this order:
-   `not-addressed:<rule>` (Dispatch did not send it to a session it was owed to; the rule is why it
-   was owed: claimant, route, follower, asker, mention, joined with `+`; a mention counts as sent
-   when its delivery's state is `sent`), `mention-failed:<error>` (`session-not-live`,
-   `receipt-timeout` or `other`), `not-running` (Dispatch sent it, and no copy, fork or resume of
-   the session was running when Dispatch published it), `running-no-row` (Dispatch sent it to a
-   running session, and the session's transcript does not have it).
+4. **Unknown.** A pair of the comment is unknown. The document names each such pair and its
+   reason.
+5. **Not delivered, with one cause.** The first cause of its pairs, in the order above.
 
-A session counts as itself, each session forked from it, and each session it was forked from,
-through any chain of `parent_session`. The document also judges each (comment, target) row alone,
-with the same classes, and gives the counts at both levels with the identity
+### What unknown means
+
+An unknown pair is one that the report cannot judge. The transcript store cannot show whether the
+pair got the comment. The reason is one of these:
+
+- `session_not_in_store`: the store does not hold the session. The store holds only the Oh My Pi
+  sessions of the two dev boxes. It does not hold Claude Code sessions or the sessions of Legion
+  pods.
+- `role`: the pair is a role, and no mention of the role resolved to a session. No session's
+  transcript can show the receipt.
+- `btw`: Dispatch delivered a mention as a BTW, and has no reply from the side turn. A BTW side
+  turn adds nothing to the transcript.
+
+An unknown is never counted as delivered or as not delivered.
+
+### The document and its refusals
+
+The document gives the counts of comments and of pairs with the identity
 `total = delivered + not delivered by cause + unknown`. `CAUSES` in `report.ts` maps each cause to
-its fix.
+its fix. The document has a row for each comment and a row for each pair, and it lists the
+unlisted rows.
 
-The document lists apart the receipts that link to no listed comment: a receipt that names a
-comment or an event that `comments.csv` does not list, and a receipt that names neither and whose
-envelope id is no `mention_envelope_id` in `comments.csv`. `comments.csv` gives only the newest
-attempt of each mention, so a delivery by an earlier attempt is in the second list.
+The report refuses its input (exit 1, each problem on stderr, nothing on stdout) in these cases:
 
-The report refuses its input (exit 1, each problem on stderr, nothing on stdout) when a header is
-not the expected columns, a row repeats (the same `comment_id` and `target`; the same
-`session_id`, `raw_file` and `raw_line`; the same `session_id` in `sessions.tsv`), the rows of one
-comment disagree, a row's `mention_delivery` is not empty, `btw`, `aside` or `steer`, a row has
-a `mention_state` without a `mention_delivery` or the other way, two comments name one
-`mention_envelope_id`, a receipt names a comment and an event that comments.csv does not pair, a
-comment falls in no class or in two, an unknown comment names no unheld target, a not-delivered
-comment has no cause, a cause has no fix, or a count identity does not add up.
+- A header is not the expected columns.
+- A row repeats: the same `comment_id` and `target` in `comments.csv`, in two listed rows of
+  `receipts.tsv`, or in two unlisted rows.
+- The rows of `receipts.tsv` are not sorted. The report names the first row out of order.
+- A pair of `comments.csv` has no listed row, or a listed row has no pair in `comments.csv`.
+- A row of `receipts.tsv` names a comment that `comments.csv` does not hold, or an event that is
+  not its comment's.
+- A value is not one of its values: `listed`, `status`, `unknown_reason`, `evidence`, a time, an
+  unlisted row's target, a mention mode or state. Or two values disagree: an `unknown` with no
+  reason, a `received` with no evidence, a number of mention envelope ids that is not the number
+  of mention modes.
+- The rows of one comment in `comments.csv` disagree.
+- A line of `receipts-counts.txt` is missing, extra, out of order or not in its form; a sum of
+  its numbers is not true; a number in it is not the number that `report.ts` counts; or
+  `rows_without_id` is not 0. The report names the line.
+- A comment falls in no class or in two, a not-delivered comment has no cause, a cause has no fix,
+  or a count identity does not add up.

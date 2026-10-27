@@ -1,0 +1,15 @@
+from	2026-10-01T00:00:00Z
+to	2026-10-27T05:00:00Z
+listed_pairs	14
+received	3
+not_received	8
+unknown	3
+unknown_session_not_in_store	1
+unknown_role	1
+unknown_btw	1
+unlisted_rows	1
+comments	14
+comments_with_receipt	4
+comments_without_receipt	10
+empty_target_pairs	1
+rows_without_id	0
