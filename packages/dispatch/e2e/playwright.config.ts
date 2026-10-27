@@ -12,12 +12,12 @@ import { takenPorts } from "./port-probe";
 // open the plain-HTTP name, which only that project maps, and the origin rows' first assertion
 // fails on loopback by design.
 const plainHttpSpecs = /plain-http-(origin|proxy)\.e2e\.ts/;
-// The `iphone` project runs only tests tagged `@phone`: the tests that take a phone-only path
-// (they branch on the project or on the phone layout, read the window's size, use touch, run
-// only on the phone, or say they cover the phone layout). An untagged test drops out of `iphone`
-// with no failure. The full rule is in `packages/dispatch/AGENTS.md`, "Phone acceptance". The
-// regex is anchored because Playwright's grep text also holds the project name `iphone` and file
-// names like `phone.e2e.ts`.
+// The `iphone` project runs only tests tagged `@phone` (written at the end of the test's or its
+// describe's title): the tests that take a phone-only path (they branch on the project or on the
+// phone layout, read the window's size, use touch, run only on the phone, or say they cover the
+// phone layout). An untagged test drops out of `iphone` with no failure. The full rule is in
+// `packages/dispatch/AGENTS.md`, "Phone acceptance". The regex is anchored because Playwright's
+// grep text also holds the project name `iphone` and file names like `phone.e2e.ts`.
 const phoneTagged = /(^|\s)@phone(\s|$)/;
 const startsOwnServers = !process.env.PLAYWRIGHT_BASE_URL;
 

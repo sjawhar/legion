@@ -987,7 +987,8 @@ assertion would still pass with the change reverted; if it would, the fixture sa
 clear-on-send check). Second, when something other than the assertion decides what it covers - fixture seeding,
 a login's casing - make that selector an assertion too, then lapse the property once and confirm the assertion
 fires, since a selector check that cannot fire only looks like a guard. The one exception is a Playwright
-project's title `grep`; its fallback is the one-time manual check beside the `webkit-iphone` project below.
+project's `grep`: `webkit-iphone`'s title `grep` falls back on the one-time manual check beside that project
+below, and `iphone`'s `@phone` tag `grep` on the `--list` check under "Phone acceptance".
 
 `run-server.sh` builds the server with the caller's `go`, in the caller's
 environment, and execs the binary with every server
@@ -1302,11 +1303,52 @@ proxy.
 ## Phone acceptance
 
 The `iphone` Playwright project uses Chromium with the iPhone 13 viewport,
-touch input, and user agent. It verifies the responsive drawer, the margin
-and recipient-picker bottom sheets, touch-sized controls, and compact Inbox
-layout. It does not replace the manual phone check: run the server on a
-tailnet-reachable address, open it from a phone, open the review panel, and
-answer an open ask in Waiting on you.
+touch input, and user agent, and runs only the tests tagged `@phone`
+(`grep: phoneTagged` in `e2e/playwright.config.ts`). Those tests cover the
+navigation drawer, the margin's bottom sheet and the phone Thread dialog,
+touch gestures and touch-sized controls, the compact Inbox and top bar, and
+the live view's phone layout. It does not replace the manual phone check: run
+the server on a tailnet-reachable address, open it from a phone, open the
+review panel, and answer an open ask in Waiting on you.
+
+A test takes the tag when, under `iphone`, it takes a phone-only path. That
+is, it:
+
+- **R1** chooses what to do by which project runs it, and `iphone` takes
+  another branch than `chromium`, directly, in a hook, or in a helper it calls:
+  `=== "iphone"`, `!== "iphone"`, a `"chromium"` test used as a layout switch
+  (an empty desktop-only block included), `PHONE_PROJECTS` or
+  `READING_PROJECTS` membership, a project-dependent value (`1280 : 390`,
+  `44 : 32`), `setSheet` and `openedThreadCard` (`e2e/editor.ts`), or a
+  file-local helper that takes the project or `isPhone`. The project name used
+  only in a file name, attachment name or seed namespace does not count.
+- **R2** branches on what the page shows where the phone layout decides it: the
+  Thread dialog or the margin card, a drawer menu button's visibility.
+- **R3** reads the window's size or checks the page against it
+  (`viewportSize()`, `innerWidth`/`innerHeight`, a `scrollWidth`/`clientWidth`
+  overflow check, `assertPageFits`), unless it first sets a fixed viewport for
+  every project.
+- **R4** uses touch: `tap()`, `page.touchscreen`, `e2e/touch.ts`, `hasTouch`,
+  `isMobile`.
+- **R5** runs only on the phone (it skips `chromium`), or is in a file named for
+  the phone (`phone*.e2e.ts`).
+- **R6** says in its title or its own comments that it covers the phone layout
+  (a phone, the drawer, the bottom sheet, 390 px).
+
+When unsure, tag it: an extra phone test costs CI minutes, and a missing one
+loses the phone coverage. Write the tag at the end of the title,
+`test("a reply opens the Thread dialog @phone", …)`, or at the end of a
+`test.describe` title when every test inside it qualifies. Playwright reads an
+`@word` in a title as a tag; the title form keeps the call at two arguments, so
+Biome does not re-indent the body as it does for a `{ tag }` details argument.
+A user-agent path (the Mac keymap that the iPhone user agent also takes) is not
+a phone-only path. A test that skips `iphone` has no reason to: leave it
+untagged and drop the skip.
+
+Nothing fails when a phone test lacks the tag: it silently drops out of
+`iphone` and runs only on `chromium`. So after writing or renaming one, run
+`bunx playwright test --config e2e/playwright.config.ts --project=iphone --list`
+and check that it is listed.
 
 A retracted ask is withdrawn history: the Inbox and the open-ask badges drop it, and the margin folds it into the `Resolved (N)` toggle beside resolved comment threads. The Conversation lists it like every other conversation, under `All` and under `Closed`; the tab has no `Show retracted` or `Show activity` control of its own. Ask event payloads carry `options` as an array (the server never emits `null`), so the Activity tab and the margin's Pinned tab render `event.payload` as the `Ask` it is.
 
