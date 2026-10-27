@@ -2,30 +2,32 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-511",
-  "completed": "2026-10-27T11:50:00Z",
+  "completed": "2026-10-27T12:33:00Z",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 8 at PR head 0f5cdd8e (code 5fd0f13e; test-only: the focused-subagent case now waits for a model request that carries 'Reply with done.' and not the start message before it opens the Agent Hub). The pod was still slow: loadExtensions finished at 26.1 s of wall time and 9.0 s of CPU. I ran that case alone 6 times as committed: 5 pass, 1 fail. Then I ran it 6 more times in a copy that logs every held request just before the hub opens: 6 pass, and the log shows what the new wait matches (below)."
+    "how": "Round 9 at PR head 55da0c69 (code 6d51373b). The change is test-only: the focused-subagent case's wait now skips any request whose system prompt is Oh My Pi's task-label prompt ('Label the delegated work'). Since 719b127e only controller-start-omp.test.ts and .legion/ changed, so the plugin and Go code are what round 6 drove. The pod was still slow: loadExtensions finished at 26.4 s of wall time and 9.3 s of CPU. I ran the focused-subagent case alone 8 times as committed: 8 pass. I ran the whole committed file twice: 9 pass, 0 fail each time (341 s). My round-4 red test block is unchanged apart from its case timeout, which now names CASE_TIMEOUT_MS (sha256 equal at 51f87278 and 6d51373b after normalising that constant)."
   },
-  "failed": 1,
-  "failures": [
-    {
-      "criterion": "The pull request's real-binary proof passes on a slow but normal host (the tree's architect, 2026-10-27). Case: \"the operator sees a refused re-claim after /new from a focused subagent view\" (controller-start-omp.test.ts), round 7's flaky case.",
-      "evidence": "Command, as committed at 5fd0f13e: `cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test ./extensions/controller-start-omp.test.ts -t \"focused subagent view\"`, 6 runs: pass, FAIL, pass, pass, pass, pass. The failure was the same as round 7's: 'timed out waiting for the subagent's view focused', the hub showing '⟳ 1 running … 3.0s active · 0 req' and 'Agent \"PregnantSilkworm\" is running and cannot be revived (no reviver registered).'. Cause: the new wait matches the wrong request. A diagnostic copy logged the held requests just before alt+a, and in all 6 runs there were exactly three: the start turn (1 message, start message), the start turn after the task call (3 messages, start message), and one request with 1 message carrying 'Reply with done.' whose system prompt begins '# Task\\nLabel the delegated work in …'. That third request is Oh My Pi's task-label oneshot (prompts/system/task-label.md, sent by task/label.ts generateTaskLabel). task/executor.ts fires it 'off the spawn's critical path' when the task is spawned, before the subagent's session is attached to its registry entry (sdk.ts attachSession). The subagent's own model request had not arrived in any of the 6 runs. Waiting for the label request therefore does not prove the subagent can be focused (agent-lifecycle.ts ensureLive throws 'cannot be revived' while the running ref has no session), so the case is still flaky on this host, at 1 in 6 this round."
-    }
-  ],
+  "failed": 0,
+  "failures": [],
   "proof": [
     {
-      "criterion": "The other real-binary cases keep passing on the slow host",
-      "surface": "the committed real-binary file, real interactive Oh My Pi 18.12.2 under a pseudo-terminal, both plugins, stand-ins, real NATS",
-      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test ./extensions/controller-start-omp.test.ts (round 7, at 9613f45a; this round changes only the focused-subagent case)",
-      "observed": "The 8 other cases passed in both full runs of round 7, with no startup timeout.",
-      "headSha": "0f5cdd8e57f3f8b0d76f0aa23c8acc0f8e1de73b",
-      "negativeControl": "Round 6 at 9037d3c9: all 9 timed out during startup with 30 s deadlines."
+      "criterion": "Round 8's failure is fixed: the focused-subagent /new case is no longer flaky on the slow host, and the whole real-binary file passes there as committed",
+      "surface": "the committed real-binary file controller-start-omp.test.ts, real interactive Oh My Pi 18.12.2 under a pseudo-terminal, both plugins of this head, stand-ins, real NATS, in this pod while loadExtensions takes about 26 s",
+      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test ./extensions/controller-start-omp.test.ts -t \"focused subagent view\" (8 times), then the same command without -t (twice)",
+      "observed": "Focused-subagent case: 8 of 8 pass (43-49 s each). Whole file: 9 pass, 0 fail, twice (341.3 s and 341.9 s). Its cases cover the start turn shown after startup, typing into it, Esc, the start message first and once, a card or notice after it, a claim refusal on screen, the refused re-claim after /new, the hand-over notice after a /new during the start claim, and the refused re-claim after /new from a focused subagent view.",
+      "headSha": "55da0c694464f1f5f208dde691ccc3847f8018d6",
+      "negativeControl": "At 5fd0f13e (round 8) the same case failed 1 of 6 runs with 'cannot be revived', because its wait matched the task-label request. At 9613f45a (round 7) it failed 2 of 5. At 9037d3c9 (round 6) the whole file failed 0/9 during startup."
+    },
+    {
+      "criterion": "The plugin behaviour this pull request delivers (no code change since round 6)",
+      "surface": "round 6's real-binary probes at 719b127e, and the built CLI smoke from round 5",
+      "command": "/legion/scratch/tmp/i511t/probe-r6.test.ts (3 pass); bun /legion/scratch/tmp/i511t/drive.ts pos (SMOKE PASS at c66e0039, Go unchanged since)",
+      "observed": "/new behind a held start claim says it waits at once. The hand-over line and the two re-claim refusals stay on screen after the /new reset, with true wording, and go at the next run. The built `legion controller start` launches the controller whose first turn is the start message.",
+      "headSha": "55da0c694464f1f5f208dde691ccc3847f8018d6",
+      "negativeControl": "Round 1's red tests and refusals (overlapping registrations giving 403 'invalid controller secret'; stdin not a terminal; contract 40 and 42; interface 3) are recorded in the earlier rounds' handoffs at d3f73ec4, 17aa79c9 and 80a6b0db."
     }
   ],
   "observations": [
-    "No plugin or Go code changed since round 6; round 6's behaviour probes (/legion/scratch/tmp/i511t/probe-r6.test.ts, 3 pass) still apply.",
-    "CI at code head 5fd0f13e: build, changes, lint, typecheck, test and pr-title queued when read at 2026-10-27T11:49Z; not waited on."
+    "CI at code head 6d51373b: build, changes, lint, typecheck, test and pr-title queued when read at 2026-10-27T12:32Z; not waited on. PR head 55da0c69 is handoff-only."
   ]
 }
