@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-529",
+  "completed": "2026-10-27T01:41:00Z",
+  "testedHead": "f6ed29f12c62aa27770790fe8c630e09ea47c86d",
+  "codeHead": "0f615248199dd925883a649fcf7e8e3c7a108546",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's command on the tester lane (port 28777, database dispatch_infra529_tester): cd packages/dispatch && . /legion/harness/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts unknown-directive.e2e.ts --project chromium -> '✓ e2e/unknown-directive.e2e.ts:19:1 … (2.5s)', the comment, message and ask cards render formatted with the fence lines as text, at f6ed29f12c62."
+  },
+  "failed": 1,
+  "failures": [
+    {
+      "criterion": "A1 / the change's goal: a displayed body holding a colon-fenced block Dispatch does not know shows its text formatted instead of losing it. The read-only engine must not drop words the base showed.",
+      "evidence": "Browser (Chromium, real Go server + Postgres, tester lane, head f6ed29f12c62): a comment with body 'Lead **bold**\\n\\n::::ask\\nQ?\\n\\n- a\\n\\n:::note\\nx\\n:::\\n::::\\n' shows only 'Lead bold' with its thread expanded; 'Q?', 'a', ':::note', 'x', ':::' are gone and there is no data-markdown-fallback. Cause: the server's ask takes 'paragraph+ bullet_list?'; drawDirective puts the note's fence paragraphs after the list, ProseMirror refuses that content, and Milkdown drops the whole ask (MilkdownError createNodeInParserFail 'Cannot create node for ask', logged, not thrown). The default engine throws 'unknown typed block \"note\"' for the same body, so before this change the card fell back to its raw text and no word was lost. Other inputs with the same mechanism: an unknown directive holding a list or a heading inside an ask (':::note' children are spliced into the ask). Red test, own commit ee272bb6d857: packages/proof-editor/tests/read-only-directives.test.ts 'read-only keeps every line of a typed block whose content a drawn directive would break'; cd packages/proof-editor && bun test tests/read-only-directives.test.ts -> 'Expected to contain: \"Which option?\" Received: \"Lead\"', 14 pass, 1 fail. Related, already in the plan's out-of-scope list: a known ask holding a heading (':::ask\\n# H\\n:::') is dropped the same way in both modes; the plan's note says Milkdown 'does not throw', which is true, but the ask's text is lost, not shown."
+    }
+  ],
+  "probed": [
+    "Engine (read-only, server schema, 'space' and 'line'): empty closed/unclosed :::note; unclosed last line ending ':' or ' :::'; closing fence with trailing spaces; CRLF; longer open/close fences; nested unknown in unknown (closed, and outer unclosed); fenced code inside an unclosed note; heading ending '::'; label only; attribute value holding ':'; attribute 'onclick' (drawn as text only); directive after a paragraph line; unclosed in a blockquote; in a nested list; known callout in a quote; unknown wrapping a known callout; Pandoc '::: {.callout}'; '::youtube{id=1}'; ':callout{#x}'; lone ':::'; closing fence followed by '---'; no trailing newline; trailing blank lines; ':::ask' with no attributes; table ending ':::|'; indented code ending ':::'; '::: trailing' (not a fence). All drew as the plan says.",
+    "Raw HTML inside a note (':::note\\n<img src=x>\\n:::') still throws (whole-body fallback): INFRA-342, out of scope, unchanged.",
+    "Browser: Pandoc '::: {.callout}' body renders on one line with 'b' strong; a quoted list item holding ':::warn' shows ':::warn', 'inside', ':::' as text with 'b' strong."
+  ],
+  "ci": "Read on GitHub at code head 0f615248199d: build, changes, lint, test, typecheck and pr-title queued (not yet run); handoff head f6ed29f12c62 carries skip-checks. Not waited for."
+}
