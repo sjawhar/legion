@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-560",
+  "completed": "2026-10-27T07:27:32Z",
+  "round": 1,
+  "reviewedHead": "c12689b3097d904907eedd83192482029df369cc",
+  "codeHead": "d0e63dd365d5b713007122feac9c2aafb40192c3",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 7,
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection none. CI head f3d1ae8c (newest pull_request run); lint, test, typecheck, build, changes queued at 07:11Z; compare f3d1ae8c...c12689b3 handoffsOnly true, 1 file. Not decisive for a request for changes.",
+  "thermonuclear": {
+    "deep": "CHANGES at c12689b3: the move runbook grants no tailnet client access to svc:<hostname> (Medium); minors: README 'It heals itself' overclaims, packages/envoy/AGENTS.md does not name /livez; hardening: Role verb update unused, ServiceAccount token mounted in every front-door container",
+    "quality": "CHANGES at c12689b3: claim gate parses JSON with sed; certificate scripts repeat SAN check, API call, cert copy and variable block; per-workload replicas and budgets split across two structs; seed-check chain not a table; 82-connection figure copied into nine places; unused localAddrPort in tailnet_service.go. Judged cleanup by the reviewer (fast-follow), not blocking: every fatal arithmetic path of the backgrounded gate is guarded by entry() and left()."
+  },
+  "keyFindings": [
+    {"severity": "important", "file": "PR body", "description": "No '## Contract change census': the PR renames the released input appPriorityClassName to priorityClassName, adds two required inputs (tailnetService, frontDoorToolsImage), adds refusals (databaseAvailabilityType, proxyCpu/proxyMemory not above 0, three budget ranges, tailnetService mismatch) and changes two defaults (databaseTier, proxy size). Consumer theorem-labs/agent-infra dispatch/main.go builds envoygcp.DispatchArgs and sets DatabaseTier only when configured."},
+    {"severity": "important", "file": "packages/envoy/infra/README.md", "description": "The move runbook (lines 169-177, 629-636, 705-708) and the CHANGELOG Breaking entry (line 890) never grant tailnet clients access to svc:<hostname> nor declare its tcp:443 port; Tailscale Services need a grant whose dst is the Service (tailscale.com/kb/1552), so following the runbook can cut every client off."},
+    {"severity": "minor", "file": "packages/envoy/infra/go.work.sum", "description": "Merge e854d947 changed go.work.sum (23 lines removed, 2 added) though neither parent has that content; unrelated tooling churn, restore main's copy."},
+    {"severity": "minor", "file": "packages/envoy/infra/README.md", "description": "Line 545 'It heals itself' is false when every front-door pod spent its 6 certificate orders (tailnet_service.go:523 waits for ever, liveness still passes)."},
+    {"severity": "minor", "file": "packages/envoy/AGENTS.md", "description": "Lines 2121-2122 (access-log exemptions, 'health endpoints reflect dependency health') do not name the new /livez."},
+    {"severity": "minor", "file": "packages/envoy/cmd/dispatch/conn_age_test.go", "description": "TestShutdownAlreadyClosesKeepAliveConnections runs a bare httptest server, not newHTTPServer, so it pins net/http and not this server."},
+    {"severity": "minor", "file": "packages/envoy/infra/README.md", "description": "The front-door section does not say each pod renews its own certificate outside the claim budget, so frontDoorReplicas pods order that many at once at renewal."},
+    {"severity": "minor", "file": "packages/envoy/infra/gcp/dispatch_frontdoor.go", "description": "Hardening: Role grants update, which no script uses (line 481); narrow to get and patch."},
+    {"severity": "minor", "file": "packages/envoy/infra/gcp/dispatch_frontdoor.go", "description": "Hardening: the front-door ServiceAccount token is automounted into tailscale and advertiser too (line 530); project it into cert-publish alone."}
+  ],
+  "fastFollow": "Deduplicate the front-door certificate scripts' shared helpers (SAN and notAfter check, the authenticated API call, the certificate copy, the variable block rendered twice into cert-publish)."
+}
