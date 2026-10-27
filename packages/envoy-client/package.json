@@ -114,6 +114,14 @@
       "bun": "./src/slack-post.ts",
       "default": "./dist/slack-post.js"
     },
+    "./testing/envoy-stack": {
+      "types": "./src/testing/envoy-stack.ts",
+      "bun": "./src/testing/envoy-stack.ts"
+    },
+    "./testing/stall-proxy": {
+      "types": "./src/testing/stall-proxy.ts",
+      "bun": "./src/testing/stall-proxy.ts"
+    },
     "./tool-contract": {
       "types": "./src/tool-contract.ts",
       "bun": "./src/tool-contract.ts",

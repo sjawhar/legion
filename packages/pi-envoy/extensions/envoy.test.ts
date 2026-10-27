@@ -1,5 +1,7 @@
 import {
+  afterAll,
   afterEach,
+  beforeAll,
   beforeEach,
   describe,
   expect,
@@ -30,6 +32,13 @@ import {
   sessionDirectory,
 } from "@legion/envoy-client/dispatch-session-state";
 import { machineID } from "@legion/envoy-client/machine";
+import { ReplayStateSchema } from "@legion/envoy-client/replay";
+import {
+  type EnvoyStack,
+  envoyStackEnabled,
+  startEnvoyStack,
+} from "@legion/envoy-client/testing/envoy-stack";
+import { startStallProxy } from "@legion/envoy-client/testing/stall-proxy";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
@@ -56,6 +65,7 @@ import { decode } from "@toon-format/toon";
 import { z } from "zod";
 import { version as packageVersion } from "../package.json" with { type: "json" };
 import { resetEnvoySessionsForTests } from "../src/envoy-session";
+import { REPLAY_STATE_ENTRY } from "../src/missed-messages";
 
 type ToolResult = {
   readonly content: readonly { readonly type: "text"; readonly text: string }[];
@@ -15807,4 +15817,143 @@ describe("messages missed while the subscription was down", () => {
       expect(notices[0]?.options).toMatchObject({ triggerTurn: false });
     });
   });
+});
+
+describe.skipIf(!envoyStackEnabled)("against a real natsd and Envoy listener", () => {
+  let stack: EnvoyStack | undefined;
+  beforeAll(async () => {
+    stack = await startEnvoyStack();
+  }, 120_000);
+  afterAll(async () => {
+    await stack?.stop();
+  }, 60_000);
+
+  /** What a replayed card ends with (`replayedText`); a live card has no such line. */
+  const REPLAYED = "while this session's connection was down.";
+
+  // The session runs on nats.js's real ping and dial timers and a real listener, so each wait polls
+  // the real clock until its condition holds or its deadline passes.
+  async function waitFor(
+    condition: () => boolean | Promise<boolean>,
+    deadline: number,
+    what: string
+  ): Promise<void> {
+    while (!(await condition())) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+      await Bun.sleep(100);
+    }
+  }
+
+  test("a session whose NATS path freezes reconnects within 60 s and shows the message sent meanwhile once, replayed", async () => {
+    if (stack === undefined) throw new Error("the Envoy stack did not start");
+    const { envoyUrl } = stack;
+    const proxy = await startStallProxy(stack.natsHostPort);
+    const originalHeartbeat = process.env.ENVOY_HEARTBEAT_MS;
+    // No heartbeat sweep runs in the test's window: the reconnect is the only catch-up trigger.
+    process.env.ENVOY_HEARTBEAT_MS = "240000";
+    process.env.ENVOY_URL = envoyUrl;
+    process.env.ENVOY_NATS_URL = proxy.url;
+    globalThis.fetch = originalFetch;
+    natsState.realConnect = true;
+    const sessionID = `ses_stall_${crypto.randomUUID().replaceAll("-", "")}`;
+    const agentSubject = `notifications.agent.${sessionID}`;
+    const { default: envoyExtension } = await import("./envoy.ts?nats-stall");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    const context = sessionContext(sessionID);
+    const run = crypto.randomUUID();
+    const cards = (marker: string) =>
+      fixture.deliveries.filter(
+        (delivery) => delivery.customType === "envoy-message" && delivery.content.includes(marker)
+      );
+    const send = async (marker: string) => {
+      const answer = await fetch(`${envoyUrl}/v1/messages/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target_session: sessionID, source: "agent", message: marker }),
+      });
+      expect(answer.status).toBe(200);
+    };
+    try {
+      await fixture.handlers.get("session_start")?.({}, context);
+      const started = Date.now();
+      await waitFor(
+        async () => (await fetch(`${envoyUrl}/v1/registry/${sessionID}`)).ok,
+        started + 30_000,
+        "the session's registration"
+      );
+      const registration = {
+        session_id: sessionID,
+        plugin: "@sjawhar/pi-envoy",
+        plugin_version: packageVersion,
+      };
+      expect(await (await fetch(`${envoyUrl}/v1/registry/${sessionID}`)).json()).toMatchObject(
+        registration
+      );
+      expect(await (await fetch(`${envoyUrl}/v1/sessions`)).json()).toContainEqual(
+        expect.objectContaining(registration)
+      );
+      // The first sweep started the agent subject's cursor, and the subscription went out first.
+      await waitFor(
+        () =>
+          fixture.entries.some(
+            (entry) =>
+              entry.customType === REPLAY_STATE_ENTRY &&
+              ReplayStateSchema.safeParse(entry.data).data?.subjects[agentSubject]?.after !==
+                undefined
+          ) && proxy.connections[0]?.subscribedAt !== undefined,
+        started + 30_000,
+        "the session's first sweep"
+      );
+
+      const live = `stall-live-before-${run}`;
+      await send(live);
+      await waitFor(() => cards(live).length > 0, Date.now() + 10_000, "the live message");
+
+      const frozenAt = proxy.freeze();
+      const missed = `stall-missed-${run}`;
+      await send(missed);
+      await waitFor(
+        () => cards(missed).length > 0,
+        frozenAt + 60_000,
+        "the message sent while the path was frozen"
+      );
+      const shownAt = Date.now();
+      const resubscribed = proxy.connections.find(
+        (opened) => opened.acceptedAt >= frozenAt && opened.subscribedAt !== undefined
+      );
+      console.log(
+        `pi-envoy stall: resubscribed ${(((resubscribed?.subscribedAt ?? Number.NaN) - frozenAt) / 1000).toFixed(1)} s, missed message shown ${((shownAt - frozenAt) / 1000).toFixed(1)} s after the freeze`
+      );
+      expect(resubscribed?.subscribedAt).toBeDefined();
+      expect((resubscribed?.subscribedAt ?? Number.POSITIVE_INFINITY) - frozenAt).toBeLessThan(
+        60_000
+      );
+      expect(shownAt - frozenAt).toBeLessThan(60_000);
+
+      const after = `stall-live-after-${run}`;
+      await send(after);
+      await waitFor(
+        () => cards(after).length > 0,
+        Date.now() + 10_000,
+        "the message after the reconnect"
+      );
+
+      // Each shown once: the two live without the replay line, the frozen window's replayed.
+      for (const [marker, replayed] of [
+        [live, false],
+        [missed, true],
+        [after, false],
+      ] as const) {
+        const shown = cards(marker);
+        expect(shown).toHaveLength(1);
+        expect(shown[0]?.content.includes(REPLAYED)).toBe(replayed);
+      }
+    } finally {
+      await fixture.handlers.get("session_shutdown")?.({}, context);
+      await proxy.close();
+      if (originalHeartbeat === undefined) delete process.env.ENVOY_HEARTBEAT_MS;
+      else process.env.ENVOY_HEARTBEAT_MS = originalHeartbeat;
+    }
+  }, 120_000);
 });
