@@ -492,9 +492,9 @@ func (s *Service) TextWithToken(ctx context.Context, artifactID string) (string,
 
 // readDocument is the document the caller sees, read without loading or writing its room, so it
 // also reads a closed issue's document: the tree of the calling transaction's fork or of the
-// resident room (heldTree), else the rendering of the stored document (coldRead), or the stored
-// document's tree where the rendering does not take it. A document with no stored state has
-// neither, and no error.
+// resident room, or of the stored document when that room is behind the stored head (heldTree),
+// else the rendering of the stored document (coldRead), or the stored document's tree where the
+// rendering does not take it. A document with no stored state has neither, and no error.
 func (s *Service) readDocument(ctx context.Context, artifactID string) (*documentRead, *pmdoc.Node, error) {
 	tree, held, err := s.heldTree(ctx, artifactID)
 	if err != nil || held {
@@ -505,7 +505,11 @@ func (s *Service) readDocument(ctx context.Context, artifactID string) (*documen
 
 // heldTree is the tree of the document where this server holds it, once a failed room's recovery
 // is done: the calling transaction's fork's when it has one (joinRead), else the resident room's,
-// as of one moment (liveTree). held is false where neither holds it.
+// as of one moment (liveTree). held is false where neither holds it. It is never older than the
+// stored head, read after joinRead and before the room (readStoredHead): a resident room behind
+// that head - another process stored an update its catch-up has not applied yet - is read from
+// the store instead (storedTree), which does not fail the room, sound and only behind; the read
+// waits for no catch-up.
 func (s *Service) heldTree(ctx context.Context, artifactID string) (tree *pmdoc.Node, held bool, err error) {
 	if err := s.awaitRoomRecovery(ctx, artifactID); err != nil {
 		return nil, false, err
@@ -518,11 +522,20 @@ func (s *Service) heldTree(ctx context.Context, artifactID string) (tree *pmdoc.
 		tree, err := treeOf(fork)
 		return tree, true, err
 	}
-	if live := s.srv.GetDoc(artifactID); live != nil {
-		tree, err := s.liveTree(artifactID, live)
+	live := s.srv.GetDoc(artifactID)
+	if live == nil {
+		return nil, false, nil
+	}
+	head, err := s.readStoredHead(ctx, artifactID)
+	if err != nil {
+		return nil, false, err
+	}
+	if !s.roomHoldsHead(live, head) {
+		tree, err := s.storedTree(ctx, artifactID)
 		return tree, true, err
 	}
-	return nil, false, nil
+	tree, err = s.liveTree(artifactID, live)
+	return tree, true, err
 }
 
 // loadTree is the tree of the document a socket's admission check reads (heldTree, else the stored
@@ -1391,14 +1404,16 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	return renderedTree{tree: tree, markdown: markdown, offsets: offsets}, capture, nil
 }
 
-// storedTree is the tree of artifactID's stored document at its head, for a version whose room
-// stands behind that head (captureLiveTextAndAuthors). It is read on the pool that owns loads
-// (LoadDocument), as a cold write's fork reads the stored document (coldFork), and the caller
-// holds the document's advisory lock, so no append lands between the head it compared against
-// and this read. A load that fails does not fail the room, where coldFork's does: coldFork reads
-// the store in place of a room, so its failure is the document's, while here the room is sound
-// and only behind, and its catch-up brings it to the head (roomCatchUps). The version's
-// transaction answers ErrServiceUnavailable instead, and its caller retries.
+// storedTree is the tree of artifactID's stored document at its head, for a version or a read
+// whose room stands behind that head (captureLiveTextAndAuthors, heldTree, docTree). It is read on
+// the pool that owns loads (LoadDocument), as a cold write's fork reads the stored document
+// (coldFork), never through the caller's transaction or a second connection of the shared pool. A
+// version's caller holds the document's advisory lock, so no append lands between the head it
+// compared against and this read; a read's holds nothing, and its load reads a head at or past
+// the one it compared against. A load that fails does not fail the room, where coldFork's does:
+// coldFork reads the store in place of a room, so its failure is the document's, while here the
+// room is sound and only behind, and its catch-up brings it to the head (roomCatchUps). The caller
+// answers ErrServiceUnavailable instead, and its caller retries.
 func (s *Service) storedTree(ctx context.Context, artifactID string) (*pmdoc.Node, error) {
 	loaded, err := s.persistence.LoadDocument(ctx, artifactID)
 	if err != nil {

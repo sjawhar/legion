@@ -810,8 +810,10 @@ func sameDeletes(was, now *crdt.IDSet) bool {
 // joinRead joins a read of artifactID to the calling transaction, as joinLiveWrite joins a write.
 // With a write of its own open it returns the fork holding that write. Otherwise, for a caller in
 // a transaction, it takes the document's owner row and waits until no other transaction's write
-// to artifactID is open, then returns nil: what the caller reads next includes every committed
-// write. Outside a transaction it takes nothing and returns nil.
+// to artifactID is open on this process, then returns nil: what the caller reads next includes
+// every committed write, the head it reads next (readStoredHead) included. Outside a transaction
+// it takes nothing and returns nil. It never waits for a room's catch-up: a read of a room behind
+// the stored head reads the store instead (heldTree, docTree).
 func (s *Service) joinRead(ctx context.Context, artifactID string) (*crdt.Doc, error) {
 	if write := joinedLiveWrite(ctx, artifactID); write != nil {
 		return s.forkLive(ctx, write)
@@ -825,9 +827,53 @@ func (s *Service) joinRead(ctx context.Context, artifactID string) (*crdt.Doc, e
 	return nil, nil
 }
 
+// readStoredHead is the stored head a read of artifactID compares a resident room's cursor
+// against (roomHoldsHead): the greatest stored version, as the gate and a version capture read it
+// (currentUpdateCursor). It reads through the caller's transaction when there is one, since a
+// second connection of the shared pool taken under it is what deadlocks the pool
+// (store.ErrNestedAcquire), and otherwise on the pool that owns loads, as a cold read reads the
+// store's stamp (PgVersioned.DocumentStamp), so a caller holding a pooled connection it did not
+// join, settlement's transaction, takes no second one either. It takes no lock and waits for
+// nothing. It is the one place a read learns the head.
+func (s *Service) readStoredHead(ctx context.Context, artifactID string) (int64, error) {
+	var q Queryer
+	if tx, joined := txFromContext(ctx); joined {
+		q = tx
+	} else {
+		rooms, err := s.store.Pool.Rooms()
+		if err != nil {
+			return 0, fmt.Errorf("%w: %w", ErrServiceUnavailable, err)
+		}
+		q = rooms
+	}
+	head, err := currentUpdateCursor(ctx, q, artifactID)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return 0, ctxErr
+		}
+		return 0, fmt.Errorf("%w: %w", ErrServiceUnavailable, err)
+	}
+	return head, nil
+}
+
+// roomHoldsHead reports whether live, a resident room, holds every stored update through head:
+// its cursor's contiguous run (roomCursor.heldThrough) stands at or past it. Each cursor advance
+// follows the update into the document, so a room it reports holds that much, and a room only
+// gains updates, so it holds them for every read after this. A room behind head is missing an
+// update another process stored that its catch-up has not applied yet (roomCatchUps), and a read
+// takes the stored document instead (storedTree) rather than wait for that catch-up. A room that
+// keeps no cursor is not judged behind: nothing says it is (roomBehindHead).
+func (s *Service) roomHoldsHead(live *crdt.Doc, head int64) bool {
+	cursor := s.cursorOf(live)
+	return cursor == nil || cursor.heldThrough() >= head
+}
+
 // docTree is the tree of the document the caller sees: the transaction's fork's when there is one
 // (joinRead), otherwise the live room's, which it loads, read as of one moment (liveTree): the
-// room's peers and the service write the room while a walk reads it.
+// room's peers and the service write the room while a walk reads it. It is never older than the
+// stored head read before the room (readStoredHead): a room behind that head, one another process
+// wrote past and whose catch-up has not landed, is read from the store (storedTree), and the read
+// waits for no catch-up.
 func (s *Service) docTree(ctx context.Context, artifactID string) (*pmdoc.Node, error) {
 	fork, err := s.joinRead(ctx, artifactID)
 	if err != nil {
@@ -836,9 +882,18 @@ func (s *Service) docTree(ctx context.Context, artifactID string) (*pmdoc.Node, 
 	if fork != nil {
 		return treeOf(fork)
 	}
+	head, err := s.readStoredHead(ctx, artifactID)
+	if err != nil {
+		return nil, err
+	}
 	var tree *pmdoc.Node
 	var treeErr error
+	behind := false
 	err = s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		if !s.roomHoldsHead(doc, head) {
+			behind = true
+			return
+		}
 		tree, treeErr = s.liveTree(artifactID, doc)
 	})
 	if treeErr != nil {
@@ -846,6 +901,9 @@ func (s *Service) docTree(ctx context.Context, artifactID string) (*pmdoc.Node, 
 	}
 	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 		return nil, err
+	}
+	if behind {
+		return s.storedTree(ctx, artifactID)
 	}
 	return tree, nil
 }
