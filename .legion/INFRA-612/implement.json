@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-612",
-  "completed": "2026-10-27T13:45:30Z",
+  "completed": "2026-10-27T14:52:00Z",
   "proof": [
+    {
+      "criterion": "Review round 1 (five findings on PR #2405): the shared reply setup is one helper, the blank option is found by position, the server-attribute drop fails closed, AskBlockStamps is private, the drop's rationale is written once; nothing a reader sees changes",
+      "surface": "Dispatch SPA (production build) on the real Go Dispatch server with Postgres 17 + pgvector, Playwright chromium and iphone (pod harness, implementer lane); bun test and tsc for proof-editor and dispatch",
+      "command": "cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts e2e/ask-blocks.e2e.ts e2e/typed-blocks.e2e.ts --project chromium --project iphone (worker run on this tree), then bun run e2e -- e2e/text-typed-blocks.e2e.ts --project chromium --project iphone (my own run); proof-editor bun run test + typecheck; dispatch typecheck; biome check on the changed files",
+      "observed": "three specs 80 passed (7.6m); text-typed-blocks 10 passed (55.5s); proof-editor 131 pass 0 fail; both typechecks exit 0; biome no diagnostics. The existing reply case keeps every assertion; only its setup moved into replyUnderDocumentDecision.",
+      "headSha": "fa623f9a443c",
+      "negativeControl": "With [&_li:empty]:hidden removed from the malformed content class, the reworked position-based assertion fails: line 297 toHaveCSS(\"display\", \"none\") Expected \"none\" Received \"list-item\" (chromium, 1 failed); class restored."
+    },
     {
       "criterion": "A1 / C4: the browser specs text-typed-blocks.e2e.ts, ask-blocks.e2e.ts and typed-blocks.e2e.ts pass on desktop and phone, no existing case changed",
       "surface": "Dispatch SPA (production build) on the real Go Dispatch server with Postgres 17 + pgvector, Playwright chromium and iphone projects (pod harness /legion/harness, implementer lane, database dispatch_implementer_e2e)",
@@ -67,7 +75,8 @@
   ],
   "deviations": [
     "C7's document leg files the malformed decision as a separate document of the issue (createIssueArtifact, /issues/<KEY>/artifacts/<slug>), because an edit of the issue's own spec refuses any malformed decision: 400 INVALID_ASK_BLOCK 'ask block \"blank\" has an option without a label'. The same source is accepted unchanged there; reported to the architect as the plan asks.",
-    "Simplify pass (ce-simplify-code, three reviewers) applied four behaviour-preserving changes in 5a2593b2: AskBlockView reads the block id from the attribute (no second askBlockFacts pass), a duplicated comment removed, askBlockShell/AskBlockShell no longer exported (no importer left), collectAskHosts answers the shared NO_ASK_HOSTS and drops an always-false check."
+    "Simplify pass (ce-simplify-code, three reviewers) applied four behaviour-preserving changes in 5a2593b2: AskBlockView reads the block id from the attribute (no second askBlockFacts pass), a duplicated comment removed, askBlockShell/AskBlockShell no longer exported (no importer left), collectAskHosts answers the shared NO_ASK_HOSTS and drops an always-false check.",
+    "Round 1 (fa623f9a): the existing case 'a reply under a document's decision keeps the lists of the typed blocks it holds' now takes its setup from the shared helper replyUnderDocumentDecision, as the reviewer asked; its assertions are unchanged. This is a setup move in an existing case, beyond A1's 'imports only' wording, made at the reviewer's request."
   ],
   "openQuestions": []
 }
