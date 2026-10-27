@@ -1589,10 +1589,15 @@ export default function envoyExtension(pi: PiApi): void {
   });
 
   // How a card goes, and the wake for one the host folds into the context with no turn
-  // (`../src/card-wake`). A card the host's dispose flushes at shutdown wakes nothing.
+  // (`../src/card-wake`). A card the host's dispose flushes at shutdown wakes nothing. The
+  // start-turn mark the Legion entry keeps holds the startup wake back while it names the session
+  // open here (`sessionOpen`: this instance's own and the host's live one), never a `task`
+  // subagent's.
   const cardWake = new CardWake({
     now: () => Date.now(),
     sendMessage: (message, options) => pi.sendMessage(message, options),
+    startupTurn: () => publishedInterface?.startupTurn,
+    isOwnSession: (session) => sessionOpen(session),
   });
 
   pi.on("message_end", async (event, context) => {

@@ -51,6 +51,16 @@
   it, unless an interrupt is still in effect or the card was a targeted Aside; a card sent while
   the session sets up a prompt is left to that prompt's run, so an interrupt there starts no turn
   either. The limits are in the package's `AGENTS.md` (INFRA-497).
+- The Legion controller's start message is its session's first turn, ahead of any Envoy card
+  that arrived while the session started (INFRA-511). In RPC mode a startup card's wake could fire
+  once the host was idle after its startup, before the daemon's start prompt arrived, and in a
+  terminal a card that reached the operator's controller during startup started a turn inside the
+  startup drain, ahead of `/legion-controller-start`. While the plugin interface's `startupTurn`
+  names the session (the start unsent, or sent under 30 s ago), a card that finds it idle goes as a
+  follow-up that starts no turn, in any mode, and the startup wake waits for the start turn: once
+  that turn ends, one wake starts a turn for every card that arrived meanwhile, counted even though
+  the start turn's reply follows them. A mark naming another session, or one whose start was sent
+  30 s ago or more, changes nothing.
 - A card that reaches an RPC session while Oh My Pi starts no longer holds back every RPC command
   until the turn it started ends. Oh My Pi settles every extension send of its startup before RPC
   mode reads its input, and an idle card's send lasted its whole turn, so a Legion worker's
@@ -161,7 +171,8 @@
 - Plugin interface version 4 (INFRA-511): the interface carries `startupTurn`, the session whose
   first turn a start that runs after Oh My Pi's startup owns and when that start was sent, which
   `@sjawhar/pi-legion` sets for its controller's start message and clears at that session's first
-  run or shutdown. Install it with the `@sjawhar/pi-legion` released beside it.
+  run or shutdown, and which this plugin reads to keep its startup cards behind that start turn
+  (under "Fixed"). Install it with the `@sjawhar/pi-legion` released beside it.
 
 - `dispatch` and `dispatch-first` say that a Legion session files no issue for a finding outside its
   own issue, and point to `legion-worker/references/findings.md`: a defect with a clear fix in code

@@ -7,6 +7,7 @@ import {
   CardWake,
   type CardWakeContext,
   STARTUP_CARD_CAP_MS,
+  STARTUP_TURN_CAP_MS,
   unreadCards,
 } from "./card-wake";
 
@@ -29,6 +30,8 @@ const interrupted = { stopReason: "aborted", errorMessage: "Interrupted by user"
 const steer = { deliverAs: "steer", triggerTurn: true } as const;
 const aside = { deliverAs: "aside", triggerTurn: true } as const;
 const followUp = { deliverAs: "followUp", triggerTurn: false } as const;
+/** The session the harness's cards go into, which `isOwnSession` answers for. */
+const OWN_SESSION = "ses_own";
 
 /**
  * A `CardWake` on a host whose branch the test writes and whose managed timer it runs (`fire`),
@@ -39,7 +42,8 @@ const followUp = { deliverAs: "followUp", triggerTurn: false } as const;
  * records, persisted in order; `reply` is an assistant message ending a step. `reportsIdle: false`
  * is a host context without `isIdle`; `mode` is the context's `mode` (RPC unless named, `null` for
  * a context without one). The wake starts in its startup phase, and `endStartup` ends it with a
- * startup card a run read.
+ * startup card a run read. `mark` is the start-turn mark the wake reads, empty until a test sets
+ * it; the cards go into `OWN_SESSION`.
  */
 function harness(
   options: {
@@ -50,11 +54,17 @@ function harness(
   let clock = 1_000;
   let idle = false;
   const sent: Sent[] = [];
+  const mark: { session: string | undefined; sentAt: number | undefined } = {
+    session: undefined,
+    sentAt: undefined,
+  };
   const wake = new CardWake({
     now: () => clock,
     sendMessage: (message, sendOptions) => {
       sent.push({ message, options: sendOptions });
     },
+    startupTurn: () => mark,
+    isOwnSession: (session) => session === OWN_SESSION,
   });
   const branch: unknown[] = [];
   const timers: (() => void | Promise<void>)[] = [];
@@ -111,9 +121,12 @@ function harness(
     },
     branch,
     card,
+    /** The harness's clock now. */
+    clock: () => clock,
     context,
     delays,
     fire,
+    mark,
     message,
     reply,
     sent,
@@ -140,6 +153,19 @@ function harness(
     /** A run starts, as the host emits `agent_start`. */
     run: () => wake.agentStart(),
     end: () => wake.agentEnd(context),
+    /** The start turn runs: its `agent_start` clears the mark, as the Legion entry does, the start
+     *  message and the model's reply land in the branch, and its `agent_end` comes on an idle
+     *  host. */
+    startTurn: () => {
+      idle = false;
+      wake.agentStart();
+      mark.session = undefined;
+      mark.sentAt = undefined;
+      message({ role: "user", content: "start" });
+      message(reply());
+      idle = true;
+      wake.agentEnd(context);
+    },
   };
 }
 
@@ -590,6 +616,153 @@ describe("in the startup phase", () => {
     expect(host.sent).toHaveLength(1);
     expect(contentOf(host.sent[0])).toContain("1 Envoy message ");
     expect(host.card("after-cap").delivery).toMatchObject(steer);
+  });
+});
+
+// The Legion controller's start message must be its session's first turn, ahead of any card. The
+// Legion entry names that session in the start-turn mark until the start turn's `agent_start`:
+// the operator's controller in a terminal with the start unsent until `/legion-controller-start`
+// sends it, the daemon's in RPC mode with it sent right before the daemon writes the prompt.
+describe("while the start-turn mark names the session", () => {
+  const oneCard = "1 Envoy message above arrived with no turn to read it: read it and act on it.";
+  const twoCards =
+    "2 Envoy messages above arrived with no turn to read them: read them and act on them.";
+
+  test("sends a terminal's idle card as a follow-up that starts no turn, and wakes for none while the start is unsent", async () => {
+    const host = harness({ mode: "tui" });
+    host.mark.session = OWN_SESSION;
+    host.setIdle(true);
+    const card = host.card("terminal-startup");
+    expect(card.delivery).toEqual({
+      ...followUp,
+      details: { envoyCard: expect.any(String), wake: "startup" },
+    });
+
+    host.message(card.message);
+    await host.fire();
+    expect(host.sent).toEqual([]);
+    // No event tells the wake the start was sent, so it polls for the stamp at the cap.
+    expect(host.delays.at(-1)).toBe(STARTUP_TURN_CAP_MS);
+    host.advance(STARTUP_TURN_CAP_MS);
+    await host.fire();
+    expect(host.sent).toEqual([]);
+    expect(host.delays.at(-1)).toBe(STARTUP_TURN_CAP_MS);
+  });
+
+  test("wakes once after the start turn's agent_end for every startup card, though the start turn's reply follows them", async () => {
+    const host = harness({ mode: "tui" });
+    host.mark.session = OWN_SESSION;
+    host.setIdle(true);
+    const cards = [host.card("owed-one"), host.card("owed-two", true)];
+    for (const card of cards) host.message(card.message);
+    await host.fire();
+    expect(host.sent).toEqual([]);
+
+    // `/legion-controller-start` sends the start and stamps the mark.
+    host.mark.sentAt = host.clock();
+    host.startTurn();
+    await host.fire();
+    expect(host.sent).toEqual([wakeMessage(twoCards)]);
+    expect(host.card("after-start-turn").delivery).toMatchObject(steer);
+  });
+
+  test("owes the wake to a startup card seen while the mark held, when the start turn starts before any check", async () => {
+    const host = harness();
+    host.mark.session = OWN_SESSION;
+    host.mark.sentAt = host.clock();
+    host.setIdle(true);
+    host.message(host.card("rpc-owed").message);
+    // The daemon's start prompt starts its turn before the check the card armed runs.
+    host.setIdle(false);
+    host.run();
+    host.mark.session = undefined;
+    host.mark.sentAt = undefined;
+    await host.fire();
+    expect(host.sent).toEqual([]);
+
+    host.message({ role: "user", content: "start" });
+    host.message(host.reply());
+    host.setIdle(true);
+    host.end();
+    await host.fire();
+    expect(host.sent).toEqual([wakeMessage(oneCard)]);
+  });
+
+  test("holds the wake until the cap once the start was sent, then wakes: a start the host failed", async () => {
+    const host = harness();
+    host.mark.session = OWN_SESSION;
+    host.mark.sentAt = host.clock() - 10_000;
+    host.setIdle(true);
+    host.message(host.card("sent-mark").message);
+    await host.fire();
+    expect(host.sent).toEqual([]);
+    expect(host.delays.at(-1)).toBe(STARTUP_TURN_CAP_MS - 10_000);
+
+    host.advance(STARTUP_TURN_CAP_MS - 10_000);
+    await host.fire();
+    expect(host.sent).toEqual([wakeMessage(oneCard)]);
+  });
+
+  test("caps a start stamped while the wake polled at its own send", async () => {
+    const host = harness({ mode: "tui" });
+    host.mark.session = OWN_SESSION;
+    host.setIdle(true);
+    host.message(host.card("stamped-later").message);
+    await host.fire();
+    host.advance(5_000);
+    host.mark.sentAt = host.clock();
+    host.advance(STARTUP_TURN_CAP_MS - 5_000);
+    await host.fire();
+    expect(host.sent).toEqual([]);
+    expect(host.delays.at(-1)).toBe(5_000);
+
+    host.advance(5_000);
+    await host.fire();
+    expect(host.sent).toEqual([wakeMessage(oneCard)]);
+  });
+
+  test("ignores a mark whose start was sent the cap ago or more", async () => {
+    const rpc = harness();
+    rpc.mark.session = OWN_SESSION;
+    rpc.mark.sentAt = rpc.clock() - STARTUP_TURN_CAP_MS;
+    rpc.setIdle(true);
+    rpc.message(rpc.card("stale-mark").message);
+    await rpc.fire();
+    expect(rpc.sent).toEqual([wakeMessage(oneCard)]);
+
+    const terminal = harness({ mode: "tui" });
+    terminal.mark.session = OWN_SESSION;
+    terminal.mark.sentAt = terminal.clock() - STARTUP_TURN_CAP_MS;
+    terminal.setIdle(true);
+    expect(terminal.card("stale-mark-terminal").delivery).toMatchObject(steer);
+  });
+
+  test("ignores a mark that names another session", async () => {
+    const rpc = harness();
+    rpc.mark.session = "ses_task_subagent";
+    rpc.setIdle(true);
+    rpc.message(rpc.card("other-session").message);
+    await rpc.fire();
+    expect(rpc.sent).toEqual([wakeMessage(oneCard)]);
+
+    const terminal = harness({ mode: "tui" });
+    terminal.mark.session = "ses_task_subagent";
+    terminal.setIdle(true);
+    expect(terminal.card("other-session-terminal").delivery).toMatchObject(steer);
+  });
+
+  test("drops the cards it owes when the session goes", async () => {
+    const host = harness({ mode: "tui" });
+    host.mark.session = OWN_SESSION;
+    host.setIdle(true);
+    host.message(host.card("owed-then-cancelled").message);
+    await host.fire();
+
+    host.wake.cancel();
+    host.mark.sentAt = host.clock();
+    host.startTurn();
+    await host.fire();
+    expect(host.sent).toEqual([]);
   });
 });
 

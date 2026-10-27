@@ -2338,6 +2338,9 @@ async function launchedController(options: {
   /** The Go-written state document the daemon's `GET /legion/v1/state` answers with, its project
    * replaced by `daemonProject`: `state.json` unless a test names another. */
   readonly stateFixture?: string;
+  /** Runs at each `/v1/roles/set` the listener takes, before its registry does: an answer it
+   * gives is the listener's, in place of the registry's. */
+  readonly roleClaim?: (body: Record<string, unknown>) => Response | undefined;
 }): Promise<LaunchedController> {
   const project = options.project ?? "omp";
   const token = `legion-${project}-controller`;
@@ -2408,6 +2411,8 @@ async function launchedController(options: {
     // session but the live holder or the holder's declared successor is refused with that holder,
     // unless the listener lost the claim.
     if (url.pathname === "/v1/roles/set") {
+      const answered = options.roleClaim?.(body);
+      if (answered !== undefined) return answered;
       if (
         body?.soft === true &&
         body.session_id !== holder &&
@@ -2540,9 +2545,10 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
   // LEGION-392's race: Oh My Pi's own positional-argument first message can lose the session's one
   // first-turn slot to an Envoy notice. A send from session_start would run inside Oh My Pi's
   // startup wait, with no TUI and no input, so the claim there only marks the start turn due —
-  // right after the role claim and before the live wake subscription opens, so the Envoy entry
-  // holds its startup wake behind it — and `/legion-controller-start`, which `legion controller
-  // start` puts on Oh My Pi's command line, sends it after startup.
+  // the start-turn mark before the role claim, the due message right after it, both before the
+  // live wake subscription opens, so the Envoy entry holds its startup wake behind it — and
+  // `/legion-controller-start`, which `legion controller start` puts on Oh My Pi's command line,
+  // sends it after startup.
   test("the startup claim sends nothing and marks the start turn due before the controller-topic subscribe opens; /legion-controller-start then sends LEGION_CONTROLLER_START_MESSAGE once", async () => {
     const topic = "notifications.legion.omp.controller";
     const controller = await launchedController({
@@ -2794,6 +2800,63 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       { message: expect.stringContaining("/legion-claim-controller"), level: "warning" },
     ]);
     expect(notices[0]?.message).toContain("no start message was sent");
+    expect(controller.sentUserMessages).toEqual([]);
+    expect(envoyPluginInterface().startupTurn).toEqual({ session: undefined, sentAt: undefined });
+  });
+
+  // The listener forwards a role-lane card as soon as it records the role, so the start-turn mark
+  // must already name the session by the role claim, or the Envoy entry would let that card take
+  // the first turn ahead of the start message.
+  test("the startup claim marks the start turn before its /v1/roles/set role claim", async () => {
+    const markAtRoleClaim: unknown[] = [];
+    const controller = await launchedController({
+      sessionId: "ses_controller_mark_first",
+      roleClaim: (body) => {
+        if (body.session_id === "ses_controller_mark_first" && body.role === controller.token) {
+          markAtRoleClaim.push({ ...envoyPluginInterface().startupTurn });
+        }
+        return undefined;
+      },
+    });
+    await controller.handlers.get("session_start")?.(
+      {},
+      controller.context("ses_controller_mark_first")
+    );
+
+    expect(markAtRoleClaim.length).toBeGreaterThan(0);
+    expect(markAtRoleClaim[0]).toEqual({ session: "ses_controller_mark_first", sentAt: undefined });
+  });
+
+  // A role claim that fails leaves the start undue and the mark set: the start command then finds
+  // nothing to send, clears the mark so the Envoy entry stops holding its startup wake, and warns.
+  test("a startup claim whose role claim fails leaves the start-turn mark until the start command, which clears it and warns", async () => {
+    const refusals: unknown[] = [];
+    const controller = await launchedController({
+      sessionId: "ses_controller_role_refused",
+      roleClaim: (body) => {
+        if (body.session_id !== "ses_controller_role_refused") return undefined;
+        if (body.role !== controller.token) return undefined;
+        refusals.push({ ...envoyPluginInterface().startupTurn });
+        return Response.json({ error: "listener unavailable" }, { status: 500 });
+      },
+    });
+    await expect(
+      controller.handlers.get("session_start")?.(
+        {},
+        controller.context("ses_controller_role_refused")
+      )
+    ).rejects.toThrow();
+    expect(refusals[0]).toEqual({ session: "ses_controller_role_refused", sentAt: undefined });
+    expect(envoyPluginInterface().startupTurn).toEqual({
+      session: "ses_controller_role_refused",
+      sentAt: undefined,
+    });
+
+    const notices = await runStartCommand(controller, "ses_controller_role_refused");
+
+    expect(notices).toEqual([
+      { message: expect.stringContaining("no start message was sent"), level: "warning" },
+    ]);
     expect(controller.sentUserMessages).toEqual([]);
     expect(envoyPluginInterface().startupTurn).toEqual({ session: undefined, sentAt: undefined });
   });

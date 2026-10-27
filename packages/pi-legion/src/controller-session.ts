@@ -86,9 +86,10 @@ export function createControllerSession(deps: {
    * (LEGION-392). The claim run at Oh My Pi's startup (`handleSessionStart`) does not send it:
    * Oh My Pi holds every send a `session_start` handler makes and drains them all at the end of
    * its startup, so a turn started there runs inside the startup wait, before the TUI shows it and
-   * before any input is read. Instead, right after the role claim and before the subscription
-   * below opens, it makes the message due and marks this session in the Envoy plugin interface's
-   * `startupTurn`, which keeps the Envoy entry's startup wake behind the start turn.
+   * before any input is read. Instead, right before the role claim it marks this session in the
+   * Envoy plugin interface's `startupTurn`, which keeps the Envoy entry's startup cards from
+   * taking a turn (and their wake behind the start turn), and right after the role claim and
+   * before the subscription below opens it makes the message due.
    * `legion controller start` puts `/legion-controller-start` on Oh My Pi's command line, which
    * Oh My Pi runs after its startup and once the TUI listens; that command (`sendStartMessage`)
    * sends the due message. A claim run after startup (`/legion-claim-controller`, a re-claim after
@@ -206,20 +207,24 @@ export function createControllerSession(deps: {
       );
     }
     const envoyContext = "setInterval" in context ? context : undefined;
-    await claimEnvoyRole(sessionID, registration.claimToken, envoyContext);
     // Once per process, ever, and before the subscription below can deliver an external wake that
     // would otherwise race the start turn for the one first-turn slot (LEGION-392). At Oh My Pi's
     // startup the message is only made due, and the mark holds the Envoy entry's startup wake
     // until `/legion-controller-start` sends it after the startup wait; a claim after startup
     // sends it here. A hand-started takeover (`startMessage` undefined) sends nothing: the
     // operator's own session speaks for itself. Nor does the daemon's own controller, whose start
-    // message the daemon delivers once it reports ready below.
+    // message the daemon delivers once it reports ready below. The mark goes on before the role
+    // claim, so a card the listener forwards on the role lane as soon as it records the role finds
+    // it; a role claim that fails leaves it to `/legion-controller-start`, which clears it.
+    if (atStartup && startMessage !== undefined && !startMessageSent) {
+      const mark = envoyPluginInterface().startupTurn;
+      mark.session = sessionID;
+      mark.sentAt = undefined;
+    }
+    await claimEnvoyRole(sessionID, registration.claimToken, envoyContext);
     if (startMessage !== undefined && !startMessageSent) {
       if (atStartup) {
         dueStartMessage = startMessage;
-        const mark = envoyPluginInterface().startupTurn;
-        mark.session = sessionID;
-        mark.sentAt = undefined;
       } else {
         pi.sendUserMessage(startMessage);
         recordStartMessageSent();
@@ -278,6 +283,8 @@ export function createControllerSession(deps: {
    * `/legion-controller-start`: sends the start message the claim at Oh My Pi's startup made due,
    * as the session's first turn — or, when the operator started a turn first, queued behind it as
    * a follow-up, which starts no turn of its own. A startup claim still running is waited for.
+   * When that claim failed before the start was due, the start-turn mark it set before its role
+   * claim is cleared, so the Envoy entry stops holding its startup wake for a start never sent.
    */
   const sendStartMessage = async (context: CommandContext): Promise<void> => {
     const pending = startupClaim;
@@ -294,6 +301,10 @@ export function createControllerSession(deps: {
       classifySession(process.env).kind === "controller" &&
       !daemonLaunchedController(process.env)
     ) {
+      const mark = envoyPluginInterface().startupTurn;
+      if (mark.session === context.sessionManager.getSessionId() && mark.sentAt === undefined) {
+        mark.session = undefined;
+      }
       context.ui.notify(
         "legion: the controller claim failed, so no start message was sent. Run /legion-claim-controller to claim the controller again; it sends the start message once the claim succeeds.",
         "warning"

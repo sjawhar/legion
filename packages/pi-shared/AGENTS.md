@@ -45,10 +45,14 @@ publishes nothing, so the first publisher wins. The object carries:
 - `startupTurn` — `{session, sentAt}`: the session whose first turn a start that runs after Oh My
   Pi's startup owns, and when that start was sent (milliseconds since the epoch, undefined until
   sent). The Legion entry sets it: the operator's controller claim at `session_start` names the
-  session with the start due, `/legion-controller-start` stamps `sentAt` when it sends the start
-  message, and the daemon-launched controller sets both right before `claims/ready`. That
+  session with the start unsent right before its role claim, `/legion-controller-start` stamps
+  `sentAt` when it sends the start message (or clears the mark when that claim failed before the
+  start was due), and the daemon-launched controller sets both right before `claims/ready`. That
   session's first `agent_start`, and its `session_shutdown`, clear both
-  (`packages/pi-legion/AGENTS.md`, "The controller's start turn").
+  (`packages/pi-legion/AGENTS.md`, "The controller's start turn"). The Envoy entry reads it
+  (`packages/pi-envoy/src/card-wake.ts`): while it names the Envoy entry's own live session and
+  its start is unsent or under 30 s old, an idle card starts no turn and the startup wake waits
+  for the start turn's end.
 
 Every consumer resolves the object at each use through `envoyPluginInterface()`; nothing caches it
 at module scope, and `resetEnvoyPluginInterfaceForTests()` is the one test seam.

@@ -351,10 +351,13 @@ first-turn slot (LEGION-392). The claim `session_start` runs (`handleSessionStar
 `src/controller-session.ts`) does not send it: Oh My Pi holds every send a `session_start` handler
 makes and drains them at the end of its startup, so a turn started there runs inside the startup
 wait, before the TUI shows it or reads any input — no start message and no busy row on screen,
-Enter not taking typed text, Esc doing nothing. Instead, right after the role claim and before the
-controller-topic subscription opens, that claim makes the message due and sets the Envoy plugin
-interface's `startupTurn` to `{session, sentAt: undefined}`, keeping LEGION-392's order: the start
-is due before the subscription a wake could arrive on opens. Oh My Pi runs command-line words
+Enter not taking typed text, Esc doing nothing. Instead, right before the role claim, that claim
+sets the Envoy plugin interface's `startupTurn` to `{session, sentAt: undefined}`, so a role-lane
+card the listener forwards as soon as it records the role already finds it, and the Envoy entry
+sends that card as a follow-up that starts no turn and holds its wake for the start turn
+(`packages/pi-envoy/src/card-wake.ts`); right after the role claim and before the controller-topic
+subscription opens, it makes the message due, keeping LEGION-392's order: the start is due before
+the subscription a wake could arrive on opens. Oh My Pi runs command-line words
 after its startup, once the TUI listens, and the extension command `legion-controller-start`
 (`extensions/legion.ts`, `sendStartMessage`) answers the word. It first waits for a startup claim
 still running (Oh My Pi moves on from a handler past its timeout, and the handler keeps running),
@@ -363,7 +366,7 @@ then:
 | When the command runs | What it does |
 | --- | --- |
 | The start message is due | Sends it as the session's first turn, or, when the operator already started a turn (`isIdle()` false), as a follow-up behind that turn (`deliverAs: "followUp"`), which starts no turn of its own; then stamps `startupTurn.sentAt` |
-| Nothing was sent, in a controller session (`LEGION_CONTROLLER=1`) that is not the daemon's: its claim failed before the start was due | A warning notice: no start message was sent, and `/legion-claim-controller` claims again and sends it once the claim succeeds |
+| Nothing was sent, in a controller session (`LEGION_CONTROLLER=1`) that is not the daemon's: its claim failed before the start was due | Clears `startupTurn` when it names this session with `sentAt` undefined (a role claim that failed after the mark went on), so the Envoy entry stops holding its startup wake; then a warning notice: no start message was sent, and `/legion-claim-controller` claims again and sends it once the claim succeeds |
 | Nothing is due: the message was sent, the session is the daemon-launched controller, or it is no controller session | An info notice that there is nothing to send |
 
 A claim run after startup — `/legion-claim-controller`, a re-claim after a session change — is
