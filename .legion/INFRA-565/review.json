@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-565",
+  "completed": "2026-10-27T09:36:44Z",
+  "decision": "changes_requested",
+  "reviewedHead": "08952b8cf2dab419a11bdd6c9945b72087f9ab01",
+  "critical": 0,
+  "important": 1,
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "docs/solutions/integration-patterns/cut-source-text-by-mdast-offsets-from-the-text-micromark-counted-INFRA-529.md",
+      "description": "Lines 43-54 still cite read-only-directives.ts:189, :108-118, :28, :121-135 (that file is now 25 lines; the code moved to typed-block-drawing.ts), and lines 52-54 say default mode's remarkTypedBlocks still passes file.toString() unchanged and that no input changes, which this PR reverses (block-schema.ts:287 now reads markdownSource(file); \\ufeffhello\\n::a is refused again). Point the evidence at typed-block-drawing.ts and rewrite the last bullet."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/proof-editor/src/lib-headless.ts",
+      "description": "Lines 88-89: 'in both modes ... (see remarkUnfitTypedBlocks)' - read-only mode draws through remarkReadOnlyDirectives, and default mode installs remarkUnfitTypedBlocks only when blockSchema is given (lines 164-166). Name both transforms and the blockSchema condition."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/proof-editor/tests/typed-block-drawing.test.ts",
+      "description": "plainTextPasteEvent (:102), withHTMLElementGlobal (:78) and pastePlainText (:109) are copies of clipboard-paste-recovery.test.ts:17,35,23, and blocks (:41) plus the blocks.json loader (:17-22) copy read-only-directives.test.ts:35,283-288. Move them into shared tests modules (as tests/marks-editor.ts, tests/dom-window.ts already are) and import them from each suite."
+    }
+  ],
+  "thermonuclear": "thermonuclear-deep-review: APPROVE at 08952b8c, one Minor (the stale doc above). thermonuclear-code-quality: CHANGES at 08952b8c (stale doc, duplicated test helpers, lib-headless doc wording).",
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. At 08952b8c every pull_request workflow (Tests, Legion Envoy and Contracts, Docs, Worker Image, PR Title) still queued at 2026-10-27T09:36Z; not a blocker for a changes request.",
+  "threads": "0 review threads on the pull request (gh api graphql)."
+}
