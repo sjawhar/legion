@@ -2,42 +2,32 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-148",
-  "completed": "2026-10-27T13:09:26Z",
-  "round": 2,
+  "completed": "2026-10-27T17:36:05Z",
+  "round": 4,
   "decision": "changes_requested",
-  "reviewedCodeHead": "ca5af069ca51c9277e90fc8a5400aa835b41ee21",
-  "scope": "As the architect narrowed it after the round cap: only the round-1 fixes, any correctness bug they introduce, and the required checks. New minors go into the architect's acceptance notes.",
+  "reviewedCodeHead": "4e965add424383a95543cdb98d9d84f4b49a1c29",
+  "scope": "What changed since 555220b3: the merge of main 3d789a90 (renumbering) and the refresher URL fix 33b1f07a with the tester's red test 1502ee12. The round-3 changes were found clean at 21da602e (see the backward-move reason).",
   "critical": 0,
   "important": 1,
   "minor": 1,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/pi-envoy/src/session-answers-context.ts:72-99",
-      "description": "Round-1 finding 1 is only partly fixed. endsBeforeBranch matches only `type: \"message\"` branch entries. When a remote compaction's cut comes right after a custom_message entry (role `custom`, which is every Envoy delivery with triggerTurn, envoy.ts:1213) or a branch_summary entry, nothing matches. The prefix conversion then gets the list, and buildLiveProviderContext's slice (ve = convert(prefix).length) keeps one message past the cut. A custom_message after the match also never sets `later`. Confirmed by /legion/scratch/tmp/dr148b/probe.ts: a prefix [user, assistant, custom] returns the list. The docs (pi-envoy AGENTS.md:375-378, README.md:67-69, CHANGELOG.md:35-37) say a remote compaction carries no list."
+      "file": "packages/claude-envoy/hooks/session-hook.ts:434",
+      "description": "Hides an error. The refresher writes `dispatch_url: dispatch.enabled ? dispatch.url : null`, but the hook compares it at :329 with sessionDispatchUrl, which is set without reading the token. So when the `!` token command fails (not signed in, exit 3), the refresher records null and the URLs never match. The hook drops the refresher's real error ('dispatch.token's command exited with status 3') and says 'the refresher read no Dispatch, not the Dispatch envoy.json names now', which is false. Both thermonuclear agents reproduced it with the committed dist. Fix: record the URL the refresher targeted, with the same function the hook uses (sessionDispatchUrl/dispatchUrl), so a matching URL carries the refresher's own text. Add a test with a token command that fails fast."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy-client/src/session-answers.ts:155",
-      "description": "The cached header `this read failed: <reason>.` ends with `..` when the reason already ends with a period (the tester saw it). This is output text an agent reads. The architect asked for it to be fixed in this PR."
+      "file": "packages/claude-envoy/tests/answers-hook.test.ts",
+      "description": "The timing checks flake on a loaded pod: the reviewer saw 2 of 3 full-file runs fail ('a quick one gives the bearer at once' at :338, and the new cross-URL test at :439, each because the refresher had not finished 800-833 ms after the hook started), and the tester saw 2 of 7 fail on `wallMs < 1000`. The claude-envoy job is not in the required set (lint, typecheck, test, pr-title). Since this round requests changes anyway, the request asks for the checks to assert the bounds the design states, not wall time from process start."
     }
   ],
-  "roundOneFindings": {
-    "1 side turns/handoff/compaction": "partial: side turns and handoff fixed (checked against the pinned binary's #jr and handoff; pi-legion legion-phase-stall-omp.test.ts passes locally at ca5af069, 5 pass, where CI failed it at 7eb8e74f); remote compaction open (finding above)",
-    "2 hook token leak": "fixed in d24dc759",
-    "3 slow ! command never lists": "fixed in d24dc759",
-    "4 failed read looks like nothing": "fixed in 833b0edf, except the doubled period",
-    "5 S2 index": "fixed in dab430a6 (0132 after the merge)",
-    "minors": "all fixed (two-copy WeakSet, URL-keyed cache, envoy AGENTS.md, GIN reason, sessionanswers package, loadThreadRoot, dispatch-session-directory, replyAddress, ownerTitle, context-message, getComments, test comment)"
-  },
+  "mergeCheck": "PR diff before the merge (fd05f188..555220b3) and after it (2df3353c..3d789a90) differ only in the renumbering 0130/0131/0132 -> 0135/0136/0137 and its references (envoy CHANGELOG, cmd/dispatch README, sessionanswers comments, migration headers). main@origin 2dbeca18 ends at 0134. No old number is left for these three migrations. check-dist: 'dist/ and legion/ match a fresh build'. GitHub reports the PR MERGEABLE.",
   "acceptanceNotes": [
-    "Live steering on the OpenAI Codex WebSocket path runs the context handler on the steering messages alone: the list goes out with a live steer, and the steer can wait up to 800 ms. Documented as a deviation in pi-envoy AGENTS.md; dispatch-first already rode along there on main.",
-    "A remote compaction whose kept tail is empty carries the list in both conversions, so it goes into the compaction request (consistent, no slice error).",
-    "claude-envoy refresher: when two refreshers both find a stale lock (REFRESH_LOCK_STALE_MS 30 s, session-hook.ts:257-268, :411), one can delete the other's lock, and the token command runs twice. No token file is left.",
-    "When Dispatch is off with an error, the newest cached list from any Dispatch URL stands in (session-answers.ts:387). Deliberate and documented.",
-    "pi-envoy CHANGELOG.md:27 has one over-long re-wrapped line."
+    "The new cross-URL test passes even if the hook times out before reading the outcome; asserting the mismatch reason would prove the branch runs.",
+    "A hook can drop the list of a refresher it started itself, when an earlier refresher for another URL finished between the hook's start and its lock check; the next hook carries it from answers.json."
   ],
-  "ci": "Required set: lint, typecheck, test, pr-title (rulesets). CI head ca5af069; the compare to 6064648f is handoffsOnly true. At review every required check was queued: GitHub's runner queue held 173 queued runs. At the earlier head 7eb8e74f all four required checks passed, while the non-required pi-legion job failed (the self-check side turns carried the list; fixed now, verified locally) and the dispatch job failed on a web-app timing test this PR does not touch.",
-  "thermonuclear": "deep-review: CHANGES (custom_message compaction cut). code-quality: APPROVE (every cleanup done; low lock race). Both ran at 6064648f.",
-  "threads": "Answered all 13 round-1 threads. Accepted 12; unresolved PRRT_kwDORFy7ds6woeGm (finding 1, still partly open)."
+  "ci": "CI head 4e965add (compare to 094377cf is .legion/ only). At review lint, typecheck, test and pr-title were queued. This request does not wait on CI.",
+  "thermonuclear": "deep-review: CHANGES (false reason on a failing token command). code-quality: CHANGES (the same finding). Both ran at 094377cf.",
+  "threads": "Every earlier thread has my answer; no new thread before this round."
 }
