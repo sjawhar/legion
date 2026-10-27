@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-529",
+  "completed": "2026-10-27T01:52:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2303",
+  "codeHead": "0f615248199dd925883a649fcf7e8e3c7a108546",
+  "proof": [
+    {
+      "criterion": "A1: a comment with bold text and a :::note block shows the bold formatted and the note block's lines as text, and the same for a message and an ask",
+      "surface": "Dispatch Conversation tab, Chromium, real Go Dispatch server and Postgres 17 + pgvector in the issue pod (packages/dispatch/e2e, harness /legion/harness/setup.sh + env.sh, implementer lane port 18777, database dispatch_infra529)",
+      "command": "cd packages/dispatch && . /legion/harness/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts unknown-directive.e2e.ts --project chromium",
+      "observed": "✓ 1 [chromium] › e2e/unknown-directive.e2e.ts:19:1 › Conversation renders comment, message and ask bodies holding an unknown container directive as formatted markdown with the fence lines as text (2.9s); 1 passed (12.1s). Each card ([data-turn^=comment:/message:/ask:]) shows strong 'bold' and strong 'inner', ':::note' and the closing ':::' as text, no '**', no [data-markdown-fallback]. Both runs posted: https://github.com/sjawhar/legion/pull/2303#issuecomment-6431409111",
+      "headSha": "0f615248199dd925883a649fcf7e8e3c7a108546",
+      "negativeControl": "The same spec copied onto base 7f7edb8de3e3 with the SPA rebuilt there: ✘ 1 failed, 'expect(locator).toBeVisible() failed … locator('[data-turn^=\"comment:\"]').locator('strong').filter({ hasText: /^bold$/ }) … element(s) not found'; the page snapshot shows the turn as one text node 'Some **bold** text :::note A note with **inner** words :::'."
+    },
+    {
+      "criterion": "Engine behaviour rows and unchanged default refusals",
+      "surface": "@legion/proof-editor headless engine",
+      "command": "cd packages/proof-editor && bun run test && bun run typecheck && bun run lint",
+      "observed": "110 pass, 0 fail across 19 files (src/tests/block-schema.test.ts unedited, still passing); tsc exit 0; biome 'Checked 29 files … No fixes applied.'",
+      "headSha": "0f615248199dd925883a649fcf7e8e3c7a108546",
+      "negativeControl": "tests/read-only-directives.test.ts 'the default mode still refuses a directive the schema does not know': createHeadlessProof({ blockSchema }) without readOnly throws 'unknown typed block \"note\"' for ':::note\\nA note line\\n:::\\n'."
+    },
+    {
+      "criterion": "MarkdownBody renders the A1 body formatted without fallback",
+      "surface": "MarkdownBody in happy-dom with the real engine and server schema",
+      "command": "cd packages/dispatch && bun test web/src/features/refs && bun run typecheck && bun run lint",
+      "observed": "195 pass, 0 fail; tsc exit 0; biome 'Checked 612 files … No fixes applied.' Full package suite (bun run test): 2414 pass, 1 fail (AgentsPage 'Agents lists live session activity and capability-aware actions', a --parallel load flake: the test passes alone twice and its file passes whole, 73/73).",
+      "headSha": "0f615248199dd925883a649fcf7e8e3c7a108546",
+      "negativeControl": "With only the readOnly: true line reverted in markdown-engine.ts, both new MarkdownBody tests fail: 'Unable to find an element with the text: bold, which matches selector strong', the container carrying data-markdown-fallback=\"true\"."
+    },
+    {
+      "criterion": "Server parity unchanged",
+      "surface": "pmdoc fixture generator (default, non-read-only engine)",
+      "command": "cd packages/envoy/internal/dispatch/pmdoc/gen && bun run check",
+      "observed": "fixtures up to date (84 documents, 43 splice cases)",
+      "headSha": "0f615248199dd925883a649fcf7e8e3c7a108546",
+      "negativeControl": "The generators call createHeadlessProof({ blockSchema }) without readOnly, so a fixture that the document service refuses still throws; the default-mode unit case above shows the refusal is intact."
+    }
+  ],
+  "filesChanged": [
+    "packages/proof-editor/src/block-schema.ts (copied file: exported typedBlockRefusal; visit throws its result)",
+    "packages/proof-editor/src/read-only-directives.ts (new, legion-own, biome-checked: remarkReadOnlyDirectives)",
+    "packages/proof-editor/src/lib-headless.ts (copied file: HeadlessProofOptions.readOnly installs remarkReadOnlyDirectives in place of remarkTypedBlocks; doc comments)",
+    "packages/proof-editor/tests/read-only-directives.test.ts (new, 14 cases)",
+    "packages/proof-editor/AGENTS.md (ten legion-own files, sixteenth copied-file edit kind, Conventions list)",
+    "biome.json (!packages/proof-editor/src/read-only-directives.ts)",
+    "packages/dispatch/web/src/features/refs/markdown-engine.ts (readOnly: true; parse doc comment)",
+    "packages/dispatch/web/src/features/refs/MarkdownBody.test.tsx (two cases)",
+    "packages/dispatch/e2e/unknown-directive.e2e.ts (new browser row)",
+    "packages/dispatch/AGENTS.md (headless parser sentence)"
+  ],
+  "trickyParts": [
+    "The closing fence is drawn only when the trailing colon run of the directive's last source line starts at or after the last kept child's end offset, so an unclosed outer directive does not take a nested accepted block's ':::' as its own.",
+    "A collapsed comment thread shows its body as a one-line MarkdownPreview, so the e2e asserts the fences as text (':::note', /words\\s*:::/) rather than as separate paragraphs; MarkdownBody.test.tsx pins the paragraph order.",
+    "The SPA dist must be rebuilt after switching between base and head; the head run quoted was rebuilt at 0f615248."
+  ],
+  "deviations": [
+    "Simplify pass: 0 applied (four low-value findings skipped, reasons on the PR's Thermo line).",
+    "Root `bunx biome check .` reports one warning outside this change (packages/claude-envoy/tests/dist-fresh.test.ts:230 noTemplateCurlyInString); no error."
+  ],
+  "openQuestions": []
+}
