@@ -29,6 +29,7 @@ import (
 	"unicode"
 
 	"golang.org/x/sync/semaphore"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
@@ -211,8 +212,8 @@ const oauthStateTTL = oauthStateMaxAge * time.Second
 
 type router struct {
 	ctx *AppContext
-	// retainedHeld counts the bytes of store reads held by responses in flight, up to
-	// maxRetainedBytesHeld (serveRetainedAsset).
+	// retainedHeld counts the bytes of store reads held by responses in flight, and by the reads
+	// abandoned requests left running, up to maxRetainedBytesHeld (serveRetainedAsset).
 	retainedHeld *semaphore.Weighted
 	// assets keeps what the asset store answered, for every request of the process
 	// (serveRetainedAsset).
@@ -562,7 +563,11 @@ func isRetainedAssetPath(normalized string) bool {
 // queued for that room or while waiting for the store's answer (a navigation cancels the chunks
 // still loading), logs nothing more than a debug line and writes no response, since neither the
 // cap nor the store was the reason and nobody is left to answer. Once the object is read the
-// request keeps only its size until its response is written or its client goes away.
+// request keeps only its size until its response is written or its client goes away. A request
+// that stops waiting for the store's answer (its client went away, or its bound ran out) leaves
+// the read running for the requests after it (readRetainedAsset), and its reservation outlives
+// the request until that read ends: a client that abandons each request the moment it reaches
+// the store cannot hold more store reads at once than the cap has room for.
 func (r *router) serveRetainedAsset(w http.ResponseWriter, req *http.Request, key string) {
 	if asset, ok := r.assets.get(key); ok {
 		writeRetainedAsset(w, req, key, asset)
@@ -579,10 +584,18 @@ func (r *router) serveRetainedAsset(w http.ResponseWriter, req *http.Request, ke
 		return
 	}
 	held := MaxRetainedAssetSize
-	// Release reads held when the handler returns: the object's size once it is read.
+	// Release reads held when the handler returns: the object's size once it is read, or nothing
+	// once the reservation is handed to a read the request stopped waiting for.
 	defer func() { r.retainedHeld.Release(held) }()
 
-	asset, err := r.readRetainedAsset(ctx, key)
+	asset, pending, err := r.readRetainedAsset(ctx, key)
+	if pending != nil {
+		go func(held int64) {
+			<-pending
+			r.retainedHeld.Release(held)
+		}(held)
+		held = 0
+	}
 	// The read itself runs on a context no request cancels (readRetainedAsset), so a cancellation
 	// is this request's own client going away.
 	if errors.Is(err, context.Canceled) {
@@ -611,8 +624,10 @@ func (r *router) serveRetainedAsset(w http.ResponseWriter, req *http.Request, ke
 // miss it at the same moment: the first starts the read and the rest wait for its answer, each
 // within its own ctx. The read is bounded by retainedAssetFetchTimeout from its start and not by
 // the first request's context, so that request's client going away fails none of the others. A
-// failed read caches nothing, and the next miss asks the store again.
-func (r *router) readRetainedAsset(ctx context.Context, key string) ([]byte, error) {
+// failed read caches nothing, and the next miss asks the store again. When ctx ends before the
+// read answers, it returns ctx's error and the channel the read will still answer on, so the
+// caller can keep the read's reservation until it does; it returns no channel otherwise.
+func (r *router) readRetainedAsset(ctx context.Context, key string) ([]byte, <-chan singleflight.Result, error) {
 	read := r.assets.reads.DoChan(key, func() (any, error) {
 		// A read that finished between this request's cache miss and its flight answers it.
 		if asset, ok := r.assets.get(key); ok {
@@ -630,11 +645,11 @@ func (r *router) readRetainedAsset(ctx context.Context, key string) ([]byte, err
 	select {
 	case result := <-read:
 		if result.Err != nil {
-			return nil, result.Err
+			return nil, nil, result.Err
 		}
-		return result.Val.([]byte), nil
+		return result.Val.([]byte), nil, nil
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, read, ctx.Err()
 	}
 }
 

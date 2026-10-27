@@ -675,6 +675,96 @@ func TestStaticHandlerWritesNoResponseWhenTheClientCancelsWhileTheStoreReads(t *
 	}
 }
 
+// blockingStore holds every read until release is closed, then answers a key under
+// assets/missing- with ErrAssetNotFound and any other with object. It reports each read's key on
+// arrived as the read starts, and records the most reads it held at once.
+type blockingStore struct {
+	object  []byte
+	arrived chan string
+	release chan struct{}
+
+	mu          sync.Mutex
+	inFlight    int
+	maxInFlight int
+}
+
+func (s *blockingStore) GetAsset(_ context.Context, key string) ([]byte, error) {
+	s.mu.Lock()
+	s.inFlight++
+	s.maxInFlight = max(s.maxInFlight, s.inFlight)
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.inFlight--
+		s.mu.Unlock()
+	}()
+	s.arrived <- key
+	<-s.release
+	if strings.HasPrefix(key, "assets/missing-") {
+		return nil, ErrAssetNotFound
+	}
+	return s.object, nil
+}
+
+// A navigation, or a client that means harm, abandons each request the moment it reaches the
+// store. The read it started runs on (readRetainedAsset), and its reservation stays until that read
+// ends, so abandoned requests for distinct missing chunks never hold more store reads at once than
+// the memory cap has room for. Once those reads end, every reservation comes back: the cap's whole
+// room is served again.
+func TestStaticHandlerHoldsTheReservationOfAnAbandonedRequestUntilItsReadEnds(t *testing.T) {
+	handler, appContext := newTestRouter(t)
+	appContext.WebDistDir = t.TempDir()
+	const requests = 20
+	store := &blockingStore{
+		object:  bytes.Repeat([]byte("/"), int(MaxRetainedAssetSize)),
+		arrived: make(chan string, requests+int(maxRetainedBytesHeld/MaxRetainedAssetSize)),
+		release: make(chan struct{}),
+	}
+	var releaseOnce sync.Once
+	releaseStore := func() { releaseOnce.Do(func() { close(store.release) }) }
+	t.Cleanup(releaseStore)
+	appContext.AssetStore = store
+
+	cancels := make(map[string]context.CancelFunc, requests)
+	var served sync.WaitGroup
+	for i := range requests {
+		ctx, cancel := context.WithCancel(context.Background())
+		key := fmt.Sprintf("assets/missing-%d.js", i)
+		cancels[key] = cancel
+		served.Add(1)
+		go func() {
+			defer served.Done()
+			handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/"+key, nil).WithContext(ctx))
+		}()
+	}
+	// Abandon each request as its read reaches the store, until no further read arrives: past the
+	// cap's room, the rest wait for a reservation and reach the store no more.
+	for quiet := false; !quiet; {
+		select {
+		case key := <-store.arrived:
+			cancels[key]()
+		case <-time.After(250 * time.Millisecond):
+			quiet = true
+		}
+	}
+	for _, cancel := range cancels {
+		cancel()
+	}
+	served.Wait()
+
+	store.mu.Lock()
+	most := store.maxInFlight
+	store.mu.Unlock()
+	if room := int(maxRetainedBytesHeld / MaxRetainedAssetSize); most > room {
+		t.Errorf("%d abandoned requests held %d store reads at once, want at most the cap's room of %d", requests, most, room)
+	}
+
+	releaseStore()
+	// Each stalled reader holds the most one object can, so all of them together need every byte
+	// of the cap back; one still held is a 503 once its fetch bound runs out.
+	stallRetainedReaders(t, handler, int(maxRetainedBytesHeld/MaxRetainedAssetSize))
+}
+
 // Every tab of another build asks for the same chunks, and a stale tab asks again on each route it
 // opens, so what the store answered once is kept: a second request for it is served from memory
 // without asking the store, and without a reservation, so it is served even while stalled readers
