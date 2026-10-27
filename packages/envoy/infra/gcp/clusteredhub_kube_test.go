@@ -325,9 +325,12 @@ func TestClusteredNatsHubRollsThePodsOnlyForASessionUserOrStoreChange(t *testing
 
 	args = clusteredArgs()
 	args.SessionUser = nil
-	podTemplate := chartValues(t, runClusteredHub(t, args))["podTemplate"].(map[string]any)
+	noSession := chartValues(t, runClusteredHub(t, args))
 	require.Equal(t, map[string]any{"metadata": map[string]any{"annotations": map[string]any{"envoy-infra.sjawhar.dev/max-file-store": "9Gi"}}},
-		podTemplate["merge"], "no session user: the store's annotation alone, and no priority class")
+		noSession["podTemplate"].(map[string]any)["merge"], "no session user: the store's annotation alone, and no priority class")
+	// The store's roll needs the StatefulSet after the ConfigMap as the session user's does, so the
+	// order holds without a session user too.
+	require.Equal(t, before["statefulSet"], noSession["statefulSet"], "the StatefulSet is applied after the ConfigMap without a session user")
 }
 
 // The chart takes one transform, which protects the chart's StatefulSet, so a change that would

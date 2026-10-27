@@ -781,10 +781,11 @@ template, and the StatefulSet replaces its pods one at a time, each server resta
 claim while the other two serve. Any other users change leaves the pod template as it was. A users
 change made in the same update as a session-user change applies, with it, as each pod restarts.
 The roll must start from the new `auth.conf`: a pod restarted on the old file keeps the old session
-user, and the reload that later brings the new file is refused. So the StatefulSet's annotation
+user, and the reload that later brings the new file is refused. The same holds for the store's roll
+below, from the new `nats.conf`. So the StatefulSet's annotation
 `config.kubernetes.io/depends-on: /namespaces/<namespace>/ConfigMap/<n>-config` makes pulumi-kubernetes
-apply the StatefulSet only after the ConfigMap, and a ConfigMap update that fails stops the update
-before any pod rolls.
+apply the StatefulSet only after the ConfigMap, with or without a session user, and a ConfigMap
+update that fails stops the update before any pod rolls.
 
 The file store's limit is the other exception. nats-server 2.15.1 refuses a reload that lowers
 `max_file_store`, logging `config reload not supported for decreasing jetstream max memory and
@@ -795,7 +796,11 @@ beside a new user, the reload was refused and the user was refused too, and the 
 admitted it. The hub therefore also writes the limit into the hub pods' annotation
 `envoy-infra.sjawhar.dev/max-file-store`, so any change of `maxFileStoreGb`, given or derived from
 `streamMaxBytes` and `diskSizeGb`, rolls the pods onto the new `nats.conf`; a raise, which
-nats-server could reload, rolls them as well.
+nats-server could reload, rolls them as well. Each pod the roll restarts starts on the new
+`nats.conf`, by the same depends-on order as the session user's roll: a pod restarted on the old
+file would keep the old limit, and the reload that later lowers it would be refused, with every
+reload after it. A disk growth whose limit follows `diskSizeGb` therefore rolls the pods too,
+unless `maxFileStoreGb` holds the limit the hub runs with (the README's disk-growth steps).
 
 ### Routes, guarded by the NetworkPolicy alone
 
@@ -837,11 +842,15 @@ bind the one durable `listener-<machine id>`. The hosts are therefore safe only 
 build that has dispatch://INFRA-557's single-deliverer take-over: one pod delivers from the
 durable, every other pod waits as a standby and takes over within seconds when the active pod
 goes, and `/healthz` answers 200 only on a pod that can serve `/v1`, which is what the advertiser
-judges. With an earlier build, a second host's listener waits 135 seconds to bind the durable the
-first one holds, then exits and is restarted, again and again (`cmd/listener/durable.go`,
-`durableBindDeadline`), and after a NATS reconnect in place two hosts can both deliver from the
-durable, so a session can be given one message twice. The component cannot tell which build
-`tailnet.listener.image` is, so this is the operator's to keep.
+judges. No such build exists until INFRA-557 lands. With an earlier build, a second host's listener
+waits 135 seconds to bind the durable the first one holds, then exits and is restarted, again and
+again (`cmd/listener/durable.go`, `durableBindDeadline`). Through each wait its `/healthz` answers
+200 (`"starting"`) and its `/v1` serves (`cmd/listener/main.go`, `healthzHandler`), so its
+advertiser advertises it after two answers, its node joins the Service and its pod counts as ready,
+in the rollout and the budget too, until its listener exits and it leaves the Service. And after a
+NATS reconnect in place two hosts can both deliver from the durable, so a session can be given one
+message twice. The component cannot tell which build `tailnet.listener.image` is, so this is the
+operator's to keep.
 
 ### Metrics and alerts
 

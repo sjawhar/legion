@@ -22,7 +22,11 @@
   which a PodMonitoring points at each pod's exporter. With `tailnet`, a Deployment of at least two
   tailnet hosts serves the hub as a Tailscale Service on TCP 4222 and 9020, each host running
   Envoy's session listener on its loopback and advertising the Service only while that listener
-  answers `/healthz` with 200. `streamMaxBytes` sizes JetStream's file store, each pod's disk and
+  answers `/healthz` with 200. Every host runs the listener as one machine id, so `tailnet` needs a
+  listener build with INFRA-557's single-deliverer take-over, which no release has yet: with an
+  earlier build a second host's listener exits every 135 s while it waits for the durable, being
+  advertised in the meantime, and two hosts can deliver one message twice after a NATS reconnect.
+  `streamMaxBytes` sizes JetStream's file store, each pod's disk and
   nats-server's memory from the measured sizes of the listener's notification stream, and
   nats-server runs with `GOMEMLIMIT` at 80% of its memory. The component refuses each invalid input
   by name before it registers anything, as `packages/envoy/infra/README.md` lists.

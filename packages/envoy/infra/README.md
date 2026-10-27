@@ -301,11 +301,14 @@ Every host runs the listener as the same machine id, so every one of them binds 
 `listener-<tailnet.listener.machineId>`. `tailnet.listener.image` must therefore be a build with
 dispatch://INFRA-557's single-deliverer take-over: one pod delivers from the durable, every other
 one waits as a standby and takes over within seconds when the active pod goes, and `/healthz`
-answers 200 only on a pod that can serve `/v1`. With an earlier build, a second pod waits 135
-seconds to bind the durable the first one holds, then exits and is restarted, over and over; and
-after a NATS reconnect in place two pods can both deliver from the durable, so a session can be
-given one message twice. The component cannot read which build an image is, so it does not check
-this.
+answers 200 only on a pod that can serve `/v1`. No such build exists until INFRA-557 lands. With an
+earlier build, a second pod waits 135 seconds to bind the durable the first one holds, then exits
+and is restarted, over and over. Its listener answers `/healthz` with 200 (`"starting"`) and
+serves `/v1` through that wait, so its advertiser advertises it after two answers, its node joins
+the Service and its pod counts as ready, in the rollout and the budget too, for most of each wait;
+it leaves the Service when its listener exits. And after a NATS reconnect in place two pods can
+both deliver from the durable, so a session can be given one message twice. The component cannot
+read which build an image is, so it does not check this.
 
 The pod's termination grace period, 60 seconds, holds both shutdowns, which run side by side: the
 tailscale hook's 30 seconds and containerboot's own 25, and the listener's 25-second wait and its
@@ -320,12 +323,14 @@ chart's one transform therefore protects the StatefulSet `<n>` with Pulumi's own
 protects nothing else. A change of `diskSizeGb` or `storageClassName`, or a chart version that
 changes one of those fields, makes the preview plan to replace the StatefulSet and fail, because it
 is protected; nothing is applied. Pod-template changes (an image, a size, the session user, the
-priority class) are updates, which roll the pods one at a time, and are not affected.
+priority class, the file store's limit) are updates, which roll the pods one at a time, and are not
+affected.
 
 The StatefulSet's claim template is fixed once Kubernetes has created the StatefulSet, and the
 running claims, `<n>-js-<n>-0`, `-1` and `-2`, never follow a template change, so `diskSizeGb`
 alone grows no disk. Grow the disks first, then bring the program's StatefulSet to the new size
-without replacing the running pods:
+without replacing the running pods, and raise the file store's limit after it, as an update of its
+own that rolls them:
 
 1. Check that the claims' StorageClass allows expansion:
    `kubectl get storageclass <class> -o jsonpath='{.allowVolumeExpansion}'` prints `true`
@@ -348,13 +353,23 @@ without replacing the running pods:
 4. Take the deleted StatefulSet out of the stack's state. Its URN is the line of
    `pulumi stack --show-urns` whose type is `kubernetes:apps/v1:StatefulSet` and whose name ends in
    `<namespace>/<n>`; then `pulumi state unprotect '<urn>'` and `pulumi state delete '<urn>'`.
-5. Set `diskSizeGb` to the new size and run `pulumi preview`. It plans to create the StatefulSet
-   `<n>`, and nothing else beyond an update of the chart's ConfigMap when `maxFileStoreGb` follows
-   `diskSizeGb` by default (`max_file_store` in `nats.conf`, which the reloader applies: nats-server
-   v2.15.1 reloads a larger `max_file_store` and refuses a smaller one, `server/reload.go`). Change
-   nothing else in the same update. `pulumi up` creates the StatefulSet, protected again, and
-   Kubernetes' StatefulSet controller adopts the three running pods, which its selector matches,
-   with their claims, whose names its claim template gives.
+5. Set `diskSizeGb` to the new size. Without `streamMaxBytes` and `maxFileStoreGb`, the file
+   store's limit follows `diskSizeGb` (⌊0.9 × `diskSizeGb`⌋), and the pods carry it in their
+   annotation `envoy-infra.sjawhar.dev/max-file-store`: a new limit gives the new StatefulSet another
+   pod template, whose controller then replaces the three running pods one at a time rather than
+   adopt them. So, in the same update, set `maxFileStoreGb` to the limit the hub runs with now, the
+   number in the pods' annotation
+   (`kubectl -n <namespace> get pod <n>-0 -o jsonpath='{.metadata.annotations.envoy-infra\.sjawhar\.dev/max-file-store}'`).
+   With `streamMaxBytes` set the limit does not follow `diskSizeGb` and nothing needs pinning. Run
+   `pulumi preview`: it plans to create the StatefulSet `<n>` and nothing else. Change nothing else
+   in the same update. `pulumi up` creates the StatefulSet, protected again, and Kubernetes'
+   StatefulSet controller adopts the three running pods, which its selector matches and whose pod
+   template it now has, with their claims, whose names its claim template gives.
+6. To use the grown disks, raise the limit in an update of its own: set `maxFileStoreGb` to the new
+   limit, or remove it to take the default for the new `diskSizeGb`. The preview updates the chart's
+   ConfigMap (`max_file_store` in `nats.conf`) and the StatefulSet's pod annotation, and `pulumi up`
+   rolls the pods one at a time, each starting on the new `nats.conf`. Every client of a restarted
+   server reconnects, and a stream kept at one copy is unavailable while its server restarts.
 
 A `storageClassName` change cannot be made this way, since a claim keeps its class: it takes new
 claims, and so a new hub that the streams are moved to.

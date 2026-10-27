@@ -245,12 +245,16 @@ func clusteredHubChartValues(s clusteredHubSettings) pulumi.Map {
 		"service":             pulumi.Map{"enabled": pulumi.Bool(true), "name": pulumi.String(s.serviceName), "ports": servicePorts},
 		"podTemplate":         podTemplate,
 		"podDisruptionBudget": pulumi.Map{"enabled": pulumi.Bool(true)},
-		// The StatefulSet is applied only once the ConfigMap holding auth.conf is. A session-user
-		// change updates both: the annotation rolls the pods, and each new pod must mount the new
-		// auth.conf, since nats-server refuses to reload no_auth_user. Applied in parallel, a pod
-		// could restart on the old file, and a failed ConfigMap update could leave the pods rolled
-		// on the old session user with nothing left to roll them again. pulumi-kubernetes orders a
-		// helm v4 Chart's objects by this annotation (references within the chart only).
+		// The StatefulSet is applied only once the chart's ConfigMap, holding nats.conf and
+		// auth.conf, is. Both pod annotations roll the pods for a value nats-server cannot reload,
+		// no-auth-user for a new no_auth_user in auth.conf and max-file-store for a lower
+		// max_file_store in nats.conf, and each pod they roll must start on the new ConfigMap: a pod
+		// restarted on the old files keeps the old value, the reload that later brings the new one
+		// is refused, and so is every reload after it. Applied in parallel, a pod could restart on
+		// the old files, and a failed ConfigMap update could leave the pods rolled on the old values
+		// with nothing left to roll them again. So the order holds always, with or without a
+		// session user. pulumi-kubernetes orders a helm v4 Chart's objects by this annotation
+		// (references within the chart only).
 		"statefulSet": pulumi.Map{"merge": pulumi.Map{"metadata": pulumi.Map{"annotations": pulumi.Map{
 			clusteredHubDependsOnAnnotation: pulumi.String(clusteredHubConfigMapRef(s.namespace, s.name)),
 		}}}},
