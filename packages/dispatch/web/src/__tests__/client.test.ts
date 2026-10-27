@@ -6,6 +6,8 @@ import {
   type FetchImplementation,
   isCredentialFeatureOff,
   isDeliveryNotConfigured,
+  isDocumentNewerContent,
+  isDocumentSchemaError,
   isRetryableQueryError,
   isUnauthorized,
 } from "../api/client";
@@ -396,6 +398,30 @@ test(
     expect(isRetryableQueryError(serverErrorResult)).toBe(true);
     expect(isDeliveryNotConfigured(deliveryUnsetError)).toBe(true);
     expect(isRetryableQueryError(deliveryUnsetError)).toBe(false);
+  }
+);
+
+test(
+  "a document holding content this build cannot read is DOC_NEWER_CONTENT, not the repair state, " +
+    "and its read is retried, since another build may answer the next one",
+  async () => {
+    const newer = createApiClient(
+      stubFetch(() =>
+        Response.json(
+          {
+            error:
+              "this Dispatch process's build cannot read an element of this document. Try again in one minute.",
+            code: "DOC_NEWER_CONTENT",
+          },
+          { status: 409 }
+        )
+      ).fetch
+    );
+    const newerError = await newer.getArtifactText("artifact-1").catch((error: unknown) => error);
+
+    expect(isDocumentNewerContent(newerError)).toBe(true);
+    expect(isDocumentSchemaError(newerError)).toBe(false);
+    expect(isRetryableQueryError(newerError)).toBe(true);
   }
 );
 

@@ -395,6 +395,45 @@ test("ProofDocument offers no rebuild for a document service that is unavailable
   }
 });
 
+// A document holding content this build of Dispatch cannot read was written by a newer build
+// during a release. Nothing on this page repairs it, and a replacement would delete that content,
+// so the page offers no upload or rebuild: it says the document reloads, reads the text again on
+// the refusal schedule, and connects once a read succeeds.
+test("ProofDocument shows content this build cannot show yet without a replace drop zone, and reloads", async () => {
+  const getArtifactText = spyOn(api, "getArtifactText").mockRejectedValue(
+    new ApiError(409, {
+      code: "DOC_NEWER_CONTENT",
+      error:
+        "this Dispatch process's build cannot read an element of this document. Try again in one minute.",
+    })
+  );
+  const { connections, view } = renderProofDocument();
+  try {
+    expect(
+      await within(view.container).findByText(
+        "This document holds content this version of Dispatch cannot show yet. It reloads in a minute."
+      )
+    ).not.toBeNull();
+    expect(connections).toHaveLength(0);
+    expect(screen.queryByLabelText("Upload artifact")).toBeNull();
+    expect(screen.queryByText("Upload markdown to replace and repair this document.")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Rebuild from the latest version" })).toBeNull();
+    expect(within(view.container).queryByText(/This document could not load/)).toBeNull();
+    await waitFor(() => expect(getArtifactText.mock.calls.length).toBeGreaterThan(1));
+
+    getArtifactText.mockResolvedValue({ markdown: "The live document", version: 1 });
+    await waitFor(() => expect(connections).toHaveLength(1), { timeout: 3_000 });
+    expect(
+      within(view.container).queryByText(
+        "This document holds content this version of Dispatch cannot show yet. It reloads in a minute."
+      )
+    ).toBeNull();
+  } finally {
+    view.unmount();
+    getArtifactText.mockRestore();
+  }
+});
+
 test("a transport that fails to load is reported instead of connecting forever", async () => {
   const fake = fakeDocumentRuntime({ text: "The live document" });
   const rejection = Promise.reject(new TypeError("Failed to fetch"));

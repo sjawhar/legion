@@ -135,8 +135,9 @@ func TestBlockPathReadsPlaceAnAnchoredCellByRowAndColumn(t *testing.T) {
 // The position is one derived field of a comment's or ask's read, so a document Dispatch cannot
 // read leaves the read standing: 200, no anchor_block, and anchor_block_error saying why. Each
 // case reads through a second server on the same database, where the document's room is not
-// resident, so the read goes to its store: one that cannot load it (a persistence outage), or one
-// whose live tree leaves the schema.
+// resident, so the read goes to its store: one that cannot load it (a persistence outage), one
+// whose live tree leaves the schema, or one whose live tree holds an element this build does not
+// know.
 func TestCommentAndAskReadsStandWhenTheAnchorDocumentCannotBeRead(t *testing.T) {
 	writer, database, _ := newTestServer(t, testServerOptions{})
 	issue := createInteractionIssue(t, writer, "TEST", "Table position",
@@ -159,6 +160,7 @@ func TestCommentAndAskReadsStandWhenTheAnchorDocumentCannotBeRead(t *testing.T) 
 	}{
 		{"the store cannot load the document", failingLoadStore{VersionedStore: docs.NewPgVersioned(database)}, codeDocServiceUnavailable},
 		{"the live tree leaves the schema", outsideSchemaStore{VersionedStore: docs.NewPgVersioned(database)}, codeDocSchema},
+		{"the live tree holds an element this build does not know", outsideSchemaStore{VersionedStore: docs.NewPgVersioned(database), element: docs.UnknownElementForTest}, codeDocNewerContent},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			reader := readingServer(t, database, test.store, nil)
@@ -376,22 +378,28 @@ func readingServer(t *testing.T, database *store.Store, persist docs.VersionedSt
 }
 
 // outsideSchemaStore loads every document, for a room or a cold read, as a live tree the Proof
-// schema refuses: an empty callout, which needs at least one block.
+// schema refuses: element alone, which is an empty callout, needing at least one block, when it is
+// empty, and an element this build does not know otherwise.
 type outsideSchemaStore struct {
 	docs.VersionedStore
+	element string
 }
 
-func outsideSchemaDocument() *crdt.Doc {
+func (s outsideSchemaStore) document() *crdt.Doc {
+	element := s.element
+	if element == "" {
+		element = "callout"
+	}
 	doc := crdt.New()
 	fragment := doc.GetXmlFragment("prosemirror")
 	doc.Transact(func(txn *crdt.Transaction) {
-		fragment.InsertElement(txn, 0, crdt.NewYXmlElement("callout"))
+		fragment.InsertElement(txn, 0, crdt.NewYXmlElement(element))
 	})
 	return doc
 }
 
-func (outsideSchemaStore) Load(context.Context, string) (persistence.LoadResult, error) {
-	return persistence.LoadResult{Update: crdt.EncodeStateAsUpdateV1(outsideSchemaDocument(), nil)}, nil
+func (s outsideSchemaStore) Load(context.Context, string) (persistence.LoadResult, error) {
+	return persistence.LoadResult{Update: crdt.EncodeStateAsUpdateV1(s.document(), nil)}, nil
 }
 
 func (s outsideSchemaStore) LoadDocument(ctx context.Context, room string) (docs.LoadedDocument, error) {
@@ -399,5 +407,5 @@ func (s outsideSchemaStore) LoadDocument(ctx context.Context, room string) (docs
 	if err != nil {
 		return docs.LoadedDocument{}, err
 	}
-	return docs.LoadedDocument{Doc: outsideSchemaDocument(), Stamp: loaded.Stamp}, nil
+	return docs.LoadedDocument{Doc: s.document(), Stamp: loaded.Stamp}, nil
 }

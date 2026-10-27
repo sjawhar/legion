@@ -135,7 +135,8 @@ func TestRebuildDocumentRestoresDocumentThatCannotLoad(t *testing.T) {
 }
 
 // A resident room remains live even when no writer holds its advisory lock, so the server registry
-// refuses rebuilding it without changing durable history.
+// refuses rebuilding it without changing durable history. The refusal names what a rebuild would
+// discard and leaves the choice to a person, rather than telling the caller to rebuild or replace.
 func TestRebuildDocumentRefusesALiveRoom(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "before\n")
@@ -146,8 +147,9 @@ func TestRebuildDocumentRefusesALiveRoom(t *testing.T) {
 	if err := service.store.Pool.QueryRow(context.Background(), `select count(*) from doc_updates where artifact_id = $1`, artifactID).Scan(&before); err != nil {
 		t.Fatalf("count updates before rebuild: %v", err)
 	}
-	if _, _, err := rebuildDocument(t, service, artifactID, nil); !errors.Is(err, ErrDocumentLive) {
-		t.Fatalf("rebuild resident room: %v, want ErrDocumentLive", err)
+	_, _, err := rebuildDocument(t, service, artifactID, nil)
+	if !errors.Is(err, ErrDocumentLive) || !strings.Contains(err.Error(), "A rebuild discards every edit made after saved version ") || !strings.Contains(err.Error(), "A person decides") || strings.Contains(err.Error(), "retry") {
+		t.Fatalf("rebuild resident room: %v, want ErrDocumentLive naming what a rebuild discards and that a person decides", err)
 	}
 	var after int
 	if err := service.store.Pool.QueryRow(context.Background(), `select count(*) from doc_updates where artifact_id = $1`, artifactID).Scan(&after); err != nil {

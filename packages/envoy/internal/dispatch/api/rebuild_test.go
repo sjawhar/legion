@@ -48,8 +48,8 @@ func TestRebuildArtifactRouteIsHumanOnlyAndRefusesADocumentThatLoads(t *testing.
 		t.Fatalf("bearer rebuild: status=%d body=%s, want 403 HUMAN_ONLY", bearer.Code, bearer.Body.String())
 	}
 	human := dispatchRequest(t, handler, http.MethodPost, path, map[string]any{}, "alice")
-	if human.Code != http.StatusConflict || !strings.Contains(human.Body.String(), `"code":"DOCUMENT_LOADS"`) {
-		t.Fatalf("healthy document rebuild: status=%d body=%s, want 409 DOCUMENT_LOADS", human.Code, human.Body.String())
+	if human.Code != http.StatusConflict || !strings.Contains(human.Body.String(), `"code":"DOCUMENT_LOADS"`) || !strings.Contains(human.Body.String(), "latest saved version ") || !strings.Contains(human.Body.String(), "A person decides") || strings.Contains(human.Body.String(), "replace it from markdown") {
+		t.Fatalf("healthy document rebuild: status=%d body=%s, want 409 DOCUMENT_LOADS naming what each repair discards and that a person decides", human.Code, human.Body.String())
 	}
 	var after int
 	if err := database.Pool.QueryRow(context.Background(), `select count(*) from doc_updates where artifact_id = $1`, artifact.ID).Scan(&after); err != nil {
@@ -134,8 +134,8 @@ func TestAHistoryThatCannotLoadReadsAsDocumentUnloadable(t *testing.T) {
 	path := "/api/v1/artifacts/" + artifact.ID + "/text"
 	broken.failNextLoad(artifact.ID)
 	unloadable := dispatchRequest(t, handler, http.MethodGet, path, nil, "alice")
-	if unloadable.Code != http.StatusConflict || !strings.Contains(unloadable.Body.String(), `"code":"DOCUMENT_UNLOADABLE"`) || !strings.Contains(unloadable.Body.String(), "rebuild it from its latest saved version") {
-		t.Fatalf("read a history that cannot load: status=%d body=%s, want 409 DOCUMENT_UNLOADABLE naming the rebuild", unloadable.Code, unloadable.Body.String())
+	if unloadable.Code != http.StatusConflict || !strings.Contains(unloadable.Body.String(), `"code":"DOCUMENT_UNLOADABLE"`) || !strings.Contains(unloadable.Body.String(), "discards every edit made after that version") || !strings.Contains(unloadable.Body.String(), "A person decides whether to rebuild the document") {
+		t.Fatalf("read a history that cannot load: status=%d body=%s, want 409 DOCUMENT_UNLOADABLE naming what a rebuild discards and that a person decides", unloadable.Code, unloadable.Body.String())
 	}
 	loads := dispatchRequest(t, handler, http.MethodGet, path, nil, "alice")
 	if loads.Code != http.StatusOK || !strings.Contains(loads.Body.String(), `"markdown":"before\n"`) {
