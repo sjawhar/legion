@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-559",
+  "completed": "2026-10-27T11:03:00Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran its A1 command at dc41305784ba on my own database (t559_e2e): 5 passed (2.1m), boot logs A assets=45 written=45, B assets=45 written=30. Re-ran its red run on a git-archive export of 47c3ba79d2e4 (node_modules linked from the workspace, database t559_red): 3 of 3 failed with every page load's entry chunk answered 404 (/assets/index-9_0rTy4y.js from B, /assets/index-CDEXtaXJ.js from A) and 60 files answered 404 by the process lacking them. Re-ran its A4 browser command: 52 passed, 2 skipped."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Root/spec acceptance 1 (A1): the browser suite against two server processes running two builds loads every page and lazily loaded route with no failed asset and no blank page; fails before, passes after",
+      "surface": "Dispatch web app in Chromium through e2e/round-robin-proxy.ts in front of two real envoy-dispatch processes on one Postgres 17 + pgvector (A web/dist, entry /assets/index-DOMzp4MO.js; B web/dist-b, entry /assets/index-CvJslgFq.js)",
+      "command": "cd packages/dispatch && . /legion/harness/env.sh && DATABASE_URL=postgres://postgres@127.0.0.1:5433/t559_e2e?sslmode=disable bun run e2e:multiprocess -- two-builds.multiprocess.e2e.ts",
+      "observed": "5 passed (2.1m): both cross-pinned route walks (52.1s, 50.6s), every file of both builds 200 with its bytes from A and B, no notice while both live, notice once only A live",
+      "headSha": "dc41305784ba39e735bffecc618323e7a5b6f740",
+      "negativeControl": "Same command in a git-archive export of 47c3ba79d2e4 (server without the shared store): 3 of 3 failed, '/assets/index-9_0rTy4y.js from Dispatch B answered 404' and '/assets/index-CDEXtaXJ.js from Dispatch A answered 404' then net::ERR_ABORTED on every page load; 60 files answered 404 from the process lacking them"
+    },
+    {
+      "criterion": "Item 1: every file of either build's assets is served by every process during a roll, including after the other build's process is gone; boot publishes before listening; restart writes no bytes; a burst is served; an oversized asset and the removed setting refuse the boot",
+      "surface": "Two processes of the head's cmd/dispatch built by hand (ports 18801 build A, 18802 build B, database t559_probe), curl and a Chromium tab through the round-robin proxy on 18800",
+      "command": "$TMPDIR/t559/serve.sh <port> <dist>; cross.sh (curl every file of both dists from both ports, cmp with disk); burst.ts 18805 30; stale-tab.ts <B pid> (tab of build B, SIGKILL B, in-app navigation to six routes); two boots of one new build (distC) started together; restart of B; boot with distBig (9 MiB asset); boot with DISPATCH_ASSET_STORE_BUCKET=old-bucket",
+      "observed": "180 of 180 requests 200 with bytes equal to disk; tab of build B fetched 10 chunks only B built (AgentsPage-Co3dGCmM.js, broadcast-plan-B3Z9QIOj.js, ReplyTurn-DvMrRkpj.js, ...) from A after B died, all 200, no failed request, no pageerror, no reload; 900 concurrent requests for B's 30 unshared files to a cold process of A all 200 in 2.0 s; concurrent boots of one new build both published (written=1, written=0) before 'listening'; B's restart logged written=0; a 404 for an unpublished file became 200 once its build booted (no negative cache); a boot that pruned with 25 newer non-live builds kept both live builds and the newest 20 and deleted 6 builds with their 6 assets; store-served asset carries text/javascript, immutable Cache-Control and honours Range (206)",
+      "headSha": "dc41305784ba39e735bffecc618323e7a5b6f740",
+      "negativeControl": "Boot with a 9 MiB file in dist/assets: exit 1, 'dashboard asset .../huge-XXXX.js is 9437184 bytes, over the 8388608-byte limit the server serves', port never bound, no row written; boot with DISPATCH_ASSET_STORE_BUCKET=old-bucket: exit 1, 'DISPATCH_ASSET_STORE_BUCKET is no longer read and must be unset'"
+    },
+    {
+      "criterion": "Item 2: recovery from a failed script, module preload or stylesheet is at most 3 reloads per tab in any 5 minutes, renews, and covers the main stylesheet",
+      "surface": "Dispatch web app in Chromium: the single-process browser suite, and a hand-driven tab whose main stylesheet is aborted on every load",
+      "command": "bunx playwright test --config e2e/playwright.config.ts shell.e2e.ts delivery-live.e2e.ts doc.e2e.ts live.e2e.ts --project chromium; bun $TMPDIR/t559/css-loop.ts (page.route aborting /assets/index-*.css on every load, three storage seeds)",
+      "observed": "52 passed, 2 skipped (phone projects), the stylesheet, renewal, shared-budget and three-reloads rows among them; stylesheet aborted on every load: 4 document loads (1 + 3 reloads) then stops, 3 times stored; seed '{not json': 4 loads (read as empty); seed of 3 recent times: 1 load (no reload)",
+      "headSha": "dc41305784ba39e735bffecc618323e7a5b6f740",
+      "negativeControl": "Seed of three reload times inside the last 5 minutes: the failing stylesheet produced no reload (1 document load), the budget refusing a fourth"
+    },
+    {
+      "criterion": "Item 3: no 'A new version is available' while two builds are live; the notice once one other build alone is live",
+      "surface": "GET /api/v1/dashboard/builds on two real processes and a Chromium tab of build B through the round-robin proxy",
+      "command": "curl the route with a dev-sign-in cookie, the agent bearer, no identity and a wrong bearer; stale-tab.ts: SIGKILL B, focus the tab, poll the route, focus again after the minute",
+      "observed": "Both processes answer live [index-CvJslgFq.js, index-DOMzp4MO.js] with their own serving entry; after B's SIGKILL the route named both builds for 11 s, the tab's check at t+2.1 s saw both and showed no notice; once only A was live the tab's next check (t+63 s) showed the notice",
+      "headSha": "dc41305784ba39e735bffecc618323e7a5b6f740",
+      "negativeControl": "The route without identity: 401 NO_IDENTITY; with bearer 'nope': 401 'invalid bearer token'; POST without an Origin: 403 'invalid request origin'"
+    },
+    {
+      "criterion": "Item 4: reconnects after a pod stops are spread out rather than all at once",
+      "surface": "20 Chromium tabs (one browser context each) signed in on process A through the round-robin proxy, A started with DISPATCH_TEST_HOOKS=1",
+      "command": "bun $TMPDIR/t559/spread.ts 20 (records each tab's /api/v1/events requests; POST /api/v1/events/_test/disconnect drops every stream at once)",
+      "observed": "first reopen after the drop per tab, sorted: 211, 273, 344, 407, 575, 598, 807, 873, 979, 1169, 1252, 1309, 1414, 1420, 1635, 1636, 1726, 1798, 1886, 2046 ms (14 distinct 100 ms buckets); browser rows 'the stream recovers after the connection drops' and 'after every socket is dropped, the page resumes' passed",
+      "headSha": "dc41305784ba39e735bffecc618323e7a5b6f740",
+      "negativeControl": "The same 20-tab drop with 47c3ba79d2e4's dashboard build (pre-spread live.ts) served by the same server: every tab reopened at 1048-1128 ms (2 buckets), all together"
+    }
+  ],
+  "ci": "Read on GitHub at dc41305784ba: build, changes, Worker Image success; lint and build in progress; dispatch, dispatch-browser-multiprocess, dispatch-multiprocess, envoy-go, test, typecheck and the rest queued (169 runs queued repository-wide). Read as running, not waited for.",
+  "notes": [
+    "GitHub reports pull request #2323 CONFLICTING (mergeStateStatus DIRTY) since main moved from b08a56bc to 2e8c68cd98ce: main's #2137 adds migration 0129_document_edit_notices, the number this branch's INFRA-555 commits give 0129_server_processes (this change's 0130_dashboard_assets follows it). Files changed on both sides since b08a56bc: .github/workflows/envoy-and-contracts.yaml, web/src/api/sse.ts, packages/envoy/AGENTS.md, CHANGELOG.md, cmd/dispatch/README.md, main.go, multiprocess_test.go, settings.go, settings_test.go, cmd/listener/dispatch_resolution_test.go, api/server_test.go, store/pool.go. The forward merge is the implementer's; its renumbering changes the diff, so the fingerprint will differ and the next head needs a full test round. Told to the architect.",
+    "Seen while probing paths, not caused by this change: GET /assets/foo%00.js answers 500 'stat failed' (os.Stat refuses the NUL byte with EINVAL, and staticHandler's stat branch, unchanged here, reports it as a server error rather than a 404). Told to the architect to decide whether this tree takes it."
+  ]
+}
