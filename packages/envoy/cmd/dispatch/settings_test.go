@@ -1382,6 +1382,54 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				}
 			})
 		},
+		"DISPATCH_DEV_SIGNIN_SHARED_KEY": func(t *testing.T) {
+			// Without dev sign-in nothing would sign with it, so a boot that sets it is refused.
+			refusedWith(t, map[string]string{"DISPATCH_DEV_SIGNIN_SHARED_KEY": "harness-secret"}, "DISPATCH_DEV_SIGNIN_SHARED_KEY")
+			// The key one dev-sign-in process signs cookies with, each in a data dir of its own.
+			devKey := func(t *testing.T, shared string) string {
+				t.Helper()
+				boot, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_DEV_SIGNIN_SHARED_KEY": shared}))
+				if err != nil {
+					t.Fatalf("dev sign-in with DISPATCH_DEV_SIGNIN_SHARED_KEY=%q: %v", shared, err)
+				}
+				key, err := sessionSigningKey(boot, t.TempDir())
+				if err != nil || key == "" {
+					t.Fatalf("DISPATCH_DEV_SIGNIN_SHARED_KEY=%q: key %q, %v", shared, key, err)
+				}
+				return key
+			}
+			cookieOf := func(t *testing.T, login, key string) string {
+				t.Helper()
+				cookie, err := http.ParseSetCookie(auth.IssueSessionCookie(login, 0, key, false))
+				if err != nil {
+					t.Fatal(err)
+				}
+				return cookie.Value
+			}
+			// Two processes of one harness: a session minted on A authenticates on B.
+			a, b := devKey(t, "harness-secret"), devKey(t, "harness-secret")
+			if session, ok := auth.VerifySession(cookieOf(t, "alice@example.com", a), b); !ok || session.Login != "alice@example.com" {
+				t.Errorf("a cookie process A minted verified on process B as %#v, %t; want alice@example.com", session, ok)
+			}
+			// The value is never the key itself: a production DISPATCH_SIGNING_KEY pasted here mints
+			// nothing its own server accepts, and that server's cookies sign no one in here.
+			if a == "harness-secret" {
+				t.Error("dev sign-in signs with DISPATCH_DEV_SIGNIN_SHARED_KEY's own value")
+			}
+			if _, ok := auth.VerifySession(cookieOf(t, "alice@example.com", a), "harness-secret"); ok {
+				t.Error("a production server keyed with the shared value accepted a dev sign-in cookie")
+			}
+			if _, ok := auth.VerifySession(cookieOf(t, "alice@example.com", "harness-secret"), a); ok {
+				t.Error("a dev-sign-in process accepted a cookie signed with the shared value itself")
+			}
+			// Another harness's value is another key, and with none each process keeps its own.
+			if devKey(t, "another-harness") == a {
+				t.Error("two shared values derived one key")
+			}
+			if devKey(t, "") == devKey(t, "") {
+				t.Error("two dev-sign-in processes with no shared value signed with one key")
+			}
+		},
 		"DISPATCH_TEST_HOOKS": func(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1"}); !boot.TestHooksEnabled {
 				t.Error("DISPATCH_TEST_HOOKS=1: hooks off")

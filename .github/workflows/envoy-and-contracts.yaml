@@ -751,6 +751,65 @@ jobs:
           name: dispatch-e2e-test-results-${{ github.run_attempt }}
           path: packages/dispatch/e2e/test-results
 
+  # The browser suite's two-process mode (packages/dispatch/e2e/harness-processes.ts): two
+  # envoy-dispatch processes against one Postgres, behind e2e/round-robin-proxy.ts, B serving a
+  # second build of the dashboard, which is what a rolling release puts in front of a browser. It
+  # runs only the *.multiprocess.e2e.ts specs, in Chromium, in a job of its own so the default
+  # suite's job does not wait on a second Vite build and two more servers.
+  dispatch-browser-multiprocess:
+    needs: changes
+    if: needs.changes.outputs.dispatch == 'true'
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+      - uses: ./.github/actions/setup-bun
+      - run: bun install --frozen-lockfile
+      - name: Build contracts for dispatch e2e
+        # The e2e helpers the specs import read some of contracts' values from its built dist/,
+        # through Playwright's own Node resolution (the dispatch job's step of the same name).
+        run: bun run build
+        working-directory: packages/contracts
+      - name: Build the Dispatch server
+        # run-server.sh builds it too, inside Playwright's 60 s wait for each server; built here,
+        # both servers find it current and start in seconds.
+        run: go build -o ./dispatch-e2e ./cmd/dispatch
+        working-directory: packages/envoy
+      - name: Install Playwright Chromium
+        # The runner image's chrome-stable apt source intermittently fails `apt-get update`; the
+        # dispatch job's install step says why dropping it is safe.
+        run: |
+          grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
+          bunx playwright install --with-deps chromium
+        working-directory: packages/dispatch
+      - name: Browser-test dispatch dashboard against two server processes
+        # Builds the dashboard twice (A's and B's, with distinct build ids) and runs the
+        # multiprocess specs through the round-robin proxy.
+        run: bun run e2e:multiprocess
+        working-directory: packages/dispatch
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: dispatch-browser-multiprocess-test-results-${{ github.run_attempt }}
+          path: packages/dispatch/e2e/test-results
+
   claude-envoy:
     needs: changes
     if: needs.changes.outputs.claude_plugin == 'true'

@@ -49,6 +49,7 @@ import type {
   Version,
 } from "../web/src/api/types";
 import { harnessPorts } from "./harness-ports";
+import { type DispatchProcess, pinnedTo } from "./harness-processes";
 
 export const baseUrl =
   process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${harnessPorts.dispatch.port}`;
@@ -68,6 +69,9 @@ interface ApiOptions {
   login?: string;
   /** The bearer an `as: "agent"` call sends; the shared `e2eAgentToken` when absent. */
   token?: string;
+  /** In two-process mode, the process the round-robin proxy sends the call to; absent, whichever
+   *  takes its turn (e2e/round-robin-proxy.ts). */
+  process?: DispatchProcess;
 }
 
 /** The name of the session cookie the server issues at sign-in, dev or GitHub. */
@@ -148,6 +152,7 @@ async function request<T>(
   } else {
     Object.assign(headers, await userHeaders(options.login));
   }
+  if (options.process !== undefined) Object.assign(headers, pinnedTo(options.process));
 
   const response = await fetch(new URL(path, baseUrl), {
     body: payload === undefined ? undefined : JSON.stringify(payload),

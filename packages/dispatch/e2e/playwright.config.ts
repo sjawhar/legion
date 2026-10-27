@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig, devices } from "@playwright/test";
 import { baseUrl } from "./api";
 import { harnessListeners } from "./harness-listeners";
+import { harnessProcessCount } from "./harness-processes";
 import { plainHttpHost, plainHttpOrigin } from "./plain-http-origin";
 import { takenPorts } from "./port-probe";
 
@@ -12,7 +13,18 @@ import { takenPorts } from "./port-probe";
 // open the plain-HTTP name, which only that project maps, and the origin rows' first assertion
 // fails on loopback by design.
 const plainHttpSpecs = /plain-http-(origin|proxy)\.e2e\.ts/;
+// Specs of two Dispatch processes behind the round-robin proxy (e2e/round-robin-proxy.ts), each
+// named `*.multiprocess.e2e.ts`. The default run ignores them, since they need both processes and
+// the proxy's own routes; two-process mode (DISPATCH_E2E_PROCESSES=2, `bun run e2e:multiprocess`)
+// runs them alone, in Chromium, since every other spec runs against one server already.
+const multiprocessSpecs = /\.multiprocess\.e2e\.ts$/;
 const startsOwnServers = !process.env.PLAYWRIGHT_BASE_URL;
+if (harnessProcessCount === 2 && !startsOwnServers) {
+  throw new Error(
+    "DISPATCH_E2E_PROCESSES=2 starts two Dispatch servers of this run's own behind the " +
+      "round-robin proxy, so it cannot run against PLAYWRIGHT_BASE_URL. Unset one of them."
+  );
+}
 
 // The rows of e2e/harness-listeners.ts this run starts: every one for a local run, the `deployed`
 // ones for a deployed run. The port probe and `webServer` both read `startedListeners`, so a
@@ -92,9 +104,16 @@ if (!reuseServers && typeof process.send !== "function" && !isListMode(process.a
 // timeout when that deadline is its observable contract (the keyboard chord-expiry test).
 const expectTimeout = 15_000;
 
+// Two-process mode's one project: the multiprocess specs, in Chromium.
+const multiprocessProjects = [
+  { name: "chromium", testMatch: multiprocessSpecs, use: { ...devices["Desktop Chrome"] } },
+];
+
 export default defineConfig({
   testDir: ".",
   testMatch: /.*\.e2e\.ts/,
+  // The projects below that name no `testIgnore` of their own inherit this one.
+  testIgnore: harnessProcessCount === 1 ? multiprocessSpecs : undefined,
   outputDir: "test-results",
   fullyParallel: false,
   workers: 1,
@@ -107,69 +126,78 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   // Runs once the web servers are up and before any row: it refuses a target that does not read
-  // this run's fake Envoy (e2e/preflight.ts).
+  // this run's fake Envoy, and in two-process mode a pair whose processes do not both read it or
+  // do not accept each other's cookies (e2e/preflight.ts).
   globalSetup: fileURLToPath(new URL("./preflight.ts", import.meta.url)),
-  webServer: startedListeners.map(({ argv, port }) => ({
+  webServer: startedListeners.map(({ argv, env, port }) => ({
     command: argv.join(" "),
+    env: env === undefined ? undefined : { ...env },
     port,
     reuseExistingServer: reuseServers,
   })),
-  projects: [
-    { name: "chromium", testIgnore: plainHttpSpecs, use: { ...devices["Desktop Chrome"] } },
-    {
-      name: "iphone",
-      testIgnore: plainHttpSpecs,
-      use: { ...devices["iPhone 13"], browserName: "chromium" },
-    },
-    // A caret beside a collaborator's cursor behaves per engine, the issue picker's keyboard-step
-    // rule and the header session pickers' (the live view's model and thinking pickers) rest on
-    // each engine dispatching a closed select's `change` in the key's own task, deep links meet
-    // each engine's chunk cancellation and the margin hold's frame and scroll order, and
-    // IndexedDB-backed document recovery must run in the engines people use. So those specs also
-    // run in WebKit.
-    {
-      name: "webkit",
-      testMatch:
-        /(collab-cursor|deep-links|keyboard-agents-picker|keyboard-session-pickers|offline-edits)\.e2e\.ts/,
-      use: { ...devices["Desktop Safari"] },
-    },
-    // The live view's phone layout (its keyboard cap, gutter and scroll locks), its model
-    // pill's ellipsis (the two engines lay out a flex child's min-width differently), the
-    // header's model and thinking pickers on a phone, and what the Conversation's floating pills
-    // cover on a phone, also run in WebKit, the engine iOS Safari uses; only those rows, since
-    // the rest of each spec is engine-agnostic.
-    {
-      name: "webkit-iphone",
-      testMatch: /(agent-view|agent-view-settings|phone-conversation|delivery-live)\.e2e\.ts/,
-      grep: /on a phone the live view|a document-scrolling route|covers none of|a capped model name|on a phone the delivery page|the header shows the session's reported model/,
-      use: { ...devices["iPhone 13"] },
-    },
-    // Firefox's native editing mishandles text typed over what follows a block's last line break,
-    // the issue picker's and the header session pickers' keyboard-step rule rests on the engine's
-    // select dispatch, offline document recovery owns browser storage, and a click on a link
-    // inside the editor meets the engine's focus rule (Firefox focuses the editing host, not the
-    // link). Those specs, and the whole deep-links spec, run in Firefox too.
-    {
-      name: "firefox",
-      testMatch:
-        /(code-line-replace|deep-links|keyboard-agents-picker|keyboard-session-pickers|offline-edits|picture-link-click)\.e2e\.ts/,
-      use: { ...devices["Desktop Firefox"] },
-    },
+  projects:
+    harnessProcessCount === 2
+      ? multiprocessProjects
+      : [
+          {
+            name: "chromium",
+            testIgnore: [plainHttpSpecs, multiprocessSpecs],
+            use: { ...devices["Desktop Chrome"] },
+          },
+          {
+            name: "iphone",
+            testIgnore: [plainHttpSpecs, multiprocessSpecs],
+            use: { ...devices["iPhone 13"], browserName: "chromium" },
+          },
+          // A caret beside a collaborator's cursor behaves per engine, the issue picker's keyboard-step
+          // rule and the header session pickers' (the live view's model and thinking pickers) rest on
+          // each engine dispatching a closed select's `change` in the key's own task, deep links meet
+          // each engine's chunk cancellation and the margin hold's frame and scroll order, and
+          // IndexedDB-backed document recovery must run in the engines people use. So those specs also
+          // run in WebKit.
+          {
+            name: "webkit",
+            testMatch:
+              /(collab-cursor|deep-links|keyboard-agents-picker|keyboard-session-pickers|offline-edits)\.e2e\.ts/,
+            use: { ...devices["Desktop Safari"] },
+          },
+          // The live view's phone layout (its keyboard cap, gutter and scroll locks), its model
+          // pill's ellipsis (the two engines lay out a flex child's min-width differently), the
+          // header's model and thinking pickers on a phone, and what the Conversation's floating pills
+          // cover on a phone, also run in WebKit, the engine iOS Safari uses; only those rows, since
+          // the rest of each spec is engine-agnostic.
+          {
+            name: "webkit-iphone",
+            testMatch: /(agent-view|agent-view-settings|phone-conversation|delivery-live)\.e2e\.ts/,
+            grep: /on a phone the live view|a document-scrolling route|covers none of|a capped model name|on a phone the delivery page|the header shows the session's reported model/,
+            use: { ...devices["iPhone 13"] },
+          },
+          // Firefox's native editing mishandles text typed over what follows a block's last line break,
+          // the issue picker's and the header session pickers' keyboard-step rule rests on the engine's
+          // select dispatch, offline document recovery owns browser storage, and a click on a link
+          // inside the editor meets the engine's focus rule (Firefox focuses the editing host, not the
+          // link). Those specs, and the whole deep-links spec, run in Firefox too.
+          {
+            name: "firefox",
+            testMatch:
+              /(code-line-replace|deep-links|keyboard-agents-picker|keyboard-session-pickers|offline-edits|picture-link-click)\.e2e\.ts/,
+            use: { ...devices["Desktop Firefox"] },
+          },
 
-    {
-      name: "firefox-download-navigation",
-      testMatch: /shell\.e2e\.ts/,
-      grep: /a chunk that fails after a Download link was followed reloads the page/,
-      use: { ...devices["Desktop Firefox"] },
-    },
-    {
-      name: "chromium-plain-http",
-      testMatch: plainHttpSpecs,
-      use: {
-        ...devices["Desktop Chrome"],
-        baseURL: plainHttpOrigin,
-        launchOptions: { args: [`--host-resolver-rules=MAP ${plainHttpHost} 127.0.0.1`] },
-      },
-    },
-  ],
+          {
+            name: "firefox-download-navigation",
+            testMatch: /shell\.e2e\.ts/,
+            grep: /a chunk that fails after a Download link was followed reloads the page/,
+            use: { ...devices["Desktop Firefox"] },
+          },
+          {
+            name: "chromium-plain-http",
+            testMatch: plainHttpSpecs,
+            use: {
+              ...devices["Desktop Chrome"],
+              baseURL: plainHttpOrigin,
+              launchOptions: { args: [`--host-resolver-rules=MAP ${plainHttpHost} 127.0.0.1`] },
+            },
+          },
+        ],
 });

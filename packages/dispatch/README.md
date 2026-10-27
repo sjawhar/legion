@@ -49,7 +49,8 @@ SIGTERM to the pid it hands its caller stops the server. It pins every server
 setting: cookie identity, the production mode, with `alice` and `bob` signed in through the
 server's dev sign-in route (`DISPATCH_DEV_SIGNIN=1`, fenced to a loopback
 origin, listener and database, with a signing key the server generates for its
-process), `DISPATCH_NATS_DISABLED=1`, the fake GitHub origin, a throwaway App
+process, or one key per run in two-process mode, below),
+`DISPATCH_NATS_DISABLED=1`, the fake GitHub origin, a throwaway App
 key, a loopback listen host and the suite's dashboard origin. Address the
 harness as `127.0.0.1:<port>`, never `localhost`: under that flag the router
 refuses any other `Host`. The server process has no caller Home or XDG
@@ -94,6 +95,28 @@ cd packages/dispatch
 DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch_<issue>?sslmode=disable' \
   bun run e2e
 ```
+
+Two-process mode runs two Dispatch servers against the one database, behind a round-robin proxy,
+the way a rolling release serves a browser from two builds at once:
+
+```bash
+cd packages/dispatch
+DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch_<issue>?sslmode=disable' \
+  bun run e2e:multiprocess
+```
+
+It builds the dashboard twice (`web/dist`, and `web/dist-b` under another build id), then runs
+Playwright with `DISPATCH_E2E_PROCESSES=2`: Dispatch A on `DISPATCH_E2E_PORT_A` (default `8787`)
+serving `web/dist`, Dispatch B on `DISPATCH_E2E_PORT_B` (default `8788`) serving
+`DISPATCH_E2E_WEB_DIST_B` (here `web/dist-b`; default A's), and `e2e/round-robin-proxy.ts` on
+`DISPATCH_E2E_PORT`, which alternates requests and websockets between them. Both servers sign
+cookies with one key the run generates, so a person stays signed in whichever answers. It runs
+only the `*.multiprocess.e2e.ts` specs, in Chromium, which the default run leaves out; arguments
+after `--` reach Playwright (`bun run e2e:multiprocess -- <name>.multiprocess.e2e.ts`). A spec
+pins a request to one process with the `X-Dispatch-E2E-Process: a|b` header or a whole browser
+context with the `dispatch-e2e-process` cookie, and reads which process served what from the
+proxy's `/_proxy/requests` and `/_proxy/sockets`; `AGENTS.md`'s end-to-end section has the whole
+contract. Any `DISPATCH_E2E_PROCESSES` other than `1`, `2` or unset is refused.
 
 ## Local instance
 

@@ -50,8 +50,10 @@ export default defineConfig({
   plugins: [react(), tailwindcss(), thirdPartyNoticesFile()],
   define: {
     // Keep the entry chunk distinct across deployments, including no-source-change image rebuilds.
+    // DISPATCH_BUILD wins over GITHUB_SHA, which CI sets on every step, so one job can build two
+    // distinct dashboards of one commit (`bun run e2e:multiprocess`'s second build).
     __DISPATCH_BUILD__: JSON.stringify(
-      process.env.GITHUB_SHA ?? process.env.DISPATCH_BUILD ?? Date.now().toString()
+      process.env.DISPATCH_BUILD ?? process.env.GITHUB_SHA ?? Date.now().toString()
     ),
   },
   resolve: {

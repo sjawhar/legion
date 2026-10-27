@@ -4,6 +4,9 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -101,8 +104,12 @@ type bootConfig struct {
 	// (pprofAddress); empty, nothing listens.
 	PprofAddr string
 	// DevSignIn (DISPATCH_DEV_SIGNIN=1) mounts GET /auth/_dev/signin behind the dev sign-in
-	// fence; the signing key is then per process.
+	// fence; the signing key is then per process, or derived from DevSignInSharedKey.
 	DevSignIn bool
+	// DevSignInSharedKey is DISPATCH_DEV_SIGNIN_SHARED_KEY: under dev sign-in, the secret every
+	// process of one local harness derives its cookie key from (sessionSigningKey), so they
+	// accept each other's cookies. resolveBootConfig refuses it without dev sign-in.
+	DevSignInSharedKey string
 	// WebDist is DISPATCH_WEB_DIST: the dashboard directory to serve, or empty to find it from
 	// the binary (defaultWebDistDir).
 	WebDist string
@@ -163,7 +170,11 @@ func main() {
 		slog.Info("dispatch: loaded github app", "slug", appCfg.Slug, "client_id", appCfg.ClientID, "source", appSource.String())
 	}
 	if boot.DevSignIn {
-		slog.Warn("dispatch: dev sign-in mounted: any email signs in at /auth/_dev/signin without the sign-in issuer; cookies are valid on this process only", "origin", serverURL)
+		cookies := "cookies are valid on this process only"
+		if boot.DevSignInSharedKey != "" {
+			cookies = "cookies are valid on every process given this DISPATCH_DEV_SIGNIN_SHARED_KEY"
+		}
+		slog.Warn("dispatch: dev sign-in mounted: any email signs in at /auth/_dev/signin without the sign-in issuer; "+cookies, "origin", serverURL)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -581,6 +592,7 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		FileStoreBucket:    strings.TrimSpace(env.get("DISPATCH_FILE_STORE_BUCKET")),
 		AssetStoreBucket:   strings.TrimSpace(env.get("DISPATCH_ASSET_STORE_BUCKET")),
 		SigningKey:         env.get("DISPATCH_SIGNING_KEY"),
+		DevSignInSharedKey: env.get("DISPATCH_DEV_SIGNIN_SHARED_KEY"),
 		InsecureCookie:     env.get("DISPATCH_INSECURE_COOKIE") != "",
 		EnvoyToken:         env.get("ENVOY_TOKEN"),
 	}
@@ -627,6 +639,12 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		devSignIn = true
 	default:
 		return bootConfig{}, fmt.Errorf("DISPATCH_DEV_SIGNIN=%q (expected 1 or unset)", flag)
+	}
+	// The shared key only ever replaces dev sign-in's per-process key; a server without the flag
+	// would ignore it, and a value an operator sets expecting it to sign their deployment's cookies
+	// would sign nothing.
+	if !devSignIn && boot.DevSignInSharedKey != "" {
+		return bootConfig{}, errors.New("DISPATCH_DEV_SIGNIN_SHARED_KEY is read only with DISPATCH_DEV_SIGNIN=1, by the processes of one local harness; unset it, and set DISPATCH_SIGNING_KEY to give a deployment's processes one key")
 	}
 
 	switch mode := identityMode; {
@@ -694,7 +712,9 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 // main loads after it. With the flag any loopback client signs in as any person it names, so the
 // process must listen, keep its data and reach the services that act on a human's word (NATS, the
 // secrets broker, the Envoy listener that delivers mentions and messages, GitHub as the App) on
-// this machine alone, and sign its cookies with a key no other process holds.
+// this machine alone, and sign its cookies with a key no production server holds: one of its own,
+// or one derived from DISPATCH_DEV_SIGNIN_SHARED_KEY under a dev-only label (sessionSigningKey),
+// which the other processes of its harness derive too and a production server never signs with.
 func devSignInFence(boot bootConfig, env settingValues) error {
 	if boot.IdentityHeader != "" {
 		return errors.New("DISPATCH_DEV_SIGNIN=1 mints session cookies, so DISPATCH_IDENTITY must be cookie")
@@ -709,7 +729,7 @@ func devSignInFence(boot bootConfig, env settingValues) error {
 		return err
 	}
 	if boot.SigningKey != "" {
-		return errors.New("DISPATCH_DEV_SIGNIN=1 signs cookies with a key generated for this process; unset DISPATCH_SIGNING_KEY")
+		return errors.New("DISPATCH_DEV_SIGNIN=1 signs cookies with a key generated for this process, or derived from DISPATCH_DEV_SIGNIN_SHARED_KEY when the processes of one local harness share their cookies; unset DISPATCH_SIGNING_KEY")
 	}
 	if !boot.NATSDisabled && env.get(bus.AllowRemoteEnvVar) == "1" {
 		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 publishes to this machine's NATS only: unset %s, or set DISPATCH_NATS_DISABLED=1", bus.AllowRemoteEnvVar)
@@ -805,19 +825,37 @@ func explainMigrateError(err error) error {
 	)
 }
 
-// sessionSigningKey is the key session cookies are signed with: one generated for this process
-// under dev sign-in, otherwise DISPATCH_SIGNING_KEY when it is set (a deployment's, from its
-// secrets manager), otherwise the data dir's signing-key file, created on first start (a local
+// sessionSigningKey is the key session cookies are signed with: under dev sign-in, the key derived
+// from DISPATCH_DEV_SIGNIN_SHARED_KEY when it is set (devSignInSharedSigningKey) and otherwise one
+// generated for this process; outside it, DISPATCH_SIGNING_KEY when it is set (a deployment's, from
+// its secrets manager), otherwise the data dir's signing-key file, created on first start (a local
 // run's). Outside dev sign-in the key must stay the same across deploys, or every dsession cookie
 // is invalidated whenever a container rolls.
 func sessionSigningKey(boot bootConfig, dataDir string) (string, error) {
 	if boot.DevSignIn {
+		if boot.DevSignInSharedKey != "" {
+			return devSignInSharedSigningKey(boot.DevSignInSharedKey), nil
+		}
 		return auth.NewSigningKey()
 	}
 	if boot.SigningKey != "" {
 		return boot.SigningKey, nil
 	}
 	return auth.LoadOrCreateSigningKey(filepath.Join(dataDir, "signing-key"))
+}
+
+// devSignInSharedSigningKeyLabel separates the cookie key dev sign-in derives from every key a
+// production server signs with.
+const devSignInSharedSigningKeyLabel = "dispatch dev sign-in"
+
+// devSignInSharedSigningKey is the cookie key every dev-sign-in process given shared derives, the
+// base64url of HMAC-SHA256 keyed by shared over a fixed dev-only label. It is never shared itself,
+// so a production DISPATCH_SIGNING_KEY pasted into DISPATCH_DEV_SIGNIN_SHARED_KEY signs no cookie,
+// and seals no refresh token, that the production server it came from accepts.
+func devSignInSharedSigningKey(shared string) string {
+	mac := hmac.New(sha256.New, []byte(shared))
+	mac.Write([]byte(devSignInSharedSigningKeyLabel))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
 // newDocumentService is the document service main serves the document websocket and the API's

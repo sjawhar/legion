@@ -328,7 +328,13 @@ write identity errors with `identity.WriteError`.
   only switch `New` reads, so no caller can mount the route without that check.
   The signing key is then
   `auth.NewSigningKey`, generated per process and never the data-dir file, so a
-  cookie it mints dies with the process. While it is on, the whole router
+  cookie it mints dies with the process, unless `DISPATCH_DEV_SIGNIN_SHARED_KEY`
+  is set (refused without the flag): every process given one value then signs
+  with the base64url of HMAC-SHA256 keyed by it over the label
+  `dispatch dev sign-in` (`devSignInSharedSigningKey`), never the value itself,
+  so the browser suite's two-process mode keeps a person signed in across its
+  two servers and a production key pasted there mints nothing production
+  accepts. While it is on, the whole router
   answers a request whose `Host` is not the dashboard origin's
   `421 HOST_MISMATCH` (`requireHost`), and the route serves only a loopback peer
   with no forwarding header and logs every mint at WARN.

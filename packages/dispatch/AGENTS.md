@@ -969,7 +969,8 @@ database must be isolated because `e2e/seed.ts` truncates it before every
 scenario and never falls back to `dispatch_c`. It runs the server in cookie
 identity, the production mode, and signs `alice` and `bob` in through the
 server's dev sign-in route (`DISPATCH_DEV_SIGNIN=1`, fenced to a loopback
-origin, listener and database, with a per-process signing key):
+origin, listener and database, with a per-process signing key, or one key per run
+in two-process mode, below):
 `e2e/users.ts`'s `signIn`/`asUser` for a browser context, `e2e/api.ts`'s
 `userHeaders` for a plain fetch, which also sends the dashboard origin the CSRF
 guard requires on writes. A cookie names its login's generation in
@@ -1002,7 +1003,8 @@ one checkout serialise their builds; Go rewrites it only when the source
 changed, and a running server keeps the inode it started from. The script
 unsets inherited `DISPATCH_*`/`ENVOY_*`/`NATS_*` variables, supplies a fresh App
 key, passes no cookie signing key (the server generates one for its process, as
-`DISPATCH_DEV_SIGNIN` requires), and gives the server no caller Home or XDG
+`DISPATCH_DEV_SIGNIN` requires, or in two-process mode derives one from the
+`DISPATCH_DEV_SIGNIN_SHARED_KEY` the script passes on), and gives the server no caller Home or XDG
 directory. A caller's environment or `~/.config/legion/envoy.json` /
 `~/.local/share/dispatch/{app.json,signing-key}` therefore cannot point the
 test server at a live Envoy, dashboard origin or GitHub App (every Legion pane
@@ -1158,9 +1160,10 @@ harness-port rule lives — `README.md` and the `docs/solutions` learning point 
 restating it.
 
 `e2e/harness-ports.ts` resolves `DISPATCH_E2E_PORT` (default `8777`), `FAKE_ENVOY_PORT` (default
-`9021`), `FAKE_GITHUB_PORT` (default `9022`), `PLAIN_HTTP_PORT` (default `9023`) and
-`FAKE_BROKER_PORT` (default `9024`) once for every reader in `e2e/`, the Playwright config and the
-four Bun listeners included. An empty value means the default for all five alike, matching
+`9021`), `FAKE_GITHUB_PORT` (default `9022`), `PLAIN_HTTP_PORT` (default `9023`),
+`FAKE_BROKER_PORT` (default `9024`), and two-process mode's `DISPATCH_E2E_PORT_A` (default `8787`)
+and `DISPATCH_E2E_PORT_B` (default `8788`) once for every reader in `e2e/`, the Playwright config
+and the Bun listeners included. An empty value means the default for all of them alike, matching
 `run-server.sh`'s `${VAR:-default}` for the four ports it reads; anything that is not a port in
 canonical decimal is
 refused naming its variable (so `1e4`, `8777.0`, `0x2249`, `+8777`, `" 8777"` and a leading-zero
@@ -1169,13 +1172,14 @@ points somewhere else, or writing one port two ways). Two variables naming one p
 together, naming both: each port passes a per-port check on its own, and every consumer would
 otherwise fail in its own words — Playwright refusing the second `webServer` without naming a
 variable, the second Bun listener dying on `EADDRINUSE`. Because the check lives with the
-resolution, those listeners refuse it too, not only the Playwright config.
+resolution, those listeners refuse it too, not only the Playwright config. A's and B's ports take
+part in it only in two-process mode, the one mode that listens on them.
 
 `e2e/playwright.config.ts` probes every port it starts before any web server starts and fails the
 run with one message listing every taken port beside its own variable, before a single spec runs.
 One table, `e2e/harness-listeners.ts`, names each listener, its command, its port's variable and
-whether a deployed run starts it; the config's probe and `webServer` read the rows it starts: all
-five ports for a local run, and `FAKE_ENVOY_PORT` plus `PLAIN_HTTP_PORT` for a deployed run. The
+whether a deployed run starts it; the config's probe and `webServer` read the rows it starts: every
+port of the mode for a local run, and `FAKE_ENVOY_PORT` plus `PLAIN_HTTP_PORT` for a deployed run. The
 probe is `e2e/port-probe.ts`: `isPortUsed` is Playwright's own predicate, and `takenPorts` lists
 the taken ports of a set of rows, which the config and `e2e/local-instance.ts` both refuse on. The
 refusal names only the variables the run probes. Its remedies are
@@ -1191,6 +1195,43 @@ not behave alike; a lane that shares one hand-started harness across runs sets
 file, which derives the target's `ENVOY_URL` from that same value; the README's acceptance recipe
 wires the pair. A listing run starts no web server, so it skips the probe. The port validation above
 is not gated on that mode, so a malformed or duplicated port is refused in every invocation.
+
+`DISPATCH_E2E_PROCESSES` picks how many Dispatch servers the harness runs
+(`e2e/harness-processes.ts`): unset or `1` is the one server above, `2` is two-process mode, and
+any other value is refused by every importer and by `run-server.sh`, naming the allowed values. In
+two-process mode the listener table starts Dispatch A on `DISPATCH_E2E_PORT_A` and B on
+`DISPATCH_E2E_PORT_B`, each a `run-server.sh` against the one `DATABASE_URL` and each with
+`DISPATCH_NATS_DISABLED=1`, and `e2e/round-robin-proxy.ts` on `DISPATCH_E2E_PORT`, so `baseUrl` and
+every helper address one origin as before. `run-server.sh` takes each server's own inputs:
+`DISPATCH_E2E_SERVER_PORT` (default `DISPATCH_E2E_PORT`), `DISPATCH_E2E_SERVER_WEB_DIST` (default
+`../dispatch/web/dist`, a path from `packages/envoy`, as `DISPATCH_WEB_DIST` is), and
+`DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY`, which it passes on as the server's
+`DISPATCH_DEV_SIGNIN_SHARED_KEY` and requires in two-process mode; there it also sets both servers'
+`DISPATCH_SERVER_URL` to the proxy's origin. The harness generates that key once per run and hands
+it to both, so a person signed in through one process is signed in on the other, and points B at
+`DISPATCH_E2E_WEB_DIST_B` when it is set (default: A's dist). The proxy alternates each HTTP
+request and each websocket upgrade between A and B (two turns, each starting at A), streams event
+streams, and forwards `Host` and `Origin` unchanged. `X-Dispatch-E2E-Process: a|b` on any request
+pins it, over a `dispatch-e2e-process=a|b` cookie, which pins a whole browser context, websocket
+upgrades included; a pinned request takes no turn, and any other value is refused (400). A path
+containing `/_test/` goes to both processes, answering A's response or the first non-2xx of the
+two. A path containing `/_proxy/` is the proxy's own and never forwarded: `GET /_proxy/requests`
+(`[{path, method, upstream}]`), `GET /_proxy/sockets` (`[{id, path, upstream, open, openedAt}]` in
+open order, `openedAt` in epoch milliseconds) and `POST /_proxy/reset`, which empties both lists
+and starts both turns over at A. `e2e/api.ts`'s calls take `process: "a" | "b"` to pin, and
+`pinnedTo` in `e2e/harness-processes.ts` builds the header for a plain fetch. `e2e/preflight.ts`
+asks each process, pinned, for this run's fake Envoy session, then signs a person in on A and
+requires B to know them. The proxy shares its relay with the plain-HTTP proxy
+(`e2e/http-relay.ts`, which passes a websocket close code on wherever the other side may send it),
+and `e2e/__tests__/round-robin-proxy.test.ts` (`bun run test`) runs it against two Bun servers.
+Specs named `*.multiprocess.e2e.ts` run only there: the default run ignores them, and two-process
+mode runs them alone, in the `chromium` project. `bun run e2e:multiprocess` builds the dashboard
+twice (`web/dist`, then `web/dist-b` with `DISPATCH_BUILD=e2e-b`, so its entry chunk differs from
+A's even where CI sets `GITHUB_SHA`; `web/vite.config.ts` takes `DISPATCH_BUILD` first) and runs
+Playwright in two-process mode with B on `dist-b`, passing on extra arguments
+(`bun run e2e:multiprocess -- <name>.multiprocess.e2e.ts`). CI's
+`dispatch-browser-multiprocess` job runs it. Two-process mode starts its own servers, so it refuses
+`PLAYWRIGHT_BASE_URL`, and `bun run dispatch:local` refuses it.
 
 `bun run dispatch:local` (`e2e/local-instance.ts`) is that harness, left running and seeded: it
 starts every row of `e2e/harness-listeners.ts`, each as the leader of a process group of its own,

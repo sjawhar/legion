@@ -133,6 +133,8 @@ var settings = []setting{
 		Description: "Bucket holding immutable assets from prior dashboard builds. Unset, Dispatch serves only its local dashboard files."},
 	{Name: "DISPATCH_DEV_SIGNIN", Required: "no",
 		Description: "Set to `1` on a loopback-only local server to sign anyone in by email at `/auth/_dev/signin` without the sign-in issuer; refused alongside any `DISPATCH_SIGNIN_*` setting, `DISPATCH_SIGNIN_DOMAIN` included."},
+	{Name: "DISPATCH_DEV_SIGNIN_SHARED_KEY", Default: "a key generated for each process", Required: "no",
+		Description: "With `DISPATCH_DEV_SIGNIN=1`, a secret every process of one local harness is given, so a session cookie one of them mints is accepted by the others; each signs with HMAC-SHA256 of it under a dev-only label, never with the value itself, so no value placed here signs a cookie a production server accepts. Refused without `DISPATCH_DEV_SIGNIN=1`."},
 	{Name: "DISPATCH_TEST_HOOKS", Required: "no",
 		Description: "Set to `1` to mount the end-to-end tests' hook routes; never in a real deployment."},
 	{Name: "DISPATCH_TEST_SETTLE_DELAY", Default: "`2s`", Required: "no",

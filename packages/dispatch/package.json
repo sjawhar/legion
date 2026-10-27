@@ -11,6 +11,7 @@
     "test": "bun test --parallel web/src e2e/__tests__",
     "dispatch:local": "bun e2e/local-instance.ts",
     "e2e": "bun run build:web && playwright test --config e2e/playwright.config.ts",
+    "e2e:multiprocess": "bun run build:web && DISPATCH_BUILD=e2e-b vite build --config web/vite.config.ts --outDir dist-b && DISPATCH_E2E_PROCESSES=2 DISPATCH_E2E_WEB_DIST_B=../dispatch/web/dist-b playwright test --config e2e/playwright.config.ts",
     "e2e:deployed": "playwright test --config e2e/playwright.config.ts",
     "e2e:install": "playwright install chromium webkit firefox",
     "typecheck": "bunx tsc --noEmit",
