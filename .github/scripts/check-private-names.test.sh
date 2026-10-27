@@ -731,7 +731,7 @@ run_pr_text
 check "an item whose id is not a whole number fails" "$(is "$status" 1)"
 check "names the cause" "$(contains "$out" 'whose id is not a whole number')"
 
-echo "case: the review event pr-title.yaml runs on"
+echo "case: the review event pr-public-text.yaml runs on"
 clean_pr
 as_review_event
 items 202 "Blocking: see $key-7." > "$work/reviews.1"

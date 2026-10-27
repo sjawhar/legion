@@ -4,32 +4,24 @@ name: PR Title
 # nothing private (check-pr-text.sh) and that its title is a conventional commit subject. It lives
 # apart from the Tests workflow (LEGION-90) so that an edit, which a Legion round makes several
 # times, does not re-run lint, typecheck and test at an unchanged head. A push, open, reopen or
-# edit (title or body) of the pull request runs it, and so does a review submitted or edited; each
-# run reports `pr-title` on the pull request's head, which main's ruleset requires. Comments and
-# review comments start no run of their own: GitHub leaves those events' checks out of a pull
-# request's checks, an inline comment posted alone arrives with a review event that does run, and
-# every run, like the required lint job at each push, reads every comment. A newer run that
-# cancels an older one loses nothing, since it repeats every check on the title and body as they
-# now are. Anyone signed in can review a public pull request, so check-pr-text.sh, not an
-# `if:`, decides whose text counts: a skipped job posts a `pr-title` that GitHub and the daemon
-# (classify.RunResult) count as a pass, so a skipped run would turn a real failure green.
+# edit (title or body) of the pull request runs it, and each run reports `pr-title` on the pull
+# request's head, which main's ruleset requires. A review or comment starts no run here: GitHub's
+# merge reads the newest `pr-title` of every event it evaluates, and a review run would leave the
+# required check pending behind the Actions queue after every approval, though the title and body
+# had not changed. pr-public-text.yaml scans the comments and reviews when one is posted, edited or
+# deleted, as a `public-text` status that no ruleset requires; every run here, like the lint job at
+# each push, reads every comment and review too. A newer run that cancels an older one loses
+# nothing, since it repeats every check on the title and body as they now are.
 on:
   pull_request:
     types: [opened, edited, reopened, synchronize]
-  pull_request_review:
-    types: [submitted, edited]
 
-# A run cancels the run before it of the same pull request and event, so a pull request holds at
-# most one running and one pending PR Title run per event however many edits and reviews arrive.
-# Nothing is lost: each run checks the title and body its event names and reads the commits,
-# comments and reviews live, so the newest repeats every check of the runs it cancels. The event is
-# in the group because GitHub lists a pull request's checks once per check name and event (as
-# `gh pr checks` does): a review run that cancelled a pull_request run would leave that event's
-# latest `pr-title` cancelled on the head until the next push or edit. A review run checks with
-# main's copy of check-pr-text.sh; the required lint job checks a pull request that changes it with
-# its own copy at every push.
+# A run cancels the run before it of the same pull request, so a pull request holds at most one
+# running and one pending PR Title run however many edits and pushes arrive. Nothing is lost: each
+# run checks the title and body its event names and reads the commits, comments and reviews live,
+# so the newest repeats every check of the runs it cancels.
 concurrency:
-  group: pr-title-${{ github.event_name }}-${{ github.event.pull_request.number }}
+  group: pr-title-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 # The job clones the repository for check-pr-text.sh, which reads the pull request's commits
@@ -45,27 +37,21 @@ jobs:
       issues: read
       pull-requests: read
     steps:
-      # A review run checks out the default branch, so the script it runs is main's, never the
-      # pull request's: a pull_request_review run would otherwise check out the pull request's
-      # merge ref, which is its GITHUB_REF. A pull_request run checks out that merge ref as the
-      # required lint job does, so a pull request that changes the script is checked by its own
-      # version.
+      # The pull request's merge ref, as the required lint job checks out, so a pull request that
+      # changes check-pr-text.sh is checked by its own version.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name != 'pull_request' && github.event.repository.default_branch || '' }}
           persist-credentials: false
 
       # The title, body, commit messages, comments and reviews are as public as the tree
       # (check-pr-text.sh says where each lands). The required lint job checks them at every
-      # push; this step checks an edit or a review. Both steps read the event payload rather than
-      # an `env:` block, which the runner prints in the job log.
+      # push; this step checks an edit. Both steps read the event payload rather than an `env:`
+      # block, which the runner prints in the job log.
       - name: Check the title, body, branch name, commits, comments and reviews name nothing private
         env:
           GH_TOKEN: ${{ github.token }}
         run: .github/scripts/check-pr-text.sh
 
-      # Every run checks the title, since a review run reports `pr-title` on the head too and a
-      # run that skipped it would post a passing `pr-title` over a failed one.
       - name: Require a conventional PR title
         run: |
           if jq -r '.pull_request.title' "$GITHUB_EVENT_PATH" | grep -qE '^[a-z]+(\([^)]+\))?!?: .+'; then

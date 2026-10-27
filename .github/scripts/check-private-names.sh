@@ -46,8 +46,9 @@
 # CI runs it over the repository in the lint job of pr-and-main.yaml, over the built site in
 # docs.yaml, over a pull request's title, body, branch name, commits (each one's message, author
 # and committer), issue comments, reviews and review comments through check-pr-text.sh (the
-# required lint job at each push, and pr-title.yaml when the pull request is opened, reopened or
-# edited or a review is submitted or edited), and its tests in pr-and-main.yaml's test job.
+# required lint job at each push, pr-title.yaml when the pull request is opened, reopened or
+# edited, and pr-public-text.yaml when a review or comment is posted, edited or deleted), and its tests in
+# pr-and-main.yaml's test job.
 set -euo pipefail
 
 # A relative path argument is read from the caller's directory, so it is prefixed with that

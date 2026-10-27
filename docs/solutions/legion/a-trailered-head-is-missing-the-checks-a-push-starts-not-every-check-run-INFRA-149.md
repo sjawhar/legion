@@ -24,9 +24,11 @@ you may conclude from the head afterwards.
 
 - **`skip-checks: true` suppresses the runs a push starts, and nothing else.** A workflow that
   triggers on something other than the push still runs and still attaches its check run to that
-  head. In this repository `.github/workflows/pr-title.yaml` triggers on `pull_request_review` as
-  well as on `pull_request`, so any review (an inline comment posted alone included) puts a
-  required check on a head no push ever built.
+  head. In this repository `.github/workflows/pr-public-text.yaml` triggers on
+  `pull_request_review`, so any review (an inline comment posted alone included) puts a
+  `public-text-scan` check run and a `public-text` commit status on a head no push ever built.
+  Neither is required; until 2026-10-27 `pr-title.yaml` also ran on reviews and put the required
+  `pr-title` there.
 - **So "the head has no check runs" is the wrong diagnostic.** It is wrong in exactly the case you
   will meet — a blocked pull request someone has reviewed — and a reader who finds runs there
   concludes CI is merely slow and waits.

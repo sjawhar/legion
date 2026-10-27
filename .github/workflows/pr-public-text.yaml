@@ -1,0 +1,100 @@
+name: PR Public Text
+
+# Checks a pull request's comments and reviews for a private name whenever one is posted, edited
+# or deleted (check-pr-text.sh, which also reads the title, body, branch name and commits again).
+# A comment or review is public on the pull request's page from the moment it is posted. No
+# ruleset requires this check: the required `pr-title` (pr-title.yaml) runs only on the pull
+# request's own events, so an approval does not leave a required check pending behind the Actions
+# queue, and the required lint job reads every comment and review at each push.
+#
+# The verdict is the `public-text` commit status on the pull request's head, red when the scan
+# fails and linking to the run. Every run sets it, because the run's own check cannot carry it:
+# GitHub reports an issue comment's run on the default branch's newest commit, and leaves a review
+# comment's run out of the pull request's checks. Each run reads every comment and review live, so
+# the newest run's status is the verdict on all of them, and deleting the text that failed (or
+# editing it) runs the scan again and clears the status. The scan step never fails its job, so a
+# private name turns no check on the default branch red. Anyone signed in can comment on a public
+# pull request; check-pr-text.sh decides whose text counts.
+on:
+  pull_request_review:
+    types: [submitted, edited]
+  pull_request_review_comment:
+    types: [edited, deleted]
+  issue_comment:
+    types: [created, edited, deleted]
+
+# A run cancels the run before it of the same pull request and event, so a pull request holds at
+# most one running and one pending run per event however many comments and reviews arrive. Nothing
+# is lost: each run reads every comment and review live, so the newest repeats every check of the
+# runs it cancels.
+concurrency:
+  group: pr-public-text-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+# The job clones the repository for check-pr-text.sh, which reads the pull request's commits
+# through the compare route (`contents: read`), the pull request, its reviews and review comments
+# (`pull-requests: read`), and its issue comments (`issues: read`); `statuses: write` sets the
+# `public-text` status on the head.
+permissions: {}
+
+jobs:
+  public-text-scan:
+    # issue_comment also fires for a comment on an issue, which has no pull request to check.
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      statuses: write
+    steps:
+      # The default branch, so the script is main's, never the pull request's: a review run would
+      # otherwise check out the pull request's merge ref, its GITHUB_REF. The required lint job
+      # checks a pull request that changes the script with its own copy at every push.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      # check-pr-text.sh reads a payload that carries the pull request. A review's or review
+      # comment's payload does; an issue comment's carries only the issue, so the pull request is
+      # read as it is now.
+      - name: Read the pull request
+        id: pull
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          payload="$RUNNER_TEMP/pull-request-event.json"
+          if [ "$GITHUB_EVENT_NAME" = issue_comment ]; then
+            number=$(jq -er '.issue.number' "$GITHUB_EVENT_PATH")
+            gh api "repos/$GITHUB_REPOSITORY/pulls/$number" | jq '{pull_request: .}' > "$payload"
+          else
+            cp "$GITHUB_EVENT_PATH" "$payload"
+          fi
+          head=$(jq -er '.pull_request.head.sha' "$payload")
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+
+      - name: Check the comments, reviews, title, body, branch name and commits name nothing private
+        id: scan
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: GITHUB_EVENT_PATH="$RUNNER_TEMP/pull-request-event.json" .github/scripts/check-pr-text.sh
+
+      # A cancelled scan sets no status: the run that cancelled it sets its own.
+      - name: Report the verdict on the pull request's head
+        if: ${{ !cancelled() && steps.pull.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD: ${{ steps.pull.outputs.head }}
+          OUTCOME: ${{ steps.scan.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$OUTCOME" = success ]; then
+            state=success description="No comment or review names anything private"
+          else
+            state=failure description="The scan of the comments and reviews failed: see the run"
+          fi
+          gh api --silent "repos/$GITHUB_REPOSITORY/statuses/$HEAD" -f state="$state" \
+            -f context=public-text -f target_url="$RUN_URL" -f description="$description"

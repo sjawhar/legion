@@ -36,6 +36,13 @@ related_issues:
   only after the merge: name its proof as the production check. A `pull_request` or
   `pull_request_review` run uses the branch's file, so a scratch pull request in the same
   repository proves those before the merge.
+- Better still, report a required check from the pull request's own events alone. Since
+  2026-10-27 `pr-title` runs only on `pull_request`: a review run re-queued the required check
+  at an unchanged head after every approval, and the merge waited for it behind the Actions
+  queue. The review and comment scan is `pr-public-text.yaml`, which no ruleset requires. Its
+  verdict is a `public-text` commit status on the head, set by every run, since an `issue_comment`
+  run's own check lands on the default branch and a review comment's is left out of the pull
+  request's checks.
 
 ## Evidence
 
