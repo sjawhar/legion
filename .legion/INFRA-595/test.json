@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-595",
+  "completed": "2026-10-27T06:20:30Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2367",
+  "evidence": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6435228788",
+  "testedHead": "e55604e4f5c4fc9a9751b2a15403980039248f39",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "I drove the same surface myself. I built envoy-listener from main c3d09eec and from e55604e4 (git archive, GOWORK=off go build ./cmd/listener), seeded 30,000 records with a seeder I wrote, and measured /proc/<pid>/stat over 60 s. Head idle was 0.0005 cores and base 0.3743, which agrees with the implementer's 0.0003 and 0.44. A signed check_run settled after debounce + one tick, as the implementer saw. I re-ran e2e-local.sh (PASS) and BenchmarkSummary(Idle|Change) -count 3 at base and head; the numbers agree with bench-after/bench-before."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "The summary is recomputed only when an entry changes or falls due (event-driven, due entries in order); no step copies or sorts the whole cache.",
+      "surface": "the real envoy-listener binary (built from e55604e4 and from base c3d09eec) on a testnats natsd with 30,000 CI records in envoy_ci_state (1 in 100 waiting), ENVOY_WEBHOOKS=github, ENVOY_CI_DEBOUNCE=5s",
+      "command": "bash $TMPDIR/infra595-test/scenario.sh <listener-head|listener-base> <out> (throwaway: seed, 30 s warm-up, then utime+stime from /proc/<pid>/stat over 60 s three times: after the seed, after six probe records put straight into the bucket, after a natsd restart; a NATS subscriber on notifications.github.> records each settlement)",
+      "observed": "head 3 / 0 / 1 ticks in 60 s = 0.0005 / 0.0000 / 0.0002 cores. The 300 waiting records settled. With no other change: a last_event_at 20 s in the future settled at 634118 (due 633400), a claim stale at 609431 was reclaimed at the 610.11 tick and settled at 611112, a fresh claim stale at 618457 settled at 620113, a claim of an older generation settled 2 ticks after its put, and a schema-0 record whose grace ended at 616528 showed in envoy_ci_legacy_records_held at the 617.11 tick (0 at 616993, 1 at 618049) and was not published",
+      "headSha": "e55604e4f5c4fc9a9751b2a15403980039248f39",
+      "negativeControl": "base c3d09eec on the same seed: 2246 / 2184 / 2171 ticks = 0.3743 / 0.3640 / 0.3618 cores idle"
+    },
+    {
+      "criterion": "Benchmark at 12,000 and 30,000 records: idle near zero, per-change cost independent of size; before and after in the PR.",
+      "surface": "internal/cistore BenchmarkSummaryIdle / BenchmarkSummaryChange (summary_bench_test.go)",
+      "command": "GOWORK=off go test -run '^$' -bench 'BenchmarkSummary(Idle|Change)' -benchmem -count 3 ./internal/cistore/ in git-archive trees of e55604e4 and of c3d09eec (the bench file copied in)",
+      "observed": "head idle 273-296 ns/op (12,000) and 270-316 ns/op (30,000), 0 B/op, 0 allocs/op; head change 1579-2406 ns/op (12,000) and 1522-2151 ns/op (30,000), 280 B/op and 3 allocs/op at both sizes",
+      "headSha": "e55604e4f5c4fc9a9751b2a15403980039248f39",
+      "negativeControl": "base: idle 124-217 ms/op and 494k allocs/op at 12,000, 338-368 ms/op and 1.36M allocs/op at 30,000; it grows with the size"
+    },
+    {
+      "criterion": "Behaviour visible to callers unchanged; existing cistore tests pass; a test covers an entry falling due with no other change.",
+      "surface": "the real envoy-listener: the signed GitHub webhook route, two replicas on one NATS, a recreated envoy_ci_state bucket, a natsd restart; packages/envoy/scripts/e2e-local.sh",
+      "command": "scenario.sh (post_check_run with the right and with a wrong secret; natsd stopped and started on the same store); bash $TMPDIR/infra595-test/replicas.sh listener-head listener-head and listener-head listener-base (150 records due in 5 s + 50 with a stale claim, then rmbucket/mkbucket); reset-held.sh head/base; E2E_NATS_PORT=14522 E2E_PORT=19320 E2E_SESSION_PORT=19321 bash packages/envoy/scripts/e2e-local.sh",
+      "observed": "signed check_run: HTTP 200, settled 5.56 s after the post. After the natsd restart: healthy, a new check_run settled after 5.1 s. Two head replicas: 200 settlements on 200 distinct subjects, 0 duplicates; head beside base gave the same. Recreated bucket: both replicas log 'bucket was recreated', the record queued on a deadline in the old bucket never settled, a new record settled once, the held gauge went 2 -> 0 -> 1 on head as on base. e2e-local PASS with its four pr.42.checks settlements. CI at e55604e4: build and lint success; test, typecheck, changes and pr-title still queued or running when read",
+      "headSha": "e55604e4f5c4fc9a9751b2a15403980039248f39",
+      "negativeControl": "the same check_run signed with a wrong secret: HTTP 401 and no settlement on pr.42.checks"
+    },
+    {
+      "criterion": ".dispatch/architecture/envoy-listener.md says what is now true.",
+      "surface": ".dispatch/architecture/envoy-listener.md",
+      "command": "grep -c 'event-driven' .dispatch/architecture/envoy-listener.md; I read the sentence against loop.go (StartSummaryLoop, schedule, summarizer.pass) and cistore.go (markChangedLocked)",
+      "observed": "1. The sentence (change feed, deadline queue for debounce/claim/grace, a pass only on a one-second tick at which a record changed or fell due) matches the code and the runs above",
+      "headSha": "e55604e4f5c4fc9a9751b2a15403980039248f39",
+      "negativeControl": "at base c3d09eec the file has no 'event-driven' sentence (the diff adds it)"
+    }
+  ],
+  "observations": [
+    "A test gap, not a defect: summarizer.pass's handling of a recreated bucket ('if reset' drops the queue and the held set) has no test. A mutant with that branch removed passes GOWORK=off go test ./internal/cistore/ (ok, 15.4 s). On the real binary the mutant's envoy_ci_legacy_records_held goes 2 -> 2 -> 3 across a recreation where head goes 2 -> 0 -> 1. The head's behaviour is correct.",
+    "An overrun probe (a throwaway test: the first Publish blocks 20 ticks, tick 50 ms) behaves the same on base and head: one retry at once, then one on each tick, with no burst of catch-up passes."
+  ]
+}
