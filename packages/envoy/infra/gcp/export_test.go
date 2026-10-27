@@ -102,6 +102,10 @@ func RefuseClusteredHubSecret(value pulumi.StringInput, name, input string) pulu
 	return refuseDispatchSeedInSecret(value, clusteredHubType+" "+name, input)
 }
 
+// ProtectClusteredHubStatefulSet is gcp:ClusteredNatsHub's chart transform, for the test that
+// calls it directly: chart children are not registered under the mocks.
+var ProtectClusteredHubStatefulSet = protectClusteredHubStatefulSet
+
 // DispatchRollingUpdate is the resolved rolling update's bounds, for the tests outside the package.
 type DispatchRollingUpdate struct {
 	MaxUnavailable int

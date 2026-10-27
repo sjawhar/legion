@@ -198,7 +198,10 @@ type clusteredHubSettings struct {
 	monitorNamespaces            []string
 	metricsNamespaces            []string
 	authConf                     string
-	tailnet                      *clusteredHubTailnet
+	// sessionNKey is the session user's public key, "" without a session user: the hub pods'
+	// no-auth-user annotation, which rolls them when it changes (clusteredHubNoAuthUserAnnotation).
+	sessionNKey string
+	tailnet     *clusteredHubTailnet
 }
 
 // clusteredHubSize is each hub pod's volume, JetStream's file store within it, and nats-server's
@@ -387,6 +390,9 @@ func newClusteredHubSettings(args *ClusteredNatsHubArgs) (clusteredHubSettings, 
 	}
 	if s.authConf, err = auth.Render([]string{confHeader}); err != nil {
 		return clusteredHubSettings{}, authorizationRefusal(err)
+	}
+	if args.SessionUser != nil {
+		s.sessionNKey = args.SessionUser.NKey
 	}
 	return s, nil
 }
@@ -610,8 +616,9 @@ func authorizationRefusal(err error) error {
 }
 
 // NewClusteredNatsHub registers a clustered hub. It refuses a seed in its name, then every invalid
-// plain input, before it registers anything, and sets the outputs, which the plain inputs alone
-// decide, after the component registers.
+// plain input, before it registers anything, then registers its Kubernetes children on the
+// provider it builds from kubeconfig (newClusteredHubKubernetes), and sets the outputs, which the
+// plain inputs alone decide, after the component registers.
 func NewClusteredNatsHub(ctx *pulumi.Context, name string, args *ClusteredNatsHubArgs, opts ...pulumi.ResourceOption) (*ClusteredNatsHub, error) {
 	// The name is quoted in every refusal below and the component registers under it, so a seed
 	// there is refused first, as NewNatsHub refuses one in its own name.
@@ -637,6 +644,9 @@ func NewClusteredNatsHub(ctx *pulumi.Context, name string, args *ClusteredNatsHu
 	if t := s.tailnet; t != nil {
 		comp.TailnetNatsUrl = pulumi.StringPtr(t.natsURL).ToStringPtrOutput()
 		comp.TailnetEnvoyUrl = pulumi.StringPtr(t.envoyURL).ToStringPtrOutput()
+	}
+	if err := newClusteredHubKubernetes(ctx, comp, name, args, s); err != nil {
+		return nil, err
 	}
 	return comp, nil
 }

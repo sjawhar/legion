@@ -544,38 +544,16 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	}
 
 	podPeer := func(app string) networkingv1.NetworkPolicyPeerArgs {
-		return networkingv1.NetworkPolicyPeerArgs{PodSelector: &metav1.LabelSelectorArgs{MatchLabels: pulumi.StringMap{"app": pulumi.String(app)}}}
-	}
-	ingressFrom := func(port int, peers networkingv1.NetworkPolicyPeerArray) networkingv1.NetworkPolicyIngressRuleArgs {
-		return networkingv1.NetworkPolicyIngressRuleArgs{
-			From:  peers,
-			Ports: networkingv1.NetworkPolicyPortArray{networkingv1.NetworkPolicyPortArgs{Port: pulumi.Int(port)}},
-		}
+		return labelPeer(map[string]string{"app": app})
 	}
 	policy := func(name string, ingress networkingv1.NetworkPolicyIngressRuleArray) error {
-		_, err := networkingv1.NewNetworkPolicy(ctx, name, &networkingv1.NetworkPolicyArgs{
-			Metadata: metadata(name),
-			Spec: &networkingv1.NetworkPolicySpecArgs{
-				PodSelector: &metav1.LabelSelectorArgs{MatchLabels: pulumi.StringMap{"app": pulumi.String(name)}},
-				PolicyTypes: pulumi.StringArray{pulumi.String("Ingress")},
-				Ingress:     ingress,
-			},
-		}, child...)
-		return err
+		return networkPolicy(ctx, name, s.namespace, map[string]string{"app": name}, ingress, child...)
 	}
 	// An ingress rule with an empty from admits every source, so a named namespace gets a rule and
 	// no named namespace gets none.
 	appIngress := networkingv1.NetworkPolicyIngressRuleArray{}
 	if len(args.AllowedNamespaces) > 0 {
-		namespacePeers := make(networkingv1.NetworkPolicyPeerArray, 0, len(args.AllowedNamespaces))
-		for _, namespace := range args.AllowedNamespaces {
-			namespacePeers = append(namespacePeers, networkingv1.NetworkPolicyPeerArgs{
-				NamespaceSelector: &metav1.LabelSelectorArgs{
-					MatchLabels: pulumi.StringMap{"kubernetes.io/metadata.name": pulumi.String(namespace)},
-				},
-			})
-		}
-		appIngress = append(appIngress, ingressFrom(8766, namespacePeers))
+		appIngress = append(appIngress, ingressFrom(8766, namespacePeers(args.AllowedNamespaces)))
 	}
 	// The front door is a pod of this namespace, which no namespace selector covers, so without
 	// this rule Serve reaches the app at no port at all.
@@ -596,4 +574,47 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		return nil, err
 	}
 	return &dispatchKubernetes{kubeconfig: kubeconfig}, nil
+}
+
+// labelPeer is a NetworkPolicy peer admitting the pods of the policy's own namespace that wear
+// labels.
+func labelPeer(labels map[string]string) networkingv1.NetworkPolicyPeerArgs {
+	return networkingv1.NetworkPolicyPeerArgs{PodSelector: &metav1.LabelSelectorArgs{MatchLabels: pulumi.ToStringMap(labels)}}
+}
+
+// namespacePeers are NetworkPolicy peers admitting every pod of each namespace named, by the
+// kubernetes.io/metadata.name label Kubernetes sets on every namespace.
+func namespacePeers(namespaces []string) networkingv1.NetworkPolicyPeerArray {
+	peers := make(networkingv1.NetworkPolicyPeerArray, 0, len(namespaces))
+	for _, namespace := range namespaces {
+		peers = append(peers, networkingv1.NetworkPolicyPeerArgs{
+			NamespaceSelector: &metav1.LabelSelectorArgs{
+				MatchLabels: pulumi.StringMap{"kubernetes.io/metadata.name": pulumi.String(namespace)},
+			},
+		})
+	}
+	return peers
+}
+
+// ingressFrom is an ingress rule admitting peers to TCP port. A rule with an empty from admits
+// every source, so a caller with no peer to name writes no rule.
+func ingressFrom(port int, peers networkingv1.NetworkPolicyPeerArray) networkingv1.NetworkPolicyIngressRuleArgs {
+	return networkingv1.NetworkPolicyIngressRuleArgs{
+		From:  peers,
+		Ports: networkingv1.NetworkPolicyPortArray{networkingv1.NetworkPolicyPortArgs{Port: pulumi.Int(port)}},
+	}
+}
+
+// networkPolicy registers NetworkPolicy name in namespace: an Ingress policy on the pods wearing
+// pods' labels, admitting what ingress names and nothing else.
+func networkPolicy(ctx *pulumi.Context, name, namespace string, pods map[string]string, ingress networkingv1.NetworkPolicyIngressRuleArray, opts ...pulumi.ResourceOption) error {
+	_, err := networkingv1.NewNetworkPolicy(ctx, name, &networkingv1.NetworkPolicyArgs{
+		Metadata: &metav1.ObjectMetaArgs{Name: pulumi.String(name), Namespace: pulumi.String(namespace)},
+		Spec: &networkingv1.NetworkPolicySpecArgs{
+			PodSelector: &metav1.LabelSelectorArgs{MatchLabels: pulumi.ToStringMap(pods)},
+			PolicyTypes: pulumi.StringArray{pulumi.String("Ingress")},
+			Ingress:     ingress,
+		},
+	}, opts...)
+	return err
 }

@@ -114,7 +114,10 @@ func TestConstructTakesTheKubeconfigAndAuthKeyFromAnotherResource(t *testing.T) 
 	inputs["tailnetAuthKey"] = property.New(authKey).WithSecret(true).WithDependencies([]resource.URN{upstream})
 	m, resp, err := constructClustered(t, inputs, false)
 	require.NoError(t, err)
-	require.Equal(t, []string{clusteredHubType}, m.Types())
+	require.ElementsMatch(t, clusteredHubTypes, m.Types())
+	value, secret := pulumitest.Plain(m.Named(t, kubernetesProviderType, "envoy-nats-kubernetes").Inputs["kubeconfig"])
+	require.True(t, secret, "the kubeconfig reaches the hub's provider as a secret")
+	require.Equal(t, kubeconfig, value.StringValue())
 	requireClusteredOutputs(t, resp, true)
 }
 
@@ -218,6 +221,32 @@ func TestClusteredNatsHubRefusesABlankOrSeededSecretOnceItResolves(t *testing.T)
 				require.Equal(t, authKey, out.Value)
 				return nil
 			}))
+		})
+	}
+}
+
+// The hub builds its provider from kubeconfig only through that check: a blank kubeconfig and
+// one holding an nkey seed, each another resource's secret output sent through Construct, fail
+// the update naming kubeconfig and never the value, and no registration carries the value.
+func TestConstructRefusesABlankOrSeededKubeconfig(t *testing.T) {
+	seed, _ := testnats.User(t)
+	for _, row := range []struct{ name, value, want string }{
+		{"blank", " \n\t", "kubeconfig is blank, which no credential is"},
+		{"a seed inside it", kubeconfig + "# " + strings.ToLower(seed) + "\n", "kubeconfig holds an nkey seed (not echoed)"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			inputs := clusteredPlainInputs()
+			inputs["kubeconfig"] = property.New(row.value).WithSecret(true).WithDependencies([]resource.URN{upstream})
+			inputs["tailnetAuthKey"] = property.New(authKey).WithSecret(true)
+			m, _, err := constructClustered(t, inputs, false)
+			require.ErrorContains(t, err, clusteredHubType+" example-clustered-hub: "+row.want)
+			require.NotContains(t, strings.ToUpper(err.Error()), seed)
+			require.NotContains(t, m.Types(), kubernetesProviderType, "no provider is built from it")
+			for _, r := range m.Registrations() {
+				for _, s := range allStrings(resource.NewProperty(r.Inputs)) {
+					require.NotContains(t, strings.ToUpper(s), seed, "%s %s holds the seed", r.Type, r.Name)
+				}
+			}
 		})
 	}
 }

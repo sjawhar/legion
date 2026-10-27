@@ -104,7 +104,7 @@ func TestClusteredNatsHubOutputs(t *testing.T) {
 			}
 		})
 		require.NoError(t, err)
-		require.Equal(t, []string{clusteredHubType}, m.Types())
+		require.ElementsMatch(t, clusteredHubTypes, m.Types())
 		want := map[string]any{
 			"serviceUrl": "nats://envoy-nats.envoy.svc.cluster.local:4222",
 			"podSelector": map[string]string{
@@ -286,7 +286,7 @@ func TestClusteredNatsHubRefusesAnInvalidInputBeforeRegistering(t *testing.T) {
 
 	m, err = runClustered(t, "example-clustered-hub", clusteredArgs(), nil)
 	require.NoError(t, err)
-	require.Equal(t, []string{clusteredHubType}, m.Types())
+	require.ElementsMatch(t, clusteredHubTypes, m.Types())
 }
 
 // NewClusteredNatsHub quotes the name in every refusal and registers the component under it, so a
