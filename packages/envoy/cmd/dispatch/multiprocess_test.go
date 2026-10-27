@@ -15,7 +15,12 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/hkdf"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1164,6 +1169,97 @@ func waitOutABucketBoundary(t *testing.T, pair *dispatchPair, period time.Durati
 	time.Sleep(left + time.Second)
 }
 
+// ───── a sign-in across the processes ───────────────────────────────────────
+
+// cookieSignIn is the environment that has a process sign people in through issuer's code flow
+// under the group rule, on a plain-HTTP cookie, as the multiprocess sign-in rows run it.
+func cookieSignIn(issuer *oidctest.Issuer) map[string]string {
+	return map[string]string{
+		"DISPATCH_IDENTITY":             "cookie",
+		"DISPATCH_SIGNIN_ISSUER":        issuer.URL(),
+		"DISPATCH_SIGNIN_CLIENT_ID":     cookieClientID,
+		"DISPATCH_SIGNIN_CLIENT_SECRET": cookieClientSecret,
+		"DISPATCH_SIGNIN_GROUP":         cookieGroup,
+		"DISPATCH_INSECURE_COOKIE":      "1",
+	}
+}
+
+// multiprocessServerURL is the one public origin a pair behind a load balancer is reached at,
+// DISPATCH_SERVER_URL on both: each process builds the sign-in's redirect_uri from it, so the
+// process that exchanges the code names the redirect_uri the process that started the sign-in
+// sent the issuer, which the issuer requires. Without it each process would build its own from
+// the request's Host, and the issuer would refuse the exchange on the other process. Nothing here
+// resolves the name: the test carries every redirect itself.
+const multiprocessServerURL = "http://dispatch.multiprocess.test"
+
+// A person starts signing in on A and the issuer's redirect back lands on B, which is what a load
+// balancer does when it sends the browser's two requests to different tasks. The sign-in in
+// flight rides the browser's state cookie, signed under the pair's key, so B completes it: the
+// callback answers 302 to the page the sign-in started from, with a session cookie, and both
+// processes name the person on that cookie. Before INFRA-555 the state was held by the process
+// that started the sign-in, and B answered 400 "invalid or expired state".
+func TestASignInStartedOnOneProcessCompletesOnTheOther(t *testing.T) {
+	issuer := oidctest.New(t)
+	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), cookieClientID, cookieClientSecret)
+	env := cookieSignIn(issuer)
+	env["DISPATCH_SERVER_URL"] = multiprocessServerURL
+	pair := startPair(t, env)
+	issuer.SignInAs(map[string]any{
+		"sub":              "alice-subject",
+		"cognito:username": "ExampleIdP_" + cookiePerson,
+		"cognito:groups":   []string{cookieGroup},
+		"identities":       []map[string]any{{"providerName": "ExampleIdP"}},
+	})
+
+	const next = "/issues/XPS-1?tab=spec"
+	started := browserGet(t, pair.a.url("/auth/start?next="+url.QueryEscape(next)), nil)
+	_ = started.Body.Close()
+	if started.StatusCode != http.StatusFound {
+		t.Fatalf("/auth/start on A answered %d, want a redirect to the issuer:\n%s", started.StatusCode, pair.a.Output.String())
+	}
+	var state *http.Cookie
+	for _, cookie := range started.Cookies() {
+		if cookie.Name == "dispatch_oauth_state" && cookie.Value != "" {
+			state = cookie
+		}
+	}
+	if state == nil {
+		t.Fatalf("/auth/start on A set no sign-in state cookie: %v", started.Cookies())
+	}
+	authorize, err := url.Parse(started.Header.Get("Location"))
+	if err != nil {
+		t.Fatalf("parse the authorization URL A answered: %v", err)
+	}
+	if got, want := authorize.Query().Get("redirect_uri"), multiprocessServerURL+"/auth/callback"; got != want {
+		t.Fatalf("A sent the issuer redirect_uri %q, want %q, the pair's public origin", got, want)
+	}
+	code, returned := issuer.Authorize(t, authorize.String())
+
+	callback := browserGet(t, pair.b.url("/auth/callback?code="+url.QueryEscape(code)+"&state="+url.QueryEscape(returned)), state)
+	body, _ := io.ReadAll(callback.Body)
+	_ = callback.Body.Close()
+	if callback.StatusCode != http.StatusFound {
+		t.Fatalf("/auth/callback on B answered %d, want 302: %s\nB:\n%s", callback.StatusCode, body, pair.b.Output.String())
+	}
+	if location := callback.Header.Get("Location"); location != next {
+		t.Errorf("/auth/callback on B redirected to %q, want the page the sign-in started from, %q", location, next)
+	}
+	var session *http.Cookie
+	for _, cookie := range callback.Cookies() {
+		if cookie.Name == "dsession" && cookie.Value != "" {
+			session = cookie
+		}
+	}
+	if session == nil {
+		t.Fatalf("/auth/callback on B set no session cookie: %v", callback.Cookies())
+	}
+	for _, process := range []*dispatchProcess{pair.a, pair.b} {
+		if answer, status := whoami(t, process, session); status != http.StatusOK || !strings.Contains(answer, cookiePerson) {
+			t.Errorf("%s answered whoami %d %s, want 200 naming %s", pair.name(process), status, answer, cookiePerson)
+		}
+	}
+}
+
 // ───── one signing key across the processes ────────────────────────────────
 
 // A person signs in on one process and their next request lands on the other, which is what a
@@ -1174,16 +1270,8 @@ func waitOutABucketBoundary(t *testing.T, pair *dispatchPair, period time.Durati
 func TestASessionMintedOnOneProcessAuthenticatesOnTheOtherUnderOneSigningKey(t *testing.T) {
 	issuer := oidctest.New(t)
 	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), cookieClientID, cookieClientSecret)
-	signIn := map[string]string{
-		"DISPATCH_IDENTITY":             "cookie",
-		"DISPATCH_SIGNIN_ISSUER":        issuer.URL(),
-		"DISPATCH_SIGNIN_CLIENT_ID":     cookieClientID,
-		"DISPATCH_SIGNIN_CLIENT_SECRET": cookieClientSecret,
-		"DISPATCH_SIGNIN_GROUP":         cookieGroup,
-		"DISPATCH_INSECURE_COOKIE":      "1",
-	}
 	pair := newPair(t)
-	pair.start(t, signIn)
+	pair.start(t, cookieSignIn(issuer))
 
 	session := signInThrough(t, pair.a, issuer)
 	for _, target := range []struct {
@@ -1270,6 +1358,113 @@ func requireRefusedToStart(t *testing.T, p *dispatchProcess, name string) {
 	}
 	if p.logged(`msg="dispatch: listening"`) {
 		t.Errorf("%s logged that it serves:\n%s", name, output)
+	}
+}
+
+// The two keys TestAKeyRotationKeepsPeopleSignedInAcrossTwoProcesses rotates between: K0, the key
+// the pair ran under, and K1, the key it moves to.
+const (
+	rotationK0 = "multiprocess-rotation-k0"
+	rotationK1 = "multiprocess-rotation-k1"
+)
+
+// A rotation halfway rolled: A carries the new key first ("K1 K0") while B still signs with the
+// old one ("K0 K1"), each holding both, which the registry admits. Nobody is signed out on either
+// process. A person signed in on B holds a cookie signed and a refresh token sealed under K0, and
+// A answers that cookie. Once the confirmation lapses, A's request refreshes it, opening the K0
+// seal and sealing the token again under K1; once it lapses again, B's request refreshes it,
+// which opens that K1 seal. A cookie minted on A, under K1, is answered on B. Before INFRA-555 a
+// DISPATCH_SIGNING_KEY of two keys was one key, so each process refused the other's cookie.
+func TestAKeyRotationKeepsPeopleSignedInAcrossTwoProcesses(t *testing.T) {
+	issuer := oidctest.New(t)
+	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), cookieClientID, cookieClientSecret)
+	pair := newPair(t)
+	pair.a = startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
+		NATSURL: pair.nats, SigningKey: rotationK1 + " " + rotationK0, Env: cookieSignIn(issuer),
+	})
+	pair.b = startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
+		NATSURL: pair.nats, SigningKey: rotationK0 + " " + rotationK1, Env: cookieSignIn(issuer),
+	})
+	pair.a.waitHealthy(t)
+	pair.b.waitHealthy(t)
+
+	signedInOnB := signInThrough(t, pair.b, issuer)
+	requireWhoami(t, pair, pair.a, signedInOnB, "the cookie B minted under K0")
+	requireSealedUnder(t, pair.database, rotationK0, "the refresh token B's sign-in stored")
+
+	lapseConfirmation(t, pair.database)
+	refreshes := issuer.Refreshes()
+	requireWhoami(t, pair, pair.a, signedInOnB, "the cookie B minted, once the confirmation lapsed")
+	if got := issuer.Refreshes(); got != refreshes+1 {
+		t.Fatalf("A answered a lapsed confirmation with %d refreshes at the issuer, want 1", got-refreshes)
+	}
+	requireSealedUnder(t, pair.database, rotationK1, "the refresh token after A's refresh")
+
+	lapseConfirmation(t, pair.database)
+	refreshes = issuer.Refreshes()
+	requireWhoami(t, pair, pair.b, signedInOnB, "its own cookie, once the confirmation A renewed lapsed")
+	if got := issuer.Refreshes(); got != refreshes+1 {
+		t.Fatalf("B answered a lapsed confirmation with %d refreshes at the issuer, want 1: it did not refresh with the token A sealed", got-refreshes)
+	}
+	requireSealedUnder(t, pair.database, rotationK0, "the refresh token after B's refresh")
+
+	signedInOnA := signInThrough(t, pair.a, issuer)
+	requireWhoami(t, pair, pair.b, signedInOnA, "the cookie A minted under K1")
+}
+
+// requireWhoami requires that p answers /auth/whoami 200 naming cookiePerson on session.
+func requireWhoami(t *testing.T, pair *dispatchPair, p *dispatchProcess, session *http.Cookie, what string) {
+	t.Helper()
+	if answer, status := whoami(t, p, session); status != http.StatusOK || !strings.Contains(answer, cookiePerson) {
+		t.Fatalf("%s answered whoami on %s with %d %s, want 200 naming %s:\n%s",
+			pair.name(p), what, status, answer, cookiePerson, p.Output.String())
+	}
+}
+
+// lapseConfirmation dates cookiePerson's last confirmation two hours back, past the hour a
+// confirmation stands, so the next request either process answers for them refreshes it.
+func lapseConfirmation(t *testing.T, database *store.Store) {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(),
+		`update people set confirmed_at = now() - interval '2 hours' where email = $1`, cookiePerson); err != nil {
+		t.Fatalf("date the confirmation two hours back: %v", err)
+	}
+}
+
+// requireSealedUnder requires that the refresh token people holds for cookiePerson opens under
+// signingKey alone. It opens the value as the v1 seal format is pinned to stay (an AES-256-GCM key
+// derived from the signing key with HKDF-SHA256, a random nonce leading the ciphertext, the email
+// as additional data), so it tells which key of the two sealed it, which a process holding both
+// cannot show.
+func requireSealedUnder(t *testing.T, database *store.Store, signingKey, what string) {
+	t.Helper()
+	var sealed string
+	if err := database.Pool.QueryRow(context.Background(),
+		`select refresh_token from people where email = $1`, cookiePerson).Scan(&sealed); err != nil {
+		t.Fatalf("read %s: %v", what, err)
+	}
+	encoded, ok := strings.CutPrefix(sealed, "v1:")
+	if !ok {
+		t.Fatalf("%s is not in the v1 sealed format", what)
+	}
+	ciphertext, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("%s does not decode: %v", what, err)
+	}
+	key, err := hkdf.Key(sha256.New, []byte(signingKey), nil, "dispatch people.refresh_token v1", 32)
+	if err != nil {
+		t.Fatalf("derive the refresh-token key: %v", err)
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatalf("refresh-token cipher: %v", err)
+	}
+	aead, err := cipher.NewGCMWithRandomNonce(block)
+	if err != nil {
+		t.Fatalf("refresh-token AEAD: %v", err)
+	}
+	if _, err := aead.Open(nil, nil, ciphertext, []byte(cookiePerson)); err != nil {
+		t.Fatalf("%s does not open under %s alone", what, signingKey)
 	}
 }
 
