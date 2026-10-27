@@ -1,0 +1,110 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-367",
+  "completed": "2026-10-27T07:15:20Z",
+  "plan": "dispatch://INFRA-367/artifact/plan-md",
+  "base": "b69f636f (main, #2210)",
+  "summary": "Every graph node the API returns (GET /api/v1/references node, edges[].node, edges[].block; GET /api/v1/block-links from, to, links[].from, links[].to) gains made_by, made_at, changed_by, changed_at (on every kind, keeping the block meaning), parent {kind,id,ref?} and parent_version, for issue, artifact, document block, ask, comment, message, component and session; dispatch read prints a Node: line. Recorded from this change on: comments/asks.written_version (before-insert trigger + backfill migration) and component_facts (importer upsert). Proven by Go store/API/importer tests, the CLI Bun tests and an R12 section of packages/dispatch/e2e/acceptance/block-graph.sh on the local harness; production run after the close.",
+  "tasks": [
+    "Task 0: rootless Postgres harness (INFRA-42 record); one Envoy message to notifications.role.legion-infra-infra-156-implementer naming shared files and migration numbers",
+    "Task 1: migrations <N>_node_facts (written_version columns, before-insert trigger on comments and asks, component_facts + seed) and <N+1>_written_version_backfill; store/node_facts_migration_test.go",
+    "Task 2: model.GraphNode + NodeParent; every loader in refs/graph.go; removed-pin node in api/references.go; api/node_facts_test.go; update whole-node comparisons references_test.go:250,259 and block_references_test.go:469,836; EXPLAIN of the issue-events and ask-edit laterals",
+    "Task 3: architecture/importer.go component_facts upsert and orphan delete, same delete in the source delete handler; TestComponentFactsRecordWhenAComponentWasMadeAndChanged",
+    "Task 4: contracts GraphNode fields + GraphNodeParent; envoy-client Node: line in graphSections and the block read; dispatch-execute tests; claude-envoy dist rebuild",
+    "Task 5: block-graph.sh R12 section with COMPONENT_SOURCE=fixture|existing|none; checks on live blocks (changes.md P and R), the removed pin, edge ends, block-links, components, the session via followed_by, and the CLI Node: lines",
+    "Task 6: docs (envoy AGENTS.md, cmd/dispatch README and AGENTS.md, contracts AGENTS.md, dispatch AGENTS.md, skills/dispatch reading reference) and five changelogs"
+  ],
+  "acceptance": [
+    {
+      "criterion": "R12/A11 for issue, artifact (document, file, image), document block, ask, comment, message, component and session, as the node asked for and as the other end of an edge (edges[].block and block-links included)",
+      "surface": "HTTP API and the real dispatch CLI on the local harness (bun run dispatch:local)",
+      "command": "DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9022 bash packages/dispatch/e2e/acceptance/block-graph.sh",
+      "negativeControl": "the head's driver against a server built at the merge-base: FAIL: R12 on its first R12 check, earlier sections PASS"
+    },
+    {
+      "criterion": "An unanchored document comment's and ask's version, an approval ask's version, older rows backfilled, the earlier build's inserts recorded",
+      "surface": "Go store tests on real Postgres",
+      "command": "cd packages/envoy && go test ./internal/dispatch/store/ -run 'TestTheWrittenVersion|TestComponentFacts|TestEveryShippedCensus|TestTheCensusPair' -count=1 -v",
+      "negativeControl": "at the base the tests do not compile (written_version absent)"
+    },
+    {
+      "criterion": "Per-kind facts, a block's maker when it predates indexing, pinned blocks, a block ask's version, what a change moves",
+      "surface": "Go API tests on real Postgres",
+      "command": "cd packages/envoy && go test ./internal/dispatch/refs/ ./internal/dispatch/api/ -run 'TestEveryNodeKind|TestTheFactsOf|TestAChangeMoves|TestABlockSeenFirst|TestAPinnedBlockCarries|TestABlockAskBelongs|TestReferences|TestArtifactReferences|TestIssueReferences|TestBlockLinks|TestTheBlock' -count=1 -v",
+      "negativeControl": "tester mutations: F alone instead of the F-1 rule fails TestABlockSeenFirst; counting ask.answered as a change fails TestAChangeMoves"
+    },
+    {
+      "criterion": "Component times recorded across imports",
+      "surface": "Go importer test",
+      "command": "cd packages/envoy && go test ./internal/dispatch/architecture/ ./internal/dispatch/api/ -run 'TestComponentFacts|TestGraphEdgesCarriesTheComponentArms|TestArchitectureSource' -count=1 -v",
+      "negativeControl": "delete-and-reinsert without the upsert fails on the re-import"
+    },
+    {
+      "criterion": "dispatch read prints the facts",
+      "surface": "the real CLI on the harness, and the Bun test",
+      "command": "cd packages/envoy-client && bun test src/__tests__/dispatch-execute.test.ts",
+      "negativeControl": "against the base build's server the CLI prints no Node: line"
+    },
+    {
+      "criterion": "Production record",
+      "surface": "production Dispatch after the close",
+      "command": "the deployment instructions' dispatch-production-check.sh with --route /api/v1/references --route /api/v1/block-links, then the driver with PROJECT=LEGSMOKE COMPONENT_SOURCE=none (production had no architecture source on 2026-10-27)",
+      "negativeControl": "none: a record"
+    }
+  ],
+  "decisions": [
+    "What counts as a change is the node's own edit route: issue PATCH (issue.created/updated/closed), ask wording edits (ask.edited), comment body edits; claims, answers, resolutions and suggestion decisions do not move changed_*",
+    "An approval ask's parent is the document it asks a person to approve (approval.artifact_id), at the version it named when opened",
+    "Unanchored document comments and asks record written_version at insert from this release on (a before-insert trigger, so the earlier build's inserts during the roll are recorded); older rows are backfilled from the ask.opened event (approval asks) or by timestamp",
+    "A block's maker is the first version that held it when Dispatch knows it (F = 1, or version F-1 indexed); otherwise empty",
+    "Component made_at/changed_at are recorded from this release on in component_facts; existing components answer null until they change; made_by/changed_by stay empty",
+    "parent.id is the parent node's own id (an artifact's uuid), not its ref_key as the tree plan's test had it",
+    "dispatch read prints the Node: line for the node it reads; edge rows keep their shape"
+  ],
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker with references/pr-body.md, default-branch-check.md, conflicts-and-rewrites.md, tools.md: the phase's steps, proofs and PR body",
+      "skill://ce-simplify-code: the simplify pass before the proof at the head",
+      "skill://dispatch: the LEGSMOKE production run and the production record on the issue",
+      "skill://envoy: the Task 0 message to the root issue's implementer about shared files and migration numbers"
+    ],
+    "test": [
+      "skill://legion-worker with references/pr-body.md: what a tester re-runs (the driver at head and base, the Go and Bun tests) and the two mutation controls",
+      "skill://dispatch: reading LEGSMOKE and the issue's plan document"
+    ],
+    "review": [
+      "skill://legion-worker with references/merge-gate.md and review-threads.md: the review and the approval of the head",
+      "skills/thermonuclear-deep-review/SKILL.md: correctness of the loaders, the trigger and backfill, and the importer upsert",
+      "skills/thermonuclear-code-quality/SKILL.md: structure of the loader changes and the shared block-first-version helper"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "A block's maker from min(document_block_texts.version) is wrong for blocks that existed before indexing (indexOwedDocument indexes the latest version only, docs/block_index.go:316-326)", "answer": "Design 2: maker known only when F = 1 or version F-1 is indexed; else made_by [] and made_at null; TestABlockSeenFirstAtItsDocumentsFirstIndexingHasNoMaker"},
+      {"finding": "The unanchored item version guessed from timestamps races, and the claim that the census forbids backfills is false (0089)", "answer": "Design 3: written_version recorded at insert by a before-insert trigger; a 0089-style backfill migration for older rows (ask.opened event for approval asks, timestamp for the rest); store migration tests"},
+      {"finding": "The approval-ask parent rule contradicted itself; an issue-document approval ask has artifact_id null (api/reviews.go:478-480, api/owner.go:43-46)", "answer": "Decision 2: approval.artifact_id at the version named at opening, on issue and project documents alike"},
+      {"finding": "'Own text or fields' was ambiguous (claims, resolutions, ask state)", "answer": "Design 1 rule: the node's own edit route, citing R12's answer example and the prior art's 'last edited'; TestAChangeMovesOnlyTheChangedNode"},
+      {"finding": "Facts of a pinned block node were undefined; the removed node needs its own queries", "answer": "Design 2: current pin = the current block's facts; removed pin = first version's maker, removing version's change, parent_version the last indexed version before removal; TestAPinnedBlockCarriesItsFacts; driver check on $pin"},
+      {"finding": "'dispatch read prints them' was underspecified: graphEdges drops the node, the block read builds its own head, no component/session read, DM thread has no graph", "answer": "Design 5: exact Node: line format, printed by graphSections and the block read; Bun tests for each read path and the older-server case; component and session read through the API"},
+      {"finding": "The driver's acceptance needed exact per-kind expectations; the tree plan's helpers do not exist; session reachable only via followed_by; comment edits need a human", "answer": "Task 5: exact jq projections with the driver's own helpers; session via ?from=<ask>&kind=followed_by; comment changed_* proven in Go tests"},
+      {"finding": "Driver surfaces missed edges[].block and block-links", "answer": "Task 5 and TestTheFactsOfAnEdgesOtherEndAreTheNodesOwn compare edges[].block and every block-links node with the node's own ?to= read"},
+      {"finding": "Component harness facts were wrong (FAKE_GITHUB_PORT, PUT /__fixture/repos); UNAVAILABLE breaks the driver's PASS/FAIL contract", "answer": "COMPONENT_SOURCE=fixture|existing|none, each a PASS or FAIL; the trap deletes the source; production checked with none (GET /api/v1/settings/architecture-sources answered [] on 2026-10-27)"},
+      {"finding": "component_facts gaps: re-added components, digest fields, earlier-build imports, made_by", "answer": "Design 4: orphan delete in the import and the source delete handler, digest fields named, roll behaviour stated, made_by empty with reason; importer test"},
+      {"finding": "The driver leaves an open ask visible to people in production", "answer": "Task 5: the driver resolves its ask before closing and in the trap"},
+      {"finding": "No coordination with the root issue's concurrent PR or migration numbers", "answer": "Task 0 Envoy message; numbers follow main's head, the second to merge renumbers"},
+      {"finding": "Event lookups risk slow reads; the partial index needs its exact type list", "answer": "Task 2: lateral limit-1 per key, batched per loader, the ask statement repeats 0030's type list; EXPLAIN recorded in the implementer's handoff"},
+      {"finding": "A block ask's version source was open", "answer": "Design 2: F of its block by the same rule; TestABlockAskBelongsToTheVersionThatAddedIt"},
+      {"finding": "Parent references need loader joins; a component parent may name a missing component", "answer": "Design 1 'Parent references' lists the joins; a missing parent component gives parent null"}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 2},
+  "specDepartures": [
+    {
+      "spec": "Issue spec, Proof: the driver's R12 section runs on the local harness before the merge and on production after it, for every node kind",
+      "plan": "Component nodes are proven on the local harness through its fake GitHub; the production run asserts that production holds no component node (COMPONENT_SOURCE=none) instead of reading one",
+      "evidence": "GET /api/v1/settings/architecture-sources on production answered [] on 2026-10-27 (agent bearer, read only): no project has an architecture source, so no component node exists to read",
+      "outcome": {"kind": "changed", "scope": "The production proof of A11 for component nodes; every other kind is unchanged"}
+    }
+  ]
+}
