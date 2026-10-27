@@ -10,10 +10,17 @@
 -- had every push arrived first, in whatever order GitHub delivered them. The run closes once every
 -- head in it has its pushes, and is cut to its newest steps when it grows past its bound.
 --
--- null on every existing row: no run is open, so a head that arrived before the deploy is judged as
--- the release before judged it, and a late push for it takes nothing back.
+-- head_moves (record.PullRequest.Moves) is the moves the record made, the last 32: a push is spent
+-- when its own move - its two heads - is among them, so a push that returns the branch to a commit
+-- it held before is never spent by the commit's first arrival.
+--
+-- null head_run and '[]' head_moves on every existing row: no run is open, so a head that arrived
+-- before the deploy is judged as the release before judged it, and a late push for it takes nothing
+-- back; a late push for a move made before the deploy waits as a push not yet linked, until the
+-- bound on such pushes lets it go.
 alter table pull_requests
   add column head_run jsonb,
+  add column head_moves jsonb not null default '[]',
   drop column head_counted_before,
   drop column head_counted_from,
   drop column head_arrived_from;

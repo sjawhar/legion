@@ -29,14 +29,14 @@ func TestAPullRequestRecordedBefore0060HasNoHeadRunOpen(t *testing.T) {
 		t.Fatalf("migrate: %v", err)
 	}
 	var attempts int
-	var counted string
+	var counted, moves string
 	var open bool
-	if err := store.Pool().QueryRow(ctx, `select fix_attempts, head_counted, head_run is not null from pull_requests where issue = 'LEGION-208'`).
-		Scan(&attempts, &counted, &open); err != nil {
+	if err := store.Pool().QueryRow(ctx, `select fix_attempts, head_counted, head_run is not null, head_moves::text from pull_requests where issue = 'LEGION-208'`).
+		Scan(&attempts, &counted, &open, &moves); err != nil {
 		t.Fatalf("read the pull request after 0060: %v", err)
 	}
-	if attempts != 3 || counted != "h4" || open {
-		t.Fatalf("fix_attempts=%d head_counted=%q head run open %v after 0060, want 3, \"h4\" and none", attempts, counted, open)
+	if attempts != 3 || counted != "h4" || open || moves != "[]" {
+		t.Fatalf("fix_attempts=%d head_counted=%q head run open %v head_moves %s after 0060, want 3, \"h4\", none and []", attempts, counted, open, moves)
 	}
 	var dropped int
 	if err := store.Pool().QueryRow(ctx, `select count(*) from information_schema.columns where table_name = 'pull_requests'

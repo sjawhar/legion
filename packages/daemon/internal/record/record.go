@@ -396,6 +396,11 @@ type PullRequest struct {
 	// and said which head it replaced, which carry an approval across, and the pushes whose heads
 	// have not arrived yet. A push that may change code is spent once its head arrives.
 	Pushes []ClassifiedPush
+	// Moves are the moves the record has made, newest last and at most the last 32: each head's
+	// arrival from the head before it, and each push on the chain of pushes it found between them. A
+	// push whose own move is among them is spent (classify.keptPushes), whenever it arrives; a push
+	// for a move not made yet - one that returns the branch to a commit it held before, say - is not.
+	Moves []Move
 	// HeadCounted is the head the fix-attempt count last counted, a push onto a red verdict, kept
 	// across every head pushed on top of it until one is pushed onto a green verdict, or onto a
 	// settled head whose base branch requires no check and no workflow
@@ -454,11 +459,14 @@ type HeadRun struct {
 	Anchor Judgement        `json:"anchor"`
 	Pushes []ClassifiedPush `json:"pushes"`
 	Steps  []RunStep        `json:"steps"`
+	// Since is when the run opened, by the daemon's clock: a red is held while the run waits for a
+	// push, for a bounded time from then (workflow's holdsRed).
+	Since time.Time `json:"since,omitzero"`
 }
 
 // Judgement is the part of a pull request a head run replays: its head, its fix-attempt count and
-// marks, its planned mark, its CI settlement, and what its base branch requires. BlockedAttempts
-// is what was reported, and is not replayed.
+// marks, its planned mark, its CI settlement, what its base branch requires, and the moves it has
+// made. BlockedAttempts is what was reported, and is not replayed.
 type Judgement struct {
 	HeadSHA       string             `json:"headSha"`
 	FixAttempts   int                `json:"fixAttempts"`
@@ -473,6 +481,13 @@ type Judgement struct {
 	Required      []string           `json:"required"`
 	Workflows     []RequiredWorkflow `json:"workflows"`
 	WorkflowsHead string             `json:"workflowsHead,omitempty"`
+	Moves         []Move             `json:"moves,omitempty"`
+}
+
+// Move is a move from the head Before to the head SHA, which a push with the same two heads makes.
+type Move struct {
+	Before string `json:"before"`
+	SHA    string `json:"sha"`
 }
 
 // RunStep is one fact a head run replays: exactly one of a head's arrival (Head), a CI settlement

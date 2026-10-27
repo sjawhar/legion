@@ -211,24 +211,33 @@ func TestPushesAreSpentOnceTheirMoveIsJudged(t *testing.T) {
 	}
 }
 
-// A push behind a webhook that never arrives is spent by no head's arrival: the walk back from
-// each head stops at the gap. The pull request keeps at most maxWaitingPushes of them, letting the
-// oldest go first and saying which it let go (DroppedPushes).
-func TestPushesWaitingBehindLostWebhooksAreBounded(t *testing.T) {
+// A push that links into no move the record makes - one of a line of commits the branch never
+// takes, or one behind a webhook that never arrives - is spent by no move. The pull request keeps
+// at most maxWaitingPushes of them, letting the oldest go first and saying which it let go
+// (DroppedPushes), and not counting there the pushes a move spent.
+func TestPushesWaitingForALinkAreBounded(t *testing.T) {
 	pr := record.PullRequest{HeadSHA: "c0"}
-	dropped := 0
 	for i := 1; i <= 80; i++ {
-		head := fmt.Sprintf("c%d", i)
-		pr = AdvancePullRequestHead(pr, head)
+		pr = AdvancePullRequestHead(pr, fmt.Sprintf("c%d", i))
 		if i%2 == 0 {
 			continue // this move's push webhook is lost
 		}
-		// The push of the move before last arrives late, behind the lost one.
 		prior := pr
 		pr = ApplyPush(pr, record.ClassifiedPush{SHA: fmt.Sprintf("c%d", i-1), Before: fmt.Sprintf("c%d", i-2)})
-		dropped += len(DroppedPushes(prior.Pushes, pr.Pushes))
+		if dropped := DroppedPushes(prior, pr); len(dropped) != 0 {
+			t.Fatalf("after %d moves the push let go %+v, want none: a move spent it", i, dropped)
+		}
 		if len(pr.Pushes) > maxWaitingPushes {
 			t.Fatalf("after %d moves %d pushes are kept, want at most %d", i, len(pr.Pushes), maxWaitingPushes)
+		}
+	}
+	dropped := 0
+	for i := 1; i <= 40; i++ {
+		prior := pr
+		pr = ApplyPush(pr, record.ClassifiedPush{SHA: fmt.Sprintf("a%d", i), Before: fmt.Sprintf("a%d", i-1)})
+		dropped += len(DroppedPushes(prior, pr))
+		if len(pr.Pushes) > maxWaitingPushes {
+			t.Fatalf("after %d pushes of a line the branch never takes %d pushes are kept, want at most %d", i, len(pr.Pushes), maxWaitingPushes)
 		}
 	}
 	if dropped == 0 {

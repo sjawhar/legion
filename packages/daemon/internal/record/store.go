@@ -390,7 +390,7 @@ func scanPhase(row scanner) (PhaseRow, error) {
 
 const pullRequestColumns = `issue, repo, number, branch, head_sha, head_updated_at,
 	failing, cancelled, fix_attempts, blocked_attempts, check_runs,
-	generation, snapshot, pushes, head_counted, head_run, planned_red, review_seen, review_seen_at, state,
+	generation, snapshot, pushes, head_moves, head_counted, head_run, planned_red, review_seen, review_seen_at, state,
 	checked_head, required, required_workflows, required_workflows_head, mergeability, merge_sha`
 
 func (s *Postgres) PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*PullRequest, error) {
@@ -468,6 +468,10 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 	if err != nil {
 		return fmt.Errorf("put pull request for %s: encode pushes: %w", pr.Issue, err)
 	}
+	moves, err := json.Marshal(append([]Move{}, pr.Moves...))
+	if err != nil {
+		return fmt.Errorf("put pull request for %s: encode moves: %w", pr.Issue, err)
+	}
 	// A set never read is null, never an empty list, which is a base that requires no check.
 	var required []byte
 	if pr.Required != nil {
@@ -487,16 +491,16 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 		}
 	}
 	_, err = tx.Exec(ctx, `insert into pull_requests (issue, repo, number, branch, head_sha, head_updated_at,
-		failing, cancelled, fix_attempts, blocked_attempts, check_runs, generation, snapshot, pushes,
+		failing, cancelled, fix_attempts, blocked_attempts, check_runs, generation, snapshot, pushes, head_moves,
 		head_counted, head_run, planned_red, review_seen, review_seen_at, state, checked_head, required,
 		required_workflows, required_workflows_head, mergeability, merge_sha)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
 		on conflict (issue) do update set repo = excluded.repo, number = excluded.number, branch = excluded.branch,
 		head_sha = excluded.head_sha, head_updated_at = excluded.head_updated_at,
 		failing = excluded.failing, cancelled = excluded.cancelled, fix_attempts = excluded.fix_attempts,
 		blocked_attempts = excluded.blocked_attempts, check_runs = excluded.check_runs,
 		generation = excluded.generation, snapshot = excluded.snapshot,
-		pushes = excluded.pushes, head_counted = excluded.head_counted, head_run = excluded.head_run,
+		pushes = excluded.pushes, head_moves = excluded.head_moves, head_counted = excluded.head_counted, head_run = excluded.head_run,
 		planned_red = excluded.planned_red, review_seen = excluded.review_seen,
 		review_seen_at = excluded.review_seen_at, state = excluded.state, checked_head = excluded.checked_head,
 		required = excluded.required, required_workflows = excluded.required_workflows,
@@ -504,7 +508,7 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 		merge_sha = excluded.merge_sha`,
 		pr.Issue, pr.Repo, pr.Number, pr.Branch, pr.HeadSHA, pr.HeadUpdatedAt,
 		failing, cancelled, pr.FixAttempts, pr.BlockedAttempts, checkRuns,
-		pr.Generation, pr.Snapshot, pushes, pr.HeadCounted, run, pr.PlannedRed,
+		pr.Generation, pr.Snapshot, pushes, moves, pr.HeadCounted, run, pr.PlannedRed,
 		pr.ReviewSeen.ID, pr.ReviewSeen.SubmittedAt, pr.State, pr.CheckedHead, required,
 		workflows, pr.WorkflowsHead, pr.Mergeability, pr.MergeSHA,
 	)
@@ -577,10 +581,10 @@ func clearGeneration(ctx context.Context, tx pgx.Tx, where, issues, key, describ
 
 func scanPullRequest(row scanner) (*PullRequest, error) {
 	var pr PullRequest
-	var failing, cancelled, checkRuns, pushes, required, workflows, run []byte
+	var failing, cancelled, checkRuns, pushes, moves, required, workflows, run []byte
 	if err := row.Scan(&pr.Issue, &pr.Repo, &pr.Number, &pr.Branch, &pr.HeadSHA, &pr.HeadUpdatedAt,
 		&failing, &cancelled, &pr.FixAttempts, &pr.BlockedAttempts, &checkRuns, &pr.Generation, &pr.Snapshot,
-		&pushes, &pr.HeadCounted, &run, &pr.PlannedRed, &pr.ReviewSeen.ID, &pr.ReviewSeen.SubmittedAt, &pr.State,
+		&pushes, &moves, &pr.HeadCounted, &run, &pr.PlannedRed, &pr.ReviewSeen.ID, &pr.ReviewSeen.SubmittedAt, &pr.State,
 		&pr.CheckedHead, &required, &workflows, &pr.WorkflowsHead, &pr.Mergeability, &pr.MergeSHA); err != nil {
 		return nil, err
 	}
@@ -595,6 +599,9 @@ func scanPullRequest(row scanner) (*PullRequest, error) {
 	}
 	if err := json.Unmarshal(pushes, &pr.Pushes); err != nil {
 		return nil, fmt.Errorf("decode pushes: %w", err)
+	}
+	if err := json.Unmarshal(moves, &pr.Moves); err != nil {
+		return nil, fmt.Errorf("decode moves: %w", err)
 	}
 	if required != nil {
 		if err := json.Unmarshal(required, &pr.Required); err != nil {

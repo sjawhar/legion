@@ -199,58 +199,83 @@ func TestAPushForAHeadNotYetArrivedChangesNoJudgement(t *testing.T) {
 	}
 }
 
-// A pull request whose heads each arrive before their pushes keeps a bounded head run: the run's
-// front folds into its anchor as each push arrives, so the stored run stays as long as the pushes
-// lag, here three heads. A push lost for good keeps the run open at its head; the run is cut to its
-// newest maxRunSteps steps and stays that size, however many heads follow.
+// tenChecks is the check runs of one settlement on a head with ten required checks, the size of a
+// real settlement step.
+func tenChecks(head int) []record.AttemptRun {
+	runs := make([]record.AttemptRun, 10)
+	for i := range runs {
+		runs[i] = record.AttemptRun{Name: fmt.Sprintf("check-%d", i), ID: int64(head*10 + i)}
+	}
+	return runs
+}
+
+// A pull request whose heads each arrive before their pushes keeps a bounded head run and record:
+// the run's front folds into its anchor as each push arrives, so the stored run stays as long as
+// the pushes lag, here three heads. A push lost for good keeps the run open at its head; the run is
+// cut to its newest maxRunSteps steps and stays that size, however many heads follow. Every second
+// push is handoff-only, which the record keeps for good (it carries an approval across) and the
+// run does not copy; each settlement holds ten check runs and is delivered twice, and the second
+// delivery takes no step.
 func TestAHeadRunStaysBounded(t *testing.T) {
-	sizes := func(pr record.PullRequest) (int, int, int) {
-		if pr.Run == nil {
-			return 0, 0, 0
-		}
-		encoded, err := json.Marshal(pr.Run)
+	encoded := func(v any) int {
+		b, err := json.Marshal(v)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return len(pr.Run.Steps), len(pr.Run.Pushes), len(encoded)
+		return len(b)
 	}
 	for _, tc := range []struct {
 		name                string
 		lost                int
 		maxSteps, maxPushes int
 	}{
-		{"every push three heads late", -1, 8, 8},
-		{"the fifth push lost", 5, maxRunSteps, maxRunSteps + 8},
+		{"every push three heads late", -1, 8, 4},
+		{"the fifth push lost", 5, maxRunSteps, maxRunSteps},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			pr := record.PullRequest{HeadSHA: "c0", CheckedHead: "c0", Failing: []string{"ci"}, Required: []string{"ci"}, CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}}
-			largest := 0
+			pr := record.PullRequest{HeadSHA: "c0", CheckedHead: "c0", Failing: []string{"check-0"}, Required: []string{"check-0"}, CheckRuns: tenChecks(0)}
+			largestRun, largestMoves := 0, 0
 			for i := 1; i <= 200; i++ {
 				pr = AdvancePullRequestHead(pr, fmt.Sprintf("c%d", i))
-				pr, _ = ApplyCheckSettlement(pr, SettlementCandidate{Head: fmt.Sprintf("c%d", i), CheckRuns: []record.AttemptRun{{Name: "ci", ID: int64(i + 1)}},
-					Generation: int64(i + 1), Snapshot: fmt.Sprintf("s%d", i), Failing: []string{"ci"}})
+				settlement := SettlementCandidate{Head: fmt.Sprintf("c%d", i), CheckRuns: tenChecks(i), Generation: int64(i + 1),
+					Snapshot: fmt.Sprintf("s%d", i), Failing: []string{"check-0"}}
+				pr, _ = ApplyCheckSettlement(pr, settlement)
+				steps := 0
+				if pr.Run != nil {
+					steps = len(pr.Run.Steps)
+				}
+				if pr, _ = ApplyCheckSettlement(pr, settlement); pr.Run != nil && len(pr.Run.Steps) != steps {
+					t.Fatalf("after %d heads the redelivered settlement took a step: %d steps, want %d", i, len(pr.Run.Steps), steps)
+				}
 				if late := i - 3; late >= 1 && late != tc.lost {
-					pr = ApplyPush(pr, record.ClassifiedPush{SHA: fmt.Sprintf("c%d", late), Before: fmt.Sprintf("c%d", late-1)})
+					pr = ApplyPush(pr, record.ClassifiedPush{SHA: fmt.Sprintf("c%d", late), Before: fmt.Sprintf("c%d", late-1), HandoffOnly: late%2 == 0})
 				}
-				steps, pushes, size := sizes(pr)
-				largest = max(largest, size)
-				if steps > tc.maxSteps || pushes > tc.maxPushes {
-					t.Fatalf("after %d heads the head run holds %d steps and %d pushes, want at most %d and %d", i, steps, pushes, tc.maxSteps, tc.maxPushes)
+				if pr.Run != nil {
+					largestRun = max(largestRun, encoded(pr.Run))
+					if len(pr.Run.Steps) > tc.maxSteps || len(pr.Run.Pushes) > tc.maxPushes {
+						t.Fatalf("after %d heads the head run holds %d steps and %d pushes, want at most %d and %d",
+							i, len(pr.Run.Steps), len(pr.Run.Pushes), tc.maxSteps, tc.maxPushes)
+					}
 				}
+				if len(pr.Moves) > maxMoves {
+					t.Fatalf("after %d heads the record holds %d moves, want at most %d", i, len(pr.Moves), maxMoves)
+				}
+				largestMoves = max(largestMoves, encoded(pr.Moves))
 			}
-			t.Logf("largest stored head run: %d bytes", largest)
+			t.Logf("largest stored head run: %d bytes; largest stored moves: %d bytes; pushes kept at the end: %d (%d bytes)",
+				largestRun, largestMoves, len(pr.Pushes), encoded(pr.Pushes))
 		})
 	}
 }
 
-// BenchmarkReplayAtTheBound replays a head run of maxRunSteps steps - heads and settlements
-// alternating, every head waiting for its push - which is the most a push replays.
+// BenchmarkReplayAtTheBound replays a head run of maxRunSteps steps - heads and settlements of ten
+// check runs alternating, every head waiting for its push - which is the most a push replays.
 func BenchmarkReplayAtTheBound(b *testing.B) {
-	pr := record.PullRequest{HeadSHA: "c0", CheckedHead: "c0", Failing: []string{"ci"}, Required: []string{"ci"}, CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}}
+	pr := record.PullRequest{HeadSHA: "c0", CheckedHead: "c0", Failing: []string{"check-0"}, Required: []string{"check-0"}, CheckRuns: tenChecks(0)}
 	for i := 1; pr.Run == nil || len(pr.Run.Steps) < maxRunSteps; i++ {
 		pr = AdvancePullRequestHead(pr, fmt.Sprintf("c%d", i))
-		pr, _ = ApplyCheckSettlement(pr, SettlementCandidate{Head: fmt.Sprintf("c%d", i), CheckRuns: []record.AttemptRun{{Name: "ci", ID: int64(i + 1)}},
-			Generation: int64(i + 1), Snapshot: fmt.Sprintf("s%d", i), Failing: []string{"ci"}})
+		pr, _ = ApplyCheckSettlement(pr, SettlementCandidate{Head: fmt.Sprintf("c%d", i), CheckRuns: tenChecks(i),
+			Generation: int64(i + 1), Snapshot: fmt.Sprintf("s%d", i), Failing: []string{"check-0"}})
 	}
 	if len(pr.Run.Steps) != maxRunSteps {
 		b.Fatalf("the run holds %d steps, want %d", len(pr.Run.Steps), maxRunSteps)

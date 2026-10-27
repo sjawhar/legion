@@ -45,11 +45,19 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 // only a required check or workflow makes a head red (classify.HeadVerdict), so a new read can
 // send work back for a newly required check or a required workflow that failed, leave standing a
 // head red only on checks the base branch never required, and give a head its first verdict when
-// its set was never read. A read that says what is recorded changes nothing.
+// its set was never read. A read that says what is recorded changes nothing, unless a red was held
+// while a head waited for its push and the hold has lapsed (holdsRed): the pass's read then decides
+// the red as it stands, once a push webhook lost for good has had its time.
 func (e *Engine) requiredChecks(ctx context.Context, tx pgx.Tx, fact intake.RequiredChecks) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
-	if err != nil || pr == nil || pr.RequiredReadUnchanged(fact.Names, fact.Workflows, fact.WorkflowsHead) {
+	if err != nil || pr == nil {
 		return intake.Result{}, err
+	}
+	if pr.RequiredReadUnchanged(fact.Names, fact.Workflows, fact.WorkflowsHead) {
+		if pr.Run == nil || e.holdsRed(*pr) {
+			return intake.Result{}, nil
+		}
+		return intake.Result{}, e.decideChecks(ctx, tx, pr, false)
 	}
 	*pr = classify.ApplyRequiredRead(*pr, fact.Names, fact.Workflows, fact.WorkflowsHead)
 	return intake.Result{}, e.decideChecks(ctx, tx, pr, true)
@@ -167,8 +175,12 @@ func (e *Engine) sendBack(ctx context.Context, tx pgx.Tx, issue record.Issue, pr
 // reportExhaustedCount posts an exhausted fix-attempt count on the issue and tells the architect,
 // once per count (classify.BlockFixAttempt). Linger holds a member of a closed tree where it stood
 // (record.TreeLingers): the count is recorded on the pull request, and nothing is posted on the
-// issue or told to its architect.
+// issue or told to its architect. While a red is held (holdsRed) the count is not yet the one every
+// push arriving first would give, so it is reported once the hold ends (push, requiredChecks).
 func (e *Engine) reportExhaustedCount(ctx context.Context, tx pgx.Tx, issue *record.Issue, pr *record.PullRequest) error {
+	if e.holdsRed(*pr) {
+		return nil
+	}
 	var blocked bool
 	if *pr, blocked = classify.BlockFixAttempt(*pr, e.cfg.MaxFixAttempts); !blocked {
 		return nil
@@ -484,12 +496,37 @@ func (e *Engine) reviewRound(issue record.Issue, row record.PhaseRow, pr *record
 // issue was held, where nothing moves (retryOrEscalate); and by the implementer's completion, which
 // hands on a head a red may have come to stand for while it was implementing, where nothing moves
 // (implementationReady). A fact that finds no red standing applies nothing, so each applies the rule
-// before whatever else it does.
+// before whatever else it does. A red is held while its head waits for a push of its move
+// (holdsRed). In awaiting_merge a red withdraws the READY whatever it is (decideChecks), so nothing
+// is held there.
 func (e *Engine) standingRed(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) (bool, error) {
-	if issue.Phase == phase.AwaitingMerge || pr == nil || !classify.RedSendsBack(*pr) || classify.FixAttemptCapHolds(*pr, e.cfg.MaxFixAttempts) {
+	if issue.Phase == phase.AwaitingMerge || pr == nil || e.holdsRed(*pr) || !classify.RedSendsBack(*pr) || classify.FixAttemptCapHolds(*pr, e.cfg.MaxFixAttempts) {
 		return false, nil
 	}
 	return e.sendBack(ctx, tx, issue, pr)
+}
+
+// redHold bounds how long a red is held while a head waits for a push of its move: GitHub delivers
+// a push webhook and its synchronize seconds apart, and the required-checks pass, which ends a lapsed
+// hold (requiredChecks), reads every requiredChecksInterval (two minutes). A push webhook lost for
+// good, which nothing replays, then leaves the red to be judged as it stands, as before the head run.
+const redHold = 10 * time.Minute
+
+// holdsRed says whether pr's red is held: a head run is open (record.PullRequest.Run) - a head
+// arrived before every push of its move - and opened less than redHold ago. While it holds, whether
+// the red is planned, and the count it stands at, are not yet what every push arriving first would
+// make them, and a send-back cannot be taken back; the push that closes the run, or whose replay
+// changes the judgement, decides the checks (push), and so does the pass's next read once the
+// hold lapses (requiredChecks). A run with no opening time is not held.
+func (e *Engine) holdsRed(pr record.PullRequest) bool {
+	return pr.Run != nil && !pr.Run.Since.IsZero() && e.now().Before(pr.Run.Since.Add(redHold))
+}
+
+// stampRun records when pr's head run opened, if one opened just now (record.HeadRun.Since).
+func (e *Engine) stampRun(pr *record.PullRequest) {
+	if pr.Run != nil && pr.Run.Since.IsZero() {
+		pr.Run.Since = e.now()
+	}
 }
 
 // implementationReady moves issue from implementing to testing on the implementer's completion of

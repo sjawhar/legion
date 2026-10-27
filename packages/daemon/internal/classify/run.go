@@ -75,9 +75,9 @@ func replayRun(pr record.PullRequest) record.PullRequest {
 	}
 	waiting = max(waiting, len(run.Steps)-maxRunSteps)
 	if waiting < len(run.Steps) {
-		at.Run = &record.HeadRun{Anchor: before[waiting].judgement, Pushes: before[waiting].pushes, Steps: clone(run.Steps[waiting:])}
+		at.Run = &record.HeadRun{Anchor: before[waiting].judgement, Pushes: before[waiting].pushes, Steps: clone(run.Steps[waiting:]), Since: run.Since}
 	}
-	at.Pushes, at.BlockedAttempts = live, blocked
+	at.Pushes, at.BlockedAttempts = unspentPushes(live, at.Moves, false), blocked
 	if at.FixAttempts < blocked {
 		at.BlockedAttempts = 0
 	}
@@ -138,14 +138,28 @@ func Reopen(pr record.PullRequest, head string) record.PullRequest {
 // (SettlementFor) and is newer than the one recorded (ApplySettlement), and says whether the
 // judgement changed. While a head run is open the settlement is a step of it, recorded whether it
 // stands or not: a push the run is waiting for can make it stand. The pull request then changed
-// either way, and the judgement changed when the replay with it differs.
+// either way, and the judgement changed when the replay with it differs. A settlement the run
+// already holds - the listener's redelivery - is no new step, so it does not use up the run's
+// bound (maxRunSteps).
 func ApplyCheckSettlement(pr record.PullRequest, candidate SettlementCandidate) (record.PullRequest, bool) {
 	if pr.Run == nil {
 		return settle(pr, candidate)
 	}
-	replayed := runStep(pr, record.RunStep{Settlement: &record.Settlement{Head: candidate.Head, CheckRuns: clone(candidate.CheckRuns),
-		Generation: candidate.Generation, Snapshot: candidate.Snapshot, Failing: clone(candidate.Failing), Cancelled: clone(candidate.Cancelled)}})
+	step := record.Settlement{Head: candidate.Head, CheckRuns: clone(candidate.CheckRuns), Generation: candidate.Generation,
+		Snapshot: candidate.Snapshot, Failing: clone(candidate.Failing), Cancelled: clone(candidate.Cancelled)}
+	for _, held := range pr.Run.Steps {
+		if held.Settlement != nil && sameSettlement(*held.Settlement, step) {
+			return pr, false
+		}
+	}
+	replayed := runStep(pr, record.RunStep{Settlement: &step})
 	return replayed, JudgementChanged(pr, replayed)
+}
+
+// sameSettlement is whether a and b are the same report of the same settlement.
+func sameSettlement(a, b record.Settlement) bool {
+	return a.Head == b.Head && a.Generation == b.Generation && a.Snapshot == b.Snapshot && sameItems(a.CheckRuns, b.CheckRuns) &&
+		sameItems(a.Failing, b.Failing) && sameItems(a.Cancelled, b.Cancelled)
 }
 
 // ApplyRequiredRead records a read of what the base branch requires (intake.RequiredChecks): its
@@ -186,7 +200,8 @@ func candidateOf(s record.Settlement) SettlementCandidate {
 func judgementOf(pr record.PullRequest) record.Judgement {
 	return record.Judgement{HeadSHA: pr.HeadSHA, FixAttempts: pr.FixAttempts, HeadCounted: pr.HeadCounted, PlannedRed: pr.PlannedRed,
 		CheckedHead: pr.CheckedHead, Failing: clone(pr.Failing), Cancelled: clone(pr.Cancelled), CheckRuns: clone(pr.CheckRuns),
-		Generation: pr.Generation, Snapshot: pr.Snapshot, Required: clone(pr.Required), Workflows: clone(pr.Workflows), WorkflowsHead: pr.WorkflowsHead}
+		Generation: pr.Generation, Snapshot: pr.Snapshot, Required: clone(pr.Required), Workflows: clone(pr.Workflows), WorkflowsHead: pr.WorkflowsHead,
+		Moves: clone(pr.Moves)}
 }
 
 // withJudgement is pr with j as its judgement.
@@ -195,6 +210,7 @@ func withJudgement(pr record.PullRequest, j record.Judgement) record.PullRequest
 	pr.CheckedHead, pr.Failing, pr.Cancelled, pr.CheckRuns = j.CheckedHead, clone(j.Failing), clone(j.Cancelled), clone(j.CheckRuns)
 	pr.Generation, pr.Snapshot = j.Generation, j.Snapshot
 	pr.Required, pr.Workflows, pr.WorkflowsHead = clone(j.Required), clone(j.Workflows), j.WorkflowsHead
+	pr.Moves = clone(j.Moves)
 	return pr
 }
 
