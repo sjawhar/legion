@@ -2,6 +2,7 @@ package pmdoc
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"runtime"
@@ -110,6 +111,9 @@ const growthStep = 8
 // them; TestRunWithDeadlineReportsAHangPromptly, below growsLinearly, proves the deadline itself).
 func TestGrowsLinearlyCatchesQuadraticAtThisFilesGrowthStepAndSlack(t *testing.T) {
 	const small, full = 1, growthStep // the growth step itself; growthVerdict never reads these as bytes
+	// Whole seconds per unit, so even the smallest synthetic time, 1s, sits 100 times above the
+	// coarsest CPU clock resolution seen (10ms, cpuClockResolution) and growthVerdict's floor never
+	// replaces a sample here: the verdicts below are the arithmetic on these exact times.
 	linear := func(size int) time.Duration { return time.Duration(size) * time.Second }
 	quadratic := func(size int) time.Duration { return time.Duration(size*size) * time.Second }
 	if failedStep, _ := growthVerdict([]int{small, full}, linearSlack, quadratic); failedStep != 0 {
@@ -377,6 +381,26 @@ const sampleCount = 3
 // leakedCallGuard (below) is what keeps that true even once a call has missed its own deadline
 // and gone on running in the background. Every measured call reads it through cpuTimeOf.
 func processCPUTime() time.Duration { return cputest.Process() }
+
+// cpuClockResolution is the smallest nonzero step processCPUTime takes in this process, measured
+// once by spinning until the clock moves, a few times over, and keeping the smallest move seen.
+// getrusage's resolution depends on the kernel underneath: an ordinary Linux kernel reports CPU
+// time to the microsecond or finer, but a sandboxing kernel such as gVisor may only advance it in
+// whole scheduler ticks (10ms where this was written), so a call that finishes inside one tick
+// reads as 0s however much work it did. growthVerdict floors its smaller sample at this, since a
+// reading under it says only that the call took less than one step, not that it took nothing.
+var cpuClockResolution = sync.OnceValue(func() time.Duration {
+	resolution := time.Duration(math.MaxInt64)
+	for range 5 {
+		start := processCPUTime()
+		moved := start
+		for moved == start {
+			moved = processCPUTime()
+		}
+		resolution = min(resolution, moved-start)
+	}
+	return resolution
+})
 
 // cpuTimeOf is the CPU time this process spends running op, with the garbage collector settled
 // before op starts and stopped while it runs, so the time is op's own work alone.
@@ -704,11 +728,19 @@ func waitForLeakToClear(t *testing.T, cleared <-chan struct{}) {
 // and one line of context for every step up to and including a failure - the fail-style line at
 // that step, a log-style line at every other. Every size, the first included, is measured
 // sampleCount times and the fastest kept, so the comparison at every step draws from the same
-// number of samples on both sides. growsLinearly below turns these into t.Fatalf/t.Logf;
-// TestGrowsLinearlyCatchesQuadraticAtThisFilesGrowthStepAndSlack calls this directly, so the
-// bound it proves is provable without a real *testing.T failing, a real parse or render, or a
-// hang past some other timeout standing in for the check actually tripping.
+// number of samples on both sides. The smaller sample of every step is floored at
+// cpuClockResolution before the comparison: a clock that advances only in coarse steps reads a
+// small size's fast call as 0s, and against 0s any nonzero time at the next size, linear or not,
+// would count as infinite growth. One clock step is the least time the clock can tell apart from
+// none, so a reading under it is compared as that step; a quadratic regression still fails
+// whenever its time at the larger size exceeds allowance*growth clock steps (640ms at 10ms steps,
+// growthAllowance and a 16x size step). The ratio each line prints is against the floored time
+// too, and the line names the floor whenever it applied. growsLinearly below turns these into
+// t.Fatalf/t.Logf; TestGrowsLinearlyCatchesQuadraticAtThisFilesGrowthStepAndSlack calls this
+// directly, so the bound it proves is provable without a real *testing.T failing, a real parse or
+// render, or a hang past some other timeout standing in for the check actually tripping.
 func growthVerdict(sizes []int, allowance int, timed func(size int) time.Duration) (failedStep int, lines []string) {
+	resolution := cpuClockResolution() // measured before the first sample, so its spinning lands in none
 	fastest := func(size int) time.Duration { return fastestOf(func() time.Duration { return timed(size) }) }
 	before := fastest(sizes[0])
 	failedStep = -1
@@ -716,14 +748,19 @@ func growthVerdict(sizes []int, allowance int, timed func(size int) time.Duratio
 		smaller, size := sizes[i-1], sizes[i]
 		growth := size / smaller
 		took := fastest(size)
-		ratio := float64(took) / float64(before)
-		if took > time.Duration(allowance*growth)*before {
+		floored := max(before, resolution)
+		beforeText := floored.Round(time.Millisecond).String()
+		if floored != before {
+			beforeText += fmt.Sprintf(" (the CPU clock's resolution; it read %s)", before.Round(time.Millisecond))
+		}
+		ratio := float64(took) / float64(floored)
+		if took > time.Duration(allowance*growth)*floored {
 			failedStep = i - 1
 			lines = append(lines, fmt.Sprintf("took %s at %s, %.0f times the %s it took at %s: the input grew %d times, and a parse linear in it may grow %d times at most",
-				took.Round(time.Millisecond), sizeText(size), ratio, before.Round(time.Millisecond), sizeText(smaller), growth, allowance*growth))
+				took.Round(time.Millisecond), sizeText(size), ratio, beforeText, sizeText(smaller), growth, allowance*growth))
 			return failedStep, lines
 		}
-		lines = append(lines, fmt.Sprintf("%s at %s, %s at %s, %.1f times for an input %d times larger (at most %d)", before.Round(time.Millisecond), sizeText(smaller), took.Round(time.Millisecond), sizeText(size), ratio, growth, allowance*growth))
+		lines = append(lines, fmt.Sprintf("%s at %s, %s at %s, %.1f times for an input %d times larger (at most %d)", beforeText, sizeText(smaller), took.Round(time.Millisecond), sizeText(size), ratio, growth, allowance*growth))
 		before = took
 	}
 	return failedStep, lines
