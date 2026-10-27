@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-610",
+  "completed": "2026-10-27T06:47:29Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2374",
+  "codeHead": "12da3a9bf2805bc5a1821e4a418e7e7af2ccb3cb",
+  "proof": [
+    {
+      "criterion": "A1: A dead session's row 14 or 15 minutes old is kept and one 16 minutes old is deleted at the grace the listener passes.",
+      "surface": "Go tests, packages/envoy (store package on a real NATS JetStream KV; integration package)",
+      "command": "cd packages/envoy && CGO_ENABLED=1 go test -race -count=1 -run 'Reap|Reaper' ./internal/store/ ./internal/integration/",
+      "observed": "ok github.com/sjawhar/envoy/internal/store 2.674s; ok github.com/sjawhar/envoy/internal/integration 2.175s (TestReaperGraceWindow: 14- and 15-minute rows kept, 16-minute row ErrKeyNotFound, count 1)",
+      "headSha": "12da3a9bf2805bc5a1821e4a418e7e7af2ccb3cb",
+      "negativeControl": "Uncommitted: allowanceMs := graceWindow.Milliseconds() (dropped + InterestRefreshAge.Milliseconds()) -> go test -race -count=1 -run TestReaperGraceWindow ./internal/store/ FAIL: kv_test.go:1158: expected 1 reaped (only the 16-minute row), got 3; restored, tag identical."
+    },
+    {
+      "criterion": "A2: The real listener binary applies the rule through its /v1 API.",
+      "surface": "envoy-listener binary built from the head on a local NATS (internal/testnats/cmd/natsd -p 24224), started with the env packages/envoy/scripts/e2e-local.sh uses (PORT=29022), driven by reap-probe.sh (dispatch://INFRA-610/artifact/reap-probe-sh)",
+      "command": "reap-probe.sh http://127.0.0.1:29022 (harness $TMPDIR/infra-610/head-rerun.sh: builds the listener and natsd from the workspace, starts the probe 240 s after the listener so each deletion tick falls outside the 14:40-15:05 window)",
+      "observed": "infra610-probe-1793082241-a: A (last 200) 15:54.9, B (first 404) 15:59.9, new rule; infra610-probe-1793082241-b: A 18:24.9, B 18:29.9, new rule; 0 unknown answers, skew 14-19 ms. Listener log: reaper cycle at 06:35:01 (row -a age 10:59.9) reaped 0, at 06:40:01 reaped 1, at 06:45:01 reaped 1.",
+      "headSha": "12da3a9bf2805bc5a1821e4a418e7e7af2ccb3cb",
+      "negativeControl": "Same probe against a listener built from base 448a41003a17e2b407fe3b8c6604709cee7bef44 (gh api repos/sjawhar/legion/tarball/<sha>) on its own NATS, port 29021: -a A 10:55.0 B 11:00.0 old rule; -b A 13:24.9 B 13:29.9 old rule (run 2, 2026-10-27 05:54Z)."
+    },
+    {
+      "criterion": "A3: Heartbeat writes are unchanged.",
+      "surface": "diff and Go tests, packages/envoy",
+      "command": "jj diff --from main -- packages/envoy/internal/store/kv.go; cd packages/envoy && CGO_ENABLED=1 go test -race -count=1 -run 'Upsert|Subscribe' ./internal/store/ ./cmd/listener/",
+      "observed": "kv.go diff touches only the new const block, Reap's allowance and comments (Upsert, mergeForUpsert, locking, deleteInterest untouched); ok internal/store 1.962s, ok cmd/listener 8.406s",
+      "headSha": "12da3a9bf2805bc5a1821e4a418e7e7af2ccb3cb",
+      "negativeControl": "The probe's subscribe writes the row (GET /v1/interests/<id> 200, updated_at set at subscribe), so a broken write path would show no 200 before the first 404; both runs show 193 and 223 polls answered 200 before the 404."
+    },
+    {
+      "criterion": "A4: Nothing else breaks.",
+      "surface": "CI's envoy-go steps and lint, run locally",
+      "command": "cd packages/envoy && go list ./... | grep -v /integration | xargs go test; go test ./internal/integration/ -timeout 300s -count=1; go test -count=1 -skip '^(<the four tests of cmd/listener/dispatch_resolution_test.go>)$' ./cmd/listener/; cd packages/contracts && bun run check:go; bunx biome check packages/pi-envoy/; bash .github/scripts/check-private-names.sh",
+      "observed": "integration ok 97.358s; cmd/listener ok 268.344s with the four Postgres-backed tests skipped; check:go exit 0; biome 'Checked 23 files ... No fixes applied'; check-private-names passed. Unit lane fails in this pod only in packages that do not import internal/store and that this diff does not touch (go list -test -deps shows 0 for each): cmd/agent-secrets, cmd/agent-secrets-helper, internal/broker/helper (SO_PEERPIDFD: protocol not available under gVisor, no controlling TTY), internal/dispatch/files and the four cmd/listener dispatch_resolution tests (rootless Docker not found for testcontainers, no DISPATCH_TEST_DATABASE_URL), internal/cmdtest (kernel port range from 16000), internal/dispatch/pmdoc (timing ratios). CI runs these with Postgres and Docker.",
+      "headSha": "12da3a9bf2805bc5a1821e4a418e7e7af2ccb3cb",
+      "negativeControl": "The failing packages fail identically by cause (PEER_UNIDENTIFIED / docker panic / port range) with no reference to the reaper; none links internal/store, so the diff cannot reach them."
+    },
+    {
+      "criterion": "A5: The docs say what is now true.",
+      "surface": "files",
+      "command": "grep -n 'InterestRefreshAge' .dispatch/architecture/envoy-listener.md packages/envoy/AGENTS.md docs/solutions/envoy/a-cache-miss-must-not-release-what-another-listener-wrote.md packages/envoy/CHANGELOG.md; grep -n 'ten-minute' packages/pi-envoy/extensions/envoy.ts",
+      "observed": "first grep: envoy-listener.md:9, AGENTS.md:1965, solutions doc:48, CHANGELOG.md:801; second grep: no match (exit 1)",
+      "headSha": "12da3a9bf2805bc5a1821e4a418e7e7af2ccb3cb",
+      "negativeControl": "At base 448a41003a17 the first grep finds nothing in any of the four files and the second finds envoy.ts:2092 'ten-minute stale-interest'."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/store/kv.go",
+    "packages/envoy/cmd/listener/main.go",
+    "packages/envoy/internal/store/kv_test.go",
+    "packages/envoy/internal/integration/e2e_test.go",
+    "packages/envoy/AGENTS.md",
+    "packages/envoy/CHANGELOG.md",
+    ".dispatch/architecture/envoy-listener.md",
+    "docs/solutions/envoy/a-cache-miss-must-not-release-what-another-listener-wrote.md",
+    "packages/pi-envoy/extensions/envoy.ts"
+  ],
+  "trickyParts": [
+    "The reaper ticks every 5 minutes from listener start, so the old rule deletes between 10:00 and 15:00 and the new one between 15:00 and 20:00; a probe can only tell them apart when a deletion tick falls outside 14:40-15:05. Starting the probe 60 s before a tick does that.",
+    "Reap adds the two millisecond counts (graceWindow.Milliseconds() + InterestRefreshAge.Milliseconds()) rather than (graceWindow + InterestRefreshAge).Milliseconds(), which keeps the exact old truncation for any graceWindow."
+  ],
+  "deviations": [
+    "reap-probe.sh's 'new rule' threshold is A >= 15:01, not the plan's A >= 14:50: the old rule can still answer 200 up to row age 15:00 (first tick after 10:00), and the first base run read A 14:50.0, B 14:54.9, which the plan's rule would have called 'new rule'. 'old rule' (B <= 14:40) and the inconclusive rule are unchanged. The attached artifact carries the corrected rule and says why in its header.",
+    "TestReaperGraceWindow sets reg.now directly: coldRegistry builds the Registry struct without Open, so the WithClock option cannot apply.",
+    "The -race lanes need CGO_ENABLED=1 in this pod (go env CGO_ENABLED is 0)."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "PR #2167 (INFRA-141) changes the same Reap region, the same tests and the same solutions-doc sentence; INFRA-141's architect was told (Envoy publish 10ff16c706b2dfc897ca7799b66504f7); whichever merges second brings its base forward."
+  ]
+}
