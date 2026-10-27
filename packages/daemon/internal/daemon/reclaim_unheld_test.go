@@ -1,8 +1,12 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -209,5 +213,113 @@ func TestABurstOfUnheldExceptionsForOneTopicTriggersOneReclaim(t *testing.T) {
 
 	if got := len(rt.CallsOf("Resume")); got != 1 {
 		t.Fatalf("resumes = %d, want one relaunch for the burst of exceptions", got)
+	}
+}
+
+// driveClaimReady walks a just-relaunched claim (launching) back to ready on its resumed session, so
+// the limiter's in-flight slot frees for the next deaf pane.
+func driveClaimReady(t *testing.T, sup *supervisor, token claim.Token) {
+	t.Helper()
+	machine, ok := sup.Machine(token)
+	if !ok {
+		t.Fatalf("no machine for %s", token)
+	}
+	view := machine.View()
+	gen, session := view.Generation, view.Session
+	for _, ev := range []supervise.Event{
+		supervise.StreamHello{Claim: token, Generation: gen},
+		supervise.RequestRegister{Claim: token, Generation: gen, Session: session, SessionFile: "/sessions/" + session + ".jsonl"},
+		supervise.RequestReady{Claim: token, Generation: gen, Session: session},
+	} {
+		if err := machine.Handle(context.Background(), ev); err != nil {
+			t.Fatalf("drive %s to ready: %v", token, err)
+		}
+	}
+}
+
+// (global bound) N deaf topics at once produce at most the cap relaunching, and the rest are not
+// dropped: once the in-flight ones come back ready, their slots free and a retry relaunches the rest.
+func TestReclaimGlobalCapBoundsConcurrentRelaunchesAndDropsNone(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	clock := time.Now()
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", supervisor: sup, project: "legion",
+		now: func() time.Time { return clock }, reclaimCap: 2, reclaimTryCap: 5, reclaimInterval: time.Millisecond}
+	tokens := make([]claim.Token, 4)
+	for i := range tokens {
+		issue := fmt.Sprintf("LEGION-%d", i+1)
+		tokens[i] = reclaimArchitect(t, sup, issue, supervise.StateReady, "ses_"+issue)
+	}
+	// Four deaf topics at once (the clock steps one stagger interval per trigger, so the cap, not the
+	// stagger, is what bounds them).
+	for _, token := range tokens {
+		runner.reclaimUnheldRunning(context.Background(), token, "publish")
+		clock = clock.Add(time.Millisecond)
+	}
+	if got := len(rt.CallsOf("Resume")); got != 2 {
+		t.Fatalf("resumes = %d, want at most the cap (2) relaunching at once", got)
+	}
+	// Free the two in flight; a retry of the queued two now reaches a slot.
+	driveClaimReady(t, sup, tokens[0])
+	driveClaimReady(t, sup, tokens[1])
+	for _, token := range tokens[2:] {
+		runner.reclaimUnheldRunning(context.Background(), token, "publish")
+		clock = clock.Add(time.Millisecond)
+	}
+	if got := len(rt.CallsOf("Resume")); got != 4 {
+		t.Fatalf("resumes = %d, want all four eventually relaunched (none dropped)", got)
+	}
+}
+
+// (global bound) The fleet-wide stagger starts at most one new relaunch per interval: two deaf topics
+// at the same instant relaunch one now and the other only once the interval has elapsed.
+func TestReclaimStaggerStartsAtMostOnePerInterval(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	clock := time.Now()
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", supervisor: sup, project: "legion",
+		now: func() time.Time { return clock }, reclaimCap: 8, reclaimTryCap: 5, reclaimInterval: time.Minute}
+	a := reclaimArchitect(t, sup, "LEGION-1", supervise.StateReady, "ses_a")
+	b := reclaimArchitect(t, sup, "LEGION-2", supervise.StateReady, "ses_b")
+
+	runner.reclaimUnheldRunning(context.Background(), a, "publish")
+	runner.reclaimUnheldRunning(context.Background(), b, "publish")
+	if got := len(rt.CallsOf("Resume")); got != 1 {
+		t.Fatalf("resumes = %d, want only one within the stagger interval", got)
+	}
+	clock = clock.Add(time.Minute)
+	runner.reclaimUnheldRunning(context.Background(), b, "publish")
+	if got := len(rt.CallsOf("Resume")); got != 2 {
+		t.Fatalf("resumes = %d, want the second relaunched once the interval elapsed", got)
+	}
+}
+
+// (loop guard) A claim whose role stays unheld after its reclaims is relaunched at most the per-claim
+// bound, and the give-up is logged once — a role another live session holds (the claude backend's
+// soft boot claim throws) would otherwise relaunch forever and burn the death budget.
+func TestReclaimLoopGuardBoundsPerClaimAttemptsAndLogsGiveUpOnce(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	clock := time.Now()
+	var logged bytes.Buffer
+	runner := &outbox{log: slog.New(slog.NewTextHandler(&logged, nil)), pool: pool, dispatchProject: "LEGION", supervisor: sup,
+		project: "legion", now: func() time.Time { return clock }, reclaimTryCap: 2, reclaimInterval: time.Nanosecond}
+	token := reclaimArchitect(t, sup, "LEGION-1", supervise.StateReady, "ses_arch")
+
+	// The claim keeps coming back deaf: drive it ready after each relaunch, step past its backoff.
+	for range 4 {
+		before := len(rt.CallsOf("Resume"))
+		runner.reclaimUnheldRunning(context.Background(), token, "publish")
+		if len(rt.CallsOf("Resume")) > before {
+			driveClaimReady(t, sup, token)
+		}
+		clock = clock.Add(10 * time.Minute)
+	}
+
+	if got := len(rt.CallsOf("Resume")); got != 2 {
+		t.Fatalf("resumes = %d, want at most the per-claim bound (2)", got)
+	}
+	if n := strings.Count(logged.String(), "gave up relaunching"); n != 1 {
+		t.Fatalf("give-up logged %d times, want once", n)
 	}
 }

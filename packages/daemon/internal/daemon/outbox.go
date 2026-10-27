@@ -118,6 +118,20 @@ type outbox struct {
 	// limitsMu guards it (deferral, noteLimit).
 	limitsMu sync.Mutex
 	limits   map[githubrest.Budget]rateLimit
+	// The running-but-unheld reclaim limiter (reclaim_unheld.go), guarded by reclaimMu: reclaimInFlight
+	// is each claim relaunched to re-claim a lost Envoy role that has not come back to a prompted
+	// state, reclaimTries is each claim's reclaim count, backoff and give-up, and reclaimNextAt is the
+	// earliest the next relaunch of any claim may start (the fleet-wide stagger). reclaimCap bounds how
+	// many relaunch at once, reclaimTryCap how many times one claim is relaunched, and reclaimInterval
+	// the stagger; each zero takes its maxReclaimsInFlight/maxReclaimAttempts/reclaimMinInterval
+	// default, so a test can set small ones.
+	reclaimMu       sync.Mutex
+	reclaimInFlight map[claim.Token]struct{}
+	reclaimTries    map[claim.Token]reclaimTry
+	reclaimNextAt   time.Time
+	reclaimCap      int
+	reclaimTryCap   int
+	reclaimInterval time.Duration
 	// The lane registry (outbox_lanes.go). mu guards running, laneCtx and lanes; running is true
 	// between Run's start and its stop, laneCtx is Run's context, which every lane runs under, and
 	// lanes is each live lane by its key. wg counts the lane goroutines, so Run returns only once
