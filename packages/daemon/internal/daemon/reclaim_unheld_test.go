@@ -351,3 +351,61 @@ func TestReclaimLoopGuardBoundsPerClaimAttemptsAndLogsGiveUpOnce(t *testing.T) {
 		t.Fatalf("give-up logged %d times, want once", n)
 	}
 }
+
+// (MEDIUM 3) A ready claim that holds a delivery sent and acknowledged but not yet confirmed — the
+// pane may be running tool calls — is NOT relaunched: "ready or idle" is not "no work in flight", and
+// a relaunch there would lose the turn's work and re-send the task without the interrupted preamble.
+func TestAReadyClaimWithWorkInFlightIsNotReclaimed(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	token := mustClaimToken(t, "LEGION-1", claim.RoleArchitect)
+	if _, _, err := sup.Create(context.Background(), supervise.Claim{
+		Token: token, Project: "legion", Tree: "LEGION-1", Issue: "LEGION-1", Role: claim.RoleArchitect,
+		State: supervise.StateReady, Session: "ses_arch", SessionFile: "/sessions/ses_arch.jsonl",
+		Pending: &supervise.Delivery{ID: "outbox:1", Task: "do the work", QueuedAt: time.Now()},
+	}, ""); err != nil {
+		t.Fatalf("create the architect with work in flight: %v", err)
+	}
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", supervisor: sup, project: "legion", now: time.Now}
+
+	runner.reclaimUnheldRunning(context.Background(), token, "publish")
+
+	if got := len(rt.CallsOf("Resume")); got != 0 {
+		t.Fatalf("resumes = %d, want a pane with work in flight left alone", got)
+	}
+}
+
+// (MEDIUM 2) A relaunch runs synchronously under the claim's machine, so the outbox row can outlive
+// its lease and be re-run by the sweep. The in-flight and backoff accounting covers the whole
+// relaunch: while it is booting a re-run is a no-op, and once it is back to ready the per-claim
+// backoff rejects a re-trigger until the backoff elapses — so a lease lapse cannot double-relaunch.
+func TestReclaimDoesNotDoubleRelaunchAcrossALeaseLapse(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	clock := time.Now()
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", supervisor: sup, project: "legion",
+		now: func() time.Time { return clock }, reclaimInterval: time.Nanosecond}
+	token := reclaimArchitect(t, sup, "LEGION-1", supervise.StateReady, "ses_arch")
+
+	runner.reclaimUnheldRunning(context.Background(), token, "publish")
+	if got := len(rt.CallsOf("Resume")); got != 1 {
+		t.Fatalf("resumes = %d, want the first relaunch", got)
+	}
+	// A lease-lapsed re-run while the relaunch is in flight (claim booting): no-op.
+	runner.reclaimUnheldRunning(context.Background(), token, "publish")
+	if got := len(rt.CallsOf("Resume")); got != 1 {
+		t.Fatalf("resumes = %d, want no relaunch while the first is booting", got)
+	}
+	// The relaunch completes (pane back to ready, still deaf). A re-run within the backoff: rejected.
+	driveClaimReady(t, sup, token)
+	runner.reclaimUnheldRunning(context.Background(), token, "publish")
+	if got := len(rt.CallsOf("Resume")); got != 1 {
+		t.Fatalf("resumes = %d, want no double-relaunch within the per-claim backoff", got)
+	}
+	// Past the backoff a legitimate second attempt relaunches.
+	clock = clock.Add(time.Minute)
+	runner.reclaimUnheldRunning(context.Background(), token, "publish")
+	if got := len(rt.CallsOf("Resume")); got != 2 {
+		t.Fatalf("resumes = %d, want the bounded second attempt once the backoff elapsed", got)
+	}
+}

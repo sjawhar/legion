@@ -82,14 +82,27 @@ func reclaimBooting(state supervise.ClaimState) bool {
 // share — the notice executor's publish (outbox.go, notice) and the delivery-exception consumer
 // (notice_exceptions.go, rehold):
 //
-//   - ready or idle — a live pane that can be prompted and is not in a turn — is relaunched through
-//     the limiter (admitReclaim), which bounds the fleet-wide blast radius.
+//   - ready or idle with no delivery in flight is relaunched through the limiter (admitReclaim),
+//     which bounds the fleet-wide blast radius. A ready or idle claim that holds a pending delivery
+//     (sent, acknowledged, or awaiting its turn) is in a turn in all but name and waits, since
+//     relaunching it would lose that work.
 //   - working is left for its turn to end: a relaunch would lose the turn's work. The caller holds
 //     the message (errNoticeWaits) or re-queues it, so a later attempt catches the pane idle.
 //   - a suspended claim is left alone here; the idle-suspended-worker branch (→ RequestRuleResume)
 //     that another lane adds goes in this switch's empty slot.
 //   - every other state — booting, failed, retired, or not supervised — holds no running pane with a
 //     role to re-claim.
+//
+// The daemon addresses a role topic only for an architect's notices (the notice executor) and the
+// merge-queue role (which does not call this), and the exception lane filters to architect reports,
+// so this heals architect role claims — which is what the deaf roles are — and not a worker role (a
+// worker is never daemon-role-addressed; it is driven on its worker stream) or the controller (it has
+// its own session-side recovery). A peer agent's publish to an unheld running role is the residual.
+//
+// The relaunch runs synchronously under the claim's machine, so the row can outlive its lease and be
+// re-run by the sweep; the in-flight and backoff accounting covers the whole relaunch so that cannot
+// double-relaunch — while it runs the claim is booting (this switch's default no-op), and once it
+// returns to ready the per-claim backoff rejects a re-trigger until the backoff elapses (admitReclaim).
 //
 // Both callers only reach it with "no live holder" already established for the pane they name, so it
 // never relaunches into a healthy holder: the publish path is in its ErrNoHolder branch (the listener
@@ -102,8 +115,19 @@ func (r *outbox) reclaimUnheldRunning(ctx context.Context, token claim.Token, tr
 	if !found {
 		return
 	}
-	switch machine.View().State {
+	view := machine.View()
+	switch view.State {
 	case supervise.StateReady, supervise.StateIdle:
+		// "ready or idle" is not "no work in flight": a task sent and acknowledged keeps the claim
+		// prompted (onAcked) until the agent's turn-start frame, so the pane may already be running
+		// tool calls. Relaunching then kills that work and re-sends the task without the interrupted
+		// preamble (the delivery is not confirmed, so interrupted is a no-op), which can duplicate
+		// side effects. A pending delivery (sent, acknowledged, or awaiting its turn) is exactly the
+		// out-of-turn condition quiesce.go checks, and for a ready or idle claim it is the one the
+		// claim carries, so a pane with work in flight waits for its turn's end.
+		if view.Pending != nil {
+			return
+		}
 		if !r.admitReclaim(token) {
 			return
 		}
