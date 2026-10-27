@@ -427,6 +427,12 @@ func main() {
 	// a connected client, exactly like the outbox above. Both take the event broker: each writes
 	// issue.deployed on a pull request's issue once its shipping run is known (LEGION-781).
 	go delivery.NewReconcile(database.Pool, appCtx.GitHub(), broker).Run(ctx, leases)
+	// stopIntakes waits for both intakes to stop. The shutdown calls it before it closes the
+	// database pool (serveUntilStopped below): an intake releases its duty.Hold through that
+	// pool as it stops, and a hold left in place for its TTL names the stopped process's deliver
+	// subject, which a process of the build before holds, binding by lookup, goes on delivering
+	// at, so the next holder would read that binding as a dead holder's and take it over.
+	stopIntakes := func() {}
 	if natsClient != nil {
 		// The intake and the job intake (LEGION-690) each bind a durable, so each takes a client of
 		// its own (delivery.StartIntakes). Once ctx is cancelled each Run stops delivering: the
@@ -436,15 +442,12 @@ func main() {
 		connectIntake := func(name string) (*bus.Client, error) {
 			return bus.Connect(envoyConfig.Envoy.NatsURLs, bus.WithEnvironment(env.lookup), bus.WithName(name))
 		}
-		stopIntakes, err := delivery.StartIntakes(ctx, connectIntake, database.Pool, appCtx.GitHub(), broker)
+		stop, err := delivery.StartIntakes(ctx, connectIntake, database.Pool, appCtx.GitHub(), broker)
 		if err != nil {
 			slog.Error("dispatch delivery: connect NATS", "error", err)
 			os.Exit(1)
 		}
-		defer func() {
-			cancel()
-			stopIntakes()
-		}()
+		stopIntakes = stop
 		// LEGION-781: the start, naming the stamped build commit, goes on the bus once the
 		// publisher is open, and is retried until the stream acknowledges it or the shutdown
 		// context ends; a binary with no stamped commit publishes none.
@@ -454,6 +457,10 @@ func main() {
 	}
 
 	routesHandler, waitDelivery := routes.New(appCtx)
+	waitDeliveryAndIntakes := func() {
+		waitDelivery()
+		stopIntakes()
+	}
 	handler := dispatchHandler(routesHandler, database, natsClient, fileStore, buildCommit)
 	server := &http.Server{
 		Handler:           handler,
@@ -468,7 +475,7 @@ func main() {
 		slog.Error("dispatch: listen", "addr", boot.ListenAddr, "error", err)
 		os.Exit(1)
 	}
-	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool, waitDelivery); err != nil {
+	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool, waitDeliveryAndIntakes); err != nil {
 		slog.Error("dispatch: serve", "error", err)
 		os.Exit(1)
 	}
