@@ -4,6 +4,23 @@
 
 ### Added
 
+- Dispatch answers what a rendered `dispatch://` reference shows without the full read:
+  `GET /api/v1/issues/{key}/summary` is the issue's `{key, project, title, status, documents}`,
+  each document `{id, slug, name, kind, latest_version}` in the order the issue read lists them,
+  and `GET /api/v1/projects/{key}/artifacts/{slug}/summary` a project document's
+  `{id, project, slug, name, kind, latest_version}`, resolved as the project document read
+  resolves its slug. Neither reads a version body, an approval, a child or an open ask; both are
+  open to every signed-in caller, as the full reads are (INFRA-492).
+- Dispatch events say what their write moved, read in the write's own transaction (INFRA-492):
+  `issue.created`, `issue.updated` and `issue.closed` carry `changed`, the fields whose value moved
+  (`closed_at` among them on a close or a reopen), and `ancestors`, the issue's parent chain;
+  `comment.created`, `comment.answered`, an issue message's `message.created` and
+  `message.answered`, `ask.opened`, `ask.answered`, `ask.resolved`, and an issue event that moved
+  the status carry `thread_logins`, whose Replies count the write can move; `user_state.updated`
+  carries `changed`, which of `pinned`, `last_read_seq` and `dismissed` moved. Each is absent from
+  an event written before this release. `GET /api/v1/events` answers
+  `X-Dispatch-Event-Replay: complete` on a resuming connection whose `since` is at or below the
+  log's head, which it replays in full (`cmd/dispatch/README.md`, "Routes").
 - `envoy-infra:gcp:Dispatch` takes `appCpu` and `appMemory`, the Kubernetes quantities that size
   the app Deployment's `envoy-dispatch` container as both its request and its limit: 1 CPU and
   `4Gi` by default, the size it always had, so a deployment that sets neither renders the same pod.
@@ -772,6 +789,24 @@
 
 ### Changed
 
+- A Dispatch tab fetches again only what an event can change (INFRA-492). The dashboard's rules
+  (`packages/dispatch/web/src/api/event-refresh.ts`) read the events' new fields, so a title change
+  on an issue no page shows sends no read of it, a message on another issue sends no Inbox or
+  pinned-list read, and a reply in a thread the viewer never wrote in sends no Replies read; an
+  event from an older server, without the fields, refreshes what any value could have moved. Every
+  refresh goes through one scheduler (`api/query-refresh.ts`): events are batched for 100 ms, and
+  each read is fetched at most once a second, never twice at once and never by cancelling the
+  request in flight, so a first load's response is kept; an inactive read is only marked stale.
+  The app's query client (`api/query-client.ts`) gives every mutation's invalidation the same
+  never-cancel rule. A reconnect whose replay the server calls complete refreshes nothing beyond
+  what its events change, where every reconnect, a tab regaining focus among them, refetched every
+  read. A `dispatch://` reference reads the new summary routes in place of the full issue, and an
+  inline link reads no document text.
+- Dispatch's `references_changed` also names a target whose edge the write kept but whose excerpt
+  it moved, which the target's `Referenced by` panel shows: an edit of an ask's question or a
+  comment's body that changes the head of its text names every target the text still cites, a
+  document version names each target whose stored excerpt it changed, and an issue retitle names
+  the issue's parent and the issues it is blocked by (INFRA-492).
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a

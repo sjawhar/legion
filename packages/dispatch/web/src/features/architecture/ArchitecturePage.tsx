@@ -104,8 +104,9 @@ function usePaneState(): {
  * The project's Architecture tab (LEGION-191 slice 1a): the component model as a tree of rows
  * with fill bars and `D/N issues done`, a chevron into a component's children with a breadcrumb
  * back, a component's details below the rows, and the Unassigned / Not architectural lists with
- * the component picker. Reads `GET /projects/{key}/architecture`; the event stream invalidates
- * it on every issue and import event, so a bar moves in place when an issue closes.
+ * the component picker. Reads `GET /projects/{key}/architecture`; `api/event-refresh.ts` refreshes
+ * it on an issue write that moves a status, a parent or a component attachment (or does not say
+ * what it moved) and on every import event, so a bar moves in place when an issue closes.
  */
 export function ArchitecturePage({ project }: { project: string }): ReactNode {
   const queryClient = useQueryClient();

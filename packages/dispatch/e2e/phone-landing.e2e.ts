@@ -212,10 +212,12 @@ test("on a phone, the Conversation opens with its newest message in view whichev
 // refetch on focus (its focusManager listens on `window`, and the `visibilitychange` this row
 // dispatches on `document` does not bubble there): `useEventStream` in `web/src/api/sse.ts`
 // listens for `visibilitychange` on `document`, `handleVisibilityChange` calls `forceReconnect`,
-// and the reopened stream's `onOpen` calls `refreshEverything()`, whose flush invalidates every
-// query, the errored asks read among them. The row depends on that path: if `visibilitychange`
-// stops reopening the stream, or the whole-cache refresh throttle (`WHOLE_CACHE_REFRESH_MS`)
-// stops letting a connection's first refresh through at once, this row stops seeing a refetch.
+// and the reopened stream's `onOpen` calls `refreshEverything()`, whose flush refreshes every
+// query, the errored asks read among them. It does so because the page has received no event, so
+// it reopens with no `since`, which the server never answers `X-Dispatch-Event-Replay: complete`.
+// The row depends on that path: if `visibilitychange` stops reopening the stream, or the
+// whole-cache refresh throttle (`WHOLE_CACHE_REFRESH_MS`) stops letting a connection's first
+// refresh through at once, this row stops seeing a refetch.
 test("on a phone, a Conversation whose read failed opens on its newest message once a refetch brings the list", async ({
   browser,
 }) => {

@@ -1075,13 +1075,15 @@ test("a credential request seeded after the Inbox loads appears, and counts, wit
 });
 
 // With nothing waiting, "Nothing needs you" stays on screen through a window focus, which refetches
-// what has gone stale and reopens the event stream, whose reconnect refreshes every query, and
-// through leaving the Inbox and coming back. Every credential-list call after the page's first is
-// held, so a refetch of that list, had one put it back to loading, would take the empty state off
-// the screen for as long as the hold lasts. A Dispatch with no secrets broker answers the list
-// `null` and is asked again only when the stream reconnects, over the held answer, so the held
-// second call leaves the empty state on screen; with the fake broker the list keeps its empty
-// answer on screen while a refetch runs. Neither page may log a failed request.
+// what has gone stale and reopens the event stream, whose reconnect refreshes every query (the page
+// has received no event, so it reopens with no `since`, which the server never answers
+// `X-Dispatch-Event-Replay: complete`), and through leaving the Inbox and coming back. Every
+// credential-list call after the page's first is held, so a refetch of that list, had one put it
+// back to loading, would take the empty state off the screen for as long as the hold lasts. A
+// Dispatch with no secrets broker answers the list `null` and is asked again only when the stream
+// reconnects, over the held answer, so the held second call leaves the empty state on screen; with
+// the fake broker the list keeps its empty answer on screen while a refetch runs. Neither page may
+// log a failed request.
 test("Nothing needs you stays on screen through a focus and a return to the Inbox", async ({
   browser,
 }) => {

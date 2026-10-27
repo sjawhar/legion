@@ -4,6 +4,17 @@
 
 ### Added
 
+- `IssueReferenceSummary` and `IssueReferenceSummaryDocument`, the body of
+  `GET /api/v1/issues/{key}/summary`, and `DocumentReferenceSummary`, the body of
+  `GET /api/v1/projects/{key}/artifacts/{slug}/summary`: what a reference to an issue or a
+  document shows, without the full read. The event payloads gain optional fields saying what a
+  write moved: `IssueEventChanges` (`changed`, `ancestors`, `thread_logins`) on
+  `IssueEventPayload`, `ThreadLoginsPayload` (`thread_logins`) on `AskEventPayload`,
+  `CommentEventPayload` and `MessageEventPayload`, and `UserStateUpdatedEventPayload.changed`,
+  with the same optional fields on `IssueEventPayloadSchema` and the ask, comment and message
+  event schemas. Each is absent from an event written before Dispatch sent it, which a reader
+  takes as "anything may have moved" (INFRA-492).
+
 - `dispatch doc-edit --help` says the spec, not every document, holds no progress or status, and that a record of open items or progress is a document of its own.
 
 - `actorAttribution(actor)`, the part of an actor's label after its name: ` (for <owner>)` for a

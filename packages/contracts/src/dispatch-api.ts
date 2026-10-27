@@ -1070,9 +1070,10 @@ export interface ThreadLoginsPayload {
  *  transaction. Each field is absent from every other `issue.*` type and from an event written
  *  before the fields existed, which a reader takes as "anything may have changed". */
 export interface IssueEventChanges {
-  /** Each field whose value the write moved, of `title`, `status`, `rank`, `priority`,
-   *  `assignee`, `parent`, `labels`, `route`, `repo`, `components`, `blocked_by` and
-   *  `external_links`; for `issue.created`, every field the new issue holds a value in. */
+  /** Each field whose value the write moved, of `title`, `status`, `closed_at` (for a close or a
+   *  reopen), `rank`, `priority`, `assignee`, `parent`, `labels`, `route`, `repo`, `components`,
+   *  `blocked_by` and `external_links`; for `issue.created`, every field the new issue holds a
+   *  value in. */
   readonly changed?: string[];
   /** The issue's parent chain after the write, parent first up to the root; `[]` for a root. */
   readonly ancestors?: string[];
