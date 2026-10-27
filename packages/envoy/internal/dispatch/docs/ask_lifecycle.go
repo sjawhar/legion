@@ -22,6 +22,16 @@ type BlockRef struct {
 	BlockID    string
 }
 
+// LogUnindexedAskBlocks logs each ask block with no ask row that a write to issueKey's
+// documents marked resolved: it is not an ask yet, so it has no record to show, and settlement
+// indexes it as a new open ask once the issue reopens.
+func LogUnindexedAskBlocks(issueKey string, blocks []BlockRef) {
+	for _, block := range blocks {
+		slog.Warn("dispatch: mark resolved an ask block no settlement indexed before its issue closed",
+			"issue", issueKey, "artifact", block.ArtifactID, "block", block.BlockID)
+	}
+}
+
 // errSettleJoined refuses SettleIssueDocuments inside a transaction: each settlement opens a
 // transaction of its own and takes the issue's row, which a caller's open transaction can hold.
 var errSettleJoined = errors.New("docs: an issue's documents settle outside every transaction")

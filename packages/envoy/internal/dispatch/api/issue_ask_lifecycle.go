@@ -246,7 +246,7 @@ func (s *server) sweepIssueAskBlocksTx(ctx context.Context, tx pgx.Tx, issueKey 
 	if err != nil {
 		return nil, err
 	}
-	logUnindexedAskBlocks(issueKey, unindexed)
+	docs.LogUnindexedAskBlocks(issueKey, unindexed)
 	return unindexed, nil
 }
 
@@ -271,14 +271,4 @@ func (s *server) readIssueAsks(ctx context.Context, tx pgx.Tx, query string, arg
 		return nil, err
 	}
 	return asks, nil
-}
-
-// logUnindexedAskBlocks logs each ask block with no ask row that a write to issueKey's
-// documents marked resolved: it is not an ask yet, so it has no record to show, and settlement
-// indexes it as a new open ask once the issue reopens.
-func logUnindexedAskBlocks(issueKey string, blocks []docs.BlockRef) {
-	for _, block := range blocks {
-		slog.Warn("dispatch: mark resolved an ask block no settlement indexed before its issue closed",
-			"issue", issueKey, "artifact", block.ArtifactID, "block", block.BlockID)
-	}
 }

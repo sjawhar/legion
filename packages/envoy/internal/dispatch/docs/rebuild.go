@@ -3,7 +3,6 @@ package docs
 import (
 	"context"
 	"fmt"
-	"log/slog"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -161,11 +160,7 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 		if err := markUpdateOwed(ctx, tx, artifactID); err != nil {
 			return RebuildReport{}, VersionResult{}, err
 		}
-		for _, block := range closedStates.marked {
-			slog.Warn("dispatch: mark resolved an ask block no settlement indexed before its issue closed",
-				"issue", *owner.IssueKey, "artifact", block.ArtifactID, "block", block.BlockID)
-		}
-		return report, VersionResult{Version: latest.Version}, nil
+		LogUnindexedAskBlocks(*owner.IssueKey, closedStates.marked)
 	}
 	if markdown == nil || canonical == latest.markdown {
 		return report, VersionResult{Version: latest.Version}, nil
