@@ -129,8 +129,6 @@ var settings = []setting{
 		Description: "Path of the federated token (a Kubernetes projected service-account token) Dispatch exchanges with Entra for an Azure access token; re-read on every exchange, since the token rotates."},
 	{Name: "DISPATCH_WEB_DIST", Default: "the `packages/dispatch/web/dist` directory found from the binary's location", Required: "no",
 		Description: "Directory of the built dashboard the server serves."},
-	{Name: "DISPATCH_ASSET_STORE_BUCKET", Required: "no",
-		Description: "Bucket holding immutable assets from prior dashboard builds. Unset, Dispatch serves only its local dashboard files."},
 	{Name: "DISPATCH_DEV_SIGNIN", Required: "no",
 		Description: "Set to `1` on a loopback-only local server to sign anyone in by email at `/auth/_dev/signin` without the sign-in issuer; refused alongside any `DISPATCH_SIGNIN_*` setting, `DISPATCH_SIGNIN_DOMAIN` included."},
 	{Name: "DISPATCH_DEV_SIGNIN_SHARED_KEY", Default: "a key generated for each process", Required: "no",
@@ -151,6 +149,7 @@ var removedSettings = []struct{ Name, Replacement string }{
 	{"COHERE_API_KEY", "meaning search (LEGION-549) calls Cohere Embed v4 through AWS Bedrock (the AWS SDK's default credential chain) or Azure AI Foundry (the DISPATCH_AZURE_* settings), chosen by DISPATCH_EMBEDDER, never with a Cohere API key"},
 	{"DISPATCH_AGENT_SECRETS_TOKEN", noSharedBrokerBearer},
 	{"DISPATCH_AGENT_SECRETS_TOKEN_FILE", noSharedBrokerBearer},
+	{"DISPATCH_ASSET_STORE_BUCKET", "every server process now keeps its build's dashboard assets in Dispatch's database"},
 }
 
 // noSharedBrokerBearer is why the secrets broker's shared bearer and its file are gone: the

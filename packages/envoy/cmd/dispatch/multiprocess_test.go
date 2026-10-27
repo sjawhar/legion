@@ -14,6 +14,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -27,6 +28,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1407,4 +1411,182 @@ func whoami(t *testing.T, p *dispatchProcess, session *http.Cookie) (string, int
 	defer response.Body.Close()
 	body, _ := io.ReadAll(response.Body)
 	return strings.TrimSpace(string(body)), response.StatusCode
+}
+
+// ───── two dashboard builds ─────────────────────────────────────────────────
+
+// dashboardBuild is a web dist a test wrote: its directory and every file below its assets
+// directory, by URL path.
+type dashboardBuild struct {
+	dir    string
+	assets map[string][]byte
+}
+
+// writeDashboardBuild writes a dist as Vite does, for build name: an index.html naming its own
+// entry chunk, the entry, chunks of the sizes the dashboard's own run to (its largest is 1,747,955
+// bytes) whose names and bytes are this build's alone, and a chunk of the same name and bytes in
+// every build, as yjs and the stylesheet are across two builds of one source.
+func writeDashboardBuild(t *testing.T, name string) dashboardBuild {
+	t.Helper()
+	build := dashboardBuild{dir: t.TempDir(), assets: map[string][]byte{}}
+	entry := "/assets/index-" + name + ".js"
+	build.assets[entry] = []byte("import './chunk-" + name + "-0.js'; console.log('" + name + "')")
+	for i, size := range []int{1_747_955, 420_000, 96_000, 12_000, 2_000, 300, 1} {
+		build.assets[fmt.Sprintf("/assets/chunk-%s-%d.js", name, i)] = bytes.Repeat([]byte(name), size)
+	}
+	build.assets["/assets/fonts/inter-"+name+".woff2"] = []byte{0x77, 0x4f, 0x46, 0x32, 0x00, byte(len(name))}
+	build.assets["/assets/yjs-shared.js"] = []byte("export const yjs = 'the same in every build'")
+	files := map[string][]byte{"index.html": []byte(`<!doctype html><html><head><script type="module" crossorigin src="` + entry + `"></script></head><body><div id="root"></div></body></html>`)}
+	for path, content := range build.assets {
+		files[strings.TrimPrefix(path, "/")] = content
+	}
+	for name, content := range files {
+		file := filepath.Join(build.dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return build
+}
+
+// startOnBuild starts a Dispatch process serving build on database, with no NATS: the dashboard's
+// assets need none.
+func startOnBuild(t *testing.T, database string, build dashboardBuild) *dispatchProcess {
+	t.Helper()
+	process := startDispatchProcessWith(t, database, dispatchOptions{Env: map[string]string{"DISPATCH_WEB_DIST": build.dir}})
+	process.waitHealthy(t)
+	return process
+}
+
+// getAsset fetches path from the process and says what is wrong with the answer, or nothing.
+func getAsset(client *http.Client, p *dispatchProcess, path string, want []byte) error {
+	response, err := client.Get(p.url(path))
+	if err != nil {
+		return fmt.Errorf("GET %s: %w", path, err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return fmt.Errorf("GET %s: read: %w", path, err)
+	}
+	if response.StatusCode != http.StatusOK || !bytes.Equal(body, want) {
+		return fmt.Errorf("GET %s: status %d with %d bytes, want 200 with the %d bytes on disk", path, response.StatusCode, len(body), len(want))
+	}
+	if got := response.Header.Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+		return fmt.Errorf("GET %s: Cache-Control %q, want the immutable year", path, got)
+	}
+	return nil
+}
+
+// A rolling update runs two builds on one database, each process holding its own build's files
+// alone: a page one process served asks the other for its chunks. Every file of either build
+// answers 200 with its bytes from both processes.
+func TestDashboardServesEveryFileOfEitherBuildFromBothProcesses(t *testing.T) {
+	database := (&dispatchPair{database: storetest.Open(t)}).databaseURL(t)
+	builds := []dashboardBuild{writeDashboardBuild(t, "a"), writeDashboardBuild(t, "b")}
+	processes := []*dispatchProcess{startOnBuild(t, database, builds[0]), startOnBuild(t, database, builds[1])}
+
+	for i, process := range processes {
+		for j, build := range builds {
+			for path, content := range build.assets {
+				if err := getAsset(http.DefaultClient, process, path, content); err != nil {
+					t.Errorf("process %s, build %s's file: %v", "AB"[i:i+1], "ab"[j:j+1], err)
+				}
+			}
+		}
+	}
+}
+
+// Every chunk a stale tab's route imports is asked for at once, by every such tab: a burst of 200
+// concurrent requests for build A's files, every one but the shared chunk missing from B's disk, is
+// answered 200 with each file's bytes by B.
+func TestDashboardServesABurstOfTheOtherBuildsFiles(t *testing.T) {
+	database := (&dispatchPair{database: storetest.Open(t)}).databaseURL(t)
+	a := writeDashboardBuild(t, "a")
+	startOnBuild(t, database, a)
+	b := startOnBuild(t, database, writeDashboardBuild(t, "b"))
+	paths := make([]string, 0, len(a.assets))
+	for path := range a.assets {
+		paths = append(paths, path)
+	}
+	slices.Sort(paths)
+
+	const burst = 200
+	client := &http.Client{Transport: &http.Transport{MaxIdleConnsPerHost: burst}}
+	failures := make([]error, burst)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range burst {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			path := paths[i%len(paths)]
+			failures[i] = getAsset(client, b, path, a.assets[path])
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	failed := 0
+	for _, err := range failures {
+		if err != nil {
+			failed++
+			t.Error(err)
+		}
+	}
+	if failed > 0 {
+		t.Fatalf("%d of %d concurrent requests for A's files to B failed:\n%s", failed, burst, b.Output.String())
+	}
+}
+
+// A pod restarted on the build it ran writes no asset: the restart's publish writes no file's
+// bytes and leaves every stored asset row as it was, renewing only the build's last start, and the
+// restarted process still serves every file.
+func TestDashboardRestartOnTheSameBuildWritesNoAssetBytes(t *testing.T) {
+	ctx := context.Background()
+	pair := &dispatchPair{database: storetest.Open(t)}
+	database := pair.databaseURL(t)
+	build := writeDashboardBuild(t, "a")
+	first := startOnBuild(t, database, build)
+	if !first.logged("dispatch: published dashboard assets", fmt.Sprintf("assets=%d written=%d", len(build.assets), len(build.assets))) {
+		t.Fatalf("the first boot did not write every one of the build's %d files:\n%s", len(build.assets), first.Output.String())
+	}
+	assetRows := func() string {
+		var rows string
+		if err := pair.database.Pool.QueryRow(ctx, `select string_agg(path || ':' || xmin::text || ':' || created_at::text, ',' order by path) from dashboard_assets`).Scan(&rows); err != nil {
+			t.Fatal(err)
+		}
+		return rows
+	}
+	lastStarted := func() time.Time {
+		var at time.Time
+		if err := pair.database.Pool.QueryRow(ctx, `select last_started_at from dashboard_builds`).Scan(&at); err != nil {
+			t.Fatal(err)
+		}
+		return at
+	}
+	rowsBefore, startedBefore := assetRows(), lastStarted()
+	first.Terminate(t)
+	first.WaitExit(t, "SIGTERM")
+
+	restarted := startOnBuild(t, database, build)
+
+	if !restarted.logged("dispatch: published dashboard assets", fmt.Sprintf("assets=%d written=0", len(build.assets))) {
+		t.Errorf("the restart wrote asset bytes, want none:\n%s", restarted.Output.String())
+	}
+	if rowsAfter := assetRows(); rowsAfter != rowsBefore {
+		t.Errorf("the restart changed asset rows: before %s, after %s", rowsBefore, rowsAfter)
+	}
+	if startedAfter := lastStarted(); !startedAfter.After(startedBefore) {
+		t.Errorf("the build's last start is %s after the restart, want later than %s", startedAfter, startedBefore)
+	}
+	for path, content := range build.assets {
+		if err := getAsset(http.DefaultClient, restarted, path, content); err != nil {
+			t.Error(err)
+		}
+	}
 }

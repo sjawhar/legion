@@ -31,6 +31,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
+	"github.com/sjawhar/envoy/internal/dispatch/dashboard"
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
@@ -113,8 +114,6 @@ type bootConfig struct {
 	// WebDist is DISPATCH_WEB_DIST: the dashboard directory to serve, or empty to find it from
 	// the binary (defaultWebDistDir).
 	WebDist string
-	// AssetStoreBucket is DISPATCH_ASSET_STORE_BUCKET. Empty preserves local-only asset serving.
-	AssetStoreBucket string
 	// SigningKey is DISPATCH_SIGNING_KEY: the session cookie key, or empty to keep one in the
 	// data dir (sessionSigningKey).
 	SigningKey string
@@ -240,6 +239,15 @@ func main() {
 		slog.Error("dispatch: resolve web dist dir", "error", err)
 		os.Exit(1)
 	}
+	// The build's assets are in the database before the process listens, so a page of this build
+	// that another process serves, during a rolling update or a rollback, finds its chunks here,
+	// and this process answers another build's from there (dashboard.Store below). A process that
+	// cannot publish exits before it is ready, and a rolling update keeps the processes it would
+	// have replaced.
+	if err := publishDashboard(store.WithTransactionTracking(ctx), database.Pool, webDistDir, dashboardPublishTimeout); err != nil {
+		slog.Error("dispatch: publish dashboard assets", "error", err)
+		os.Exit(1)
+	}
 
 	// The store's construction reads no network: credentials come with the first request.
 	fileStore, err := openFileStore(ctx, boot)
@@ -249,14 +257,6 @@ func main() {
 	}
 	if fileStore != nil {
 		slog.Info("dispatch: storing uploaded files in a bucket", "bucket", boot.FileStoreBucket)
-	}
-	var assetStore routes.AssetStore
-	if boot.AssetStoreBucket != "" {
-		assetStore, err = routes.NewS3AssetStore(ctx, boot.AssetStoreBucket)
-		if err != nil {
-			slog.Error("dispatch: configure retained asset store", "error", err)
-			os.Exit(1)
-		}
 	}
 
 	signIn, err := discoverSignIn(ctx, boot)
@@ -318,7 +318,7 @@ func main() {
 	appCtx, err := routes.BuildAppContext(appContextOptions(boot, routes.AppContextOptions{
 		SigningKey:  signingKey,
 		WebDistDir:  webDistDir,
-		AssetStore:  assetStore,
+		AssetStore:  dashboard.NewStore(database.Pool),
 		People:      people,
 		Sessions:    sessions,
 		Identity:    requestIdentity,
@@ -590,7 +590,6 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		TestHooksEnabled:   env.get("DISPATCH_TEST_HOOKS") == "1",
 		WebDist:            env.get("DISPATCH_WEB_DIST"),
 		FileStoreBucket:    strings.TrimSpace(env.get("DISPATCH_FILE_STORE_BUCKET")),
-		AssetStoreBucket:   strings.TrimSpace(env.get("DISPATCH_ASSET_STORE_BUCKET")),
 		SigningKey:         env.get("DISPATCH_SIGNING_KEY"),
 		DevSignInSharedKey: env.get("DISPATCH_DEV_SIGNIN_SHARED_KEY"),
 		InsecureCookie:     env.get("DISPATCH_INSECURE_COOKIE") != "",
@@ -865,6 +864,43 @@ func devSignInSharedSigningKey(shared string) string {
 func newDocumentService(boot bootConfig, built docs.Deps) *docs.Service {
 	built.AgentTokens = boot.AgentTokens
 	return docs.New(built)
+}
+
+// dashboardPublishTimeout bounds the boot's publish of its dashboard build and the prune after it.
+// A first publish writes the whole build, 45 files and 5.4 MB for the dashboard of 2026-10-27; a
+// restart on a stored build writes nothing.
+const dashboardPublishTimeout = 60 * time.Second
+
+// publishDashboard stores the dashboard build at webDistDir in the database
+// (dashboard.Publish, stamped with buildCommit) and then prunes the builds no process needs any
+// more (dashboard.Prune), both within timeout. A dist with no index.html (the Go test rigs serve an
+// empty directory) publishes nothing and logs that it did not. A failed publish is the error
+// returned, and refuses the boot; a failed prune is logged and the start goes on, since it leaves
+// only builds the next boot's prune deletes.
+func publishDashboard(ctx context.Context, pool *store.Pool, webDistDir string, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	published, err := dashboard.Publish(ctx, pool, webDistDir, buildCommit)
+	switch {
+	case errors.Is(err, dashboard.ErrNoBuild):
+		slog.Info("dispatch: no dashboard build to publish: the web dist holds no index.html", "dir", webDistDir)
+	case err != nil:
+		return err
+	default:
+		slog.Info("dispatch: published dashboard assets", "build", published.Build, "entry", published.Entry,
+			"assets", published.Assets, "written", published.Written)
+	}
+	// No process keeps a record of the build it runs yet (INFRA-555's registry of live server
+	// processes adds one), so no build is live here and the newest dashboard.KeepNewest builds
+	// alone are kept: every build a running process serves stays as long as fewer than that many
+	// builds have started since it did.
+	pruned, err := dashboard.Prune(ctx, pool, nil)
+	if err != nil {
+		slog.Error("dispatch: prune dashboard builds", "error", err)
+		return nil
+	}
+	slog.Info("dispatch: pruned dashboard builds", "builds", pruned.Builds, "assets", pruned.Assets)
+	return nil
 }
 
 // decidedWordingRestoreTimeout bounds the boot's restoration of decided asks' wordings. On the

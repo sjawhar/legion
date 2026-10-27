@@ -705,6 +705,11 @@ jobs:
       - name: Check dispatch dashboard CSS classes
         run: bun run check:classes
         working-directory: packages/dispatch
+      # The server refuses to boot on a build holding an asset over 8 MiB (it publishes every
+      # asset to its database at boot), which would stall a roll; refuse the build here instead.
+      - name: Check dispatch dashboard asset sizes
+        run: bun run check:asset-sizes
+        working-directory: packages/dispatch
       - name: Install Playwright Chromium, WebKit and Firefox
         # The runner image preconfigures Google's chrome-stable apt source, whose
         # index intermittently fails `apt-get update` with a hash-sum mismatch and

@@ -806,6 +806,15 @@ the release before it runs over the new schema unchanged, and the trigger gives 
 release writes its sequence. The auto-deployer is the exception, by its own rule above: once the
 schema has moved it refuses to start the previous tag, and recovery there is forward.
 
+Migration `0121_dashboard_assets` creates `dashboard_builds`, `dashboard_assets` and
+`dashboard_build_assets`, where every server process publishes its dashboard build's assets at
+boot and from which it answers a page of another build that asks it for that build's chunks
+(`internal/dispatch/dashboard`). It creates tables and touches no row; its census answers `0`.
+The release before it never reads or writes these tables, so it serves beside `0121` unaffected
+while both run — its own pages are served from its own image, as before — and rolling Dispatch
+back past `0121` is an image rollback alone, with no schema to restore: the tables are left for
+the next release that carries them, whose boot prunes what no build still needs.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success

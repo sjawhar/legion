@@ -171,7 +171,7 @@ func TestResolveBootConfigRefusesSignInSettingsItCannotUse(t *testing.T) {
 
 // A setting a release removed is refused, never silently ignored.
 func TestResolveBootConfigRefusesRemovedSettings(t *testing.T) {
-	for _, name := range []string{"DISPATCH_ALLOWED_LOGINS", "DISPATCH_APP_CLIENT_SECRET", "COHERE_API_KEY", "DISPATCH_AGENT_SECRETS_TOKEN", "DISPATCH_AGENT_SECRETS_TOKEN_FILE"} {
+	for _, name := range []string{"DISPATCH_ALLOWED_LOGINS", "DISPATCH_APP_CLIENT_SECRET", "COHERE_API_KEY", "DISPATCH_AGENT_SECRETS_TOKEN", "DISPATCH_AGENT_SECRETS_TOKEN_FILE", "DISPATCH_ASSET_STORE_BUCKET"} {
 		_, err := resolveBootConfig(envGetter(signInEnvironment(map[string]string{name: "value"})))
 		if err == nil || !strings.Contains(err.Error(), name+" is no longer read") {
 			t.Errorf("%s set: err = %v, want a refusal naming it", name, err)

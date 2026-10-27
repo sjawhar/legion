@@ -8,6 +8,7 @@
     "dev": "vite --config web/vite.config.ts",
     "build:web": "vite build --config web/vite.config.ts",
     "check:classes": "bun web/src/theme/classes-in-build-css.ts",
+    "check:asset-sizes": "bun web/src/asset-sizes-in-build.ts",
     "test": "bun test --parallel web/src e2e/__tests__",
     "dispatch:local": "bun e2e/local-instance.ts",
     "e2e": "bun run build:web && playwright test --config e2e/playwright.config.ts",

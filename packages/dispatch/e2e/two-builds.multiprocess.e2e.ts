@@ -478,18 +478,34 @@ async function walk(
   /** Every status each asset path was answered with, across the walk. */
   const answers = new Map<string, number[]>();
   /** Asset requests not yet finished: a visit ends only once none is, so the next navigation
-   *  never cancels one and reads as a failed request. */
-  const pending = new Set<Request>();
+   *  never cancels one and reads as a failed request. Each is keyed to the document that made it
+   *  (`documents`, counted at the main-frame commit each `goto` makes): a page being left can
+   *  still start a lazy import between the wait and the next `goto`, and Chromium then cancels it
+   *  with neither `requestfinished` nor `requestfailed`, so a request of a document already
+   *  replaced is dropped at the commit rather than waited for. Its response, when one arrives, is
+   *  still read below. Only the first commit after a `goto` starts counts: the app's own history
+   *  navigations commit the main frame too, and its requests stay its document's. */
+  const pending = new Map<Request, number>();
+  let documents = 0;
+  let awaitingCommit = false;
   /** What went wrong on the current visit. */
   let problems: string[] = [];
+  page.on("framenavigated", (frame) => {
+    if (frame !== page.mainFrame() || !awaitingCommit) return;
+    awaitingCommit = false;
+    documents += 1;
+    for (const [request, document] of pending) if (document < documents) pending.delete(request);
+  });
   page.on("request", (request) => {
-    if (isAsset(new URL(request.url()))) pending.add(request);
+    if (isAsset(new URL(request.url()))) pending.set(request, documents);
   });
   page.on("requestfinished", (request) => pending.delete(request));
   page.on("requestfailed", (request) => {
+    const document = pending.get(request);
     pending.delete(request);
     const url = new URL(request.url());
-    if (isAsset(url)) {
+    // A request of a document already replaced was cancelled by the navigation, not refused.
+    if (isAsset(url) && document === documents) {
       problems.push(`${url.pathname} from ${assetsFrom} failed: ${request.failure()?.errorText}`);
     }
   });
@@ -509,6 +525,7 @@ async function walk(
       problems = [];
       const shows = visit.shows(page);
       try {
+        awaitingCommit = true;
         await page.goto(visit.url);
         // A failed asset ends the visit at once: the landmark it keeps from rendering would
         // only add a timeout.
