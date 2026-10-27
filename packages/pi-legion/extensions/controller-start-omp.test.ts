@@ -655,3 +655,50 @@ test.skipIf(skip)(
   },
   120_000
 );
+
+// A `/new` replaces the controller session, and pi-legion's session_switch handler claims the new
+// session again. When the daemon refuses that re-claim, the operator is told in a warning naming
+// the refusal (`reclaimAfterSessionChange`). Oh My Pi's `/new` awaits the session_switch handlers,
+// then resets the transcript and clears the scrollback
+// (command-controller.ts `#runNewSessionFlow` in the pinned build), so a notice the handler shows
+// while it runs is wiped before the operator can read it. The new session's `legion` tool then
+// refuses every call, and the screen does not say why.
+test.skipIf(skip)(
+  "the operator sees a refused re-claim after /new",
+  async () => {
+    const fixture: unknown = JSON.parse(
+      await readFile(
+        path.resolve(
+          import.meta.dir,
+          "../../contracts/fixtures/daemon-api/register-controller.json"
+        ),
+        "utf8"
+      )
+    );
+    let registrations = 0;
+    const session = await startController({
+      register: () => {
+        registrations += 1;
+        return registrations === 1
+          ? Response.json(fixture)
+          : Response.json({ error: "capability revoked" }, { status: 403 });
+      },
+    });
+    const start = await session.nextTurn("the start turn's model request");
+    start.reply("Start procedure done.");
+    await settledOn(session, "Start procedure done.");
+
+    session.terminal.write("/new");
+    await session.shows("/new in the composer", "/new");
+    session.terminal.write("\r");
+    await session.until("the re-claim's registration", () =>
+      registrations >= 2 ? true : undefined
+    );
+    await session.shows(
+      "the re-claim's refusal on screen after /new",
+      "re-claiming the controller for this session failed",
+      "capability revoked"
+    );
+  },
+  120_000
+);
