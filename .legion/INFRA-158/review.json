@@ -2,28 +2,16 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-158",
-  "completed": "2026-10-27T05:15:00Z",
+  "completed": "2026-10-27T06:18:30Z",
   "round": 8,
   "generation": 4,
-  "head": "5d17db145c276bdd38f259b024f3aa64c6635186",
+  "head": "21c784af1c137773a07a1f18f2704bd3a6e53d9c",
   "decision": "approved",
   "critical": 0,
   "important": 0,
-  "minor": 1,
-  "ci": "Required set: lint, typecheck, test, pr-title. At CI head 5d17db14: lint, typecheck success (run 40448347760), pr-title success (run 40448347731), test failure (job 122005329563). Every failing test is in packages/daemon (internal/admit, internal/api, internal/daemon timeout), with 'read a slotted issue ... number of field descriptions must equal number of destinations, got 20 and 31'; this pull request changes no file under packages/daemon, and main's own test check failed at its ancestors 7d889fce and f94bb7ec. It is main's failure (#2289), fixed on main by #2317 (baadccdc). Compare 5d17db14...92cf1a1e changes only .legion/.",
-  "thermonuclear": "At 86b33b75 (fingerprint 4e648533 -> 5d17db14 unchanged, b9213970...; the twelfth merge conflicted only in pool.go's comment, resolved to main's wording with leasePoolSize 9, and pi-legion's CHANGELOG): thermonuclear-deep-review APPROVE (73 assistant turns, all anthropic / claude-opus-5-5); thermonuclear-code-quality APPROVE (18 assistant turns, all anthropic / claude-opus-5-5). Read turn by turn from each pass's session transcript.",
-  "previousFindings": {
-    "review 5661612491: stamp stored while a writable tab reconnects read-only": "fixed in acaf0337: an update changing only heading id or list label/listType is held unstored until acknowledged; adapted PROBE D/E/W in ygo's order store nothing and show no notice",
-    "named cleanups": "landed: admitted flag removed, logUnindexedAskBlocks inside WriteIssueAskStates and unexported, e2e reopen checks poll after sync and check offline",
-    "earlier findings": "none came back (round 1 fresh read-only load, round 4 restore order and writable-reconnect storage, round 6 held-stamp row all pass)",
-    "15 s read-only lead": "not from this pull request's code: connection.ts hands every Authenticated straight to onAdmission and ProofDocument sets editable from it; the server admits from issueOpen, which the reopen commits before SetIssueClosed(false) and the response; remaining causes are the provider's reconnect backoff (1, 2, 4, 8 s) or the Playwright route, unconfirmed without a trace on the iphone project"
-  },
-  "keyFindings": [
-    {
-      "severity": "minor",
-      "file": "packages/envoy/CHANGELOG.md:1475",
-      "description": "Says the dashboard 'never counts or stores' a derived-only update; a person's next edit stores the held ones with it (pending-sync.ts:463-466), as packages/dispatch/AGENTS.md says. Wording."
-    }
-  ],
-  "fastFollow": "CHANGELOG wording at packages/envoy/CHANGELOG.md:1475: '...until a person's next edit, which stores them with it.'"
+  "minor": 0,
+  "confirmation": "Confirmation of review 5662530063 (APPROVE at 066713c78a7abb3ea325f5f3b9906cca4ee6a2f0) after the thirteenth forward merge (21c784af, picking up main's #2317). Unchanged-diff fingerprint b9213970aa87bfe6dac2fe0b10698ddb85734c319f784073ad257f0db01ffaf8 at both 066713c7 and 56ccb9d7, computed by the reviewer per conflicts-and-rewrites.md. No thermonuclear pass and no thread pass, as a confirmation takes none.",
+  "ci": "Required set: lint, typecheck, test, pr-title. At CI head 21c784af all four completed success (run 40455544826 for lint, typecheck, test; pr-title runs 40455546469 and 40455544857). Compare 21c784af...56ccb9d7 changes only .legion/. Main's daemon failure that turned test red at 5d17db14 is gone.",
+  "keyFindings": [],
+  "fastFollow": "Unchanged from review 5662530063: packages/envoy/CHANGELOG.md:1475's 'never counts or stores' wording."
 }
