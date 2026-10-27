@@ -1411,6 +1411,57 @@ func TestPlainStateSummarizesThePendingStatusWrites(t *testing.T) {
 	}
 }
 
+// An operator reading plain `legion state` is told, on one line of its own, how many repositories
+// the daemon serves and which, and every mapped repository it leaves out with why — an App not
+// installed on it, or an installation read GitHub refused — so a daemon serving less of its mapping
+// than the project maps never reads as healthy. With none left out the line says so.
+func TestPlainStateSummarizesTheRepositoryMapping(t *testing.T) {
+	daemon := `"daemon":{"project":"LEGION","schemaVersion":6,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},` +
+		`"admission":{"cap":2,"active":[],"waiting":[]},"issues":{},"pendingStatusWrites":[]`
+	const unread = "the implement App's installation on acme/sprockets could not be read: read whether the implement App is installed on acme/sprockets failed (401)"
+	for _, tc := range []struct {
+		name, repositories, want string
+	}{
+		{
+			name: "two served, two left out",
+			repositories: `{"owners":["acme","zeta"],"mapped":[{"repo":"acme/widgets","default":true},{"repo":"zeta/tools","default":false}],` +
+				`"refused":[{"repo":"acme/gadgets","reason":"the review App is not installed on acme/gadgets"},{"repo":"acme/sprockets","reason":"` + unread + `"}],"caches":[]}`,
+			want: "repositories: 2 served — acme/widgets, zeta/tools; 2 left out — acme/gadgets: the review App is not installed on acme/gadgets; acme/sprockets: " + unread + "\n",
+		},
+		{
+			name:         "every repository served",
+			repositories: `{"owners":["acme"],"mapped":[{"repo":"acme/widgets","default":true}],"refused":[],"caches":[]}`,
+			want:         "repositories: 1 served — acme/widgets; none left out\n",
+		},
+		{
+			name:         "none served, every repository left out",
+			repositories: `{"owners":[],"mapped":[],"refused":[{"repo":"acme/sprockets","reason":"` + unread + `"}],"caches":[]}`,
+			want:         "repositories: 0 served; 1 left out — acme/sprockets: " + unread + "\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			served := "{" + daemon + `,"repositories":` + tc.repositories + "}"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(served))
+			}))
+			defer server.Close()
+			t.Chdir(t.TempDir())
+			t.Setenv("LEGION_DAEMON_URL", server.URL)
+			t.Setenv("LEGION_ISSUE", "")
+
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), []string{"legion", "state"}, &out, &errb); code != 0 {
+				t.Fatalf("legion state = %d, stderr %q", code, errb.String())
+			}
+			// The line stands alone: it starts a line of the output and ends one.
+			if !strings.Contains(out.String(), "\n"+tc.want) {
+				t.Fatalf("legion state printed %q, want the line %q", out.String(), tc.want)
+			}
+		})
+	}
+}
+
 // An operator reading plain `legion state` is told how many lifecycle rows wait behind their
 // issues' running ones and which has waited longest: its kind, id, issue, wait and the row it waits
 // on, on one line. With none held the line says so.

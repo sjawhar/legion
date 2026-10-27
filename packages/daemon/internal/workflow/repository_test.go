@@ -17,10 +17,12 @@ import (
 )
 
 // fixedRepositories is a project's repositories as the daemon would hold them: each served
-// repository's default branch by its name, and every left-out repository with its reason.
+// repository's default branch by its name, every left-out repository with its reason, and every
+// repository left out because its installation read failed (unread) with its reason.
 type fixedRepositories struct {
 	served  map[string]string
 	leftOut map[string]string
+	unread  map[string]string
 }
 
 func (r fixedRepositories) ResolveRepository(resolved string) (Resolution, error) {
@@ -30,14 +32,20 @@ func (r fixedRepositories) ResolveRepository(resolved string) (Resolution, error
 	if reason, ok := r.leftOut[resolved]; ok {
 		return Resolution{Refusal: reason, LeftOut: true}, nil
 	}
+	if reason, ok := r.unread[resolved]; ok {
+		return Resolution{Refusal: reason, LeftOut: true, Unread: true}, nil
+	}
 	return Resolution{Refusal: resolved + " is not mapped to project LEGION in Dispatch"}, nil
 }
 
-// testRepositories serves every repository the workflow tests record issues on, and leaves out
-// acme/gadgets, whose review App is not installed.
+// testRepositories serves every repository the workflow tests record issues on, leaves out
+// acme/gadgets, whose review App is not installed, and acme/sprockets, whose implement App's
+// installation read GitHub refused.
 var testRepositories = fixedRepositories{
 	served:  map[string]string{"sjawhar/legion": "main", "acme/widgets": "main", "acme/tools": "release/v7.1"},
 	leftOut: map[string]string{"acme/gadgets": "the review App is not installed on acme/gadgets"},
+	unread: map[string]string{"acme/sprockets": "the implement App's installation on acme/sprockets could not be read: " +
+		"read whether the implement App is installed on acme/sprockets failed (401)"},
 }
 
 // openTree seeds a running root with an open gate, under which a todo child is recorded.
@@ -68,7 +76,9 @@ func TestAChildIsRecordedOnItsResolvedRepositoryAndItsDefaultBranch(t *testing.T
 
 // A child whose repository resolves to none, to one Legion leaves out, or to one not mapped to the
 // project is not recorded: the daemon says why on the child and tells the tree's architect, once
-// for one resolution, so a repeated event says nothing again.
+// for one resolution, so a repeated event says nothing again. A repository left out because its
+// installation read failed (Resolution.Unread) gets its own note, word for word: it asks for no
+// install, since the App may well be installed, and says when Legion reads the installation again.
 func TestAChildOnARepositoryLegionDoesNotServeIsNotRecordedAndSaysWhy(t *testing.T) {
 	for _, tc := range []struct {
 		name, resolved, note, reason string
@@ -79,6 +89,13 @@ func TestAChildOnARepositoryLegionDoesNotServeIsNotRecordedAndSaysWhy(t *testing
 		{name: "left out", resolved: "acme/gadgets",
 			note:   "Legion did not admit this issue: the review App is not installed on acme/gadgets. Install it on acme/gadgets, or set another repository (the issue header's Repository picker, or dispatch issue-update --repo owner/name), and move the issue to todo again.",
 			reason: "the review App is not installed on acme/gadgets"},
+		{name: "left out, its installation read failed", resolved: "acme/sprockets",
+			note: "Legion did not admit this issue: the implement App's installation on acme/sprockets could not be read: " +
+				"read whether the implement App is installed on acme/sprockets failed (401). " +
+				"Legion reads that installation again whenever an issue of acme/sprockets comes up for admission, " +
+				"when the repository mapping changes in Dispatch, and at its next boot: move the issue to todo again, " +
+				"or set another repository (the issue header's Repository picker, or dispatch issue-update --repo owner/name).",
+			reason: "the implement App's installation on acme/sprockets could not be read"},
 		{name: "not mapped", resolved: "other/thing",
 			note:   "Legion did not admit this issue: other/thing is not mapped to project LEGION in Dispatch. Set its repository (the issue header's Repository picker, or dispatch issue-update --repo owner/name) and move it to todo again.",
 			reason: "other/thing is not mapped to project LEGION in Dispatch"},
