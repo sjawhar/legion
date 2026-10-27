@@ -125,22 +125,26 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer cancel()
-	// Every connection reads the log's newest id, a resuming one too, which costs it one extra
-	// round trip. The event log can be reset under a reader (`truncate events restart identity`,
-	// the browser suite's e2e/seed.ts): the ids restart at 1 and the relay, which notices, ends
-	// every open subscription and so sends the browser through its reconnect. The browser only
-	// ever raises its lastEventId and never lowers it (web/src/api/sse.ts), so it resumes with a
-	// since above the new log's newest id. Unclamped, the live loop below would then drop every
-	// event of the new log for ever, on a connection that stays open and heartbeats: a reader
-	// silent for good, with nothing logged and nothing failed.
-	var head int64
-	if err := s.deps.Store.Pool.QueryRow(r.Context(), `select coalesce(max(id), 0) from events`).Scan(&head); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	// A cold client asked for no backlog, and a since above the newest id can only be an id of a
-	// log this one replaced; both start at published, the handover this connection holds.
-	if !sinceProvided || since > head {
+	// A cold client asked for no backlog and starts at published, the handover this connection
+	// holds. A resuming connection reads the log's newest id, which costs it one extra round trip.
+	// The event log can be reset under a reader (`truncate events restart identity`, the browser
+	// suite's e2e/seed.ts): the ids restart at 1 and the relay, which notices, ends every open
+	// subscription and so sends the browser through its reconnect. The browser only ever raises
+	// its lastEventId and never lowers it (web/src/api/sse.ts), so it resumes with a since above
+	// the new log's newest id. Unclamped, the live loop below would then drop every event of the
+	// new log for ever, on a connection that stays open and heartbeats: a reader silent for good,
+	// with nothing logged and nothing failed. A since above the newest id can only be an id of a
+	// log this one replaced, so it starts at published too.
+	if sinceProvided {
+		var head int64
+		if err := s.deps.Store.Pool.QueryRow(r.Context(), `select coalesce(max(id), 0) from events`).Scan(&head); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		if since > head {
+			since = published
+		}
+	} else {
 		since = published
 	}
 	w.Header().Set("Content-Type", "text/event-stream")

@@ -1127,7 +1127,7 @@ func (r *hubRig) isP0(key string) bool {
 	return p0
 }
 
-// T6. Event ids are not commit order: a write that drew the lower id a can still be open after one
+// Event ids are not commit order: a write that drew the lower id a can still be open after one
 // that drew b > a has committed. A catch-up that read b and moved its cursor there would never read
 // a, and the views a touches would miss it for good. The hub's catch-up reads only up to the safe
 // horizon, which a's open transaction holds below a, so b's commit (its notification, as another
@@ -1150,7 +1150,7 @@ func TestAHubCatchUpNeverMovesItsCursorPastAnOpenLowerID(t *testing.T) {
 	rig.waitForEventCursor(t, high, "both ids committed")
 }
 
-// T6. The broker hands the hub an event as soon as its own transaction commits, which with ids out
+// The broker hands the hub an event as soon as its own transaction commits, which with ids out
 // of commit order can be cursor+2 while cursor+1 is still open. The hub acts at once only on the
 // event right after its cursor; cursor+2 goes to the catch-up, which reads only up to the safe
 // horizon, so the hub acts on neither while cursor+1 is open (acting on cursor+2 would move the

@@ -79,10 +79,7 @@ func (h *deliveryHub) readCursors() bool {
 	var eventID int64
 	var eventAt time.Time
 	if err == nil {
-		var safe int64
-		if safe, err = h.server.horizon().Await(ctx); err == nil {
-			eventID, eventAt, err = lastEventThrough(ctx, pool, safe)
-		}
+		_, eventID, eventAt, err = h.server.awaitEventCursor(ctx)
 	}
 	var p0 map[string]struct{}
 	if err == nil {
@@ -138,17 +135,9 @@ func (h *deliveryHub) rereadGap(safe int64, gap bool) {
 		h.gapTimer.Stop()
 		h.gapTimer = nil
 	}
-	switch {
-	case !gap:
-		h.gapWait = 0
-		return
-	case h.gapWait == 0 || safe != h.gapSafe:
-		h.gapWait = eventRelayGapMin
-	default:
-		h.gapWait = min(2*h.gapWait, eventRelayGapMax)
+	if wait, open := h.gapReread.next(safe, gap); open {
+		h.gapTimer = time.AfterFunc(wait, func() { signal(h.wakeEvents) })
 	}
-	h.gapSafe = safe
-	h.gapTimer = time.AfterFunc(h.gapWait, func() { signal(h.wakeEvents) })
 }
 
 // catchUpChanges reads every delivery change after the cursor, marking the views each can touch.
@@ -231,17 +220,15 @@ func (h *deliveryHub) catchUpEvents() (safe int64, gap bool, err error) {
 	cursor, at := h.eventCursor, h.eventAt
 	h.mu.Unlock()
 	from := cursor
-	maxID, _, cursorAt, err := eventCursorCheck(ctx, pool, cursor)
+	maxID, cursorAt, err := eventCursorCheck(ctx, pool, cursor)
 	if err != nil {
 		return 0, false, err
 	}
 	if maxID < cursor || (cursor > 0 && (cursorAt == nil || !cursorAt.Equal(at))) {
 		horizon.Reset()
-		safe, err := horizon.Await(ctx)
-		if err != nil {
-			return 0, false, err
-		}
-		to, toAt, err := lastEventThrough(ctx, pool, safe)
+		var to int64
+		var toAt time.Time
+		safe, to, toAt, err = h.server.awaitEventCursor(ctx)
 		if err != nil {
 			return 0, false, err
 		}
@@ -261,7 +248,7 @@ func (h *deliveryHub) catchUpEvents() (safe int64, gap bool, err error) {
 	if err != nil {
 		return 0, false, err
 	}
-	for {
+	for cursor < safe {
 		events, through, throughAt, err := liveEventsSince(ctx, pool, cursor, safe, deliveryLivePage)
 		if err != nil {
 			return 0, false, err
@@ -279,7 +266,7 @@ func (h *deliveryHub) catchUpEvents() (safe int64, gap bool, err error) {
 		scanned := through - cursor
 		cursor = through
 		// Ids leave gaps, so a page that spans fewer ids than its limit scanned fewer rows: it
-		// reached the horizon. A full page at the horizon reads once more, and finds nothing.
+		// reached the horizon.
 		if scanned < deliveryLivePage {
 			break
 		}

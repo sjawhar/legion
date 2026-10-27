@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -60,7 +59,7 @@ func (b *Broker) LockOwners(ctx context.Context, tx pgx.Tx, owners ...model.Even
 	for index, owner := range sorted {
 		// An ownerless (session-addressed) event has no row to lock; its Append takes the
 		// transaction id itself.
-		if (index > 0 && owner.key == sorted[index-1].key) || strings.HasPrefix(owner.key, "agent:") {
+		if (index > 0 && owner.key == sorted[index-1].key) || ownerless(owner.event) {
 			continue
 		}
 		if _, err := lockEventOwner(ctx, tx, &owner.event); err != nil {
@@ -124,7 +123,7 @@ func (b *Broker) Append(ctx context.Context, tx pgx.Tx, e model.Event) (model.Ev
 		return model.Event{}, err
 	}
 
-	if e.IssueKey == nil && e.ArtifactID == nil && e.ProjectKey == nil {
+	if ownerless(e) {
 		e.Seq = 0
 	} else {
 		e.Seq = lastSeq + 1
@@ -181,6 +180,12 @@ func (b *Broker) Append(ctx context.Context, tx pgx.Tx, e model.Event) (model.Ev
 		}
 	}
 	return e, nil
+}
+
+// ownerless reports whether e names no owner row: a session-addressed event, which has no
+// sequence and no row to lock.
+func ownerless(e model.Event) bool {
+	return e.IssueKey == nil && e.ArtifactID == nil && e.ProjectKey == nil
 }
 
 // eventOwnerKey requires exactly one of IssueKey/ArtifactID/ProjectKey (or a session-addressed

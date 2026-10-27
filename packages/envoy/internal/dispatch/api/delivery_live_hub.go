@@ -170,12 +170,10 @@ type deliveryHub struct {
 	// Each wake holds at most one pending signal: what it asks for covers every signal before it.
 	wakeWork, wakeChanges, wakeEvents, connected chan struct{}
 	barrier                                      chan chan struct{}
-	// gapTimer is the scheduled re-read of an event gap left open above the safe horizon, gapWait
-	// its current delay (zero while no gap is open) and gapSafe the horizon the catch-up that
-	// scheduled it read through (rereadGap). Only the intake goroutine touches them.
-	gapTimer *time.Timer
-	gapWait  time.Duration
-	gapSafe  int64
+	// gapTimer is the scheduled re-read of an event gap left open above the safe horizon and
+	// gapReread its backoff (rereadGap). Only the intake goroutine touches them.
+	gapTimer  *time.Timer
+	gapReread eventGapReread
 
 	mu    sync.Mutex
 	views map[string]*deliveryView // by canonical view key

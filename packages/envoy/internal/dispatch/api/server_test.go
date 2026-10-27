@@ -1343,17 +1343,28 @@ func TestSSEReplaysThenStreamsCommittedEvent(t *testing.T) {
 	}
 }
 
-// readSSEFrame reads the next frame that carries an event, the way an SSE client reads the
-// stream: a comment line (one starting with ":") is ignored, so a frame made only of comments --
-// the ": open" every stream starts with, and its heartbeats -- dispatches nothing and is skipped.
+// readSSEFrame reads the next frame that carries an event (nextSSEFrame), failing the test when
+// the stream ends first.
 func readSSEFrame(t *testing.T, scanner *bufio.Scanner) []string {
 	t.Helper()
+	if frame, ok := nextSSEFrame(scanner); ok {
+		return frame
+	}
+	t.Fatalf("read SSE frame: %v", scanner.Err())
+	return nil
+}
+
+// nextSSEFrame reads the next frame that carries an event, the way an SSE client reads the
+// stream: a comment line (one starting with ":") is ignored, so a frame made only of comments --
+// the ": open" every stream starts with, and its heartbeats -- dispatches nothing and is skipped.
+// false means the stream ended first.
+func nextSSEFrame(scanner *bufio.Scanner) ([]string, bool) {
 	frame := []string{}
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
 			if len(frame) > 0 {
-				return frame
+				return frame, true
 			}
 			continue
 		}
@@ -1362,8 +1373,7 @@ func readSSEFrame(t *testing.T, scanner *bufio.Scanner) []string {
 		}
 		frame = append(frame, line)
 	}
-	t.Fatalf("read SSE frame: %v", scanner.Err())
-	return nil
+	return nil, false
 }
 
 func TestPerUserIssueStateIsIsolated(t *testing.T) {
@@ -2187,10 +2197,9 @@ func newTestHandlerWithBroker(t *testing.T) (http.Handler, *store.Store, *events
 // issue X (id a) and stays open while tx B appends on issue Y (id b > a) and commits. A reader
 // resuming from just before a must be sent nothing while A is open, then a and b in that order,
 // on the connection it holds and on a fresh resume alike. Reading the log by `id > since` alone,
-// the stream sends b at once and the reader's position moves past a, which then never reaches
-// it: with Broker.Append's database-wide lock removed and no safe horizon, that is what this
-// reader got (b, and never a). The catch-up and the relay read only up to the horizon
-// (events.Horizon), which stays below a while A is open.
+// the stream would send b at once and move the reader past a, which would then never reach it.
+// The catch-up and the relay read only up to the horizon (events.Horizon), which stays below a
+// while A is open.
 func TestSSEResumeCursorOrdersConcurrentEventCommits(t *testing.T) {
 	handler, database, broker := newTestHandlerWithBroker(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
@@ -2346,30 +2355,23 @@ func sseRequest(t *testing.T, url string, prepare func(*http.Request)) *http.Req
 	return request
 }
 
-// sseFrames reads scanner's event frames, as readSSEFrame does, on a goroutine of its own, so a
-// test can wait for a frame with a deadline or hold that none arrives. The channel closes when
-// the stream ends.
+// sseFrames reads scanner's event frames (nextSSEFrame) on a goroutine of its own, so a test can
+// wait for a frame with a deadline or hold that none arrives. The channel closes when the stream
+// ends.
 func sseFrames(t *testing.T, scanner *bufio.Scanner) <-chan []string {
 	frames := make(chan []string)
 	ended := t.Context().Done()
 	go func() {
 		defer close(frames)
-		frame := []string{}
-		for scanner.Scan() {
-			line := scanner.Text()
-			switch {
-			case line == "":
-				if len(frame) == 0 {
-					continue
-				}
-				select {
-				case frames <- frame:
-				case <-ended:
-					return
-				}
-				frame = []string{}
-			case !strings.HasPrefix(line, ":"):
-				frame = append(frame, line)
+		for {
+			frame, ok := nextSSEFrame(scanner)
+			if !ok {
+				return
+			}
+			select {
+			case frames <- frame:
+			case <-ended:
+				return
 			}
 		}
 	}()

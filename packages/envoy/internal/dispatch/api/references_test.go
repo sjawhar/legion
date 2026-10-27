@@ -329,7 +329,7 @@ func awaitGraphEdges(t *testing.T, handler http.Handler, query url.Values, want 
 	}
 }
 
-// T7. A poller reads ?since=<the highest source_seq it was shown>. Event ids are not commit order:
+// A poller reads ?since=<the highest source_seq it was shown>. Event ids are not commit order:
 // a comment edit that drew event a can still be open after one that drew b > a has committed. A
 // read that answered b's mention would move the poller's since to b, and a's mention, committing
 // later below it, would never be shown. The since read stops at the safe horizon, which a's open

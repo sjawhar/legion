@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,36 +19,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-func TestParseHorizonSnapshot(t *testing.T) {
-	for _, tc := range []struct {
-		text string
-		want horizonSnapshot
-	}{
-		{text: "740:740:", want: horizonSnapshot{xmin: 740, xmax: 740}},
-		{text: "10:20:10,14,19", want: horizonSnapshot{xmin: 10, xmax: 20, xip: []uint64{10, 14, 19}}},
-		{
-			text: "4294967296:4294967300:4294967297",
-			want: horizonSnapshot{xmin: 4294967296, xmax: 4294967300, xip: []uint64{4294967297}},
-		},
-	} {
-		got, err := parseHorizonSnapshot(tc.text)
-		if err != nil {
-			t.Fatalf("parse %q: %v", tc.text, err)
-		}
-		if got.xmin != tc.want.xmin || got.xmax != tc.want.xmax || !slices.Equal(got.xip, tc.want.xip) {
-			t.Fatalf("parse %q = %+v, want %+v", tc.text, got, tc.want)
-		}
-	}
-	for _, text := range []string{
-		"", "10", "10:20", "10:20:14:15", "x:20:", "10:x:", "-1:20:", "20:10:",
-		"10:20:x", "10:20:14,", "10:20:,14", "10:20:9", "10:20:20", "10:20:14,12", "10:20:14,14",
-	} {
-		if got, err := parseHorizonSnapshot(text); err == nil {
-			t.Fatalf("parse %q = %+v, want it refused", text, got)
-		}
-	}
-}
-
 // The xmax hole, scripted with the counterexample the package documentation names. T2 took
 // transaction id 100, T took 101 and drew event 7, then T2 drew event 8 and committed. The first
 // observation's snapshot sees 8 and lists nothing in progress -- 101 is not below its xmax, so it
@@ -59,10 +28,10 @@ func TestParseHorizonSnapshot(t *testing.T) {
 func TestHorizonProvesAnObservationOnlyFromALaterSnapshot(t *testing.T) {
 	ctx := context.Background()
 	db := &scriptedHorizonDB{script: []scriptedObservation{
-		{newest: 8, snapshot: "101:101:", xid: 102},
-		{newest: 8, snapshot: "101:103:101", xid: 103}, // T is still open
-		{newest: 9, snapshot: "104:104:", xid: 104},    // T has ended, and so have both observers
-		{newest: 9, snapshot: "105:105:", xid: 105},
+		{newest: 8, xmin: 101, xid: 102},
+		{newest: 8, xmin: 101, xid: 103}, // T is still open
+		{newest: 9, xmin: 104, xid: 104}, // T has ended, and so have both observers
+		{newest: 9, xmin: 105, xid: 105},
 	}}
 	horizon := NewHorizon(db)
 	for step, want := range []struct {
@@ -93,13 +62,9 @@ func TestHorizonKeepsTheNewestObservationWhenThePendingListIsFull(t *testing.T) 
 	const stuck = 3 * horizonPendingLimit
 	db := &scriptedHorizonDB{}
 	for i := range stuck {
-		db.script = append(db.script, scriptedObservation{
-			newest:   int64(i + 1),
-			snapshot: "10:" + strconv.Itoa(300+i) + ":10",
-			xid:      uint64(300 + i),
-		})
+		db.script = append(db.script, scriptedObservation{newest: int64(i + 1), xmin: 10, xid: uint64(300 + i)})
 	}
-	db.script = append(db.script, scriptedObservation{newest: stuck, snapshot: "1000:1000:", xid: 1000})
+	db.script = append(db.script, scriptedObservation{newest: stuck, xmin: 1000, xid: 1000})
 	horizon := NewHorizon(db)
 	for range stuck {
 		if safe, err := horizon.Safe(ctx); err != nil || safe != 0 {
@@ -120,9 +85,7 @@ func TestHorizonStallWarningNamesTheHolderAndNeverFailsSafe(t *testing.T) {
 	ctx := context.Background()
 	db := &scriptedHorizonDB{holder: func(...any) error { return errors.New("pg_stat_activity unavailable") }}
 	for i := range 4 {
-		db.script = append(db.script, scriptedObservation{
-			newest: 5, snapshot: "10:" + strconv.Itoa(20+i) + ":10", xid: uint64(20 + i),
-		})
+		db.script = append(db.script, scriptedObservation{newest: 5, xmin: 10, xid: uint64(20 + i)})
 	}
 	var logged bytes.Buffer
 	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
@@ -165,9 +128,8 @@ func TestHorizonStallWarningNamesTheHolderAndNeverFailsSafe(t *testing.T) {
 	}
 }
 
-// T3, the horizon's part: a write that drew a lower id and is still open keeps the horizon below
-// it however often a reader asks, while a higher id beside it has committed; once it commits,
-// Await reaches past both.
+// A write that drew a lower id and is still open keeps the horizon below it however often a reader
+// asks, while a higher id beside it has committed; once it commits, Await reaches past both.
 func TestHorizonStaysBelowAnOpenLowerWrite(t *testing.T) {
 	database := storetest.Open(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -197,7 +159,7 @@ func TestHorizonStaysBelowAnOpenLowerWrite(t *testing.T) {
 	}
 }
 
-// T3b, the xmax hole on a real Postgres. T2 takes its transaction id first; T takes a higher one
+// The xmax hole on a real Postgres. T2 takes its transaction id first; T takes a higher one
 // and draws the lower event id; T2 draws the higher id and commits. A snapshot taken then has its
 // xmax one past T2's id, the newest completed one, so T's id is not below it and T is missing
 // from its in-progress list although T is open and holds a lower id than the snapshot sees: a
@@ -228,25 +190,27 @@ func TestHorizonDoesNotPassAWriterAboveTheSnapshotXmax(t *testing.T) {
 		}
 
 		var visible int64
-		var snapshotText string
+		var xmaxText string
 		if err := database.Pool.QueryRow(ctx,
-			`select coalesce(max(id), 0), pg_current_snapshot()::text from events`,
-		).Scan(&visible, &snapshotText); err != nil {
+			`select coalesce(max(id), 0), pg_snapshot_xmax(pg_current_snapshot())::text from events`,
+		).Scan(&visible, &xmaxText); err != nil {
 			t.Fatalf("read one snapshot: %v", err)
 		}
-		snapshot, err := parseHorizonSnapshot(snapshotText)
+		xmax, err := strconv.ParseUint(xmaxText, 10, 64)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("parse snapshot xmax %q: %v", xmaxText, err)
 		}
-		hole := writerXid >= snapshot.xmax && !slices.Contains(snapshot.xip, writerXid) && visible >= higherID
+		// A snapshot lists in-progress ids only below its xmax, so an id at or above it is not
+		// listed: T is open, yet missing from the snapshot's in-progress list.
+		hole := writerXid >= xmax && visible >= higherID
 		if !hole && attempt < attempts {
 			if err := writer.Commit(ctx); err != nil {
 				t.Fatalf("commit T: %v", err)
 			}
 			continue
 		}
-		t.Logf("xmax hole reproduced: %v on attempt %d (snapshot %s sees id %d; T holds xid %d and id %d)",
-			hole, attempt, snapshotText, visible, writerXid, lowerID)
+		t.Logf("xmax hole reproduced: %v on attempt %d (snapshot xmax %d sees id %d; T holds xid %d and id %d)",
+			hole, attempt, xmax, visible, writerXid, lowerID)
 
 		requireHorizonBelow(ctx, t, horizon, lowerID)
 		if err := writer.Commit(ctx); err != nil {
@@ -479,9 +443,9 @@ type scriptedHorizonDB struct {
 }
 
 type scriptedObservation struct {
-	newest   int64
-	snapshot string
-	xid      uint64
+	newest int64
+	xmin   uint64
+	xid    uint64
 }
 
 func (db *scriptedHorizonDB) SendBatch(context.Context, *pgx.Batch) pgx.BatchResults {
@@ -515,7 +479,7 @@ func (r scriptedResults) QueryRow() pgx.Row {
 			return r.err
 		}
 		*dest[0].(*int64) = r.observation.newest
-		*dest[1].(*string) = r.observation.snapshot
+		*dest[1].(*string) = strconv.FormatUint(r.observation.xmin, 10)
 		*dest[2].(*string) = strconv.FormatUint(r.observation.xid, 10)
 		return nil
 	})

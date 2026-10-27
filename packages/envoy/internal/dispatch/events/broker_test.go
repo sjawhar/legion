@@ -410,10 +410,9 @@ func issueUpdated(key string) model.Event {
 	}
 }
 
-// A write on one issue must never wait for an open write on another. Append once took one
-// database-wide lock until commit as well as the owner's row, so a single slow write anywhere
-// held up every other write in Dispatch; it now locks only the owner's row. The second write
-// here must commit while the first is still open, with no backend ever seen waiting on a lock.
+// A write on one issue must never wait for an open write on another: Append locks only its
+// owner's row (Broker.Append). The second write here must commit while the first is still open,
+// with no backend ever seen waiting on a lock.
 func TestAppendsOnDifferentIssuesDoNotWaitForEachOther(t *testing.T) {
 	ctx := context.Background()
 	database := storetest.Open(t)

@@ -170,18 +170,18 @@ func TestLiveEventsSinceScansAtMostLimitRows(t *testing.T) {
 	}
 }
 
-// eventCursorCheck reads the newest event's id and time, and the time of the event at the cursor;
-// once the cursor's row is gone (a reset of the log), cursorAt is nil.
+// eventCursorCheck reads the newest event's id and the time of the event at the cursor; once the
+// cursor's row is gone (a reset of the log), cursorAt is nil.
 func TestEventCursorCheckReadsTheNewestEventAndTheCursorsRow(t *testing.T) {
 	database := storetest.Open(t)
 	ctx := context.Background()
 
-	maxID, maxAt, cursorAt, err := eventCursorCheck(ctx, database.Pool, 0)
+	maxID, cursorAt, err := eventCursorCheck(ctx, database.Pool, 0)
 	if err != nil {
 		t.Fatalf("eventCursorCheck on an empty log: %v", err)
 	}
-	if maxID != 0 || !maxAt.IsZero() || cursorAt != nil {
-		t.Fatalf("an empty log = %d, %v, %v; want 0, zero, nil", maxID, maxAt, cursorAt)
+	if maxID != 0 || cursorAt != nil {
+		t.Fatalf("an empty log = %d, %v; want 0, nil", maxID, cursorAt)
 	}
 
 	base := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
@@ -190,12 +190,12 @@ func TestEventCursorCheckReadsTheNewestEventAndTheCursorsRow(t *testing.T) {
 		{kind: "artifact.version", actor: liveUser, payload: `{}`, at: base.Add(time.Minute)},
 		{kind: "issue.updated", actor: liveUser, payload: `{}`, at: base.Add(2 * time.Minute)},
 	})
-	maxID, maxAt, cursorAt, err = eventCursorCheck(ctx, database.Pool, ids[1])
+	maxID, cursorAt, err = eventCursorCheck(ctx, database.Pool, ids[1])
 	if err != nil {
 		t.Fatalf("eventCursorCheck: %v", err)
 	}
-	if maxID != ids[2] || !maxAt.Equal(base.Add(2*time.Minute)) {
-		t.Fatalf("newest event = %d at %v, want %d at %v", maxID, maxAt, ids[2], base.Add(2*time.Minute))
+	if maxID != ids[2] {
+		t.Fatalf("newest event = %d, want %d", maxID, ids[2])
 	}
 	if cursorAt == nil || !cursorAt.Equal(base.Add(time.Minute)) {
 		t.Fatalf("the cursor's row time = %v, want %v", cursorAt, base.Add(time.Minute))
@@ -204,19 +204,19 @@ func TestEventCursorCheckReadsTheNewestEventAndTheCursorsRow(t *testing.T) {
 	if _, err := database.Pool.Exec(ctx, `delete from events where id = $1`, ids[1]); err != nil {
 		t.Fatalf("delete the cursor's row: %v", err)
 	}
-	maxID, maxAt, cursorAt, err = eventCursorCheck(ctx, database.Pool, ids[1])
+	maxID, cursorAt, err = eventCursorCheck(ctx, database.Pool, ids[1])
 	if err != nil {
 		t.Fatalf("eventCursorCheck once the cursor's row is gone: %v", err)
 	}
-	if maxID != ids[2] || !maxAt.Equal(base.Add(2*time.Minute)) || cursorAt != nil {
-		t.Fatalf("with the cursor's row gone = %d, %v, %v; want %d, %v, nil", maxID, maxAt, cursorAt, ids[2], base.Add(2*time.Minute))
+	if maxID != ids[2] || cursorAt != nil {
+		t.Fatalf("with the cursor's row gone = %d, %v; want %d, nil", maxID, cursorAt, ids[2])
 	}
 
 	if _, err := database.Pool.Exec(ctx, `truncate events restart identity cascade`); err != nil {
 		t.Fatalf("reset the event log: %v", err)
 	}
 	reset := seedLiveEvents(t, database, []liveEventSeed{{kind: "issue.created", actor: liveUser, payload: `{}`, at: base.Add(time.Hour)}})
-	maxID, _, cursorAt, err = eventCursorCheck(ctx, database.Pool, ids[2])
+	maxID, cursorAt, err = eventCursorCheck(ctx, database.Pool, ids[2])
 	if err != nil {
 		t.Fatalf("eventCursorCheck after a reset: %v", err)
 	}

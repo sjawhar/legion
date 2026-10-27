@@ -11,10 +11,11 @@
 //
 // An observation is one statement in a transaction of its own, sent as one batch:
 //
-//	select coalesce(max(id), 0), pg_current_snapshot()::text, pg_current_xact_id()::text from events
+//	select coalesce(max(id), 0), pg_snapshot_xmin(pg_current_snapshot())::text, pg_current_xact_id()::text from events
 //
-// It yields A, the newest id visible to the statement's snapshot S, and X, the observer's own
-// transaction id, which pg_current_xact_id assigns while the statement runs, after S was taken.
+// It yields A, the newest id visible to the statement's snapshot S, the xmin of S, and X, the
+// observer's own transaction id, which pg_current_xact_id assigns while the statement runs, after
+// S was taken.
 //
 // A is final once no transaction id below X is still running. Take any transaction T that owns an
 // id g <= A and had not committed when S was taken. T held its transaction id before nextval handed
@@ -67,7 +68,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -171,12 +171,6 @@ type horizonFlight struct {
 	// abandoned is an observation that failed because its runner's context ended; a waiter
 	// whose own context is still live runs another rather than return a cancellation not its own.
 	abandoned bool
-}
-
-// horizonSnapshot is a pg_snapshot's text form, xmin:xmax:xip1,xip2,..., as xid8 values.
-type horizonSnapshot struct {
-	xmin, xmax uint64
-	xip        []uint64
 }
 
 // NewHorizon returns a Horizon observing the event log through db, with H at 0.
@@ -294,7 +288,7 @@ func (h *Horizon) observe(ctx context.Context, after uint64) error {
 // run takes flight's observation and records it, unless a Reset came between. A stall warning it
 // finds due runs after the waiters are released.
 func (h *Horizon) run(ctx context.Context, flight *horizonFlight) {
-	observation, snapshot, err := h.take(ctx)
+	observation, xmin, err := h.take(ctx)
 	h.mu.Lock()
 	h.inFlight = nil
 	flight.err = err
@@ -303,7 +297,7 @@ func (h *Horizon) run(ctx context.Context, flight *horizonFlight) {
 	var safe int64
 	if err == nil && flight.generation == h.generation {
 		observation.number, observation.at = flight.number, h.now()
-		h.record(observation, snapshot.xmin)
+		h.record(observation, xmin)
 		stalled, safe = h.stalled(observation.at), h.safe
 	}
 	h.mu.Unlock()
@@ -313,24 +307,25 @@ func (h *Horizon) run(ctx context.Context, flight *horizonFlight) {
 	}
 }
 
-// take runs one observation: A, the snapshot S its statement read and X, the observer's own
-// transaction id. synchronous_commit is off for it alone, since the observer writes nothing a
-// crash could lose, and its commit need not wait for a WAL flush to end its transaction id.
-func (h *Horizon) take(ctx context.Context) (horizonObservation, horizonSnapshot, error) {
+// take runs one observation: A, the xmin of the snapshot S its statement read and X, the
+// observer's own transaction id. synchronous_commit is off for it alone, since the observer
+// writes nothing a crash could lose, and its commit need not wait for a WAL flush to end its
+// transaction id.
+func (h *Horizon) take(ctx context.Context) (horizonObservation, uint64, error) {
 	batch := &pgx.Batch{}
 	batch.Queue(`begin`)
 	batch.Queue(`set local synchronous_commit = off`)
-	batch.Queue(`select coalesce(max(id), 0), pg_current_snapshot()::text, pg_current_xact_id()::text from events`)
+	batch.Queue(`select coalesce(max(id), 0), pg_snapshot_xmin(pg_current_snapshot())::text, pg_current_xact_id()::text from events`)
 	batch.Queue(`commit`)
 	results := h.db.SendBatch(ctx, batch)
 	var newest int64
-	var snapshotText, xidText string
+	var xminText, xidText string
 	_, err := results.Exec()
 	if err == nil {
 		_, err = results.Exec()
 	}
 	if err == nil {
-		err = results.QueryRow().Scan(&newest, &snapshotText, &xidText)
+		err = results.QueryRow().Scan(&newest, &xminText, &xidText)
 	}
 	if err == nil {
 		_, err = results.Exec()
@@ -339,17 +334,17 @@ func (h *Horizon) take(ctx context.Context) (horizonObservation, horizonSnapshot
 		err = closeErr
 	}
 	if err != nil {
-		return horizonObservation{}, horizonSnapshot{}, fmt.Errorf("observe event horizon: %w", err)
+		return horizonObservation{}, 0, fmt.Errorf("observe event horizon: %w", err)
 	}
-	snapshot, err := parseHorizonSnapshot(snapshotText)
+	xmin, err := strconv.ParseUint(xminText, 10, 64)
 	if err != nil {
-		return horizonObservation{}, horizonSnapshot{}, fmt.Errorf("observe event horizon: %w", err)
+		return horizonObservation{}, 0, fmt.Errorf("observe event horizon: parse snapshot xmin %q: %w", xminText, err)
 	}
 	xid, err := strconv.ParseUint(xidText, 10, 64)
 	if err != nil {
-		return horizonObservation{}, horizonSnapshot{}, fmt.Errorf("observe event horizon: parse transaction id %q: %w", xidText, err)
+		return horizonObservation{}, 0, fmt.Errorf("observe event horizon: parse transaction id %q: %w", xidText, err)
 	}
-	return horizonObservation{newest: newest, xid: xid}, snapshot, nil
+	return horizonObservation{newest: newest, xid: xid}, xmin, nil
 }
 
 // record checks every pending observation against the new one's snapshot xmin, raises H to the
@@ -427,44 +422,4 @@ func (h *Horizon) warnStall(ctx context.Context, oldest horizonObservation, safe
 		logger = slog.Default()
 	}
 	logger.Warn("dispatch: event horizon held back by an open transaction; live event readers wait for it", attrs...)
-}
-
-// parseHorizonSnapshot parses a pg_snapshot's text form, xmin:xmax:xip1,xip2,... with an empty
-// xip list when nothing is in progress. It refuses anything Postgres would not print: a missing
-// field, a value that is not an unsigned integer, xmin above xmax, or an xip value outside
-// [xmin, xmax) or out of ascending order.
-func parseHorizonSnapshot(text string) (horizonSnapshot, error) {
-	fields := strings.Split(text, ":")
-	if len(fields) != 3 {
-		return horizonSnapshot{}, fmt.Errorf("parse snapshot %q: want xmin:xmax:xip", text)
-	}
-	xmin, err := strconv.ParseUint(fields[0], 10, 64)
-	if err != nil {
-		return horizonSnapshot{}, fmt.Errorf("parse snapshot %q: xmin: %w", text, err)
-	}
-	xmax, err := strconv.ParseUint(fields[1], 10, 64)
-	if err != nil {
-		return horizonSnapshot{}, fmt.Errorf("parse snapshot %q: xmax: %w", text, err)
-	}
-	if xmin > xmax {
-		return horizonSnapshot{}, fmt.Errorf("parse snapshot %q: xmin above xmax", text)
-	}
-	snapshot := horizonSnapshot{xmin: xmin, xmax: xmax}
-	if fields[2] == "" {
-		return snapshot, nil
-	}
-	for value := range strings.SplitSeq(fields[2], ",") {
-		xid, err := strconv.ParseUint(value, 10, 64)
-		if err != nil {
-			return horizonSnapshot{}, fmt.Errorf("parse snapshot %q: xip: %w", text, err)
-		}
-		if xid < xmin || xid >= xmax {
-			return horizonSnapshot{}, fmt.Errorf("parse snapshot %q: in-progress id %d outside [xmin, xmax)", text, xid)
-		}
-		if n := len(snapshot.xip); n > 0 && xid <= snapshot.xip[n-1] {
-			return horizonSnapshot{}, fmt.Errorf("parse snapshot %q: in-progress ids not ascending", text)
-		}
-		snapshot.xip = append(snapshot.xip, xid)
-	}
-	return snapshot, nil
 }
