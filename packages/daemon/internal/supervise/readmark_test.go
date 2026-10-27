@@ -314,7 +314,7 @@ func TestAnUnacknowledgedResendLeavesTheGivenUpPromptsRefusalToClearTheMark(t *t
 			h.observe(runtime.Alive)
 		}},
 		{name: "the agent refuses the re-send on arrival", resend: func(h *harness) {
-			h.conn.RefusePrompt("agent busy")
+			h.conn.RefusePrompt("the model provider refused the request")
 			h.observe(runtime.Alive)
 		}},
 		{name: "the re-send's turn confirms it in flight, then the send is lost", resend: func(h *harness) {

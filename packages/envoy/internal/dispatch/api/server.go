@@ -256,6 +256,9 @@ type server struct {
 	// Only a test sets it, so a budget that ends before every selected session is read is the
 	// test's choice rather than a race against five seconds of wall clock (INFRA-249).
 	broadcastResolveBudget time.Duration
+	// rosters is the process's copy of the listener's live-session list that issue reads judge
+	// routes against (issue_route_status.go). Only register gives it non-zero TTLs.
+	rosters rosterCache
 	// deliveryHub keeps the open Delivery and Pipeline pages current (LEGION-690); every server
 	// register mounts has one, and only a server a test builds directly (directServer) has none.
 	deliveryHub *deliveryHub
@@ -332,7 +335,7 @@ func register(mux *http.ServeMux, deps Deps) *server {
 	if deps.Lifetime == nil {
 		panic("api.Register: Deps.Lifetime is required: it is the context that ends the delivery hub, the event stream relay and every broadcast delivery (a test passes t.Context())")
 	}
-	s := &server{deps: deps}
+	s := &server{deps: deps, rosters: rosterCache{ttl: routeRosterTTL, silenceTTL: routeRosterSilenceTTL}}
 	s.eventRelay = newEventStreamRelay(s, deps.Lifetime)
 	s.deliveryHub = newDeliveryHub(s, deps.Lifetime, deliveryHubClock{})
 	routes := s.routes()

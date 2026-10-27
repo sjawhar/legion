@@ -29,7 +29,9 @@ type AttemptRun struct {
 type ClassifiedPush struct {
 	SHA string `json:"sha"`
 	// Before is the head the push replaced, empty when the push did not say.
-	Before      string `json:"before,omitempty"`
+	Before string `json:"before,omitempty"`
+	// HandoffOnly is a push every one of whose changed paths is the issue's own handoff, under
+	// .legion/<issue>/ (classify.HandoffPath); a .legion/-only push names such a push throughout.
 	HandoffOnly bool   `json:"handoffOnly"`
 	Unknown     string `json:"unknown,omitempty"`
 	// ByReviewApp is whether the push was the review App's (its pusher is the review App's bot login).
@@ -40,8 +42,8 @@ type ClassifiedPush struct {
 	Forced bool `json:"forced,omitempty"`
 }
 
-// MayChangeCode is whether the push may have changed anything outside .legion/ in the head it
-// replaced.
+// MayChangeCode is whether the push may have changed anything outside the issue's own
+// .legion/<issue>/ in the head it replaced.
 func (p ClassifiedPush) MayChangeCode() bool {
 	return !p.HandoffOnly || p.Forced
 }
@@ -105,6 +107,40 @@ type Issue struct {
 	// event subjects carry, which NATS matches case-sensitively, so GitHub intake hears the issue's
 	// repository by it, read from the record at boot.
 	GitHubRepo string
+	// Ancestry is the keys of a root's Dispatch parent chain, from its parent upward to the top,
+	// stopping only at a repeated key or back at the root, as the newest Dispatch observation
+	// applied to the record was prepared with (intake's DispatchIssue.Ancestry), or as the
+	// preparation of an event of an issue on that chain read it again (intake's
+	// DispatchIssue.Reread): kept for a labelled todo root under a parent unrecorded or recorded as
+	// a root, such as a child of a live tree that tree's architect has not released. Such a root
+	// is held under that unreleased child (the ancestry hold) and waits for no slot while any live
+	// root is on its chain (Waiting), exactly while that root's release would reach it; it is not
+	// the hold on Dispatch blocked-by links (blockers.WaitsOn). Empty for every other record, for a
+	// root that ran as a tree of its own (workflow's RanAsRoot), which no release adopts, and
+	// cleared when adoption takes the record into a tree.
+	Ancestry []string
+	// HandedOverFrom is the key of the tree the issue left when it became a root of its own:
+	// re-admission (admit.Admission.readmit) writes it whenever it moves a member of another tree
+	// into a tree of its own, a child its finished tree handed over (carrying its run or not) or an
+	// orphan a person admitted, and never clears it, a root's re-admission of itself included. Such
+	// a root stays its own tree (workflow's RanAsRoot): no admission sweep or release of children
+	// adopts it, into the tree it left or any other, and no ancestry hold holds it. Empty for every
+	// other record.
+	HandedOverFrom string
+	// Awaiting is what a root in phase awaiting_person waits on, nil in every other phase: the two
+	// change together, as Hold and held do.
+	Awaiting *Awaiting
+	// HandoutSeq is the highest Dispatch sequence of the issue the record held when the daemon last
+	// gave the root's architect work (Store.StartHandout, Store.TakeInThrough), 0 for never. It is
+	// never lowered, and only those two write it: PutIssue keeps the stored value.
+	HandoutSeq int64
+	// DeclaredSeq is the newest Dispatch sequence of a hand-back the architect made to a person
+	// since its last handout (Store.Declare), 0 when it made none or when nothing it handed back is
+	// still with the person (Store.ClearDeclared), and DeclaredAt Dispatch's time of that hand-back
+	// (zero when its event gave none). Only Declare, ClearDeclared, StartHandout and TakeInThrough
+	// write them: PutIssue keeps the stored values.
+	DeclaredSeq int64
+	DeclaredAt  time.Time
 }
 
 // Repository is the repository the record names (Repo) in the spelling the record keeps: what
@@ -135,6 +171,61 @@ type HoldReason string
 
 // HoldEscalated is a hold its architect sent to the controller.
 const HoldEscalated HoldReason = "escalated"
+
+// Awaiting is what a root in awaiting_person waits on: an ask its architect opened on the root
+// (Ask, the ask's id), or the closed design gate at a spec version (GateVersion) on the document
+// it registered (Artifact); when a person answered it (AnsweredAt, nil until then), with what
+// (AnsweredBy) and that act's own detail (AnsweredDetail: the ask acted on, who closed it, or the
+// version and reason of the review); and where on Dispatch the wait began (Since): the newest
+// hand-back the architect made since it was last given work (Issue.DeclaredSeq). It is a snapshot
+// of the wait's subject; what else is still with the person is the root's asks (RootAsk). A
+// person's act Dispatch recorded at or before Since never answers the wait. An answered root waits
+// for a slot ahead of every root that never ran (Waiting).
+type Awaiting struct {
+	Ask            string
+	GateVersion    int
+	Artifact       string
+	AnsweredAt     *time.Time
+	AnsweredBy     Answer
+	AnsweredDetail string
+	Since          EventMark
+}
+
+// Answer is the act that answered a root's wait, which the task resuming its architect names.
+type Answer string
+
+const (
+	// AnsweredByAsk is a person's answer, resolution or reply on the ask the root waits on.
+	AnsweredByAsk Answer = "ask"
+	// AnsweredByRetraction is Dispatch's settlement retracting the last ask of the root's wait still
+	// with the person, whose decision block left the spec: no person can answer it any more.
+	AnsweredByRetraction Answer = "retracted"
+	// AnsweredByClosed is a close, by anyone who is not a person, of the last ask of the root's wait
+	// still with the person: the question is gone, so nobody will answer it.
+	AnsweredByClosed Answer = "closed"
+	// AnsweredByReply is a person's act on another ask of the root.
+	AnsweredByReply Answer = "reply"
+	// AnsweredByTurn is a session handing the last question of the root's wait still with the person
+	// to the agent's turn: a progress note leaves no question with the person, so the architect
+	// looks again.
+	AnsweredByTurn Answer = "turn"
+	// AnsweredByApproval is the root's design gate standing open: a person's approval of the
+	// root's spec, or a registration under gates.design: off, where nobody approved it.
+	AnsweredByApproval Answer = "approved"
+	// AnsweredByChanges is a person's changes request on the root's spec, which the gate records
+	// as told with its reason.
+	AnsweredByChanges Answer = "changes_requested"
+	// AnsweredByVersion is a spec version newer than the one waited on, which hands the approval
+	// request back to the architect.
+	AnsweredByVersion Answer = "version"
+)
+
+// AwaitingPerson says whether the issue is a root waiting on a person (phase awaiting_person).
+func (i Issue) AwaitingPerson() bool { return i.Phase == phase.AwaitingPerson && i.Awaiting != nil }
+
+// Answered says whether the issue is a root a person's answer released from awaiting_person, which
+// waits for its slot.
+func (i Issue) Answered() bool { return i.AwaitingPerson() && i.Awaiting.AnsweredAt != nil }
 
 // EventMark places a Dispatch event in its issue's event log: its sequence on the issue (Seq) and
 // Dispatch's time of it (At), each zero when unknown. Dispatch appends an issue's events under the
@@ -582,6 +673,10 @@ func (a RootAsk) PersonActSeq(gateArtifact string) int64 {
 	return max(a.PersonSeq, a.PersonAnswerSeq)
 }
 
+// Question says whether the ask is an ordinary question (AskQuestion): an approval request, and
+// an ask no event has named a kind this daemon knows of, are not.
+func (a RootAsk) Question() bool { return a.Kind == AskQuestion }
+
 // Slot is an active admission slot.
 type Slot struct {
 	Issue      string
@@ -657,6 +752,14 @@ type Store interface {
 	MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID string) (fresh bool, err error)
 	Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, error)
 	Issues(ctx context.Context, tx pgx.Tx) ([]Issue, error)
+	// QueuedRootsUnder is every labelled todo root whose Ancestry holds key, by key: the roots the
+	// waiting line may hold under a live root on a chain key is on (Waiting), whose Ancestry an
+	// event of key reads again.
+	QueuedRootsUnder(ctx context.Context, tx pgx.Tx, key string) ([]Issue, error)
+	// SlottedIssues is the record of each issue of project that holds an admission slot, in slot
+	// order, in one read: another project's slot in the shared table, and every issue holding no
+	// slot, are left out of the read rather than of the caller's loop.
+	SlottedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error)
 	// PutIssue writes issue, refusing one without its repository, default branch or GitHub's
 	// spelling of the repository, one whose GitHub spelling names another repository, and one that
 	// would give a recorded issue another of any of them.
@@ -671,6 +774,12 @@ type Store interface {
 	// FillIssueRepository does.
 	UnnamedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error)
 	NameIssueRepository(ctx context.Context, tx pgx.Tx, key, repo, githubRepo string) error
+	// HandedOffWithoutPullRequest is every record of the Dispatch project key project in
+	// implementing, named on its repository as GitHub spells it, whose implementer has recorded its
+	// handoff and which has no open or merged pull request recorded, by key: an issue whose
+	// completion waits for the pull request record that only its opened webhook writes. A merged
+	// one is left out, as GitHub never reopens it and a new generation removes it.
+	HandedOffWithoutPullRequest(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error)
 	// RepoNote is what the daemon last said on issue about its repository, nil for nothing;
 	// PutRepoNote records a note it posts.
 	RepoNote(ctx context.Context, tx pgx.Tx, issue string) (*RepoNote, error)
@@ -693,6 +802,11 @@ type Store interface {
 	// DispatchIssues is every mirrored row of the Dispatch project key project, by key: both
 	// consumers read the whole project in one query and judge what is blocked in memory.
 	DispatchIssues(ctx context.Context, tx pgx.Tx, project string) ([]DispatchIssueRow, error)
+	// DispatchClaim is who the claims mirror shows holding key's claim (`<kind>:<id>`, "" for
+	// nobody), "" when it holds no claim of key. It reads the claim alone (PutDispatchClaim), with
+	// or without a mirrored row of the issue: a claim event applied before the issue's first row is
+	// the newest claim Dispatch showed.
+	DispatchClaim(ctx context.Context, tx pgx.Tx, key string) (string, error)
 	Phases(ctx context.Context, tx pgx.Tx, issue string) ([]PhaseRow, error)
 	PutPhase(ctx context.Context, tx pgx.Tx, phase PhaseRow) error
 	PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*PullRequest, error)
@@ -736,6 +850,31 @@ type Store interface {
 	PutRootAsk(ctx context.Context, tx pgx.Tx, ask RootAsk) error
 	// RootAsks is the mirror rows of each of issues, by issue and then ask, in one read.
 	RootAsks(ctx context.Context, tx pgx.Tx, issues []string) (map[string][]RootAsk, error)
+	// StartHandout records that the daemon gives issue's architect work now: HandoutSeq rises to
+	// the highest Dispatch sequence the record holds of the issue (its last observation, the claim
+	// its Dispatch mirror shows, its wait's start, every fence and person's act of its mirrored
+	// asks, its gate's reviews), DeclaredSeq clears, and an issue with no catch-up cursor (recorded
+	// before it existed) gets one at 0, so its next catch-up reads from this handout.
+	StartHandout(ctx context.Context, tx pgx.Tx, issue string) error
+	// TakeInThrough records work the daemon gives issue's architect about an event at seq (a
+	// design-changes notice): HandoutSeq rises to seq, and DeclaredSeq clears only when it is at or
+	// below seq, so a hand-back newer than that event, applied first, still stands.
+	TakeInThrough(ctx context.Context, tx pgx.Tx, issue string, seq int64) error
+	// Declare records a hand-back to a person at mark: DeclaredSeq becomes the greater of itself and
+	// mark.Seq, and DeclaredAt the newest hand-back's time.
+	Declare(ctx context.Context, tx pgx.Tx, issue string, mark EventMark) error
+	// ClearDeclared clears DeclaredSeq: nothing the architect handed back is still with the person.
+	ClearDeclared(ctx context.Context, tx pgx.Tx, issue string) error
+	// CaughtUpSeq is the Dispatch sequence the boot catch-up last applied issue's event log
+	// through, and whether the issue has a cursor at all: an issue recorded before the cursor
+	// existed and given no work by this release since has none (its first catch-up replays
+	// nothing); one recorded since, or handed work since (StartHandout), starts at 0.
+	CaughtUpSeq(ctx context.Context, tx pgx.Tx, issue string) (int64, bool, error)
+	// SetCaughtUp raises issue's catch-up cursor to seq; it is never lowered.
+	SetCaughtUp(ctx context.Context, tx pgx.Tx, issue string, seq int64) error
+	// RestartCaughtUp sets issue's catch-up cursor back to 0, so its next catch-up reads from its
+	// last handout: a re-admission's new generation, whose old generation's events are not its own.
+	RestartCaughtUp(ctx context.Context, tx pgx.Tx, issue string) error
 	Slots(ctx context.Context, tx pgx.Tx) ([]Slot, error)
 	PutSlot(ctx context.Context, tx pgx.Tx, slot Slot) error
 	ReleaseSlot(ctx context.Context, tx pgx.Tx, issue string) error

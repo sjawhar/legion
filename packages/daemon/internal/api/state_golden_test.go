@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -184,6 +185,8 @@ func minimalSettingsConfig(t *testing.T) config.Config {
 func populatedState(t *testing.T) State {
 	t.Helper()
 	approvedVersion := 6
+	waitedSince := time.Date(2026, 9, 22, 8, 5, 0, 0, time.UTC)
+	answeredAt := time.Date(2026, 9, 22, 9, 21, 0, 0, time.UTC)
 	return State{
 		Daemon: DaemonInfo{
 			Project:       "legion",
@@ -296,6 +299,24 @@ func populatedState(t *testing.T) State {
 				HoldReason:    "escalated",
 				Workers: map[claim.Role]PhaseView{
 					claim.RoleImplementer: {Claim: ClaimView{Session: "ses_implementer_210", State: "failed"}, Rounds: 1},
+				},
+			},
+			// LEGION-212's architect asked a person a question and handed the turn back, which gave
+			// its slot up; the person has answered the question.
+			"LEGION-212": {
+				Key:           "LEGION-212",
+				Generation:    1,
+				Phase:         phase.AwaitingPerson,
+				Status:        "in_progress",
+				Repo:          "acme/widgets",
+				DefaultBranch: "main",
+				Workers:       map[claim.Role]PhaseView{},
+				WaitingOn: &WaitingOnView{
+					Kind:       "ask",
+					Ask:        "9a8fd348-55d5-4d72-a793-3cd037f75f13",
+					Since:      &waitedSince,
+					AnsweredAt: &answeredAt,
+					AnsweredBy: record.AnsweredByAsk,
 				},
 			},
 			// LEGION-207 merged and closed; its production check is open at its second look, woken by

@@ -305,9 +305,10 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 }
 
 // An issue's backlinks are its mentions and its structure in one list: the child issue
-// (child_of), its own documents (attached_to), and a document elsewhere that cites it, whose
-// excerpt is the block containing the mention. Read from the citing document the same mention
-// points out at the issue; read from the issue's spec the structural edge points out at it.
+// (child_of), its own documents (attached_to), and a document elsewhere that cites it, listed
+// from the block holding the mention, whose excerpt is that block. Read from the citing document
+// the same mention points out at the issue; read from the issue's spec the structural edge points
+// out at it.
 func TestReferencesIncludeStructuralEdgesAndDocumentBlockExcerpts(t *testing.T) {
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
@@ -336,8 +337,8 @@ func TestReferencesIncludeStructuralEdgesAndDocumentBlockExcerpts(t *testing.T) 
 		}
 	}
 	mention := byKind["mentions"]
-	if mention.Node.Kind != "artifact" || mention.Node.ID != design.ID || mention.Node.Project != "OPS" || mention.Node.Ref != "dispatch://OPS/artifact/design-notes" {
-		t.Fatalf("mention node = %#v; want the OPS design document", mention.Node)
+	if mention.Node.Kind != "block" || mention.Node.Document != "dispatch://OPS/artifact/design-notes" || mention.Node.Project != "OPS" {
+		t.Fatalf("mention node = %#v; want a block of the OPS design document", mention.Node)
 	}
 	if mention.Excerpt == nil || mention.Excerpt.BlockID == "" || mention.Excerpt.Text != "The plan lives in dispatch://"+parent.Key+" and nowhere else." {
 		t.Fatalf("mention excerpt = %#v; want the containing paragraph block with its id", mention.Excerpt)
@@ -472,7 +473,8 @@ func TestArtifactReferencesSkipANodeKindThisBuildCannotAddress(t *testing.T) {
 // A spec seeded at issue creation that cites an issue in bold, another project's issue in a code
 // span and a third project's issue as an autolink, which the spec stores as a link whose text is
 // its target, mentions all three. The source of each mention is the spec document, not the issue
-// that owns it: the issue node writes no mention, and each target's backlink names the spec.
+// that owns it: the issue node writes no mention, and each target's backlink names the spec's
+// block holding it.
 func TestSeededSpecCitationsInMarkdownDelimitersAreDocumentMentions(t *testing.T) {
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "LEGION")
@@ -509,8 +511,8 @@ func TestSeededSpecCitationsInMarkdownDelimitersAreDocumentMentions(t *testing.T
 	}
 	for _, target := range targets {
 		backlinks := graphEdges(t, handler, url.Values{"to": {"dispatch://" + target.Key}, "kind": {"mentions"}}).Edges
-		if len(backlinks) != 1 || backlinks[0].Node.Kind != "artifact" || backlinks[0].Node.ID != citing.PrimaryArtifactID || backlinks[0].Node.Ref != specRef {
-			t.Fatalf("%s backlinks = %#v; want one mention from %s", target.Key, backlinks, specRef)
+		if len(backlinks) != 1 || backlinks[0].Node.Kind != "block" || backlinks[0].Node.Document != specRef {
+			t.Fatalf("%s backlinks = %#v; want one mention from a block of %s", target.Key, backlinks, specRef)
 		}
 	}
 }
@@ -629,9 +631,20 @@ func TestRebuildRefsConvergesOnTheLiveIndex(t *testing.T) {
 		t.Fatalf("rebuild refs: %v", err)
 	}
 	// Every document has a version (three, counting the two specs); the planted row from a message
-	// that does not exist is the one orphan.
-	if report != (refs.Rebuild{Documents: 3, Asks: 1, Comments: 1, Messages: 1, Orphans: 1, Edges: 6}) {
+	// that does not exist is the one orphan. Each of the three is marked owed a block index.
+	if report != (refs.Rebuild{Documents: 3, Asks: 1, Comments: 1, Messages: 1, Orphans: 1, Edges: 6, BlocksOwed: 3}) {
 		t.Fatalf("rebuild report = %#v", report)
+	}
+	var documents, owed int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*), count(*) filter (where b.artifact_id is not null and b.version is null)
+		from artifacts a left join document_block_versions b on b.artifact_id = a.id
+		where a.kind = 'doc'
+	`).Scan(&documents, &owed); err != nil {
+		t.Fatalf("read the block index of every document: %v", err)
+	}
+	if documents != 3 || owed != documents {
+		t.Fatalf("after rebuild-refs %d of %d documents are owed a block index, want every one", owed, documents)
 	}
 	rebuilt := readRefRows(t, database)
 	if len(rebuilt) != len(live) {
