@@ -18,8 +18,8 @@ const (
 	ListenerContainerName = "envoy-listener"
 	// MaxNatsReplicas is the most natsReplicas Check takes: NATS keeps at most 5 copies of a stream
 	// or a bucket, and the listener refuses a larger ENVOY_NATS_REPLICAS at load
-	// (config.MaxNATSReplicas in github.com/sjawhar/envoy/internal/config, which this module cannot
-	// import, carries the same number).
+	// (config.MaxNATSReplicas in github.com/sjawhar/envoy/internal/config carries the same number;
+	// this module compiles no listener configuration package, TestCoreCompilesNoListenerConfigPackage).
 	MaxNatsReplicas = 5
 )
 
@@ -97,7 +97,6 @@ func (e ListenerEnv) Check() error {
 	if e.NatsReplicas < 1 {
 		return core.InputErrorf("natsReplicas", "natsReplicas %d is below 1", e.NatsReplicas)
 	}
-	// The listener refuses more at load (ENVOY_NATS_REPLICAS), so it would never start.
 	if e.NatsReplicas > MaxNatsReplicas {
 		return core.InputErrorf("natsReplicas", "natsReplicas %d is above %d, the most copies NATS keeps", e.NatsReplicas, MaxNatsReplicas)
 	}

@@ -64,7 +64,7 @@ func raiseReplicas(js nats.JetStreamContext, bucket string, replicas int) error 
 	}
 	raised := info.Config
 	raised.Replicas = replicas
-	if _, err = js.UpdateStream(&raised); err != nil && unanswered(err) {
+	if _, err = js.UpdateStream(&raised); unanswered(err) {
 		if again, infoErr := js.StreamInfo(stream); infoErr == nil && again.Config.Replicas >= replicas {
 			return nil
 		}

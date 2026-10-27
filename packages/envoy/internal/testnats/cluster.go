@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
 // Cluster is n nats-servers in this test process, routed to each other with JetStream clustered
@@ -130,17 +129,7 @@ func (c *Cluster) URL() string { return strings.Join(c.URLs(), ",") }
 // asks JetStream for anything that needs the meta group.
 func (c *Cluster) AwaitReady(t testing.TB) {
 	t.Helper()
-	deadline := time.Now().Add(connectTimeout)
-	var err error
-	for time.Now().Before(deadline) {
-		if err = c.metaReady(); err == nil {
-			break
-		}
-		time.Sleep(retryInterval)
-	}
-	if err != nil {
-		t.Fatalf("the JetStream cluster was not ready within %s: %v", connectTimeout, err)
-	}
+	waitForJetStream(t, c.metaReady)
 	for _, server := range c.Servers {
 		if server.running() {
 			Connect(t, server.URL()).Close()
