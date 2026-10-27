@@ -945,10 +945,20 @@ func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 	return c.PublishCoreContext(ctx, subject, item)
 }
 
+// errNoDeadline is PublishCoreContext's answer to a context without a deadline: the server's
+// confirmation is a flush bounded by a time, and the caller is the one that knows it.
+var errNoDeadline = errors.New("bus: PublishCoreContext needs a context with a deadline")
+
 // PublishCoreContext is PublishCoreTo bounded by ctx rather than by publishAcknowledgementTimeout:
-// the reconnect it waits for and the server's confirmation both end with ctx, so a caller answering
-// inside a deadline of its own (the listener's confirmed publish) is never held past it.
+// the reconnect it waits for and the server's confirmation both end at ctx's deadline, so a caller
+// answering inside a deadline of its own (the listener's confirmed publish) is never held past it.
+// ctx must carry a deadline; a context without one is refused before anything is sent, since the
+// flush that confirms the publish needs a time to end at.
 func (c *Client) PublishCoreContext(ctx context.Context, subject string, item contracts.Envelope) error {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return errNoDeadline
+	}
 	if err := checkSubject(subject); err != nil {
 		return err
 	}
@@ -958,10 +968,6 @@ func (c *Client) PublishCoreContext(ctx context.Context, subject string, item co
 	}
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return err
-	}
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		deadline = time.Now().Add(publishAcknowledgementTimeout)
 	}
 	conn := c.Conn
 	return c.publishConfirmed(conn, &nats.Msg{Subject: subject, Data: data}, deadline, conn.PublishMsg)

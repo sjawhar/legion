@@ -59,8 +59,9 @@ type undeliveredRecipient struct {
 	Reason    string `json:"reason"`
 }
 
-// topicSendFailure is the 504 of an ad-hoc topic send that some recipient did not confirm inside
-// the window. Delivered names every recipient that did; an empty list is [] rather than null.
+// topicSendFailure is the 504 of an ad-hoc topic send that published the message and that some
+// recipient did not confirm inside the window. Delivered names every recipient that did; an empty
+// list is [] rather than null.
 type topicSendFailure struct {
 	Error       string                 `json:"error"`
 	Reason      string                 `json:"reason"`
@@ -68,6 +69,66 @@ type topicSendFailure struct {
 	DedupeKey   string                 `json:"dedupe_key"`
 	Delivered   []string               `json:"delivered"`
 	Undelivered []undeliveredRecipient `json:"undelivered"`
+}
+
+// topicPublishFailure is the 504 of an ad-hoc topic send whose own publish on the topic did not
+// reach NATS, reason publish_failed: no recipient was forwarded the message, so the answer lists
+// none, and its error says the topic was not published, which is all a client that shows only the
+// error (envoy-client's EnvoyApiError) tells its agent.
+type topicPublishFailure struct {
+	Error     string `json:"error"`
+	Reason    string `json:"reason"`
+	EventID   string `json:"event_id"`
+	DedupeKey string `json:"dedupe_key"`
+}
+
+// sendOutcome is how a confirmed send ended, or how one recipient of an ad-hoc topic send did. Its
+// value is the outcome the send's log line names and, where the answer carries a reason, that
+// reason, so the log, the answer and the role lane's own lines read alike.
+type sendOutcome string
+
+const (
+	// sendDelivered is a send whose recipient's receipt arrived through this route.
+	sendDelivered sendOutcome = "delivered"
+	// sendDedupe is a recipient that had confirmed this dedupe key through the route already, so
+	// it was not sent the message again.
+	sendDedupe sendOutcome = "dedupe"
+	// sendSkipped is a role send from the role's own holder, the role lane's echo skip.
+	sendSkipped sendOutcome = "skipped"
+	// sendUnclaimed and sendHolderLapsed are a role send with no live claim, answered 404.
+	sendUnclaimed    sendOutcome = sendOutcome(roleHolderUnclaimed)
+	sendHolderLapsed sendOutcome = sendOutcome(roleHolderLapsed)
+	// sendReceiptTimeout is a recipient whose last forward reached the server and drew no receipt.
+	sendReceiptTimeout sendOutcome = "receipt_timeout"
+	// sendDeliveryFailed is a recipient that no forward was shown to reach: none live to forward
+	// to, a read that failed or ran out of time, or a forward not shown to have reached the server.
+	sendDeliveryFailed sendOutcome = "delivery_failed"
+	// sendCapability is a role holder that cannot take the payload's delivery mode, answered 403.
+	sendCapability sendOutcome = "capability"
+	// sendFailed is a send refused as writeNATSError maps it, or a role-claim read that failed.
+	sendFailed sendOutcome = "failed"
+	// sendNotConfirmed is an ad-hoc topic send that published and that some recipient did not
+	// confirm.
+	sendNotConfirmed sendOutcome = "not_confirmed"
+	// sendPublishFailed is an ad-hoc topic send whose own publish did not reach NATS.
+	sendPublishFailed sendOutcome = "publish_failed"
+)
+
+// reason is the outcome as an answer's JSON reason names it.
+func (o sendOutcome) reason() string { return string(o) }
+
+// deliveryStatus is the messagesDelivered label the role lane gives the same outcome, so the
+// route's counts read as the lane's: an unclaimed role is skipped, and every outcome that is
+// neither taken, skipped nor a receipt timeout is failed.
+func (o sendOutcome) deliveryStatus() string {
+	switch o {
+	case sendDelivered, sendDedupe, sendSkipped, sendReceiptTimeout:
+		return string(o)
+	case sendUnclaimed:
+		return string(sendSkipped)
+	default:
+		return string(sendFailed)
+	}
 }
 
 // readBefore runs read on its own goroutine and waits for its answer until ctx ends. The registry's
@@ -111,23 +172,23 @@ func forwardRefused(err error) bool {
 	return errors.Is(err, bus.ErrRefused) || errors.Is(err, bus.ErrPublishDenied)
 }
 
-// unconfirmedReason is the reason a send gives for a recipient that never sent its receipt, from
-// the last forward made to it: receipt_timeout when that forward reached the server and drew no
+// unconfirmedReason is the outcome a send gives a recipient that never sent its receipt, from the
+// last forward made to it: receipt_timeout when that forward reached the server and drew no
 // receipt, delivery_failed for anything else, no forward at all among them.
-func unconfirmedReason(lastForward error) string {
+func unconfirmedReason(lastForward error) sendOutcome {
 	if errors.Is(lastForward, bus.ErrReceiptTimeout) {
-		return "receipt_timeout"
+		return sendReceiptTimeout
 	}
-	return "delivery_failed"
+	return sendDeliveryFailed
 }
 
-// deliveryStatus is the messagesDelivered label of a reason, as the role lane labels the same
-// outcome.
-func deliveryStatus(reason string) string {
-	if reason == "receipt_timeout" {
-		return reason
-	}
-	return "failed"
+// confirm records that sessionID's receipt for the message under dedupeKey arrived through the
+// route. The route's own record (listenerDeps.confirmed) is what a later send of the same key
+// reads, so envoy-client's retry of a send skips a recipient the first attempt confirmed; the
+// delivery handlers' cache is told too, so they do not push the same key to it again.
+func (d *listenerDeps) confirm(dedupeKey, sessionID string) {
+	d.confirmed.Record(dedupeKey, sessionID)
+	d.dedupeCache.Record(dedupeKey, sessionID)
 }
 
 // roleSend is one role message through the publish route. The route does not publish on the role
@@ -146,24 +207,25 @@ type roleSend struct {
 }
 
 // settle counts and logs the send's outcome, the one line a send writes, once its answer is written.
-// metricStatus is the label the role lane gives the same outcome.
-func (s *roleSend) settle(outcome, metricStatus string) {
+// It counts the label the role lane gives the same outcome.
+func (s *roleSend) settle(outcome sendOutcome) {
+	metricStatus := outcome.deliveryStatus()
 	s.d.messagesDelivered.Inc([2]string{"delivery_status", metricStatus})
-	level := slog.LevelInfo
-	if metricStatus != "delivered" && metricStatus != "skipped" && metricStatus != "dedupe" {
-		level = slog.LevelWarn
+	level := slog.LevelWarn
+	switch metricStatus {
+	case string(sendDelivered), string(sendSkipped), string(sendDedupe):
+		level = slog.LevelInfo
 	}
-	s.d.logger.DeliveryLog(level, "listener publish role send", s.holder, s.item.Topic, s.item.EventID, outcome,
+	s.d.logger.DeliveryLog(level, "listener publish role send", s.holder, s.item.Topic, s.item.EventID, string(outcome),
 		slog.String("dedupe_key", s.item.DedupeKey),
 		slog.Int("attempts", s.attempts),
 		slog.String("elapsed", time.Since(s.arrived).String()))
 }
 
-// delivered answers 200 with the envelope and the holder that took it; outcome is also the label
-// the role lane gives it.
-func (s *roleSend) delivered(outcome string) {
+// delivered answers 200 with the envelope and the holder that took it.
+func (s *roleSend) delivered(outcome sendOutcome) {
 	writeJSON(s.w, http.StatusOK, publishResponse{Envelope: s.item, Holder: s.holder})
-	s.settle(outcome, outcome)
+	s.settle(outcome)
 }
 
 // noHolder answers writeRoleHolderError's 404 (unclaimed or holder_lapsed) for a role with no live
@@ -171,48 +233,53 @@ func (s *roleSend) delivered(outcome string) {
 // role skipped and a lapsed holder failed.
 func (s *roleSend) noHolder(result roleHolderResult) {
 	writeRoleHolderError(s.w, s.role, result)
-	metricStatus := "failed"
+	outcome := sendHolderLapsed
 	if result.state == roleHolderUnclaimed {
-		metricStatus = "skipped"
+		outcome = sendUnclaimed
 	}
-	s.settle(string(result.state), metricStatus)
+	s.settle(outcome)
 }
 
 // failed answers a failure that is not the window's end, as writeNATSError maps it.
 func (s *roleSend) failed(err error) {
 	writeNATSError(s.w, err, http.StatusInternalServerError, err.Error())
-	s.settle("failed", "failed")
+	s.settle(sendFailed)
 }
 
 // timedOut answers the 504 of a send whose window ended without a receipt.
 func (s *roleSend) timedOut(lastForward error) {
-	reason := unconfirmedReason(lastForward)
+	outcome := unconfirmedReason(lastForward)
 	writeJSON(s.w, http.StatusGatewayTimeout, roleSendFailure{
 		Error: fmt.Sprintf("role %s: event %s was not confirmed by its holder %s within %s (%s)",
-			s.role, s.item.EventID, cmp.Or(s.holder, "(none)"), publishDeliveryWindow, reason),
-		Reason:    reason,
+			s.role, s.item.EventID, cmp.Or(s.holder, "(none)"), publishDeliveryWindow, outcome.reason()),
+		Reason:    outcome.reason(),
 		EventID:   s.item.EventID,
 		DedupeKey: s.item.DedupeKey,
 		Holder:    s.holder,
 		Attempts:  s.attempts,
 	})
-	s.settle(reason, deliveryStatus(reason))
+	s.settle(outcome)
 }
 
 // settledBeforeForward applies, to a holder the send has not checked yet, whose session entry is
 // entry, the rules the role lane applies before it forwards, in the lane's order, and reports
 // whether it answered: the source session holds the role (the lane's echo skip) or the holder
-// already took this dedupe key, both answered 200 with nothing forwarded; the holder cannot take
-// the payload's delivery mode (deliveryModeRefusal, sendHandler's refusal, read as
-// roleTopicDelivery reads it), answered 403. Guarding after the dedupe check keeps a delivered
-// repeat from being judged by the holder's current capabilities.
+// already confirmed this dedupe key through the route, both answered 200 with nothing forwarded;
+// the holder cannot take the payload's delivery mode (deliveryModeRefusal, sendHandler's refusal,
+// read as roleTopicDelivery reads it), answered 403. Guarding after the dedupe check keeps a
+// delivered repeat from being judged by the holder's current capabilities.
+//
+// The dedupe check reads the route's own record (listenerDeps.confirmed), not the delivery
+// handlers' cache: agentSubjectDelivery and fanoutDelivery record a key there for a self-subscribed
+// session whose push they skipped, having heard nothing from it, so a role send under a key one of
+// them saw would be answered 200 for a holder that never confirmed it.
 func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
 	if s.item.SourceSession != "" && s.item.SourceSession == s.holder {
-		s.delivered("skipped")
+		s.delivered(sendSkipped)
 		return true
 	}
-	if s.d.dedupeCache.Seen(s.item.DedupeKey, s.holder) {
-		s.delivered("dedupe")
+	if s.d.confirmed.Seen(s.item.DedupeKey, s.holder) {
+		s.delivered(sendDedupe)
 		return true
 	}
 	refusal := deliveryModeRefusal(s.holder, entry, s.item.Payload)
@@ -221,10 +288,10 @@ func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
 	}
 	writeJSON(s.w, http.StatusForbidden, capabilityRefusal{
 		Error:  refusal,
-		Reason: "capability",
+		Reason: sendCapability.reason(),
 		Holder: s.holder,
 	})
-	s.settle("capability", "failed")
+	s.settle(sendCapability)
 	return true
 }
 
@@ -318,8 +385,8 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, d *listenerDeps, ite
 			send.attempts++
 			err := d.forward(contracts.AgentSubject(send.holder), forwarded, window)
 			if err == nil {
-				d.dedupeCache.Record(item.DedupeKey, send.holder)
-				send.delivered("delivered")
+				d.confirm(item.DedupeKey, send.holder)
+				send.delivered(sendDelivered)
 				return
 			}
 			if forwardRefused(err) {
@@ -357,16 +424,21 @@ func topicRecipients(d *listenerDeps, item contracts.Envelope) []string {
 
 // confirmTopicRecipient forwards item, unchanged, to sessionID's agent subject until its receipt
 // arrives or ctx ends, by a role send's retry rule, and reports how the recipient ended: delivered,
-// dedupe (it had taken this key already), receipt_timeout or delivery_failed. The recipient is
-// checked live and self-subscribed before each attempt, and one that took the key already is not
-// sent it again. A forward refused however often it is sent (forwardRefused) ends this recipient
-// alone as delivery_failed: the envelope itself already passed the topic's publish, so the refusal
-// is the recipient's subject or the grant's, not the sender's input.
-func confirmTopicRecipient(ctx context.Context, d *listenerDeps, item contracts.Envelope, sessionID string) string {
+// dedupe (it had confirmed this key through the route already), receipt_timeout or delivery_failed.
+// The recipient is checked live and self-subscribed before each attempt, and one that confirmed the
+// key already is not sent it again. A forward refused however often it is sent (forwardRefused)
+// ends this recipient alone as delivery_failed: the envelope itself already passed the topic's
+// publish, so the refusal is the recipient's subject or the grant's, not the sender's input.
+//
+// Only a receipt that arrived through the route counts, which is why it reads the route's own
+// record (listenerDeps.confirmed) and not the delivery handlers' cache: with the live topics lane
+// on, the lane receives this send's own publish on the topic, and its fanout records there every
+// self-subscribed session on this machine whose push it skipped, having heard nothing from it.
+func confirmTopicRecipient(ctx context.Context, d *listenerDeps, item contracts.Envelope, sessionID string) sendOutcome {
 	var lastForward error
 	for {
-		if d.dedupeCache.Seen(item.DedupeKey, sessionID) {
-			return "dedupe"
+		if d.confirmed.Seen(item.DedupeKey, sessionID) {
+			return sendDedupe
 		}
 		if entry, err := d.sessions.Get(sessionID); err == nil && entry.SelfSubscribed {
 			window := receiptWindow(ctx)
@@ -375,12 +447,12 @@ func confirmTopicRecipient(ctx context.Context, d *listenerDeps, item contracts.
 			}
 			err := d.forward(contracts.AgentSubject(sessionID), item, window)
 			if err == nil {
-				d.dedupeCache.Record(item.DedupeKey, sessionID)
-				return "delivered"
+				d.confirm(item.DedupeKey, sessionID)
+				return sendDelivered
 			}
 			if forwardRefused(err) {
-				d.logger.DeliveryLog(slog.LevelWarn, "listener publish topic forward refused", sessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
-				return "delivery_failed"
+				d.logger.DeliveryLog(slog.LevelWarn, "listener publish topic forward refused", sessionID, item.Topic, item.EventID, string(sendFailed), slog.String("error", err.Error()))
+				return sendDeliveryFailed
 			}
 			lastForward = err
 		}
@@ -396,23 +468,78 @@ func confirmTopicRecipient(ctx context.Context, d *listenerDeps, item contracts.
 // moment. It still publishes the envelope on the topic, for the serve-port sessions the live lane
 // delivers to and any subscriber the registry does not know; then it forwards the same envelope,
 // topic, event_id and dedupe_key unchanged, to the agent subject of every recipient
-// (topicRecipients) in parallel and answers once each confirmed, or 504 naming each that did not
-// once publishDeliveryWindow from arrived has passed. A recipient that took both copies drops the
-// second by its event_id.
+// (topicRecipients) in parallel and answers once each confirmed, or 504 not_confirmed naming each
+// that did not once publishDeliveryWindow from arrived has passed. A recipient that took both
+// copies drops the second by its event_id.
+//
+// A send whose own publish on the topic did not reach NATS answers 504 publish_failed, whether the
+// window ended first (the sender-stamp read or the publish's reconnect wait used it up) or the
+// publish failed at once on a connection that is down, so its status does not depend on how soon
+// the failure came; nothing was forwarded, and with no recipient the send is answered 200 only once
+// the topic was published. A publish NATS refuses however often it is sent (forwardRefused) is the
+// sender's input or the grant's, answered as writeNATSError maps it.
 func sendToTopic(ctx context.Context, w http.ResponseWriter, d *listenerDeps, item contracts.Envelope, arrived time.Time) {
 	recipients := topicRecipients(d, item)
-	settle := func(outcome string, delivered []string, undelivered []undeliveredRecipient) {
+	settle := func(outcome sendOutcome, delivered []string, undelivered []undeliveredRecipient, attrs ...slog.Attr) {
 		level := slog.LevelInfo
-		if outcome != "delivered" {
+		if outcome != sendDelivered {
 			level = slog.LevelWarn
 		}
-		d.logger.DeliveryLog(level, "listener publish topic send", "", item.Topic, item.EventID, outcome,
+		attrs = append([]slog.Attr{
 			slog.String("dedupe_key", item.DedupeKey),
 			slog.Any("delivered", delivered),
 			slog.Any("undelivered", undelivered),
-			slog.String("elapsed", time.Since(arrived).String()))
+			slog.String("elapsed", time.Since(arrived).String()),
+		}, attrs...)
+		d.logger.DeliveryLog(level, "listener publish topic send", "", item.Topic, item.EventID, string(outcome), attrs...)
 	}
-	notConfirmed := func(delivered []string, undelivered []undeliveredRecipient) {
+	notPublished := func(cause error) {
+		writeJSON(w, http.StatusGatewayTimeout, topicPublishFailure{
+			Error:     fmt.Sprintf("%s was not published within %s: %v; no session was sent it", item.Topic, publishDeliveryWindow, cause),
+			Reason:    sendPublishFailed.reason(),
+			EventID:   item.EventID,
+			DedupeKey: item.DedupeKey,
+		})
+		settle(sendPublishFailed, nil, nil, slog.String("error", cause.Error()))
+	}
+	sender, err := readBefore(ctx, func() *contracts.EnvelopeSender {
+		return senderStamp(d.registry, d.sessions, item.SourceSession)
+	})
+	if err != nil {
+		notPublished(fmt.Errorf("reading the sender's session: %w", err))
+		return
+	}
+	item.Sender = sender
+	// The topic's own core publish waits for a reconnecting connection as long as the send's window
+	// lasts and no longer, so a hub that is down is answered inside the window, never after the
+	// bus's own reconnect wait, which outlasts envoy-client's 5 s attempt.
+	if err := d.client.PublishCoreContext(ctx, item.Topic, item); err != nil {
+		if forwardRefused(err) {
+			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
+			settle(sendFailed, nil, nil, slog.String("error", err.Error()))
+			return
+		}
+		notPublished(err)
+		return
+	}
+	outcomes := make([]sendOutcome, len(recipients))
+	var wg sync.WaitGroup
+	for i, sessionID := range recipients {
+		wg.Go(func() { outcomes[i] = confirmTopicRecipient(ctx, d, item, sessionID) })
+	}
+	wg.Wait()
+	delivered := []string{}
+	undelivered := []undeliveredRecipient{}
+	for i, outcome := range outcomes {
+		d.messagesDelivered.Inc([2]string{"delivery_status", outcome.deliveryStatus()})
+		switch outcome {
+		case sendDelivered, sendDedupe:
+			delivered = append(delivered, recipients[i])
+		default:
+			undelivered = append(undelivered, undeliveredRecipient{SessionID: recipients[i], Reason: outcome.reason()})
+		}
+	}
+	if len(undelivered) > 0 {
 		// The error names each session, since a client that shows only the error (envoy-client's
 		// EnvoyApiError) must still tell its agent which sessions did not take the message.
 		named := make([]string, len(undelivered))
@@ -422,65 +549,15 @@ func sendToTopic(ctx context.Context, w http.ResponseWriter, d *listenerDeps, it
 		writeJSON(w, http.StatusGatewayTimeout, topicSendFailure{
 			Error: fmt.Sprintf("%d of %d sessions subscribed to %s did not confirm event %s within %s: %s",
 				len(undelivered), len(recipients), item.Topic, item.EventID, publishDeliveryWindow, strings.Join(named, ", ")),
-			Reason:      "not_confirmed",
+			Reason:      sendNotConfirmed.reason(),
 			EventID:     item.EventID,
 			DedupeKey:   item.DedupeKey,
 			Delivered:   delivered,
 			Undelivered: undelivered,
 		})
-		settle("not_confirmed", delivered, undelivered)
-	}
-	// noneDelivered answers a send whose window ended before anything was forwarded: every
-	// recipient is undelivered, and so is a send that had none.
-	noneDelivered := func() {
-		undelivered := make([]undeliveredRecipient, 0, len(recipients))
-		for _, sessionID := range recipients {
-			undelivered = append(undelivered, undeliveredRecipient{SessionID: sessionID, Reason: "delivery_failed"})
-		}
-		notConfirmed([]string{}, undelivered)
-	}
-	sender, err := readBefore(ctx, func() *contracts.EnvelopeSender {
-		return senderStamp(d.registry, d.sessions, item.SourceSession)
-	})
-	if err != nil {
-		noneDelivered()
-		return
-	}
-	item.Sender = sender
-	// The topic's own core publish waits for a reconnecting connection as long as the send's window
-	// lasts and no longer, so a hub that is down is answered inside the window, never after the
-	// bus's own reconnect wait, which outlasts envoy-client's 5 s attempt.
-	if err := d.client.PublishCoreContext(ctx, item.Topic, item); err != nil {
-		if ctx.Err() != nil {
-			noneDelivered()
-			return
-		}
-		writeNATSError(w, err, http.StatusInternalServerError, err.Error())
-		settle("failed", nil, nil)
-		return
-	}
-	statuses := make([]string, len(recipients))
-	var wg sync.WaitGroup
-	for i, sessionID := range recipients {
-		wg.Go(func() { statuses[i] = confirmTopicRecipient(ctx, d, item, sessionID) })
-	}
-	wg.Wait()
-	delivered := []string{}
-	undelivered := []undeliveredRecipient{}
-	for i, status := range statuses {
-		switch status {
-		case "delivered", "dedupe":
-			delivered = append(delivered, recipients[i])
-			d.messagesDelivered.Inc([2]string{"delivery_status", status})
-		default:
-			undelivered = append(undelivered, undeliveredRecipient{SessionID: recipients[i], Reason: status})
-			d.messagesDelivered.Inc([2]string{"delivery_status", deliveryStatus(status)})
-		}
-	}
-	if len(undelivered) > 0 {
-		notConfirmed(delivered, undelivered)
+		settle(sendNotConfirmed, delivered, undelivered)
 		return
 	}
 	writeJSON(w, http.StatusOK, publishResponse{Envelope: item})
-	settle("delivered", delivered, undelivered)
+	settle(sendDelivered, delivered, undelivered)
 }

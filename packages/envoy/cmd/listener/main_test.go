@@ -387,7 +387,7 @@ func TestPublishHandlerDeliversAnAdHocTopicToItsSubscriber(t *testing.T) {
 		t.Fatalf("flush the subscription: %v", err)
 	}
 
-	state := harness.publishDeps()
+	state := harness.publishDeps(t)
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"deploy complete","source_session":"ses_publisher","idempotency_key":"adhoc-1"}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -440,7 +440,7 @@ func TestPublishHandlerRefusesATopicOutsideNotifications(t *testing.T) {
 	if err := client.Conn.Flush(); err != nil {
 		t.Fatalf("flush the subscriptions: %v", err)
 	}
-	state := harness.publishDeps()
+	state := harness.publishDeps(t)
 	publish := func(topic string) *httptest.ResponseRecorder {
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"hello"}`))
@@ -608,7 +608,7 @@ func TestPublishHandler_RoleMessageReachesTheCurrentHolderWithoutTheRoleLane(t *
 		t.Fatal("role lane should not create a JetStream consumer")
 	}
 
-	state := harness.publishDeps()
+	state := harness.publishDeps(t)
 	handler := publishHandler(state)
 	publishRole := func(topic, source string) contracts.Envelope {
 		t.Helper()
@@ -718,7 +718,7 @@ func TestPublishHandler_RoleFreshDeafHolderAnswersReceiptTimeout(t *testing.T) {
 
 	probe := exceptionProbe(t, harness.client)
 
-	state := harness.publishDeps()
+	state := harness.publishDeps(t)
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+roleTopic+`","message":"deaf role event","payload":"{\"type\":\"worker-queued\"}","source":"agent"}`))
 	publishHandler(state).ServeHTTP(recorder, request)
@@ -774,7 +774,7 @@ func TestPublishHandler_ExplicitDedupeKeyForwardsAgainAfterReceiptTimeoutOnly(t 
 	}
 	t.Cleanup(func() { _ = responder.Unsubscribe() })
 	probe := exceptionProbe(t, harness.client)
-	state := harness.publishDeps()
+	state := harness.publishDeps(t)
 	publish := func(what string, want int) {
 		t.Helper()
 		recorder := httptest.NewRecorder()

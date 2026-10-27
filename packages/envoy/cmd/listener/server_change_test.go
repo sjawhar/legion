@@ -143,6 +143,8 @@ type serverChangeSoak struct {
 	cluster *testnats.Cluster
 	holder  *listenerProcess
 	sender  *listenerProcess
+	// via is the listener the senders publish through, S or H as the run's serverChangeRun says.
+	via     *listenerProcess
 	gates   []*testnats.Gate
 	standIn *natsgo.Conn
 	// js reads the stream and buckets' cluster state on a connection of the test's own.
@@ -175,24 +177,56 @@ type serverChangeSoak struct {
 	heartbeatFailures  []string
 }
 
+// serverChangeRun is one way TestServerChange runs: what both listeners start with beyond the
+// cluster, and whether the senders publish through the holder's listener H rather than the
+// sender's S.
+type serverChangeRun struct {
+	name              string
+	env               []string
+	sendThroughHolder bool
+}
+
 // TestServerChange is the acceptance test of INFRA-547 (plan section "The acceptance test"). The
-// stand-in registers through the holder's listener H and claims the role there; the senders publish
-// through the sender's listener S, so every message crosses the hub. Each disruption closes the
-// stand-in's gates, lame-ducks or kills the server it is on, opens the gates 1.5 s after its
-// connection drops, restarts the server, and waits for the cluster to be whole again before 3 s of
-// quiet sending. The assertions then say, by kind and message number, that no message was lost
+// stand-in registers through the holder's listener H and claims the role there. Each disruption
+// closes the stand-in's gates, lame-ducks or kills the server it is on, opens the gates 1.5 s after
+// its connection drops, restarts the server, and waits for the cluster to be whole again before 3 s
+// of quiet sending. The assertions then say, by kind and message number, that no message was lost
 // without its sender's error, that each repeat carried its first copy's id, that the run did the
 // moves it claims, and that the route stays live when nothing moves.
+//
+// It runs twice. With the live topics lane off, the senders publish through the sender's listener
+// S, so every message crosses the hub. With the lane on in both listeners (liveLaneEnv), the
+// senders publish through H, so the publish route runs on the machine whose live lane receives
+// each ad-hoc publish and records the stand-in in its delivery handlers' dedupe cache as a push it
+// skipped; a route that counted that record as the stand-in's receipt would answer 200 for an
+// ad-hoc message sent while the stand-in is held off, and fail assertion 1.
 func TestServerChange(t *testing.T) {
+	runs := []serverChangeRun{
+		{name: "live lane off, senders through S"},
+		{name: "live lane on, senders through H", env: liveLaneEnv, sendThroughHolder: true},
+	}
+	for _, run := range runs {
+		t.Run(run.name, func(t *testing.T) { runServerChange(t, run) })
+	}
+}
+
+// runServerChange is one run of TestServerChange: the cluster, both listeners started with run's
+// environment, the stand-in, at least a minute of sending through the listener run names with at
+// least two disruptions of each kind, and the assertions.
+func runServerChange(t *testing.T, run serverChangeRun) {
 	cluster := testnats.StartCluster(t, 3)
 	binary := cmdtest.Build(t, "envoy-listener")
 	urls := cluster.URLs()
-	replicas := "ENVOY_NATS_REPLICAS=" + strconv.Itoa(serverChangeReplicas)
+	env := append([]string{"ENVOY_NATS_REPLICAS=" + strconv.Itoa(serverChangeReplicas)}, run.env...)
 	// Each listener lists the members in another order, so the two do not start on one member.
-	holder := startListenerProcess(t, binary, strings.Join([]string{urls[0], urls[1], urls[2]}, ","), "holder-host", replicas)
+	holder := startListenerProcess(t, binary, strings.Join([]string{urls[0], urls[1], urls[2]}, ","), "holder-host", env...)
 	holder.waitHealthy(t)
-	sender := startListenerProcess(t, binary, strings.Join([]string{urls[2], urls[0], urls[1]}, ","), "sender-host", replicas)
+	sender := startListenerProcess(t, binary, strings.Join([]string{urls[2], urls[0], urls[1]}, ","), "sender-host", env...)
 	sender.waitHealthy(t)
+	via := sender
+	if run.sendThroughHolder {
+		via = holder
+	}
 
 	checks, err := natsgo.Connect(cluster.URL(), natsgo.Timeout(time.Second), natsgo.MaxReconnects(-1), natsgo.ReconnectWait(100*time.Millisecond))
 	if err != nil {
@@ -209,6 +243,7 @@ func TestServerChange(t *testing.T) {
 		cluster:     cluster,
 		holder:      holder,
 		sender:      sender,
+		via:         via,
 		js:          js,
 		client:      &http.Client{Transport: transport},
 		stopped:     make(chan struct{}),
@@ -231,7 +266,7 @@ func TestServerChange(t *testing.T) {
 	}
 
 	s.startStandIn(t)
-	s.awaitStandInSeenBySender(t)
+	s.awaitStandInSeenBySenders(t)
 
 	stopSending := make(chan struct{})
 	var senders sync.WaitGroup
@@ -341,13 +376,13 @@ func (s *serverChangeSoak) startStandIn(t *testing.T) {
 	go s.sweeper()
 }
 
-// awaitStandInSeenBySender waits until S, the listener the senders call, lists the stand-in with
-// both topics and names it the role's holder, so the first message is not refused for a
-// registration S has not read yet.
-func (s *serverChangeSoak) awaitStandInSeenBySender(t *testing.T) {
+// awaitStandInSeenBySenders waits until the listener the senders call (via) lists the stand-in
+// with both topics and names it the role's holder, so the first message is not refused for a
+// registration that listener has not read yet.
+func (s *serverChangeSoak) awaitStandInSeenBySenders(t *testing.T) {
 	t.Helper()
-	waitFor(t, serverChangeRecovery, "S to list the stand-in with both topics and name it the role's holder", func() bool {
-		status, body := callListener(t, s.sender.port, http.MethodGet, "/v1/sessions", "")
+	waitFor(t, serverChangeRecovery, "the senders' listener to list the stand-in with both topics and name it the role's holder", func() bool {
+		status, body := callListener(t, s.via.port, http.MethodGet, "/v1/sessions", "")
 		var sessions []sessionInfo
 		if status != http.StatusOK || json.Unmarshal([]byte(body), &sessions) != nil {
 			return false
@@ -359,7 +394,7 @@ func (s *serverChangeSoak) awaitStandInSeenBySender(t *testing.T) {
 		if !listed {
 			return false
 		}
-		status, body = callListener(t, s.sender.port, http.MethodGet, "/v1/roles/"+serverChangeRole, "")
+		status, body = callListener(t, s.via.port, http.MethodGet, "/v1/roles/"+serverChangeRole, "")
 		var role struct {
 			Holder string `json:"holder"`
 		}
@@ -589,10 +624,10 @@ func (s *serverChangeSoak) sendEvery(kind int, stop <-chan struct{}) {
 	}
 }
 
-// publish sends message through S's POST /v1/messages/publish as envoy-client's publish does: a
-// UUID idempotency key, a 5 s timeout per attempt, and one retry after 250 ms with the same key on
-// a 5xx or a transport error. Any other answer than 200 from the last attempt is the sender's
-// error.
+// publish sends message through the senders' listener's POST /v1/messages/publish (via) as
+// envoy-client's publish does: a UUID idempotency key, a 5 s timeout per attempt, and one retry
+// after 250 ms with the same key on a 5xx or a transport error. Any other answer than 200 from the
+// last attempt is the sender's error.
 func (s *serverChangeSoak) publish(message *soakMessage) {
 	defer close(message.done)
 	kind := serverChangeKinds[message.kind]
@@ -603,7 +638,7 @@ func (s *serverChangeSoak) publish(message *soakMessage) {
 		"idempotency_key": uuid.NewString(),
 	}
 	for attempt := 1; attempt <= 2; attempt++ {
-		status, answer, err := s.call(s.sender.port, http.MethodPost, "/v1/messages/publish", body, serverChangeAttemptTimeout)
+		status, answer, err := s.call(s.via.port, http.MethodPost, "/v1/messages/publish", body, serverChangeAttemptTimeout)
 		switch {
 		case err == nil && status == http.StatusOK:
 			message.failure = ""

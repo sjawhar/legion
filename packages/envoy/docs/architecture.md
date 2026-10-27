@@ -93,8 +93,14 @@ that failed or timed out). The route publishes no exception: its sender has the 
 
 An ad-hoc topic sent through the route is published over core NATS, then forwarded the same way
 to each session registered on it, on any machine, that holds its own NATS connection
-(`self_subscribed`), other than the sender. It answers `200` once each confirmed, and otherwise
-`504` with `reason: "not_confirmed"`, `delivered` and `undelivered` (each `{session_id, reason}`).
+(`self_subscribed`), other than the sender. It answers `200` once the topic was published and
+each recipient confirmed, there being none included; `504` with `reason: "publish_failed"` and no
+recipient list when the topic's own publish did not reach NATS, whether the four seconds ended
+first or the publish failed at once for any reason but a refusal, since nothing was forwarded;
+and otherwise `504` with `reason: "not_confirmed"`, `delivered` and `undelivered` (each
+`{session_id, reason}`). Only a receipt that arrived through the route counts as a confirmation:
+the route keeps its own record of who confirmed each dedupe key, apart from the delivery handlers'
+dedupe cache, where the live topics lane records a self-subscribed session whose push it skipped.
 A session that stopped without unregistering stays registered for up to five minutes and is
 named in `undelivered` in that time; it is not a failed delivery to the others. A session served
 on a port is not confirmed. Every forward carries a `Nats-Msg-Id`, so the stream keeps one copy

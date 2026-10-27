@@ -24,21 +24,34 @@ import (
 )
 
 // publishDeps is the harness's stores as main hands them to the /v1 routes, with the delivery
-// handlers' own dedupe cache, forward, logger and delivered counter, as main wires the publish route.
-func (h listenerDeliveryHarness) publishDeps() *listenerDeps {
+// handlers' own dedupe cache, forward, logger and delivered counter, and a confirmation record of
+// the route's own, as main wires the publish route.
+func (h listenerDeliveryHarness) publishDeps(t *testing.T) *listenerDeps {
+	t.Helper()
 	return &listenerDeps{
 		client:            h.client,
 		registry:          h.registry,
 		sessions:          h.sessions,
 		dedupeCache:       h.config.dedupeCache,
+		confirmed:         newConfirmedRecord(t),
 		forward:           h.config.forwardRole,
 		logger:            h.config.logger,
 		messagesDelivered: h.config.messagesDelivered,
 	}
 }
 
+// newConfirmedRecord is the publish route's own confirmation record as main makes it, stopped
+// when the test ends.
+func newConfirmedRecord(t *testing.T) *dedupe.Cache {
+	t.Helper()
+	confirmed := dedupe.New(10 * time.Minute)
+	t.Cleanup(confirmed.Stop)
+	return confirmed
+}
+
 // withPublishRoute gives d what the publish route needs beyond its stores, as main wires it: a
-// dedupe cache, client.RequestCoreTo as the forward, a logger and a delivered counter.
+// dedupe cache, a confirmation record, client.RequestCoreTo as the forward, a logger and a
+// delivered counter.
 func withPublishRoute(t *testing.T, d *listenerDeps) *listenerDeps {
 	t.Helper()
 	cache := dedupe.New(10 * time.Minute)
@@ -50,6 +63,7 @@ func withPublishRoute(t *testing.T, d *listenerDeps) *listenerDeps {
 		}
 	})
 	d.dedupeCache = cache
+	d.confirmed = newConfirmedRecord(t)
 	d.forward = d.client.RequestCoreTo
 	d.logger = logging.NewWithWriter("test", logs)
 	d.messagesDelivered = metrics.New().NewCounter("test_messages_delivered", "test")
@@ -164,7 +178,7 @@ func TestPublishRouteForwardsARoleMessageAgainUntilItsHolderConfirms(t *testing.
 	frames := startStandIn(t, testnats.URL(t), "ses_holder", func(n int) bool { return n >= 2 })
 	probe := exceptionProbe(t, harness.client)
 
-	recorder, elapsed := publishThrough(harness.publishDeps(), `{"topic":"`+contracts.RoleTopicPrefix+role+`","message":"take this","idempotency_key":"retry-1"}`)
+	recorder, elapsed := publishThrough(harness.publishDeps(t), `{"topic":"`+contracts.RoleTopicPrefix+role+`","message":"take this","idempotency_key":"retry-1"}`)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status %d after %s, want 200; body %s", recorder.Code, elapsed, recorder.Body.String())
 	}
@@ -193,7 +207,7 @@ func TestPublishRouteAnswersReceiptTimeoutWhenTheHolderNeverConfirms(t *testing.
 	frames := startStandIn(t, testnats.URL(t), "ses_silent", never)
 	probe := exceptionProbe(t, harness.client)
 
-	recorder, elapsed := publishThrough(harness.publishDeps(), `{"topic":"`+contracts.RoleTopicPrefix+role+`","message":"anyone there","idempotency_key":"silent-1"}`)
+	recorder, elapsed := publishThrough(harness.publishDeps(t), `{"topic":"`+contracts.RoleTopicPrefix+role+`","message":"anyone there","idempotency_key":"silent-1"}`)
 	if recorder.Code != http.StatusGatewayTimeout || elapsed > 4500*time.Millisecond {
 		t.Fatalf("status %d after %s, want 504 inside 4.5s; body %s", recorder.Code, elapsed, recorder.Body.String())
 	}
@@ -260,7 +274,7 @@ func TestPublishRouteRefusesADeliveryModeTheHolderDoesNotAdvertise(t *testing.T)
 	claimRoleFor(t, harness.registry, harness.sessions, "ses_aside_only", role, []string{"aside"})
 	frames := startStandIn(t, testnats.URL(t), "ses_aside_only", always)
 
-	recorder, _ := publishThrough(harness.publishDeps(), `{"topic":"`+contracts.RoleTopicPrefix+role+`","message":"steer now","payload":"{\"delivery\":{\"mode\":\"steer\"}}"}`)
+	recorder, _ := publishThrough(harness.publishDeps(t), `{"topic":"`+contracts.RoleTopicPrefix+role+`","message":"steer now","payload":"{\"delivery\":{\"mode\":\"steer\"}}"}`)
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("status %d, want 403; body %s", recorder.Code, recorder.Body.String())
 	}
@@ -286,7 +300,7 @@ func TestPublishRouteSendsNothingToASenderHoldingTheRole(t *testing.T) {
 		t.Fatalf("flush the lane probe: %v", err)
 	}
 
-	recorder, _ := publishThrough(harness.publishDeps(), `{"topic":"`+contracts.RoleTopicPrefix+role+`","message":"note to self","source_session":"ses_self"}`)
+	recorder, _ := publishThrough(harness.publishDeps(t), `{"topic":"`+contracts.RoleTopicPrefix+role+`","message":"note to self","source_session":"ses_self"}`)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status %d, want 200; body %s", recorder.Code, recorder.Body.String())
 	}
@@ -307,7 +321,7 @@ func TestPublishRouteDoesNotForwardARepeatKeyItsHolderConfirmed(t *testing.T) {
 	const role = "repeat-key"
 	claimRoleFor(t, harness.registry, harness.sessions, "ses_holder", role, nil)
 	frames := startStandIn(t, testnats.URL(t), "ses_holder", always)
-	deps := harness.publishDeps()
+	deps := harness.publishDeps(t)
 	body := `{"topic":"` + contracts.RoleTopicPrefix + role + `","message":"once","idempotency_key":"repeat-1"}`
 
 	first, _ := publishThrough(deps, body)
@@ -348,7 +362,7 @@ func TestPublishRouteNamesTheAdHocTopicSubscriberThatDidNotConfirm(t *testing.T)
 	startStandIn(t, testnats.URL(t), "ses_silent", never)
 	served := startStandIn(t, testnats.URL(t), "ses_served", always)
 
-	recorder, elapsed := publishThrough(harness.publishDeps(), `{"topic":"`+topic+`","message":"deploy done","idempotency_key":"squad-1"}`)
+	recorder, elapsed := publishThrough(harness.publishDeps(t), `{"topic":"`+topic+`","message":"deploy done","idempotency_key":"squad-1"}`)
 	if recorder.Code != http.StatusGatewayTimeout || elapsed > 4500*time.Millisecond {
 		t.Fatalf("status %d after %s, want 504 inside 4.5s; body %s", recorder.Code, elapsed, recorder.Body.String())
 	}
@@ -366,6 +380,124 @@ func TestPublishRouteNamesTheAdHocTopicSubscriberThatDidNotConfirm(t *testing.T)
 		t.Fatalf("ses_confirming received event %s topic %s dedupe key %s, want the answered event unchanged", frame.EventID, frame.Topic, frame.DedupeKey)
 	}
 	expectFrames(t, served, 0, 100*time.Millisecond)
+}
+
+// With the live topics lane on, the lane receives the route's own publish on the topic and its
+// fanout records, in the delivery handlers' dedupe cache, every self-subscribed session on this
+// machine whose push it skipped: such a session holds its own subscription, so there is nothing to
+// push to, and nothing was heard from it. A recipient that never sends its receipt must still be
+// named as not confirming, rather than counted delivered from that record.
+func TestPublishRouteDoesNotCountTheLiveLanesSkippedPushAsAConfirmation(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	live, err := openLiveTopics([]string{testnats.URL(t)}, harness.config.machineID, liveDeliveryHandler(harness.config))
+	if err != nil {
+		t.Fatalf("open the live topics lane: %v", err)
+	}
+	t.Cleanup(live.Close)
+	const topic = "notifications.team.live-lane-silent"
+	if _, err := harness.registry.Upsert(store.Interest{SessionID: "ses_silent", MachineID: harness.config.machineID}, []string{topic}); err != nil {
+		t.Fatalf("register ses_silent's interest: %v", err)
+	}
+	if err := harness.sessions.Put("ses_silent", session.SessionEntry{MachineID: harness.config.machineID, SelfSubscribed: true}); err != nil {
+		t.Fatalf("register ses_silent: %v", err)
+	}
+	frames := startStandIn(t, testnats.URL(t), "ses_silent", never)
+
+	recorder, elapsed := publishThrough(harness.publishDeps(t), `{"topic":"`+topic+`","message":"anyone there","idempotency_key":"lane-1"}`)
+	if recorder.Code != http.StatusGatewayTimeout || elapsed > 4500*time.Millisecond {
+		t.Fatalf("status %d after %s, want 504 inside 4.5s; body %s", recorder.Code, elapsed, recorder.Body.String())
+	}
+	var failure topicSendFailure
+	if err := json.Unmarshal(recorder.Body.Bytes(), &failure); err != nil {
+		t.Fatalf("decode the answer %s: %v", recorder.Body.String(), err)
+	}
+	if failure.Reason != "not_confirmed" || failure.DedupeKey != "publish.lane-1" || len(failure.Delivered) != 0 ||
+		len(failure.Undelivered) != 1 || failure.Undelivered[0] != (undeliveredRecipient{SessionID: "ses_silent", Reason: "receipt_timeout"}) {
+		t.Fatalf("answer %s, want ses_silent undelivered by receipt_timeout and nobody delivered", recorder.Body.String())
+	}
+	for _, frame := range expectFrames(t, frames, 2, 300*time.Millisecond) {
+		if frame.EventID != failure.EventID {
+			t.Fatalf("ses_silent received event %s, want only the answered %s", frame.EventID, failure.EventID)
+		}
+	}
+	// The lane did run for this send: without its record the test would not tell the fix apart.
+	if !harness.config.dedupeCache.Seen("publish.lane-1", "ses_silent") {
+		t.Fatalf("the live lane did not record ses_silent's skipped push of publish.lane-1, so the test exercised nothing")
+	}
+}
+
+// An ad-hoc topic whose own publish did not reach NATS is answered 504 publish_failed, saying the
+// topic was not published and listing no recipient, whether the window ran out while the bus
+// waited for a reconnect or the publish failed at once on a closed connection: the status does not
+// depend on how soon the failure came, and a topic with no recipient is not answered as if a
+// session had failed to confirm it.
+func TestPublishRouteAnswersPublishFailedForAnAdHocTopicItCouldNotPublish(t *testing.T) {
+	const topic = "notifications.team.unpublished"
+	cases := []struct {
+		name   string
+		deps   func(t *testing.T) *listenerDeps
+		cause  string
+		within time.Duration
+	}{
+		{
+			name: "the hub stays down for the whole window",
+			deps: func(t *testing.T) *listenerDeps {
+				srv, uri := testnats.Start(t)
+				client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
+				if err != nil {
+					t.Fatalf("connect: %v", err)
+				}
+				t.Cleanup(client.Close)
+				registry, err := store.Open(client.Conn, store.WithReplicas(1))
+				if err != nil {
+					t.Fatalf("open the interest registry: %v", err)
+				}
+				sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
+				if err != nil {
+					t.Fatalf("open the session registry: %v", err)
+				}
+				deps := withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
+				srv.Stop(t)
+				waitFor(t, 5*time.Second, "the listener's connection to be reconnecting", client.Conn.IsReconnecting)
+				return deps
+			},
+			cause:  "bus: waiting for NATS to reconnect: context deadline exceeded",
+			within: 4500 * time.Millisecond,
+		},
+		{
+			name: "the listener's connection is closed",
+			deps: func(t *testing.T) *listenerDeps {
+				deps := newListenerDeliveryHarness(t, nil).publishDeps(t)
+				closed, err := bus.Connect([]string{testnats.URL(t)}, bus.WithName("closed-publisher"))
+				if err != nil {
+					t.Fatalf("connect: %v", err)
+				}
+				closed.Close()
+				deps.client = closed
+				return deps
+			},
+			cause:  "bus: client is stopped",
+			within: time.Second,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deps := tc.deps(t)
+			recorder, elapsed := publishThrough(deps, `{"topic":"`+topic+`","message":"through no hub","idempotency_key":"unpublished-1"}`)
+			if recorder.Code != http.StatusGatewayTimeout || elapsed > tc.within {
+				t.Fatalf("status %d after %s, want 504 inside %s; body %s", recorder.Code, elapsed, tc.within, recorder.Body.String())
+			}
+			var failure topicPublishFailure
+			if err := json.Unmarshal(recorder.Body.Bytes(), &failure); err != nil || failure.EventID == "" {
+				t.Fatalf("decode the answer %s: %v", recorder.Body.String(), err)
+			}
+			want := `{"error":"` + topic + ` was not published within 4s: ` + tc.cause + `; no session was sent it",` +
+				`"reason":"publish_failed","event_id":"` + failure.EventID + `","dedupe_key":"publish.unpublished-1"}` + "\n"
+			if body := recorder.Body.String(); body != want {
+				t.Fatalf("body %q, want %q", body, want)
+			}
+		})
+	}
 }
 
 // An ad-hoc topic sent while the listener's connection to its server is down is answered inside

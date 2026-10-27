@@ -890,19 +890,28 @@
   (one `event_id`, dedupe key `envoy.role.forward.<key>`) 100 ms after each miss, each forward
   waiting at most 2 s, until a receipt arrives or 4 s from the request's arrival have passed. It
   answers `200` with the envelope and `holder` once the holder's receipt arrived, and also,
-  forwarding nothing, when `source_session` holds the role or the holder already took the dedupe
-  key; `404` with `reason` `unclaimed` or `holder_lapsed`, as before; `403 {"error":…,
-  "reason":"capability","holder":…}` when the holder does not advertise the payload's delivery
-  mode, where the role lane dropped such a message after the 200; and `504 {"error":…,"reason":…,
-  "event_id":…,"dedupe_key":…,"holder":…,"attempts":N}` once the 4 s passed, `reason` being
-  `receipt_timeout` (the last forward reached the server and drew no receipt) or `delivery_failed`
-  (no live holder, a read that failed or ran out of time, a forward not shown to have reached the
-  server). An ad-hoc topic (one no stream subject captures, `bus.UsesCoreTransport`) is still
-  published over core NATS, then forwarded the same way, `event_id` and `dedupe_key` unchanged, to
-  the agent subject of each live `self_subscribed` session registered on it on any machine
-  (`store.Registry.MatchAll`), the sender excepted; it answers `200` when each confirmed or there
-  was none, and otherwise `504 {"error":…,"reason":"not_confirmed","event_id":…,"dedupe_key":…,
-  "delivered":[…],"undelivered":[{"session_id":…,"reason":…}]}`. A session that stopped without
+  forwarding nothing, when `source_session` holds the role or the holder already confirmed the
+  dedupe key through the route; `404` with `reason` `unclaimed` or `holder_lapsed`, as before;
+  `403 {"error":…,"reason":"capability","holder":…}` when the holder does not advertise the
+  payload's delivery mode, where the role lane dropped such a message after the 200; and
+  `504 {"error":…,"reason":…,"event_id":…,"dedupe_key":…,"holder":…,"attempts":N}` once the 4 s
+  passed, `reason` being `receipt_timeout` (the last forward reached the server and drew no
+  receipt) or `delivery_failed` (no live holder, a read that failed or ran out of time, a forward
+  not shown to have reached the server). An ad-hoc topic (one no stream subject captures,
+  `bus.UsesCoreTransport`) is still published over core NATS, then forwarded the same way,
+  `event_id` and `dedupe_key` unchanged, to the agent subject of each live `self_subscribed`
+  session registered on it on any machine
+  (`store.Registry.MatchAll`), the sender excepted; it answers `200` once it was published and
+  each confirmed or there was none. Its own publish not reaching NATS, the 4 s ending first or the
+  publish failing at once for any reason but a refusal, answers `504 {"error":"<topic> was not
+  published within 4s: <cause>; no session was sent it","reason":"publish_failed","event_id":…,
+  "dedupe_key":…}` and forwards to no one; a refusal keeps its 400, 413 or 500. A topic published
+  that some recipient did not confirm answers `504 {"error":…,"reason":"not_confirmed",
+  "event_id":…,"dedupe_key":…,"delivered":[…],"undelivered":[{"session_id":…,"reason":…}]}`. Only
+  a receipt that arrived through the route counts as a recipient's confirmation: the route keeps a
+  record of its own of who confirmed each dedupe key, which a re-send of the key reads, since the
+  live topics lane's fanout records a self-subscribed session whose push it skipped in the
+  delivery handlers' dedupe cache without hearing from it. A session that stopped without
   unregistering stays registered for up to 5 minutes and is named in `undelivered` in that time; a
   named session is not a failed delivery to the others. A session served on a port is not
   confirmed and keeps the live topics lane's delivery. A topic the stream captures is unchanged:

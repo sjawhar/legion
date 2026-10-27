@@ -49,9 +49,15 @@ type listenerDeps struct {
 	streamName string
 	streamInfo streamInfoLookup
 	// dedupeCache is the delivery handlers' own cache (listenerDeliveryHandlerConfig.dedupeCache),
-	// the same instance: the publish route skips a holder or recipient that already took a
-	// message's key, by the route or by the role lane, and records each one it confirms.
+	// the same instance: the publish route records there each session it confirms, so the handlers
+	// do not push that key to it again. The route never reads it, since the handlers also record a
+	// self-subscribed session whose push they skipped without hearing from it.
 	dedupeCache *dedupe.Cache
+	// confirmed is the publish route's own record of each (dedupe key, session) whose receipt arrived
+	// through the route, which only the route writes. A send skips a holder or recipient recorded
+	// there, so envoy-client's retry of a send does not forward again to one the first attempt
+	// confirmed, and no one is counted as confirming a message without having sent its receipt.
+	confirmed *dedupe.Cache
 	// forward sends an envelope to an agent subject and waits for its recipient's empty receipt, as
 	// the role lane's forwardRole does; main wires client.RequestCoreTo, and a test substitutes it.
 	forward func(subject string, item contracts.Envelope, timeout time.Duration) error
@@ -837,6 +843,7 @@ func main() {
 		consumer:          consumer,
 		streamName:        bus.Stream,
 		dedupeCache:       dedupeCache,
+		confirmed:         dedupe.New(10 * time.Minute),
 		forward:           client.RequestCoreTo,
 		logger:            logger,
 		messagesDelivered: messagesDelivered,
