@@ -4,6 +4,9 @@
 
 ### Added
 
+- A person's browser edit of a spec a session wrote reaches that session as one Envoy card, 30
+  seconds after the person stops editing: the card names the document, the two versions and each
+  editor, and the diff follows it in a fenced `diff` block. An idle session starts a turn on it.
 - The `dispatch` command this plugin ships reads one block of a document:
   `dispatch read --ref dispatch://KEY/spec#b-<id>` (or an issue's or a project's document with
   `#b-<id>`, optionally pinned to a version with `@v<N>`) prints the block, the version its text
@@ -16,13 +19,12 @@
   Legion role of its tree, even when its claim reads `not running`: the Legion daemon suspends a
   root's architect while the root waits on a person, and taking that claim takes the tree out of
   the workflow.
-
 - Every model request of a session's conversation with Dispatch — a top-level session, a Legion
   pane or a `task` subagent — carries, as its last message, what people wrote to the session in
   the last 72 hours that Dispatch delivered to it, newest first and word for word: answers to its
   asks, replies on them and in its comment threads, comments on its documents and routed issues,
   mentions and messages (dispatch://INFRA-148). A subagent carries its parent's list. The message
-  is capped at 8,000 characters, leaving the oldest items out with a line that counts them and
+  stays under 8,000 characters (at most 7,999), leaving the oldest items out with a line that counts them and
   names `dispatch answers`. Each request waits at most 800 ms for Dispatch, then carries the last
   list read from that Dispatch, with its read time and why this read failed, or, when that list
   shows nothing, a line saying the list could not be read and why; a Dispatch without the answers
@@ -34,7 +36,6 @@
   `/btw`) and the handoff keep their own prompt last, and a remote compaction's request ends at
   its cut. Two copies of the extension make one read per request, a list or none.
 - `dispatch-first`'s blocker rule says a design question that a document records is an ask block in that document, and any other blocker a `dispatch ask`. `packages/pi-shared/test/skills-partition.test.ts` now fails when a shipped skill or a daemon prompt names a `skill://` that neither plugin ships.
-
 - The agent stream reports the model and thinking level the session runs now, so Dispatch's live
   view can show and switch them: a `settings` frame carrying the current model (`provider/id`),
   every model the session lists as available, the configured thinking level `/effort` reports

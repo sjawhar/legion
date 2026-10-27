@@ -120,6 +120,7 @@ import {
 } from "./dispatch-pictures";
 import { ownerSubscribeLine } from "./dispatch-subscribe";
 import { messageFor } from "./errors";
+import { humanEditHead } from "./human-edit";
 import { pageSummaryText, searchAnswer } from "./search-answer";
 import { isNoAnswersRoute, renderSessionAnswersList } from "./session-answers";
 import { formatZodIssues, ToolInputError } from "./tool-input-errors";
@@ -2052,6 +2053,8 @@ function eventHead(event: Event): string | undefined {
       return textHead(
         `${event.payload.name} v${event.payload.version.number}${event.payload.version.summary ? `: ${event.payload.version.summary}` : ""}`
       );
+    case "artifact.human_edited":
+      return textHead(humanEditHead(event.payload));
     case "issue.created":
     case "issue.updated":
     case "issue.closed":

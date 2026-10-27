@@ -393,7 +393,7 @@ What the two processes share, and what each keeps to itself:
   event committed on either process reaches every open stream with no reconnect.
 - The two delivery durables keep their shape. NATS admits one binder; the second process stands
   by, asking every two seconds, and takes the durable over within seconds of the holder dying.
-- Seven periodic maintenance loops run once per period across the processes, not once per process.
+- Eight periodic maintenance loops run once per period across the processes, not once per process.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a
   process whose tick lands inside another's pass logs a skip; and, under that lease, each pass is
   recorded in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick
@@ -866,27 +866,27 @@ is written. Its own migration, so its transaction holds `comments` alone: the dr
 `ACCESS EXCLUSIVE`, and every read and write of a comment waits while the one index builds. It
 refuses and rewrites no row; its census answers `0`.
 
-Migrations `0129_events_person_words` and `0130_comment_deliveries_session` add two partial
+Migrations `0130_events_person_words` and `0131_comment_deliveries_session` add two partial
 indexes for `GET /api/v1/agents/{session_id}/answers` (`sessionanswers.List`, Routes below), which
-every agent host reads on every model request. `0129` creates `events_person_words` on `events
+every agent host reads on every model request. `0130` creates `events_person_words` on `events
 (created_at desc, id desc)` where the actor is a person and the type is `ask.answered`,
 `comment.created`, `message.created` or `message.answered`: the route reads the window's human
 events of those types through it, newest first, and keeps those whose `published_destinations`
 hold the session's own topic. A GIN index on `published_destinations` would find the session's
 events directly, but the outbox appends each topic it published an event to that array, and every
 such append would then also write the new element's entry into the index: a write load every
-outbox append would pay for a read only this route makes. `0130` creates
+outbox append would pay for a read only this route makes. `0131` creates
 `comment_deliveries_session` on `comment_deliveries (session_id, created_at desc)` where
 `session_id` is not null: the route reads the session's mentions created since an hour before its
 window as one range of it. Each is a plain `create index` inside the runner's
 transaction, so it holds `SHARE` on its table while it builds: writes to it wait, reads do not. On
 a local Postgres 17 (two CPUs, `maintenance_work_mem` 64 MB) with `events` seeded to 1,000,000
-rows (421 MB with its indexes, 126,541 of them in the index), `0129` built in 0.66-1.13 s over
-three runs and `0130` in 0.11-0.14 s on 50,003 deliveries. Both censuses answer `0`: an index
+rows (421 MB with its indexes, 126,541 of them in the index), `0130` built in 0.66-1.13 s over
+three runs and `0131` in 0.11-0.14 s on 50,003 deliveries. Both censuses answer `0`: an index
 build refuses and rewrites no row, and the census report already counts and sizes each table it
 reads.
 
-Migration `0131_message_deliveries_session_created` creates `message_deliveries_session_created`
+Migration `0132_message_deliveries_session_created` creates `message_deliveries_session_created`
 on `message_deliveries (session_id, created_at desc) include (message_id)` where `state` is
 `sent`, for the same route's read of the session's sent message deliveries created since an hour
 before its window. `message_deliveries_session` (`0051`) keys `session_id` alone, so through it

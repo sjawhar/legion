@@ -4,6 +4,10 @@
 
 ### Added
 
+- The event `artifact.human_edited` and its payload, `ArtifactHumanEditedEventPayload` and
+  `ArtifactHumanEditedEventPayloadSchema`: `artifact_id`, `name`, `from_version`, `to_version`,
+  `editors`, `diff` and `diff_truncated`. Dispatch sends it once a document has been quiet for 30
+  seconds after a person's last browser edit.
 - Blocks of a Dispatch document as graph nodes: `GraphNode.kind` gains `"block"`, whose node
   carries `block_id`, `document`, `changed_version` and `changed_at`, and, on the node a reference
   read names, `text` and, for a reference pinned to a version (`#b-<id>@v<N>`), `pin` (`BlockPin`:
