@@ -222,7 +222,7 @@ func (s *server) sweepClosedIssueAsksTx(ctx context.Context, issueKey string, wi
 // and the blocks of withdrawing, open asks as their blocks show them once withdrawn
 // (readOpenIssueAsks), which a repair records withdrawn after this, all in one write of each
 // document (docs.WriteIssueAskStates). It marks resolved every readable ask block no settlement
-// has indexed, logs each one and answers them.
+// has indexed, which WriteIssueAskStates logs, and answers them for a caller that counts them.
 func (s *server) sweepIssueAskBlocksTx(ctx context.Context, tx pgx.Tx, issueKey string, withdrawnIDs []string, withdrawing []model.Ask, actor model.Actor) ([]docs.BlockRef, error) {
 	// The rows as they stand under the issue's row: a reopen, an answer and a second close
 	// between the close's commit and this lock leave them other than the close wrote them. Every
@@ -242,12 +242,7 @@ func (s *server) sweepIssueAskBlocksTx(ctx context.Context, tx pgx.Tx, issueKey 
 	if err != nil {
 		return nil, err
 	}
-	unindexed, err := s.deps.Docs.WriteIssueAskStates(ctx, issueKey, append(current, withdrawing...), actor, true)
-	if err != nil {
-		return nil, err
-	}
-	docs.LogUnindexedAskBlocks(issueKey, unindexed)
-	return unindexed, nil
+	return s.deps.Docs.WriteIssueAskStates(ctx, issueKey, append(current, withdrawing...), actor, true)
 }
 
 // readIssueAsks reads the asks query selects (askRowColumns from askRowFrom), taking whatever row

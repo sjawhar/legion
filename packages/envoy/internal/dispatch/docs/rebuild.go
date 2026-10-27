@@ -160,7 +160,7 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 		if err := markUpdateOwed(ctx, tx, artifactID); err != nil {
 			return RebuildReport{}, VersionResult{}, err
 		}
-		LogUnindexedAskBlocks(*owner.IssueKey, closedStates.marked)
+		logUnindexedAskBlocks(*owner.IssueKey, closedStates.marked)
 	}
 	if markdown == nil || canonical == latest.markdown {
 		return report, VersionResult{Version: latest.Version}, nil
