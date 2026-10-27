@@ -87,7 +87,7 @@ port_daemon='' port_listener='' port_dispatch='' port_worker_stream='' port_nats
 # timeout_hook names a function lib/rig.sh's until_true runs when a wait times out.
 # shellcheck disable=SC2034
 timeout_hook=''
-prod_baseline='' prod_since='' prod_dispatch_url=''
+prod_baseline='' prod_dispatch_url=''
 prod_token=''
 prod_envoy_url=${STAGE3_PRODUCTION_ENVOY_URL:-http://127.0.0.1:9020}
 audited=
@@ -677,7 +677,7 @@ note "project $project, profile $profile, plugins $(jq -r '.name + "@" + .versio
 pane_watcher &
 watcher_pid=$!
 production_baseline
-note "production Dispatch audit baseline: event ${prod_baseline}, issues updated since $prod_since"
+note "production Dispatch audit baseline: event ${prod_baseline}"
 pass
 
 

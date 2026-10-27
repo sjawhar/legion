@@ -439,13 +439,15 @@ turns off the configured route. A watcher checks each pane the daemon launches â
 the ones it starts on its own included â€” as soon as its OMP process exists, before the plugin
 registers and so before any turn; a mismatch kills the private tmux server and aborts naming the
 pane, and the audit fails naming any launch the watcher never saw. At
-the end, a read-only audit lists the production Dispatch issues updated since a time read at boot,
-reads each one's events above a baseline event id read just after that time, and reads the
-production projects. It fails on any such event a rig session authored or that names the rig's
-project key, and on any production project naming that key, then reads the operator's Envoy
-listener (`GET /v1/sessions`, `STAGE3_PRODUCTION_ENVOY_URL`, default `http://127.0.0.1:9020`) and
-fails on any rig session. A read that fails, or a listing of updated issues none of whose events
-is above the baseline (the control that the reads reached the run's window), fails the audit. The
+the end, a read-only audit reads every production Dispatch event from a baseline event id read at
+boot, whatever owns it (an issue, a document, a project or none), by paging
+`GET /api/v1/events/log?after=` by id, and reads the production projects. It fails on any such
+event a rig session authored or that names the rig's project key, and on any production project
+naming that key, then reads the operator's Envoy listener (`GET /v1/sessions`,
+`STAGE3_PRODUCTION_ENVOY_URL`, default `http://127.0.0.1:9020`) and fails on any rig session. A
+read that fails, or a first event that is not the baseline event itself (the control that the read
+started at the run's window), fails the audit; a production Dispatch without the event-log route
+answers it 404, so the audit fails as one that could not be read rather than passing unread. The
 audit writes nothing. It reads the operator's Dispatch as a command run from the operator's shell
 resolves it ([`lib/operator-dispatch.sh`](#liboperator-dispatchsh)), with the `DISPATCH_TOKEN` the
 script read at start and took out of its environment, so nothing the run starts inherits it. A file,
@@ -3035,21 +3037,21 @@ The operator's Dispatch, for a script run from the operator's shell. Stage 3 and
 . "$root/scripts/e2e/lib/operator-dispatch.sh"     # sourced, never run
 operator_dispatch     # sets operator_dispatch_file, _url, _token and _notice
 operator_dispatch_hold_token     # moves DISPATCH_TOKEN into operator_token, out of the environment
-production_baseline     # sets prod_since, prod_dispatch_url, prod_token, prod_baseline (`none` without Dispatch)
-production_issue_events HEADER OUT     # events above prod_baseline on issues updated since prod_since
-production_dispatch_audit SESSIONS ENVOY     # the audit of production Dispatch above the baseline
+production_baseline     # sets prod_dispatch_url, prod_token, prod_baseline (`none` without Dispatch)
+production_dispatch_audit SESSIONS ENVOY     # the audit of every production Dispatch event from the baseline
 ```
 
 The two Stage 3 scripts call `operator_dispatch_hold_token` once at start, so nothing a run starts
 inherits the operator's production bearer, and `production_baseline` to open their audit's window:
-it records the time the window opens (`prod_since`, UTC), then resolves the operator's Dispatch with
-the held bearer and reads the newest event id of the issues updated in the last 24 hours, through a
-0600 header file under the caller's `$work` (`prod_header_file`). Their `production_audit` calls
-`production_dispatch_audit`, which reads every event above that id on the issues updated since
-`prod_since` (`production_issue_events`, each issue's log paged newest first down to the baseline)
-and the production projects, writes `$evidence/production-dispatch-audit.json`, and fails on an
-event a rig session authored or that names the rig's `$project`, on a production project naming it,
-on a read that fails, and on a listing of updated issues none of whose events is above the baseline.
+it resolves the operator's Dispatch with the held bearer and reads the newest event id of the issues
+updated in the last 24 hours, through a 0600 header file under the caller's `$work`
+(`prod_header_file`). Their `production_audit` calls `production_dispatch_audit`, which pages
+`GET /api/v1/events/log?after=` from the baseline id less one until a short page, so it reads every
+event at or above the baseline whatever owns it, and reads the production projects; it writes
+`$evidence/production-dispatch-audit.json` and fails on an event a rig session authored or that
+names the rig's `$project`, on a production project naming it, on a read that fails (a Dispatch
+without that route answers 404, and the audit says production Dispatch could not be read), and on a
+first event that is not the baseline event.
 
 `operator_dispatch` runs `bun scripts/e2e/lib/operator-dispatch.ts <bearer file>`, which resolves
 Dispatch with `@legion/envoy-client` as every command does, so no script keeps its own copy of the which-file or

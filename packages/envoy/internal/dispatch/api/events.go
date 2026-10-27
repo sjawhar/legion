@@ -28,6 +28,11 @@ const (
 	// eventReplayHeader is set to "complete" on an SSE response whose replay is everything its
 	// client lacks; a client that reconnects without it refetches what it shows.
 	eventReplayHeader = "X-Dispatch-Event-Replay"
+	// maxEventPage is the most events one page of an issue's or a document's event log holds,
+	// and its default.
+	maxEventPage = 200
+	// maxEventLogPage is the most events one page of the whole event log holds, and its default.
+	maxEventLogPage = 1000
 )
 
 const eventSelect = `select e.id, e.issue_key, e.artifact_id::text, coalesce(e.project_key, i.project_key, ar.project_key, ''), e.seq, e.type, e.actor, e.notify, e.created_at, e.payload
@@ -45,6 +50,36 @@ func (s *server) listIssueEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	events, err := s.readEvents(r.Context(), issueOwner(r.PathValue("key")), options)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, events)
+}
+
+// listEventLog pages the whole event log by id, whatever owns each event: an issue, a document,
+// a project or nothing. It answers the events after ?after= (default 0) in ascending id order,
+// at most ?limit= of them. Any authenticated caller may read it, as GET /api/v1/events streams
+// every event to them.
+func (s *server) listEventLog(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	query := r.URL.Query()
+	after, err := parseNonNegativeInt(query.Get("after"), "after")
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	limit, err := parseEventLimit(query.Get("limit"), maxEventLogPage)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	events, err := s.readEventRows(r.Context(), eventSelect+`
+		where e.id > $1
+		order by e.id asc limit $2
+	`, after, limit)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -74,7 +109,7 @@ func parseEventListOptions(r *http.Request) (eventListOptions, error) {
 	if err != nil {
 		return eventListOptions{}, err
 	}
-	limit, err := parseEventLimit(query.Get("limit"))
+	limit, err := parseEventLimit(query.Get("limit"), maxEventPage)
 	if err != nil {
 		return eventListOptions{}, err
 	}
@@ -602,13 +637,14 @@ func parseNonNegativeInt(raw, field string) (int64, error) {
 	return value, nil
 }
 
-func parseEventLimit(raw string) (int, error) {
+// parseEventLimit reads a page's limit: 1 to most, and most when absent.
+func parseEventLimit(raw string, most int) (int, error) {
 	if strings.TrimSpace(raw) == "" {
-		return 200, nil
+		return most, nil
 	}
 	limit, err := strconv.Atoi(raw)
-	if err != nil || limit < 1 || limit > 200 {
-		return 0, errorf(http.StatusBadRequest, "INVALID_QUERY", "limit must be between 1 and 200")
+	if err != nil || limit < 1 || limit > most {
+		return 0, errorf(http.StatusBadRequest, "INVALID_QUERY", "limit must be between 1 and %d", most)
 	}
 	return limit, nil
 }

@@ -124,7 +124,6 @@ timeout_hook=
 gate_artifact=
 gate_version=
 prod_baseline=
-prod_since=
 prod_dispatch_url=
 prod_token=
 prod_envoy_url=${STAGE3_PRODUCTION_ENVOY_URL:-http://127.0.0.1:9020}
@@ -785,7 +784,7 @@ note "project $project, profile $profile, plugins $(jq -r '.name + "@" + .versio
 pane_watcher &
 watcher_pid=$!
 production_baseline
-note "production Dispatch audit baseline: event ${prod_baseline}, issues updated since $prod_since, on ${prod_dispatch_url:-<no user-level Dispatch>}"
+note "production Dispatch audit baseline: event ${prod_baseline} on ${prod_dispatch_url:-<no user-level Dispatch>}"
 pass
 
 begin admission

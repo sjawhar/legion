@@ -51,18 +51,15 @@ prod_header_file() {
   (umask 077 && printf 'Authorization: Bearer %s\n' "$prod_token" >"$header")
   printf '%s\n' "$header"
 }
-# production_baseline reads a recent production Dispatch event id so the post-run audit reads only
-# events above it, on the issues updated since prod_since, the UTC time it records first: an issue
-# holding an event above that event was updated since it. It is a read-only query to the
-# operator's Dispatch, resolved as every
+# production_baseline reads a recent production Dispatch event id so the post-run audit reads every
+# event from it on. It is a read-only query to the operator's Dispatch, resolved as every
 # command of the operator's resolves it (operator_dispatch) with the DISPATCH_TOKEN the script took
 # out of its environment at start (operator_dispatch_hold_token); a file, URL or token that prevents
 # it fails the run, naming it. With no Dispatch configured there is no production Dispatch to audit.
-# It sets prod_since, prod_dispatch_url, prod_token and prod_baseline (`none` with no Dispatch), and
-# says why through the caller's `note` when there is none.
+# It sets prod_dispatch_url, prod_token and prod_baseline (`none` with no Dispatch), and says why
+# through the caller's `note` when there is none.
 production_baseline() {
   local header since keys key id max=0
-  TZ=UTC printf -v prod_since '%(%FT%TZ)T' -1
   DISPATCH_TOKEN=$operator_token operator_dispatch
   if [ -z "$operator_dispatch_url" ]; then
     note "$operator_dispatch_notice"
@@ -82,54 +79,43 @@ production_baseline() {
   prod_baseline=$max
 }
 
-# production_issue_events HEADER OUT writes to OUT, one per line, every event above prod_baseline on
-# the production Dispatch issues updated since prod_since, and prints how many issues that listing
-# named, or fails when a read fails. Each issue's log is paged newest first down to the baseline.
-production_issue_events() {
-  local header=$1 out=$2 keys key page before count=0
-  : >"$out"
-  keys=$(curl -fsS --max-time 20 -H "@$header" "$prod_dispatch_url/api/v1/issues?updated_since=$prod_since" |
-    jq -r '.[].key') || return 1
-  for key in $keys; do
-    count=$((count + 1)) before=
-    while :; do
-      page=$(curl -fsS --max-time 20 -H "@$header" \
-        "$prod_dispatch_url/api/v1/issues/$key/events?order=desc&limit=200${before:+&before=$before}") || return 1
-      jq -c --argjson baseline "$prod_baseline" '.[] | select(.id > $baseline)' <<<"$page" >>"$out" || return 1
-      jq -e --argjson baseline "$prod_baseline" 'length == 200 and .[-1].id > $baseline' <<<"$page" >/dev/null || break
-      before=$(jq '.[-1].seq' <<<"$page")
-    done
-  done
-  printf '%s\n' "$count"
-}
-
-# production_dispatch_audit SESSIONS ENVOY reads production Dispatch's events above prod_baseline on
-# every issue updated since prod_since (production_issue_events), and its projects, into the
-# caller's $evidence/production-dispatch-audit.json, and fails on any event a session in the JSON
-# array SESSIONS authored or that names the caller's $project, and on a production project naming
-# it. A read that fails, or a listing of updated issues none of whose events is above the baseline
-# (the control that the read reached the run's window), fails it too: the audit cannot vouch for
-# production. Its summary line names ENVOY, the rig sessions the caller found on the production
-# Envoy listener.
+# production_dispatch_audit SESSIONS ENVOY reads every production Dispatch event from prod_baseline
+# on, whatever owns it (an issue, a document, a project or none), by paging GET /api/v1/events/log
+# by id until a short page, and the production projects, into the caller's
+# $evidence/production-dispatch-audit.json. It fails on any event a session in the JSON array
+# SESSIONS authored or that names the caller's $project, and on a production project naming it. A
+# read that fails (a Dispatch without the log route answers 404), or a first event that is not the
+# baseline event itself (the control that the read started at the run's window), fails it too: the
+# audit cannot vouch for production. Its summary line names ENVOY, the rig sessions the caller found
+# on the production Envoy listener.
 production_dispatch_audit() {
-  local sessions=$1 envoy=$2 header issues projects events found=0
+  local sessions=$1 envoy=$2 out=$work/production-events.jsonl header page projects events
+  local after=$((prod_baseline - 1)) complete=1 found=0
   header=$(prod_header_file)
-  if ! issues=$(production_issue_events "$header" "$work/production-events.jsonl") ||
-    ! projects=$(curl -fsS --max-time 20 -H "@$header" "$prod_dispatch_url/api/v1/projects"); then
+  : >"$out"
+  while :; do
+    if ! page=$(curl -fsS --max-time 20 -H "@$header" "$prod_dispatch_url/api/v1/events/log?after=$after&limit=1000") ||
+      ! jq -c '.[]' <<<"$page" >>"$out"; then
+      complete=
+      break
+    fi
+    [ "$(jq length <<<"$page")" -eq 1000 ] || break
+    after=$(jq '.[-1].id' <<<"$page")
+  done
+  if [ -z "$complete" ] || ! projects=$(curl -fsS --max-time 20 -H "@$header" "$prod_dispatch_url/api/v1/projects"); then
     rm -f "$header"
     printf 'production Dispatch could not be read for the audit\n'
     return 1
   fi
   rm -f "$header"
-  events=$(jq -s -c --argjson ids "$sessions" --arg project "$project" --argjson issues "$issues" --argjson projects "$projects" '
-    {issues: $issues, count: length,
+  events=$(jq -s -c --argjson ids "$sessions" --arg project "$project" --argjson baseline "$prod_baseline" --argjson projects "$projects" '
+    {control: (.[0].id == $baseline), count: length,
      rig: [.[] | select((.actor.id as $a | $ids | index($a)) or (tostring | contains($project)))
-       | {id, issue_key, type, actor: .actor.id, created_at}],
-     projects: [$projects[] | select(tostring | contains($project))]}' "$work/production-events.jsonl")
+       | {id, issue_key, artifact_id, project, type, actor: .actor.id, created_at}],
+     projects: [$projects[] | select(tostring | contains($project))]}' "$out")
   printf '%s\n' "$events" >"$evidence/production-dispatch-audit.json"
-  if jq -e '.issues > 0 and .count == 0' >/dev/null <<<"$events"; then
-    printf 'production Dispatch listed %s issues updated since %s, and none of their events is above the baseline event %s\n' \
-      "$issues" "$prod_since" "$prod_baseline"
+  if ! jq -e '.control' >/dev/null <<<"$events"; then
+    printf 'production Dispatch event log did not start at its baseline event %s\n' "$prod_baseline"
     return 1
   fi
   if ! jq -e '.rig == []' >/dev/null <<<"$events"; then
@@ -140,8 +126,8 @@ production_dispatch_audit() {
     printf 'production Dispatch holds the rig project: %s\n' "$(jq -c .projects <<<"$events")"
     found=1
   fi
-  printf 'production audit: %s events above %s on %s issues updated since %s, rig events %s, rig projects %s, rig Envoy sessions %s\n' \
-    "$(jq -r .count <<<"$events")" "$prod_baseline" "$issues" "$prod_since" "$(jq -c .rig <<<"$events")" \
+  printf 'production audit: %s events from %s, rig events %s, rig projects %s, rig Envoy sessions %s\n' \
+    "$(jq -r .count <<<"$events")" "$prod_baseline" "$(jq -c .rig <<<"$events")" \
     "$(jq -c .projects <<<"$events")" "$envoy"
   return "$found"
 }
