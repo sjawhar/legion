@@ -257,3 +257,52 @@ test("a refresh owed to a removed read is not paid by the read that replaces it"
     second.stop();
   }
 });
+
+test("a read left inside the second after a fetch an event landed in still owes that event when it is rendered again", async () => {
+  const queryClient = newClient();
+  const key = ["issue-summary", "CORE-1"];
+  const summary = servedQuery(queryClient, key, 300);
+  await advance(1_200);
+  // A first event fetches at 1,200 ms; a second lands at 1,300 ms while that fetch is out, whose
+  // body was composed before it. The fetch settles at 1,500 ms and the owed one waits for 2,200.
+  refreshQueries(queryClient, [{ exact: true, queryKey: key }]);
+  await advance(100);
+  refreshQueries(queryClient, [{ exact: true, queryKey: key }]);
+  await advance(250);
+  // The page is left inside that wait.
+  summary.stop();
+  await advance(2_000);
+
+  expect(summary.starts).toEqual([0, 1_200]);
+  // Nothing fetched the answer composed after the second event, so the read must still be stale,
+  // or the page that renders it again shows the answer from before it.
+  expect(queryClient.getQueryState(key)?.isInvalidated).toBe(true);
+});
+
+test("a test of a read's data while a fetch is out runs on the response that lands, not the data it replaces", async () => {
+  const queryClient = newClient();
+  // The second fetch's body, composed before the test below, holds a row of CORE-1's; the data
+  // on screen when the test runs does not.
+  const inbox = servedQuery(queryClient, ["inbox"], 400, (fetch) =>
+    fetch === 2 ? [{ issue_key: "OTHER-1" }, { issue_key: "CORE-1" }] : [{ issue_key: "OTHER-1" }]
+  );
+  try {
+    await advance(1_500);
+    refreshQueries(queryClient, [{ queryKey: ["inbox"] }]);
+    await advance(100);
+    refreshQueries(queryClient, [
+      {
+        queryKey: ["inbox"],
+        when: (data) =>
+          Array.isArray(data) &&
+          data.some((row: { issue_key: string }) => row.issue_key === "CORE-1"),
+      },
+    ]);
+    await advance(3_000);
+
+    expect(inbox.starts).toEqual([0, 1_500, 2_500]);
+    expect(inbox.mostInFlight()).toBe(1);
+  } finally {
+    inbox.stop();
+  }
+});
