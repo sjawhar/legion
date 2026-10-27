@@ -68,8 +68,13 @@ committed that transaction, and ygo hands the worker an update for it too (the d
 set), so its slot is finished with that update and the worker takes it rather than storing it. A
 settlement that wrote into the room renders its version from the document as it stands after the
 repairs (`readSettlementTree`, `liveTree`), so a peer's edit made since its read is in that version
-too. A document's pending authors are in one of two places: F, the room's local in-flight credits
-(`roomState.inflight`), or R, the durable `doc_pending_authors` rows from migration `0084`.
+too. A settlement that wrote nothing into the room and repaired nothing in the tree it read
+versions the rendering it made of that read, offsets included, and renders no second time; it
+renders again when a stamp's tree replaced the read, when it read the document again after a
+write, or when `reconcileAskBlocks` repaired the read in place (`changedTree`), so nothing but
+`reconcileAskBlocks` may change that read. A document's pending authors are in one of two places:
+F, the room's local in-flight credits (`roomState.inflight`), or R, the durable
+`doc_pending_authors` rows from migration `0084`.
 `creditContentChange` puts a browser update's connected peers in F. Its append takes the document's
 advisory lock, writes an unconsumed credit to R in that update's transaction, then removes it from
 F after the transaction ends. A joined write records its authors directly in R in the transaction

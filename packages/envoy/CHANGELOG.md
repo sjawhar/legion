@@ -885,6 +885,10 @@
 
 ### Changed
 
+- A settlement of a Dispatch document that wrote nothing into the room and repaired nothing in
+  the tree it read now renders that tree once, where it rendered it twice: its version reuses the
+  first rendering, block offsets included (INFRA-647). Versions, their block index and the
+  reference excerpts are what they were.
 - A dead session's subscriptions now stay 5 minutes longer: the interest reaper deletes one only
   15 minutes after its row's last write, where it was 10, because it now adds
   `store.InterestRefreshAge` to its grace window. For that time the subscribers page and the
@@ -1688,6 +1692,10 @@
 
 ### Fixed
 
+- An ask block whose answer selects nothing is now written `selected="[]"` in a version that a
+  settlement made from the tree it repaired, as the room holds it, where it was `selected="null"`
+  (INFRA-647). It happened when a peer wrote the answer into the block before the settlement's own
+  repair did, and the next settlement wrote a version again that changed only that attribute.
 - A bare email address, or one written `<a@b.test>`, in Markdown written to a document through the
   API is now stored and shown as a link to its `mailto:` URL, `[a@b.test](mailto:a@b.test)`, as a
   comment and the browser editor show it (INFRA-530). Dispatch linked it to the bare address, which
