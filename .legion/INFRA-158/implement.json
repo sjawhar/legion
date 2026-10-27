@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-158",
-  "completed": "2026-10-27T07:20:00Z",
+  "completed": "2026-10-27T08:01:58Z",
   "proof": [
+    {
+      "criterion": "Review round 9: a closed issue's document that the close or the ask repair left live ahead of its latest version is block-indexed at that version, including in the deploy order, and its #b- references resolve",
+      "surface": "real Postgres with the docs service, the api repair and the real RunBlockIndexReconciliation loop; refs.Node resolution of dispatch://KEY/spec#b- references",
+      "command": "go test -count=1 -run 'BlockIndex|Rebuild|WriteIssueAskStates' ./internal/dispatch/docs/ ; go test -count=1 -run 'Repair|Unloadable|TestClosingAnIssue|BlockReference|TestTheBlockIndex' ./internal/dispatch/api/ ; go test ./internal/dispatch/refs/",
+      "observed": "TestBlockIndexIndexesAClosedDocumentWhoseAskStatesAreAheadOfItsVersion: indexed at version 1 under the live ids, OwedDocuments 0, both block references resolve. TestTheBlockIndexAfterTheBootRepairIndexesAClosedIssuesDocument: after 0121's owed state and the boot repair, the loop indexes the document at its latest version with nothing owed and every block reference resolves. Open-issue live-ahead stays skipped. All targeted suites pass.",
+      "headSha": "a0484132d5bb23d0f51791021010e5614a19b04d",
+      "negativeControl": "With 4440fc7b's block_index.go the docs test reads LiveAhead:1 OwedDocuments:1 and the deploy-order loop logs live_ahead=1 owed_documents=1"
+    },
     {
       "criterion": "Fourteenth forward merge resolves main's conflicts, sizes the lease pool to the merged tree's leased callers, and leaves the pull request mergeable",
       "surface": "the merged tree's builds, the store and duty Postgres suites, the repair/close/block-index tests in api and docs, the dispatch document unit tests; GitHub's mergeability",
@@ -14,9 +22,11 @@
     }
   ],
   "filesChanged": [
+    "round 9: docs/block_index.go (closedVersionBlocks, open flag), docs/block_index_test.go, api/issue_ask_repair_test.go, packages/envoy/AGENTS.md; wording: docs/solutions lease learning, cmd/dispatch/multiprocess_test.go, packages/envoy/CHANGELOG.md",
     "fourteenth forward merge 4440fc7b: packages/envoy/internal/dispatch/store/pool.go (leasePoolSize 10, ten-name comment), packages/envoy/cmd/dispatch/main.go (both loops start), packages/envoy/cmd/dispatch/README.md (eight loops), packages/dispatch/web/src/features/doc/ProofDocument.decisions.test.tsx (both tests kept)"
   ],
   "deviations": [
+    "The reviewer suggested indexing pmdoc.ParseRendering(stored)'s blocks; that parse mints random ids for every untyped block (a version's markdown names only typed blocks' ids), so the fix indexes the version's rendering under the live document's block ids, and only when the live text differs from the version in ask blocks' attributes alone.",
     "The fingerprint changed: main's #2210 added the block-index reconciliation, a leased loop, so this branch's ask repair is the tenth lease caller (leasePoolSize 10, not 9) and the README counts eight loops, not seven."
   ]
 }
