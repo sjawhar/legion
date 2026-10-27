@@ -23,6 +23,12 @@
   own copy of the `legion-architect` skill says a component file goes in the branch of the source
   repository that holds it, with an id no other source of the project uses, since `dist/` and
   `legion/` were regenerated (INFRA-391).
+- The `dispatch` command (`dist/dispatch.js`) prints, under each ask hit of `dispatch search`,
+  where the ask stands: `Answered by …` with the options chosen and `Answer text: …`, `Closed with
+  no answer: …`, `Closed after an answer: …` with `Last answer by …`, or `Open: no answer yet.`;
+  against a Dispatch older than this release, which reports no state, `Answer state not reported
+  by this Dispatch; open the link to read the ask.` The bundled `dispatch_search` description says
+  an ask hit says whether it is answered, since `dist/` was regenerated (INFRA-569).
 
 ### Changed
 

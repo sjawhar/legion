@@ -4,6 +4,12 @@
 
 ### Added
 
+- `dispatch search` prints, under each ask hit, where the ask stands: `Answered by …` with the
+  options chosen and `Answer text: …`, `Closed with no answer: …`, `Closed after an answer: …` with
+  `Last answer by …`, or `Open: no answer yet.`; against a Dispatch older than this release, which
+  reports no state, `Answer state not reported by this Dispatch; open the link to read the ask.`
+  Its description says an ask hit says whether it is answered (INFRA-569).
+
 - The `dispatch` skill never claims an issue with the `legion` label unless the session is a
   Legion role of its tree, even when its claim reads `not running`: the Legion daemon suspends a
   root's architect while the root waits on a person, and taking that claim takes the tree out of

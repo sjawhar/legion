@@ -76,6 +76,15 @@
   names that value beside the deadline in force. The field reports that one raise: the 25 ms
   interval floor and the timer's ceiling are applied in silence and are not reported by it.
 
+- `dispatch search` prints, under each ask hit, where the ask stands: `Answered by <user> at
+  <time> · options chosen: <labels>` and `Answer text: <text>` (each `none` when empty);
+  `Closed with no answer: <resolved|retracted> by <actor> at <time>: <reason>`; `Closed after an
+  answer: …` followed by `Last answer by …` and its `Answer text:`; or `Open: no answer yet.`. A
+  later line of a multi-line answer is indented four spaces, so it stays under its hit. A Dispatch
+  older than this release reports no state, and its ask hits read `Answer state not reported by
+  this Dispatch; open the link to read the ask.` rather than passing for open ones. `actorText`
+  moves to `actor-text.ts`, shared by the event log and the search answer (INFRA-569).
+
 ### Fixed
 
 - The `dispatch` command logs a refusal it makes before the call reaches Dispatch (an unknown

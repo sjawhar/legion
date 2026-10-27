@@ -793,6 +793,16 @@
 - The secrets broker logs at boot how it signs in to its database, `database sign-in
   method=rds-iam` or `method=password`, before it reaches for AWS or the database, so an operator
   tells a token sign-in from a password one in the log rather than the task's environment.
+- `GET /api/v1/search` gives every `ask` hit `ask`, where the ask stands when the search ran:
+  `open`, `answered` with its latest answer (who gave it, when, the options it chose and its
+  text), or `resolved` with its resolution and, when anyone answered it, the last answer it had,
+  which for an ask that document settlement retracted while it was answered is read from its
+  `ask.answered` events, since its row keeps none. One query reads every ask hit of a page, the
+  events are read only when the page holds a resolved ask, and a page with no ask hit reads
+  nothing more. The search palette shows it under each ask hit's excerpt: a badge (`Open`,
+  `Answered`, `Closed, no answer` or `Closed after an answer`), who closed the ask and when, and
+  its latest answer, with who gave it, when, the options chosen and its text cut to three lines
+  (INFRA-569).
 
 ### Changed
 
@@ -1429,6 +1439,10 @@
 
 ### Fixed
 
+- An ask hit's search excerpt, in `GET /api/v1/search` and in the write-time suggestions, is cut
+  from the text its search vector indexes - the question, the options' labels and descriptions,
+  the answer's text and the options it chose - where it was cut from the question, the options'
+  raw JSON and the answer's text, so the excerpt could show JSON keys and braces (INFRA-569).
 - Every `envoy-infra` component refuses a number in an integer input that is not a whole number
   within the 64-bit integer range, at any depth (an object type's property, an array element, a
   map value), naming the component and the input's path and never quoting a secret value, before
