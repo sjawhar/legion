@@ -214,9 +214,7 @@ interface AskBlockShell {
 function askBlockShell(facts: AskBlockFacts): AskBlockShell {
   const malformed = facts.malformedReason !== undefined;
   return {
-    contentClass: malformed
-      ? `${textMutedOnSurfaceMuted} [&_li:empty]:hidden [&_li:has(>p:empty)]:hidden [&_li:has(>p>br:only-child)]:hidden`
-      : textPrimaryOnSurface,
+    contentClass: malformed ? textMutedOnSurfaceMuted : textPrimaryOnSurface,
     foldsOptions: !malformed,
     frameClass: `proof-typed-block proof-typed-block-ask my-5 rounded-xl border border-l-4 px-4 pt-3 pb-4 shadow-sm ${borderDefault} ${askUrgencyAccent[facts.urgency]} ${askBlockTint[facts.urgency]}`,
     stamps: {

@@ -13,9 +13,10 @@ import {
   createIssueArtifact,
   createProject,
   editArtifact,
+  getArtifactText,
   getIssue,
 } from "./api";
-import { documentEditor } from "./editor";
+import { documentEditor, openWithCaret } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -261,9 +262,10 @@ test("a decision in a reply under a document's decision sits flush in its card",
 });
 
 // A malformed decision shows its source list, the only place its options show. A blank item in
-// that list is no option at all, so it shows no bullet: the document hides it, and a text body,
-// whose tight list items carry no paragraph, hides it the same way.
-test("a malformed decision's blank option shows no bullet in a body, as in the document", async ({
+// that list is no option at all, so it shows no bullet where nothing is edited: a text body,
+// whose tight list items carry no paragraph, hides it, and so does a read-only render of a
+// document. In an editable document the blank item is where a human types the option, so it shows.
+test("a malformed decision's blank option shows no bullet in a body or a read-only document", async ({
   browser,
 }) => {
   const source = ':::ask{#blank urgency="high"}\nWhich one?\n\n- A: first\n-\n:::\n';
@@ -304,7 +306,48 @@ test("a malformed decision's blank option shows no bullet in a body, as in the d
     await expect(docItems.filter({ hasText: "A: first" })).toBeVisible();
     const docBlank = docItems.nth(1);
     await expect(docBlank).toHaveText("");
-    await expect(docBlank).toBeHidden();
+    await expect(docBlank).toHaveCSS("display", "list-item");
+
+    await page.goto(`/issues/${issue.key}/artifacts/${created.artifact.slug}?v=1`);
+    const versionView = page.getByTestId("version-view");
+    await expect(versionView.locator('.dispatch-doc[data-read-only="true"]')).toBeVisible();
+    const readOnlyDecision = versionView.locator('[data-dispatch-ask-block="blank"]');
+    await expect(readOnlyDecision).toHaveAttribute("data-dispatch-ask-malformed", "true");
+    const readOnlyItems = readOnlyDecision.locator("[data-proof-block-content] > ul > li");
+    await expect(readOnlyItems).toHaveCount(2);
+    await expect(readOnlyItems.filter({ hasText: "A: first" })).toBeVisible();
+    await expect(readOnlyItems.nth(1)).toHaveText("");
+    await expect(readOnlyItems.nth(1)).toHaveCSS("display", "none");
+  } finally {
+    await alice.close();
+  }
+});
+
+// Typing a decision's first option goes through a blank item: Enter after the question, then
+// `- `, leaves an option without a label, so the decision is malformed until its label is typed.
+// The blank item holds the caret, so it shows, and the label typed next lands in it, not in the
+// question.
+test("typing a new option into a decision with no options stores it as a typed option", async ({
+  browser,
+}) => {
+  const { alice, issue, page } = await openWithCaret(
+    browser,
+    "Typed option",
+    "Intro.\n\n:::ask{#a1}\nWhich one?\n:::\n\nAfter.\n",
+    "Which one?",
+    "end"
+  );
+  try {
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("- ");
+    await page.keyboard.type("Option A");
+
+    await expect
+      .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+      .toContain("- Option A");
+    const stored = (await getArtifactText(issue.primary_artifact_id)).markdown;
+    expect(stored).not.toContain("Which one?Option A");
+    expect(stored).toMatch(/\nWhich one\?\n\n- Option A\n:::\n/);
   } finally {
     await alice.close();
   }

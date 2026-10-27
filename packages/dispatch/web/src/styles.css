@@ -440,6 +440,21 @@ a {
   display: block;
 }
 
+/* A malformed decision shows its source list, the only place its options show. A blank item in
+   that list (`-` alone: an empty item, an empty paragraph, or the editor's trailing break) is no
+   option, so it shows no bullet where nothing is edited: in a body (`.dispatch-markdown`, a reply
+   under a document's decision included) and in a read-only document. In an editable document the
+   blank item is where the caret is, the option a human is typing (Enter after the question, then
+   `- `), so it shows there and the typed text lands in it. The child combinators keep the rule to
+   the decision's own list, never a typed block inside a reply or answer note its card renders. */
+:is(.dispatch-markdown, .dispatch-doc[data-read-only="true"])
+  .proof-typed-block-ask[data-dispatch-ask-malformed="true"]
+  > [data-proof-block-content]
+  > :is(ul, ol)
+  > li:is(:empty, :has(> p:empty), :has(> p > br:only-child)) {
+  display: none;
+}
+
 /* On touch screens the library docks the selection bar at the viewport bottom.
    An expanded margin sheet owns that space, so it suppresses the bar. */
 @media (max-width: 1279px) {
