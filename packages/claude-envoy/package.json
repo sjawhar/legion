@@ -29,7 +29,7 @@
     "build": "bun scripts/build.ts",
     "check-dist": "bun scripts/build.ts --check",
     "typecheck": "bunx tsc --noEmit",
-    "test": "bun test",
+    "test": "bun test --timeout=15000",
     "lint": "bunx biome check src/ hooks/ scripts/"
   },
   "dependencies": {

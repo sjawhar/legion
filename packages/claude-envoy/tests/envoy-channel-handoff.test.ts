@@ -27,6 +27,7 @@ import {
   directSubject,
   FakeNats,
   noInterest,
+  observedClient,
   recordingClient,
   scratchState,
   sessionOptions,
@@ -111,9 +112,15 @@ test("follows the session id its Claude process hands off: new subject first, th
 
     expect(await readdir(join(stateDirectory, "roles"))).toEqual(["ses_new.json"])
 
+    // A tick already inside the registry chain when shutdown begins still registers; shutdown's
+    // deregistration queues behind it, so it is the last write, and nothing else may come.
     calls.length = 0
     await session.shutdown()
-    expect(calls).toEqual(["nats.unsubscribe notifications.agent.ses_new", "unregister ses_new"])
+    expect(calls.filter((call) => call !== reregister)).toEqual([
+      "nats.unsubscribe notifications.agent.ses_new",
+      "unregister ses_new",
+    ])
+    expect(calls.at(-1)).toBe("unregister ses_new")
     // The handoff file outlives this server: a restart inside the same Claude process reads it.
     expect(await readdir(join(stateDirectory, "sessions"))).toEqual(["777"])
   } finally {
@@ -589,22 +596,29 @@ test("a role claim that fails at startup still starts the session, and the next 
   // so a single failure would pass even if that retry were one-shot.
   let holder = ""
   let claims = 0
-  const client = recordingClient([], {
-    setRole: async (input) => {
-      claims += 1
-      if (claims <= 2) throw new Error("listener unavailable")
-      holder = input.sessionID
-      return { claimed: true, interest: noInterest() }
-    },
-    getRole: async (role) => ({ role, holder, last_seen: 1 }),
-  })
+  const observed = observedClient(
+    recordingClient([], {
+      setRole: async (input) => {
+        claims += 1
+        if (claims <= 2) throw new Error("listener unavailable")
+        holder = input.sessionID
+        return { claimed: true, interest: noInterest() }
+      },
+      getRole: async (role) => ({ role, holder, last_seen: 1 }),
+    }),
+  )
+  const state = (): string => `holder now "${holder}"; ${observed.describe()}`
   const session = await startChannelSession(
-    sessionOptions(identity, stateDirectory, { client, heartbeatMs: 25 }),
+    sessionOptions(identity, stateDirectory, { client: observed.client, heartbeatMs: 25 }),
   )
 
   try {
     expect(holder).toBe("")
-    await waitFor(async () => holder === "ses_claude", "the listener naming ses_claude holder")
+    await waitFor(
+      async () => holder === "ses_claude",
+      "the listener naming ses_claude holder",
+      state,
+    )
     expect(await readPersistedRole(roleFile)).toEqual({
       session_id: "ses_claude",
       role: "reviewer",
@@ -612,7 +626,11 @@ test("a role claim that fails at startup still starts the session, and the next 
     // The session counts the role as its own, not only the listener: a holder the listener then
     // loses is one the heartbeat's soft claim takes back, and it reclaims only a role it holds.
     holder = "ses_lost"
-    await waitFor(async () => holder === "ses_claude", "the heartbeat reclaiming the held role")
+    await waitFor(
+      async () => holder === "ses_claude",
+      "the heartbeat reclaiming the held role",
+      state,
+    )
   } finally {
     await session.shutdown()
     await rm(stateDirectory, { recursive: true, force: true })
