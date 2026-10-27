@@ -21,9 +21,12 @@ name: Rebuild Claude Envoy plugin
 # version-bump commit, which starts no run of its own — it pushes nothing and starts a fresh run on
 # main instead, which builds main's tip. Its commit carries GitHub's skip keyword in its subject, so
 # it starts no CI or release run of its own; `build` ran the private-name check over the bundle
-# already. A failed run lands nothing, and the next push to main or the next hourly run builds
-# again. The hourly run is the net under a missed or failed run: it ends red when it repaired a copy
-# that had been stale for more than 30 minutes, so a person learns that a push run missed it.
+# already. A failed run lands nothing and is red on its own; the next run builds again.
+#
+# Every push to main starts a run, and only a newer run replaces a pending one, so the newest main
+# is always built. The daily run is there only for a push that started no run of this workflow: a
+# commit carrying GitHub's skip keyword, such as a release's version bump, that changed a build
+# input.
 #
 # A pull request that changes this workflow or release-push.sh runs `build` on its merge commit, its
 # own proof before merge; `push` runs only on main.
@@ -31,7 +34,7 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: "23 * * * *"
+    - cron: "23 5 * * *"
   workflow_dispatch:
   pull_request:
     paths:
@@ -108,7 +111,7 @@ jobs:
 
   # Lands build's tar on main as one commit over the commit build built from, or starts a fresh run
   # when main has moved on (release-push.sh push-built). It runs no dependency code: only
-  # release-push.sh, git, gh, tar and date, and the two pinned actions below. Its condition runs on
+  # release-push.sh, git, gh and tar, and the two pinned actions below. Its condition runs on
   # `always()` and tests build's result before reading its outputs.
   push:
     needs: build
@@ -134,21 +137,8 @@ jobs:
           path: ${{ runner.temp }}/built
       # The only step that holds the deploy key.
       - name: Land the build on main
-        id: push
         env:
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BASE: ${{ needs.build.outputs.base }}
         run: .github/scripts/release-push.sh push-built "$BASE" "$RUNNER_TEMP/built/claude-envoy-built.tar"
-      # A copy that stayed stale for more than 30 minutes until the hourly run means a push run
-      # missed it: the repair landed, and the run ends red so a person looks.
-      - name: Fail when the hourly run repaired a stale copy
-        if: github.event_name == 'schedule' && steps.push.outputs.pushed == 'true'
-        env:
-          BASE: ${{ needs.build.outputs.base }}
-        run: |
-          age=$(( $(date +%s) - $(git log -1 --format=%ct "$BASE") ))
-          if [ "$age" -gt 1800 ]; then
-            echo "::error::main's built Claude Envoy plugin was stale at $BASE, committed $((age / 60)) minutes before this hourly run repaired it; a push run missed it"
-            exit 1
-          fi

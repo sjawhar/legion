@@ -245,10 +245,22 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # A source that does not build fails a required check here: the claude-envoy job is not
-      # required, and main's Rebuild Claude Envoy plugin workflow would otherwise keep failing.
-      - name: Build the Claude Code plugin from source
-        run: bun packages/claude-envoy/scripts/build.ts --out "$RUNNER_TEMP/claude-envoy"
+      # The checks main's Rebuild Claude Envoy plugin workflow runs: a source that does not build,
+      # does not build the same bytes twice, or puts a private name in the bundle fails a required
+      # check here, where otherwise it would merge and then fail each rebuild on main (the
+      # claude-envoy job is not required). It builds in place in this job's own disposable checkout
+      # and byte-compares a second build with the first, as the rebuild workflow does; no later step
+      # here reads the two directories.
+      - name: Build the Claude Code plugin in place
+        run: bun run build -- --in-place
+        working-directory: packages/claude-envoy
+
+      - name: Check a second build of the plugin matches the first
+        run: bun run check-dist
+        working-directory: packages/claude-envoy
+
+      - name: Check the built plugin names nothing private
+        run: .github/scripts/check-private-names.sh packages/claude-envoy/dist packages/claude-envoy/legion
 
       - name: Test release scripts
         run: .github/scripts/release-push.test.sh

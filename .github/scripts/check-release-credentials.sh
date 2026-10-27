@@ -15,9 +15,10 @@
 #    `secrets['DEPLOY_KEY']`, in any casing (GitHub resolves `secrets.deploy_key` too) —
 #    (a) runs no dependency code, (b) uses only the actions on CREDENTIALED_USES below, (c) sets
 #    `cache-mode: none`, and (d) names the deploy key only as `DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}`
-#    (the dot form) in the step-level `env:` of a step whose `run:` calls `release-push.sh push-tag`,
-#    `push-main` or `push-built`; the workflow's `env:` reaches every job, so the key there is never
-#    allowed.
+#    (the dot form) in the step-level `env:` of a step whose `run:` calls one of its workflow's push
+#    commands (PUSH_COMMANDS): `release-push.sh push-tag` or `push-main` in the three release
+#    workflows, `release-push.sh push-built` in claude-envoy-rebuild.yaml and nowhere else; the
+#    workflow's `env:` reaches every job, so the key there is never allowed.
 # 2. A build job — one that runs dependency code — holds none of those four write scopes and no
 #    `secrets` reference but `secrets.GITHUB_TOKEN`, in its own text or the workflow's `env:` (so
 #    no deploy key, by dot or by index, no other secret and no `toJSON(secrets)`), declares
@@ -154,7 +155,15 @@ DEPLOY_KEY_REF = re.compile(
 DEPLOY_KEY_VALUE = re.compile(r"\$\{\{\s*secrets\.DEPLOY_KEY\s*\}\}", re.IGNORECASE)
 RELEASE_PUSH = ".github/scripts/release-push.sh"
 TRIPWIRE = f"{RELEASE_PUSH} no-credential"
-PUSH_COMMANDS = ("release-push.sh push-tag", "release-push.sh push-main", "release-push.sh push-built")
+# The release-push.sh commands a step holding the deploy key may run, by workflow: a release pushes
+# its tag and its version bump, the rebuild lands its build, and neither runs the other's push.
+RELEASE_PUSHES = ("release-push.sh push-tag", "release-push.sh push-main")
+PUSH_COMMANDS = {
+    RELEASE: RELEASE_PUSHES,
+    LISTENER: RELEASE_PUSHES,
+    INFRA: RELEASE_PUSHES,
+    REBUILD: ("release-push.sh push-built",),
+}
 # A secret other than GITHUB_TOKEN, which a build job must not hold: `secrets.X` or `secrets['X']`
 # for any X but GITHUB_TOKEN, `toJSON(secrets)` (the context and functions are case-insensitive,
 # as are secret names), or a bare `secrets` inside a `${{ … }}` expression (`${{ secrets }}`,
@@ -487,15 +496,16 @@ def texts_of(node, path=(), line=0) -> list[tuple[tuple, int, str]]:
     return texts
 
 
-def deploy_key_allowed(steps: list, path: tuple, text: str) -> bool:
-    """`DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}` in the env of a step that pushes, and nothing else:
-    the dot form, exactly, as the one value of that key."""
+def deploy_key_allowed(steps: list, path: tuple, text: str, pushes: tuple[str, ...]) -> bool:
+    """`DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}` in the env of a step that runs one of pushes, the
+    workflow's push commands, and nothing else: the dot form, exactly, as the one value of that
+    key."""
     if len(path) != 4 or path[0] != "steps" or path[2:] != ("env", "DEPLOY_KEY"):
         return False
     if not DEPLOY_KEY_VALUE.fullmatch(text.strip()):
         return False
     run = steps[path[1]].get("run")
-    return isinstance(run, str) and any(push in run for push in PUSH_COMMANDS)
+    return isinstance(run, str) and any(push in run for push in pushes)
 
 
 def describe(step: Mapping, index: int) -> str:
@@ -602,15 +612,16 @@ def check_job(
                 f"job '{name}' holds a credential, so it must set 'cache-mode: none' to restore "
                 f"no cache ({found})",
             )
-        # 1d. The deploy key reaches only the steps that push.
+        # 1d. The deploy key reaches only the steps that run this workflow's push commands.
+        pushes = PUSH_COMMANDS[path]
         for key_path, line, text in key_sites:
-            if not deploy_key_allowed(steps, key_path, text):
+            if not deploy_key_allowed(steps, key_path, text, pushes):
                 problem(
                     path, line,
                     f"job '{name}' names secrets.DEPLOY_KEY at {describe_site(steps, key_path)}; "
                     f"the deploy key may appear only as 'DEPLOY_KEY: ${{{{ secrets.DEPLOY_KEY }}}}' "
-                    f"in the env of a step whose run calls release-push.sh push-tag, push-main or "
-                    f"push-built",
+                    f"in the env of a step whose run calls {' or '.join(pushes)}, which "
+                    f"{path.name} allows",
                 )
 
     if dependency:

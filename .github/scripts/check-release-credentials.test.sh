@@ -2,7 +2,8 @@
 # Tests for `check-release-credentials.sh`: a job of the four workflows it reads (the three release
 # workflows and claude-envoy-rebuild.yaml) that holds a credential runs no dependency code, uses
 # only allow-listed actions, restores no cache and holds the deploy key only in the env of a step
-# that pushes; a job that runs dependency code holds no credential and ends in the no-credential
+# that runs one of its workflow's push commands (a release's push-tag or push-main, the rebuild's
+# push-built); a job that runs dependency code holds no credential and ends in the no-credential
 # tripwire; every checkout persists no credential; the two release orderings (pi_legion_publish
 # after pi_envoy_publish, release_publish in its concurrency group) stay; and a job condition
 # downstream of a skippable job calls `always()` and tests the result of every job whose outputs it
@@ -88,9 +89,9 @@ REBUILD=.github/workflows/claude-envoy-rebuild.yaml
 # `if:`. The listener: a docker build job (`packages: write`, a build-push) and release_publish in
 # its concurrency group, with `docker buildx imagetools create`. Infra: a build job
 # (install-pulumi, `pulumi package get-schema`, tripwire) and a publish job. The rebuild: a build
-# job (setup-bun, `bun run build`, the private-name check, upload, tripwire) with an `if:` of its
-# own, and a push job (`actions: write`, the deploy key in the env of its `push-built` step, a git
-# and date step after it) whose `if:` calls `always()` and tests build's result.
+# job (setup-bun, `bun run build`, `bun run check-dist`, the private-name check, upload, tripwire)
+# with an `if:` of its own, and a push job (`actions: write`, the deploy key in the env of its
+# `push-built` step) whose `if:` calls `always()` and tests build's result.
 write_green() {
   local dir=$1
   cat > "$dir/release.yaml" <<'YAML'
@@ -359,7 +360,13 @@ name: Rebuild Claude Envoy plugin
 on:
   push:
     branches: [main]
+  schedule:
+    - cron: "23 5 * * *"
   workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/claude-envoy-rebuild.yaml"
+      - ".github/scripts/release-push.sh"
 permissions: {}
 concurrency:
   group: claude-envoy-rebuild-${{ github.ref }}
@@ -383,6 +390,9 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Build the plugin in place
         run: bun run build -- --in-place
+        working-directory: packages/claude-envoy
+      - name: Check a second build matches the first
+        run: bun run check-dist
         working-directory: packages/claude-envoy
       - name: Check the built plugin names nothing private
         run: .github/scripts/check-private-names.sh packages/claude-envoy/dist packages/claude-envoy/legion
@@ -420,22 +430,11 @@ jobs:
           name: claude-envoy-built
           path: ${{ runner.temp }}/built
       - name: Land the build on main
-        id: push
         env:
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BASE: ${{ needs.build.outputs.base }}
         run: .github/scripts/release-push.sh push-built "$BASE" "$RUNNER_TEMP/built/claude-envoy-built.tar"
-      - name: Fail when the hourly run repaired a stale copy
-        if: github.event_name == 'schedule' && steps.push.outputs.pushed == 'true'
-        env:
-          BASE: ${{ needs.build.outputs.base }}
-        run: |
-          age=$(( $(date +%s) - $(git log -1 --format=%ct "$BASE") ))
-          if [ "$age" -gt 1800 ]; then
-            echo "::error::stale at $BASE"
-            exit 1
-          fi
 YAML
 }
 
@@ -494,13 +493,32 @@ check "exits 1" "$(is "$status" 1)"
 check "names the push job, the step and the command at the step's line" \
   "$(contains "$out" "^::error::$REBUILD:$(line_of "$root/$REBUILD" '^      - name: Install$'): job 'push' holds a credential, but step 'Install' runs 'bun'; dependency code runs only in a job that holds none")"
 
-echo "case: the deploy key in the env of the rebuild's stale-copy step, which runs no push"
-root=$(fixture rebuild-stale-step-key)
-mutate "$root/$REBUILD" $'        env:\n          BASE: ${{ needs.build.outputs.base }}\n        run: |\n' $'        env:\n          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}\n          BASE: ${{ needs.build.outputs.base }}\n        run: |\n'
+echo "case: the deploy key in the env of the rebuild's download step, which runs no push"
+root=$(fixture rebuild-download-step-key)
+mutate "$root/$REBUILD" $'      - uses: actions/download-artifact@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          name: claude-envoy-built\n' $'      - uses: actions/download-artifact@3d3c42e5aac5ba805825da76410c181273ba90b1\n        env:\n          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}\n        with:\n          name: claude-envoy-built\n'
 run_check "$root"
 check "exits 1" "$(is "$status" 1)"
-check "names the step" \
-  "$(contains "$out" "job 'push' names secrets.DEPLOY_KEY at step 'Fail when the hourly run repaired a stale copy' env.DEPLOY_KEY; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-tag, push-main or push-built")"
+check "names the step at its line and the one command the rebuild allows" \
+  "$(contains "$out" "^::error::$REBUILD:$(line_of "$root/$REBUILD" '^          DEPLOY_KEY:'): job 'push' names secrets.DEPLOY_KEY at step 'actions/download-artifact@$SHA' env.DEPLOY_KEY; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-built, which claude-envoy-rebuild.yaml allows$")"
+check "reports that one problem only" "$(contains "$out" '^1 release credential problem(s)$')"
+
+echo "case: the deploy key in the rebuild's push step, which runs push-main, a release's push"
+root=$(fixture rebuild-push-main)
+# shellcheck disable=SC2016 # the literal run lines the workflow carries, never expanded
+mutate "$root/$REBUILD" 'run: .github/scripts/release-push.sh push-built "$BASE" "$RUNNER_TEMP/built/claude-envoy-built.tar"' 'run: .github/scripts/release-push.sh push-main packages/claude-envoy "$BASE"'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the push job, the step and the one command the rebuild allows" \
+  "$(contains "$out" "^::error::$REBUILD:$(line_of "$root/$REBUILD" '^          DEPLOY_KEY:'): job 'push' names secrets.DEPLOY_KEY at step 'Land the build on main' env.DEPLOY_KEY; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-built, which claude-envoy-rebuild.yaml allows$")"
+check "reports that one problem only" "$(contains "$out" '^1 release credential problem(s)$')"
+
+echo "case: the deploy key in a release's push step, which runs push-built, the rebuild's push"
+root=$(fixture release-push-built)
+mutate "$root/$RELEASE" $'        run: .github/scripts/release-push.sh push-tag "$TAG"\n' $'        run: .github/scripts/release-push.sh push-built "$TAG" built.tar\n' 1
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the publish job, the step and the two commands a release allows" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^          DEPLOY_KEY:'): job 'pi_envoy_publish' names secrets.DEPLOY_KEY at step 'Push tag' env.DEPLOY_KEY; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-tag or release-push.sh push-main, which release.yaml allows$")"
 check "reports that one problem only" "$(contains "$out" '^1 release credential problem(s)$')"
 
 echo "case: a credentialed job runs bun install"
@@ -647,7 +665,7 @@ mutate "$root/$RELEASE" $'          persist-credentials: false\n' $'          pe
 run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "names the site at its line" \
-  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" 'ssh-key:'): job 'pi_envoy_publish' names secrets.DEPLOY_KEY at step 'actions/checkout@$SHA' with.ssh-key; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-tag, push-main or push-built")"
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" 'ssh-key:'): job 'pi_envoy_publish' names secrets.DEPLOY_KEY at step 'actions/checkout@$SHA' with.ssh-key; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-tag or release-push.sh push-main, which release.yaml allows$")"
 
 echo "case: the deploy key in a job-level env"
 root=$(fixture job-env-key)
@@ -1007,7 +1025,7 @@ check "exits 1" "$(is "$status" 1)"
 check "names the workflow's env for the build job at its line" \
   "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^  DEPLOY_KEY:'): job 'pi_envoy_build' runs dependency code (.*), but its text names secrets.DEPLOY_KEY; a build job holds no secret but GITHUB_TOKEN")"
 check "names the workflow's env for a credentialed job at its line" \
-  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^  DEPLOY_KEY:'): job 'pi_envoy_publish' names secrets.DEPLOY_KEY at the workflow's env.DEPLOY_KEY; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-tag, push-main or push-built")"
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^  DEPLOY_KEY:'): job 'pi_envoy_publish' names secrets.DEPLOY_KEY at the workflow's env.DEPLOY_KEY; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-tag or release-push.sh push-main, which release.yaml allows$")"
 check "names the workflow's env for the other credentialed job too" \
   "$(contains "$out" "job 'pi_legion_publish' names secrets.DEPLOY_KEY at the workflow's env.DEPLOY_KEY;")"
 check "the plain job, credentialed through the workflow's env, must set cache-mode: none" \

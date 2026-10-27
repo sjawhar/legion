@@ -178,10 +178,9 @@
 #            build main's files already match stages nothing: a ::notice says
 #            so and nothing is pushed. Otherwise github-actions[bot], as `tag`
 #            commits, commits them as `chore(claude-envoy): rebuild dist/ and
-#            legion/ from <the base's first 12 hex> [skip ci]`, once every
-#            staged path is checked to sit under the two directories: GitHub's
-#            skip keyword, so the commit starts no CI or release run (the
-#            build job ran the private-name check over the bundle already).
+#            legion/ from <the base's first 12 hex> [skip ci]`: GitHub's skip
+#            keyword, so the commit starts no CI or release run (the build job
+#            ran the private-name check over the bundle already).
 #
 #            land_on_main <base-sha> <workflow-file>, the function that then
 #            lands it, never forces and never rebases. It refuses a <base-sha>
@@ -225,6 +224,15 @@ command=${1:?usage: release-push.sh version <tag-prefix> [--package-dir <dir>] [
 # without leading zeros (release-bump.sh does arithmetic on the fields, where a
 # leading zero reads as octal).
 is_plain_version() { [[ $1 =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; }
+
+# is_commit_sha <value>: true when <value> is a full commit sha, 40 lower-case
+# hex.
+is_commit_sha() { [[ $1 =~ ^[0-9a-f]{40}$ ]]; }
+
+# The identity the publish job's commits carry: `tag`'s bump commit and
+# push-built's rebuild commit.
+bot_name="github-actions[bot]"
+bot_email="41898282+github-actions[bot]@users.noreply.github.com"
 
 # quote_all <value>...: the values, each %q-quoted, separated by spaces.
 quote_all() {
@@ -320,7 +328,7 @@ fail_outstanding() {
 # is an ::error:: and exit 1.
 land_on_main() {
   local base=$1 workflow=$2 shas head parents tip started
-  if ! [[ $base =~ ^[0-9a-f]{40}$ ]]; then
+  if ! is_commit_sha "$base"; then
     fail_error "the base commit $(quote_all "$base") is not 40 lower-case hex; refusing it"
   fi
   # HEAD's sha, then its parents, space-separated: exactly one, the base.
@@ -360,8 +368,8 @@ case "$command" in
     package_dir=${2:?package dir}
     commit_message=${3:?commit message}
     tag=${4:?tag}
-    git config user.name "github-actions[bot]"
-    git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+    git config user.name "$bot_name"
+    git config user.email "$bot_email"
     git add "$package_dir/package.json"
     git diff --staged --quiet || git commit -m "$commit_message"
     git fetch --tags origin
@@ -523,7 +531,7 @@ case "$command" in
     # commit still missing counts as not holding HEAD, and a run is started.
     git fetch -q origin "refs/heads/$branch"
     while read -r id sha; do
-      [[ $id =~ ^[0-9]+$ && $sha =~ ^[0-9a-f]{40}$ ]] || continue
+      { [[ $id =~ ^[0-9]+$ ]] && is_commit_sha "$sha"; } || continue
       if git merge-base --is-ancestor "$head" "$sha" 2>/dev/null; then
         echo "::notice title=No release run started::another run took this run's version first; run ${GITHUB_SERVER_URL:-https://github.com}/$GITHUB_REPOSITORY/actions/runs/$id, started later and not finished, is on $branch at $sha, which holds this commit: it releases this commit, or fails where a person sees it" >&2
         exit 0
@@ -725,7 +733,7 @@ case "$command" in
   push-built)
     [ $# -eq 3 ] || fail_error "usage: release-push.sh push-built <base-sha> <tar>"
     base=$2 tar_file=$3
-    if ! [[ $base =~ ^[0-9a-f]{40}$ ]]; then
+    if ! is_commit_sha "$base"; then
       fail_error "the base commit $(quote_all "$base") is not 40 lower-case hex; refusing it"
     fi
     head=$(git rev-parse HEAD) || fail_error "reading HEAD failed"
@@ -796,22 +804,17 @@ case "$command" in
     # The tar is the whole of both directories: a file it lacks is deleted.
     rm -rf packages/claude-envoy/dist packages/claude-envoy/legion
     tar -xf "$tar_file" -C packages/claude-envoy --no-same-owner || fail_error "extracting $shown_tar into packages/claude-envoy failed"
+    # Only the two directories can be staged: the tree was clean above, and
+    # `git add` is limited to them.
     git add -A -- packages/claude-envoy/dist packages/claude-envoy/legion
     staged=$(git diff --cached --name-only) || fail_error "reading the staged paths failed"
     if [ -z "$staged" ]; then
       echo "::notice title=Nothing to push::main's packages/claude-envoy/dist and packages/claude-envoy/legion at $base already match this build" >&2
       exit 0
     fi
-    while IFS= read -r path; do
-      case $path in
-        packages/claude-envoy/dist/* | packages/claude-envoy/legion/*) ;;
-        *) fail_error "the staged path $(quote_all "$path") is outside packages/claude-envoy/dist and packages/claude-envoy/legion; refusing to commit it" ;;
-      esac
-    done <<<"$staged"
     # The identity `tag` commits as, set for author and committer alike in the
     # environment, which wins over any GIT_AUTHOR_* or GIT_COMMITTER_* already set.
-    bot="github-actions[bot]" bot_email="41898282+github-actions[bot]@users.noreply.github.com"
-    GIT_AUTHOR_NAME=$bot GIT_AUTHOR_EMAIL=$bot_email GIT_COMMITTER_NAME=$bot GIT_COMMITTER_EMAIL=$bot_email \
+    GIT_AUTHOR_NAME=$bot_name GIT_AUTHOR_EMAIL=$bot_email GIT_COMMITTER_NAME=$bot_name GIT_COMMITTER_EMAIL=$bot_email \
       git commit -q -m "chore(claude-envoy): rebuild dist/ and legion/ from ${base:0:12} [skip ci]"
     land_on_main "$base" claude-envoy-rebuild.yaml
     ;;
