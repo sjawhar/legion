@@ -40,30 +40,50 @@ const (
 	eventRelayGapMax = 250 * time.Millisecond
 )
 
-// eventGapReread is the backoff of a reader's re-read while a gap stands open above the safe
-// horizon, shared by the relay (run) and the delivery hub (rereadGap): wait is the current delay,
-// zero while no gap is open, and safe the horizon the read that scheduled it read through. Its
-// one owner's goroutine alone touches it.
+// eventGapReread schedules a reader's re-read while a gap stands open above the safe horizon,
+// shared by the relay (run) and the delivery hub (intake): timer is the scheduled re-read, nil
+// while none is; wait the current delay, zero while no gap is open; and safe the horizon the read
+// that scheduled it read through. Its one owner's goroutine alone touches it, and receives the
+// re-read from due.
 type eventGapReread struct {
-	wait time.Duration
-	safe int64
+	timer *time.Timer
+	wait  time.Duration
+	safe  int64
 }
 
-// next answers the delay before the re-read a read through safe needs, and false when it left no
-// gap open (gap false): eventRelayGapMin for the first gap or a horizon that moved, otherwise the
-// last delay doubled up to eventRelayGapMax.
-func (g *eventGapReread) next(safe int64, gap bool) (time.Duration, bool) {
+// schedule replaces the scheduled re-read, if any, with the one a read through safe needs: none
+// when it left no gap open (gap false), otherwise after eventRelayGapMin for the first gap or a
+// horizon that moved, or after the last delay doubled up to eventRelayGapMax.
+func (g *eventGapReread) schedule(safe int64, gap bool) {
+	g.stop()
 	switch {
 	case !gap:
 		g.wait = 0
-		return 0, false
+		return
 	case g.wait == 0 || safe != g.safe:
 		g.wait = eventRelayGapMin
 	default:
 		g.wait = min(2*g.wait, eventRelayGapMax)
 	}
 	g.safe = safe
-	return g.wait, true
+	g.timer = time.NewTimer(g.wait)
+}
+
+// stop drops the scheduled re-read, if any; a stopped timer delivers nothing on due afterwards.
+func (g *eventGapReread) stop() {
+	if g.timer != nil {
+		g.timer.Stop()
+		g.timer = nil
+	}
+}
+
+// due delivers the scheduled re-read once its delay has passed; nil, which never delivers, while
+// none is scheduled.
+func (g *eventGapReread) due() <-chan time.Time {
+	if g.timer == nil {
+		return nil
+	}
+	return g.timer.C
 }
 
 // eventStreamRelay is the live source of every open SSE connection on this process: it holds a
@@ -232,6 +252,19 @@ func (s *server) awaitEventCursor(ctx context.Context) (safe, id int64, at time.
 	return safe, id, at, err
 }
 
+// reseedEventCursor answers an event log that was reset under a reader's cursor
+// (eventLogWasReset). The horizon is then the old log's: its H stands among the old ids, above
+// every id the new log has handed out, so read as it stands it would cap nothing until the new log
+// climbed past it, and a cursor taken under it (the new log's raw max(id)) could step over a lower
+// id the refill still holds open. It forgets that horizon (Horizon.Reset) and answers the new
+// cursor as awaitEventCursor does: the last event at or below the first horizon proven after the
+// reset, which waits for every write open at the reset to end. The relay (resetCursor) and the
+// delivery hub (seedEvents) both answer a reset through it.
+func (s *server) reseedEventCursor(ctx context.Context) (safe, id int64, at time.Time, err error) {
+	s.horizon().Reset()
+	return s.awaitEventCursor(ctx)
+}
+
 // lastEventThrough answers the newest event whose id is at or below through, with its
 // created_at: 0 and the zero time when there is none.
 func lastEventThrough(ctx context.Context, q queryer, through int64) (int64, time.Time, error) {
@@ -273,16 +306,8 @@ func (r *eventStreamRelay) onConnected() { signal(r.wake) }
 // so a gap held open by a long transaction costs no request a connection. A reset is still caught
 // at the next notification, which the refill's own inserts send.
 func (r *eventStreamRelay) run(ctx context.Context) {
-	var (
-		gapTimer *time.Timer
-		gapRead  <-chan time.Time
-		gaps     eventGapReread
-	)
-	defer func() {
-		if gapTimer != nil {
-			gapTimer.Stop()
-		}
-	}()
+	var gaps eventGapReread
+	defer gaps.stop()
 	for {
 		checkReset := true
 		select {
@@ -292,13 +317,10 @@ func (r *eventStreamRelay) run(ctx context.Context) {
 			if !waitFor(ctx, r.window()) {
 				return
 			}
-		case <-gapRead:
+		case <-gaps.due():
 			checkReset = false
 		}
-		if gapTimer != nil {
-			gapTimer.Stop()
-			gapTimer, gapRead = nil, nil
-		}
+		gaps.stop()
 		safe, gap, ok := r.read(ctx, checkReset)
 		for !ok {
 			if !waitFor(ctx, eventRelayRetry) {
@@ -306,12 +328,7 @@ func (r *eventStreamRelay) run(ctx context.Context) {
 			}
 			safe, gap, ok = r.read(ctx, checkReset)
 		}
-		wait, open := gaps.next(safe, gap)
-		if !open {
-			continue
-		}
-		gapTimer = time.NewTimer(wait)
-		gapRead = gapTimer.C
+		gaps.schedule(safe, gap)
 	}
 }
 
@@ -390,20 +407,16 @@ func (r *eventStreamRelay) publish(page []model.Event) {
 // resetCursor tells an event log that was reset under the cursor from one that has merely gone
 // quiet, and answers a reset by forgetting the horizon, moving the cursor to the last event at or
 // below a horizon proven afresh, and ending every open subscription. The check is the delivery
-// hub's, through the same read (eventCursorCheck, catchUpEvents): a log whose newest id is below
-// the cursor, or whose row at the cursor is gone or carries another created_at — a `truncate
-// events restart identity` refilled past it, which is what e2e/seed.ts does between browser
-// scenarios — is a log the cursor no longer names a position in. Nothing of the first kind of
-// reset would ever be published: the new log's ids start again at 1, far below the cursor, so
+// hub's, through the same read and test (eventCursorCheck, eventLogWasReset): a log whose newest
+// id is below the cursor, or whose row at the cursor is gone or carries another created_at — a
+// `truncate events restart identity` refilled past it, which is what e2e/seed.ts does between
+// browser scenarios — is a log the cursor no longer names a position in. Nothing of the first kind
+// of reset would ever be published: the new log's ids start again at 1, far below the cursor, so
 // `id > cursor` matches no row until they have climbed back past it, and the stream falls silent
 // for every reader.
 //
-// The horizon is the old log's too: its H stands among the old ids, above every id the new log
-// has handed out, so read as it stands it would cap nothing until the new log climbed past it,
-// and a new cursor taken under it (the new log's raw max(id)) could step over a lower id the
-// refill still holds open. Horizon.Reset forgets it, and the new cursor is the last event at or
-// below the first horizon proven after that (awaitEventCursor), which waits for every write open
-// at the reset to end.
+// The horizon is the old log's too, so the new cursor comes from reseedEventCursor, which forgets
+// it and takes the last event at or below the first horizon proven after that.
 //
 // A reset is the one thing the relay cannot publish its way out of, because its ids have been
 // reused: the rows it would read as `id > cursor` are not the ones it published, and every open
@@ -429,11 +442,10 @@ func (r *eventStreamRelay) resetCursor(ctx context.Context) (reset bool, safe in
 	if err != nil {
 		return false, 0, err
 	}
-	if maxID >= cursor && (cursor == 0 || (cursorAt != nil && cursorAt.Equal(at))) {
+	if !eventLogWasReset(cursor, at, maxID, cursorAt) {
 		return false, 0, nil
 	}
-	r.server.horizon().Reset()
-	safe, to, toAt, err := r.server.awaitEventCursor(ctx)
+	safe, to, toAt, err := r.server.reseedEventCursor(ctx)
 	if err != nil {
 		return false, 0, err
 	}

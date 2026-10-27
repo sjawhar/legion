@@ -77,8 +77,9 @@ func liveEventsSince(ctx context.Context, q queryer, cursor, safe int64, limit i
 }
 
 // eventCursorCheck reads the newest event's id (0 when the log is empty) and the created_at of the
-// event at cursor (nil when no row holds it): the hub compares them with what it read for its
-// cursor to tell an event log that was reset.
+// event at cursor (nil when no row holds it): the delivery hub (catchUpEvents) and the event stream
+// relay (resetCursor) compare them with what they read for their cursor to tell an event log that
+// was reset (eventLogWasReset).
 func eventCursorCheck(ctx context.Context, q queryer, cursor int64) (maxID int64, cursorAt *time.Time, err error) {
 	if err := q.QueryRow(ctx, `select coalesce(max(id), 0) from events`).Scan(&maxID); err != nil {
 		return 0, nil, err
@@ -91,4 +92,14 @@ func eventCursorCheck(ctx context.Context, q queryer, cursor int64) (maxID int64
 		return 0, nil, err
 	}
 	return maxID, &rowAt, nil
+}
+
+// eventLogWasReset is whether the event log was reset under a reader's cursor, from what
+// eventCursorCheck read for it (maxID, cursorAt) and what the reader read when it moved there (at):
+// a log whose newest id is below the cursor, or whose row at the cursor is gone or carries another
+// created_at — a `truncate events restart identity` refilled past it, which is what e2e/seed.ts:20
+// and :150 do between browser scenarios. The cursor is always an existing row's id, or 0 before the
+// first, so until a reset the row at it carries the created_at the reader read.
+func eventLogWasReset(cursor int64, at time.Time, maxID int64, cursorAt *time.Time) bool {
+	return maxID < cursor || (cursor > 0 && (cursorAt == nil || !cursorAt.Equal(at)))
 }

@@ -37,7 +37,7 @@ type hubRig struct {
 }
 
 // newHubRig starts a hub on a new test server; configure, when given, sets the hub's seams before
-// anything subscribes.
+// it starts.
 func newHubRig(t *testing.T, configure func(*deliveryHub)) *hubRig {
 	t.Helper()
 	handler, database, deps := newTestServer(t, testServerOptions{})
@@ -162,8 +162,20 @@ func (c *fakeHubClock) Advance(d time.Duration) {
 	}
 }
 
-// hubOn starts a hub on an existing test server, as a second Dispatch task's hub would.
+// hubOn starts a hub on an existing test server, as a second Dispatch task's hub would, and waits
+// until it holds its event cursor. Taking that cursor marks every view the hub holds dirty
+// (applySeed), so a test's views, all subscribed after it, see no recompute of the seed's.
 func hubOn(t *testing.T, handler http.Handler, database *store.Store, deps Deps, clock hubClock, configure func(*deliveryHub)) *hubRig {
+	t.Helper()
+	rig := idleHubOn(t, handler, database, deps, clock, configure)
+	rig.hub.start()
+	rig.waitFor(t, 0, sseFrameWait, "the hub's event cursor", func(note deliveryHubNote) bool { return note.what == "events seeded" })
+	return rig
+}
+
+// idleHubOn is a hub on an existing test server that nothing has started: the first Subscribe
+// starts it, as it does a Dispatch task's.
+func idleHubOn(t *testing.T, handler http.Handler, database *store.Store, deps Deps, clock hubClock, configure func(*deliveryHub)) *hubRig {
 	t.Helper()
 	rig := &hubRig{handler: handler, database: database, deps: deps}
 	lifetime, cancel := context.WithCancel(context.Background())
@@ -1195,6 +1207,101 @@ func TestAHubActsOnABrokerEventOnlyOnceEveryLowerIDIsFinal(t *testing.T) {
 	rig.waitForEventCursor(t, high.ID, "both ids committed")
 	if !rig.isP0(first) || !rig.isP0(second) {
 		t.Fatalf("after both commits: %s a P0 = %v, %s a P0 = %v; want both acted on", first, rig.isP0(first), second, rig.isP0(second))
+	}
+}
+
+// A transaction that holds an id anywhere on the Postgres instance keeps every safe horizon of the
+// event log from being proven, and an operator's psql session, a migration or another database's
+// job can hold one for as long as it likes. A fresh hub still serves its pages meanwhile: the
+// delivery change log has nothing to do with that horizon, so the hub answers a page its snapshot
+// and carries a delivery change to it while the transaction is open, and the issue event committed
+// meanwhile reaches the page once the horizon is proven.
+func TestAFreshHubServesDeliveryChangesWhileATransactionHoldsTheEventHorizon(t *testing.T) {
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	rig := idleHubOn(t, handler, database, deps, deliveryHubClock{}, nil)
+	seedHubSettings(t, rig.database)
+	key := createHubIssue(t, rig.handler, map[string]any{"title": "Ship widgets"})
+	upsertPR(t, rig.database, prNaming(1, time.Now().UTC().Add(-3*time.Hour), key))
+
+	const hold = 3 * time.Second
+	heldAt := time.Now()
+	release := holdClusterTransactionID(t, hold)
+	// The page's subscribe starts the hub.
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
+	select {
+	case <-rig.hub.ready:
+	case <-time.After(time.Second):
+		t.Fatal("the hub was not ready a second after it started, while a transaction held the event horizon")
+	}
+	held := conn.snapshot(t, hold, "t").Body
+
+	upsertPR(t, rig.database, hubPR(2, time.Now().UTC().Add(-time.Hour)))
+	delta := conn.delta(t, hold, "t")
+	if elapsed := time.Since(heldAt); elapsed >= hold {
+		t.Fatalf("the delivery change reached the page %s after the transaction began, once its %s hold could have ended", elapsed, hold)
+	}
+	if got := liveUpsertIDs(t, delta, "prs"); !slices.Equal(got, []string{"acme/widgets#2"}) {
+		t.Fatalf("the change's delta upserts %v, want acme/widgets#2", got)
+	}
+	held = requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, held, delta, "")
+
+	patchHubIssue(t, rig.handler, key, map[string]any{"title": "Ship the widgets"})
+	if elapsed := time.Since(heldAt); elapsed >= hold {
+		t.Fatalf("the retitle committed %s after the transaction began, once its %s hold could have ended", elapsed, hold)
+	}
+	release()
+	delta = conn.delta(t, sseFrameWait, "t")
+	if got := liveMapValues(t, delta, "issue_titles"); got[key] != "Ship the widgets" {
+		t.Fatalf("after the hold the delta's issue_titles = %v, want %s retitled", got, key)
+	}
+	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, held, delta, "")
+}
+
+// A gap held open above the safe horizon (an id still open below one that committed) has the hub
+// re-read the event log every 10-250 ms until the gap closes, for as long as the transaction holding
+// it stays open. That re-read asks only the horizon, on the horizon's own connections, and reads the
+// shared pool once the horizon has moved past the hub's cursor, so a gap a long transaction holds
+// open takes no connection a request needs. The reset check, two shared-pool queries, runs on the
+// catch-ups a notification wakes.
+func TestAHubGapRereadTakesNoSharedConnectionWhileTheHorizonStandsStill(t *testing.T) {
+	rig := newHubRig(t, nil)
+	first := createHubIssue(t, rig.handler, map[string]any{"title": "First"})
+	second := createHubIssue(t, rig.handler, map[string]any{"title": "Second"})
+	rig.startCaughtUp(t)
+	rig.waitQuiet(t, 300*time.Millisecond)
+	caughtUp := func(note deliveryHubNote) bool { return note.what == "events caught up" }
+
+	start := rig.mark()
+	low, high, commitLow := appendOutOfOrder(t, rig.database, rig.deps.Events, first, second)
+	// The higher id's commit notifies: that catch-up checks for a reset and leaves the gap open.
+	rig.waitFor(t, start, 3*time.Second, "the catch-up the higher id's commit woke", caughtUp)
+	before, rereads := acquires(rig.database), rig.mark()
+	time.Sleep(time.Second)
+	if n := rig.count(rereads, caughtUp); n < 3 {
+		t.Fatalf("the hub re-read the gap below %d %d times in a second, want at least 3", high, n)
+	}
+	if got := acquires(rig.database); got != before {
+		t.Fatalf("the hub's gap re-reads took %d shared-pool connections while %d stayed open, want none", got-before, low)
+	}
+
+	commitLow()
+	rig.waitForEventCursor(t, high, "the lower id committed")
+}
+
+// waitQuiet waits until the hub has made no note for quiet.
+func (r *hubRig) waitQuiet(t *testing.T, quiet time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	last, since := r.mark(), time.Now()
+	for time.Since(since) < quiet {
+		if time.Now().After(deadline) {
+			t.Fatalf("the hub was still making notes after %s", 10*time.Second)
+		}
+		time.Sleep(10 * time.Millisecond)
+		if n := r.mark(); n != last {
+			last, since = n, time.Now()
+		}
 	}
 }
 
