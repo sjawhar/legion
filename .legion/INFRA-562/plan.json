@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-562",
+  "completed": "2026-10-27T02:34:30Z",
+  "plan": "dispatch://INFRA-562/artifact/plan-md",
+  "summary": "Six items in packages/envoy, each with a two-process row in cmd/dispatch/multiprocess_test.go (build tag multiprocess) that fails on main and passes on the branch, plus in-package two-instance tests. Item 1: createStoredMessage opens attempt 1 (pending, unclaimed, unpinned, with urgency) in its own transaction and its post-commit send is bound to attempt 1 (bound branch of recordPendingMessageDelivery accepts an unpinned row). Item 2: post-commit sends run on context.WithoutCancel(r.Context()); a new leased loop (duty.Exclusive 'delivery-resume', 10 s, horizon 1 h, claim lease 1 min) resumes pending message_deliveries and comment_deliveries attempts bound to their own attempt (new comment claim mode 'resume one attempt'); leasePoolSize 8 -> 9. Item 3: redeliver claim becomes an in-flight marker with a 60 s deadline, outcome written after GitHub answers. Item 4: importer writes compare-and-set on last_sync_at as loaded, retry on errSuperseded. Item 5: route roster stored in one Postgres row judged by now(). Item 6: shared github_rate_limits table gated in githubapp.Client.request (scopes app, installation:<id>, redelivery), sweep's NATS KV limit removed, redeliver-webhooks opens DATABASE_URL, ProxyREST 503 GITHUB_RATE_LIMITED, repositories cache gets a 10-min TTL, configuration warnings logged once via delivery_run_warnings, claim/answer/approval-answer times from the transaction's now(), snooze check in SQL.",
+  "orderOfWork": [
+    "Migrations (next free numbers on main at the time; main is at 0120): message_deliveries.urgency plus partial pending indexes on message_deliveries and comment_deliveries; route_roster; github_rate_limits; delivery_run_warnings. Each with .census.sql (select 0 plus comment) and a README 'Database migrations' paragraph. leasePoolSize 8 -> 9 with its comment.",
+    "Tests first, committed and run against main's code; record each red run with its commit.",
+    "Item 1, then item 2, then items 3, 4, 5 (independent), then item 6.",
+    "Comments and documents named in plan.md section 'Comments and documents to correct'; packages/envoy/CHANGELOG.md Unreleased.",
+    "Simplify pass, full verification (plan.md 'Verification commands'), pull request with 'Dispatch: INFRA-562', CI dispatch-multiprocess green with no --- SKIP on the new rows."
+  ],
+  "verification": {
+    "postgres": "The pod has no Postgres server and storetest skips without DISPATCH_TEST_DATABASE_URL. Stand up the rootless Postgres 17 with pgvector under $TMPDIR per docs/solutions/testing/the-real-dispatch-stack-runs-inside-a-legion-pod-with-no-postgres-no-docker-and-no-root-INFRA-42.md, recreate template1 under ICU (docs/solutions/testing/recreate-template1-under-the-icu-provider-and-the-pods-postgres-runs-the-collation-test-too-INFRA-56.md), guard its start on the port (docs/solutions/testing/a-pods-shared-postgres-is-alive-by-its-port-never-by-its-pid-file-INFRA-95.md).",
+    "commands": [
+      "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run 'TestADeliveryAKilledProcess|TestASendWhoseRequest|TestAWebhookRedelivery|TestTwoProcessesSyncing|TestBothProcessesJudge|TestARateLimitOneProcess|TestClaimAndAnswerTimes|TestAConfigurationWarning' ./cmd/dispatch",
+      "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v ./cmd/dispatch",
+      "cd packages/envoy && go test -count=1 -timeout 55m ./internal/dispatch/... ./cmd/dispatch/...",
+      "cd packages/envoy && go vet ./... && gofmt -l ."
+    ],
+    "skipRule": "Read every -v log for '--- SKIP' on the named rows; a skip fails the check. CI job dispatch-multiprocess (.github/workflows/envoy-and-contracts.yaml) is read the same way."
+  },
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the phase rules, pr-body.md for the proof records and the simplify pass, conflicts-and-rewrites.md for migration-number renumbering against sibling trees, default-branch-check.md before every push.",
+      "ce-simplify-code: pr-body.md's simplify pass over the settled diff (delivery_resume.go, the claim-mode change, the githubapp Limits gate).",
+      "dispatch: any Dispatch write (the plan's findings for the architect stay with the architect; a human-only to-do is a dispatch ask).",
+      "envoy: coordinating the shared files with sibling INFRA-63 trees (migration numbers, store/pool.go leasePoolSize, README 'Running more than one process') by Envoy message, not by waiting."
+    ],
+    "test": [
+      "legion-worker: the tester's proof records (pr-body.md 'What a proof is'), re-running each two-process row and one fail-before run per item, and the skip rule.",
+      "dispatch-first: search before posting any finding, and findings.md for anything outside the issue."
+    ],
+    "review": [
+      "legion-worker: merge-gate.md and review-threads.md for the review round, pr-body.md for checking the proofs.",
+      "ce-simplify-code: judging whether delivery_resume.go, the comment claim mode and the rate-limit gate are the simplest shape that holds."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "A1: mentions have no claim bound to one attempt, so a resume loop calling the existing modes could open a second attempt (second frame) beside a live sender (comment_delivery.go:163-237).", "answer": "Plan replaces initial bool with a three-value claim mode; the resume mode claims exactly (comment, target, attempt) when pending and lapsed, otherwise sends nothing. In-package test covers the loop against a live sender."},
+      {"finding": "A2: the lease pool has zero headroom (store/pool.go:255-270, leasePoolSize 8); a ninth leased loop waits.", "answer": "leasePoolSize 8 -> 9 with its comment rewritten; siblings adding leases add their own caller at merge; named in the plan's shared-files finding."},
+      {"finding": "A3: a pending attempt the claim refuses for good (message on a closed issue, requireOpenIssue) would be retried every tick.", "answer": "The candidate query excludes rows the claim path refuses permanently (closed issue for messages; whatever lockedComment/claimCommentDeliveryAttempt refuses for comments); the one-hour horizon bounds any other retry."},
+      {"finding": "A4: lock order and nested connections if the loop reads candidates FOR UPDATE.", "answer": "Candidates are read with one plain query per table and fully drained; each row then goes through the existing claim functions (issue -> message -> attempt); each sending goroutine takes its own transaction-tracking mark."},
+      {"finding": "A5: actor on a resumed receipt; requested_by nullable; comment_deliveries has no requester.", "answer": "Messages: requested_by, else the message author. Comments: the comment author."},
+      {"finding": "A6: a resumed direct message is older than a minute, so acceptFresh refuses it as the session's turn (ACCEPT_STALE).", "answer": "Kept: the freshness rule stops stale messages being injected as a turn; the session shows a card. Stated in the plan."},
+      {"finding": "A7: resuming everything inside the 72 h duplicate window would blast three days of stranded attempts at the first deploy; no latency bound.", "answer": "Horizon one hour (recorded as a departure); latency about 70 s after the claim lapses (10 s loop, 1 min lease); tests assert within 30 s with back-dated rows."},
+      {"finding": "A8: no index on pending rows; migrations run in one transaction so no concurrent index build.", "answer": "Partial indexes on pending rows of both tables, plain create index as 0120 does; census select 0 with comment."},
+      {"finding": "A9: the urgency column: roll behaviour, API exposure, census.", "answer": "Internal only (not in messageDeliveryColumns or contracts); old-build rows resume without urgency, stated; census and README paragraph."},
+      {"finding": "A10: rate limits: one app scope with strike doubling would block every token mint for an hour; intake under a limit; split limit during a roll; CLI needs the database; new 503 code.", "answer": "Scopes app, installation:<id> and redelivery (the sweep's strike doubling only on redelivery); intake fails fast and reconcile catches up after the limit; roll split stated; redeliver-webhooks opens DATABASE_URL; README route table documents 503 GITHUB_RATE_LIMITED."},
+      {"finding": "A11: redelivery ClaimedAt clock, dry run, old CLI duplicates.", "answer": "ClaimedAt on the sweeper's clock like LastAttemptAt, 60 s deadline far above skew; dry run reports fresh in-flight as ClaimedElsewhere and void as WouldRedeliver; an old build's duplicate POST is dropped by the listener's message-id dedupe, stated."},
+      {"finding": "A12: shared roster: one pod's listener outage makes every pod read unknown; extra read; stale comment.", "answer": "Stated as the behaviour that makes pods agree; one primary-key read per routed read; comment at issue_route_status.go:14-34 rewritten."},
+      {"finding": "B1: item 2 scope narrow (request-bound senders) vs broad (broadcasts, Retry); dashboard stranded-retry text.", "answer": "Broad, recorded as a departure; the broadcast page's text stays true (a person can still Retry), so no reader-facing page changes; AGENTS.md 2182-2185 rewritten."},
+      {"finding": "B2: item 5 'never skip or repeat' exact vs across pods.", "answer": "Across pods within one stored answer; recorded as a departure for the architect."},
+      {"finding": "B3: are per-pod installation tokens correct?", "answer": "Yes: GitHub budgets per installation, each pod's token is valid, storing tokens in Postgres would put live credentials in the database; stated in the plan and the code comment."},
+      {"finding": "B4: API 6 occurs; a test showing reads agree would pass before the change.", "answer": "Warnings deduplicated across pods via delivery_run_warnings with a fail-before two-process row (two warning lines today, one after); hub recompute and LISTEN connections kept with the reason in README."},
+      {"finding": "B5: item 4 wording says commit age; draft orders by observation.", "answer": "Ordered by observation of the head (force-push to an older commit still imports); recorded as a departure with outcome unchanged."},
+      {"finding": "B6: which timestamp sites.", "answer": "API 8's four sites plus docs/approval_carry.go:418 (same stored field); Background F11 stays with INFRA-555."},
+      {"finding": "C: no time bound on 'reaches its recipient'; no checks for item 6 parts; a skip is not a pass.", "answer": "Rows assert within 30 s; item 6 checks: claimed_at = updated_at, answer at = event created_at, one warning line, no request under the limited scope; skip rule in verification."},
+      {"finding": "D: test wall time (1-minute lease, 60 s claim deadline, 5 s roster window) and existing rows disturbed by the loop.", "answer": "Back-date claimed_at/created_at and ClaimedAt; hook-gated DISPATCH_TEST_DELIVERY_RESUME_INTERVAL and DISPATCH_TEST_ROUTE_ROSTER_TTL; implementer checks no existing row leaves a pending attempt."},
+      {"finding": "E: sibling interactions (migration numbers, INFRA-555 importer comment and NATS-less boot, INFRA-556 docs package, INFRA-557 Send not retried on take-over, INFRA-563 workflow comment, README section, API 5 and API 7 unowned, two-build harness).", "answer": "Shared files and NATS-less boot named in 'Findings for the architect'; API 7 fixed in the three touched files; API 5 and the take-over send reported to the architect as needing an owner; INFRA-563's comment left to it; formats are additive for INFRA-558's harness."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": [
+    {
+      "spec": "Item 5: 'filtered pages never skip or repeat issues'.",
+      "plan": "Both pods filter against one stored listener answer, so which pod serves a page no longer changes what it holds; a change in the listener's live list between two page reads can still move issues, as any change does under offset paging today.",
+      "evidence": "issue_queries.go:244-268 filters in Go after reading the whole listing; issue_page.go:53-56 slices by offset. Exact paging across a change needs a snapshot or cursor carried in the request, an API change both builds must accept during a roll.",
+      "outcome": {"kind": "changed", "summary": ["Item 5: filtered pages never skip or repeat issues because of which pod serves them."]}
+    },
+    {
+      "spec": "Item 2: 'Pending mention and message delivery attempts whose sender's request ended (connection cut, pod killed) are sent automatically'.",
+      "plan": "Also resumes broadcast recipients and a person's Retry, which strand the same way when a pod dies.",
+      "evidence": "broadcasts.go:564-602 sends on the server's lifetime and strands pending rows on a process death, which only a manual same-mode Retry resumes (AGENTS.md:2182-2185).",
+      "outcome": {"kind": "changed", "scope": "Item 2 covers every pending message or mention attempt left by a stopped sender: direct messages, mentions, broadcast recipients and Retries."}
+    },
+    {
+      "spec": "Item 2: pending attempts 'are sent automatically' (no age bound).",
+      "plan": "Automatic sending covers attempts created in the last hour; an older stranded attempt still waits for a person's Retry, as today.",
+      "evidence": "The case is one pod stopping while others run, resent within about 70 s; an older attempt means every pod was down that long, and an hour-old steer or aside sent unasked could act on stale instructions. The 72 h duplicate window (contracts.DeliveryDuplicateWindow) bounds safety, not usefulness.",
+      "outcome": {"kind": "changed", "summary": ["Item 2: pending attempts created within the last hour are sent automatically."]}
+    },
+    {
+      "spec": "Item 4: 'never write an older commit over a newer one'.",
+      "plan": "Never write a head observed earlier over one observed later (compare-and-set on last_sync_at as loaded, retry when superseded).",
+      "evidence": "The branch head is what is imported; a force-push back to an older commit must still import, and commit dates are author-set (importer.go Sync/project/touch).",
+      "outcome": {"kind": "unchanged"}
+    }
+  ],
+  "findingsForArchitect": [
+    "Audit API handlers 5 (test hooks act on one pod) is named by no INFRA-63 child; recommended for INFRA-556, which adds the browser suite against two server processes.",
+    "A send during a listener take-over settles failed at once (Envoy.Send does not retry), so no resume covers it; the root acceptance line on a message sent while the active listener pod is deleted needs that Dispatch-side retry and an owner (INFRA-557's acceptance names the same case).",
+    "Shared files with sibling trees: cmd/dispatch/README.md 'Running more than one process', store/pool.go leasePoolSize, migration numbers, architecture/importer.go:52-57 (also in INFRA-555's Server core F10 list).",
+    "webhookSweeper returns nil when NATS is absent at boot (cmd/dispatch/redeliver.go:28-30); INFRA-555 changes NATS-less boot, so the redelivery sweep's start follows it."
+  ]
+}
