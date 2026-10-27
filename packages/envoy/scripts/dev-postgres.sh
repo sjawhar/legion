@@ -8,10 +8,11 @@
 # The pinned image is pgvector on PostgreSQL 18, the version Dispatch's tests and dev databases
 # run; Dispatch's migrations need its `vector` extension. A `dispatch-pg` running any other image
 # (an older version of this script created it from postgres:16, then from pgvector on PostgreSQL
-# 16) is refused, naming both images and the commands that dump every database in it and restore
-# them into a new container on the pinned image, which works from any image or major and needs no
-# volume. This script never starts, stops, renames, removes or recreates a stale container itself:
-# the container can hold other work's databases, and moving it is its owner's call.
+# 16) is refused, naming both images and the commands that dump every database in it, check the
+# dump finished, and restore them into a new container on the pinned image, which works from any
+# image or major and needs no volume. This script never starts, stops, renames, removes or
+# recreates a stale container itself: the container can hold other work's databases, and moving it
+# is its owner's call.
 set -euo pipefail
 
 container="dispatch-pg"
@@ -65,6 +66,7 @@ fi
 container_image="$(docker container inspect -f '{{.Config.Image}}' "$container")"
 backup="$container-$(printf '%s' "${container_image_id#sha256:}" | cut -c1-12)"
 dump="${TMPDIR:-/tmp}/$backup.sql"
+wait_ready=(docker exec "$container" pg_isready -h 127.0.0.1 -U postgres)
 steps=()
 # pg_dumpall reads from a running server: a stopped container is started first, as it is, and
 # waited for, since a server still starting refuses the dump and the redirect leaves an empty file.
@@ -72,7 +74,7 @@ if [ "$running" != "true" ]; then
   steps+=(
     "  $(quote docker start "$container")"
     "Repeat this until it reports accepting connections; a dump taken before then is refused and leaves an empty file:"
-    "  $(quote docker exec "$container" pg_isready -h 127.0.0.1 -U postgres)"
+    "  $(quote "${wait_ready[@]}")"
   )
 fi
 # The same listing runs against the old container before the dump and the new one after the
@@ -81,25 +83,30 @@ fi
 # printed as <tables>|<rows>: after an empty dump restores nothing, the new container still lists
 # postgres and dispatch, which it creates itself, but its dispatch database holds no table, and
 # after a dump that stopped once its schema was written, it holds every table and none of their rows.
+# The count covers the dispatch database alone; the whole dump is checked by its last comment,
+# which pg_dumpall writes only once it has dumped every database, before the old container stops.
 list_databases=(docker exec "$container" psql -U postgres -Atc 'select datname from pg_database where not datistemplate order by 1')
 count_dispatch=(docker exec "$container" psql -U postgres -d dispatch -Atc "select count(*), coalesce(sum((xpath('/row/c/text()', query_to_xml(format('select count(*) as c from %I.%I', schemaname, tablename), false, true, '')))[1]::text::bigint), 0) from pg_tables where schemaname = 'public'")
 steps+=(
   "Keep the output of this: the databases the old container holds, every one of which the new container must list after the restore."
   "  $(quote "${list_databases[@]}")"
-  "Keep the output of this too: the number of tables in the old container's dispatch database and the rows they hold."
+  "Keep the output of this too: the number of tables in the old container's dispatch database and the rows they hold. It counts the dispatch database alone; the check after the dump covers every database. Stop anything that writes to this container (a Dispatch server, a test run) before these counts and the dump, or the counts after the restore cannot match them."
   "  $(quote "${count_dispatch[@]}")"
-  "Then dump them and move the old container aside:"
+  "Then dump them:"
   "  $(quote docker exec "$container" pg_dumpall -U postgres --clean --if-exists) > $(quote "$dump")"
+  "This prints 1 when pg_dumpall finished every database; if it prints 0 (a failed, cut or empty dump), stop here: the old container is still running and untouched."
+  "  $(quote grep -c -x -- '-- PostgreSQL database cluster dump complete' "$dump")"
+  "Then move the old container aside:"
   "  $(quote docker stop "$container")"
   "  $(quote docker rename "$container" "$backup")"
   "  $(quote docker run "${run_flags[@]}" "$image")"
   "Repeat this until it reports accepting connections. It asks over TCP because the new container's first-start setup server listens only on its socket, and stops before the server that keeps running starts:"
-  "  $(quote docker exec "$container" pg_isready -h 127.0.0.1 -U postgres)"
+  "  $(quote "${wait_ready[@]}")"
   "Then restore the dump. psql reports two errors, which are expected: role \"postgres\" already exists, and current user cannot be dropped."
   "  $(quote docker exec -i "$container" psql -h 127.0.0.1 -U postgres -q -f -) < $(quote "$dump")"
   "This lists the new container's databases. It must list every database the old container's listing printed; if one is missing, the dump is incomplete, so stop here and keep the old container and the dump:"
   "  $(quote "${list_databases[@]}")"
-  "This counts the tables in the new container's dispatch database and the rows they hold. It must print the same two numbers as the old container did; if either differs (a dump that failed or stopped partway), stop here and keep the old container and the dump:"
+  "This counts the tables in the new container's dispatch database and the rows they hold, the dispatch database alone. It must print the same two numbers as the old container did; if either differs (a dump that failed or stopped partway, or a write to the old container's dispatch database after its count), stop here and keep the old container and the dump:"
   "  $(quote "${count_dispatch[@]}")"
   "These print 1 and 18xxxx once the new container serves the restored data:"
   "  $(quote docker exec "$container" psql -U postgres -Atc "select 1 from pg_available_extensions where name = 'vector'")"
