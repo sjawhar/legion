@@ -2656,6 +2656,42 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     ).toHaveLength(registrations);
   });
 
+  // Oh My Pi reads the terminal while the start command's claim runs, so the operator can run the
+  // command again (it is in the command list) while its registration is still in flight. Each
+  // registration replaces the secret the daemon holds for the controller (api/controller.go
+  // registerController), so a second claim racing the first leaves the session holding whichever
+  // secret its last-finishing claim got: when that is the first registration's, every controller
+  // grant (set_status) is refused 403 until a re-claim. The command awaits a claim already in
+  // flight and then decides again, so the second run registers nothing and has nothing to do.
+  test("/legion-controller-start run again while the start command's claim is in flight registers once and says nothing to do", async () => {
+    const held = Promise.withResolvers<void>();
+    const firstRegistration = Promise.withResolvers<void>();
+    let registrations = 0;
+    const controller = await launchedController({
+      sessionId: "ses_controller_start_twice",
+      register: async () => {
+        registrations += 1;
+        firstRegistration.resolve();
+        await held.promise;
+        return undefined;
+      },
+    });
+    const context = controller.context("ses_controller_start_twice");
+    await controller.handlers.get("session_start")?.({}, context);
+
+    const first = runStartCommand(controller, context);
+    await firstRegistration.promise;
+    const second = runStartCommand(controller, context);
+    held.resolve();
+
+    expect(await first).toEqual([]);
+    expect(await second).toEqual([NOTHING_TO_DO]);
+    expect(registrations).toBe(1);
+    expect(controller.sentUserMessages).toEqual([
+      "Legion controller start: follow skill://legion-controller",
+    ]);
+  });
+
   // The start message is read and validated before anything that mutates daemon-side state
   // (registerController, which replaces the running controller's session; claimEnvoyRole, which
   // takes its role): a missing value refuses here, leaving the previous controller, if any, still
