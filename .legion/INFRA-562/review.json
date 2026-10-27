@@ -2,64 +2,37 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-562",
-  "completed": "2026-10-27T12:23:16Z",
-  "round": 1,
-  "reviewedHead": "750061928f0e1838a333de80030928a1deeb97ee",
-  "codeHead": "125a3bfb0484c48e70407bd5c7fb5258a1fc003f",
+  "completed": "2026-10-27T15:17:30Z",
+  "round": 2,
+  "reviewedHead": "5fb0c8be6caa3e70a0e9904202fddfb286ee5f52",
+  "codeHead": "58fd08bf4d64d7a37fe5b4d06a25914f8654833f",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 3,
-  "minor": 6,
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. CI head 125a3bfb0484 (compare to 75006192: handoffsOnly true, 2 files). At 12:23Z: pr-title and changes success, every other lane (test, lint, typecheck, dispatch-multiprocess, envoy-go, ...) still queued. Not a gate for a request for changes; the next round reads it again.",
+  "important": 1,
+  "minor": 2,
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title, all completed success at code head 58fd08bf (compare to 5fb0c8be: handoffsOnly true, 2 files). The envoy lanes (envoy-go, envoy-go-race, dispatch-multiprocess) were still queued at 15:17Z. At the previous code head 125a3bfb, envoy-go FAILED: internal/dispatch/api hit go test's 10-minute default ('panic: test timed out after 10m0s', FAIL ... 600.169s, job 122182845579). The tester's CI line omitted that lane.",
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at 75006192 (one Medium: a resumed or retried comment mention re-resolves and can reach the route holder twice)",
-    "codeQuality": "Verdict: APPROVE at 75006192 (cleanup only: comment claim-mode enum, take-over loop written three times, pacing carried on ResolvedMention)"
+    "deepReview": "Verdict: APPROVE at 5fb0c8be (round-1 fixes hold on the creating, resume and Retry paths; two Minor doc gaps)",
+    "codeQuality": "Verdict: APPROVE at 5fb0c8be (structural suggestion: insert a decided sessionless attempt 1 as failed at commit; minor cleanups)"
   },
+  "roundOneThreads": "All eight round-1 threads were fixed (01548af0, e7a19587, 58fd08bf). Each one is answered on its thread.",
+  "censusRecheck": "Re-ran the census's five searches at the head (redeliver-webhooks; GITHUB_UPSTREAM|GITHUB_RATE_LIMITED plus the api/github/rest callers; FRAME_INPUT|_test/publish; envoy listener; ENVOY_UNAVAILABLE in dispatch, envoy-client, pi-envoy and contracts). The census lists every hit outside .legion/. I accept its rollout lines: 1 refuses at once, because without the database the command would obey no shared rate limit; 2, 4 and 5 change an answer that was already an error, not a refusal of a caller's input; 3 is test-only.",
+  "measurement": "internal/dispatch/api in the pod at the head: `go test -json -count=1 -timeout 60m ./internal/dispatch/api/`. 1089.7 s in total. Sixteen tests that exist on main took about 214 s together. The same sixteen at the merge base 2e8c68cd took 13 s (`git archive` of packages/envoy into $TMPDIR, GOWORK=off). Each now waits the full 12 s listenerTakeoverWindow; TestTargetedMessagePrefixesUnavailableListenerErrors takes 34 s against 5.7 s. On CI, main's api package took 462.6 s in a passing envoy-go run (job 122133381891), so about 200 s more passes the 600 s default, as 125a3bfb's run did. The local run also failed TestALoneRunnerMakesAPassOnEveryTick (suggestion_outcomes_lease_test.go, which this PR does not touch; 9 of 10 one-second ticks under load). That is the timing flake INFRA-523 tracks, not this change.",
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/comment_delivery.go:504",
-      "description": "A routed comment's attempt 1 stored with a pre-commit resolve_error and no session (the take-over window ran out) is, after a process death in the gap before its settle, resumed by delivery-resume (or taken by a Retry): the first try sends the stored error, which is retryable, and the loop then calls mentionResolutionFor with pending=nil and resolves the mention afresh. If the session is now live it is pinned and sent under <comment>:<target>:<mode>, while the outbox already sent the comment along the route the mention did not suppress, so the route holder hears it twice. Breaks the PR's own 'one copy, not two' and mentionResolutionFor's documented rule that a resumed attempt keeps the resolution it was opened with. Needs a red-first resume-path test."
-    },
-    {
-      "severity": "important",
-      "file": "PR #2387 body",
-      "description": "No '## Contract change census', while the PR adds refusals at process boundaries: envoy-dispatch redeliver-webhooks now exits 2 without DATABASE_URL; the GitHub proxy answers 503 GITHUB_RATE_LIMITED where it answered 502 GITHUB_UPSTREAM or passed GitHub's 403 through; the agent-stream publish test hook refuses 400 FRAME_INPUT; recorded listener failure text moves from 'envoy listener: ...' to 'envoy listener answered: ...'. Each needs its search command, every hit with a disposition, and a rollout line (warn-first, or immediate refusal with the reason)."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/message_delivery.go:50",
-      "description": "A same-mode Retry of a stranded direct message resumes that same pending attempt (the unbound lapsed branch of recordPendingMessageDelivery) but sends it with urgency nil, while delivery-resume sends the same attempt with the urgency migration 0130 now records. The CHANGELOG promises a resumed direct message keeps the urgency it was sent with; the Retry branch should carry the row's urgency when it resumes the same attempt."
+      "file": "packages/envoy/internal/dispatch/api/envoy_resolve.go:178",
+      "description": "listenerTakeoverWindow is a const, so every existing api test whose send meets 'no live session', a refused connection or a 503 now sleeps the full 12 s. Sixteen tests that exist on main went from 13 s to about 214 s together, and the package now runs past go test's 10-minute default on CI: envoy-go failed with 'panic: test timed out after 10m0s' at code head 125a3bfb. Make the window a variable that a test can set short, as DeliveryResumeInterval and the route-roster TTL already are, and keep 12 s only in the tests that prove the window itself. Show internal/dispatch/api back near main's time, and envoy-go green on CI."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/issue_route_status.go:142",
-      "description": "A failed read of route_roster returns an unanswered roster, so GET /api/v1/issues?route_status=live|no_holder answers 503 ENVOY_UNAVAILABLE 'the Envoy listener did not answer' for a database failure; the reply should name the database."
+      "file": "packages/envoy/AGENTS.md:1371",
+      "description": "The sentence says only a comment that does not record mentions_decide_routes resolves an unpinned row again. The code also re-resolves on a decided comment for attempts after the first, and for an attempt-1 row that recorded neither a session nor an error (comment_delivery.go:439-440,478-490). The doc comment at comment_delivery.go:413-421 says this correctly; make AGENTS.md match it."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/githubapi/proxy.go:166",
-      "description": "Comment says the web app waits as Retry-After asks; nothing in packages/dispatch/web reads Retry-After (GitHubLink.tsx:181-184 special-cases only GITHUB_TOKEN_UNAVAILABLE)."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/routes_table.go:192",
-      "description": "'The first four hooks' fan out, but the fourth route is outside-schema; the fan-out routes are the 1st, 2nd, 3rd and 5th."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/comment_delivery.go:165",
-      "description": "Cleanup: claimCreating equals claimResume{attempt: 1} in every state that changes what is sent; the message path says 'bound' with one int (resumeAttempt). One bound-attempt int would delete the enum, the struct and the 'named' mapping."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/message_delivery.go:664",
-      "description": "Cleanup: the take-over retry loop is written in message_delivery.go:664-680, comment_delivery.go:491-513 and envoy_resolve.go:239-244; one takeoverRetry method taking send and renew closures keeps a later fix in one place."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/comment_delivery.go:466",
-      "description": "Cleanup: the take-over pacing rides on ResolvedMention.takeover, so 'paced := target.takeover' must be read before line 467 reassigns target; pass it as an argument instead."
+      "file": "packages/envoy/AGENTS.md:1355",
+      "description": "Say that the protection covers attempt 1 only. A person's Retry after attempt 1 has settled opens attempt 2, which resolves afresh and can reach a route holder the route already reached. That is the same as on main, and it is the person's explicit resend, but the paragraph reads as if a mention always reaches the route holder once."
     }
   ]
 }
