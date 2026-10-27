@@ -375,13 +375,28 @@ write identity errors with `identity.WriteError`.
   Unset, the branch does not exist and bearer handling is unchanged.
 
 The GitHub proxy (`/api/github/rest/...`, `internal/dispatch/githubapi`) reads as the GitHub App
-installation that covers the repository, for a signed-in person, GET only and only three paths: a
-pull request (`repos/{o}/{r}/pulls/{n}`), an issue (`repos/{o}/{r}/issues/{n}`) and a commit's
-check runs (`repos/{o}/{r}/commits/{sha}/check-runs`), the only reads the web app makes. Every
-person shares the one App credential, which can read far more of a repository than the web app
-shows, so the proxy forwards nothing else: another method is `405 METHOD_NOT_ALLOWED`, another path
-`404 GITHUB_PATH_REFUSED`, and a repository the App is not installed on, or a deployment with no
-App key, `503 GITHUB_TOKEN_UNAVAILABLE`.
+installation that covers the repository, for a signed-in person, GET only and only four paths: a
+pull request (`repos/{o}/{r}/pulls/{n}`), an issue (`repos/{o}/{r}/issues/{n}`), a commit's
+check runs (`repos/{o}/{r}/commits/{sha}/check-runs`) and a commit's workflow runs
+(`repos/{o}/{r}/actions/runs?head_sha={sha}`, whose query is the full 40-hex `head_sha` and at
+most a numeric `per_page` and `page`, each once), the only reads the web app makes: the checks pill
+joins each check run to its workflow run for the workflow name and event, so it keeps only the
+newest run of each check as GitHub's merge does, and drops the runs of an event GitHub does not
+evaluate for a pull request (only `push`, `pull_request`, `pull_request_review`,
+`pull_request_target`, `deployment` and `deployment_status` count). A workflow-runs answer of `200`
+is trimmed to `total_count` and, per run in GitHub's order, only `check_suite_id`, `event` and
+`name`, so a run's head commit (message, author), actor and repository never reach the browser; a
+body that does not decode is `502 GITHUB_UPSTREAM`, and any other status passes through unchanged.
+GitHub's answer is read within 16 MiB rather than the proxy's usual 1 MiB, since each run carries
+its repository and head commit (about 12.8 KB a run) and a page of 100 passes 1 MiB before it is
+trimmed.
+The pill needs the App's Actions: read, which the delivery reconcile already needs: without it
+`actions/runs` answers `403` and the pill disappears. Every person shares the one App credential,
+which can read far more of a repository than the web app shows, so the proxy forwards nothing else:
+another method is `405 METHOD_NOT_ALLOWED`; another path, a workflow-runs read with any other
+query, or a path under it (`actions/runs/{id}`, its jobs or logs) `404 GITHUB_PATH_REFUSED`; and a
+repository the App is not installed on, or a deployment with no App key,
+`503 GITHUB_TOKEN_UNAVAILABLE`.
 
 ## Routes
 
@@ -436,7 +451,7 @@ the table says human only.
 | `/auth/logout` | POST | identity | Advance the person's session generation, forget their refresh token, and clear the cookie. Local only: the issuer's own session is left alone. |
 | `/auth/whoami` | GET | identity | Return the resolved person, `{kind: "user", login}` with `login` their lowercase email. |
 | `/auth/_dev/signin` | GET | public, `DISPATCH_DEV_SIGNIN=1` only; loopback peer, no forwarding header | Record the lowercased person `login` names and issue their session cookie with no issuer exchange, then redirect to the sanitized `next`; `400 DEV_SIGNIN_INPUT`, `403 DEV_SIGNIN_FORBIDDEN`. Not mounted otherwise. |
-| `/api/github/rest/...` | GET | identity | Read a pull request, an issue or a commit's check runs from GitHub as the GitHub App (above). |
+| `/api/github/rest/...` | GET | identity | Read a pull request, an issue, a commit's check runs or a commit's workflow runs from GitHub as the GitHub App (above). |
 | `/healthz` | GET | public | Report that the process serves, Postgres answers within two seconds on the health pool, NATS is connected where configured, and the file store's bucket answers a two-second `HeadBucket` where one is configured (`files`, null otherwise), plus `commit` (the build's legion commit, or `null`) and `schema_version` (the highest applied migration, or `null` when the database did not answer). |
 | `/api/v1/projects` | GET, POST | user or bearer | List projects (including `open_asks`) or create one from `key` and `name`, whoever asks: a person or an agent session, which names itself in `actor`. A key that is not a project key, an empty name, a name holding a control character (Unicode Cc) or a bidi embedding, override or isolate (U+202A-U+202E, U+2066-U+2069), or a name with no visible character (a letter, number, punctuation or symbol other than the blank fillers U+115F, U+1160, U+3164, U+FFA0 and U+2800, or a code point Go's Unicode tables leave unassigned, such as an emoji newer than them, other than a noncharacter (U+FDD0-U+FDEF and each code point ending in FFFE or FFFF) or a reserved default-ignorable (U+2065, U+FFF0-U+FFF8, U+E0000-U+E0FFF); combining marks, format characters, private-use characters and whitespace don't count) is `400 INVALID_PROJECT`; every other format character (an emoji's joiner, a flag's tags, a direction mark, a soft hyphen) and combining mark is allowed beside a visible one; a name over `contracts.ProjectNameMax` (80) UTF-16 units after the trim is `400 CAP_EXCEEDED`; a key that already exists is `409 PROJECT_EXISTS`. |
 | `/api/v1/projects/{key}/artifacts` | GET, POST | user or bearer | List non-primary artifacts in a project (`?unlinked=true` selects unlinked ones) or create an unlinked project artifact, its kind read from its bytes as an issue upload's is. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. A markdown document over 1 MiB, or any file over 25 MiB, is `413 CAP_EXCEEDED`, and so is a document whose markdown makes more than 65,536 elements (weighed as `README.md`'s Element weights lists), naming the line that passes the limit; a document or version whose markdown as stored (what `.../text` answers) would be longer than 1 MiB and longer than the document's was, or make more than 65,536 elements and more than the document's did, or that would leave a live state ygo could not decode as one update; or whose formatting is more items than one document update can store (1,048,576), naming the count. A file the configured bucket refuses is `502 FILE_STORE_UNAVAILABLE`, with no version written. |

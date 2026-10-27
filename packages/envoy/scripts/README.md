@@ -199,8 +199,8 @@ It downloads the dump under `DISPATCH_CORPUS_DIR` (default `$TMPDIR` or `/tmp`) 
 it is restored, whether or not the restore succeeded. `DISPATCH_CORPUS_CONTAINER` (default
 `dispatch-corpus-pg`), `DISPATCH_CORPUS_PORT` (default `55433`, on `127.0.0.1`) and
 `DISPATCH_CORPUS_DATABASE` (default `dispatch_corpus`) name the copy. Run again while the container
-holds the database, it prints the URL and restores nothing; `docker rm -f <container>` deletes the
-copy.
+holds the database, it prints the URL and restores nothing; `docker rm -f -v <container>` deletes the
+copy and its data volume.
 
 `search-smoke.sh` prints what a searcher sees for each query in a file
 (`search-smoke-queries.txt` is one): it starts `envoy-dispatch` against the copy, built from this

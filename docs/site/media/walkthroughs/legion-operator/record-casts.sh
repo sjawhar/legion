@@ -119,11 +119,11 @@ chmod +x "$work/bin/omp"
 keep_port daemon_keeper daemon_port
 
 check=services
-docker run -d --name "$pg_container" --cpus 0.5 --mount type=tmpfs,destination=/var/lib/postgresql/data \
+docker run -d --name "$pg_container" --cpus 0.5 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql/data \
   -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 postgres:16 >/dev/null
 pg_port=$(docker port "$pg_container" 5432/tcp | head -1 | sed 's/.*://')
 until_true 60 "Postgres" docker exec "$pg_container" pg_isready -h 127.0.0.1 -U legion -d legion
-docker run -d --name "$nats_container" --cpus 0.5 -p 127.0.0.1::4222 nats:2.10 -js >/dev/null
+docker run -d --name "$nats_container" --cpus 0.5 --memory 512m -p 127.0.0.1::4222 nats:2.10 -js >/dev/null
 until_true 90 "NATS" sh -c "docker logs '$nats_container' 2>&1 | grep -q 'Server is ready'"
 nats_url="nats://127.0.0.1:$(docker port "$nats_container" 4222/tcp | head -1 | sed 's/.*://')"
 (umask 077 && head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$operator/envoy-token")

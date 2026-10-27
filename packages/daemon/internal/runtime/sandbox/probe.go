@@ -1049,10 +1049,12 @@ var undefinedFlag = regexp.MustCompile(`flag provided but not defined: (-\S+)`)
 // (bootprobe.ExtensionsDiscovered): a CLI that predates the discovery-on pod lane probed the plugin
 // roots with Oh My Pi's extension discovery disabled, and the image it certified links the plugins
 // into its profile, which a pod of this daemon — discovery on, the two roots explicit — would load
-// twice. It must carry the capabilities mark too
-// (bootprobe.CapabilitiesChecked): a CLI that predates the capability check prints none, having
-// checked no capability, and a current one that found a capability missing exits 1 before the OK
-// line, so the mark's absence on a Succeeded pod is the image's CLI, refused as a rebuild. When the
+// twice. It must carry the capabilities mark too, at bootprobe.CapabilitiesAll
+// (bootprobe.Capabilities): a CLI that predates the capability check prints none, having checked
+// no capability, and a current one that found a capability missing exits 1 before the OK line, so
+// the mark's absence on a Succeeded pod is the image's CLI, refused as a rebuild; a line that left
+// the browser row unchecked (bootprobe.CapabilitiesBrowserSkipped, `probe-image --skip-browser`,
+// which this probe's command never passes) is refused naming that mark. When the
 // daemon has a pane NATS nkey seed (Options.NATSUser),
 // the probe must also name the same user as the seed its pointer read (bootprobe.NATSUser), a
 // refusal otherwise. Naming none is the image's: a current CLI whose pointer holds a blank or
@@ -1106,8 +1108,13 @@ func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, lo
 		return imageRefusal(digest, "pod %s Succeeded without the extensions=discovered mark: its legion CLI predates the discovery-on pod lane and its profile links the plugins a pod names explicitly, which a pod of this daemon would load twice — build the image from this daemon's commit — log tail: %s",
 			name, logTail)
 	}
-	if !bootprobe.CapabilitiesChecked(logTail) {
+	switch mark := bootprobe.Capabilities(logTail); mark {
+	case bootprobe.CapabilitiesAll:
+	case "":
 		return imageRefusal(digest, "pod %s Succeeded without checking the capability list (its legion CLI predates the check): build the image from this daemon's commit — log tail: %s", name, logTail)
+	default:
+		return imageRefusal(digest, "pod %s Succeeded without checking the whole capability list (its OK line's capabilities mark: %s, where the daemon's probe requires %s) — log tail: %s",
+			name, mark, bootprobe.CapabilitiesAll, logTail)
 	}
 	if r.natsUser != "" {
 		switch got := bootprobe.NATSUser(logTail); got {
