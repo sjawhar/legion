@@ -260,11 +260,15 @@ legion state --config legion.yaml --json |
   jq '.issues["<KEY>"] | {phase, waitingOn, designGate}'
 ```
 
-`waitingOn.ask` is the question it waits on, and `since` Dispatch's time of the hand-back the wait
-began at. `answeredAt` means the wait was answered, and `answeredBy` names how — not always by a
-person: `closed` (a session or anyone else who is not a person closed the question), `turn` (a
-session handed it back to the agent's turn), `retracted` (Dispatch's settlement), and `approved`
-also when the spec's gate stands open with nobody's approval under `gates.design: off`. The root is
+`waitingOn.kind` is `ask` for a wait on a question, with `waitingOn.ask` the question, or `gate`
+for a wait on the spec's approval, with `gateVersion` and `artifactId`; `since` is Dispatch's time
+of the hand-back the wait began at. `answeredAt` means the wait was answered, and `answeredBy`
+names how — not always by a person: `ask` or `reply` (a person's act on an ask of the root),
+`changes_requested` (a person's changes request on the spec), `version` (a newer spec version once
+the approval request is on the architect's turn), `closed` (a session or anyone else who is not a
+person closed the question), `turn` (a session handed it back to the agent's turn), `retracted`
+(Dispatch's settlement), and `approved` also when the spec's gate stands open with nobody's
+approval under `gates.design: off`, or when the gate was switched off while the root waited on it. The root is
 at the front of `admission.waiting` and resumes itself at the next free slot. Do not park it or
 start it by hand. Without `answeredAt`, check, in order:
 
@@ -284,10 +288,12 @@ start it by hand. Without `answeredAt`, check, in order:
    then `todo` with the label queues the root again.
 4. **An answer the daemon never saw.** When `dispatch read <KEY>` shows the person already
    answered after `since` and none of the above holds, the answer's event never reached the
-   daemon, and nothing re-reads a waiting root's asks before the next boot. Have the person (or
-   anyone acting as them) add a reply in the thread of any ask of the root, one that leaves the
-   turn with the agent: that new act wakes the root on its own event. Restarting the daemon does
-   not replay the root's asks in this release.
+   daemon, and nothing re-reads a waiting root's asks until the next boot. Restarting the daemon
+   (`legion restart`) catches the root up: the boot applies the root's Dispatch event log after
+   its catch-up cursor, with the root held until the whole window is in, then decides it once.
+   Without a restart, have the person (or anyone acting as them) add a reply in the thread of any
+   ask of the root, one that leaves the turn with the agent: that new act wakes the root on its
+   own event.
 
 A root whose architect registered its spec while the approval request waits on the person is in
 `awaiting_person` with `waitingOn.kind` `gate`, once nothing else holds its slot; one still

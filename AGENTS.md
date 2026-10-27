@@ -285,8 +285,15 @@ A daemon that was down catches each root at `admitted` or `awaiting_person` up a
 decides it: it reads the root's Dispatch event log after the root's cursor (`caught_up_seq`, else
 its last handout) and applies every ask, review and version event through the live handlers, with
 the root held out of admission's decision until its whole window is applied, then decides it once
-and moves the cursor to the sequence it read through. A root recorded before the cursor existed has
-none: its first boot on this release replays nothing and only sets the cursor. A gate whose document
+and moves the cursor to the sequence it read through. One event its handlers fail on is logged and
+passed over, not retried at every boot: the durable Dispatch consumer still holds it. A root
+recorded before the cursor existed has none until the daemon first gives it work (an admission, a
+re-admission or a resume sets the cursor to 0, so the next catch-up reads from that handout) or
+catches it up: a catch-up of a root with no cursor replays nothing and only sets the cursor, so the
+first boot on this release replays nothing, and the events of the deploy's own downtime reach a
+root that has no cursor yet one at a time from the durable consumer, unheld, as before this
+release. A re-admission sets the cursor back to 0, so a new generation never replays the old
+one's tail. A gate whose document
 has no approval request in the mirror (one an earlier release registered before the mirror
 existed) has the request Dispatch shows open on that document mirrored at boot, and when that
 request waits on the person the boot declares the hand-back as a registration would, so a root already waiting on its approval at the deploy returns its slot. A root Dispatch
@@ -304,10 +311,13 @@ it, whichever ask the wait names, since the architect is the tree's only agent w
 may have superseded the question it asked. A person's answer of the approval request of the
 gate's own document is a review, and answers through that review. A person's review of the root's
 spec (an approval or a changes request, applied through the root's design gate) answers it too,
-and so does the root's design gate standing open, whatever opened it and whenever, for a wait on
-a question (a wait on the gate is answered by the act that opened it) (an approval
+and so does the root's design gate standing open, whatever opened it and whenever (an approval
 Dispatch recorded before the hand-back, a registration's read of one, a registration under
-`gates.design: off`): its tree advances with its resume. A close of an item of the wait — a tree
+`gates.design: off`); for a wait on the gate that open gate is the backstop of the act that opened
+it: its tree advances with its resume. A wait on the gate when the operator switches
+`gates.design` to `off` is decided on the next admission pass, since with the gate off no approval
+request is with the person: it moves to a tree question still with the person, or is answered,
+and the architect resumes to register its spec, which opens the gate. A close of an item of the wait — a tree
 question, or an approval request of the closed gate's document — by anyone who is not a person —
 Dispatch's settlement retracting it once its decision block has left the spec, or a session
 closing it — moves the wait to what is still with the person, and ends it only when nothing is; so
@@ -334,9 +344,10 @@ order the answer is taken in and the slot kept; a tree session's hand-back reply
 its question's opening declares nothing, so the root keeps its slot until the architect's next
 hand-back; and a person's answer of an approval request applied before the gate is registered on
 its document answers a waiting root as an act on an ask, where after the registration it is a
-review. Nothing re-reads a waiting root's asks between boots: if the event of a person's answer
+review. Between boots nothing re-reads a waiting root's asks: if the event of a person's answer
 never reaches the daemon, the root waits until any newer act of a person on any ask of the root,
-or a review of its spec, reaches it (the site's troubleshooting page, "A tree waits on a person").
+or a review of its spec, reaches it, or until the daemon's next boot, whose catch-up applies the
+root's event log after its cursor (the site's troubleshooting page, "A tree waits on a person").
 
 **Gate:** the design gate, when armed (`gates.design: root-issues` in `legion.yaml`, the default),
 is a human approving the root issue's spec document at a version in Dispatch: once the spec's
