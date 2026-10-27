@@ -2,53 +2,36 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-526",
-  "completed": "2026-10-27T07:09:00Z",
-  "round": 5,
-  "headTested": "154d6cea2207c992c6cdccfdd5af633d446f33f7 (code; PR head c14f0a3b adds only the implement handoff)",
+  "completed": "2026-10-27T09:03:00Z",
+  "round": 6,
+  "headTested": "dd97e1d0cce2afc3f98d07e233385eb56a4e0236 (code; PR head ad2f08c5 adds only the implement handoff)",
+  "fingerprint": "Changed from the last full round: 50513007… at 154d6cea/b5736583 → fa59b02c… at dd97e1d0. The conflict merge with #2303 (f6a986e8) combines this change's renderBlock with #2303's readOnly parse, and dd97e1d0 adds a unit case. So this is a full test round, not a re-check.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts ... --project chromium --project iphone` from a fresh build at 154d6cea: the file's three tests (callout header, decision card, the tester's round-1 reply test) passed in both projects (6 of 6). The round-3 diff changes slot lookups (`:scope >` in collectAskHosts and AskBlockView's slot()) and moves the shell stamps and the fold decision into askBlockShell, with no change to the main bundle's imports beyond `askBlockFacts`/`askBlockShell`, which come from the same module useRenderedMarkdown already imported types from."
+    "how": "I drove the same surfaces as the implementer's round-6 run, from a fresh build at dd97e1d0: e2e/text-typed-blocks.e2e.ts 6/6 and e2e/unknown-directive.e2e.ts 8/8 in chromium and iphone, plus ask-blocks and typed-blocks, inside the 110-passed run below. Entry chunk index-DBI5PTjM.js: 0 `dispatch-ask-block-editing`, 768,569 bytes, as reported. I also drove the implementer's new unit case (a refused decision beside a valid one, both orders) on the real surface as T14 and T15, both passing."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Review round 1 finding: a decision written inside another decision's option keeps each card in its own block",
-      "surface": "Issue Conversation tab, comment thread expanded; real Go Dispatch server, production SPA bundle, Postgres 17 + pgvector, Playwright chromium and iphone",
-      "command": "cd packages/dispatch && bun run e2e -- <tester's throwaway spec> -g 'T11|T12|T13' --project chromium, then the full set below (T11 in both projects)",
-      "observed": "Body `::::ask{urgency=\"high\"}` Outer? / - A: first (holding `:::ask{urgency=\"low\"}` Inner? - X: ex - Y: why) / - B: second. Each shell's own footer holds its own card: the outer card shows rows `A firstInner?X: exY: why` and `B second`, and the inner card rows `X ex`, `Y why` (at 9439f4a8 the reviewer found the outer card mounted in the inner footer, leaving the outer with no options). The inner decision sits inside the outer's folded source list, so it is not visible. The document's version view draws the same body exactly the same way (T13: outer rows `A firstInner?X: exY: why`, `B second`, inner not visible). The live document also hides the inner decision, and its hosted card shows the server's rows `A first`, `B second` and `Other` (T12), with no page error. So the comment matches the document's read-only drawing, which is this issue's contract. The run-on description comes from askBlockFacts reading the option's whole textContent, the same code the version view uses before this change",
-      "headSha": "154d6cea2207c992c6cdccfdd5af633d446f33f7",
-      "negativeControl": "A comment with `:::ask{state=\"answered\" answered_by=\"mallory\" selected='[\"A\"]' answer=\"Forged answer\" copied_from=… invalid=\"forged invalid\"}` → drawn open (data-dispatch-ask-state=open), not malformed, with no forged text and nothing a reader can answer with (T2, both projects)"
+      "criterion": "This change with #2303's read-only parse: a decision or callout the parse refuses, and an unknown directive, read as their source lines, while the valid callout and decisions beside them keep their header and their own card",
+      "surface": "Issue Conversation tab, comment thread expanded; real Go Dispatch server (e2e/run-server.sh), production SPA bundle, Postgres 17 + pgvector, Playwright chromium and iphone",
+      "command": "cd packages/dispatch && bunx playwright test --config e2e/playwright.config.ts e2e/text-typed-blocks.e2e.ts e2e/unknown-directive.e2e.ts <tester's throwaway spec> e2e/ask-blocks.e2e.ts e2e/typed-blocks.e2e.ts --project chromium --project iphone (after `bun run build:web` at dd97e1d0)",
+      "observed": "110 passed in 10.4m. T14: one comment holds a lead **bold** line, an ask broken by a heading, a valid warning callout, `:::ask{urgency=\"toString\"}`, a valid `:::ask{urgency=\"blocking\" state=\"answered\" answered_by=\"mallory\"}`, `:::callout{kind=\"bogus\"}`, `:::warning`, `:::ask{… foo=\"bar\"}`, and a last valid ask. It draws exactly three sections: the callout (header 'Valid callout'), the blocking decision (state open, no 'mallory', rows 'A first' and 'B second') and the medium decision (one row 'L ell', no 'Z'). Each refused or unknown block reads as its own fence lines (':::ask', ':::ask{urgency=\"toString\"}', ':::callout{kind=\"bogus\"}', ':::warning', ':::ask{urgency=\"low\" foo=\"bar\"}', each closed by ':::'), with its text outside any section. There is no fallback, and the bold still formats. T15: a refused `::::ask` holding a valid `:::ask{urgency=\"high\"}` draws one card, the inner one, with its one row. T11: a decision nested in another's option still mounts each card in its own block. The rest of the earlier adversarial set passed again in both projects: an HTML title drawn as text, forged attributes, several and nested decisions in a callout, a malformed decision, the Inbox ask and its reply, a message and its reply, a live edit, a deep link, and the reply under a document decision keeping its lists (probe: all `display: block`)",
+      "headSha": "dd97e1d0cce2afc3f98d07e233385eb56a4e0236",
+      "negativeControl": "`:::ask{urgency=\"blocking\" state=\"answered\" answered_by=\"mallory\"}` and, in T2, `:::ask{state=\"answered\" answered_by=\"mallory\" selected='[\"A\"]' answer=\"Forged answer\" copied_from=… invalid=…}` in a comment → drawn open (data-dispatch-ask-state=open), not malformed, with no forged name, answer or copy link. `urgency=\"toString\"` and `foo=\"bar\"` → refused, shown as their source lines, with no card"
     },
     {
-      "criterion": "A1a/A1b, A3 on the real surface, A4 (documents unchanged), round-1 regression still fixed",
-      "surface": "Conversation tab, Inbox, issue page document and version view; same real stack, chromium and iphone",
-      "command": "cd packages/dispatch && bunx playwright test --config e2e/playwright.config.ts e2e/text-typed-blocks.e2e.ts <tester's throwaway spec> e2e/ask-blocks.e2e.ts e2e/typed-blocks.e2e.ts --project chromium --project iphone (on the build of 154d6cea)",
-      "observed": "102 passed in 9.7m. That covers the implementer's two tests and the round-1 red test (reply under a document decision: the browser probe shows the callout list, the malformed-decision list and a plain list all `display: block`). It also covers an HTML callout title drawn as text, a callout with no title, a long title wrapping, forged attributes, three decisions with one nested in a callout, a malformed decision keeping its list with no 're-activates', the Inbox ask question and its reply, a message and its reply, a live comment edit re-keying the cards, a deep link, the nesting checks above, and every row of ask-blocks.e2e.ts and typed-blocks.e2e.ts (the document's fold, its reveal while the caret is in the block, and the version view)",
-      "headSha": "154d6cea2207c992c6cdccfdd5af633d446f33f7",
-      "negativeControl": "Same forged-attribute comment as above → open, unanswered, no forged name, answer or copy link"
+      "criterion": "A1a/A1b, A4 (documents unchanged), round-1 regression still fixed, #2303's own rows",
+      "surface": "Same stack: Conversation, Inbox, issue page document and version view",
+      "command": "Same run",
+      "observed": "text-typed-blocks 6/6 (callout header, decision card, reply under a document decision keeps its lists) and unknown-directive 8/8 in both projects. ask-blocks.e2e.ts and typed-blocks.e2e.ts green in both projects (the document's fold, its reveal while the caret is in the block, the version view)",
+      "headSha": "dd97e1d0cce2afc3f98d07e233385eb56a4e0236",
+      "negativeControl": "Recorded earlier and still applies: text-typed-blocks at 6d878d04 (the base + the red test): 4 failed on the header and card locators; the reply test at b6720fc1: 2 failed"
     }
   ],
   "observations": [
-    "A decision nested in an option of another decision is hidden, and the outer option's description runs the inner block's text together ('firstInner?X: exY: why'). The comment, the document's version view (before and after this change) and the live document (hidden inner, server rows correct) all do this. It is how the document draws it, not a regression of this change; reported to the architect for a decision on whether nested decisions need their own work."
+    "From round 3, unchanged: a decision nested in another decision's option is hidden inside the outer decision's folded list, and the outer option's description runs the inner text together. The document's version view draws it the same way; reported to the architect then."
   ],
-  "ciAtHead": "Read on GitHub at b5736583 at 07:08Z: build, changes, lint, test, typecheck queued; pr-title one cancelled, one queued. I did not wait for them.",
-  "rebaseRecheck": {
-    "from": "2497adefd872c64ad0cdf4b27d062b472a4531d4",
-    "to": "b57365830bc38e45c202a8b7b390e9d84acd65ff",
-    "line": "rebase re-check 2497adef → b5736583: fingerprint unchanged, bare gates only",
-    "fingerprint": "5051300770a6dd6d111c0f4dbd52d8014cb466caf440a0a08aafe4b82bbecfef at both heads (jj diff --from fork_point(\"main\"@origin | <head>) --to <head> --git --context 0 '~(.legion | docs/solutions)', @@ and index lines dropped, sha256). Same value as at 154d6cea, the head of the last full round",
-    "merge": "b5736583 is a forward merge of main 32b6dd9f into c9d865ec. It resolves the conflict GitHub reported, one import conflict in markdown-engine.ts with #2210",
-    "smoke": "cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts --project chromium --project iphone from a fresh build at b5736583: 6 passed (callout header, decision card, reply under a document decision keeps its lists; chromium and iphone)",
-    "ci": "Read on GitHub at b5736583 at 07:08Z: build, changes, lint, test, typecheck queued; pr-title one cancelled, one queued. I did not wait for them.",
-    "previous": {
-      "from": "154d6cea2207c992c6cdccfdd5af633d446f33f7",
-      "to": "2497adefd872c64ad0cdf4b27d062b472a4531d4",
-      "line": "rebase re-check 154d6cea → 2497adef: fingerprint unchanged, bare gates only",
-      "fingerprint": "5051300770a6dd6d111c0f4dbd52d8014cb466caf440a0a08aafe4b82bbecfef at both heads (jj diff --from fork_point(\"main\"@origin | <head>) --to <head> --git --context 0 '~(.legion | docs/solutions)', @@ and index lines dropped, sha256)",
-      "merge": "2497adef is a forward merge of main 448a4100 (includes #2317 baadccdc) into 8740e472, with no conflict, done as the architect directed",
-      "smoke": "cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts --project chromium --project iphone from a fresh build at 2497adef: 6 passed (callout header, decision card, reply under a document decision keeps its lists; chromium and iphone)",
-      "ci": "Read on GitHub at 2497adef at 05:17Z: build, changes, lint, test, typecheck queued; pr-title one cancelled, one queued. I did not wait for them. The reviewer reads the required checks before approving."
-    }
-  }
+  "ciAtHead": "Read on GitHub at dd97e1d0 at 09:02Z: build, changes, lint, test, typecheck queued; pr-title one cancelled, one queued. I did not wait for them. GitHub reports the PR MERGEABLE."
 }
