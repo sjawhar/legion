@@ -188,7 +188,7 @@ func main() {
 	if boot.NATSDisabled {
 		slog.Info("dispatch: NATS publisher disabled")
 	} else {
-		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, serverBus(bus.WithEnvironment(env.lookup), bus.WithName("dispatch"))...)
+		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, serverClient(bus.WithEnvironment(env.lookup), bus.WithName("dispatch"))...)
 		if err != nil {
 			slog.Error("dispatch: connect NATS", "error", err)
 			os.Exit(1)
@@ -458,7 +458,7 @@ func main() {
 		// both Runs, which return once ctx is cancelled, and not for that handler. Each connects in
 		// the background as the publisher does, and its bind poll binds the durable once it has.
 		connectIntake := func(name string) (*bus.Client, error) {
-			return bus.Connect(envoyConfig.Envoy.NatsURLs, serverBus(bus.WithEnvironment(env.lookup), bus.WithName(name))...)
+			return bus.Connect(envoyConfig.Envoy.NatsURLs, serverClient(bus.WithEnvironment(env.lookup), bus.WithName(name))...)
 		}
 		stopIntakes, err := delivery.StartIntakes(ctx, connectIntake, database.Pool, appCtx.GitHub(), broker)
 		if err != nil {
@@ -1012,13 +1012,21 @@ func openFileStore(ctx context.Context, boot bootConfig) (files.Store, error) {
 	return bucketStore, nil
 }
 
-// serverBus is the options every NATS client of the server connects with, after extra: it connects
-// in the background (bus.WithConnectInBackground), so a bus that is down at boot or refuses the
-// credential leaves the process serving and connects it once the bus answers, and it declares a
-// connection whose packets stop coming back lost within seconds (bus.WithSilentCutDetection), so
-// /healthz reports a cut bus within seconds of the cut.
-func serverBus(extra ...bus.ConnectOption) []bus.ConnectOption {
-	return append(extra, bus.WithConnectInBackground(), bus.WithSilentCutDetection())
+// serverBus is the options every NATS connection of the server is made with: it connects in the
+// background (bus.WithConnectInBackground), so a bus that is down at boot or refuses the credential
+// leaves the process serving and connects it once the bus answers, and it declares a connection
+// whose packets stop coming back lost within seconds (bus.WithSilentCutDetection), so /healthz
+// reports a cut bus within seconds of the cut.
+func serverBus() []bus.DialOption {
+	return []bus.DialOption{bus.WithConnectInBackground(), bus.WithSilentCutDetection()}
+}
+
+// serverClient is the options a NATS client of the server connects with: extra, then serverBus's.
+func serverClient(extra ...bus.ConnectOption) []bus.ConnectOption {
+	for _, option := range serverBus() {
+		extra = append(extra, option)
+	}
+	return extra
 }
 
 // dispatchHandler mounts the one /healthz the process serves above every dashboard and API
