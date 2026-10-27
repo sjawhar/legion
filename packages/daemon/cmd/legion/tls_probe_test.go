@@ -111,7 +111,7 @@ func TestTLSCommandClientClassifiesApplicationErrorBeforeTruncatingDetail(t *tes
 		clientName:      "aws",
 		applicationSeen: awsResponseSeen,
 		command: func(tlsSite) (string, []string, []string) {
-			return "sh", []string{"-c", `printf %s "$1"; exit 255`, "sh", response}, nil
+			return "sh", []string{"-c", `printf %s "$1" >&2; exit 255`, "sh", response}, nil
 		},
 	}
 
@@ -136,7 +136,7 @@ func TestImageTLSClientsCoverTheWorkerInventory(t *testing.T) {
 
 func TestTLSPositiveControlsRequireTheExpectedChain(t *testing.T) {
 	for _, testCase := range []struct {
-		name, want       string
+		name, want         string
 		outcome, isolation tlsOutcome
 	}{
 		{name: "accepts pinned root", outcome: tlsOutcome{status: tlsConnectionAccepted}, isolation: tlsOutcome{status: tlsCertificateRefused}},
@@ -162,18 +162,53 @@ func TestTLSPositiveControlsRequireTheExpectedChain(t *testing.T) {
 	}
 }
 
-
-func TestTLSCommandClientAcceptsSuccessfulCertificateMarkerBodies(t *testing.T) {
-	for _, name := range []string{"node", "chromium"} {
-		t.Run(name, func(t *testing.T) {
+func TestTLSCommandClientClassifiesOutputStreams(t *testing.T) {
+	for _, testCase := range []struct {
+		name, stdout, stderr, exit string
+		want                       tlsStatus
+	}{
+		{name: "accepts a loaded body with certificate text", stdout: "page body NET::ERR_CERT_AUTHORITY_INVALID", want: tlsConnectionAccepted},
+		{name: "refuses a certificate failure", stderr: "net::ERR_CERT_AUTHORITY_INVALID", exit: "failure", want: tlsCertificateRefused},
+		{name: "reports another failure as unavailable", stderr: "network is unreachable", exit: "failure", want: tlsNetworkUnavailable},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
 			client := tlsCommandClient{
-				clientName: name,
+				clientName: "generic",
 				command: func(tlsSite) (string, []string, []string) {
-					return "sh", []string{"-c", `printf %s "$1"`, "sh", "page body NET::ERR_CERT_AUTHORITY_INVALID"}, nil
+					return "sh", []string{"-c", `printf %s "$1"; printf %s "$2" >&2; test "$3" != failure`, "sh", testCase.stdout, testCase.stderr, testCase.exit}, nil
 				},
 			}
-			if outcome := client.probe(context.Background(), controlTLSSite); outcome.status != tlsConnectionAccepted {
-				t.Fatalf("client.probe() = %+v, want accepted successful response", outcome)
+
+			if outcome := client.probe(context.Background(), controlTLSSite); outcome.status != testCase.want {
+				t.Fatalf("client.probe() = %+v, want status %q", outcome, testCase.want)
+			}
+		})
+	}
+}
+
+func TestTLSChromiumClientClassifiesNavigationResult(t *testing.T) {
+	for _, testCase := range []struct {
+		name, stdout, stderr string
+		want                 tlsStatus
+	}{
+		{name: "accepts a loaded DOM with certificate text", stdout: "page body NET::ERR_CERT_AUTHORITY_INVALID", want: tlsConnectionAccepted},
+		{name: "refuses a certificate navigation failure", stdout: "page body NET::ERR_CERT_AUTHORITY_INVALID", stderr: "Page load failed: net::ERR_CERT_AUTHORITY_INVALID", want: tlsCertificateRefused},
+		{name: "reports another navigation failure as unavailable", stderr: "Page load failed: net::ERR_NAME_NOT_RESOLVED", want: tlsNetworkUnavailable},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			client := tlsChromiumClient{tlsCommandClient: tlsCommandClient{
+				clientName: "chromium",
+				command: func(tlsSite) (string, []string, []string) {
+					return "sh", []string{"-c", `printf %s "$1"; printf %s "$2" >&2`, "sh", testCase.stdout, testCase.stderr}, nil
+				},
+			}}
+
+			outcome := client.probe(context.Background(), controlTLSSite)
+			if outcome.status != testCase.want {
+				t.Fatalf("client.probe() = %+v, want status %q", outcome, testCase.want)
+			}
+			if strings.Contains(outcome.detail, "page body") {
+				t.Fatalf("client.probe() detail = %q, must not read the DOM", outcome.detail)
 			}
 		})
 	}

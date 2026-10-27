@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"time"
@@ -19,11 +21,11 @@ type tlsSite struct {
 }
 
 var (
-	emSignTLSSite  = tlsSite{name: "emSign", url: "https://dv-g3b-emudhra.we-have-a-problem.com/", root: "/usr/share/legion/tls-roots/emsign-ecc-root-ca-g3.pem"}
-	aaaTLSSite     = tlsSite{name: "AAA", url: "https://dv-g3b-aaa-emudhra.we-have-a-problem.com/", root: "/usr/share/legion/tls-roots/aaa-certificate-services.pem"}
-	controlTLSSite = tlsSite{name: "control", url: "https://example.com/", control: true}
+	emSignTLSSite    = tlsSite{name: "emSign", url: "https://dv-g3b-emudhra.we-have-a-problem.com/", root: "/usr/share/legion/tls-roots/emsign-ecc-root-ca-g3.pem"}
+	aaaTLSSite       = tlsSite{name: "AAA", url: "https://dv-g3b-aaa-emudhra.we-have-a-problem.com/", root: "/usr/share/legion/tls-roots/aaa-certificate-services.pem"}
+	controlTLSSite   = tlsSite{name: "control", url: "https://example.com/", control: true}
 	isolationTLSSite = tlsSite{name: "isolation", url: "https://letsencrypt.org/"}
-	tlsSites       = []tlsSite{emSignTLSSite, aaaTLSSite, controlTLSSite}
+	tlsSites         = []tlsSite{emSignTLSSite, aaaTLSSite, controlTLSSite}
 )
 
 type tlsStatus string
@@ -132,14 +134,8 @@ type tlsCommandClient struct {
 func (c tlsCommandClient) name() string { return c.clientName }
 
 func (c tlsCommandClient) probe(ctx context.Context, site tlsSite) tlsOutcome {
-	program, args, extraEnv := c.command(site)
-	commandCtx, cancel := context.WithTimeout(ctx, tlsProbeTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(commandCtx, program, args...)
-	cmd.Env = tlsEnvironment(c.env, append(extraEnv, "LEGION_TLS_URL="+site.url))
-	cmd.Dir = c.workDir
-	output, err := cmd.CombinedOutput()
-	message := tlsCommandMessage(err, string(output))
+	stderr, err := c.run(ctx, site)
+	message := tlsCommandMessage(err, stderr)
 	detail := trimTLSDetail(message)
 	switch {
 	case err == nil || c.applicationSeen != nil && c.applicationSeen(message):
@@ -149,6 +145,52 @@ func (c tlsCommandClient) probe(ctx context.Context, site tlsSite) tlsOutcome {
 	default:
 		return tlsOutcome{status: tlsNetworkUnavailable, detail: detail}
 	}
+}
+
+func (c tlsCommandClient) run(ctx context.Context, site tlsSite) (string, error) {
+	program, args, extraEnv := c.command(site)
+	commandCtx, cancel := context.WithTimeout(ctx, tlsProbeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(commandCtx, program, args...)
+	cmd.Env = tlsEnvironment(c.env, append(extraEnv, "LEGION_TLS_URL="+site.url))
+	cmd.Dir = c.workDir
+	var stderr bytes.Buffer
+	cmd.Stdout = io.Discard
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stderr.String(), err
+}
+
+// tlsChromiumClient reads Chromium's navigation result from stderr because its headless DOM dump
+// exits successfully after a failed navigation.
+type tlsChromiumClient struct {
+	tlsCommandClient
+}
+
+func (c tlsChromiumClient) probe(ctx context.Context, site tlsSite) tlsOutcome {
+	stderr, err := c.run(ctx, site)
+	if failure := chromiumNavigationFailure(stderr); failure != "" {
+		detail := trimTLSDetail(failure)
+		if tlsCertificateError(failure) {
+			return tlsOutcome{status: tlsCertificateRefused, detail: detail}
+		}
+		return tlsOutcome{status: tlsNetworkUnavailable, detail: detail}
+	}
+	detail := trimTLSDetail(tlsCommandMessage(err, stderr))
+	if err == nil {
+		return tlsOutcome{status: tlsConnectionAccepted, detail: detail}
+	}
+	return tlsOutcome{status: tlsNetworkUnavailable, detail: detail}
+}
+
+func chromiumNavigationFailure(stderr string) string {
+	const marker = "Page load failed:"
+	for _, line := range strings.Split(stderr, "\n") {
+		if _, failure, found := strings.Cut(line, marker); found {
+			return marker + strings.TrimSpace(failure)
+		}
+	}
+	return ""
 }
 
 func tlsEnvironment(base, additions []string) []string {
@@ -261,9 +303,17 @@ var workerTLSClients = []tlsClientSpec{
 		return []string{"-c", "import os, urllib.request; urllib.request.urlopen(os.environ['LEGION_TLS_URL']).read(1)"}
 	}, nil),
 	tlsCommandClientSpec("gh", "/usr/local/bin/gh", func(site tlsSite) []string { return []string{"api", site.url} }, ghResponseSeen, "GH_TOKEN=legion-tls-probe"),
-	tlsCommandClientSpec("chromium", "chromium", func(site tlsSite) []string {
-		return []string{"--headless", "--no-sandbox", "--dump-dom", site.url}
-	}, nil),
+	{
+		name: "chromium",
+		build: func(_ string, env []string, workDir string) tlsClient {
+			return tlsChromiumClient{tlsCommandClient: tlsCommandClient{
+				clientName: "chromium", env: env, workDir: workDir,
+				command: func(site tlsSite) (string, []string, []string) {
+					return "chromium", []string{"--headless", "--no-sandbox", "--dump-dom", site.url}, nil
+				},
+			}}
+		},
+	},
 }
 
 // imageTLSClients returns the image's TLS-capable programs. The gh wrapper manages worker tokens,
