@@ -19,11 +19,13 @@ import { directiveContainerSyntax } from './directive-container.js';
  * pass has to undo (a leaf directive interrupts a paragraph, so undoing it after the fact would
  * still leave one paragraph split in three).
  *
- * The container construct is legion's own (`./directive-container`), a micromark document
- * construct rather than micromark-extension-directive's flow construct, which tokenized a block's
- * content once per block around it: its cost is linear in the depth of nesting, and blocks nest at
- * most 32 deep, an opener past that reading as the text it is (INFRA-581). It emits the package's
- * token types, so `mdast-util-directive` builds the nodes from them as before.
+ * The container construct is legion's own, `directiveContainerSyntax` from
+ * `./directive-container`: a micromark document construct rather than
+ * micromark-extension-directive's flow construct, which tokenized a block's content once per block
+ * around it. It tokenizes the content once, and blocks nest at most `maxDirectiveNesting` (32)
+ * deep, an opener inside that many reading as the text it is, which bounds what each line costs
+ * (INFRA-581). It emits the package's token types, so `mdast-util-directive` builds the nodes from
+ * them as before.
  */
 export function remarkContainerDirectives(this: Processor): void {
   const data = this.data();

@@ -848,6 +848,14 @@
 
 ### Changed
 
+- A Markdown document now nests at most 32 typed blocks inside one another, whatever other blocks
+  stand between them, within its 100 blocks. A document write refuses a typed block opened inside
+  32 typed blocks, `400 INVALID_MARKDOWN` with `line N opens a typed block inside 32 typed blocks;
+  a document nests at most 32 typed blocks`, and a write whose own markdown nests within the bound
+  but lands deep enough that the result would nest past it is refused with `the result nests N
+  typed blocks inside one another` (an accepted suggestion's `INVALID_OP` on `replace_with`). 32 is
+  where the browser's parser stops opening `:::` blocks, so the server stores no document the
+  browser would read differently (INFRA-581).
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a
@@ -1480,6 +1488,21 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+
+- A Dispatch body that nests `:::` blocks deeply no longer freezes the reader's browser tab. The
+  browser's parser, micromark-extension-directive's container construct, read a block's content
+  once for each block around it: a comment of 2,000 nested unclosed `:::a` lines and one long line
+  held the page for about a minute, and one of 1,000 nested blocks, closed again, about 15 s. A
+  construct of `@legion/proof-editor`'s own reads that content once, and an opener inside 32 open
+  blocks reads as the text it is, so each of those bodies now draws in well under a second, in
+  every surface that shows one and in the document editor. A body nesting 32 blocks or fewer reads
+  as before, with two exceptions, since the browser now opens a `:::` block as it opens a quote or
+  a list: after a leading `---` that no later line closes, a `:::name{...}` line opens no typed
+  block at the document's level and reads as text, as a list, a quote or a footnote definition
+  there already did, and a document write reads it so too; and a footnote definition inside a
+  `:::` block also defines its footnote for a call in the text before the block. A rule opening a
+  document that holds a typed block at its level is now written `***`, so it no longer reads back
+  as an unclosed front-matter opener that turns the typed block into text (INFRA-581).
 
 - Every `envoy-infra` component refuses a number in an integer input that is not a whole number
   within the 64-bit integer range, at any depth (an object type's property, an array element, a
