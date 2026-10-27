@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-562",
+  "completed": "2026-10-27T08:47:30Z",
+  "proof": [
+    {
+      "criterion": "Items 1 and 2: a message or mention whose request is cancelled after commit reaches its recipient without a retry; pending attempts a killed process left are sent by the other process under their own key",
+      "surface": "Dispatch HTTP API (POST /api/v1/agents/{session}/messages, POST /api/v1/issues/{key}/comments with a mention, POST /api/v1/broadcasts) on two real envoy-dispatch processes against one Postgres 17 and one NATS, with a fake Envoy listener",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -tags multiprocess -count=1 -timeout 30m -v -run 'TestADeliveryAKilledProcess|TestASendWhoseRequest' ./cmd/dispatch",
+      "observed": "--- PASS: TestADeliveryAKilledProcessLeftPendingIsSentByTheOther (19.10s) with killed_while_sending and killed_before_the_claim PASS; --- PASS: TestASendWhoseRequestIsCancelledAfterItsCommitReachesItsRecipient (11.87s); each attempt reads 1:sent with one send per key and one receipt; no --- SKIP. Whole two-process suite at the head: ok 384.857s, 94 PASS, 0 FAIL, 0 SKIP",
+      "headSha": "ff6089dde70d",
+      "negativeControl": "The same rows at 2c76dfcfbb36 (tests only, on main's code): --- FAIL both rows; 'the direct message reads [1:pending] 30s after the row began waiting', 'the message stored before the kill reads [] 30s after', 'the mention reads [1:pending] 15s after'"
+    },
+    {
+      "criterion": "Item 8: a message or mention sent while the listener is being replaced (connection refused, 503, starting gate's JSON 503 on the send, no live session yet) reaches its session within 10 s on its original attempt; a session the listener never knows still reads failed: no live session; a process killed during the wait has its attempt sent by the other",
+      "surface": "Dispatch HTTP API on two envoy-dispatch processes against a fake listener that goes away and comes back",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=3 -timeout 30m -v -run 'TestASendDuringAListenerTakeOver' ./cmd/dispatch",
+      "observed": "--- PASS: TestASendDuringAListenerTakeOverReachesItsSession three times out of three (sent_during_the_take-over, sent_to_a_session_the_listener_never_knows, killed_during_the_wait all PASS); both keys met the 503 'service starting' gate at least once",
+      "headSha": "ff6089dde70d",
+      "negativeControl": "At 88bf24bf68b7 (tests only, before the retry): --- FAIL sent_during_the_take-over (attempts read [1:failed]) and killed_during_the_wait; at the client before the JSON-503 fix: TestRoleAndSendReportAStartingListenerAsUnavailable FAIL 'err = service starting, want ErrUnavailable true'"
+    },
+    {
+      "criterion": "Item 3: a webhook redelivery whose process died between its claim and its request is requested again",
+      "surface": "envoy-dispatch redeliver-webhooks --since 1h, two processes against one NATS, one Postgres and the GitHub webhook fake behind a proxy that holds the POST",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run 'TestAWebhookRedelivery' ./cmd/dispatch",
+      "observed": "--- PASS: TestAWebhookRedeliveryWhoseProcessDiedAfterItsClaimIsRequestedAgain (4.86s): GitHub got the delivery's redelivery request exactly once from the second process, summary redelivered=1",
+      "headSha": "ff6089dde70d",
+      "negativeControl": "On the unfixed sweep: --- FAIL 'GitHub got redelivery requests [], want [<id>] once' (the second sweep read the dead claim as Pending)"
+    },
+    {
+      "criterion": "Item 4: two processes syncing one project's architecture never write the older head over the newer",
+      "surface": "POST /api/v1/projects/{key}/architecture-sources/{owner}/{repo}/sync on two envoy-dispatch processes",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run 'TestTwoProcessesSyncing' ./cmd/dispatch",
+      "observed": "--- PASS: TestTwoProcessesSyncingOneProjectNeverWriteTheOlderCommit (7.83s): last_commit = Y, components [queue store], architecture.synced events exactly [Y]",
+      "headSha": "ff6089dde70d",
+      "negativeControl": "On the unfixed importer: --- FAIL 'last_commit = 1111…, want 2222…', components [api], synced events [2222… 1111…]"
+    },
+    {
+      "criterion": "Item 5: an issue's route status agrees across processes and a filtered page served by either process is cut from one answer",
+      "surface": "GET /api/v1/issues/{key} and GET /api/v1/issues?route_status= on two envoy-dispatch processes",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run 'TestBothProcessesJudge' ./cmd/dispatch",
+      "observed": "--- PASS: TestBothProcessesJudgeARouteAgainstOneRoster (16.25s), an_issue's_route and a_filtered_page PASS: B and A read the same live with one sessions call; pages 1 (A) and 2 (B) hold exactly the first six, total 6 on both",
+      "headSha": "ff6089dde70d",
+      "negativeControl": "On the unfixed roster: --- FAIL 'B reads no_holder null after the listener stopped listing the holder, want the stored live', 'page 2 on B holds [-8 -10 -12]'"
+    },
+    {
+      "criterion": "Item 6: a GitHub rate limit one process met stops the other from calling GitHub; claim and answer times come from the database; a configuration warning is logged once across processes",
+      "surface": "GET /api/github/rest/…, POST /api/v1/issues/{key}/claim, the ask answer route and the delivery timeline API on two envoy-dispatch processes",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run 'TestARateLimitOneProcess|TestClaimAndAnswerTimes|TestAConfigurationWarning' ./cmd/dispatch",
+      "observed": "--- PASS: TestARateLimitOneProcessMetStopsTheOtherFromCallingGitHub (7.90s): B answers 503 GITHUB_RATE_LIMITED and GitHub saw no request under the installation token after A's; --- PASS: TestClaimAndAnswerTimesComeFromTheDatabaseOnEitherProcess (7.77s); --- PASS: TestAConfigurationWarningIsLoggedOnceAcrossTheProcesses (8.32s)",
+      "headSha": "ff6089dde70d",
+      "negativeControl": "On the unfixed code: rate-limit row FAIL 'B's read inside the limit: status 200, want 503 GITHUB_RATE_LIMITED'; clock row FAIL (Go-clock times differ from the transaction's now()); warning row FAIL '1 on A, 1 on B, want one between them'"
+    },
+    {
+      "criterion": "Item 7: every test hook acts on every server process; a dead process does not hold a hook call",
+      "surface": "POST /api/v1/events/_test/disconnect, /api/v1/delivery/_test/disconnect, /api/v1/artifacts/_test/quiesce, /api/v1/agents/{session}/stream/_test/publish on two envoy-dispatch processes, plus the browser suite on one process (chromium)",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=2 -timeout 30m -v -run 'TestEveryTestHookActsOnBothProcesses' ./cmd/dispatch; cd packages/dispatch && bun run e2e --project chromium live.e2e.ts:339 agents.e2e.ts:460 delivery-live.e2e.ts:332 agent-view.e2e.ts:371 agent-view.e2e.ts:744 agent-view.e2e.ts:970",
+      "observed": "--- PASS twice (8.53s, 7.69s); the hook on A answered ~110 ms after B was SIGKILLed; e2e: 6 passed (31.9s), agent-view.e2e.ts:970 publishing a 12 KB replay split across notifications",
+      "headSha": "ff6089dde70d",
+      "negativeControl": "On the unfixed hooks: --- FAIL 'the event stream B held after the disconnect hook was called on A was still open 10s later'"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/api/{messages.go,message_delivery.go,comment_create.go,comment_delivery.go,broadcasts.go,envoy_resolve.go,delivery_resume.go (new),issue_route_status.go,test_hooks_fanout.go (new),events.go,delivery_live_socket.go,artifacts.go,agent_stream.go,routes_table.go,server.go,delivery.go,issue_claim.go,ask_transitions.go,ask_snooze.go}",
+    "packages/envoy/internal/dispatch/{envoy/client.go,redeliver/sweep.go,architecture/importer.go,githubapp/client.go,githubapp/deliveries.go,githubapp/ratelimit/ratelimit.go (new),githubapi/proxy.go,docs/approval_carry.go,docs/copied_asks.go,duty/exclusive.go,routes/router.go,store/pool.go,model/model.go}",
+    "packages/envoy/internal/pglisten/listener.go",
+    "packages/envoy/internal/dispatch/store/migrations/0121_message_delivery_urgency, 0122_route_roster, 0123_github_rate_limits, 0124_delivery_run_warnings (.up.sql + .census.sql)",
+    "packages/envoy/cmd/dispatch/{main.go,redeliver.go,settings.go,README.md,AGENTS.md}",
+    "packages/envoy/{AGENTS.md,CHANGELOG.md}, packages/envoy-client/src/dispatch-execute.ts (comment)",
+    "packages/dispatch/e2e/{message-agent,mention-composer,broadcast,agent-view-settings}.e2e.ts (the 12 s take-over window)",
+    "tests: cmd/dispatch/multiprocess_test.go (10 new two-process rows and a fake listener), api/{delivery_resume,listener_takeover,test_hooks_fanout,database_clock}_test.go (new), api/{issue_route_status,issue_route_status_cache,delivery,messages,comment_delivery_*,issue_claim}_test.go, githubapp/limits_test.go (new), envoy/client_test.go, redeliver/sweep_test.go, architecture/importer_test.go, githubapi/proxy_test.go, cmd/dispatch/settings_test.go"
+  ],
+  "trickyParts": [
+    "Item 8's take-over wait retries 'no live session' too, so a send to a session that is really gone reads failed about 12 s after its first try, and a request that sends during a take-over answers up to ~12 s later (up to ~22 s against a listener that hangs every read). Browser specs that assert a failed send were given their own timeouts naming listenerTakeoverWindow; 7 affected specs pass on chromium in the pod.",
+    "Item 7 departs from the plan's 400 above 8000 bytes for a published frame: the browser suite's agent-view specs publish ~12.4 KB replays, so a call is split into parts under 7900 bytes sent in one transaction and reassembled on every process; a frame that is not valid UTF-8 is refused 400 FRAME_INPUT.",
+    "A person's Retry beside a live claim still opens its own attempt (existing rule); claim renewal during the take-over wait keeps the resume loop off the attempt, not a Retry.",
+    "The redelivery claim deadline is a function (3 x githubapp.RequestTimeout) because RequestTimeout is a var tests shrink.",
+    "A GitHub installation token keeps its rate-limit scope until it expires, so a caller holding a token minted before a refresh is still gated."
+  ],
+  "deviations": [
+    "Item 7 frame limit: chunked notifications instead of a 400 above 8000 bytes (reason above).",
+    "leasePoolSize is 9 here; INFRA-555 also raises it to 9 for its own loop, so whichever of the two merges second sets 10 (architect's instruction).",
+    "Tests-first red runs: the two-process rows' red runs are on the tests-only commits (2c76dfcf for items 1/2, 88bf24bf for item 8) or the worker's pre-fix run (items 3-7, logs under /legion/scratch/tmp/infra562/red-*.log); in-package tests that need a new symbol were red against stubs."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "Full ./internal/dispatch/... ./cmd/dispatch/... run in the pod: everything passes except environment-bound tests in packages this branch does not touch (files TestS3AgainstAnS3CompatibleServer: rootless Docker not found; pmdoc linearity timings under gVisor's 10 ms timer) and api TestSavingAPathologicalBodyIsBounded, a timing bound that failed once under the full-suite load and passed 3/3 alone."
+  ]
+}
