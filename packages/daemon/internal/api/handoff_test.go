@@ -505,17 +505,6 @@ func TestHandoffCompleteHoldsTheCompletionToTheRecordItNames(t *testing.T) {
 	}
 }
 
-// The route's table of the role whose completion of each file-backed phase names a handoff record
-// is the workflow's: the role it starts on that phase.
-func TestRecordWritersAreTheRolesTheWorkflowStartsOnEachFileBackedPhase(t *testing.T) {
-	for _, p := range phase.All {
-		writer, listed := recordWriters[p]
-		if phase.FileBacked(p) != listed || (listed && writer != workflow.RoleFor(p)) {
-			t.Errorf("phase %s: the route's record writer is %q (listed %t), want %q exactly when it is file-backed (%t)", p, writer, listed, workflow.RoleFor(p), phase.FileBacked(p))
-		}
-	}
-}
-
 func TestHandoffCompleteEnforcesRoleSpecificFieldsAndDeduplicatesTheRecord(t *testing.T) {
 	github := newHandoffGitHub(t)
 	h, facts := newHandoffHarness(t, github, nil, nil)

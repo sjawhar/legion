@@ -408,7 +408,8 @@ merger's role prompt
 `note` is the already-merged sentence, for a pull request merged before READY, or the by-hand note
 (`MANUAL_MERGE_REQUIRED:`) for a pull request a person merges. The
 operation mints its grant in-process and posts it with the request; nothing is written to the
-pane. A predecessor's handoff is read with `dispatch handoff-read`. GitHub is the pane's
+pane. A predecessor's handoff is read with `dispatch handoff-read`, at the version the task's
+`Handoff:` line names (`--version <n>`). GitHub is the pane's
 `gh` and `git`, which read the role's App tokens from the gh bundle under `LEGION_GH_OWNERS_DIR`; no
 tool operation writes to GitHub for a role. Review threads are the pull request author's to
 resolve: the reviewer, whose review

@@ -194,8 +194,9 @@ architect has written its spec.
 
 Each phase ends by writing a **handoff**, a small JSON record on its Dispatch issue, kept under the
 phase's word: `plan`, `implement`, `test` and `review`. The worker writes it with
-`dispatch handoff-write` under its own session, and every write adds a version; the next phase
-reads the newest with `dispatch handoff-read`. A handoff is the copy that survives: when a worker
+`dispatch handoff-write` under its own session, and every write adds a version; the next phase's
+task names the version the daemon accepted, which it reads with
+`dispatch handoff-read --version <n>`. A handoff is the copy that survives: when a worker
 comes back after a restart, or a memory disagrees with a record, the record wins. The issue's
 Conversation in Dispatch lists every version, and opens each to its fields. The merger writes
 none, and nor does the architect.

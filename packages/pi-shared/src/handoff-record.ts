@@ -64,7 +64,7 @@ export interface HandoffReportInput {
 }
 
 /** The handoff a file-backed phase ends with, by the phase's word, and the role that works it:
- * the daemon's `phase.HandoffFile` and `workflow.RoleFor` tables, mirrored. */
+ * the daemon's `phase.Handoff` table (each phase's word and writer), mirrored. */
 const FILE_BACKED: Readonly<Partial<Record<LegionPhase, { word: string; role: LegionRole }>>> = {
   planning: { word: "plan", role: "planner" },
   implementing: { word: "implement", role: "implementer" },

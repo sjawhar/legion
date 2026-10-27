@@ -37,10 +37,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   from the same commit, in this order (docs/kubernetes.md, "Moving the handoffs onto their Dispatch
   issues"): deploy the Dispatch server that carries the handoff routes first, then run
   `legion handoffs import` while the old daemon still runs, then roll out the daemon and the
-  plugins, then run the import again, which catches a file an old worker pushed in between.
+  plugins, then run the import again, which catches a file an old worker pushed in between, until
+  it prints `deferred 0` and no `kept` line.
 - The skills this plugin ships teach the handoff record (INFRA-177): a worker writes its phase's
   handoff with `dispatch handoff-write --issue <KEY> --phase <phase> --body-file <file>` and reads
-  the previous role's with `dispatch handoff-read`, rather than committing and pushing
+  the previous role's with `dispatch handoff-read`, at the version its task's `Handoff:` line names
+  (`--version <n>`), rather than committing and pushing
   `.legion/<issue>/<phase>.json`. The `LEGION_WORKSPACE_RECREATED` notice tells a worker whose
   workspace was recreated to re-read the last handoff recorded on its issue with
   `dispatch handoff-read --issue <KEY> --phase <phase>`, since Dispatch keeps it whatever the

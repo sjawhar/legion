@@ -20,19 +20,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// recordWriters is the role whose completion of each file-backed phase (phase.FileBacked) names
-// its Dispatch handoff record: the role the workflow starts on it, workflow.RoleFor, which this
-// package cannot call since workflow's tests import it (a test ties the two).
-var recordWriters = map[phase.Phase]claim.Role{
-	phase.Planning:     claim.RolePlanner,
-	phase.Implementing: claim.RoleImplementer,
-	phase.Testing:      claim.RoleTester,
-	phase.Reviewing:    claim.RoleReviewer,
-}
-
 // HandoffCompleteRequest is what a worker reports when its phase is done, or what the implementer
-// reports on a look of its closed issue's production check. A file-backed phase (planning,
-// implementing, testing, reviewing; phase.FileBacked) ends with a handoff record on the Dispatch
+// reports on a look of its closed issue's production check. A phase with a handoff (planning,
+// implementing, testing, reviewing; phase.Handoff) ends with a handoff record on the Dispatch
 // issue, which the worker writes with `dispatch handoff-write` under its own session, and its
 // completion names it: HandoffID and HandoffVersion, which the `legion` tool's handoff_complete
 // reads as the newest record of the phase before posting. The daemon reads that record back from
@@ -138,18 +128,18 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusConflict, "HANDOFF_STALE_GENERATION", staleCompletion(grant.Issue, issue.Generation, serving, machine.Claim().Pending))
 		return
 	}
-	// A file-backed phase ends with a Dispatch handoff record, which its role's completion names and
-	// the route reads back and holds to the completion before anything is recorded; a phase that
-	// writes none takes no record. A completion of a file-backed phase the role does not run is the
-	// engine's to refuse (HANDOFF_NOT_CURRENT_PHASE), so its record is not read.
-	word, fileBacked := phase.HandoffFile(issue.Phase)
-	recordBacked := fileBacked && recordWriters[issue.Phase] == grant.Role
+	// A phase with a handoff ends with a Dispatch handoff record, which its writer's completion
+	// names and the route reads back and holds to the completion before anything is recorded; a
+	// phase that writes none takes no record. A completion of such a phase by a role other than
+	// its writer is the engine's to refuse (HANDOFF_NOT_CURRENT_PHASE), so its record is not read.
+	word, writer, handoffPhase := phase.Handoff(issue.Phase)
+	recordBacked := handoffPhase && writer == grant.Role
 	switch {
 	case recordBacked:
 		if !s.handoffRecord(w, r, held.Session, issue, word, req) {
 			return
 		}
-	case !fileBacked && (req.HandoffID != "" || req.HandoffVersion != 0):
+	case !handoffPhase && (req.HandoffID != "" || req.HandoffVersion != 0):
 		writeFailure(w, http.StatusConflict, "HANDOFF_RECORD_MISMATCH", fmt.Sprintf(
 			"phase %s of %s ends with no handoff record, and this completion names one: complete without handoffId and handoffVersion; this completion changed nothing", issue.Phase, issue.Key))
 		return

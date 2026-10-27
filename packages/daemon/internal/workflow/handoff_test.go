@@ -55,10 +55,30 @@ func TestReworkRoundAdvancesOnlyOnThatRoundsHandoff(t *testing.T) {
 	if err := pool.QueryRow(ctx, "select payload->>'task' from outbox where kind = 'supervise' and payload->>'op' = 'start'").Scan(&task); err != nil {
 		t.Fatalf("read the tester's start task: %v", err)
 	}
-	for _, want := range []string{"Handoff: implement version 2 (dispatch handoff-read --issue LEGION-208 --phase implement).", "Handoff commit: round-1."} {
+	for _, want := range []string{"Handoff: implement version 2 (dispatch handoff-read --issue LEGION-208 --phase implement --version 2).", "Handoff commit: round-1."} {
 		if !strings.Contains(task, want) {
 			t.Fatalf("tester task %q, want it to carry %q", task, want)
 		}
+	}
+}
+
+// phase.Handoff's writer of each phase with a handoff is the role the workflow starts on it
+// (RoleFor), so the route reads a record from that role's completion alone, and the task line
+// names each role's word (handoffWord).
+func TestTheHandoffWriterOfEachPhaseIsTheRoleTheWorkflowStartsOnIt(t *testing.T) {
+	handoffs := 0
+	for _, p := range phase.All {
+		word, writer, ok := phase.Handoff(p)
+		if !ok {
+			continue
+		}
+		handoffs++
+		if writer != RoleFor(p) || handoffWord(writer) != word {
+			t.Errorf("phase %s: phase.Handoff names %q written by %q; RoleFor names %q, and handoffWord(%q) is %q", p, word, writer, RoleFor(p), writer, handoffWord(writer))
+		}
+	}
+	if handoffs != 4 {
+		t.Errorf("phase.Handoff names %d phases with a handoff, want planning, implementing, testing and reviewing", handoffs)
 	}
 }
 

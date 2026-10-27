@@ -275,9 +275,9 @@ type PhaseRow struct {
 	// merger's READY names. The planner, the tester and the reviewer report none.
 	HandoffCommit string
 	// HandoffRecord and HandoffVersion are the Dispatch handoff record the role's completion of its
-	// current file-backed phase named (phase.FileBacked), and that record's version among its
-	// phase's records: the next worker reads it with `dispatch handoff-read`. Empty and zero for a
-	// phase that writes none.
+	// current phase named, for a phase with a handoff (phase.Handoff), and that record's version
+	// among its phase's records: the next worker reads that version with `dispatch handoff-read
+	// --version <n>`, as its task's Handoff line says. Empty and zero for a phase that writes none.
 	HandoffRecord  string
 	HandoffVersion int
 	Rounds         int

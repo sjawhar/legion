@@ -22,8 +22,9 @@
 // starts and names in LEGION_E2E_NATS_URL. GitHub is two REST stand-ins: the daemon's
 // (mergedRootWaitsGitHub, which answers each repository with default branch main and nothing
 // else), and the import's (handoffRecordsGitHub), one branch carrying `.legion/<KEY>/`, which the
-// import reads and removes through GitHub's contents and Git Data APIs. The Apps' tokens are
-// workflowTokenRecorder's placeholders, Envoy's listener is the package's noticeListener, and no
+// import reads through GitHub's contents API and, its issue in testing, leaves as it is. The Apps'
+// tokens are workflowTokenRecorder's placeholders, Envoy's listener is the package's
+// noticeListener, and no
 // agent runs: each claim is launched by the package's fake runtime, which provisions its workspace
 // in its own pod, and is driven over the daemon's worker stream as its pane's shim drives it
 // (handoffClaimant). The issues, their pull requests, their trees' slots and the claims the boot
@@ -43,19 +44,16 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -358,16 +356,32 @@ func (r *handoffRecordsLive) a3Accepted() {
 }
 
 // Step A7. `legion handoffs import` writes the files on a7's branch as its records under the
-// daemon's session and removes `.legion/` from the branch; the tester's completion naming the
-// imported test record is refused 403 HANDOFF_SESSION_MISMATCH; the tester reads it with `dispatch
+// daemon's session and, a7 being in testing under the records' daemon, defers the removal of
+// `.legion/` and writes nothing to the branch; the tester's completion naming the imported test
+// record is refused 403 HANDOFF_SESSION_MISMATCH; the tester reads it with `dispatch
 // handoff-read`, writes it again under its own session, and completes; and the reviewer the pass
-// starts is told that record in its task.
+// starts is told that record in its task, the version its command reads.
 func (r *handoffRecordsLive) a7Import() {
 	t := r.t
 	tester := r.claimant(claim.RoleTester, r.a7, "ses_a7_tester")
 	var stdout, stderr bytes.Buffer
+	state := func(ctx context.Context) ([]byte, error) {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, r.cfg.DaemonURL+"/legion/v1/state", nil)
+		if err != nil {
+			return nil, err
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			return nil, err
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("GET /legion/v1/state answered %d", response.StatusCode)
+		}
+		return io.ReadAll(response.Body)
+	}
 	code := handoffimport.Run(context.Background(), handoffimport.Options{
-		Project: r.cfg.Project, DaemonURL: r.cfg.DaemonURL, GitHubAPI: r.importGH.server.URL,
+		Project: r.cfg.Project, State: state, GitHubAPI: r.importGH.server.URL,
 		Tokens: &workflowTokenRecorder{}, Dispatch: dispatch.New(r.dispatch.base, r.dispatch.token),
 	}, &stdout, &stderr)
 	for _, line := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
@@ -376,12 +390,13 @@ func (r *handoffRecordsLive) a7Import() {
 	if code != 0 {
 		t.Fatalf("legion handoffs import exited %d: %s%s", code, stdout.String(), stderr.String())
 	}
-	for _, want := range []string{r.a7 + " plan: imported v1", r.a7 + " implement: imported v1", r.a7 + " test: imported v1", r.a7 + ": removed .legion/ at "} {
+	deferred := r.a7 + ": removal deferred: " + r.a7 + " is in testing; run the import again once the phase ends"
+	for _, want := range []string{r.a7 + " plan: imported v1", r.a7 + " implement: imported v1", r.a7 + " test: imported v1", deferred} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("the import printed %q, want a line %q", stdout.String(), want)
 		}
 	}
-	r.importGH.heldRemoval(t, r)
+	r.importGH.heldNoRemoval(t, r)
 	imported := r.dispatch.latest(r.a7, "test")
 	if imported.Author.Kind != "session" || imported.Author.ID != dispatch.DaemonSession(r.a7) || imported.Body != r.importGH.files["test.json"] {
 		t.Fatalf("the imported test record = %+v, want the branch's test.json under %s", imported, dispatch.DaemonSession(r.a7))
@@ -414,12 +429,12 @@ func (r *handoffRecordsLive) a7Import() {
 
 	reviewer := r.claimant(claim.RoleReviewer, r.a7, "ses_a7_reviewer")
 	task := reviewer.awaitPrompt()
-	want := fmt.Sprintf("Handoff: test version %d (dispatch handoff-read --issue %s --phase test).", rewritten.version, r.a7)
+	want := fmt.Sprintf("Handoff: test version %d (dispatch handoff-read --issue %s --phase test --version %d).", rewritten.version, r.a7, rewritten.version)
 	if !strings.Contains(task.Message, want) {
 		t.Fatalf("the reviewer was prompted %q, want it to name %q", task.Message, want)
 	}
 	r.note("the reviewer's shim was prompted: %q", task.Message)
-	meta, _ = r.read(reviewer.session, r.a7, "test")
+	meta, _ = r.read(reviewer.session, r.a7, "test", "--version", strconv.Itoa(rewritten.version))
 	if !strings.Contains(meta, fmt.Sprintf("version %d (id %s)", rewritten.version, rewritten.id)) || !strings.Contains(meta, tester.session) {
 		t.Fatalf("the reviewer's handoff-read says %q, want version %d (id %s) by %s", meta, rewritten.version, rewritten.id, tester.session)
 	}
@@ -873,171 +888,29 @@ func (c *handoffClaimant) complete(req api.HandoffCompleteRequest) (int, api.Fai
 	return status, failure
 }
 
-// handoffDispatch is the real Dispatch server this run builds and runs: its binary, its own
-// database, the port it serves on (kept across a restart, since the daemon's dispatch_url and the
-// CLI's DISPATCH_URL name it), and the running process.
+// handoffDispatch is the real Dispatch server this run builds and runs (startScratchDispatchOn's,
+// with NATS off), and the requests the driver sends it. Its port is kept across a restart, since
+// the daemon's dispatch_url and the CLI's DISPATCH_URL name it.
 type handoffDispatch struct {
-	t        *testing.T
-	binary   string
-	dir      string
-	webDist  string
-	database string
-	token    string
-	home     string
-	log      io.Writer
-	port     int
-	base     string
-	command  *exec.Cmd
-	exited   chan error
-	output   *syncBuffer
-	client   *http.Client
+	*scratchDispatch
+	client *http.Client
 }
 
-// startHandoffDispatch creates the run's Dispatch database on LEGION_TEST_PG_DSN's server, builds
-// cmd/dispatch from root's packages/envoy, and starts it. The database is dropped and the process
-// stopped when the test ends. Dispatch's own log goes beside the daemon's in the evidence
-// directory when the script names one.
+// startHandoffDispatch starts the run's Dispatch server from root's packages/envoy on a database
+// of its own. Dispatch's own log goes beside the daemon's in the evidence directory when the
+// script names one.
 func startHandoffDispatch(t *testing.T, root string) *handoffDispatch {
 	t.Helper()
-	ctx := context.Background()
-	base, err := url.Parse(testDSN(t))
-	if err != nil {
-		t.Fatalf("parse LEGION_TEST_PG_DSN: %v", err)
-	}
-	adminURL := *base
-	adminURL.Path = "/postgres"
-	admin, err := pgxpool.New(ctx, adminURL.String())
-	if err != nil {
-		t.Fatalf("open the Postgres admin pool: %v", err)
-	}
-	t.Cleanup(admin.Close)
-	name := "dispatch_handoff_records_" + strings.ToLower(randomSuffix(t))
-	if _, err := admin.Exec(ctx, "create database "+name); err != nil {
-		t.Fatalf("create the Dispatch database: %v", err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
-			t.Errorf("drop the Dispatch database %s: %v", name, err)
-		}
-	})
-	serverURL := *base
-	serverURL.Path = "/" + name
-	d := &handoffDispatch{
-		t: t, binary: filepath.Join(t.TempDir(), "dispatch"), dir: filepath.Join(root, "packages", "envoy"),
-		webDist: filepath.Join(root, "packages", "dispatch", "web", "dist"), database: serverURL.String(),
-		token: "handoff-records-agent-" + strings.ToLower(randomSuffix(t)), home: t.TempDir(), log: io.Discard,
-		client: &http.Client{Timeout: 10 * time.Second},
-	}
+	options := scratchDispatchOptions{root: root}
 	if daemonLog := os.Getenv(liveDaemonLogEnv); daemonLog != "" {
 		file, err := os.OpenFile(filepath.Join(filepath.Dir(daemonLog), "dispatch.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
 			t.Fatalf("open Dispatch's log: %v", err)
 		}
 		t.Cleanup(func() { file.Close() })
-		d.log = file
+		options.log = file
 	}
-	build := exec.Command("go", "build", "-o", d.binary, "./cmd/dispatch")
-	build.Dir = d.dir
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build Dispatch: %v\n%s", err, output)
-	}
-	t.Cleanup(d.stop)
-	d.start()
-	return d
-}
-
-// start runs the server and returns once GET /api/v1 answers 200. The first start takes a free
-// port; a restart takes the same one again, retrying while the kernel still holds it.
-func (d *handoffDispatch) start() {
-	t := d.t
-	t.Helper()
-	restart := d.port != 0
-	for attempt := 1; ; attempt++ {
-		if d.port == 0 {
-			d.port = boundPort(t)
-			d.base = fmt.Sprintf("http://127.0.0.1:%d", d.port)
-		}
-		command := exec.Command(d.binary)
-		command.Dir = d.dir
-		// Nothing of the caller's Dispatch, Envoy or NATS settings reaches the scratch server, as
-		// run-server.sh drops them: a Legion pane exports DISPATCH_URL and friends.
-		for _, entry := range os.Environ() {
-			if !strings.HasPrefix(entry, "DISPATCH_") && !strings.HasPrefix(entry, "ENVOY_") && !strings.HasPrefix(entry, "NATS_") && !strings.HasPrefix(entry, "HOME=") {
-				command.Env = append(command.Env, entry)
-			}
-		}
-		command.Env = append(command.Env,
-			"DATABASE_URL="+d.database,
-			"DISPATCH_AGENT_TOKEN="+d.token,
-			"DISPATCH_IDENTITY=header:X-Dispatch-User",
-			"DISPATCH_IDENTITY_HEADER_TRUSTED=1",
-			"DISPATCH_NATS_DISABLED=1",
-			"DISPATCH_LISTEN_HOST=127.0.0.1",
-			fmt.Sprintf("DISPATCH_PORT=%d", d.port),
-			"DISPATCH_SERVER_URL="+d.base,
-			"DISPATCH_WEB_DIST="+d.webDist,
-			"HOME="+d.home,
-		)
-		output := &syncBuffer{}
-		command.Stdout = io.MultiWriter(output, d.log)
-		command.Stderr = command.Stdout
-		if err := command.Start(); err != nil {
-			t.Fatalf("start Dispatch: %v", err)
-		}
-		exited := make(chan error, 1)
-		go func() { exited <- command.Wait() }()
-		d.command, d.exited, d.output = command, exited, output
-		if d.ready() {
-			return
-		}
-		d.command = nil
-		if attempt < 10 && strings.Contains(output.String(), "address already in use") {
-			if !restart {
-				d.port = 0
-			}
-			time.Sleep(500 * time.Millisecond)
-			continue
-		}
-		t.Fatalf("Dispatch did not become ready:\n%s", output.String())
-	}
-}
-
-// ready waits for the started process to answer GET /api/v1, and says whether it did before it
-// exited or two minutes passed.
-func (d *handoffDispatch) ready() bool {
-	deadline := time.Now().Add(2 * time.Minute)
-	for time.Now().Before(deadline) {
-		select {
-		case <-d.exited:
-			return false
-		default:
-		}
-		if response, err := pollClient.Get(d.base + "/api/v1"); err == nil {
-			response.Body.Close()
-			if response.StatusCode == http.StatusOK {
-				return true
-			}
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	_ = d.command.Process.Kill()
-	<-d.exited
-	return false
-}
-
-// stop interrupts the running server and waits for it to exit, killing it after ten seconds.
-func (d *handoffDispatch) stop() {
-	if d.command == nil {
-		return
-	}
-	_ = d.command.Process.Signal(syscall.SIGINT)
-	select {
-	case <-d.exited:
-	case <-time.After(10 * time.Second):
-		_ = d.command.Process.Kill()
-		<-d.exited
-	}
-	d.command = nil
+	return &handoffDispatch{scratchDispatch: startScratchDispatchOn(t, options), client: &http.Client{Timeout: 10 * time.Second}}
 }
 
 // user sends one request as the person handoffRecordsUser and requires want, decoding the answer
@@ -1153,33 +1026,25 @@ func (d *handoffDispatch) latest(key, word string) handoffRecord {
 	return latest
 }
 
-// handoffRecordsGitHub is GitHub's REST API as `legion handoffs import` reads and writes it for one
-// branch, legion/<key> on liveRepo, whose head carries `.legion/<key>/{plan,implement,test}.json`
-// and a README beside `.legion/`: the ref, the contents API's listings and files, the commit and
-// its trees, and the tree, commit and non-forced ref update the removal writes, each recorded.
-// Every other branch is 404, which the import reports as no branch.
+// handoffRecordsGitHub is GitHub's REST API as `legion handoffs import` reads it for one branch,
+// legion/<key> on liveRepo, whose head carries `.legion/<key>/{plan,implement,test}.json`: the
+// ref, and the contents API's listings and files. Every request is recorded, so a write the import
+// must not make is seen; every other path, and every other branch, is 404, which the import
+// reports as no branch.
 type handoffRecordsGitHub struct {
-	server *httptest.Server
-	key    string
-	files  map[string]string
-	mu     sync.Mutex
-	head   string
-	// tree, commit and ref are the bodies of the removal's three writes, as GitHub received them.
-	tree, commit, ref map[string]any
+	server   *httptest.Server
+	key      string
+	files    map[string]string
+	mu       sync.Mutex
+	requests []string
 }
 
-// The commits and trees the stand-in branch is made of, and what the removal writes.
-const (
-	handoffGitHead      = "1111111111111111111111111111111111111111"
-	handoffGitRootTree  = "2222222222222222222222222222222222222222"
-	handoffGitLegion    = "3333333333333333333333333333333333333333"
-	handoffGitNewTree   = "4444444444444444444444444444444444444444"
-	handoffGitNewCommit = "5555555555555555555555555555555555555555"
-)
+// handoffGitHead is the commit the stand-in branch names.
+const handoffGitHead = "1111111111111111111111111111111111111111"
 
 func newHandoffRecordsGitHub(t *testing.T, key string) *handoffRecordsGitHub {
 	t.Helper()
-	g := &handoffRecordsGitHub{key: key, head: handoffGitHead, files: map[string]string{
+	g := &handoffRecordsGitHub{key: key, files: map[string]string{
 		"plan.json":      fmt.Sprintf("{\n  \"schemaVersion\": 1,\n  \"phase\": \"plan\",\n  \"issue\": %q,\n  \"plan\": \"committed before the cutover\"\n}\n", key),
 		"implement.json": fmt.Sprintf("{\n  \"schemaVersion\": 1,\n  \"phase\": \"implement\",\n  \"issue\": %q,\n  \"proof\": [{\"criterion\": \"A7\", \"observed\": \"committed before the cutover\"}]\n}\n", key),
 		"test.json":      fmt.Sprintf("{\n  \"schemaVersion\": 1,\n  \"phase\": \"test\",\n  \"issue\": %q,\n  \"verdict\": \"pass\",\n  \"implementerProof\": [\"A7\"]\n}\n", key),
@@ -1192,103 +1057,49 @@ func newHandoffRecordsGitHub(t *testing.T, key string) *handoffRecordsGitHub {
 func (g *handoffRecordsGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.requests = append(g.requests, r.Method+" "+r.URL.Path)
 	w.Header().Set("Content-Type", "application/json")
 	repo := "/repos/" + liveRepo
 	path := strings.TrimPrefix(r.URL.Path, repo)
 	answer := func(value any) { _ = json.NewEncoder(w).Encode(value) }
 	notFound := func() { w.WriteHeader(http.StatusNotFound); _, _ = io.WriteString(w, `{"message":"Not Found"}`) }
-	write := func(into *map[string]any) bool {
-		if err := json.NewDecoder(r.Body).Decode(into); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return false
-		}
-		return true
-	}
 	ref := r.URL.Query().Get("ref")
 	legion := ".legion/" + g.key
 	switch {
-	case !strings.HasPrefix(r.URL.Path, repo+"/"):
+	case r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, repo+"/"):
 		notFound()
-	case r.Method == http.MethodGet && path == "/git/ref/heads/legion/"+g.key:
-		answer(map[string]any{"object": map[string]string{"sha": g.head}})
-	case r.Method == http.MethodGet && path == "/contents/.legion" && ref == handoffGitHead:
+	case path == "/git/ref/heads/legion/"+g.key:
+		answer(map[string]any{"object": map[string]string{"sha": handoffGitHead}})
+	case path == "/contents/.legion" && ref == handoffGitHead:
 		answer([]map[string]string{{"name": g.key, "type": "dir"}})
-	case r.Method == http.MethodGet && path == "/contents/"+legion && ref == handoffGitHead:
+	case path == "/contents/"+legion && ref == handoffGitHead:
 		var entries []map[string]string
 		for name := range g.files {
 			entries = append(entries, map[string]string{"name": name, "type": "file"})
 		}
 		answer(entries)
-	case r.Method == http.MethodGet && strings.HasPrefix(path, "/contents/"+legion+"/") && ref == handoffGitHead:
+	case strings.HasPrefix(path, "/contents/"+legion+"/") && ref == handoffGitHead:
 		text, ok := g.files[strings.TrimPrefix(path, "/contents/"+legion+"/")]
 		if !ok {
 			notFound()
 			return
 		}
 		answer(map[string]string{"encoding": "base64", "content": base64.StdEncoding.EncodeToString([]byte(text))})
-	case r.Method == http.MethodGet && path == "/git/commits/"+handoffGitHead:
-		answer(map[string]any{"tree": map[string]string{"sha": handoffGitRootTree}})
-	case r.Method == http.MethodGet && path == "/git/trees/"+handoffGitRootTree:
-		answer(map[string]any{"sha": handoffGitRootTree, "tree": []map[string]string{
-			{"path": ".legion", "mode": "040000", "type": "tree", "sha": handoffGitLegion},
-			{"path": "README.md", "mode": "100644", "type": "blob", "sha": "6666666666666666666666666666666666666666"},
-		}})
-	case r.Method == http.MethodGet && path == "/git/trees/"+handoffGitLegion && r.URL.Query().Get("recursive") == "1":
-		entries := []map[string]string{{"path": g.key, "mode": "040000", "type": "tree", "sha": "7777777777777777777777777777777777777777"}}
-		for name := range g.files {
-			entries = append(entries, map[string]string{"path": g.key + "/" + name, "mode": "100644", "type": "blob", "sha": "8888888888888888888888888888888888888888"})
-		}
-		answer(map[string]any{"sha": handoffGitLegion, "tree": entries, "truncated": false})
-	case r.Method == http.MethodPost && path == "/git/trees":
-		if write(&g.tree) {
-			w.WriteHeader(http.StatusCreated)
-			answer(map[string]string{"sha": handoffGitNewTree})
-		}
-	case r.Method == http.MethodPost && path == "/git/commits":
-		if write(&g.commit) {
-			w.WriteHeader(http.StatusCreated)
-			answer(map[string]string{"sha": handoffGitNewCommit})
-		}
-	case r.Method == http.MethodPatch && path == "/git/refs/heads/legion/"+g.key:
-		if write(&g.ref) {
-			if sha, _ := g.ref["sha"].(string); sha != "" {
-				g.head = sha
-			}
-			answer(map[string]any{"object": map[string]string{"sha": g.head}})
-		}
 	default:
 		notFound()
 	}
 }
 
-// heldRemoval holds what the import wrote to the branch: one tree on the head's tree deleting each
-// `.legion/` file (a nil sha), one commit of it on the head with no trailer and no bracket keyword,
-// and a non-forced ref update to that commit.
-func (g *handoffRecordsGitHub) heldRemoval(t *testing.T, r *handoffRecordsLive) {
+// heldNoRemoval holds that the import, deferring the removal of an issue in testing, wrote nothing
+// to the branch: every request it made of GitHub was a read.
+func (g *handoffRecordsGitHub) heldNoRemoval(t *testing.T, r *handoffRecordsLive) {
 	t.Helper()
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	entries, _ := g.tree["tree"].([]any)
-	if g.tree["base_tree"] != handoffGitRootTree || len(entries) != len(g.files) {
-		t.Fatalf("the removal's tree = %v, want %d deletions on base_tree %s", g.tree, len(g.files), handoffGitRootTree)
-	}
-	var deleted []string
-	for _, entry := range entries {
-		e, _ := entry.(map[string]any)
-		if sha, present := e["sha"]; !present || sha != nil {
-			t.Fatalf("the removal's tree entry %v does not delete its path (sha null)", e)
+	for _, request := range g.requests {
+		if !strings.HasPrefix(request, http.MethodGet+" ") {
+			t.Fatalf("the import sent %s to GitHub, want only reads while the removal is deferred", request)
 		}
-		deleted = append(deleted, e["path"].(string))
 	}
-	message, _ := g.commit["message"].(string)
-	parents, _ := g.commit["parents"].([]any)
-	if len(parents) != 1 || parents[0] != handoffGitHead || g.commit["tree"] != handoffGitNewTree ||
-		strings.Contains(message, "skip-checks") || strings.Contains(message, "[skip") {
-		t.Fatalf("the removal's commit = %v, want the new tree on parent %s with no trailer or bracket keyword", g.commit, handoffGitHead)
-	}
-	if g.ref["sha"] != handoffGitNewCommit || g.ref["force"] != false {
-		t.Fatalf("the removal's ref update = %v, want %s with force false", g.ref, handoffGitNewCommit)
-	}
-	r.note("GitHub stand-in received: POST git/trees base_tree %s deleting %v (sha null); POST git/commits %q on parent %s; PATCH refs/heads/legion/%s sha %s force false",
-		handoffGitRootTree, deleted, message, handoffGitHead, g.key, handoffGitNewCommit)
+	r.note("GitHub stand-in received %d reads and no write: %v", len(g.requests), g.requests)
 }

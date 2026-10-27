@@ -12,8 +12,9 @@
 #   - empty-root-pull-request (D13): a branch whose only commit above main is empty and carries no
 #     trailer - the commit a root whose code all lands through its children pushes - is opened as a
 #     pull request by GitHub, and its head gets a `gate` check run.
-# The removal makes the very calls handoffimport makes (packages/daemon/internal/handoffimport/
-# handoffimport.go: branch.head, branch.removalSet, branch.removalCommit and branch.move), driven
+# The removal makes the very calls handoffimport makes under the records' daemon (packages/daemon/
+# internal/handoffimport/handoffimport.go: ghbranch.Head, branch.removalSet, branch.removalCommit
+# and branch.move, through ghbranch.Move), driven
 # here with `gh api` so that no token leaves gh: the branch's ref, its head commit, the head's root
 # tree, `.legion/`'s recursive tree, a tree on the root tree deleting each path under `.legion/`
 # (sha null), a commit of it on the head, and PATCH of the ref with force false. Every commit is
@@ -224,7 +225,7 @@ assert_no_gate "$handoff" "the handoff push"
 pass
 
 begin import-removal
-# branch.head: the branch's ref.
+# ghbranch.Head: the branch's ref.
 head=$(github GET "repos/$repo/git/ref/heads/$negative_branch" | jq -r .object.sha)
 [ "$head" = "$handoff" ] || fail "$negative_branch is at $head, not the handoff commit $handoff"
 # branch.removalSet: the head's root tree, its .legion entry, and every non-tree path below it.

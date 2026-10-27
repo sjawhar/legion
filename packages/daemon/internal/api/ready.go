@@ -167,14 +167,22 @@ func mergeReadyPolicy(ctx context.Context, github githubrest.Client, rules confi
 	return "", nil
 }
 
-// pullRequestPaths is every path pull request number's change touches, both names of a renamed
-// file among them (changedPaths), and how many files GitHub listed.
+// pullRequestPaths is every path pull request number's change touches — each file's name, and a
+// renamed file's old name too, since moving a file out of a path changes that path — and how many
+// files GitHub listed.
 func pullRequestPaths(ctx context.Context, github githubrest.Client, number int) ([]string, int, error) {
 	files, err := githubrest.GetPages[changedFile](ctx, github, fmt.Sprintf("/pulls/%d/files", number))
 	if err != nil {
 		return nil, 0, err
 	}
-	return changedPaths(files), len(files), nil
+	paths := make([]string, 0, len(files))
+	for _, file := range files {
+		paths = append(paths, file.Filename)
+		if file.PreviousFilename != "" {
+			paths = append(paths, file.PreviousFilename)
+		}
+	}
+	return paths, len(files), nil
 }
 
 // changedFile is one file GitHub lists in a change, a pull request's or a compare's, with what the
@@ -183,19 +191,6 @@ type changedFile struct {
 	Filename         string `json:"filename"`
 	PreviousFilename string `json:"previous_filename"`
 	Status           string `json:"status"`
-}
-
-// changedPaths is every path files touch: each file's name, and a renamed file's old name too,
-// since moving a file out of a path changes that path.
-func changedPaths(files []changedFile) []string {
-	paths := make([]string, 0, len(files))
-	for _, file := range files {
-		paths = append(paths, file.Filename)
-		if file.PreviousFilename != "" {
-			paths = append(paths, file.PreviousFilename)
-		}
-	}
-	return paths
 }
 
 // shortSHA is sha as a refusal names it, its first twelve characters.
@@ -261,16 +256,16 @@ func unreviewedChange(ctx context.Context, github githubrest.Client, issue strin
 		return unreviewed("%s answered no file list, so what changed above the approved head is unknown", compared)
 	}
 	files := *compare.Files
-	kept := make([]changedFile, 0, len(files))
-	for _, file := range files {
-		if file.Status != "removed" || !strings.HasPrefix(file.Filename, ".legion/") {
-			kept = append(kept, file)
-		}
-	}
 	var outside []string
-	for _, path := range changedPaths(kept) {
-		if path != "" && !strings.HasPrefix(path, "docs/solutions/") {
-			outside = append(outside, path)
+	for _, file := range files {
+		if file.Status == "removed" && strings.HasPrefix(file.Filename, ".legion/") {
+			continue
+		}
+		if !strings.HasPrefix(file.Filename, "docs/solutions/") {
+			outside = append(outside, file.Filename)
+		}
+		if file.PreviousFilename != "" && !strings.HasPrefix(file.PreviousFilename, "docs/solutions/") {
+			outside = append(outside, file.PreviousFilename)
 		}
 	}
 	if len(outside) > 0 {

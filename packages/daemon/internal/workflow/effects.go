@@ -17,9 +17,9 @@ import (
 )
 
 // RoleFor is the role that works a phase: the one a transition starts, and the one whose handoff
-// record the `legion` tool's `handoff_complete` reads for a file-backed phase
-// (packages/pi-shared/src/handoff-record.ts). A phase no role works — awaiting_person,
-// awaiting_merge, done, held —
+// record the `legion` tool's `handoff_complete` reads for a phase with a handoff (phase.Handoff,
+// whose writer a test holds to this; packages/pi-shared/src/handoff-record.ts). A phase no role
+// works — awaiting_person, awaiting_merge, done, held —
 // has none. Accepting is the tree architect's, a claim per tree that no row starts: every site
 // that starts, resumes or reports a phase's worker skips it (start, admit's startMidPhaseMembers,
 // booted, Stranded).
@@ -285,9 +285,10 @@ func withApprovedHead(ctx context.Context, store record.Store, tx pgx.Tx, issue 
 // task is what a started worker is told. It names the phase the worker starts, which the issue
 // record already holds: one role runs several phases (the implementer runs implementing and
 // retro), and a resumed session cannot otherwise tell a new phase from its last.
-// The handoff a file-backed phase ended with is a Dispatch handoff record on the issue, which the
-// line names by its phase word and version with the command that reads it; a commit is named only
-// when the completion reported one (the implementer's, retro's, the merger's).
+// The handoff a phase ended with is a Dispatch handoff record on the issue, which the line names by
+// its phase word and version with the command that reads that version, the record the daemon
+// accepted, whatever was written to the phase since; a commit is named only when the completion
+// reported one (the implementer's, retro's, the merger's).
 // A handoff's verdict is always the tester's, since the daemon accepts one from no other role on
 // a phase completion (api/handoff.go, VERDICT_ROLE_FORBIDDEN; the implementer's check report is no
 // phase completion and starts nobody), so the line names the tester: the reviewer it starts on a
@@ -296,7 +297,7 @@ func task(issue record.Issue, handoff record.PhaseRow, pr *record.PullRequest, r
 	text := continueLine(issue)
 	if handoff.HandoffRecord != "" {
 		word := handoffWord(handoff.Role)
-		text += fmt.Sprintf(" Handoff: %s version %d (dispatch handoff-read --issue %s --phase %s).", word, handoff.HandoffVersion, issue.Key, word)
+		text += fmt.Sprintf(" Handoff: %s version %d (dispatch handoff-read --issue %s --phase %s --version %d).", word, handoff.HandoffVersion, issue.Key, word, handoff.HandoffVersion)
 	}
 	if handoff.HandoffCommit != "" {
 		text += " Handoff commit: " + handoff.HandoffCommit + "."
@@ -317,11 +318,11 @@ func continueLine(issue record.Issue) string {
 	return fmt.Sprintf("Continue %s. Issue: %s. Phase: %s.", issue.Title, issue.Key, issue.Phase)
 }
 
-// handoffWord is the word of the Dispatch handoff record role's file-backed phase ends with
-// (phase.HandoffFile), "" for a role that runs none.
+// handoffWord is the word of the Dispatch handoff record role writes (phase.Handoff's writer), ""
+// for a role that writes none.
 func handoffWord(role claim.Role) string {
 	for _, p := range phase.All {
-		if word, ok := phase.HandoffFile(p); ok && RoleFor(p) == role {
+		if word, writer, ok := phase.Handoff(p); ok && writer == role {
 			return word
 		}
 	}

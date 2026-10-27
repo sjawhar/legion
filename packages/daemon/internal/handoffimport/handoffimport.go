@@ -3,8 +3,11 @@
 // (INFRA-177). For every issue the running daemon holds in a phase other than done, it reads the
 // issue's branch `legion/<KEY>` as the implement App, writes each of `.legion/<KEY>/plan.json`,
 // `implement.json`, `test.json` and `review.json` to Dispatch as that phase's handoff record under
-// the daemon's Dispatch session, and then removes all of `.legion/` from the branch in one commit
-// moved there by a non-forced ref update.
+// the daemon's Dispatch session, and then removes the handoffs from the branch in one commit moved
+// there by a non-forced ref update. What it removes follows the daemon it runs under
+// (recordsSchema): under the release before the records, only `.legion/<KEY>/`, the push that
+// release carries as handoffs alone; under the records' release, all of `.legion/`, except on an
+// issue in testing or reviewing, whose removal waits for the phase to end.
 package handoffimport
 
 import (
@@ -18,27 +21,27 @@ import (
 	"net/url"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghbranch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 )
 
-// handoffDir is the directory the workers committed their handoffs under, and that the removal
-// commit takes off every branch whole: it can hold other issues' directories, merged in from
-// branches that carried them.
+// handoffDir is the directory the workers committed their handoffs under. Under the records'
+// daemon the removal commit takes it off every branch whole: it can hold other issues'
+// directories, merged in from branches that carried them.
 const handoffDir = ".legion"
 
-// phaseWords are the handoff words a file-backed phase ends with (phase.HandoffFile), in the
-// workflow's order: the file `.legion/<KEY>/<word>.json`, and the phase of its Dispatch record.
+// phaseWords are the handoff words a phase ends with (phase.Handoff), in the workflow's order: the
+// file `.legion/<KEY>/<word>.json`, and the phase of its Dispatch record.
 var phaseWords = func() []string {
 	var words []string
 	for _, p := range phase.All {
-		if word, ok := phase.HandoffFile(p); ok {
+		if word, _, ok := phase.Handoff(p); ok {
 			words = append(words, word)
 		}
 	}
@@ -49,8 +52,12 @@ var phaseWords = func() []string {
 // and the ref update, the branch read again before each, before the issue is reported failed.
 const removalAttempts = 3
 
-// stateTimeout bounds the read of the daemon's state.
-const stateTimeout = 30 * time.Second
+// recordsSchema is the store schema version of the daemon release that reads handoffs from
+// Dispatch alone: migration 0059_handoff_records, which that release added. A daemon whose state
+// names a daemon.schemaVersion at or past it is that release's, and carries no push; below it, it
+// is the release before, whose carry reads a push changing only `.legion/<KEY>/` (classify's
+// HandoffPath of that release) as handoffs alone, and every other push as code.
+const recordsSchema = 59
 
 // Tokens mints the implement App's installation token for a repository owner (appauth.Manager).
 type Tokens interface {
@@ -69,9 +76,9 @@ type Dispatch interface {
 type Options struct {
 	// Project is the configuration's project, which the daemon's state must name.
 	Project string
-	// DaemonURL is the daemon's API root, whose unauthenticated GET /legion/v1/state names the
-	// issues in the workflow.
-	DaemonURL string
+	// State reads the body of the daemon's unauthenticated GET /legion/v1/state, which names the
+	// daemon's project and schema version and the issues in the workflow.
+	State func(ctx context.Context) ([]byte, error)
 	// GitHubAPI is GitHub's API root; empty is https://api.github.com.
 	GitHubAPI string
 	Tokens    Tokens
@@ -88,6 +95,7 @@ const (
 	unchanged
 	keptWorker
 	removed
+	deferred
 	noBranch
 	failed
 )
@@ -101,6 +109,7 @@ var countLabels = []struct {
 	{unchanged, "unchanged", "unchanged"},
 	{keptWorker, "kept worker record", "kept worker record"},
 	{removed, "removed .legion/", "would remove .legion/"},
+	{deferred, "deferred", "deferred"},
 	{noBranch, "no branch", "no branch"},
 	{failed, "failed", "failed"},
 }
@@ -114,20 +123,26 @@ type result struct {
 // failure is the failed line for err: `failed: <err>`.
 func failure(err error) result { return result{failed, "failed: " + err.Error()} }
 
-// runner is one run: its options, and the count of each outcome printed so far.
+// runner is one run: its options, whether the daemon is the records' release (recordsSchema), and
+// the count of each outcome printed so far.
 type runner struct {
 	Options
-	out    io.Writer
-	counts map[outcome]int
+	out           io.Writer
+	recordsDaemon bool
+	counts        map[outcome]int
 }
 
 // Run is `legion handoffs import` once the configuration is read: one line per issue and phase on
 // stdout — `<KEY> <word>: imported v<n>`, `unchanged`, `kept worker record v<n>` or `failed:
-// <why>`, then `<KEY>: removed .legion/ at <sha>`, `unchanged` (the branch carries nothing under
-// .legion/), `no branch` or `failed: <why>` — and a closing count of each. Under DryRun the lines
-// say what the run would do (`would import v<n>`, `would remove .legion/ …`) and nothing is
-// written. A run that cannot start, or that meets a Dispatch without the handoff routes, says why
-// on stderr. It answers the command's exit: 0 when every line went through, 1 otherwise.
+// <why>` — then the branch's: `<KEY>: removed .legion/ at <sha>` under the records' daemon, or
+// `removal deferred: <KEY> is in <phase>; …` for an issue in testing or reviewing there; `removed
+// .legion/<KEY>/ at <sha>` under the daemon before it, with `; kept .legion/<dirs> for the run
+// after the rollout` when the branch carries more under .legion/; `unchanged` (nothing of the
+// issue's under .legion/ to remove), `no branch` or `failed: <why>` — and a closing count of each.
+// Under DryRun the lines say what the run would do (`would import v<n>`, `would remove .legion/ …`)
+// and nothing is written. A run that cannot start, or that meets a Dispatch without the handoff
+// routes, says why on stderr. It answers the command's exit: 0 when every line went through (a
+// deferred removal included), 1 otherwise.
 func Run(ctx context.Context, o Options, stdout, stderr io.Writer) int {
 	r := &runner{Options: o, out: stdout, counts: map[outcome]int{}}
 	err := r.run(ctx)
@@ -155,38 +170,26 @@ func (r *runner) run(ctx context.Context) error {
 	return nil
 }
 
-// workflowIssue is one issue of the daemon's state the run reads: its key and repository.
+// workflowIssue is one issue of the daemon's state the run reads: its key, repository and phase.
 type workflowIssue struct {
 	key, repo string
+	phase     phase.Phase
 }
 
 // readState is every issue the daemon holds in a phase other than done, with a repository, by key:
 // an issue with no repository is an operator's claim, which the workflow does not record and no
-// branch of which a worker committed handoffs to. The state is decoded into only the fields the run
-// reads, so a daemon of an earlier contract answers it as well.
+// branch of which a worker committed handoffs to. It notes whether the daemon is the records'
+// release (recordsSchema). The state is decoded into only the fields the run reads, so a daemon of
+// an earlier contract answers it as well.
 func (r *runner) readState(ctx context.Context) ([]workflowIssue, error) {
-	timed, cancel := context.WithTimeout(ctx, stateTimeout)
-	defer cancel()
-	address := strings.TrimRight(r.DaemonURL, "/") + "/legion/v1/state"
-	request, err := http.NewRequestWithContext(timed, http.MethodGet, address, nil)
+	body, err := r.State(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("read the daemon's state at %s: %w", address, err)
-	}
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		return nil, fmt.Errorf("read the daemon's state at %s: %w", address, err)
-	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read the daemon's state at %s: %w", address, err)
-	}
-	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("the daemon's state at %s answered %d: %s", address, response.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("read the daemon's state: %w", err)
 	}
 	var state struct {
 		Daemon struct {
-			Project string `json:"project"`
+			Project       string `json:"project"`
+			SchemaVersion int    `json:"schemaVersion"`
 		} `json:"daemon"`
 		Issues map[string]struct {
 			Phase phase.Phase `json:"phase"`
@@ -194,26 +197,27 @@ func (r *runner) readState(ctx context.Context) ([]workflowIssue, error) {
 		} `json:"issues"`
 	}
 	if err := json.Unmarshal(body, &state); err != nil {
-		return nil, fmt.Errorf("decode the daemon's state at %s: %w", address, err)
+		return nil, fmt.Errorf("decode the daemon's state: %w", err)
 	}
 	if r.Project != "" && state.Daemon.Project != r.Project {
-		return nil, fmt.Errorf("the daemon at %s serves project %q, and the configuration names %q", r.DaemonURL, state.Daemon.Project, r.Project)
+		return nil, fmt.Errorf("the daemon serves project %q, and the configuration names %q", state.Daemon.Project, r.Project)
 	}
+	r.recordsDaemon = state.Daemon.SchemaVersion >= recordsSchema
 	var issues []workflowIssue
 	for key, issue := range state.Issues {
 		if issue.Phase != phase.Done && issue.Repo != "" {
-			issues = append(issues, workflowIssue{key: key, repo: issue.Repo})
+			issues = append(issues, workflowIssue{key: key, repo: issue.Repo, phase: issue.Phase})
 		}
 	}
 	slices.SortFunc(issues, func(a, b workflowIssue) int { return strings.Compare(a.key, b.key) })
 	return issues, nil
 }
 
-// issue imports one issue's handoff files and removes .legion/ from its branch, reading the branch
-// again and starting over when it moved under the removal, at most removalAttempts times. Each
-// phase's line is the last attempt's, except that a file imported by an earlier attempt and found
-// unchanged by a later one stays imported. An error ends the whole run after the lines gathered: a
-// Dispatch without the handoff routes, which every issue would meet the same way.
+// issue imports one issue's handoff files and removes its handoffs from its branch, reading the
+// branch again and starting over when it moved under the removal, at most removalAttempts times.
+// Each phase's line is the last attempt's, except that a file imported by an earlier attempt and
+// found unchanged by a later one stays imported. An error ends the whole run after the lines
+// gathered: a Dispatch without the handoff routes, which every issue would meet the same way.
 func (r *runner) issue(ctx context.Context, issue workflowIssue) error {
 	repo, err := ghrepo.Parse("the daemon's repository of "+issue.key, issue.repo)
 	if err != nil {
@@ -225,7 +229,7 @@ func (r *runner) issue(ctx context.Context, issue workflowIssue) error {
 		r.print(issue.key, "", result{failed, fmt.Sprintf("failed: mint the implement App's token for %s: %v", repo.Owner(), err)})
 		return nil
 	}
-	b := branch{key: issue.key, repo: repo, github: githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.GitHubAPI, repo)}}
+	b := branch{key: issue.key, phase: issue.phase, repo: repo, github: githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.GitHubAPI, repo)}}
 
 	phases := map[string]result{}
 	var last result
@@ -254,14 +258,14 @@ func (r *runner) issue(ctx context.Context, issue workflowIssue) error {
 }
 
 // attempt is one pass over the branch at its current head: each phase's file into phases, then the
-// removal. moved says the branch moved between the read and the ref update.
+// removal (removal). moved says the branch moved between the read and the ref update.
 func (r *runner) attempt(ctx context.Context, b branch, phases map[string]result) (last result, moved bool, err error) {
-	head, found, err := b.head(ctx)
-	if err != nil {
-		return failure(err), false, nil
-	}
+	head, found, err := ghbranch.Head(ctx, b.github, b.repo, b.ref())
 	if !found {
 		return result{noBranch, "no branch"}, false, nil
+	}
+	if err != nil {
+		return failure(err), false, nil
 	}
 	top, err := b.list(ctx, handoffDir, head)
 	if err != nil {
@@ -271,7 +275,8 @@ func (r *runner) attempt(ctx context.Context, b branch, phases map[string]result
 		return result{unchanged, "unchanged"}, false, nil
 	}
 	allThere := true
-	if slices.ContainsFunc(top, func(e contentEntry) bool { return e.Name == b.key && e.Type == "dir" }) {
+	own := slices.ContainsFunc(top, b.ownDir)
+	if own {
 		files, err := b.list(ctx, handoffDir+"/"+b.key, head)
 		if err != nil {
 			return failure(err), false, nil
@@ -296,7 +301,46 @@ func (r *runner) attempt(ctx context.Context, b branch, phases map[string]result
 	if !allThere {
 		return result{failed, "failed: .legion/ stays on the branch until every handoff above is on Dispatch"}, false, nil
 	}
-	return r.remove(ctx, b, head)
+	return r.removal(ctx, b, head, top, own)
+}
+
+// removal is what the attempt removes from the branch at head, whose .legion/ lists top, and
+// removes it. Under the records' daemon it is all of .legion/, but nothing for an issue in testing
+// or reviewing: that daemon carries no push, so the new head would clear a tester's planned red
+// and leave a reviewer's approval of the round it has not completed standing for nothing; the line
+// says the removal is deferred until the phase ends. Under the daemon before it, it is only
+// .legion/<KEY>/ (own says the branch has it), the one push that daemon carries as handoffs alone,
+// keeping the issue's verdict and approval; every other path under .legion/ stays on the branch for
+// the run after the rollout, and the line names it.
+func (r *runner) removal(ctx context.Context, b branch, head string, top []contentEntry, own bool) (last result, moved bool, err error) {
+	if r.recordsDaemon {
+		if b.phase == phase.Testing || b.phase == phase.Reviewing {
+			return result{deferred, fmt.Sprintf("removal deferred: %s is in %s; run the import again once the phase ends", b.key, b.phase)}, false, nil
+		}
+		return r.remove(ctx, b, head, "")
+	}
+	var kept []string
+	for _, entry := range top {
+		if !b.ownDir(entry) {
+			name := handoffDir + "/" + entry.Name
+			if entry.Type == "dir" {
+				name += "/"
+			}
+			kept = append(kept, name)
+		}
+	}
+	keptLine := ""
+	if len(kept) > 0 {
+		keptLine = "kept " + strings.Join(kept, ", ") + " for the run after the rollout"
+	}
+	if !own {
+		return result{unchanged, "unchanged; " + keptLine}, false, nil
+	}
+	last, moved, err = r.remove(ctx, b, head, b.key+"/")
+	if last.outcome == removed && keptLine != "" {
+		last.text += "; " + keptLine
+	}
+	return last, moved, err
 }
 
 // phase writes `.legion/<KEY>/<word>.json` at head as the issue's newest record of the phase when
@@ -341,10 +385,12 @@ func noRoute(route string, err error) error {
 	return fmt.Errorf("Dispatch answered %s with 404 (%v): it has no handoff routes; deploy Dispatch with them before the import (docs/kubernetes.md)", route, err)
 }
 
-// remove makes one commit on head that deletes every path under .legion/ and moves the branch to
-// it with a non-forced ref update. moved says GitHub refused the update as not a fast-forward.
-func (r *runner) remove(ctx context.Context, b branch, head string) (last result, moved bool, err error) {
-	rootTree, deletions, err := b.removalSet(ctx, head)
+// remove makes one commit on head that deletes every path under .legion/<under> (under is "" for
+// all of .legion/, or "<KEY>/") and moves the branch to it with a non-forced ref update. moved says
+// the branch moved from head before the update.
+func (r *runner) remove(ctx context.Context, b branch, head, under string) (last result, moved bool, err error) {
+	dir := handoffDir + "/" + under
+	rootTree, deletions, err := b.removalSet(ctx, head, under)
 	if err != nil {
 		return failure(err), false, nil
 	}
@@ -353,20 +399,20 @@ func (r *runner) remove(ctx context.Context, b branch, head string) (last result
 		if len(deletions) == 1 {
 			paths = "1 path"
 		}
-		return result{removed, fmt.Sprintf("would remove .legion/ (%s) above %s", paths, head)}, false, nil
+		return result{removed, fmt.Sprintf("would remove %s (%s) above %s", dir, paths, head)}, false, nil
 	}
 	commit, err := b.removalCommit(ctx, head, rootTree, deletions)
 	if err != nil {
 		return failure(err), false, nil
 	}
-	moved, err = b.move(ctx, commit)
+	moved, err = b.move(ctx, head, commit)
 	if err != nil {
 		return failure(err), false, nil
 	}
 	if moved {
 		return result{}, true, nil
 	}
-	return result{removed, "removed .legion/ at " + commit}, false, nil
+	return result{removed, "removed " + dir + " at " + commit}, false, nil
 }
 
 // print writes one line, `<KEY> <word>: <text>` for a phase and `<KEY>: <text>` for the branch,
@@ -398,9 +444,10 @@ func (r *runner) printCounts() {
 }
 
 // branch is an issue's branch legion/<KEY> on its repository, read and written through GitHub's
-// REST API as the implement App.
+// REST API as the implement App, and the phase the daemon holds the issue in.
 type branch struct {
 	key    string
+	phase  phase.Phase
 	repo   ghrepo.Repository
 	github githubrest.Client
 }
@@ -408,25 +455,8 @@ type branch struct {
 // ref is the branch's name.
 func (b branch) ref() string { return claim.IssueBranch(b.key) }
 
-// head is the commit the branch names, and whether GitHub has the branch.
-func (b branch) head(ctx context.Context) (string, bool, error) {
-	var ref struct {
-		Object struct {
-			SHA string `json:"sha"`
-		} `json:"object"`
-	}
-	err := b.github.Get(ctx, "/git/ref/heads/"+b.ref(), &ref)
-	if notFound(err) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, fmt.Errorf("read %s of %s: %w", b.ref(), b.repo, err)
-	}
-	if ref.Object.SHA == "" {
-		return "", false, fmt.Errorf("read %s of %s: GitHub named no commit", b.ref(), b.repo)
-	}
-	return ref.Object.SHA, true, nil
-}
+// ownDir says whether entry, one of .legion/'s, is the issue's own directory .legion/<KEY>/.
+func (b branch) ownDir(entry contentEntry) bool { return entry.Name == b.key && entry.Type == "dir" }
 
 // contentEntry is one entry of a directory GitHub's contents API lists.
 type contentEntry struct {
@@ -483,9 +513,10 @@ type tree struct {
 	Truncated bool        `json:"truncated"`
 }
 
-// removalSet is head's root tree and an entry deleting every path under .legion/ at head: every
-// file, symlink and submodule its recursive tree lists, wherever under .legion/ it sits.
-func (b branch) removalSet(ctx context.Context, head string) (string, []treeEntry, error) {
+// removalSet is head's root tree and an entry deleting every path under .legion/<under> at head
+// (under is "" for all of .legion/, or "<KEY>/"): every file, symlink and submodule its recursive
+// tree lists there, wherever below it sits.
+func (b branch) removalSet(ctx context.Context, head, under string) (string, []treeEntry, error) {
 	var commit struct {
 		Tree struct {
 			SHA string `json:"sha"`
@@ -511,12 +542,12 @@ func (b branch) removalSet(ctx context.Context, head string) (string, []treeEntr
 	}
 	var deletions []treeEntry
 	for _, entry := range below.Tree {
-		if entry.Type != "tree" {
+		if entry.Type != "tree" && strings.HasPrefix(entry.Path, under) {
 			deletions = append(deletions, treeEntry{Path: handoffDir + "/" + entry.Path, Mode: entry.Mode, Type: entry.Type})
 		}
 	}
 	if len(deletions) == 0 {
-		return "", nil, fmt.Errorf("GitHub listed nothing under %s/ at %s of %s", handoffDir, head, b.repo)
+		return "", nil, fmt.Errorf("GitHub listed nothing under %s/%s at %s of %s", handoffDir, under, head, b.repo)
 	}
 	return commit.Tree.SHA, deletions, nil
 }
@@ -527,7 +558,7 @@ func (b branch) removalSet(ctx context.Context, head string) (string, []treeEntr
 func (b branch) removalCommit(ctx context.Context, head, rootTree string, deletions []treeEntry) (string, error) {
 	var written tree
 	if err := b.github.Post(ctx, "/git/trees", map[string]any{"base_tree": rootTree, "tree": deletions}, &written); err != nil {
-		return "", fmt.Errorf("write the tree of %s without %s/ on %s: %w", head, handoffDir, b.repo, err)
+		return "", fmt.Errorf("write the tree of %s without the removed paths on %s: %w", head, b.repo, err)
 	}
 	var commit struct {
 		SHA string `json:"sha"`
@@ -542,18 +573,28 @@ func (b branch) removalCommit(ctx context.Context, head, rootTree string, deleti
 	return commit.SHA, nil
 }
 
-// move updates the branch to commit without force. moved says GitHub refused it with 422, which it
-// answers an update that is not a fast-forward with: the branch moved since its read.
-func (b branch) move(ctx context.Context, commit string) (moved bool, err error) {
-	err = b.github.Patch(ctx, "/git/refs/heads/"+b.ref(), map[string]any{"sha": commit, "force": false}, nil)
+// move moves the branch from head to commit (ghbranch.Move, without force). moved says it was no
+// longer at head: GitHub refused the update 422, as it does an update that is not a fast-forward,
+// and a read of the branch after the refusal names another commit, or none. A 422 with the branch
+// still at head is a refusal of GitHub's own, a ruleset's or a validation's, and is an error
+// carrying GitHub's answer.
+func (b branch) move(ctx context.Context, head, commit string) (moved bool, err error) {
+	err = ghbranch.Move(ctx, b.github, b.repo, b.ref(), commit)
 	var answer *githubrest.Answer
-	if errors.As(err, &answer) && answer.Status == http.StatusUnprocessableEntity {
+	if !errors.As(err, &answer) || answer.Status != http.StatusUnprocessableEntity {
+		return false, err
+	}
+	now, found, readErr := ghbranch.Head(ctx, b.github, b.repo, b.ref())
+	if !found {
 		return true, nil
 	}
-	if err != nil {
-		return false, fmt.Errorf("move %s of %s to %s: %w", b.ref(), b.repo, commit, err)
+	if readErr != nil {
+		return false, fmt.Errorf("GitHub refused the ref update (%s), and the branch could not be read again: %w", answer.Body, readErr)
 	}
-	return false, nil
+	if now != head {
+		return true, nil
+	}
+	return false, fmt.Errorf("GitHub refused the ref update: %s", answer.Body)
 }
 
 // notFound says whether err is GitHub's 404.

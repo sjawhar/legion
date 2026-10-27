@@ -38,8 +38,9 @@ missing proof goes back as step 1 says. The Dispatch message (step 6) is for a f
 ## Steps
 
 1. **Read the evidence:** the issue and its acceptance criteria, the pull request, and the tester's
-   and reviewer's handoffs (`dispatch handoff-read --issue <issue> --phase test`, then
-   `--phase review`). Confirm the body has an `E2E (implementer)` and an `E2E (tester)` line, each
+   and reviewer's handoffs (`dispatch handoff-read --issue <issue> --phase test`, then the review
+   at the version your task's `Handoff:` line names, `--phase review --version <n>`, the command
+   that line quotes). Confirm the body has an `E2E (implementer)` and an `E2E (tester)` line, each
    a proof as `skill://legion-worker/references/pr-body.md#what-a-proof-is` defines it. In
    sjawhar/legion a surface may also be the daemon's real-process tests, a live proof under
    `scripts/e2e/`, or a live check at the operator's next daemon restart recorded on the pull

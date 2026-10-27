@@ -5217,8 +5217,10 @@ still in flight at the release carries files its next role would never see.
 `legion handoffs import --config <legion.yaml> [--dry-run]` (`packages/daemon/internal/handoffimport/`)
 moves them. From the daemon's own configuration — `project`, `dispatch_url` and
 `dispatch_token_file`, the implement GitHub App, and `daemon_url` — it reads the running daemon's
-unauthenticated `GET /legion/v1/state` for every issue in a phase other than done, and for each, as
-the implement App:
+unauthenticated `GET /legion/v1/state` for every issue in a phase other than done, and for the
+daemon's `daemon.schemaVersion`, which tells which release runs: at or past 59, the store migration
+`0059_handoff_records` the records' release added, it is the new daemon; below it, the old one.
+For each issue, as the implement App, it:
 
 - lists `.legion/` on `legion/<KEY>` through GitHub's contents API, and writes each of
   `.legion/<KEY>/plan.json`, `implement.json`, `test.json` and `review.json` to Dispatch as that
@@ -5228,13 +5230,25 @@ the implement App:
   worker wrote. The daemon refuses a completion naming a record the import wrote, since that record
   is another session's: the next role reads it with `dispatch handoff-read` and writes it again
   under its own session.
-- then, when every file of the issue is on Dispatch and the branch carries anything under `.legion/`
-  (other issues' directories merged in from their branches included), makes one commit on the
-  branch's head that removes all of `.legion/`, with the message
-  `chore(legion): <KEY>'s handoffs are on its Dispatch issue now`, no trailer and no bracket
-  keyword, so every required check runs on it as on any push, and moves the branch to it with a
-  non-forced ref update. A branch that moved in between is read again and the issue started over,
-  three times at most.
+- then, when every file of the issue is on Dispatch, makes one commit on the branch's head that
+  removes the handoffs, with the message `chore(legion): <KEY>'s handoffs are on its Dispatch issue
+  now`, no trailer and no bracket keyword, so every required check runs on it as on any push, and
+  moves the branch to it with a non-forced ref update. What it removes follows the daemon:
+  - **old daemon:** `.legion/<KEY>/` alone, the one push the old daemon's carry counts as the
+    issue's handoffs (`HandoffPath`), so the issue keeps its verdict and its approval across it.
+    Any other path under `.legion/` (another issue's directory, merged in from its branch) would
+    make the push a code push to the old daemon too, so it stays on the branch, and the line says
+    `kept .legion/<dirs> for the run after the rollout`.
+  - **new daemon:** all of `.legion/`, other issues' directories included. The new daemon carries
+    no push, so the removal is a code push like any other; for an issue in `testing` or `reviewing`
+    it would clear the tester's planned red, or leave an approval of a round the reviewer has not
+    completed standing for nothing, so there the import writes the records as usual, removes
+    nothing, and the line says `removal deferred: <KEY> is in <phase>; run the import again once
+    the phase ends`.
+
+  A branch that moved in between is read again and the issue started over, three times at most. A
+  ref update GitHub refuses with the branch still where it was (a ruleset's refusal, a
+  validation's) fails the issue at once with GitHub's answer.
 
 `--dry-run` reads all of it and prints what the run would do, writing nothing. A second run with
 nothing changed writes nothing and pushes nothing.
@@ -5253,15 +5267,26 @@ The cutover, in this order:
    A run against a Dispatch without them stops at its first handoff call, naming the route Dispatch
    answered 404 to, before it writes or pushes anything; that is the order's own check, and the
    daemon has no boot refusal for it.
-2. **`legion handoffs import` of the new release, while the old daemon still runs.** The old
-   daemon's carry treats the removal commit as a push of handoffs alone, so each branch keeps its
-   verdict and its approval across the removal push.
+2. **`legion handoffs import` of the new release, while the old daemon still runs.** On each
+   branch it removes `.legion/<KEY>/` alone, which the old daemon carries as a push of the issue's
+   handoffs, so the issue keeps its verdict and its approval across the removal push. A branch
+   that also carries another issue's directory keeps it, and its line says `kept .legion/<dirs>
+   for the run after the rollout`: removing it under the old daemon would be a code push there.
 3. **The daemon and the plugins roll to the release.** The plugin pair comes with the stale-plugin
    relaunch from the release ([Contract discipline](#contract-discipline)).
-4. **`legion handoffs import` again.** It catches a file a worker of the old release pushed between
-   step 2 and step 3; everything else reads `unchanged`. The new daemon's READY lets the removal of
-   `.legion/` above an approved head through without a new review round, and refuses a `.legion/`
-   file added there.
+4. **`legion handoffs import` again, until it prints `deferred 0` and no `kept` line.** It catches
+   a file a worker of the old release pushed between step 2 and step 3, and removes what is left
+   under `.legion/`: every directory step 2 kept, and the issue's own on a branch that took a file
+   since. Under the new daemon the removal push is a code push, with the effects of any:
+   - in `testing` or `reviewing` it is deferred, the line saying so; run the import again once the
+     phase ends;
+   - in `implementing` on a red head it counts one fix attempt, as any push onto a red head does;
+   - in `accepting`, `retro` or `merging` the new head runs its required checks, and a red sends
+     the issue back to `implementing` as any red does; READY lets the removal of `.legion/` above
+     the approved head through without a new review round, and refuses a `.legion/` file added
+     there.
+
+   Everything else reads `unchanged`.
 
 A worker whose push is refused because `legion/<KEY>` moved under it by the removal commit (its
 message names it) fetches, merges `legion/<KEY>@origin` forward and pushes again; it never rewrites.
@@ -5273,18 +5298,26 @@ branch's (`<KEY>: …`):
   `legion-daemon:<PROJECT>` (under `--dry-run`, `would import v<n>`).
 - `unchanged` — on a file's line, the phase's newest record is the import's and holds the file's
   text exactly, so nothing was written; on a branch's line, the branch carries nothing under
-  `.legion/`, so nothing was pushed.
+  `.legion/`, so nothing was pushed (`unchanged; kept .legion/<dirs> for the run after the rollout`
+  under the old daemon: the branch carries nothing of the issue's, and another issue's directory it
+  leaves for step 4).
 - `kept worker record v<n>` — a worker's session wrote the phase's newest record, version `<n>`; the
-  file was not written above it, and is removed with the rest of `.legion/`.
-- `removed .legion/ at <sha>` — the branch now names `<sha>`, the one commit that removed
-  `.legion/` (under `--dry-run`, `would remove .legion/ (<n> paths) above <head>`).
+  file was not written above it, and is removed with the rest of the issue's handoffs.
+- `removed .legion/ at <sha>` under the new daemon, `removed .legion/<KEY>/ at <sha>` under the
+  old one — the branch now names `<sha>`, the one commit that removed them (under `--dry-run`,
+  `would remove .legion/ (<n> paths) above <head>`, or `.legion/<KEY>/`). Under the old daemon a
+  branch carrying more under `.legion/` adds `; kept .legion/<dirs> for the run after the rollout`.
+- `removal deferred: <KEY> is in <phase>; run the import again once the phase ends` — under the new
+  daemon, for an issue in `testing` or `reviewing`: the records are written, nothing is pushed.
 - `no branch` — GitHub has no `legion/<KEY>`: the issue has nothing to import.
 - `failed: <why>` — that file or branch did not go through; on a file's failure `.legion/` stays on
-  the branch, and the branch's line says so. Run the import again once the cause is fixed.
+  the branch, and the branch's line says so; `failed: GitHub refused the ref update: <answer>`
+  quotes GitHub's refusal of the removal. Run the import again once the cause is fixed.
 
-A last line counts each kind. The exit is 0 when no line failed, and 1 when one did or the run
-stopped, its reason on stderr: a configuration it could not read, a daemon that did not answer or
-serves another project, or a Dispatch without the handoff routes.
+A last line counts each kind, `deferred` among them. The exit is 0 when no line failed (a
+deferred removal included), and 1 when one did or the run stopped, its reason on stderr: a
+configuration it could not read, a daemon that did not answer or serves another project, or a
+Dispatch without the handoff routes.
 
 ## Kubernetes runtime (TypeScript daemon)
 

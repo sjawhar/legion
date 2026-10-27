@@ -1130,7 +1130,9 @@ export async function runEnvoyChannelServer(): Promise<void> {
   }
 
   // Only the `dispatch` command reads the stamp, so nothing is written while the session starts with
-  // Dispatch off, or under the QA override ENVOY_SESSION_ID, whose id that command never reads.
+  // Dispatch off. Nothing is written under the QA override ENVOY_SESSION_ID either, although that
+  // command acts as the override's id when it is set (`runDispatchCli` in envoy-client): a QA
+  // session's Dispatch writes carry no session title unless its shell sets DISPATCH_SESSION_TITLE.
   const stamping = dispatch.enabled && configuredValue(overrideSessionId) === undefined
   /** Stamp the title for the session id `resolveId` names, once, where nothing will register it. */
   const stampOnce = (resolveId: () => string): void => {

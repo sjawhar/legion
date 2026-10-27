@@ -205,7 +205,7 @@ func (a Approval) ChangesRequestedLatest() (int, string) {
 }
 
 // Handoff is one phase handoff record Dispatch keeps on an issue, as a phase completion names it:
-// the issue carrying it, its phase word (plan, implement, test or review; phase.HandoffFile), its
+// the issue carrying it, its phase word (plan, implement, test or review; phase.Handoff), its
 // version among that phase's records, and the actor that wrote it. Body, the record's exact text,
 // is read only by LatestHandoff, for `legion handoffs import` to compare with a branch's file: the
 // daemon holds a completion to who wrote which record, and what a handoff says is the next role's

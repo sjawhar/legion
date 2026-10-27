@@ -581,8 +581,8 @@ type HandoffComplete struct {
 	// round, the commit retro stands on, the head the merger's READY names; none for the planner,
 	// the tester or the reviewer.
 	Commit string
-	// HandoffRecord and HandoffVersion name the Dispatch handoff record a file-backed phase's
-	// completion ends with (phase.FileBacked): the route read it back from Dispatch and held it to
+	// HandoffRecord and HandoffVersion name the Dispatch handoff record the completion of a phase
+	// with a handoff ends with (phase.Handoff): the route read it back from Dispatch and held it to
 	// the issue, the phase's word, this version and the claim's session before it applied the fact.
 	// Empty and zero for a phase that writes none.
 	HandoffRecord  string

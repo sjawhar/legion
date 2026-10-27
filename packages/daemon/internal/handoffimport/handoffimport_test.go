@@ -16,6 +16,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/store/migrations"
 )
 
 const (
@@ -79,6 +80,9 @@ type world struct {
 	t  *testing.T
 	mu sync.Mutex
 
+	// schema is the store schema version the daemon's state names: the release before the records
+	// (below recordsSchema) unless a test says otherwise.
+	schema   int
 	states   map[string]seededIssue
 	commits  map[string]commit
 	branches map[string]string
@@ -89,6 +93,8 @@ type world struct {
 	updates []refUpdate
 	// moves is how many more times a branch's ref update finds it moved by another push.
 	moves map[string]int
+	// refusals is the message GitHub refuses a branch's ref update with, 422, the branch unmoved.
+	refusals map[string]string
 
 	handoffs map[string]map[string][]handoff
 	// dispatchWrites counts handoff writes Dispatch took.
@@ -109,8 +115,8 @@ type handoff struct {
 
 func newWorld(t *testing.T) *world {
 	w := &world{
-		t: t, states: map[string]seededIssue{}, commits: map[string]commit{}, branches: map[string]string{},
-		trees: map[string]treeRef{}, moves: map[string]int{}, handoffs: map[string]map[string][]handoff{},
+		t: t, schema: recordsSchema - 1, states: map[string]seededIssue{}, commits: map[string]commit{}, branches: map[string]string{},
+		trees: map[string]treeRef{}, moves: map[string]int{}, refusals: map[string]string{}, handoffs: map[string]map[string][]handoff{},
 	}
 	base := w.commit("", "initial", map[string]string{"README.md": "# widgets\n", "src/main.go": "package main\n"})
 	for key, issue := range seed {
@@ -150,7 +156,7 @@ func (w *world) serve() Options {
 	server := httptest.NewServer(http.HandlerFunc(w.handle))
 	w.t.Cleanup(server.Close)
 	return Options{
-		Project: "LEG", DaemonURL: server.URL, GitHubAPI: server.URL,
+		Project: "LEG", State: w.state, GitHubAPI: server.URL,
 		Tokens: fakeTokens{t: w.t}, Dispatch: dispatch.New(server.URL, "dispatch-token"),
 	}
 }
@@ -159,8 +165,6 @@ func (w *world) handle(rw http.ResponseWriter, r *http.Request) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	switch {
-	case r.URL.Path == "/legion/v1/state" && r.Method == http.MethodGet:
-		w.state(rw)
 	case strings.HasPrefix(r.URL.Path, "/api/v1/"):
 		w.dispatch(rw, r)
 	case strings.HasPrefix(r.URL.Path, repoPrefix+"/"):
@@ -174,9 +178,11 @@ func (w *world) handle(rw http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// state answers the daemon's state as a contract-39 daemon serves it, with members the import does
-// not read.
-func (w *world) state(rw http.ResponseWriter) {
+// state is the body of the daemon's state as a contract-39 daemon serves it, with members the
+// import does not read, naming the world's schema version.
+func (w *world) state(context.Context) ([]byte, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	issues := map[string]any{}
 	for key, issue := range w.states {
 		issues[key] = map[string]any{
@@ -185,8 +191,8 @@ func (w *world) state(rw http.ResponseWriter) {
 		}
 	}
 	issues["LEG-99"] = map[string]any{"key": "LEG-99", "phase": "planning", "workers": map[string]any{}}
-	writeJSON(rw, http.StatusOK, map[string]any{
-		"daemon":    map[string]any{"project": "LEG", "schemaVersion": 55, "boots": 3},
+	return json.Marshal(map[string]any{
+		"daemon":    map[string]any{"project": "LEG", "schemaVersion": w.schema, "boots": 3},
 		"admission": map[string]any{"cap": 4, "active": []string{}, "waiting": []string{}},
 		"issues":    issues,
 	})
@@ -413,8 +419,9 @@ func (w *world) writeTree(rw http.ResponseWriter, r *http.Request) {
 	writeJSON(rw, http.StatusCreated, map[string]string{"sha": w.tree(files, "")})
 }
 
-// updateRef answers a branch update: a move another push makes first (moves), answered as GitHub
-// answers an update that is no longer a fast-forward, else a fast-forward, else that same 422.
+// updateRef answers a branch update: a refusal of GitHub's own (refusals), 422 with the branch
+// where it was; a move another push makes first (moves), answered as GitHub answers an update that
+// is no longer a fast-forward; else a fast-forward; else that same 422.
 func (w *world) updateRef(rw http.ResponseWriter, r *http.Request, branch string) {
 	var input struct {
 		SHA   string `json:"sha"`
@@ -424,6 +431,10 @@ func (w *world) updateRef(rw http.ResponseWriter, r *http.Request, branch string
 		w.t.Errorf("ref update: %v", err)
 	}
 	w.updates = append(w.updates, refUpdate{branch: branch, sha: input.SHA, force: input.Force})
+	if message, ok := w.refusals[branch]; ok {
+		writeJSON(rw, http.StatusUnprocessableEntity, map[string]string{"message": message})
+		return
+	}
 	head := w.branches[branch]
 	if w.moves[branch] > 0 {
 		w.moves[branch]--
@@ -480,9 +491,9 @@ func wantLines(t *testing.T, output string, lines ...string) {
 }
 
 // removalOf is the removal commit a branch's head is, checked: the import's message with no trailer
-// and no bracket keyword, its parent the head before it, no path under .legion/, and the code
-// files as they were.
-func (w *world) removalOf(t *testing.T, key, before string) string {
+// and no bracket keyword, its parent the head before it, no path under removed (".legion/" or
+// ".legion/<KEY>/"), and every other file, under .legion/ or not, as it was.
+func (w *world) removalOf(t *testing.T, key, before, removed string) string {
 	t.Helper()
 	head := w.branches["legion/"+key]
 	c := w.commits[head]
@@ -497,23 +508,25 @@ func (w *world) removalOf(t *testing.T, key, before string) string {
 		t.Errorf("%s: removal message %q carries a trailer or a bracket keyword", key, c.message)
 	}
 	for path := range c.files {
-		if strings.HasPrefix(path, ".legion/") {
+		if strings.HasPrefix(path, removed) {
 			t.Errorf("%s: removal commit %s still holds %s", key, head, path)
 		}
 	}
 	for path, text := range w.commits[before].files {
-		if !strings.HasPrefix(path, ".legion/") && c.files[path] != text {
+		if !strings.HasPrefix(path, removed) && c.files[path] != text {
 			t.Errorf("%s: removal commit changed %s", key, path)
 		}
 	}
 	return head
 }
 
-// Each file of every in-flight branch becomes version 1 of its phase's record under the daemon's
-// session, exactly as committed; each branch gets exactly one removal commit, moved there without
-// force, and an issue with no branch says so. Another issue's merged .legion/OTHER-1/ is removed
-// with the rest and imported nowhere; a done issue's branch is not read.
-func TestImportWritesEachFileAsVersionOneAndRemovesLegionInOneCommit(t *testing.T) {
+// Under the daemon of the release before the records, each file of every in-flight branch becomes
+// version 1 of its phase's record under the daemon's session, exactly as committed; each branch
+// gets exactly one removal commit, moved there without force, removing only .legion/<KEY>/, the
+// push that daemon carries as handoffs alone, and an issue with no branch says so. Another issue's
+// merged .legion/OTHER-1/ stays on the branch, named on its line for the run after the rollout,
+// and is imported nowhere; a done issue's branch is not read.
+func TestUnderTheOldDaemonTheImportRemovesOnlyTheIssuesOwnDirectory(t *testing.T) {
 	w := newWorld(t)
 	o := w.serve()
 	heads := maps.Clone(w.branches)
@@ -552,22 +565,30 @@ func TestImportWritesEachFileAsVersionOneAndRemovesLegionInOneCommit(t *testing.
 		if updated["legion/"+key] != 1 {
 			t.Errorf("%s was updated %d times, want once", key, updated["legion/"+key])
 		}
-		removal := w.removalOf(t, key, heads["legion/"+key])
-		wantLines(t, stdout, key+": removed .legion/ at "+removal)
+		removal := w.removalOf(t, key, heads["legion/"+key], ".legion/"+key+"/")
+		line := key + ": removed .legion/" + key + "/ at " + removal
+		if key == "LEG-5" {
+			line += "; kept .legion/OTHER-1/ for the run after the rollout"
+		}
+		wantLines(t, stdout, line)
 	}
 	if len(w.handoffs["OTHER-1"]) != 0 || len(w.handoffs["LEG-7"]) != 0 || len(w.handoffs["LEG-6"]) != 0 {
 		t.Errorf("records of issues the import must not write: %+v", w.handoffs)
 	}
+	if files := w.commits[w.branches["legion/LEG-5"]].files; files[".legion/OTHER-1/notes/review-thread.md"] == "" || files[".legion/OTHER-1/plan.json"] == "" {
+		t.Errorf("LEG-5's removal took another issue's .legion/OTHER-1/ under the old daemon: %v", slices.Sorted(maps.Keys(files)))
+	}
 	if w.branches["legion/LEG-7"] != heads["legion/LEG-7"] {
 		t.Error("the done issue's branch moved")
 	}
-	wantLines(t, stdout, "LEG-6: no branch", "imported 14, unchanged 0, kept worker record 0, removed .legion/ 5, no branch 1, failed 0")
+	wantLines(t, stdout, "LEG-6: no branch", "imported 14, unchanged 0, kept worker record 0, removed .legion/ 5, deferred 0, no branch 1, failed 0")
 	if strings.Contains(stdout, "LEG-7") || strings.Contains(stdout, "LEG-99") {
 		t.Errorf("output names an issue outside the workflow's branches:\n%s", stdout)
 	}
 }
 
-// A second run over branches the first emptied writes nothing to Dispatch and pushes nothing.
+// A second run over branches the first emptied writes nothing to Dispatch and pushes nothing; the
+// other issue's directory the old daemon's run kept is named again.
 func TestASecondRunWritesAndPushesNothing(t *testing.T) {
 	w := newWorld(t)
 	o := w.serve()
@@ -585,13 +606,13 @@ func TestASecondRunWritesAndPushesNothing(t *testing.T) {
 	if w.dispatchWrites != writes || len(w.writes) != githubWrites || !maps.Equal(w.branches, heads) {
 		t.Fatalf("second run wrote %d records and sent %v to GitHub; want nothing", w.dispatchWrites-writes, w.writes[githubWrites:])
 	}
-	wantLines(t, stdout, "LEG-1: unchanged", "LEG-5: unchanged", "LEG-6: no branch",
-		"imported 0, unchanged 5, kept worker record 0, removed .legion/ 0, no branch 1, failed 0")
+	wantLines(t, stdout, "LEG-1: unchanged", "LEG-5: unchanged; kept .legion/OTHER-1/ for the run after the rollout", "LEG-6: no branch",
+		"imported 0, unchanged 5, kept worker record 0, removed .legion/ 0, deferred 0, no branch 1, failed 0")
 }
 
 // The write rule: a phase whose newest record a worker wrote keeps it, and the file is not written
 // above it; a newest record the import wrote is written again only when the file differs from it.
-// The branch's .legion/ goes either way.
+// The issue's own .legion/<KEY>/ goes either way.
 func TestAWorkerRecordIsKeptAndAnImportRecordIsWrittenOnlyWhenItDiffers(t *testing.T) {
 	w := newWorld(t)
 	o := w.serve()
@@ -616,9 +637,9 @@ func TestAWorkerRecordIsKeptAndAnImportRecordIsWrittenOnlyWhenItDiffers(t *testi
 	if records := w.handoffs["LEG-2"]["implement"]; len(records) != 2 || records[1].Body != handoffText("LEG-2", "implement") || records[1].Author.ID != daemonSession {
 		t.Errorf("LEG-2 implement records = %+v, want v2 holding the file under %s", records, daemonSession)
 	}
-	w.removalOf(t, "LEG-3", before["legion/LEG-3"])
-	w.removalOf(t, "LEG-2", before["legion/LEG-2"])
-	wantLines(t, stdout, "imported 12, unchanged 1, kept worker record 1, removed .legion/ 5, no branch 1, failed 0")
+	w.removalOf(t, "LEG-3", before["legion/LEG-3"], ".legion/LEG-3/")
+	w.removalOf(t, "LEG-2", before["legion/LEG-2"], ".legion/LEG-2/")
+	wantLines(t, stdout, "imported 12, unchanged 1, kept worker record 1, removed .legion/ 5, deferred 0, no branch 1, failed 0")
 }
 
 // A branch that moves between its read and the ref update is read again and its issue started
@@ -651,11 +672,11 @@ func TestABranchThatMovedIsReadAgainAndRetried(t *testing.T) {
 	if !strings.HasSuffix(w.commits[pushed].message, "an old-release worker's push") {
 		t.Fatalf("LEG-1's removal sits on %q, want the push that moved the branch", w.commits[pushed].message)
 	}
-	removal := w.removalOf(t, "LEG-1", pushed)
+	removal := w.removalOf(t, "LEG-1", pushed, ".legion/LEG-1/")
 	if records := w.handoffs["LEG-1"]["implement"]; len(records) != 1 || records[0].Body != handoffText("LEG-1", "implement")+" " {
 		t.Errorf("LEG-1 implement records = %+v, want the moving push's file as v1", records)
 	}
-	wantLines(t, stdout, "LEG-1 plan: imported v1", "LEG-1 implement: imported v1", "LEG-1: removed .legion/ at "+removal)
+	wantLines(t, stdout, "LEG-1 plan: imported v1", "LEG-1 implement: imported v1", "LEG-1: removed .legion/LEG-1/ at "+removal)
 }
 
 // A branch that moves under every one of the three attempts is reported failed and the run exits
@@ -683,7 +704,106 @@ func TestThreeMovesFailTheIssueAndExitOne(t *testing.T) {
 		t.Errorf("LEG-1's head is %q, want the last moving push", head.message)
 	}
 	wantLines(t, stdout, "LEG-1: failed: legion/LEG-1 moved under the removal commit 3 times; run the import again",
-		"imported 15, unchanged 0, kept worker record 0, removed .legion/ 4, no branch 1, failed 1")
+		"imported 15, unchanged 0, kept worker record 0, removed .legion/ 4, deferred 0, no branch 1, failed 1")
+}
+
+// A 422 to the ref update with the branch still at the head the attempt read is GitHub's own
+// refusal (a ruleset's, here), not a move: the issue fails at once with GitHub's answer, with no
+// retry and no second removal commit, and the run exits 1.
+func TestARefusalThatMovedNothingFailsAtOnceWithGitHubsAnswer(t *testing.T) {
+	w := newWorld(t)
+	o := w.serve()
+	w.refusals["legion/LEG-1"] = "Repository rule violations found"
+	before := w.branches["legion/LEG-1"]
+
+	code, stdout, stderr := run(t, o)
+
+	if code != 1 {
+		t.Fatalf("exit %d, want 1:\n%s%s", code, stdout, stderr)
+	}
+	count, commits := 0, 0
+	for _, update := range w.updates {
+		if update.branch == "legion/LEG-1" {
+			count++
+		}
+	}
+	for _, write := range w.writes {
+		if write == "POST /git/commits" {
+			commits++
+		}
+	}
+	if count != 1 || commits != 5 {
+		t.Errorf("LEG-1 was updated %d times and the run wrote %d commits, want one update and one commit a branch", count, commits)
+	}
+	if w.branches["legion/LEG-1"] != before {
+		t.Errorf("LEG-1 moved to %s, want it left at %s", w.branches["legion/LEG-1"], before)
+	}
+	wantLines(t, stdout, `LEG-1: failed: GitHub refused the ref update: {"message":"Repository rule violations found"}`,
+		"imported 14, unchanged 0, kept worker record 0, removed .legion/ 4, deferred 0, no branch 1, failed 1")
+}
+
+// Under the records' daemon (a schema version at recordsSchema), the removal is all of .legion/,
+// other issues' directories included, on an issue in any phase but testing and reviewing: there
+// the records are written as usual, nothing is pushed, and the line says the removal is deferred
+// until the phase ends, which exits 0. A second run once the phases moved on removes them.
+func TestUnderTheRecordsDaemonTestingAndReviewingDeferTheRemoval(t *testing.T) {
+	w := newWorld(t)
+	w.schema = recordsSchema
+	o := w.serve()
+	files := maps.Clone(w.commits[w.branches["legion/LEG-4"]].files)
+	files[".legion/OTHER-2/plan.json"] = handoffText("OTHER-2", "plan")
+	w.branches["legion/LEG-4"] = w.commit(w.branches["legion/LEG-4"], "LEG-4: merged OTHER-2's branch", files)
+	heads := maps.Clone(w.branches)
+
+	code, stdout, stderr := run(t, o)
+
+	if code != 0 || stderr != "" {
+		t.Fatalf("exit %d, stderr %q; want 0 and nothing:\n%s", code, stderr, stdout)
+	}
+	wantLines(t, stdout,
+		"LEG-2 implement: imported v1", "LEG-2: removal deferred: LEG-2 is in testing; run the import again once the phase ends",
+		"LEG-3 test: imported v1", "LEG-3: removal deferred: LEG-3 is in reviewing; run the import again once the phase ends",
+		"LEG-4: removed .legion/ at "+w.removalOf(t, "LEG-4", heads["legion/LEG-4"], ".legion/"),
+		"LEG-5: removed .legion/ at "+w.removalOf(t, "LEG-5", heads["legion/LEG-5"], ".legion/"),
+		"imported 14, unchanged 0, kept worker record 0, removed .legion/ 3, deferred 2, no branch 1, failed 0")
+	for _, update := range w.updates {
+		if update.branch == "legion/LEG-2" || update.branch == "legion/LEG-3" {
+			t.Errorf("%s was moved to %s, want its removal deferred", update.branch, update.sha)
+		}
+	}
+	if w.branches["legion/LEG-2"] != heads["legion/LEG-2"] || w.branches["legion/LEG-3"] != heads["legion/LEG-3"] {
+		t.Error("a branch in testing or reviewing moved")
+	}
+	if strings.Contains(stdout, "kept .legion/") {
+		t.Errorf("the records' daemon's run kept a directory:\n%s", stdout)
+	}
+
+	w.mu.Lock()
+	w.states["LEG-2"] = seededIssue{"reviewing", seed["LEG-2"].files}
+	w.states["LEG-3"] = seededIssue{"accepting", seed["LEG-3"].files}
+	w.mu.Unlock()
+	code, stdout, stderr = run(t, o)
+
+	if code != 0 || stderr != "" {
+		t.Fatalf("second run exit %d, stderr %q:\n%s", code, stderr, stdout)
+	}
+	wantLines(t, stdout, "LEG-2: removal deferred: LEG-2 is in reviewing; run the import again once the phase ends",
+		"LEG-3: removed .legion/ at "+w.removalOf(t, "LEG-3", heads["legion/LEG-3"], ".legion/"),
+		"imported 0, unchanged 8, kept worker record 0, removed .legion/ 1, deferred 1, no branch 1, failed 0")
+}
+
+// The records' daemon is told by its store's schema version: recordsSchema is migration
+// 0059_handoff_records, the one the records' release added.
+func TestTheRecordsSchemaIsTheHandoffRecordsMigration(t *testing.T) {
+	all, err := migrations.All()
+	if err != nil {
+		t.Fatalf("read the migrations: %v", err)
+	}
+	if !slices.ContainsFunc(all, func(m migrations.Migration) bool {
+		return m.Version == recordsSchema && m.Name == "0059_handoff_records.up.sql"
+	}) {
+		t.Fatalf("no migration 0059_handoff_records.up.sql at version %d, the records' daemon's schema", recordsSchema)
+	}
 }
 
 // --dry-run reads everything and says what it would do, writing nothing to Dispatch or GitHub.
@@ -701,9 +821,9 @@ func TestADryRunWritesNothing(t *testing.T) {
 	if w.dispatchWrites != 0 || len(w.writes) != 0 || !maps.Equal(w.branches, heads) {
 		t.Fatalf("a dry run wrote %d records and sent %v to GitHub", w.dispatchWrites, w.writes)
 	}
-	wantLines(t, stdout, "LEG-1 plan: would import v1", "LEG-1: would remove .legion/ (1 path) above "+heads["legion/LEG-1"],
-		"LEG-5: would remove .legion/ (7 paths) above "+heads["legion/LEG-5"],
-		"dry run, nothing written: would import 14, unchanged 0, kept worker record 0, would remove .legion/ 5, no branch 1, failed 0")
+	wantLines(t, stdout, "LEG-1 plan: would import v1", "LEG-1: would remove .legion/LEG-1/ (1 path) above "+heads["legion/LEG-1"],
+		"LEG-5: would remove .legion/LEG-5/ (4 paths) above "+heads["legion/LEG-5"]+"; kept .legion/OTHER-1/ for the run after the rollout",
+		"dry run, nothing written: would import 14, unchanged 0, kept worker record 0, would remove .legion/ 5, deferred 0, no branch 1, failed 0")
 }
 
 // A Dispatch without the handoff routes stops the run at its first handoff call, naming the route,

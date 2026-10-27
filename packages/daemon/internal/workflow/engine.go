@@ -520,10 +520,10 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 			return result, err
 		}
 	}
-	if word, ok := phase.HandoffFile(issue.Phase); ok {
-		// A file-backed phase ends with a Dispatch handoff record, which the route read back and
-		// held to this issue, the phase's word, the reported version and the claim's session: the
-		// record the role named for its previous phase means this phase wrote none.
+	if word, _, ok := phase.Handoff(issue.Phase); ok {
+		// A phase with a handoff ends with a Dispatch handoff record, which the route read back
+		// and held to this issue, the phase's word, the reported version and the claim's session:
+		// the record the role named for its previous phase means this phase wrote none.
 		if fact.HandoffRecord == "" {
 			return refused("HANDOFF_RECORD_REQUIRED", fmt.Sprintf("the %s's completion of phase %s of %s names no handoff record: write it with `dispatch handoff-write --issue %s --phase %s --body-file <file>`, then complete again; this completion changed nothing",
 				fact.Role, issue.Phase, issue.Key, issue.Key, word)), nil
