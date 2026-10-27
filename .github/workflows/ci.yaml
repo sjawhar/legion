@@ -668,18 +668,15 @@ jobs:
               # internal/dispatch/docs/approval_carry_test.go:26.
               - 'packages/contracts/fixtures/delivery-live/**'
               - 'packages/contracts/fixtures/decision-blocks/**'
-            # `go test -tags memory ./cmd/dispatch`: cmd/dispatch/memory_profile_test.go:147-148
-            # reads the guides below.
+            # `go test -tags memory ./cmd/dispatch`. memory_profile_test.go reads four guides only
+            # when DISPATCH_EDIT_PROFILE_OUT is set (its line 126), which CI never sets, so they are
+            # not here.
             dispatch_memory:
               - '.github/workflows/ci.yaml'
               - *go_workspace
               - *dispatch_command_tests
-              - 'packages/envoy/AGENTS.md'
-              - 'packages/envoy/README.md'
-              - 'scripts/e2e/README.md'
-              - 'docs/superpowers/plans/2026-09-05-dispatch-conversations.md'
-            # `go test -tags multiprocess ./cmd/dispatch`, as dispatch_memory but for the guides
-            # (memory_profile_test.go builds only under `memory`) and with the in-process NATS.
+            # `go test -tags multiprocess ./cmd/dispatch`, the same closure as dispatch_memory, with
+            # the in-process NATS.
             dispatch_multiprocess:
               - '.github/workflows/ci.yaml'
               - *go_workspace

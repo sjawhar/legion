@@ -89,8 +89,10 @@ main: on a push, `changes` selects by that push's own diff, so main skips the jo
 re-runs it later, and the break shows up in the next change that does select the job, far from its
 cause.
 
-So when you add an import, an embed, a go command a test starts, or a test that reads a new file,
-re-run the method and extend the filter in the same pull request.
+So when a change makes a job's command, or a binary its tests build, compile a new package (an import
+in production code or in a test), embed a file, or read a new file, or makes a test start a new go
+command, re-run the method and extend the filter in the same pull request. A file read only behind an
+environment variable CI never sets stays out.
 
 ## Caches: only main writes
 
