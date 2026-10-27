@@ -515,6 +515,9 @@ which hands both plugin entries to the Oh My Pi child by path.
 
 ## Checks
 
-`bunx tsc --noEmit`, `bun test`, `bunx biome check extensions/ src/`, each from this directory;
+`bunx tsc --noEmit`, `bun run test`, `bunx biome check extensions/ src/`, each from this directory;
 `LEGION_TEST_OMP=<omp> bun test extensions/legion-phase-stall-omp.test.ts extensions/legion-role-tools-omp.test.ts` and
 `LEGION_TEST_OMP=<omp> LEGION_TEST_NATS_URL=<nats> bun test extensions/controller-start-omp.test.ts` for the real binary.
+`bun run test` runs `controller-start-omp.test.ts` in a process of its own: `extensions/legion.test.ts`
+replaces the `nats` module for the whole process (`mock.module`), and that file's controller cases
+publish over the real NATS server, so a plain `bun test` with both variables set fails them.
