@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-526",
+  "completed": "2026-10-27T03:23:33Z",
+  "round": 1,
+  "reviewedHead": "9439f4a8ef90669b5a184c2a5ca9c484eb3dc208 (code; handoff heads above it change only .legion/)",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 0,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/refs/useRenderedMarkdown.tsx:57-58",
+      "description": "collectAskHosts finds a shell's slots with shell.querySelector('[data-dispatch-ask-header]') / ('[data-dispatch-ask-footer]'), which search every descendant in document order. An ask block may sit inside an option of another ask block (list_item holds blocks), and the inner shell's footer comes before the outer shell's own footer, so the outer card mounts in the inner footer, the outer is marked data-dispatch-ask-options=rows and its source list (holding the inner block) is folded: the outer decision shows only its header, no options, and the inner decision is hidden. Reproduced by the reviewer in happy-dom at 9439f4a8 (throwaway test, deleted): shells 2, outer own footer empty, shell 1 footer text 'AfirstInner?X: xXx'. Fix: ':scope > [data-dispatch-ask-header]' and ':scope > [data-dispatch-ask-footer]' (and the same in ask-block.ts slot() to keep the two in step), plus a MarkdownBody.test.tsx case for a decision nested in an option."
+    },
+    {
+      "severity": "cleanup",
+      "file": "packages/dispatch/web/src/features/doc/typed-block-drawing.ts (renderAskBlockShell); ask-block.ts:70-88 (applyShell); useRenderedMarkdown.tsx:64-68 (collectAskHosts)",
+      "description": "Fast-follow (no behaviour change): the shell's stamped attributes (urgency, state, malformed) and the fold rule (not malformed means data-dispatch-ask-options=rows) are written in renderAskBlockShell, AskBlockView.applyShell and collectAskHosts; askBlockShell could return the attribute record and the fold decision once, and the DOM write could leave collectAskHosts."
+    }
+  ],
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection: none. CI head 9439f4a8 (compare to cc8741b0: handoffsOnly true, 2 files). At 2026-10-27T03:17Z every check at 9439f4a8 was queued (127 runs queued repo-wide); this round requests changes, which does not wait on CI.",
+  "thermonuclear": "Both run at 9439f4a8. Deep review: one important finding (the nested-decision slot lookup above), no security bug; the server-attribute reset holds against every later pass. Code quality: one finding (the duplicated shell stamping), judged cleanup with no behaviour change and carried as the fast-follow.",
+  "threads": "No review threads and no prior reviews on #2310 at review time (gh api graphql).",
+  "verifiedLocally": "cd packages/dispatch && bun test web/src/features/refs web/src/features/doc: 350 pass, 0 fail at 9439f4a8."
+}
