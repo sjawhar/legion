@@ -43,15 +43,18 @@
   next step, after the Send, without ending the running tool batch; a card still queued at an
   interrupt is folded into the context with no run and read at the next turn. On an idle session a
   card is still a steer with `triggerTurn`, so it starts a turn as before; a targeted Aside stays
-  an aside, and a host context without `ctx.isIdle()` keeps every card a steer. A card the host
-  folds into the context with no turn, as it does for an aside that lands as a run ends in a
+  an aside, and a host context without `ctx.isIdle()` keeps every other card a steer. A card the
+  host folds into the context with no turn, as it does for an aside that lands as a run ends in a
   session interrupted earlier, or in plan mode, now gets one hidden wake that starts a turn to read
-  it, unless an interrupt is still in effect (INFRA-497).
-- A card that reaches a session while Oh My Pi starts no longer holds back every RPC command until
-  the turn it started ends. Oh My Pi settles every extension send of its startup before RPC mode
-  reads its input, and an idle card's send lasted its whole turn, so a Legion worker's `get_state`
-  and task waited for it (once 72 minutes). Such a card now goes into the context with no turn, and
-  the wake starts its turn once the host is idle after its startup (INFRA-497).
+  it, unless an interrupt is still in effect or the card was a targeted Aside; a card sent while
+  the session sets up a prompt is left to that prompt's run, so an interrupt there starts no turn
+  either. The limits are in the package's `AGENTS.md` (INFRA-497).
+- A card that reaches an RPC session while Oh My Pi starts no longer holds back every RPC command
+  until the turn it started ends. Oh My Pi settles every extension send of its startup before RPC
+  mode reads its input, and an idle card's send lasted its whole turn, so a Legion worker's
+  `get_state` and task waited for it (once 72 minutes). Such a card now goes into the context with
+  no turn, and the wake starts its turn once the host is idle after its startup. Print, json and
+  terminal sessions keep the idle steer (INFRA-497).
 
 - A live view held open while its session is relaunched with `--resume` now shows the resumed
   process's model, thinking level and command changes. Two things stopped it. Every process
