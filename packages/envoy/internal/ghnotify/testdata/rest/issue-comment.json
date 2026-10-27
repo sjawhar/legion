@@ -1,0 +1,19 @@
+{
+  "id": 9001,
+  "node_id": "IC_kwDOexample9001",
+  "url": "https://api.github.com/repos/acme/widgets/issues/comments/9001",
+  "html_url": "https://github.com/acme/widgets/issues/7#issuecomment-9001",
+  "issue_url": "https://api.github.com/repos/acme/widgets/issues/7",
+  "user": {
+    "login": "maintainer",
+    "id": 3200,
+    "type": "User"
+  },
+  "created_at": "2026-10-27T11:30:00Z",
+  "updated_at": "2026-10-27T11:30:00Z",
+  "author_association": "MEMBER",
+  "body": "Reproduced on main; the spin counter wraps after one turn.",
+  "reactions": {
+    "total_count": 0
+  }
+}

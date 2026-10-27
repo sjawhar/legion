@@ -1,0 +1,31 @@
+{
+  "id": "18000000002",
+  "unread": true,
+  "reason": "review_requested",
+  "updated_at": "2026-10-27T11:55:00Z",
+  "last_read_at": null,
+  "subject": {
+    "title": "Spin the widget twice",
+    "url": "https://api.github.com/repos/acme/widgets/pulls/8",
+    "latest_comment_url": "https://api.github.com/repos/acme/widgets/pulls/comments/9101",
+    "type": "PullRequest"
+  },
+  "repository": {
+    "id": 1000,
+    "node_id": "R_kgDOexample",
+    "name": "widgets",
+    "full_name": "acme/widgets",
+    "private": false,
+    "owner": {
+      "login": "acme",
+      "id": 2000,
+      "type": "Organization"
+    },
+    "html_url": "https://github.com/acme/widgets",
+    "description": "Widgets that spin",
+    "fork": false,
+    "url": "https://api.github.com/repos/acme/widgets"
+  },
+  "url": "https://api.github.com/notifications/threads/18000000002",
+  "subscription_url": "https://api.github.com/notifications/threads/18000000002/subscription"
+}

@@ -1,0 +1,15 @@
+{
+  "id": 15001,
+  "node_id": "CE_lADOexample15001",
+  "url": "https://api.github.com/repos/acme/widgets/issues/events/15001",
+  "actor": {
+    "login": "maintainer",
+    "id": 3200,
+    "type": "User"
+  },
+  "event": "closed",
+  "commit_id": "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3",
+  "commit_url": "https://api.github.com/repos/acme/widgets/commits/d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3",
+  "created_at": "2026-10-27T11:50:00Z",
+  "state_reason": null
+}

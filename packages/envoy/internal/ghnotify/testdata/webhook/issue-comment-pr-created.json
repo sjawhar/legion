@@ -1,0 +1,74 @@
+{
+  "action": "created",
+  "issue": {
+    "url": "https://api.github.com/repos/acme/widgets/issues/8",
+    "repository_url": "https://api.github.com/repos/acme/widgets",
+    "html_url": "https://github.com/acme/widgets/pull/8",
+    "id": 3002,
+    "node_id": "PR_kwDOexample8",
+    "number": 8,
+    "title": "Spin the widget twice",
+    "user": {
+      "login": "contributor",
+      "id": 3300,
+      "type": "User"
+    },
+    "labels": [],
+    "state": "open",
+    "locked": false,
+    "assignees": [],
+    "comments": 1,
+    "created_at": "2026-10-27T10:00:00Z",
+    "updated_at": "2026-10-27T11:44:00Z",
+    "closed_at": null,
+    "author_association": "CONTRIBUTOR",
+    "draft": false,
+    "pull_request": {
+      "url": "https://api.github.com/repos/acme/widgets/pulls/8",
+      "html_url": "https://github.com/acme/widgets/pull/8",
+      "diff_url": "https://github.com/acme/widgets/pull/8.diff",
+      "patch_url": "https://github.com/acme/widgets/pull/8.patch",
+      "merged_at": null
+    },
+    "body": "Fixes the spin."
+  },
+  "comment": {
+    "url": "https://api.github.com/repos/acme/widgets/issues/comments/9003",
+    "html_url": "https://github.com/acme/widgets/pull/8#issuecomment-9003",
+    "issue_url": "https://api.github.com/repos/acme/widgets/issues/8",
+    "id": 9003,
+    "node_id": "IC_kwDOexample9003",
+    "user": {
+      "login": "maintainer",
+      "id": 3200,
+      "type": "User"
+    },
+    "created_at": "2026-10-27T11:44:00Z",
+    "updated_at": "2026-10-27T11:44:00Z",
+    "author_association": "MEMBER",
+    "body": "CI is green; one question inline.\n\n<!-- legion: worker footer -->"
+  },
+  "repository": {
+    "id": 1000,
+    "node_id": "R_kgDOexample",
+    "name": "widgets",
+    "full_name": "acme/widgets",
+    "private": false,
+    "owner": {
+      "login": "acme",
+      "id": 2000,
+      "type": "Organization"
+    },
+    "html_url": "https://github.com/acme/widgets",
+    "default_branch": "main"
+  },
+  "organization": {
+    "login": "acme",
+    "id": 2000
+  },
+  "sender": {
+    "login": "maintainer",
+    "id": 3200,
+    "type": "User"
+  }
+}

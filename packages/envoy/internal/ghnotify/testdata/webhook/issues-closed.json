@@ -1,0 +1,51 @@
+{
+  "action": "closed",
+  "issue": {
+    "url": "https://api.github.com/repos/acme/widgets/issues/7",
+    "repository_url": "https://api.github.com/repos/acme/widgets",
+    "html_url": "https://github.com/acme/widgets/issues/7",
+    "id": 3001,
+    "node_id": "I_kwDOexample7",
+    "number": 7,
+    "title": "Widget fails to spin",
+    "user": {
+      "login": "reporter",
+      "id": 3100,
+      "type": "User"
+    },
+    "labels": [],
+    "state": "closed",
+    "state_reason": "completed",
+    "locked": false,
+    "assignees": [],
+    "comments": 2,
+    "created_at": "2026-10-27T09:00:00Z",
+    "updated_at": "2026-10-27T11:50:00Z",
+    "closed_at": "2026-10-27T11:50:00Z",
+    "author_association": "NONE",
+    "body": "The widget stops after one turn."
+  },
+  "repository": {
+    "id": 1000,
+    "node_id": "R_kgDOexample",
+    "name": "widgets",
+    "full_name": "acme/widgets",
+    "private": false,
+    "owner": {
+      "login": "acme",
+      "id": 2000,
+      "type": "Organization"
+    },
+    "html_url": "https://github.com/acme/widgets",
+    "default_branch": "main"
+  },
+  "organization": {
+    "login": "acme",
+    "id": 2000
+  },
+  "sender": {
+    "login": "maintainer",
+    "id": 3200,
+    "type": "User"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "id": 3001,
+  "node_id": "I_kwDOexample7",
+  "url": "https://api.github.com/repos/acme/widgets/issues/7",
+  "repository_url": "https://api.github.com/repos/acme/widgets",
+  "html_url": "https://github.com/acme/widgets/issues/7",
+  "number": 7,
+  "state": "open",
+  "state_reason": null,
+  "title": "Widget fails to spin",
+  "body": "The widget stops after one turn.",
+  "user": {
+    "login": "reporter",
+    "id": 3100,
+    "type": "User"
+  },
+  "labels": [],
+  "assignees": [],
+  "locked": false,
+  "comments": 2,
+  "created_at": "2026-10-27T09:00:00Z",
+  "updated_at": "2026-10-27T11:30:00Z",
+  "closed_at": null,
+  "author_association": "NONE"
+}

@@ -1,0 +1,19 @@
+{
+  "id": 9002,
+  "node_id": "IC_kwDOexample9002",
+  "url": "https://api.github.com/repos/acme/widgets/issues/comments/9002",
+  "html_url": "https://github.com/acme/widgets/issues/7#issuecomment-9002",
+  "issue_url": "https://api.github.com/repos/acme/widgets/issues/7",
+  "user": {
+    "login": "maintainer",
+    "id": 3200,
+    "type": "User"
+  },
+  "created_at": "2026-10-27T11:35:00Z",
+  "updated_at": "2026-10-27T11:35:00Z",
+  "author_association": "MEMBER",
+  "body": "@legion can you take a look at the counter?",
+  "reactions": {
+    "total_count": 0
+  }
+}

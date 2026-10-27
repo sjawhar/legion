@@ -1,0 +1,31 @@
+{
+  "id": "18000000001",
+  "unread": false,
+  "reason": "author",
+  "updated_at": "2026-10-27T11:50:00Z",
+  "last_read_at": "2026-10-27T11:45:00Z",
+  "subject": {
+    "title": "Widget fails to spin",
+    "url": "https://api.github.com/repos/acme/widgets/issues/7",
+    "latest_comment_url": "https://api.github.com/repos/acme/widgets/issues/comments/9001",
+    "type": "Issue"
+  },
+  "repository": {
+    "id": 1000,
+    "node_id": "R_kgDOexample",
+    "name": "widgets",
+    "full_name": "acme/widgets",
+    "private": false,
+    "owner": {
+      "login": "acme",
+      "id": 2000,
+      "type": "Organization"
+    },
+    "html_url": "https://github.com/acme/widgets",
+    "description": "Widgets that spin",
+    "fork": false,
+    "url": "https://api.github.com/repos/acme/widgets"
+  },
+  "url": "https://api.github.com/notifications/threads/18000000001",
+  "subscription_url": "https://api.github.com/notifications/threads/18000000001/subscription"
+}

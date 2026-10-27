@@ -1,0 +1,15 @@
+{
+  "id": 15004,
+  "node_id": "REE_lADOexample15004",
+  "url": "https://api.github.com/repos/acme/widgets/issues/events/15004",
+  "actor": {
+    "login": "reporter",
+    "id": 3100,
+    "type": "User"
+  },
+  "event": "reopened",
+  "commit_id": null,
+  "commit_url": null,
+  "created_at": "2026-10-27T11:53:00Z",
+  "state_reason": "reopened"
+}
