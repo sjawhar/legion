@@ -2,39 +2,42 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-549",
-  "completed": "2026-10-27T09:16:00Z",
-  "round": 2,
-  "reviewedCodeHead": "22e1c3aef576556ee672cb14e2c97539495ca0f6",
-  "decision": "changes_requested",
+  "completed": "2026-10-27T09:59:40Z",
+  "round": 3,
+  "reviewedCodeHead": "f589463471e3",
+  "decision": "approved",
   "critical": 0,
-  "important": 3,
-  "minor": 0,
-  "roundOneThreads": {
-    "PRRT_kwDORFy7ds6wmI-h": "accepted: fixed in 90d28d94626a (max-file-store annotation rolls the pods)",
-    "PRRT_kwDORFy7ds6wmI-o": "accepted: fixed in 8bf4bfe7451e (trap and nap; busybox PID-1 run by the tester)",
-    "PRRT_kwDORFy7ds6wmI-t": "accepted: fixed in 22e1c3aef576 (INFRA-557 prerequisite in README and nats-hub.md)"
+  "important": 0,
+  "minor": 3,
+  "threads": {
+    "PRRT_kwDORFy7ds6wmI-h": "round 1, accepted: fixed in 90d28d94626a",
+    "PRRT_kwDORFy7ds6wmI-o": "round 1, accepted: fixed in 8bf4bfe7451e",
+    "PRRT_kwDORFy7ds6wmI-t": "round 1, accepted: fixed in 22e1c3aef576",
+    "PRRT_kwDORFy7ds6wndgk": "round 2, accepted: fixed in f589463471e3 (disk growth pins maxFileStoreGb)",
+    "PRRT_kwDORFy7ds6wndgp": "round 2, accepted: fixed in f589463471e3 (depends-on rationale for both annotations, pinned without a session user)",
+    "PRRT_kwDORFy7ds6wndgv": "round 2, accepted: fixed in f589463471e3 (earlier listener build advertised during its wait; CHANGELOG names INFRA-557)"
   },
   "keyFindings": [
     {
-      "severity": "important",
+      "severity": "minor",
       "file": "packages/envoy/infra/README.md",
-      "description": "Since 90d28d94 the disk-growth steps restart every hub pod when maxFileStoreGb follows diskSizeGb by default (no streamMaxBytes, no explicit maxFileStoreGb). The max-file-store annotation changes with diskSizeGb, so the StatefulSet created in step 5 has a new template revision, and its controller rolls the three orphaned pods. Step 5 (and the intro at :327-328) still says no pod is replaced and that 'the reloader applies' the new limit. The pod-template list at :322-323 also omits the store limit. Say what happens, or how to keep the pods (pin maxFileStoreGb to its current value during the growth)."
+      "description": "Not a defect: step 6 previews nothing when the floor of 0.9 times the new diskSizeGb equals the pinned limit; 'remove it' refers to step 5's pin, which a streamMaxBytes hub never made."
     },
     {
-      "severity": "important",
-      "file": "packages/envoy/infra/gcp/clusteredhub_kube.go",
-      "description": "The depends-on rationale at :248-253 and docs/nats-hub.md:783-787 still names only the session user and auth.conf. The max-file-store roll needs the same order (a pod restarted on the old nats.conf would hold the higher limit, and the later reload of the lower one is refused and blocks every reload after it). State the rule for both annotations, so no one makes the annotation conditional on the session user."
+      "severity": "minor",
+      "file": "packages/envoy/infra/docs/nats-hub.md",
+      "description": "Not a defect: with an earlier listener build the host leaves the Service after tailnetHealthFall failed answers (about 15 s after the listener exits), not at the exit; the text describes a build the same paragraph forbids."
     },
     {
-      "severity": "important",
-      "file": "packages/envoy/infra/README.md",
-      "description": "The earlier-build text (README:304-308, nats-hub.md:840-844) leaves out that today's listener answers /healthz 200 'starting' from process start until its durable binds (cmd/listener/main.go:340-358). So the advertiser advertises the second host and marks it ready for most of each 135 s wait, the rollout and budget count it as serving, and the host then leaves the Service when its listener exits. Also, CHANGELOG.md:18-25 does not name the INFRA-557 prerequisite."
+      "severity": "minor",
+      "file": "PR body",
+      "description": "My own 'Not proven / risk' lines were stale (round-2 request now done; disk-growth steps 3-6 were run by the tester against kube-apiserver and kube-controller-manager); corrected in the body, no commit."
     }
   ],
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at 22e1c3ae (Medium: README disk-growth step 5 contradicted by the store annotation; minors: earlier-build healthz text, CHANGELOG prerequisite, stale PR body lines). Trap/nap correct, also under busybox 1.35 ash; store annotation covers the only input-derived value in nats.conf that nats-server cannot reload; tailnet_service.go byte-identical to legion/INFRA-560@origin.",
-    "codeQuality": "Verdict: CHANGES at 22e1c3ae, cleanup only: depends-on rationale names only the session user (requested here as finding 2); no correctness finding."
+    "deepReview": "Verdict: APPROVE at f5894634 (two Minors: step 6 empty preview case; stale PR body lines). Pinning yields an identical pod template; kubectl jsonpath valid; depends-on rationale and INFRA-557 text match the code.",
+    "codeQuality": "Verdict: CHANGES at f5894634, docs precision only (step 6 'remove it' for streamMaxBytes hubs; host leaves the Service ~15 s after the listener exits). Judged Minor, not defects: see keyFindings."
   },
-  "ci": "At 22e1c3ae every pull_request run (Tests, Legion Envoy and Contracts, Docs, PR Title) was queued at 09:10Z; e0040d22's runs were cancelled without running. legion/INFRA-546 requires no check. A request for changes does not wait on CI.",
-  "verifiedLocally": "gofmt clean, go vet -tags pulumilive,natslive ./gcp/ ok, go test -run 'TestTailnetService|TestClusteredNatsHub' ./gcp/ ok (dash) at 22e1c3ae; tailnet_service.go and its test byte-identical to legion/INFRA-560@origin."
+  "ci": "legion/INFRA-546 requires no check (no ruleset with required checks, branch not protected). At f589463471e3 every pull_request run (Tests, Legion Envoy and Contracts, Docs, PR Title) is queued; no run has executed on this pull request at any head, since the repository's runners hold 178 queued runs with the oldest in-progress started 05:58Z. Compare f589463471e3...a2797f01: handoffsOnly true, 2 files. Told to the architect.",
+  "verifiedLocally": "At f589463471e3: gofmt clean on gcp, go vet -tags pulumilive,natslive ./gcp/ ok, go test -run 'TestClusteredNatsHubRollsThePodsOnlyForASessionUserOrStoreChange|TestClusteredNatsHubChartValues' ./gcp/ ok. Round 2: the changed gcp tests passed at 22e1c3ae."
 }
