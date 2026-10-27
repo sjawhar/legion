@@ -221,7 +221,14 @@ Legion uses GitHub's own review mechanisms rather than labels:
   the daemon already applied, by webhook or by read, decides nothing again. A review submitted while
   no round is open (the work is being implemented or tested) decides no later round when the daemon
   reads it before the next round opens. One it first hears of after that round opened can still
-  decide it, as a webhook delivered late can.
+  decide it, as a webhook delivered late can. An approval of a head below the pull request's head
+  still counts when everything above it changed only the issue's own `.legion/<issue>/`: the
+  daemon learns that from each push's webhook, and the same two-minute read also asks GitHub to
+  compare the approved head with the head while the approval does not count, so a push webhook
+  lost or late, or an approved head the record never held, sets nothing aside. Any other change
+  above the approved head, another issue's `.legion/` included, or a head not built on it, sets the
+  approval aside, and only an approval of the head itself or a request for changes ends the round;
+  an approval of the head itself ends it as soon as the record reaches that head.
 - **CI** on the pull request's head counts: red checks while testing, reviewing, in retro or
   merging, or once the issue awaits its merge, send the issue back to the implementer, naming the
   failing checks. The tester, a reviewer whose round is not yet completed, or the merger has its
@@ -254,20 +261,20 @@ Legion uses GitHub's own review mechanisms rather than labels:
   a run belongs to the repository it ran for, so a required workflow another repository defines
   (an organization ruleset) never matches a run: the head never reads green, so Legion sends the
   work nowhere for it, and whether it holds the merge is GitHub's to say. A head that a push
-  changing only
-  `.legion/` made carries the checks and workflow runs of the head before it, except a workflow run
-  cancelled there, which the new head's own run superseded: it leaves no verdict until that head's
-  own CI settles, and a red carried that way is that code's red and sends the work back as the
-  code head's own would. The daemon reads each open pull request's required set with the implement
-  App as it starts and every two minutes after, with the required workflows' runs on the head;
-  until a read succeeds, no verdict stands for the head, and a read GitHub refuses is logged with
-  the repository and the HTTP status. The same read follows the pull request's head: when GitHub
-  shows a head the daemon has not recorded, the daemon takes it as the synchronize webhook would,
-  and takes its push too when GitHub shows that it changed only `.legion/`, so a lost or late
-  webhook leaves the record behind for at most one read. A push that changed code is still read
-  from its webhook. The daemon also looks up the open pull request of each issue whose implementer
-  completed while no pull request is recorded, and records it as the opened webhook would, which
-  moves the issue to testing.
+  changing only the issue's own `.legion/<issue>/` made carries the checks and workflow runs of the
+  head before it, except a workflow run cancelled there, which the new head's own run superseded:
+  it leaves no verdict until that head's own CI settles, and a red carried that way is that code's
+  red and sends the work back as the code head's own would. The daemon reads each open pull
+  request's required set with the implement App as it starts and every two minutes after, with the
+  required workflows' runs on the head; until a read succeeds, no verdict stands for the head, and
+  a read GitHub refuses is logged with the repository and the HTTP status. The same read follows
+  the pull request's head: when GitHub shows a head the daemon has not recorded, the daemon takes
+  it as the synchronize webhook would, and takes its push too when GitHub shows that it changed
+  only the issue's own `.legion/<issue>/`, so a lost or late webhook leaves the record behind for
+  at most one read. A push that changed anything else is still read from its webhook. The daemon
+  also looks up the open pull request of each issue whose implementer completed while no pull
+  request is recorded, and records it as the opened webhook would, which moves the issue to
+  testing.
 - **Review threads** close one by one, and only once the thread's opener (or, for a thread a bot
   opened, Legion's reviewer) accepts the reply.
 - Two limits flag a loop: after `review_round_cap` rounds (three by default), or once
