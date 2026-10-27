@@ -152,8 +152,8 @@ func NewPool(pool *pgxpool.Pool) *Pool {
 // The ceiling is picked here rather than derived from the task's CPU allotment or read out of
 // the DSN another repository's URL builder writes. It is 64, from 16, since 2026-10-27: a
 // request takes a connection per statement one after another (an issue read is about eleven),
-// so under ~240 agent requests a minute the API held all sixteen and the outbox, which shares
-// the pool, waited 1-3 s per event; the database (16 vCPU) has hundreds of connections spare.
+// so under ~240 agent requests a minute the API held all sixteen and every other request waited
+// seconds for one; the database (16 vCPU) has hundreds of connections spare.
 const sharedPoolSize = 64
 
 // roomsPoolSize bounds the connections document loads use. Loading takes no lock and always
