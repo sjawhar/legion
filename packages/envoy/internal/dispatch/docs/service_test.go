@@ -1210,7 +1210,40 @@ func TestSettleStampsLegacyChangeInExactlyOneVersion(t *testing.T) {
 	}
 }
 
-func TestSettleDiscardsIdentityUpdateWhenVersionTransactionFails(t *testing.T) {
+// rejectFirstStampAppend has the database refuse the first stored update that changes no rendered
+// markdown - here the settlement's block-id stamp, the one such update the test makes - so the
+// settlement's repair transaction fails once the stamp is in the room.
+func rejectFirstStampAppend(t *testing.T, database *store.Store) {
+	t.Helper()
+	for _, statement := range []string{
+		`create sequence dispatch_test_stamp_appends`,
+		`create function dispatch_test_reject_stamp_append() returns trigger language plpgsql as $$
+		begin
+			if nextval('dispatch_test_stamp_appends') = 1 then
+				raise exception 'reject the settlement''s stamp';
+			end if;
+			return new;
+		end;
+		$$`,
+		`create trigger dispatch_test_reject_stamp_append
+		before insert on doc_updates for each row when (not new.content_changed)
+		execute function dispatch_test_reject_stamp_append()`,
+	} {
+		if _, err := database.Pool.Exec(context.Background(), statement); err != nil {
+			t.Fatalf("arrange the stamp's refusal: %v", err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = database.Pool.Exec(context.Background(), `drop trigger if exists dispatch_test_reject_stamp_append on doc_updates`)
+		_, _ = database.Pool.Exec(context.Background(), `drop function if exists dispatch_test_reject_stamp_append()`)
+		_, _ = database.Pool.Exec(context.Background(), `drop sequence if exists dispatch_test_stamp_appends`)
+	})
+}
+
+// A settlement's stamp is committed in a transaction of its own, before the version. When that
+// transaction fails, the stamp it wrote into the room never reaches the store: the room fails and
+// reloads the stored document, and the next settlement stamps and versions it.
+func TestSettleDiscardsIdentityUpdateWhenItsRepairTransactionFails(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	seedUnidentifiedProofDocument(t, database, artifactID, "before")
@@ -1220,32 +1253,9 @@ func TestSettleDiscardsIdentityUpdateWhenVersionTransactionFails(t *testing.T) {
 			t.Errorf("shutdown document service: %v", err)
 		}
 	})
-	if _, err := database.Pool.Exec(context.Background(), `
-		create function dispatch_test_reject_identity_settlement() returns trigger language plpgsql as $$
-		begin
-			if new.number = 2 then
-				raise exception 'reject identity settlement version';
-			end if;
-			return new;
-		end;
-		$$
-	`); err != nil {
-		t.Fatalf("create identity settlement failure function: %v", err)
-	}
-	if _, err := database.Pool.Exec(context.Background(), `
-		create trigger dispatch_test_reject_identity_settlement
-		before insert on artifact_versions for each row
-		execute function dispatch_test_reject_identity_settlement()
-	`); err != nil {
-		t.Fatalf("create identity settlement failure trigger: %v", err)
-	}
-	t.Cleanup(func() {
-		_, _ = database.Pool.Exec(context.Background(), `drop trigger if exists dispatch_test_reject_identity_settlement on artifact_versions`)
-		_, _ = database.Pool.Exec(context.Background(), `drop function if exists dispatch_test_reject_identity_settlement()`)
-	})
-
 	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
 	waitForPersistedProofText(t, database, artifactID, "after\n")
+	rejectFirstStampAppend(t, database)
 	state := service.room(artifactID)
 	state.mu.Lock()
 	generation := state.roomGeneration
@@ -1264,12 +1274,6 @@ func TestSettleDiscardsIdentityUpdateWhenVersionTransactionFails(t *testing.T) {
 	}
 	if versions != 1 {
 		t.Fatalf("versions after failed settlement = %d, want 1", versions)
-	}
-	if _, err := database.Pool.Exec(context.Background(), `drop trigger dispatch_test_reject_identity_settlement on artifact_versions`); err != nil {
-		t.Fatalf("drop identity settlement failure trigger: %v", err)
-	}
-	if _, err := database.Pool.Exec(context.Background(), `drop function dispatch_test_reject_identity_settlement()`); err != nil {
-		t.Fatalf("drop identity settlement failure function: %v", err)
 	}
 	if err := service.awaitRoomRecovery(context.Background(), artifactID); err != nil {
 		t.Fatalf("await room recovery: %v", err)
@@ -1309,29 +1313,7 @@ func TestFailedSettlementDoesNotDiscardSuccessorRoomUpdate(t *testing.T) {
 			t.Errorf("shutdown document service: %v", err)
 		}
 	})
-	if _, err := database.Pool.Exec(context.Background(), `
-		create function dispatch_test_reject_successor_settlement() returns trigger language plpgsql as $$
-		begin
-			if new.number = 2 then
-				raise exception 'reject successor settlement version';
-			end if;
-			return new;
-		end;
-		$$
-	`); err != nil {
-		t.Fatalf("create successor settlement failure function: %v", err)
-	}
-	if _, err := database.Pool.Exec(context.Background(), `
-		create trigger dispatch_test_reject_successor_settlement
-		before insert on artifact_versions for each row
-		execute function dispatch_test_reject_successor_settlement()
-	`); err != nil {
-		t.Fatalf("create successor settlement failure trigger: %v", err)
-	}
-	t.Cleanup(func() {
-		_, _ = database.Pool.Exec(context.Background(), `drop trigger if exists dispatch_test_reject_successor_settlement on artifact_versions`)
-		_, _ = database.Pool.Exec(context.Background(), `drop function if exists dispatch_test_reject_successor_settlement()`)
-	})
+	rejectFirstStampAppend(t, database)
 
 	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
 	<-entered

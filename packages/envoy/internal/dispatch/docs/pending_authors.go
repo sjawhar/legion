@@ -484,16 +484,16 @@ func (s *Service) capturePendingAuthors(ctx context.Context, tx pgx.Tx, room str
 	}
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
-	return captureAuthors(state, owed, write, actor), nil
+	return captureAuthors(state, owed, write, actor, state.creditSeq.Load()), nil
 }
 
 // captureAuthors is whom a version lists: owed, the pending authors its transaction read under
-// the document's advisory lock; the room's in-flight credits no committed version has listed; the
-// authors the calling transaction's own write records once it commits; and actor. The version's
-// commit deletes the pending authors it read and marks the in-flight credits it took consumed
-// (commitConsuming); a credit observed after this take is not among them and stays pending for
-// the next version. The caller holds state.mu.
-func captureAuthors(state *roomState, owed map[string]model.Actor, write *liveWrite, actor *model.Actor) authorCapture {
+// the document's advisory lock; the room's in-flight credits no committed version has listed,
+// observed no later than through (creditSeq); the authors the calling transaction's own write
+// records once it commits; and actor. The version's commit deletes the pending authors it read
+// and marks the in-flight credits it took consumed (commitConsuming); a credit observed after
+// through is not among them and stays pending for the next version. The caller holds state.mu.
+func captureAuthors(state *roomState, owed map[string]model.Actor, write *liveWrite, actor *model.Actor, through uint64) authorCapture {
 	capture := authorCapture{
 		state:    state,
 		authors:  make(map[string]model.Actor, len(owed)+1),
@@ -503,7 +503,7 @@ func captureAuthors(state *roomState, owed map[string]model.Actor, write *liveWr
 		capture.authors[key] = author
 		capture.rAuthors = append(capture.rAuthors, author)
 	}
-	capture.inflight = state.unconsumedInflightLocked(state.creditSeq.Load())
+	capture.inflight = state.unconsumedInflightLocked(through)
 	for _, record := range capture.inflight {
 		maps.Copy(capture.authors, record.authors)
 	}

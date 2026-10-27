@@ -82,8 +82,8 @@ type roomState struct {
 	// arms no second settlement for the document's pending-settlement row (onLoadDocument).
 	settleWarming  bool
 	settleFailures int
-	// settling counts the settlements running on this state (settleRoomWithin), which hold it
-	// across their database work.
+	// settling counts the settlements running on this state (settleRoomWithin), from before their
+	// wait for a settlement slot to the end of their database work, which they hold it across.
 	settling   int
 	closed     bool
 	failed     error

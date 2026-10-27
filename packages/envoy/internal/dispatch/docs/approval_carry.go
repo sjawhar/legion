@@ -38,7 +38,7 @@ import (
 // Nor is anything carried while a block's server attributes are other than settlement's own
 // writer (setAskServerAttributes) writes from its row - its state, who answered and when, and the
 // answer itself, which the browser shows as the human's decision - save an answer settlement
-// withheld (withholdAnswers), or while a decided block asks other wording than its row was decided
+// withheld (weighAnswers), or while a decided block asks other wording than its row was decided
 // on, which settlement writes back (reconcileAskBlocks): until it does, the block shows a decision
 // nobody made, or one under words nobody decided.
 //
@@ -302,7 +302,7 @@ func blockAsSettlementLeavesIt(node *pmdoc.Node, ask model.Ask) bool {
 // blockAsItsRowHasIt reports whether node's server attributes (askServerAttributeNames) are what
 // settlement's own writer, setAskServerAttributes, writes for ask on a block of this document -
 // with the answer, or without it, as settlement leaves out an answer the document has no room for
-// (withholdAnswers): the writer, run on a copy of the attributes, changes nothing one way or the
+// (weighAnswers): the writer, run on a copy of the attributes, changes nothing one way or the
 // other. A copy's copied_from, an unreadable block's invalid, and a state, answerer, time,
 // selection or answer other than the row's are each a change the writer would make.
 func blockAsItsRowHasIt(node *pmdoc.Node, ask model.Ask) bool {

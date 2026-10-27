@@ -772,7 +772,7 @@ func TestARepairingSettlementIsNotEvictedBetweenItsCursorAndItsCommit(t *testing
 
 	var decision *decided
 	var waitErr error
-	pair.taskA.afterSettleVersionRead = func(room string) {
+	pair.taskA.afterSettleRepairAppend = func(room string) {
 		if room != pair.artifactID || decision != nil {
 			return
 		}

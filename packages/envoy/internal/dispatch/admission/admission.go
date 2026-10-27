@@ -143,6 +143,11 @@ type ClassStats struct {
 	// QueueFull and WaitExceeded count the requests refused for each reason since the Limiter
 	// was made.
 	QueueFull, WaitExceeded uint64
+	// LongestRefusedWait is the longest a request refused for waiting (WaitExceeded) was queued
+	// before the limiter refused it: from its arrival in the queue to the time its wait's timer
+	// reports firing. It is the admission's own share of a refusal's time, without the time the
+	// refused request's goroutine then waits to run, which a loaded machine stretches.
+	LongestRefusedWait time.Duration
 }
 
 // Stats reads each class's counts, reads first. The counts of one class are read together.
@@ -254,6 +259,7 @@ type gate struct {
 	waiters list.List // of *waiter, in arrival order
 
 	queueFull, waitExceeded atomic.Uint64
+	longestRefusedWait      atomic.Int64
 }
 
 // waiter is one queued acquire; ready closes once its units are granted.
@@ -282,16 +288,19 @@ func (g *gate) acquire(ctx context.Context, units int) error {
 	element := g.waiters.PushBack(queued)
 	g.mu.Unlock()
 
+	queuedAt := time.Now()
 	timer := time.NewTimer(g.wait)
 	defer timer.Stop()
 	var failure error
+	var waited time.Duration
 	select {
 	case <-queued.ready:
 		return nil
 	case <-ctx.Done():
 		failure = ctx.Err()
-	case <-timer.C:
+	case fired := <-timer.C:
 		failure = &Refusal{Class: g.class, Reason: WaitExceeded}
+		waited = fired.Sub(queuedAt)
 	}
 
 	g.mu.Lock()
@@ -316,6 +325,8 @@ func (g *gate) acquire(ctx context.Context, units int) error {
 	}
 	if _, refused := failure.(*Refusal); refused {
 		g.waitExceeded.Add(1)
+		for longest := g.longestRefusedWait.Load(); int64(waited) > longest && !g.longestRefusedWait.CompareAndSwap(longest, int64(waited)); longest = g.longestRefusedWait.Load() {
+		}
 	}
 	return failure
 }
@@ -349,5 +360,6 @@ func (g *gate) stats() ClassStats {
 	return ClassStats{
 		Class: g.class, Limit: g.limit, InFlight: inFlight, Queued: queued,
 		QueueFull: g.queueFull.Load(), WaitExceeded: g.waitExceeded.Load(),
+		LongestRefusedWait: time.Duration(g.longestRefusedWait.Load()),
 	}
 }

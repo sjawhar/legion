@@ -66,8 +66,12 @@ func holdIssueRow(t *testing.T, database *store.Store, key string) func() {
 }
 
 // A write that finds its class's one unit held waits its 75 ms in the queue and is refused 429
-// OVERLOADED, which tells its client to retry, within the 100 ms a refusal is answered in: it never
-// runs, so it never queues behind the held write for as long as that write is held.
+// OVERLOADED, which tells its client to retry: it never runs, so it never queues behind the held
+// write for as long as that write is held. The admission's own share of the refusal - its wait in
+// the queue, which the limiter records - is within the 100 ms a refusal is answered in. The round
+// trip, which a loaded machine stretches with scheduling it does not control, is held only to
+// arriving while the write is still held and far inside the next bound a request meets, the
+// request pool's 3 s acquire bound.
 func TestARequestPastTheAdmissionLimitIsRefusedOverloaded(t *testing.T) {
 	limiter := admission.New(admission.Limits{Read: 1, Write: 1})
 	handler, database, _ := newTestServer(t, testServerOptions{admission: limiter})
@@ -82,12 +86,21 @@ func TestARequestPastTheAdmissionLimitIsRefusedOverloaded(t *testing.T) {
 
 	started := time.Now()
 	refused := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": "OTHER", "name": "Other"}, "alice")
-	if waited := time.Since(started); waited >= 100*time.Millisecond {
-		t.Fatalf("the refusal took %v, want under 100ms", waited)
+	if waited := time.Since(started); waited >= time.Second {
+		t.Fatalf("the refusal took %v, want it long before the request pool's 3s acquire bound", waited)
+	}
+	select {
+	case response := <-held:
+		t.Fatalf("the held write answered %d before the refusal was read, want it still held", response.Code)
+	default:
 	}
 	assertRetryable(t, refused.Result(), http.StatusTooManyRequests, admission.CodeOverloaded)
-	if stats := limiter.Stats()[admission.Write]; stats.WaitExceeded != 1 {
+	stats := limiter.Stats()[admission.Write]
+	if stats.WaitExceeded != 1 {
 		t.Fatalf("write stats %+v, want one wait_exceeded refusal", stats)
+	}
+	if stats.LongestRefusedWait < admission.DefaultWait || stats.LongestRefusedWait >= 100*time.Millisecond {
+		t.Fatalf("the refused write waited %v in the queue, want its %v wait and under 100ms", stats.LongestRefusedWait, admission.DefaultWait)
 	}
 
 	release()

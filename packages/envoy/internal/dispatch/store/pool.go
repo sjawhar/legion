@@ -382,6 +382,19 @@ func (p *Pool) wrapped(name string, size int32) (*Pool, error) {
 	return NewPool(opened), nil
 }
 
+// SetAcquireBoundForTest sets the acquire bound the separate pool named name opens with, in place
+// of its own (defaultAcquireBound). It is for tests outside this package alone, which shorten a
+// bound so a full pool refuses in milliseconds rather than production's seconds; nothing in
+// production calls it, since every pool's bound is set in code. A pool already open keeps its bound.
+func (p *Pool) SetAcquireBoundForTest(name string, bound time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.acquireBounds == nil {
+		p.acquireBounds = make(map[string]time.Duration)
+	}
+	p.acquireBounds[name] = bound
+}
+
 // separate opens the pool named name on demand, sized at size, copied from this pool's
 // configuration and configured as its own (configurePool: its application_name and its acquire
 // bound, acquireBounds' or defaultAcquireBound's), and closes it with this pool. Each caller holds

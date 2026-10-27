@@ -1032,7 +1032,7 @@ func editTree(current *pmdoc.Node, read func() (*pmdoc.Node, error)) (*pmdoc.Nod
 // transactional live-document mutation path. An ask's answer the document has no room for - its
 // words or the options it selects (pmdoc.IsAnswerAttribute), which are caller text - is left out of
 // the block: the block is written without either, saying who answered and when, and the caller's
-// ask keeps the answer, as settlement leaves a returning block's answer out (withholdAnswers).
+// ask keeps the answer, as settlement leaves a returning block's answer out (weighAnswers).
 // attributes' names are the server's own, never taken from a request (pmdoc.SetBlockAttributes).
 func (s *Service) SetBlockAttributes(
 	ctx context.Context,
