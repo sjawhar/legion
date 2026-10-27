@@ -889,8 +889,7 @@
   runs a pass only on the one-second tick at which a record changed or a record it waits on falls
   due (its debounce runs out, its claim goes stale or its handover grace ends), so with nothing
   changed it does no work, and a change costs the same at any cache size. Settlements, retries,
-  the `envoy_ci_legacy_records_held` gauge and its `checks held back` log line keep their timing
-  (INFRA-595).
+  the `envoy_ci_legacy_records_held` gauge and its `checks held back` log line keep their timing.
 - A dead session's subscriptions now stay 5 minutes longer: the interest reaper deletes one only
   15 minutes after its row's last write, where it was 10, because it now adds
   `store.InterestRefreshAge` to its grace window. For that time the subscribers page and the
